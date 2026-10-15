@@ -1021,7 +1021,17 @@ pub struct SuccessorBase<'a> {
     /// The monitor overlay of the predecessor's base and of this successor (decision 17, C8,
     /// #1559 D9). [`MonitorBase::NONE`] for a host without a solo.
     pub monitor: MonitorBase<'a>,
+    /// The taps the host has armed, as the successor renders under them (#1584 D6a): the
+    /// predecessor's bindings after the transaction, so a binding whose effect the transaction
+    /// removed is already gone. Each successor tap named here is armed at preparation and opens
+    /// its first window at its first rendered block; a tap that carries from the predecessor
+    /// takes the predecessor's own state instead, and is never restarted by this.
+    /// [`NO_OBSERVATION`] for a host without subscriptions.
+    pub observation: &'a controls::ObservationBindings,
 }
+
+/// The bindings that arm nothing, for a [`SuccessorBase`] of a host without subscriptions.
+pub static NO_OBSERVATION: controls::ObservationBindings = controls::ObservationBindings::new();
 
 /// The host-local monitor values (solo) a successor is prepared under (decision 17, C8, #1559).
 ///
@@ -2178,8 +2188,23 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             let _ = taps;
             return Err(shape("host.observation.live_controls"));
         }
-        taps => attach_effect_observation(&mut effects, taps, observation_window_blocks)
-            .map_err(effect_diagnostics)?,
+        taps => {
+            // #1584 D6a: the taps the host armed before this rebuild are armed in the successor.
+            let arms: Vec<effect_compiler::ObservationArm<'_>> = successor
+                .map(|base| base.observation.bindings())
+                .unwrap_or_default()
+                .iter()
+                .map(|binding| effect_compiler::ObservationArm {
+                    strip_id: binding.key.strip.as_str(),
+                    console: binding.key.section.is_console(),
+                    effect_id: binding.key.section.id().as_str(),
+                    tap_id: binding.key.tap_id,
+                    window_blocks: binding.window_blocks,
+                })
+                .collect();
+            attach_effect_observation(&mut effects, taps, observation_window_blocks, &arms)
+                .map_err(effect_diagnostics)?
+        }
     };
 
     // Issue #137 D1/D2: the live-control requests are derived here, once, from the canonical strip

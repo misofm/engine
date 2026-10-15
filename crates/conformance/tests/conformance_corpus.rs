@@ -7,7 +7,7 @@ use protocol::{DecodeScratch, ProtocolCodec};
 fn frozen_corpus_bytes_and_typed_decoders_are_unchanged() {
     let codec = ProtocolCodec::default();
     let corpus = complete_schema_corpus();
-    assert_eq!(corpus.len(), 45);
+    assert_eq!(corpus.len(), 46);
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for frame in &corpus {
         hash = hash_bytes(hash, frame.name.as_bytes());

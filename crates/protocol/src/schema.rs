@@ -628,6 +628,23 @@ pub(crate) mod transport_state_event {
     };
 }
 
+/// `OBSERVATION_ENDED` (#1584): the stable key of the tap whose subscription ended. The revision
+/// that removed the tap's effect is the event header's.
+pub(crate) mod observation_ended {
+    use super::*;
+    pub(crate) const EVENT_SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const STRIP_ID: FieldSpec = FieldSpec::req(2, Wire::Utf8);
+    /// The section: inserts `2` or console `5`, the `RackName` codes.
+    pub(crate) const SECTION: FieldSpec = FieldSpec::req(3, Wire::U8);
+    /// The insert's effect ID or the console slot ID.
+    pub(crate) const EFFECT_ID: FieldSpec = FieldSpec::req(4, Wire::Utf8);
+    pub(crate) const TAP_ID: FieldSpec = FieldSpec::req(5, Wire::U32);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ObservationEnded",
+        fields: &[EVENT_SEQUENCE, STRIP_ID, SECTION, EFFECT_ID, TAP_ID],
+    };
+}
+
 pub(crate) mod meter_batch {
     use super::*;
     pub(crate) const OBSERVED_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
@@ -1772,6 +1789,7 @@ mod tests {
             &transport_set::SPEC,
             &transport_snapshot::SPEC,
             &transport_state_event::SPEC,
+            &observation_ended::SPEC,
             &meter_batch::SPEC,
             &telemetry_configuration::SPEC,
             &counters_request::SPEC,

@@ -290,6 +290,11 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
         checked_layout::<SharedArcAllocation<SharedPlanState<A::Row>>>(1)?,
         checked_layout::<RetainedDiagnosticSlotMirror>(2)?,
+        // #1584 D6a: the observation-ended cells, one more than the reliable queue's slots (an
+        // event popped for egress keeps its cell until its frame is delivered).
+        checked_layout::<Option<protocol::ObservationEnded>>(
+            queue_config.reliable_event_slots.get() + 1,
+        )?,
         checked_layout::<RenderDiagnosticSlot>(RENDER_DIAGNOSTIC_SLOTS)?,
         checked_layout::<u8>(RENDER_DIAGNOSTIC_CODE.len() * RENDER_DIAGNOSTIC_SLOTS)?,
         // ProtocolController and SessionControlProvider each retain their own telemetry config.
@@ -952,35 +957,34 @@ where
         .try_reserve_exact(decode_field_count)
         .map_err(|_| failure(ResourceFault::Allocation))?;
     decode_fields.resize(decode_field_count, 0);
+    let mut session = SessionState {
+        controller: ObservedController::new(controller),
+        providers: ProviderEpoch::current(sources, inventory, strips, effects, capi, revision_gate),
+        pending_providers,
+        retired_providers,
+        publisher,
+        retirer,
+        limits,
+        preparer,
+        live_values_superseded,
+        decode_fields: decode_fields.into_boxed_slice(),
+        response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
+        shared: Arc::clone(&shared),
+        observed_render_sequence: 0,
+        counter_snapshot_sequence: 0,
+        render_diagnostics: prepare_render_diagnostic_slots()?,
+        render_diagnostic_head: 0,
+        render_diagnostic_len: 0,
+        protocol_reliable_pending: false,
+        monitor: controls::MonitorOverlay::new(),
+        observation: controls::ObservationBindings::new(),
+        observation_pending: Box::default(),
+        observation_offsets: Box::default(),
+    };
+    (session.observation_offsets, session.observation_pending) =
+        crate::control::observation_slots(&session.providers.effects);
     Ok(CompiledChildren {
-        session: SessionState {
-            controller: ObservedController::new(controller),
-            providers: ProviderEpoch::current(
-                sources,
-                inventory,
-                strips,
-                effects,
-                capi,
-                revision_gate,
-            ),
-            pending_providers,
-            retired_providers,
-            publisher,
-            retirer,
-            limits,
-            preparer,
-            live_values_superseded,
-            decode_fields: decode_fields.into_boxed_slice(),
-            response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
-            shared: Arc::clone(&shared),
-            observed_render_sequence: 0,
-            counter_snapshot_sequence: 0,
-            render_diagnostics: prepare_render_diagnostic_slots()?,
-            render_diagnostic_head: 0,
-            render_diagnostic_len: 0,
-            protocol_reliable_pending: false,
-            monitor: controls::MonitorOverlay::new(),
-        },
+        session,
         plan: PlanState::new(owner, shared),
     })
 }

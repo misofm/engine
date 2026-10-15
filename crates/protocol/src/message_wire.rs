@@ -886,6 +886,60 @@ pub struct TransportStateEvent {
     pub origin_request_id: Option<crate::RequestId>,
 }
 
+/// The effect section an [`ObservationEnded`] names: the `RackName` codes of the two sections that
+/// hold an effect (inserts `2`, console `5`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ObservationSection {
+    /// One of the strip's inserts.
+    Inserts = 2,
+    /// A session console slot.
+    Console = 5,
+}
+
+impl ObservationSection {
+    /// The section's stable wire code.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// The section a wire code names, or `None` for any other.
+    #[must_use]
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            2 => Some(Self::Inserts),
+            5 => Some(Self::Console),
+            _ => None,
+        }
+    }
+}
+
+/// The stable key of one observation tap, as the wire names it: the strip, the section, the
+/// insert's effect ID or the console slot ID, and the effect-local tap ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservationTapKey {
+    /// The strip (a track or a submix) the tap belongs to.
+    pub strip_id: String,
+    /// Whether the tap's effect is an insert or a console slot.
+    pub section: ObservationSection,
+    /// The insert's effect ID or the console slot ID.
+    pub effect_id: String,
+    /// The effect-local tap ID.
+    pub tap_id: u32,
+}
+
+/// Typed reliable `OBSERVATION_ENDED` event payload (#1584 D6a): a tap a host had armed no longer
+/// exists, because a transaction removed its strip, its insert or its console slot, or reused the ID
+/// for an effect without that tap. The event's revision is the revision that removed it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservationEnded {
+    /// Endpoint-monotonic reliable event sequence.
+    pub event_sequence: u64,
+    /// The tap that ended.
+    pub key: ObservationTapKey,
+}
+
 /// Frozen meter component registry for one fixed telemetry record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u16)]
@@ -1685,6 +1739,63 @@ impl ProtocolCodec {
         })
     }
 
+    /// Return the exact caller-buffer size of a reliable typed observation-ended event.
+    pub fn encoded_observation_ended_len(
+        &self,
+        value: &ObservationEnded,
+    ) -> Result<usize, EncodeError> {
+        let mut sink = CountSink::new(self.limits());
+        write_observation_ended(&mut sink, value)?;
+        checked_sink_len(self, &mut sink)
+    }
+
+    /// Encode a reliable typed observation-ended event payload into caller output.
+    pub fn encode_observation_ended(
+        &self,
+        value: &ObservationEnded,
+        output: &mut [u8],
+    ) -> Result<usize, EncodeError> {
+        let required = self.encoded_observation_ended_len(value)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
+        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_observation_ended(&mut writer, value)?;
+        checked_writer_len(&writer, required)
+    }
+
+    /// Strictly decode a reliable typed observation-ended event payload. Both IDs must be stable
+    /// IDs and the section an effect section.
+    pub fn decode_observation_ended(
+        &self,
+        payload: &[u8],
+        count: u32,
+    ) -> Result<ObservationEnded, DecodeError> {
+        let fields = Message::top_level(payload, count, self.limits())?
+            .schema_spec(&schema::observation_ended::SPEC)?;
+        let id = |spec: schema::FieldSpec| -> Result<String, DecodeError> {
+            let text = read_string(self, one_spec!(fields, spec)?)?;
+            session::StableId::parse(text).ok_or(DecodeError::InvalidField)?;
+            Ok(text.to_owned())
+        };
+        Ok(ObservationEnded {
+            event_sequence: read_u64(one_spec!(
+                fields,
+                schema::observation_ended::EVENT_SEQUENCE
+            )?)?,
+            key: ObservationTapKey {
+                strip_id: id(schema::observation_ended::STRIP_ID)?,
+                section: ObservationSection::from_code(read_u8(one_spec!(
+                    fields,
+                    schema::observation_ended::SECTION
+                )?)?)
+                .ok_or(DecodeError::InvalidField)?,
+                effect_id: id(schema::observation_ended::EFFECT_ID)?,
+                tap_id: read_u32(one_spec!(fields, schema::observation_ended::TAP_ID)?)?,
+            },
+        })
+    }
+
     /// Return the exact caller-buffer bytes required for one fixed-record meter batch.
     pub fn encoded_meter_batch_len(&self, value: MeterBatch<'_>) -> Result<usize, EncodeError> {
         let mut sink = CountSink::new(self.limits());
@@ -2480,6 +2591,43 @@ pub(crate) fn write_transport_state_event(
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn write_observation_ended(
+    sink: &mut dyn Sink,
+    value: &ObservationEnded,
+) -> Result<(), EncodeError> {
+    if session::StableId::parse(&value.key.strip_id).is_none()
+        || session::StableId::parse(&value.key.effect_id).is_none()
+    {
+        return Err(EncodeError::InvalidField);
+    }
+    sink.check_field_count(schema::observation_ended::SPEC.field_count(&[])?)?;
+    write_spec!(
+        sink,
+        schema::observation_ended::EVENT_SEQUENCE,
+        &value.event_sequence.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::observation_ended::STRIP_ID,
+        value.key.strip_id.as_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::observation_ended::SECTION,
+        &[value.key.section.code()]
+    )?;
+    write_spec!(
+        sink,
+        schema::observation_ended::EFFECT_ID,
+        value.key.effect_id.as_bytes()
+    )?;
+    write_spec!(
+        sink,
+        schema::observation_ended::TAP_ID,
+        &value.key.tap_id.to_le_bytes()
+    )
 }
 
 pub(crate) fn write_meter_batch(
@@ -3862,6 +4010,8 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
         || ((value.flags.0 & (1 << 14) != 0) != has_command(0x000e))
         || (has_command(0x0003) != has_event(0x8001))
+        // `OBSERVATION_ENDED` rides the session family (#1584): it follows a commit.
+        || (has_event(0x8011) && !session_family)
         || (has_command(0x000c) != has_command(0x000d))
         || (has_command(0x0008) != has_event(0x8010))
         || (has_command(0x000a) != has_event(0x8021))
@@ -3874,7 +4024,7 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
 fn allocated_id(id: u16, event: bool) -> bool {
     if event {
         // `0x8002` is retired: never allocated again, never advertised (#1628).
-        matches!(id, 0x8001 | 0x8010 | 0x8020 | 0x8021 | 0x8030)
+        matches!(id, 0x8001 | 0x8010 | 0x8011 | 0x8020 | 0x8021 | 0x8030)
             && !crate::wire::is_retired_message_id(id)
     } else {
         // `0x0004`, `0x0005` and `0x0006` are retired: never allocated again, never advertised.

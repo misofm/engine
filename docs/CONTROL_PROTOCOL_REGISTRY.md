@@ -6,7 +6,7 @@ This freezes the semantic registry referenced by [the wire specification](CONTRO
 
 | Commands and echoed response IDs | Events |
 | --- | --- |
-| `0001` capabilities get; `0002` session snapshot get; `0003` session transaction apply; `0007` transport get; `0008` transport set; `0009` telemetry configure; `000a` counters get; `000b` diagnostics get; `000c` control list get; `000d` control state get; `000e` response get | `8001` session committed; `8010` transport state; `8020` meter batch; `8021` counter snapshot; `8030` diagnostic |
+| `0001` capabilities get; `0002` session snapshot get; `0003` session transaction apply; `0007` transport get; `0008` transport set; `0009` telemetry configure; `000a` counters get; `000b` diagnostics get; `000c` control list get; `000d` control state get; `000e` response get | `8001` session committed; `8010` transport state; `8011` observation ended; `8020` meter batch; `8021` counter snapshot; `8030` diagnostic |
 
 Message IDs `0004` (parameter metadata get) and `0005` (parameter state get) are **retired** by decision 17 (C4, #1551): the decoder refuses them as `UNSUPPORTED_MESSAGE`, no capability registry lists them, and they are never reallocated (`RETIRED_MESSAGE_IDS`; a conformance row pins each). `CONTROL_LIST_GET` and `CONTROL_STATE_GET` replace them.
 
@@ -91,7 +91,7 @@ A control row's own rules: all numbers are finite and `minimum <= maximum`; choi
 
 ## Events
 
-Reliable `8001` contains sequence, origin request ID, previous revision, and operation count. Reliable `8010` contains sequence, state, position, effective sample, and optional origin request ID. Lossy `8020` contains observed sample plus the fixed 16-byte meter array. Lossy `8021` contains observed sample plus ascending counter values. Reliable `8030` contains one diagnostic with provider sequence. Events have header request ID zero; reliable events have endpoint-monotonic payload sequence.
+Reliable `8001` contains sequence, origin request ID, previous revision, and operation count. Reliable `8010` contains sequence, state, position, effective sample, and optional origin request ID. Reliable `8011` (`OBSERVATION_ENDED`, #1584) contains sequence `1:U64 R`, strip ID `2:UTF8 R`, section `3:U8 R` (inserts `2` or console `5`, the rack codes), the insert's effect ID or the console slot ID `4:UTF8 R`, and the effect-local tap ID `5:U32 R`; the event header's revision is the revision that ended the tap. Both IDs are stable IDs and any other section code is `INVALID_FIELD`. It is advertised with `8001`, in the session family, when the endpoint keeps observation subscriptions. Lossy `8020` contains observed sample plus the fixed 16-byte meter array. Lossy `8021` contains observed sample plus ascending counter values. Reliable `8030` contains one diagnostic with provider sequence. Events have header request ID zero; reliable events have endpoint-monotonic payload sequence.
 
 A stored automation segment applies on `[start,end)` and holds its end value until replaced; the session schema states this hold rule (`SESSION_SCHEMA_V1.md`, #1626).
 

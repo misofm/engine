@@ -2040,6 +2040,87 @@ fn b3a_transport_goldens_truncation_and_direct_codec_are_strict() {
     );
 }
 
+/// #1584: `OBSERVATION_ENDED` round-trips its stable key exactly, every truncation of it fails,
+/// and an ID that is not a stable ID or a section that holds no effect is refused on both sides.
+///
+/// Red if the key loses a field in the round trip, a builtins or own section is taken for an
+/// effect section, or an event the codec cannot decode is encodable.
+#[test]
+fn observation_ended_round_trips_its_stable_key_and_refuses_anything_else() {
+    let codec = codec();
+    let event = ObservationEnded {
+        event_sequence: 7,
+        key: ObservationTapKey {
+            strip_id: "vocal".to_owned(),
+            section: ObservationSection::Console,
+            effect_id: "glue".to_owned(),
+            tap_id: 3,
+        },
+    };
+    let mut bytes = vec![0_u8; 256];
+    let length = codec
+        .encode_observation_ended(&event, &mut bytes)
+        .expect("encode");
+    assert_eq!(
+        length,
+        codec.encoded_observation_ended_len(&event).expect("length")
+    );
+    bytes.truncate(length);
+    assert_eq!(codec.decode_observation_ended(&bytes, 5), Ok(event.clone()));
+    for end in 0..bytes.len() {
+        assert!(
+            codec.decode_observation_ended(&bytes[..end], 5).is_err(),
+            "{end}"
+        );
+    }
+    let inserts = ObservationEnded {
+        key: ObservationTapKey {
+            section: ObservationSection::Inserts,
+            ..event.key.clone()
+        },
+        ..event.clone()
+    };
+    let mut other = vec![0_u8; 256];
+    let other_length = codec
+        .encode_observation_ended(&inserts, &mut other)
+        .expect("encode");
+    assert_ne!(
+        &other[..other_length],
+        &bytes[..],
+        "the section is on the wire"
+    );
+    assert_eq!(
+        codec.decode_observation_ended(&other[..other_length], 5),
+        Ok(inserts)
+    );
+
+    // Not a stable ID: encode refuses it, and so does decode of a frame that carries one.
+    for bad in ["", "Vocal", "9lives", "has space"] {
+        let mut invalid = event.clone();
+        invalid.key.strip_id = bad.to_owned();
+        assert_eq!(
+            codec.encode_observation_ended(&invalid, &mut other),
+            Err(EncodeError::InvalidField),
+            "{bad:?}"
+        );
+    }
+    // The section byte is the third field's value: 2 and 5 name an effect, anything else does not.
+    let section_offset = bytes
+        .windows(2)
+        .position(|pair| pair == [3, 0])
+        .expect("the section field header");
+    let value = section_offset + 8;
+    for code in [0_u8, 1, 3, 4, 6] {
+        let mut forged = bytes.clone();
+        forged[value] = code;
+        assert_eq!(
+            codec.decode_observation_ended(&forged, 5),
+            Err(DecodeError::InvalidField),
+            "section {code}"
+        );
+    }
+}
+
 /// Issue #1351 gate 4: every registered counter ID, the newest `TRANSITION_REPREPARE_REFUSALS`
 /// included, round-trips through the telemetry configuration; the next ID and the retired IDs
 /// 2 and 11 to 14 (#1629) are refused.

@@ -5850,6 +5850,7 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
             revision: 1,
             edit_ramps: &edit_ramps,
             monitor: host_core::MonitorBase::NONE,
+            observation: &host_core::NO_OBSERVATION,
         };
         let (mut successor, successor_handles) = preparer
             .prepare(&compiled, &caps, lanes, Some(base), &superseded)

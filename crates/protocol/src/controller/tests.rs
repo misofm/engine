@@ -199,6 +199,16 @@ fn controller_over(
     replay_entries: usize,
     current_sample: SampleTime,
 ) -> ProtocolController<MockProvider> {
+    controller_with_event_slots(model, replay_entries, current_sample, 1)
+}
+
+/// [`controller_over`] with `event_slots` slots in the reliable event queue.
+fn controller_with_event_slots(
+    model: session::SessionModel,
+    replay_entries: usize,
+    current_sample: SampleTime,
+    event_slots: usize,
+) -> ProtocolController<MockProvider> {
     let session = SessionStore::new(
         model,
         CompileCaps {
@@ -215,7 +225,7 @@ fn controller_over(
         control_command_slots: NonZeroUsize::new(1).expect("one"),
         control_command_bytes: NonZeroUsize::new(64).expect("bytes"),
         reliable_response_slots: NonZeroUsize::new(1).expect("response"),
-        reliable_event_slots: NonZeroUsize::new(1).expect("event"),
+        reliable_event_slots: NonZeroUsize::new(event_slots).expect("event"),
         telemetry_slots: NonZeroUsize::new(1).expect("telemetry"),
     })
     .expect("queues");
@@ -1120,6 +1130,177 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
         accepted_event
     );
     assert_eq!(endpoint.replay().len(), 1);
+}
+
+fn ended_key(strip: &str, tap_id: u32) -> crate::ObservationTapKey {
+    crate::ObservationTapKey {
+        strip_id: strip.to_owned(),
+        section: crate::ObservationSection::Inserts,
+        effect_id: "comp".to_owned(),
+        tap_id,
+    }
+}
+
+/// The reliable events of `endpoint`, decoded.
+fn drain_events(
+    endpoint: &mut ProtocolController<MockProvider>,
+) -> Vec<(u64, crate::DecodedEventPayload<'static>)> {
+    let codec = ProtocolCodec::default();
+    let mut events = Vec::new();
+    loop {
+        let mut frame = vec![0_u8; 1024];
+        let Some(length) = endpoint
+            .dequeue_reliable_event_frame_into(&mut frame)
+            .expect("an event")
+        else {
+            return events;
+        };
+        let mut fields = [0_u16; 64];
+        let decoded = codec
+            .decode_typed_event(&frame[..length], &mut DecodeScratch::new(&mut fields))
+            .expect("a decodable event");
+        let payload = match decoded.payload {
+            crate::DecodedEventPayload::SessionCommitted(value) => {
+                crate::DecodedEventPayload::SessionCommitted(value)
+            }
+            crate::DecodedEventPayload::ObservationEnded(value) => {
+                crate::DecodedEventPayload::ObservationEnded(value)
+            }
+            _ => panic!("an unexpected event"),
+        };
+        events.push((decoded.header.revision.0, payload));
+    }
+}
+
+/// #1584 D6a: the ends a host attaches to a prepared transaction are reserved with it and emitted
+/// by its commit, after `SESSION_COMMITTED`, in order, at the committing revision with endpoint
+/// sequences that follow the commit's.
+///
+/// Red if the ends precede the commit event, carry the previous revision, repeat or skip a
+/// sequence, or are lost when the lane is read in one drain.
+#[test]
+fn attached_observation_ends_follow_their_commit_in_order() {
+    let transaction = [SessionEdit::SetSessionId {
+        session_id: session::StableId::parse("ending-session").expect("ID"),
+    }];
+    let input = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&transaction),
+    );
+    let mut endpoint = controller_with_event_slots(
+        parse_session_json(EXAMPLE).expect("fixture"),
+        8,
+        SampleTime(0),
+        4,
+    );
+    let mut prepared = match endpoint
+        .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+        .expect("prepare")
+    {
+        PreparedCommandFrame::Structural(prepared) => *prepared,
+        PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
+    };
+    endpoint
+        .attach_observation_ended(&mut prepared, vec![ended_key("a", 1), ended_key("b", 2)])
+        .expect("room for the commit and two ends");
+    endpoint
+        .commit_prepared_structural(prepared, EditPath::Rebuild)
+        .expect("commit");
+    let events = drain_events(&mut endpoint);
+    assert_eq!(events.len(), 3);
+    let crate::DecodedEventPayload::SessionCommitted(commit) = &events[0].1 else {
+        panic!("the commit event comes first");
+    };
+    assert_eq!(events[0].0, 8);
+    for (index, (strip, tap)) in [("a", 1), ("b", 2)].into_iter().enumerate() {
+        let crate::DecodedEventPayload::ObservationEnded(ended) = &events[index + 1].1 else {
+            panic!("an end follows the commit");
+        };
+        assert_eq!(events[index + 1].0, 8, "the committing revision");
+        assert_eq!(ended.key, ended_key(strip, tap));
+        assert_eq!(
+            ended.event_sequence,
+            commit.event_sequence + 1 + index as u64
+        );
+    }
+    // The next commit's sequence continues after the last end.
+    let next = full_command(
+        2,
+        ExpectedRevision::Exact(SessionRevision(8)),
+        crate::CommandPayload::SessionTransactionApply(&[SessionEdit::SetSessionId {
+            session_id: session::StableId::parse("again-session").expect("ID"),
+        }]),
+    );
+    let mut output = [0_u8; 2048];
+    endpoint
+        .process_command_frame_into(
+            &next,
+            &mut DecodeScratch::new(&mut [0_u16; 1024]),
+            &mut output,
+        )
+        .expect("next commit");
+    let events = drain_events(&mut endpoint);
+    let crate::DecodedEventPayload::SessionCommitted(second) = &events[0].1 else {
+        panic!("commit event");
+    };
+    assert_eq!(second.event_sequence, commit.event_sequence + 3);
+}
+
+/// #1584 D6a, the acked-batch question: the room for the ends is checked together with the
+/// commit's own event. A lane that cannot hold them refuses the attachment and changes nothing;
+/// a token dropped after a successful attachment releases the room it held.
+///
+/// Red if an attachment succeeds that the lane cannot honour (the commit would drop an end after
+/// the ack), if a refusal leaves a half reservation, or if a dropped token keeps the room.
+#[test]
+fn the_ends_need_room_with_the_commit_and_a_dropped_token_releases_it() {
+    let transaction = [SessionEdit::SetSessionId {
+        session_id: session::StableId::parse("ending-session").expect("ID"),
+    }];
+    let input = full_command(
+        1,
+        ExpectedRevision::Exact(SessionRevision(7)),
+        crate::CommandPayload::SessionTransactionApply(&transaction),
+    );
+    let mut endpoint = controller_with_event_slots(
+        parse_session_json(EXAMPLE).expect("fixture"),
+        8,
+        SampleTime(0),
+        3,
+    );
+    let prepare = |endpoint: &mut ProtocolController<MockProvider>| match endpoint
+        .prepare_command_frame(&input, &mut DecodeScratch::new(&mut [0_u16; 1024]), 2048)
+        .expect("prepare")
+    {
+        PreparedCommandFrame::Structural(prepared) => *prepared,
+        PreparedCommandFrame::Immediate(_) => panic!("valid transaction was immediate"),
+    };
+    // Three slots: the commit and two ends fit, the commit and three do not.
+    let mut token = prepare(&mut endpoint);
+    let three = vec![ended_key("a", 1), ended_key("b", 1), ended_key("c", 1)];
+    assert!(matches!(
+        endpoint.attach_observation_ended(&mut token, three),
+        Err(crate::AttachObservationEndedError::NoRoom(_))
+    ));
+    // The refusal reserved nothing: the two that fit still do.
+    endpoint
+        .attach_observation_ended(&mut token, vec![ended_key("a", 1), ended_key("b", 1)])
+        .expect("two ends fit");
+    // A second attachment replaces the first, so its room counts as free.
+    endpoint
+        .attach_observation_ended(&mut token, vec![ended_key("c", 1), ended_key("d", 1)])
+        .expect("a replacement fits too");
+    drop(token);
+    // The dropped token released everything: a fresh one can reserve the whole lane again.
+    let mut token = prepare(&mut endpoint);
+    endpoint
+        .attach_observation_ended(&mut token, vec![ended_key("a", 1), ended_key("b", 1)])
+        .expect("the room came back");
+    endpoint
+        .commit_prepared_structural(token, EditPath::Rebuild)
+        .expect("commit");
+    assert_eq!(drain_events(&mut endpoint).len(), 3);
 }
 
 fn transaction_edit_path(frame: &[u8]) -> EditPath {

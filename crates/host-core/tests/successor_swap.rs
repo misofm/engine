@@ -1016,6 +1016,25 @@ impl LivePlan {
         committed: &SessionModel,
         backend: Backend,
     ) -> Self {
+        Self::successor_observed(
+            session,
+            request,
+            predecessor,
+            committed,
+            &host_core::NO_OBSERVATION,
+            backend,
+        )
+    }
+
+    /// A successor prepared with the taps the host armed (#1584 D6a).
+    fn successor_observed(
+        session: &Session,
+        request: &host_core::HostLiveControlRequest,
+        predecessor: &host_core::PlanStateInventory,
+        committed: &SessionModel,
+        observation: &controls::ObservationBindings,
+        backend: Backend,
+    ) -> Self {
         let (prepared, handles) =
             host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
                 &session.compiled,
@@ -1027,6 +1046,7 @@ impl LivePlan {
                     revision: successor::SUCCESSOR_REVISION,
                     edit_ramps: &EditRamps::new(),
                     monitor: host_core::MonitorBase::NONE,
+                    observation,
                 },
                 backend,
             )
@@ -2646,6 +2666,7 @@ impl CellPlan {
                 revision: successor::SUCCESSOR_REVISION,
                 edit_ramps,
                 monitor: host_core::MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
             },
             backend,
             form,
@@ -3908,6 +3929,7 @@ fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
                 revision,
                 edit_ramps: &EditRamps::new(),
                 monitor: host_core::MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
             },
             backend,
             Form::Split,
@@ -3931,6 +3953,7 @@ fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
                 revision: accepted,
                 edit_ramps: &EditRamps::new(),
                 monitor: host_core::MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
             },
             backend,
             Form::Split,
@@ -3960,6 +3983,7 @@ fn successor_handle(
                 revision: successor::SUCCESSOR_REVISION,
                 edit_ramps: &EditRamps::new(),
                 monitor: host_core::MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
             },
             backend,
         )
@@ -7138,6 +7162,7 @@ mod meter_carry {
                 revision: SUCCESSOR_REVISION,
                 edit_ramps: &session::EditRamps::new(),
                 monitor: MonitorBase::NONE,
+                observation: &host_core::NO_OBSERVATION,
             }),
             backend,
         );
@@ -7571,10 +7596,9 @@ mod observation_carry {
                 continue;
             };
             let stream = streams.entry(handle.track_id.to_string()).or_default();
-            if stream
-                .last()
-                .is_none_or(|last| last.sequence != window.sequence)
-            {
+            // A window is new when its sequence or its start differs: a restarted tap's sequence
+            // begins at 1 again, after the predecessor's.
+            if stream.last().is_none_or(|last| *last != window) {
                 stream.push(window);
             }
         }
@@ -7589,6 +7613,36 @@ mod observation_carry {
                 .expect("a control channel for the insert")
                 .try_push_observe(0, true, WINDOW_BLOCKS)
                 .expect("room in the queue");
+        }
+    }
+
+    /// Disarm the same tap, as an app does.
+    fn unsubscribe(plan: &mut LivePlan, strips: &[String]) {
+        for strip in strips {
+            plan.handles
+                .effect_control_mut(strip, LiveEffectAddress::insert(0))
+                .expect("a control channel for the insert")
+                .try_push_observe(0, false, WINDOW_BLOCKS)
+                .expect("room in the queue");
+        }
+    }
+
+    /// The bindings of `strips`' compressor tap 1 (the gain-reduction tap), each armed with
+    /// [`WINDOW_BLOCKS`]: what the host's table holds after the subscribes above.
+    fn bindings_of(strips: &[String]) -> controls::ObservationBindings {
+        let mut bindings = controls::ObservationBindings::new();
+        for strip in strips {
+            bindings.set(tap_key(strip), WINDOW_BLOCKS);
+        }
+        bindings
+    }
+
+    /// The stable key of `strip`'s compressor insert `comp`, gain-reduction tap.
+    fn tap_key(strip: &str) -> controls::TapKey {
+        controls::TapKey {
+            strip: id(strip),
+            section: controls::TapSection::Inserts(id("comp")),
+            tap_id: 1,
         }
     }
 
@@ -7636,20 +7690,57 @@ mod observation_carry {
     /// prepared as its successor and swapped in at [`SWAP_BLOCK`], rendered to [`BLOCKS`]. B
     /// subscribes to nothing: whatever its taps hold at the swap is what the carry brought.
     fn swapped(backend: Backend, a: &Session, b: &Session, subscribed: &[String]) -> Swapped {
+        swapped_with(
+            backend,
+            a,
+            b,
+            &Swap {
+                early: subscribed,
+                ..Swap::default()
+            },
+        )
+    }
+
+    /// What a swapped run subscribes, when, and what the host's table holds at the swap.
+    #[derive(Default)]
+    struct Swap<'a> {
+        /// Subscribes acknowledged before A's first block.
+        early: &'a [String],
+        /// Subscribes acknowledged after A's last block: still in A's queue at the swap block.
+        late: &'a [String],
+        /// Disarms acknowledged after A's last block, likewise.
+        late_disarm: &'a [String],
+        /// Subscribes pushed into B's own queue before its first block: the reference for a tap
+        /// armed at preparation.
+        successor_records: &'a [String],
+        /// The taps the host's table holds (#1584 D6a); none by default.
+        bindings: Option<&'a controls::ObservationBindings>,
+    }
+
+    fn swapped_with(backend: Backend, a: &Session, b: &Session, swap: &Swap<'_>) -> Swapped {
         use bench_support::alloc as bench_alloc;
         let feed = bursty_feed(SOURCE, 5);
         let request = observed_request();
         let mut streams = Streams::new();
         let mut plan = LivePlan::fresh_with(a, &request, backend);
-        subscribe(&mut plan, subscribed);
+        subscribe(&mut plan, swap.early);
         attach(&mut plan);
         for block in 0..SWAP_BLOCK {
             plan.submit(&feed, QUANTUM, block);
             plan.render(QUANTUM);
             read_all(&mut plan, &mut streams);
         }
-        let mut successor =
-            LivePlan::successor_with(b, &request, &plan.prepared.inventory, &a.model, backend);
+        subscribe(&mut plan, swap.late);
+        unsubscribe(&mut plan, swap.late_disarm);
+        let mut successor = LivePlan::successor_observed(
+            b,
+            &request,
+            &plan.prepared.inventory,
+            &a.model,
+            swap.bindings.unwrap_or(&host_core::NO_OBSERVATION),
+            backend,
+        );
+        subscribe(&mut successor, swap.successor_records);
         attach(&mut successor);
         assert_eq!(
             successor
@@ -7927,6 +8018,279 @@ mod observation_carry {
     )]
     fn a_restarted_effect_starts_its_tap_fresh_at_four_lanes() {
         a_restarted_effect_starts_its_tap_fresh(Backend::Simd4);
+    }
+
+    /// A compressor insert whose link mode changed restarts, with a base that holds it and a
+    /// successor that is the base plus one track.
+    fn restarted_pair(backend: Backend) -> (Session, Session) {
+        let base = compressor_insert_session(bank_width(backend) - 2);
+        let mut changed = with_muted_track(base.clone());
+        track_mut(&mut changed, "eq1").inserts.effects[0].link_mode = LinkMode::Average;
+        (Session::compile(base), Session::compile(changed))
+    }
+
+    /// #1584 D6a gates 1 and 2: a subscription the host acknowledged survives a rebuild that
+    /// restarts its effect, whether the record was applied before the swap or still waits in the
+    /// predecessor's queue. The restarted tap is armed at preparation and opens its first window at
+    /// the adoption block's first sample, and every window equals the one a record in the
+    /// successor's own queue, applied at that block, produces from the same state and input.
+    ///
+    /// Red mutation: prepare the successor's taps unarmed (drop the arm in
+    /// `attach_effect_observation`) -> eq1 publishes no window after the swap, and a record that
+    /// waited in the predecessor's queue is lost with it.
+    fn a_restarted_effects_subscription_survives_the_rebuild(backend: Backend, pending: bool) {
+        let what = format!("{backend:?} pending={pending}");
+        let (a, b) = restarted_pair(backend);
+        let all = strips_of(&a);
+        let restarted = vec!["eq1".to_owned()];
+        let others: Vec<String> = all.iter().filter(|s| *s != "eq1").cloned().collect();
+        // The reference: B's own queue holds the record for eq1 at its first block.
+        let reference = swapped_with(
+            backend,
+            &a,
+            &b,
+            &Swap {
+                early: &others,
+                successor_records: &restarted,
+                ..Swap::default()
+            },
+        );
+        // The run: the host's table holds eq1's tap (and the carried ones).
+        let bindings = bindings_of(&all);
+        let run = if pending {
+            swapped_with(
+                backend,
+                &a,
+                &b,
+                &Swap {
+                    early: &others,
+                    late: &restarted,
+                    bindings: Some(&bindings),
+                    ..Swap::default()
+                },
+            )
+        } else {
+            swapped_with(
+                backend,
+                &a,
+                &b,
+                &Swap {
+                    early: &all,
+                    bindings: Some(&bindings),
+                    ..Swap::default()
+                },
+            )
+        };
+        assert_eq!(run.carry, CarryOutcome::Carried, "{what}");
+        assert_eq!(run.restarted, vec![Box::<str>::from("eq1")], "{what}");
+        assert_eq!(
+            run.armed[0],
+            all.len() as u64,
+            "{what}: the restarted effect's tap is armed on the successor, with the carried ones"
+        );
+        let eq1 = run.streams["eq1"]
+            .iter()
+            .find(|window| window.first_sample >= SWAP_SAMPLE)
+            .copied()
+            .expect("eq1 publishes after the swap");
+        assert_eq!(
+            eq1.first_sample, SWAP_SAMPLE,
+            "{what}: the first window opens at the adoption block"
+        );
+        assert_eq!(eq1.sequence, 1, "{what}: a fresh tap starts its sequence");
+        assert!(
+            eq1.left > 0.0 || eq1.right > 0.0,
+            "{what}: the compressor reduces gain, or the reading is vacuous"
+        );
+        for strip in &all {
+            let want = reference.streams[strip]
+                .iter()
+                .filter(|window| window.first_sample >= SWAP_SAMPLE || strip != "eq1");
+            let got = run.streams[strip]
+                .iter()
+                .filter(|window| window.first_sample >= SWAP_SAMPLE || strip != "eq1");
+            assert_eq!(
+                got.collect::<Vec<_>>(),
+                want.collect::<Vec<_>>(),
+                "{what} {strip}: the windows equal a record applied at the adoption block"
+            );
+        }
+        assert_eq!(
+            run.allocator,
+            ((0, 0, 0), (0, 0)),
+            "{what}: allocator and render audit over the swap block"
+        );
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn a_restarted_effects_subscription_survives_the_rebuild_at_eight_lanes() {
+        for pending in [false, true] {
+            a_restarted_effects_subscription_survives_the_rebuild(Backend::Simd8, pending);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(any(target_feature = "neon", target_feature = "simd128")),
+        ignore = "a console effect bank binds only at the width its build executes, and four \
+                  lanes is the NEON and simd128 width (#1017)"
+    )]
+    fn a_restarted_effects_subscription_survives_the_rebuild_at_four_lanes() {
+        for pending in [false, true] {
+            a_restarted_effects_subscription_survives_the_rebuild(Backend::Simd4, pending);
+        }
+    }
+
+    /// #1584 D6a gate 3: a disarm still waiting in the predecessor's queue at the swap leaves the
+    /// restarted effect's successor tap unarmed: the host's table no longer holds it.
+    ///
+    /// Red mutation: arm every tap the predecessor had armed -> eq1's successor tap is armed and
+    /// publishes after the swap.
+    fn a_pending_disarm_leaves_the_restarted_tap_unarmed(backend: Backend) {
+        let what = format!("{backend:?}");
+        let (a, b) = restarted_pair(backend);
+        let all = strips_of(&a);
+        let restarted = vec!["eq1".to_owned()];
+        let others: Vec<String> = all.iter().filter(|s| *s != "eq1").cloned().collect();
+        let bindings = bindings_of(&others);
+        let run = swapped_with(
+            backend,
+            &a,
+            &b,
+            &Swap {
+                early: &all,
+                late_disarm: &restarted,
+                bindings: Some(&bindings),
+                ..Swap::default()
+            },
+        );
+        assert_eq!(run.restarted, vec![Box::<str>::from("eq1")], "{what}");
+        assert_eq!(
+            run.armed[0],
+            others.len() as u64,
+            "{what}: the disarmed tap starts unarmed"
+        );
+        assert!(
+            run.streams["eq1"]
+                .iter()
+                .all(|window| window.end_sample <= SWAP_SAMPLE),
+            "{what}: eq1 publishes nothing after the swap"
+        );
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn a_pending_disarm_leaves_the_restarted_tap_unarmed_at_eight_lanes() {
+        a_pending_disarm_leaves_the_restarted_tap_unarmed(Backend::Simd8);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(any(target_feature = "neon", target_feature = "simd128")),
+        ignore = "a console effect bank binds only at the width its build executes, and four \
+                  lanes is the NEON and simd128 width (#1017)"
+    )]
+    fn a_pending_disarm_leaves_the_restarted_tap_unarmed_at_four_lanes() {
+        a_pending_disarm_leaves_the_restarted_tap_unarmed(Backend::Simd4);
+    }
+
+    /// #1584 D6a gate 6: the table arms every carried tap too, and the prepared arm never wins
+    /// over the state a carried tap brings: the windows continue (sequences 1, 2, 3, the one open
+    /// at the swap included) exactly as with an empty table.
+    ///
+    /// Red mutation: let `arm_prepared` survive `swap_state` (restart the window at the first
+    /// block) -> the window spanning the swap restarts and the sequence breaks.
+    fn a_carried_tap_is_not_restarted_by_the_prepared_arm(backend: Backend, form: Form) {
+        let what = format!("{backend:?} {form:?}");
+        let (a, b) = pair(backend, form);
+        let subscribed = strips_of(&a);
+        let kept: Vec<String> = subscribed
+            .iter()
+            .filter(|strip| strips_of(&b).contains(strip))
+            .cloned()
+            .collect();
+        let bindings = bindings_of(&kept);
+        let plain = swapped(backend, &a, &b, &subscribed);
+        let armed = swapped_with(
+            backend,
+            &a,
+            &b,
+            &Swap {
+                early: &subscribed,
+                bindings: Some(&bindings),
+                ..Swap::default()
+            },
+        );
+        assert_eq!(armed.carry, CarryOutcome::Carried, "{what}");
+        assert_eq!(armed.restarted, Vec::<Box<str>>::new(), "{what}");
+        assert_eq!(armed.streams, plain.streams, "{what}: no tap restarted");
+        // The retiring predecessor holds whatever the successor's lanes held before the exchange.
+        assert_eq!(armed.armed[0], plain.armed[0], "{what}");
+        for strip in &kept {
+            assert_eq!(
+                armed.streams[strip]
+                    .iter()
+                    .map(|window| window.sequence)
+                    .collect::<Vec<_>>(),
+                vec![1, 2, 3],
+                "{what} {strip}: no gap and no restart"
+            );
+        }
+        assert_eq!(armed.allocator, ((0, 0, 0), (0, 0)), "{what}");
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn a_carried_tap_is_not_restarted_by_the_prepared_arm_at_eight_lanes() {
+        for form in [Form::NodeToNode, Form::BankToBank, Form::NodeToBank] {
+            a_carried_tap_is_not_restarted_by_the_prepared_arm(Backend::Simd8, form);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(any(target_feature = "neon", target_feature = "simd128")),
+        ignore = "a console effect bank binds only at the width its build executes, and four \
+                  lanes is the NEON and simd128 width (#1017)"
+    )]
+    fn a_carried_tap_is_not_restarted_by_the_prepared_arm_at_four_lanes() {
+        for form in [Form::NodeToNode, Form::BankToBank, Form::NodeToBank] {
+            a_carried_tap_is_not_restarted_by_the_prepared_arm(Backend::Simd4, form);
+        }
+    }
+
+    /// #1584 D6a gate 4, the plan half: a table that still names a removed insert, a removed
+    /// strip or an ID reused for an effect without the tap arms nothing and fails nothing. (The
+    /// control plane drops such a binding and ends it with an event; this is the plan's own
+    /// guard.)
+    #[test]
+    fn a_stale_binding_arms_nothing() {
+        let backend = Backend::current();
+        let base = compressor_insert_session(bank_width(backend) - 2);
+        let mut stripped = with_muted_track(base.clone());
+        track_mut(&mut stripped, "eq1").inserts.effects.clear();
+        let (a, b) = (Session::compile(base), Session::compile(stripped));
+        let all = strips_of(&a);
+        let mut bindings = bindings_of(&all);
+        // A strip B does not have, and an insert B does not have on a strip it does.
+        bindings.set(tap_key("gone"), WINDOW_BLOCKS);
+        let run = swapped_with(
+            backend,
+            &a,
+            &b,
+            &Swap {
+                early: &all,
+                bindings: Some(&bindings),
+                ..Swap::default()
+            },
+        );
+        assert_eq!(run.carry, CarryOutcome::Carried);
+        assert_eq!(
+            run.armed[0],
+            all.len() as u64 - 1,
+            "every tap B still has is armed; eq1's insert is gone"
+        );
     }
 
     /// Gate 5 for the taps: the swap block -- carry, the attachment hook's pairing and the first

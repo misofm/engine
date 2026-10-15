@@ -10,10 +10,10 @@ use crate::{
     CounterSnapshot, CounterSnapshotRef, CountersRequest, DecodeError, DecodeScratch,
     DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticsPage,
     DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId, MeterBatch, NonOkResponse,
-    OUTER_HEADER_BYTES, ProtocolCodec, RequestId, ResponseGetRequest, ResponseHeader,
-    ResponseResult, SessionCommitted, SessionEdit, SessionRevision, SessionSnapshot,
-    SessionSnapshotRequest, StatusCode, TelemetryConfiguration, TransactionApplied,
-    TransportSetRequest, TransportSnapshot, TransportStateEvent,
+    OUTER_HEADER_BYTES, ObservationEnded, ProtocolCodec, RequestId, ResponseGetRequest,
+    ResponseHeader, ResponseResult, SessionCommitted, SessionEdit, SessionRevision,
+    SessionSnapshot, SessionSnapshotRequest, StatusCode, TelemetryConfiguration,
+    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
 };
 
 #[cfg(test)]
@@ -99,6 +99,7 @@ pub struct TypedNonOkResponseFrame<'a> {
 pub enum EventPayload<'a> {
     SessionCommitted(SessionCommitted),
     TransportState(TransportStateEvent),
+    ObservationEnded(&'a ObservationEnded),
     MeterBatch(MeterBatch<'a>),
     CounterSnapshot(CounterSnapshotRef<'a>),
     Diagnostic(&'a Diagnostic),
@@ -168,6 +169,7 @@ pub enum DecodedTypedResponseFrame<'a> {
 pub enum DecodedEventPayload<'a> {
     SessionCommitted(SessionCommitted),
     TransportState(TransportStateEvent),
+    ObservationEnded(ObservationEnded),
     MeterBatch(DecodedMeterBatch<'a>),
     CounterSnapshot(CounterSnapshot),
     Diagnostic(DiagnosticEvent),
@@ -221,6 +223,7 @@ impl<'a> EventPayload<'a> {
         match self {
             Self::SessionCommitted(_) => MessageId::SessionCommitted,
             Self::TransportState(_) => MessageId::TransportState,
+            Self::ObservationEnded(_) => MessageId::ObservationEnded,
             Self::MeterBatch(_) => MessageId::MeterBatch,
             Self::CounterSnapshot(_) => MessageId::CounterSnapshot,
             Self::Diagnostic(_) => MessageId::Diagnostic,
@@ -529,6 +532,9 @@ impl ProtocolCodec {
             MessageId::TransportState => DecodedEventPayload::TransportState(
                 self.decode_transport_state_event(decoded.payload, header.tlv_count)?,
             ),
+            MessageId::ObservationEnded => DecodedEventPayload::ObservationEnded(
+                self.decode_observation_ended(decoded.payload, header.tlv_count)?,
+            ),
             MessageId::MeterBatch => DecodedEventPayload::MeterBatch(
                 self.decode_meter_batch(decoded.payload, header.tlv_count)?,
             ),
@@ -727,6 +733,9 @@ fn write_event_payload(
         }
         EventPayload::TransportState(value) => {
             crate::message_wire::write_transport_state_event(sink, *value)
+        }
+        EventPayload::ObservationEnded(value) => {
+            crate::message_wire::write_observation_ended(sink, value)
         }
         EventPayload::MeterBatch(value) => crate::message_wire::write_meter_batch(sink, *value),
         EventPayload::CounterSnapshot(value) => {
