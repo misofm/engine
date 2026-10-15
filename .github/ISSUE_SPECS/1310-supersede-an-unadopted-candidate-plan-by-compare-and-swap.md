@@ -238,3 +238,101 @@ a revision word. The decisions above keep their meaning, read through the follow
 - *Prepare a successor across a withdrawn candidate plan* (#1344).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
 - *Size the C ABI's plan capacities and resource admission for a superseding candidate* (#1398).
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `e2f6cfb24`.
+
+**Batch order (root, 2026-10-15).** Batch 15a is the controls lane: #1344, #1398, #1310, in
+that order. #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288,
+#1391, #1363 and #1325, in that order. The rest of batch 15 follows. #1319 and #1323 need this
+slice (root rulings R4 and R5 of 2026-10-15).
+
+**Moved anchors.** Each fact in Context still holds; only the lines moved.
+- The one-candidate refusal is `crates/control-plane/src/control.rs:1742-1744`. The #1042 lag
+  check is `:1579-1586`. The reservation refusals are `:1751-1765` (four arms since #1343 and
+  #1311). The full report table or pending list is `:1781-1788`.
+- The base: `prepare_runtime` with its `SuccessorBase` literal is `control.rs:1662-1683`.
+  `SuccessorBase` is `crates/host-core/src/prepare.rs:1070-1097`. The carry program names its
+  predecessor at `prepare.rs:2131-2134` (and `:3067-3073`).
+- The persisting producers move at `control.rs:1846-1849` (`adopt_persisting`, still
+  `crates/host-core/src/source.rs:286`).
+- `SessionStore::commit_prepared` is `crates/protocol/src/model.rs:1384`. The controller's
+  structural commit is `commit_prepared_structural`, `crates/protocol/src/controller.rs:2260`.
+- The exchange: `PlanPublisher::withdraw` `crates/engine/src/realtime/plan_exchange.rs:552`,
+  `republish` `:586`, `PlanReplacementReservation::set_superseded` `:642`, `UnadoptedCandidate`
+  `:251`.
+- Gate 3's fault test is `crates/capi/src/runtime/tests.rs:2364`. `TestStructuralFaultPhase` is
+  `control.rs:161-175`.
+- Gate 5: the structural tolerance in `plan_swap_race.rs` is now `:420` (a bounded wedge window,
+  `WEDGE_BLOCKS`); the source-submit tolerance is `:323`.
+- Gate 7's assertions are in `crates/capi/tests/resource_lifecycle.rs` (`paused_bursts`,
+  `:3311-3365`, and the test at `:3078`).
+
+**Code notes for the implementer.**
+- D3: since #1613 a value-only transaction can commit in place (`commit_prepared`'s
+  `TransactionForm::InPlace`, `model.rs:1397-1400`), with no displaced compilation. A rebuild
+  never does: the structural arm reads `prospective_session().compiled()` (`control.rs:1662-1667`).
+  So D3's displaced model always exists on the rebuild path. A live commit while A waits swaps
+  owners in A's committed model, never in P0's kept one.
+- D4 and D5: `check_donation` reads A's plan through `UnadoptedCandidate::plan()`. After the
+  commit A is never republished, so step 2 takes A's plan with `into_plan()`. That returns A's
+  credit early, which only frees a credit. No `plan_exchange.rs` edit is needed.
+- D4: `republish` panics if a newer epoch was committed after the withdrawal. B's reservation
+  takes no epoch until its commit (step 4), so a refusal before the commit can republish A.
+- D6: `r_P0` is the revision last published on P0's gate (Amendment 1). P0's `ProviderEpoch`
+  (`control.rs:37`) holds that gate's handle, and `PlanRevisionGate::last_published`
+  (`crates/engine/src/realtime/plan.rs:663`) reads it. No new field is needed.
+
+**Decisions.** D1, D4-D7 hold against the code and decision 17. Two do not hold as written.
+- **ROOT RULING (2026-10-15): B's base keeps P0's monitor overlay with P0's model, and the edit
+  ramps committed after `r_P0`, merged with B's own (B wins on a shared row).** This is the
+  proposal below; D2 and D3 read with it. The finding follows. The rest of B's base (D2, D3).
+  D2 writes `SuccessorBase { inventory,
+  committed }`. `SuccessorBase` now also has `monitor` (#1559), `edit_ramps` (#1394) and
+  `observation` (#1584). `monitor.committed` is "the overlay the predecessor's cells hold"; today
+  the control plane passes its one `self.monitor` (`control.rs:1677-1681`). While A waits, a solo
+  edit goes to A's cells (Amendment 1), not P0's. So for B the overlay P0's cells hold is not
+  `self.monitor`. `edit_ramps` is B's own transaction's. A row that only A (or a live edit while
+  A waited) changed then ramps with the session's `control_smoothing` in B, and gate 1's twin
+  (one combined transaction) ramps it with A's length. Proposed: D3 also keeps P0's monitor
+  overlay beside P0's model, and B's `monitor.committed` is that kept overlay. The control plane
+  keeps the edit ramps of every edit committed after `r_P0` and drops them with the epoch; B's
+  `edit_ramps` are those merged with B's own, B's ramp winning on a row both set. `observation`
+  is the host's bindings as now.
+- **ROOT RULING (2026-10-15): B arms its taps from the host's bindings (#1584 D6a). A record kind
+  the bindings cannot express moves to B before publication, with room checked in D4. A kind that
+  fits neither stops the implementer, who reports to root.** D8 reads with this. Where the
+  proposal below says "before step 4", the ruling's "before publication" governs. The finding
+  follows. Records queued on A (D8). Each epoch's effect producers own the
+  instance's observation queue (`EffectControlProducer`, `crates/effect-compiler/src/prepare.rs:619`).
+  A record admitted between A's commit and its adoption waits in A's queue: see
+  `hosts/host-web/src/tests.rs:7020-7032` ("the record is queued on the successor"). D5 step 6
+  drops A with that queue, so an acked record can be lost. D8 says nothing about it. Proposed: D8
+  adds that B's preparation arms each tap from the host's bindings as they stand after every
+  admitted record (#1584 D6a), so B holds what a record queued on A asked for, and the record
+  drops with A. The implementer shows this for each record kind the queue holds. A kind that the
+  bindings do not express moves to B's matching instance queue before step 4, with room checked
+  in D4. If neither holds for a kind, stop and report to root.
+
+**The browser (non-goal).** "The browser (it adopts the control plane in #1332)" is stale. Since
+#1381a the browser runs `control_plane::SessionState` in its one instance
+(`hosts/host-web/src/lib.rs:6-16`). Supersession reaches it through the same code, which decision
+17 C1 asks for. No browser export changes. Browser tests that expect a second structural edit to
+be refused while a candidate waits are superseded with gate 7. Add `hosts/host-web/src/tests.rs`
+to Authorized paths for that only, and run `cargo test --locked -p host-web --features
+host-web/test-support` in gate 9.
+
+**Dependencies on GitHub.**
+- Closed: #1502, #1309, #1343, #1314, #1311, #1312.
+- Open, batch 15a before this slice: #1344, #1398.
+- #1403 (open, not in batch 15) adds `PrimedCandidate`; D5 step 6's drop of it is #1403's. #1325
+  (open, not in batch 15) is cited only for D5's reason.
+- #1482 (open) also edits `plan_exchange.rs`'s area; this slice does not edit that file.
+
+**Gates and commands.** Every named command, package, feature and script exists
+(`scripts/check-protocol-control-policy.sh`, `scripts/check-capi-abi.sh`, protocol and
+control-plane `test-support`).
+
+**Realtime-path edits.** None planned under `crates/engine/src/realtime`. The exchange's
+`withdraw`, `republish` and `set_superseded` exist.

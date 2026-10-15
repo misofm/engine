@@ -107,3 +107,53 @@ spectrum windows carry.
 ## Dependencies
 
 - none
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `228fca26c`.
+
+**Moved anchors.** Each fact in Context still holds; only the lines moved.
+
+- `held_seek` is still `crates/source/src/lib.rs:1018`; `HeldSeek` is `:1022-1027`.
+  `observe_seek_at_block_boundary` is `:1323-1365`. The `begin_block_at` doc is `:1106-1114`.
+- The missing-PCM branch of `begin_block_play` is `:1154-1178` (the function is `:1135-1190`).
+  `SourceReadReport` is `:404-423`, `SourceConsumerTelemetry` `:439-448`, `telemetry()`
+  `:1290-1299`.
+- The graph source driver's block entry is `:1752-1785`. The vacant-entry branch is `:1765-1769`;
+  the fold of `report.underrun_event` is `:1773`.
+- `copy_after_disarm_telemetry` is `:1854-1875`. It still writes five slots per source.
+- `GraphObservationValidity` is `crates/graph/src/lib.rs:2927-2940`.
+- Spectrum windows moved into the core service (#1591): the flag is retained in
+  `crates/host-core/src/spectrum_service.rs` (`:496`, `:517`, `:1206`), not `spectrum.rs`. The
+  browser copies it into its window record at `hosts/host-web/src/ffi.rs:1048` and `:1174`. No
+  code changes there: a held block simply stops setting the flag.
+- The header clause is `crates/capi/include/miso_engine_v1.h:214-215` ("and those blocks / count
+  as source underruns").
+- The host-core facade's `seek_at` doc is `crates/host-core/src/source.rs:209-222`; "reports an
+  underrun" is `:222`.
+- Tests: `prepare_seek_holds_an_anchored_seek` is `:2245`. The anchored-seek tests are now
+  `:2160-2445`. The held-block underrun assertion that this slice changes is `:2364`
+  (`assert_eq!(consumer.underrun_events, u64::from(anchored))` in
+  `a_seek_whose_pcm_arrives_inside_the_block_window_keeps_its_pcm`). The region-end tests are
+  `:2264-2310`. `graph_driver_forwards_underrun_and_seek_generation_facts` is `:2748`.
+
+**Decisions.**
+
+- D1-D6 hold against the code and decision 17.
+- D1, made precise. `begin_block_play`'s acquire step can re-observe a command and set or apply
+  a held seek (`acquire_current_block`, `:1394-1440`, #1274 MINOR-3). So read `held_seek` in the
+  missing-PCM branch, after the acquire. That is the "after this block's observe step" of D1.
+- The missing-PCM branch also advances `next_frame` by one quantum while held. D2 keeps that, so
+  no bit moves.
+
+**Dependencies on GitHub.** None. Downstream and open: #1316, #1317, #1320, #1387, #1537 and
+#1640. `crates/source/src/lib.rs` is a hot file: #1640's hazard note orders stream B's source
+slices (#1316, #1318, #1320) before it.
+
+**Gates and commands.** Gate 4's tests exist (`crates/host-core/tests/successor_swap.rs`,
+`anchored_swap_run`, `:629-830`). That file also compares spectrum windows' `source_underrun`
+between a run and its reference (`:9438`). Both runs hold the same way, so it stays green. Every
+named command exists.
+
+**Realtime-path edits.** None under `crates/engine/src/realtime`. The change is on the source
+consumer's render path in `crates/source/src/lib.rs`.

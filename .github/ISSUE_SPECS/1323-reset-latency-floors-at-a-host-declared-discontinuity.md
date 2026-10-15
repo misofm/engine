@@ -227,3 +227,103 @@ The discontinuity successor publishes the *committed* revision on a fresh gate, 
 revision 0 would be refused by `stamp(0)` (and by host-core's entry check, `host.successor.revision`,
 which requires `1 <= revision`). Root decides how this slice handles a session at revision 0 when
 #1323 is next.
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `228fca26c`.
+
+**Moved anchors.**
+- "render.time.discontinuity" is a render diagnostic, now at
+  `crates/capi/include/miso_engine_v1.h:182`. The seek prototypes are `:420-430`.
+- The last feature bit is now `MISO_ENGINE_V1_FEATURE_SERVICE` (`1 << 7`,
+  `crates/capi/src/abi.rs:70`, header `:251`). The mask is `abi.rs:72-79` and header `:252`. #1316
+  and #1642 also add bits. D1's "next free bit when this slice merges" still governs.
+- The mask test at `crates/capi/src/abi.rs:554` asserts `FEATURE_MASK == 0xff`, a literal. Gate 6
+  replaces that assertion in this slice.
+- `SuccessorBase` is `crates/host-core/src/prepare.rs:1070-1097`.
+- The control plane's `prepare_runtime` call is `crates/control-plane/src/control.rs:1662`, with
+  its `SuccessorBase` literal at `:1670`.
+
+**`SuccessorBase::new` does not exist.** #1277 closed without it, so this slice adds it.
+- `SuccessorBase` now has six fields: `inventory`, `committed`, `revision`, `edit_ramps` (#1394),
+  `monitor` (#1559) and `observation` (#1584).
+- Each new field has a neutral value: `EditRamps::new()` is `const`
+  (`crates/session/src/edit_ramp.rs:102`), `MonitorBase::NONE` (`prepare.rs:1125`) and
+  `NO_OBSERVATION` (`prepare.rs:1100`). `new` sets those and `discontinuity: false`.
+  `edit_ramps` is a reference, so `new` needs a static neutral `EditRamps` beside
+  `NO_OBSERVATION`.
+
+**Construction sites at `228fca26c`.** These replace D3's list:
+- `crates/control-plane/src/control.rs:1670`;
+- `crates/host-core/tests/support/successor.rs:98`;
+- `crates/host-core/tests/successor_swap.rs:1043`, `:2663`, `:3926`, `:3950`, `:3980`, `:7159`,
+  `:9331`;
+- `crates/host-core/tests/browser_successor.rs:284`;
+- `crates/host-core/tests/effect_observation.rs:544`;
+- `crates/capi/tests/resource_lifecycle.rs:1805`;
+- `hosts/host-web/src/tests.rs:5938`.
+
+`crates/host-core/tests/withdrawn_successor.rs` does not exist (#1344 is open). Add to the
+authorized paths, for the construction sites only: `crates/host-core/tests/browser_successor.rs`,
+`crates/host-core/tests/effect_observation.rs` and `hosts/host-web/src/tests.rs`.
+
+**Dependencies.**
+- #1285, #1317 and #1396 are in the batch.
+- #1309 is closed: the control plane is `crates/control-plane/src/`.
+- #1311 is closed: `PlanAdoption::Primed` is `crates/engine/src/realtime/spsc.rs:532`.
+- #1314 is closed: the outcome flags are header `:255-256`.
+- #1310 is open and not in batch 15/16. D2's supersede, D4's completion and gate 5 need it. The
+  engine's `withdraw` exists (`crates/engine/src/realtime/plan_exchange.rs:552`, #1343), but #1310's
+  compare-and-swap and its D2, D5 and D6 do not. #1310 also waits on #1344 and #1398, both open.
+- #1403 (open) adds `PrimedCandidate` later. It is not a dependency.
+- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398 and #1310.
+  #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288, #1391,
+  #1363 and #1325.
+  The rest of batch 15 follows. This slice is in the rest (R5).
+
+**ROOT RULING (2026-10-15): order #1310, #1344 and #1398 before #1323. No placeholder
+refusal.** (R5.) #1344, #1398 and #1310 are in batch 15a; #1323 follows in the rest of batch 15.
+The finding follows. D2 supersedes a pending candidate
+through #1310, which is not planned for this batch. A declaration while a candidate is pending has
+no rule without it. Proposed: order #1310, #1344 and #1398 before #1323. Do not ship a placeholder,
+such as a typed backpressure refusal while a candidate is pending.
+
+**ROOT RULING (2026-10-15): no revision-0 special case. At revision 0 the call returns OK and
+publishes nothing.** (R6.) D2 adds that sentence. Gate 3 adds a revision-0 case: a declaration
+on a host at revision 0 returns OK, publishes no candidate, and leaves the next render and the
+reported latency unchanged. The finding follows. Proposed answer: no special
+case. Floors and source-read offsets come only from a successor. A successor needs
+`1 <= revision` (`host.successor.revision`, `prepare.rs:1915`, `:3200`), and the committed revision
+only grows. So when D2's test holds, the committed revision is at least 1. At revision 0 the call
+returns OK and publishes nothing. Add that sentence to D2 and a revision-0 case to gate 3.
+
+**ROOT RULING (2026-10-15): this slice also adds `miso_engine_web_v1_declare_discontinuity(handle)
+-> u32`.** (R7.) It forwards to the same control-plane function. It adds the export-list mirrors
+of #1293 D7 and a native host-web gate equal to gate 2 (in `hosts/host-web/src/tests.rs`).
+#1643 calls it before its seek. Add `hosts/host-web/src/ffi.rs`, `hosts/host-web/src/lib.rs` and
+the mirror files of #1293 D7 to Authorized paths. The finding follows. D5 leaves the browser to #1332 and
+#1296. Since #1381a the browser runs `control_plane::SessionState` in its one instance
+(`hosts/host-web/src/lib.rs:6-16`), so the function is reachable there now. Only a browser entry
+is missing. Decision 17 C1 says a behaviour on one host only is a defect. #1642 makes a C ABI host
+declare before a session seek, but #1643 (the browser session seek) does not, so browser floors
+would never reset. Proposed: this slice also adds a control-half export
+`miso_engine_web_v1_declare_discontinuity(handle) -> u32` that forwards to the same control-plane
+function. It adds the export-list mirrors of #1293 D7 and a host-web native gate equal to gate 2.
+#1643 then calls it before its seek. Alternative: carry the declaration as a protocol frame
+through `submit_command` and `control_command`, C13's form with no new export. But D1, #1317 and
+#1642 already name the C export.
+
+**Other notes.**
+- `TRANSPORT_SET` now carries the state only (#1635, code landed; issue still open). A transport
+  stop is not a declaration. The host calls D1 itself.
+- #1641 (open) gives every plan a timeline that "carries like a source". D2's successor "carries
+  only the source consumers". If #1641 lands first, the timeline consumer carries too, or the
+  playhead and stored automation (#1647) restart at the declaration. Whichever lands second adds
+  it to the discontinuity join.
+- Decisions D1-D4 otherwise hold against the code and decision 17. The declaration is not a
+  control.
+
+**Gates and commands.**
+- The named files exist, except `withdrawn_successor.rs` (#1344, new there).
+- `tools/audit/src/capi.rs` exists, and `scripts/check-capi-abi.sh` has `--self-test`.
+- Gate 7's commands are valid. Its features exist.

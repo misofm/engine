@@ -293,7 +293,9 @@ the browser moves onto the same frames. The phase after S13 delivers them (slice
 smaller one-host differences found by the same audit (plan latency and tail, the agent lattice,
 source submit diagnostics, render-failure recovery, session admission caps, CPU telemetry, the SDK
 builder's checks, canonical-PCM decode and content identity) are recorded for root to file as
-their own issues under this rule.
+their own issues under this rule. Source submission, seeks and the seek report are transport under
+C1, with one core function behind both hosts, so their direct exports are not C13 exceptions
+(ruling 2026-10-15, #1316).
 
 ### How to add a control
 

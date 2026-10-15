@@ -312,3 +312,73 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
   between a bank and a per-node instance* (#1281) and *Carry per-node effect instances across a plan
   swap* (#1282): gates 5, 7(b) and 9 assume that an untouched insert carries. Until these land, a strip
   that holds an insert is in `restarted_strips()` and is ducked (root, 2026-10-12).
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `e2f6cfb24`.
+
+**Batch order (root, 2026-10-15).** Batch 15a is the controls lane: #1344, #1398, #1310, in
+that order. The rest of batch 15 follows. This slice is not in batch 15a; see the root ruling below.
+
+**Moved anchors.**
+- `SuccessorBase` is `crates/host-core/src/prepare.rs:1070-1097`, with six fields: `inventory`,
+  `committed`, `revision`, `edit_ramps` (#1394), `monitor` (#1559) and `observation` (#1584).
+  `prepare_host_runtime_with_live_lanes_successor` is `:1311`. `restarted_strips()` is
+  `:686-690`; its doc already names this issue as its consumer. The restart set is built at
+  `:3101-3105` from the strip, effect and strip-delay joins.
+- The classifier no longer has `Prepared` and `PreparedBypass`. Decision 17's control rows
+  replaced them: `LiveRebuild` is `prepare.rs:4230` (`Structure`, `Domain`,
+  `RebuildOnly(reason)`, `AutomationTarget`), and the steps are documented at
+  `crates/host-core/src/live_delta.rs:259-280`. A non-`Block` parameter and a rebuild-only builtin
+  are `RebuildOnly` with the row's reason. Each trigger of gate 3 still rebuilds: insert add,
+  remove, order and quality are `Structure`; `delay_samples` is a rebuild-only row (the row at
+  `crates/session/src/visit.rs:122`, field 5; `crates/host-core/src/control_provider.rs:3108-3113`
+  finds it as "a rebuild-only value"); the limiter's `lookahead_ms` is `AutomationRate::None` with a
+  prepared reason (`crates/true-peak-limiter/src/lib.rs:212-228`).
+- `SendTap` is `crates/session/src/model.rs:957-972`.
+- The sidechain edge is built at `crates/graph-compiler/src/compile.rs:377-384`; the tap's stage
+  is `crates/graph-compiler/src/ids.rs:198` and `:210-220`.
+- `render_sample` is `crates/control-plane/src/plan.rs:13`, read at `:39`.
+- The compressor's zero latency is `crates/compressor/src/lib.rs:306`.
+
+**Code that does not exist yet.** `crates/host-core/src/transition.rs`,
+`plan_strip_transition`, the duck overlay and `crates/capi/tests/strip_transitions.rs` are
+#1325's. The arm entry point is #1288's. `SuccessorBase::forced_restart` is #1397's; until #1397
+lands, D1's forced-restart clause has nothing to read.
+
+**Dependencies on GitHub.**
+- Closed: #1277, #1280, #1281 and #1282. So per-node and moving inserts carry now. The hazard
+  and the dependency note on gates 5, 7(b) and 9 no longer apply: an untouched insert carries.
+- Open, in batch 15a before this slice: #1310.
+- Open and not in batch 15: #1288 (arm), #1325 (duck, `S`, overlay, `transition.rs`), #1363 (route
+  arm, D3) and #1391 (pre-fader route lanes). D1-D5 and every gate need all four.
+- Forward references, not dependencies: #1397, #1354, #1287, #1402 and #1392 (open).
+- **ROOT RULING (2026-10-15): #1324 leaves batch 15a. It lands in a later batch after #1288,
+  #1391, #1363 and #1325, in that order. Batch 15a is #1344, #1398, #1310.**
+  The finding follows. It needs #1288, #1325, #1363 and #1391,
+  which are open and outside batch 15. None of their code is on `main`. Proposed: move #1324 out
+  of 15a to the batch that lands #1288, #1391, #1363 and #1325, in that order, with #1324 after
+  them. Batch 15a is then #1344, #1398 and #1310. #1285's batch-15 note (D3's duck-swap) then
+  keeps its fallback: until #1324 lands, a restarted strip starts at rest with no duck. The
+  alternative is to add the four to batch 15a before #1324.
+
+**Decisions.**
+- D1-D7 hold against the code. Decision 17 does not change which strips restart: the restart set
+  comes from the carry joins, not from the classifier's rows.
+- D3's "channels the model leaves unmuted": since #1559 a successor bakes the effective values
+  (`controls::effective`: the model, VCA mutes and the monitor overlay, C8). An armed strip must
+  stay muted when the effective value is muted, so a solo elsewhere does not fade it in. Read
+  D3 with "effective" for "model". #1288's arm entry point must take the same input.
+- D5's structural edit during the window is #1310's supersession with #1325 D6's overlay. #1310's
+  base (its batch-15 amendment) keeps P0's model; the overlay mutes go on top of it.
+
+**Authorized paths.** Deliverable 2 calls #1325's path from the control plane. Add
+`crates/control-plane/src/control.rs` (the call only). The control plane is
+`crates/control-plane/src/` since #1309.
+
+**Gates and commands.** The commands, packages and scripts exist, except
+`crates/capi/tests/strip_transitions.rs`, which #1325 creates. `--test strip_transitions` fails
+until then.
+
+**Realtime-path edits.** None planned under `crates/engine/src/realtime`. The fire and the ramped
+mutes are #1288's and #1325's render-side work.

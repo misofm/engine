@@ -153,3 +153,88 @@ stem's frame exactly, instead of guessing one or two quanta (round-1 finding D1-
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314): the record
   module this generalizes.
 - *Report held source blocks apart from underruns* (#1318): the held counter this reports.
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `228fca26c`.
+
+**Moved anchors.** Each fact in Context still holds; only the lines moved.
+
+- `begin_block_at` is `crates/source/src/lib.rs:1115` (doc `:1106-1114`). It and
+  `begin_block_play` (`:1135`) now take a private `SeekClock` (`:1030-1038`, the enum at `:1031`). D1's rename is
+  `SeekClock::At`'s field and `begin_block_at`'s parameter.
+- `observe_seek_at_block_boundary` is `:1323-1365`. The acquire step can re-observe a command
+  inside `begin_block_play` (`acquire_current_block`, `:1394-1440`, #1274 MINOR-3). D3's
+  publication at the end of `begin_block_play` sees both.
+- The graph driver's block entry is `:1752-1785`; the call is `:1772`.
+- The producer flips `active_generation` in `try_seek` at `:778` (`try_seek` `:753-787`). The
+  C ABI submit report copies it at `crates/capi/src/ffi.rs:501`.
+- `SourceResourceReport` is `:209-236`; `resource_report` is `:490-546`. The row-sum test of
+  gate 6 is `report_separates_session_pcm_from_source_overhead` (`:2056`).
+- `prepare_seek` is still `:1049`. The carry's `mem::swap` is `:1931` (`adopt_sources`,
+  `:1902-1938`).
+- `SourceControlSet::seek` is `crates/host-core/src/source.rs:200`, `seek_at` `:223`, its doc
+  `:209-222`.
+- `newest_providers` is `crates/control-plane/src/control.rs:2557`, `newest_providers_mut`
+  `:2578`. `SessionState::seek` is `:3003`, `seek_at` `:3028`.
+- The header's anchor text is `crates/capi/include/miso_engine_v1.h:204-216` (the clock clause
+  `:205-207`). The session-thread table is `:18-22`.
+
+**Dependencies on GitHub.**
+
+- #1314 is closed. `crates/engine/src/realtime/watermark.rs` is on this tree.
+- #1309 is closed. `crates/control-plane/src/control.rs` is correct in Authorized paths.
+- #1318 is open. It is in the batch-15/16 list.
+- #1348 is closed. Its service step exists (`SessionState::service`, `control.rs:1486`).
+- Downstream, not dependencies: #1350, #1293, #1332, #1387, #1537, #1640 and #1641 (open). #1641
+  plans a seek-report row for the timeline, which has no ring. D2's record shape must not stop a
+  later non-ring owner from publishing the same words.
+
+**Decisions.**
+
+- D1, D3, D4, D5, D7 and D8 hold against the code.
+- D6 and #1348. The header (`:148-153`) says every session call that passes its argument checks
+  runs the service step first. Now that #1348 has landed, the new call follows that rule:
+  `SessionState::seek_report` calls `self.service()` first, as `seek` does, and the header's
+  thread table and service paragraph list the new call. This applies #1348 D2. It does not change
+  D6's results.
+- D6 needs a re-export in `crates/capi/src/runtime/mod.rs` and `crates/control-plane/src/lib.rs`.
+  Add both to Authorized paths for re-exports only.
+- D6's feature bit: the mask is 255 today (`MISO_ENGINE_V1_FEATURE_SERVICE` is 128). The rule
+  "next free bit when it merges, by symbol" stands.
+- **ROOT RULING (2026-10-15): one shared seqlock module, `crates/engine/src/realtime/seqlock.rs`.
+  #1316 lands first and creates it. #1482 D3 later moves `observe.rs` onto it.** (R1, D2 against
+  #1482 D3.) D2 puts the generic part in `seqlock.rs`, not in `watermark.rs`, and `watermark.rs`
+  uses it. Add `crates/engine/src/realtime/seqlock.rs` (new) to Authorized paths. The finding
+  follows. D2 makes #1314's record a generic `PublishedWords<const N: usize>` in `watermark.rs`. *Attribute each claim's revisions exactly in
+  the watermark and share one seqlock* (#1482, open, not in the batch-15/16 list) D3 puts the
+  seqlock protocol in a new `crates/engine/src/realtime/seqlock.rs` that `observe.rs` and
+  `watermark.rs` both use. Done in either order without a rule, the two slices build two shared
+  abstractions or a third copy of the seqlock. Proposed resolution: one shared seqlock module.
+  If #1482 lands first, D2 builds the seek report on `seqlock.rs` and leaves `watermark.rs`
+  untouched. If this slice lands first, D2 puts the generic part in `seqlock.rs` (added to
+  Authorized paths) and #1482 D3 then moves `observe.rs` onto it. Root picks the order.
+- **ROOT RULING (2026-10-15): keep D6 as a direct C export, `miso_engine_v1_source_seek_report`.**
+  (R2, D6 against decision 17 C13.) The logic is one core function,
+  `SourceControlSet::seek_report`, behind both hosts. Source submission, seeks and the seek report
+  are transport under decision 17 C1, so their direct exports are not C13 exceptions. Decision 17's
+  C13 line records this (`docs/rulings/one-control-abstraction-2026-10-13.md`). The finding
+  follows. C13 says a new feature gets "its C ABI
+  form (a protocol message through `miso_engine_v1_submit_command`, no new C export)". D6 adds
+  a new C export, `miso_engine_v1_source_seek_report`. Root's decision-17 amendments to #1293 kept
+  that slice's browser seek-report export (#1293 D6), so root seems to treat source seeks and
+  their reports as host transport (C1: "frame staging"), like `seek` and `seek_at`. Proposed
+  resolution: keep D6 as a direct export. Record that source submission, seeks and the seek
+  report are transport under C1, with one core function (`SourceControlSet::seek_report`) behind
+  both hosts. The alternative is a protocol message, which would need a new message ID and a
+  source-ID field in the protocol.
+
+**Gates and commands.** Every named script, package and feature exists. `crates/source/tests/`
+holds `randomized.rs` and `seek_schedule_model.rs`. Gate 6's "`crates/source` resource test" is
+the unit test named above. Moved pins from the new per-ring row can reach
+`crates/capi/tests/resource_lifecycle.rs` and `hosts/host-web/tests/browser-v1/expected.json`.
+Re-pin from the measurement, with the reason.
+
+**Realtime-path edits.** D2 edits `crates/engine/src/realtime/watermark.rs` and `mod.rs` and adds
+the new `seqlock.rs` (R1). D3 adds a render-side publication in the source consumer. That slice gets
+one attempt.
