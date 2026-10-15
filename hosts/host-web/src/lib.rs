@@ -1275,6 +1275,106 @@ struct EffectInstance {
     descriptor: &'static effect_contract::EffectDescriptor,
 }
 
+/// What the browser derives from one plan's shape (issue #1290a): the strip order, the dense effect
+/// table that addresses the plan's effects and observation readers, and the per-meter and
+/// per-effect scratch that the control and delivery paths use. Every table is a function of the
+/// plan's session model, producers and companions, so the plan's own preparation builds it
+/// ([`build_plan_shape`]) and a replacement plan carries its own in its
+/// [`RenderCompanions`]. The host swaps the pair at the block that adopts the plan, a pointer
+/// exchange that allocates and frees nothing.
+///
+/// The published meter frame and header are not here: the worklet binds fixed views over them at
+/// boot, so they keep the boot's size (#1290d owns their growth).
+struct PlanShape {
+    /// Canonical normalized track order: the leading segment of the strip order that
+    /// `track_index` addresses (issue #1213 D1).
+    tracks: Vec<Box<str>>,
+    /// Canonical normalized submix order, the strip order's trailing segment: submix `j` is strip
+    /// `tracks.len() + j` (issue #1207 D2), which is the index word a command addresses it by
+    /// (issue #1213 D1).
+    submixes: Vec<Box<str>>,
+    /// Effects per strip (tracks, then submixes) in each lowered rack, in chain order
+    /// `[pre_insert, inserts, post_insert]`, so an effect-addressed command is answered with
+    /// `UNKNOWN_EFFECT` before anything else ([`LiveEffectAddress::lower`] reads them).
+    rack_effects: Box<[[u32; 3]]>,
+    /// Per-strip prefix sum of effect instances, so `effect_slot` is arithmetic, not a lookup:
+    /// the tracks first, then the submixes (issue #1207 D3), so a track's entry is the same with
+    /// or without submixes.
+    effect_base: Box<[u32]>,
+    /// Every effect instance of the plan in the dense `effect_slot` order, whose length is the
+    /// number of instances. It is how an observe record (kinds 7 and 8, ruling C9) reaches its
+    /// effect's observation queue, and how the reads reach its readers.
+    effect_instances: Box<[Option<EffectInstance>]>,
+    /// Issue #143: the meter consumers (issue #137 D2, one per selected meter, empty when
+    /// `live_control_meter_blocks` was zero) and the observation reader sets are the plan's
+    /// [`RenderCompanions`]; `effect_instances` says where each effect's reader set is.
+    /// Strip index of each observed effect slot (a submix's is `tracks.len() + j`), or `u32::MAX`
+    /// for a slot with no taps. Built once at compilation, so the poll's fold is arithmetic rather
+    /// than a search.
+    observation_tracks: Box<[u32]>,
+    /// Armed-tap bitmask per effect slot, maintained at **admission**.
+    ///
+    /// A conflating cell holds its last window forever -- that is what makes it wait-free -- so
+    /// "has this tap been unsubscribed" is not a question the transport can answer, and it must
+    /// not be: a reader that treated an unconsumed window as absent would make an armed tap's
+    /// reading flicker to zero on every poll between windows, exactly as the peak section would if
+    /// it forgot its last value. The subscription state is control-plane state, so it lives on the
+    /// control plane, updated by the one function that admits the record.
+    observation_armed: Box<[u32]>,
+    /// Admission sample at which each tap's current arm was acknowledged. A resident cell keeps
+    /// its previous window forever, so a read is fresh for a re-arm only when the whole returned
+    /// window starts at or after this sample. The nested index is the dense effect slot followed
+    /// by that descriptor's tap index; zero means no command has changed the tap yet.
+    observation_arm_samples: Box<[Box<[u64]>]>,
+    /// The designated master strip index (tracks first, then submixes), or `None` (issue #143
+    /// D6, issue #1213 D5).
+    master_track: Option<u32>,
+    /// Room needed per effect's observation queue by the submission being validated: the
+    /// subscriptions it queues on each effect. Allocated at compilation, one entry per effect
+    /// instance.
+    command_wanted: Box<[u32]>,
+    /// The observation taps the submission being validated has named, one bit per tap, one word per
+    /// effect instance (a session binds at most [`MAXIMUM_OBSERVATION_TAPS`] taps per effect).
+    /// An `Observe` record overwrites its tap's whole state at the block that drains it and one
+    /// submission drains in one block, so a submission names each tap once (#1345 D2). Cleared with
+    /// `command_wanted` at the top of every submission.
+    observe_named: Box<[u32]>,
+    /// Observation subscriptions admitted per effect queue since the last successful render.
+    ///
+    /// The browser's control plane and render plane are the same thread and every live-control
+    /// stage drains its whole observation queue at the top of every block, so a successful render
+    /// empties every control queue. That is what makes this an exact free-slot count rather than
+    /// an estimate, and it is what lets a submission be refused *before* anything is queued.
+    in_flight: Box<[u32]>,
+    /// One bounded pending snapshot per track. This is fixed at preparation and never grows from
+    /// the callback; the queue itself remains the only producer-side buffer.
+    meter_pending: Box<[Option<MeterSnapshot>]>,
+    /// One count per strip meter (track or submix), read from its queue at each poll's entry and
+    /// decremented before each pop (issue #1448 D2). Scratch for one call: every poll sets every
+    /// entry before it pops, so delivery resets do not touch it. Allocated at preparation, sized
+    /// by the meter count.
+    meter_remaining: Box<[usize]>,
+    /// Whether each strip contributed a gain-reduction reading to the most recent poll. Allocated
+    /// at compilation, one entry per strip; it is what makes `masterGrDb` absent rather than zero.
+    observation_present: Box<[bool]>,
+}
+
+/// How many replacement plans' tables the host holds at once: the plan exchange admits one
+/// unadopted candidate at a time, and one more waits for the service step after its adoption.
+const PENDING_SHAPES: usize = 4;
+
+/// One replacement plan's tables, committed with the plan (#1290a).
+struct PendingShape {
+    /// The plan's epoch.
+    epoch: u64,
+    /// The plan's tables until the block that adopts the plan swaps them with the host's, and the
+    /// tables that block retired after it.
+    shape: Box<PlanShape>,
+    /// Whether the adoption block has passed: the entry then holds tables nothing reads, which
+    /// the service step drops on the control side.
+    adopted: bool,
+}
+
 /// Everything one compiled session owns on the browser side.
 ///
 /// Field order is the drop order and is load-bearing: the control plane's session drops first (its
@@ -1296,6 +1396,21 @@ struct ReadyOwnership {
     /// The any-thread projection of the plan: its resource row and the applied-revision watermark
     /// (#1381a D5).
     queries: PlanQueries<WebAdapter>,
+    /// The tables of the plan that renders (#1290a): the boot plan's until the block that adopts a
+    /// replacement, which swaps in the replacement's own from its companions.
+    shape: Box<PlanShape>,
+    /// The epoch of the plan `shape` describes.
+    shape_epoch: u64,
+    /// Where the preparer leaves a replacement plan's tables (#1290a).
+    record: Arc<Mutex<BootRecord>>,
+    /// The tables of replacement plans between their commit and the service step after their
+    /// adoption block (#1290a). Reserved at boot, so neither the commit (it checks the room first)
+    /// nor the adoption (it swaps in place) ever grows it from a render call.
+    pending_shapes: Vec<PendingShape>,
+    /// The structural commands this instance's control half ran in place of its render half
+    /// (#1290a D6), saturating: a rebuild's preparation and publication run on the thread that
+    /// also renders, so each one is a blocking rebuild, counted and reported.
+    blocking_rebuilds: u32,
     /// Whether the boot asked for observation taps (`live_control_observation_taps != 0`): the
     /// command staging exists and the observation records (kinds 7 and 8) are accepted only then.
     commands_enabled: bool,
@@ -1303,80 +1418,17 @@ struct ReadyOwnership {
     /// control plane made, which every cell reader of every plan the session prepares adds to,
     /// and which the status reports (#1399).
     live_values_superseded: host_core::LiveValuesSuperseded,
-    /// Every effect instance of the plan in the dense `effect_slot` order, whose length is the
-    /// number of instances. It is how an observe record (kinds 7 and 8, ruling C9) reaches its
-    /// effect's observation queue, and how the reads reach its readers.
-    effect_instances: Box<[Option<EffectInstance>]>,
-    /// Per-strip prefix sum of effect instances, so `effect_slot` is arithmetic, not a lookup:
-    /// the tracks first, then the submixes (issue #1207 D3), so a track's entry is the same with
-    /// or without submixes.
-    effect_base: Box<[u32]>,
-    /// Room needed per effect's observation queue by the submission being validated: the
-    /// subscriptions it queues on each effect. Allocated at compilation, one entry per effect
-    /// instance.
-    command_wanted: Box<[u32]>,
-    /// The observation taps the submission being validated has named, one bit per tap, one word per
-    /// effect instance (a session binds at most [`MAXIMUM_OBSERVATION_TAPS`] taps per effect).
-    /// An `Observe` record overwrites its tap's whole state at the block that drains it and one
-    /// submission drains in one block, so a submission names each tap once (#1345 D2). Cleared with
-    /// `command_wanted` at the top of every submission.
-    observe_named: Box<[u32]>,
     /// Decoded submission staging: one entry per staged record, [`MAXIMUM_COMMAND_RECORDS`] long.
     command_decoded: Box<[StagedObserve]>,
-    /// Observation subscriptions admitted per effect queue since the last successful render.
-    ///
-    /// The browser's control plane and render plane are the same thread and every live-control
-    /// stage drains its whole observation queue at the top of every block, so a successful render
-    /// empties every control queue. That is what makes this an exact free-slot count rather than
-    /// an estimate, and it is what lets a submission be refused *before* anything is queued.
-    in_flight: Box<[u32]>,
     /// Whether any subscription has been queued since the last successful render.
     ///
     /// This keeps command-free blocks from walking every destination counter. It is set at each
     /// successful push, so a partial internal failure cannot accidentally credit queue capacity.
     has_in_flight_commands: bool,
-    /// Canonical normalized track order: the leading segment of the strip order that
-    /// `track_index` addresses (issue #1213 D1).
-    tracks: Vec<Box<str>>,
-    /// Canonical normalized submix order, the strip order's trailing segment: submix `j` is strip
-    /// `tracks.len() + j` (issue #1207 D2), which is the index word a command addresses it by
-    /// (issue #1213 D1).
-    submixes: Vec<Box<str>>,
-    /// Effects per strip (tracks, then submixes) in each lowered rack, in chain order
-    /// `[pre_insert, inserts, post_insert]`, so an effect-addressed command is answered with
-    /// `UNKNOWN_EFFECT` before anything else ([`LiveEffectAddress::lower`] reads them).
-    rack_effects: Box<[[u32; 3]]>,
     /// The optional one-shot spectrum service over its observer or atomically selectable
     /// collection. It is declared before the prepared host so consumers are released before the
     /// plan's producers.
     spectrum: Option<SpectrumService>,
-    /// Issue #143: the meter consumers (issue #137 D2, one per selected meter, empty when
-    /// `live_control_meter_blocks` was zero) and the observation reader sets are the active
-    /// plan's [`RenderCompanions`]; `effect_instances` says where each effect's reader set is.
-    /// Strip index of each observed effect slot (a submix's is `tracks.len() + j`), or `u32::MAX`
-    /// for a slot with no taps. Built once at compilation, so the poll's fold is arithmetic rather
-    /// than a search.
-    observation_tracks: Box<[u32]>,
-    /// Whether each strip contributed a gain-reduction reading to the most recent poll. Allocated
-    /// at compilation, one entry per strip; it is what makes `masterGrDb` absent rather than zero.
-    observation_present: Box<[bool]>,
-    /// Armed-tap bitmask per effect slot, maintained at **admission**.
-    ///
-    /// A conflating cell holds its last window forever -- that is what makes it wait-free -- so
-    /// "has this tap been unsubscribed" is not a question the transport can answer, and it must
-    /// not be: a reader that treated an unconsumed window as absent would make an armed tap's
-    /// reading flicker to zero on every poll between windows, exactly as the peak section would if
-    /// it forgot its last value. The subscription state is control-plane state, so it lives on the
-    /// control plane, updated by the one function that admits the record.
-    observation_armed: Box<[u32]>,
-    /// Admission sample at which each tap's current arm was acknowledged. A resident cell keeps
-    /// its previous window forever, so a read is fresh for a re-arm only when the whole returned
-    /// window starts at or after this sample. The nested index is the dense effect slot followed
-    /// by that descriptor's tap index; zero means no command has changed the tap yet.
-    observation_arm_samples: Box<[Box<[u64]>]>,
-    /// The designated master strip index (tracks first, then submixes), or `None` (issue #143
-    /// D6, issue #1213 D5).
-    master_track: Option<u32>,
     /// `[track0 L, track0 R, .., trackN L, trackN R, bus0 L, bus0 R, .., busM L, busM R, master L,
     /// master R, track0 GR, .., trackN GR, bus0 GR, .., busM GR, master GR]` -- `3(T + S) + 3`
     /// words, one peak pair and one gain-reduction word per strip (issue #1209 D1). With `S = 0`
@@ -1396,14 +1448,6 @@ struct ReadyOwnership {
     master_read: usize,
     master_write: usize,
     master_count: usize,
-    /// One bounded pending snapshot per track. This is fixed at preparation and never grows from
-    /// the callback; the queue itself remains the only producer-side buffer.
-    meter_pending: Box<[Option<MeterSnapshot>]>,
-    /// One count per strip meter (track or submix), read from its queue at each poll's entry and
-    /// decremented before each pop (issue #1448 D2). Scratch for one call: every poll sets every
-    /// entry before it pops, so delivery resets do not touch it. Allocated at preparation, sized
-    /// by the meter count.
-    meter_remaining: Box<[usize]>,
     /// Host publication generation, advanced on lease transitions and detected producer resets.
     meter_generation: u64,
     /// Losses and rejected stale/mismatched windows waiting to be reported in the next complete
@@ -1437,11 +1481,95 @@ impl ReadyOwnership {
         self.control.committed_session()
     }
 
+    /// Run one control command frame through the control plane (#1290a). When it publishes a
+    /// replacement plan (the control plane's newest plan epoch advances exactly when a rebuild was
+    /// prepared, committed and published), the plan's tables are kept for its adoption block and
+    /// the rebuild is counted as a blocking rebuild (D6); a refused or live command counts and
+    /// keeps nothing.
+    ///
+    /// The room for the tables is checked before the command runs, so a command is never
+    /// acknowledged and then unable to keep what the host needs to read its plan.
+    fn run_command(
+        &mut self,
+        request: &[u8],
+        output_capacity: u64,
+    ) -> Result<usize, control_plane::CommandError> {
+        self.reclaim_shapes();
+        if self.pending_shapes.len() == self.pending_shapes.capacity() {
+            return Err(control_plane::CommandError::Backpressure);
+        }
+        let before = self.control.newest_plan_epoch();
+        let result = self.control.command(request, output_capacity);
+        // Whatever the preparer left is taken: a command refused after its preparation leaves
+        // tables nothing will read.
+        let prepared = self
+            .record
+            .lock()
+            .ok()
+            .and_then(|mut record| record.shape.take());
+        let epoch = self.control.newest_plan_epoch();
+        if result.is_ok() && epoch != before {
+            let Some(shape) = prepared else {
+                return Err(control_plane::CommandError::Internal);
+            };
+            self.pending_shapes.push(PendingShape {
+                epoch,
+                shape: Box::new(shape),
+                adopted: false,
+            });
+            self.blocking_rebuilds = self.blocking_rebuilds.saturating_add(1);
+        }
+        result
+    }
+
+    /// Drop the tables of plans render has adopted past (#1290a): the host's own, retired by the
+    /// adoption block, and those of a candidate that a later one superseded. Control side only.
+    fn reclaim_shapes(&mut self) {
+        self.pending_shapes.retain(|entry| !entry.adopted);
+    }
+
+    /// Take the tables of the plan whose epoch is `epoch` (#1290a), at the block that adopted it.
+    /// The tables it retires stay in the entry for [`Self::reclaim_shapes`]; an entry of an
+    /// earlier epoch was superseded and is marked the same way. A pointer exchange: it allocates
+    /// and frees nothing, and indexes nothing, so it adds no trap to the render export.
+    fn adopt_shape(&mut self, epoch: u64) {
+        self.shape_epoch = epoch;
+        let mut taken = false;
+        for entry in self.pending_shapes.iter_mut() {
+            if entry.adopted {
+                continue;
+            }
+            if entry.epoch == epoch {
+                core::mem::swap(&mut self.shape, &mut entry.shape);
+                entry.adopted = true;
+                taken = true;
+            } else if entry.epoch < epoch {
+                entry.adopted = true;
+            }
+        }
+        if taken {
+            // A swap restarts the meter delivery state, as a producer reset does (#1290d carries
+            // it).
+            self.reset_meter_delivery(false);
+            self.meter_generation = self.meter_generation.saturating_add(1);
+        }
+    }
+
+    /// Whether a replacement plan is committed but its tables and the control plane's producers
+    /// do not describe one plan (#1290a): the replacement waits for its block, or render adopted it
+    /// and the next service step has yet to promote its producers. An observation record
+    /// addresses an effect by this host's tables and reaches it through the producers, so it is
+    /// admitted only when both are the same plan's.
+    fn replacement_pending(&self) -> bool {
+        self.control.newest_plan_epoch() != self.shape_epoch
+            || self.control.current_plan_epoch() != self.shape_epoch
+    }
+
     /// Clear host-owned pending delivery state. Producer-side accumulators continue rendering;
     /// `meter_activation_sample` makes the already bounded poll reject queued pre-activation
     /// windows before it accepts a clean interval.
     fn reset_meter_delivery(&mut self, clear_publication: bool) {
-        for pending in &mut self.meter_pending {
+        for pending in &mut self.shape.meter_pending {
             *pending = None;
         }
         self.master_peak = [0.0, 0.0];
@@ -1499,7 +1627,7 @@ impl ReadyOwnership {
     /// Strips these controls address: the tracks, then the submixes (issue #1213 D1). An
     /// observation record's `track_index` is a strip index, so a bus is addressed as a track is.
     fn strip_count(&self) -> usize {
-        self.tracks.len() + self.submixes.len()
+        self.shape.tracks.len() + self.shape.submixes.len()
     }
 
     /// The dense index of one addressed effect instance in `effect_instances`.
@@ -1510,18 +1638,18 @@ impl ReadyOwnership {
     /// session prepared.
     fn effect_slot(&self, track: usize, address: LiveEffectAddress) -> Option<usize> {
         let slot = dense_effect_slot(
-            *self.effect_base.get(track)?,
-            *self.rack_effects.get(track)?,
+            *self.shape.effect_base.get(track)?,
+            *self.shape.rack_effects.get(track)?,
             address,
         )?;
-        (slot < self.effect_instances.len()).then_some(slot)
+        (slot < self.shape.effect_instances.len()).then_some(slot)
     }
 
     /// The position, in the control plane's producer list, of the effect at dense slot `effect`
     /// (#1381a): the one way the observation records reach an effect's observation queue (ruling
     /// C9).
     fn effect_producer_position(&self, effect: usize) -> Option<usize> {
-        let position = self.effect_instances.get(effect)?.as_ref()?.producer;
+        let position = self.shape.effect_instances.get(effect)?.as_ref()?.producer;
         Some(position as usize)
     }
 
@@ -1548,7 +1676,7 @@ impl ReadyOwnership {
             )
             .ok_or(())?
             .map_err(|_| ())?;
-        if let Some(mask) = self.observation_armed.get_mut(effect)
+        if let Some(mask) = self.shape.observation_armed.get_mut(effect)
             && staged.tap_index < u32::BITS
         {
             let bit = 1_u32 << staged.tap_index;
@@ -1557,7 +1685,7 @@ impl ReadyOwnership {
             } else {
                 *mask & !bit
             };
-            if let Some(samples) = self.observation_arm_samples.get_mut(effect)
+            if let Some(samples) = self.shape.observation_arm_samples.get_mut(effect)
                 && let Some(sample) = samples.get_mut(staged.tap_index as usize)
             {
                 *sample = applied_at_sample;
@@ -1857,6 +1985,7 @@ impl AudioWorkletEngineHost {
         let reader = self
             .ready
             .as_ref()?
+            .shape
             .effect_instances
             .get(effect)?
             .as_ref()?
@@ -1866,10 +1995,11 @@ impl AudioWorkletEngineHost {
             .get(reader as usize)
     }
 
-    /// Run one structural command frame through the control plane (#1381a gates 2 and 4): it
-    /// prepares a successor of the committed model through the browser's preparer and publishes
-    /// it, for the render of the next block to adopt. No export reaches it, and the production
-    /// host has no structural edit of its own until #1290.
+    /// Run one structural command frame through the control plane (#1381a gates 2 and 4, #1290a):
+    /// it prepares a successor of the committed model through the browser's preparer and publishes
+    /// it, for the render of the next block to adopt, with the rebuild arm open past
+    /// [`REBUILD_PENDING`]. No export reaches it: the production entry keeps the refusal until
+    /// #1562b deletes it.
     ///
     /// Returns the control plane's response frame.
     ///
@@ -1886,7 +2016,7 @@ impl AudioWorkletEngineHost {
             .as_mut()
             .ok_or(control_plane::CommandError::Internal)?;
         ready.allow_rebuild.store(true, Ordering::Release);
-        let length = ready.control.command(request, CONTROL_FRAME_BYTES);
+        let length = ready.run_command(request, CONTROL_FRAME_BYTES);
         ready.allow_rebuild.store(false, Ordering::Release);
         Ok(ready.control.command_response(length?).to_vec())
     }
@@ -1939,7 +2069,9 @@ impl AudioWorkletEngineHost {
     /// correlate; [`RESULT_BUFFER_TOO_SMALL`] for a response over the control frame;
     /// [`RESULT_BACKPRESSURE`] for a queue or plan with no room now; [`RESULT_COMPILE_REJECTED`]
     /// for a typed refusal before commit, `web.apply.rebuild_pending` for a transaction that needs
-    /// a plan rebuild (D9); [`RESULT_INTERNAL`] for a bookkeeping failure. For each failure the
+    /// a plan rebuild (D9); [`RESULT_REPREPARE_REQUIRED`] for a transaction that changes the
+    /// session's sample rate or quantum (#1290a: the session is re-prepared from its document);
+    /// [`RESULT_INTERNAL`] for a bookkeeping failure. For each failure the
     /// response is the refusal's diagnostic (`code\tpath\n` lines).
     ///
     /// A frame refused after the core has seen it, `web.apply.rebuild_pending` included, has
@@ -1958,7 +2090,7 @@ impl AudioWorkletEngineHost {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let request = &buffers.control_request[..len as usize];
-        match ready.control.command(request, CONTROL_FRAME_BYTES) {
+        match ready.run_command(request, CONTROL_FRAME_BYTES) {
             Ok(length) => {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
@@ -1973,6 +2105,13 @@ impl AudioWorkletEngineHost {
                     control_plane::CommandError::Invalid => RESULT_INVALID_ARGUMENT,
                     control_plane::CommandError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
                     control_plane::CommandError::Backpressure => RESULT_BACKPRESSURE,
+                    // #1290a: a transaction that changes the rate or the quantum cannot be applied
+                    // to a running plan; the page re-prepares the session from its document.
+                    control_plane::CommandError::CompileRejected(_)
+                        if diagnostic.starts_with(control_plane::REPREPARE_REQUIRED.as_bytes()) =>
+                    {
+                        RESULT_REPREPARE_REQUIRED
+                    }
                     control_plane::CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
                     control_plane::CommandError::Internal => RESULT_INTERNAL,
                 })
@@ -2050,6 +2189,18 @@ impl AudioWorkletEngineHost {
         }
     }
 
+    /// How many structural commands ran their rebuild on this instance's own thread (#1290a D6),
+    /// saturating at `u32::MAX`: a page without cross-origin isolation runs the control half in
+    /// the worklet's message handler, outside `process()`, so each published replacement plan is
+    /// a blocking rebuild that decision 15 accepts only when it is counted and reported. A
+    /// refused command, a live command and a command that fails after preparation count nothing.
+    #[must_use]
+    pub fn blocking_rebuilds(&self) -> u32 {
+        self.ready
+            .as_ref()
+            .map_or(0, |ready| ready.blocking_rebuilds)
+    }
+
     /// The committed session revision (issue #1562a, carry-forward 2): what the SDK's transaction
     /// queue starts its expected revision from after a successful boot. It advances by one for
     /// each transaction the control plane commits, whatever its path, and is `0` for a session
@@ -2079,7 +2230,10 @@ impl AudioWorkletEngineHost {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         match ready.control.service() {
-            Ok(()) => RESULT_OK,
+            Ok(()) => {
+                ready.reclaim_shapes();
+                RESULT_OK
+            }
             Err(error) => {
                 let diagnostic = error.diagnostic().into_owned();
                 self.fail(RESULT_INTERNAL, &diagnostic)
@@ -2131,7 +2285,7 @@ impl AudioWorkletEngineHost {
     /// Canonical normalized track order, the addressing authority for `track_index`.
     #[must_use]
     pub fn live_control_tracks(&self) -> &[Box<str>] {
-        self.ready.as_ref().map_or(&[], |ready| &ready.tracks)
+        self.ready.as_ref().map_or(&[], |ready| &ready.shape.tracks)
     }
 
     /// Canonical normalized submix order (issue #1210 D1): the trailing segment of the strip order,
@@ -2139,7 +2293,9 @@ impl AudioWorkletEngineHost {
     /// submix sections.
     #[must_use]
     pub fn live_control_submixes(&self) -> &[Box<str>] {
-        self.ready.as_ref().map_or(&[], |ready| &ready.submixes)
+        self.ready
+            .as_ref()
+            .map_or(&[], |ready| &ready.shape.submixes)
     }
 
     /// Number of sources the compiled session declares; zero before compilation (issue #207).
@@ -2219,6 +2375,7 @@ impl AudioWorkletEngineHost {
     pub fn observation_armed_taps(&self) -> u32 {
         self.ready.as_ref().map_or(0, |ready| {
             ready
+                .shape
                 .observation_armed
                 .iter()
                 .map(|mask| mask.count_ones())
@@ -2231,6 +2388,7 @@ impl AudioWorkletEngineHost {
     pub fn observation_attached(&self) -> bool {
         self.ready.as_ref().is_some_and(|ready| {
             ready
+                .shape
                 .effect_instances
                 .iter()
                 .flatten()
@@ -2509,6 +2667,7 @@ impl AudioWorkletEngineHost {
             let values = read_observation_values(ready, plan, sample_rate_hz, selection)?;
             let (effect, tap_index) = resolve_observation(ready, selection)?;
             let handle = ready
+                .shape
                 .effect_instances
                 .get(effect)
                 .and_then(Option::as_ref)
@@ -2540,6 +2699,7 @@ impl AudioWorkletEngineHost {
     pub fn observation_binding_count(&self) -> usize {
         self.ready.as_ref().map_or(0, |ready| {
             ready
+                .shape
                 .effect_instances
                 .iter()
                 .flatten()
@@ -2553,12 +2713,12 @@ impl AudioWorkletEngineHost {
     pub fn observation_binding(&self, index: u32) -> Option<ObservationBinding<'_>> {
         let ready = self.ready.as_ref()?;
         let mut observed_index = 0_u32;
-        for (effect, handle) in ready.effect_instances.iter().enumerate() {
+        for (effect, handle) in ready.shape.effect_instances.iter().enumerate() {
             let Some(handle) = handle.as_ref().filter(|handle| handle.reader.is_some()) else {
                 continue;
             };
             if observed_index == index {
-                let track_index = *ready.observation_tracks.get(effect)?;
+                let track_index = *ready.shape.observation_tracks.get(effect)?;
                 if track_index == u32::MAX {
                     return None;
                 }
@@ -2665,7 +2825,7 @@ impl AudioWorkletEngineHost {
     pub fn meters_attached(&self) -> bool {
         self.ready
             .as_ref()
-            .is_some_and(|ready| !ready.meter_pending.is_empty())
+            .is_some_and(|ready| !ready.shape.meter_pending.is_empty())
     }
 
     /// Take or release the meter lease. Returns the frozen result code.
@@ -2936,6 +3096,13 @@ impl AudioWorkletEngineHost {
                     self.status.watermark_outcome_flags = watermark.outcome_flags;
                 }
                 let next_absolute_sample = plan.owner().next_absolute_sample();
+                // #1290a: the block that adopted a replacement plan takes the replacement's own
+                // tables, a pointer exchange that allocates and frees nothing; the control side
+                // drops the retired ones at its next step.
+                let epoch = plan.owner().active_epoch().0;
+                if epoch != ready.shape_epoch {
+                    ready.adopt_shape(epoch);
+                }
                 self.status.next_absolute_sample = next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
                 // #1570b D3: the block's activity, published by the control plane's one rule
@@ -2960,8 +3127,8 @@ impl AudioWorkletEngineHost {
                 // blocks have no counters to clear and skip the dense write pass entirely.
                 if ready.has_in_flight_commands {
                     #[cfg(test)]
-                    record_admission_counter_clear(ready.in_flight.len());
-                    ready.in_flight.fill(0);
+                    record_admission_counter_clear(ready.shape.in_flight.len());
+                    ready.shape.in_flight.fill(0);
                     ready.has_in_flight_commands = false;
                 }
                 // Issue #137 D2: the master bus is the host's own output plane, so there is
@@ -3062,6 +3229,14 @@ impl AudioWorkletEngineHost {
         let Some((buffers, ready)) = self.buffers.as_ref().zip(self.ready.as_mut()) else {
             return self.fail(RESULT_INTERNAL, b"web.internal.live_controls\t$\n");
         };
+        // #1290a: an observation record addresses an effect by the tables of the plan that
+        // renders and reaches it through the control plane's producers. From a rebuild's commit
+        // until the service step after its adoption block the two are not one plan's (and a
+        // record queued on the retiring plan would be lost with it), so the submission waits
+        // (typed, retryable backpressure, nothing queued) rather than arm another plan's effect.
+        if ready.replacement_pending() {
+            return self.finish_commands(RESULT_BACKPRESSURE, COMMAND_REASON_BACKPRESSURE, 0, 0);
+        }
         let Some(bytes) = buffers.command.get(..staged) else {
             return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
         };
@@ -3117,6 +3292,19 @@ impl AudioWorkletEngineHost {
         if meter_count == 0 {
             return 0;
         }
+        // #1290a: the published frame keeps the boot's size (the worklet binds fixed views over
+        // it), so a plan whose strip count differs cannot be described by it. Publish nothing
+        // rather than a frame whose words name other strips; #1290d grows the frame with the plan.
+        let frame_words = ready
+            .shape
+            .tracks
+            .len()
+            .saturating_add(ready.shape.submixes.len())
+            .saturating_mul(3)
+            .saturating_add(3);
+        if ready.meter_frame.len() != frame_words {
+            return 0;
+        }
         // The render path is the sole producer of this fixed-capacity ring and increments the
         // count only when the configured master interval closes. An empty ring therefore proves
         // that no coherent track/master publication can exist. Preserve pending/public bytes and
@@ -3129,11 +3317,15 @@ impl AudioWorkletEngineHost {
         // pass that does not end the loop has cleared at least one pending slot, and the next pass
         // either refills it (spending one count) or ends the loop at the empty-slot check, so
         // `1 + sum(remaining)` passes always suffice: the bound never cuts a recovery short.
-        for (meter, remaining) in companions.meters.iter().zip(&mut ready.meter_remaining) {
+        for (meter, remaining) in companions
+            .meters
+            .iter()
+            .zip(&mut ready.shape.meter_remaining)
+        {
             *remaining = meter.consumer.available_at_entry().min(METER_QUEUE_DEPTH);
         }
         let mut passes = 1_usize;
-        for remaining in ready.meter_remaining.iter() {
+        for remaining in ready.shape.meter_remaining.iter() {
             passes = passes.saturating_add(*remaining);
         }
         let mut windows = 0_u32;
@@ -3144,8 +3336,8 @@ impl AudioWorkletEngineHost {
             for ((meter, pending), remaining) in companions
                 .meters
                 .iter_mut()
-                .zip(&mut ready.meter_pending)
-                .zip(&mut ready.meter_remaining)
+                .zip(&mut ready.shape.meter_pending)
+                .zip(&mut ready.shape.meter_remaining)
             {
                 if pending.is_some() || *remaining == 0 {
                     continue;
@@ -3157,10 +3349,11 @@ impl AudioWorkletEngineHost {
                     *pending = Some(snapshot);
                 }
             }
-            if ready.meter_pending.iter().any(Option::is_none) {
+            if ready.shape.meter_pending.iter().any(Option::is_none) {
                 break;
             }
             let Some(first) = ready
+                .shape
                 .meter_pending
                 .first()
                 .and_then(Option::as_ref)
@@ -3169,6 +3362,7 @@ impl AudioWorkletEngineHost {
                 break;
             };
             let all_equal = ready
+                .shape
                 .meter_pending
                 .iter()
                 .enumerate()
@@ -3188,21 +3382,22 @@ impl AudioWorkletEngineHost {
                 // A sequence gap can be recovered by dropping only the older stream head. Equal
                 // sequences with different spans/generations are a discontinuity: drop the whole
                 // candidate set so no mixed interval reaches the public frame.
-                let same_generation = ready.meter_pending.iter().all(|entry| {
+                let same_generation = ready.shape.meter_pending.iter().all(|entry| {
                     entry
                         .is_some_and(|snapshot| snapshot.reset_generation == first.reset_generation)
                 });
-                let same_sequence = ready.meter_pending.iter().all(|entry| {
+                let same_sequence = ready.shape.meter_pending.iter().all(|entry| {
                     entry.is_some_and(|snapshot| snapshot.window_sequence == first.window_sequence)
                 });
                 if same_generation && !same_sequence {
                     let minimum = ready
+                        .shape
                         .meter_pending
                         .iter()
                         .filter_map(|entry| entry.as_ref().map(|snapshot| snapshot.window_sequence))
                         .min()
                         .unwrap_or(first.window_sequence);
-                    for pending in &mut ready.meter_pending {
+                    for pending in &mut ready.shape.meter_pending {
                         if pending
                             .as_ref()
                             .is_some_and(|snapshot| snapshot.window_sequence == minimum)
@@ -3212,7 +3407,7 @@ impl AudioWorkletEngineHost {
                         }
                     }
                 } else {
-                    for pending in &mut ready.meter_pending {
+                    for pending in &mut ready.shape.meter_pending {
                         *pending = None;
                         ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
                     }
@@ -3223,7 +3418,7 @@ impl AudioWorkletEngineHost {
                 || first.end_sample <= first.start_sample
                 || u64::from(first.frames) != first.end_sample - first.start_sample
             {
-                for pending in &mut ready.meter_pending {
+                for pending in &mut ready.shape.meter_pending {
                     *pending = None;
                 }
                 ready.meter_loss_count = ready.meter_loss_count.saturating_add(1);
@@ -3262,7 +3457,7 @@ impl AudioWorkletEngineHost {
         }
         // Issue #1209 D1: one peak pair per strip, tracks then submixes, so the master follows the
         // last submix rather than the last track.
-        let strips = ready.tracks.len() + ready.submixes.len();
+        let strips = ready.shape.tracks.len() + ready.shape.submixes.len();
         let master = strips * 2;
         let mut stale_master_budget = ready.master_count;
         while stale_master_budget > 0 {
@@ -3290,7 +3485,7 @@ impl AudioWorkletEngineHost {
             // The host cannot recover an interval peak from one envelope once its boundary is
             // lost. Consume the track group, count the discontinuity, and wait for the next clean
             // master/track span rather than publishing a mixed or guessed master value.
-            for pending in &mut ready.meter_pending {
+            for pending in &mut ready.shape.meter_pending {
                 if let Some(snapshot) = pending.take()
                     && snapshot.cumulative_dropped_snapshots > ready.meter_snapshot_drops_seen
                 {
@@ -3310,7 +3505,7 @@ impl AudioWorkletEngineHost {
             .map_or([0.0, 0.0], |measurement| measurement.peak);
         // All candidate validation is complete. Only this commit section mutates the public frame;
         // every earlier zero-return path leaves both public buffers byte-for-byte unchanged.
-        for (index, pending) in ready.meter_pending.iter_mut().enumerate() {
+        for (index, pending) in ready.shape.meter_pending.iter_mut().enumerate() {
             let Some(snapshot) = pending.take() else {
                 continue;
             };
@@ -3346,11 +3541,11 @@ impl AudioWorkletEngineHost {
         for slot in ready.meter_frame.iter_mut().skip(gain_base) {
             *slot = 0.0;
         }
-        for slot in ready.observation_present.iter_mut() {
+        for slot in ready.shape.observation_present.iter_mut() {
             *slot = false;
         }
         let mut observed_any = false;
-        for (effect, entry) in ready.effect_instances.iter().enumerate() {
+        for (effect, entry) in ready.shape.effect_instances.iter().enumerate() {
             #[cfg(test)]
             {
                 ready.meter_effect_scan_count = ready.meter_effect_scan_count.saturating_add(1);
@@ -3364,7 +3559,7 @@ impl AudioWorkletEngineHost {
             else {
                 continue;
             };
-            let Some(track) = ready.observation_tracks.get(effect).copied() else {
+            let Some(track) = ready.shape.observation_tracks.get(effect).copied() else {
                 continue;
             };
             // Issue #1209 D5: the frame carries one gain-reduction word per strip, so a submix's
@@ -3372,7 +3567,12 @@ impl AudioWorkletEngineHost {
             if track == u32::MAX {
                 continue;
             }
-            let armed = ready.observation_armed.get(effect).copied().unwrap_or(0);
+            let armed = ready
+                .shape
+                .observation_armed
+                .get(effect)
+                .copied()
+                .unwrap_or(0);
             if armed == 0 {
                 continue;
             }
@@ -3387,7 +3587,12 @@ impl AudioWorkletEngineHost {
                 // It writes no slot, marks nothing present and is not acknowledged; the first
                 // fresh window's acknowledgement covers its sequence.
                 let Some(window) = reader.read().and_then(|window| {
-                    window_since_arm(&ready.observation_arm_samples, effect, tap_index, window)
+                    window_since_arm(
+                        &ready.shape.observation_arm_samples,
+                        effect,
+                        tap_index,
+                        window,
+                    )
                 }) else {
                     continue;
                 };
@@ -3408,7 +3613,7 @@ impl AudioWorkletEngineHost {
                 {
                     *slot = value;
                 }
-                if let Some(present) = ready.observation_present.get_mut(track as usize) {
+                if let Some(present) = ready.shape.observation_present.get_mut(track as usize) {
                     *present = true;
                 }
                 observed_any = true;
@@ -3417,8 +3622,9 @@ impl AudioWorkletEngineHost {
         // `masterGrDb` is a designation, not a discovery (D6). It is absent -- not zero -- when no
         // track was designated or the designated track published nothing, because zero would be
         // indistinguishable from "the master is not reducing".
-        let master_present = match ready.master_track {
+        let master_present = match ready.shape.master_track {
             Some(track) => ready
+                .shape
                 .observation_present
                 .get(track as usize)
                 .copied()
@@ -3426,7 +3632,7 @@ impl AudioWorkletEngineHost {
             None => false,
         };
         if master_present
-            && let Some(track) = ready.master_track
+            && let Some(track) = ready.shape.master_track
             && let Some(value) = ready.meter_frame.get(gain_base + track as usize).copied()
             && let Some(slot) = ready.meter_frame.get_mut(gain_base + strips)
         {
@@ -3678,8 +3884,8 @@ fn admit_commands(
     let record_bytes = COMMAND_RECORD_BYTES as usize;
     // The index word is a strip index, tracks first, then submixes (issue #1213 D1).
     let strip_count = ready.strip_count();
-    ready.command_wanted.fill(0);
-    ready.observe_named.fill(0);
+    ready.shape.command_wanted.fill(0);
+    ready.shape.observe_named.fill(0);
     let refuse = |reason: u32, index: usize| CommandRejection {
         result: match reason {
             // `ObservationUnbound` is "this preparation cannot deliver it", which is exactly what
@@ -3707,13 +3913,14 @@ fn admit_commands(
         else {
             return Err(refuse(COMMAND_REASON_UNKNOWN_RACK, index));
         };
-        if ready.rack_effects.get(track).is_none() {
+        if ready.shape.rack_effects.get(track).is_none() {
             return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
         }
         let Some(effect) = ready.effect_slot(track, address) else {
             return Err(refuse(COMMAND_REASON_UNKNOWN_EFFECT, index));
         };
         let Some((descriptor, observed)) = ready
+            .shape
             .effect_instances
             .get(effect)
             .and_then(Option::as_ref)
@@ -3733,6 +3940,7 @@ fn admit_commands(
             .checked_shl(tap_index)
             .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
         let named = ready
+            .shape
             .observe_named
             .get_mut(effect)
             .ok_or_else(|| refuse(COMMAND_REASON_MALFORMED, index))?;
@@ -3740,7 +3948,7 @@ fn admit_commands(
             return Err(refuse(COMMAND_REASON_MALFORMED, index));
         }
         *named |= bit;
-        let Some(wanted) = ready.command_wanted.get_mut(effect) else {
+        let Some(wanted) = ready.shape.command_wanted.get_mut(effect) else {
             return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
         };
         *wanted = wanted.saturating_add(1);
@@ -3761,14 +3969,14 @@ fn admit_commands(
     for entry in 0..staged_count {
         let staged = ready.command_decoded[entry];
         let effect = staged.effect as usize;
-        let needed = ready.command_wanted[effect];
+        let needed = ready.shape.command_wanted[effect];
         let Some(available) = ready.queue_available(effect) else {
             return Err(refuse(
                 COMMAND_REASON_UNSUPPORTED_KIND,
                 staged.original_wire_index as usize,
             ));
         };
-        if needed > available || ready.in_flight[effect].checked_add(needed).is_none() {
+        if needed > available || ready.shape.in_flight[effect].checked_add(needed).is_none() {
             return Err(refuse(
                 COMMAND_REASON_BACKPRESSURE,
                 staged.original_wire_index as usize,
@@ -3780,7 +3988,7 @@ fn admit_commands(
         ready
             .push_observe(staged, applied_at_sample)
             .expect("the free-room pass checked this record's room");
-        ready.in_flight[staged.effect as usize] += 1;
+        ready.shape.in_flight[staged.effect as usize] += 1;
         ready.has_in_flight_commands = true;
     }
     Ok(())
@@ -3800,9 +4008,15 @@ fn observation_selection_for_address<'a>(
 ) -> Result<ObservationSelection<'a>, ObservationReadError> {
     let strip = address.track_index as usize;
     let track_id = ready
+        .shape
         .tracks
         .get(strip)
-        .or_else(|| ready.submixes.get(strip.checked_sub(ready.tracks.len())?))
+        .or_else(|| {
+            ready
+                .shape
+                .submixes
+                .get(strip.checked_sub(ready.shape.tracks.len())?)
+        })
         .map(Box::as_ref)
         .ok_or(ObservationReadError::InvalidSelection)?;
     let effect = ready
@@ -3815,6 +4029,7 @@ fn observation_selection_for_address<'a>(
         )
         .ok_or(ObservationReadError::InvalidSelection)?;
     let instance = ready
+        .shape
         .effect_instances
         .get(effect)
         .and_then(Option::as_ref)
@@ -3836,9 +4051,14 @@ fn resolve_observation(
     ready: &ReadyOwnership,
     selection: &ObservationSelection<'_>,
 ) -> Result<(usize, usize), ObservationReadError> {
-    let track = strip_index(&ready.tracks, &ready.submixes, selection.track_id)
-        .ok_or(ObservationReadError::InvalidSelection)?;
+    let track = strip_index(
+        &ready.shape.tracks,
+        &ready.shape.submixes,
+        selection.track_id,
+    )
+    .ok_or(ObservationReadError::InvalidSelection)?;
     let [pre_insert, inserts, post_insert] = ready
+        .shape
         .rack_effects
         .get(track)
         .copied()
@@ -3857,7 +4077,12 @@ fn resolve_observation(
         let Some(effect) = ready.effect_slot(track, address) else {
             return Err(ObservationReadError::InvalidSelection);
         };
-        let Some(observed) = ready.effect_instances.get(effect).and_then(Option::as_ref) else {
+        let Some(observed) = ready
+            .shape
+            .effect_instances
+            .get(effect)
+            .and_then(Option::as_ref)
+        else {
             continue;
         };
         if observed.effect_id.as_ref() == selection.effect_slot_id {
@@ -3867,6 +4092,7 @@ fn resolve_observation(
     }
     let effect = addressed.ok_or(ObservationReadError::InvalidSelection)?;
     let handle = ready
+        .shape
         .effect_instances
         .get(effect)
         .and_then(Option::as_ref)
@@ -3919,6 +4145,7 @@ fn read_observation_values(
 ) -> Result<ObservationReadValues, ObservationReadError> {
     let (effect, tap_index) = resolve_observation(ready, selection)?;
     let observed = ready
+        .shape
         .effect_instances
         .get(effect)
         .and_then(Option::as_ref)
@@ -3929,7 +4156,12 @@ fn read_observation_values(
         .zip(observed.reader)
         .and_then(|(companions, reader)| companions.effect_observations.get(reader as usize))
         .ok_or(ObservationReadError::Unsupported)?;
-    let armed = ready.observation_armed.get(effect).copied().unwrap_or(0)
+    let armed = ready
+        .shape
+        .observation_armed
+        .get(effect)
+        .copied()
+        .unwrap_or(0)
         & (1_u32 << u32::try_from(tap_index).unwrap_or(u32::MAX));
     let window = (armed != 0)
         .then(|| {
@@ -3938,7 +4170,12 @@ fn read_observation_values(
                 .get(tap_index)
                 .and_then(|reader| reader.read())
                 .and_then(|window| {
-                    window_since_arm(&ready.observation_arm_samples, effect, tap_index, window)
+                    window_since_arm(
+                        &ready.shape.observation_arm_samples,
+                        effect,
+                        tap_index,
+                        window,
+                    )
                 })
         })
         .flatten();
@@ -4515,6 +4752,8 @@ fn control_limits(caps: &HostPrepareCaps, memory_budget: u64) -> ControlLimits {
         maximum_submixes: caps.maximum_submixes,
         maximum_vcas: caps.maximum_vcas,
         maximum_vca_reach_pairs: caps.maximum_vca_reach_pairs,
+        // The boot sets the real figure once its bridge rows are exact (`compile_ready`).
+        maximum_replacement_peak_bytes: memory_budget,
     }
 }
 
@@ -4777,8 +5016,9 @@ impl Drop for RenderCompanions {
     }
 }
 
-/// What a boot preparation leaves for the host (#1381a D1): the facts of the first plan that
-/// `PlanResources` and the attachment do not carry. The preparer writes it, boot reads it.
+/// What a preparation leaves for the host (#1381a D1): the facts of the first plan that
+/// `PlanResources` and the attachment do not carry, and (#1290a) the tables of the plan the preparer
+/// prepared last. The preparer writes it, boot and a committed command read it.
 #[derive(Default)]
 struct BootRecord {
     /// The engine-owned report of the boot plan, after the attachment's rows were charged.
@@ -4789,6 +5029,10 @@ struct BootRecord {
     superseded: Option<host_core::LiveValuesSuperseded>,
     /// The class of the preparation refusal, so a refused boot keeps its result code.
     rejection: Option<PrepareRejection>,
+    /// The tables of the plan the preparer prepared last (#1290a): one function builds the boot
+    /// plan's and every replacement plan's. Boot takes the first; a command that publishes a
+    /// replacement takes that plan's, and one that fails after preparing leaves a table to drop.
+    shape: Option<PlanShape>,
 }
 
 impl HostAttachment for RenderCompanions {
@@ -4895,6 +5139,25 @@ impl WebRuntimePreparer {
             superseded,
             successor,
         )?;
+        // #1290a: the plan's tables, built from the plan's own model, producers and companions.
+        // They go to the host through the record: the boot's at boot, a replacement's when its
+        // command commits. The boot report charges the boot's to the bridge rows; a replacement
+        // plan charges its own to the plan's rows, so the swap budget counts them.
+        let shape = build_plan_shape(
+            compiled.normalized_model(),
+            &handles.effect_controls,
+            &handles.effect_observations,
+            handles.meters.len(),
+            handles.master_track,
+        )
+        .map_err(|code| {
+            let rejection = if code.starts_with("web.resource.") {
+                PrepareRejection::Platform
+            } else {
+                PrepareRejection::Session
+            };
+            PrepareDiagnostics::fixed(rejection, code)
+        })?;
         let companions = RenderCompanions {
             spectrum_capture,
             meters: core::mem::take(&mut handles.meters),
@@ -4903,20 +5166,303 @@ impl WebRuntimePreparer {
         // The attachment is the plan's own allocation, so the plan's rows charge it: the control
         // plane builds its plan resource row from this report, and nothing else would count the
         // box or the two vectors the companions keep alive for the plan's lifetime.
-        let (retained, largest) = companions.retained_bytes().ok_or_else(|| {
-            PrepareDiagnostics::fixed(PrepareRejection::Platform, "web.resource.arithmetic")
-        })?;
+        let arithmetic =
+            || PrepareDiagnostics::fixed(PrepareRejection::Platform, "web.resource.arithmetic");
+        let (mut retained, mut largest) = companions.retained_bytes().ok_or_else(arithmetic)?;
+        if !boot {
+            let (tables, tables_largest) = shape.retained_bytes().ok_or_else(arithmetic)?;
+            retained = retained.checked_add(tables).ok_or_else(arithmetic)?;
+            largest = largest.max(tables_largest);
+        }
         charge_attachment(&mut host.report, caps, retained, largest)?;
         host.plan.set_host_attachment(Box::new(companions));
-        if boot
-            && let Some(record) = &self.record
+        if let Some(record) = &self.record
             && let Ok(mut record) = record.lock()
         {
-            record.report = Some(host.report);
-            record.master_track = handles.master_track;
-            record.superseded = Some(handles.live_values_superseded.clone());
+            if boot {
+                record.report = Some(host.report);
+                record.master_track = handles.master_track;
+                record.superseded = Some(handles.live_values_superseded.clone());
+            }
+            record.shape = Some(shape);
         }
         Ok((host, handles))
+    }
+}
+
+/// Build one plan's tables (issue #1290a): `model` is the plan's normalized session, `producers`
+/// its effect producers in the control plane's list order, `observations` its companions'
+/// observation handles, `meter_count` its companions' meters. The same function builds the boot
+/// plan's and every replacement plan's, so the two cannot disagree on what an index means.
+///
+/// Issue #1207 D1: the handles' strips are the tracks, then the submixes. Since issue #1213 D1
+/// every queue band, per-strip table and meter word covers both segments, tracks first, so a
+/// track's entry is the same with or without submixes. #1381a: the strip order is the normalized
+/// model's, the order host-core's addressing authority uses and the control plane's producers
+/// follow.
+///
+/// Errors are the diagnostic code of the refusal.
+fn build_plan_shape(
+    model: &session::SessionModel,
+    producers: &[host_core::EffectControlProducer],
+    observations: &[EffectObservationHandle],
+    meter_count: usize,
+    master_track: Option<u32>,
+) -> Result<PlanShape, &'static str> {
+    let track_count = model.tracks.len();
+    let submix_count = model.submixes.len();
+    let strip_count = track_count + submix_count;
+    let mut tracks: Vec<Box<str>> = Vec::new();
+    tracks
+        .try_reserve_exact(track_count)
+        .map_err(|_| "web.resource.allocation")?;
+    tracks.extend(
+        model
+            .tracks
+            .iter()
+            .map(|track| Box::from(track.id.as_str())),
+    );
+    let mut submixes: Vec<Box<str>> = Vec::new();
+    submixes
+        .try_reserve_exact(submix_count)
+        .map_err(|_| "web.resource.allocation")?;
+    submixes.extend(
+        model
+            .submixes
+            .iter()
+            .map(|submix| Box::from(submix.id.as_str())),
+    );
+    let mut rack_effects = Vec::new();
+    rack_effects
+        .try_reserve_exact(strip_count)
+        .map_err(|_| "web.resource.allocation")?;
+    let count = |effects: usize| -> Result<u32, &'static str> {
+        u32::try_from(effects).map_err(|_| "web.live_controls.effects")
+    };
+    // The lowered racks (decision 12), in chain order: every strip carries every `pre_insert` and
+    // `post_insert` slot, so those counts are the session's. A live address (rack byte `3`
+    // console or `1` inserts, #1096) reaches them through `dense_effect_slot`. Tracks first, then
+    // submixes (issue #1207 D3): the strip order, so `rack_effects[t]` of a track never moves.
+    for track in &model.tracks {
+        rack_effects.push([
+            count(model.console.pre_insert.len())?,
+            count(track.inserts.effects.len())?,
+            count(model.console.post_insert.len())?,
+        ]);
+    }
+    for submix in &model.submixes {
+        rack_effects.push([
+            count(model.console.pre_insert.len())?,
+            count(submix.inserts.effects.len())?,
+            count(model.console.post_insert.len())?,
+        ]);
+    }
+    // Issue #140 A: the dense effect-queue index. `effect_base[s]` is the number of effect
+    // instances declared by every earlier strip, so `effect_slot` is arithmetic rather than a
+    // search, and the producers are permuted into exactly that order once, here. The tracks lead,
+    // so every track effect keeps its dense index and the submixes' effects follow them.
+    let mut effect_base = Vec::new();
+    effect_base
+        .try_reserve_exact(strip_count)
+        .map_err(|_| "web.resource.allocation")?;
+    let mut total_effects = 0_u32;
+    for counts in &rack_effects {
+        effect_base.push(total_effects);
+        for count in counts {
+            total_effects = total_effects
+                .checked_add(*count)
+                .ok_or("web.live_controls.effects")?;
+        }
+    }
+    // #1381a: the effect producers are the control plane's. The browser keeps, in the dense slot
+    // order, where each instance's producer is, so an observe record (kinds 7 and 8) reaches its
+    // effect's observation queue through the control plane's accessor.
+    let mut effect_instances: Vec<Option<EffectInstance>> = Vec::new();
+    effect_instances
+        .try_reserve_exact(total_effects as usize)
+        .map_err(|_| "web.resource.allocation")?;
+    effect_instances.resize_with(total_effects as usize, || None);
+    for (position, producer) in producers.iter().enumerate() {
+        let (track_id, address, effect_id, descriptor) = (
+            &producer.track_id,
+            &producer.address,
+            &producer.effect_id,
+            producer.descriptor,
+        );
+        let Some(strip) = strip_index(&tracks, &submixes, track_id) else {
+            return Err("web.live_controls.effects");
+        };
+        let Some(entry) = dense_effect_slot(effect_base[strip], rack_effects[strip], *address)
+            .and_then(|slot| effect_instances.get_mut(slot))
+        else {
+            return Err("web.live_controls.effects");
+        };
+        if entry.is_some() {
+            return Err("web.live_controls.effects");
+        }
+        *entry = Some(EffectInstance {
+            producer: u32::try_from(position).map_err(|_| "web.live_controls.effects")?,
+            reader: None,
+            track_id: track_id.clone(),
+            effect_id: effect_id.clone(),
+            address: *address,
+            descriptor,
+        });
+    }
+    let mut observation_arm_samples: Vec<Box<[u64]>> = Vec::new();
+    observation_arm_samples
+        .try_reserve_exact(total_effects as usize)
+        .map_err(|_| "web.resource.allocation")?;
+    observation_arm_samples.resize_with(total_effects as usize, || Box::new([]));
+    // `observation_tracks[slot]` is the strip index of that effect slot's observed instance, or
+    // `u32::MAX` for a slot with no taps. Built once, here, so the poll's fold is arithmetic.
+    let mut observation_tracks = vec![u32::MAX; total_effects as usize];
+    let observation_present = vec![false; strip_count];
+    for (reader, handle) in observations.iter().enumerate() {
+        let Some(strip) = strip_index(&tracks, &submixes, &handle.track_id) else {
+            return Err("web.live_controls.observation");
+        };
+        let Some(slot) = dense_effect_slot(effect_base[strip], rack_effects[strip], handle.address)
+        else {
+            return Err("web.live_controls.observation");
+        };
+        let Some(instance) = effect_instances
+            .get_mut(slot)
+            .and_then(Option::as_mut)
+            .filter(|instance| instance.reader.is_none())
+        else {
+            return Err("web.live_controls.observation");
+        };
+        // The frame carries one gain-reduction slot per strip, so every observed effect of a strip
+        // points at that strip and the poll folds them max-magnitude into the one slot; a
+        // submix's effect points at its strip index `T + j` (issue #1209 D5).
+        observation_tracks[slot] =
+            u32::try_from(strip).map_err(|_| "web.live_controls.observation")?;
+        let tap_count = handle.descriptor.observations.len();
+        let mut arm_samples = Vec::new();
+        arm_samples
+            .try_reserve_exact(tap_count)
+            .map_err(|_| "web.resource.allocation")?;
+        arm_samples.resize(tap_count, 0);
+        observation_arm_samples[slot] = arm_samples.into_boxed_slice();
+        instance.reader = Some(u32::try_from(reader).map_err(|_| "web.live_controls.observation")?);
+    }
+    Ok(PlanShape {
+        tracks,
+        submixes,
+        rack_effects: rack_effects.into_boxed_slice(),
+        effect_base: effect_base.into_boxed_slice(),
+        effect_instances: effect_instances.into_boxed_slice(),
+        observation_tracks: observation_tracks.into_boxed_slice(),
+        observation_armed: zero_u32(total_effects as usize)?,
+        observation_arm_samples: observation_arm_samples.into_boxed_slice(),
+        master_track,
+        command_wanted: zero_u32(total_effects as usize)?,
+        observe_named: zero_u32(total_effects as usize)?,
+        in_flight: zero_u32(total_effects as usize)?,
+        meter_pending: (0..meter_count)
+            .map(|_| None)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        meter_remaining: (0..meter_count)
+            .map(|_| 0)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        observation_present: observation_present.into_boxed_slice(),
+    })
+}
+
+/// `count` zero words, or the allocation refusal.
+fn zero_u32(count: usize) -> Result<Box<[u32]>, &'static str> {
+    let mut value = Vec::new();
+    value
+        .try_reserve_exact(count)
+        .map_err(|_| "web.resource.allocation")?;
+    value.resize(count, 0);
+    Ok(value.into_boxed_slice())
+}
+
+/// The bridge rows one plan's tables are charged (issue #1290a): the boot charges them to the
+/// bridge, a replacement plan charges them to its attachment, so the swap budget counts them.
+struct ShapeRows {
+    /// The dense instance and arm-sample tables' own bytes.
+    arm_table_bytes: u64,
+    /// The arm samples' bytes and the IDs the dense instance table copies out of the producers.
+    arm_sample_bytes: u64,
+    /// The largest single allocation among the arm tables.
+    arm_largest: u64,
+    /// The per-meter pending snapshots.
+    pending_bytes: u64,
+    /// The per-meter remaining counts.
+    remaining_bytes: u64,
+}
+
+impl PlanShape {
+    /// The rows this shape is charged, or `None` on arithmetic overflow.
+    fn bridge_rows(&self) -> Option<ShapeRows> {
+        // The IDs the dense instance table copies out of the producers are retained beside the arm
+        // samples.
+        let observed_string_bytes =
+            self.effect_instances
+                .iter()
+                .flatten()
+                .try_fold(0_u64, |total, instance| {
+                    total.checked_add(
+                        u64::try_from(instance.track_id.len() + instance.effect_id.len()).ok()?,
+                    )
+                })?;
+        let arm_sample_bytes = self.observation_arm_samples.iter().try_fold(
+            observed_string_bytes,
+            |total, samples| {
+                total.checked_add(
+                    u64::try_from(samples.len())
+                        .ok()?
+                        .checked_mul(size_of::<u64>() as u64)?,
+                )
+            },
+        )?;
+        let arm_sample_largest =
+            self.observation_arm_samples
+                .iter()
+                .try_fold(0_u64, |largest, samples| {
+                    let bytes = u64::try_from(samples.len())
+                        .ok()?
+                        .checked_mul(size_of::<u64>() as u64)?;
+                    Some(largest.max(bytes))
+                })?;
+        let arm_table_bytes = u64::try_from(self.effect_instances.len())
+            .ok()?
+            .checked_mul((size_of::<Box<[u64]>>() + size_of::<Option<EffectInstance>>()) as u64)?;
+        let pending_bytes = u64::try_from(self.meter_pending.len())
+            .ok()?
+            .checked_mul(size_of::<Option<MeterSnapshot>>() as u64)?;
+        let remaining_bytes = u64::try_from(self.meter_remaining.len())
+            .ok()?
+            .checked_mul(size_of::<usize>() as u64)?;
+        Some(ShapeRows {
+            arm_table_bytes,
+            arm_sample_bytes,
+            arm_largest: arm_sample_largest.max(arm_table_bytes),
+            pending_bytes,
+            remaining_bytes,
+        })
+    }
+
+    /// The heap a replacement plan's attachment holds for these tables, and the largest single
+    /// allocation: the shell, then the rows. `None` on overflow.
+    fn retained_bytes(&self) -> Option<(u64, u64)> {
+        let rows = self.bridge_rows()?;
+        let shell = u64::try_from(size_of::<Self>()).ok()?;
+        let total = shell
+            .checked_add(rows.arm_table_bytes)?
+            .checked_add(rows.arm_sample_bytes)?
+            .checked_add(rows.pending_bytes)?
+            .checked_add(rows.remaining_bytes)?;
+        let largest = shell
+            .max(rows.arm_largest)
+            .max(rows.pending_bytes)
+            .max(rows.remaining_bytes);
+        Some((total, largest))
     }
 }
 
@@ -5001,40 +5547,26 @@ fn compile_ready(
     let allow_rebuild = Arc::clone(&preparer.allow_rebuild);
     let limits = control_limits(caps, memory_budget);
     let control_plane::CompiledChildren {
-        session: control,
+        session: mut control,
         mut plan,
     } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer))
         .map_err(|failure| boot_refusal(&failure, &record))?;
-    let (engine, master_track, live_values_superseded) = {
+    let (engine, master_track, live_values_superseded, shape) = {
         let mut record = record
             .lock()
             .map_err(|_| fixed_diagnostic("web.internal.boot_record"))?;
-        match (record.report.take(), record.superseded.take()) {
-            (Some(engine), Some(superseded)) => (engine, record.master_track, superseded),
+        match (
+            record.report.take(),
+            record.superseded.take(),
+            record.shape.take(),
+        ) {
+            (Some(engine), Some(superseded), Some(shape)) => {
+                (engine, record.master_track, superseded, shape)
+            }
             _ => return Err(fixed_diagnostic("web.internal.boot_record").into()),
         }
     };
     let resources = plan.queries().resources();
-    // The effect producers' identities, taken before the control plane's model is borrowed for the
-    // rest of this function: the control plane keeps the one compiled model, and the browser reads
-    // it (#1381a), so the host holds no second copy of it.
-    let producer_facts: Vec<(
-        Box<str>,
-        LiveEffectAddress,
-        Box<str>,
-        &'static effect_contract::EffectDescriptor,
-    )> = control
-        .effect_producers()
-        .iter()
-        .map(|producer| {
-            (
-                producer.track_id.clone(),
-                producer.address,
-                producer.effect_id.clone(),
-                producer.descriptor,
-            )
-        })
-        .collect();
     let session = control.committed_session();
     let session_sample_rate_hz = session.sample_rate().0;
     let session_quantum_frames = session.quantum().0;
@@ -5082,190 +5614,23 @@ fn compile_ready(
     // Issue #143 R7: the engine's walked row, carried through unchanged. Zero for a session
     // prepared with `live_control_observation_taps == 0`.
     report.observation_retained_bytes = engine.observation_retained_bytes;
-    // Issue #1207 D1: `handles.strips` is the tracks, then the submixes. Since issue #1213 D1
-    // every queue band, per-strip table and meter word covers both segments, tracks first, so a
-    // track's entry is the same with or without submixes.
-    //
-    // #1381a: the strip order is the normalized model's, tracks then submixes, the order host-core's
-    // addressing authority uses and the control plane's producers follow.
+    // #1290a: the tables were built by the boot plan's own preparation (`build_plan_shape`), the
+    // same function every replacement plan's preparation runs. The companions' spectrum capture is
+    // the one thing moved out here, to the spectrum service.
     let model = session.normalized_model();
     let track_count = model.tracks.len();
-    let strip_count = track_count + model.submixes.len();
-    let mut tracks: Vec<Box<str>> = Vec::new();
-    tracks
-        .try_reserve_exact(track_count)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    tracks.extend(
-        model
-            .tracks
-            .iter()
-            .map(|track| Box::from(track.id.as_str())),
-    );
-    let mut submixes: Vec<Box<str>> = Vec::new();
-    submixes
-        .try_reserve_exact(strip_count - track_count)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    submixes.extend(
-        model
-            .submixes
-            .iter()
-            .map(|submix| Box::from(submix.id.as_str())),
-    );
-    let mut rack_effects = Vec::new();
-    rack_effects
-        .try_reserve_exact(strip_count)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    let count = |effects: usize| -> Result<u32, Vec<u8>> {
-        u32::try_from(effects).map_err(|_| fixed_diagnostic("web.live_controls.effects"))
-    };
-    // The lowered racks (decision 12), in chain order: every strip carries every `pre_insert` and
-    // `post_insert` slot, so those counts are the session's. A live address (rack byte `3`
-    // console or `1` inserts, #1096) reaches them through `dense_effect_slot`. Tracks first, then
-    // submixes (issue #1207 D3): the strip order, so `rack_effects[t]` of a track never moves.
-    for track in &model.tracks {
-        rack_effects.push([
-            count(model.console.pre_insert.len())?,
-            count(track.inserts.effects.len())?,
-            count(model.console.post_insert.len())?,
-        ]);
-    }
-    for submix in &model.submixes {
-        rack_effects.push([
-            count(model.console.pre_insert.len())?,
-            count(submix.inserts.effects.len())?,
-            count(model.console.post_insert.len())?,
-        ]);
-    }
-    // Issue #140 A: the dense effect-queue index. `effect_base[s]` is the number of effect
-    // instances declared by every earlier strip, so `effect_slot` is arithmetic rather than a
-    // search, and the producers are permuted into exactly that order once, here. The tracks lead,
-    // so every track effect keeps its dense index and the submixes' effects follow them.
-    let mut effect_base = Vec::new();
-    effect_base
-        .try_reserve_exact(strip_count)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    let mut total_effects = 0_u32;
-    for counts in &rack_effects {
-        effect_base.push(total_effects);
-        for count in counts {
-            total_effects = total_effects
-                .checked_add(*count)
-                .ok_or_else(|| fixed_diagnostic("web.live_controls.effects"))?;
-        }
-    }
-    // #1381a: the effect producers are the control plane's. The browser keeps, in the dense slot
-    // order, where each instance's producer is, so an observe record (kinds 7 and 8) reaches its
-    // effect's observation queue through the control plane's accessor.
-    let mut effect_instances: Vec<Option<EffectInstance>> = Vec::new();
-    effect_instances
-        .try_reserve_exact(total_effects as usize)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    effect_instances.resize_with(total_effects as usize, || None);
-    for (position, (track_id, address, effect_id, descriptor)) in producer_facts.iter().enumerate()
-    {
-        let Some(strip) = strip_index(&tracks, &submixes, track_id) else {
-            return Err(fixed_diagnostic("web.live_controls.effects").into());
-        };
-        let Some(entry) = dense_effect_slot(effect_base[strip], rack_effects[strip], *address)
-            .and_then(|slot| effect_instances.get_mut(slot))
-        else {
-            return Err(fixed_diagnostic("web.live_controls.effects").into());
-        };
-        if entry.is_some() {
-            return Err(fixed_diagnostic("web.live_controls.effects").into());
-        }
-        *entry = Some(EffectInstance {
-            producer: u32::try_from(position)
-                .map_err(|_| fixed_diagnostic("web.live_controls.effects"))?,
-            reader: None,
-            track_id: track_id.clone(),
-            effect_id: effect_id.clone(),
-            address: *address,
-            descriptor,
-        });
-    }
-    // Issue #143: the observation handles stay in the plan's attachment, in host-core's order; the
-    // browser keeps, in the same dense `effect_slot` order the command addressing uses, which
-    // reader each slot's handle is and what the handle declares, so one index serves both the
-    // subscribe path and the poll. The companions are reached through the plan's owner.
+    let submix_count = model.submixes.len();
+    let strip_count = track_count + submix_count;
     let companions = plan
         .active_attachment_mut::<RenderCompanions>()
         .ok_or_else(|| fixed_diagnostic("web.internal.companions"))?;
     let spectrum_capture = companions.take_spectrum_capture();
-    let mut observation_arm_samples: Vec<Box<[u64]>> = Vec::new();
-    observation_arm_samples
-        .try_reserve_exact(total_effects as usize)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    observation_arm_samples.resize_with(total_effects as usize, || Box::new([]));
-    // `observation_tracks[slot]` is the strip index of that effect slot's observed instance, or
-    // `u32::MAX` for a slot with no taps. Built once, here, so the poll's fold is arithmetic.
-    let mut observation_tracks = vec![u32::MAX; total_effects as usize];
-    let observation_present = vec![false; strip_count];
-    for (reader, handle) in companions.effect_observations().iter().enumerate() {
-        let Some(strip) = strip_index(&tracks, &submixes, &handle.track_id) else {
-            return Err(fixed_diagnostic("web.live_controls.observation").into());
-        };
-        let Some(slot) = dense_effect_slot(effect_base[strip], rack_effects[strip], handle.address)
-        else {
-            return Err(fixed_diagnostic("web.live_controls.observation").into());
-        };
-        let Some(instance) = effect_instances
-            .get_mut(slot)
-            .and_then(Option::as_mut)
-            .filter(|instance| instance.reader.is_none())
-        else {
-            return Err(fixed_diagnostic("web.live_controls.observation").into());
-        };
-        // The frame carries one gain-reduction slot per strip, so every observed effect of a strip
-        // points at that strip and the poll folds them max-magnitude into the one slot; a
-        // submix's effect points at its strip index `T + j` (issue #1209 D5).
-        observation_tracks[slot] =
-            u32::try_from(strip).map_err(|_| fixed_diagnostic("web.live_controls.observation"))?;
-        let tap_count = handle.descriptor.observations.len();
-        let mut arm_samples = Vec::new();
-        arm_samples
-            .try_reserve_exact(tap_count)
-            .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-        arm_samples.resize(tap_count, 0);
-        observation_arm_samples[slot] = arm_samples.into_boxed_slice();
-        instance.reader = Some(
-            u32::try_from(reader).map_err(|_| fixed_diagnostic("web.live_controls.observation"))?,
-        );
-    }
-    // The IDs the dense instance table copies out of the producers are retained beside the arm
-    // samples.
-    let observed_string_bytes = effect_instances
-        .iter()
-        .flatten()
-        .try_fold(0_u64, |total, instance| {
-            total.checked_add(
-                u64::try_from(instance.track_id.len() + instance.effect_id.len()).ok()?,
-            )
-        })
+    let rows = shape
+        .bridge_rows()
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let observation_arm_sample_bytes = observation_arm_samples
-        .iter()
-        .try_fold(observed_string_bytes, |total, samples| {
-            total.checked_add(
-                u64::try_from(samples.len())
-                    .ok()?
-                    .checked_mul(size_of::<u64>() as u64)?,
-            )
-        })
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let observation_arm_sample_largest = observation_arm_samples
-        .iter()
-        .try_fold(0_u64, |largest, samples| {
-            let bytes = u64::try_from(samples.len())
-                .ok()?
-                .checked_mul(size_of::<u64>() as u64)?;
-            Some(largest.max(bytes))
-        })
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let observation_arm_table_bytes = u64::from(total_effects)
-        .checked_mul((size_of::<Box<[u64]>>() + size_of::<Option<EffectInstance>>()) as u64)
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let observation_arm_largest = observation_arm_sample_largest.max(observation_arm_table_bytes);
+    let observation_arm_table_bytes = rows.arm_table_bytes;
+    let observation_arm_sample_bytes = rows.arm_sample_bytes;
+    let observation_arm_largest = rows.arm_largest;
     report.bridge_metadata_bytes = report
         .bridge_metadata_bytes
         .checked_add(observation_arm_table_bytes)
@@ -5286,21 +5651,14 @@ fn compile_ready(
     meter_header.track_count =
         u32::try_from(track_count).map_err(|_| fixed_diagnostic("web.live_controls.effects"))?;
     meter_header.submix_count =
-        u32::try_from(submixes.len()).map_err(|_| fixed_diagnostic("web.live_controls.effects"))?;
+        u32::try_from(submix_count).map_err(|_| fixed_diagnostic("web.live_controls.effects"))?;
     meter_header.master_track_plus_one = master_track.map_or(0, |track| track.saturating_add(1));
-    let meter_count = companions.meters().len();
     let master_capacity = companions
         .meters()
         .first()
         .map_or(0, |meter| meter.consumer.capacity());
-    let pending_meter_bytes = u64::try_from(meter_count)
-        .ok()
-        .and_then(|count| count.checked_mul(size_of::<Option<MeterSnapshot>>() as u64))
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
-    let remaining_meter_bytes = u64::try_from(meter_count)
-        .ok()
-        .and_then(|count| count.checked_mul(size_of::<usize>() as u64))
-        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let pending_meter_bytes = rows.pending_bytes;
+    let remaining_meter_bytes = rows.remaining_bytes;
     let master_meter_bytes = u64::try_from(master_capacity)
         .ok()
         .and_then(|count| count.checked_mul(size_of::<Option<MasterMeasurement>>() as u64))
@@ -5349,6 +5707,14 @@ fn compile_ready(
     report.largest_named_allocation_bytes =
         report.largest_named_allocation_bytes.max(decoded_bytes);
     let queries = plan.queries();
+    // #1290a D3: a replacement is admitted against the one budget. What it leaves for the plans is
+    // the budget less every byte the bridge retains, the committed model aside: the replacement's
+    // own check counts both compiled models.
+    control.set_replacement_peak_limit(
+        memory_budget
+            .saturating_sub(report.bridge_retained_bytes)
+            .saturating_add(engine.session_model_bytes),
+    );
     let ready = ReadyOwnership {
         control,
         queries,
@@ -5358,22 +5724,20 @@ fn compile_ready(
         limits,
         commands_enabled,
         live_values_superseded,
-        effect_instances: effect_instances.into_boxed_slice(),
-        observation_tracks: observation_tracks.into_boxed_slice(),
-        observation_present: observation_present.into_boxed_slice(),
-        observation_armed: boxed_zero_u32(total_effects as usize)?,
-        observation_arm_samples: observation_arm_samples.into_boxed_slice(),
-        master_track,
+        shape: Box::new(shape),
+        shape_epoch: 0,
+        record,
+        pending_shapes: {
+            let mut pending = Vec::new();
+            pending
+                .try_reserve_exact(PENDING_SHAPES)
+                .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+            pending
+        },
+        blocking_rebuilds: 0,
         meter_header,
-        effect_base: effect_base.into_boxed_slice(),
-        command_wanted: boxed_zero_u32(total_effects as usize)?,
-        observe_named: boxed_zero_u32(total_effects as usize)?,
         command_decoded: boxed_observe_staging(decoded_count)?,
-        in_flight: boxed_zero_u32(total_effects as usize)?,
         has_in_flight_commands: false,
-        tracks,
-        submixes,
-        rack_effects: rack_effects.into_boxed_slice(),
         spectrum: spectrum_capture.map(|captures| {
             SpectrumService::new(
                 captures,
@@ -5393,14 +5757,6 @@ fn compile_ready(
         master_read: 0,
         master_write: 0,
         master_count: 0,
-        meter_pending: (0..meter_count)
-            .map(|_| None)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-        meter_remaining: (0..meter_count)
-            .map(|_| 0)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
         meter_generation: 0,
         meter_loss_count: 0,
         meter_snapshot_drops_seen: 0,
@@ -5438,15 +5794,6 @@ fn live_control_request(
             value => Some(u32::try_from(value.checked_sub(1)?).ok()?),
         },
     })
-}
-
-fn boxed_zero_u32(count: usize) -> Result<Box<[u32]>, Vec<u8>> {
-    let mut value = Vec::new();
-    value
-        .try_reserve_exact(count)
-        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
-    value.resize(count, 0);
-    Ok(value.into_boxed_slice())
 }
 
 /// `3(T + S) + 3` words: two peak lanes and one gain-reduction magnitude per strip, then the

@@ -208,6 +208,7 @@ impl From<CompileLimits> for ControlLimits {
             maximum_vcas: limits.maximum_vcas,
             // The compile limits carry no word for it: the same bound as every host.
             maximum_vca_reach_pairs: host_core::MAXIMUM_VCA_REACH_PAIRS,
+            maximum_replacement_peak_bytes: u64::MAX,
         }
     }
 }

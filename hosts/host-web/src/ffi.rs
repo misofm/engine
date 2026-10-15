@@ -4032,6 +4032,13 @@ pub mod native_staging {
         (result, frame)
     }
 
+    /// How many blocking rebuilds the host `handle` names counted (#1290a D6); `None` for an
+    /// unknown handle.
+    #[cfg(feature = "test-support")]
+    pub fn blocking_rebuilds(handle: u32) -> Option<u32> {
+        super::with_host(handle, None, |host| Some(host.blocking_rebuilds()))
+    }
+
     /// The epoch of the plan that renders, for the host `handle` names (#1381a gates 2 and 4).
     #[cfg(feature = "test-support")]
     pub fn active_plan_epoch(handle: u32) -> Option<u64> {

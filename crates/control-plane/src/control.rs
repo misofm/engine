@@ -552,6 +552,12 @@ impl Drop for ObservedPreparedToken {
     }
 }
 
+/// The diagnostic code of a transaction that changes the session's sample rate or quantum (#1290a):
+/// the plan exchange admits a replacement plan only at the envelope of the plan it replaces, so
+/// the session must be re-prepared from its document instead. An adapter maps it to its own
+/// "re-prepare" result.
+pub const REPREPARE_REQUIRED: &str = "control.apply.reprepare_required";
+
 /// Why a control command was refused.
 #[derive(Debug)]
 pub enum CommandError {
@@ -1265,6 +1271,26 @@ where
                     return Err(CommandError::CompileRejected(crate::error::diagnostic(
                         code,
                     )));
+                }
+                // #1290a: a plan's rate and quantum are fixed for its session: the plan exchange
+                // admits a replacement only at the same envelope, and would hand a different one
+                // back as retryable backpressure. A transaction that changes either is refused
+                // here, typed and permanent, before anything is prepared, stamped or queued.
+                {
+                    let prospective = prepared
+                        .get()
+                        .prospective_session()
+                        .compiled()
+                        .ok_or(CommandError::Internal)?;
+                    let committed = self.controller.session().compiled();
+                    if prospective.sample_rate() != committed.sample_rate()
+                        || prospective.quantum() != committed.quantum()
+                    {
+                        drop(prepared);
+                        return Err(CommandError::CompileRejected(crate::error::diagnostic(
+                            REPREPARE_REQUIRED,
+                        )));
+                    }
                 }
                 // Issue #1042: while the atomic lags the providers, a render call has swapped plans
                 // but not yet published the epoch. The retired plan's row stays for any-thread
@@ -2174,6 +2200,31 @@ where
     /// for its swap, else the current plan's (issue #1273 D3).
     pub(crate) fn newest_providers(&self) -> &ProviderEpoch {
         self.pending_providers.last().unwrap_or(&self.providers)
+    }
+
+    /// Sets the replacement peak ceiling ([`ControlLimits::maximum_replacement_peak_bytes`]) once
+    /// the adapter knows its own fixed bytes exactly (#1290a D3): they are known only after the
+    /// first plan is prepared, and the limits the session was built with are a plain value.
+    pub fn set_replacement_peak_limit(&mut self, bytes: u64) {
+        self.limits.maximum_replacement_peak_bytes = bytes;
+    }
+
+    /// The epoch of the plan whose producers [`Self::effect_producers`] lists (#1290a): the plan
+    /// that renders, as of the last service step that saw render adopt a successor. It trails
+    /// [`Self::newest_plan_epoch`] while a replacement waits for its block, and trails the plan
+    /// render has adopted until the next service step promotes the replacement's producers.
+    #[must_use]
+    pub fn current_plan_epoch(&self) -> u64 {
+        self.providers.epoch
+    }
+
+    /// The epoch of the newest plan (#1290a): the pending candidate's while one waits for its
+    /// swap, else the current plan's. It advances by a published rebuild, so a host that compares
+    /// it across a command knows whether the command published a replacement plan, and, against
+    /// the epoch of the plan it renders, whether a replacement is still waiting for its block.
+    #[must_use]
+    pub fn newest_plan_epoch(&self) -> u64 {
+        self.newest_providers().epoch
     }
 
     fn newest_providers_mut(&mut self) -> &mut ProviderEpoch {
