@@ -96,3 +96,30 @@ copy after a discard). `revision_overflow_is_refused_before_candidate_mutation` 
 candidate is built on a refused begin. Updated arithmetic: `prepare.rs` resource tests and
 `host-core/tests/prepare.rs` drop the candidate and mask terms. `realtime-policy` ok; clippy
 `-D warnings` and fmt clean on the touched crates.
+
+**Review fold (batch 14b).** (a) `begin` allocates fallibly: the rows and the touched mask are
+`try_reserve_exact`'d, then filled within that capacity and boxed in place, and a failed
+reservation refuses with the new `EffectControlOwnerError::Allocation`, leaving the owner idle and
+unchanged. `commit_live` (`crates/control-plane/src/control.rs`, step 3) maps it, as every failed
+`try_reserve_exact` of that commit, to `CommandError::Internal` before the stamp: nothing is written
+or acknowledged, and `OpenOwners` discards the owners begun so far. (b) The candidate lives inside
+the phase: a private `OwnerState` enum (`Idle`, `Open(candidate)`, `Poisoned(candidate)`,
+`Faulted`, `Published { candidate, next_revision }`) replaces the `candidate`, `pending_revision`
+and `phase` fields, so a phase and a candidate cannot disagree and the two "impossible state"
+error paths are gone; `phase()` still returns the public `EffectControlOwnerPhase`. (c)
+`the_candidate_lives_only_between_begin_and_commit_or_discard` moved to `prepare.rs`'s
+`owner_tests` (it needs the `OwnerRig` to publish): it now publishes and commits, and asserts the
+candidate is held while published and gone after the commit, with the committed rows equal to the
+edited candidate. The always-true `resource_facts` comparison is dropped. Red evidence: a `commit`
+that leaves the published state (candidate kept) fails it at the post-commit phase check. (d)
+`tools/parameter-metadata/tests/control_command_heap.rs` (debug, `verify_stages(false)`), measured
+at 1, 64 and 256 tracks: steady 758 allocations / 103,918 requested / 72,841 peak, first call 757 /
+103,033 / 72,865. Re-pinned under the file's one slack rule, now written down (measured plus 2,000
+bytes, rounded up to the next 1,000), reason "#1624 (B' adds 780 B and 2 allocations per begun EQ
+owner)": steady peak 73,000 -> 75,000 and requested 104,000 -> 106,000 (room 159 and 82 bytes
+before, 2,159 and 2,082 after); first call 74,000 -> 75,000 and 105,000 -> 106,000. The doc's old
+#1615 figures (71,252 / 101,025 / 753) are kept as history beside the current measurement. (e) The
+655,360-byte saving above is boot and idle retention only. A transaction that begins every EQ of
+the worst document still allocates about 780 bytes per EQ for its candidates, transiently, so the
+wasm high-water mark of such a transaction gains about 600 KB (768 EQs x 780 = 599,040 bytes)
+over the idle figure.

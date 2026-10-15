@@ -1279,6 +1279,57 @@ mod owner_tests {
         }; 12]
     }
 
+    /// An idle owner holds no candidate: the candidate and its touched mask exist from `begin`
+    /// to `commit` or `discard` and nowhere else, and each new candidate starts from the
+    /// committed rows (#1624).
+    #[test]
+    fn the_candidate_lives_only_between_begin_and_commit_or_discard() {
+        let mut rig = OwnerRig::new();
+        let rows = rig.owner.committed().len();
+        assert!(rig.owner.candidate().is_empty() && rig.owner.dirty().is_empty());
+
+        rig.owner.begin(0).expect("begin");
+        assert_eq!(rig.owner.candidate(), rig.owner.committed());
+        assert_eq!(rig.owner.dirty().len(), rows);
+        assert!(rig.owner.dirty().iter().all(|touched| !touched));
+        rig.owner
+            .edit(2, ParameterChannel::Both, 100.0)
+            .expect("edit");
+        assert!(rig.owner.dirty().iter().any(|touched| *touched));
+        rig.owner.discard().expect("discard");
+        assert!(rig.owner.candidate().is_empty() && rig.owner.dirty().is_empty());
+
+        // A second candidate starts from the committed rows, not from the discarded edit.
+        rig.owner.begin(0).expect("begin again");
+        assert_eq!(rig.owner.candidate(), rig.owner.committed());
+        assert!(rig.owner.dirty().iter().all(|touched| !touched));
+        // A poisoned candidate is still the open one until discarded.
+        assert!(rig.owner.edit(9_999, ParameterChannel::Both, 0.0).is_err());
+        assert_eq!(rig.owner.phase(), EffectControlOwnerPhase::Poisoned);
+        assert_eq!(rig.owner.dirty().len(), rows);
+        rig.owner.discard().expect("discard poisoned");
+        assert!(rig.owner.candidate().is_empty());
+
+        // A published candidate lives until its one commit, which drops it.
+        rig.owner.begin(0).expect("begin a committed transaction");
+        rig.owner
+            .edit(2, ParameterChannel::Both, 100.0)
+            .expect("edit");
+        let edited = rig.owner.candidate().to_vec();
+        let mut targets = blank_targets();
+        let count = rig
+            .owner
+            .prepare_targets_into(&mut targets)
+            .expect("prepare");
+        rig.publish(0, &targets[..count]).expect("publish");
+        assert_eq!(rig.owner.phase(), EffectControlOwnerPhase::Published);
+        assert_eq!(rig.owner.candidate(), &edited[..]);
+        assert_eq!(rig.owner.commit(), Ok(1));
+        assert_eq!(rig.owner.phase(), EffectControlOwnerPhase::Idle);
+        assert!(rig.owner.candidate().is_empty() && rig.owner.dirty().is_empty());
+        assert_eq!(rig.owner.committed(), &edited[..]);
+    }
+
     #[test]
     fn effect_control_resources_charge_actual_tables_and_shared_owner_once() {
         let factory: Arc<dyn NativeEffectFactory> = Arc::new(ParametricEqFactory);

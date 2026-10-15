@@ -1,7 +1,7 @@
 //! #1613: a live-only transaction committed without cloning and compiling the model.
 //!
-//! The protocol prepares a transaction of `SetControl`s on existing values **in place**
-//! (`SessionStore::prepare_transaction_in_place`): the owners the edits name, edited, and nothing
+//! The protocol prepares a transaction of `SetControl`s, on existing values or adding parameter
+//! entries (#1620), **in place** (`SessionStore::prepare_transaction_in_place`): the owners the edits name, edited, and nothing
 //! of the model. The classifier reads the committed model and those owners as one view
 //! (`classify_live_staged`), the catalog stage reads them through the same view, and the commit
 //! swaps the owners in. This file holds the differential gate: the in-place chain must equal the

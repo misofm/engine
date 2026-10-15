@@ -1943,9 +1943,9 @@ where
     /// epoch advances if a descriptor or an address changed: a VCA added or removed live adds or
     /// removes its rows (#1558 D5), a member change, an offset or a mute changes none.
     ///
-    /// **A token prepared in place (#1613).** A transaction of `SetControl`s on existing values holds
-    /// the owners it edited and no compilation (`PreparedSessionTransaction::is_in_place`). The
-    /// classification, the admission, the catalog stage and the producers' preflight read the
+    /// **A token prepared in place (#1613).** A transaction of `SetControl`s, on existing values or
+    /// adding parameter entries (#1620), holds the owners it edited and no compilation
+    /// (`PreparedSessionTransaction::is_in_place`). The classification, the admission, the catalog stage and the producers' preflight read the
     /// committed model and those owners as one view (`controls::ModelView`), and nothing writes the
     /// committed model before the commit: the protocol commit swaps the owners in as the last write.
     /// If the fast classification cannot judge the transaction, the token is materialized (the full
@@ -2167,6 +2167,10 @@ where
             else {
                 return LiveCommit::Done(Err(CommandError::Internal));
             };
+            // `begin` allocates the candidate fallibly (#1624): its `Allocation` refusal maps to
+            // `INTERNAL`, as every failed `try_reserve_exact` of this commit does, before the
+            // stamp. Nothing is written or acknowledged, and `OpenOwners` discards the owners
+            // begun so far.
             if producer.begin_owner(base_revision).is_err() {
                 return LiveCommit::Done(Err(CommandError::Internal));
             }

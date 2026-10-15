@@ -120,12 +120,37 @@ pub fn owners_values_valid<'a>(owners: impl IntoIterator<Item = OwnerRef<'a>>) -
 /// What an edit of values adds to the counts of the resource estimate (#1620): parameter entries,
 /// and nothing else. A `SetControl` of a parameter that an effect's sparse list does not hold yet
 /// adds its entry (a one-lane write on a `both` entry splits it into two).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+///
+/// Only [`owners_growth`] builds one: its fields are private, so no caller can hand
+/// [`ResourceEstimate::after_owners_edit`] a growth smaller than the owners' real one and have the
+/// estimate under-charge.
+///
+/// [`ResourceEstimate::after_owners_edit`]: crate::ResourceEstimate::after_owners_edit
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OwnersGrowth {
     /// Parameter entries added across the edited owners.
-    pub parameters: usize,
+    parameters: usize,
     /// The length of the longest parameter list that grew, or zero.
-    pub largest_grown_list: usize,
+    largest_grown_list: usize,
+}
+
+impl OwnersGrowth {
+    const NONE: Self = Self {
+        parameters: 0,
+        largest_grown_list: 0,
+    };
+
+    /// Parameter entries added across the edited owners.
+    #[must_use]
+    pub const fn parameters(&self) -> usize {
+        self.parameters
+    }
+
+    /// The length of the longest parameter list that grew, or zero.
+    #[must_use]
+    pub const fn largest_grown_list(&self) -> usize {
+        self.largest_grown_list
+    }
 }
 
 /// What the owners of `new` add to those of `old`, pairwise, to the counts the resource estimate
@@ -141,7 +166,7 @@ pub fn owners_growth<'a>(
     new: impl IntoIterator<Item = OwnerRef<'a>>,
 ) -> Option<OwnersGrowth> {
     let (mut old, mut new) = (old.into_iter(), new.into_iter());
-    let mut growth = OwnersGrowth::default();
+    let mut growth = OwnersGrowth::NONE;
     loop {
         match (old.next(), new.next()) {
             (None, None) => return Some(growth),

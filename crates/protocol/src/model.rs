@@ -939,8 +939,8 @@ enum TransactionForm {
     /// The complete prospective compilation: the clone of the model with the edits applied,
     /// validated, normalized and written as canonical text.
     Compiled(CompiledSession),
-    /// A transaction of `SetControl`s on existing values (#1613): the owners the edits changed and
-    /// nothing else of the model. The committed compilation is not cloned, compiled or serialized;
+    /// A transaction of `SetControl`s that change values or add parameter entries (#1613, #1620):
+    /// the owners the edits changed and nothing else of the model. The committed compilation is not cloned, compiled or serialized;
     /// the commit installs the owners in it.
     InPlace(InPlaceEdit),
     /// A transaction of solo writes only: the model, the revision and the compilation stay as
@@ -1202,7 +1202,8 @@ impl SessionStore {
     /// [`Self::prepare_transaction_with_monitor`] for a host that commits a transaction of values
     /// without a compilation (#1613).
     ///
-    /// A transaction whose edits are all `SetControl`s on values that exist is prepared **in
+    /// A transaction whose edits are all `SetControl`s, on values that exist or adding parameter
+    /// entries (#1620, charged exactly by `ResourceEstimate::after_owners_edit`), is prepared **in
     /// place**: the owners the edits name are cloned and edited with the very `controls::set` the
     /// full path uses, checked with the session's own value validators, and held with the exact
     /// resource estimate and the revision the commit gives. The committed model is not cloned,

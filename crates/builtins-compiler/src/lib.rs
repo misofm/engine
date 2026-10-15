@@ -398,7 +398,62 @@ struct FaderReader {
     cells: [CellReader; FADER_CELLS],
     dirty: DirtyReader,
     superseded: LiveValuesSuperseded,
+    /// The carry marks (#1630 f, D15-2); see [`CarryMarks`].
+    marks: CarryMarks,
 }
+
+/// What one reader knows about values a plan swap carried (#1630 f, decision 15 D15-2). Bit `n`
+/// is the cell with dirty bit `n`.
+///
+/// `applied` is the cells the reader's last drain applied. The swap's carry drain on the
+/// predecessor sets it, and the successor's adopting lane takes it as `carried`: the cells whose
+/// value the swap carried into lane state and no sample has rendered yet. The successor's first
+/// drain, in the adopting block before any sample, counts each carried cell it applies a value of
+/// its own to as one superseded value (the carried value was replaced unheard, as an effect lane's
+/// carried write is), and clears `carried`, whether or not it applied anything: from the second
+/// block on, the carried value has been heard.
+#[derive(Clone, Copy, Default)]
+struct CarryMarks {
+    carried: u16,
+    applied: u16,
+}
+
+// REALTIME_POLICY_BEGIN
+impl CarryMarks {
+    /// Start a drain: take the carried cells and forget the last drain's applied ones.
+    fn begin(&mut self) -> u16 {
+        self.applied = 0;
+        core::mem::take(&mut self.carried)
+    }
+
+    /// The drain applied cell `bit`; a carried value of that cell was replaced unheard.
+    fn applied(&mut self, bit: usize, carried: u16, superseded: &LiveValuesSuperseded) {
+        let mask = 1_u16 << bit;
+        self.applied |= mask;
+        if carried & mask != 0 {
+            superseded.add_carried(1);
+        }
+    }
+
+    /// The successor's adopting lane takes the cells the predecessor's carry drain applied.
+    fn adopt(&mut self, predecessor: &Self) {
+        self.carried = predecessor.applied;
+    }
+}
+
+/// An adopted lane's reader takes its predecessor reader's carry marks; a lane without a reader on
+/// either side has none to take.
+fn adopt_carry_marks<R>(
+    into: Option<&mut Option<R>>,
+    from: Option<&Option<R>>,
+    marks_mut: impl FnOnce(&mut R) -> &mut CarryMarks,
+    marks: impl FnOnce(&R) -> &CarryMarks,
+) {
+    if let (Some(Some(into)), Some(Some(from))) = (into, from) {
+        marks_mut(into).adopt(marks(from));
+    }
+}
+// REALTIME_POLICY_END
 
 /// Which cell kind a drain applies.
 #[derive(Clone, Copy)]
@@ -426,6 +481,7 @@ impl FaderReader {
             [u32; FADER_CELL_WORDS],
         ) -> Result<(), BuiltinParameterError>,
     ) -> Result<(), BuiltinParameterError> {
+        let carried = self.marks.begin();
         let pending = self.dirty.pending(&self.lane.dirty);
         if pending == 0 {
             return Ok(());
@@ -442,6 +498,7 @@ impl FaderReader {
                 index as u32,
                 &self.superseded,
             ) {
+                self.marks.applied(index, carried, &self.superseded);
                 *slot = Some(words);
             }
         }
@@ -476,6 +533,8 @@ struct MatrixReader {
     cell: CellReader,
     dirty: DirtyReader,
     superseded: LiveValuesSuperseded,
+    /// The carry marks (#1630 f, D15-2); see [`CarryMarks`].
+    marks: CarryMarks,
 }
 
 // REALTIME_POLICY_BEGIN
@@ -487,6 +546,7 @@ impl MatrixReader {
         snapshot: LiveSnapshot,
         mut apply: impl FnMut(Matrix2x2, u32) -> Result<(), BuiltinParameterError>,
     ) -> Result<(), BuiltinParameterError> {
+        let carried = self.marks.begin();
         let pending = self.dirty.pending(&self.lane.dirty);
         if pending == 0 {
             return Ok(());
@@ -500,6 +560,7 @@ impl MatrixReader {
         ) else {
             return Ok(());
         };
+        self.marks.applied(0, carried, &self.superseded);
         apply(
             Matrix2x2 {
                 ll: f32::from_bits(words[0]),
@@ -526,6 +587,7 @@ fn fader_lane(superseded: &LiveValuesSuperseded) -> (FaderCells, FaderReader) {
             cells: core::array::from_fn(|_| CellReader::new()),
             dirty: DirtyReader::new(),
             superseded: superseded.clone(),
+            marks: CarryMarks::default(),
         },
     )
 }
@@ -543,6 +605,7 @@ fn matrix_lane(superseded: &LiveValuesSuperseded) -> (MatrixCells, MatrixReader)
             cell: CellReader::new(),
             dirty: DirtyReader::new(),
             superseded: superseded.clone(),
+            marks: CarryMarks::default(),
         },
     )
 }
@@ -714,6 +777,8 @@ struct InputReader {
     filter: [CellReader; 2 * FILTER_SECTIONS],
     dirty: DirtyReader,
     superseded: LiveValuesSuperseded,
+    /// The carry marks (#1630 f, D15-2); see [`CarryMarks`].
+    marks: CarryMarks,
 }
 
 /// The value(s) a pair of channel cells applied in one drain: one `Both` value when the two words
@@ -736,7 +801,9 @@ fn paired_channels<const N: usize>(
 }
 
 /// Read one pending cell under `snapshot`: its newest value in range, if it was not applied
-/// before. The replaced count joins `superseded`.
+/// before. The replaced count joins `superseded`, and an applied cell marks `marks` (a carried
+/// value it replaces joins the count too, #1630 f).
+#[allow(clippy::too_many_arguments)]
 fn read_input_cell<const N: usize>(
     pending: u64,
     bit: usize,
@@ -745,12 +812,16 @@ fn read_input_cell<const N: usize>(
     snapshot: LiveSnapshot,
     dirty: &mut DirtyReader,
     superseded: &LiveValuesSuperseded,
+    (marks, carried): (&mut CarryMarks, u16),
 ) -> Option<[u32; N]> {
     if pending & (1 << bit) == 0 {
         return None;
     }
     match reader.read_counted(cell, snapshot, dirty, bit as u32, superseded) {
-        CellRead::Applied { words, .. } => Some(words),
+        CellRead::Applied { words, .. } => {
+            marks.applied(bit, carried, superseded);
+            Some(words)
+        }
         CellRead::Unchanged => None,
     }
 }
@@ -775,6 +846,7 @@ impl InputReader {
         witness: &mut ChannelSymmetryWitness,
         mut apply: impl FnMut(TrackInputRecord) -> Result<(), BuiltinParameterError>,
     ) -> Result<(), BuiltinParameterError> {
+        let carried = self.marks.begin();
         let pending = self.dirty.pending(&self.lane.dirty);
         if pending == 0 {
             return Ok(());
@@ -786,6 +858,7 @@ impl InputReader {
             filter,
             dirty,
             superseded,
+            marks,
         } = self;
         let trim_words: [Option<[u32; TRIM_CELL_WORDS]>; 2] = core::array::from_fn(|channel| {
             read_input_cell(
@@ -796,6 +869,7 @@ impl InputReader {
                 snapshot,
                 dirty,
                 superseded,
+                (&mut *marks, carried),
             )
         });
         let polarity_words: [Option<[u32; POLARITY_CELL_WORDS]>; 2] =
@@ -808,6 +882,7 @@ impl InputReader {
                     snapshot,
                     dirty,
                     superseded,
+                    (&mut *marks, carried),
                 )
             });
         let filter_words: [Option<[u32; FILTER_CELL_WORDS]>; 2 * FILTER_SECTIONS] =
@@ -820,6 +895,7 @@ impl InputReader {
                     snapshot,
                     dirty,
                     superseded,
+                    (&mut *marks, carried),
                 )
             });
         let mut first_error = Ok(());
@@ -896,6 +972,7 @@ fn input_lane_cells(superseded: &LiveValuesSuperseded) -> (InputCells, InputRead
             filter: core::array::from_fn(|_| CellReader::new()),
             dirty: DirtyReader::new(),
             superseded: superseded.clone(),
+            marks: CarryMarks::default(),
         },
     )
 }
@@ -1299,6 +1376,12 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
             return false;
         }
         *slot = live;
+        adopt_carry_marks(
+            self.controls.get_mut(lane),
+            predecessor.controls.get(predecessor_lane),
+            |reader| &mut reader.marks,
+            |reader| &reader.marks,
+        );
         true
     }
 
@@ -1469,12 +1552,22 @@ impl FaderBankProcessor {
     }
 
     /// Copy `predecessor`'s lane `predecessor_lane` into lane `lane` (#1277 D7, D8). The cell
-    /// reader stays: the successor's own cells take every later value.
+    /// reader stays: the successor's own cells take every later value, and it takes the carry
+    /// marks of the values the carry drain applied (#1630 f).
     fn adopt_lane(&mut self, lane: usize, predecessor: &Self, predecessor_lane: usize) -> bool {
-        predecessor
+        let adopted = predecessor
             .bank
             .export_lane(predecessor_lane)
-            .is_some_and(|state| self.bank.import_lane(lane, &state).is_ok())
+            .is_some_and(|state| self.bank.import_lane(lane, &state).is_ok());
+        if adopted {
+            adopt_carry_marks(
+                self.controls.get_mut(lane),
+                predecessor.controls.get(predecessor_lane),
+                |reader| &mut reader.marks,
+                |reader| &reader.marks,
+            );
+        }
+        adopted
     }
     // REALTIME_POLICY_END
 }
@@ -1621,10 +1714,19 @@ impl MatrixBankProcessor {
 
     /// The matrix bank's counterpart of [`FaderBankProcessor::adopt_lane`].
     fn adopt_lane(&mut self, lane: usize, predecessor: &Self, predecessor_lane: usize) -> bool {
-        predecessor
+        let adopted = predecessor
             .bank
             .export_lane(predecessor_lane)
-            .is_some_and(|state| self.bank.import_lane(lane, &state).is_ok())
+            .is_some_and(|state| self.bank.import_lane(lane, &state).is_ok());
+        if adopted {
+            adopt_carry_marks(
+                self.controls.get_mut(lane),
+                predecessor.controls.get(predecessor_lane),
+                |reader| &mut reader.marks,
+                |reader| &reader.marks,
+            );
+        }
+        adopted
     }
     // REALTIME_POLICY_END
 }

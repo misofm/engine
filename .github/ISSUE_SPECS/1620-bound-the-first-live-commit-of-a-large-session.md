@@ -124,9 +124,12 @@ in canonical `(ID, channel)` order, the order `compile_session` sorts into.
 
 Outside the listed paths (mechanical): the in-place admission comment in
 `crates/control-plane/src/control.rs` (the in-place transaction may now add parameter entries, never
-a count `check_counts` reads); `crates/session/tests/in_place.rs` moved to the new function; the
-differential gate lives in `crates/host-core/tests/in_place_commit.rs`, the home of the #1613 `Pair`
-harness that compares the two paths.
+a count `check_counts` reads); `crates/session/src/estimate.rs` (`ResourceEstimate::after_owners_edit`
+and the named `CANONICAL_BYTES_PER_ITEM`), `crates/session/src/compile.rs` (`check_caps` made
+`pub(crate)`, its unused model argument dropped) and `crates/session/src/lib.rs` (the exports);
+`crates/session/tests/in_place.rs` moved to the new function; the differential gate lives in
+`crates/host-core/tests/in_place_commit.rs`, the home of the #1613 `Pair` harness that compares the
+two paths.
 
 **Gates.**
 
@@ -141,14 +144,34 @@ harness that compares the two paths.
    store is unchanged). Session unit: `owners_with_values_the_compiler_refuses_are_not_valid_and_counts_are_compared`.
 2. `tools/parameter-metadata/tests/control_command_heap.rs` (debug): the first call is gated at
    every size, `FIRST_PEAK_CEILING` 74,000 and `FIRST_REQUESTED_CEILING` 105,000 (was 78,000 peak
-   at one track only); `first.left <= 256` (was 4,096). Re-pinned for #1620 from these
-   measurements, on this head before and after the change:
+   at one track only). Re-pinned for #1620 from these measurements, on this head before and after
+   the change:
 
-   | tracks | first call before: allocations / requested / peak / left | first call after | steady (unchanged) |
+   | tracks | first call before: allocations / requested / peak | first call after | steady (unchanged) |
    |---|---|---|---|
-   | 1 | 839 / 130,294 / 77,600 / 1,078 | 757 / 103,033 / 72,865 / 80 | 758 / 103,918 / 72,841 / 80 |
-   | 64 | 1,853 / 550,437 / 198,182 / 1,078 | 757 / 103,033 / 72,865 / 80 | the same |
-   | 256 | 4,927 / 1,867,749 / 663,179 / 1,078 | 757 / 103,033 / 72,865 / 80 | the same |
+   | 1 | 839 / 130,294 / 77,600 | 757 / 103,033 / 72,865 | 758 / 103,918 / 72,841 |
+   | 64 | 1,853 / 550,437 / 198,182 | 757 / 103,033 / 72,865 | the same |
+   | 256 | 4,927 / 1,867,749 / 663,179 | 757 / 103,033 / 72,865 | the same |
 
-   The steady ceilings (73,000 peak, 104,000 requested) are kept.
+   The steady ceilings (73,000 peak, 104,000 requested) were kept here; the batch 14b review fold
+   re-pinned all four (below).
 3. The same test asserts the first call's allocation count equal at 1, 64 and 256 tracks.
+
+**Review fold (batch 14b).** (1) The comments that still said the in-place form takes only existing
+values now say it also adds parameter entries: `protocol/src/model.rs` (`TransactionForm::InPlace`,
+`prepare_transaction_in_place`), `protocol/src/controller.rs`, `control-plane/src/control.rs`
+(`commit_live`) and `host-core/tests/in_place_commit.rs`. (2) `control_command_heap.rs` drops the
+`first.left <= 256` check: it had no unique catch (the first in-place commit frees the boot's
+canonical text, and the live-bytes window stops at zero), so the left-bytes claim is removed from
+gate 2 above; `steady.left <= 256` stays. (3) `OwnersGrowth`'s fields are private with `const`
+getters (`parameters()`, `largest_grown_list()`) and it no longer derives `Default`: only
+`owners_growth` builds one, so no caller outside `session` can hand the public
+`ResourceEstimate::after_owners_edit` a growth smaller than the owners' real one; the session tests
+compare the getters' pair. (4) The heap ceilings follow one slack rule (measured plus 2,000 bytes,
+rounded up to the next 1,000): first call 75,000 peak / 106,000 requested, steady 75,000 / 106,000
+(were 74,000 / 105,000 and 73,000 / 104,000); measured, debug, every size: first 757 / 103,033 /
+72,865, steady 758 / 103,918 / 72,841 (the #1624 re-pin, recorded there). (5) Original gate 2
+(`scripts/check-web-boot-budget.mjs`) was not run in attempt 1; run in this fold on a fresh
+`build-web-audioworklet.sh --module-only` simd128 module (`765e340fa583b48c`, 4,096,024 B, built from this fold's working tree): `node
+scripts/check-web-boot-budget.mjs` passes at its current pin ("web boot budget high-water gate
+passed; mismatches: 0").

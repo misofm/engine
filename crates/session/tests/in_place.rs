@@ -128,8 +128,9 @@ fn swapping_the_owners_in_gives_the_compiled_session_of_the_edited_model() {
         owners_growth(
             slots.in_committed(compiled.normalized_model()),
             slots.in_owners(&owners)
-        ),
-        Some(OwnersGrowth::default())
+        )
+        .map(growth_pair),
+        Some((0, 0))
     );
     compiled.swap_owners(&mut owners, &slots);
     compiled.finish_in_place(
@@ -212,8 +213,9 @@ fn owners_with_values_the_compiler_refuses_are_not_valid_and_counts_are_compared
         owners_growth(
             [OwnerRef::Track(&model.tracks[0])],
             [OwnerRef::Track(&model.tracks[0].clone())],
-        ),
-        Some(OwnersGrowth::default())
+        )
+        .map(growth_pair),
+        Some((0, 0))
     );
     // #1620: an added parameter entry is growth, counted with the list it lengthens.
     let mut added = model.tracks[0].clone();
@@ -226,10 +228,13 @@ fn owners_with_values_the_compiler_refuses_are_not_valid_and_counts_are_compared
         owners_growth(
             [OwnerRef::Track(&model.tracks[0])],
             [OwnerRef::Track(&added)],
-        ),
-        Some(OwnersGrowth {
-            parameters: 1,
-            largest_grown_list: length,
-        })
+        )
+        .map(growth_pair),
+        Some((1, length))
     );
+}
+
+/// The growth's two counts, the only view of it outside `session`.
+fn growth_pair(growth: OwnersGrowth) -> (usize, usize) {
+    (growth.parameters(), growth.largest_grown_list())
 }

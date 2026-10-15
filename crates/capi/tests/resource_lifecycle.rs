@@ -1226,6 +1226,14 @@ impl Budget {
 /// bytes less per EQ: 60 rows of 12 bytes and 60 flags). `capi_retained_bytes` measured 166,374
 /// before and 159,354 after (x86-64, -7,020 = nine EQs; the row does not depend on the lane width),
 /// so its ceiling is 159,354 plus 10 %, rounded up to 64: 175,289.4 -> 175,296 (was 182,400).
+///
+/// #1630 (batch 14b review fold) raises the eight-lane builtin bank row, a structural move: each
+/// strip's input, fader and matrix cell readers keep carry marks (two `u16`s each), so a carried
+/// value the successor's retarget replaces is counted (D15-2). `builtin_bank_bytes` measured 15,321
+/// before and 15,705 after (x86-64, eight lanes, +384), so its ceiling is 15,705 plus 10 %, rounded
+/// up to 64: 17,275.5 -> 17,280 (was 15,680). The four-lane ceiling (21,056) was not re-measured
+/// (no AArch64 run in this fold); `builtin_processor_payload_bytes` moved 36,171 -> 36,387 inside
+/// its ceiling.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1272,7 +1280,7 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_bank_bytes",
         value: |report| report.builtin_bank_bytes,
-        eight_lanes: 15_680,
+        eight_lanes: 17_280,
         four_lanes: 21_056,
     },
     Budget {

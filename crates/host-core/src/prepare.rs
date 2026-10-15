@@ -2091,7 +2091,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                         // records, so the carried lane ramps as a live edit would. A value the
                         // live path refuses restarts the section.
                         let edit = StripEditRamps::of(base.edit_ramps, strip.id);
-                        input_records(before, strip.builtins, rate, ramps, edit).ok()?
+                        let records = input_records(before, strip.builtins, rate, ramps, edit);
+                        // A compiled model's values are in the live domain, so a refusal here is
+                        // an internal fault that would silently restart the section.
+                        debug_assert!(
+                            records.is_ok(),
+                            "a compiled strip's input values have live records: {records:?}"
+                        );
+                        records.ok()?
                     } else if same_input_section(before, strip.builtins) {
                         Vec::new()
                     } else {

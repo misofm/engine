@@ -327,7 +327,7 @@ impl ResourceEstimate {
         canonical_bytes: u64,
         caps: crate::CompileCaps,
     ) -> Option<Self> {
-        let parameters = u64::try_from(growth.parameters).ok()?;
+        let parameters = u64::try_from(growth.parameters()).ok()?;
         let entry = size::<crate::EffectParam>();
         let canonical_upper_bound_bytes = self
             .canonical_upper_bound_bytes
@@ -340,7 +340,7 @@ impl ResourceEstimate {
             .checked_sub(self.canonical_bytes)?
             .checked_add(canonical_upper_bound_bytes)?
             .checked_add(parameters.checked_mul(entry)?)?;
-        let largest_grown_list = u64::try_from(growth.largest_grown_list)
+        let largest_grown_list = u64::try_from(growth.largest_grown_list())
             .ok()?
             .checked_mul(entry)?;
         let single_allocation_bytes = self

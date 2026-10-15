@@ -8,7 +8,8 @@
 //! allocator's thread-scoped counters and live-heap window (`bench_support::alloc`), relative to the
 //! heap live at the call's entry.
 //!
-//! The ceilings are the numbers measured on this head with a few KB of slack. The steady call is
+//! The ceilings are the numbers measured on this head plus 2,000 bytes, rounded up to the next
+//! 1,000 (the slack rule below). The steady call is
 //! the same at every track count, and so is the first (#1620): a live-only commit must not depend
 //! on the session's size. The numbers print with `--nocapture`.
 //!
@@ -206,22 +207,24 @@ fn run(tracks: usize) -> (Heap, Heap) {
     (first.expect("a first call"), steady_first)
 }
 
-/// Ceilings, measured on this head (decision record of #1615): bytes of heap live at the peak above
-/// the call's entry, and bytes requested over the call, with a few KB of slack. Debug and release
-/// builds give the same numbers (the debug stage check is off, above).
+/// Ceilings: bytes of heap live at the peak above the call's entry, and bytes requested over the
+/// call. The slack rule: each ceiling is the number measured on this head plus 2,000 bytes,
+/// rounded up to the next 1,000. Debug and release builds give the same numbers (the debug stage
+/// check is off, above).
 ///
-/// One track: the first call peaks at 76,011 bytes and every later call at 71,252, requesting
-/// 101,025 bytes in 753 allocations. Before #1615 they were 172,790 and 168,031, requesting 293,477
-/// in 786.
+/// Measured at every size (1, 64 and 256 tracks): the first call peaks at 72,865 bytes, requesting
+/// 103,033 in 757 allocations; every steady call peaks at 72,841, requesting 103,918 in 758.
 ///
-/// #1620: the first call is in place too. It used to take the full path, because its edits add
-/// parameter entries to the sparse EQ list (peak 77,600 / 198,182 / 663,179 bytes at 1 / 64 / 256
-/// tracks, 839 / 1,853 / 4,927 allocations); in place, it peaks at 72,865 bytes, requesting 103,033
-/// in 757 allocations, at every size. Its ceiling was 78,000 at one track and none above.
-const FIRST_PEAK_CEILING: usize = 74_000;
-const FIRST_REQUESTED_CEILING: usize = 105_000;
-const STEADY_PEAK_CEILING: usize = 73_000;
-const STEADY_REQUESTED_CEILING: usize = 104_000;
+/// History. #1615: the steady call peaked at 71,252 bytes, requesting 101,025 in 753 allocations
+/// (before #1615: 168,031, requesting 293,477 in 786). #1620: the first call is in place too; it
+/// used to take the full path, because its edits add parameter entries to the sparse EQ list
+/// (peak 77,600 / 198,182 / 663,179 bytes at 1 / 64 / 256 tracks, 839 / 1,853 / 4,927
+/// allocations). #1624 (B' adds 780 B and 2 allocations per begun EQ owner): the steady ceilings
+/// rose from 73,000 / 104,000 and the first call's from 74,000 / 105,000 under this rule.
+const FIRST_PEAK_CEILING: usize = 75_000;
+const FIRST_REQUESTED_CEILING: usize = 106_000;
+const STEADY_PEAK_CEILING: usize = 75_000;
+const STEADY_REQUESTED_CEILING: usize = 106_000;
 
 #[test]
 fn a_live_only_nine_edit_transaction_has_a_small_peak_at_every_size() {
@@ -234,11 +237,9 @@ fn a_live_only_nine_edit_transaction_has_a_small_peak_at_every_size() {
         for tracks in [1_usize, 64, 256] {
             let (first, steady) = run(tracks);
             println!("tracks {tracks}: first {first:?}; steady {steady:?}");
-            // A call keeps only its 80-byte response.
-            assert!(
-                steady.left <= 256 && first.left <= 256,
-                "a call leaves heap live"
-            );
+            // A steady call keeps only its 80-byte response. The first call is not checked: it
+            // frees the boot's canonical text, and the live-bytes window stops at zero.
+            assert!(steady.left <= 256, "a call leaves heap live: {steady:?}");
             assert!(
                 first.peak <= FIRST_PEAK_CEILING && first.requested <= FIRST_REQUESTED_CEILING,
                 "{tracks}: first {first:?}"
