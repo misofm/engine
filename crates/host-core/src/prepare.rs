@@ -3250,6 +3250,7 @@ fn resolve_delay_carry(
         .collect()
 }
 
+// REALTIME_POLICY_BEGIN: #1327 D3, the pairing runs in the plan-swap block.
 /// Swap each carried effect observation reader set between the plans' reader vectors, at the swap
 /// block (#1327 D3): for each record of kind [`engine::realtime::ObserverKind::Observation`], the
 /// successor handle at `successor` and the predecessor handle at `predecessor` exchange their
@@ -3276,7 +3277,9 @@ pub fn pair_carried_observations(
         }
     }
 }
+// REALTIME_POLICY_END
 
+// REALTIME_POLICY_BEGIN: #1327 D3, the pairing runs in the plan-swap block.
 /// Swap each carried meter's reader between the plans' reader vectors, at the swap block
 /// (#1327 D3): for each record of kind [`engine::realtime::ObserverKind::Meter`], the successor
 /// reader at `successor` and the predecessor reader at `predecessor` exchange their consumers, so
@@ -3304,6 +3307,7 @@ pub fn pair_carried_meters(
         }
     }
 }
+// REALTIME_POLICY_END
 
 /// Strip `id`'s row of `rows`, which are sorted by strip ID.
 fn input_section_row<'a>(
@@ -5177,12 +5181,6 @@ mod tests {
         }
     }
 
-    /// #1283 D1: lines join by edge ID and endpoints, never by index. A line moves when its
-    /// edge exists on both sides with the same endpoints, whatever its length and whatever
-    /// index either side gave it; a route re-pointed to another destination or another source
-    /// keeps its route ID, and its line does not move; an edge with a line on one side only
-    /// moves nothing. Red if the join keys by index (the added track shifts every index) or by
-    /// route ID alone (a re-pointed route's line would continue into the wrong bus).
     fn strip_delay(strip: &str, line: u32, samples: [u32; 2]) -> graph::GraphStripDelayLine {
         graph::GraphStripDelayLine {
             strip: strip.into(),
@@ -5306,6 +5304,12 @@ mod tests {
         assert_eq!(carry.retargets, vec![("a-main", record)]);
     }
 
+    /// #1283 D1: lines join by edge ID and endpoints, never by index. A line moves when its
+    /// edge exists on both sides with the same endpoints, whatever its length and whatever
+    /// index either side gave it; a route re-pointed to another destination or another source
+    /// keeps its route ID, and its line does not move; an edge with a line on one side only
+    /// moves nothing. Red if the join keys by index (the added track shifts every index) or by
+    /// route ID alone (a re-pointed route's line would continue into the wrong bus).
     #[test]
     fn delay_lines_join_by_edge_and_endpoints() {
         let mut before = vec![

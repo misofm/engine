@@ -199,3 +199,13 @@ features, default, all features) and `host-core graph capi` with all targets; `r
 `check-bench-policy.sh`, `check-workspace-policy.sh`, `check-builtins-fixtures.sh`,
 `check-graph-determinism.sh`, `check-cross-targets.sh`, `check-web-audioworklet.sh`,
 `trace-graph-audit.sh` (1,000,000 blocks) and rustdoc `-D warnings` pass.
+
+## Fold (batch 11 review)
+
+- The `#1283 D1` join doc sat on the test helper `strip_delay`; it now sits on
+  `delay_lines_join_by_edge_and_endpoints`, the test it describes.
+- `a_live_mute_survives_a_later_rebuild` and `a_prepared_bypass_change_rebuilds_and_renders_the_committed_model`
+  compared two of six blocks after the lines flushed. Both rigs, the control and the rebuild run now render
+  `flushed + 6` blocks after the seek and compare `[flushed..]`, so six blocks are compared. The gate-3 comment
+  now says what the pre-flush window holds: the source ring's audio and audio rendered under the predecessor's
+  bypass in the carried lines, which no control built from the committed model reproduces.

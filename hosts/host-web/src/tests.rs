@@ -6784,6 +6784,47 @@ mod structural_apply {
         assert!(after > before, "the windows continue ({before} to {after})");
     }
 
+    /// A tap command admitted against the successor at sample zero is not overwritten by the
+    /// predecessor's state (#1381b): the hand-over tells "commanded" from the arm sample's zero,
+    /// which is also the sample of a command admitted before the first block.
+    ///
+    /// Test value: red if the hand-over reads arm sample zero as "no command" (the predecessor's
+    /// armed bit would come back over a disarm admitted against the successor before any block
+    /// rendered, and the page's unsubscribe would silently be undone by the swap).
+    #[test]
+    fn a_tap_command_admitted_at_sample_zero_survives_the_hand_over() {
+        let mut model =
+            parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+                .expect("accepted command fixture");
+        model.tracks[0].inserts.effects[0] = observed_compressor_insert();
+        let mut rig = Rig::boot(&model, options(), None);
+        assert_eq!(
+            observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_OK,
+            "the subscription is admitted before the first block, at sample zero"
+        );
+        assert_eq!(rig.host.observation_armed_taps(), 1);
+        assert!(matches!(
+            rig.apply(&add_muted_track(&model, ADDED), 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(
+            observe(&mut rig.host, 1, RACK_INSERTS, 0, 1, 2, false),
+            RESULT_OK,
+            "the disarm is admitted against the successor, still at sample zero"
+        );
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(
+            rig.host.observation_armed_taps(),
+            0,
+            "the successor keeps the disarm it was commanded; the predecessor's arm is not carried"
+        );
+    }
+
     fn meter_loss(rig: &Rig) -> u64 {
         rig.host.ready.as_ref().expect("ready").meter_loss_count
     }

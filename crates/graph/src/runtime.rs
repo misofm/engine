@@ -922,7 +922,7 @@ impl LiveRoute {
     ///
     /// The cell holds the newest value whose revision is `<= S`, never a newer or torn one, and
     /// never skips it (#1312 D1). When it applies sequence `s` after `p`, the `s - p - 1` writes
-    /// it replaced are added to the session's `live_values_superseded` (#1312 D2). The drain runs
+    /// it replaced are added to the session's `live_values_superseded` (#1312 D2). The read runs
     /// in every block, active route or not (#1504 D3). It allocates nothing and takes no lock.
     #[inline]
     fn apply_pending(&mut self, snapshot: LiveSnapshot) -> usize {

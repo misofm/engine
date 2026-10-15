@@ -1331,8 +1331,15 @@ struct PlanShape {
     /// Admission sample at which each tap's current arm was acknowledged. A resident cell keeps
     /// its previous window forever, so a read is fresh for a re-arm only when the whole returned
     /// window starts at or after this sample. The nested index is the dense effect slot followed
-    /// by that descriptor's tap index; zero means no command has changed the tap yet.
+    /// by that descriptor's tap index; zero is a valid sample (a command admitted before the first
+    /// block), so `observation_commanded` says whether a command named the tap.
     observation_arm_samples: Box<[Box<[u64]>]>,
+    /// Commanded-taps bitmask per effect slot: bit `t` is set when a tap command (arm or disarm)
+    /// was admitted against this shape's plan for tap `t`, whatever sample it was admitted at, so
+    /// sample zero is not "no command". The swap's hand-over reads it to keep a command admitted
+    /// against the successor from being overwritten by the predecessor's state, then clears it
+    /// at the commit of that hand-over (#1381b).
+    observation_commanded: Box<[u32]>,
     /// The designated master strip index (tracks first, then submixes), or `None` (issue #143
     /// D6, issue #1213 D5).
     master_track: Option<u32>,
@@ -1547,7 +1554,11 @@ impl ReadyOwnership {
     /// executors carried, which this hand-over follows with the per-reader state the tables hold.
     /// A swap that carried a meter keeps the meter delivery running, because the carried meters
     /// keep their window grid and the host's master windows are continuous; one that carried none
-    /// restarts it, because its meters open their first window at the adoption block.
+    /// restarts it, because its meters open their first window at the adoption block. The poll
+    /// finds the carried pending windows where it left them only while the meter handles are
+    /// unchanged: a swap that removes one strip and adds another shifts handles, so a carried
+    /// pending snapshot fails the poll's handle check, is dropped, and is added to the meter loss
+    /// count.
     fn adopt_shape(&mut self, epoch: u64, carried: &[CarriedReader]) {
         self.shape_epoch = epoch;
         let meters_carried = carried
@@ -1772,6 +1783,9 @@ impl ReadyOwnership {
                 && let Some(sample) = samples.get_mut(staged.tap_index as usize)
             {
                 *sample = applied_at_sample;
+            }
+            if let Some(commanded) = self.shape.observation_commanded.get_mut(effect) {
+                *commanded |= bit;
             }
         }
         Ok(())
@@ -5580,6 +5594,7 @@ fn build_plan_shape(
         reader_slots: reader_slots.into_boxed_slice(),
         observation_armed: zero_u32(total_effects as usize)?,
         observation_arm_samples: observation_arm_samples.into_boxed_slice(),
+        observation_commanded: zero_u32(total_effects as usize)?,
         master_track,
         command_wanted: zero_u32(total_effects as usize)?,
         observe_named: zero_u32(total_effects as usize)?,
@@ -5628,10 +5643,11 @@ impl PlanShape {
     /// samples of the effect slot each reader sits at (`reader_slots`).
     ///
     /// A tap a command named after this plan was committed already holds that command's state
-    /// here (its arm sample is not zero) and keeps it, so a subscription admitted against the
-    /// successor is not overwritten by the predecessor's older one. Every other tap takes the
-    /// predecessor's. Slot tables of different tap counts are left alone: a carried reader never
-    /// has them. Swaps and scalar writes only.
+    /// here (its `observation_commanded` bit is set, whatever sample the command was admitted at)
+    /// and keeps it, so a subscription admitted against the successor is not overwritten by the
+    /// predecessor's older one. Every other tap takes the predecessor's. The bits are cleared once
+    /// the hand-over has read them. Slot tables of different tap counts are left alone: a carried
+    /// reader never has them. Swaps and scalar writes only.
     fn carry_tap_state(&mut self, predecessor: &mut Self, successor_reader: usize, reader: usize) {
         let (Some(into), Some(from)) = (
             self.reader_slots.get(successor_reader).copied(),
@@ -5655,21 +5671,25 @@ impl PlanShape {
             .copied()
             .unwrap_or(0);
         let mut armed = self.observation_armed.get(into).copied().unwrap_or(0);
+        let commanded = self.observation_commanded.get(into).copied().unwrap_or(0);
         for (tap, (new, old)) in new_samples.iter_mut().zip(old_samples.iter()).enumerate() {
-            if *new != 0 {
-                continue;
-            }
-            *new = *old;
             let Some(bit) = u32::try_from(tap)
                 .ok()
                 .and_then(|tap| 1_u32.checked_shl(tap))
             else {
                 continue;
             };
+            if commanded & bit != 0 {
+                continue;
+            }
+            *new = *old;
             armed = (armed & !bit) | (old_armed & bit);
         }
         if let Some(slot) = self.observation_armed.get_mut(into) {
             *slot = armed;
+        }
+        if let Some(slot) = self.observation_commanded.get_mut(into) {
+            *slot = 0;
         }
     }
 
@@ -5709,7 +5729,10 @@ impl PlanShape {
                 })?;
         let arm_table_bytes = u64::try_from(self.effect_instances.len())
             .ok()?
-            .checked_mul((size_of::<Box<[u64]>>() + size_of::<Option<EffectInstance>>()) as u64)?
+            .checked_mul(
+                (size_of::<Box<[u64]>>() + size_of::<Option<EffectInstance>>() + size_of::<u32>())
+                    as u64,
+            )?
             .checked_add(
                 u64::try_from(self.reader_slots.len())
                     .ok()?

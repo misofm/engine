@@ -548,3 +548,14 @@ Checked against `12d4a4f9d`.
 | allocation-free swap block | `tests/structural_apply_realtime.rs` (render-locked count 0 across the adoption block, hook included) |
 
 With the hook returning early, all three unit tests turn red (checked).
+
+## Fold (batch 11 review)
+
+- `PlanShape::carry_tap_state` no longer reads arm sample `0` as "no command". A command admitted against the
+  successor at sample zero (before the first block) was overwritten by the predecessor's armed bit. The shape now
+  holds `observation_commanded`, one bit per tap per effect slot, set where `push_observe` admits a tap command and
+  cleared once the hand-over has read it; the table is charged in `arm_table_bytes`. Gate:
+  `a_tap_command_admitted_at_sample_zero_survives_the_hand_over` (red with the sentinel, checked).
+- The `adopt_shape` doc over-claimed that the poll finds the carried pending windows where it left them. That holds
+  only while the meter handles are unchanged: a swap that removes one strip and adds another shifts handles, the
+  carried pending snapshots fail the poll's handle check, and they are dropped and added to the meter loss count.

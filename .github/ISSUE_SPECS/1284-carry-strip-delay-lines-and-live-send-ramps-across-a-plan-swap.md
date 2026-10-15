@@ -210,3 +210,9 @@ without the destination (gate 2b red), lanes keyed together (gate 2a red).
 `check-graph-determinism.sh`, `check-cross-targets.sh`, `check-web-audioworklet.sh`, rustdoc
 `-D warnings` and clippy `-D warnings` (host-core no features, default, all features; graph) pass.
 `trace-graph-audit.sh` was not run.
+
+## Fold (batch 11 review)
+
+- `LiveRoute::apply_pending` doc: "The drain runs in every block" is now "The read runs in every block"
+  (#1347 D3 reads a cell, it drains no queue).
+- The two capi oracles that cover the carried lines now compare six blocks after the flush (see #1283).

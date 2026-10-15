@@ -410,3 +410,16 @@ reference's window field by field, per-node and bank forms in both directions.
 #1327a record says (#1381b). No other `host-web` test changed: the browser's rebuild path is test-support only and
 no host-web test swaps observation taps. #1381b pairs the browser's observation handles with
 `pair_carried_observations` from the attachment hook, through its host-core-index-to-slot map.
+
+## Fold (batch 11 review)
+
+- `host_core::pair_carried_observations` and `pair_carried_meters` run on the render thread (host-web's
+  `adopt_predecessor` calls them) and now sit inside `REALTIME_POLICY_BEGIN`/`END` regions; `realtime-policy`
+  passes.
+- Observe records left in the queue of a predecessor owner that did not move (a restarted or removed owner) are
+  never applied and never counted: `carry_effect_lanes` visits only the effect moves. No counter that a host
+  reports covers them (`unbound_observations` is read by tests only), and the rule is not to add an unread
+  counter. This goes to #1584 D6 (batch 12), which owns the reported observation counters.
+- `cargo clippy -p host-core --no-default-features --all-targets` already passes at this head: the file the
+  review named, `tests/vca_live.rs`, no longer exists, and every host-core test that needs `control-provider`
+  carries a crate-level `cfg`. No change.
