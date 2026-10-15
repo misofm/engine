@@ -517,7 +517,7 @@ impl Subject {
     fn held(&self, index: usize) -> bool {
         match self {
             Self::Bank(bank) => bank.gain_held(index, 0).expect("member lane"),
-            Self::Scalar(track) => track.gain_held(index),
+            Self::Scalar(track) => track.gain_held(index).expect("a channel"),
         }
     }
 
@@ -651,8 +651,8 @@ const KINDS: [FaderOperation; 6] = [
 /// operations applied between, at every width, for every kind and lane state, and the block after
 /// it agrees too (so the state left behind is the same).
 ///
-/// Red if a piece reuses a stale countdown, an operation lands a sample early or late, or a width
-/// diverges from the scalar oracle's split.
+/// Red if a piece reuses a stale countdown or an operation lands a sample early or late. Each width
+/// is compared only with its own split, so a divergence between widths is not this test's claim.
 #[test]
 fn an_operation_inside_a_block_renders_the_split_blocks_bits() {
     let states = [
@@ -1036,6 +1036,29 @@ fn the_held_flag_follows_the_mute_ramp() {
     assert_eq!(bank.gain_held(0, 0), Some(true), "muted");
     assert_eq!(bank.gain_held(3, 0), None, "a padding lane");
     assert_eq!(bank.gain_held(0, 2), None, "no third channel");
+}
+
+/// The scalar fader's lane queries answer `None` for a lane above `1`, as the bank's do for a
+/// channel above `1`.
+///
+/// Red if a lane out of range wraps onto another lane (lane 2 read as lane 0's muted state).
+#[test]
+fn the_scalar_fader_refuses_a_lane_out_of_range() {
+    let mut track = FaderMuteRampBuiltins::new(parameters(0.0, 0.0, false, false)).expect("fader");
+    track
+        .apply_fader_operation(
+            BuiltinLaneSelector::Left,
+            FaderOperation::SetMute {
+                muted: true,
+                samples: 0,
+            },
+        )
+        .expect("a valid operation");
+    assert_eq!(track.gain_held(0), Some(true), "muted");
+    assert_eq!(track.gain_held(1), Some(false), "the right lane is free");
+    assert_eq!(track.gain_held(2), None, "no third lane");
+    assert_eq!(track.ramp_remaining(0), Some(0), "a mute with no ramp");
+    assert_eq!(track.ramp_remaining(2), None, "no third lane");
 }
 
 /// Gate 5: 1,000 blocks of `process_with` with operations allocate and free nothing.

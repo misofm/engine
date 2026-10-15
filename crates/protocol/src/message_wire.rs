@@ -3215,7 +3215,7 @@ fn write_address_fields(
 /// The address message of a stored automation target: the control list's one address encoding with
 /// `control` and `lane` present, and no expected effect (the target is a row, not an edit). An
 /// address that breaks the list's rules is `InvalidField`.
-pub(crate) fn write_set_control_address(
+pub(crate) fn write_automation_target_address(
     sink: &mut dyn Sink,
     address: &controls::ControlAddress,
 ) -> Result<(), EncodeError> {
@@ -3228,12 +3228,19 @@ pub(crate) fn write_set_control_address(
 
 /// A stored automation target, decoded by the control list's one address decoder and held to the
 /// list's rules for a control row: every refusal is `InvalidField`, an unallocated owner, section
-/// or lane code included.
-pub(crate) fn decode_set_control_address(
+/// or lane code included. A target holds no expected effect in any section: the `SET_CONTROL`
+/// address's seventh field is refused here as `SET_CONTROL` refuses it outside an effect section
+/// (`InvalidField` in its optional form, `InvalidTlv` in its mandatory form), never skipped as an
+/// unknown optional field.
+pub(crate) fn decode_automation_target_address(
     message: Message<'_>,
 ) -> Result<controls::ControlAddress, DecodeError> {
     let limits = message.limits();
-    let address = decode_control_address(limits, message)?;
+    let message = message.schema_spec(&set_control_address::SPEC)?;
+    if optional_spec!(message, set_control_address::EXPECTED_EFFECT)?.is_some() {
+        return Err(DecodeError::InvalidField);
+    }
+    let address = decode_control_address_fields(limits, &message)?;
     if !control_address_is_valid(limits, &address, ControlRowKind::Control) {
         return Err(DecodeError::InvalidField);
     }

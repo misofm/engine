@@ -416,8 +416,9 @@ pub struct SessionState<A: ControlAdapter> {
     /// acknowledged survives a rebuild that restarts its effect.
     pub(crate) observation: controls::ObservationBindings,
     /// The subscription state each observation slot of the newest plan was last pushed, waiting
-    /// to be folded into [`Self::observation`] (#1584 D6a). The browser admits a subscription
-    /// inside `process()`, where nothing may allocate, and a binding owns its key's text, so the
+    /// to be folded into [`Self::observation`] (#1584 D6a). The browser admits a subscription in
+    /// the worklet's message handler between render quanta, on the audio thread, where nothing may
+    /// allocate, and a binding owns its key's text, so the
     /// push records the absolute state here, in storage sized when the plan is published, and the
     /// next service step folds it into the table. A rebuild folds first: it only starts from
     /// [`Self::command`], which services.
@@ -536,6 +537,14 @@ pub enum ObservationRefusal {
         /// The position in the batch of the second change that names the tap.
         index: usize,
     },
+    /// The change at `index` names a producer whose observation queue has no slot for its tap:
+    /// the tap index is past the producer's observation menu, or the plan bound the producer no
+    /// observation queue at all (capacity `0`). Such a record would be acknowledged and never
+    /// applied, so it is refused before anything is queued. Not retryable as sent.
+    Unbound {
+        /// The change's position in the batch.
+        index: usize,
+    },
 }
 
 /// The index in `descriptor`'s observation menu of the tap with ID `tap_id`, the one the render side
@@ -644,7 +653,7 @@ pub(crate) struct ObservationBatchCount {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ObservationSlot {
     /// Armed now: the table's state with every push since folded in. Lets a subscription be
-    /// admitted against the cap without a key lookup, inside `process()`.
+    /// admitted against the cap without a key lookup, on the audio thread between quanta.
     pub(crate) armed: bool,
     /// The push waiting to be folded into the table.
     pub(crate) pending: PendingArm,
@@ -2620,12 +2629,13 @@ where
     /// plan [`Self::effect_producers`] lists, the pending candidate's while one waits for its swap.
     /// A subscribe or unsubscribe names its tap by this key and no position of any plan, so a
     /// rebuild between a client's last read and the record cannot make it arm another effect's
-    /// tap. The one function the browser's record and the C ABI's observe edit both call.
+    /// tap. The browser's record calls it, and the future C ABI observe edit (#1584) must call it.
     ///
     /// The strip is looked up in the committed model, so a strip with no effect is still an
     /// unknown effect and not an unknown strip. The effect is the producer of the strip's console
     /// slot or insert of that ID. The comparison is by bytes and the call allocates nothing: the
-    /// browser admits a record inside `process()`.
+    /// browser admits a record in the worklet's message handler, on the audio thread between
+    /// render quanta.
     ///
     /// # Errors
     ///
@@ -2643,10 +2653,7 @@ where
             || model
                 .submixes
                 .binary_search_by(|submix| submix.id.as_str().as_bytes().cmp(key.strip_id))
-                .is_ok()
-            || model
-                .strips()
-                .any(|strip| strip.id.as_str().as_bytes() == key.strip_id);
+                .is_ok();
         if !strip_known {
             return Err(ObservationKeyError::UnknownStrip);
         }
@@ -2688,8 +2695,10 @@ where
     /// Three checks run before anything is written, in this order, and a refusal names the first
     /// change in the iterator's order that breaks the first check that fails:
     ///
-    /// 1. **One naming per tap.** A change that names a tap an earlier change of the batch named
-    ///    is [`ObservationRefusal::Duplicate`], at the second naming. The cap below counts each
+    /// 1. **A slot per tap, and one naming per tap.** A change whose producer has no observation
+    ///    slot for its tap (a tap index past the menu, or a producer with no observation queue) is
+    ///    [`ObservationRefusal::Unbound`]. A change that names a tap an earlier change of the
+    ///    batch named is [`ObservationRefusal::Duplicate`], at the second naming. The cap below counts each
     ///    tap once, so it is only sound for a batch that names each tap once.
     /// 2. **The cap.** The batch is judged by the state it leaves: arms of taps that are not
     ///    armed add, disarms of armed taps remove, and the rest change nothing. A batch that would
@@ -2705,7 +2714,7 @@ where
     /// Then every change is queued. A refusal writes nothing observable, so it is whole and
     /// precedes every acknowledgement. The call is linear in the batch, reads the per-slot state
     /// the pushes keep and per-producer scratch sized with the plan, and allocates nothing, so it
-    /// runs inside the browser's `process()`.
+    /// runs in the browser worklet's message handler, on the audio thread between render quanta.
     ///
     /// # Errors
     ///
@@ -2721,8 +2730,16 @@ where
         changes: impl Iterator<Item = ObservationChange> + Clone,
     ) -> Result<(), ObservationRefusal> {
         let mark = self.next_observation_batch_mark();
-        // Pass 1: the second naming of a tap, and each producer's record count for pass 3.
+        // Pass 1: a tap the producer has no slot for, the second naming of a tap, and each
+        // producer's record count for pass 3. A position past the list is pass 3's `NoProducer`.
         for (index, change) in changes.clone().enumerate() {
+            if change.position < self.newest_providers().effects.len()
+                && self
+                    .observation_slot(change.position, change.tap_index)
+                    .is_none()
+            {
+                return Err(ObservationRefusal::Unbound { index });
+            }
             if let Some(count) = self.observation_batch_counts.get_mut(change.position) {
                 if count.mark != mark {
                     *count = ObservationBatchCount { mark, needed: 0 };
@@ -2873,8 +2890,8 @@ where
         if pushed.is_ok() {
             // #1584 D6a: the push is the acknowledgement, so the state every later successor is
             // prepared from is recorded with it, after the only fallible step and without
-            // allocating: this runs inside the browser's `process()`. A record the lane refused
-            // records nothing. The next service step folds it into the table.
+            // allocating: this runs on the browser's audio thread, between quanta. A record the
+            // lane refused records nothing. The next service step folds it into the table.
             let slots = self
                 .observation_offsets
                 .get(position)

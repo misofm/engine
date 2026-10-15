@@ -298,6 +298,47 @@ fn committed(events: &[(u64, DecodedEventPayload<'static>)]) -> usize {
         .count()
 }
 
+/// A change whose producer has no observation slot for its tap is refused as `Unbound` before
+/// anything is queued, ahead of the room check, and the same producer's real tap is still admitted
+/// afterwards.
+///
+/// Red if the core admits a tap index past the producer's observation menu: the record would be
+/// queued and acknowledged, and the render side would never apply it.
+#[test]
+fn a_change_for_a_tap_with_no_slot_is_refused_and_queues_nothing() {
+    let mut rig = Rig::new();
+    let position = rig.position("comp1");
+    let capacity = rig.session.effect_producers()[position].observe_capacity();
+    let free = rig.session.effect_producers()[position].observe_available_capacity();
+    let past = ObservationChange {
+        tap_index: u32::try_from(capacity).expect("a small menu"),
+        ..change(position, true)
+    };
+    assert_eq!(
+        rig.batch(&[past]),
+        Err(ObservationRefusal::Unbound { index: 0 }),
+        "the tap past the menu"
+    );
+    assert_eq!(
+        rig.batch(&[change(position, true), past]),
+        Err(ObservationRefusal::Unbound { index: 1 }),
+        "at its own index, before the room check"
+    );
+    assert_eq!(
+        rig.session.effect_producers()[position].observe_available_capacity(),
+        free,
+        "a refusal queues nothing"
+    );
+    assert_eq!(
+        rig.session.observation_armed(),
+        0,
+        "a refusal moves nothing"
+    );
+    assert!(rig.session.observation_bindings().is_empty());
+    rig.observe(position, true)
+        .expect("the real tap is admitted");
+}
+
 /// The push is the acknowledgement: it writes the table with it, a disarm clears it, and a push
 /// the lane refuses writes nothing.
 ///
@@ -680,7 +721,8 @@ fn an_end_event_over_one_control_frame_refuses_the_removal_and_changes_nothing()
 
 /// A stable key names one tap on the newest committed plan, whatever position the plan gives its
 /// effect, and a key the plan has not is refused with its own reason before anything is written
-/// (#1677): the one function the browser's record and the C ABI's observe edit share.
+/// (#1677): the function the browser's record calls and the future C ABI observe edit (#1584)
+/// must call.
 ///
 /// Red if the key resolves to a position of an older plan (after the removal the producers move up
 /// and `comp2` is another position), if a strip without the effect is reported as an unknown strip

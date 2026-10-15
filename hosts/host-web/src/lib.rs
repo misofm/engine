@@ -4122,12 +4122,13 @@ impl<'a> CommandRecord<'a> {
         ) {
             return Err(COMMAND_REASON_MALFORMED);
         }
-        // An ID field holds its bytes and then zeros: a length past the field, or a byte after the
-        // length, is a record that does not say what it names.
+        // An ID field holds its bytes and then zeros: a length of zero, a length past the field,
+        // or a byte after the length, is a record that does not say what it names. A stable ID is
+        // 1..=127 bytes, so an empty one names nothing.
         let id = |length: u8, offset: usize| -> Result<&'a [u8], u32> {
             let length = usize::from(length);
             let field = &bytes[offset..offset + ID];
-            if length >= ID || field[length..].iter().any(|byte| *byte != 0) {
+            if length == 0 || length >= ID || field[length..].iter().any(|byte| *byte != 0) {
                 return Err(COMMAND_REASON_MALFORMED);
             }
             Ok(&field[..length])
@@ -4313,6 +4314,9 @@ fn admit_commands(
             // Pass one already refuses a second naming of a tap as malformed at that record; the
             // core's own check gives the same answer, so the browser's outcome is one.
             ObservationRefusal::Duplicate { index } => (COMMAND_REASON_MALFORMED, index),
+            // Pass one resolved the tap from the effect's menu and refused an effect with no
+            // reader as `observationUnbound`; the core's own slot check gives the same answer.
+            ObservationRefusal::Unbound { index } => (COMMAND_REASON_OBSERVATION_UNBOUND, index),
         };
         let wire = staged
             .get(index)
@@ -6040,6 +6044,12 @@ impl PlanShape {
             )?
             .checked_add(
                 u64::try_from(self.reader_slots.len())
+                    .ok()?
+                    .checked_mul(size_of::<u32>() as u64)?,
+            )?
+            // #1677: the producer-to-instance table is retained beside the reader table.
+            .checked_add(
+                u64::try_from(self.producer_slots.len())
                     .ok()?
                     .checked_mul(size_of::<u32>() as u64)?,
             )?;

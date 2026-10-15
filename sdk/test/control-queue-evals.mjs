@@ -160,6 +160,33 @@ describe("one transaction in flight, the committed revision in every frame", () 
     assert.equal(core.waiting, 0);
   });
 
+  test("two edits of one row for different expected effects do not coalesce", async () => {
+    // Plausible defect: the coalescing key ignores `expectedEffect`, so a stale edit (written for an
+    // effect a rebuild replaced) and a fresh one on the same numeric row collapse into one, and the
+    // stale submit resolves `ok` as superseded, or the fresh value is dropped behind the stale one.
+    const core = fakeCore({ hold: true });
+    const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n });
+    const insert = (expectedEffect, value) => ({
+      address: { owner: vocal, section: { kind: "inserts", effect: "comp" }, control: 2, lane: "both", expectedEffect },
+      value,
+    });
+    const first = queue.submit([edit(vocal, 1, 0)]);
+    const stale = insert("miso.compressor", -10);
+    const fresh = insert("miso.gate", -20);
+    const staged = [queue.submit([stale]), queue.submit([fresh])];
+    core.release();
+    await first;
+    await settled();
+    assert.equal(
+      hexOf(core.frames[1]),
+      hexOf(encodeControlTransaction({ requestId: 2n, expectedRevision: 1n, edits: [stale, fresh] })),
+      "both edits are sent, in staged order",
+    );
+    core.release();
+    await Promise.all(staged);
+    assert.deepEqual({ ...queue.stats }, { transactions: 2, coalescedEdits: 0, replacedSubmits: 0 });
+  });
+
   test("edits of one submit go in one transaction, and an address staged again moves last", async () => {
     const core = fakeCore({ hold: true });
     const queue = new ControlTransactionQueue(core.send, { initialRevision: 0n });

@@ -2462,6 +2462,42 @@ fn a_live_control_free_host_refuses_every_live_kind_as_unsupported() {
     );
 }
 
+/// A record whose strip ID or effect ID has length zero is refused `MALFORMED` at its index in pass
+/// one, before anything is admitted: a stable ID is 1..=127 bytes, so an empty one names nothing.
+///
+/// Test value: red if an empty ID decodes (the record then reaches key resolution and is refused
+/// as an unknown strip or effect, a reason that says the record named something the plan lacks).
+#[test]
+fn a_record_with_an_empty_id_is_refused_malformed_at_its_index() {
+    const QUANTUM: u32 = 128;
+    let mut host = observed_effect_live_control_host(QUANTUM);
+    feed_and_render(&mut host, 1, 0, 0.75);
+    let (strip, effect) = key_at(&host, 0, RACK_INSERTS, 0);
+    for (strip_id, effect_id) in [(&[][..], &effect[..]), (&strip[..], &[][..])] {
+        stage_observe_subscribe(&mut host, 0);
+        stage_record(
+            &mut host,
+            1,
+            COMMAND_OBSERVE_SUBSCRIBE,
+            RACK_INSERTS,
+            strip_id,
+            effect_id,
+            1,
+            QUANTUM,
+        );
+        assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
+        let report = *host.command_report();
+        assert_eq!(report.reason, COMMAND_REASON_MALFORMED);
+        assert_eq!(report.rejected_index, 1);
+        assert_eq!(report.admitted, 0);
+        assert_eq!(host.observation_armed_taps(), 0);
+        assert!(
+            !host.ready.as_ref().expect("ready").has_in_flight_commands,
+            "nothing was queued"
+        );
+    }
+}
+
 /// #1565A gate 1: a record of a deleted value kind (1-6 and 9-17) is refused `MALFORMED` at its
 /// index, before anything is admitted, and changes no cell. The browser keeps no value admission of
 /// its own: every value goes through `control_command`, so these numbers are only retired.

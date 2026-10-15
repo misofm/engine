@@ -446,9 +446,10 @@ function projectRow(row: ObservationReadResult, channels: ObservationChannels): 
 }
 
 function commandFailure(message: string, report: CommandReport): MisoEngineError {
-  // The result code alone does not say which rule refused the record, so the message names the
-  // reason and the record. `observationLimit` (#1676) is the cap on armed taps: no render makes room,
-  // so it is never resent, and the message says what does.
+  // The result code alone does not say which rule refused the record, so the error carries the
+  // reason as its diagnostic code and the message names the reason and the record. `observationLimit`
+  // (#1676) is the cap on armed taps: no render makes room, so it is never resent, and the message
+  // says what does.
   const hint = report.reasonName === "observationLimit"
     ? " (the cap on armed observation taps is full; unsubscribe another tap first)"
     : "";
@@ -456,6 +457,7 @@ function commandFailure(message: string, report: CommandReport): MisoEngineError
     phase: report.code === "wrongState" ? "lifecycle" : "output",
     code: report.code,
     result: report.result,
+    diagnostics: [{ code: report.reasonName, path: "" }],
   });
 }
 

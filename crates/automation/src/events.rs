@@ -125,8 +125,9 @@ impl CellState {
     }
 
     /// Places the cursor for node time `t` (an adoption): the next block's discontinuities start
-    /// at `t`. The in-flight ramp and a deferred jump belong to the old position and are dropped;
-    /// the current target is kept.
+    /// at `t`. The in-flight ramp and a deferred jump belong to the old position and are dropped,
+    /// and an outstanding held event is cleared, so the next retarget to an unchanged value emits
+    /// nothing; the current target is kept.
     pub fn reposition(&mut self, program: &CellProgram<'_>, t: i64) {
         self.cursor = to_cursor(program.discontinuities.partition_point(|&time| time < t));
         self.ramp_done = IDLE;

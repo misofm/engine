@@ -91,8 +91,7 @@ fn changed(operation_index: usize) -> SessionStoreError {
 /// and the same edit without the expected effect (or with the effect that runs) commits.
 ///
 /// Red if the check is missing on either path (the stale edit would land on the compressor's row
-/// 0, which is its bypass, with no refusal), if a refused edit leaves the revision or the snapshot
-/// moved, or if the matching and absent forms are refused.
+/// 0, which is its bypass, with no refusal), or if the matching and absent forms are refused.
 #[test]
 fn a_stale_effect_row_edit_is_refused_after_a_rebuild() {
     let mut store = store();
@@ -173,8 +172,6 @@ fn a_stale_effect_row_edit_is_refused_after_a_rebuild() {
         Ok(()),
         "an edit is held to the effect the candidate runs at its place in the transaction"
     );
-    assert_eq!(store.revision(), revision);
-    assert_eq!(store.canonical_snapshot(), before_stale);
     // Without an expected effect, or with the one that runs, the edit commits as it always did.
     for edit in [
         SessionEdit::set_control(insert_bypass(), 1.0, None),

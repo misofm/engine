@@ -1015,8 +1015,9 @@ fn tx_route(sink: &mut dyn Sink, value: &Route) -> Result<(), EncodeError> {
         value.follows_mute,
     )
 }
-/// A stored automation target is the control address `SET_CONTROL` carries (#1566 D4), written by
-/// the same encoder; no session row is automatable, so a session owner has no spelling here.
+/// A stored automation target is the control list's address message with `control` and `lane`
+/// present (#1566 D4), and no expected effect; no session row is automatable, so a session owner
+/// has no spelling here.
 fn tx_automation_target(
     sink: &mut dyn Sink,
     value: &controls::ControlAddress,
@@ -1024,7 +1025,7 @@ fn tx_automation_target(
     if value.owner == controls::Owner::Session {
         return Err(EncodeError::InvalidField);
     }
-    crate::message_wire::write_set_control_address(sink, value)
+    crate::message_wire::write_automation_target_address(sink, value)
 }
 fn tx_automation_segment(
     sink: &mut dyn Sink,
@@ -1283,9 +1284,9 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
     }
 }
 
-/// The control address of a `SetControl` edit: the control list's address message, in which a set
-/// requires the `control` and the `lane`, and the optional expected effect (#1678). Its encoder and
-/// decoder are the list's (`message_wire`).
+/// The control address of a `SetControl` edit: the control list's address fields, in which a set
+/// requires the `control` and the `lane`, and the optional expected effect (#1678) as a seventh
+/// field. Its encoder and decoder are `message_wire`'s set-control edit address codec.
 fn tx_control_address(
     sink: &mut dyn Sink,
     address: &controls::ControlAddress,
@@ -1683,7 +1684,7 @@ fn parse_route(message: Message<'_>) -> Result<Route, DecodeError> {
     })
 }
 fn parse_automation_target(message: Message<'_>) -> Result<controls::ControlAddress, DecodeError> {
-    let address = crate::message_wire::decode_set_control_address(message)?;
+    let address = crate::message_wire::decode_automation_target_address(message)?;
     if address.owner == controls::Owner::Session {
         return Err(DecodeError::InvalidField);
     }

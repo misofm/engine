@@ -693,7 +693,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
 
   // #1676: the cap on armed taps is its own reason, never backpressure. Red if the SDK treats it as
   // flow control (it would wait for a render and send the same subscription again) or if the
-  // thrown error does not name the cap.
+  // thrown error does not carry the cap as its diagnostic code.
   test("a subscription past the cap is refused with observationLimit at once, never resent, and the error names it", async () => {
     const rig = slotHost();
     const engine = await browserEngine(rig, { requestDeadlineMs: 2_000 });
@@ -706,7 +706,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       await assert.rejects(() => engine.subscribeObservations(request), (error) => {
         assert.ok(error instanceof MisoEngineError);
         assert.equal(error.code, "unsupported");
-        assert.match(error.message, /observationLimit at record 0/);
+        assert.equal(error.diagnosticCode, "observationLimit");
         assert.match(error.message, /unsubscribe another tap/);
         return true;
       });

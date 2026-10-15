@@ -289,9 +289,14 @@ export function controlEditBytes(edit: ControlFrameEdit): number {
   return editField(edit).length;
 }
 
-/** The address an edit writes: two edits with one key write the same lane of the same control. */
+/**
+ * The address an edit writes: two edits with one key write the same lane of the same control, for
+ * the same expected effect. The expected effect is part of the key: an edit written for one effect
+ * and an edit written for another (or for none) are different requests, which the core may answer
+ * differently, so neither may supersede the other.
+ */
 export function controlEditKey(edit: ControlFrameEdit): string {
-  const { owner, section, control, lane } = edit.address;
+  const { owner, section, control, lane, expectedEffect } = edit.address;
   return JSON.stringify([
     owner.kind,
     "id" in owner ? owner.id : "",
@@ -299,6 +304,7 @@ export function controlEditKey(edit: ControlFrameEdit): string {
     section.kind === "console" ? section.slot : section.kind === "inserts" ? section.effect : "",
     control,
     lane,
+    expectedEffect ?? null,
   ]);
 }
 

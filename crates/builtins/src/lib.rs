@@ -5209,16 +5209,24 @@ impl FaderMuteRampBuiltins {
         Ok(())
     }
 
-    /// Whether one lane's gain is held: muted, or in a mute or unmute ramp (issue #1638 D2).
+    /// Whether one lane's gain is held (`0` left, `1` right): muted, or in a mute or unmute ramp
+    /// (issue #1638 D2). `None` for a lane above `1`.
     #[must_use]
-    pub const fn gain_held(&self, lane: usize) -> bool {
-        self.stage.gain_held(0, lane % 2)
+    pub const fn gain_held(&self, lane: usize) -> Option<bool> {
+        if lane > 1 {
+            return None;
+        }
+        Some(self.stage.gain_held(0, lane))
     }
 
-    /// Frames left in one lane's ramp; `0` when settled.
+    /// Frames left in one lane's ramp (`0` left, `1` right); `0` when settled. `None` for a lane
+    /// above `1`.
     #[must_use]
-    pub const fn ramp_remaining(&self, lane: usize) -> u32 {
-        self.stage.ramp_remaining(0, lane % 2)
+    pub const fn ramp_remaining(&self, lane: usize) -> Option<u32> {
+        if lane > 1 {
+            return None;
+        }
+        Some(self.stage.ramp_remaining(0, lane))
     }
 
     /// Completes a settled fader over a graph block whose shape was validated by preparation.

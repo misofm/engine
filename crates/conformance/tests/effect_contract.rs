@@ -142,7 +142,7 @@ fn normalized_mapping_endpoints_ties_and_round_trips_are_stable() {
 }
 
 #[test]
-fn smoothers_and_segments_finish_on_the_exact_update_or_endpoint() {
+fn smoothers_finish_on_the_exact_update() {
     let mut linear = ParameterSmoother::new(0.0, SmoothingRule::Linear, 4).unwrap();
     assert!(linear.set_target(1.0));
     assert_eq!(

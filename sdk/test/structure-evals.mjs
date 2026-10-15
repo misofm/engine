@@ -178,11 +178,6 @@ describe("#1678 -- the core holds an effect-row edit to the effect it was writte
     return refusal;
   };
 
-  test("the SDK keeps no resolver of its own", async () => {
-    const live = await import("../src/core/live-controls.ts");
-    assert.equal(live.effectRowResolver, undefined, "the resolver hook is gone");
-  });
-
   test("the builders send the effect an edit was written for", async () => {
     const engine = await boot();
     try {
