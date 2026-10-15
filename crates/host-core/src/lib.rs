@@ -191,8 +191,8 @@ pub use spectrum::{
     SpectrumCaptureError, SpectrumCaptureReadError, SpectrumCaptureRequest,
     SpectrumCaptureResources, SpectrumChannels, SpectrumContinuousCaptureError,
     SpectrumContinuousReadError, SpectrumContinuousWindow, SpectrumHop, SpectrumOutput,
-    SpectrumPrepareError, SpectrumSmoothingConfig, SpectrumSmoothingConfigError, SpectrumTarget,
-    SpectrumTargetRef, SpectrumWindow, spectrum_analysis_history_resources,
+    SpectrumPair, SpectrumPrepareError, SpectrumSmoothingConfig, SpectrumSmoothingConfigError,
+    SpectrumTarget, SpectrumTargetRef, SpectrumWindow, spectrum_analysis_history_resources,
     spectrum_capture_collection_resources, spectrum_capture_resources,
     spectrum_capture_resources_for,
 };
