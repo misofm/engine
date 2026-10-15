@@ -293,6 +293,12 @@ const frameOf = (epoch, trackCount) => ({
   trackGrDb: new Float32Array(trackCount),
 });
 
+/** Wait until `done()` holds, polling each macrotask, for at most `ms` (a loaded machine must not flake). */
+async function settle(done, ms = 2000) {
+  const deadline = Date.now() + ms;
+  while (!done() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 1));
+}
+
 test("a meter frame of a new structure epoch is named by the list of that epoch, in order", async () => {
   const host = fakeHost();
   const orders = epochOrders({
@@ -306,7 +312,7 @@ test("a meter frame of a new structure epoch is named by the list of that epoch,
   // The next two arrive while the first is still waiting for its list, and keep their order.
   host.emitMeter(frameOf(2, 3));
   host.emitMeter(frameOf(1, 2));
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await settle(() => seen.length >= 3);
   assert.deepEqual(seen, [["kick", "snare"], ["added", "kick", "snare"], ["kick", "snare"]]);
   assert.deepEqual(orders.reads, [1, 2], "each list is read once, however many frames name it");
   // Held lists are named at once, with no read.
@@ -327,7 +333,7 @@ test("a meter frame whose list the page cannot name is dropped, counted, and the
   host.emitMeter({ ...frameOf(1, 2), sequence: 3, windows: 2 });
   host.emitMeter({ ...frameOf(2, 2), sequence: 4, lossCount: 3 });
   host.emitMeter({ ...frameOf(2, 2), sequence: 5, lossCount: 3 });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await settle(() => seen.length >= 3);
   assert.deepEqual(seen.map((update) => update.sequence), [1n, 4n, 5n],
     "epoch 1 has no list: its frames are not named by another's");
   // A gap in the sequence is never silent: the three windows the page dropped join the host's own

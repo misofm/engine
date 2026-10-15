@@ -5224,7 +5224,7 @@ type WebPlan = PlanState<WebAdapter>;
 /// The browser renders through the plan owner (#1381a D4) and reaches the active plan's companions
 /// through `PlanState::active_attachment_mut`: the meter poll and the observation reads read the
 /// readers there. A plan's spectrum captures are not among them: [`SpectrumService`] owns the
-/// captures, so the preparer leaves a plan's in the [`BootRecord`] (boot moves them into the
+/// captures, so the preparer leaves a plan's in the `BootRecord` (boot moves them into the
 /// service; a replacement's wait beside its tables for the promotion, #1290d2) until the spectrum
 /// readers move to the control plane (#1596).
 ///
