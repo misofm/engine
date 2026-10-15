@@ -2,7 +2,7 @@
 
 Follow-up of #1060 (resource budgets, not exact counts), found by the batch 14a review of #1683.
 Code anchors verified on the batch 14a fold branch `codex/controls-b14a-fold`. Issue number:
-assigned at filing (written here as TBD37). Feature sprint mode (owner, 2026-10-13): one
+assigned at filing (written here as #1691). Feature sprint mode (owner, 2026-10-13): one
 implementer, normal tests, a batch review.
 
 ## Product outcome

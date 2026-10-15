@@ -120,7 +120,7 @@ before the master, it named another strip, or refused the rebuild).
 **Departures (batch 14a, appended).** "Departures: none" above needs one line. The C ABI lists,
 accepts and reads back the `master` row, but nothing on the C ABI consumes it yet. Under decision 17
 C1 this is correct: the designation is core state, readable on both hosts. Its reading on the C ABI
-is the successor TBD36 ("Read the master strip's meter on the C ABI").
+is the successor #1690 ("Read the master strip's meter on the C ABI").
 
 **Review fold (batch 14a).**
 
