@@ -366,7 +366,7 @@ the control plane validates and parses it off the render thread.
     `Uint8Array`, the same checks as `frame`); `readControlCommand` stages it with
     `replace_document_ptr` before it stages the frame. This is the message handler's work
     (`single` mode) or the control side's; `process()` never stages, hashes or parses.
-    **ROOT CHECK: a new browser export.** Reason: `document_ptr` refuses a live instance and
+    **ROOT APPROVED (2026-10-15): a new browser export.** Reason: `document_ptr` refuses a live instance and
     that refusal is a pinned contract; relaxing it would change the single-live-handle
     lifecycle rule. The export moves the ABI layout mirrors (D7 paths).
   - **C ABI: borrow the document beside the frame.** The C ABI has no staging a frame can name
@@ -380,7 +380,7 @@ the control plane validates and parses it off the render thread.
     sent through it is the D4 `session.replace.document_length` refusal. The C ABI retains
     nothing. A session-owned copy staging (a stage export plus a buffer) was rejected: it would
     retain up to `maximum_document_bytes` per session and add a stale-staging state.
-    **ROOT CHECK: a new C export.**
+    **ROOT APPROVED (2026-10-15): a new C export.**
 
 ### Deliverables
 
@@ -540,6 +540,14 @@ already carry both rulings.
   `maximum_document_bytes`, on both hosts; it is not capped by the control frame. The frame names
   the document and does not carry it; the bytes are validated and parsed off the render thread,
   by one rule on both hosts. Applied as D1's fields, D3's core entry, D4's refusals, D7 and
-  gate 8. D7 adds one export per host; both are marked ROOT CHECK.
+  gate 8. D7 adds one export per host; root approved both (2026-10-15).
 - **(b) `control_smoothing`.** Approved: a replace-only preparation step applies the document's
   `control_smoothing` (absent = the session default), with no new wire edit. Applied in D2.
+- **Second review (root, 2026-10-15).** Both exports are approved
+  (`miso_engine_web_v1_replace_document_ptr`, `miso_engine_v1_submit_document_command`), with the
+  frame naming the document by length and SHA-256, and `SessionState::command_with_document` with a
+  borrowed document. Freeing the browser's uncharged boot-document copy at the first command is
+  kept: gate 8 records the browser's retained bytes before and after that first command. Gate 8
+  adds one case: on a page without cross-origin isolation, the 1 MiB replace runs in the worklet's
+  message handler, so it is recorded as a counted blocking rebuild (the documented exception), and
+  `process()` still allocates and frees nothing (the render-locked count stays 0).
