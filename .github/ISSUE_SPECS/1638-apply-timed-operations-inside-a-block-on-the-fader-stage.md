@@ -267,3 +267,9 @@ the grid for the reissue's own ramp, composes the reissued gain as D1.4, and add
 case to gate 8. No code change. The counter `fader_operations_stopped` is to be summed by #1647
 when it wires `process_with` into production.
 
+**Attempt 3 review and rescope (coordinator).** The attempt-3 review confirmed the hold rule is
+quantum-invariant and found two more design gaps in #1647's D1.6 (a grid event that is not held
+inside the hold's last 64 samples; stopping the cell exactly at the ramp end). Three reviews found
+this slice's code correct; every failure was in the successor's mechanism. The mechanism is
+therefore #1647's design: #1647's amendment now states the requirement, the measured constraints and
+gate 8, and #1648's amendment the carry. This slice's obligation is that record.

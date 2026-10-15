@@ -250,3 +250,10 @@ Checked against `12d4a4f9d`.
   `crates/capi/src/runtime/live_tests.rs`. Realtime policy as in #1637's amendment.
 - **Dependencies.** #1277, #1313, #1314 and #1335 have landed; add #1562b. Must-land group: #1646,
   #1647, #1648, #1649, #1650.
+
+## Amendment (controls coordinator, batch 13b, from #1638's reviews)
+
+- **D2 also carries #1647 D1.6's state.** The per-lane, per-channel obligation to move to the
+  automation value at a held ramp's end carries with the cell's event state, and the successor
+  re-reports a carried held ramp to the cell with `hold_until` at adoption (`CellState::reposition`
+  drops it).

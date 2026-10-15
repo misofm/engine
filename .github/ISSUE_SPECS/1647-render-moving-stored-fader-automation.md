@@ -194,52 +194,46 @@ Checked against `12d4a4f9d`.
 - **Composition.** Each event's gain is #1646 D1's with `S` that includes the hand offset (#1650).
 - **Must-land group** is #1646, #1647, #1648, #1649 and #1650.
 
-## Amendment (controls coordinator, batch 13b, from #1638's review)
+## Amendment (controls coordinator, batch 13b, from #1638's reviews)
 
-Checked against `d5b9410df`.
+Checked against `d5b9410df`. This is a requirement for this slice's brief, with the constraints
+three #1638 reviews measured; the mechanism is this slice's design, reviewed with it.
 
-- **The gap.** #1638 D2 holds a lane's gain during an unmute ramp as well as a mute ramp: a timed
-  `RetargetGain` or `SetGain` on a lane whose `gain_held` is true only remembers the gain. D1.2's
-  `hold_until` makes #1637 hold its `Grid` events, but a `Jump` (cell not `no_restart`) and a seek
-  `Set` (D3) always emit and commit the cell's target with `held = false`. Converted to
-  `RetargetGain` or `SetGain` inside an unmute ramp, such an event is only remembered; the ramp
-  settles at the pre-unmute gain, and on a flat curve the cell emits nothing more, so the lane stays
-  wrong with no end.
-- **Why #1637's held bookkeeping does not close it.** `CellState::hold_until` only sets the
-  completion of the ramp in flight; `held` is set only by a held `Grid` event whose value differs
-  from the cell's target, and a `Jump` or `Set` commits its value as that target. After the ramp,
-  a grid event on an unchanged curve is suppressed. So calling `hold_until` with the ramp's end
-  does not re-emit a remembered `Jump` or `Set`.
-- **D1.6 (new). Reissue after a held ramp.** While the stage reports `gain_held` for a lane, a
-  `Jump` or a `Set` converts to `RememberGain`, and #1647 sets one bit per lane and channel in the
-  lane's fixed event state ("a jump was remembered"). At the sample the held ramp ends with the gain
-  free (offset `ramp_remaining` from the block-entry read, after the live drain, when it lies inside
-  the block; else a later block), if the bit is set, #1647 pushes one `RetargetGain` toward the
-  gain composed as D1.4 from the cell's current target (`CellState::target()`, the automation value,
-  read after the cell's own events at that offset, with `S` and the #1650 hand offset) over the
-  fader row's jump length `J` for that block, in place of any gain operation the cell gives at that
-  offset, clears the bit, and calls `hold_until(completion_of(End, E, J))` for the reissue's own
-  ramp (`E` the reissue sample), so the cell's grid holds inside it as it does after the cell's own
-  `Jump`; without that, a moving curve's grid events would cut the reissue into 64-sample
-  retargets. A ramp that ends with the lane muted leaves `gain_held` true and
-  keeps the bit; the later unmute ramps to the remembered gain, and its end reissues the target
-  once more, which moves no bit when the target is unchanged. **When D1.2 reports the hold.** During a held
-  ramp, D1.2's `hold_until` is called once, at the block entry whose live drain starts or restarts
-  that ramp, and again after an adoption that carries it (`CellState::reposition` drops the cell's
-  ramp, so #1648 re-reports it). It is not refreshed at later block entries: a cell `Jump` inside
-  the hold sets the cell's own ramp end, and a later refresh would overwrite it and change which
-  grid events after it are held, so `target()` at the reissue would depend on where block entries
-  fall (measured in #1638's attempt-2 review: -0.0616 dB at quantum 128 against -0.1955 dB at 100,
-  for a `Jump` whose ramp ends after the unmute ramp). With this rule the reissue sample and its
-  target do not depend on the quantum (gate 5). The bit is event state that #1648
-  carries across a swap. No allocation; one byte per lane and channel.
-- **Gate 8 (new).** A `Jump`, and separately a seek `Set`, landing inside an unmute ramp, on a flat
-  curve after it: the stage takes a `RetargetGain` toward the new automation value at the sample
-  the unmute ramp ends, so the lane settles at that value one fader jump length later (at once
-  with `control_smoothing` explicit 0); the same bits at quantum 128 and 100; and the lane never
-  settles at the pre-unmute gain. A moving-curve case: a `Jump` inside the unmute ramp whose
-  own ramp ends after the unmute ramp ends, with a block entry between the `Jump` and the unmute
-  ramp's end at one quantum only: the same bits at quantum 128 and 100, and the reissue's ramp is
-  not cut by grid events. Test value: red if a remembered `Jump` or `Set` is never reissued, if the
-  reissue follows the block entry instead of the ramp's end, if D1.2 refreshes `hold_until` at a
-  later block entry inside the hold, or if the reissue does not hold the grid for its own ramp.
+- **The gap (a requirement, D1.6).** #1638 D2 holds a lane's gain during an unmute ramp as well as
+  a mute ramp: while the stage reports `gain_held`, a timed `RetargetGain` or `SetGain` only
+  remembers the gain. #1637 commits a `Jump`, a seek `Set` and a grid event that is not held as the
+  cell's target with `held = false`, and on a curve that is flat afterwards it emits nothing more.
+  So any gain event the stage only remembers inside a held ramp leaves the lane at the pre-unmute
+  gain with no end. The requirement: when a held ramp ends with the gain free, the lane moves to the
+  automation value the cell then holds (composed as D1.4, with `S` and the #1650 hand offset), and
+  the result does not depend on the quantum (gate 5). Every remembered gain event counts, not only
+  `Jump` and `Set`: in every hold of length `R` the one grid point in its last 64 samples is not
+  held by #1637 (its own completion reaches the hold's end) and commits.
+- **Constraints the design must meet (measured with the real `crates/automation`).**
+  1. D1.2 reports the hold with `hold_until` once, at the block entry whose live drain starts or
+     restarts the held ramp, and again after an adoption that carries it (`CellState::reposition`
+     drops it). A refresh at later block entries overwrote a cell `Jump`'s own ramp end and made
+     `target()` at the ramp end -0.0616 dB at quantum 128 against -0.1955 dB at 100.
+  2. The cell is stopped exactly at the ramp end `E`: the lane's `NodeSpan` ends at `E` and a second
+     span starts at `E + 1`, with any seek step kept in the piece that holds it; the per-lane merge
+     (D1.3) never pulls an event past `E` before the move at `E`. `CellEvents` borrows the
+     `CellState`, so `hold_until` cannot be called inside a span. A move built at the block end or
+     the next block entry instead gave -0.4273 dB at 128 against -0.4535 dB at 100.
+  3. The move at `E` holds the grid for its own ramp (`hold_until(completion_of(End, E, J))`), as
+     after the cell's own `Jump`; otherwise a moving curve's grid events cut it into 64-sample
+     retargets.
+  4. A ramp that ends muted keeps the obligation for the later unmute ramp's end. A live fader write
+     that clears the hold inside it discharges the obligation at that block entry.
+  5. D3's "exactly, with no ramp" does not hold for a seek `Set` inside a held ramp: the stage only
+     remembers it, and it lands by the move at `E`.
+  6. The stage's `fader_operations_stopped` counter (#1638) is summed into this slice's report.
+- **Gate 8 (new).** At quantum 128, 100, 64 and 37, the same bits, and the lane never settles at the
+  pre-unmute gain: (a) a `Jump`, and (b) a seek `Set`, inside an unmute ramp on a curve flat after
+  it; (c) a `Jump` whose own ramp ends after `E`, with a block entry between the `Jump` and `E` at
+  one quantum only; (d) a curve that goes flat inside the last 64 samples of the unmute ramp (no
+  `Jump` or `Set`, only grid events); (e) grid events that are not held lying between `E` and the
+  next block entry at one quantum only (a `Jump` whose ramp ends before `E`, or a seek `Set` on a
+  moving curve). Test value: red if a remembered event is never moved to at `E`, if the move follows
+  a block entry instead of `E`, if D1.2 refreshes `hold_until` inside the hold, or if the move does
+  not hold the grid for its own ramp.
+- **#1648** carries the obligation across a swap (see its amendment).
