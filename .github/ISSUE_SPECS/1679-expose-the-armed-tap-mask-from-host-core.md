@@ -1,6 +1,6 @@
 # Expose the armed tap mask from host-core
 
-Successor of the batch 12b review (m5), decision 17. Code anchors verified on the batch 12b branch `codex/controls-batch-12b`. Issue number: assigned at filing (written here as TBD28). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
+Successor of the batch 12b review (m5), decision 17. Code anchors verified on the batch 12b branch `codex/controls-batch-12b`. Issue number: assigned at filing (written here as #1679). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
 

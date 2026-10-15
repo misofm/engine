@@ -1,6 +1,6 @@
 # Address observation records by stable key in the core
 
-Successor of the batch 12b review (M1), decision 17. Code anchors verified on the batch 12b branch `codex/controls-batch-12b`. Issue number: assigned at filing (written here as TBD26). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
+Successor of the batch 12b review (M1), decision 17. Code anchors verified on the batch 12b branch `codex/controls-batch-12b`. Issue number: assigned at filing (written here as #1677). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
 

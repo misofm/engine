@@ -2,7 +2,7 @@
 
 Successor of #1584 D6a (batch 12a, root 2026-10-15), decision 17
 (`docs/rulings/one-control-abstraction-2026-10-13.md`). Code anchors verified on `45a2ab9df`
-(PR #1675). Issue number: assigned at filing (written here as TBD25). Feature sprint mode (owner,
+(PR #1675). Issue number: assigned at filing (written here as #1676). Feature sprint mode (owner,
 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
