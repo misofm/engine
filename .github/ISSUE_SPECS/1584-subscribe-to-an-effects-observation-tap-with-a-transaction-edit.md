@@ -362,3 +362,16 @@ Checked against `ea336c039`.
 - `SessionState::command` is at `control.rs:1208`, and `miso_engine_v1_submit_command` at
   `crates/capi/src/ffi.rs:680`.
 - `host_core::launch_maximum_observation_taps` does not exist yet (D7 adds it).
+
+## Ruling (root, 2026-10-15): batch 12
+
+1. **D3, where the bindings live.** Neither as filed nor inside `MonitorOverlay`: solo and
+   subscriptions are different things. The bindings get their own type (for example
+   `ObservationBindings`), owned by `SessionState` next to the monitor overlay, and they travel to
+   every successor preparation in `SuccessorBase` the same way the monitor does (a field, not a new
+   preparer argument). Its `after()` drops the bindings whose target is gone and returns their keys.
+   `ProtocolController` does not own them. D6's `ArmedTap`/`armed_taps` are replaced by this.
+2. **D6, a removed owner.** A reliable `OBSERVATION_ENDED` event (revision and stable key),
+   room-checked with `SESSION_COMMITTED` before the commit; no room is `BACKPRESSURE` and nothing
+   changes. The same on both hosts, with a parity row.
+3. **Order.** D6a (core, lane K) lands in batch 12a; D6b (browser arm bits, lane W) in batch 12b.

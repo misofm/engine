@@ -469,3 +469,11 @@ Checked against `ea336c039`.
 - **Order in lane W:** (d1), #1584 D6b, (d2), #1562b-W. The four slices edit `hosts/host-web/src/lib.rs`
   and `src/tests.rs` in that order. (d1) and #1562b-W also edit the worklet JS and the ABI layout
   mirrors, in that order.
+
+## Ruling (root, 2026-10-15): meter frame growth, (d1)
+
+The meter frame travels with the `PlanShape`; its views are cut in the message handler that
+commits (control side, counted on a non-isolated page), and `process()` switches to them by
+reference at the swap block. `process()` never cuts a view or allocates. Gate: a strip-count change
+publishes a correctly shaped frame on the first block after adoption, with zero render
+allocations. (d1) lands in batch 12a; (d2) in batch 12b after #1395.
