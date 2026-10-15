@@ -8985,8 +8985,8 @@ mod spectrum_carry {
         HostLiveControlRequest, HostLiveLanes, LiveValuesSuperseded, MonitorBase, PreparedHost,
         PreparedSpectrumCaptures, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest,
         SpectrumCaptureRequest, SpectrumChannels, SpectrumContinuousWindow, SpectrumHop,
-        SpectrumPair, SpectrumService, SpectrumSmoothingConfig, SpectrumSnapshot,
-        SpectrumStreamStatus, SpectrumTarget, SuccessorBase,
+        SpectrumPair, SpectrumService, SpectrumServiceError, SpectrumSmoothingConfig,
+        SpectrumSnapshot, SpectrumStreamStatus, SpectrumTarget, SuccessorBase,
         prepare_host_runtime_with_live_controls_and_spectrum,
         prepare_host_runtime_with_live_controls_and_spectrum_collection,
         prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
@@ -9161,6 +9161,9 @@ mod spectrum_carry {
         Stream,
         /// A one-shot armed before the given block and read after every block from there on.
         OneShot(usize),
+        /// As `OneShot`, but a refused read is recorded, and after `CaptureInvalid` the host arms
+        /// again at once (#1618).
+        OneShotRearm(usize),
     }
 
     /// The host's reader of one run: the service and what it read.
@@ -9170,6 +9173,10 @@ mod spectrum_carry {
         script: Script,
         reads: Vec<Read>,
         shot: Option<SpectrumSnapshot>,
+        /// The refusals the one-shot's reads answered, with the block after which each came.
+        refused: Vec<(usize, SpectrumServiceError)>,
+        /// The block after which the one-shot completed.
+        shot_at: Option<usize>,
     }
 
     impl Driver {
@@ -9201,6 +9208,8 @@ mod spectrum_carry {
                 script,
                 reads: Vec::new(),
                 shot: None,
+                refused: Vec::new(),
+                shot_at: None,
             }
         }
 
@@ -9212,7 +9221,12 @@ mod spectrum_carry {
                     .select_stream(target.as_ref(), *channels, None, None)
                     .expect("switch the stream to the other entry");
             }
-            if matches!(self.drive, Drive::OneShot(at) if at == block) {
+            if matches!(self.drive, Drive::OneShot(at) | Drive::OneShotRearm(at) if at == block) {
+                if matches!(self.drive, Drive::OneShotRearm(_)) {
+                    // A collection's select armed its entry for nobody: the host's own arm
+                    // replaces that one.
+                    let _ = self.service.cancel();
+                }
                 self.service.arm().expect("arm");
             }
         }
@@ -9232,7 +9246,24 @@ mod spectrum_carry {
                         .read(SpectrumChannels::Stereo)
                         .expect("read the one-shot");
                 }
-                Drive::OneShot(_) => {}
+                Drive::OneShotRearm(at) if block >= at && self.shot.is_none() => {
+                    // Without a selection the read refuses before it looks at the mask.
+                    let channels = self.service.channels().unwrap_or(SpectrumChannels::Stereo);
+                    match self.service.read(channels) {
+                        Ok(Some(snapshot)) => {
+                            self.shot = Some(snapshot);
+                            self.shot_at = Some(block);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            self.refused.push((block, error));
+                            if error == SpectrumServiceError::CaptureInvalid {
+                                self.service.arm().expect("arm again after the refusal");
+                            }
+                        }
+                    }
+                }
+                Drive::OneShot(_) | Drive::OneShotRearm(_) => {}
             }
         }
     }
@@ -9340,6 +9371,7 @@ mod spectrum_carry {
                     b_capture.take().expect("the successor's capture"),
                     &pairing,
                     carried,
+                    None,
                 ));
                 let delta = bench_support::alloc::current_thread_delta_since(mark);
                 adopt_counts = (delta.allocations, delta.reallocations, delta.deallocations);
@@ -9523,6 +9555,15 @@ mod spectrum_carry {
             panic!("a single capture");
         };
         assert_eq!(old.stream_epoch(), Some(1));
+        // The stream the service ran on the old capture ended with it (#1618): the host starts
+        // one anew on the successor's capture.
+        let mut run = run;
+        assert!(!run.driver.service.stream_active());
+        assert_eq!(run.driver.service.stream_cadence(), None);
+        run.driver
+            .service
+            .start_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("a stream starts on the fresh capture");
     }
 
     /// Gate 3, one-shot: a capture armed before the swap and carried completes with a window that
@@ -9597,6 +9638,108 @@ mod spectrum_carry {
             Some(1),
             "a fresh epoch, not the predecessor's"
         );
+    }
+
+    /// #1618 gate 1: a one-shot armed on a capture that does not carry (its channel mask changed)
+    /// would wait for an observer that no longer renders. The service settles it: the read after
+    /// the promotion answers `CaptureInvalid` once, and the arm that follows completes on the
+    /// successor with the window a fresh arm there gives.
+    #[test]
+    fn a_one_shot_that_does_not_carry_settles_invalid_and_a_new_arm_completes() {
+        let (a, b) = sessions();
+        let a_request = stereo_post_matrix();
+        let b_request = request(
+            SpectrumTarget::TrackPostMatrix(TRACK.into()),
+            SpectrumChannels::Left,
+        );
+        let run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::OneShotRearm(ARM),
+            Promote::AsReported,
+        );
+        assert!(run.pairing.is_empty(), "the changed key carries nothing");
+        assert_eq!(
+            run.driver.refused,
+            vec![(SWAP, SpectrumServiceError::CaptureInvalid)],
+            "pending until the promotion, one refusal at it, none after"
+        );
+        let got = run
+            .driver
+            .shot
+            .expect("the new arm completes on the successor");
+        let shot_at = run.driver.shot_at.expect("completed");
+        assert!(shot_at > SWAP && shot_at < TOTAL, "completed at {shot_at}");
+        assert!(
+            got.window.first_sample > SWAP_SAMPLE,
+            "a window of the successor, armed after the promotion"
+        );
+        assert_eq!(got.window.channels, SpectrumChannels::Left);
+        // The window equals what a fresh arm on the same plan gives at the same block.
+        let expected = reference(&b, &b_request, Drive::OneShotRearm(SWAP + 1));
+        let want = expected.shot.expect("the reference completes");
+        assert_eq!(got.window.first_sample, want.window.first_sample);
+        assert!(
+            got.window
+                .left
+                .iter()
+                .zip(&want.window.left)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the plane equals the reference's bit for bit"
+        );
+    }
+
+    /// #1618 gate 1, refused hand-over: the list names a pair but the adoption did not carry, so
+    /// the capture is settled the same way. (The engine did carry the observer here, so the
+    /// re-armed fresh capture has no producer and stays pending: the point is the refusal.)
+    #[test]
+    fn a_one_shot_after_a_refused_hand_over_settles_invalid() {
+        let (a, b) = sessions();
+        let request = stereo_post_matrix();
+        let run = swapped(
+            &a,
+            &request,
+            &b,
+            &request,
+            Drive::OneShotRearm(ARM),
+            Promote::Refused,
+        );
+        assert_eq!(
+            run.driver.refused,
+            vec![(SWAP, SpectrumServiceError::CaptureInvalid)]
+        );
+        assert!(run.driver.shot.is_none());
+    }
+
+    /// A one-shot that completed and was read before the swap leaves nothing to settle: the next
+    /// read after the promotion is not a refusal, and a stream may start on the fresh capture.
+    #[test]
+    fn an_idle_capture_that_does_not_carry_settles_nothing() {
+        let (a, b) = sessions();
+        let a_request = stereo_post_matrix();
+        let b_request = request(
+            SpectrumTarget::TrackPostMatrix(TRACK.into()),
+            SpectrumChannels::Left,
+        );
+        let mut run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::OneShotRearm(0),
+            Promote::AsReported,
+        );
+        // Armed at block 0: it completed at block 15, long before the swap.
+        assert!(
+            run.driver.refused.is_empty(),
+            "nothing in flight at the swap"
+        );
+        run.driver
+            .service
+            .start_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("the fresh capture is idle");
     }
 
     /// Gate 4: the swap block and the promotion allocate and free nothing.
@@ -9843,8 +9986,7 @@ mod spectrum_carry {
     }
 
     /// A refused hand-over moved no observer: the successor's fresh collection is installed,
-    /// without a selection, and its epoch says the selection was lost. (Settling the stream the
-    /// service still believes it runs is #1618's.)
+    /// without a selection, and its epoch says the selection was lost.
     #[test]
     fn a_refused_hand_over_installs_the_fresh_collection_without_a_selection() {
         let (a, b) = sessions();
@@ -9876,6 +10018,81 @@ mod spectrum_carry {
         };
         assert_eq!(old.selected_index(), Some(0));
         assert_eq!(old.selection_epoch(), 1);
+    }
+
+    /// #1618 / #1395b: the selected entry did not carry, so the service holds no stream any more.
+    /// `select_stream` answers `StreamInactive`; a plain select and a new start run the cadence
+    /// again on the entry (it does not arm a one-shot in the stream's place).
+    #[test]
+    fn a_lost_selection_ends_the_stream_and_a_new_start_restarts_the_cadence() {
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(vec![u_entry(SpectrumChannels::Left), t_stereo()], None);
+        let mut run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::Stream,
+            Promote::Refused,
+        );
+        let service = &mut run.driver.service;
+        assert!(!service.stream_active(), "no stream without a selection");
+        assert_eq!(service.stream_cadence(), None);
+        assert_eq!(
+            service
+                .select_stream(
+                    t_stereo().target.as_ref(),
+                    SpectrumChannels::Stereo,
+                    None,
+                    None
+                )
+                .expect_err("nothing to restart"),
+            SpectrumServiceError::StreamInactive
+        );
+        service
+            .select(t_stereo().target.as_ref(), SpectrumChannels::Stereo)
+            .expect("select the entry");
+        service
+            .start_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("the cadence starts again");
+        assert!(service.stream_active());
+        assert!(service.stream_cadence().is_some());
+        assert_eq!(
+            service.stream_metadata().status,
+            SpectrumStreamStatus::Warming
+        );
+    }
+
+    /// #1618: a one-shot armed on the selected entry of a collection whose selection did not carry
+    /// ends with the selection. The read answers `NotArmed`, the caller's arm is released (a
+    /// select and a stream start are not `Busy`), and the epoch says the selection was lost.
+    #[test]
+    fn a_one_shot_on_a_lost_selection_is_released() {
+        let (a, b) = sessions();
+        let a_request = many(vec![t_stereo(), u_entry(SpectrumChannels::Left)], None);
+        let b_request = many(vec![u_entry(SpectrumChannels::Left), t_stereo()], None);
+        let mut run = swapped(
+            &a,
+            &a_request,
+            &b,
+            &b_request,
+            Drive::OneShotRearm(ARM),
+            Promote::Refused,
+        );
+        assert_eq!(
+            run.driver.refused.first(),
+            Some(&(SWAP, SpectrumServiceError::NotArmed))
+        );
+        assert!(run.driver.shot.is_none());
+        let service = &mut run.driver.service;
+        assert_eq!(service.selection_epoch(), 2);
+        service
+            .select(t_stereo().target.as_ref(), SpectrumChannels::Stereo)
+            .expect("the arm is released: select is not Busy");
+        service
+            .start_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("and neither is a stream start");
     }
 
     /// Gate 4, collection: the swap block and the promotion allocate and free nothing.
