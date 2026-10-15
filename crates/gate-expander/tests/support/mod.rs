@@ -3,10 +3,10 @@
 use lane::Backend;
 
 use effect_contract::{
-    AutomationSpanKind, BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue,
-    LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect,
-    PreparedEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadOutput,
+    BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
+    NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect, PreparedEffectBank,
+    PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadOutput,
 };
 use gate_expander::{GATE_EXPANDER_DESCRIPTOR, GATE_EXPANDER_PARAMETERS, GateExpanderFactory};
 
@@ -331,17 +331,14 @@ pub fn retarget_spans(first_sample: u64) -> [PreparedAutomationSpan; 8] {
             targets[parameter_index].1
         };
         PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
             channel: if left {
                 ParameterChannel::Left
             } else {
                 ParameterChannel::Right
             },
             parameter_index: parameter_index as u32,
-            start_sample: first_sample,
-            end_sample: first_sample,
-            start_value: value,
-            end_value: value,
+            sample: first_sample,
+            value,
         }
     })
 }

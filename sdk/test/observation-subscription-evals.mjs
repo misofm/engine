@@ -691,10 +691,11 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
     }
   });
 
-  // #1676: the cap on armed taps is its own reason, never backpressure. Red if the SDK treats it as
-  // flow control (it would wait for a render and send the same subscription again) or if the
-  // thrown error does not carry the cap as its diagnostic code.
-  test("a subscription past the cap is refused with observationLimit at once, never resent, and the error names it", async () => {
+  // #1676, #1685: a full frame of armed taps is its own reason, never backpressure. Red if the SDK
+  // treats it as flow control (it would wait for a render and send the same subscription again), if
+  // the thrown error does not carry the reason as its diagnostic code, or if the message does not
+  // say the frame is full.
+  test("a subscription past a full frame is refused with observationLimit at once, never resent, and the error names it", async () => {
     const rig = slotHost();
     const engine = await browserEngine(rig, { requestDeadlineMs: 2_000 });
     try {
@@ -707,10 +708,10 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
         assert.ok(error instanceof MisoEngineError);
         assert.equal(error.code, "unsupported");
         assert.equal(error.diagnosticCode, "observationLimit");
-        assert.match(error.message, /unsubscribe another tap/);
+        assert.match(error.message, /control frame .* is full; unsubscribe another tap/);
         return true;
       });
-      assert.ok(Date.now() - started < 500, "the cap refusal does not wait for a render");
+      assert.ok(Date.now() - started < 500, "the full-frame refusal does not wait for a render");
       assert.equal(rig.log.commands.length, 1, "the one refused subscription, no resend");
     } finally {
       await engine.close();

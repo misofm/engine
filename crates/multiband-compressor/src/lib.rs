@@ -38,17 +38,17 @@
 
 use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
-    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
-    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
-    ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffect, PreparedEffectBank,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
-    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
+    EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue, LatencySamples,
+    LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
+    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
+    ObservationTapId, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedBankMetadata, PreparedEffect, PreparedEffectBank, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata,
 };
 use effect_runtime::bank::{self, NonFiniteReport};
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db, knee_coefficients};
@@ -1408,7 +1408,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
 
     /// Points one track's ramps at the values a block's automation spans carry.
     ///
-    /// The spans are `AutomationSpanKind::Point` events landing on the block's first sample, one
+    /// The spans are events landing on the block's first sample, one
     /// per parameter per channel, in `parameter_index * 2 + channel` order. Anything else is
     /// counted as an invalid span and ignored; nothing partially applies.
     fn apply_automation(
@@ -1440,11 +1440,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 .filter(|value| *value < RAMP_COUNT && parameter < PARAMETER_COUNT);
             let valid = ramp.is_some()
                 && index < capacity as usize
-                && span.kind == AutomationSpanKind::Point
-                && span.start_sample == first_sample
-                && span.end_sample == first_sample
-                && span.start_value.to_bits() == span.end_value.to_bits()
-                && parameter_value_valid(&SPECS[parameter], span.start_value)
+                && span.sample == first_sample
+                && parameter_value_valid(&SPECS[parameter], span.value)
                 && order.is_some_and(|value| previous.is_none_or(|earlier| value > earlier))
                 && ramp.is_some_and(|value| pending[side][value].is_none());
             let Some(ramp) = ramp else {
@@ -1456,7 +1453,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 continue;
             }
             previous = order;
-            pending[side][ramp] = Some(normalize_zero(span.start_value));
+            pending[side][ramp] = Some(normalize_zero(span.value));
         }
         for (side, targets) in pending.iter().enumerate() {
             for (index, target) in targets.iter().enumerate() {

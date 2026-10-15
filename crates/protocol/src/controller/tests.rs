@@ -1653,7 +1653,8 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
             prepared.monitor_edits(),
             [crate::control_core::MonitorWrite {
                 strip: track.clone(),
-                soloed: true,
+                row: crate::control_core::MonitorRow::Solo,
+                on: true,
                 ramp: Some(96),
             }]
         );
@@ -1741,7 +1742,8 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
         prepared.monitor_edits(),
         [crate::control_core::MonitorWrite {
             strip: track.clone(),
-            soloed: false,
+            row: crate::control_core::MonitorRow::Solo,
+            on: false,
             ramp: Some(20),
         }]
     );

@@ -12,10 +12,9 @@ use bench_support::alloc;
 use lane::Backend;
 
 use effect_contract::{
-    AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedPorts, PreparedSidechainPort, ResetKind,
+    BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
+    LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort, ResetKind,
 };
 use true_peak_limiter::{
     TRUE_PEAK_LIMITER_DESCRIPTOR, TRUE_PEAK_LIMITER_PARAMETERS, TruePeakLimiterFactory,
@@ -96,13 +95,10 @@ fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
 fn automation(block: usize) -> [PreparedAutomationSpan; 1] {
     let value = if block.is_multiple_of(2) { -3.0 } else { -9.0 };
     [PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel: ParameterChannel::Left,
         parameter_index: 0,
-        start_sample: (block * 128) as u64,
-        end_sample: (block * 128) as u64,
-        start_value: value,
-        end_value: value,
+        sample: (block * 128) as u64,
+        value,
     }]
 }
 

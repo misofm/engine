@@ -277,8 +277,9 @@ lane and takes the segment's unit and values is the control core's rule
 (`controls::automation_diagnostics`), reported by host preparation and `session-validator` stage 5
 beside the effect diagnostics: `control.address.unknown` (no row), `control.automation.target`
 (the row is rebuild-only, derived, a monitor row, a setting, or one of the two live rows that a ruling keeps out of automation: a send's `follows_mute`, a routing setting, and a strip's `matrix_mode`, a mode; #1632), `control.inactive` (the owner's shape
-does not use the row), `control.lane` (`left` or `right` on a shared row) and `control.domain` (a
-segment whose unit is not the row's, or a value the row refuses). A console target on a submix
+does not use the row), `control.lane` (`left` or `right` on a shared row), `control.domain` (a
+segment whose unit is not the row's, or a value the row refuses), `control.automation.shape` and
+`control.automation.order` (#1645, below). A console target on a submix
 addresses that submix's entry for the slot (#1202). A session does not have to state a parameter
 value for the row it automates: the row exists whether or not the session states it.
 
@@ -296,6 +297,30 @@ segment `[start_sample, end_sample)` it follows the segment: `linear` is `v0 + (
 `start_value` on the whole of `[start_sample, end_sample)`. After a segment, and in a gap between
 two, the lane holds that segment's `end_value`; a `step` takes its `end_value` at `end_sample`. The
 value after the last segment holds for ever.
+
+**What a row takes (#1645).** Each segment is reported once, at
+`$.automation[id=<id>].segments[<k>]`: `control.domain` first, else `control.automation.shape`.
+The shape rule is one rule for every row: a toggle row (polarity, mute) or an enumeration takes only
+`step`; `exponential` only on a continuous row whose minimum is above `0` and whose unit is not dB
+(of the builtins, only HPF and LPF; never a fader, trim, pan or matrix row); and on a row with a
+disabled value (a filter's `0`, "off") a `linear` or `exponential` segment has neither value equal
+to it, so "off" is entered and left only by a `step`.
+
+**The input filter order, on curves (#1645).** On each strip lane where HPF (3) or LPF (4) is
+automated (a `both` entry drives both lanes), each side is its entry under the hold rule, or the
+constant of its static value. The time axis is cut at every `start_sample` and `end_sample` of
+either curve; on each piece a side that is a constant `0` leaves it unchecked, and otherwise:
+two constants need `H < L` (the static rule); two `linear` or two `exponential` pieces need
+`L > H·(1 + 2^-22)` at both ends; any other pair needs `min(L) > max(H)·(1 + 2^-22)` over the two
+ends, which is sufficient, not necessary, and refuses some pairs that never cross. The margin keeps
+the rendered `f32` values strictly ordered. Render can lead a stored filter value by 64 samples
+(the grid lookahead) and lag it by 64 (the filter's jump ramp), so the HPF at each sample is held
+below the LPF at every sample within 128 samples of it: stored automation the render would carry
+across the order is refused here, never accepted and then refused in render.
+A failure is `control.automation.order`, once per lane
+at the first failing piece, at the segment of the LPF entry (else the HPF entry) that defines its
+value there. The rule reads only the model, so it also judges a static filter value under an
+automated curve.
 
 Session validation refuses what no rendering could honour, structurally and before any row is read:
 

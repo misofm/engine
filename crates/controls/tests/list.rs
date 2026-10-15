@@ -19,12 +19,19 @@ enum Listed {
 }
 use Listed::{PerLane, Shared};
 
-/// A submix has no solo row (it is solo-safe).
-const SUBMIX_OWN: [(u32, Listed); 4] = [(1, Shared), (3, Shared), (64, PerLane), (65, PerLane)];
-const STRIP_OWN: [(u32, Listed); 5] = [
+/// A submix has no solo row (it is solo-safe); every strip has the master row (#1683).
+const SUBMIX_OWN: [(u32, Listed); 5] = [
+    (1, Shared),
+    (3, Shared),
+    (4, Shared),
+    (64, PerLane),
+    (65, PerLane),
+];
+const STRIP_OWN: [(u32, Listed); 6] = [
     (1, Shared),
     (2, Shared),
     (3, Shared),
+    (4, Shared),
     (64, PerLane),
     (65, PerLane),
 ];

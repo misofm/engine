@@ -9,10 +9,9 @@
 use bench_support::alloc as bench_alloc;
 use delay::{DELAY_PARAMETERS, DelayFactory};
 use effect_contract::{
-    AutomationSpanKind, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
-    NativeEffectFactory, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort,
-    ProcessReport,
+    EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory,
+    ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedNativeEffect, PreparedPorts, PreparedSidechainPort, ProcessReport,
 };
 use engine::realtime::audit;
 
@@ -122,13 +121,10 @@ fn automation(block: u64, first_sample: u64) -> [PreparedAutomationSpan; 3] {
     let damping = [0.0_f32, 0.25, 0.995, 0.5];
     let cross = [0.0_f32, 0.5, 1.0, 0.25];
     let point = |parameter_index: u32, channel, value| PreparedAutomationSpan {
-        kind: AutomationSpanKind::Point,
         channel,
         parameter_index,
-        start_sample: first_sample,
-        end_sample: first_sample,
-        start_value: value,
-        end_value: value,
+        sample: first_sample,
+        value,
     };
     [
         point(0, ParameterChannel::Left, delay[step]),

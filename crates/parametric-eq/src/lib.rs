@@ -6643,8 +6643,7 @@ mod boundary_fold {
 mod target_application {
     use super::*;
     use effect_contract::{
-        AutomationSpanKind, EffectTargetRequest, NativeEffectTargetPreparation,
-        PreparedAutomationSpan,
+        EffectTargetRequest, NativeEffectTargetPreparation, PreparedAutomationSpan,
     };
 
     fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<'a> {
@@ -6787,13 +6786,10 @@ mod target_application {
                 None,
                 0,
                 &[PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel: ParameterChannel::Left,
                     parameter_index: 2,
-                    start_sample: 0,
-                    end_sample: 0,
-                    start_value: 2_000.0,
-                    end_value: 2_000.0,
+                    sample: 0,
+                    value: 2_000.0,
                 }],
                 128,
             )
@@ -9641,13 +9637,10 @@ mod padded_banks {
 
             // Two spans on the last member, three on the padded lane.
             let span = PreparedAutomationSpan {
-                kind: effect_contract::AutomationSpanKind::Point,
                 channel: ParameterChannel::Left,
                 parameter_index: 2,
-                start_sample: 0,
-                end_sample: 0,
-                start_value: 500.0,
-                end_value: 500.0,
+                sample: 0,
+                value: 500.0,
             };
             let automation = [span; 5];
             let mut offsets = vec![0_u32; lanes + 1];

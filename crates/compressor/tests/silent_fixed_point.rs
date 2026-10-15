@@ -21,9 +21,7 @@
 
 mod support;
 
-use effect_contract::{
-    AutomationSpanKind, EffectBankProcessBlock, ParameterChannel, PreparedAutomationSpan,
-};
+use effect_contract::{EffectBankProcessBlock, ParameterChannel, PreparedAutomationSpan};
 use support::{bind_bank, native_bank_width, request, values_with};
 
 const FRAMES: usize = 128;
@@ -98,13 +96,10 @@ fn render_with(
         let restated: Vec<PreparedAutomationSpan> = if restate {
             (0..lanes)
                 .map(|_| PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel: ParameterChannel::Left,
                     parameter_index: 0,
-                    start_sample: first_sample,
-                    end_sample: first_sample,
-                    start_value: threshold_db,
-                    end_value: threshold_db,
+                    sample: first_sample,
+                    value: threshold_db,
                 })
                 .collect()
         } else {
@@ -249,13 +244,10 @@ fn negative_zero_blocks_match_the_forced_slow_path() {
             let restated: Vec<PreparedAutomationSpan> = if restate {
                 (0..lanes)
                     .map(|_| PreparedAutomationSpan {
-                        kind: AutomationSpanKind::Point,
                         channel: ParameterChannel::Left,
                         parameter_index: 0,
-                        start_sample: first_sample,
-                        end_sample: first_sample,
-                        start_value: THRESHOLD_DB,
-                        end_value: THRESHOLD_DB,
+                        sample: first_sample,
+                        value: THRESHOLD_DB,
                     })
                     .collect()
             } else {

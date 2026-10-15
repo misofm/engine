@@ -24,5 +24,9 @@ protocol.workspace = true
 session.workspace = true
 source.workspace = true
 
+[dev-dependencies]
+# #1685 gate 3: the admission allocation count, by the audited allocator's thread counters.
+bench-support.workspace = true
+
 [lints]
 workspace = true

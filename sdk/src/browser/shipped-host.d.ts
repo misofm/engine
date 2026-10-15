@@ -235,7 +235,7 @@ export const enum MisoCommandReason {
   /// code, not a backpressure one, when the plan's revision gate refuses the batch's stamp (a
   /// revision past the gate's ceiling); that batch wrote nothing.
   ///
-  /// Never the answer to the cap on armed taps, which is `ObservationLimit`.
+  /// Never the answer to a full observation event, which is `ObservationLimit`.
   Backpressure = 8,
   /// The engine is not `STATE_READY`.
   WrongState = 9,
@@ -252,9 +252,10 @@ export const enum MisoCommandReason {
   // Reasons 12-14 (`NotSoloable`, `UnknownRoute`, `UnknownVca`) were deleted with the value kinds
   // (issue #1565); their numbers are never reused.
   /// The subscription would leave more taps armed than the engine can end honestly in one
-  /// `OBSERVATION_ENDED` event in one control frame (issue 1676: 51 taps at the browser's 16 KiB
-  /// frame). `rejectedIndex` names the subscription that crossed the cap, after every unsubscribe
-  /// of the same submission is counted; nothing was admitted. The result is `RESULT_UNSUPPORTED`.
+  /// `OBSERVATION_ENDED` event in one control frame (issue 1685: the event's exact encoded bytes
+  /// against the browser's 16 KiB frame). `rejectedIndex` names the subscription that crossed it,
+  /// after every unsubscribe of the same submission is counted; nothing was admitted. The result
+  /// is `RESULT_UNSUPPORTED`.
   ///
   /// A render does not make room, so retrying the same submission will not help, which is why this
   /// is its own reason and not `Backpressure`: unsubscribe another tap first.
@@ -559,7 +560,8 @@ export interface MisoMeterFrame {
   /// or after their last subscribe, and `0` when no armed tap has such a window. `masterGrDb` is
   /// `null` when the designated strip has none.
   readonly trackGrDb: Float32Array;
-  /// The designated master strip's own folded reading, or `null` (issue 143 D6).
+  /// The designated master strip's own folded reading, or `null` (issue 143 D6). The master is the
+  /// strip whose `master` monitor row is on (issue 1683), or the boot word's strip until one is set.
   ///
   /// `null` -- never `0` -- when no strip was designated or the designated strip published no
   /// window, because `0` would be indistinguishable from "the master is not reducing".
@@ -711,7 +713,12 @@ export interface MisoWebBootOptions {
   ///
   /// V1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
   /// Plus one because zero has to keep meaning "unset". Requires
-  /// `liveControlObservationTaps !== 0n`.
+  /// `liveControlObservationTaps !== 0n`. This word designates the first plan only (issue
+  /// 1683): after boot the app sets or moves the master with the strip's `master` monitor row
+  /// (`SET_CONTROL`), the core holds it by strip ID, and every later plan follows it. The row has
+  /// no tap requirement: it is valid on every host (the C ABI has no taps), and with no tap on the
+  /// strip `masterGrDb` is `null`. Only this boot word keeps the stricter rule, until its
+  /// successor retires it.
   liveControlMasterTrackPlusOne: bigint;
   /// One optional prepared graph boundary; `null` retains no capture storage.
   spectrum?: MisoSpectrumBootOptions | null;

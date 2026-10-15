@@ -10,10 +10,10 @@ use core::num::{NonZeroU32, NonZeroUsize};
 
 use builtins::MeterTap;
 use effect_contract::{
-    AutomationSpanKind, EffectControlRecord, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LinkMode, NativeEffectFactory, ObservationSample, ParameterChannel,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect,
-    PreparedPorts, PreparedSidechainPort,
+    EffectControlRecord, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
+    NativeEffectFactory, ObservationSample, ParameterChannel, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedPorts,
+    PreparedSidechainPort,
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
@@ -536,11 +536,16 @@ fn prepare_successor(
     bindings: &controls::ObservationBindings,
 ) -> Session {
     let request = live_controls(Leg::AllArmed);
+    // #1683: a successor's master designation is its overlay's, never the request's.
+    let successor_request = HostLiveControlRequest {
+        master_track: None,
+        ..live_controls(Leg::AllArmed)
+    };
     let (mut prepared, handles) = match &first {
         Some((first, committed)) => host_core::prepare_host_runtime_with_live_controls_successor(
             compiled,
             &caps(),
-            &request,
+            &successor_request,
             host_core::SuccessorBase {
                 inventory: &first.prepared.inventory,
                 committed,
@@ -796,13 +801,10 @@ fn scalar_reference_windows(
             Some((at, value)) if at == block => [ParameterChannel::Left, ParameterChannel::Right]
                 .into_iter()
                 .map(|channel| PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel,
                     parameter_index: THRESHOLD_INDEX,
-                    start_sample: first_sample,
-                    end_sample: first_sample,
-                    start_value: value,
-                    end_value: value,
+                    sample: first_sample,
+                    value,
                 })
                 .collect(),
             _ => Vec::new(),

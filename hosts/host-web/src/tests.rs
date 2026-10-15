@@ -8035,43 +8035,507 @@ mod structural_apply {
             "the successor has no insert, so no slot to read"
         );
     }
+
+    /// The `master` monitor row of strip `strip` (#1683), as `SET_CONTROL` addresses it.
+    fn master_edit(strip: &str, on: bool) -> SessionEdit {
+        SessionEdit::SetControl {
+            address: controls::ControlAddress {
+                owner: controls::Owner::Strip(StableId::parse(strip).expect("a strip ID")),
+                section: controls::Section::Own,
+                control: 4,
+                lane: controls::Lane::Both,
+            },
+            value: if on { 1.0 } else { 0.0 },
+            ramp_samples: None,
+            expected_effect: None,
+        }
+    }
+
+    /// The gain-reduction word of strip `strip` and the master's word, when the header says it
+    /// is present.
+    fn master_reading(host: &AudioWorkletEngineHost, strip: usize) -> (f32, Option<f32>) {
+        let strips = host.live_control_tracks().len() + host.meter_header().submix_count as usize;
+        let frame = host.meter_frame();
+        let base = strips * 2 + 2;
+        let master = (host.meter_header().master_gr_present == 1).then(|| frame[base + strips]);
+        (frame[base + strip], master)
+    }
+
+    /// #1683 gate 1: a session that boots empty (the boot word cannot name a strip it does not
+    /// have) gets its master through the core after boot. A track with a compressor arrives by a
+    /// rebuild; one `SET_CONTROL` of its `master` row designates it, a monitor write that spends no
+    /// revision; the meter header names it and the master reading is that strip's own word, as a
+    /// boot-time designation reads (`the_meter_frame_carries_the_app_shaped_gain_reduction`). A
+    /// track added before it by a later rebuild moves its index and the designation follows it by
+    /// ID; a strip the session does not have is refused before commit; clearing the row makes the
+    /// reading absent, never zero.
+    ///
+    /// Test value: red if the designation cannot be set after boot, is held by index (the reading
+    /// would move to the added track), is not carried into a successor plan, reaches the meter
+    /// header late or never, spends a revision, or a designation of an unknown strip is admitted.
+    #[test]
+    fn a_master_designated_after_an_empty_boot_reads_as_a_boot_designation() {
+        const WINDOW: u64 = 2;
+        let full = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/observation-frame-shape.json"
+        ))
+        .expect("the observation fixture parses");
+        let mut empty = full.clone();
+        empty.sources.clear();
+        empty.tracks.clear();
+        empty.routes.clear();
+        let options = WebBootOptions {
+            source_ring_frames: QUANTUM * 4,
+            live_control_meter_blocks: WINDOW,
+            live_control_observation_taps: 4,
+            ..boot_options(QUANTUM)
+        };
+        let document = canonical_session_json(&empty).expect("canonical empty session");
+        let failure = AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                live_control_master_track_plus_one: 1,
+                ..options
+            },
+        )
+        .err()
+        .expect("the boot word cannot name a strip an empty session lacks");
+        assert!(
+            failure
+                .diagnostic()
+                .starts_with(b"host.observation.master_track\t")
+        );
+
+        let mut rig = Rig::boot(&empty, options, None);
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 0);
+        let track = |index: usize, id: &str| {
+            let mut track = full.tracks[index].clone();
+            let mut route = full.routes[index].clone();
+            track.id = StableId::parse(id).expect("a track ID");
+            route.id = StableId::parse(&format!("{id}-main")).expect("a route ID");
+            let RouteSource::Track { track_id, .. } = &mut route.source else {
+                panic!("the fixture routes a track")
+            };
+            *track_id = track.id.clone();
+            [
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ]
+        };
+        let mut first = vec![SessionEdit::UpsertSource {
+            source: full.sources[0].clone(),
+        }];
+        first.extend(track(0, "t0"));
+        assert!(matches!(
+            rig.apply(&first, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
+
+        // An unknown strip is refused before commit, and nothing is designated.
+        let revision = rig.host.committed_revision();
+        assert!(matches!(
+            rig.apply(&[master_edit("nobody", true)], 2),
+            Outcome::Refused(..)
+        ));
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 0);
+
+        assert_eq!(
+            rig.apply(&[master_edit("t0", true)], 3),
+            Outcome::Applied {
+                path: EditPath::Monitor,
+                revision,
+            },
+            "a monitor write spends no revision"
+        );
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 1);
+
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        assert_eq!(
+            observe_key(
+                &mut rig.host,
+                "t0",
+                RACK_INSERTS,
+                "comp",
+                1,
+                WINDOW as u32,
+                true
+            ),
+            RESULT_OK
+        );
+        assert_eq!(rig.host.seek_source(SOURCE, 2, 0), RESULT_OK);
+        let mut fed = 0;
+        let mut feed = |host: &mut AudioWorkletEngineHost, blocks: u64| {
+            for _ in 0..blocks {
+                feed_and_render(host, 2, fed, 0.5);
+                fed += 1;
+            }
+        };
+        feed(&mut rig.host, 8 * WINDOW);
+        assert!(rig.host.poll_meters() > 0, "a window closed");
+        let (word, master) = master_reading(&rig.host, 0);
+        assert!(word > 0.0, "the compressor reduces: {word}");
+        assert_eq!(
+            master.map(f32::to_bits),
+            Some(word.to_bits()),
+            "the master is t0's own word"
+        );
+
+        // A track whose ID sorts first arrives by a rebuild: t0 is strip 1 now, and stays the
+        // master.
+        assert!(matches!(
+            rig.apply(&track(1, "a0"), 4),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        feed(&mut rig.host, 8 * WINDOW);
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 2);
+        assert!(rig.host.poll_meters() > 0, "a window closed");
+        let (word, master) = master_reading(&rig.host, 1);
+        assert!(word > 0.0, "t0 still reduces: {word}");
+        assert_eq!(master.map(f32::to_bits), Some(word.to_bits()));
+
+        // Cleared: absent, not zero.
+        let revision = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(&[master_edit("t0", false)], 5),
+            Outcome::Applied {
+                path: EditPath::Monitor,
+                revision,
+            }
+        );
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 0);
+        feed(&mut rig.host, 4 * WINDOW);
+        assert!(rig.host.poll_meters() > 0, "a window closed");
+        let (word, master) = master_reading(&rig.host, 1);
+        assert!(word > 0.0);
+        assert_eq!(master, None, "no designation reads absent");
+    }
+
+    impl Rig {
+        /// The strips whose `master` monitor row is on in the control list, read through the
+        /// production control entry by the rows' typed fields.
+        fn listed_masters(&mut self, request: u64) -> Vec<String> {
+            let codec = ProtocolCodec::default();
+            let mut masters = Vec::new();
+            let (mut epoch, mut after, mut request) = (0, 0, request);
+            loop {
+                let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+                let length = codec
+                    .encode_command_frame_into(
+                        &TypedCommandFrame {
+                            request_id: RequestId::new(request).expect("nonzero request"),
+                            expected_revision: ExpectedRevision::Any,
+                            payload: CommandPayload::ControlListGet(
+                                &protocol::ControlListRequest {
+                                    structure_epoch: epoch,
+                                    after_handle: after,
+                                    limit: 256,
+                                    owner: None,
+                                },
+                            ),
+                        },
+                        &mut bytes,
+                    )
+                    .expect("a control list frame");
+                bytes.truncate(length);
+                request += 1;
+                let (result, response) = self.entry(&bytes);
+                assert_eq!(result, RESULT_OK, "the control plane answers the list");
+                let mut fields = [0_u16; 8192];
+                let DecodedTypedResponseFrame::Success {
+                    payload: DecodedSuccessResponsePayload::ControlListPage(page),
+                    ..
+                } = codec
+                    .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+                    .expect("a control list page")
+                else {
+                    panic!("expected a control list page")
+                };
+                masters.extend(page.entries.iter().filter_map(|entry| match &entry.body {
+                    protocol::ControlBody::Control(row)
+                        if row.name == "master" && row.value == 1.0 =>
+                    {
+                        entry.address.owner_id.clone()
+                    }
+                    _ => None,
+                }));
+                if page.eof {
+                    return masters;
+                }
+                epoch = page.structure_epoch;
+                after = page.last_handle;
+            }
+        }
+    }
+
+    /// The observation fixture's three tracks (`t0`, `t1`, `t2`), booted with the boot word
+    /// designating track `master` (#1683).
+    fn boot_designated(master: u64) -> (SessionModel, Rig) {
+        let model = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/observation-frame-shape.json"
+        ))
+        .expect("the observation fixture parses");
+        let options = WebBootOptions {
+            source_ring_frames: QUANTUM * 4,
+            live_control_meter_blocks: 2,
+            live_control_observation_taps: 4,
+            live_control_master_track_plus_one: master + 1,
+            ..boot_options(QUANTUM)
+        };
+        let rig = Rig::boot(&model, options, None);
+        (model, rig)
+    }
+
+    /// #1683 review fold: a master the boot word designates is the core's `master` row of that
+    /// strip, held by ID from boot on. A live `SET_CONTROL` of another row and then a rebuild that
+    /// adds a track whose ID sorts first leave the row on `t1` and move the header's index with it.
+    ///
+    /// Test value: red if the boot word seeds the overlay by index only (a live write or the
+    /// rebuild would then leave the reading on strip 1, now `t0`), or if a live write re-seeds it.
+    #[test]
+    fn a_boot_designated_master_follows_its_strip_through_a_live_write_and_a_rebuild() {
+        let (model, mut rig) = boot_designated(1);
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 2);
+        assert_eq!(rig.listed_masters(1), ["t1"]);
+
+        let fader = SessionEdit::SetControl {
+            expected_effect: None,
+            address: controls::ControlAddress {
+                owner: controls::Owner::Strip(StableId::parse("t2").expect("strip ID")),
+                section: controls::Section::Builtins,
+                control: 5,
+                lane: session::ParameterChannel::Both,
+            },
+            value: -6.0,
+            ramp_samples: None,
+        };
+        let live = rig.apply(&[fader], 1_000);
+        assert!(
+            matches!(
+                live,
+                Outcome::Applied {
+                    path: EditPath::Live,
+                    ..
+                }
+            ),
+            "{live:?}"
+        );
+        assert_eq!(rig.host.render_next(), RESULT_OK);
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 2);
+        assert_eq!(rig.listed_masters(1_001), ["t1"]);
+
+        let mut track = model.tracks[0].clone();
+        let mut route = model.routes[0].clone();
+        track.id = StableId::parse("a0").expect("a track ID");
+        route.id = StableId::parse("a0-main").expect("a route ID");
+        let RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("the fixture routes a track")
+        };
+        *track_id = track.id.clone();
+        assert!(matches!(
+            rig.apply(
+                &[
+                    SessionEdit::UpsertTrack { track },
+                    SessionEdit::UpsertRoute { route },
+                ],
+                2_000
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
+        assert_eq!(
+            rig.host.meter_header().master_track_plus_one,
+            3,
+            "t1 is strip 2 now, and still the master"
+        );
+        assert_eq!(rig.listed_masters(2_001), ["t1"]);
+    }
+
+    /// #1683 review fold: a rebuild that removes the master strip ends the designation in the
+    /// committed model and the replacement's tables at once, but the plan still rendering keeps its
+    /// master until the block that adopts the replacement.
+    ///
+    /// Test value: red if the commit rewrites the rendering plan's header (its reading would vanish
+    /// before render has moved to the plan without the strip), or if the adopted plan keeps a
+    /// master the session no longer has.
+    #[test]
+    fn a_rebuild_that_removes_the_master_keeps_the_rendering_plans_master_until_adoption() {
+        let (_, mut rig) = boot_designated(0);
+        assert_eq!(rig.host.meter_header().master_track_plus_one, 1);
+        assert!(matches!(
+            rig.apply(
+                &[
+                    SessionEdit::RemoveRoute {
+                        route_id: StableId::parse("t0-main").expect("a route ID"),
+                    },
+                    SessionEdit::RemoveTrack {
+                        track_id: StableId::parse("t0").expect("a track ID"),
+                    },
+                ],
+                1
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert!(rig.pending(), "the replacement waits for its adoption");
+        assert_eq!(
+            rig.host.meter_header().master_track_plus_one,
+            1,
+            "the rendering plan keeps its master until adoption"
+        );
+        assert_eq!(rig.listed_masters(2), Vec::<String>::new());
+        assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
+        assert!(!rig.pending());
+        assert_eq!(
+            rig.host.meter_header().master_track_plus_one,
+            0,
+            "the adopted plan has no master"
+        );
+    }
 }
 
-/// A subscription past the engine's cap on armed taps (#1676) is refused as a whole before any
-/// record is queued, so the acknowledgement never promises a tap the engine could not end honestly;
-/// unsubscribing one tap makes room for the next. The cap is the control plane's, shared with the C
-/// ABI: the browser only reports the refusal, as its own non-retryable reason `observationLimit`
-/// with `RESULT_UNSUPPORTED`, never as backpressure, at the record that crossed it.
+/// The encoded bytes of the one `OBSERVATION_ENDED` frame that ends the insert taps keyed by
+/// `(strip, insert)` (tap 1), by the real codec: the oracle the control plane's exact-byte
+/// admission is held to (#1685).
+fn ended_frame_bytes(keys: &[(String, String)]) -> usize {
+    let mut keys: Vec<protocol::ObservationTapKey> = keys
+        .iter()
+        .map(|(strip, effect)| protocol::ObservationTapKey {
+            strip_id: strip.clone(),
+            section: protocol::ObservationSection::Inserts,
+            effect_id: effect.clone(),
+            tap_id: 1,
+        })
+        .collect();
+    keys.sort_by(|a, b| (&a.strip_id, &a.effect_id).cmp(&(&b.strip_id, &b.effect_id)));
+    let event = protocol::ObservationEnded {
+        event_sequence: u64::MAX,
+        keys,
+    };
+    match protocol::ProtocolCodec::default().encode_event_frame_into(
+        &protocol::TypedEventFrame {
+            revision: protocol::SessionRevision(u64::MAX),
+            payload: protocol::EventPayload::ObservationEnded(&event),
+        },
+        &mut [],
+    ) {
+        Err(protocol::EncodeError::OutputTooSmall { required }) => required,
+        other => panic!("an ended event is measured: {other:?}"),
+    }
+}
+
+/// The large session (#1685 gate 1) on the browser: a 64-track session with one compressor insert
+/// per track subscribes the compressor's meter tap on every insert, in one submission, at the
+/// browser's 16 KiB control frame: all 64 are admitted, and the ended event they would need is the
+/// real codec's size for their keys.
 ///
-/// Red if the browser admits a subscription past the cap (the later removal of every subscribed tap
-/// could not be told to its subscribers), if it reports the cap as backpressure (the SDK would
-/// resend it after every render), if the refusal still queues or arms the tap, if a refused batch
-/// moves the armed count or keeps part of itself, if the refusal names a record other than the arm
-/// that crossed (index 2 of a batch that first unsubscribes), or if an unsubscribe does not give its
-/// place back.
+/// Red if admission still assumes the longest IDs (the cap of #1676 held 51 taps at this frame and
+/// refused record 51).
 #[test]
-fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
+fn every_insert_of_a_sixty_four_track_session_subscribes() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 64;
+    let mut document: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/browser-v1/observation-session.json"))
+            .expect("fixture");
+    let track = document["tracks"][0].clone();
+    let route = document["routes"][0].clone();
+    let name = |index: usize| format!("t{index:02}");
+    document["tracks"] = (0..TRACKS)
+        .map(|index| {
+            let mut track = track.clone();
+            track["id"] = serde_json::Value::String(name(index));
+            track
+        })
+        .collect();
+    document["routes"] = (0..TRACKS)
+        .map(|index| {
+            let mut route = route.clone();
+            route["id"] = serde_json::Value::String(format!("{}-main", name(index)));
+            route["source"]["track_id"] = serde_json::Value::String(name(index));
+            route
+        })
+        .collect();
+    let document = serde_json::to_string_pretty(&document).expect("document");
+    let options = WebBootOptions {
+        live_control_observation_taps: 1,
+        live_control_master_track_plus_one: 1,
+        ..boot_options(QUANTUM)
+    };
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
+    for track in 0..TRACKS {
+        stage_command(
+            &mut host,
+            track,
+            COMMAND_OBSERVE_SUBSCRIBE,
+            1,
+            track as u32,
+            0,
+            1,
+            2,
+        );
+    }
+    host.submit_commands(TRACKS as u32);
+    let report = *host.command_report();
+    assert_eq!(report.result, RESULT_OK, "{report:?}");
+    let control = &host.ready.as_ref().expect("ready").control;
+    assert_eq!(control.observation_armed(), TRACKS);
+    let keys: Vec<(String, String)> = (0..TRACKS)
+        .map(|index| (name(index), "comp".to_owned()))
+        .collect();
+    assert_eq!(control.observation_ended_bytes(), ended_frame_bytes(&keys));
+    assert!(control.observation_ended_bytes() <= CONTROL_FRAME_BYTES as usize);
+}
+
+/// A subscription whose `OBSERVATION_ENDED` event would outgrow the browser's 16 KiB control frame
+/// (#1676, #1685) is refused as a whole before any record is queued, so the acknowledgement never
+/// promises a tap the engine could not end honestly; unsubscribing one tap makes room for the
+/// next. The admission is the control plane's, by the event's exact encoded bytes, shared with the
+/// C ABI: the browser only reports the refusal, as its own non-retryable reason `observationLimit`
+/// with `RESULT_UNSUPPORTED`, never as backpressure, at the record that crossed it. The insert IDs
+/// are of the grammar's longest length, so the frame holds `k` of them by the real codec.
+///
+/// Red if the browser admits a subscription past the frame (the later removal of every subscribed
+/// tap could not be told to its subscribers), if it reports the refusal as backpressure (the SDK
+/// would resend it after every render), if the refusal still queues or arms the tap, if a refused
+/// batch moves the armed count or keeps part of itself, if the refusal names a record other than
+/// the arm that crossed (index 2 of a batch that first unsubscribes), or if an unsubscribe does not
+/// give its place back.
+#[test]
+fn a_subscription_past_the_frame_is_refused_and_an_unsubscribe_makes_room() {
     const QUANTUM: u32 = 128;
     let document: serde_json::Value =
         serde_json::from_str(include_str!("../tests/browser-v1/observation-session.json"))
             .expect("fixture");
-    let probe_cap = {
-        let options = WebBootOptions {
-            live_control_observation_taps: 1,
-            live_control_master_track_plus_one: 1,
-            ..boot_options(QUANTUM)
-        };
-        let host = AudioWorkletEngineHost::boot(
-            include_bytes!("../tests/browser-v1/observation-session.json"),
-            options,
-        )
-        .expect("boot");
-        host.ready
-            .as_ref()
-            .expect("ready")
-            .control
-            .observation_cap()
+    let insert_id = |index: usize| {
+        let id = format!(
+            "i{index:03}{}",
+            "x".repeat(session::STABLE_ID_MAXIMUM_BYTES - 4)
+        );
+        assert_eq!(id.len(), session::STABLE_ID_MAXIMUM_BYTES);
+        id
     };
+    let keys = |count: usize| -> Vec<(String, String)> {
+        (0..count)
+            .map(|index| ("track".to_owned(), insert_id(index)))
+            .collect()
+    };
+    let frame = CONTROL_FRAME_BYTES as usize;
+    let probe_cap = (1..)
+        .take_while(|count| ended_frame_bytes(&keys(*count)) <= frame)
+        .last()
+        .expect("one key fits");
     let inserts = probe_cap + 2;
     let mut document = document;
     let template = document["tracks"][0]["inserts"]["effects"][0].clone();
@@ -8079,7 +8543,7 @@ fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
         (0..inserts)
             .map(|index| {
                 let mut effect = template.clone();
-                effect["id"] = serde_json::Value::String(format!("ins{index:03}"));
+                effect["id"] = serde_json::Value::String(insert_id(index));
                 effect
             })
             .collect(),
@@ -8128,6 +8592,14 @@ fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
         assert_eq!(report.result, RESULT_OK, "{effect}: {report:?}");
     }
     assert_eq!(armed(&host), probe_cap);
+    assert_eq!(
+        host.ready
+            .as_ref()
+            .expect("ready")
+            .control
+            .observation_ended_bytes(),
+        ended_frame_bytes(&keys(probe_cap))
+    );
     let refused = submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, probe_cap as u32);
     assert_eq!(
         (
@@ -8145,7 +8617,7 @@ fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
         "a refused subscription arms nothing"
     );
     render(&mut host);
-    // A batch that unsubscribes one tap, takes its place and then crosses the cap is refused whole,
+    // A batch that unsubscribes one tap, takes its place and then crosses the frame is refused whole,
     // at the record that crossed: wire index 2, not the first record or the first arm.
     let cap = probe_cap as u32;
     stage_command(&mut host, 0, COMMAND_OBSERVE_UNSUBSCRIBE, 1, 0, 0, 1, 2);

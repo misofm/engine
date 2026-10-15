@@ -44,7 +44,10 @@ mod tables;
 mod vca;
 mod view;
 
-pub use automation::{ControlDiagnostic, automation_diagnostics};
+pub use automation::{
+    ControlDiagnostic, automation_diagnostics, filter_statics_changed_under_automation,
+    filter_under_automation,
+};
 pub use descriptor::{
     AutomationRule, Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, check,
 };
@@ -58,7 +61,7 @@ pub use effect_rows::{BYPASS_CONTROL, LINK_MODE_CONTROL, check_expected_effect};
 pub use effective::{
     Effective, EffectiveInputs, EffectiveRoute, EffectiveRouteInput, EffectiveShapeError,
     EffectiveSource, EffectiveStrip, LocalEffective, LocalInputs, ModelInputs, MonitorChange,
-    MonitorOverlay, MonitorWrite, any_solo, any_solo_in, effective, effective_follow,
+    MonitorOverlay, MonitorRow, MonitorWrite, any_solo, any_solo_in, effective, effective_follow,
     effective_gate, effective_into, effective_strip, solo_term,
 };
 pub use error::ControlError;

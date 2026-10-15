@@ -40,9 +40,9 @@
 
 use dsp_reference::randomized::{Draw, Profile, first_difference, run_seeds, same_word};
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectId, EffectProcessBlock, EffectTargetRequest, InitialParameterValue,
-    LinkMode, NativeEffectFactory, NativeEffectRegistry, NativeEffectTargetPreparation,
+    AutomationRate, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectDescriptor,
+    EffectId, EffectProcessBlock, EffectTargetRequest, InitialParameterValue, LinkMode,
+    NativeEffectFactory, NativeEffectRegistry, NativeEffectTargetPreparation,
     PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
     ParameterDomain, PortRole, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
     PreparedAutomationSpan, PreparedEffect, PreparedEffectBank, PreparedEffectMetadata,
@@ -1347,7 +1347,7 @@ fn run_width(
         for (lane, until) in in_flight_until.iter_mut().enumerate() {
             if scalar_reports[lane].invalid_spans == 0 {
                 for span in &lane_spans[lane] {
-                    *until = (*until).max(span.end_sample.saturating_add(IN_FLIGHT_SAMPLES));
+                    *until = (*until).max(span.sample.saturating_add(IN_FLIGHT_SAMPLES));
                 }
             }
         }
@@ -1881,12 +1881,11 @@ fn draw_spans(
             // One span per parameter and start sample: two would sort as `L L R R`, which is no
             // longer twin pairs.
             if spans.iter().any(|span: &PreparedAutomationSpan| {
-                span.parameter_index == index as u32 && span.start_sample == start
+                span.parameter_index == index as u32 && span.sample == start
             }) {
                 continue;
             }
-            let start_value = draw_value(draw, parameter);
-            let end_value = start_value;
+            let value = draw_value(draw, parameter);
             let channels: &[ParameterChannel] = match parameter.channel_policy {
                 ParameterChannelPolicy::Shared => &[ParameterChannel::Both],
                 ParameterChannelPolicy::PerLane if mono => {
@@ -1902,33 +1901,30 @@ fn draw_spans(
             };
             for channel in channels {
                 spans.push(PreparedAutomationSpan {
-                    kind: AutomationSpanKind::Point,
                     channel: *channel,
                     parameter_index: index as u32,
-                    start_sample: start,
-                    end_sample: start,
-                    start_value,
-                    end_value,
+                    sample: start,
+                    value,
                 });
             }
         }
     }
-    spans.sort_by_key(|span| (span.start_sample, span.parameter_index, span.channel));
-    // Per (parameter, channel), a span starts at or after the previous one's end, and one that
-    // starts exactly there continues its value. Twins share a history, so they stay or go together.
+    spans.sort_by_key(|span| (span.sample, span.parameter_index, span.channel));
+    // Per (parameter, channel), a span is at or after the previous one's sample, and one at
+    // exactly that sample repeats its value. Twins share a history, so they stay or go together.
     let mut last: Vec<((u32, ParameterChannel), u64, u32)> = Vec::new();
     spans.retain(|span| {
         let key = (span.parameter_index, span.channel);
         if let Some(entry) = last.iter_mut().find(|entry| entry.0 == key) {
-            if span.start_sample < entry.1
-                || (span.start_sample == entry.1 && canonical_bits(span.start_value) != entry.2)
+            if span.sample < entry.1
+                || (span.sample == entry.1 && canonical_bits(span.value) != entry.2)
             {
                 return false;
             }
-            entry.1 = span.end_sample;
-            entry.2 = canonical_bits(span.end_value);
+            entry.1 = span.sample;
+            entry.2 = canonical_bits(span.value);
         } else {
-            last.push((key, span.end_sample, canonical_bits(span.end_value)));
+            last.push((key, span.sample, canonical_bits(span.value)));
         }
         true
     });
@@ -1944,17 +1940,14 @@ fn draw_spans(
         let parameter = draw.below(descriptor.parameters.len() + 1) as u32;
         let value = draw.pick(&[f32::NAN, f32::INFINITY, 1.0e30, -1.0e30, -0.0, 0.5]);
         spans.push(PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
             channel: draw.pick(&[
                 ParameterChannel::Left,
                 ParameterChannel::Right,
                 ParameterChannel::Both,
             ]),
             parameter_index: parameter,
-            start_sample: first + frames as u64 - 1,
-            end_sample: first + frames as u64 - 1,
-            start_value: value,
-            end_value: value,
+            sample: first + frames as u64 - 1,
+            value,
         });
     }
     spans
@@ -1983,7 +1976,7 @@ fn render_scalar(
         let pieces = chunk.map(|_| {
             spans
                 .iter()
-                .filter(|span| span.start_sample >= from && span.start_sample < to)
+                .filter(|span| span.sample >= from && span.sample < to)
                 .copied()
                 .collect::<Vec<_>>()
         });
@@ -2880,13 +2873,10 @@ fn edge_ramp_restore_violations(factory: Box<dyn NativeEffectFactory>) -> Vec<St
                 let spans: Vec<PreparedAutomationSpan> = channels
                     .iter()
                     .map(|channel| PreparedAutomationSpan {
-                        kind: AutomationSpanKind::Point,
                         channel: *channel,
                         parameter_index: index as u32,
-                        start_sample: 0,
-                        end_sample: 0,
-                        start_value: edge,
-                        end_value: edge,
+                        sample: 0,
+                        value: edge,
                     })
                     .collect();
                 for sample in 0..u64::from(samples) {

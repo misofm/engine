@@ -332,6 +332,7 @@ dependencies = [
 name = "control-plane"
 version = "0.1.0"
 dependencies = [
+ "bench-support",
  "controls",
  "effect-contract",
  "engine",
@@ -345,6 +346,7 @@ dependencies = [
 name = "controls"
 version = "0.1.0"
 dependencies = [
+ "automation",
  "bench-support",
  "builtins",
  "effect-compiler",

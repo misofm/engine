@@ -37,13 +37,13 @@
 #![allow(missing_docs)]
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, EffectDescriptor, EffectPrepareError, EffectProcessBlock,
-    EffectQuality, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
-    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect,
-    PreparedEffectMetadata, PreparedNativeEffect, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    AutomationRate, EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality,
+    InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedEffect, PreparedEffectMetadata,
+    PreparedNativeEffect, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
 use effect_runtime::bank::check_block;
@@ -1514,24 +1514,21 @@ fn apply_automation(
         let accepted = match slot {
             Some(slot) => {
                 span_index < automation_capacity as usize
-                    && span.kind == AutomationSpanKind::Point
-                    && span.start_sample == first_sample
-                    && span.end_sample == first_sample
-                    && span.start_value.to_bits() == span.end_value.to_bits()
-                    && parameter_value_valid(&PARAMETER_SPECS[parameter_index], span.start_value)
+                    && span.sample == first_sample
+                    && parameter_value_valid(&PARAMETER_SPECS[parameter_index], span.value)
                     && last_slot.is_none_or(|previous| slot > previous)
                     && pending[slot].is_none()
                     // The delay time is the one parameter whose domain is not the whole story: it
                     // has to land on a legal integer tap as well.
                     && (parameter_index != 0
-                        || delay_samples(span.start_value, sample_rate, maximum_delay).is_some())
+                        || delay_samples(span.value, sample_rate, maximum_delay).is_some())
             }
             None => false,
         };
         match slot.filter(|_| accepted) {
             Some(slot) => {
                 last_slot = Some(slot);
-                pending[slot] = Some(normalize_zero(span.start_value));
+                pending[slot] = Some(normalize_zero(span.value));
             }
             None => report.invalid_spans = report.invalid_spans.saturating_add(1),
         }
@@ -1814,13 +1811,10 @@ mod tests {
         value: f32,
     ) -> PreparedAutomationSpan {
         PreparedAutomationSpan {
-            kind: AutomationSpanKind::Point,
             channel,
             parameter_index,
-            start_sample: first_sample,
-            end_sample: first_sample,
-            start_value: value,
-            end_value: value,
+            sample: first_sample,
+            value,
         }
     }
 
@@ -2694,19 +2688,9 @@ mod tests {
             point(9, ParameterChannel::Left, 0, 0.5),
             // Outside the domain.
             point(4, ParameterChannel::Both, 0, 2.0),
-            // A point whose end sample differs from its start sample.
-            PreparedAutomationSpan {
-                kind: AutomationSpanKind::Point,
-                channel: ParameterChannel::Both,
-                parameter_index: 4,
-                start_sample: 0,
-                end_sample: 1,
-                start_value: 0.5,
-                end_value: 0.5,
-            },
         ];
         let report = process_zeros(&mut effect, 4, 0, &spans);
-        assert_eq!(report.invalid_spans, 5);
+        assert_eq!(report.invalid_spans, 4);
         assert_eq!(effect.left.ramps[2].target.to_bits(), 0.5_f32.to_bits());
         assert_eq!(effect.left.ramps[0].current.to_bits(), 0.35_f32.to_bits());
         assert_eq!(effect.cross.target.to_bits(), 0.0_f32.to_bits());

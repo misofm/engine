@@ -98,3 +98,83 @@ measured with the real IDs of the armed taps, not with the longest IDs the gramm
 
 - #1676 and #1677 (the cap, the stable key; batch 13b).
 - #1584 D6a (one event per commit).
+
+## Decision record: #1685 (batch 14a)
+
+**What shipped.**
+
+- **D1.** `SessionState` keeps `observation_armed_bytes` (the armed keys' encoded bytes, pushes not
+  yet folded included) and an `ObservationWire` (the frame with no key, a key's fixed part, the
+  control frame limit). `admit_and_push_observation_batch` judges the batch by
+  `base + armed bytes after every removal and arm <= frame`; the arm that crosses is
+  `ObservationRefusal::Limit(ObservationLimit { index, event_bytes, frame_bytes })` (bytes, not a
+  count), with nothing queued and no state moved. The naming and room checks are unchanged.
+  `observation_cap()` is removed; `observation_ended_bytes()` and `observation_frame_bytes()`
+  replace it.
+- **D2.** A key's size is `key_fixed + pad8(strip_len) + pad8(effect_len)` (the BTLV value
+  alignment). `observation_wire` measures `base` and `key_fixed` with the real codec once per
+  session compile and checks the model against the codec for padded and longest IDs; a mismatch
+  fails the compile. Each observation slot stores its key's bytes as a `u16` (in the slot's
+  padding: `ObservationSlot` stays 16 bytes), set when the plan's slots are built, so admission
+  reads a slot field and allocates nothing.
+- **D3.** Unchanged: one event per commit, room reserved at commit; a rebuild recomputes the armed
+  bytes from the kept bindings.
+- **D4.** The ended-event heap and the binding rows charge, as ceilings, the peak over the key count
+  `n <= min(reserve slots, room / shortest key)` of `n` struct sizes plus the ID text, where the
+  text is `min(n * 254, room - n * key_fixed)` (an ID's text is at most its padded encoded length,
+  and every admitted key fits one frame together). The table no longer charges text per spare
+  capacity entry.
+
+**Measured** (`observation_reserve_bytes(frame, slots)` as `(active, token)`, before -> after):
+1 KiB, >= 16 slots: (7306, 930) -> (6630, 930). 4 KiB, 1 slot: (4174, 310) -> (2396, 310); 4 KiB,
+>= 51 slots: (26616, 3720) -> (27880, 3928). 16 KiB, 51 slots: (113118, 15810) -> (100164, 15810);
+16 KiB, 64 slots: (113118, 15810) -> (101792, 15904); 16 KiB, 1000 slots: (113118, 15810) ->
+(112992, 15904). The 4 KiB and 16 KiB tokens rise by 208 and 94 bytes because exact-byte admission
+lets 13 keys of 120-byte IDs in at 4 KiB where the cap allowed 12 longest keys; that is the measured
+rise (#1685 exact-byte admission). No retained byte row was pinned to these values: the capi
+allocator oracle reads `observation_reserve_bytes`, the browser identity fixture has no observation
+capacity (its rows are unchanged and within budget), and `retained_ceilings.rs` passed. No re-pin
+was needed.
+
+**Departure (gate 1, 4 KiB).** A key takes at least 80 encoded bytes (nested TLV 8, message header
+8, strip 16, section 16, effect 16, tap 16), so a 4 KiB frame holds about 50 short keys and 64
+cannot fit one event at 4 KiB by any exact count. D1 is frozen, so gate 1 is met at the browser's
+16 KiB on both the browser and the core; at 4 KiB the core test proves the exact edge for the
+64-track session (the arm that crosses is refused at its index with the codec's bytes, and exactly
+the taps that fit are admitted). A C ABI host that wants 64 insert meters configures a frame of at
+least about 5.2 KiB. The C ABI has no observe edit yet (#1584), so the C ABI side is the core
+admission through `SessionState`.
+
+**Outside the authorized paths (mechanical).** `crates/control-plane/Cargo.toml` (+ `Cargo.lock`):
+`bench-support` as a dev dependency, for gate 3's thread counters (allowed for `crates/` by
+`check-bench-policy.sh`). `hosts/host-web/src/lib.rs`: the `debug_assert` that called
+`observation_cap()` now compares `observation_ended_bytes()` with `observation_frame_bytes()`.
+
+**Gates.**
+
+1. Large session: `every_insert_of_a_sixty_four_track_session_subscribes_at_the_browser_frame`
+   (core, 16 KiB and 4 KiB), `tests::every_insert_of_a_sixty_four_track_session_subscribes`
+   (browser, 16 KiB, one submission of 64 records): pass.
+2. Edge: `a_subscription_past_the_frame_is_refused_and_the_removal_of_all_still_commits` (core,
+   1 KiB, longest IDs, `k` from the codec), `the_ended_bytes_are_the_encoded_event_of_the_armed_keys`
+   (IDs on each side of the alignment), browser
+   `tests::a_subscription_past_the_frame_is_refused_and_an_unsubscribe_makes_room`: pass.
+3. Realtime: `admission_allocates_nothing` (`bench_support::alloc` thread counters after a warm-up;
+   arms, a `Limit` refusal and disarms): 0 allocations.
+4. `cargo test --locked -p control-plane --features test-support`, `-p host-web --all-features`,
+   `-p host-core --all-features`, `-p capi`: pass. `scripts/check-web-audioworklet.sh`,
+   `scripts/check-browser-expected-resources.py`, `scripts/check-sdk-headless.sh` (559 evals),
+   `scripts/check-sdk-generated.sh`, `check-command-reason-vocabulary.py`, `realtime-policy`,
+   clippy `-D warnings`, `fmt --check`: pass.
+
+**Correction (batch 14a).** The departure above says a 64-tap C ABI frame is "about 5.2 KiB". The
+measured figure is 5,184 bytes (about 5.06 KiB) for strip and effect IDs of 8 bytes or less, and
+6,208 bytes with 16-byte IDs. The comment on `maximum_control_frame_bytes` in
+`crates/capi/include/miso_engine_v1.h` gives the rule: 64 bytes plus, per armed tap, 64 bytes plus
+each ID padded to a multiple of 8.
+
+**Review fold (batch 14a).**
+
+- **The binding-table reserve charges two peaks.** It charges the capacity peak and the text peak
+  separately. The `Vec` keeps its high-water capacity, while the text belongs to a later armed set,
+  so the two peaks do not come from one armed set.

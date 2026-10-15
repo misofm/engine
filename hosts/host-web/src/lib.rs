@@ -864,7 +864,7 @@ pub const COMMAND_REASON_DOMAIN: u32 = 6;
 /// exists, and this session has no post-preparation write path for it.
 pub const COMMAND_REASON_UNSUPPORTED_KIND: u32 = 7;
 /// A bounded control queue had no room for the submission; nothing was admitted. Retryable: the
-/// queue drains at the next render. Never the answer to the cap on armed taps, which is
+/// queue drains at the next render. Never the answer to a full observation event, which is
 /// [`COMMAND_REASON_OBSERVATION_LIMIT`].
 pub const COMMAND_REASON_BACKPRESSURE: u32 = 8;
 /// The host is not `STATE_READY`.
@@ -885,14 +885,15 @@ pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
 // Reasons 12-14 (`notSoloable`, `unknownRoute`, `unknownVca`) belonged to the value kinds #1565A
 // deleted. They are retired and never reallocated, so the vocabulary is dense from 0 except for
 // them, and the next reason is 15.
-/// The subscription would leave more taps armed than one `OBSERVATION_ENDED` event can name in one
-/// control frame (#1676), so the engine could not tell the app honestly when a later edit ends
-/// them all. The record named is the arm that crossed the cap, after every unsubscribe of the same
-/// submission is counted; nothing was admitted.
+/// The subscription would leave armed taps whose one `OBSERVATION_ENDED` event, every key with its
+/// real IDs, does not fit one control frame (#1676, #1685): the frame is full, so the engine could
+/// not tell the app honestly when a later edit ends them all. The record named is the arm that
+/// made the event outgrow the frame, after every unsubscribe of the same submission is counted;
+/// nothing was admitted.
 ///
 /// Not retryable as sent, and deliberately **not** `BACKPRESSURE`: no render makes room. The
-/// submission is admitted only after the app unsubscribes another tap. The cap is the control
-/// plane's (`observation_cap`, 51 taps at the browser's 16 KiB frame), so the result is
+/// submission is admitted only after the app unsubscribes another tap. The admission is the control
+/// plane's, by the event's exact encoded bytes against the browser's 16 KiB frame, so the result is
 /// `RESULT_UNSUPPORTED`, as for [`COMMAND_REASON_OBSERVATION_UNBOUND`].
 pub const COMMAND_REASON_OBSERVATION_LIMIT: u32 = 15;
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
@@ -1100,6 +1101,12 @@ pub struct WebBootOptions {
     ///
     /// Boot v1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
     /// Plus one because zero has to keep meaning "unset" in a word every V1 writer already zeroes.
+    ///
+    /// Two rules stand side by side until a successor retires this word (#1683). The word is
+    /// refused at boot (`web.options.live_controls`) unless `live_control_observation_taps` is
+    /// nonzero. The core's `master` monitor row, written by `SET_CONTROL`, is a designation valid
+    /// on every host with or without observation taps (the C ABI has none); without a tap on the
+    /// strip, `masterGrDb` is `null`. The word seeds that row at boot by the strip's ID.
     pub live_control_master_track_plus_one: u64,
 }
 
@@ -1642,8 +1649,40 @@ impl ReadyOwnership {
         }
         if result.is_ok() {
             self.stamp_structure_epoch();
+            self.sync_master();
         }
         result
+    }
+
+    /// Point the newest plan's tables at the master strip the core designates now (#1683): each
+    /// replacement's that waits for its adoption, else the rendering plan's, each by
+    /// the strip's ID in that plan's own strip order, so a strip added or removed before the
+    /// master never moves the reading to another strip. A plan that does not hold the strip has no
+    /// master. The designation moves no render value; the next poll folds the master reading from
+    /// it. Control side only, as [`Self::stamp_structure_epoch`].
+    fn sync_master(&mut self) {
+        let master = self.control.master_strip();
+        // While a replacement waits for its adoption, the designation rides it: the rendering
+        // plan keeps its own until the block that adopts the replacement swaps the tables (#1683
+        // review fold), so a rebuild that removes the master never clears the reading of the
+        // plan still rendering.
+        let waiting = self.pending_shapes.iter().any(|entry| !entry.adopted);
+        let rendering = (!waiting).then_some(&mut *self.shape);
+        let shapes = rendering.into_iter().chain(
+            self.pending_shapes
+                .iter_mut()
+                .filter(|entry| !entry.adopted)
+                .map(|entry| &mut *entry.shape),
+        );
+        for shape in shapes {
+            let index = master.and_then(|id| {
+                strip_index(&shape.tracks, &shape.submixes, id.as_str().as_bytes())
+                    .and_then(|index| u32::try_from(index).ok())
+            });
+            shape.master_track = index;
+            shape.meter_header.master_track_plus_one =
+                index.map_or(0, |track| track.saturating_add(1));
+        }
     }
 
     /// Stamp the structure epoch the control list holds now on the newest committed plan's meter
@@ -4193,7 +4232,7 @@ fn admit_commands(
             // `ObservationUnbound` is "this preparation cannot deliver it", which is exactly what
             // `RESULT_UNSUPPORTED` means; `UnknownTap` is a bad address, like every other unknown.
             // `ObservationLimit` is the same answer for the configuration: this session's control
-            // frame cannot end one more tap honestly, and only an unsubscribe changes that.
+            // frame cannot carry the end of one more tap, and only an unsubscribe changes that.
             COMMAND_REASON_UNSUPPORTED_KIND
             | COMMAND_REASON_OBSERVATION_UNBOUND
             | COMMAND_REASON_OBSERVATION_LIMIT => RESULT_UNSUPPORTED,
@@ -4284,11 +4323,12 @@ fn admit_commands(
             ));
         }
     }
-    // The cap, the room and the push are one core call (#1676): the control plane judges the whole
-    // submission by the taps it leaves armed, then by the room of every effect's observation queue,
-    // and only then queues it. A subscription past what one `OBSERVATION_ENDED` event can name in a
-    // control frame is refused there, before any record is queued and so before any is
-    // acknowledged, and the adapter reports it as `observationLimit` at the record that crossed it.
+    // The frame, the room and the push are one core call (#1676, #1685): the control plane judges
+    // the whole submission by the encoded bytes of the one `OBSERVATION_ENDED` event the taps it
+    // leaves armed would need, then by the room of every effect's observation queue, and only then
+    // queues it. A subscription whose event would outgrow the control frame is refused there,
+    // before any record is queued and so before any is acknowledged, and the adapter reports it as
+    // `observationLimit` at the record that crossed it.
     // A change's index in the batch is its staged index, and the staged index names the record's
     // wire index.
     let staged = &ready.command_decoded[..staged_count];
@@ -4324,10 +4364,10 @@ fn admit_commands(
         return Err(refuse(reason, wire));
     }
     debug_assert!(
-        ready.control.observation_armed() <= ready.control.observation_cap(),
-        "a browser admission left {} taps armed past the cap {}",
-        ready.control.observation_armed(),
-        ready.control.observation_cap()
+        ready.control.observation_ended_bytes() <= ready.control.observation_frame_bytes(),
+        "a browser admission left an ended event of {} bytes past the frame of {}",
+        ready.control.observation_ended_bytes(),
+        ready.control.observation_frame_bytes()
     );
     for entry in 0..staged_count {
         let staged = ready.command_decoded[entry];
@@ -5542,10 +5582,15 @@ impl WebRuntimePreparer {
         superseded: &host_core::LiveValuesSuperseded,
         boot: bool,
     ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
-        let live_controls =
-            live_control_request(self.options, compiled.quantum().0).ok_or_else(|| {
+        let mut live_controls = live_control_request(self.options, compiled.quantum().0)
+            .ok_or_else(|| {
                 PrepareDiagnostics::fixed(PrepareRejection::Session, "web.live_controls.config")
             })?;
+        // #1683: the boot word designates the first plan's master only; the core's overlay, which
+        // it seeds, designates every successor's.
+        if successor.is_some() {
+            live_controls.master_track = None;
+        }
         // Observation taps ride the effect lanes (#1254 D2): an app that asked for taps gets the
         // effect lanes whatever the session's live rows chose, as before the control plane chose
         // the lanes, so a session with no effect to observe still boots.

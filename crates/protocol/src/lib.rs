@@ -42,7 +42,7 @@ pub mod control_core {
     pub use crate::control_rows::{builtins_edits, fader_edits, matrix_or_pan_edits, row_address};
     pub use controls::{
         BYPASS_CONTROL, ControlAddress, ControlError, LINK_MODE_CONTROL, Lane, MonitorOverlay,
-        MonitorWrite, Owner, Section,
+        MonitorRow, MonitorWrite, Owner, Section,
     };
 }
 pub use model::{

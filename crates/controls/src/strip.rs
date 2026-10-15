@@ -12,7 +12,7 @@ use crate::descriptor::{
     AutomationExclusion, AutomationRule, BASE, Choice, ControlDescriptor, Lanes, Motion,
 };
 use crate::effect_rows::{self, Instance};
-use crate::effective::EffectiveStrip;
+use crate::effective::{EffectiveStrip, MonitorOverlay, MonitorRow};
 use crate::error::ControlError;
 use crate::lane::Side;
 use crate::lane::{is_on, toggle};
@@ -26,6 +26,8 @@ pub(crate) const MATRIX_MODE: u32 = 1;
 pub(crate) const SOLO: u32 = 2;
 /// The own-row ID of `pan_window_samples`.
 pub(crate) const PAN_WINDOW_SAMPLES: u32 = 3;
+/// The own-row ID of `master` (#1683).
+pub(crate) const MASTER: u32 = 4;
 /// The own-row ID of `effective_fader_db`.
 pub(crate) const EFFECTIVE_FADER_DB: u32 = 64;
 /// The own-row ID of `effective_mute`.
@@ -63,7 +65,7 @@ pub(crate) enum StripValue {
         read: fn(&EffectiveStrip, Side) -> f32,
     },
     /// Held by the host, not the model: the overlay writes it and the row reads the overlay.
-    Monitor,
+    Monitor(MonitorRow),
 }
 
 /// One row of a strip's own table.
@@ -76,7 +78,7 @@ pub(crate) struct StripRow {
 }
 
 /// A strip's own rows, in listing order. Never reuse an ID.
-pub(crate) static ROWS: [StripRow; 5] = [
+pub(crate) static ROWS: [StripRow; 6] = [
     StripRow {
         id: MATRIX_MODE,
         on_submix: true,
@@ -114,7 +116,7 @@ pub(crate) static ROWS: [StripRow; 5] = [
             family: Family::StripLevel,
             ..BASE
         },
-        value: StripValue::Monitor,
+        value: StripValue::Monitor(MonitorRow::Solo),
     },
     StripRow {
         id: PAN_WINDOW_SAMPLES,
@@ -135,6 +137,30 @@ pub(crate) static ROWS: [StripRow; 5] = [
                 Ok(())
             },
         },
+    },
+    // #1683: the designated master strip, host-local like solo (a monitor row, never saved). On
+    // a submix too: a bus whose strip carries a limiter can be the master (issue #1208 D3). At
+    // most one strip is the master; designating one ends the other's designation. It moves no
+    // render value, so it has no ramp and no family that render reads.
+    //
+    // The row is a core designation, valid on every host and with no observation tap: the C ABI
+    // has no taps, and a browser booted with no observation taps takes the write too. Without a
+    // tap on the strip the master's reading (`masterGrDb`) is absent, never zero. The browser's
+    // boot word (`WebBootOptions::live_control_master_track_plus_one`) keeps its stricter boot
+    // rule, refused unless observation taps are configured, until its successor retires it.
+    StripRow {
+        id: MASTER,
+        on_submix: true,
+        descriptor: ControlDescriptor {
+            name: "master",
+            display_name: "Master",
+            kind: ControlKind::Toggle,
+            taper: Taper::Stepped,
+            lattice: ParameterLattice::indices(),
+            scope: ControlScope::Monitor,
+            ..BASE
+        },
+        value: StripValue::Monitor(MonitorRow::Master),
     },
     StripRow {
         id: EFFECTIVE_FADER_DB,
@@ -265,11 +291,11 @@ pub(crate) fn push_rows(
     console: &Console,
     strip: &StripRef<'_>,
     effective: &EffectiveStrip,
-    soloed: bool,
+    overlay: &MonitorOverlay,
     sample_rate: u32,
 ) {
     let owner = Owner::Strip(strip.id.clone());
-    push_own_rows(out, strip, effective, soloed, false);
+    push_own_rows(out, strip, effective, overlay, false);
     for row in builtin_rows::rows() {
         let descriptor = builtin_rows::descriptor(row, sample_rate, strip.matrix_or_pan);
         push_control(
@@ -305,7 +331,7 @@ fn push_own_rows(
     out: &mut Vec<ControlRow>,
     strip: &StripRef<'_>,
     effective: &EffectiveStrip,
-    soloed: bool,
+    overlay: &MonitorOverlay,
     derived_only: bool,
 ) {
     let owner = Owner::Strip(strip.id.clone());
@@ -323,7 +349,7 @@ fn push_own_rows(
             |side| match &row.value {
                 StripValue::Stored { read, .. } => read(strip, side),
                 StripValue::Derived { read } => read(effective, side),
-                StripValue::Monitor => toggle(soloed),
+                StripValue::Monitor(monitor) => toggle(monitor_value(overlay, *monitor, strip.id)),
             },
         );
     }
@@ -335,7 +361,15 @@ pub(crate) fn push_derived_rows(
     strip: &StripRef<'_>,
     effective: &EffectiveStrip,
 ) {
-    push_own_rows(out, strip, effective, false, true);
+    push_own_rows(out, strip, effective, &MonitorOverlay::new(), true);
+}
+
+/// Whether the monitor row `row` of strip `id` is on under `overlay`.
+pub(crate) fn monitor_value(overlay: &MonitorOverlay, row: MonitorRow, id: &StableId) -> bool {
+    match row {
+        MonitorRow::Solo => overlay.is_soloed(id),
+        MonitorRow::Master => overlay.is_master(id),
+    }
 }
 
 /// Find one row of strip `id` (a track or a submix) by section and control, as [`push_rows`] would
@@ -367,9 +401,9 @@ pub(crate) fn resolve(
                     descriptor: row.descriptor,
                     source: Source::StripDerived(*read),
                 },
-                StripValue::Monitor => Resolved {
+                StripValue::Monitor(monitor) => Resolved {
                     descriptor: row.descriptor,
-                    source: Source::Monitor,
+                    source: Source::Monitor(*monitor),
                 },
             })
         }
@@ -443,7 +477,7 @@ pub(crate) fn write_own(
             ..
         }) => Err(ControlError::ReadOnly),
         Some(StripRow {
-            value: StripValue::Monitor,
+            value: StripValue::Monitor(_),
             ..
         }) => Err(ControlError::Monitor),
         None => Err(ControlError::AddressUnknown),
