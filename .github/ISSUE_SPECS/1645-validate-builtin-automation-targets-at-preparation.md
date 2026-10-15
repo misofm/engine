@@ -272,3 +272,49 @@ Checked against `12d4a4f9d`.
   `crates/control-plane/src/control.rs`).
 - **Dependencies.** #1626, #1637, #1566 (in place of #1335's route). Obsolete draft 03a is not filed; this spec
   carries its shape rule. Batch R1.
+
+## Decision record: #1645 (batch 14a)
+
+- **Shipped, per the amendment.** `controls::automation_diagnostics` (`crates/controls/src/automation.rs`)
+  gains the shape rule and the curve form of the input filter order rule; `ControlError` gains
+  `AutomationShape` (`control.automation.shape`) and `AutomationOrder` (`control.automation.order`).
+  `controls` gains a normal dependency on `automation` and calls `automation::value_at` for every
+  evaluated value. No new call site: preparation, the classifier's step 2 and `session-validator`
+  stage `prepare-effects` already call the row rule, so browser and C ABI refuse alike.
+- **Shape rule, every row.** A segment is reported once at `.segments[<k>]`: `control.domain`
+  first, else `control.automation.shape`. Toggle or enumeration row: `step` only. `exponential`:
+  continuous, `minimum > 0`, unit not dB. A row with a `disabled_value`: a `linear` or
+  `exponential` segment has neither value equal to it.
+- **Order rule.** As D2, per strip and lane (a `both` entry drives both lanes). Departures, each
+  for the code's truth: (1) the value at a sub-interval's right end is the left limit, evaluated on
+  the defining segment alone (`value_at(&[segment], b)`), because `value_at` on the whole table at
+  a segment's `end` returns the next segment's `start_value` when one begins there; (2) the rule
+  skips a lane whose HPF or LPF entry has its own fault (target, domain or shape), so it never reads
+  a curve that ramps through "off", and a fault is reported once; (3) a `both` entry failing both
+  lanes at one segment is reported once (identical code and path). Stage index: the row rule runs
+  at stage index 4 (`prepare-effects`), not 3 as gate 3 says.
+- **Gates.**
+  - 1 and 2: `crates/controls/tests/automation.rs`
+    `builtin_rows_refuse_a_segment_by_unit_domain_and_shape`,
+    `input_filter_curves_keep_the_hpf_below_the_lpf` (adds one case: the LPF ride against an HPF
+    that stays on, refused in the gap's hold at the LPF entry's segment 0). PASS.
+  - 3: `tools/session-validator/tests/validate.rs` two `MUTATIONS` rows (fader ride in `linear`
+    units -> `control.domain`, polarity flip as `linear` -> `control.automation.shape`, both stage
+    index 4). PASS; `fixtures_distinguish_schema_examples_from_launch_effects` and `skill` PASS.
+  - 7: `crates/host-core/tests/live_delta.rs` `an_automation_the_builtin_rows_refuse_needs_a_rebuild`;
+    `crates/capi/src/runtime/live_tests.rs`
+    `a_builtin_automation_the_rows_refuse_is_refused_before_any_ack` (shape and order refusals on a
+    playing engine: `RESULT_COMPILE_REJECTED`, preparation's diagnostic, no revision, candidate or
+    event, next three blocks bit-identical). PASS.
+  - 6: `cargo test` for controls, session-validator, host-core (`test-support,control-provider`;
+    the `live_delta` target is `cfg(feature = "control-provider")`), protocol, builtins-compiler,
+    capi: PASS. `check-workspace-policy.sh`, `check-builtins-policy.sh`, `check-cross-targets.sh`
+    (no new `memset_pattern16`; the #1018 expected failures unchanged), `realtime-policy`, clippy on
+    the touched crates with `-D warnings`, `cargo fmt --check`: PASS.
+  - 5: no render code changed; the `audit capi` digest comparison is left to the coordinator's PR
+    evidence.
+- **Docs.** `docs/SESSION_SCHEMA_V1.md` names both codes, the shape rule and the curve order rule;
+  the `author-session` skill's automation refusal table gains three rows at `prepare-effects`.
+- **Not done here (successor, #1660):** a static HPF/LPF edit that crosses an automated curve
+  without changing the automation still classifies live, because the classifier's step 2 runs the
+  row rule only when the automation or activity changes.

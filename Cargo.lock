@@ -346,6 +346,7 @@ dependencies = [
 name = "controls"
 version = "0.1.0"
 dependencies = [
+ "automation",
  "bench-support",
  "builtins",
  "effect-compiler",

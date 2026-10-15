@@ -4514,6 +4514,122 @@ fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
     }
 }
 
+// Issue #1645: the builtin rows' shape and filter-order rules on the C ABI's live path.
+
+/// An `UpsertAutomation` on `eq_session`'s `eq0` builtin row `control` (both lanes), one segment
+/// over the first 960 samples.
+fn builtin_automation_edit(
+    control: u32,
+    shape: session::AutomationShape,
+    unit: session::ParameterUnit,
+    (start_value, end_value): (f32, f32),
+) -> SessionEdit {
+    let id = |text: &str| StableId::parse(text).expect("stable ID");
+    SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("builtin-ride"),
+            target: session::ControlAddress {
+                owner: session::Owner::Strip(id("eq0")),
+                section: session::Section::Builtins,
+                control,
+                lane: session::ParameterChannel::Both,
+            },
+            segments: vec![session::AutomationSegment {
+                shape,
+                start_sample: 0,
+                end_sample: 960,
+                start_value,
+                end_value,
+                unit,
+            }],
+        },
+    }
+}
+
+/// #1645 gate 7. On a playing engine, a transaction that only adds a builtin entry the row rule
+/// refuses -- a mute that ramps (`control.automation.shape`), an HPF ride from 200 Hz that reaches
+/// the static 1 kHz LPF (`control.automation.order`) -- is refused
+/// with the compile rejection a rebuild's preparation gives: the revision, the committed model and
+/// the reliable lane do not move, no candidate is prepared, and the following blocks are
+/// bit-identical to an engine that never received it.
+///
+/// Red if the classifier's row-rule check misses the shape or the order rule: the edit commits
+/// live, acked, and its next rebuild refuses it.
+#[test]
+fn a_builtin_automation_the_rows_refuse_is_refused_before_any_ack() {
+    use session::{AutomationShape, ParameterUnit};
+    let document = with_model(&eq_session(48_000), |model| {
+        let builtins = &mut model.tracks[0].builtins;
+        for lane in [&mut builtins.left, &mut builtins.right] {
+            lane.hpf_hz = 0.0;
+            lane.lpf_hz = 1_000.0;
+        }
+    });
+    let mut rig = Rig::new(&document);
+    let mut untouched = Rig::new(&document);
+    for _ in 0..window(rig.latency(), 0, rig.quantum) {
+        assert_eq!(bits(&rig.step()), bits(&untouched.step()), "warm-up");
+    }
+    let refused = [
+        (
+            builtin_automation_edit(
+                6,
+                AutomationShape::Linear,
+                ParameterUnit::Linear,
+                (0.0, 1.0),
+            ),
+            "control.automation.shape",
+        ),
+        (
+            builtin_automation_edit(
+                3,
+                AutomationShape::Linear,
+                ParameterUnit::Hz,
+                (200.0, 1_000.0),
+            ),
+            "control.automation.order",
+        ),
+    ];
+    for (edit, code) in refused {
+        let before = (refusal_state(&rig), rig.summary());
+        assert_eq!(
+            rig.apply(core::slice::from_ref(&edit)),
+            crate::RESULT_COMPILE_REJECTED,
+            "{code}"
+        );
+        let mut rejected = parse_session_json(&document).expect("model");
+        protocol::apply_session_edit(&mut rejected, &edit).expect("the edit applies to the model");
+        let rejected = session::canonical_session_json(&rejected).expect("canonical rejected");
+        let Err(failure) = compile_children(&rejected, limits()) else {
+            panic!("{code}: the entry does not prepare")
+        };
+        assert_eq!(
+            rig.last_error(),
+            failure.diagnostics,
+            "{code}: the refusal is preparation's diagnostic"
+        );
+        assert!(
+            String::from_utf8_lossy(&failure.diagnostics).contains(code),
+            "{}",
+            String::from_utf8_lossy(&failure.diagnostics)
+        );
+        assert_eq!(
+            (refusal_state(&rig), rig.summary()),
+            before,
+            "{code}: no revision, no candidate, no event"
+        );
+        for _ in 0..3 {
+            let block = rig.block;
+            let expected = untouched.step();
+            assert!(
+                expected.iter().any(|sample| *sample != 0.0),
+                "block {block}"
+            );
+            assert_eq!(bits(&rig.step()), bits(&expected), "{code}: block {block}");
+        }
+    }
+}
+
 // Issue #1552: the control list on the C ABI.
 
 /// Two tracks (each with an insert and the session's console slots), a submix that a send feeds, a

@@ -24,6 +24,16 @@ pub enum ControlError {
     /// rebuild-only, derived or monitor row, or a setting). Raised by
     /// [`automation_diagnostics`](crate::automation_diagnostics) only; a write never meets it.
     AutomationTarget,
+    /// `control.automation.shape`: a stored automation segment whose shape its row does not take
+    /// (#1645): a toggle or enumeration row takes only `step`; `exponential` needs a continuous row
+    /// whose minimum is strictly positive and whose unit is not dB; a `linear` or `exponential`
+    /// segment never reaches a row's disabled value. Raised by
+    /// [`automation_diagnostics`](crate::automation_diagnostics) only.
+    AutomationShape,
+    /// `control.automation.order`: a strip lane's HPF and LPF curves (stored automation or static
+    /// value) can bring the HPF to or above an enabled LPF (#1645 D2). Raised by
+    /// [`automation_diagnostics`](crate::automation_diagnostics) only.
+    AutomationOrder,
     /// `control.ramp.fixed`: an explicit ramp length on a row whose ramp is fixed (an
     /// acknowledgement must not hide an ignored field).
     RampFixed,
@@ -54,6 +64,8 @@ impl ControlError {
             Self::Lane => "control.lane",
             Self::Domain => "control.domain",
             Self::AutomationTarget => "control.automation.target",
+            Self::AutomationShape => "control.automation.shape",
+            Self::AutomationOrder => "control.automation.order",
             Self::RampFixed => "control.ramp.fixed",
             Self::Monitor => "control.monitor",
             Self::RampConflict => "control.ramp.conflict",

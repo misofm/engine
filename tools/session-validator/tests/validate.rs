@@ -299,6 +299,23 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
         4,
         "control.automation.target",
     ),
+    // The row also judges each segment (#1566, #1645): the fader ride written in `linear` units is
+    // `control.domain`, and the polarity flip as a `linear` ramp is `control.automation.shape` (a
+    // toggle row takes only `step`).
+    (
+        "builtins-automation.json",
+        "\"end_value\": -3.0,\n          \"unit\": \"db\"",
+        "\"end_value\": -3.0,\n          \"unit\": \"linear\"",
+        4,
+        "control.domain",
+    ),
+    (
+        "builtins-automation.json",
+        "\"shape\": \"step\",\n          \"start_sample\": \"480\"",
+        "\"shape\": \"linear\",\n          \"start_sample\": \"480\"",
+        4,
+        "control.automation.shape",
+    ),
     // Stored automation gives each lane one curve (#1626), checked structurally at stage 1: a
     // `left` trim ride added to the `both` fader's control, and a step then a segment that starts
     // away from the held value 40 samples later.
