@@ -5,10 +5,10 @@
 //! rebuilds the plan on purpose.
 
 use super::tests::{
-    SESSION, add_muted_track, automation_status, automation_target, boxed_c_children_with_limits,
-    command_bytes, command_bytes_at_revision, command_c, control_list_all_c, control_list_c,
-    control_state_all_c, control_state_c, counter_telemetry_for, event_c, generated_parity_session,
-    limits, lossy_counter_snapshots, submit_c,
+    SESSION, add_muted_track, boxed_c_children_with_limits, command_bytes,
+    command_bytes_at_revision, command_c, control_list_all_c, control_list_c, control_state_all_c,
+    control_state_c, counter_telemetry_for, event_c, generated_parity_session, limits,
+    lossy_counter_snapshots, submit_c,
 };
 use super::*;
 use protocol::{ExpectedRevision, SessionEdit, SessionRevision};
@@ -2305,21 +2305,17 @@ fn reliable_event_kinds(rig: &Rig) -> Vec<&'static str> {
             .expect("reliable event");
         kinds.push(match event.payload {
             protocol::DecodedEventPayload::SessionCommitted(_) => "SESSION_COMMITTED",
-            protocol::DecodedEventPayload::AutomationCanceled(_) => "AUTOMATION_CANCELED",
             _ => "other",
         });
     }
 }
 
 /// #1053 D10: a live edit emits exactly the events a rebuild's commit does -- one
-/// `SESSION_COMMITTED`. The C ABI serves no automation (#1315), so a refused `AUTOMATION_ENQUEUE`
-/// leaves no batch for the next commit to cancel and the next live edit raises no
-/// `AUTOMATION_CANCELED` either; the cancel event itself is the protocol crate's, tested there
-/// with the command enabled.
+/// `SESSION_COMMITTED` and nothing else: `AUTOMATION_CANCELED` is retired with `AUTOMATION_ENQUEUE`
+/// (#1627, #1628), so no commit cancels anything.
 ///
 /// Test value: red if a live edit commits through a path that skips the protocol commit's events,
-/// for example a live-only commit that emits no `SESSION_COMMITTED`, or if a refused automation
-/// batch is queued anyway and the next commit cancels it.
+/// for example a live-only commit that emits no `SESSION_COMMITTED`.
 #[test]
 fn a_live_edit_emits_the_commit_events_of_a_rebuild() {
     let mut rig = Rig::new(&long_session(10, 48_000));
@@ -2329,22 +2325,6 @@ fn a_live_edit_emits_the_commit_events_of_a_rebuild() {
     assert_eq!(rig.summary().3, 0, "the edit is live");
     assert_eq!(reliable_event_kinds(&rig), ["SESSION_COMMITTED"]);
 
-    // Offer one automation batch at the committed revision: it is refused, so the next live edit
-    // has nothing to cancel.
-    let (entries, ..) = control_list_all_c(rig.session, &mut rig.request, 64);
-    let request = rig.next_request();
-    assert_eq!(
-        automation_status(
-            rig.session,
-            request,
-            rig.summary().0,
-            automation_target(&entries, 100.0),
-            100.0
-        )
-        .0,
-        protocol::StatusCode::Unavailable
-    );
-    assert_eq!(reliable_event_kinds(&rig), Vec::<&str>::new());
     let bytes = rig.transaction(&[left_db_edit("eq0", -2.0)]);
     assert_eq!(command_c(rig.session, &bytes).0, crate::RESULT_OK);
     assert_eq!(rig.summary().3, 0, "the edit is live");

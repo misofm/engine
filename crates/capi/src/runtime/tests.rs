@@ -86,10 +86,11 @@ fn pinned_hex(value: &str) -> Vec<u8> {
         .collect()
 }
 
-const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
-    // #1315 re-pin: the capabilities record lists no command `0x0006` and clears flag bit 5 (the
-    // list is 22 bytes, was 24; the flags 0x7fdf, was 0x7fff); event `0x8002` stays listed.
-    "4d49534f43544c00010000003000020001000000c801000001000000000000002a000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01160000000100020003000700080009000a000b000c000d000e0000001a000c010c000000018002801080208021803080000000001b00040108000000df7f000000000000",
+const ALL_COMMAND_RESPONSE_VECTORS: [&str; 10] = [
+    // #1627 re-pin: `AUTOMATION_ENQUEUE` is retired. The capabilities record drops fields 9, 12,
+    // 19 and 20 (23 fields, was 27; the length 0x188, was 0x1c8) and the flags are 0x7fdf as
+    // before; the earlier #1315 re-pin already listed no command `0x0006` and cleared bit 5.
+    "4d49534f43544c000100000030000200010000008801000001000000000000002a00000000000000170000000000000001000201020000000100000000000000020002010200000000000000000000000300020102000000010000000000000004000201020000000000000000000000050004010800000000100000000000000600030104000000000800000000000007000401080000000010000000000000080001010100000004000000000000000a0004010800000001000000000000000b0004010800000000100000000000000d0004010800000001000000000000000e0004010800000002000000000000000f0004010800000001000000000000001000040108000000100000000000000011000401080000000020000000000000120004010800000000100000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01160000000100020003000700080009000a000b000c000d000e0000001a000c010a000000018010802080218030800000000000001b00040108000000df7f000000000000",
     // #338 re-pin: canonical JSON snapshot bytes were 16,712 (0x4148), beginning with `{`.
     // #1093 re-pin: 13,729 (0x35a1) after the fixture moved to decision 12's console shape.
     // #1216 re-pin: 13,918 (0x365e), route field `mute` added, value false (21 bytes, 9 routes).
@@ -104,18 +105,17 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
     // #1093 re-pin: the first descriptor's rack is `console` (5), was `simd1` (1).
     "4d49534f43544c0001000000300002000c000000d000000003000000000000002a00000000000000050000000000000001000401080000002a0000000000000002000401080000000100000000000000030003010400000001000000000000000400080101000000000000000000000005000b01880000000500000000000000010003010400000001000000000000000200010101000000010000000000000003000b013800000003000000000000000100010101000000020000000000000002000900030000006571300000000000030001010100000006000000000000000400010001000000010000000000000005000900030000006571300000000000",
     "4d49534f43544c0001000000300002000d0000006800000004000000000000002a00000000000000070000000000000001000401080000002a00000000000000020004010800000001000000000000000300030104000000010000000000000004000801010000000000000000000000050002010200000000000000000000000600020102000000080000000000000007000a0100000000",
-    // #1315 re-pin: `AUTOMATION_ENQUEUE` is refused `UNAVAILABLE` (status 14, `protocol.failure`),
-    // was `INVALID_FIELD` with `automation.target.unsupported`: the C ABI serves no automation.
-    "4d49534f43544c00010000003000020006000e004800000005000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000",
-    "4d49534f43544c000100000030000200070000003000000006000000000000002a000000000000000300000000000000010001010100000001000000000000000200040108000000000000000000000003000401080000000000000000000000",
-    "4d49534f43544c000100000030000200080000003000000007000000000000002a000000000000000300000000000000010001010100000002000000000000000200040108000000000000000000000003000401080000000000000000000000",
-    "4d49534f43544c000100000030000200090000005000000008000000000000002a00000000000000060000000000000001000d01000000000200030104000000000000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
+    "4d49534f43544c000100000030000200070000003000000005000000000000002a000000000000000300000000000000010001010100000001000000000000000200040108000000000000000000000003000401080000000000000000000000",
+    "4d49534f43544c000100000030000200080000003000000006000000000000002a000000000000000300000000000000010001010100000002000000000000000200040108000000000000000000000003000401080000000000000000000000",
+    "4d49534f43544c000100000030000200090000005000000007000000000000002a00000000000000060000000000000001000d01000000000200030104000000000000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
     // #1312 re-pin: the counter snapshot gains `LIVE_VALUES_SUPERSEDED` (id 16), value 0, as a
     // third value (a 40-byte `CounterValue` message): the length 0x70 became 0xa0 and the
     // frame's TLV count 3 became 4.
-    "4d49534f43544c0001000000300002000a0000000001000009000000000000002a0000000000000006000000000000000100040108000000000000000000000002000b01280000000200000000000000010003010400000005000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000006000000000000000200040108000000000000000000000002000b0128000000020000000000000001000301040000000c000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000010000000000000000200040108000000000000000000000002000b012800000002000000000000000100030104000000110000000000000002000401080000000000000000000000",
-    "4d49534f43544c0001000000300002000b000000200000000a000000000000002a0000000000000002000000000000000100040108000000000000000000000002000801010000000100000000000000",
-    "4d49534f43544c00010000003000020003000000200000000b000000000000002b0000000000000002000000000000000100030104000000010000000000000002000101010000000300000000000000",
+    // #1629 re-pin: the served set loses `CANCELED_AUTOMATION` (id 12), whose 40-byte value
+    // message leaves: the length 0x100 became 0xd0 and the TLV count 6 became 5.
+    "4d49534f43544c0001000000300002000a000000d000000008000000000000002a0000000000000005000000000000000100040108000000000000000000000002000b01280000000200000000000000010003010400000005000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000006000000000000000200040108000000000000000000000002000b01280000000200000000000000010003010400000010000000000000000200040108000000000000000000000002000b012800000002000000000000000100030104000000110000000000000002000401080000000000000000000000",
+    "4d49534f43544c0001000000300002000b0000002000000009000000000000002a0000000000000002000000000000000100040108000000000000000000000002000801010000000100000000000000",
+    "4d49534f43544c00010000003000020003000000200000000a000000000000002b0000000000000002000000000000000100030104000000010000000000000002000101010000000300000000000000",
 ];
 
 /// A structural edit that renders identically, for a test that needs a plan rebuild (#1260 D3).
@@ -281,48 +281,37 @@ pub(super) fn command_c_capacity(
     (result, output.required_bytes, storage)
 }
 
-/// The status and diagnostic codes of one `AUTOMATION_ENQUEUE` record to `handle` at `revision`
-/// with `value` at both ends: the control row the provider holds for the handle decides it
-/// (`NOT_FOUND` for a handle the catalog does not hold).
-pub(super) fn automation_status(
-    session: *mut crate::Session,
-    request_id: u64,
-    revision: u64,
-    handle: u32,
-    value: f32,
-) -> (StatusCode, Vec<String>) {
-    let record = protocol::AutomationRecord {
-        kind: protocol::AutomationKind::Point,
-        handle: protocol::ParameterHandle(handle),
-        start: protocol::SampleTime(1 << 20),
-        end: protocol::SampleTime(1 << 20),
-        start_value: value,
-        end_value: value,
-    };
-    let request = command_bytes_at_revision(
-        request_id,
-        ExpectedRevision::Exact(SessionRevision(revision)),
-        protocol::CommandPayload::AutomationEnqueue(protocol::AutomationEnqueue {
-            records: core::slice::from_ref(&record),
-        }),
-    );
-    let (result, response) = command_c(session, &request);
-    assert_eq!(result, crate::RESULT_OK);
-    let mut fields = [0_u16; 64];
-    match ProtocolCodec::default()
-        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
-        .expect("automation response")
-    {
-        protocol::DecodedTypedResponseFrame::Success { .. } => (StatusCode::Ok, Vec::new()),
-        protocol::DecodedTypedResponseFrame::NonOk { header, payload } => (
-            header.status,
-            payload
-                .diagnostics
-                .into_iter()
-                .map(|diagnostic| diagnostic.code)
-                .collect(),
-        ),
+/// A complete command frame under the retired message ID `0x0006` (`AUTOMATION_ENQUEUE`, #1627)
+/// at `revision`, carrying the payload the command had: `count` (field 1), `record_bytes`
+/// (field 2) and `records` (field 3, one valid 32-byte point record).
+pub(super) fn retired_automation_frame(request_id: u64, revision: u64) -> Vec<u8> {
+    let mut bytes = command_bytes(request_id, protocol::CommandPayload::CapabilitiesGet);
+    assert_eq!(bytes.len(), protocol::OUTER_HEADER_BYTES);
+    bytes[15] = 0; // the revision precondition is exact, as the command's was
+    bytes[32..40].copy_from_slice(&revision.to_le_bytes());
+    bytes[16..18].copy_from_slice(&0x0006_u16.to_le_bytes());
+    // One 32-byte point record: kind 1, three reserved zero bytes, handle 1, start and end
+    // 1 << 20 (two `u64`), then both values 0.0 (two `f32`).
+    let mut record = [0_u8; 32];
+    record[0] = 1;
+    record[4] = 1;
+    record[8..16].copy_from_slice(&(1_u64 << 20).to_le_bytes());
+    record[16..24].copy_from_slice(&(1_u64 << 20).to_le_bytes());
+    for (id, wire, value) in [
+        (1_u16, 2_u8, &1_u16.to_le_bytes()[..]),
+        (2, 2, &32_u16.to_le_bytes()[..]),
+        (3, 10, &record[..]),
+    ] {
+        bytes.extend_from_slice(&id.to_le_bytes());
+        bytes.extend_from_slice(&[wire, 1]);
+        bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(value);
+        bytes.resize(bytes.len().next_multiple_of(8), 0);
     }
+    let payload = (bytes.len() - protocol::OUTER_HEADER_BYTES) as u32;
+    bytes[20..24].copy_from_slice(&payload.to_le_bytes());
+    bytes[40..44].copy_from_slice(&3_u32.to_le_bytes());
+    bytes
 }
 
 /// One decoded success page, or the status and diagnostic codes of a non-OK response.
@@ -452,37 +441,6 @@ pub(super) fn control_state_all_c(
             return values;
         }
     }
-}
-
-/// [`automation_target`] of a session of its own: the handle a session built from `document`
-/// gives, read without touching the session under test.
-pub(super) fn automation_target_of(document: &str, value: f32) -> u32 {
-    let (c_session, c_plan) = boxed_c_children(document);
-    let (entries, ..) = control_list_all_c(c_session, &mut 0, 64);
-    crate::ffi::test_plan_destroy(c_plan);
-    crate::ffi::test_session_destroy(c_session);
-    automation_target(&entries, value)
-}
-
-/// The handle of the first listed effect parameter that accepts `value` as an automation target
-/// (a live continuous parameter whose range holds it).
-pub(super) fn automation_target(entries: &[protocol::ControlEntry], value: f32) -> u32 {
-    entries
-        .iter()
-        .find_map(|entry| match &entry.body {
-            protocol::ControlBody::Control(row)
-                if row.family == protocol::ControlFamily::Effect
-                    && row.automatable
-                    && row.kind == protocol::ControlKind::Continuous
-                    && entry.address.control != Some(0)
-                    && row.minimum <= value
-                    && value <= row.maximum =>
-            {
-                Some(entry.handle)
-            }
-            _ => None,
-        })
-        .expect("a live effect parameter that takes the value")
 }
 
 /// A committed structural edit publishes the replacement control list to the running controller:
@@ -2114,31 +2072,30 @@ fn a_rejected_render_call_that_swaps_plans_leaves_the_c_session_live() {
     crate::ffi::test_session_destroy(c_session);
 }
 
-/// #1315 gate 1. The C ABI renders no stored automation, so `AUTOMATION_ENQUEUE` is refused
-/// `UNAVAILABLE` before any check or admission: a valid `Block`-rate batch at the exact revision
-/// queues nothing, advances no revision and raises no event, and `CAPABILITIES_GET` neither lists
-/// command `0x0006` nor sets flag bit 5, while event `0x8002` stays listed with the session family.
-/// The record passes the wire validator (the decode below runs it).
+/// #1627 gate 3. A frame under the retired message ID `0x0006` (`AUTOMATION_ENQUEUE`), with the
+/// payload the command had, is refused at decode by the C ABI as an unsupported message: the call
+/// fails `INVALID_ARGUMENT`, writes nothing and reports no size, and the revision, the queues and
+/// the reliable event lane stay as they were (no ack precedes a drop). `CAPABILITIES_GET` neither
+/// lists command `0x0006` nor sets flag bit 5, and its record has the 23 fields.
 ///
-/// Red if the command is acked or queued again with nothing to drain it into render, or if the
-/// capabilities record advertises a command the controller refuses (or breaks the wire rule that
-/// ties flag bit 5 to command `0x0006`).
+/// Red if the C ABI dispatches the retired command again, if the refusal changes state first, or
+/// if the capabilities record advertises the command or its flag.
 #[test]
-fn automation_enqueue_is_refused_unavailable_and_not_advertised() {
+fn the_retired_automation_command_is_refused_at_decode_and_not_advertised() {
     let (c_session, c_plan) = boxed_c_children(SESSION);
     let mut request = 0;
-    let (entries, _, revision) = control_list_all_c(c_session, &mut request, 64);
-    let target = automation_target(&entries, 100.0);
+    let (_, _, revision) = control_list_all_c(c_session, &mut request, 64);
     let before = crate::ffi::test_session_state_summary(c_session);
+    let snapshot_before = crate::ffi::test_transaction_snapshot(c_session);
     request += 1;
-    assert_eq!(
-        automation_status(c_session, request, revision, target, 100.0),
-        (StatusCode::Unavailable, vec!["protocol.failure".to_owned()])
-    );
-    assert_eq!(StatusCode::Unavailable as u16, 14);
+    let frame = retired_automation_frame(request, revision);
+    let (result, required, storage) = command_c_capacity(c_session, &frame, 4_096);
+    assert_eq!(result, crate::RESULT_INVALID_ARGUMENT);
+    assert_eq!(required, u64::MAX, "no size is reported");
+    assert_eq!(storage, vec![0xa5; 4_096], "nothing is written");
     let snapshot = crate::ffi::test_transaction_snapshot(c_session);
-    assert_eq!(snapshot.automation.occupancy, 0, "nothing was queued");
     assert_eq!(snapshot.revision, revision);
+    assert_eq!(snapshot.revision, snapshot_before.revision);
     let after = crate::ffi::test_session_state_summary(c_session);
     assert_eq!((after.0, after.2, after.3), (before.0, before.2, before.3));
     assert_eq!(
@@ -2147,15 +2104,7 @@ fn automation_enqueue_is_refused_unavailable_and_not_advertised() {
         "no reliable event"
     );
 
-    // The same refusal holds for a handle the catalog does not hold: the command is refused
-    // before its records are read.
-    request += 1;
-    assert_eq!(
-        automation_status(c_session, request, revision, u32::MAX, 0.0).0,
-        StatusCode::Unavailable
-    );
-
-    request += 1;
+    // The refusal spent no request ID: the same ID serves the next command.
     let bytes = command_bytes(request, protocol::CommandPayload::CapabilitiesGet);
     let (result, response) = command_c(c_session, &bytes);
     assert_eq!(result, crate::RESULT_OK);
@@ -2179,27 +2128,26 @@ fn automation_enqueue_is_refused_unavailable_and_not_advertised() {
     let events = ids(capabilities.supported_events);
     assert!(!commands.contains(&0x0006), "{commands:?}");
     assert_eq!(capabilities.flags.0 & (1 << 5), 0, "flag bit 5");
-    assert!(events.contains(&0x8002), "the session family keeps 0x8002");
+    assert!(events.contains(&0x8001), "the session family keeps 0x8001");
+    assert!(!events.contains(&0x8002), "0x8002 is retired (#1628)");
     assert!(commands.contains(&0x0003), "the session family is served");
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
 }
 
-/// The C ABI serves five event families: `AUTOMATION_CANCELED` is raised only by a transaction or a
-/// transport locate that cancels a queued automation batch, and no batch is queued while the
-/// controller refuses `AUTOMATION_ENQUEUE` (#1315). The refused command, its frame and a commit that
-/// then has nothing to cancel are pinned here; the sixth family returns with stored automation
-/// (#1058).
+/// The C ABI serves five event families: `SESSION_COMMITTED`, `TRANSPORT_STATE`, `DIAGNOSTIC`,
+/// `METER_BATCH` and `COUNTER_SNAPSHOT`. `AUTOMATION_CANCELED` (`0x8002`) is retired with
+/// `AUTOMATION_ENQUEUE` (#1627, #1628): no batch can be queued, so no path raises it and no
+/// capabilities record lists it.
 #[test]
 fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
-    const RESPONSES: [&str; 8] = [
+    const RESPONSES: [&str; 7] = [
         "4d49534f43544c000100000030000200090000005800000001000000000000002a00000000000000060000000000000001000d010400000001000000000000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000010000000000000006000101010000000100000000000000",
         "4d49534f43544c000100000030000200080000003000000002000000000000002a000000000000000300000000000000010001010100000002000000000000000200040108000000000000000000000003000401080000000000000000000000",
-        "4d49534f43544c00010000003000020006000e004800000003000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000",
         "4d49534f43544c000100000030000200030000002000000004000000000000002b0000000000000002000000000000000100030104000000010000000000000002000101010000000200000000000000",
         "4d49534f43544c000100000030000200090000005800000005000000000000002b00000000000000060000000000000001000d010400000001000000000000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
         "4d49534f43544c000100000030000200090000005800000006000000000000002b00000000000000060000000000000001000d010800000001000000020000000200030104000000010000000000000003000d0100000000040003010400000000000000000000000500080101000000000000000000000006000101010000000100000000000000",
-        "4d49534f43544c00010000003000020001000000c801000007000000000000002b000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01160000000100020003000700080009000a000b000c000d000e0000001a000c010c000000018002801080208021803080000000001b00040108000000df7f000000000000",
+        "4d49534f43544c000100000030000200010000008801000007000000000000002b00000000000000170000000000000001000201020000000100000000000000020002010200000000000000000000000300020102000000010000000000000004000201020000000000000000000000050004010800000000100000000000000600030104000000000800000000000007000401080000000010000000000000080001010100000004000000000000000a0004010800000001000000000000000b0004010800000000100000000000000d0004010800000001000000000000000e0004010800000002000000000000000f0004010800000001000000000000001000040108000000100000000000000011000401080000000020000000000000120004010800000000100000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01160000000100020003000700080009000a000b000c000d000e0000001a000c010a000000018010802080218030800000000000001b00040108000000df7f000000000000",
         "4d49534f43544c000100000030000200090000005800000008000000000000002b00000000000000060000000000000001000d01000000000200030104000000000000000000000003000d01040000000600000000000000040003010400000001000000000000000500080101000000000000000000000006000101010000000100000000000000",
     ];
     const EVENTS: [&str; 6] = [
@@ -2248,24 +2196,6 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
         &pinned_hex(EVENTS[0]),
     );
 
-    let record = protocol::AutomationRecord {
-        kind: protocol::AutomationKind::Point,
-        handle: protocol::ParameterHandle(automation_target_of(SESSION, 100.0)),
-        start: protocol::SampleTime(1),
-        end: protocol::SampleTime(1),
-        start_value: 100.0,
-        end_value: 100.0,
-    };
-    let automation = command_bytes_at_revision(
-        3,
-        ExpectedRevision::Exact(revision),
-        protocol::CommandPayload::AutomationEnqueue(protocol::AutomationEnqueue {
-            records: core::slice::from_ref(&record),
-        }),
-    );
-    let (automation_result, automation_response) = command_c(c_session, &automation);
-    assert_eq!(automation_result, crate::RESULT_OK);
-    assert_eq!(automation_response, pinned_hex(RESPONSES[2]));
     let edit = protocol::SessionEdit::SetSessionId {
         session_id: session::StableId::parse("event-origin").expect("stable ID"),
     };
@@ -2276,7 +2206,7 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     );
     assert_eq!(
         command_c(c_session, &structural),
-        (crate::RESULT_OK, pinned_hex(RESPONSES[3]))
+        (crate::RESULT_OK, pinned_hex(RESPONSES[2]))
     );
     for event in &EVENTS[1..=1] {
         event_c_exact_retry(c_session, crate::EVENT_LANE_RELIABLE, &pinned_hex(event));
@@ -2317,7 +2247,7 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     );
     assert_eq!(
         command_c(c_session, &disable_diagnostics),
-        (crate::RESULT_OK, pinned_hex(RESPONSES[4]))
+        (crate::RESULT_OK, pinned_hex(RESPONSES[3]))
     );
     assert_eq!(
         crate::ffi::test_render(c_plan, 128, &output),
@@ -2338,7 +2268,7 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     );
     assert_eq!(
         command_c(c_session, &expand_meters),
-        (crate::RESULT_OK, pinned_hex(RESPONSES[5]))
+        (crate::RESULT_OK, pinned_hex(RESPONSES[4]))
     );
     assert_eq!(
         crate::ffi::test_render(c_plan, 256, &output),
@@ -2347,7 +2277,7 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     let collect_third_render = command_bytes(7, protocol::CommandPayload::CapabilitiesGet);
     assert_eq!(
         command_c(c_session, &collect_third_render),
-        (crate::RESULT_OK, pinned_hex(RESPONSES[6]))
+        (crate::RESULT_OK, pinned_hex(RESPONSES[5]))
     );
     assert_eq!(
         crate::ffi::test_telemetry_counters(c_session),
@@ -2375,7 +2305,7 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     );
     assert_eq!(
         command_c(c_session, &configure_counters),
-        (crate::RESULT_OK, pinned_hex(RESPONSES[7]))
+        (crate::RESULT_OK, pinned_hex(RESPONSES[6]))
     );
     assert_eq!(
         crate::ffi::test_render(c_plan, 384, &output),
@@ -2649,7 +2579,7 @@ fn capi_controller_dispatches_every_advertised_command_family() {
             assert_eq!(summary.2, 0, "pinned active provider epoch");
             assert_eq!(
                 summary.3,
-                usize::from(request_id == 11),
+                usize::from(request_id == 10),
                 "pinned pending provider count"
             );
             header.message_id
@@ -2706,26 +2636,6 @@ fn capi_controller_dispatches_every_advertised_command_family() {
             &[]
         ),
         protocol::MessageId::ControlStateGet
-    );
-    let automation = [protocol::AutomationRecord {
-        kind: protocol::AutomationKind::Point,
-        handle: protocol::ParameterHandle(1),
-        start: protocol::SampleTime(1),
-        end: protocol::SampleTime(1),
-        start_value: 0.0,
-        end_value: 0.0,
-    }];
-    assert_eq!(
-        dispatch!(
-            ExpectedRevision::Exact(SessionRevision(42)),
-            protocol::CommandPayload::AutomationEnqueue(protocol::AutomationEnqueue {
-                records: &automation,
-            },),
-            StatusCode::Unavailable,
-            42,
-            &[]
-        ),
-        protocol::MessageId::AutomationEnqueue
     );
     assert_eq!(
         dispatch!(
@@ -2807,10 +2717,10 @@ fn capi_controller_dispatches_every_advertised_command_family() {
         ),
         protocol::MessageId::SessionTransactionApply
     );
-    assert_eq!(request_id, 11);
+    assert_eq!(request_id, 10);
     assert_eq!(
         crate::ffi::test_session_state_summary(c_session),
-        (43, 11, 0, 1),
+        (43, 10, 0, 1),
         "pinned revision/replay/provider/pending vector"
     );
     assert_eq!(
@@ -4216,7 +4126,6 @@ fn every_served_counter_reads_zero_on_a_fresh_session() {
         vec![
             protocol::CounterId::TelemetryCoalesced,
             protocol::CounterId::TelemetryDropped,
-            protocol::CounterId::CanceledAutomation,
             protocol::CounterId::LiveValuesSuperseded,
             protocol::CounterId::TransitionReprepareRefusals,
         ]

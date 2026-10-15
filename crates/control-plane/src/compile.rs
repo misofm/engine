@@ -184,7 +184,6 @@ pub(crate) fn checked_sum(rows: &[u64]) -> Result<u64, CompileFailure> {
 
 pub(crate) fn protocol_queue_config(
     limits: ControlLimits,
-    quantum_frames: usize,
 ) -> Result<ProtocolQueueConfig, CompileFailure> {
     let one = NonZeroUsize::new(1).expect("one is nonzero");
     Ok(ProtocolQueueConfig {
@@ -194,16 +193,9 @@ pub(crate) fn protocol_queue_config(
                 .map_err(|_| failure(ResourceFault::Platform))?,
         )
         .ok_or_else(|| failure(ResourceFault::Limit))?,
-        automation_batch_slots: one,
         reliable_response_slots: one,
         reliable_event_slots: NonZeroUsize::new(2).expect("two is nonzero"),
         telemetry_slots: one,
-        per_block_automation_density: NonZeroUsize::new(
-            limits.maximum_automation_spans_per_block as usize,
-        )
-        .ok_or_else(|| failure(ResourceFault::Limit))?,
-        quantum_frames: NonZeroUsize::new(quantum_frames)
-            .ok_or_else(|| failure(ResourceFault::Limit))?,
     })
 }
 
@@ -213,13 +205,12 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     source_count: usize,
     source_id_bytes: usize,
     strip_table_bytes: u64,
-    quantum_frames: usize,
     provider: host_core::SessionControlProviderResources,
     inventory_bytes: u64,
     effect_controls: host_core::EffectControlResources,
     route_controls: host_core::RouteControlResources,
 ) -> Result<CapiResources, CompileFailure> {
-    let queue_config = protocol_queue_config(limits, quantum_frames)?;
+    let queue_config = protocol_queue_config(limits)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
         .map_err(|_| failure(ResourceFault::Arithmetic))?;
     let replay_config = ReplayCacheConfig {
@@ -408,7 +399,6 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         source_id_bytes,
         host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
             .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
-        compiled.quantum().0 as usize,
         provider,
         inventory.retained_bytes(),
         effect_controls,
@@ -855,8 +845,6 @@ where
         .map_err(|_| failure(ResourceFault::Platform))?;
     let replay_entries = usize::try_from(limits.maximum_replay_entries)
         .map_err(|_| failure(ResourceFault::Platform))?;
-    let quantum_frames = usize::try_from(store.compiled().quantum().0)
-        .map_err(|_| failure(ResourceFault::Platform))?;
     let maximum_tlvs = u32::try_from(control_bytes / size_of::<u16>()).unwrap_or(u32::MAX);
     let codec = ProtocolCodec::new(ProtocolLimits {
         max_frame_bytes: control_bytes,
@@ -865,7 +853,7 @@ where
         max_nesting: 4,
     });
     let one = NonZeroUsize::new(1).expect("one is nonzero");
-    let queues = ProtocolQueues::prepare(protocol_queue_config(limits, quantum_frames)?)
+    let queues = ProtocolQueues::prepare(protocol_queue_config(limits)?)
         .map_err(|_| failure(ResourceFault::ProtocolQueue))?;
     let replay = ReplayCache::try_new(ReplayCacheConfig {
         entries: NonZeroUsize::new(replay_entries).ok_or_else(|| failure(ResourceFault::Limit))?,
@@ -935,13 +923,7 @@ where
         ProtocolControllerConfig {
             maximum_transaction_edits: maximum_tlvs,
             maximum_response_diagnostics: u16::MAX,
-            // No host serves stored automation: nothing drains the automation queue into render,
-            // so the command is refused `UNAVAILABLE` on both hosts and not advertised (#1315).
-            // Flip it in the slice that wires the render-side drain (#1058, answer A9).
-            provider_features: ProviderFeatures {
-                automation: false,
-                ..ProviderFeatures::ALL
-            },
+            provider_features: ProviderFeatures::ALL,
         },
         retained_capacity,
     )

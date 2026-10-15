@@ -249,8 +249,6 @@ pub struct TestTransactionSnapshot<Row> {
     pub reliable_event: protocol::QueueReport,
     /// The reliable response queue.
     pub reliable_response: protocol::QueueReport,
-    /// The automation queue.
-    pub automation: protocol::QueueReport,
     /// The telemetry queue.
     pub telemetry: protocol::QueueReport,
     /// The telemetry counters.
@@ -926,10 +924,6 @@ where
                 .controller
                 .queues()
                 .report(protocol::QueueKind::ReliableResponse),
-            automation: self
-                .controller
-                .queues()
-                .report(protocol::QueueKind::Automation),
             telemetry: self
                 .controller
                 .queues()

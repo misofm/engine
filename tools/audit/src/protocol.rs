@@ -4,13 +4,13 @@ use std::num::NonZeroUsize;
 
 use bench_support::alloc as bench_alloc;
 use protocol::{
-    AutomationEnqueue, AutomationRecord, CommandPayload, ControlCommand, ControllerRequest,
-    CounterId, CounterSnapshot, CounterValue, DecodeScratch, DiagnosticsRequest, EditPath,
-    EventPayload, ExpectedRevision, MessageId, MeterComponent, MeterRecord, MockProvider,
-    NonOkResponse, ProtocolCodec, ProtocolController, ProtocolQueueConfig, ProtocolQueues,
-    ReplayCache, ReplayCacheConfig, RequestId, SampleTime, SessionEdit, SessionRevision,
-    SessionStore, StatusCode, SuccessResponsePayload, TelemetryConfiguration, TransactionApplied,
-    TypedCommandFrame, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    CommandPayload, ControlCommand, ControllerRequest, CounterId, CounterSnapshot, CounterValue,
+    DecodeScratch, DiagnosticsRequest, EditPath, EventPayload, ExpectedRevision, MessageId,
+    MeterComponent, MeterRecord, MockProvider, NonOkResponse, ProtocolCodec, ProtocolController,
+    ProtocolQueueConfig, ProtocolQueues, ReplayCache, ReplayCacheConfig, RequestId, SampleTime,
+    SessionEdit, SessionRevision, SessionStore, StatusCode, SuccessResponsePayload,
+    TelemetryConfiguration, TransactionApplied, TypedCommandFrame, TypedEventFrame,
+    TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 use session::{CompileCaps, StableId, parse_session_json};
 
@@ -38,9 +38,6 @@ struct Corpus {
     non_ok: NonOkResponse,
     frame_output: Vec<u8>,
     decode_fields: [u16; 1024],
-    automation_batches: Vec<[AutomationRecord; protocol::AUTOMATION_BATCH_RECORDS]>,
-    automation_counts: [usize; 40],
-    queues: ProtocolQueues,
 }
 
 /// Prepared egress state. Reliable, meter, and counter dequeue/encode paths are allocation-free
@@ -90,35 +87,6 @@ fn prepare_corpus() -> Corpus {
             session_id: StableId::parse(&format!("audit-{index}")).expect("prepared stable ID"),
         })
         .collect::<Vec<_>>();
-    let automation_counts = core::array::from_fn(|index| if index == 39 { 16 } else { 256 });
-    let mut next_sample = 0_u64;
-    let mut automation_batches = Vec::with_capacity(automation_counts.len());
-    for count in automation_counts {
-        let mut records = [AutomationRecord::EMPTY; protocol::AUTOMATION_BATCH_RECORDS];
-        for record in &mut records[..count] {
-            *record = AutomationRecord {
-                kind: protocol::AutomationKind::Point,
-                handle: protocol::ParameterHandle(1),
-                start: SampleTime(next_sample),
-                end: SampleTime(next_sample),
-                start_value: next_sample as f32,
-                end_value: next_sample as f32,
-            };
-            next_sample += 1;
-        }
-        automation_batches.push(records);
-    }
-    assert_eq!(next_sample, 10_000, "prepared exact automation corpus");
-    let queue_config = ProtocolQueueConfig {
-        control_command_slots: NonZeroUsize::new(1).expect("prepared control slots"),
-        control_command_bytes: NonZeroUsize::new(1).expect("prepared control bytes"),
-        automation_batch_slots: NonZeroUsize::new(1).expect("prepared automation slots"),
-        reliable_response_slots: NonZeroUsize::new(1).expect("prepared response slots"),
-        reliable_event_slots: NonZeroUsize::new(1).expect("prepared event slots"),
-        telemetry_slots: NonZeroUsize::new(1).expect("prepared telemetry slots"),
-        per_block_automation_density: NonZeroUsize::new(256).expect("prepared density"),
-        quantum_frames: NonZeroUsize::new(1).expect("prepared quantum"),
-    };
     let non_ok = NonOkResponse {
         diagnostics: Vec::new(),
         omitted_diagnostics: 0,
@@ -131,9 +99,6 @@ fn prepare_corpus() -> Corpus {
         non_ok,
         frame_output: vec![0_u8; 32 * 1024],
         decode_fields: [0_u16; 1024],
-        automation_batches,
-        automation_counts,
-        queues: ProtocolQueues::prepare(queue_config).expect("prepared protocol queues"),
     };
     let telemetry = TelemetryConfiguration {
         meter_handles: Vec::new(),
@@ -173,14 +138,6 @@ fn prepare_corpus() -> Corpus {
         maximum_automation_spans: None,
         maximum_reply_bytes: None,
     };
-    let automation_record = [AutomationRecord {
-        kind: protocol::AutomationKind::Point,
-        handle: protocol::ParameterHandle(1),
-        start: SampleTime(0),
-        end: SampleTime(0),
-        start_value: 0.0,
-        end_value: 0.0,
-    }];
     let revision = ExpectedRevision::Exact(SessionRevision(7));
     corpus.push_command(TypedCommandFrame {
         request_id: request_id(1),
@@ -214,13 +171,6 @@ fn prepare_corpus() -> Corpus {
         request_id: request_id(14),
         expected_revision: ExpectedRevision::Any,
         payload: CommandPayload::ResponseGet(&response_request),
-    });
-    corpus.push_command(TypedCommandFrame {
-        request_id: request_id(6),
-        expected_revision: revision,
-        payload: CommandPayload::AutomationEnqueue(AutomationEnqueue {
-            records: &automation_record,
-        }),
     });
     corpus.push_command(TypedCommandFrame {
         request_id: request_id(7),
@@ -309,12 +259,9 @@ fn prepare_egress_corpus() -> EgressCorpus {
     let queues = ProtocolQueues::prepare(ProtocolQueueConfig {
         control_command_slots: NonZeroUsize::new(1).expect("control"),
         control_command_bytes: NonZeroUsize::new(64).expect("bytes"),
-        automation_batch_slots: NonZeroUsize::new(1).expect("automation"),
         reliable_response_slots: NonZeroUsize::new(1).expect("response"),
         reliable_event_slots: NonZeroUsize::new(1).expect("event"),
         telemetry_slots: NonZeroUsize::new(1).expect("telemetry"),
-        per_block_automation_density: NonZeroUsize::new(256).expect("density"),
-        quantum_frames: NonZeroUsize::new(1).expect("quantum"),
     })
     .expect("prepared queues");
     let mut controller = ProtocolController::new(
@@ -458,51 +405,6 @@ fn run_audit(corpus: &mut Corpus, egress: &mut EgressCorpus) {
                 .all(|byte| *byte == 0xa5)
         );
 
-        let mut audited_records = 0_usize;
-        for (batch_index, (records, count)) in corpus
-            .automation_batches
-            .iter()
-            .zip(corpus.automation_counts)
-            .enumerate()
-        {
-            corpus.frame_output.fill(0xa5);
-            let length = corpus
-                .codec
-                .encode_automation_enqueue(
-                    AutomationEnqueue {
-                        records: &records[..count],
-                    },
-                    &mut corpus.frame_output,
-                )
-                .expect("caller output automation encode");
-            assert!(
-                corpus.frame_output[length..]
-                    .iter()
-                    .all(|byte| *byte == 0xa5)
-            );
-            let decoded = corpus
-                .codec
-                .decode_automation_enqueue(&corpus.frame_output[..length], 3)
-                .expect("caller input automation decode");
-            let slot = decoded
-                .into_batch(
-                    SessionRevision(7),
-                    request_id(u64::try_from(batch_index).expect("batch index") + 1_000),
-                )
-                .expect("decoded automation slot");
-            corpus
-                .queues
-                .try_enqueue_automation(SampleTime(0), slot)
-                .expect("prepared queue accepts batch");
-            let dequeued = corpus
-                .queues
-                .try_dequeue_automation()
-                .expect("prepared queue returns batch");
-            assert_eq!(dequeued.as_slice(), &records[..count]);
-            audited_records += dequeued.as_slice().len();
-        }
-        assert_eq!(audited_records, 10_000, "exact automation record audit");
-
         egress.output.fill(0xa5);
         let reliable = egress
             .controller
@@ -536,6 +438,6 @@ pub(crate) fn main() {
     let mut egress = prepare_egress_corpus();
     run_audit(&mut corpus, &mut egress);
     println!(
-        "protocol caller-buffer audit: ok (command, success, non-OK, event, reliable/meter/counter egress, 64 edits, 10,000 automation records in 40 batches; diagnostic egress is control-plane typed storage)"
+        "protocol caller-buffer audit: ok (command, success, non-OK, event, reliable/meter/counter egress, 64 edits; diagnostic egress is control-plane typed storage)"
     );
 }

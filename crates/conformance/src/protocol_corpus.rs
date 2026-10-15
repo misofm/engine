@@ -290,7 +290,7 @@ pub fn console_session_fixture() -> SessionModel {
 /// One wire conformance row for decision 12's retired and refused codes (#1094).
 ///
 /// `bytes` is one complete command frame, request ID 1: a `SESSION_TRANSACTION_APPLY` at exact
-/// revision 7, or, for the two retired message IDs, an empty frame under the retired ID, which
+/// revision 7, or, for the four retired message IDs, a frame under the retired ID (empty, or for `0x0006` carrying the payload the command had), which
 /// the endpoint refuses with the decoder's `UNSUPPORTED_MESSAGE` and no response frame. An endpoint whose session is [`console_session_fixture`] answers it with `status`
 /// and exactly the diagnostic codes in `diagnostic`: the endpoint's generic `protocol.failure` for
 /// a frame refused at decode, the edit's own code for an edit refusal, none for a success. A
@@ -324,8 +324,10 @@ pub struct RetiredCodeRow {
 ///   (`VALIDATION_FAILED`, `session.edit.value_op_retired`);
 /// - the retired command message IDs `0x0004` (`PARAMETER_METADATA_GET`) and `0x0005`
 ///   (`PARAMETER_STATE_GET`), replaced by `CONTROL_LIST_GET` and `CONTROL_STATE_GET` (decision 17,
-///   C4): `UNSUPPORTED_MESSAGE`, never served and never reallocated. A message ID that decodes to
-///   no message leaves no safe request identity, so these two rows carry the status the decoder
+///   C4), `0x0006` (`AUTOMATION_ENQUEUE`, #1627, a frame with the payload the command had) and
+///   `0x8002` (the event `AUTOMATION_CANCELED`, #1628, under the command header): `UNSUPPORTED_MESSAGE`,
+///   never served and never reallocated. A message ID that decodes to
+///   no message leaves no safe request identity, so these four rows carry the status the decoder
 ///   maps the refusal to, no diagnostic, and the endpoint writes no response frame for them.
 ///
 /// The last row, `control.unknown_optional_track_field_12`, is the splice's control: the same
@@ -416,7 +418,7 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
         status: VALIDATION_FAILED,
         diagnostic: Some("session.edit.value_op_retired"),
     });
-    for retired in [0x0004_u16, 0x0005] {
+    for retired in [0x0004_u16, 0x0005, 0x0006, 0x8002] {
         let mut bytes = vec![0; OUTER_HEADER_BYTES];
         ProtocolCodec::default()
             .encode_command_frame_into(
@@ -429,11 +431,54 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
             )
             .expect("an empty command frame encodes");
         bytes[16..18].copy_from_slice(&retired.to_le_bytes());
+        if retired == 0x0006 {
+            // `AUTOMATION_ENQUEUE` is refused by its ID alone, whatever the payload: carry the
+            // payload the command had, so the row is the frame a peer of the old build sent.
+            add_former_automation_enqueue_payload(&mut bytes);
+        }
         rows.push(RetiredCodeRow {
             name: format!("retired.message_id_{retired:#06x}"),
             bytes,
             status: UNSUPPORTED_MESSAGE,
             diagnostic: None,
+        });
+    }
+    // Counters 2 and 11 to 14 retired with the automation queue (#1629). A `TELEMETRY_CONFIGURE`
+    // naming one is refused at decode; a `COUNTERS_GET` naming one finds no such counter, as for
+    // any ID the provider does not report. `TRANSITION_REPREPARE_REFUSALS` (17) is the sentinel
+    // the probe frame carries before it is patched.
+    for retired in RETIRED_COUNTER_IDS {
+        let mut configure = counter_command_frame(CommandPayload::TelemetryConfigure(
+            &TelemetryConfiguration {
+                meter_handles: Vec::new(),
+                meter_period_blocks: 0,
+                counter_ids: vec![CounterId::TransitionReprepareRefusals],
+                counter_period_blocks: 3,
+                diagnostics_enabled: false,
+                minimum_diagnostic_severity: DiagnosticSeverity::Info,
+            },
+        ));
+        let sentinel = (CounterId::TransitionReprepareRefusals as u32).to_le_bytes();
+        let at = configure[OUTER_HEADER_BYTES..]
+            .windows(4)
+            .position(|window| window == sentinel)
+            .expect("the probe frame carries its counter ID")
+            + OUTER_HEADER_BYTES;
+        configure[at..at + 4].copy_from_slice(&retired.to_le_bytes());
+        rows.push(RetiredCodeRow {
+            name: format!("retired.counter_{retired}.telemetry_configure"),
+            bytes: configure,
+            status: INVALID_FIELD,
+            diagnostic: DECODE_REFUSAL,
+        });
+        rows.push(RetiredCodeRow {
+            name: format!("retired.counter_{retired}.counters_get"),
+            bytes: counter_command_frame(CommandPayload::CountersGet(&CountersRequest {
+                all: false,
+                ids: vec![retired],
+            })),
+            status: StatusCode::NotFound as u16,
+            diagnostic: DECODE_REFUSAL,
         });
     }
     rows.push(RetiredCodeRow {
@@ -443,6 +488,59 @@ pub fn retired_code_rows() -> Vec<RetiredCodeRow> {
         diagnostic: None,
     });
     rows
+}
+
+/// The counter IDs retired with the automation queue (#1629). Their codes are refused or unserved
+/// and never reallocated.
+const RETIRED_COUNTER_IDS: [u32; 5] = [2, 11, 12, 13, 14];
+
+/// One complete command frame, request ID 1: exact revision 7 for the state-changing
+/// `TELEMETRY_CONFIGURE`, any revision for the read.
+fn counter_command_frame(payload: CommandPayload<'_>) -> Vec<u8> {
+    let frame = TypedCommandFrame {
+        request_id: RequestId::new(1).expect("literal request ID"),
+        expected_revision: match payload {
+            CommandPayload::TelemetryConfigure(_) => ExpectedRevision::Exact(SessionRevision(7)),
+            _ => ExpectedRevision::Any,
+        },
+        payload,
+    };
+    let mut bytes = vec![0; 512];
+    let len = ProtocolCodec::default()
+        .encode_command_frame_into(&frame, &mut bytes)
+        .expect("a counter command frame encodes");
+    bytes.truncate(len);
+    bytes
+}
+
+/// Append the payload `AUTOMATION_ENQUEUE` carried (#1627) to an empty command frame: `count`
+/// (field 1, `U16`), `record_bytes` (field 2, `U16`) and `records` (field 3, `Bytes`), one valid
+/// 32-byte point record. The result is the complete frame the retired command had.
+fn add_former_automation_enqueue_payload(bytes: &mut Vec<u8>) {
+    // The 32-byte point record: kind 1, three reserved zero bytes, handle 1, start 1, end 1 (two
+    // `u64`), then both values 0.0 (two `f32`).
+    let mut record_bytes = [0_u8; 32];
+    record_bytes[0] = 1;
+    record_bytes[4] = 1;
+    record_bytes[8] = 1;
+    record_bytes[16] = 1;
+    let mut field = |id: u16, wire: u8, value: &[u8]| {
+        bytes.extend_from_slice(&id.to_le_bytes());
+        bytes.extend_from_slice(&[wire, 1]);
+        bytes.extend_from_slice(
+            &u32::try_from(value.len())
+                .expect("a short value")
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(value);
+        bytes.resize(bytes.len().next_multiple_of(8), 0);
+    };
+    field(1, 2, &1_u16.to_le_bytes());
+    field(2, 2, &32_u16.to_le_bytes());
+    field(3, 10, &record_bytes);
+    let payload_len = u32::try_from(bytes.len() - OUTER_HEADER_BYTES).expect("a short frame");
+    bytes[20..24].copy_from_slice(&payload_len.to_le_bytes());
+    bytes[40..44].copy_from_slice(&3_u32.to_le_bytes());
 }
 
 /// The value ops decision 17 retired (C5, #1561). Their codes are refused at decode and never
@@ -754,7 +852,15 @@ pub enum ConformanceDecoder {
 /// is the `SET_CONTROL` address message (`owner_kind`, `owner_id`, `section`, `slot_id`,
 /// `control`, `lane`) and no longer the five-field strip target, so the `UpsertAutomation` and
 /// `SetAutomationTarget` edits of the transaction carry it. The frame count stays 50.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x4f6a_80fb_52c1_2aed;
+/// Issue #1627 (draft 21a) repinned it from `4f6a80fb52c12aed`: `AUTOMATION_ENQUEUE` (`0x0006`),
+/// statuses 15 (`TIME_IN_PAST`) and 16 (`AUTOMATION_ORDER`) and capability fields 9, 12, 19 and 20
+/// are retired and never reallocated, so the corpus loses the `command.automation_enqueue` and
+/// `response.automation` frames and the two status frames, and the capabilities response carries
+/// 23 fields and lists no command `0x0006` (flag bit 5 clear). The frame count is 46.
+/// Issue #1628 (draft 21b) repinned it from `cfa58ab7b7bbb7c4`: the event `AUTOMATION_CANCELED`
+/// (`0x8002`) is retired and never reallocated, so the corpus loses `event.automation_canceled`
+/// and the capabilities response lists no event `0x8002`. The frame count is 45.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x4b21_d9e6_f520_afd9;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -812,14 +918,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_automation_spans: Some(4096),
         maximum_reply_bytes: Some(65_536),
     };
-    let automation = [AutomationRecord {
-        kind: AutomationKind::Point,
-        handle: ParameterHandle(1),
-        start: SampleTime(1),
-        end: SampleTime(1),
-        start_value: 0.0,
-        end_value: 0.0,
-    }];
     let telemetry = TelemetryConfiguration {
         meter_handles: Vec::new(),
         meter_period_blocks: 0,
@@ -884,12 +982,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         "command.response_get",
         CommandPayload::ResponseGet(&response_request)
     );
-    command!(
-        "command.automation_enqueue",
-        CommandPayload::AutomationEnqueue(AutomationEnqueue {
-            records: &automation
-        })
-    );
     command!("command.transport_get", CommandPayload::TransportGet);
     command!(
         "command.transport_set",
@@ -922,24 +1014,20 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_tlvs: 1024,
         maximum_string_bytes: 1024,
         maximum_nesting: 4,
-        maximum_automation_records: 256,
         control_command_slots: 1,
         control_command_bytes: 64,
-        automation_batch_slots: 1,
         reliable_response_slots: 1,
         reliable_event_slots: 1,
         telemetry_slots: 1,
         replay_entries: 1,
         replay_bytes: 64,
         maximum_cached_response_bytes: 64,
-        per_block_automation_density: 1,
-        admission_quantum_frames: 1,
         maximum_control_page_items: 256,
         maximum_diagnostic_page_items: 256,
         maximum_telemetry_handles: 256,
         maximum_transaction_edits: 64,
-        supported_commands: &[1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-        supported_events: &[0x8001, 0x8002, 0x8010, 0x8020, 0x8021, 0x8030],
+        supported_commands: &[1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14],
+        supported_events: &[0x8001, 0x8010, 0x8020, 0x8021, 0x8030],
         flags: CapabilityFlags::B4_BASE,
     };
     macro_rules! success {
@@ -1015,15 +1103,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         SuccessResponsePayload::ResponseResult(ResponseResult::Tag(77))
     );
     success!(
-        "response.automation",
-        SuccessResponsePayload::AutomationEnqueued(AutomationEnqueued {
-            accepted_records: 1,
-            occupancy: 0,
-            capacity: 1,
-            generation: 1
-        })
-    );
-    success!(
         "response.transport_get",
         SuccessResponsePayload::TransportGetSnapshot(TransportSnapshot {
             state: TransportState::Stopped,
@@ -1073,8 +1152,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         StatusCode::ValidationFailed,
         StatusCode::NotFound,
         StatusCode::Unavailable,
-        StatusCode::TimeInPast,
-        StatusCode::AutomationOrder,
         StatusCode::PcmForbidden,
         StatusCode::Internal,
     ] {
@@ -1140,17 +1217,6 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             origin_request_id: request,
             previous_revision: SessionRevision(6),
             applied_operations: 1
-        })
-    );
-    event!(
-        "event.automation_canceled",
-        EventPayload::AutomationCanceled(AutomationCanceled {
-            event_sequence: 1,
-            origin_request_id: request,
-            canceled_records: 1,
-            reason: AutomationCancellationReason::RevisionChanged,
-            queue_generation: 1,
-            effective_sample: None
         })
     );
     event!(
@@ -1442,8 +1508,6 @@ fn status_name(status: StatusCode) -> &'static str {
         StatusCode::ValidationFailed => "response.validation_failed",
         StatusCode::NotFound => "response.not_found",
         StatusCode::Unavailable => "response.unavailable",
-        StatusCode::TimeInPast => "response.time_in_past",
-        StatusCode::AutomationOrder => "response.automation_order",
         StatusCode::PcmForbidden => "response.pcm_forbidden",
         StatusCode::Internal => "response.internal",
     }

@@ -252,3 +252,108 @@ Checked against `12d4a4f9d`.
 - **Anchors.** Every line in the inventory has moved; re-read them at filing. The C ABI tests are
   in `crates/capi/src/runtime/tests.rs` and `live_tests.rs` (`a_live_edit_emits_the_commit_events_of_a_rebuild`,
   `:2324`). Batch P1, ready (README "Batch P1 readiness").
+
+## Decision record: #1627 retire AUTOMATION_ENQUEUE (batch 10)
+
+**What shipped.** The command, its success response, statuses 15 and 16, capability fields 9, 12,
+19 and 20, flag bit 5 and the provider hook are gone from `protocol`, host-core and the control
+plane; nothing else changed on the wire.
+
+- `MessageId::AutomationEnqueue`, `StatusCode::{TimeInPast, AutomationOrder}`, `AutomationEnqueue`,
+  `DecodedAutomationEnqueue`, `AutomationEnqueued`, their schemas, codecs, typed-frame arms,
+  `ControlCommand::AutomationEnqueue`, `Body::AutomationEnqueued`, the controller's execute arm,
+  `validate_automation_domains`, `status_for_automation` and `AutomationRefusal` are deleted.
+  `0x0006` joins `RETIRED_MESSAGE_IDS` (`[0x0004, 0x0005, 0x0006]`), so `from_raw` and `allocated_id`
+  refuse it with no new code. `DecodedCommandPayload` and `DecodedTypedCommandFrame` lose a lifetime
+  that only the borrowed automation view used (clippy `needless_lifetimes` then elided three more).
+- `ProviderFeatures::automation`, its `ALL`/`NONE` entries, its three arms and the compile.rs flip
+  comment are deleted; the control plane passes `ProviderFeatures::ALL`.
+- `ControlProvider::control_row` leaves with `MockProvider`'s and host-core's implementations, and
+  with it `ParameterProviderError::UnsupportedTarget` (its only producer) and the
+  `automation.target.unsupported` diagnostic. host-core's test
+  `only_an_effect_parameter_is_an_automation_target` is deleted with the hook.
+- `Capabilities`/`DecodedCapabilities` lose `maximum_automation_records`, `automation_batch_slots`,
+  `per_block_automation_density` and `admission_quantum_frames` (23 fields). Schema
+  `capabilities::RETIRED` is read through `schema_spec_retiring`, so each of 9, 12, 19 and 20 is
+  refused in both flag forms (optional `INVALID_TLV`, mandatory `UNKNOWN_REQUIRED_FIELD`).
+  `maximum_tlvs >= 23`; bit 5 leaves `KNOWN` and `B4_BASE`; `capability_registry` starts from
+  `((1 << 7) - 1) & !(1 << 5)`; the invariant check no longer ties bit 5 to a command.
+- The audit's wire leg and its "10,000 automation records in 40 batches" success text are gone
+  (script updated to match); `Corpus.queues` left with it (the egress leg keeps its own queues).
+
+**Tests.** Deleted (existed only for the command): `public_b1b_automation_replay_uses_the_ordinary_queue`,
+`backpressure_is_cached_without_second_enqueue`, `endpoint_owned_current_sample_rejects_past_automation_without_client_time`,
+`b2b_btlv_automation_uses_header_identity_typed_domains_and_backpressure`,
+`a_controller_without_the_automation_feature_refuses_and_does_not_advertise_the_command`,
+`automation_keeps_its_domain_rules_over_the_control_row`,
+`b2b_automation_goldens_truncation_and_malformed_cases_are_functional`, host-core
+`only_an_effect_parameter_is_an_automation_target`. Rewritten without the command:
+`full_frame_ingress_dispatches_every_registered_command_through_typed_frames`,
+`full_frame_ingress_replays_exact_bytes_and_rejects_changed_request_reuse` (now a `TRANSPORT_SET`,
+replay counted on the reliable event queue), `every_non_ok_status_has_a_canonical_common_response_payload`,
+`the_capability_registry_lists_the_control_messages_and_not_the_retired_ones`,
+`provider_feature_matrix_derives_capabilities_and_refuses_disabled_dispatch` (23-field count),
+`capi_controller_dispatches_every_advertised_command_family` (ten vectors; see re-pins),
+`all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes` (no automation step; seven
+responses), `a_live_edit_emits_the_commit_events_of_a_rebuild`, and typed-frame/schema/message-wire
+fixtures. Kept: `decoded_invalid_automation_rolls_back_after_final_compilation` (it exercises the
+stored `SetAutomationSegments` edit, not the command) and
+`structural_token_cancel_owner_generation_and_serial_rules_are_affine` (its only touch is
+`cancel_pending_automation`, which is #1628's).
+
+**Gates and their tests.**
+
+1. Refused at decode: protocol `a_frame_under_the_retired_automation_id_is_refused_before_any_state_changes`
+   (the conformance row `retired.message_id_0x0006`, a frame with the former payload; revision,
+   snapshot, replay cache and all five queue reports unchanged, request ID unspent, capabilities
+   list no `0x0006`/bit 5); `retired_and_console_refused_codes_meet_their_conformance_rows` (rows
+   16 + 4 + 7 + 13 + 1 + 3 + 1); `retired_message_ids_are_never_reused_or_advertised`; wire
+   `retired_status_codes_are_invalid_statuses` (15 and 16 `InvalidStatus`; 14, 17, 18 decode);
+   message-wire `retired_capability_fields_are_refused_in_either_flag_form` (23 fields; each of 9,
+   12, 19, 20 in both flag forms; control splice field 28 decodes).
+2. Capabilities: `capability_flag_bit_5_is_unknown_and_the_floor_is_the_field_count` and
+   `capability_id_views_reject_order_allocation_and_session_family_identically` (a record listing 6
+   is refused).
+3. C ABI: `the_retired_automation_command_is_refused_at_decode_and_not_advertised` (`INVALID_ARGUMENT`,
+   buffer untouched, `required_bytes` unwritten, revision/queue/events unchanged) and the re-pinned
+   dispatch test.
+4. Corpus and audits: `cargo test --locked -p conformance`; `bash scripts/check-protocol-wasm-parity.sh`
+   and `--self-test` pass; `run-protocol-allocation-audit.sh target/release/audit` passes;
+   `audit capi` shows 0 allocations, locks, syscalls.
+5. No rendered bit moves: `audit capi` `pcm_digest` is `76525e7ef9e78cf4` at base (`2e6343a99`) and head.
+
+**Departures.**
+
+- Retired statuses, capability fields and flag bit are tested by decoder unit tests, not by rows in
+  `retired_code_rows`: a `RetiredCodeRow` is a command frame an endpoint answers, and these are
+  response-side. The one row that fits (`0x0006`, with its former payload) is added there. The C ABI
+  gate asserts `INVALID_ARGUMENT` (the call result for a frame that decodes to no message) rather
+  than a response frame: an unknown message ID leaves no safe request identity, so no frame is written,
+  as for `0x0004` and `0x0005`.
+- Mechanical edits outside the authorized paths: `crates/conformance/src/main.rs` and
+  `crates/conformance/tests/mutation_million.rs` (frame count 50 to 46), `hosts/host-web/tests/protocol_cross_host.rs`
+  (script step 11 sends `0x0006`; both hosts must refuse it identically), `sdk/src/core/control-frame.ts`
+  (status names 15 and 16 become unregistered holes; the table is index-by-wire-number), and the
+  `crates/protocol/src/typed_frame.rs` lifetimes above.
+- The wasm-parity self-test and the fuzz manifest still carried the pre-#1566 hash `cdfdb0540f093424`
+  (the self-test's search text matched nothing and would have failed `--self-test`). Both now carry
+  the new pin.
+
+**Re-pins** (reason: draft 21a retires `AUTOMATION_ENQUEUE`, statuses 15 and 16 and capability
+fields 9, 12, 19 and 20): `COMPLETE_SCHEMA_HASH` `0x4f6a_80fb_52c1_2aed` to `0xcfa5_8ab7_b7bb_b7c4`
+(corpus 50 to 46 frames: the command row, its success row and the two status rows are gone, and the
+capabilities response has 23 fields and lists no `0006`), the parity self-test strings, the fuzz
+manifest, the conformance record, and C ABI vectors: capabilities (27 fields to 23, length
+`0x1c8` to `0x188`; flags `0x7fdf` unchanged), the automation response vector deleted (11 to 10),
+the request IDs of the six later vectors one lower, and the `all_five_event_families` capabilities
+response (request 7) rebuilt from the new vector. The C ABI header and `check-capi-abi.sh` are
+unaffected; the SDK generated modules are current.
+
+**Left for the successors.** #1628: `AUTOMATION_CANCELED`, `cancel_pending_automation`,
+`cancel_queued_automation_reserved`, `record_canceled_automation`, `CounterId::{CanceledAutomation,
+AutomationTimePast, AutomationOrderReject}`, `ReliablePayload::AutomationCanceled`. #1629: the queue,
+`AutomationBatchSlot`/`AutomationRecord`/`ParameterHandle`, `QueueKind::Automation`,
+`BackpressureQueueKind::Automation`, `ProtocolQueueConfig::{automation_batch_slots,
+per_block_automation_density, quantum_frames}`, and the sizing guide's automation queue and
+10,000-record paragraphs and the semantics guide's "Queues and telemetry" automation sentences.
+`crates/capi/tests/resource_lifecycle.rs:1119` keeps a historical comment naming the command.
