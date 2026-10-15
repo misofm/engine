@@ -12,9 +12,9 @@
 use effect_compiler::{launch_native_effect_registry, lowers_session_bypass};
 use effect_contract::control::PreparedReason;
 use effect_contract::{
-    AutomationRate, EffectDescriptor, LinkMode as ContractLinkMode, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterLattice, ParameterMapping, ParameterUnit,
-    normalize_zero,
+    AutomationRate, EffectDescriptor, LinkMode as ContractLinkMode, ObservationCost,
+    ObservationDescriptor, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
+    ParameterLattice, ParameterMapping, ParameterUnit, normalize_zero,
 };
 use session::{
     ConsoleEntry, Effect, EffectIdentity, EffectParam, LinkMode, ParameterChannel,
@@ -434,6 +434,23 @@ fn identity_of<'a>(
             .map(|candidate| &candidate.identity),
         Section::Own | Section::Builtins => None,
     }
+}
+
+/// The declared observation tap `tap_id` of the effect at `section` of strip `id`, if the strip,
+/// the instance and the tap exist and the tap is [`ObservationCost::Resident`] (a computed tap has
+/// no subscription path). `None` for a `cid` effect, an unknown effect and a section that is not
+/// an effect's.
+pub(crate) fn resident_observation_tap(
+    model: &SessionModel,
+    id: &StableId,
+    section: &Section,
+    tap_id: u32,
+) -> Option<&'static ObservationDescriptor> {
+    let descriptor = identity_of(model, id, section).and_then(contract)?;
+    descriptor
+        .observations
+        .iter()
+        .find(|tap| tap.id.0 == tap_id && tap.cost == ObservationCost::Resident)
 }
 
 /// The mutable instance at `section` of strip `id`.

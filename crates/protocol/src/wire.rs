@@ -122,6 +122,9 @@ pub enum MessageId {
     SessionCommitted = 0x8001,
     /// `TRANSPORT_STATE`.
     TransportState = 0x8010,
+    /// `OBSERVATION_ENDED` (#1584): a host-local observation subscription ended because its
+    /// effect left the session.
+    ObservationEnded = 0x8011,
     /// `METER_BATCH`.
     MeterBatch = 0x8020,
     /// `COUNTER_SNAPSHOT`.
@@ -178,6 +181,7 @@ impl MessageId {
             0x000e => Self::ResponseGet,
             0x8001 => Self::SessionCommitted,
             0x8010 => Self::TransportState,
+            0x8011 => Self::ObservationEnded,
             0x8020 => Self::MeterBatch,
             0x8021 => Self::CounterSnapshot,
             0x8030 => Self::Diagnostic,

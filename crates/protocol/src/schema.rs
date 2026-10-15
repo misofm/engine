@@ -628,6 +628,34 @@ pub(crate) mod transport_state_event {
     };
 }
 
+/// One ended tap's stable key inside `OBSERVATION_ENDED` (#1584 D6a fold).
+pub(crate) mod observation_tap_key {
+    use super::*;
+    pub(crate) const STRIP_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+    /// The section: inserts `2` or console `5`, the `RackName` codes.
+    pub(crate) const SECTION: FieldSpec = FieldSpec::req(2, Wire::U8);
+    /// The insert's effect ID or the console slot ID.
+    pub(crate) const EFFECT_ID: FieldSpec = FieldSpec::req(3, Wire::Utf8);
+    pub(crate) const TAP_ID: FieldSpec = FieldSpec::req(4, Wire::U32);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ObservationTapKey",
+        fields: &[STRIP_ID, SECTION, EFFECT_ID, TAP_ID],
+    };
+}
+
+/// `OBSERVATION_ENDED` (#1584): the stable keys of every tap whose subscription one commit ended,
+/// one repeated `key` message each, at least one, in strictly ascending key order. The revision
+/// that removed the taps' effects is the event header's.
+pub(crate) mod observation_ended {
+    use super::*;
+    pub(crate) const EVENT_SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const KEY: FieldSpec = FieldSpec::msg(2, true, true, &observation_tap_key::SPEC);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ObservationEnded",
+        fields: &[EVENT_SEQUENCE, KEY],
+    };
+}
+
 pub(crate) mod meter_batch {
     use super::*;
     pub(crate) const OBSERVED_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
@@ -1772,6 +1800,8 @@ mod tests {
             &transport_set::SPEC,
             &transport_snapshot::SPEC,
             &transport_state_event::SPEC,
+            &observation_tap_key::SPEC,
+            &observation_ended::SPEC,
             &meter_batch::SPEC,
             &telemetry_configuration::SPEC,
             &counters_request::SPEC,

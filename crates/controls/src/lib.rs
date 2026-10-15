@@ -34,6 +34,7 @@ mod lane;
 mod live_lanes;
 mod live_ramps;
 mod mask;
+mod observation;
 mod owner_edits;
 mod registry;
 mod route;
@@ -60,6 +61,9 @@ pub use error::ControlError;
 pub use live_lanes::{LiveLanes, live_lanes};
 pub use live_ramps::LiveRamps;
 pub use mask::mask_values;
+pub use observation::{
+    ObservationBinding, ObservationBindings, ObservationChange, TapKey, TapSection,
+};
 pub use owner_edits::{OwnerEditError, OwnerEdits};
 pub use registry::{
     ControlRow, check_monitor, derived_rows_in, derived_rows_with, get, list, owner_count,

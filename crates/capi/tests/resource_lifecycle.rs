@@ -1775,6 +1775,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             revision: 1,
             edit_ramps: &session::EditRamps::new(),
             monitor: host_core::MonitorBase::NONE,
+            observation: &host_core::NO_OBSERVATION,
         },
         &host_core::LiveValuesSuperseded::default(),
     )
