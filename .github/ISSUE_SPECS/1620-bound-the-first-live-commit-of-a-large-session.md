@@ -88,3 +88,17 @@ only the first. The candidate fixes are outside this spec's authorized paths and
 is charged exactly); or (C2) densify every effect's parameter list at preparation (changes the
 committed model and its canonical snapshot, a contract change). Per the coordinator's ruling the
 work stopped here; no code changed.
+
+## Root ruling (2026-10-15): C1
+
+- **Design.** The in-place path admits a `SetControl` that adds a parameter entry, and charges the
+  added entry exactly. The committed model and the canonical snapshot equal the full path's for
+  the same transaction. The rejected alternative (C2, fill every parameter list at preparation)
+  would change the committed model and its canonical snapshot.
+- **Authorized paths** gain `crates/session/src/in_place.rs` and `crates/protocol/src/model.rs`
+  (the in-place admission and its resource estimate), and the heap gate's real home,
+  `tools/parameter-metadata/tests/control_command_heap.rs`.
+- **Gates.** (1) A differential gate: for edits that add parameter entries, the in-place commit's
+  model and canonical snapshot equal the full path's, bit for bit. (2) The first-call peak at 64
+  and 256 tracks is measured and recorded, with a ceiling near the steady peak. (3) The first
+  call's allocation count does not depend on the track count.
