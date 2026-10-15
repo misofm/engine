@@ -429,17 +429,22 @@ impl<'a, 's> CellEvents<'a, 's> {
             };
             let offset = self.position + distance;
             let is_boundary = boundary == Some(next);
-            if is_boundary && self.program.no_restart && next < self.free_at() {
-                // The ramp cannot restart: the jump waits for the lane to be free.
-                self.state.cursor += 1;
+            let is_deferred = deferred == Some(next);
+            if (is_boundary || is_deferred) && self.program.no_restart && next < self.free_at() {
+                // The ramp cannot restart: the jump waits for the lane to be free. A deferral due
+                // now waits again when the caller reported a ramp after it was deferred
+                // (`hold_until` between blocks), including one due at a run's first sample.
+                if is_boundary {
+                    self.state.cursor += 1;
+                }
                 self.state.deferred = self.free_at();
                 continue;
             }
-            let is_jump = is_boundary || deferred == Some(next);
+            let is_jump = is_boundary || is_deferred;
             if is_boundary {
                 self.state.cursor += 1;
             }
-            if deferred == Some(next) {
+            if is_deferred {
                 self.state.deferred = IDLE;
             }
             self.position = offset + 1;

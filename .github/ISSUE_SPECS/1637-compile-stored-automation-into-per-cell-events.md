@@ -114,7 +114,9 @@ it yet; #1645's order check (`value_at`) and #1646 and #1647 are its first users
   - The cursor advances one segment per boundary crossed and never moves backwards except at a seek
     or a reposition.
   - Bound: at most `⌈q/G⌉ + 1` grid events, `⌈q/64⌉ + 1` jumps (#1626's spacing rule) and one
-    seek: `2⌈q/64⌉ + 3` per cell and block.
+    seek: `2⌈q/64⌉ + 3` per cell and block, plus one for a `no_restart` cell (a jump deferred from
+    the previous block); `CellProgram::max_events(q)` returns it. Amended at attempt 2, which has
+    the proof (decision record, "Attempt 2", finding 1).
 - **D5. Builder.** `ProgramBuilder` takes neutral cell descriptions (segments and D2's parameters;
   no session type) and reports the exact bytes it will allocate (`bytes(&cells) -> u64`) before it
   allocates them with fallible reservations. It refuses, typed, a description that breaks D2's
@@ -184,7 +186,8 @@ it yet; #1645's order check (`value_at`) and #1646 and #1647 are its first users
   offset and at offset 0; a `Word` key's jump ramps over the word passed for the block, so two
   blocks with different words give two jump lengths.
 3. **Bound.** An adversarial table (a discontinuity every 64 samples, every segment moving) and a
-   seek in the block give at most `2⌈q/64⌉ + 3` events per block at `q` in {64, 100, 128, 1024}.
+   seek in the block give at most `2⌈q/64⌉ + 3` events per block at `q` in {64, 100, 128, 1024},
+   plus one for a `no_restart` cell (D4, amended at attempt 2).
 4. **Quantum and seek invariance.** The same table rendered through mappings of quantum 128 and
    quantum 100, and with one seek to the same timeline sample landing at two different render
    samples, gives the same sequence of `(node time, kind, ramp, value bits)` events from the first
@@ -386,3 +389,27 @@ finding. Each is fixed below with the test that is red without the fix.
    `tools/realtime-policy/src/policy.rs` are 32 and 144 (departure 8's 31 and 143 are superseded).
 6. **INFO.** The `tools/wasm-gate-corpus` header names the automation block at the end of the
    layout. `quantum_invariance` runs once: its blocks hold no seek, so the mode loop added nothing.
+
+### Attempt 3
+
+The adversarial verdict on attempt 2 (`40514b1fc`) failed it on one MEDIUM finding.
+
+1. **MEDIUM: a deferral fired inside a caller ramp reported after it.** `next_in_run` checked the
+   lane (`next < free_at()`) only for a fresh discontinuity. A deferral fired at its stored time
+   even when the caller had called `hold_until(later)` between blocks; with a jump ramp of 0,
+   `commit` then set the lane idle, so the next discontinuity also fired inside the caller's ramp.
+   That broke D4: a `no_restart` cell whose ramp is in flight takes the jump at the ramp's last
+   sample plus one. Fix: a deferral that is due (`is_deferred`) meets the same lane check as a
+   discontinuity; while the lane is busy it is deferred again to `free_at()` (the cursor advances
+   only for a discontinuity). The check also covers a deferral behind a forward span, which is due
+   at the run's first sample (attempt 2, finding 2). A deferral only moves forward, so the loop
+   ends. The bound is unchanged: at most one deferral is outstanding.
+   - Test `events::a_deferral_waits_for_a_caller_ramp_reported_after_it` (the verifier's case on
+     `deferral_table`): `hold_until(130)`, block at 64, `hold_until(200)`, block at 128 gives only
+     held grid events (attempt 2 gave a `Jump` at 131 and at 134), and the next block gives one
+     `Jump` at 201 to 3.0. Its second half carries the deferral behind a forward span to 500 with
+     the caller's ramp to 600: no jump before 601, one `Jump` at 601 to 3.0. Each half is red on
+     attempt 2's `events.rs` and green after the fix.
+   - `events::events_per_block_are_bounded` again proves the tables stress the bound: for
+     `q >= 64` the most events in one block exceeds `⌈q/64⌉`.
+   - D4's bound bullet and gate 3 now state the `no_restart` term.

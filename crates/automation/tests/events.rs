@@ -384,6 +384,7 @@ fn events_per_block_are_bounded() {
             let bound = stated_bound(quantum, no_restart);
             assert_eq!(cell.max_events(quantum) as usize, bound);
             let mut state = CellState::new();
+            let mut most = 0;
             for index in 0..(20_000 / quantum).min(2_000) {
                 let first = i64::from(index) * i64::from(quantum);
                 // A seek in every fifth block, at a mid-block offset; a caller ramp in every
@@ -406,6 +407,14 @@ fn events_per_block_are_bounded() {
                     events.len() <= bound,
                     "no_restart {no_restart}, q {quantum}: {} > {bound}",
                     events.len()
+                );
+                most = most.max(events.len());
+            }
+            // The tables stress the bound: a block holds more events than its grid points alone.
+            if quantum >= 64 {
+                assert!(
+                    most > quantum.div_ceil(64) as usize,
+                    "no_restart {no_restart}, q {quantum}: most {most}"
                 );
             }
         }
@@ -461,6 +470,81 @@ fn a_carried_deferral_reaches_the_no_restart_bound() {
     );
     assert_eq!(events.len(), stated_bound(64, true));
     assert_eq!(cell.max_events(64) as usize, events.len());
+}
+
+/// Red if a deferral fires inside a caller ramp reported between blocks (attempt 2 checked the lane
+/// only for a fresh discontinuity): the jump at 70, deferred to 131, meets a caller ramp that runs
+/// to 200, so it and the discontinuity at 134 wait for the lane and fire once at 201, the ramp's
+/// last sample plus one, aimed at the curve there.
+#[test]
+fn a_deferral_waits_for_a_caller_ramp_reported_after_it() {
+    let program = deferral_table();
+    let mut state = CellState::new();
+    state.hold_until(130);
+    let _ = block(&program, &mut state, span(64, None, 64), SeekMode::Exact, 0);
+    state.hold_until(200);
+    let second = block(
+        &program,
+        &mut state,
+        span(128, None, 64),
+        SeekMode::Exact,
+        0,
+    );
+    assert!(
+        second.iter().all(|e| e.kind == EventKind::Grid && e.held),
+        "{second:?}"
+    );
+    let third = block(
+        &program,
+        &mut state,
+        span(192, None, 64),
+        SeekMode::Exact,
+        0,
+    );
+    let jumps: Vec<_> = third
+        .iter()
+        .filter(|e| e.kind == EventKind::Jump)
+        .map(|e| (192 + i64::from(e.offset), e.value))
+        .collect();
+    assert_eq!(jumps, [(201, 3.0)], "{third:?}");
+
+    // The same deferral carried behind a forward span is due at the run's first sample (500),
+    // where the caller's ramp still runs to 600: it waits for 601.
+    let mut state = CellState::new();
+    state.hold_until(130);
+    let _ = block(&program, &mut state, span(64, None, 64), SeekMode::Exact, 0);
+    state.hold_until(600);
+    let skipped = block(
+        &program,
+        &mut state,
+        span(500, None, 64),
+        SeekMode::Exact,
+        0,
+    );
+    assert!(
+        skipped.iter().all(|e| e.kind != EventKind::Jump),
+        "{skipped:?}"
+    );
+    let _ = block(
+        &program,
+        &mut state,
+        span(564, None, 32),
+        SeekMode::Exact,
+        0,
+    );
+    let due = block(
+        &program,
+        &mut state,
+        span(596, None, 64),
+        SeekMode::Exact,
+        0,
+    );
+    let jumps: Vec<_> = due
+        .iter()
+        .filter(|e| e.kind == EventKind::Jump)
+        .map(|e| (596 + i64::from(e.offset), e.value))
+        .collect();
+    assert_eq!(jumps, [(601, 3.0)], "{due:?}");
 }
 
 /// Red if a deferral the caller skipped past (node time moved forward with no seek step) gives an
