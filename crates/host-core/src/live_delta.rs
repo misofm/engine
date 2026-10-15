@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::control_preparation::{
     INPUT_FILTER_TARGET_CAPACITY, InputFilterEdit, InputFilterPreparer,
 };
-use crate::route_controls::{RouteControlError, RouteControlRecord, route_record};
+use crate::route_controls::RouteControlRecord;
 use builtins::{
     BuiltinLaneSelector, PreparedInputFilterTarget, checked_trim_gain, validate_input_filter_pair,
     validate_prepared_input_filter_target,
@@ -39,8 +39,8 @@ use controls::{
 use effect_compiler::{LiveEffectAddress, launch_native_effect_registry, resolve_initial_values};
 use effect_contract::{EffectControlRecord, ParameterChannel, PreparedEffectTarget};
 use session::{
-    EditRampRow, EditRampTarget, EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks,
-    Route, RouteDestination, SessionModel, StableId, StripRef, canonical_session_json,
+    EditRamps, Effect, EffectIdentity, EffectParam, LoweredRacks, Route, RouteDestination,
+    SessionModel, StableId, StripRef, canonical_session_json,
 };
 
 #[cfg(feature = "test-support")]
@@ -59,9 +59,9 @@ pub fn take_fast_classification_count() -> usize {
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
 use crate::prepare::{
-    EffectiveDiff, LevelRules, OutOfDomain, StripChange, StripEditRamps, effect_instance_records,
-    effective_fader, fader_records, lane_records, level_differs, matrix_record, route_source_strip,
-    same_params, strip_at,
+    EffectiveDiff, LevelRules, OutOfDomain, RouteEditRamps, StripChange, StripEditRamps,
+    effect_instance_records, effective_fader, fader_records, lane_records, level_differs,
+    matrix_record, route_record_between, route_source_strip, same_params, strip_at,
 };
 use crate::prepare::{LiveRampRow, LiveRamps, MonitorBase};
 
@@ -1238,30 +1238,6 @@ struct Context<'m> {
     diff: Option<&'m dyn LevelDiff>,
 }
 
-/// The per-edit ramp lengths of one route's three rows, looked up once from the transaction's
-/// [`EditRamps`] (#1557 D3): the `(Route, RouteGain)`, `(Route, RouteMute)` and
-/// `(Route, RouteMatrix)` entries. `None` is "the edit gave no length": the session's applies.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct RouteEditRamps {
-    gain: Option<u32>,
-    mute: Option<u32>,
-    matrix: Option<u32>,
-}
-
-impl RouteEditRamps {
-    fn of(edit_ramps: &EditRamps, id: &StableId) -> Self {
-        if edit_ramps.is_empty() {
-            return Self::default();
-        }
-        let target = EditRampTarget::Route(id.clone());
-        Self {
-            gain: edit_ramps.get(&target, EditRampRow::RouteGain),
-            mute: edit_ramps.get(&target, EditRampRow::RouteMute),
-            matrix: edit_ramps.get(&target, EditRampRow::RouteMatrix),
-        }
-    }
-}
-
 /// What a lowering is of: a strip (or one of its effect instances), or a route.
 enum Subject<'s, 'm, 'a> {
     Strip(Target<'s, 'm, 'a>),
@@ -1369,17 +1345,8 @@ fn lower<'a>(
 }
 
 /// The record that brings a send from `before`'s live values to `after`'s (#1557 D2, D3), when the
-/// target the render plane holds changes.
-///
-/// The target is `graph_compiler::route_coefficients` of the route's gain, matrix and mute with
-/// its effective gate ([`route_record`]), exactly what preparation folds into the route's
-/// constants, so a settled send is bit-identical to a prepared one. It is compared as bits, with
-/// the gate: a gain or matrix edit on a muted send leaves the silenced `+0.0` target as it was and
-/// gives no record, and the later unmute carries the new values.
-///
-/// The ramp is the gate's when the gate changes in either lane (`EffectiveDiff::gate_length`, #1558
-/// D7), else the longest of the changed rows' lengths (`SendGain`, `SendMatrix`), each through
-/// [`LiveRamps::resolve`] (an explicit `0` is a step).
+/// target the render plane holds changes: [`route_record_between`] of the lowering's inputs, the
+/// one function of a send (#1284 D3), which a successor's preparation asks too.
 ///
 /// # Errors
 ///
@@ -1389,41 +1356,16 @@ fn route_records<'a>(
     ctx: &Context<'_>,
     target: &RouteTarget<'_, 'a>,
 ) -> Result<Option<LiveRouteRecord<'a>>, LiveRebuild> {
-    let (before, after) = (target.before, target.after);
-    let matrix = |route: &Route| {
-        let matrix = &route.channel_matrix;
-        [matrix.ll, matrix.lr, matrix.rl, matrix.rr]
-    };
-    let build = |route: &Route, gate: [bool; 2], length: u32| {
-        route_record(route.gain_db, matrix(route), route.mute, gate, length).map_err(|error| {
-            match error {
-                RouteControlError::Domain | RouteControlError::Length => LiveRebuild::Domain,
-            }
-        })
-    };
-    let prior = build(before, target.gates[0], 0)?;
-    let current = build(after, target.gates[1], 0)?;
-    let bits = |record: &RouteControlRecord| record.target().map(f32::to_bits);
-    let gate_changed = target.gates[0] != target.gates[1];
-    if prior.mute() == current.mute() && bits(&prior) == bits(&current) {
-        return Ok(None);
-    }
-    let edit = target.edit;
-    let length = if gate_changed {
-        target.gate_length
-    } else {
-        let gain = (before.gain_db.to_bits() != after.gain_db.to_bits())
-            .then(|| ctx.ramps.resolve(LiveRampRow::SendGain, edit.gain));
-        let matrix = (matrix(before).map(f32::to_bits) != matrix(after).map(f32::to_bits))
-            .then(|| ctx.ramps.resolve(LiveRampRow::SendMatrix, edit.matrix));
-        gain.into_iter()
-            .chain(matrix)
-            .max()
-            .unwrap_or_else(|| ctx.ramps.resolve(LiveRampRow::SendMute, edit.mute))
-    };
-    let record = build(after, target.gates[1], length)?;
-    Ok(Some(LiveRouteRecord {
-        route_id: after.id.as_str(),
+    Ok(route_record_between(
+        ctx.ramps,
+        target.before,
+        target.after,
+        target.gates,
+        target.gate_length,
+        target.edit,
+    )?
+    .map(|record| LiveRouteRecord {
+        route_id: target.after.id.as_str(),
         record,
     }))
 }
