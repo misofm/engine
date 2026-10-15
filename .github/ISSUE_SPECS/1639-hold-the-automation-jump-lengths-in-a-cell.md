@@ -147,11 +147,13 @@ already in flight keeps the length it started with.
 
 ## Test value
 
-- Gate 1: red if the graph reads the cell only at preparation, a block late, or reads an older
-  write.
+- Gate 1: red if the graph reads the cell only at preparation, under no snapshot, or reads an
+  older write, or if the cell's allocations drift from its retained row.
 - Gate 2: red if the edit is `live` with no entry that reads a word (a needless write), `model_only`
   with one (the new lengths never reach render), or if equal sample counts still write.
-- Gate 3: red if the commit does not write the cell, or writes it to a plan that is not the newest.
+- Gate 3: red if the commit does not write the cell, or reports the path from anything but the
+  classifier's value; with a structural edit beside it (D4), red if the successor's cell is not
+  seeded from the committed model.
 - Gate 4: red if the block-entry read or the hand-off to the stages allocates on render.
 
 ## Dependencies
@@ -195,9 +197,9 @@ block entry sets). `crates/host-core`: `session_jump_lengths(model)` (from
 `LiveRamps::for_session`), preparation attaches and seeds the cell on every plan after bind and
 charges it in the graph row, `HostLiveControlHandles::jump_lengths`; the classifier's
 `LiveDelta::jump_lengths: Option<GraphJumpLengths>` (read by `is_empty`) and
-`automation_jump_row(target)`. `crates/control-plane`: the epoch's `StripLanes` holds the writer;
-`commit_live_once` checks it is present before the stamp and writes the value with the records,
-under the stamp, before the revision's publication. D7's sentence is in `docs/SESSION_SCHEMA_V1.md`.
+`automation_jump_row(target)`. `crates/control-plane`: the epoch's `StripLanes` holds the writer (preparation refuses a plan
+without one, review fold 1); `commit_live_once` writes the value with the records, under the stamp,
+before the revision's publication. D7's sentence is in `docs/SESSION_SCHEMA_V1.md`.
 
 **Departures and choices (code truth).**
 
@@ -223,7 +225,9 @@ under the stamp, before the revision's publication. D7's sentence is in `docs/SE
    closes it for rendered rows.
 
 **Re-pinned rows** (each "the jump-length cell, #1639 D1"; measured: the cell's two allocations are
-168 bytes, a count 24 bytes, the revision gate 72 bytes):
+168 bytes, a count 24 bytes, the revision gate 72 bytes; since the review fold gate 1 measures the
+cell's bytes and its two allocations against `jump_length_retained_bytes()` with the thread
+counters):
 
 | Test | Row | Before | After |
 |---|---|---|---|
@@ -240,9 +244,31 @@ before the automation upsert (on a session with a fader entry it is `live` by D3
 
 | Gate | Test | Result |
 |---|---|---|
-| 1 Block-entry read | `graph` `tests/jump_lengths.rs` `the_block_entry_holds_the_newest_published_lengths` (prepared lengths at block 0; an unpublished write not held; held from the first block after publication; two writes give the last and count one superseded; a second attach refused) | pass |
+| 1 Block-entry read | `graph` `tests/jump_lengths.rs` `the_block_entry_holds_the_newest_published_lengths` (prepared lengths at block 0; an unpublished write not held; held from the first block after publication; two writes give the last and count one superseded; a second attach refused; the attach leaves exactly `jump_length_retained_bytes()` live in 2 allocations, 0 frees). The probe is set right after the block's snapshot, so the test does not show where in the block the read is | pass |
 | 2 Classifier | `host-core` `tests/live_delta.rs` `a_control_smoothing_change_writes_the_jump_lengths_only_for_automation_that_reads_them` (fader, mute, pan entries live; none, EQ parameter entry and 10.0 -> 10.001 ms empty; effect bypass entry live), `the_rows_that_read_a_jump_length_are_the_ramped_rows` | pass |
-| 3 C ABI | `capi` `runtime::live_tests::a_control_smoothing_edit_on_an_automated_session_writes_the_jump_lengths_live` (SET_CONTROL of the three smoothing rows: `live`, same epoch, no candidate, next block holds 96/48/144; without automation `model_only`, prepared 960/480/960 held). Red with the commit's write removed. | pass |
+| 3 C ABI | `capi` `runtime::live_tests::a_control_smoothing_edit_on_an_automated_session_writes_the_jump_lengths_live` (SET_CONTROL of the three smoothing rows: `live`, same epoch, no candidate, next block holds 96/48/144; without automation `model_only`, prepared 960/480/960 held). Red with the commit's write removed. No candidate is pending, so it does not show which plan a write with a candidate reaches. D4: `a_successor_prepared_with_a_control_smoothing_edit_holds_the_new_lengths` (an added track and the three rows in one transaction: `rebuild`, one candidate; after adoption, a new epoch, the next block holds 96/48/144). Red with the seed made a constant 960/480/960: the successor held 960/480/960. | pass |
 | 4 Realtime | gates 1 and 3 count 0 allocations and 0 frees in the block that applies the write; `audit capi`: every violation count 0 | pass |
 | 5 Commands | `graph --features test-support`, `host-core` (all features), `capi`, `control-plane`, `host-web` suites; the `test-debug-a` workspace leg (2228 passed, 0 failed); `realtime_policy` (149 regions in 32 files; floor 147 -> 149 for this issue's two regions), graph, host-core and workspace policy scripts; `check-cross-targets.sh` (PASS, iOS memset only the known #1018 builtins/lane calls); workspace clippy `-D warnings`; `fmt --check` | pass |
 | 6 No bit moves | `audit capi` `pcm_digest` `bf7dcedd1d92621f` at base and head. Browser legs: run by the coordinator | native pass |
+
+**Review fold (batch 13b).** Five minor findings of the adversarial review, folded:
+
+1. **The invariant is typed.** The epoch's `StripLanes::jump_lengths` holds the writer, not an
+   `Option`: `prepare_runtime` refuses a handle set without it with the cell's own attach failure
+   (`host.jump_lengths.attach`, stage `Graph`), and `commit_live_once` lost its unreachable
+   `Internal` refusal. `HostLiveControlHandles::jump_lengths` stays an `Option` (handle sets built
+   without a preparation) and converts at the control-plane boundary.
+2. **The cell's bytes are measured.** Gate 1 counts the attach with the thread counters (statics
+   warmed on a throwaway plan): requested less released bytes equal
+   `jump_length_retained_bytes()`, in 2 allocations and 0 frees. The counters carry no largest
+   allocation, so `jump_length_largest_allocation_bytes()` is not measured.
+3. **Two claims removed.** Gate 1 no longer claims "a block late": its probe is set right after the
+   block's snapshot. Gate 3 no longer claims "a plan that is not the newest": that test has no
+   candidate.
+4. **D4 has a C ABI test** (gate 3's row): `a_successor_prepared_with_a_control_smoothing_edit_holds_the_new_lengths`,
+   red with the seed made a constant.
+5. **`session_jump_lengths`** moved out of the `use` block in `crates/host-core/src/prepare.rs`.
+   `prepare.rs` also moves the graph row's charge (the superseded count charged when the
+   preparation made its own), the largest-allocation row and a `HostLiveControlHandles` field,
+   past the authorized "the seed only": all three are needed for D1 and are covered by the root
+   ruling on byte rows.

@@ -196,18 +196,36 @@ fn lengths(fader_samples: u32, mute_samples: u32, pan_samples: u32) -> GraphJump
 /// before a block entry is held from that block on, not before; a write whose revision is not yet
 /// published is not held; two writes before one block give the last, and the replaced one is
 /// counted superseded. Every block allocates and frees nothing, the block that applies a write
-/// included (gate 4's render half).
+/// included (gate 4's render half). The attach allocates exactly the cell's retained row, in two
+/// allocations.
 ///
-/// Test value: red if the graph reads the cell only at preparation, a block late (after the
-/// units), under no snapshot (a write held before its revision is published), or applies an older
-/// write than the newest.
+/// Test value: red if the graph reads the cell only at preparation, under no snapshot (a write
+/// held before its revision is published), or applies an older write than the newest, or if the
+/// cell's allocations drift from the retained row the hosts charge.
 #[test]
 fn the_block_entry_holds_the_newest_published_lengths() {
     bench_support::alloc::assert_installed();
     let superseded = realtime::LiveValuesSuperseded::new();
+    // Warm any process static the attach touches on a throwaway plan, so the counted attach
+    // below sees the cell's own allocations alone.
+    let mut warm = bound();
+    drop(attach_jump_lengths(&mut warm, PREPARED, &superseded).expect("a graph plan's cell"));
+    drop(warm);
     let mut plan = bound();
+    let mark = bench_support::alloc::current_thread_counters();
     let mut producer =
         attach_jump_lengths(&mut plan, PREPARED, &superseded).expect("a graph plan's cell");
+    let cell = bench_support::alloc::current_thread_delta_since(mark);
+    assert_eq!(
+        cell.requested_bytes - cell.released_bytes,
+        jump_length_retained_bytes(),
+        "the cell's live bytes are the retained row"
+    );
+    assert_eq!(
+        (cell.allocations, cell.deallocations, cell.reallocations),
+        (2, 0, 0),
+        "the cell is two allocations: the shared lane and the plan's reader"
+    );
     assert_eq!(
         attach_jump_lengths(&mut plan, PREPARED, &superseded).err(),
         Some(GraphJumpLengthError::AlreadyAttached)
