@@ -1148,6 +1148,9 @@ struct DirectRun {
     /// values its adopting block replaced (#1630 f). The test seam gives each plan its own count;
     /// a host passes both plans the session's.
     successor_superseded: u64,
+    /// The last plan's own count after the final block: the successor's, when `b` is given. A
+    /// carried value counted again by a later drain shows here and not in `successor_superseded`.
+    final_superseded: u64,
 }
 
 /// Render `a` for [`SWAP_BLOCK`] blocks of `quantum` frames, then -- when `b` is given -- prepare
@@ -1260,6 +1263,7 @@ fn direct_run_ramped(
         transitions: plan.prepared.plan.bank_collapse_transitions(),
         carry_superseded,
         successor_superseded,
+        final_superseded: plan.handles.live_values_superseded.get(),
     }
 }
 
@@ -2053,15 +2057,29 @@ fn a_carried_input_value_the_retarget_replaces_is_counted(backend: Backend) {
     let a = Session::compile(filtered_session(false));
     let written = with_left_trim(WRITTEN_DB);
     let b = Session::compile(with_muted_track(with_left_trim(MOVED_DB)));
-    let writes = [LiveWrite {
-        block: SWAP_BLOCK,
-        strip: STRIP,
-        record: builtins_compiler::TrackInputRecord::TrimDb {
-            lanes: builtins::BuiltinLaneSelector::Left,
-            db: WRITTEN_DB,
-            smoothing_samples: 64,
+    // The second write: a second value to the same cell, two blocks after the adopting block,
+    // through the successor's normal write path. The carry marks are spent by then, so it is a plain
+    // write, never a second carried value.
+    let writes = [
+        LiveWrite {
+            block: SWAP_BLOCK,
+            strip: STRIP,
+            record: builtins_compiler::TrackInputRecord::TrimDb {
+                lanes: builtins::BuiltinLaneSelector::Left,
+                db: WRITTEN_DB,
+                smoothing_samples: 64,
+            },
         },
-    }];
+        LiveWrite {
+            block: SWAP_BLOCK + 2,
+            strip: STRIP,
+            record: builtins_compiler::TrackInputRecord::TrimDb {
+                lanes: builtins::BuiltinLaneSelector::Left,
+                db: 0.5,
+                smoothing_samples: 64,
+            },
+        },
+    ];
     let feed = Feed::new(SOURCE, 19);
     let run = |b: &Session, committed: &SessionModel, writes: &[LiveWrite]| {
         let run = direct_run(
@@ -2082,8 +2100,13 @@ fn a_carried_input_value_the_retarget_replaces_is_counted(backend: Backend) {
         (0, 1),
         "{backend:?}: the carried value the retarget replaced is counted once"
     );
-    let unwritten = run(&b, &a.model, &[]);
+    assert_eq!(
+        replaced.final_superseded, 1,
+        "{backend:?}: a later write to the cell is not a second carried value"
+    );
+    let unwritten = run(&b, &a.model, &writes[1..]);
     assert_eq!(unwritten.successor_superseded, 0, "{backend:?}");
+    assert_eq!(unwritten.final_superseded, 0, "{backend:?}");
     assert_eq!(
         first_direct_difference(&replaced, &unwritten),
         None,
@@ -2100,6 +2123,7 @@ fn a_carried_input_value_the_retarget_replaces_is_counted(backend: Backend) {
         (0, 0),
         "{backend:?}: a carried value nothing replaces is not counted"
     );
+    assert_eq!(kept.final_superseded, 0, "{backend:?}");
 }
 
 #[test]
@@ -3059,6 +3083,8 @@ struct CellRun {
     carry_superseded: u64,
     /// The successor's own count after its first block, as [`DirectRun::successor_superseded`].
     successor_superseded: u64,
+    /// The last plan's count after the final block, as [`DirectRun::final_superseded`].
+    final_superseded: u64,
 }
 
 /// Render `a` and write `writes` to the plan that renders their block next; with a `swap`, prepare
@@ -3139,6 +3165,7 @@ fn cell_run(
         swap_allocator,
         carry_superseded,
         successor_superseded,
+        final_superseded: plan.live.handles.live_values_superseded.get(),
     }
 }
 
@@ -3710,15 +3737,29 @@ fn a_carried_strip_value_the_retarget_replaces_is_counted(backend: Backend, form
         [MOVED_DB, right],
     )));
     let feed = feed_for_strips();
-    let writes = [CellWrite {
-        block: SWAP_BLOCK,
-        strip: MOVED,
-        record: CellRecord::Fader(TrackFaderRecord::FaderDb {
-            lanes: BuiltinLaneSelector::Left,
-            db: WRITTEN_DB,
-            smoothing_samples: 64,
-        }),
-    }];
+    // The second write: a second value to the same cell, two blocks after the adopting block,
+    // through the successor's normal write path. The carry marks are spent by then, so it is a plain
+    // write, never a second carried value.
+    let writes = [
+        CellWrite {
+            block: SWAP_BLOCK,
+            strip: MOVED,
+            record: CellRecord::Fader(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: WRITTEN_DB,
+                smoothing_samples: 64,
+            }),
+        },
+        CellWrite {
+            block: SWAP_BLOCK + 2,
+            strip: MOVED,
+            record: CellRecord::Fader(TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: -4.0,
+                smoothing_samples: 64,
+            }),
+        },
+    ];
     let run = |to: &Session, committed: &SessionModel, writes: &[CellWrite]| {
         let run = cell_run(
             &a,
@@ -3744,8 +3785,13 @@ fn a_carried_strip_value_the_retarget_replaces_is_counted(backend: Backend, form
         (0, 1),
         "{backend:?} {form:?}: the carried value the retarget replaced is counted once"
     );
-    let unwritten = run(&b, &base, &[]);
+    assert_eq!(
+        replaced.final_superseded, 1,
+        "{backend:?} {form:?}: a later write to the cell is not a second carried value"
+    );
+    let unwritten = run(&b, &base, &writes[1..]);
     assert_eq!(unwritten.successor_superseded, 0, "{backend:?} {form:?}");
+    assert_eq!(unwritten.final_superseded, 0, "{backend:?} {form:?}");
     assert_eq!(
         first_cell_difference(&replaced, &unwritten),
         None,
@@ -3761,6 +3807,7 @@ fn a_carried_strip_value_the_retarget_replaces_is_counted(backend: Backend, form
         (0, 0),
         "{backend:?} {form:?}: a carried value nothing replaces is not counted"
     );
+    assert_eq!(kept.final_superseded, 0, "{backend:?} {form:?}");
 }
 
 #[test]
