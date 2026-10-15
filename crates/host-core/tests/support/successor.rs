@@ -116,8 +116,13 @@ pub(crate) struct Feed {
 
 impl Feed {
     pub(crate) fn new(id: &'static str, seed: u32) -> Self {
+        Self::with_blocks(id, seed, BLOCKS)
+    }
+
+    /// [`Self::new`] over `blocks` blocks, for a run longer than [`BLOCKS`].
+    pub(crate) fn with_blocks(id: &'static str, seed: u32, blocks: usize) -> Self {
         let plane = |channel: u32| {
-            (0..(QUANTUM * BLOCKS) as u32)
+            (0..(QUANTUM * blocks) as u32)
                 .map(|frame| {
                     let step = frame
                         .wrapping_mul(7_919)

@@ -4281,18 +4281,48 @@ fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
     let document = with_bypass(false);
     // The blocks after the swap of `rebuilds` successive rebuilds, each one block, the swap, a
     // seek and six blocks, by content edits from a document holding the multiband at `bypass`.
+    // A content edit alone moves a per-node multiband across the swap (#1282), as the bypass
+    // rebuild does not, so each control rebuild also replaces the multiband by a fresh instance
+    // of the same declaration under a new ID: a prepared change of that owner, which restarts it
+    // and its strip exactly as the bypass rebuild does.
     let control = |bypass: bool, rebuilds: u8| {
         let document = with_bypass(bypass);
         let model = parse_session_json(&document).expect("control model");
+        let multiband = model.tracks[0]
+            .inserts
+            .effects
+            .last()
+            .expect("multiband")
+            .clone();
+        let position = u32::try_from(model.tracks[0].inserts.effects.len() - 1).expect("position");
         let mut control = Rig::new(&document);
         control.step();
         let mut rebuilt = Vec::new();
+        let mut previous = multiband.id.clone();
         for tag in 0..rebuilds {
             let mut edit = content_edit(&model);
             if let SessionEdit::SetSourceContent { content, .. } = &mut edit {
                 *content = format!("blake3:{}", format!("{:02x}", 0xc0 + tag).repeat(32));
             }
-            assert_eq!(control.apply(&[edit]), crate::RESULT_OK);
+            let mut renamed = multiband.clone();
+            renamed.id = StableId::parse(&format!("mb{tag}")).expect("renamed multiband");
+            let track_id = model.tracks[0].id.clone();
+            let replace = [
+                SessionEdit::RemoveTrackEffect {
+                    track_id: track_id.clone(),
+                    rack_name: session::RackName::Inserts,
+                    effect_id: previous,
+                },
+                SessionEdit::PutTrackEffect {
+                    track_id,
+                    rack_name: session::RackName::Inserts,
+                    final_position: position,
+                    effect: renamed.clone(),
+                },
+            ];
+            previous = renamed.id;
+            let [remove, put] = replace;
+            assert_eq!(control.apply(&[edit, remove, put]), crate::RESULT_OK);
             assert_eq!(control.summary().3, 1, "the control rebuilds");
             control.render();
             control.seek_to_start();

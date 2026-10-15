@@ -1615,11 +1615,12 @@ impl LiveControlEffectBankStage {
         true
     }
 
-    /// Whether a per-node instance with control lane `control` could exchange its state with this
-    /// stage's lane `lane` in a plan swap, in either direction (#1281): the lane exists and is of
-    /// the instance's kind, the two control lanes have one cell shape, and `scratch_bytes` holds
-    /// the payload. The two layouts agree by the join that named the move, which compares them
-    /// where both are known. Allocation-free and bounded.
+    /// Whether the per-node instance with control lane `control` could be moved into this stage's
+    /// lane `lane` in a plan swap (#1281): the lane exists and is of the instance's kind, the
+    /// lane's carried slots are installed ([`EffectControlLane::install_carry_slots`]) and the two
+    /// control lanes have one cell shape, and `scratch_bytes` holds the payload. The two layouts
+    /// agree by the join that named the move, which compares them where both are known.
+    /// Allocation-free and bounded.
     #[must_use]
     pub fn can_carry_instance(
         &self,
@@ -1631,6 +1632,25 @@ impl LiveControlEffectBankStage {
             .get(lane)
             .and_then(Option::as_ref)
             .is_some_and(|own| own.can_carry_from(control))
+            && self.lane_kind(lane) == Some(EffectLaneKind::of_instance(control))
+            && usize::try_from(self.layout.payload_bytes())
+                .is_ok_and(|payload| payload <= scratch_bytes)
+    }
+
+    /// Whether this stage's lane `lane` could be moved into the per-node instance with control
+    /// lane `control` in a plan swap (#1281): [`Self::can_carry_instance`] with the direction
+    /// reversed, so the instance's carried slots are the ones that must be installed.
+    #[must_use]
+    pub fn can_carry_lane_into_instance(
+        &self,
+        lane: usize,
+        control: &EffectControlLane,
+        scratch_bytes: usize,
+    ) -> bool {
+        self.lanes
+            .get(lane)
+            .and_then(Option::as_ref)
+            .is_some_and(|own| control.can_carry_from(own))
             && self.lane_kind(lane) == Some(EffectLaneKind::of_instance(control))
             && usize::try_from(self.layout.payload_bytes())
                 .is_ok_and(|payload| payload <= scratch_bytes)
@@ -1695,7 +1715,7 @@ impl LiveControlEffectBankStage {
     /// whether the instance took it; `false` leaves the instance as prepared, at rest, and the
     /// caller counts the refusal (D6).
     ///
-    /// The caller has checked [`Self::can_carry_instance`], and has disengaged this stage's chain
+    /// The caller has checked [`Self::can_carry_lane_into_instance`], and has disengaged this stage's chain
     /// ([`BankChain::disengage_for_carry`], D3), so a collapsed bank's right channel holds the
     /// state a dual run would and the instance continues it bit for bit. Reads this stage only:
     /// it never renders again. Allocation-free and bounded by the prepared state size and the
@@ -1706,7 +1726,7 @@ impl LiveControlEffectBankStage {
         into: EffectInstanceMut<'_>,
         scratch: &mut [u8],
     ) -> bool {
-        if !self.can_carry_instance(lane, into.control, scratch.len()) {
+        if !self.can_carry_lane_into_instance(lane, into.control, scratch.len()) {
             return false;
         }
         if carry_payload_into_instance(
@@ -1735,6 +1755,24 @@ impl LiveControlEffectBankStage {
         true
     }
     // REALTIME_POLICY_END
+
+    /// The bytes [`Self::install_carry_slots`] allocates for lane `lane`, and the lane holds once
+    /// it has: none for a lane that is absent or has no cells (#1633 D1).
+    #[must_use]
+    pub fn carry_slot_bytes(&self, lane: usize) -> u64 {
+        self.lanes
+            .get(lane)
+            .and_then(Option::as_ref)
+            .map_or(0, EffectControlLane::carry_slot_bytes)
+    }
+
+    /// Allocate the carried slots of lane `lane`, the successor lane of a plan swap's move. Off the
+    /// render thread; a lane that is absent or has no cells takes none (#1633 D1).
+    pub fn install_carry_slots(&mut self, lane: usize) {
+        if let Some(control) = self.lanes.get_mut(lane).and_then(Option::as_mut) {
+            control.install_carry_slots();
+        }
+    }
 
     /// `Observe` records refused because this slot has no observation capacity. Read off render.
     #[must_use]
@@ -2007,6 +2045,15 @@ impl LiveControlEffectBankStage {
                 .and_then(Option::as_mut),
             unbound: Some(&mut self.unbound),
         })
+    }
+
+    /// Lane `lane`'s observation tap state, if the slot has observation capacity and the lane has
+    /// a tap (#1327 D2): the part of the lane a plan swap exchanges. Allocation-free.
+    pub fn observation_mut(&mut self, lane: usize) -> Option<&mut ObservationLane> {
+        self.observations
+            .as_deref_mut()
+            .and_then(|lanes| lanes.get_mut(lane))
+            .and_then(Option::as_mut)
     }
     // REALTIME_POLICY_END
 

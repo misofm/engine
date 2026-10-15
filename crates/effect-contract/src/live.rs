@@ -704,8 +704,8 @@ pub fn effect_control_lane(
         mix_position: 0,
         symmetry,
         carried_bypass: CarriedCell::EMPTY,
-        carried_parameters: vec![CarriedCell::EMPTY; parameter_cells].into_boxed_slice(),
-        carried_targets: vec![CarriedCell::EMPTY; target_cells].into_boxed_slice(),
+        carried_parameters: Box::default(),
+        carried_targets: Box::default(),
         carried_pending: false,
     };
     Some((writer, lane))
@@ -775,9 +775,12 @@ pub struct EffectControlLane {
     symmetry: ChannelSymmetryWitness,
     /// The predecessor's unread bypass write this lane took at a plan swap (#1280 D2).
     carried_bypass: CarriedCell<2>,
-    /// The predecessor's unread parameter writes, one per parameter cell.
+    /// The predecessor's unread parameter writes, one per parameter cell. Empty until
+    /// [`EffectControlLane::install_carry_slots`] runs: a lane no successor carries holds none
+    /// (#1633 D1).
     carried_parameters: Box<[CarriedCell<1>]>,
-    /// The predecessor's unread target writes, one per target cell.
+    /// The predecessor's unread target writes, one per target cell. Installed with
+    /// [`Self::carried_parameters`].
     carried_targets: Box<[CarriedCell<PREPARED_EFFECT_TARGET_WORDS>]>,
     /// Whether any carried slot holds a write: the next [`Self::stage`] resolves them before it
     /// decides it has nothing to read.
@@ -943,6 +946,41 @@ impl EffectControlLane {
         resources
     }
 
+    /// The bytes [`Self::install_carry_slots`] allocates for this lane, and the lane holds once it
+    /// has: none for a lane without cells. The one place the slot charge is spelled, so
+    /// preparation's admission and the retained-bytes row cannot disagree.
+    #[must_use]
+    pub fn carry_slot_bytes(&self) -> u64 {
+        if self.cells.is_none() {
+            return 0;
+        }
+        let parameters = self
+            .parameter_readers
+            .len()
+            .saturating_mul(core::mem::size_of::<CarriedCell<1>>());
+        let targets = self
+            .target_readers
+            .len()
+            .saturating_mul(core::mem::size_of::<
+                CarriedCell<PREPARED_EFFECT_TARGET_WORDS>,
+            >());
+        u64::try_from(parameters.saturating_add(targets)).unwrap_or(u64::MAX)
+    }
+
+    /// Allocate the carried slots a plan swap fills, one per parameter and target cell (#1633
+    /// D1). Off the render thread: preparation calls it for each successor lane a swap carries
+    /// into, and for no other, so a plan that is never a successor holds none. A lane without
+    /// cells has nothing to carry, and a lane whose slots are installed keeps them.
+    pub fn install_carry_slots(&mut self) {
+        if self.cells.is_none() || self.carry_slots_installed() {
+            return;
+        }
+        self.carried_parameters =
+            vec![CarriedCell::EMPTY; self.parameter_readers.len()].into_boxed_slice();
+        self.carried_targets =
+            vec![CarriedCell::EMPTY; self.target_readers.len()].into_boxed_slice();
+    }
+
     // REALTIME_POLICY_BEGIN
 
     /// This lane's live channel-symmetry terms as of the last [`stage`](Self::stage).
@@ -1045,16 +1083,34 @@ impl EffectControlLane {
         }
     }
 
-    /// Whether [`Self::carry_from`] would take `predecessor`: both lanes have no cells, or both
-    /// have cells of one shape (the same parameter groups and target slots), so every cell of the
-    /// predecessor has a carried slot here. Allocation-free and bounded by the group count.
+    /// Whether this lane and `other` have no cells, or cells of one shape (the same parameter
+    /// groups and target slots), so every cell of one has a cell of the other. Allocation-free and
+    /// bounded by the group count.
     #[must_use]
-    pub fn can_carry_from(&self, predecessor: &Self) -> bool {
-        match (self.cells.as_deref(), predecessor.cells.as_deref()) {
+    pub fn same_cell_shape(&self, other: &Self) -> bool {
+        match (self.cells.as_deref(), other.cells.as_deref()) {
             (None, None) => true,
             (Some(own), Some(before)) => own.shape == before.shape,
             _ => false,
         }
+    }
+
+    /// Whether [`Self::carry_from`] would take `predecessor`: both lanes have no cells, or both
+    /// have cells of one shape, so every cell of the predecessor has a carried slot here, and
+    /// this lane's slots are installed ([`Self::install_carry_slots`], #1633 D2). The
+    /// predecessor's own slots may be missing: it reads them as empty. Allocation-free and
+    /// bounded by the group count.
+    #[must_use]
+    pub fn can_carry_from(&self, predecessor: &Self) -> bool {
+        self.same_cell_shape(predecessor) && self.carry_slots_installed()
+    }
+
+    /// Whether this lane holds the carried slots a successor writes into: always true for a lane
+    /// without cells, which has nothing to carry.
+    #[must_use]
+    pub fn carry_slots_installed(&self) -> bool {
+        self.carried_parameters.len() == self.parameter_readers.len()
+            && self.carried_targets.len() == self.target_readers.len()
     }
 
     /// Take the live state of `predecessor`, the lane of the plan this lane's plan displaces, at
@@ -1090,24 +1146,35 @@ impl EffectControlLane {
             predecessor.carried_bypass,
         );
         pending |= self.carried_bypass.unread != 0;
-        for (((slot, cell), reader), earlier) in self
+        // A predecessor that was never carried into holds no slots: it has no earlier writes.
+        for (index, ((slot, cell), reader)) in self
             .carried_parameters
             .iter_mut()
             .zip(&before.parameters)
             .zip(&predecessor.parameter_readers)
-            .zip(&predecessor.carried_parameters)
+            .enumerate()
         {
-            *slot = CarriedCell::of(reader, cell, *earlier);
+            let earlier = predecessor
+                .carried_parameters
+                .get(index)
+                .copied()
+                .unwrap_or(CarriedCell::EMPTY);
+            *slot = CarriedCell::of(reader, cell, earlier);
             pending |= slot.unread != 0;
         }
-        for (((slot, cell), reader), earlier) in self
+        for (index, ((slot, cell), reader)) in self
             .carried_targets
             .iter_mut()
             .zip(&before.targets)
             .zip(&predecessor.target_readers)
-            .zip(&predecessor.carried_targets)
+            .enumerate()
         {
-            *slot = CarriedCell::of(reader, cell, *earlier);
+            let earlier = predecessor
+                .carried_targets
+                .get(index)
+                .copied()
+                .unwrap_or(CarriedCell::EMPTY);
+            *slot = CarriedCell::of(reader, cell, earlier);
             pending |= slot.unread != 0;
         }
         self.carried_pending = pending;
@@ -1191,7 +1258,7 @@ impl EffectControlLane {
             superseded,
         };
         if let Some([word, ramp_samples]) =
-            reads.read(0, &cells.bypass, bypass_reader, carried_bypass)
+            reads.read(0, &cells.bypass, bypass_reader, Some(carried_bypass))
         {
             let value = word != 0;
             // A record whose target is the lane's current target changes nothing, whether the
@@ -1229,7 +1296,7 @@ impl EffectControlLane {
                         1 + first + offset,
                         &cells.parameters[first + offset],
                         &mut parameter_readers[first + offset],
-                        &mut carried_parameters[first + offset],
+                        carried_parameters.get_mut(first + offset),
                     )
                     .map(|[bits]| bits);
             }
@@ -1277,7 +1344,7 @@ impl EffectControlLane {
                     cells.shape.target_bit(index),
                     &cells.targets[index],
                     &mut target_readers[index],
-                    &mut carried_targets[index],
+                    carried_targets.get_mut(index),
                 );
             }
             let slot = slot as u32;
@@ -1362,7 +1429,7 @@ impl Reads<'_> {
         bit: usize,
         cell: &LatestCell<N>,
         reader: &mut CellReader,
-        carried: &mut CarriedCell<N>,
+        carried: Option<&mut CarriedCell<N>>,
     ) -> Option<[u32; N]> {
         let own = if self.pending[bit / 64] & (1 << (bit % 64)) == 0 {
             None
@@ -1378,9 +1445,10 @@ impl Reads<'_> {
                 CellRead::Unchanged => None,
             }
         };
-        if carried.unread == 0 {
+        // A lane whose slots are not installed was never carried into: nothing waits in them.
+        let Some(carried) = carried.filter(|carried| carried.unread != 0) else {
             return own;
-        }
+        };
         let unread = core::mem::replace(&mut carried.unread, 0);
         if own.is_some() {
             self.superseded.add_carried(unread);
@@ -1623,6 +1691,36 @@ impl ObservationLane {
         self.armed_count != 0
     }
 
+    /// Whether [`Self::swap_state`] would exchange this lane's taps with `other`'s: both declare
+    /// the same number of taps, with the same fold at each index (the same effect's menu, #1327
+    /// D1). One load and one compare per tap; allocation-free.
+    #[must_use]
+    pub fn same_taps(&self, other: &Self) -> bool {
+        self.taps.len() == other.taps.len()
+            && self
+                .taps
+                .iter()
+                .zip(other.taps.iter())
+                .all(|(own, theirs)| own.fold == theirs.fold)
+    }
+
+    /// Exchange every tap's whole state with `other`'s at a plan swap (#1327 D2): arm state, open
+    /// window, sequence, accumulated peaks and the publisher, so a reader that holds the carried
+    /// tap's slot stays connected to the tap that renders on. The two lanes' default window
+    /// lengths stay where they are: each plan sized its own, and a carried tap keeps the length
+    /// it was armed with.
+    ///
+    /// Returns `false` and exchanges nothing unless [`Self::same_taps`]. Two pointer exchanges and
+    /// a scalar one: no allocation, free, lock or syscall, and constant time.
+    pub fn swap_state(&mut self, other: &mut Self) -> bool {
+        if !self.same_taps(other) {
+            return false;
+        }
+        core::mem::swap(&mut self.taps, &mut other.taps);
+        core::mem::swap(&mut self.armed_count, &mut other.armed_count);
+        true
+    }
+
     /// Whether tap `tap_index` should be read for this block at all.
     ///
     /// The whole of level-2 zero: one bounds check and one flag load. An unarmed tap's effect state
@@ -1828,6 +1926,17 @@ impl BypassShunt {
     #[must_use]
     pub const fn feeds_line(&self) -> bool {
         !self.line_left.is_empty()
+    }
+
+    /// Whether `other` was allocated for the same block and the same latency, so a plan swap can
+    /// exchange the two shunts whole (#1282 D2): every buffer of one has the length of the
+    /// matching buffer of the other. Allocation-free and constant time.
+    #[must_use]
+    pub fn same_shape(&self, other: &Self) -> bool {
+        self.dry_left.len() == other.dry_left.len()
+            && self.dry_right.len() == other.dry_right.len()
+            && self.line_left.len() == other.line_left.len()
+            && self.line_right.len() == other.line_right.len()
     }
 
     /// Capture this block's input and advance the latency line, returning nothing.

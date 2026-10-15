@@ -235,6 +235,63 @@ fn a_drained_cell_stages_nothing_on_the_next_block() {
     assert_eq!(rig.stage().staged, 0);
 }
 
+/// A lane holds no carried slots until a successor swap installs them (#1633 D1), refuses to be
+/// carried into before that (D2), and its retained bytes grow by exactly the charge the install
+/// is admitted against.
+///
+/// Test value: a lane that allocates its slots at build (the boot growth #1633 removes), a
+/// `carry_from` that writes into slots that do not exist, or a charge that differs from what the
+/// install allocates.
+#[test]
+fn carried_slots_are_installed_for_a_successor_only_and_charged_exactly() {
+    let mut successor = Rig::new(shape(&[0, 2], &[], 3), 0);
+    let predecessor = Rig::new(shape(&[0, 2], &[], 3), 0);
+    let before = successor.lane.retained_resources();
+    assert!(!successor.lane.carry_slots_installed());
+    assert!(
+        !successor.lane.can_carry_from(&predecessor.lane),
+        "a lane with no slots takes no carry"
+    );
+    let charge = successor.lane.carry_slot_bytes();
+    assert!(charge > 0, "a lane with cells has slots to charge");
+    successor.lane.install_carry_slots();
+    let after = successor.lane.retained_resources();
+    assert_eq!(after.total_bytes - before.total_bytes, charge);
+    assert!(successor.lane.carry_slots_installed());
+    assert!(
+        successor.lane.can_carry_from(&predecessor.lane),
+        "the predecessor never had slots: its earlier writes read as empty"
+    );
+    successor.lane.install_carry_slots();
+    assert_eq!(
+        successor.lane.retained_resources(),
+        after,
+        "a second install keeps the slots it has"
+    );
+    let bare = effect_contract::EffectControlLane::without_channel(false);
+    assert_eq!(bare.carry_slot_bytes(), 0, "a lane without cells has none");
+    assert!(bare.can_carry_from(&effect_contract::EffectControlLane::without_channel(true)));
+}
+
+/// A successor with installed slots resolves a write its never-carried-into predecessor held
+/// unread, in its first block, and counts nothing it did not replace.
+///
+/// Test value: a carry that reads a missing predecessor slot as a write, or drops the unread
+/// write when the predecessor holds no slots.
+#[test]
+fn a_predecessor_without_slots_hands_its_unread_write_to_an_installed_successor() {
+    let mut predecessor = Rig::new(shape(&[1], &[], 0), 0);
+    let mut successor = Rig::new(shape(&[1], &[], 0), 0);
+    predecessor.commit(&[left(1, 0.25)]).expect("a cell");
+    successor.lane.install_carry_slots();
+    assert!(successor.lane.carry_from(&predecessor.lane));
+    let staged = successor.stage();
+    assert_eq!(staged.staged, 1);
+    assert_eq!(successor.staging[0].start_value, 0.25);
+    assert_eq!(successor.superseded.get(), 0);
+    assert_eq!(successor.stage().staged, 0, "the slot resolves once");
+}
+
 /// Bypass is not a span: it is retained state that survives blocks with no traffic.
 #[test]
 fn bypass_is_retained_state_and_produces_no_span() {

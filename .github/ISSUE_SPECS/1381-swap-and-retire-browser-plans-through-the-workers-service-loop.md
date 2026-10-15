@@ -503,3 +503,48 @@ Checked against `12d4a4f9d`.
   authorized paths allow.
 - **Anchors in `hosts/host-web/src/lib.rs` moved** (the attachment is reached at `:1846` and
   `:2652`); lane W re-reads them at implementation.
+
+## Decision record: #1381b the pairing hook (batch 11, worktree b8w)
+
+**Shipped.** No engine edit: #1327a's `HostAttachment::adopt_predecessor(predecessor, carries)` is enough. All edits are in
+`hosts/host-web/src/lib.rs` and `src/tests.rs`.
+
+- **`RenderCompanions::adopt_predecessor`** (render thread, swap block, inside a realtime-policy region). It downcasts the
+  predecessor through `as_any_mut`, calls host-core's `pair_carried_meters` and `pair_carried_observations` on the two
+  companions' vectors (the browser keeps both in host-core's order, so the record's indices address them directly), and notes each
+  paired reader in `carried: Box<[CarriedReader]>`, sized at preparation to one entry per reader and charged in
+  `RenderCompanions::retained_bytes`. Another attachment type, or an empty record, pairs and notes nothing.
+- **Table hand-over.** `adopt_shape(epoch, carried)` runs in the same block and follows the pairs with the state the tables hold:
+  `meter_pending` entries swap per carried meter, and `PlanShape::carry_tap_state` moves the armed bits and arm samples of
+  each carried observation reader between the two shapes' slots. The slot of reader `r` is `PlanShape::reader_slots[r]`, the
+  inverse of `EffectInstance::reader`, built in `build_plan_shape` and charged in `arm_table_bytes`. A tap whose arm sample in
+  the successor shape is not zero was named by a command admitted after the commit and keeps that state; the others take the
+  predecessor's.
+- **Delivery.** A swap whose record carries at least one meter no longer restarts the meter delivery: `meter_generation`,
+  the loss count, the master windows and the published header are the stream's and stay. A swap that carries no meter (the meter
+  window length changed, #1327a gate 2 test A) restarts as before.
+
+**Departures from the text.**
+
+- The spec's per-plan bookkeeping inside the companions (D3: generation, master windows, `observation_armed` in the attachment)
+  was not moved: #1381a/#1290a left them in `ReadyOwnership` and `PlanShape` (swapped at the adoption block), and the delivery
+  fields are continuous without a copy. The hook plus the table hand-over give the same result.
+- `pair_carried_observations` is called (the spec said the browser would not): the browser's `effect_observations` is
+  already in host-core's order. The slot map is for the per-slot tap state only.
+- Gate 3's published frame with a changed strip count (`track_count` 3, the shifted strip's word) needs the frame to grow with
+  the plan: that is #1290d. Here a strip-count change still publishes nothing and counts every window it leaves; the
+  strip-count-keeping swap and the shifted observation slot are tested.
+- The spectrum pairing is not in the hook (batch 10 amendment).
+- `meter_windows_a_strip_count_change_leaves_unpublished_are_counted`: the windows waiting at the swap are now counted by the poll that finds them
+  unpublishable, not at the swap; the count is not zeroed.
+
+**Gates -> tests** (`hosts/host-web/src/tests.rs`, `structural_apply`):
+
+| Gate | Test |
+|---|---|
+| 2 (meters carry, no epoch change, no loss) and the misshaped frame | `meter_delivery_carries_through_a_swap_and_never_publishes_a_misshaped_frame` (was `meter_delivery_restarts_...`) |
+| 2/3 (acknowledged subscription, shifted slot) | `an_armed_tap_and_its_windows_follow_the_effect_through_a_swap` |
+| loss counted | `meter_windows_a_strip_count_change_leaves_unpublished_are_counted` |
+| allocation-free swap block | `tests/structural_apply_realtime.rs` (render-locked count 0 across the adoption block, hook included) |
+
+With the hook returning early, all three unit tests turn red (checked).

@@ -57,6 +57,32 @@ thread_local! {
     static TEST_ONLY_BANK_METER_DECLINED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     static TEST_ONLY_BANK_METER_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_ONLY_CARRY_PAYLOAD_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Zero the count of payload bytes a plan swap's effect carry has passed through the payload
+/// scratch (#1282 D2, gate 4).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_reset_carry_payload_bytes() {
+    TEST_ONLY_CARRY_PAYLOAD_BYTES.with(|value| value.set(0));
+}
+
+/// The bytes of effect state the carry has moved through the payload scratch since the last
+/// [`test_only_reset_carry_payload_bytes`], on this thread: each lane move that snapshots into the
+/// scratch and restores from it adds its layout's payload. An instance moved by pointer
+/// ([`LiveControlEffect::move_from`]) adds nothing.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_carry_payload_bytes() -> u64 {
+    TEST_ONLY_CARRY_PAYLOAD_BYTES.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[inline]
+fn test_only_note_carry_payload(bytes: u64) {
+    TEST_ONLY_CARRY_PAYLOAD_BYTES.with(|value| value.set(value.get().saturating_add(bytes)));
 }
 
 /// Decline (`true`) or restore (`false`) the banked sample-peak pass of issue #943, and reset its
@@ -1276,6 +1302,39 @@ impl LiveControlEffect {
             shunt: &mut self.shunt,
         }
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// Whether [`Self::move_from`] would take `predecessor` into this instance at a plan swap
+    /// (#1282 D2): one effect, one state layout, prepared bypass and latency; control lanes of one
+    /// kind and one cell shape, this one holding its carried slots (#1633); and shunts allocated
+    /// for the same block and latency. Allocation-free and constant time.
+    fn can_move_from(&self, predecessor: &Self) -> bool {
+        self.layout == predecessor.layout
+            && rack::EffectLaneKind::of_instance(&self.control)
+                == rack::EffectLaneKind::of_instance(&predecessor.control)
+            && self.control.can_carry_from(&predecessor.control)
+            && self.shunt.same_shape(&predecessor.shunt)
+    }
+
+    /// Take `predecessor`'s whole instance at the swap block, by pointer (#1282 D2): the two
+    /// processor boxes and the two shunts are exchanged, so this plan's instance continues the
+    /// predecessor's state exactly (a ramp in flight, a delay's line) with no payload, no copy and
+    /// no allocation, and the predecessor's plan keeps this plan's at-rest ones to retire with it.
+    /// The control lane takes the predecessor's live state through
+    /// [`EffectControlLane::carry_from`]. The staging window and the observation lane stay: each
+    /// plan sized its own, and the tap state is the observer carry's (#1327).
+    ///
+    /// The caller has checked [`Self::can_move_from`], and `predecessor` never renders again.
+    fn move_from(&mut self, predecessor: &mut Self) {
+        let carried = self.control.carry_from(&predecessor.control);
+        debug_assert!(carried, "a checked control lane carries");
+        core::mem::swap(
+            &mut self.effect.processor,
+            &mut predecessor.effect.processor,
+        );
+        core::mem::swap(&mut self.shunt, &mut predecessor.shunt);
+    }
+    // REALTIME_POLICY_END
 
     /// This instance's pending-`Observe` drain for a plan swap's carry (#1281, #1280 D3): its
     /// queue and its tap. Pops nothing; the carry pops in a loop of its own. `None` when the
@@ -4442,6 +4501,48 @@ impl<'a> EffectStageMut<'a> {
             Self::Live(stage) => stage.observe_target_mut(lane),
         }
     }
+
+    /// The observation tap state of a live stage's lane (#1327 D2). A plain stage has no control
+    /// lane, so no tap.
+    fn into_observation(self, lane: usize) -> Option<&'a mut ObservationLane> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Live(stage) => stage.observation_mut(lane),
+        }
+    }
+}
+
+/// The observation tap state of the effect instance at `site` (#1327 D2): a live stage's lane, or
+/// a per-node instance. Allocation-free.
+fn observation_at_mut(
+    units: &mut [crate::runtime::RuntimeUnit],
+    site: crate::GraphEffectSite,
+) -> Option<&mut ObservationLane> {
+    match site {
+        crate::GraphEffectSite::Lane(at) => {
+            let (chain, slot, lane) = effect_lane_mut(units, at)?;
+            effect_stage_mut(chain, slot)?.into_observation(lane)
+        }
+        crate::GraphEffectSite::Node(unit) => {
+            effect_node_mut(units, unit)?.observation.as_deref_mut()
+        }
+    }
+}
+
+/// Note that effect move `index` carried, for the tap move bound to it (#1327 D1). `taps` is
+/// sorted by effect move and `cursor` only advances, so a whole carry is one pass over it. The
+/// carry marks moves in ascending index order.
+fn mark_effect_move_taken(taps: &mut [crate::ObserverTapMove], cursor: &mut usize, index: usize) {
+    while let Some(tap) = taps.get_mut(*cursor) {
+        if tap.effect_move < index {
+            *cursor += 1;
+        } else {
+            if tap.effect_move == index {
+                tap.taken = true;
+            }
+            return;
+        }
+    }
 }
 
 /// The pending-`Observe` drain of the predecessor instance at `site`: its queue, tap and unbound
@@ -4513,9 +4614,67 @@ fn effect_node_mut(
         crate::runtime::RuntimeUnit::Bank { .. } => None,
     }
 }
+
+/// The observer binding at `at` (#1327 D2): a bounds-checked unit, member and index lookup.
+/// Allocation-free. `None` when `at` names no observer, including a member of a unit that is one
+/// op and no member of a bank.
+fn observer_at_mut(
+    units: &mut [RuntimeUnit],
+    at: crate::GraphObserverLocation,
+) -> Option<&mut GraphNodeObserverBinding> {
+    let op = match units.get_mut(at.unit as usize)? {
+        RuntimeUnit::Op(op) if at.member == crate::GraphObserverLocation::NO_MEMBER => op,
+        RuntimeUnit::Op(_) => return None,
+        RuntimeUnit::Bank { members, .. } => members.get_mut(at.member as usize)?,
+    };
+    op.observers.get_mut(at.index as usize)
+}
 // REALTIME_POLICY_END
 
 impl crate::runtime::Runtime {
+    /// The bytes of carried slots the effect instance at `site` holds once a carry is installed
+    /// into it (#1633 D1): the cell tables of its control lane. Zero for a stage without control
+    /// lanes and for a lane without cells; `None` when `site` resolves to no instance.
+    pub(crate) fn effect_site_carry_slot_bytes(
+        &mut self,
+        site: crate::GraphEffectSite,
+    ) -> Option<u64> {
+        match site {
+            crate::GraphEffectSite::Lane(at) => {
+                let (chain, slot, lane) = effect_lane_mut(&mut self.units, at)?;
+                Some(match effect_stage_mut(chain, slot)? {
+                    EffectStageMut::Plain(_) => 0,
+                    EffectStageMut::Live(stage) => stage.carry_slot_bytes(lane),
+                })
+            }
+            crate::GraphEffectSite::Node(unit) => Some(
+                effect_node_mut(&mut self.units, unit)?
+                    .control
+                    .carry_slot_bytes(),
+            ),
+        }
+    }
+
+    /// Allocate the carried slots of the successor instance at `site` (#1633 D1). Off the render
+    /// thread. A site that resolves to a stage without control lanes or a lane without cells
+    /// takes none.
+    pub(crate) fn install_effect_carry_slots(&mut self, site: crate::GraphEffectSite) {
+        match site {
+            crate::GraphEffectSite::Lane(at) => {
+                if let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, at)
+                    && let Some(EffectStageMut::Live(stage)) = effect_stage_mut(chain, slot)
+                {
+                    stage.install_carry_slots(lane);
+                }
+            }
+            crate::GraphEffectSite::Node(unit) => {
+                if let Some(node) = effect_node_mut(&mut self.units, unit) {
+                    node.control.install_carry_slots();
+                }
+            }
+        }
+    }
+
     /// Every banked strip input section of this runtime: `(strip ID, location)`, in program order
     /// (issue #1276 D6). Read off the render thread, after bind.
     pub(crate) fn builtin_input_lanes(&mut self) -> Vec<(Box<str>, crate::GraphLaneLocation)> {
@@ -4884,8 +5043,9 @@ impl crate::runtime::Runtime {
     /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,
     /// to two effect instances a carry would join, with a scratch of `scratch_bytes` (issues #1279
     /// D3, #1281): two lanes of stages [`rack::EffectBankStage::can_carry_lane_from`] or its live
-    /// twin would join, or a lane of a live stage and a per-node instance it
-    /// [`rack::LiveControlEffectBankStage::can_carry_instance`] accepts. Checked before anything
+    /// twin would join, a lane of a live stage and a per-node instance it
+    /// [`rack::LiveControlEffectBankStage::can_carry_instance`] accepts, or two per-node instances
+    /// [`LiveControlEffect::can_move_from`] accepts (#1282). Checked before anything
     /// moves, so the carry is all or nothing. Allocation-free.
     pub(crate) fn can_carry_effect_lanes(
         &mut self,
@@ -4940,10 +5100,16 @@ impl crate::runtime::Runtime {
                     matches!(
                         effect_stage_mut(chain, slot),
                         Some(EffectStageMut::Live(from))
-                            if from.can_carry_instance(predecessor_lane, &node.control, scratch_bytes)
+                            if from.can_carry_lane_into_instance(predecessor_lane, &node.control, scratch_bytes)
                     )
                 }
-                (Node(_), Node(_)) => false,
+                (Node(successor), Node(before)) => {
+                    let Some(from) = effect_node_mut(&mut predecessor.units, before) else {
+                        return false;
+                    };
+                    effect_node_mut(&mut self.units, successor)
+                        .is_some_and(|into| into.can_move_from(from))
+                }
             })
     }
 
@@ -4972,11 +5138,13 @@ impl crate::runtime::Runtime {
         moves: &[crate::GraphEffectMove],
         scratch: &mut [u8],
         predecessor_next_sample: u64,
+        taps: &mut [crate::ObserverTapMove],
     ) -> u64 {
         use crate::GraphEffectSite::{Lane, Node};
         let mut disengaged: Option<u32> = None;
         let mut node_refused = 0_u64;
-        for step in moves {
+        let mut tap_cursor = 0_usize;
+        for (index, step) in moves.iter().enumerate() {
             match (step.successor, step.predecessor) {
                 (Lane(successor), Lane(before)) => {
                     let Some((chain, slot, predecessor_lane)) =
@@ -4999,8 +5167,11 @@ impl crate::runtime::Runtime {
                     let Some(mut into) = effect_stage_mut(chain, slot) else {
                         continue;
                     };
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_note_carry_payload(into.layout().payload_bytes());
                     if into.carry_lane_from(lane, &from, predecessor_lane, scratch) {
                         chain.inherit_channel_agreement(agree);
+                        mark_effect_move_taken(taps, &mut tap_cursor, index);
                     }
                 }
                 (Lane(successor), Node(before)) => {
@@ -5012,7 +5183,11 @@ impl crate::runtime::Runtime {
                         continue;
                     };
                     if let Some(EffectStageMut::Live(into)) = effect_stage_mut(chain, slot) {
-                        into.carry_lane_from_instance(lane, node.instance(), scratch);
+                        #[cfg(any(test, feature = "test-support"))]
+                        test_only_note_carry_payload(into.layout().payload_bytes());
+                        if into.carry_lane_from_instance(lane, node.instance(), scratch) {
+                            mark_effect_move_taken(taps, &mut tap_cursor, index);
+                        }
                     }
                 }
                 (Node(successor), Lane(before)) => {
@@ -5031,17 +5206,30 @@ impl crate::runtime::Runtime {
                     let Some(node) = effect_node_mut(&mut self.units, successor) else {
                         continue;
                     };
-                    if let EffectStageMut::Live(stage) = &from
-                        && !stage.carry_lane_into_instance(
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_note_carry_payload(node.layout.payload_bytes());
+                    if let EffectStageMut::Live(stage) = &from {
+                        if stage.carry_lane_into_instance(
                             predecessor_lane,
                             node.instance_mut(),
                             scratch,
-                        )
-                    {
-                        node_refused = node_refused.saturating_add(1);
+                        ) {
+                            mark_effect_move_taken(taps, &mut tap_cursor, index);
+                        } else {
+                            node_refused = node_refused.saturating_add(1);
+                        }
                     }
                 }
-                (Node(_), Node(_)) => {}
+                (Node(successor), Node(before)) => {
+                    let Some(from) = effect_node_mut(&mut predecessor.units, before) else {
+                        continue;
+                    };
+                    let Some(into) = effect_node_mut(&mut self.units, successor) else {
+                        continue;
+                    };
+                    into.move_from(from);
+                    mark_effect_move_taken(taps, &mut tap_cursor, index);
+                }
             }
         }
         // The predecessor never renders again: an `Observe` record admitted after its last block
@@ -5080,7 +5268,156 @@ impl crate::runtime::Runtime {
         }
         node_refused
     }
+
+    /// Whether the effect instance at `site` holds an observation lane (#1327 D1), which a tap
+    /// move needs of its successor. Off the render thread.
+    pub(crate) fn has_observation_lane(&mut self, site: crate::GraphEffectSite) -> bool {
+        observation_at_mut(&mut self.units, site).is_some()
+    }
+
+    /// Run the effect tap section of a carry program at the swap block (#1327 D1, D2): for each
+    /// tap move whose effect move carried (`taken`), the successor instance's observation lane and
+    /// the predecessor's exchange their whole tap state, publisher included. It runs after
+    /// [`Self::carry_effect_lanes`], which applied the predecessor's pending `Observe` records to
+    /// its taps as their next block would have, so the successor continues the window the
+    /// predecessor would have published. Each carried move is written to `record` in order, and
+    /// the count written is returned. A pair of lanes with different tap menus exchanges nothing
+    /// and is not recorded. Bounded by `taps.len()`; allocation-free, and never panics.
+    pub(crate) fn carry_taps(
+        &mut self,
+        predecessor: &mut Self,
+        taps: &[crate::ObserverTapMove],
+        record: &mut [engine::realtime::ObserverCarry],
+    ) -> usize {
+        let mut carried = 0;
+        for tap in taps.iter().filter(|tap| tap.taken) {
+            let (Some(into), Some(from)) = (
+                observation_at_mut(&mut self.units, tap.step.successor),
+                observation_at_mut(&mut predecessor.units, tap.step.predecessor),
+            ) else {
+                continue;
+            };
+            let Some(slot) = record.get_mut(carried) else {
+                continue;
+            };
+            if into.swap_state(from) {
+                *slot = engine::realtime::ObserverCarry {
+                    kind: engine::realtime::ObserverKind::Observation,
+                    successor: tap.step.successor_entry,
+                    predecessor: tap.step.predecessor_entry,
+                };
+                carried += 1;
+            }
+        }
+        carried
+    }
+
+    /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,
+    /// to an observer that answers the move's kind (#1327 D2). Checked before anything moves, so
+    /// the carry is all or nothing. Allocation-free.
+    pub(crate) fn can_carry_observers(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphObserverMove],
+    ) -> bool {
+        moves.iter().all(|step| {
+            observer_at_mut(&mut self.units, step.successor)
+                .is_some_and(|into| into.observer.carry_kind() == Some(step.kind))
+                && observer_at_mut(&mut predecessor.units, step.predecessor)
+                    .is_some_and(|from| from.observer.carry_kind() == Some(step.kind))
+        })
+    }
+
+    /// Run the observer section of a carry program at the swap block (#1327 D2, D3, D6).
+    ///
+    /// For each move the two boxed observers exchange places, so the successor's binding holds
+    /// the predecessor's whole state, producer included, and the predecessor's binding holds the
+    /// fresh observer; each then takes the handle of the binding that holds it. Each carried move
+    /// is written to `record` in order. Then every join opens its fresh observer's first window
+    /// where its donor's open window is. Returns how many moves carried, which is how many
+    /// entries of `record` are written. The caller has checked [`Self::can_carry_observers`].
+    /// Bounded by `moves.len() + joins.len()`; allocation-free, and never panics.
+    pub(crate) fn carry_observers(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphObserverMove],
+        joins: &[crate::GraphObserverJoin],
+        record: &mut [engine::realtime::ObserverCarry],
+    ) -> usize {
+        let mut carried = 0;
+        for step in moves {
+            let (Some(into), Some(from)) = (
+                observer_at_mut(&mut self.units, step.successor),
+                observer_at_mut(&mut predecessor.units, step.predecessor),
+            ) else {
+                continue;
+            };
+            let Some(slot) = record.get_mut(carried) else {
+                continue;
+            };
+            core::mem::swap(&mut into.observer, &mut from.observer);
+            into.observer.adopt_binding_handle(into.handle);
+            from.observer.adopt_binding_handle(from.handle);
+            *slot = engine::realtime::ObserverCarry {
+                kind: step.kind,
+                successor: step.successor_entry,
+                predecessor: step.predecessor_entry,
+            };
+            carried += 1;
+        }
+        for join in joins {
+            let Some(position) = observer_at_mut(&mut self.units, join.donor)
+                .and_then(|donor| donor.observer.window_position())
+            else {
+                continue;
+            };
+            if let Some(fresh) = observer_at_mut(&mut self.units, join.fresh) {
+                fresh.observer.join_window(position);
+            }
+        }
+        carried
+    }
     // REALTIME_POLICY_END
+
+    /// Every observer a swap can carry: those that answer
+    /// [`crate::GraphRuntimeObserver::carry_kind`], in program order (#1327 D2). Read off the
+    /// render thread, after bind.
+    pub(crate) fn observer_rows(&mut self) -> Vec<crate::GraphObserverRow> {
+        let mut rows = Vec::new();
+        for (unit, runtime_unit) in self.units.iter().enumerate() {
+            let Ok(unit) = u32::try_from(unit) else {
+                continue;
+            };
+            let mut visit = |member: u32, op: &RuntimeOp| {
+                for (index, binding) in op.observers.iter().enumerate() {
+                    if let (Some(kind), Ok(index)) =
+                        (binding.observer.carry_kind(), u32::try_from(index))
+                    {
+                        rows.push(crate::GraphObserverRow {
+                            kind,
+                            handle: binding.handle,
+                            location: crate::GraphObserverLocation {
+                                unit,
+                                member,
+                                index,
+                            },
+                        });
+                    }
+                }
+            };
+            match runtime_unit {
+                RuntimeUnit::Op(op) => visit(crate::GraphObserverLocation::NO_MEMBER, op),
+                RuntimeUnit::Bank { members, .. } => {
+                    for (member, op) in members.iter().enumerate() {
+                        if let Ok(member) = u32::try_from(member) {
+                            visit(member, op);
+                        }
+                    }
+                }
+            }
+        }
+        rows
+    }
 }
 
 /// A padded group's active mask **is** its membership: the planner emits `Some` members before

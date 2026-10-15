@@ -1066,7 +1066,7 @@ impl LivePlan {
                 SourceSubmission {
                     generation: 1,
                     start_frame: range.start as u64,
-                    sample_rate_hz: 48_000,
+                    sample_rate_hz: self.prepared.report.sample_rate_hz,
                     planes: &[&feed.planes[0][range.clone()], &feed.planes[1][range]],
                     frames: quantum as u32,
                     end_of_region: false,
@@ -5018,6 +5018,9 @@ struct EffectRun {
     refusals: u64,
     /// Effect lanes the predecessor's inventory records.
     effect_lanes: usize,
+    /// Bytes of effect state the swap block's carry passed through the payload scratch (#1282
+    /// gate 4); an instance moved by pointer adds none.
+    payload_bytes: u64,
 }
 
 /// Render `a` for [`SWAP_BLOCK`] blocks and write `writes` to the plan that renders their block
@@ -5032,18 +5035,32 @@ fn effect_run(
     successor_writes: &[EffectWrite],
     backend: Backend,
 ) -> EffectRun {
+    effect_run_blocks(a, b, feed, writes, successor_writes, backend, BLOCKS)
+}
+
+/// [`effect_run`] over `blocks` blocks; `feed` holds at least that many.
+fn effect_run_blocks(
+    a: &Session,
+    b: Option<(&Session, &SessionModel)>,
+    feed: &Feed,
+    writes: &[EffectWrite],
+    successor_writes: &[EffectWrite],
+    backend: Backend,
+    blocks: usize,
+) -> EffectRun {
     use bench_support::alloc as bench_alloc;
     let quantum = a.model.quantum_frames as usize;
     let mut plan = LivePlan::fresh(a, backend);
     let effect_lanes = plan.prepared.inventory.effect_lane_count();
-    let mut blocks = Vec::with_capacity(BLOCKS);
+    let mut rendered = Vec::with_capacity(blocks);
     let mut carry = CarryOutcome::NotRequested;
     let mut restarted = Vec::new();
     let mut swap_allocator = ((0, 0, 0), (0, 0));
     let mut superseded = 0;
     let mut refusals = 0;
+    let mut payload_bytes = 0;
     plan.submit(feed, quantum, 0);
-    for block in 0..BLOCKS {
+    for block in 0..blocks {
         for write in writes.iter().filter(|write| write.block == block) {
             write_effect_value(&mut plan, write);
         }
@@ -5061,11 +5078,12 @@ fn effect_run(
                     .adopt_persisting(&mut plan.prepared.sources),
                 1
             );
-            if block + 1 < BLOCKS {
+            if block + 1 < blocks {
                 successor.submit(feed, quantum, block + 1);
             }
             let mut output = vec![f32::NAN; quantum * 2];
             engine::realtime::audit::reset();
+            graph::test_only_reset_carry_payload_bytes();
             let mark = bench_alloc::current_thread_counters();
             carry = successor
                 .prepared
@@ -5078,10 +5096,11 @@ fn effect_run(
                 (delta.allocations, delta.reallocations, delta.deallocations),
                 (audit.allocations, audit.deallocations),
             );
+            payload_bytes = graph::test_only_carry_payload_bytes();
             superseded = successor.handles.live_values_superseded.get();
             refusals =
                 graph::carry_refusal_count(&mut successor.prepared.plan).expect("a graph plan");
-            blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
+            rendered.push(output.iter().map(|sample| sample.to_bits()).collect());
             plan = successor;
             continue;
         }
@@ -5090,22 +5109,23 @@ fn effect_run(
                 write_effect_value(&mut plan, write);
             }
         }
-        if block + 1 < BLOCKS {
+        if block + 1 < blocks {
             plan.submit(feed, quantum, block + 1);
         }
-        blocks.push(plan.render(quantum));
+        rendered.push(plan.render(quantum));
         if block == SWAP_BLOCK {
             superseded = plan.handles.live_values_superseded.get();
         }
     }
     EffectRun {
-        blocks,
+        blocks: rendered,
         carry,
         restarted,
         swap_allocator,
         superseded,
         refusals,
         effect_lanes,
+        payload_bytes,
     }
 }
 
@@ -5909,7 +5929,6 @@ fn pending_observe_swap(
                 handle.track_id.as_ref() == strip && handle.address == LiveEffectAddress::insert(0)
             })
             .and_then(|handle| handle.readers[0].read())
-            .map(|window| (window.first_sample, window.end_sample, window.blocks))
     };
 
     // The swap: A renders its blocks, the records are admitted, B is prepared and adopts.
@@ -5964,7 +5983,7 @@ fn pending_observe_swap(
         "{what}: no restore was refused"
     );
 
-    // A's queues read empty and A's taps hold what its next block would have reached.
+    // A's queues read empty: the carry popped every record.
     for strip in &strips {
         let producer = plan
             .handles
@@ -5976,14 +5995,38 @@ fn pending_observe_swap(
             "{what}: {strip}: the retired queue reads empty"
         );
     }
+    // The acknowledged subscribe is not dropped at the swap (#1327b): the carry applied it to
+    // A's tap as A's next block would have, and the tap then moved to the successor with its
+    // window and its publisher, so A keeps the successor's fresh, unarmed taps.
+    assert_eq!(
+        successor.prepared.plan.observation_binding_counts()[2],
+        armed_at_reference,
+        "{what}: every admitted subscribe is armed on the successor's tap"
+    );
     assert_eq!(
         plan.prepared.plan.observation_binding_counts()[2],
-        armed_at_reference,
-        "{what}: every admitted subscribe is armed on A's tap"
+        0,
+        "{what}: the retiring predecessor holds the fresh taps"
     );
-    // One more block of A's own (its sources moved on, so it renders silence) closes the windows
-    // the records opened: they open at the sample A's next block starts at, as the reference's do.
-    plan.render(quantum);
+    let carries = successor.prepared.plan.observer_carries().to_vec();
+    assert_eq!(
+        carries.len(),
+        strips.len(),
+        "{what}: one record per carried instance"
+    );
+    assert!(
+        carries
+            .iter()
+            .all(|carry| carry.kind == engine::realtime::ObserverKind::Observation),
+        "{what}"
+    );
+    host_core::pair_carried_observations(
+        &mut successor.handles.effect_observations,
+        &mut plan.handles.effect_observations,
+        &carries,
+    );
+    // The successor's swap block published the window the predecessor's next block would have:
+    // the reference's, field for field, from the reader the host now holds for the successor.
     for strip in &strips {
         let expected = window_of(&reference, strip);
         assert_eq!(
@@ -5992,9 +6035,9 @@ fn pending_observe_swap(
             "{what}: {strip}: the reference publishes exactly the subscribed windows"
         );
         assert_eq!(
-            window_of(&plan, strip),
+            window_of(&successor, strip),
             expected,
-            "{what}: {strip}: A's window opens at the sample its next block starts at"
+            "{what}: {strip}: the successor publishes the window the predecessor would have"
         );
     }
 }
@@ -6379,5 +6422,1472 @@ fn pending_observe_records_cross_the_form_change_at_eight_lanes() {
             pending,
             Some((false, true)),
         );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1282: per-node effect instances move by pointer across a plan swap.
+// ---------------------------------------------------------------------------------------------
+
+/// Blocks of the tail runs: long enough for a 50 ms delay at high feedback to ring through
+/// several repeats after the swap.
+const TAIL_BLOCKS: usize = 64;
+
+/// A native insert `instance` of `effect` with `params`, dual-mono linked.
+fn native_insert(instance: &str, effect: &str, params: Vec<EffectParam>) -> Effect {
+    Effect {
+        id: id(instance),
+        identity: EffectIdentity::Native {
+            effect_id: id(effect),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::DualMono,
+        params,
+        sidechain: SidechainDeclaration::None,
+    }
+}
+
+/// Three tracks, each with one insert that no plan banks (a group of one never fills a bank, and
+/// the delay has no bank kernel): `eq0` a 50 ms delay at high feedback, `eq1` a multiband
+/// compressor, `eq2` a compressor.
+fn tail_session() -> SessionModel {
+    use ParameterUnit::{Linear, Milliseconds};
+    let mut model = filtered_session(false);
+    let cut: Vec<String> = model
+        .tracks
+        .iter()
+        .skip(3)
+        .map(|track| track.id.as_str().to_owned())
+        .collect();
+    for track in cut {
+        remove_track(&mut model, &track);
+    }
+    let inserts = [
+        native_insert(
+            "dly",
+            "miso.delay",
+            vec![
+                param(1, Milliseconds, 50.0),
+                param(2, Linear, 0.85),
+                param(3, Linear, 0.2),
+                param(4, Linear, 0.5),
+            ],
+        ),
+        native_insert("mb", "miso.multiband-compressor", Vec::new()),
+        native_insert("comp", "miso.compressor", console_params("comp", 0, false)),
+    ];
+    for (track, insert) in model.tracks.iter_mut().zip(inserts) {
+        track.inserts.effects.push(insert);
+    }
+    model
+}
+
+/// [`tail_session`] and its successor: the same session plus the muted track [`MUTED_TRACK`],
+/// which sorts first and holds no insert.
+fn tail_pair() -> (Session, Session) {
+    let mut b = with_muted_track(tail_session());
+    track_mut(&mut b, MUTED_TRACK).inserts.effects.clear();
+    (Session::compile(tail_session()), Session::compile(b))
+}
+
+/// The source plays for four blocks, then drops to a deterministic noise near -80 dBFS that is
+/// never an exact zero, so no stage skips its work for silence.
+fn tail_feed() -> Feed {
+    let mut feed = Feed::with_blocks(SOURCE, 9, TAIL_BLOCKS);
+    for plane in &mut feed.planes {
+        for sample in &mut plane[4 * QUANTUM..] {
+            *sample *= 0.0002;
+        }
+    }
+    assert!(feed.planes.iter().flatten().all(|sample| *sample != 0.0));
+    feed
+}
+
+/// Every insert of `session` is a per-node instance.
+fn assert_inserts_per_node(session: &Session, backend: Backend, count: usize, what: &str) {
+    assert_eq!(
+        insert_forms(session, backend),
+        vec![true; count],
+        "{what}: every insert renders per node"
+    );
+}
+
+fn loudest(block: &[u32]) -> f32 {
+    block
+        .iter()
+        .map(|bits| f32::from_bits(*bits).abs())
+        .fold(0.0, f32::max)
+}
+
+/// Gate 1: a delay's echoes and a multiband compressor's envelope ring on through a swap that
+/// adds a muted track, at the sixth block, while the source is down at the noise floor. The
+/// swapped run is bit-identical to B fed the same PCM from frame 0, nothing restarts, the swap
+/// block makes no allocator call, and the carry passes nothing through the payload scratch. The
+/// same swap with every strip restarted loses the echoes.
+fn a_delay_tail_rings_on_through_the_swap(backend: Backend) {
+    let what = format!("{backend:?}");
+    let (a, b) = tail_pair();
+    assert_inserts_per_node(&a, backend, 3, &what);
+    assert_inserts_per_node(&b, backend, 3, &what);
+    let feed = tail_feed();
+    let reference = effect_run_blocks(&b, None, &feed, &[], &[], backend, TAIL_BLOCKS);
+    let run = effect_run_blocks(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &[],
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_clean_swap(&run, &what);
+    assert_eq!(run.effect_lanes, 3, "{what}: three per-node instances");
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        run.payload_bytes, 0,
+        "{what}: nothing passed through the scratch"
+    );
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals B rendered from frame 0"
+    );
+    // Not vacuous. The first echo of the source's loud blocks is audible long after the swap...
+    assert!(
+        loudest(&reference.blocks[20]) > 1e-3,
+        "{what}: the echo rings above the noise floor"
+    );
+    // ...and a swap whose strips all restart cuts it.
+    let mut committed = a.model.clone();
+    for track in &mut committed.tracks {
+        for entry in &mut track.inserts.effects {
+            entry.quality = session::EffectQuality::High;
+        }
+    }
+    let restarted = effect_run_blocks(
+        &a,
+        Some((&b, &committed)),
+        &feed,
+        &[],
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_eq!(restarted.restarted.len(), 3, "{what}: the strips restart");
+    let cut = first_effect_difference(&restarted, &reference).expect("the echoes are cut");
+    assert!(cut <= 20, "{what}: the echo is lost at block {cut}");
+}
+
+#[test]
+fn a_delay_tail_rings_on_through_the_swap_at_every_width() {
+    for backend in backends() {
+        a_delay_tail_rings_on_through_the_swap(backend);
+    }
+}
+
+/// Gate 2: a delay-time value written to A's cell just before the swap (never rendered by A) and
+/// a ramped live bypass of the per-node compressor a block earlier both reach the successor. The
+/// reference is B fed the same writes at the same blocks.
+fn unread_values_and_a_live_bypass_cross_the_swap(backend: Backend) {
+    let what = format!("{backend:?}");
+    let (a, b) = tail_pair();
+    let feed = tail_feed();
+    let writes = [
+        EffectWrite {
+            block: SWAP_BLOCK - 1,
+            strip: "eq2",
+            address: LiveEffectAddress::insert(0),
+            value: EffectValue::Bypass(BypassSwitch {
+                bypassed: true,
+                ramp_samples: 300,
+            }),
+        },
+        EffectWrite {
+            block: SWAP_BLOCK,
+            strip: "eq0",
+            address: LiveEffectAddress::insert(0),
+            // The delay time, in milliseconds.
+            value: EffectValue::Parameter {
+                index: 0,
+                value: 80.0,
+            },
+        },
+    ];
+    let reference = effect_run_blocks(&b, None, &feed, &writes, &[], backend, TAIL_BLOCKS);
+    let run = effect_run_blocks(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &writes,
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_clean_swap(&run, &what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(run.payload_bytes, 0, "{what}");
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals B fed the same values at the same blocks"
+    );
+    // Not vacuous: each write is audible after the swap on its own.
+    for kept in 0..writes.len() {
+        let one = [writes[kept]];
+        let alone = effect_run_blocks(&b, None, &feed, &one, &[], backend, TAIL_BLOCKS);
+        let other = [writes[1 - kept]];
+        let without = effect_run_blocks(&b, None, &feed, &other, &[], backend, TAIL_BLOCKS);
+        assert_ne!(
+            first_effect_difference(&alone, &without),
+            None,
+            "{what}: write {kept} changes the output"
+        );
+    }
+}
+
+#[test]
+fn unread_values_and_a_live_bypass_cross_the_swap_at_every_width() {
+    for backend in backends() {
+        unread_values_and_a_live_bypass_cross_the_swap(backend);
+    }
+}
+
+/// Gate 3: a committed bypass change on the delay is a prepared one (the delay lowers no live
+/// bypass), so its owner restarts and its strip, and only it, is in the restart set. The other
+/// two per-node instances still move.
+fn a_prepared_bypass_change_restarts_its_strip(backend: Backend) {
+    let what = format!("{backend:?}");
+    let (a, _) = tail_pair();
+    let mut b_model = tail_session();
+    track_mut(&mut b_model, "eq0").inserts.effects[0].bypass = true;
+    let b = Session::compile(b_model);
+    let feed = tail_feed();
+    let run = effect_run_blocks(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &[],
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_clean_swap(&run, &what);
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from("eq0")],
+        "{what}: exactly the delay's strip restarts"
+    );
+    assert_eq!(run.payload_bytes, 0, "{what}");
+    // The restarted strip starts at rest, so the swapped run is not B rendered from frame 0.
+    let reference = effect_run_blocks(&b, None, &feed, &[], &[], backend, TAIL_BLOCKS);
+    assert_ne!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: the restarted strip starts at rest"
+    );
+}
+
+#[test]
+fn a_prepared_bypass_change_restarts_its_strip_at_every_width() {
+    for backend in backends() {
+        a_prepared_bypass_change_restarts_its_strip(backend);
+    }
+}
+
+/// D3: a plan that holds the owners without live controls has no row for them, so a successor
+/// built from live-controlled predecessor lanes restarts their strips.
+fn an_owner_without_live_controls_on_one_side_restarts(backend: Backend) {
+    let what = format!("{backend:?}");
+    let (a, b) = tail_pair();
+    let mut plan = LivePlan::fresh(&a, backend);
+    let successor = b
+        .prepare_successor(&plan.prepared.inventory, &a.model, &caps(), backend)
+        .unwrap_or_else(|failure| panic!("{what}: {failure:?}"));
+    let mut restarted = successor.restarted_strips().to_vec();
+    restarted.sort();
+    assert_eq!(
+        restarted,
+        ["eq0", "eq1", "eq2"].map(Box::<str>::from).to_vec(),
+        "{what}: every strip with a per-node insert restarts"
+    );
+    drop(plan.prepared.plan.take_revision_gate());
+}
+
+#[test]
+fn an_owner_without_live_controls_on_one_side_restarts_at_every_width() {
+    for backend in backends() {
+        an_owner_without_live_controls_on_one_side_restarts(backend);
+    }
+}
+
+/// Gate 4: at 96 kHz the delay holds two seconds a channel, about 1.5 MiB. Its owner moves by
+/// pointer, so the carry passes no byte of it through the payload scratch, and the swap block
+/// makes no allocation and no free. The bits equal B's from frame 0.
+fn a_delay_moves_by_pointer_at_96_khz(backend: Backend) {
+    let what = format!("{backend:?}");
+    let at_96k = |mut model: SessionModel| {
+        model.sample_rate_hz = 96_000;
+        model
+    };
+    let a = Session::compile(at_96k(tail_session()));
+    let mut b_model = with_muted_track(tail_session());
+    track_mut(&mut b_model, MUTED_TRACK).inserts.effects.clear();
+    let b = Session::compile(at_96k(b_model));
+    let feed = tail_feed();
+    let reference = effect_run_blocks(&b, None, &feed, &[], &[], backend, TAIL_BLOCKS);
+    let run = effect_run_blocks(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &[],
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_clean_swap(&run, &what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        run.payload_bytes, 0,
+        "{what}: the delay's state was not copied"
+    );
+    assert_eq!(first_effect_difference(&run, &reference), None, "{what}");
+}
+
+#[test]
+fn a_delay_moves_by_pointer_at_96_khz_at_every_width() {
+    for backend in backends() {
+        a_delay_moves_by_pointer_at_96_khz(backend);
+    }
+}
+
+/// The payload counter reads what a lane move passes through the scratch: a per-node compressor
+/// that joins a bank is copied, so the counter is nonzero there (gate 4's oracle can fail).
+#[cfg(target_feature = "avx2")]
+#[test]
+fn the_payload_counter_counts_a_lane_move() {
+    let backend = Backend::Simd8;
+    let (a, b) = form_pair(Insert::Compressor, backend, true);
+    let feed = bursty_feed(SOURCE, 5);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &[], &[], backend);
+    assert_clean_swap(&run, "per node to bank");
+    assert!(
+        run.payload_bytes > 0,
+        "a state that changes form goes through the scratch"
+    );
+}
+
+/// A live difference on a moved per-node instance retargets it (#1280c D4): the delay's time and
+/// a compressor's session bypass, each as one committed edit whose successor takes the instance
+/// by pointer and then writes the new value. Run 1 is the structural swap with the retarget;
+/// run 2 writes the same edit to A before the swap and prepares B from a base that holds it.
+fn a_live_difference_on_a_moved_instance_is_retargeted(backend: Backend) {
+    let ramp = LiveRamps::for_session(&tail_session()).for_row(LiveRampRow::BypassCrossfade);
+    type Edit = fn(SessionModel) -> SessionModel;
+    let edits: [(&str, Edit, EffectWrite); 2] = [
+        (
+            "delay time",
+            |model| with_insert_param_all(model, "eq0", "dly", 1, 80.0),
+            EffectWrite {
+                block: SWAP_BLOCK,
+                strip: "eq0",
+                address: LiveEffectAddress::insert(0),
+                value: EffectValue::Parameter {
+                    index: 0,
+                    value: 80.0,
+                },
+            },
+        ),
+        (
+            "compressor bypass",
+            |mut model| {
+                track_mut(&mut model, "eq2").inserts.effects[0].bypass = true;
+                model
+            },
+            EffectWrite {
+                block: SWAP_BLOCK,
+                strip: "eq2",
+                address: LiveEffectAddress::insert(0),
+                value: EffectValue::Bypass(BypassSwitch {
+                    bypassed: true,
+                    ramp_samples: ramp,
+                }),
+            },
+        ),
+    ];
+    let feed = tail_feed();
+    for (name, edit, write) in edits {
+        let what = format!("{backend:?} {name}");
+        let (a, b) = tail_pair();
+        let b_edited = Session::compile(edit(b.model.clone()));
+        let a_edited = edit(a.model.clone());
+        let run = effect_run_blocks(
+            &a,
+            Some((&b_edited, &a.model)),
+            &feed,
+            &[],
+            &[],
+            backend,
+            TAIL_BLOCKS,
+        );
+        assert_clean_swap(&run, &what);
+        assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+        assert_eq!(run.payload_bytes, 0, "{what}");
+        let reference = effect_run_blocks(
+            &a,
+            Some((&b_edited, &a_edited)),
+            &feed,
+            &[write],
+            &[],
+            backend,
+            TAIL_BLOCKS,
+        );
+        assert_clean_swap(&reference, &format!("{what} reference"));
+        assert_eq!(
+            first_effect_difference(&run, &reference),
+            None,
+            "{what}: move, then retarget equals live edit, then structural edit"
+        );
+        // Not vacuous: the moved instance keeps its old value without the retarget.
+        let stale = effect_run_blocks(
+            &a,
+            Some((&b, &a.model)),
+            &feed,
+            &[],
+            &[],
+            backend,
+            TAIL_BLOCKS,
+        );
+        assert_ne!(
+            first_effect_difference(&stale, &run),
+            None,
+            "{what}: the edit is audible after the swap"
+        );
+    }
+}
+
+#[test]
+fn a_live_difference_on_a_moved_instance_is_retargeted_at_every_width() {
+    for backend in backends() {
+        a_live_difference_on_a_moved_instance_is_retargeted(backend);
+    }
+}
+
+// Issue #1327a (stream A of decision 15, D15-14): builtin meters carry across a plan swap. A
+// meter whose strip, tap, metric set and configuration are the predecessor's keeps its open
+// window, its counters and its sequence, and the host's reader keeps receiving. The oracle is the
+// post-edit session prepared fresh and fed from frame 0, with the same meters.
+
+mod meter_carry {
+    use core::num::{NonZeroU32, NonZeroUsize};
+    use std::collections::BTreeMap;
+
+    use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
+    use builtins_compiler::MeterConsumer;
+    use engine::realtime::{HostAttachment, ObserverCarry, ObserverKind, PlanAdoption};
+    use host_core::{
+        HostLiveControlRequest, HostMeterRequest, MonitorBase, PreparedHost, SuccessorBase,
+        pair_carried_meters, test_only_prepare_host_runtime_with_selected_meters_on,
+    };
+
+    use super::successor::{self, SUCCESSOR_REVISION};
+    use super::*;
+
+    const TAPS: [MeterTap; 7] = [
+        MeterTap::Input,
+        MeterTap::PostInputBuiltins,
+        MeterTap::PostSimd1,
+        MeterTap::PostDynamic,
+        MeterTap::PostSimd2PreFader,
+        MeterTap::PostFader,
+        MeterTap::PostMatrix,
+    ];
+    /// Not a multiple of the quantum, and longer than the swap block's start: the window opened at
+    /// sample 0 closes at 600 and the next one is open across the swap at sample 768.
+    const PERIOD: u32 = 600;
+    const THIRD_TRACK: &str = "eq2";
+
+    type Key = (String, MeterTap);
+
+    fn live(period: u32) -> HostLiveControlRequest {
+        HostLiveControlRequest {
+            meter_period_frames: NonZeroU32::new(period),
+            meter_queue_depth: NonZeroUsize::new(16).expect("depth"),
+            ..HostLiveControlRequest::default()
+        }
+    }
+
+    fn requests(strips: &[&str]) -> Vec<HostMeterRequest> {
+        strips
+            .iter()
+            .flat_map(|strip| {
+                TAPS.iter().map(|tap| HostMeterRequest {
+                    strip_id: (*strip).into(),
+                    tap: *tap,
+                    metrics: MeterMetricSet::ALL,
+                })
+            })
+            .collect()
+    }
+
+    fn key(request: &HostMeterRequest) -> Key {
+        (request.strip_id.to_string(), request.tap)
+    }
+
+    /// Three audible tracks.
+    fn session_three() -> SessionModel {
+        let mut model = session_a();
+        add_track(&mut model, "eq0", THIRD_TRACK, SOURCE, false);
+        model
+    }
+
+    /// The test's host attachment, as the browser's is: it holds the plan's meter readers and
+    /// pairs them with the predecessor's in the swap block.
+    struct Rig {
+        meters: Vec<MeterConsumer>,
+        carries: Vec<ObserverCarry>,
+    }
+
+    impl Rig {
+        fn new(meters: Vec<MeterConsumer>) -> Box<Self> {
+            Box::new(Self {
+                meters,
+                carries: Vec::with_capacity(256),
+            })
+        }
+    }
+
+    impl HostAttachment for Rig {
+        fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+            self
+        }
+
+        fn adopt_predecessor(
+            &mut self,
+            predecessor: &mut dyn HostAttachment,
+            carries: &[ObserverCarry],
+        ) {
+            let Some(predecessor) = predecessor.as_any_mut().downcast_mut::<Self>() else {
+                return;
+            };
+            pair_carried_meters(&mut self.meters, &mut predecessor.meters, carries);
+            // Within the capacity reserved at construction: no allocation.
+            self.carries.extend_from_slice(carries);
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Reader {
+        /// The host keeps the predecessor's consumers and the successor's, and reads both
+        /// (gate 1): a carried meter's snapshots keep arriving on the predecessor's consumer.
+        Direct,
+        /// The readers live in the plans' attachments and pair in the swap block (gate 3).
+        Paired,
+    }
+
+    struct Run {
+        blocks: Vec<successor::Block>,
+        /// Every snapshot read, by the reader's strip and tap, in arrival order.
+        streams: BTreeMap<Key, Vec<MeterSnapshot>>,
+        /// The successor's carry record after the swap block ([`Reader::Paired`] only).
+        carries: Vec<ObserverCarry>,
+    }
+
+    fn drain(consumers: &mut [MeterConsumer], streams: &mut BTreeMap<Key, Vec<MeterSnapshot>>) {
+        for consumer in consumers {
+            while let Ok(snapshot) = consumer.consumer.try_pop() {
+                streams
+                    .entry((consumer.track_id.to_string(), consumer.tap))
+                    .or_default()
+                    .push(snapshot);
+            }
+        }
+    }
+
+    fn prepare(
+        session: &Session,
+        live: &HostLiveControlRequest,
+        meters: &[HostMeterRequest],
+        base: Option<SuccessorBase<'_>>,
+        backend: Backend,
+    ) -> (PreparedHost, host_core::HostLiveControlHandles) {
+        test_only_prepare_host_runtime_with_selected_meters_on(
+            &session.compiled,
+            &caps(),
+            live,
+            meters,
+            base,
+            backend,
+        )
+        .unwrap_or_else(|failure| panic!("prepare: {failure:?}"))
+    }
+
+    /// `a` rendered for [`SWAP_BLOCK`] blocks, `b` prepared as its successor with its own meter
+    /// request and swapped in, rendered to [`BLOCKS`].
+    #[allow(clippy::too_many_arguments)]
+    fn swapped(
+        backend: Backend,
+        a: &Session,
+        a_live: &HostLiveControlRequest,
+        a_meters: &[HostMeterRequest],
+        b: &Session,
+        b_live: &HostLiveControlRequest,
+        b_meters: &[HostMeterRequest],
+        reader: Reader,
+    ) -> Run {
+        let feed = Feed::new(SOURCE, 1);
+        let (mut a_prepared, mut a_handles) = prepare(a, a_live, a_meters, None, backend);
+        let mut a_direct = Vec::new();
+        match reader {
+            Reader::Direct => a_direct = core::mem::take(&mut a_handles.meters),
+            Reader::Paired => a_prepared
+                .plan
+                .set_host_attachment(Rig::new(core::mem::take(&mut a_handles.meters))),
+        }
+        let rate = a_prepared.report.sample_rate_hz;
+        let PreparedHost {
+            plan,
+            sources: mut a_sources,
+            inventory,
+            ..
+        } = a_prepared;
+        let (mut publisher, mut owner, retirer) = successor::exchange(plan);
+        let mut streams = BTreeMap::new();
+        let mut blocks = Vec::new();
+        feed.submit(&mut a_sources, rate, 0);
+        for block in 0..SWAP_BLOCK {
+            feed.submit(&mut a_sources, rate, block + 1);
+            blocks.push(successor::render(&mut owner));
+            match reader {
+                Reader::Direct => drain(&mut a_direct, &mut streams),
+                Reader::Paired => {
+                    let rig = owner.active_attachment_mut::<Rig>().expect("attachment");
+                    drain(&mut rig.meters, &mut streams);
+                }
+            }
+        }
+        let (mut b_prepared, mut b_handles) = prepare(
+            b,
+            b_live,
+            b_meters,
+            Some(SuccessorBase {
+                inventory: &inventory,
+                committed: &a.model,
+                revision: SUCCESSOR_REVISION,
+                edit_ramps: &session::EditRamps::new(),
+                monitor: MonitorBase::NONE,
+            }),
+            backend,
+        );
+        b_prepared.sources.adopt_persisting(&mut a_sources);
+        let mut b_direct = Vec::new();
+        match reader {
+            Reader::Direct => b_direct = core::mem::take(&mut b_handles.meters),
+            Reader::Paired => b_prepared
+                .plan
+                .set_host_attachment(Rig::new(core::mem::take(&mut b_handles.meters))),
+        }
+        let PreparedHost {
+            mut plan,
+            sources: mut b_sources,
+            ..
+        } = b_prepared;
+        plan.take_revision_gate()
+            .expect("the successor's handle")
+            .publish(SUCCESSOR_REVISION);
+        publisher
+            .reserve_replacement(plan, PlanAdoption::Next)
+            .unwrap_or_else(|_| panic!("reserve the successor"))
+            .commit();
+        for block in SWAP_BLOCK..BLOCKS {
+            if block + 1 < BLOCKS {
+                feed.submit(&mut b_sources, rate, block + 1);
+            }
+            blocks.push(successor::render(&mut owner));
+            match reader {
+                Reader::Direct => {
+                    drain(&mut a_direct, &mut streams);
+                    drain(&mut b_direct, &mut streams);
+                }
+                Reader::Paired => {
+                    let rig = owner.active_attachment_mut::<Rig>().expect("attachment");
+                    drain(&mut rig.meters, &mut streams);
+                }
+            }
+        }
+        let carries = match reader {
+            Reader::Direct => Vec::new(),
+            Reader::Paired => owner
+                .active_attachment_mut::<Rig>()
+                .expect("attachment")
+                .carries
+                .clone(),
+        };
+        drop((retirer, publisher, a_handles, b_handles));
+        Run {
+            blocks,
+            streams,
+            carries,
+        }
+    }
+
+    /// `b` prepared fresh with `meters` and fed from frame 0.
+    fn reference(
+        backend: Backend,
+        b: &Session,
+        live: &HostLiveControlRequest,
+        meters: &[HostMeterRequest],
+    ) -> BTreeMap<Key, Vec<MeterSnapshot>> {
+        let feed = Feed::new(SOURCE, 1);
+        let (prepared, mut handles) = prepare(b, live, meters, None, backend);
+        let rate = prepared.report.sample_rate_hz;
+        let PreparedHost {
+            plan, mut sources, ..
+        } = prepared;
+        let (_publisher, mut owner, _retirer) = successor::exchange(plan);
+        let mut streams = BTreeMap::new();
+        feed.submit(&mut sources, rate, 0);
+        for block in 0..BLOCKS {
+            if block + 1 < BLOCKS {
+                feed.submit(&mut sources, rate, block + 1);
+            }
+            successor::render(&mut owner);
+            drain(&mut handles.meters, &mut streams);
+        }
+        streams
+    }
+
+    /// A snapshot with the fields a swap legitimately changes set to the reference's: a snapshot
+    /// the predecessor published before the swap names the predecessor's handle.
+    fn same_but_handle(snapshot: &MeterSnapshot, reference: &MeterSnapshot) -> MeterSnapshot {
+        MeterSnapshot {
+            handle: reference.handle,
+            ..*snapshot
+        }
+    }
+
+    const SWAP_SAMPLE: u64 = (SWAP_BLOCK * QUANTUM) as u64;
+
+    /// Gates 1 and 3 at one width and reader. Strips: A has three tracks, B adds a muted one that
+    /// sorts first, so every carried meter's reader index shifts by [`TAPS`].len().
+    fn meters_carry(backend: Backend, reader: Reader) {
+        let a = Session::compile(session_three());
+        let mut b_model = session_three();
+        add_track(&mut b_model, "eq0", MUTED_TRACK, SOURCE, true);
+        let b = Session::compile(b_model);
+        let a_strips = ["eq0", "eq1", THIRD_TRACK];
+        let b_strips = [MUTED_TRACK, "eq0", "eq1", THIRD_TRACK];
+        let (a_meters, b_meters) = (requests(&a_strips), requests(&b_strips));
+        let expected = reference(backend, &b, &live(PERIOD), &b_meters);
+        let run = swapped(
+            backend,
+            &a,
+            &live(PERIOD),
+            &a_meters,
+            &b,
+            &live(PERIOD),
+            &b_meters,
+            reader,
+        );
+        assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
+        assert_eq!(run.blocks[SWAP_BLOCK].swap, SwapOutcome::Applied);
+        assert!(!expected.is_empty());
+
+        let carried: Vec<Key> = a_meters.iter().map(key).collect();
+        for k in &carried {
+            let got = &run.streams[k];
+            let want = &expected[k];
+            assert_eq!(
+                got.len(),
+                want.len(),
+                "{backend:?} {reader:?} {k:?}: every window arrives once, none lost or doubled"
+            );
+            for (index, (got, want)) in got.iter().zip(want).enumerate() {
+                assert_eq!(
+                    got.window_sequence, index as u64,
+                    "{backend:?} {reader:?} {k:?}: no gap in the sequence"
+                );
+                assert_eq!(got.cumulative_discontinuities, 0, "{k:?}: no discontinuity");
+                assert_eq!(got.reset_generation, want.reset_generation, "{k:?}");
+                assert_eq!(
+                    same_but_handle(got, want),
+                    *want,
+                    "{backend:?} {reader:?} {k:?}: window {index} equals the reference field by field"
+                );
+                if got.end_sample > SWAP_SAMPLE {
+                    assert_eq!(
+                        got.handle, want.handle,
+                        "{k:?}: the carried state names the reader that receives it"
+                    );
+                }
+            }
+            assert!(
+                got.iter()
+                    .any(|s| s.start_sample < SWAP_SAMPLE && s.end_sample > SWAP_SAMPLE),
+                "{k:?}: a window spans the swap, or the carry is not tested"
+            );
+        }
+
+        // The added muted track's meters join the carried grid (D6). Its pre-fader taps see the
+        // source, which the strip did not have before adoption, so only the grid and, where the
+        // strip is silent in the reference too, every field equal the reference's.
+        for tap in TAPS {
+            let k: Key = (MUTED_TRACK.to_string(), tap);
+            let got = &run.streams[&k];
+            assert!(!got.is_empty(), "{k:?}: the added meter publishes");
+            for snapshot in got {
+                let want = expected[&k]
+                    .iter()
+                    .find(|want| want.window_sequence == snapshot.window_sequence)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{k:?}: the reference has window {}",
+                            snapshot.window_sequence
+                        )
+                    });
+                assert_eq!(
+                    (
+                        snapshot.start_sample,
+                        snapshot.end_sample,
+                        snapshot.frames,
+                        snapshot.handle
+                    ),
+                    (want.start_sample, want.end_sample, want.frames, want.handle),
+                    "{backend:?} {reader:?} {k:?}: on the carried window grid from its first snapshot"
+                );
+                assert_eq!(snapshot.cumulative_discontinuities, 0);
+                if matches!(tap, MeterTap::PostFader | MeterTap::PostMatrix) {
+                    assert_eq!(snapshot, want, "{k:?}: a muted strip is silent in both");
+                }
+            }
+            assert_eq!(
+                got[0].window_sequence, 1,
+                "{k:?}: it joined the open window"
+            );
+        }
+
+        if reader == Reader::Paired {
+            let index_in = |meters: &[HostMeterRequest], k: &Key| {
+                meters
+                    .iter()
+                    .position(|request| key(request) == *k)
+                    .expect("key")
+            };
+            assert_eq!(
+                run.carries.len(),
+                a_meters.len(),
+                "one record per carried meter"
+            );
+            for carry in &run.carries {
+                assert_eq!(carry.kind, ObserverKind::Meter);
+                let k = key(&a_meters[carry.predecessor]);
+                assert_eq!(
+                    index_in(&b_meters, &k),
+                    carry.successor,
+                    "{k:?}: the record names the successor's reader of the same strip and tap"
+                );
+            }
+        }
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn meters_carry_through_the_predecessors_readers_at_eight_lanes() {
+        meters_carry(Backend::Simd8, Reader::Direct);
+    }
+
+    #[test]
+    fn meters_carry_through_the_predecessors_readers_at_four_lanes() {
+        meters_carry(Backend::Simd4, Reader::Direct);
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn paired_readers_follow_the_record_at_eight_lanes() {
+        meters_carry(Backend::Simd8, Reader::Paired);
+    }
+
+    #[test]
+    fn paired_readers_follow_the_record_at_four_lanes() {
+        meters_carry(Backend::Simd4, Reader::Paired);
+    }
+
+    /// Gate 2: a changed window length starts every meter fresh, and a changed key starts that
+    /// meter fresh alone.
+    #[test]
+    fn a_changed_meter_starts_fresh_and_the_others_carry() {
+        let backend = Backend::Simd4;
+        let a = Session::compile(session_three());
+        let strips = ["eq0", "eq1", THIRD_TRACK];
+        let meters = requests(&strips);
+
+        // A different window length: nothing carries, and the first window opens at adoption.
+        let run = swapped(
+            backend,
+            &a,
+            &live(PERIOD),
+            &meters,
+            &a,
+            &live(PERIOD / 2),
+            &meters,
+            Reader::Paired,
+        );
+        assert!(
+            run.carries.is_empty(),
+            "no meter carries across a changed window length"
+        );
+        for (k, stream) in &run.streams {
+            let fresh: Vec<_> = stream
+                .iter()
+                .filter(|s| s.start_sample >= SWAP_SAMPLE)
+                .collect();
+            assert_eq!(fresh[0].window_sequence, 0, "{k:?}: a new sequence");
+            assert_eq!(
+                fresh[0].start_sample, SWAP_SAMPLE,
+                "{k:?}: opened at the adoption block"
+            );
+            assert_eq!(fresh[0].frames, PERIOD / 2, "{k:?}: the new window length");
+        }
+
+        // One meter keeps another metric set: that meter alone is not in the record.
+        let mut changed = requests(&strips);
+        let at = 9;
+        assert_eq!(key(&changed[at]), ("eq1".to_string(), TAPS[2]));
+        changed[at].metrics = MeterMetricSet::SAMPLE_PEAK;
+        let reference_streams = reference(backend, &a, &live(PERIOD), &changed);
+        let run = swapped(
+            backend,
+            &a,
+            &live(PERIOD),
+            &meters,
+            &a,
+            &live(PERIOD),
+            &changed,
+            Reader::Paired,
+        );
+        assert_eq!(run.carries.len(), meters.len() - 1);
+        assert!(
+            run.carries
+                .iter()
+                .all(|carry| carry.successor != at && carry.predecessor != at)
+        );
+        for (index, request) in changed.iter().enumerate() {
+            let k = key(request);
+            let got = &run.streams[&k];
+            let want = &reference_streams[&k];
+            if index == at {
+                // Fresh, on the carried grid (D6): the window it joined holds the swap block on.
+                // [the predecessor's window 0, the successor's fresh meter's window 1]
+                assert_eq!(got.len(), 2, "{k:?}");
+                assert_eq!(got[1].window_sequence, 1);
+                assert_eq!(got[1].present_metrics, MeterMetricSet::SAMPLE_PEAK);
+            } else {
+                assert_eq!(got.len(), want.len(), "{k:?}");
+                for (got, want) in got.iter().zip(want) {
+                    assert_eq!(same_but_handle(got, want), *want, "{k:?}");
+                }
+            }
+        }
+    }
+
+    /// Gate 5: the swap block, with the hook's pairing in it, allocates and frees nothing.
+    #[test]
+    fn the_meter_swap_block_allocates_and_frees_nothing() {
+        use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+        struct RestoreMode(Mode);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                set_mode(self.0);
+            }
+        }
+        assert_installed();
+        let _restore = RestoreMode(mode());
+        set_mode(Mode::Count);
+        engine::realtime::audit::warm_up();
+        let a = Session::compile(session_three());
+        let mut b_model = session_three();
+        add_track(&mut b_model, "eq0", MUTED_TRACK, SOURCE, true);
+        let b = Session::compile(b_model);
+        let run = swapped(
+            Backend::current(),
+            &a,
+            &live(PERIOD),
+            &requests(&["eq0", "eq1", THIRD_TRACK]),
+            &b,
+            &live(PERIOD),
+            &requests(&[MUTED_TRACK, "eq0", "eq1", THIRD_TRACK]),
+            Reader::Paired,
+        );
+        assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
+        assert!(!run.carries.is_empty());
+        for (index, block) in run.blocks.iter().enumerate().skip(1) {
+            assert_eq!(block.allocator, (0, 0, 0), "block {index}: allocator calls");
+            assert_eq!(block.audit, (0, 0), "block {index}: render audit");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1327b: an effect's observation taps follow their effect instance across a swap.
+//
+// The tap's whole state moves with the instance: its arm state, its open window, its sequence and
+// its publisher. The reader the host holds for the predecessor's tap is paired with the
+// successor's in the swap block, so it keeps receiving, and a subscribe that was acknowledged
+// before the swap is armed on the successor's tap after it.
+
+mod observation_carry {
+    use std::collections::BTreeMap;
+
+    use engine::realtime::{HostAttachment, ObservationWindow, ObserverCarry, ObserverKind};
+    use host_core::{EffectObservationHandle, pair_carried_observations};
+
+    use super::*;
+
+    /// Blocks per window. The swap block (6) falls inside the window of blocks 4..8, so a window
+    /// is open across the swap and it publishes after it.
+    const WINDOW_BLOCKS: u32 = 4;
+
+    /// The test's host attachment, as the browser's is: it holds the plan's observation readers
+    /// and pairs them with the predecessor's in the swap block.
+    struct Rig {
+        observations: Vec<EffectObservationHandle>,
+        carries: Vec<ObserverCarry>,
+    }
+
+    impl Rig {
+        fn new(observations: Vec<EffectObservationHandle>) -> Box<Self> {
+            let capacity = observations.len() + 8;
+            Box::new(Self {
+                observations,
+                carries: Vec::with_capacity(capacity),
+            })
+        }
+
+        /// The strip of each reader set, in reader order.
+        fn strips(&self) -> Vec<String> {
+            self.observations
+                .iter()
+                .map(|handle| handle.track_id.to_string())
+                .collect()
+        }
+    }
+
+    impl HostAttachment for Rig {
+        fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+            self
+        }
+
+        fn adopt_predecessor(
+            &mut self,
+            predecessor: &mut dyn HostAttachment,
+            carries: &[ObserverCarry],
+        ) {
+            let Some(predecessor) = predecessor.as_any_mut().downcast_mut::<Self>() else {
+                return;
+            };
+            pair_carried_observations(
+                &mut self.observations,
+                &mut predecessor.observations,
+                carries,
+            );
+            // Within the capacity reserved at construction: no allocation.
+            self.carries.extend_from_slice(carries);
+        }
+    }
+
+    type Streams = BTreeMap<String, Vec<ObservationWindow>>;
+
+    /// The windows the readers of `plan` hold that they have not shown before, by strip.
+    fn read_all(plan: &mut LivePlan, streams: &mut Streams) {
+        let rig = plan
+            .prepared
+            .plan
+            .host_attachment_mut::<Rig>()
+            .expect("the plan's attachment");
+        for handle in &rig.observations {
+            let Some(window) = handle.readers[0].read() else {
+                continue;
+            };
+            let stream = streams.entry(handle.track_id.to_string()).or_default();
+            if stream
+                .last()
+                .is_none_or(|last| last.sequence != window.sequence)
+            {
+                stream.push(window);
+            }
+        }
+    }
+
+    /// Subscribe to the gain-reduction tap of each of `strips`' compressor insert, as an app
+    /// does: a record in the insert's observation queue, acknowledged when it is queued.
+    fn subscribe(plan: &mut LivePlan, strips: &[String]) {
+        for strip in strips {
+            plan.handles
+                .effect_control_mut(strip, LiveEffectAddress::insert(0))
+                .expect("a control channel for the insert")
+                .try_push_observe(0, true, WINDOW_BLOCKS)
+                .expect("room in the queue");
+        }
+    }
+
+    /// Attach `plan`'s observation readers to it, as the browser does.
+    fn attach(plan: &mut LivePlan) {
+        let observations = core::mem::take(&mut plan.handles.effect_observations);
+        plan.prepared
+            .plan
+            .set_host_attachment(Rig::new(observations));
+    }
+
+    /// `session` prepared fresh, subscribed to `subscribed` at its first block, and fed from
+    /// frame 0: every window each strip's tap publishes.
+    fn reference(backend: Backend, session: &Session, subscribed: &[String]) -> Streams {
+        let feed = bursty_feed(SOURCE, 5);
+        let mut plan = LivePlan::fresh_with(session, &observed_request(), backend);
+        subscribe(&mut plan, subscribed);
+        attach(&mut plan);
+        let mut streams = Streams::new();
+        for block in 0..BLOCKS {
+            plan.submit(&feed, QUANTUM, block);
+            plan.render(QUANTUM);
+            read_all(&mut plan, &mut streams);
+        }
+        streams
+    }
+
+    struct Swapped {
+        streams: Streams,
+        carry: CarryOutcome,
+        /// The successor's carry record, as its attachment's hook saw it in the swap block.
+        carries: Vec<ObserverCarry>,
+        /// The strip of each reader set of A and of B.
+        a_strips: Vec<String>,
+        b_strips: Vec<String>,
+        restarted: Vec<Box<str>>,
+        /// Armed taps of the successor and of the predecessor after the swap block.
+        armed: [u64; 2],
+        /// The allocator's `(allocations, reallocations, deallocations)` and the render audit's
+        /// `(allocations, deallocations)` over the swap block: hand-over, hook and render.
+        allocator: ((u64, u64, u64), (u64, u64)),
+    }
+
+    /// A rendered for [`SWAP_BLOCK`] blocks with `subscribed` acknowledged before its first, B
+    /// prepared as its successor and swapped in at [`SWAP_BLOCK`], rendered to [`BLOCKS`]. B
+    /// subscribes to nothing: whatever its taps hold at the swap is what the carry brought.
+    fn swapped(backend: Backend, a: &Session, b: &Session, subscribed: &[String]) -> Swapped {
+        use bench_support::alloc as bench_alloc;
+        let feed = bursty_feed(SOURCE, 5);
+        let request = observed_request();
+        let mut streams = Streams::new();
+        let mut plan = LivePlan::fresh_with(a, &request, backend);
+        subscribe(&mut plan, subscribed);
+        attach(&mut plan);
+        for block in 0..SWAP_BLOCK {
+            plan.submit(&feed, QUANTUM, block);
+            plan.render(QUANTUM);
+            read_all(&mut plan, &mut streams);
+        }
+        let mut successor =
+            LivePlan::successor_with(b, &request, &plan.prepared.inventory, &a.model, backend);
+        attach(&mut successor);
+        assert_eq!(
+            successor
+                .prepared
+                .sources
+                .adopt_persisting(&mut plan.prepared.sources),
+            1
+        );
+        successor.submit(&feed, QUANTUM, SWAP_BLOCK);
+        let mut output = vec![f32::NAN; QUANTUM * 2];
+        engine::realtime::audit::reset();
+        let mark = bench_alloc::current_thread_counters();
+        let carry = successor
+            .prepared
+            .plan
+            .adopt_predecessor_plan(&mut plan.prepared.plan);
+        successor.render_into(&mut output, QUANTUM);
+        let delta = bench_alloc::current_thread_delta_since(mark);
+        let audit = engine::realtime::audit::snapshot();
+        read_all(&mut successor, &mut streams);
+        for block in SWAP_BLOCK + 1..BLOCKS {
+            successor.submit(&feed, QUANTUM, block);
+            successor.render(QUANTUM);
+            read_all(&mut successor, &mut streams);
+        }
+        let strips = |plan: &mut LivePlan| {
+            plan.prepared
+                .plan
+                .host_attachment_mut::<Rig>()
+                .expect("attachment")
+                .strips()
+        };
+        Swapped {
+            streams,
+            carry,
+            carries: successor
+                .prepared
+                .plan
+                .host_attachment_mut::<Rig>()
+                .expect("attachment")
+                .carries
+                .clone(),
+            a_strips: strips(&mut plan),
+            b_strips: strips(&mut successor),
+            restarted: successor.prepared.restarted_strips().to_vec(),
+            armed: [
+                successor.prepared.plan.observation_binding_counts()[2],
+                plan.prepared.plan.observation_binding_counts()[2],
+            ],
+            allocator: (
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (audit.allocations, audit.deallocations),
+            ),
+        }
+    }
+
+    fn strips_of(session: &Session) -> Vec<String> {
+        session
+            .model
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str().to_owned())
+            .collect()
+    }
+
+    /// Which sessions the swap runs between.
+    #[derive(Clone, Copy, Debug)]
+    enum Form {
+        /// Per-node instances on both sides: A's inserts and B's, with one more.
+        NodeToNode,
+        /// A bank of lanes on both sides: B adds a track with no insert.
+        BankToBank,
+        /// Per-node instances become a bank of lanes.
+        NodeToBank,
+        /// A bank of lanes becomes per-node instances.
+        BankToNode,
+    }
+
+    fn pair(backend: Backend, form: Form) -> (Session, Session) {
+        let width = bank_width(backend);
+        match form {
+            Form::NodeToNode => {
+                let short = compressor_insert_session(width - 2);
+                let (a, b) = (
+                    Session::compile(short.clone()),
+                    Session::compile(with_muted_track(short)),
+                );
+                assert_eq!(insert_forms(&a, backend), vec![true; width - 2]);
+                assert_eq!(insert_forms(&b, backend), vec![true; width - 1]);
+                (a, b)
+            }
+            Form::BankToBank => {
+                let full = compressor_insert_session(width);
+                let mut bare = with_muted_track(full.clone());
+                track_mut(&mut bare, MUTED_TRACK).inserts.effects.clear();
+                let (a, b) = (Session::compile(full), Session::compile(bare));
+                assert_eq!(insert_forms(&a, backend), vec![false; width]);
+                assert_eq!(insert_forms(&b, backend), vec![false; width]);
+                (a, b)
+            }
+            Form::NodeToBank => form_pair(Insert::Compressor, backend, true),
+            Form::BankToNode => form_pair(Insert::Compressor, backend, false),
+        }
+    }
+
+    /// Gate 4, and the acknowledged subscribe: a tap subscribed before the swap publishes the
+    /// windows a fresh B subscribed from frame 0 does, field for field, across the swap, with
+    /// no restart and no gap in its sequence; the host's reader was paired by the record, which
+    /// names each tap by its effect owner, not its position.
+    fn taps_carry(backend: Backend, form: Form) {
+        let what = format!("{backend:?} {form:?}");
+        let (a, b) = pair(backend, form);
+        let subscribed = strips_of(&a);
+        // A strip B removes has no instance to carry, and its tap goes with it.
+        let kept: Vec<String> = subscribed
+            .iter()
+            .filter(|strip| strips_of(&b).contains(strip))
+            .cloned()
+            .collect();
+        let expected = reference(backend, &b, &kept);
+        let run = swapped(backend, &a, &b, &subscribed);
+        assert_eq!(run.carry, CarryOutcome::Carried, "{what}");
+        assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+        assert_eq!(
+            run.armed,
+            [kept.len() as u64, (subscribed.len() - kept.len()) as u64],
+            "{what}: the subscribes are armed on the successor's taps; the retiring predecessor \
+             holds fresh unarmed ones and the tap of a removed strip"
+        );
+        assert_eq!(
+            run.allocator,
+            ((0, 0, 0), (0, 0)),
+            "{what}: allocator and render audit over the swap block"
+        );
+
+        assert_eq!(
+            run.carries.len(),
+            kept.len(),
+            "{what}: one record per tap set"
+        );
+        let mut shifted = false;
+        for carry in &run.carries {
+            assert_eq!(carry.kind, ObserverKind::Observation, "{what}");
+            assert_eq!(
+                run.a_strips[carry.predecessor], run.b_strips[carry.successor],
+                "{what}: the record joins the two reader sets of one strip"
+            );
+            shifted |= carry.predecessor != carry.successor;
+        }
+        assert_eq!(
+            shifted,
+            matches!(form, Form::NodeToNode | Form::NodeToBank | Form::BankToNode),
+            "{what}: the added track shifts every reader index, or this swap shifts none"
+        );
+
+        for strip in &kept {
+            let got = &run.streams[strip];
+            let want = &expected[strip];
+            assert_eq!(
+                got, want,
+                "{what} {strip}: the windows equal a fresh B's, the one open at the swap included"
+            );
+            assert_eq!(
+                got.iter().map(|window| window.sequence).collect::<Vec<_>>(),
+                vec![1, 2, 3],
+                "{what} {strip}: no gap and no restart"
+            );
+            assert!(
+                got.iter()
+                    .any(|window| window.left > 0.0 || window.right > 0.0),
+                "{what} {strip}: the compressor reduces gain, or the readings are vacuous"
+            );
+        }
+        assert!(
+            expected
+                .values()
+                .any(|windows| windows[1].first_sample < SWAP_SAMPLE
+                    && windows[1].end_sample > SWAP_SAMPLE),
+            "{what}: a window spans the swap"
+        );
+        // The added track's tap was not subscribed and is no carried one's: it publishes nothing.
+        for strip in run
+            .b_strips
+            .iter()
+            .filter(|strip| !subscribed.contains(strip))
+        {
+            assert!(!run.streams.contains_key(strip), "{what}: {strip} is fresh");
+        }
+    }
+
+    const SWAP_SAMPLE: u64 = (SWAP_BLOCK * QUANTUM) as u64;
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn taps_follow_their_effect_through_every_form_at_eight_lanes() {
+        for form in [
+            Form::NodeToNode,
+            Form::BankToBank,
+            Form::NodeToBank,
+            Form::BankToNode,
+        ] {
+            taps_carry(Backend::Simd8, form);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(any(target_feature = "neon", target_feature = "simd128")),
+        ignore = "a console effect bank binds only at the width its build executes, and four \
+                  lanes is the NEON and simd128 width (#1017)"
+    )]
+    fn taps_follow_their_effect_through_every_form_at_four_lanes() {
+        for form in [
+            Form::NodeToNode,
+            Form::BankToBank,
+            Form::NodeToBank,
+            Form::BankToNode,
+        ] {
+            taps_carry(Backend::Simd4, form);
+        }
+    }
+
+    /// Gate 4, second case: a compressor whose prepared setup changed (its link mode) restarts,
+    /// and so does its tap: it is not in the record, and its successor reader receives nothing
+    /// while every other strip's tap carries.
+    fn a_restarted_effect_starts_its_tap_fresh(backend: Backend) {
+        let what = format!("{backend:?}");
+        let width = bank_width(backend);
+        let base = compressor_insert_session(width - 2);
+        let mut changed = with_muted_track(base.clone());
+        track_mut(&mut changed, "eq1").inserts.effects[0].link_mode = LinkMode::Average;
+        let (a, b) = (Session::compile(base), Session::compile(changed));
+        let subscribed = strips_of(&a);
+        let run = swapped(backend, &a, &b, &subscribed);
+        assert_eq!(run.carry, CarryOutcome::Carried, "{what}");
+        assert_eq!(run.restarted, vec![Box::<str>::from("eq1")], "{what}");
+        assert_eq!(run.carries.len(), subscribed.len() - 1, "{what}");
+        assert!(
+            run.carries
+                .iter()
+                .all(|carry| run.a_strips[carry.predecessor] != "eq1"
+                    && run.b_strips[carry.successor] != "eq1"),
+            "{what}: eq1's taps are not in the record"
+        );
+        let expected = reference(backend, &b, &subscribed);
+        for strip in subscribed.iter().filter(|strip| *strip != "eq1") {
+            assert_eq!(run.streams[strip], expected[strip], "{what} {strip}");
+        }
+        assert_eq!(
+            run.streams["eq1"]
+                .iter()
+                .map(|window| window.sequence)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "{what}: eq1 published its first window in A, and its fresh tap publishes none"
+        );
+        assert_eq!(
+            run.armed[0],
+            subscribed.len() as u64 - 1,
+            "{what}: the restarted effect's tap starts unarmed"
+        );
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn a_restarted_effect_starts_its_tap_fresh_at_eight_lanes() {
+        a_restarted_effect_starts_its_tap_fresh(Backend::Simd8);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(any(target_feature = "neon", target_feature = "simd128")),
+        ignore = "a console effect bank binds only at the width its build executes, and four \
+                  lanes is the NEON and simd128 width (#1017)"
+    )]
+    fn a_restarted_effect_starts_its_tap_fresh_at_four_lanes() {
+        a_restarted_effect_starts_its_tap_fresh(Backend::Simd4);
+    }
+
+    /// Gate 5 for the taps: the swap block -- carry, the attachment hook's pairing and the first
+    /// render -- allocates and frees nothing, counted rather than aborted.
+    #[test]
+    fn the_tap_swap_block_allocates_and_frees_nothing() {
+        use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+        struct RestoreMode(Mode);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                set_mode(self.0);
+            }
+        }
+        assert_installed();
+        let _restore = RestoreMode(mode());
+        set_mode(Mode::Count);
+        engine::realtime::audit::warm_up();
+        let backend = Backend::current();
+        let (a, b) = pair(backend, Form::NodeToNode);
+        let subscribed = strips_of(&a);
+        let run = swapped(backend, &a, &b, &subscribed);
+        assert_eq!(run.carry, CarryOutcome::Carried);
+        assert_eq!(run.carries.len(), subscribed.len());
+        assert_eq!(run.allocator, ((0, 0, 0), (0, 0)));
     }
 }

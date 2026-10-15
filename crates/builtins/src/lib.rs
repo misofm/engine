@@ -5144,6 +5144,19 @@ pub struct MeterAccumulator {
     producer: Producer<MeterSnapshot>,
 }
 
+/// Where a meter's open window sits on the sample grid (#1327 D6): the first sample of the open
+/// window (`None` before the first observation), the frames it has already taken in, and the
+/// sequence number its snapshot will carry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeterWindowPosition {
+    /// First sample of the open window, or `None` for a meter that has observed nothing.
+    pub start: Option<u64>,
+    /// Frames already in the open window.
+    pub frames: u32,
+    /// `window_sequence` of the snapshot the open window will publish.
+    pub sequence: u64,
+}
+
 pub struct PreparedMeter {
     pub accumulator: MeterAccumulator,
     pub consumer: Consumer<MeterSnapshot>,
@@ -5638,6 +5651,52 @@ impl MeterAccumulator {
     pub const fn dropped_snapshots(&self) -> u64 {
         self.dropped
     }
+
+    /// The configuration this meter was prepared with.
+    #[must_use]
+    pub const fn config(&self) -> MeterConfig {
+        self.config
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Where this meter's open window sits (#1327 D6): scalar reads, allocation-free.
+    #[must_use]
+    pub const fn window_position(&self) -> MeterWindowPosition {
+        MeterWindowPosition {
+            start: self.start,
+            frames: self.frames,
+            sequence: self.sequence,
+        }
+    }
+
+    /// Open this meter's first window at `position` (#1327 D6), as a meter that observed silence
+    /// since that window opened would hold it: the window's start, frame count and sequence are
+    /// the donor's, and the lanes and cumulative counters stay at zero.
+    ///
+    /// Only a meter that has observed nothing takes it: a meter with a window, a sequence or a
+    /// counter keeps its own, and this returns `false`. Scalar writes, allocation-free.
+    pub fn join_window(&mut self, position: MeterWindowPosition) -> bool {
+        if self.start.is_some()
+            || self.frames != 0
+            || self.sequence != 0
+            || self.discontinuities != 0
+            || self.dropped != 0
+        {
+            return false;
+        }
+        self.start = position.start;
+        self.frames = position.frames;
+        self.sequence = position.sequence;
+        true
+    }
+
+    /// Name this meter by `handle` from now on (#1327 D2): its snapshots carry it. A swap moves a
+    /// meter's whole state, producer included, into the successor's binding, and the binding's
+    /// handle is the reader's; the state that moved takes it. A scalar write.
+    pub fn rebind_handle(&mut self, handle: MeterHandle) {
+        self.handle = handle;
+    }
+    // REALTIME_POLICY_END
     fn discontinuity(&mut self, first_sample: u64) {
         self.start = Some(first_sample);
         self.frames = 0;

@@ -315,6 +315,22 @@ pub trait PreparedPlanExecutor: Send {
     fn adopt_predecessor(&mut self, _predecessor: &mut dyn PreparedPlanExecutor) -> CarryOutcome {
         CarryOutcome::NotRequested
     }
+    /// The observers this plan took from its predecessor in the block that applied its swap
+    /// (#1327 D3): one record per carried observer, written by
+    /// [`adopt_predecessor`](Self::adopt_predecessor) into preallocated storage and never changed
+    /// after, since a plan is adopted at most once.
+    ///
+    /// **Where it runs.** Called on the render thread inside the render scope, right after the
+    /// hand-over, by [`PreparedRenderPlan::adopt_predecessor_plan`] and by the plan exchange's swap
+    /// block. Control-side code may read it too.
+    ///
+    /// **Render-thread code.** A borrow of existing storage: no allocation, free, lock, syscall,
+    /// log or unbounded loop.
+    ///
+    /// The default is empty: this executor carried no observer.
+    fn observer_carries(&self) -> &[ObserverCarry] {
+        &[]
+    }
     /// Whether this plan, running, is ready for its successor to adopt with a prime of
     /// `lead_blocks` blocks at the block that starts at `block_start` (#1311 D3).
     ///
@@ -524,6 +540,37 @@ pub enum CarryOutcome {
     PredecessorMismatch,
 }
 
+/// Which host-visible reader vector an [`ObserverCarry`] indexes (#1327 D3).
+///
+/// The kinds name vectors the host holds, in the order the plan's observer location table
+/// lists the entries of that kind, so an entry's index is its reader's index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObserverKind {
+    /// A strip meter's reader.
+    Meter,
+    /// An effect observation tap's reader.
+    Observation,
+    /// A spectrum capture's reader (#1395).
+    Spectrum,
+}
+
+/// One observer the successor took from its predecessor in the swap block (#1327 D3): the
+/// successor's observer at entry `successor` of its `kind` now holds the state that sat at entry
+/// `predecessor` of the predecessor's, producer included, so a reader the host already holds for
+/// the predecessor's entry must follow it to the successor's.
+///
+/// Plain data: the executor writes the record into preallocated storage in the swap block, and a
+/// host pairs its readers from it with no allocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObserverCarry {
+    /// The reader vector both indices address.
+    pub kind: ObserverKind,
+    /// The entry index in the successor plan (this plan).
+    pub successor: usize,
+    /// The entry index in the predecessor plan.
+    pub predecessor: usize,
+}
+
 /// Absolute sample time supplied by the host; no wall clock is used.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderTime {
@@ -713,8 +760,9 @@ pub struct PreparedRenderPlan {
     gate: Arc<RevisionGate>,
     /// The pin of `gate` until [`Self::take_revision_gate`] hands the control handle out.
     gate_pin: Option<GatePin>,
-    /// Host data that travels with the plan (issue #1400 D4). Render never reads, calls or drops
-    /// it: it is set on the control thread before publication, and drops with the plan on the
+    /// Host data that travels with the plan (issue #1400 D4). Render never reads or drops it, and
+    /// calls it once per applied swap, through [`HostAttachment::adopt_predecessor`] in the swap
+    /// block. It is set on the control thread before publication, and drops with the plan on the
     /// retirement path.
     host_attachment: Option<Box<dyn HostAttachment>>,
     _not_sync: Cell<()>,
@@ -732,6 +780,26 @@ pub struct PreparedRenderPlan {
 pub trait HostAttachment: Send + 'static {
     /// The attachment as `Any`, for [`PreparedRenderPlan::host_attachment_mut`]'s downcast.
     fn as_any_mut(&mut self) -> &mut dyn core::any::Any;
+    /// Take state from the attachment of the plan this one displaces, in the block that applies the
+    /// swap (#1381 D3).
+    ///
+    /// **Where it runs.** On the render thread, inside the render scope, from
+    /// `PreparedRenderPlan::carry_from`: after the executor hand-over, and only when both plans
+    /// carry an attachment. `carries` is the successor executor's
+    /// [`PreparedPlanExecutor::observer_carries`] (empty when it has none), so an attachment that
+    /// holds a host's readers pairs them with the observers the executors carried.
+    ///
+    /// **Render-thread code.** No allocation, free, lock, syscall, log or unbounded loop: it may
+    /// only move or swap state between preallocated storage. `predecessor` retires after this
+    /// returns and never renders again, so state may be moved out of it.
+    ///
+    /// The default takes nothing.
+    fn adopt_predecessor(
+        &mut self,
+        _predecessor: &mut dyn HostAttachment,
+        _carries: &[ObserverCarry],
+    ) {
+    }
 }
 
 #[cfg(test)]
@@ -1154,15 +1222,37 @@ impl PreparedRenderPlan {
             .is_some_and(|executor| executor.prime_ready(block_start, lead_blocks))
     }
 
-    /// Run the executor hand-over from `predecessor`, if both plans have executors.
+    /// The observers this plan took from its predecessor at its swap block
+    /// ([`PreparedPlanExecutor::observer_carries`]); empty without an executor or a carry.
+    #[must_use]
+    pub fn observer_carries(&self) -> &[ObserverCarry] {
+        self.executor
+            .as_deref()
+            .map_or(&[], |executor| executor.observer_carries())
+    }
+
+    /// Run the executor hand-over from `predecessor`, if both plans have executors, then the
+    /// attachment hand-over ([`HostAttachment::adopt_predecessor`]), if both plans have an
+    /// attachment, with the successor executor's observer carries.
     pub(crate) fn carry_from(&mut self, predecessor: &mut Self) -> CarryOutcome {
-        match (
+        let outcome = match (
             self.executor.as_deref_mut(),
             predecessor.executor.as_deref_mut(),
         ) {
             (Some(successor), Some(predecessor)) => successor.adopt_predecessor(predecessor),
             _ => CarryOutcome::NotRequested,
+        };
+        if let (Some(successor), Some(predecessor)) = (
+            self.host_attachment.as_deref_mut(),
+            predecessor.host_attachment.as_deref_mut(),
+        ) {
+            let carries = self
+                .executor
+                .as_deref()
+                .map_or(&[][..], |executor| executor.observer_carries());
+            successor.adopt_predecessor(predecessor, carries);
         }
+        outcome
     }
 
     /// Render one block through the plan's own revision gate (#1502 D2). After the output-shape
