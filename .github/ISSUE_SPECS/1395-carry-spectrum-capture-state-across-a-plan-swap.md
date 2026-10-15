@@ -239,3 +239,43 @@ Checked against `ea336c039`.
   `spectrum_service.rs` is edited in this order: #1395a, #1395b, #1618.
 - **Order in lane K.** #1395a, then #1395b, after #1584 D6a. Both slices edit
   `crates/host-core/src/prepare.rs` and `crates/host-core/tests/successor_swap.rs`.
+
+## Decision record: #1395a, the single capture (batch 8)
+
+**Shipped.** A single spectrum capture carries across a plan swap, and the control side keeps
+reading it.
+
+- *Swap block (D1, D2).* `SpectrumCaptureObserver` answers `carry_kind() = Some(Spectrum)`
+  (`spectrum.rs`). `prepare.rs` gives each single capture an inventory row keyed by
+  `(target, channels)` (`SpectrumInventoryRow`), and `resolve_spectrum_carry` joins the rows with the
+  predecessor's by key, never by entry or handle, and only at equal sample rate and quantum (both
+  are now in `PlanStateInventory`). The moves go into the one observer section with the meters'
+  (`install_observer_carry`), and a carry program is requested when a capture may carry
+  (`spectrum_may_carry`). No engine, graph or `latest_cell` edit. The observer keeps no binding
+  handle, so `adopt_binding_handle` has nothing to do (a collection's reorder in #1395b needs no
+  handle work either).
+- *Pairing at promotion (D3, D5, batch-10 amendment).* The pairing list is built at preparation
+  from the same join (`PlanStateInventory::spectrum_pairing`, `SpectrumPair`), so it names exactly
+  the observers the swap block moves. `SpectrumCapture::pair_carried(&mut self, predecessor,
+  pairs)` swaps the two captures only when the list names entry 0 of both and their target and
+  channels are equal. `SpectrumService::adopt_successor(successor, pairing, carried)` applies it
+  when the adoption carried, installs the successor's fresh captures otherwise (a refused
+  hand-over), and returns the displaced captures so the caller drops them off the audio thread.
+  The service is allocation- and free-free here. No host pairs in the swap block.
+- *Departures.* (1) `pair_carried` takes the control-side pairing list, not the swap block's
+  `ObserverCarry` slice (the record exists and a test proves it equals the list). (2) The
+  inventory carries only single captures' rows: a collection has none, so it never moves an
+  observer; #1395b adds its rows and the collection arm of `adopt_successor`. (3) An in-flight
+  arm or stream on a capture that does not carry is not settled by `adopt_successor`; that is
+  #1618's, in this method. (4) `browser_successor.rs` gate 2 read the successor's own capture; that
+  observer is now carried away, so the test pairs the captures first (a mechanical update).
+
+**Gates -> tests** (`crates/host-core/tests/successor_swap.rs`, `mod spectrum_carry`):
+gate 1 `a_continuous_capture_carries_and_its_reader_keeps_receiving` (status, window fields and
+planes equal the reference's block by block, epoch 1, no gap; record == pairing list);
+`a_refused_hand_over_installs_the_fresh_capture` (the oracle can fail);
+gate 3 `an_armed_one_shot_completes_across_the_swap` (a window that spans the swap, equal to the
+reference's) and `a_changed_key_starts_fresh`; gate 4
+`the_swap_block_and_the_promotion_allocate_and_free_nothing` (zero allocator calls in every
+block and in `adopt_successor`). Unit tests: `spectrum::tests::pair_carried_swaps_only_a_named_pair_of_one_key`,
+`prepare::tests::a_spectrum_capture_carries_by_key_at_one_shape`. Gate 2 (collection) is #1395b.
