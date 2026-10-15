@@ -3,7 +3,7 @@
 Successor of #1683 (the master strip is a core `master` monitor row), decision 17 C1
 (`docs/rulings/one-control-abstraction-2026-10-13.md`: a behaviour that exists on one host only is
 a defect). Code anchors verified on branch `codex/controls-batch-14aw` at `5ef2c81d8` (the #1683
-tree). Issue number: assigned at filing (written here as TBD35). Feature sprint mode (owner,
+tree). Issue number: assigned at filing (written here as #1689). Feature sprint mode (owner,
 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
@@ -132,7 +132,7 @@ values they are today; only the second route to the designation is gone.
 - No new master behaviour: the `master` row, its monitor overlay, `sync_master` and the meter
   header's `masterTrackPlusOne` keep their #1683 meaning.
 - No change to the 64-byte block size or to any other boot word.
-- No master reading on the C ABI (TBD36).
+- No master reading on the C ABI (#1690).
 - No change to the memory pins in `expected.json` unless the measurement moves; if it does, the
   PR records the measured numbers.
 

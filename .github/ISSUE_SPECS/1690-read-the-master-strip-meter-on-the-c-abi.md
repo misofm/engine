@@ -4,7 +4,7 @@ Successor of #1683 (the master strip is a core `master` monitor row), decision 1
 (`docs/rulings/one-control-abstraction-2026-10-13.md`: a behaviour that exists on one host only is
 a defect). Code anchors verified on branch `codex/controls-batch-14aw` at `5ef2c81d8` (the #1683
 tree). The specs of #1581, #1582, #1583 and #1587 are read as frozen text: none of their code is
-on that tree yet. Issue number: assigned at filing (written here as TBD36). Feature sprint mode
+on that tree yet. Issue number: assigned at filing (written here as #1690). Feature sprint mode
 (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
@@ -118,7 +118,7 @@ browser, an invalid record on the C ABI), never `0`.
 - No change to the observation taps, their arm rule (#1534, #1584, #1585) or the reduction
   formula (`reduction_db`).
 - No master peak. The master has no structural bus; its peak is the strip's own entry.
-- No change to #1683's row, the boot word (TBD35) or the browser's lease frame bytes.
+- No change to #1683's row, the boot word (#1689) or the browser's lease frame bytes.
 - No SDK API beyond the generated table type; a later issue gives the SDK a `masterGainReduction`
   call on the batch.
 

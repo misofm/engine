@@ -2,7 +2,7 @@
 
 One of the one-host differences of decision 17 C13 (`docs/rulings/one-control-abstraction-2026-10-13.md`).
 Code anchors verified on `main` at `e2f6cfb24`. Issue number: assigned at filing (written here
-as TBD34). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
+as #1688). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
 
