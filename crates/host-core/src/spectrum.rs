@@ -986,6 +986,36 @@ impl SpectrumCapture {
         core::mem::swap(self, predecessor);
         true
     }
+
+    /// Settle the one-shot capture of a displaced plan that did not carry (#1618, option A): when
+    /// `predecessor` was armed, capturing, or held a window or a result, `self` (the successor's
+    /// fresh capture) starts in `INVALID` at the predecessor's arm generation, so the reader that
+    /// armed it reads [`SpectrumCaptureReadError::Invalid`] once and can arm again. Returns whether
+    /// it settled anything.
+    ///
+    /// The window the predecessor held, and the result it queued, lived in an observer that no
+    /// longer renders, so no later block can complete the arm. A predecessor with no one-shot in
+    /// flight (idle, or running a stream) leaves `self` untouched. The generation carries over, so
+    /// the next arm is `g + 1` and a record of an earlier arm can never be mistaken for its
+    /// window.
+    ///
+    /// Call it only for a capture that [`Self::pair_carried`] did not exchange: a carried capture
+    /// keeps its one-shot state. Control-side, allocation-free and free-free. It is one atomic
+    /// exchange on a word that the successor's observer treats as "no window" (that observer moves
+    /// the word only from `ARMED` or `CAPTURING`), so it is safe while the successor's plan
+    /// renders.
+    pub fn settle_unpaired(&mut self, predecessor: &Self) -> bool {
+        if predecessor.mode.load(Ordering::Acquire) != ONE_SHOT_MODE {
+            return false;
+        }
+        let word = predecessor.state.load(Ordering::Acquire);
+        if word_phase(word) == IDLE {
+            return false;
+        }
+        self.state
+            .swap(state_word(word_generation(word), INVALID), Ordering::AcqRel);
+        true
+    }
 }
 
 /// One spectrum capture a successor takes from its predecessor (#1395 D1): the successor's
@@ -1056,8 +1086,8 @@ impl SpectrumCaptureCollection {
     /// not, `self` has no selection and its epoch is the predecessor's plus one, so a reader of the
     /// epoch sees the loss; the host's next `select` arms an entry as it does today. A predecessor
     /// with no selection leaves `self` with none and with the predecessor's epoch. This runs for an
-    /// empty list too (a refused hand-over carries nothing), and any one-shot or stream armed on an
-    /// entry that did not pair is not settled here (#1618's).
+    /// empty list too (a refused hand-over carries nothing). It does not settle the arm or the
+    /// stream the service held on a lost selection: [`crate::SpectrumService::adopt_successor`] does.
     ///
     /// Allocation-free and drops nothing: the caller drops the displaced collection where it
     /// chooses.
@@ -4204,6 +4234,69 @@ mod tests {
                 .first_sample,
             8_192
         );
+    }
+
+    /// #1618 gate 2: a window held behind a stale record when the plan swaps, on a capture that
+    /// does not carry. The held window died with its observer, so no block end will ever publish
+    /// it: the service settles the arm, the read answers `CaptureInvalid` (not `Pending` forever),
+    /// the generation carries over, and a new arm completes on the successor's observer, whose
+    /// window a record of the old generation cannot be mistaken for.
+    #[test]
+    fn a_window_held_behind_a_stale_record_settles_invalid_when_the_plan_swaps() {
+        use crate::{PreparedSpectrumCaptures, SpectrumService, SpectrumServiceError};
+
+        let (mut observer, capture) = one_shot_pair(SpectrumChannels::Left);
+        let mut service =
+            SpectrumService::new(PreparedSpectrumCaptures::Single(capture), 48_000, 128, None);
+        service.arm().expect("first arm");
+        service.cancel().expect("cancel");
+        service.arm().expect("an arm after a cancel is never Busy");
+        let stale = super::SpectrumCapturedRecord {
+            window: window(0.25),
+            stream_epoch: 0,
+            sequence: 0,
+            dropped_captures: 0,
+            arm_generation: 1,
+        };
+        assert!(observer.producer.try_push(stale).is_ok());
+        feed_window(&mut observer, 8_192, 16);
+        observer.block_end();
+        assert!(
+            service
+                .read(SpectrumChannels::Left)
+                .expect("pending")
+                .is_none(),
+            "the window is held behind the stale record"
+        );
+
+        // The plan swaps; the successor's capture is fresh and its observer is its own.
+        let (mut next_observer, next) = one_shot_pair(SpectrumChannels::Left);
+        let displaced =
+            service.adopt_successor(PreparedSpectrumCaptures::Single(next), &[], true, None);
+        assert!(
+            matches!(
+                service.read(SpectrumChannels::Left),
+                Err(SpectrumServiceError::CaptureInvalid)
+            ),
+            "settled, not pending forever"
+        );
+        // The refusal is read once; the generation is the old arm's, so the next arm is its
+        // successor and completes on the new observer.
+        assert!(matches!(
+            service.read(SpectrumChannels::Left),
+            Err(SpectrumServiceError::NotArmed)
+        ));
+        service.arm().expect("a new arm after the refusal");
+        feed_window(&mut next_observer, 16_384, 16);
+        // The displaced observer keeps its held window; its later block ends reach nobody.
+        observer.block_end();
+        next_observer.block_end();
+        let snapshot = service
+            .read(SpectrumChannels::Left)
+            .expect("read")
+            .expect("the new arm completes on the successor");
+        assert_eq!(snapshot.window.first_sample, 16_384);
+        drop(displaced);
     }
 
     /// Gate 1 (issue #1609): a cancel races the completion of the window it cancels.
