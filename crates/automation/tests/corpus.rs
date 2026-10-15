@@ -1,6 +1,6 @@
-//! The corpus's own sanity: every case produces events, and the pins are for these cases.
+//! The corpus's own sanity: every case produces events. The pins are checked by gate G5 alone.
 
-use automation::corpus::{CASE_COUNT, G5_DIGESTS, run_case};
+use automation::corpus::{CASE_COUNT, run_case};
 use sha2::{Digest, Sha256};
 
 fn digest(words: &[u32]) -> [u8; 32] {
@@ -27,18 +27,16 @@ fn print_pins() {
     }
 }
 
-/// Red if a case stopped producing events (a digest of nothing agrees everywhere), or its digest
-/// moved off its pin.
+/// Red if a case stopped producing events: a digest of nothing agrees everywhere, so gate G5
+/// (`g5_native_digests_match_pins`, the single owner of the pins) would pass vacuously.
 #[test]
-fn cases_produce_events_and_match_their_pins() {
-    assert_eq!(G5_DIGESTS.len(), CASE_COUNT);
-    for (case, pin) in G5_DIGESTS.iter().enumerate() {
+fn cases_produce_events() {
+    for case in 0..CASE_COUNT {
         let words = run_case(case);
         assert!(
             words.len() / 5 > 20,
             "case {case} has {} events",
             words.len() / 5
         );
-        assert_eq!(digest(&words), *pin, "case {case}");
     }
 }

@@ -25,6 +25,11 @@
 //! node time, not render time, the events do not depend on the quantum or on the render sample a
 //! seek landed at.
 //!
+//! A block of `q` samples yields at most [`CellProgram::max_events`] events: `2⌈q/64⌉ + 3`, and
+//! one more for a `no_restart` cell, whose jump deferred from an earlier block can fire in it. The
+//! bound rests on the session's spacing rule (discontinuities at least 64 samples apart, #1626),
+//! which [`ProgramBuilder`] enforces again ([`BuildError::Spacing`]).
+//!
 //! # Realtime
 //!
 //! Evaluation and event generation are render-reachable: they allocate, lock and block on
@@ -45,7 +50,9 @@ pub use evaluate::value_at;
 pub use events::{
     CellEvents, CellState, Event, EventKind, NodeSpan, SeekMode, SpanError, completion_of,
 };
-pub use program::{BuildError, CellDescription, CellProgram, Program, ProgramBuilder};
+pub use program::{
+    BuildError, CellDescription, CellProgram, DISCONTINUITY_SPACING, Program, ProgramBuilder,
+};
 
 /// The shape of one segment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

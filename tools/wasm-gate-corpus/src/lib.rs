@@ -40,8 +40,10 @@
 //! pin keeps its index, while the delegated blocks after it -- whose pins live in their own crates
 //! and are indexed there -- move up by one. The original layout ends with the compressor family of issue #88.
 //! Issue #213 appends two builtin cases after that family, preserving the original eight-case
-//! builtin block and every later index. `tests/g5_native_corpus.rs` checks both the preserved
-//! layout and the two appended cases.
+//! builtin block and every later index. Issue #1637 appends the scalar [`automation::corpus`]
+//! block after those two builtin cases, the last block, so no earlier index moves.
+//! `tools/wasm-gates/tests/g5_native_corpus.rs` checks the preserved layout, the two builtin cases
+//! after it and the automation block at the end.
 
 use automation::corpus as automation_corpus;
 use builtins::corpus as builtins_corpus;

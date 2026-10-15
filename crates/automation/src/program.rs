@@ -8,6 +8,11 @@ use crate::{Completion, JumpLength, Segment, Shape, value_at};
 /// Times are exact in `f64` below this bound, which the evaluator relies on.
 const TIME_LIMIT: u64 = 1 << 53;
 
+/// The least distance, in node-time samples, between two discontinuities of one cell: the session
+/// refuses closer ones (`automation.discontinuity_spacing`, #1626 D3), and the builder refuses
+/// them again, typed, because the per-block event bound ([`CellProgram::max_events`]) rests on it.
+pub const DISCONTINUITY_SPACING: u32 = 64;
+
 /// One cell, in neutral terms: its table and the parameters of its events.
 #[derive(Clone, Copy, Debug)]
 pub struct CellDescription<'a> {
@@ -60,6 +65,13 @@ pub enum BuildError {
         /// The cell's index.
         cell: usize,
     },
+    /// Two discontinuities of the cell are closer than [`DISCONTINUITY_SPACING`] samples.
+    Spacing {
+        /// The cell's index.
+        cell: usize,
+        /// The node time of the later discontinuity of the first close pair.
+        time: i64,
+    },
     /// A count does not fit the program's `u32` indexes.
     TooLarge,
     /// The allocator refused the reservation.
@@ -99,6 +111,7 @@ pub struct CellProgram<'a> {
     pub(crate) no_restart: bool,
 }
 
+// REALTIME_POLICY_BEGIN
 impl<'a> CellProgram<'a> {
     /// The cell's segment slice, the argument of [`value_at`].
     #[must_use]
@@ -116,6 +129,22 @@ impl<'a> CellProgram<'a> {
     #[must_use]
     pub const fn grid(&self) -> u32 {
         self.grid
+    }
+
+    /// The most events one block of `frames` samples yields for this cell: the capacity a
+    /// per-cell event buffer needs.
+    ///
+    /// A block is at most two runs (before and after a seek step) of `a + b = frames - 1` samples,
+    /// or one run of `frames`. Each run holds at most `⌈run/64⌉` grid points (`G` is at least 64)
+    /// and, with discontinuities at least [`DISCONTINUITY_SPACING`] apart, `⌈run/64⌉` of them, and
+    /// `⌈a/64⌉ + ⌈b/64⌉ <= ⌈frames/64⌉ + 1`. The seek adds its landing. A `no_restart` cell can
+    /// also fire, in the run before the step, one jump deferred from an earlier block (it carries
+    /// every discontinuity its ramp covered, so later discontinuities of the run still come at
+    /// least 64 apart): `2⌈frames/64⌉ + 3`, plus one for a `no_restart` cell.
+    #[must_use]
+    pub const fn max_events(&self, frames: u32) -> u32 {
+        let per_kind = frames.div_ceil(64) + 1;
+        2 * per_kind + 1 + if self.no_restart { 1 } else { 0 }
     }
 }
 
@@ -154,6 +183,7 @@ fn range((start, len): (u32, u32)) -> core::ops::Range<usize> {
     let start = start as usize;
     start..start + len as usize
 }
+// REALTIME_POLICY_END
 
 /// Builds a [`Program`] from cell descriptions.
 #[derive(Clone, Copy, Debug)]
@@ -256,6 +286,19 @@ fn validate(cell: usize, description: &CellDescription<'_>) -> Result<(), BuildE
             return Err(BuildError::NonPositiveExponential { cell, segment });
         }
         previous_end = value.end;
+    }
+    let mut previous = None;
+    let mut close = None;
+    for_each_discontinuity(description.segments, |time| {
+        if close.is_none()
+            && previous.is_some_and(|before: i64| time - before < i64::from(DISCONTINUITY_SPACING))
+        {
+            close = Some(time);
+        }
+        previous = Some(time);
+    });
+    if let Some(time) = close {
+        return Err(BuildError::Spacing { cell, time });
     }
     Ok(())
 }

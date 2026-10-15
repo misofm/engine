@@ -129,3 +129,37 @@ fn bytes_report_equals_the_live_bytes() {
     assert!(reported > 0);
     drop(program);
 }
+
+/// Red if the builder accepts two discontinuities closer than the session's 64-sample spacing
+/// (#1626 D3), which the per-block event bound rests on, or refuses a pair exactly 64 apart.
+#[test]
+fn closer_discontinuities_are_refused() {
+    let table = |second: u64| {
+        [
+            seg(0, 100, 1.0, 1.0, Shape::Step),
+            seg(100, second, 2.0, 2.0, Shape::Step),
+            seg(second, 1000, 3.0, 3.0, Shape::Step),
+        ]
+    };
+    assert_eq!(
+        build(&table(163)).unwrap_err(),
+        BuildError::Spacing { cell: 0, time: 163 }
+    );
+    assert_eq!(
+        build(&table(164))
+            .unwrap()
+            .cell(0)
+            .unwrap()
+            .discontinuities(),
+        &[100, 164]
+    );
+    // A step's own end counts: 2 -> 5 at 150 is 50 after the start at 100.
+    assert_eq!(
+        build(&[
+            seg(0, 100, 1.0, 1.0, Shape::Step),
+            seg(100, 150, 2.0, 5.0, Shape::Step),
+        ])
+        .unwrap_err(),
+        BuildError::Spacing { cell: 0, time: 150 }
+    );
+}

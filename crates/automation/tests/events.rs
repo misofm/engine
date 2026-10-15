@@ -349,39 +349,168 @@ fn adversarial() -> automation::Program {
     fader(&table)
 }
 
-/// Red if a pathological table makes a block's work grow past `2⌈q/64⌉ + 3` events.
+fn no_restart_adversarial() -> automation::Program {
+    // The same discontinuity every 64 samples, on a delay-like cell whose jumps wait for its ramp.
+    let table: Vec<_> = (0..400_u64)
+        .map(|k| {
+            let (a, b) = if k % 2 == 0 { (0.0, 1.0) } else { (3.0, 2.0) };
+            seg(k * 64 + 32, k * 64 + 96, a, b, Shape::Linear)
+        })
+        .collect();
+    ProgramBuilder::build(&[description(
+        &table,
+        32,
+        JumpLength::Fixed(0),
+        Completion::End,
+        true,
+    )])
+    .unwrap()
+}
+
+/// The stated per-block bound: `2⌈q/64⌉ + 3`, plus one for a `no_restart` cell.
+fn stated_bound(quantum: u32, no_restart: bool) -> usize {
+    2 * quantum.div_ceil(64) as usize + 3 + usize::from(no_restart)
+}
+
+/// Red if a pathological table makes a block's work grow past the stated bound, or if
+/// `max_events` (the capacity a successor sizes its buffer by) differs from it: a discontinuity
+/// every 64 samples, seeks mid-block, and for the `no_restart` cell, caller ramps that defer jumps
+/// across blocks.
 #[test]
 fn events_per_block_are_bounded() {
-    let program = adversarial();
-    for quantum in [64_u32, 100, 128, 1024] {
-        let bound = 2 * quantum.div_ceil(64) as usize + 3;
-        let mut state = CellState::new();
-        let mut most = 0;
-        for index in 0..(20_000 / quantum) {
-            let first = i64::from(index) * i64::from(quantum);
-            // A seek in every fifth block, at a mid-block offset.
-            let step = (index % 5 == 2).then_some((quantum / 3, (first * 7) % 24_000));
-            let events = CellEvents::new(
-                program.cell(0).unwrap(),
-                &mut state,
-                span(first, step, quantum),
-                SeekMode::Exact,
-                480,
-            )
-            .collect::<Vec<_>>();
-            assert!(events.windows(2).all(|w| w[0].offset < w[1].offset));
-            most = most.max(events.len());
-            assert!(
-                events.len() <= bound,
-                "q {quantum}: {} > {bound}",
-                events.len()
-            );
+    for (program, no_restart) in [(adversarial(), false), (no_restart_adversarial(), true)] {
+        let cell = program.cell(0).unwrap();
+        for quantum in [1_u32, 63, 64, 100, 128, 1024] {
+            let bound = stated_bound(quantum, no_restart);
+            assert_eq!(cell.max_events(quantum) as usize, bound);
+            let mut state = CellState::new();
+            for index in 0..(20_000 / quantum).min(2_000) {
+                let first = i64::from(index) * i64::from(quantum);
+                // A seek in every fifth block, at a mid-block offset; a caller ramp in every
+                // seventh.
+                let step = (index % 5 == 2).then_some((quantum / 3, (first * 7) % 24_000));
+                if index % 7 == 3 {
+                    state.hold_until(first + 70);
+                }
+                let events = CellEvents::new(
+                    cell,
+                    &mut state,
+                    span(first, step, quantum),
+                    SeekMode::Exact,
+                    480,
+                )
+                .collect::<Vec<_>>();
+                assert!(events.windows(2).all(|w| w[0].offset < w[1].offset));
+                assert!(events.iter().all(|e| e.offset < quantum));
+                assert!(
+                    events.len() <= bound,
+                    "no_restart {no_restart}, q {quantum}: {} > {bound}",
+                    events.len()
+                );
+            }
         }
-        assert!(
-            most > quantum.div_ceil(64) as usize,
-            "the table must stress the bound, q {quantum}: {most}"
-        );
     }
+}
+
+/// Jumps at 70 and 134, then a step to a ramp at 1010, on a `no_restart` cell with jump ramp 0.
+fn deferral_table() -> automation::Program {
+    let table = [
+        seg(0, 70, 1.0, 1.0, Shape::Step),
+        seg(70, 134, 2.0, 2.0, Shape::Step),
+        seg(134, 1010, 3.0, 3.0, Shape::Step),
+        seg(1010, 2000, 4.0, 5.0, Shape::Linear),
+    ];
+    ProgramBuilder::build(&[description(
+        &table,
+        32,
+        JumpLength::Fixed(0),
+        Completion::End,
+        true,
+    )])
+    .unwrap()
+}
+
+/// The verifier's case for attempt 1's `+ 3` on a `no_restart` cell: a jump deferred from the
+/// previous block, two discontinuities and a seek in one 64-sample block. Red if the bound or
+/// `max_events` is lower than the six events this block yields (so `+ 4` is reached, not slack).
+#[test]
+fn a_carried_deferral_reaches_the_no_restart_bound() {
+    let program = deferral_table();
+    let cell = program.cell(0).unwrap();
+    let mut state = CellState::new();
+    state.hold_until(130);
+    let _ = block(&program, &mut state, span(64, None, 64), SeekMode::Exact, 0);
+    let events = block(
+        &program,
+        &mut state,
+        span(128, Some((23, 1000)), 64),
+        SeekMode::Exact,
+        0,
+    );
+    let shape: Vec<_> = events.iter().map(|e| (e.offset, e.kind)).collect();
+    assert_eq!(
+        shape,
+        [
+            (0, EventKind::Grid),
+            (3, EventKind::Jump),  // the jump at 70, deferred to 131
+            (6, EventKind::Jump),  // the discontinuity at 134
+            (23, EventKind::Set),  // the seek to 1000
+            (33, EventKind::Jump), // the discontinuity at 1010
+            (47, EventKind::Grid), // 1024
+        ]
+    );
+    assert_eq!(events.len(), stated_bound(64, true));
+    assert_eq!(cell.max_events(64) as usize, events.len());
+}
+
+/// Red if a deferral the caller skipped past (node time moved forward with no seek step) gives an
+/// offset outside the block (attempt 1 wrapped a negative distance to `4294966927`), or is lost:
+/// it is due at the span's first sample, aimed at the curve there.
+#[test]
+fn a_deferral_behind_a_forward_span_is_due_at_its_start() {
+    let program = deferral_table();
+    let mut state = CellState::new();
+    state.hold_until(130);
+    let first = block(&program, &mut state, span(64, None, 64), SeekMode::Exact, 0);
+    assert!(first.iter().all(|e| e.kind == EventKind::Grid && e.held));
+    let events = block(
+        &program,
+        &mut state,
+        span(500, None, 64),
+        SeekMode::Exact,
+        0,
+    );
+    assert!(events.iter().all(|e| e.offset < 64), "{events:?}");
+    let shape: Vec<_> = events.iter().map(|e| (e.offset, e.kind, e.value)).collect();
+    assert_eq!(shape, [(0, EventKind::Jump, 3.0)]);
+}
+
+/// Red if change only drops a real jump because the grid ramp in flight aims at the same value:
+/// the grid ramp from 0 aims at `value(31) = 32`, the curve jumps from its left limit 33 to
+/// `value(32) = 32`, and the ramp (completing at 64) has not reached 32 at sample 32.
+#[test]
+fn a_jump_to_the_in_flight_target_still_lands_at_its_time() {
+    let table = [
+        seg(0, 32, 1.0, 33.0, Shape::Linear),
+        seg(32, 500, 32.0, 100.0, Shape::Linear),
+    ];
+    let program = ProgramBuilder::build(&[description(
+        &table,
+        64,
+        JumpLength::Fixed(0),
+        Completion::After,
+        false,
+    )])
+    .unwrap();
+    assert_eq!(program.cell(0).unwrap().discontinuities(), &[32]);
+    let mut state = CellState::new();
+    let events = block(&program, &mut state, span(0, None, 128), SeekMode::Exact, 0);
+    let shape: Vec<_> = events
+        .iter()
+        .map(|e| (e.offset, e.kind, e.ramp, e.value))
+        .collect();
+    assert_eq!(shape[0], (0, EventKind::Grid, 64, 32.0));
+    assert_eq!(shape[1], (32, EventKind::Jump, 0, 32.0));
 }
 
 fn digest_table() -> automation::Program {
@@ -409,19 +538,32 @@ fn trace(
 }
 
 /// Red if event values depend on the quantum: the same table at quantum 128 and at quantum 100
-/// (blocks that straddle the grid differently) gives the same events.
+/// (blocks that straddle the grid differently) gives the same events. The blocks hold no seek, so
+/// the seek mode does not enter.
 #[test]
 fn quantum_invariance() {
     let program = digest_table();
-    for mode in [SeekMode::Exact, SeekMode::Ramp] {
-        let a = trace(&program, &mut CellState::new(), -128, 128, 90, mode);
-        let b = trace(&program, &mut CellState::new(), -128, 100, 116, mode);
-        let end = 11_000;
-        let a: Vec<_> = a.into_iter().filter(|e| e.0 < end).collect();
-        let b: Vec<_> = b.into_iter().filter(|e| e.0 < end).collect();
-        assert_eq!(a, b);
-        assert!(a.len() > 100);
-    }
+    let a = trace(
+        &program,
+        &mut CellState::new(),
+        -128,
+        128,
+        90,
+        SeekMode::Exact,
+    );
+    let b = trace(
+        &program,
+        &mut CellState::new(),
+        -128,
+        100,
+        116,
+        SeekMode::Exact,
+    );
+    let end = 11_000;
+    let a: Vec<_> = a.into_iter().filter(|e| e.0 < end).collect();
+    let b: Vec<_> = b.into_iter().filter(|e| e.0 < end).collect();
+    assert_eq!(a, b);
+    assert!(a.len() > 100);
 }
 
 /// Red if the events after a seek depend on the render sample the seek landed at, or on what

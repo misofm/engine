@@ -50,6 +50,7 @@ pub enum SpanError {
     StepOutsideBlock,
 }
 
+// REALTIME_POLICY_BEGIN
 /// One node block's mapping from offset to node time: the node time at offset 0, at most one step
 /// (a seek) and the block length.
 ///
@@ -199,7 +200,6 @@ pub struct CellEvents<'a, 's> {
     position: u32,
 }
 
-// REALTIME_POLICY_BEGIN
 impl<'a, 's> CellEvents<'a, 's> {
     /// The events of the block `span` of `program`.
     ///
@@ -331,7 +331,13 @@ impl<'a, 's> CellEvents<'a, 's> {
     fn jump_event(&mut self, offset: u32, time: i64) -> Option<Event> {
         let ramp = self.jump_length();
         let value = self.target_at(time, ramp);
-        if self.unchanged(value) {
+        // A ramp in flight that completes after this jump would is still short of its target at
+        // the discontinuity: its target can equal the jump's (a grid ramp aimed at `d - 1` where
+        // `value(d - 1) == value(d)` but the left limit differs), and change only must not drop
+        // the jump then.
+        let lagging =
+            self.state.ramp_done != IDLE && self.state.ramp_done > self.completion(time, ramp);
+        if self.unchanged(value) && !lagging {
             return None;
         }
         self.commit(value, time, ramp);
@@ -376,6 +382,18 @@ impl<'a, 's> CellEvents<'a, 's> {
         })
     }
 
+    /// Steps the cursor over the discontinuities before `here`, which the caller passed by moving
+    /// node time forward with no seek step. Their jumps are dropped: the next grid event retargets
+    /// along the curve. A binary search, so a long skip costs `O(log n)`.
+    fn skip_behind(&mut self, here: i64) {
+        let cursor = self.state.cursor as usize;
+        if let Some(ahead) = self.program.discontinuities.get(cursor..)
+            && ahead.first().is_some_and(|&time| time < here)
+        {
+            self.state.cursor = to_cursor(cursor + ahead.partition_point(|&time| time < here));
+        }
+    }
+
     /// The next event of the current run, or `None` at its end.
     fn next_in_run(&mut self) -> Option<Event> {
         loop {
@@ -383,15 +401,7 @@ impl<'a, 's> CellEvents<'a, 's> {
                 return None;
             }
             let here = self.run_time + i64::from(self.position - self.run_start);
-            // A discontinuity behind the run was missed by the caller; step over it, never hang.
-            while self
-                .program
-                .discontinuities
-                .get(self.state.cursor as usize)
-                .is_some_and(|&time| time < here)
-            {
-                self.state.cursor += 1;
-            }
+            self.skip_behind(here);
             let period = i64::from(self.program.grid);
             let grid = match here.rem_euclid(period) {
                 0 => here,
@@ -402,16 +412,22 @@ impl<'a, 's> CellEvents<'a, 's> {
                 .discontinuities
                 .get(self.state.cursor as usize)
                 .copied();
-            let deferred = (self.state.deferred != IDLE).then_some(self.state.deferred);
+            // A deferral behind the run (the caller moved node time forward with no seek step) is
+            // still owed: it is due at the run's first sample. Inside a run a deferral is always
+            // ahead, since it is set to a free time past the sample that deferred it.
+            let deferred = (self.state.deferred != IDLE).then(|| self.state.deferred.max(here));
             let jump = boundary.into_iter().chain(deferred).min();
             let next = jump.map_or(grid, |jump| jump.min(grid));
             let remaining = i64::from(self.run_end - self.position);
+            // Every candidate is at or after `here`, so `distance` is not negative.
             let distance = next.saturating_sub(here);
             if distance >= remaining {
                 return None;
             }
-            // `distance` is below `remaining`, so it fits `u32`.
-            let offset = self.position + distance as u32;
+            let Ok(distance) = u32::try_from(distance) else {
+                return None;
+            };
+            let offset = self.position + distance;
             let is_boundary = boundary == Some(next);
             if is_boundary && self.program.no_restart && next < self.free_at() {
                 // The ramp cannot restart: the jump waits for the lane to be free.
