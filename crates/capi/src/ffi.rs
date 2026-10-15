@@ -450,7 +450,7 @@ pub unsafe extern "C" fn miso_engine_v1_source_submit_planar_f32(
             || report.struct_size != crate::SUBMIT_REPORT_SIZE
             || report.reserved0 != 0
             || chunk.plane_count == 0
-            || chunk.plane_count > 255
+            || chunk.plane_count > host_core::SOURCE_CHANNELS_LAUNCH_MAXIMUM
             || chunk.planes.is_null()
             || !chunk.planes.is_aligned()
             || u64::from(chunk.frames).saturating_mul(core::mem::size_of::<f32>() as u64)
@@ -466,11 +466,12 @@ pub unsafe extern "C" fn miso_engine_v1_source_submit_planar_f32(
             };
         let plane_count = chunk.plane_count as usize;
         // SAFETY: `chunk.planes` was proved nonnull and pointer-aligned above, `plane_count` is at
-        // most 255 so the array is far inside `isize::MAX` bytes, and the caller promises that many
-        // readable plane pointers for this call.
+        // most the launch source-channel maximum (two) so the array is far inside `isize::MAX`
+        // bytes, and the caller promises that many readable plane pointers for this call.
         let plane_pointers = unsafe { core::slice::from_raw_parts(chunk.planes, plane_count) };
         let frames = chunk.frames as usize;
-        let mut planes: [&[f32]; 255] = [&[]; 255];
+        let mut planes: [&[f32]; host_core::SOURCE_CHANNELS_LAUNCH_MAXIMUM as usize] =
+            [&[]; host_core::SOURCE_CHANNELS_LAUNCH_MAXIMUM as usize];
         for (index, plane) in plane_pointers.iter().enumerate() {
             if plane.is_null() || !plane.is_aligned() {
                 return RESULT_INVALID_ARGUMENT;
@@ -2318,12 +2319,9 @@ mod tests {
                 b"source.rate.mismatch",
             ),
             (
-                "three planes for a stereo source",
+                "one plane for a stereo source",
                 b"fixture-source",
-                &|chunk| {
-                    chunk.planes = three.as_ptr();
-                    chunk.plane_count = 3;
-                },
+                &|chunk| chunk.plane_count = 1,
                 b"source.channels.mismatch",
             ),
             (
@@ -2365,6 +2363,27 @@ mod tests {
             );
             assert_eq!(read_last_error(session.cast()), diagnostic, "{why}");
         }
+
+        // A source is mono or stereo (owner answer of 2026-10-15): a third plane is not a
+        // channel-count mismatch against some declaration but an argument no source can match, so
+        // it is refused at the boundary before any plane is read.
+        let mut chunk = base();
+        chunk.planes = three.as_ptr();
+        chunk.plane_count = 3;
+        assert_eq!(
+            // SAFETY: As above; the chunk is refused before any plane is read.
+            unsafe {
+                miso_engine_v1_source_submit_planar_f32(
+                    session,
+                    b"fixture-source".as_ptr(),
+                    14,
+                    &chunk,
+                    &mut report,
+                )
+            },
+            RESULT_INVALID_ARGUMENT,
+            "three planes"
+        );
 
         // The seek path reports through the same table.
         assert_eq!(

@@ -1,3 +1,4 @@
+import { ABI_LAYOUT } from "../generated/abi.ts";
 import { CATALOG } from "../generated/catalog.ts";
 import { CONTROLS } from "../generated/controls.ts";
 import type { ControlLane } from "../generated/controls.ts";
@@ -676,8 +677,10 @@ export class SessionBuilder {
       fail(`${path}.id`, "a source with this ID is already declared");
     }
     if (spec === null || typeof spec !== "object") fail(path, "expected a source specification");
-    if (spec.channels !== 1 && spec.channels !== 2) {
-      fail(`${path}.channels`, "a V1 source is mono or dual-mono");
+    // The engine's own limit, from its generated ABI constants: a source is mono or stereo.
+    const maximumChannels = ABI_LAYOUT.constants.maximumSourceChannels;
+    if (!Number.isInteger(spec.channels) || spec.channels < 1 || spec.channels > maximumChannels) {
+      fail(`${path}.channels`, `a V1 source has 1 to ${maximumChannels} channels (mono or stereo)`);
     }
     if (spec.bitDepth !== 16 && spec.bitDepth !== 24 && spec.bitDepth !== "32f") {
       fail(`${path}.bitDepth`, 'expected the token 16, 24 or "32f"');

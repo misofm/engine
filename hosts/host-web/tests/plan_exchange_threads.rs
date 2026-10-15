@@ -400,18 +400,17 @@ fn the_watermark_export_copies_the_applied_revision_and_refuses_a_wrong_handle()
     .expect("the watermark phase completes");
 }
 
-/// A rebuild adds a source whose ID has the longest length the grammar allows and whose channel
-/// count exceeds every boot source's (#1562b review B1). Through the exports the worklet calls:
-/// `source_id` copies the ID into staging (it trapped on a staging sized from the boot session),
-/// the channel and frame queries answer the session map, and the source takes a six-plane chunk
-/// and is heard (the staging held two planes, so the worklet's source rows failed and the source
-/// could never be fed).
+/// A rebuild adds a source whose ID has the longest length the grammar allows (#1562b review B1).
+/// Through the exports the worklet calls: `source_id` copies the ID into staging (it trapped on a
+/// staging sized from the boot session), the channel and frame queries answer the session map, and
+/// the source takes a two-plane chunk and is heard. A source is mono or stereo (owner answer of
+/// 2026-10-15), so the staging holds `SOURCE_CHANNELS_LAUNCH_MAXIMUM` planes and no more.
 ///
 /// Test value: red if the browser's ID or PCM staging is sized from the boot session. The parity
 /// row in `control_parity.rs` compares the bits against the C ABI through the host's safe API,
 /// which bypasses the staging; only the exports exercise it.
 #[test]
-fn a_rebuild_adds_the_longest_id_with_more_channels_than_any_boot_source() {
+fn a_rebuild_adds_the_longest_id_and_feeds_the_new_source() {
     let _turn = TURN.lock().expect("the turn");
     std::thread::spawn(|| {
         let handle = boot();
@@ -419,12 +418,12 @@ fn a_rebuild_adds_the_longest_id_with_more_channels_than_any_boot_source() {
         let name = format!("s{}", "x".repeat(session::STABLE_ID_MAXIMUM_BYTES - 1));
         let mut source = model.sources[0].clone();
         source.id = StableId::parse(&name).expect("source ID");
-        source.channels = 6;
+        source.channels = 2;
         let mut track = model.tracks[0].clone();
         track.id = StableId::parse("wide").expect("track ID");
         track.source_id = source.id.clone();
-        track.left_source_channel = 4;
-        track.right_source_channel = 5;
+        track.left_source_channel = 0;
+        track.right_source_channel = 1;
         let mut route = model.routes[0].clone();
         route.id = StableId::parse("wide-main").expect("route ID");
         let RouteSource::Track { track_id, .. } = &mut route.source else {
@@ -459,9 +458,9 @@ fn a_rebuild_adds_the_longest_id_with_more_channels_than_any_boot_source() {
             native_staging::staged_source_id(handle, length).as_deref(),
             Some(name.as_bytes())
         );
-        assert_eq!(host_web::miso_engine_web_v1_source_channels(handle, 1), 6);
+        assert_eq!(host_web::miso_engine_web_v1_source_channels(handle, 1), 2);
 
-        // Feed it a six-plane chunk of its own generation and hear it.
+        // Feed it a two-plane chunk of its own generation and hear it.
         assert!(native_staging::source_id(handle, name.as_bytes()));
         assert_eq!(
             host_web::miso_engine_web_v1_source_seek(handle, length, 2, 0),
@@ -469,9 +468,9 @@ fn a_rebuild_adds_the_longest_id_with_more_channels_than_any_boot_source() {
         );
         assert!(native_staging::source_pcm(handle, 0.5));
         assert_eq!(
-            host_web::miso_engine_web_v1_source_submit(handle, length, 2, 0, 6, QUANTUM_FRAMES, 0),
+            host_web::miso_engine_web_v1_source_submit(handle, length, 2, 0, 2, QUANTUM_FRAMES, 0),
             RESULT_OK,
-            "a six-channel chunk fits the staging"
+            "a stereo chunk fits the staging"
         );
         assert_eq!(
             host_web::miso_engine_web_v1_render(handle, QUANTUM_FRAMES),

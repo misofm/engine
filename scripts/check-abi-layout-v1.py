@@ -478,7 +478,7 @@ def validate(document: object) -> None:
     require(isinstance(constants, dict), "constants is an object")
     require(set(constants) == {
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
-        "wireCommandKinds", "commandReasons", "maximumCommandRecords", "maximumDocumentBytes",
+        "wireCommandKinds", "commandReasons", "maximumCommandRecords", "maximumDocumentBytes", "maximumSourceChannels",
         "diagnosticBytes", "defaultMeterBlocks",
         "maximumObservationTaps", "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
         "responseGrids", "responseChannels", "observationChannels",
@@ -535,6 +535,7 @@ def validate(document: object) -> None:
     for name, expected in (
         ("maximumCommandRecords", 256),
         ("maximumDocumentBytes", 1 << 20),
+        ("maximumSourceChannels", 2),
         ("diagnosticBytes", 1 << 14),
         ("defaultMeterBlocks", 12),
         ("maximumObservationTaps", 16),
