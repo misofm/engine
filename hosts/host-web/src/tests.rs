@@ -6645,16 +6645,19 @@ mod structural_apply {
         windows
     }
 
-    /// The meter delivery across a swap, until #1290d carries it: a swap that keeps the strip
-    /// count restarts delivery on the successor's meters (a new epoch the page can see), and a
-    /// swap that changes the count publishes nothing rather than a frame whose words name other
-    /// strips (the worklet's views over the frame keep the boot's size).
+    /// The meter delivery across a swap (#1381b): a swap that keeps the strip count carries the
+    /// predecessor's meters, so the delivery epoch the page sees does not change and the windows
+    /// follow each other without a gap, and a swap that changes the count publishes nothing rather
+    /// than a frame whose words name other strips (the worklet's views over the frame keep the
+    /// boot's size, #1290d).
     ///
-    /// Test value: red if the meter poll reads past the boot-sized frame or the successor's
-    /// meters after a swap that adds a strip, or if a swap that keeps the strip count leaves the
-    /// delivery on the retired plan's state (no window would ever fold again).
+    /// Test value: red if the swap block's hook does not pair the meter consumers (the successor's
+    /// meters would sit on observers the retiring plan owns and no window would ever fold again),
+    /// if the swap restarts the delivery epoch or discards the windows waiting for a poll, or if
+    /// the poll reads past the boot-sized frame or the successor's meters after a swap that adds a
+    /// strip.
     #[test]
-    fn meter_delivery_restarts_on_the_successor_and_never_publishes_a_misshaped_frame() {
+    fn meter_delivery_carries_through_a_swap_and_never_publishes_a_misshaped_frame() {
         let model = gate_model();
 
         // A swap that keeps the strips: an unused source is added.
@@ -6664,6 +6667,7 @@ mod structural_apply {
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         assert!(poll_blocks(&mut rig, 6) > 0, "the boot plan's windows fold");
         let generation = rig.host.meter_header().reserved[0];
+        let published = *rig.host.meter_header();
         let strips = rig.host.live_control_tracks().len();
         let base = rig.host.committed_revision();
         assert_eq!(
@@ -6679,8 +6683,17 @@ mod structural_apply {
         assert!(windows > 0, "the successor's windows fold");
         assert_eq!(
             rig.host.meter_header().reserved[0],
-            generation + 1,
-            "the swap is a new delivery epoch"
+            generation,
+            "the swap is not a new delivery epoch: the meters carry"
+        );
+        assert!(
+            rig.host.meter_header().sequence >= published.sequence + u64::from(windows),
+            "every window the successor closed was published"
+        );
+        assert_eq!(
+            rig.host.meter_header().reserved[1],
+            published.reserved[1],
+            "no window was lost to the swap"
         );
 
         // A swap that adds a strip.
@@ -6703,16 +6716,85 @@ mod structural_apply {
         assert_eq!(rig.host.meter_header().sequence, header.sequence);
     }
 
+    /// An acknowledged subscription survives a swap (#1381b): the tap's armed bit and arm sample
+    /// move with its effect to the successor's slot, which a strip added in front shifts, and the
+    /// successor's reader is the carried tap's, so its windows continue.
+    ///
+    /// Test value: red if the swap block's hook does not pair the observation readers or the
+    /// table hand-over does not carry the armed bits through the reader-to-slot map (the tap would
+    /// read as unarmed and the page's subscription would silently stop after every swap), or if
+    /// it maps the readers to the wrong slot after the added strip shifts them.
+    #[test]
+    fn an_armed_tap_and_its_windows_follow_the_effect_through_a_swap() {
+        let mut model =
+            parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+                .expect("accepted command fixture");
+        model.tracks[0].inserts.effects[0] = observed_compressor_insert();
+        let mut rig = Rig::boot(&model, options(), None);
+        rig.step();
+        assert_eq!(
+            observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_OK
+        );
+        for _ in 0..8 {
+            rig.step();
+        }
+        assert_eq!(rig.host.observation_armed_taps(), 1);
+        let address = |track_index| ObservationAddress {
+            track_index,
+            rack: LiveEffectRack::Inserts,
+            effect_index: 0,
+            tap_id: 1,
+            channels: ObservationReadChannels::Both,
+        };
+        let before = rig
+            .host
+            .read_observation_addresses(&[address(0)])
+            .expect("a read")[0]
+            .window
+            .expect("the armed tap published a window")
+            .sequence;
+
+        let base = rig.host.committed_revision();
+        assert!(matches!(
+            rig.apply(&add_muted_track(&model, ADDED), 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision
+            } if revision == base + 1
+        ));
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(
+            rig.host.observation_armed_taps(),
+            1,
+            "the subscription the plan had acknowledged is armed on the successor"
+        );
+        assert_eq!(rig.host.service(), RESULT_OK);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let after = rig
+            .host
+            .read_observation_addresses(&[address(1)])
+            .expect("a read at the shifted strip")[0]
+            .window
+            .expect("the carried tap kept publishing")
+            .sequence;
+        assert!(after > before, "the windows continue ({before} to {after})");
+    }
+
     fn meter_loss(rig: &Rig) -> u64 {
         rig.host.ready.as_ref().expect("ready").meter_loss_count
     }
 
     /// Telemetry is dropped only with a count. A swap that changes the strip count publishes no
-    /// frame, so every window it leaves unpublished is added to the loss count the next published
-    /// frame reports, and the swap does not zero what was counted before it.
+    /// frame (the carried meters keep the delivery state, #1381b), so every window it leaves
+    /// unpublished is counted when the poll finds it unpublishable and added to the loss count
+    /// the next published frame reports, and the swap does not zero what was counted before it.
     ///
     /// Test value: red if the unpublished windows of a strip-count change vanish without a count
-    /// (a page would see a silent gap), or if the restart at the swap zeroes the loss count.
+    /// (a page would see a silent gap), or if the swap zeroes the loss count.
     #[test]
     fn meter_windows_a_strip_count_change_leaves_unpublished_are_counted() {
         let model = gate_model();
@@ -6738,9 +6820,9 @@ mod structural_apply {
         rig.step();
         assert_eq!(rig.epoch(), 1);
         let after_swap = meter_loss(&rig);
-        assert!(
-            after_swap >= 5 + waiting,
-            "the swap keeps the count ({after_swap}) and adds the {waiting} windows it discarded"
+        assert_eq!(
+            after_swap, 5,
+            "the swap keeps the count; the {waiting} windows waiting are counted by the poll"
         );
 
         // Every window closed afterwards is polled, found unpublishable and counted.

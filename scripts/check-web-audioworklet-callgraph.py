@@ -176,6 +176,16 @@ V0_CRATE_HASH = re.compile(r"Cs[0-9A-Za-z]*_")
 # review of new dynamic dispatch on the render thread, never a re-pin without its reason.
 INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
     "miso_engine_web_v1_render": {
+        # Issue #1381b: the block that adopted a plan hands the plan's tables over together with
+        # what the swap block's attachment hook paired, which it reads from the active plan's
+        # companions.
+        "_RNvMs0_Cs_8host_webNtB5_22AudioWorkletEngineHost11render_next": (
+            2,
+            "`PlanState::active_attachment_mut::<RenderCompanions>()` at the adoption block "
+            "(#1381b): the active plan's `Box<dyn HostAttachment>` answers `as_any_mut` and the "
+            "downcast asks its `type_id`, one `call_indirect` each, neither of which allocates or "
+            "drops",
+        ),
         # Issue #1381a D4: the browser renders through the plan owner, so the block boundary's
         # swap decision is in the closure. The plan's own `render` entry is not: the owner calls
         # `render_inner` and counts a failed block itself.
