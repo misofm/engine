@@ -34,8 +34,9 @@ use std::sync::{Arc, Mutex};
 use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
 use builtins_compiler::MeterConsumer;
 use control_plane::{
-    CompileFailure, ControlAdapter, ControlLimits, ObservationKeyError, ObservationKeyRef,
-    PlanQueries, PlanResources, PlanState, SessionState, SourceFailure,
+    CompileFailure, ControlAdapter, ControlLimits, ObservationChange, ObservationKeyError,
+    ObservationKeyRef, ObservationRefusal, PlanQueries, PlanResources, PlanState, SessionState,
+    SourceFailure,
 };
 use effect_contract::{ObservationCost, ObservationDescriptor};
 use engine::realtime::{
@@ -862,10 +863,9 @@ pub const COMMAND_REASON_DOMAIN: u32 = 6;
 /// This is not "malformed" and it is not "unknown target": the record is well formed and the tap
 /// exists, and this session has no post-preparation write path for it.
 pub const COMMAND_REASON_UNSUPPORTED_KIND: u32 = 7;
-/// A bounded control queue had no room for the submission; nothing was admitted. Also the answer
-/// to a subscription that would leave more taps armed than the engine can end honestly in one
-/// event (#1676): the control plane's cap on armed taps is full, and a retry succeeds once the
-/// app unsubscribes another tap.
+/// A bounded control queue had no room for the submission; nothing was admitted. Retryable: the
+/// queue drains at the next render. Never the answer to the cap on armed taps, which is
+/// [`COMMAND_REASON_OBSERVATION_LIMIT`].
 pub const COMMAND_REASON_BACKPRESSURE: u32 = 8;
 /// The host is not `STATE_READY`.
 pub const COMMAND_REASON_WRONG_STATE: u32 = 9;
@@ -882,6 +882,19 @@ pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;
 /// staging, and refuses every submission `COMMAND_REASON_UNSUPPORTED_KIND` before it reads a
 /// record (#1565C); this reason is only reachable with capacity bound.
 pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
+// Reasons 12-14 (`notSoloable`, `unknownRoute`, `unknownVca`) belonged to the value kinds #1565A
+// deleted. They are retired and never reallocated, so the vocabulary is dense from 0 except for
+// them, and the next reason is 15.
+/// The subscription would leave more taps armed than one `OBSERVATION_ENDED` event can name in one
+/// control frame (#1676), so the engine could not tell the app honestly when a later edit ends
+/// them all. The record named is the arm that crossed the cap, after every unsubscribe of the same
+/// submission is counted; nothing was admitted.
+///
+/// Not retryable as sent, and deliberately **not** `BACKPRESSURE`: no render makes room. The
+/// submission is admitted only after the app unsubscribes another tap. The cap is the control
+/// plane's (`observation_cap`, 51 taps at the browser's 16 KiB frame), so the result is
+/// `RESULT_UNSUPPORTED`, as for [`COMMAND_REASON_OBSERVATION_UNBOUND`].
+pub const COMMAND_REASON_OBSERVATION_LIMIT: u32 = 15;
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
 pub const DEFAULT_METER_BLOCKS: u32 = 12;
 
@@ -1938,35 +1951,20 @@ impl ReadyOwnership {
 
     /// The position, in the control plane's producer list, of the effect at dense slot `effect`
     /// (#1381a): the one way the observation records reach an effect's observation queue (ruling
-    /// C9).
-    fn effect_producer_position(&self, effect: usize) -> Option<usize> {
-        let position = self.shape.effect_instances.get(effect)?.as_ref()?.producer;
+    /// C9). A free function of the shape, so the admission can read it while it lends the control
+    /// plane mutably.
+    fn effect_producer_position(shape: &PlanShape, effect: usize) -> Option<usize> {
+        let position = shape.effect_instances.get(effect)?.as_ref()?.producer;
         Some(position as usize)
     }
 
-    /// The free room of one effect's observation queue (one slot per declared tap, #1345 D2).
-    fn queue_available(&self, effect: usize) -> Option<u32> {
-        let position = self.effect_producer_position(effect)?;
-        let producer = self.control.effect_producers().get(position)?;
-        u32::try_from(producer.observe_available_capacity()).ok()
-    }
-
-    /// Queue one admitted observation subscription on its effect. `Err` only on a full queue,
-    /// which the free-room pass has already ruled out.
-    fn push_observe(&mut self, staged: StagedObserve, applied_at_sample: u64) -> Result<(), ()> {
+    /// Record one observation subscription the control plane has just queued on its effect
+    /// (#1676 attempt 2: the queue push itself is the core's
+    /// [`SessionState::admit_and_push_observation_batch`], which admits the whole batch first).
+    fn record_observe(&mut self, staged: StagedObserve, applied_at_sample: u64) {
         let effect = staged.effect as usize;
         // Issue #143: the armed set is control-plane state and is updated here, where the record
         // is admitted, so it can never disagree with what the render side was told.
-        let position = self.effect_producer_position(effect).ok_or(())?;
-        self.control
-            .push_effect_observe(
-                position,
-                staged.tap_index,
-                staged.armed,
-                staged.window_blocks,
-            )
-            .ok_or(())?
-            .map_err(|_| ())?;
         if let Some(mask) = self.shape.observation_armed.get_mut(effect)
             && staged.tap_index < u32::BITS
         {
@@ -1985,7 +1983,6 @@ impl ReadyOwnership {
                 *commanded |= bit;
             }
         }
-        Ok(())
     }
 }
 
@@ -4194,9 +4191,11 @@ fn admit_commands(
         result: match reason {
             // `ObservationUnbound` is "this preparation cannot deliver it", which is exactly what
             // `RESULT_UNSUPPORTED` means; `UnknownTap` is a bad address, like every other unknown.
-            COMMAND_REASON_UNSUPPORTED_KIND | COMMAND_REASON_OBSERVATION_UNBOUND => {
-                RESULT_UNSUPPORTED
-            }
+            // `ObservationLimit` is the same answer for the configuration: this session's control
+            // frame cannot end one more tap honestly, and only an unsubscribe changes that.
+            COMMAND_REASON_UNSUPPORTED_KIND
+            | COMMAND_REASON_OBSERVATION_UNBOUND
+            | COMMAND_REASON_OBSERVATION_LIMIT => RESULT_UNSUPPORTED,
             COMMAND_REASON_BACKPRESSURE => RESULT_BACKPRESSURE,
             _ => RESULT_INVALID_ARGUMENT,
         },
@@ -4268,51 +4267,64 @@ fn admit_commands(
         };
         staged_count += 1;
     }
-    // The cap pass (#1676): the control plane judges the whole submission by the taps it leaves
-    // armed, so a subscription past what one `OBSERVATION_ENDED` event can name in a control frame
-    // is refused here, before any record is queued and so before any is acknowledged. The cap is
-    // the core's; the adapter only reports the refusal as the record that crossed it.
-    if let Err(limit) =
-        ready
-            .control
-            .admit_observation_changes(ready.command_decoded[..staged_count].iter().map(|staged| {
-                // Pass one resolved every record to a producer; a position that vanished would
-                // name no slot and change nothing, and keeps the indices aligned.
-                let position = ready
-                    .effect_producer_position(staged.effect as usize)
-                    .unwrap_or(usize::MAX);
-                (position, staged.tap_index, staged.armed)
-            }))
-    {
-        let index = ready.command_decoded[..staged_count]
-            .get(limit.index)
-            .map_or(0, |staged| staged.original_wire_index as usize);
-        return Err(refuse(COMMAND_REASON_BACKPRESSURE, index));
-    }
-    // The room pass: an effect's observation queue holds one subscription per declared tap, and
-    // the subscriptions this submission queues must fit it.
+    // The in-flight counter of an effect counts its records the render side has not drained. The
+    // queue's room bounds it far below `u32::MAX`, so this refusal is a defence that never fires;
+    // it runs before the core is lent the batch because nothing may be refused after a push.
     for entry in 0..staged_count {
         let staged = ready.command_decoded[entry];
         let effect = staged.effect as usize;
-        let needed = ready.shape.command_wanted[effect];
-        let Some(available) = ready.queue_available(effect) else {
-            return Err(refuse(
-                COMMAND_REASON_UNSUPPORTED_KIND,
-                staged.original_wire_index as usize,
-            ));
-        };
-        if needed > available || ready.shape.in_flight[effect].checked_add(needed).is_none() {
+        if ready.shape.in_flight[effect]
+            .checked_add(ready.shape.command_wanted[effect])
+            .is_none()
+        {
             return Err(refuse(
                 COMMAND_REASON_BACKPRESSURE,
                 staged.original_wire_index as usize,
             ));
         }
     }
+    // The cap, the room and the push are one core call (#1676): the control plane judges the whole
+    // submission by the taps it leaves armed, then by the room of every effect's observation queue,
+    // and only then queues it. A subscription past what one `OBSERVATION_ENDED` event can name in a
+    // control frame is refused there, before any record is queued and so before any is
+    // acknowledged, and the adapter reports it as `observationLimit` at the record that crossed it.
+    // A change's index in the batch is its staged index, and the staged index names the record's
+    // wire index.
+    let staged = &ready.command_decoded[..staged_count];
+    let shape = &ready.shape;
+    let admitted = ready
+        .control
+        .admit_and_push_observation_batch(staged.iter().map(|staged| {
+            ObservationChange {
+                // Pass one resolved every record to a producer; a position that vanished names no
+                // producer and is refused as such.
+                position: ReadyOwnership::effect_producer_position(shape, staged.effect as usize)
+                    .unwrap_or(usize::MAX),
+                tap_index: staged.tap_index,
+                armed: staged.armed,
+                window_blocks: staged.window_blocks,
+            }
+        }));
+    if let Err(refusal) = admitted {
+        let (reason, index) = match refusal {
+            ObservationRefusal::Limit(limit) => (COMMAND_REASON_OBSERVATION_LIMIT, limit.index),
+            ObservationRefusal::Full { index } => (COMMAND_REASON_BACKPRESSURE, index),
+            ObservationRefusal::NoProducer { index } => (COMMAND_REASON_UNSUPPORTED_KIND, index),
+        };
+        let wire = staged
+            .get(index)
+            .map_or(0, |staged| staged.original_wire_index as usize);
+        return Err(refuse(reason, wire));
+    }
+    debug_assert!(
+        ready.control.observation_armed() <= ready.control.observation_cap(),
+        "a browser admission left {} taps armed past the cap {}",
+        ready.control.observation_armed(),
+        ready.control.observation_cap()
+    );
     for entry in 0..staged_count {
         let staged = ready.command_decoded[entry];
-        ready
-            .push_observe(staged, applied_at_sample)
-            .expect("the free-room pass checked this record's room");
+        ready.record_observe(staged, applied_at_sample);
         ready.shape.in_flight[staged.effect as usize] += 1;
         ready.has_in_flight_commands = true;
     }
@@ -5819,7 +5831,7 @@ fn build_plan_shape(
         observation_arm_samples[slot] = arm_samples.into_boxed_slice();
         // #1584 D6b: the taps the host had armed are the ones host-core armed in this plan's
         // lanes, in the descriptor's tap order (the bit is the effect-local tap index, as
-        // `push_observe` sets it); host-core made the match, so it is copied, not repeated.
+        // `record_observe` sets it); host-core made the match, so it is copied, not repeated.
         if let Some(word) = observation_armed.get_mut(slot) {
             *word = handle.armed_taps;
         }

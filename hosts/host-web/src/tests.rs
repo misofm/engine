@@ -2169,8 +2169,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     // The observed compressor declares one tap, so its observation queue holds one subscription
     // between two renders (#1345 D2: one slot per declared tap).
     let ready = host.ready.as_ref().expect("ready");
-    let queue_depth = ready
-        .effect_producer_position(0)
+    let queue_depth = ReadyOwnership::effect_producer_position(&ready.shape, 0)
         .and_then(|position| ready.control.effect_producers().get(position))
         .map(|producer| producer.observe_capacity())
         .expect("the compressor's producer");
@@ -8005,11 +8004,15 @@ mod structural_apply {
 /// A subscription past the engine's cap on armed taps (#1676) is refused as a whole before any
 /// record is queued, so the acknowledgement never promises a tap the engine could not end honestly;
 /// unsubscribing one tap makes room for the next. The cap is the control plane's, shared with the C
-/// ABI: the browser only reports the refusal, as backpressure, at the record that crossed it.
+/// ABI: the browser only reports the refusal, as its own non-retryable reason `observationLimit`
+/// with `RESULT_UNSUPPORTED`, never as backpressure, at the record that crossed it.
 ///
 /// Red if the browser admits a subscription past the cap (the later removal of every subscribed tap
-/// could not be told to its subscribers), if the refusal still queues or arms the tap, if a refused
-/// batch moves the armed count, or if an unsubscribe does not give its place back.
+/// could not be told to its subscribers), if it reports the cap as backpressure (the SDK would
+/// resend it after every render), if the refusal still queues or arms the tap, if a refused batch
+/// moves the armed count or keeps part of itself, if the refusal names a record other than the arm
+/// that crossed (index 2 of a batch that first unsubscribes), or if an unsubscribe does not give its
+/// place back.
 #[test]
 fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
     const QUANTUM: u32 = 128;
@@ -8097,13 +8100,37 @@ fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
             refused.rejected_index,
             refused.admitted
         ),
-        (RESULT_BACKPRESSURE, COMMAND_REASON_BACKPRESSURE, 0, 0),
+        (RESULT_UNSUPPORTED, COMMAND_REASON_OBSERVATION_LIMIT, 0, 0),
         "{refused:?}"
     );
     assert_eq!(
         armed(&host),
         probe_cap,
         "a refused subscription arms nothing"
+    );
+    render(&mut host);
+    // A batch that unsubscribes one tap, takes its place and then crosses the cap is refused whole,
+    // at the record that crossed: wire index 2, not the first record or the first arm.
+    let cap = probe_cap as u32;
+    stage_command(&mut host, 0, COMMAND_OBSERVE_UNSUBSCRIBE, 1, 0, 0, 1, 2);
+    stage_command(&mut host, 1, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, cap, 1, 2);
+    stage_command(&mut host, 2, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, cap + 1, 1, 2);
+    host.submit_commands(3);
+    let refused = *host.command_report();
+    assert_eq!(
+        (
+            refused.result,
+            refused.reason,
+            refused.rejected_index,
+            refused.admitted
+        ),
+        (RESULT_UNSUPPORTED, COMMAND_REASON_OBSERVATION_LIMIT, 2, 0),
+        "{refused:?}"
+    );
+    assert_eq!(
+        armed(&host),
+        probe_cap,
+        "the refused batch's unsubscribe and first arm are not kept"
     );
     render(&mut host);
     // A window change on an armed tap adds no tap.

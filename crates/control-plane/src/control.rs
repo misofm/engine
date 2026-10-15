@@ -484,6 +484,39 @@ pub struct ObservationLimit {
     pub cap: usize,
 }
 
+/// One subscription change of a batch handed to
+/// [`SessionState::admit_and_push_observation_batch`] (#1676).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationChange {
+    /// The producer's position in [`SessionState::effect_producers`].
+    pub position: usize,
+    /// The tap's index in the producer's observation menu.
+    pub tap_index: u32,
+    /// `true` arms the tap, `false` disarms it.
+    pub armed: bool,
+    /// Render blocks per published window; ignored by a disarm.
+    pub window_blocks: u32,
+}
+
+/// Why [`SessionState::admit_and_push_observation_batch`] refused a batch. Nothing was queued.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservationRefusal {
+    /// The batch would leave more taps armed than the cap. Not retryable as sent: a tap must be
+    /// disarmed first.
+    Limit(ObservationLimit),
+    /// The change at `index` needs more room than its producer's observation queue has free.
+    /// Retryable once a render drains the queue.
+    Full {
+        /// The change's position in the batch.
+        index: usize,
+    },
+    /// The change at `index` names a position past [`SessionState::effect_producers`].
+    NoProducer {
+        /// The change's position in the batch.
+        index: usize,
+    },
+}
+
 /// The index in `descriptor`'s observation menu of the tap with ID `tap_id`, the one the render side
 /// arms (#1677). A tap the menu does not declare is [`ObservationKeyError::UnknownTap`], and a
 /// declared tap that is not resident is [`ObservationKeyError::ComputedTap`]: V1 ships no
@@ -2511,8 +2544,9 @@ where
     /// The newest plan's effect producers, in `HostLiveControlHandles::effect_controls` order
     /// (#1381a), for reading: each producer's identity and descriptor, and the free room of its
     /// observation queue. The adapter reaches an effect's observation queue for the browser's
-    /// observe kinds 7 and 8 (ruling C9) through [`Self::push_effect_observe`], and nothing
-    /// else of a producer, so it cannot write a live value or open an owner behind the commit.
+    /// observe kinds 7 and 8 (ruling C9) through [`Self::admit_and_push_observation_batch`], and
+    /// nothing else of a producer, so it cannot write a live value or open an owner behind the
+    /// commit.
     ///
     /// These are the producers of the newest committed plan (#1290a, batch 10 review): the
     /// pending candidate's while one waits for its swap, else the current plan's. That is the plan
@@ -2590,25 +2624,79 @@ where
         self.observation_armed
     }
 
-    /// Admits a batch of subscription changes against the cap (#1676 D1), before any is pushed. A
-    /// change is `(position, tap_index, armed)`: the producer's position in
+    /// Admits a batch of subscription changes, then queues it: the one way a host arms or disarms
+    /// an observation tap (#1676 D1, attempt 2). A change names the producer's position in
     /// [`Self::effect_producers`] and the tap, as [`Self::resolve_observation_key`] returns them.
-    /// The batch is judged by the state it leaves: arms of taps that are not armed add, disarms of
-    /// armed taps remove, and the rest change nothing. Each tap is named at most once, as a
-    /// submission does. It reads the per-slot state the pushes keep, so it allocates nothing and
-    /// runs inside the browser's `process()`.
+    /// Each tap is named at most once, as a submission does.
     ///
-    /// The caller pushes the batch with [`Self::push_effect_observe`] only when this admits it;
-    /// nothing is queued and no state moves here, so a refusal is whole.
+    /// Two checks run before anything is written, in this order, and a refusal names the first
+    /// change in the iterator's order that breaks the first check that fails:
+    ///
+    /// 1. **The cap.** The batch is judged by the state it leaves: arms of taps that are not
+    ///    armed add, disarms of armed taps remove, and the rest change nothing. A batch that would
+    ///    leave more than [`Self::observation_cap`] taps armed is
+    ///    [`ObservationRefusal::Limit`], at the arm that crosses after every removal of the batch
+    ///    is counted. A retry of the same batch never succeeds until another tap is disarmed.
+    /// 2. **The room.** Each producer's observation queue holds one record per declared tap until
+    ///    a render drains it; a batch that needs more than the free room of a producer is
+    ///    [`ObservationRefusal::Full`] (retryable after a render), and a position past the list is
+    ///    [`ObservationRefusal::NoProducer`].
+    ///
+    /// Then every change is queued. A refusal writes nothing, so it is whole and precedes every
+    /// acknowledgement. The call reads the per-slot state the pushes keep and allocates nothing,
+    /// so it runs inside the browser's `process()`.
     ///
     /// # Errors
     ///
-    /// [`ObservationLimit`] when the batch would leave more taps armed than the cap. It names the
-    /// first change in the iterator's order that adds a tap past the cap, after every removal of
-    /// the batch is counted.
-    pub fn admit_observation_changes(
+    /// [`ObservationRefusal`], as above. Nothing was queued and no state moved.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: the room check covers every push of the batch on the one control thread,
+    /// so a push that is refused after it is an engine fault, which would break the whole-batch
+    /// promise and is not returned as a typed refusal.
+    pub fn admit_and_push_observation_batch(
+        &mut self,
+        changes: impl Iterator<Item = ObservationChange> + Clone,
+    ) -> Result<(), ObservationRefusal> {
+        self.admit_observation_changes(changes.clone())
+            .map_err(ObservationRefusal::Limit)?;
+        let producers = &self.newest_providers().effects;
+        for (index, change) in changes.clone().enumerate() {
+            let Some(producer) = producers.get(change.position) else {
+                return Err(ObservationRefusal::NoProducer { index });
+            };
+            let needed = changes
+                .clone()
+                .filter(|other| other.position == change.position)
+                .count();
+            if needed > producer.observe_available_capacity() {
+                return Err(ObservationRefusal::Full { index });
+            }
+        }
+        for change in changes {
+            self.push_effect_observe(
+                change.position,
+                change.tap_index,
+                change.armed,
+                change.window_blocks,
+            )
+            .expect("the room check found the producer")
+            .expect("the room check found room for every record of the batch");
+        }
+        debug_assert!(
+            self.observation_armed <= self.observation_cap,
+            "an admitted batch leaves {} taps armed past the cap {}",
+            self.observation_armed,
+            self.observation_cap
+        );
+        Ok(())
+    }
+
+    /// The cap check of [`Self::admit_and_push_observation_batch`]: moves nothing.
+    fn admit_observation_changes(
         &self,
-        changes: impl Iterator<Item = (usize, u32, bool)> + Clone,
+        changes: impl Iterator<Item = ObservationChange> + Clone,
     ) -> Result<(), ObservationLimit> {
         let state = |position: usize, tap_index: u32| -> Option<bool> {
             let first = *self.observation_offsets.get(position)?;
@@ -2618,11 +2706,13 @@ where
         };
         let removed = changes
             .clone()
-            .filter(|&(position, tap, armed)| !armed && state(position, tap) == Some(true))
+            .filter(|change| {
+                !change.armed && state(change.position, change.tap_index) == Some(true)
+            })
             .count();
         let mut armed_after = self.observation_armed.saturating_sub(removed);
-        for (index, (position, tap, armed)) in changes.enumerate() {
-            if armed && state(position, tap) == Some(false) {
+        for (index, change) in changes.enumerate() {
+            if change.armed && state(change.position, change.tap_index) == Some(false) {
                 armed_after += 1;
                 if armed_after > self.observation_cap {
                     return Err(ObservationLimit {
@@ -2635,13 +2725,33 @@ where
         Ok(())
     }
 
+    /// Queues one observation record past every admission check, the over-frame defence's only
+    /// way in (#1676 attempt 2): a test arms more taps than the cap to prove that a commit whose
+    /// ended event would not fit one frame is still refused.
+    ///
+    /// # Errors
+    ///
+    /// As the queue push: `None` for a position past the list, else the producer's refusal.
+    #[cfg(feature = "test-support")]
+    pub fn test_push_observe_unadmitted(
+        &mut self,
+        position: usize,
+        tap_index: u32,
+        armed: bool,
+        window_blocks: u32,
+    ) -> Option<Result<(), effect_contract::ObservePushError>> {
+        self.push_effect_observe(position, tap_index, armed, window_blocks)
+    }
+
     /// Queues one observation record on the newest plan's effect producer at `position` of
-    /// [`Self::effect_producers`]: the only write the adapter makes to a producer.
+    /// [`Self::effect_producers`]. Private to the crate: a host reaches it only through
+    /// [`Self::admit_and_push_observation_batch`], so no record is queued without the cap check
+    /// (#1676 attempt 2).
     ///
     /// # Errors
     ///
     /// `None` for a position past the list, else the producer's refusal (no queue, or full).
-    pub fn push_effect_observe(
+    pub(crate) fn push_effect_observe(
         &mut self,
         position: usize,
         tap_index: u32,

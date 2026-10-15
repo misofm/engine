@@ -243,6 +243,10 @@ function validObservationRow(row) {
 // `hosts/host-web/src/lib.rs`'s `COMMAND_REASON_*` constants, the `.d.ts`
 // `MisoCommandReason` enum, the metadata generator's `commandReasons` rows and the schema
 // gate's own list. Bump a Rust reason without the rest and that gate is red.
+//
+// Reasons 12-14 belonged to the value kinds #1565A deleted. They are retired and never
+// reallocated, so their entries are `null`: an acknowledgement that names one is malformed.
+// Issue #1676 added 15, `observationLimit`.
 const COMMAND_REASONS = Object.freeze([
   "none",
   "malformed",
@@ -256,6 +260,10 @@ const COMMAND_REASONS = Object.freeze([
   "wrongState",
   "unknownTap",
   "observationUnbound",
+  null,
+  null,
+  null,
+  "observationLimit",
 ]);
 
 /// `true` for exactly the reasons this ABI version declares.
@@ -263,7 +271,7 @@ const COMMAND_REASONS = Object.freeze([
 /// A reason outside the table is a genuinely malformed acknowledgement and still fails the host:
 /// the fix for #151 widened the vocabulary, it did not stop validating it.
 function validCommandReason(reason) {
-  return validU32(reason) && reason < COMMAND_REASONS.length;
+  return validU32(reason) && reason < COMMAND_REASONS.length && COMMAND_REASONS[reason] !== null;
 }
 
 const COMMAND_FIELDS = ["kind", "rack", "stripId", "effectId", "tapId", "windowBlocks"];

@@ -80,6 +80,10 @@ export const CATALOG = deepFreeze(
     {
       "value": 11,
       "name": "observationUnbound"
+    },
+    {
+      "value": 15,
+      "name": "observationLimit"
     }
   ],
   "observationVocabularies": {

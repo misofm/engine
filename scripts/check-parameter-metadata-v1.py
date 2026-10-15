@@ -52,13 +52,27 @@ PLANE_OBSERVATION = "observation"
 # The list is spelled here rather than imported on purpose -- this validator is deliberately a
 # second implementation -- and `scripts/check-command-reason-vocabulary.py` is what proves the two
 # spellings, the Rust constants, the host JS table and the `.d.ts` enum are one vocabulary.
+# Issue #1676 added `observationLimit` (15), after the retired gap.
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
     "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
+    "observationLimit",
 ]
 # Reasons 12-14 (`notSoloable`, `unknownRoute`, `unknownVca`) belonged to the deleted value kinds and
 # are retired with them, never reallocated.
 RETIRED_COMMAND_REASONS = {12, 13, 14}
+
+
+def dense_reason_values(values: list[int]) -> bool:
+    """The declared values are exactly `range(0, max + 1)` minus the retired set, in order.
+
+    So a reallocated retired value, a gap other than the retired one and a missing reason are all
+    refused, and the next reason after 11 is 15.
+    """
+    if not values:
+        return False
+    expected = [value for value in range(max(values) + 1) if value not in RETIRED_COMMAND_REASONS]
+    return values == expected
 BUILTIN_UPDATE_RATES = {"preparedOnly", "blockTarget"}
 BUILTIN_SCOPES = {"perLane", "matrixShared"}
 BUILTIN_MAPPINGS = {"boolean", "decibelAmplitude", "hertz", "linear"}
@@ -248,8 +262,8 @@ def validate(document: dict) -> None:
     reasons = document["commandReasons"]
     require([reason["name"] for reason in reasons] == COMMAND_REASONS, "command reasons")
     require(
-        [reason["value"] for reason in reasons] == list(range(len(COMMAND_REASONS))),
-        "command reason values",
+        dense_reason_values([reason["value"] for reason in reasons]),
+        "command reason values are dense from 0 except the retired 12-14",
     )
     require(
         not RETIRED_COMMAND_REASONS & {reason["value"] for reason in reasons},
@@ -665,10 +679,24 @@ def self_test() -> int:
             slice(10, None)
         )),
         ("reason renamed", lambda d: d["commandReasons"][10].update(name="unknownObservation")),
-        ("reason value renumbered", lambda d: d["commandReasons"][11].update(value=15)),
+        ("reason value renumbered", lambda d: d["commandReasons"][11].update(value=16)),
         (
             "a retired reason returns",
             lambda d: d["commandReasons"].append({"value": 12, "name": "notSoloable"}),
+        ),
+        # Issue #1676: 15 follows the retired gap. Each way of breaking "dense except 12-14".
+        (
+            "observationLimit reallocates a retired value",
+            lambda d: d["commandReasons"][12].update(value=12),
+        ),
+        (
+            "a gap other than the retired one",
+            lambda d: d["commandReasons"][12].update(value=16),
+        ),
+        ("the newest reason is missing", lambda d: d["commandReasons"].pop(12)),
+        (
+            "an older reason is missing before the gap",
+            lambda d: d["commandReasons"].pop(11),
         ),
         (
             "builtin live disagrees with update rate",

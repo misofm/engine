@@ -130,3 +130,79 @@ Half a day.
 **Successor candidates.** A dedicated browser command reason for the cap (needs a vocabulary
 decision). The C ABI `Observe` edit must admit against `observation_cap()`. 51 simultaneous taps at
 the browser frame is the product limit; a larger frame raises it linearly.
+
+### Attempt 2 (batch 13b)
+
+**Root ruling (2026-10-15).** A cap refusal is never backpressure. The browser vocabulary gains
+command reason 15, `observationLimit`; reasons 12-14 stay retired and are never reallocated, and the
+declared values are exactly `range(0, max + 1)` minus `{12, 13, 14}`. This supersedes attempt 1's
+departures 1 (the cap reported as `backpressure`) and 3 (an uncapped public push).
+
+- **The reason, in every spelling.** `COMMAND_REASON_OBSERVATION_LIMIT = 15` in
+  `hosts/host-web/src/lib.rs` (result `RESULT_UNSUPPORTED`, the same result as
+  `observationUnbound`: the session's configuration cannot take one more tap, and only an
+  unsubscribe changes that); the host JS table (`null` at 12-14; `validCommandReason` refuses a
+  `null` entry); the `.d.ts` `MisoCommandReason.ObservationLimit = 15` and its SDK mirror; the
+  metadata generator and the ABI-layout generator rows (`tools/parameter-metadata`); the schema
+  gate's own list; the ABI-layout gate's list (now explicit `(value, name)` pairs). The SDK assets
+  and `sdk/src/generated/{abi,catalog}.ts` were regenerated with `node codegen/assets.mjs` and
+  `node codegen/generate.mjs`. The C ABI header declares no command reasons, so nothing changes
+  there. No schema hash or ABI digest is pinned for these files, so nothing was re-pinned
+  (`abiVersion` stays `65536`: a new reason value is additive).
+- **Gates for the gap.** `check-command-reason-vocabulary.py`, `check-parameter-metadata-v1.py`
+  and `check-abi-layout-v1.py` require "dense except the retired set". The vocabulary gate reads
+  the JS table's `null` holes (a hole at a non-retired value is red), takes the generator's values
+  from the Rust constants, maps the schema gate's hole-free list onto the non-retired values, and
+  requires the schema gate's `RETIRED_COMMAND_REASONS` to be its own. New red mutations: the JS
+  bound accepting a retired `null`; the JS table losing a hole or holing a live value;
+  `observationLimit` moved to 12 or to 16 in the Rust constants; dropped from the `.d.ts`, the
+  generator or the schema list; on 12 in the `.d.ts`; the schema retired set losing 14; plus eight
+  direct cases of the dense rule (31 mutations in all). The metadata gate's self-test gains four
+  (reallocated 12, gap at 16, missing 15, missing 11) and the ABI-layout gate's two. The on-disk
+  drift mutation in `test-web-audioworklet.sh` now adds a reason at 16. The hermetic worklet test
+  (`scripts/test-web-audioworklet.mjs`) settles a reason-15 acknowledgement as a typed refusal with
+  result 7 and a healthy host afterwards.
+- **SDK.** `#submit` already resent only on `backpressure`; a comment now names
+  `observationLimit` among the reasons thrown at once, and `commandFailure` names the reason and the
+  record in the message, with a hint for the cap ("unsubscribe another tap first").
+
+**Review findings.**
+
+1. *Short IDs let the removal half pass with no cap.* The core test
+   `a_subscription_past_the_cap_is_refused_and_the_removal_of_all_still_commits` now renames
+   `comp1` to a 127-byte strip ID and adds 127-byte insert IDs at the 1 KiB frame, so the `cap`
+   keys of the removal fill the frame. Its second half pushes `cap + 1` taps past admission (the
+   test-support hook `test_push_observe_unadmitted`) and requires the same removal to be refused
+   by the over-frame defence (`ResourceFault::Limit`). **Red without the fix:** raising the cap by
+   one (`observation_binding_cap(..)? + 1` in `compile.rs`) turns it red at the removal (`cap + 1`
+   longest keys are refused); run and observed red, then restored.
+2. *`push_effect_observe` was public and uncapped.* It is now `pub(crate)`. The one public entry
+   is `SessionState::admit_and_push_observation_batch(changes)` (`ObservationChange` items): it
+   runs the cap check, then the queue-room check (moved from the browser into the core, since the
+   queues are the core's), then queues every change, and returns `ObservationRefusal::{Limit,
+   Full, NoProducer}` with nothing written on a refusal. A `debug_assert!` checks armed <= cap
+   after the push, in the core and again in the browser after its admission. The browser's
+   `admit_commands` calls it once after pass one; the room-refusal order is unchanged (cap, then
+   room, both before any write) and its own host-side state (armed masks, arm samples, in-flight
+   counts) is written only after the core admits. One departure in order: the browser's in-flight
+   counter overflow check (unreachable: the queue room bounds it far below `u32::MAX`) now runs
+   before the core call, because nothing may be refused after a push. No token was needed. Tests
+   that push without admission use the test-support hook only.
+3. *A refusal at record index > 0.* The host-web test submits `[unsubscribe 0, subscribe cap,
+   subscribe cap + 1]` with the cap full and requires `observationLimit` at rejected index 2, with
+   nothing kept. The core test also requires `ObservationLimit { index: 1 }` for a batch whose
+   first change re-arms an armed tap. **Red without the fix:** mapping the crossing change to index
+   0 in `lib.rs` turns the host-web test red (`rejected_index` 0, expected 2); run and observed.
+4. *The host-web test expected backpressure.* `a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room`
+   now expects `(RESULT_UNSUPPORTED, COMMAND_REASON_OBSERVATION_LIMIT, 0, 0)`. **Red without the
+   fix:** mapping the cap back to `COMMAND_REASON_BACKPRESSURE` turns it red (6, 8 against 7, 15);
+   run and observed.
+5. *The SDK must not resend the cap.* New eval in `sdk/test/observation-subscription-evals.mjs`:
+   a scripted host refuses one subscription with result 7, reason 15; the call rejects at once with
+   a `MisoEngineError` whose message names `observationLimit at record 0`, and exactly one command
+   was sent although a render happens 30 ms later. **Red without the fix:** letting `#submit` retry
+   on `observationLimit` turns it red; run and observed.
+
+**Docs.** `docs/CONTROL_PROTOCOL_SEMANTICS.md` (observation paragraph) now says the browser reports
+the cap as `RESULT_UNSUPPORTED` with reason `observationLimit` and that the core admits and queues a
+batch in one call. `hosts/host-web/MUTATIONS.md` lists the new mutations.

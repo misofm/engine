@@ -18,8 +18,12 @@ syntax, and issue #151's field defect is exactly what that costs when they drift
 * `scripts/check-parameter-metadata-v1.py` -- the schema gate's deliberately independent list.
 
 Adding a reason to the Rust constants without the other five is the drift class. This gate makes
-that red: every source must yield the same ordered `value -> camelCase name` mapping, contiguous
-from `0`.
+that red: every source must yield the same ordered `value -> camelCase name` mapping, dense from
+`0` except for the retired reasons 12-14. Those belonged to the value kinds #1565A deleted; they
+are never reallocated, so the declared values are exactly `range(0, max + 1)` minus the retired set
+and issue #1676's `observationLimit` is 15. A spelling whose row position stands for its value (the
+host JS table) holds `null` at each retired value, and a positional list without holes (the schema
+gate's) maps its n-th name to the n-th value that is not retired.
 
 Issue #151's other half is structural rather than numeric, and is checked here too: the shipped
 `.d.ts` must declare `observe()` and the `miso.observe.v1` subscription-map types, with field sets
@@ -49,6 +53,10 @@ SCHEMA_GATE = pathlib.Path("scripts/check-parameter-metadata-v1.py")
 SOURCES = (RUST_CONSTANTS, HOST_JS, WORKLET_JS, HOST_DTS, METADATA_GENERATOR, SCHEMA_GATE)
 
 METADATA_DOCUMENT = "miso-engine-v1-parameter-metadata.json"
+
+# Reasons 12-14 (`notSoloable`, `unknownRoute`, `unknownVca`) were the deleted value kinds' (#1565A).
+# Retired: never a declared value again, and the one gap the vocabulary may have.
+RETIRED_REASONS = frozenset({12, 13, 14})
 
 
 class Invalid(Exception):
@@ -85,6 +93,24 @@ def balanced(text: str, start: int, opening: str, closing: str) -> str:
     raise Invalid(f"unbalanced {opening!r} from offset {start}")
 
 
+def dense_values(values: list[int]) -> bool:
+    """The values are exactly `range(0, max + 1)` minus the retired set, in order."""
+    if not values:
+        return False
+    return values == [value for value in range(max(values) + 1) if value not in RETIRED_REASONS]
+
+
+def vocabulary_values(count: int) -> list[int]:
+    """The first `count` values the vocabulary may declare: 0, 1, ... skipping the retired ones."""
+    values: list[int] = []
+    value = 0
+    while len(values) < count:
+        if value not in RETIRED_REASONS:
+            values.append(value)
+        value += 1
+    return values
+
+
 def block_after(text: str, anchor: str, opening: str, closing: str) -> str:
     """The bracketed block that follows `anchor`."""
     at = text.find(anchor)
@@ -108,10 +134,16 @@ def rust_constants(text: str) -> list[tuple[int, str]]:
 
 
 def host_js_table(text: str) -> list[tuple[int, str]]:
+    """The table is indexed by value: a name, or `null` at a retired value."""
     block = block_after(text, "const COMMAND_REASONS = Object.freeze(", "[", "]")
-    names = re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', block)
-    require(names, "the host JS COMMAND_REASONS table is empty")
-    return list(enumerate(names))
+    entries = re.findall(r'"([A-Za-z][A-Za-z0-9]*)"|\bnull\b', block)
+    require(any(entries), "the host JS COMMAND_REASONS table is empty")
+    holes = [index for index, name in enumerate(entries) if not name]
+    require(
+        set(holes) <= RETIRED_REASONS,
+        f"the host JS COMMAND_REASONS table has a hole at a value that is not retired: {holes}",
+    )
+    return [(index, name) for index, name in enumerate(entries) if name]
 
 
 def host_dts_enum(text: str) -> list[tuple[int, str]]:
@@ -124,7 +156,8 @@ def host_dts_enum(text: str) -> list[tuple[int, str]]:
     return sorted(rows)
 
 
-def metadata_generator_table(text: str) -> list[tuple[int, str]]:
+def metadata_generator_table(text: str, constants: dict[str, int]) -> list[tuple[int, str]]:
+    """Each row emits its constant's value, so the value is the Rust constant's."""
     block = block_after(text, "let reasons = ", "[", "]")
     names = [
         camel_from_screaming(constant)
@@ -139,14 +172,23 @@ def metadata_generator_table(text: str) -> list[tuple[int, str]]:
         "a metadata generator row emits a name that is not its own constant's name: "
         f"{[pair for pair in zip(names, emitted) if pair[0] != pair[1]]}",
     )
-    return list(enumerate(names))
+    missing = [name for name in names if name not in constants]
+    require(not missing, f"a metadata generator row names no Rust constant: {missing}")
+    return [(constants[name], name) for name in names]
 
 
 def schema_gate_list(text: str) -> list[tuple[int, str]]:
     block = block_after(text, "\nCOMMAND_REASONS = ", "[", "]")
     names = re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', block)
     require(names, "the schema gate's COMMAND_REASONS list is empty")
-    return list(enumerate(names))
+    return list(zip(vocabulary_values(len(names)), names))
+
+
+def schema_gate_retired(text: str) -> set[int]:
+    """The schema gate's own retired set, which must be this gate's."""
+    match = re.search(r"^RETIRED_COMMAND_REASONS = \{([0-9, ]*)\}$", text, re.MULTILINE)
+    require(match, "the schema gate declares no RETIRED_COMMAND_REASONS set")
+    return {int(value) for value in match.group(1).split(",") if value.strip()}
 
 
 def worklet_js_constants(text: str) -> list[tuple[int, str]]:
@@ -258,21 +300,28 @@ def check_no_literal_bound(js: str) -> None:
     )
     derived = re.search(
         r"function validCommandReason\(reason\) \{\s*return validU32\(reason\)"
-        r" && reason < COMMAND_REASONS\.length;",
+        r" && reason < COMMAND_REASONS\.length && COMMAND_REASONS\[reason\] !== null;",
         js,
     )
-    require(derived, "validCommandReason() no longer derives its bound from COMMAND_REASONS")
+    require(
+        derived,
+        "validCommandReason() no longer derives its bound from COMMAND_REASONS, or accepts a "
+        "retired reason's null entry",
+    )
 
 
 # --- the gate -----------------------------------------------------------------------------------
 
 
 def validate(texts: dict[pathlib.Path, str], document: dict | None = None) -> None:
+    rust = rust_constants(texts[RUST_CONSTANTS])
     spellings = {
-        "rust host constants": rust_constants(texts[RUST_CONSTANTS]),
+        "rust host constants": rust,
         "host JS table": host_js_table(texts[HOST_JS]),
         ".d.ts MisoCommandReason": host_dts_enum(texts[HOST_DTS]),
-        "metadata generator rows": metadata_generator_table(texts[METADATA_GENERATOR]),
+        "metadata generator rows": metadata_generator_table(
+            texts[METADATA_GENERATOR], {name: value for value, name in rust}
+        ),
         "schema gate list": schema_gate_list(texts[SCHEMA_GATE]),
     }
     if document is not None:
@@ -280,8 +329,13 @@ def validate(texts: dict[pathlib.Path, str], document: dict | None = None) -> No
 
     authority = spellings["rust host constants"]
     require(
-        [value for value, _ in authority] == list(range(len(authority))),
-        f"the Rust reason constants are not contiguous from 0: {authority}",
+        dense_values([value for value, _ in authority]),
+        "the Rust reason constants are not dense from 0 except the retired "
+        f"{sorted(RETIRED_REASONS)}: {authority}",
+    )
+    require(
+        schema_gate_retired(texts[SCHEMA_GATE]) == RETIRED_REASONS,
+        "the schema gate's RETIRED_COMMAND_REASONS is not this gate's retired set",
     )
     for name, rows in spellings.items():
         require(
@@ -329,7 +383,7 @@ def self_test() -> int:
                 RUST_CONSTANTS,
                 "pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;",
                 "pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;\n"
-                "pub const COMMAND_REASON_FUTURE_TAP: u32 = 15;",
+                "pub const COMMAND_REASON_FUTURE_TAP: u32 = 16;",
             ),
         ),
         # Reasons 12-14 belonged to the deleted value kinds (#1565A); a constant that brings one
@@ -348,7 +402,7 @@ def self_test() -> int:
             mutate(
                 RUST_CONSTANTS,
                 "pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;",
-                "pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 15;",
+                "pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 16;",
             ),
         ),
         # The shipped #151 defect itself, in each of the five downstream spellings.
@@ -372,8 +426,65 @@ def self_test() -> int:
             "the host JS bound stops deriving from the table",
             mutate(
                 HOST_JS,
-                "reason < COMMAND_REASONS.length;",
-                "reason <= 11;",
+                "reason < COMMAND_REASONS.length &&",
+                "reason <= 15 &&",
+            ),
+        ),
+        # Issue #1676: the retired gap, in each spelling that can express it.
+        (
+            "the host JS accepts a retired reason's null entry",
+            mutate(HOST_JS, " && COMMAND_REASONS[reason] !== null;", ";"),
+        ),
+        (
+            "the host JS table drops a retired hole, so observationLimit reads as 14",
+            mutate(HOST_JS, "  null,\n  \"observationLimit\",", "  \"observationLimit\","),
+        ),
+        (
+            "the host JS table holds a hole at a value that is not retired",
+            mutate(HOST_JS, '  "observationUnbound",\n', "  null,\n"),
+        ),
+        (
+            "the Rust observationLimit reallocates retired 12 without the other spellings",
+            mutate(
+                RUST_CONSTANTS,
+                "pub const COMMAND_REASON_OBSERVATION_LIMIT: u32 = 15;",
+                "pub const COMMAND_REASON_OBSERVATION_LIMIT: u32 = 12;",
+            ),
+        ),
+        (
+            "the Rust observationLimit leaves a gap other than the retired one",
+            mutate(
+                RUST_CONSTANTS,
+                "pub const COMMAND_REASON_OBSERVATION_LIMIT: u32 = 15;",
+                "pub const COMMAND_REASON_OBSERVATION_LIMIT: u32 = 16;",
+            ),
+        ),
+        (
+            "the .d.ts enum drops ObservationLimit",
+            mutate(HOST_DTS, "  ObservationLimit = 15,\n", ""),
+        ),
+        (
+            "the .d.ts enum puts ObservationLimit on a retired value",
+            mutate(HOST_DTS, "  ObservationLimit = 15,", "  ObservationLimit = 12,"),
+        ),
+        (
+            "the metadata generator drops observationLimit",
+            mutate(
+                METADATA_GENERATOR,
+                '        (COMMAND_REASON_OBSERVATION_LIMIT, "observationLimit"),\n',
+                "",
+            ),
+        ),
+        (
+            "the schema gate's list drops observationLimit",
+            mutate(SCHEMA_GATE, '\n    "observationLimit",\n', "\n"),
+        ),
+        (
+            "the schema gate's retired set forgets 14",
+            mutate(
+                SCHEMA_GATE,
+                "RETIRED_COMMAND_REASONS = {12, 13, 14}",
+                "RETIRED_COMMAND_REASONS = {12, 13}",
             ),
         ),
         (
@@ -483,7 +594,23 @@ def self_test() -> int:
         ),
     ]
 
+    # The dense rule itself (#1676 root ruling): 0..11 then 15 passes; a reallocated retired value,
+    # a gap other than the retired one and a missing reason are each refused.
+    rule_cases = [
+        ("0..11 then 15", list(range(12)) + [15], True),
+        ("0..11 only", list(range(12)), True),
+        ("12 reallocated", list(range(13)), False),
+        ("14 reallocated before 15", list(range(12)) + [14, 15], False),
+        ("a gap at 16", list(range(12)) + [16], False),
+        ("15 then a gap at 17", list(range(12)) + [15, 17], False),
+        ("11 missing", list(range(11)) + [15], False),
+        ("out of order", list(range(11)) + [15, 11], False),
+    ]
     failures = 0
+    for name, values, expected in rule_cases:
+        if dense_values(values) != expected:
+            print(f"self-test FAILED: the dense rule misjudges {name}", file=sys.stderr)
+            failures += 1
     for name, apply in mutations:
         state = dict(texts)
         try:
@@ -501,7 +628,10 @@ def self_test() -> int:
         print(f"self-test FAILED: mutation escaped -- {name}", file=sys.stderr)
         failures += 1
     if failures == 0:
-        print(f"command-reason vocabulary self-test passed ({len(mutations)} red mutations)")
+        print(
+            f"command-reason vocabulary self-test passed ({len(mutations)} red mutations, "
+            f"{len(rule_cases)} dense-rule cases)"
+        )
     return failures
 
 

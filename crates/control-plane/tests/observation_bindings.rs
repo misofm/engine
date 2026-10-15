@@ -9,8 +9,9 @@
 
 use control_plane::{
     CommandError, CompileFailure, CompiledChildren, ControlAdapter, ControlLimits, EventLane,
-    ObservationKeyError, ObservationKeyRef, ObservationLimit, PlanResources, PlanState,
-    ResolvedObservationTap, ResourceFault, RuntimePreparer, SessionState, compile_children,
+    ObservationChange, ObservationKeyError, ObservationKeyRef, ObservationLimit,
+    ObservationRefusal, PlanResources, PlanState, ResolvedObservationTap, ResourceFault,
+    RuntimePreparer, SessionState, compile_children,
 };
 use controls::{TapKey, TapSection};
 use host_core::{
@@ -108,8 +109,12 @@ impl Rig {
     }
 
     fn with_limits(limits: ControlLimits) -> Self {
+        Self::with_session(SESSION, limits)
+    }
+
+    fn with_session(document: &str, limits: ControlLimits) -> Self {
         let CompiledChildren { session, plan } =
-            compile_children::<Adapter>(SESSION, limits, Box::new(ObservingPreparer))
+            compile_children::<Adapter>(document, limits, Box::new(ObservingPreparer))
                 .expect("boot compile");
         Self {
             session,
@@ -160,18 +165,23 @@ impl Rig {
     /// Arm tap 0 (gain reduction) of `strip`'s `comp` insert, as the browser's kind 7 does.
     fn subscribe(&mut self, strip: &str) {
         let position = self.position(strip);
-        self.session
-            .push_effect_observe(position, 0, true, WINDOW_BLOCKS)
-            .expect("a producer")
-            .expect("room in the queue");
+        self.observe(position, true).expect("admitted");
     }
 
     fn unsubscribe(&mut self, strip: &str) {
         let position = self.position(strip);
+        self.observe(position, false).expect("admitted");
+    }
+
+    /// Arm or disarm tap 0 of the producer at `position`, as a batch of one: the one way a host
+    /// queues an observation record (#1676).
+    fn observe(&mut self, position: usize, armed: bool) -> Result<(), ObservationRefusal> {
+        self.batch(&[change(position, armed)])
+    }
+
+    fn batch(&mut self, changes: &[ObservationChange]) -> Result<(), ObservationRefusal> {
         self.session
-            .push_effect_observe(position, 0, false, 0)
-            .expect("a producer")
-            .expect("room in the queue");
+            .admit_and_push_observation_batch(changes.iter().copied())
     }
 
     fn position(&self, strip: &str) -> usize {
@@ -213,6 +223,16 @@ impl Rig {
             events.push((revision, payload));
         }
         events
+    }
+}
+
+/// Arm (with the test's window) or disarm tap 0 of the producer at `position`.
+fn change(position: usize, armed: bool) -> ObservationChange {
+    ObservationChange {
+        position,
+        tap_index: 0,
+        armed,
+        window_blocks: if armed { WINDOW_BLOCKS } else { 0 },
     }
 }
 
@@ -295,11 +315,12 @@ fn a_push_writes_the_table_and_a_refused_push_writes_nothing() {
     // The queue holds one slot per declared tap, so a disarm before any render is refused, and
     // the binding stays: the table never says less than the lane was told.
     let position = rig.position("comp1");
-    let refused = rig
-        .session
-        .push_effect_observe(position, 0, false, 0)
-        .expect("a producer");
-    assert!(refused.is_err(), "the queue has no room for the disarm");
+    let refused = rig.observe(position, false);
+    assert_eq!(
+        refused,
+        Err(ObservationRefusal::Full { index: 0 }),
+        "the queue has no room for the disarm"
+    );
     assert_eq!(rig.session.observation_bindings().len(), 2);
     // After a render drained it, the disarm is accepted and clears the binding.
     rig.render();
@@ -514,10 +535,7 @@ fn a_strip_removed_with_many_subscribed_inserts_gives_one_event_with_every_key()
                 .iter()
                 .position(|producer| &*producer.track_id == "comp1" && &*producer.effect_id == id)
                 .expect("the insert has a producer");
-            rig.session
-                .push_effect_observe(position, 0, true, WINDOW_BLOCKS)
-                .expect("a producer")
-                .expect("room in the queue");
+            rig.observe(position, true).expect("under the cap");
         }
         assert_eq!(rig.session.observation_bindings().len(), ids.len());
         let before = rig.revision();
@@ -561,7 +579,8 @@ fn a_strip_removed_with_many_subscribed_inserts_gives_one_event_with_every_key()
 /// plan epoch and the event lane are as they were. A strip with two subscribed inserts (an end
 /// that fits) commits under the same small limit. This is the defensive path: a subscription
 /// is admitted against the cap (#1676), so a valid removal never reaches it; the test pushes
-/// past the cap on purpose, as a caller that skipped admission would.
+/// past the cap on purpose, through the test-only `test_push_observe_unadmitted`, the one way
+/// past admission.
 ///
 /// Red if the commit goes ahead and drops the end (an acked removal whose subscribers never hear),
 /// if the refusal is backpressure (the host would retry forever), or if the refusal leaves the
@@ -615,8 +634,9 @@ fn an_end_event_over_one_control_frame_refuses_the_removal_and_changes_nothing()
                 .iter()
                 .position(|producer| &*producer.track_id == "comp1" && &*producer.effect_id == id)
                 .expect("the insert has a producer");
+            // Past the cap on purpose: the defence below is only reachable without admission.
             rig.session
-                .push_effect_observe(position, 0, true, WINDOW_BLOCKS)
+                .test_push_observe_unadmitted(position, 0, true, WINDOW_BLOCKS)
                 .expect("a producer")
                 .expect("room in the queue");
         }
@@ -785,8 +805,13 @@ impl Rig {
 
     /// Add one compressor insert per ID, one request each, and let the plan adopt each.
     fn add_inserts(&mut self, ids: &[String]) {
+        self.add_inserts_to("comp1", ids);
+    }
+
+    /// [`Self::add_inserts`] on `strip`.
+    fn add_inserts_to(&mut self, strip: &str, ids: &[String]) {
         for id in ids {
-            self.apply(&[put_compressor("comp1", id)])
+            self.apply(&[put_compressor(strip, id)])
                 .expect("the insert is added");
             self.render();
             self.render();
@@ -865,86 +890,173 @@ fn the_cap_is_what_one_frame_carries_with_the_longest_ids() {
     }
 }
 
-/// A subscription past the cap is refused before it is acknowledged and changes nothing; removing
-/// every subscribed target afterwards commits, with one event holding every key. Disarming one tap
-/// in the same batch makes room for another.
-///
-/// Red if the cap is not enforced at admission (the removal would then be refused for its event),
-/// if a refused batch moves the armed count, if an arm of an armed tap counts twice, or if a
-/// disarm in the batch is not counted against the arms.
-#[test]
-fn a_subscription_past_the_cap_is_refused_and_the_removal_of_all_still_commits() {
-    let mut small = limits();
-    small.maximum_control_frame_bytes = 1_024;
-    let mut rig = Rig::with_limits(small);
-    let cap = rig.session.observation_cap();
-    assert!(cap >= 2, "the small frame still holds some keys: {cap}");
-    let ids: Vec<String> = (0..=cap).map(|index| format!("ins{index:02}")).collect();
-    rig.add_inserts(&ids);
-    let positions: Vec<usize> = ids
-        .iter()
-        .map(|id| rig.insert_position("comp1", id))
-        .collect();
-    let arm = |position: usize| (position, 0_u32, true);
-    // Arm the first `cap` taps.
-    for position in &positions[..cap] {
-        rig.session
-            .admit_observation_changes([arm(*position)].into_iter())
-            .expect("under the cap");
-        rig.session
-            .push_effect_observe(*position, 0, true, WINDOW_BLOCKS)
-            .expect("a producer")
-            .expect("room in the queue");
-    }
-    assert_eq!(rig.session.observation_armed(), cap);
-    // Re-arming an armed tap adds nothing.
-    rig.session
-        .admit_observation_changes([arm(positions[0])].into_iter())
-        .expect("a window change adds no tap");
-    // One more tap is past the cap.
-    let over = rig
-        .session
-        .admit_observation_changes([arm(positions[cap])].into_iter());
-    assert_eq!(over, Err(ObservationLimit { index: 0, cap }));
-    // A batch that disarms one and arms one leaves the count where it was; the error names the
-    // arm that crosses when the batch only adds.
-    rig.session
-        .admit_observation_changes([arm(positions[cap]), (positions[0], 0, false)].into_iter())
-        .expect("a disarm in the batch makes room");
+/// `comp1` renamed to a strip ID of the longest length, so its ended keys are as long as the keys
+/// the cap is computed from.
+fn long_strip() -> String {
+    let id = format!("comp1{}", "x".repeat(session::STABLE_ID_MAXIMUM_BYTES - 5));
+    assert_eq!(id.len(), session::STABLE_ID_MAXIMUM_BYTES);
+    id
+}
+
+/// The fixture with `comp1` named [`long_strip`]; its route keeps the ID `comp1-main`.
+fn long_session() -> String {
+    let renamed = SESSION.replace("\"comp1\"", &format!("\"{}\"", long_strip()));
     assert_eq!(
-        rig.session.admit_observation_changes(
-            [
-                (positions[0], 0, false),
-                arm(positions[cap]),
-                arm(positions[1])
-            ]
-            .into_iter()
-        ),
-        Ok(()),
-        "an arm of an armed tap adds nothing"
+        renamed.matches(&long_strip()).count(),
+        2,
+        "the track and its route source"
     );
-    assert_eq!(
-        rig.session.observation_armed(),
-        cap,
-        "admission moves nothing"
+    renamed
+}
+
+/// An insert ID of the longest length.
+fn long_insert(index: usize) -> String {
+    let id = format!(
+        "ins{index:02}{}",
+        "x".repeat(session::STABLE_ID_MAXIMUM_BYTES - 5)
     );
-    // Remove every subscribed target: the strip goes with its inserts.
-    let before = rig.revision();
-    rig.apply(&[
+    assert_eq!(id.len(), session::STABLE_ID_MAXIMUM_BYTES);
+    id
+}
+
+/// The edits that remove [`long_strip`] with its route: every subscribed insert goes with it.
+fn remove_long_strip() -> [SessionEdit; 2] {
+    [
         SessionEdit::RemoveRoute {
             route_id: StableId::parse("comp1-main").expect("route"),
         },
         SessionEdit::RemoveTrack {
-            track_id: StableId::parse("comp1").expect("strip"),
+            track_id: StableId::parse(&long_strip()).expect("strip"),
         },
-    ])
-    .expect("the removal of every subscribed tap commits");
+    ]
+}
+
+/// A small-frame rig with [`long_strip`] carrying `count` subscribable inserts of the longest IDs,
+/// and their producer positions.
+fn long_rig(count: usize) -> (Rig, Vec<usize>) {
+    let mut small = limits();
+    small.maximum_control_frame_bytes = 1_024;
+    let mut rig = Rig::with_session(&long_session(), small);
+    let strip = long_strip();
+    let ids: Vec<String> = (0..count).map(long_insert).collect();
+    rig.add_inserts_to(&strip, &ids);
+    let positions = ids
+        .iter()
+        .map(|id| rig.insert_position(&strip, id))
+        .collect();
+    (rig, positions)
+}
+
+/// A subscription past the cap is refused before it is acknowledged and changes nothing; removing
+/// every subscribed target afterwards commits, with one event holding every key. Every ID is of the
+/// longest length, so the event that ends `cap` taps fills the frame: the cap is exactly what one
+/// frame carries, and one tap more (pushed past admission) reaches the over-frame defence.
+///
+/// Red if the cap is not enforced at admission, or is one too high (the `cap + 1`-th arm is then
+/// admitted, and the removal of `cap + 1` longest keys is refused for its event); if a refused batch
+/// moves the armed count or queues a record; if an arm of an armed tap counts as a new one; if the
+/// refusal names the wrong change of the batch; or if a disarm in the batch is not counted against
+/// its arms.
+#[test]
+fn a_subscription_past_the_cap_is_refused_and_the_removal_of_all_still_commits() {
+    let cap = {
+        let mut small = limits();
+        small.maximum_control_frame_bytes = 1_024;
+        Rig::with_limits(small).session.observation_cap()
+    };
+    assert!(cap >= 2, "the small frame still holds some keys: {cap}");
+    let (mut rig, positions) = long_rig(cap + 1);
+    // Arm the first `cap` taps.
+    for position in &positions[..cap] {
+        rig.observe(*position, true).expect("under the cap");
+    }
+    assert_eq!(rig.session.observation_armed(), cap);
+    rig.render();
+    // Re-arming an armed tap adds nothing.
+    rig.observe(positions[0], true)
+        .expect("a window change adds no tap");
+    rig.render();
+    // One more tap is past the cap, alone or after a change that adds nothing; the refusal names
+    // the arm that crossed, and nothing moves or is queued.
+    let room = |rig: &Rig| -> Vec<usize> {
+        rig.session
+            .effect_producers()
+            .iter()
+            .map(host_core::EffectControlProducer::observe_available_capacity)
+            .collect()
+    };
+    let (bindings, free) = (rig.session.observation_bindings().clone(), room(&rig));
+    assert_eq!(
+        rig.observe(positions[cap], true),
+        Err(ObservationRefusal::Limit(ObservationLimit {
+            index: 0,
+            cap
+        }))
+    );
+    assert_eq!(
+        rig.batch(&[change(positions[1], true), change(positions[cap], true)]),
+        Err(ObservationRefusal::Limit(ObservationLimit {
+            index: 1,
+            cap
+        })),
+        "the second change crosses: the first re-arms an armed tap"
+    );
+    assert_eq!(
+        rig.session.observation_armed(),
+        cap,
+        "a refusal moves nothing"
+    );
+    assert_eq!(room(&rig), free, "a refusal queues nothing");
+    rig.render();
+    assert_eq!(rig.session.observation_bindings(), &bindings);
+    // A disarm later in the batch makes room for an arm earlier in it.
+    rig.batch(&[change(positions[cap], true), change(positions[0], false)])
+        .expect("a disarm in the batch makes room");
+    assert_eq!(rig.session.observation_armed(), cap);
+    rig.render();
+    // Remove every subscribed target: `cap` keys of the longest IDs, in one event in one frame.
+    let before = rig.revision();
+    rig.apply(&remove_long_strip())
+        .expect("the removal of every subscribed tap commits");
     assert_eq!(rig.revision(), before + 1);
     assert_eq!(rig.session.observation_armed(), 0);
     let events = rig.drain();
     let ended = ended(&events);
     assert_eq!(ended.len(), 1, "one event");
     assert_eq!(ended[0].1.keys.len(), cap, "holding every key");
+    assert!(
+        ended[0]
+            .1
+            .keys
+            .iter()
+            .all(|key| key.strip_id.len() == session::STABLE_ID_MAXIMUM_BYTES
+                && key.effect_id.len() == session::STABLE_ID_MAXIMUM_BYTES),
+        "every key is of the longest length"
+    );
+
+    // One tap more than the cap, pushed past admission: its end does not fit one frame, so the
+    // same removal reaches the over-frame defence and is refused whole.
+    let (mut over, positions) = long_rig(cap + 1);
+    for position in &positions {
+        over.session
+            .test_push_observe_unadmitted(*position, 0, true, WINDOW_BLOCKS)
+            .expect("a producer")
+            .expect("room in the queue");
+    }
+    assert_eq!(over.session.observation_armed(), cap + 1);
+    over.render();
+    let revision = over.revision();
+    let refused = over.apply(&remove_long_strip());
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::CompileRejected(CompileFailure::Resource(
+                ResourceFault::Limit
+            )))
+        ),
+        "cap + 1 longest keys do not fit one frame: {refused:?}"
+    );
+    assert_eq!(over.revision(), revision);
 }
 
 /// A rebuild keeps the armed count of the taps it carries, so the cap holds across plans.
@@ -958,10 +1070,7 @@ fn the_armed_count_follows_the_bindings_across_a_rebuild() {
     rig.add_inserts(&ids);
     for id in &ids {
         let position = rig.insert_position("comp1", id);
-        rig.session
-            .push_effect_observe(position, 0, true, WINDOW_BLOCKS)
-            .expect("a producer")
-            .expect("room in the queue");
+        rig.observe(position, true).expect("under the cap");
     }
     assert_eq!(rig.session.observation_armed(), 3);
     // Remove one subscribed insert: the other two stay armed in the successor.
@@ -976,10 +1085,7 @@ fn the_armed_count_follows_the_bindings_across_a_rebuild() {
     // The successor knows them armed: disarming one lowers the count, a second disarm does not.
     let position = rig.insert_position("comp1", "ins01");
     for expected in [1, 1] {
-        rig.session
-            .push_effect_observe(position, 0, false, 0)
-            .expect("a producer")
-            .expect("room in the queue");
+        rig.observe(position, false).expect("a disarm is admitted");
         rig.render();
         assert_eq!(rig.session.observation_armed(), expected);
     }

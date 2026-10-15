@@ -1625,6 +1625,10 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 11,
         "name": "observationUnbound"
+      },
+      {
+        "value": 15,
+        "name": "observationLimit"
       }
     ],
     "racks": [

@@ -2295,6 +2295,9 @@ async function testMainRealm() {
       // The tap is declared and correctly addressed; this preparation bound no observation
       // capacity, which is what `RESULT_UNSUPPORTED` means. Retrying will never help.
       { reason: 11, result: 7, what: "a session that bound no observation capacity" },
+      // Issue #1676: past the cap on armed taps. The value follows the retired 12-14, so a table
+      // bound that stopped at 12 or accepted a retired hole would read it as malformed.
+      { reason: 15, result: 7, what: "a subscription past the cap on armed taps" },
     ]) {
       commandResult = result;
       commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });

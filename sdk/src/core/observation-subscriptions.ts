@@ -446,7 +446,13 @@ function projectRow(row: ObservationReadResult, channels: ObservationChannels): 
 }
 
 function commandFailure(message: string, report: CommandReport): MisoEngineError {
-  return new MisoEngineError(message, {
+  // The result code alone does not say which rule refused the record, so the message names the
+  // reason and the record. `observationLimit` (#1676) is the cap on armed taps: no render makes room,
+  // so it is never resent, and the message says what does.
+  const hint = report.reasonName === "observationLimit"
+    ? " (the cap on armed observation taps is full; unsubscribe another tap first)"
+    : "";
+  return new MisoEngineError(`${message}: ${report.reasonName} at record ${report.rejectedIndex}${hint}`, {
     phase: report.code === "wrongState" ? "lifecycle" : "output",
     code: report.code,
     result: report.result,
@@ -1062,8 +1068,9 @@ export class ObservationSubscriptionOwner {
       if (report.ok) return report;
       // A submission names each tap once, so a refusal for room means a record of an earlier
       // submission still holds the tap's slot, and a render drains it. That refusal alone is flow
-      // control: it is typed and retryable. Anything else, a malformed or unbound request
-      // included, never succeeds on resend and is thrown at once.
+      // control: it is typed and retryable. Anything else, a malformed or unbound request or one
+      // past the cap on armed taps (`observationLimit`, #1676) included, never succeeds on resend
+      // and is thrown at once.
       if (report.reasonName !== "backpressure" || wait === undefined
           || attempt >= MAXIMUM_ADMISSION_RETRIES) {
         throw commandFailure("observation transaction was refused", report);
