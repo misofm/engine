@@ -596,7 +596,6 @@ fn full_frame_ingress_dispatches_every_registered_command_through_typed_frames()
                 revision,
                 crate::CommandPayload::TransportSet(TransportSetRequest {
                     state: TransportState::Playing,
-                    position: Some(SampleTime(48)),
                 }),
             ),
         ),
@@ -656,7 +655,6 @@ fn full_frame_ingress_replays_exact_bytes_and_rejects_changed_request_reuse() {
         ExpectedRevision::Exact(SessionRevision(7)),
         crate::CommandPayload::TransportSet(TransportSetRequest {
             state: TransportState::Playing,
-            position: Some(SampleTime(48)),
         }),
     );
     let mut endpoint = controller(8);
@@ -2156,7 +2154,7 @@ fn a_ramp_length_out_of_range_answers_its_own_code_at_the_edit_path() {
 #[test]
 fn retired_and_console_refused_codes_meet_their_conformance_rows() {
     let rows = conformance::retired_code_rows();
-    assert_eq!(rows.len(), 16 + 4 + 7 + 13 + 1 + 4 + 10 + 1);
+    assert_eq!(rows.len(), 16 + 4 + 7 + 13 + 1 + 4 + 10 + 2 + 1);
     for row in rows {
         let mut endpoint =
             controller_over(conformance::console_session_fixture(), 8, SampleTime(0));
@@ -2234,6 +2232,130 @@ fn retired_and_console_refused_codes_meet_their_conformance_rows() {
             }
         }
     }
+}
+
+/// #1635 gate 1. A `TRANSPORT_SET` that still carries the retired position (field 2), in either
+/// flag form, is refused at decode: the transport state, the revision, the session and the
+/// reliable lane stay as they were, and no response frame acknowledges it.
+///
+/// Red if a peer can still store a position, if the field is skipped as an unknown optional field
+/// and the state set anyway (a playing readback), or if the refusal moves state before it refuses.
+#[test]
+fn a_transport_set_with_the_retired_position_changes_nothing() {
+    let rows = conformance::retired_code_rows()
+        .into_iter()
+        .filter(|row| row.name.starts_with("retired.transport_set_field_2."))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2, "one row per flag form");
+    for row in rows {
+        let mut endpoint = controller(8);
+        let snapshot = endpoint.session().canonical_snapshot().to_owned();
+        let response = process_full_command(&mut endpoint, &row.bytes);
+        let mut fields = [0_u16; 64];
+        let crate::DecodedTypedResponseFrame::NonOk { header, .. } = ProtocolCodec::default()
+            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+            .unwrap_or_else(|error| panic!("{}: correlatable response: {error:?}", row.name))
+        else {
+            panic!("{}: a set with a position was acknowledged", row.name);
+        };
+        assert_eq!(header.status as u16, row.status, "{}", row.name);
+        assert_eq!(endpoint.session().revision(), SessionRevision(7));
+        assert_eq!(endpoint.session().canonical_snapshot(), snapshot);
+        assert_eq!(
+            endpoint
+                .queues()
+                .report(crate::QueueKind::ReliableEvent)
+                .occupancy,
+            0,
+            "{}: no TRANSPORT_STATE event",
+            row.name
+        );
+        let get = process_full_command(
+            &mut endpoint,
+            &full_command(
+                2,
+                ExpectedRevision::Any,
+                crate::CommandPayload::TransportGet,
+            ),
+        );
+        let crate::DecodedTypedResponseFrame::Success { header, payload } =
+            ProtocolCodec::default()
+                .decode_typed_response(&get, &mut DecodeScratch::new(&mut fields))
+                .expect("transport get response")
+        else {
+            panic!("{}: TRANSPORT_GET failed", row.name);
+        };
+        assert_eq!(header.message_id, MessageId::TransportGet);
+        let crate::DecodedSuccessResponsePayload::TransportGetSnapshot(snapshot) = payload else {
+            panic!("{}: not a transport snapshot", row.name);
+        };
+        assert_eq!(snapshot.state, TransportState::Stopped, "{}", row.name);
+    }
+}
+
+/// #1635 gate 2. `TRANSPORT_SET` still works without the position: it answers a snapshot with the
+/// requested state and the effective sample and queues exactly one `TRANSPORT_STATE` event that
+/// carries the same two values.
+///
+/// Red if removing the position breaks the state round trip, the effective sample, or the event.
+#[test]
+fn a_transport_set_answers_the_state_and_queues_one_event_with_it() {
+    let mut endpoint = controller_over(
+        parse_session_json(EXAMPLE).expect("fixture"),
+        8,
+        SampleTime(96),
+    );
+    let response = process_full_command(
+        &mut endpoint,
+        &full_command(
+            1,
+            ExpectedRevision::Exact(SessionRevision(7)),
+            crate::CommandPayload::TransportSet(TransportSetRequest {
+                state: TransportState::Playing,
+            }),
+        ),
+    );
+    let mut fields = [0_u16; 64];
+    let crate::DecodedTypedResponseFrame::Success { header, payload } = ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("transport set response")
+    else {
+        panic!("TRANSPORT_SET failed");
+    };
+    assert_eq!(header.message_id, MessageId::TransportSet);
+    let crate::DecodedSuccessResponsePayload::TransportSetSnapshot(snapshot) = payload else {
+        panic!("not a transport set snapshot");
+    };
+    assert_eq!(
+        snapshot,
+        TransportSnapshot {
+            state: TransportState::Playing,
+            effective_sample: SampleTime(96),
+        }
+    );
+    assert_eq!(
+        endpoint
+            .queues()
+            .report(crate::QueueKind::ReliableEvent)
+            .occupancy,
+        1
+    );
+    let slot = endpoint.queues_mut().try_dequeue_event().expect("event");
+    assert_eq!(slot.message_id, MessageId::TransportState);
+    let mut event = [0_u8; 64];
+    let length = endpoint
+        .encode_transport_state_event(slot, &mut event)
+        .expect("event payload");
+    assert_eq!(
+        ProtocolCodec::default().decode_transport_state_event(&event[..length], 4),
+        Ok(TransportStateEvent {
+            event_sequence: 1,
+            state: TransportState::Playing,
+            effective_sample: SampleTime(96),
+            origin_request_id: Some(id(1)),
+        })
+    );
+    assert!(endpoint.queues_mut().try_dequeue_event().is_err());
 }
 
 /// The acked-batch question for the console (#1094): a transaction that changes the slot set but
@@ -2771,7 +2893,7 @@ fn b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state() {
                 wire_revision,
                 flags,
                 payload_len as u32,
-                if request.position.is_some() { 2 } else { 1 },
+                1,
             )
             .expect("header");
         codec
@@ -2797,7 +2919,6 @@ fn b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state() {
     );
     let set = TransportSetRequest {
         state: TransportState::Playing,
-        position: Some(SampleTime(9)),
     };
     let set_bytes = set_frame(2, ExpectedRevision::Exact(SessionRevision(7)), set);
     let mut controller = controller(8);
@@ -2807,11 +2928,10 @@ fn b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state() {
     assert_eq!(get_response.status, StatusCode::Ok);
     assert_eq!(
         codec
-            .decode_transport_snapshot(get_response.payload(), 3)
+            .decode_transport_snapshot(get_response.payload(), 2)
             .expect("get snapshot"),
         TransportSnapshot {
             state: TransportState::Stopped,
-            position: SampleTime(0),
             effective_sample: SampleTime(0),
         }
     );
@@ -2821,11 +2941,10 @@ fn b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state() {
     assert_eq!(set_response.status, StatusCode::Ok);
     assert_eq!(
         codec
-            .decode_transport_snapshot(set_response.payload(), 3)
+            .decode_transport_snapshot(set_response.payload(), 2)
             .expect("set snapshot"),
         TransportSnapshot {
             state: TransportState::Playing,
-            position: SampleTime(9),
             effective_sample: SampleTime(0),
         }
     );
@@ -2833,22 +2952,21 @@ fn b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state() {
         .queues_mut()
         .try_dequeue_event()
         .expect("transport event");
-    let mut event_payload = [0_u8; 80];
+    let mut event_payload = [0_u8; 64];
     assert_eq!(
         controller.encode_transport_state_event(event, &mut event_payload),
-        Ok(80)
+        Ok(64)
     );
     assert_eq!(
-        codec.decode_transport_state_event(&event_payload, 5),
+        codec.decode_transport_state_event(&event_payload, 4),
         Ok(TransportStateEvent {
             event_sequence: 1,
             state: TransportState::Playing,
-            position: SampleTime(9),
             effective_sample: SampleTime(0),
             origin_request_id: Some(id(2)),
         })
     );
-    let mut event_frame = [0_u8; crate::OUTER_HEADER_BYTES + 80];
+    let mut event_frame = [0_u8; crate::OUTER_HEADER_BYTES + 64];
     codec
         .write_outer_header(
             &mut event_frame,
@@ -2858,38 +2976,35 @@ fn b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state() {
             0,
             7,
             0,
-            80,
-            5,
+            64,
+            4,
         )
         .expect("event header");
     event_frame[crate::OUTER_HEADER_BYTES..].copy_from_slice(&event_payload);
     assert_eq!(
         hex(&event_frame),
         concat!(
-            "4d49534f43544c0001000000300003001080000050000000",
-            "000000000000000007000000000000000500000000000000",
+            "4d49534f43544c0001000000300003001080000040000000",
+            "000000000000000007000000000000000400000000000000",
             "01000401080000000100000000000000",
             "02000101010000000200000000000000",
-            "03000401080000000900000000000000",
             "04000401080000000000000000000000",
             "05000400080000000200000000000000"
         )
     );
-    let retain = TransportSetRequest {
+    let stop = TransportSetRequest {
         state: TransportState::Stopped,
-        position: None,
     };
     let retained = controller
         .process_b1b_btlv(
-            &set_frame(3, ExpectedRevision::Exact(SessionRevision(7)), retain),
+            &set_frame(3, ExpectedRevision::Exact(SessionRevision(7)), stop),
             &mut DecodeScratch::new(&mut [0_u16; 1]),
         )
-        .expect("retain position");
+        .expect("stop");
     assert_eq!(
-        codec.decode_transport_snapshot(retained.payload(), 3),
+        codec.decode_transport_snapshot(retained.payload(), 2),
         Ok(TransportSnapshot {
             state: TransportState::Stopped,
-            position: SampleTime(9),
             effective_sample: SampleTime(0),
         })
     );
@@ -2905,7 +3020,6 @@ fn b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state() {
         TransportState::Stopped,
         "a full reliable-event queue must leave the typed provider unchanged"
     );
-    assert_eq!(controller.provider().transport_position, SampleTime(9));
     let invalid_revision = set_frame(5, ExpectedRevision::Any, set);
     assert_eq!(
         controller
@@ -2954,7 +3068,6 @@ fn a_revision_change_and_a_locate_reserve_and_emit_only_their_own_events() {
         command: ControlCommand::TransportSet {
             request: TransportSetRequest {
                 state: TransportState::Playing,
-                position: Some(SampleTime(10)),
             },
         },
     });
@@ -3766,7 +3879,6 @@ fn c2b2_event_egress_emits_all_five_schema_closed_full_frames() {
         revision,
         2,
         TransportState::Playing,
-        SampleTime(8),
         SampleTime(12),
         Some(id(11)),
     );
@@ -3839,7 +3951,6 @@ fn c2b2_event_egress_emits_all_five_schema_closed_full_frames() {
             payload: EventPayload::TransportState(TransportStateEvent {
                 event_sequence: 2,
                 state: TransportState::Playing,
-                position: SampleTime(8),
                 effective_sample: SampleTime(12),
                 origin_request_id: Some(id(11)),
             }),
@@ -3957,14 +4068,8 @@ fn c2b2_short_buffers_retain_pending_reliable_order_and_diagnostic_storage() {
         Err(EventEgressError::Encode(EncodeError::OutputTooSmall { required })) if required > short.len()
     ));
     assert_eq!(short, [0xa5]);
-    let second = ReliableSlot::transport_state(
-        revision,
-        2,
-        TransportState::Stopped,
-        SampleTime(0),
-        SampleTime(0),
-        None,
-    );
+    let second =
+        ReliableSlot::transport_state(revision, 2, TransportState::Stopped, SampleTime(0), None);
     controller
         .queues_mut()
         .try_enqueue_event(second)

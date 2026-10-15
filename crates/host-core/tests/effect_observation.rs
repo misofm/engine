@@ -140,6 +140,7 @@ fn prepare_from(document: &str, leg: Leg) -> Session {
             route_controls: Vec::new(),
             master_track: None,
             live_values_superseded: LiveValuesSuperseded::default(),
+            jump_lengths: None,
         };
         (prepared, handles)
     } else {

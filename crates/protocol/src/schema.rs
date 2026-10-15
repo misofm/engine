@@ -619,21 +619,30 @@ pub(crate) mod transport_get {
 pub(crate) mod transport_set {
     use super::*;
     pub(crate) const STATE: FieldSpec = FieldSpec::req(1, Wire::U8);
-    pub(crate) const POSITION: FieldSpec = FieldSpec::opt(2, Wire::U64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "TransportSet",
-        fields: &[STATE, POSITION],
+        fields: &[STATE],
+    };
+    /// The retired position (#1635): field 2 is refused in either flag form, never skipped as an
+    /// unknown optional field and never reallocated.
+    pub(crate) static RETIRED: MessageSpec = MessageSpec {
+        name: "TransportSetRetiredFields",
+        fields: &[FieldSpec::opt(2, Wire::U64)],
     };
 }
 
 pub(crate) mod transport_snapshot {
     use super::*;
     pub(crate) const STATE: FieldSpec = FieldSpec::req(1, Wire::U8);
-    pub(crate) const POSITION: FieldSpec = FieldSpec::req(2, Wire::U64);
     pub(crate) const EFFECTIVE_SAMPLE: FieldSpec = FieldSpec::req(3, Wire::U64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "TransportSnapshot",
-        fields: &[STATE, POSITION, EFFECTIVE_SAMPLE],
+        fields: &[STATE, EFFECTIVE_SAMPLE],
+    };
+    /// The retired position (#1635): field 2.
+    pub(crate) static RETIRED: MessageSpec = MessageSpec {
+        name: "TransportSnapshotRetiredFields",
+        fields: &[FieldSpec::opt(2, Wire::U64)],
     };
 }
 
@@ -641,18 +650,16 @@ pub(crate) mod transport_state_event {
     use super::*;
     pub(crate) const EVENT_SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
     pub(crate) const STATE: FieldSpec = FieldSpec::req(2, Wire::U8);
-    pub(crate) const POSITION: FieldSpec = FieldSpec::req(3, Wire::U64);
     pub(crate) const EFFECTIVE_SAMPLE: FieldSpec = FieldSpec::req(4, Wire::U64);
     pub(crate) const ORIGIN_REQUEST_ID: FieldSpec = FieldSpec::opt(5, Wire::U64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "TransportStateEvent",
-        fields: &[
-            EVENT_SEQUENCE,
-            STATE,
-            POSITION,
-            EFFECTIVE_SAMPLE,
-            ORIGIN_REQUEST_ID,
-        ],
+        fields: &[EVENT_SEQUENCE, STATE, EFFECTIVE_SAMPLE, ORIGIN_REQUEST_ID],
+    };
+    /// The retired position (#1635): field 3.
+    pub(crate) static RETIRED: MessageSpec = MessageSpec {
+        name: "TransportStateEventRetiredFields",
+        fields: &[FieldSpec::opt(3, Wire::U64)],
     };
 }
 
@@ -1828,8 +1835,11 @@ mod tests {
             &response_result::SPEC,
             &transport_get::SPEC,
             &transport_set::SPEC,
+            &transport_set::RETIRED,
             &transport_snapshot::SPEC,
+            &transport_snapshot::RETIRED,
             &transport_state_event::SPEC,
+            &transport_state_event::RETIRED,
             &observation_tap_key::SPEC,
             &observation_ended::SPEC,
             &meter_batch::SPEC,
@@ -1975,8 +1985,14 @@ mod tests {
         );
         assert_eq!(transport_set::SPEC.field_count(&[]), Ok(1));
         assert_eq!(
-            transport_set::SPEC.field_count(&[(transport_set::POSITION, 1)]),
-            Ok(2)
+            transport_state_event::SPEC.field_count(&[]),
+            Ok(3),
+            "the event's origin is optional, so three required fields count"
+        );
+        assert_eq!(
+            transport_state_event::SPEC
+                .field_count(&[(transport_state_event::ORIGIN_REQUEST_ID, 1)]),
+            Ok(4)
         );
         assert_eq!(
             counter_snapshot::SPEC.field_count(&[(counter_snapshot::VALUE, 3)]),
@@ -1987,8 +2003,10 @@ mod tests {
             Err(crate::EncodeError::LimitExceeded)
         );
         assert_eq!(
-            transport_set::SPEC
-                .field_count(&[(transport_set::POSITION, 1), (transport_set::POSITION, 1),]),
+            transport_state_event::SPEC.field_count(&[
+                (transport_state_event::ORIGIN_REQUEST_ID, 1),
+                (transport_state_event::ORIGIN_REQUEST_ID, 1),
+            ]),
             Err(crate::EncodeError::LimitExceeded)
         );
     }

@@ -27,7 +27,8 @@ ABI_VERSION = 0x0001_0000
 UNITS = {1: "db", 2: "hz", 3: "milliseconds", 4: "samples", 5: "linear", 6: "ratio"}
 DOMAINS = {1: "continuous", 2: "boolean", 3: "enumeration"}
 MAPPINGS = {1: "linear", 2: "logarithmic", 3: "exponential", 4: "stepped"}
-RATES = {1: "sample", 2: "block", 3: "none"}
+# Rate 1 (`sample`) is retired (#1636): refused here, never reallocated.
+RATES = {2: "block", 3: "none"}
 POLICIES = {1: "shared", 2: "perLane"}
 SMOOTHINGS = {1: "none", 2: "linear", 3: "onePole99"}
 
@@ -745,6 +746,12 @@ def self_test() -> int:
         # Issue #242 replaced #127's null slot with a populated lattice declaration. Each
         # mutation below breaks exactly one sentence of that contract.
         ("builtin step slot is null", lambda d: d["builtins"]["parameters"][0].update(step=None)),
+        (
+            "the retired sample automation rate returns (#1636)",
+            lambda d: d["effects"][0]["parameters"][0].update(
+                automationRate=1, automationRateName="sample"
+            ),
+        ),
         ("effect step slot is null", lambda d: d["effects"][0]["parameters"][0].update(step=None)),
         (
             "step size is a float rather than decimal text",

@@ -11552,18 +11552,17 @@ mod tests {
     }
 
     /// The drain applies a strip's fader cells before its mute cells (#1312 D4), whatever order the
-    /// writes came in: they share one gain ramp, and a fader move after a mute would cut the
-    /// mute's ramp short. The oracle applies the same two values directly in D4's order; the
-    /// reverse order is shown to differ, so the comparison can tell them apart.
+    /// writes came in: they share one gain ramp, and a fader move after an unmute would cut the
+    /// unmute's ramp short. (Since #1638 a fader move on a muted lane only remembers the gain, so
+    /// the case starts muted and unmutes: a mute write would leave the two orders alike.) The
+    /// oracle applies the same two values directly in D4's order; the reverse order is shown to
+    /// differ, so the comparison can tell them apart.
     #[test]
     fn the_drain_applies_the_fader_before_the_mute_whatever_the_write_order() {
+        let mut muted = BuiltinParameters::default();
+        muted.left.muted = true;
         let new_bank = || {
-            BuiltinFaderBank::new(
-                Backend::Simd4,
-                BankWidth::Four,
-                vec![BuiltinParameters::default(); 4],
-            )
-            .expect("bank")
+            BuiltinFaderBank::new(Backend::Simd4, BankWidth::Four, vec![muted; 4]).expect("bank")
         };
         let words =
             |bank: &BuiltinFaderBank| builtins::test_support::fader_bank_lane_words(bank, 0);
@@ -11574,11 +11573,11 @@ mod tests {
             .set_fader_db(0, BuiltinLaneSelector::Left, fader_db, fader_ramp)
             .unwrap();
         canonical
-            .set_mute(0, BuiltinLaneSelector::Left, true, mute_ramp)
+            .set_mute(0, BuiltinLaneSelector::Left, false, mute_ramp)
             .unwrap();
         let mut reversed = new_bank();
         reversed
-            .set_mute(0, BuiltinLaneSelector::Left, true, mute_ramp)
+            .set_mute(0, BuiltinLaneSelector::Left, false, mute_ramp)
             .unwrap();
         reversed
             .set_fader_db(0, BuiltinLaneSelector::Left, fader_db, fader_ramp)
@@ -11604,7 +11603,7 @@ mod tests {
             let mut gate = TestOnlyGate::new();
             let mute = TrackFaderRecord::Mute {
                 lanes: BuiltinLaneSelector::Left,
-                muted: true,
+                muted: false,
                 smoothing_samples: mute_ramp,
             };
             let fader = TrackFaderRecord::FaderDb {

@@ -146,3 +146,59 @@ Checked against `12d4a4f9d`.
 - **Anchors moved.** The stored position is `transport_position` (`crates/host-core/src/control_provider.rs:339`,
   seed `:405`, set `:1186-1187`, snapshot `:1179`). #1315 has landed and kept `TRANSPORT_SET`.
   Decision 17 does not touch the transport. Batch P1, ready.
+
+## Decision record: #1635 (batch 13b)
+
+**Shipped.** `TRANSPORT_SET` field 2, `TransportSnapshot` field 2 and `TransportStateEvent` field 3
+(the stored position) are retired. Each message has a `RETIRED` spec in `crates/protocol/src/schema.rs`
+(`transport_set`, `transport_snapshot`, `transport_state_event`) and its decoder reads through
+`schema_spec_retiring`, so a retired field is refused in either flag form: optional as
+`InvalidTlv` (`MALFORMED_FRAME`), mandatory as `UnknownRequiredField`
+(`UNKNOWN_REQUIRED_FIELD`). The remaining field IDs keep their numbers (snapshot 1 and 3; event 1, 2,
+4 and 5). `TransportSetRequest`, `TransportSnapshot`, `TransportStateEvent`,
+`ReliablePayload::TransportState` and `ReliableSlot::transport_state` lose `position`; the encoded
+lengths are 16 (set), 48 and 64 (event without and with origin; were 64 and 80). The provider trait
+keeps its shape; host-core's provider and `MockProvider` lose `transport_position`. D5: a set with a
+position is refused at decode, before any change and before any event reservation, so no ack
+precedes a drop.
+
+**Re-pins** (reason "#1635 retires the stored transport position"): `COMPLETE_SCHEMA_HASH`
+`0xcc9a_7bcc_502c_4936` to `0x3316_54b3_24d0_76e8` with its history line in
+`crates/conformance/src/protocol_corpus.rs`; the two parity strings in
+`scripts/check-protocol-wasm-parity.sh`; `fuzz/corpus/complete-schema-manifest.md` (hash, history
+line, and the prose that named an optional transport position); `docs/CONTROL_PROTOCOL_CONFORMANCE.md`;
+the C ABI vectors with a transport frame in `crates/capi/src/runtime/tests.rs` (the two snapshot
+vectors, `TRANSPORT_20`/`TRANSPORT_21`, the `RESPONSES` snapshot, and the three event vectors),
+re-derived mechanically by deleting the position field and fixing the payload length and field count.
+The corpus frame count stays 46.
+
+**Departures.**
+
+- D3 says `retired_code_rows` gains one row per retired field. A `RetiredCodeRow` is a command frame
+  an endpoint answers, so only `TRANSPORT_SET` field 2 can be a row. It has two rows, one per flag
+  form (`retired.transport_set_field_2.mandatory`, `.optional`). The snapshot and event fields are
+  refused by `b3a_transport_goldens_truncation_and_direct_codec_are_strict` in both flag forms.
+- Gate 1's status: the refusals answer `UNKNOWN_REQUIRED_FIELD` (mandatory) and `MALFORMED_FRAME`
+  (optional), the statuses the retiring machinery maps to for the track fields, not `INVALID_FIELD`.
+- Corpus `counter_command_frame` now gives `TRANSPORT_SET` an exact revision 7 (a set requires one).
+- Anchors had moved (queue.rs `:61`/`:138`, host-core `:337`); followed the code. Mechanical edits
+  outside the listed paths: `hosts/host-web/tests/protocol_cross_host.rs` (the `TransportSetRequest`
+  literal and the unused `SampleTime` import). The SDK mirrors no transport frame; no SDK input changed.
+
+**Gates.**
+
+1. Refused: `a_transport_set_with_the_retired_position_changes_nothing` (both flag forms: status, revision,
+   session, reliable lane and `TRANSPORT_GET` state unchanged) and
+   `retired_and_console_refused_codes_meet_their_conformance_rows` (rows 16+4+7+13+1+4+10+2+1).
+   Decoder: `b3a_transport_goldens_truncation_and_direct_codec_are_strict`.
+2. State still works: `a_transport_set_answers_the_state_and_queues_one_event_with_it`,
+   `b3a_transport_btlv_is_typed_idempotent_and_emits_reliable_state` (event golden re-pinned, 64 bytes).
+3. `cargo test --locked -p protocol` (163), `-p conformance` (`frozen_corpus_bytes_and_typed_decoders_are_unchanged`),
+   `-p host-core --lib control_provider`, `-p capi --lib runtime` (114), all green;
+   `bash scripts/check-protocol-wasm-parity.sh` ok (simd128); `scripts/run-protocol-allocation-audit.sh`
+   ok; `audit capi`: zero allocations, locks and syscalls, `pcm_digest` `bf7dcedd1d92621f`, equal to base.
+4. `scripts/check-cross-targets.sh` was not run here (coordinator's batch gate); the change adds no
+   memset-style code.
+
+**Successor.** `docs/CONTROL_PROTOCOL_SEMANTICS.md:23` still says "locating transport cancels
+nothing"; reword when that file is next in scope (outside this slice's authorized paths).

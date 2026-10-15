@@ -31,7 +31,7 @@ const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     maximum: Some(24.0),
     default_value: 0.0,
     mapping: ParameterMapping::Linear,
-    automation_rate: AutomationRate::Sample,
+    automation_rate: AutomationRate::Block,
     channel_policy: ParameterChannelPolicy::Shared,
     smoothing: SmoothingRule::Linear,
     smoothing_samples: 8,

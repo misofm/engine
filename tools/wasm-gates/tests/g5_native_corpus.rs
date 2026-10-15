@@ -373,9 +373,9 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
     );
     let compressor_base = limiter_base + corpus::LIMITER_CASE_COUNT;
     assert_eq!(
-        compressor_base + corpus::COMPRESSOR_CASE_COUNT + 2,
+        compressor_base + corpus::COMPRESSOR_CASE_COUNT + 2 + corpus::AUTOMATION_CASE_COUNT,
         corpus::CASE_COUNT,
-        "exactly two new builtin cases follow the original final compressor case"
+        "two builtin cases, then the automation block, follow the original final compressor case"
     );
     assert_eq!(corpus::BUILTINS_ORIGINAL_CASE_COUNT, 8);
     assert_eq!(corpus::BUILTINS_CASE_COUNT, 10);
@@ -390,6 +390,27 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
             format!("builtins/{}", builtins::corpus::CASE_NAMES[case])
         );
         assert!(corpus::is_width_dependent(index));
+    }
+    assert_eq!(
+        corpus::AUTOMATION_CASE_COUNT,
+        automation::corpus::CASE_COUNT,
+        "the automation block must cover every case that crate pins"
+    );
+    let automation_base = compressor_base + corpus::COMPRESSOR_CASE_COUNT + 2;
+    for case in 0..corpus::AUTOMATION_CASE_COUNT {
+        assert_eq!(
+            corpus::expected_digest(automation_base + case),
+            automation::corpus::G5_DIGESTS[case],
+            "automation case {case} must be pinned by automation, not by this crate"
+        );
+        assert!(
+            !corpus::is_width_dependent(automation_base + case),
+            "an automation case is scalar f64 and is run once"
+        );
+        assert_eq!(
+            corpus::case_name(automation_base + case),
+            automation::corpus::CASE_NAMES[case]
+        );
     }
     for case in 0..corpus::COMPRESSOR_CASE_COUNT {
         assert_eq!(

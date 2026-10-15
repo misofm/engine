@@ -137,18 +137,20 @@ pub use engine::realtime::{
 };
 #[cfg(feature = "control-provider")]
 pub use live_delta::{
-    LiveDelta, LiveRebuild, LiveRouteRecord, LiveStripRecords, classify_live_delta,
-    classify_live_delta_with_monitor, classify_live_edit, classify_live_staged,
+    LiveDelta, LiveRebuild, LiveRouteRecord, LiveStripRecords, automation_jump_row,
+    classify_live_delta, classify_live_delta_with_monitor, classify_live_edit,
+    classify_live_staged,
 };
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
 pub use live_delta::{take_fast_classification_count, take_lowered_owner_count};
 pub use prepare::{
-    HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
-    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LiveRampRow, LiveRamps,
-    MAXIMUM_VCA_REACH_PAIRS, MAXIMUM_VCAS_BOUNDED, MonitorBase, NO_OBSERVATION, PlanStateInventory,
-    PreparedHost, SOURCE_STALL_TOLERANCE_MS, SourceInventoryRow, SuccessorBase, check_counts,
-    compile_host_model, compile_host_session, count_effects, default_source_ring_frames,
-    effect_producer_position, pair_carried_meters, pair_carried_observations, parse_host_session,
+    GraphJumpLengthProducer, GraphJumpLengths, HostLiveControlHandles, HostLiveControlRequest,
+    HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
+    LiveRampRow, LiveRamps, MAXIMUM_VCA_REACH_PAIRS, MAXIMUM_VCAS_BOUNDED, MonitorBase,
+    NO_OBSERVATION, PlanStateInventory, PreparedHost, SOURCE_STALL_TOLERANCE_MS,
+    SourceInventoryRow, SuccessorBase, check_counts, compile_host_model, compile_host_session,
+    count_effects, default_source_ring_frames, effect_producer_position,
+    jump_length_retained_bytes, pair_carried_meters, pair_carried_observations, parse_host_session,
     prepare_host_runtime, prepare_host_runtime_between_render_calls,
     prepare_host_runtime_successor, prepare_host_runtime_with_live_controls,
     prepare_host_runtime_with_live_controls_and_spectrum,
@@ -160,7 +162,8 @@ pub use prepare::{
     prepare_host_runtime_with_selected_meters_between_render_calls,
     prepare_host_runtime_with_selected_meters_successor, prepare_host_runtime_with_spectrum,
     prepare_host_runtime_with_spectrum_collection, prepare_host_session,
-    prepare_host_session_with_live_controls, strip_control_table_bytes, strip_position,
+    prepare_host_session_with_live_controls, session_jump_lengths, strip_control_table_bytes,
+    strip_position,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{

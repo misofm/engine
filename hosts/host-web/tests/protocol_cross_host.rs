@@ -29,9 +29,9 @@ use host_web::{
 };
 use protocol::{
     CommandPayload, ControlListRequest, CounterId, CountersRequest, DiagnosticSeverity,
-    DiagnosticsRequest, ExpectedRevision, ProtocolCodec, RequestId, SampleTime, SessionEdit,
-    SessionRevision, SessionSnapshotRequest, TelemetryConfiguration, TransportSetRequest,
-    TransportState, TypedCommandFrame,
+    DiagnosticsRequest, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionRevision,
+    SessionSnapshotRequest, TelemetryConfiguration, TransportSetRequest, TransportState,
+    TypedCommandFrame,
 };
 use session::{ParameterChannel, StableId, canonical_session_json, parse_session_json};
 
@@ -622,12 +622,11 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     );
     legs.both("3 transport get", &transport_get);
 
-    // 4. TRANSPORT_SET to playing at position 0.
+    // 4. TRANSPORT_SET to playing.
     legs.command(
         "4 transport set",
         CommandPayload::TransportSet(TransportSetRequest {
             state: TransportState::Playing,
-            position: Some(SampleTime(0)),
         }),
     );
     legs.drain("after 4");

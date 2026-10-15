@@ -38,6 +38,20 @@ use graph::{
     GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, StableGraphId,
     TrackStage,
 };
+pub use graph::{GraphJumpLengthProducer, GraphJumpLengths, jump_length_retained_bytes};
+
+/// The jump lengths a plan's cell holds for `model` (#1639 D1): its `control_smoothing` keys in
+/// samples, the values of [`LiveRamps::for_session`]. Preparation seeds every plan's cell with
+/// them, and a live `control_smoothing` change writes them ([`crate::LiveDelta::jump_lengths`]).
+#[must_use]
+pub fn session_jump_lengths(model: &SessionModel) -> GraphJumpLengths {
+    let ramps = LiveRamps::for_session(model);
+    GraphJumpLengths {
+        fader_samples: ramps.fader_samples,
+        mute_samples: ramps.mute_samples,
+        pan_samples: ramps.pan_samples,
+    }
+}
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM;
 use session::{
@@ -520,6 +534,10 @@ pub struct HostLiveControlHandles {
     /// [`prepare_host_runtime_with_live_lanes`], else a fresh count this preparation made. Read
     /// it with [`LiveValuesSuperseded::get`].
     pub live_values_superseded: LiveValuesSuperseded,
+    /// The writer of the plan's jump-length cell (#1639 D1), which preparation seeded with
+    /// [`session_jump_lengths`]. Every prepared plan has the cell; `None` only in a handle set a
+    /// caller built without a preparation.
+    pub jump_lengths: Option<GraphJumpLengthProducer>,
 }
 
 impl HostLiveControlHandles {
@@ -2501,18 +2519,18 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let output_latency = artifact.report().output_latency;
     let output_tail = artifact.report().output_tail;
     let mut graph_resources = artifact.graph_resource_estimate().clone();
-    // The plan's own allocations that the graph row does not count: its revision gate (#1502 D1)
-    // and, when this preparation made its own `live_values_superseded` count rather than taking the
-    // session's, and strips and routes hold a clone of it in their cell readers, that count (#1312
-    // D2; a session's count is the host's to charge once). A preparation with no strip controls
-    // keeps no reader of the count (a route lane exists only beside strips), so the plan retains
-    // none and charges none. Charged here so every host, the C ABI and the browser, counts them in
-    // the one row.
+    // The plan's own allocations that the graph row does not count: its revision gate (#1502 D1),
+    // its jump-length cell (#1639 D1, attached after bind below) and, when this preparation made
+    // its own `live_values_superseded` count rather than taking the session's, that count (#1312
+    // D2; a session's count is the host's to charge once): the jump-length cell's reader holds a
+    // clone of it in every plan. Charged here so every host, the C ABI and the browser, counts
+    // them in the one row.
     graph_resources.session_plus_plan_bytes = graph_resources
         .session_plus_plan_bytes
         .checked_add(engine::realtime::plan_revision_gate_retained_bytes())
+        .and_then(|bytes| bytes.checked_add(graph::jump_length_retained_bytes()))
         .and_then(|bytes| {
-            bytes.checked_add(if superseded.is_none() && !control_requests.is_empty() {
+            bytes.checked_add(if superseded.is_none() {
                 LiveValuesSuperseded::retained_bytes()
             } else {
                 0
@@ -2578,6 +2596,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     }
     let largest_engine_allocation_bytes = graph_resources
         .largest_allocation_bytes
+        .max(graph::jump_length_largest_allocation_bytes())
         .max(source_resources.largest_allocation_bytes)
         .max(carried_largest_bytes)
         .max(builtin_resources.maximum_single_allocation_bytes)
@@ -2713,6 +2732,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .retained_bytes()
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let mut plan = bound.plan;
+    // #1639 D1: the plan's jump-length cell, seeded with the session's lengths, so the plan holds
+    // them from its first block. A successor is seeded from the committed model, which holds any
+    // edit of them (D4): nothing carries.
+    let jump_lengths =
+        graph::attach_jump_lengths(&mut plan, session_jump_lengths(model), &live_superseded)
+            .map_err(|_| graph_failure("host.jump_lengths.attach"))?;
     // Issue #1272 D4: the join's program goes in before the plan leaves preparation.
     let has_carry_program = carry_program.is_some();
     if let Some(program) = carry_program {
@@ -3234,6 +3259,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             route_controls,
             master_track,
             live_values_superseded: live_superseded,
+            jump_lengths: Some(jump_lengths),
         },
         spectrum_capture,
     ))
@@ -4315,9 +4341,9 @@ fn parameter_records(
         }
         let parameter = &descriptor.parameters[value_after.parameter_index as usize];
         // A row is live only when the plan keeps a block-rate cell for it, and the control rows
-        // say so: only a `Block`-rate parameter is `Live` (`controls::effect_rows`), a `Sample`-rate
-        // one is rebuild-only for correctness. This guard keeps the classifier from trusting a row
-        // that ever claimed more than the plan holds.
+        // say so: only a `Block`-rate parameter is `Live` (`controls::effect_rows`), a `None`-rate
+        // one is prepared. This guard keeps the classifier from trusting a row that ever claimed
+        // more than the plan holds.
         if parameter.automation_rate != AutomationRate::Block {
             return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
         }

@@ -334,7 +334,6 @@ pub struct SessionControlProvider {
     diagnostics: Vec<Diagnostic>,
     diagnostic_live: Vec<bool>,
     transport_state: TransportState,
-    transport_position: SampleTime,
     telemetry_configuration: TelemetryConfiguration,
     /// The most reply frame bytes a `RESPONSE_GET` may answer: the smaller of the endpoint's
     /// frame bound and the replay cache's response bound.
@@ -400,7 +399,6 @@ impl SessionControlProvider {
             diagnostics: Vec::new(),
             diagnostic_live: Vec::new(),
             transport_state: TransportState::Stopped,
-            transport_position: SampleTime(0),
             telemetry_configuration: retained_telemetry(retained)?,
             maximum_reply_bytes,
         };
@@ -1139,16 +1137,12 @@ impl ControlProvider for SessionControlProvider {
     fn transport_get(&mut self) -> TransportSnapshot {
         TransportSnapshot {
             state: self.transport_state,
-            position: self.transport_position,
             effective_sample: self.current_sample(),
         }
     }
 
     fn transport_set(&mut self, request: TransportSetRequest) -> TransportSnapshot {
         self.transport_state = request.state;
-        if let Some(position) = request.position {
-            self.transport_position = position;
-        }
         self.transport_get()
     }
 
@@ -3186,10 +3180,10 @@ mod tests {
         assert_eq!(provider.current_sample(), SampleTime(256));
         let transport = provider.transport_set(TransportSetRequest {
             state: TransportState::Playing,
-            position: Some(SampleTime(64)),
         });
         assert_eq!(transport.effective_sample, SampleTime(256));
-        assert_eq!(transport.position, SampleTime(64));
+        assert_eq!(transport.state, TransportState::Playing);
+        assert_eq!(provider.transport_get(), transport);
 
         let counter_capacity = provider.retained_capacities().1;
         assert_eq!(counter_capacity, PROVIDER_COUNTER_SLOTS);

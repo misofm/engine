@@ -50,7 +50,7 @@ const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     maximum: Some(2.0),
     default_value: 1.0,
     mapping: ParameterMapping::Linear,
-    automation_rate: effect_contract::AutomationRate::Sample,
+    automation_rate: effect_contract::AutomationRate::Block,
     channel_policy: ParameterChannelPolicy::PerLane,
     smoothing: SmoothingRule::None,
     smoothing_samples: 0,
@@ -82,8 +82,8 @@ const PORTS: [PortDescriptor; 3] = [
 ];
 const STATE_SIZES: StatePayloadSizes = StatePayloadSizes {
     common_bytes: 4,
-    left_bytes: 56,
-    right_bytes: 56,
+    left_bytes: 20,
+    right_bytes: 20,
 };
 const fn quality(sample_rate: u32) -> QualityDescriptor {
     QualityDescriptor {
@@ -199,7 +199,6 @@ impl NativeEffectFactory for DualAccumulatorDelayFactory {
             gain: [left, right],
             delay: [[0.0; 3]; 2],
             accumulator: [0.0; 2],
-            active: [None; 2],
             delay_index: 0,
             snapshot_calls: Cell::new(0),
             fault: self.fault,
@@ -241,7 +240,6 @@ impl NativeEffectFactory for DualAccumulatorDelayFactory {
             gain: [1.0; 2],
             delay: [[0.0; 3]; 2],
             accumulator: [0.0; 2],
-            active: [None; 2],
             delay_index: 0,
             snapshot_calls: Cell::new(0),
             fault: FaultKind::None,
@@ -293,7 +291,6 @@ impl PreparedNativeEffectBank for DualAccumulatorDelayBank {
         for frame in 0..block.frames as usize {
             for lane in 0..lanes {
                 let index = frame * lanes + lane;
-                let sample = block.first_sample + frame as u64;
                 let mut left = block.left[index];
                 let mut right = block.right[index];
                 if !canonical_finite(left) {
@@ -308,8 +305,8 @@ impl PreparedNativeEffectBank for DualAccumulatorDelayBank {
                         .sanitized_main_samples
                         .saturating_add(1);
                 }
-                let (left, recover_left) = self.lanes[lane].process_lane(0, left, sample);
-                let (right, recover_right) = self.lanes[lane].process_lane(1, right, sample);
+                let (left, recover_left) = self.lanes[lane].process_lane(0, left);
+                let (right, recover_right) = self.lanes[lane].process_lane(1, right);
                 if recover_left {
                     report.reports[lane].nonfinite_left_blocks =
                         report.reports[lane].nonfinite_left_blocks.saturating_add(1);
@@ -360,35 +357,12 @@ struct DualAccumulatorDelay {
     gain: [f32; 2],
     delay: [[f32; 3]; 2],
     accumulator: [f32; 2],
-    active: [Option<PreparedAutomationSpan>; 2],
     delay_index: usize,
     snapshot_calls: Cell<u64>,
     fault: FaultKind,
 }
 impl DualAccumulatorDelay {
-    fn process_lane(&mut self, lane: usize, input: f32, sample: u64) -> (f32, bool) {
-        if let Some(span) = self.active[lane] {
-            match span.kind {
-                AutomationSpanKind::Step => {
-                    if sample == span.start_sample {
-                        self.gain[lane] = span.start_value;
-                    }
-                    if sample == span.end_sample {
-                        self.gain[lane] = span.end_value;
-                        self.active[lane] = None;
-                    }
-                }
-                AutomationSpanKind::Linear | AutomationSpanKind::Exponential => {
-                    if let Some(value) = effect_contract::automation_segment_value(span, sample) {
-                        self.gain[lane] = value;
-                    }
-                    if sample == span.end_sample {
-                        self.active[lane] = None;
-                    }
-                }
-                AutomationSpanKind::Point => {}
-            }
-        }
+    fn process_lane(&mut self, lane: usize, input: f32) -> (f32, bool) {
         let delayed = self.delay[lane][self.delay_index];
         self.delay[lane][self.delay_index] = input;
         let output = if self.bypass {
@@ -413,7 +387,6 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
     fn reset(&mut self, kind: ResetKind) {
         self.delay = [[0.0; 3]; 2];
         self.accumulator = [0.0; 2];
-        self.active = [None; 2];
         if self.fault != FaultKind::StickyReset {
             self.delay_index = 0;
         }
@@ -460,12 +433,10 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
             for &lane in lanes {
                 match span.kind {
                     AutomationSpanKind::Point => self.gain[lane] = span.start_value,
-                    _ => self.active[lane] = Some(*span),
                 }
             }
         }
         for frame in 0..block.left.len() {
-            let sample = block.first_sample + frame as u64;
             let mut input = [block.left[frame], block.right[frame]];
             for value in &mut input {
                 if !canonical_finite(*value) {
@@ -481,8 +452,8 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
                     }
                 }
             }
-            let (mut left, recover_left) = self.process_lane(0, input[0], sample);
-            let (right, recover_right) = self.process_lane(1, input[1], sample);
+            let (mut left, recover_left) = self.process_lane(0, input[0]);
+            let (right, recover_right) = self.process_lane(1, input[1]);
             if self.fault == FaultKind::SharedLaneState {
                 self.accumulator[1] = self.accumulator[0];
             }
@@ -527,14 +498,12 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
             self.delay[0],
             self.gain[0],
             self.accumulator[0],
-            self.active[0],
         );
         encode_lane(
             output.right,
             self.delay[1],
             self.gain[1],
             self.accumulator[1],
-            self.active[1],
         );
         Ok(())
     }
@@ -562,36 +531,21 @@ impl PreparedNativeEffect for DualAccumulatorDelay {
         self.delay = [left.0, right.0];
         self.gain = [left.1, right.1];
         self.accumulator = [left.2, right.2];
-        self.active = [left.3, right.3];
         Ok(())
     }
 }
 
-fn encode_lane(
-    output: &mut [u8],
-    delay: [f32; 3],
-    gain: f32,
-    accumulator: f32,
-    active: Option<PreparedAutomationSpan>,
-) {
+fn encode_lane(output: &mut [u8], delay: [f32; 3], gain: f32, accumulator: f32) {
     output.fill(0);
     for (index, value) in delay.into_iter().enumerate() {
         output[index * 4..index * 4 + 4].copy_from_slice(&value.to_bits().to_le_bytes());
     }
     output[12..16].copy_from_slice(&gain.to_bits().to_le_bytes());
     output[16..20].copy_from_slice(&accumulator.to_bits().to_le_bytes());
-    if let Some(span) = active {
-        output[20] = 1;
-        output[24..28].copy_from_slice(&(span.kind as u32).to_le_bytes());
-        output[28..36].copy_from_slice(&span.start_sample.to_le_bytes());
-        output[36..44].copy_from_slice(&span.end_sample.to_le_bytes());
-        output[44..48].copy_from_slice(&span.start_value.to_bits().to_le_bytes());
-        output[48..52].copy_from_slice(&span.end_value.to_bits().to_le_bytes());
-    }
 }
-type LaneState = ([f32; 3], f32, f32, Option<PreparedAutomationSpan>);
+type LaneState = ([f32; 3], f32, f32);
 fn decode_lane(input: &[u8]) -> Result<LaneState, StatePayloadError> {
-    if input.len() != 56 || input[20] > 1 || input[21..24] != [0; 3] || input[52..56] != [0; 4] {
+    if input.len() != 20 {
         return Err(StatePayloadError {
             code: "effect.state.invalid",
         });
@@ -615,36 +569,7 @@ fn decode_lane(input: &[u8]) -> Result<LaneState, StatePayloadError> {
             code: "effect.state.invalid",
         });
     }
-    let active = if input[20] == 0 {
-        None
-    } else {
-        let kind = AutomationSpanKind::from_raw(u32::from_le_bytes(
-            input[24..28].try_into().expect("bounded lane field"),
-        ))
-        .ok_or(StatePayloadError {
-            code: "effect.state.invalid",
-        })?;
-        let start_sample =
-            u64::from_le_bytes(input[28..36].try_into().expect("bounded lane field"));
-        let end_sample = u64::from_le_bytes(input[36..44].try_into().expect("bounded lane field"));
-        let start_value = read(44);
-        let end_value = read(48);
-        if !start_value.is_finite() || !end_value.is_finite() || end_sample <= start_sample {
-            return Err(StatePayloadError {
-                code: "effect.state.invalid",
-            });
-        }
-        Some(PreparedAutomationSpan {
-            kind,
-            channel: ParameterChannel::Left,
-            parameter_index: 0,
-            start_sample,
-            end_sample,
-            start_value,
-            end_value,
-        })
-    };
-    Ok((delay, gain, accumulator, active))
+    Ok((delay, gain, accumulator))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

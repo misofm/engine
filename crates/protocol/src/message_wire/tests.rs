@@ -1919,58 +1919,72 @@ fn b3a_transport_goldens_truncation_and_direct_codec_are_strict() {
 
     let set = TransportSetRequest {
         state: TransportState::Playing,
-        position: Some(crate::SampleTime(2)),
     };
-    let mut set_bytes = [0_u8; 32];
+    let mut set_bytes = [0_u8; 16];
+    assert_eq!(codec.encoded_transport_set_request_len(set), 16);
     codec
         .encode_transport_set_request(set, &mut set_bytes)
         .expect("set encode");
-    assert_eq!(
-        hex(&set_bytes),
-        concat!(
-            "01000101010000000200000000000000",
-            "02000400080000000200000000000000"
-        )
-    );
-    assert_eq!(codec.decode_transport_set_request(&set_bytes, 2), Ok(set));
-    let mut short = [0xaa; 31];
+    assert_eq!(hex(&set_bytes), "01000101010000000200000000000000");
+    assert_eq!(codec.decode_transport_set_request(&set_bytes, 1), Ok(set));
+    let mut short = [0xaa; 15];
     assert_eq!(
         codec.encode_transport_set_request(set, &mut short),
-        Err(EncodeError::OutputTooSmall { required: 32 })
+        Err(EncodeError::OutputTooSmall { required: 16 })
     );
     assert!(short.iter().all(|byte| *byte == 0xaa));
     for end in 0..set_bytes.len() {
         assert!(
             codec
-                .decode_transport_set_request(&set_bytes[..end], 2)
+                .decode_transport_set_request(&set_bytes[..end], 1)
                 .is_err()
         );
     }
     let mut bad = set_bytes;
     bad[8] = 3;
-    assert!(codec.decode_transport_set_request(&bad, 2).is_err());
+    assert!(codec.decode_transport_set_request(&bad, 1).is_err());
     bad = set_bytes;
     bad[3] = 0;
-    assert!(codec.decode_transport_set_request(&bad, 2).is_err());
+    assert!(codec.decode_transport_set_request(&bad, 1).is_err());
     let mut extension = set_bytes.to_vec();
     extension.extend_from_slice(&[3, 0, WIRE_U8, 0, 1, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(
-        codec.decode_transport_set_request(&extension, 3),
+        codec.decode_transport_set_request(&extension, 2),
         Ok(set),
         "unknown optional fields are skippable"
     );
-    extension[32 + 3] = 1;
+    extension[16 + 3] = 1;
     assert_eq!(
-        codec.decode_transport_set_request(&extension, 3),
+        codec.decode_transport_set_request(&extension, 2),
         Err(DecodeError::UnknownRequiredField)
     );
 
+    // The retired position (#1635): field 2 of the set, field 2 of the snapshot and field 3 of the
+    // event are refused in either flag form, and an unknown optional field in the same slot is
+    // skipped only when it is not retired.
+    let retired = |base: &[u8], id: u8, mandatory: bool| {
+        let mut bytes = base.to_vec();
+        bytes.extend_from_slice(&[id, 0, 4, u8::from(mandatory), 8, 0, 0, 0]);
+        bytes.extend_from_slice(&9_u64.to_le_bytes());
+        bytes
+    };
+    for mandatory in [false, true] {
+        let expected = if mandatory {
+            DecodeError::UnknownRequiredField
+        } else {
+            DecodeError::InvalidTlv
+        };
+        assert_eq!(
+            codec.decode_transport_set_request(&retired(&set_bytes, 2, mandatory), 2),
+            Err(expected)
+        );
+    }
+
     let snapshot = TransportSnapshot {
         state: TransportState::Stopped,
-        position: crate::SampleTime(2),
         effective_sample: crate::SampleTime(3),
     };
-    let mut snapshot_bytes = [0_u8; 48];
+    let mut snapshot_bytes = [0_u8; 32];
     codec
         .encode_transport_snapshot(snapshot, &mut snapshot_bytes)
         .expect("snapshot encode");
@@ -1978,30 +1992,42 @@ fn b3a_transport_goldens_truncation_and_direct_codec_are_strict() {
         hex(&snapshot_bytes),
         concat!(
             "01000101010000000100000000000000",
-            "02000401080000000200000000000000",
             "03000401080000000300000000000000"
         )
     );
     assert_eq!(
-        codec.decode_transport_snapshot(&snapshot_bytes, 3),
+        codec.decode_transport_snapshot(&snapshot_bytes, 2),
         Ok(snapshot)
     );
     for end in 0..snapshot_bytes.len() {
         assert!(
             codec
-                .decode_transport_snapshot(&snapshot_bytes[..end], 3)
+                .decode_transport_snapshot(&snapshot_bytes[..end], 2)
                 .is_err()
         );
     }
+    // The position sits between the two fields, where it was: field order is by ID.
+    let mut with_position = snapshot_bytes[..16].to_vec();
+    with_position.extend_from_slice(&retired(&[], 2, false));
+    with_position.extend_from_slice(&snapshot_bytes[16..]);
+    assert_eq!(
+        codec.decode_transport_snapshot(&with_position, 3),
+        Err(DecodeError::InvalidTlv)
+    );
+    with_position[16 + 3] = 1;
+    assert_eq!(
+        codec.decode_transport_snapshot(&with_position, 3),
+        Err(DecodeError::UnknownRequiredField)
+    );
 
     let event = TransportStateEvent {
         event_sequence: 1,
         state: TransportState::Playing,
-        position: crate::SampleTime(2),
         effective_sample: crate::SampleTime(3),
         origin_request_id: crate::RequestId::new(9),
     };
-    let mut event_bytes = [0_u8; 80];
+    let mut event_bytes = [0_u8; 64];
+    assert_eq!(codec.encoded_transport_state_event_len(event), 64);
     codec
         .encode_transport_state_event(event, &mut event_bytes)
         .expect("event encode");
@@ -2010,32 +2036,44 @@ fn b3a_transport_goldens_truncation_and_direct_codec_are_strict() {
         concat!(
             "01000401080000000100000000000000",
             "02000101010000000200000000000000",
-            "03000401080000000200000000000000",
             "04000401080000000300000000000000",
             "05000400080000000900000000000000"
         )
     );
     assert_eq!(
-        codec.decode_transport_state_event(&event_bytes, 5),
+        codec.decode_transport_state_event(&event_bytes, 4),
         Ok(event)
     );
     for end in 0..event_bytes.len() {
         assert!(
             codec
-                .decode_transport_state_event(&event_bytes[..end], 5)
+                .decode_transport_state_event(&event_bytes[..end], 4)
                 .is_err()
         );
     }
+    let mut with_position = event_bytes[..32].to_vec();
+    with_position.extend_from_slice(&retired(&[], 3, false));
+    with_position.extend_from_slice(&event_bytes[32..]);
+    assert_eq!(
+        codec.decode_transport_state_event(&with_position, 5),
+        Err(DecodeError::InvalidTlv)
+    );
+    with_position[32 + 3] = 1;
+    assert_eq!(
+        codec.decode_transport_state_event(&with_position, 5),
+        Err(DecodeError::UnknownRequiredField)
+    );
     let no_origin = TransportStateEvent {
         origin_request_id: None,
         ..event
     };
-    let mut no_origin_bytes = [0_u8; 64];
+    let mut no_origin_bytes = [0_u8; 48];
+    assert_eq!(codec.encoded_transport_state_event_len(no_origin), 48);
     codec
         .encode_transport_state_event(no_origin, &mut no_origin_bytes)
         .expect("no origin encode");
     assert_eq!(
-        codec.decode_transport_state_event(&no_origin_bytes, 4),
+        codec.decode_transport_state_event(&no_origin_bytes, 3),
         Ok(no_origin)
     );
 }

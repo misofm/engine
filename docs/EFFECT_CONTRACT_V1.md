@@ -298,10 +298,11 @@ One-pole-99 likewise precomputes `a = exp(ln(0.01)/N)` and `1-a` once, then
 
 V1 runtime automation is `Point` spans whose `start_sample` equals the block's first sample,
 validated off render by `validate_automation_block`; an effect trusts the slice it is given.
-`Step`, `Linear` and `Exponential` spans and `AutomationRate::Sample` are descriptor and protocol
-vocabulary — `valid_runtime_span` and `automation_segment_value` define their meaning for the
-control plane and for the conformance reference mock — whose sample-accurate render-path delivery
-is a later protocol capability. Malformed render spans are ignored, counted once, and do not
+The `Step`, `Linear` and `Exponential` span kinds (raw values 2 to 4), `automation_segment_value`
+and the `Sample` automation rate (raw value 1) are retired (#1636): no producer stages them and no
+effect accepts them, so `AutomationSpanKind::from_raw` refuses 2 to 4, `AutomationRate::from_raw`
+refuses 1, and the values are never reallocated or renumbered. A parameter is automated at block
+rate or not at all. Malformed render spans are ignored, counted once, and do not
 change the last valid target.
 
 Effects may opt into `NativeEffectTargetPreparation` (#807). Their control owner validates
@@ -389,9 +390,8 @@ registry before preparing any effect, a host observes the same refusal as before
 
 Stored automation is not judged by effect preparation. `controls::automation_diagnostics` holds each
 automation to the control row its target names (#1566). A row is live only for an `automatable`
-parameter whose `automation_rate` is `Block`: a `None`-rate parameter is prepared, and a `Sample`-rate
-one is rebuild-only for correctness (its render-path delivery is the later capability named in
-*Parameters and automation*), so a target on either is refused with `control.automation.target`.
+parameter whose `automation_rate` is `Block`: a `None`-rate parameter is prepared, so a target on
+it is refused with `control.automation.target`.
 Host preparation and `session-validator` stage 5 report it beside the diagnostics above.
 
 ## Evidence contract

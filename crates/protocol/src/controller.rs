@@ -662,8 +662,6 @@ pub struct MockProvider {
     diagnostics: Vec<crate::Diagnostic>,
     /// Current absolute state.
     transport_state: TransportState,
-    /// Current absolute position.
-    transport_position: SampleTime,
     /// Last endpoint-local complete typed telemetry configuration.
     telemetry_configuration: TelemetryConfiguration,
     /// How many times `response_get` ran: a replayed read never runs again.
@@ -684,7 +682,6 @@ impl Default for MockProvider {
             },
             diagnostics: Vec::new(),
             transport_state: TransportState::Stopped,
-            transport_position: SampleTime(0),
             telemetry_configuration: TelemetryConfiguration {
                 meter_handles: Vec::new(),
                 meter_period_blocks: 0,
@@ -905,15 +902,11 @@ impl ControlProvider for MockProvider {
     fn transport_get(&mut self) -> TransportSnapshot {
         TransportSnapshot {
             state: self.transport_state,
-            position: self.transport_position,
             effective_sample: self.current_sample,
         }
     }
     fn transport_set(&mut self, request: TransportSetRequest) -> TransportSnapshot {
         self.transport_state = request.state;
-        if let Some(position) = request.position {
-            self.transport_position = position;
-        }
         self.transport_get()
     }
     fn telemetry_configure(
@@ -3017,7 +3010,6 @@ impl<P: ControlProvider> ProtocolController<P> {
             ReliablePayload::TransportState {
                 event_sequence,
                 state,
-                position,
                 effective_sample,
                 origin_request_id,
             } => self.codec.encode_event_frame_into(
@@ -3026,7 +3018,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                     payload: EventPayload::TransportState(TransportStateEvent {
                         event_sequence,
                         state,
-                        position,
                         effective_sample,
                         origin_request_id,
                     }),
@@ -3318,7 +3309,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                         self.session.revision(),
                         event_sequence,
                         snapshot.state,
-                        snapshot.position,
                         snapshot.effective_sample,
                         Some(request.request_id),
                     ),
@@ -3773,7 +3763,6 @@ impl<P: ControlProvider> ProtocolController<P> {
         let ReliablePayload::TransportState {
             event_sequence,
             state,
-            position,
             effective_sample,
             origin_request_id,
         } = slot.payload
@@ -3787,7 +3776,6 @@ impl<P: ControlProvider> ProtocolController<P> {
             TransportStateEvent {
                 event_sequence,
                 state,
-                position,
                 effective_sample,
                 origin_request_id,
             },

@@ -327,6 +327,7 @@ impl Live {
                 route_controls: Vec::new(),
                 master_track: None,
                 live_values_superseded: host_core::LiveValuesSuperseded::default(),
+                jump_lengths: None,
             };
             (host, handles)
         };
@@ -1041,13 +1042,13 @@ fn live_send_lanes_are_charged_against_the_graph_cap() {
         idle.host.report.route_control_resources,
         RouteControlResources::default()
     );
+    // The jump-length cell, #1639 D1: an idle preparation's cell reader holds the count it made
+    // too, so both charge it and only the route lanes separate them.
     assert_eq!(
-        admitted(&idle.host)
-            + charged.total_bytes
-            + host_core::LiveValuesSuperseded::retained_bytes(),
+        admitted(&idle.host) + charged.total_bytes,
         total,
-        "only the route lanes and the count the strips' cell readers hold separate the two charges: \
-         an idle preparation has no reader, so it retains and charges no count"
+        "only the route lanes separate the two charges: both plans' jump-length cells hold their \
+         preparation's count"
     );
 }
 

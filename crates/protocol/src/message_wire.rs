@@ -851,13 +851,12 @@ pub enum TransportState {
     Playing = 2,
 }
 
-/// Typed `TRANSPORT_SET` command. An absent position retains the provider's current position.
+/// Typed `TRANSPORT_SET` command: the absolute target state. The stored position is retired
+/// (#1635); the engine has one playhead, which the host moves with source seeks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransportSetRequest {
     /// Absolute target state.
     pub state: TransportState,
-    /// Absolute target position, when changing it.
-    pub position: Option<crate::SampleTime>,
 }
 
 /// Typed `TRANSPORT_GET`/`TRANSPORT_SET` success payload.
@@ -865,8 +864,6 @@ pub struct TransportSetRequest {
 pub struct TransportSnapshot {
     /// Effective absolute state.
     pub state: TransportState,
-    /// Effective absolute position.
-    pub position: crate::SampleTime,
     /// Engine sample at which this observation/change is effective.
     pub effective_sample: crate::SampleTime,
 }
@@ -878,8 +875,6 @@ pub struct TransportStateEvent {
     pub event_sequence: u64,
     /// Effective absolute state.
     pub state: TransportState,
-    /// Effective absolute position.
-    pub position: crate::SampleTime,
     /// Effective engine sample.
     pub effective_sample: crate::SampleTime,
     /// Originating set request, when this state change came from a command.
@@ -1612,8 +1607,8 @@ impl ProtocolCodec {
     }
 
     /// Return the exact caller-output size for a typed absolute transport set request.
-    pub const fn encoded_transport_set_request_len(&self, value: TransportSetRequest) -> usize {
-        if value.position.is_some() { 32 } else { 16 }
+    pub const fn encoded_transport_set_request_len(&self, _value: TransportSetRequest) -> usize {
+        16
     }
 
     /// Encode a typed absolute transport-state set request without allocation.
@@ -1637,21 +1632,20 @@ impl ProtocolCodec {
         payload: &[u8],
         count: u32,
     ) -> Result<TransportSetRequest, DecodeError> {
-        let fields = Message::top_level(payload, count, self.limits())?
-            .schema_spec(&schema::transport_set::SPEC)?;
+        // Field 2, the stored position, is retired (#1635): refused in either flag form.
+        let fields = Message::top_level(payload, count, self.limits())?.schema_spec_retiring(
+            &schema::transport_set::SPEC,
+            &schema::transport_set::RETIRED,
+        )?;
         Ok(TransportSetRequest {
             state: parse_transport_state(read_u8(one_spec!(
                 fields,
                 schema::transport_set::STATE
             )?)?)?,
-            position: optional_spec!(fields, schema::transport_set::POSITION)?
-                .map(read_u64)
-                .transpose()?
-                .map(crate::SampleTime),
         })
     }
 
-    /// Encode a typed three-field transport snapshot directly into caller output.
+    /// Encode a typed two-field transport snapshot directly into caller output.
     pub fn encode_transport_snapshot(
         &self,
         value: TransportSnapshot,
@@ -1668,23 +1662,22 @@ impl ProtocolCodec {
         checked_writer_len(&writer, required)
     }
 
-    /// Strictly decode a typed three-field transport snapshot without allocation.
+    /// Strictly decode a typed two-field transport snapshot without allocation.
     pub fn decode_transport_snapshot(
         &self,
         payload: &[u8],
         count: u32,
     ) -> Result<TransportSnapshot, DecodeError> {
-        let fields = Message::top_level(payload, count, self.limits())?
-            .schema_spec(&schema::transport_snapshot::SPEC)?;
+        // Field 2, the stored position, is retired (#1635).
+        let fields = Message::top_level(payload, count, self.limits())?.schema_spec_retiring(
+            &schema::transport_snapshot::SPEC,
+            &schema::transport_snapshot::RETIRED,
+        )?;
         Ok(TransportSnapshot {
             state: parse_transport_state(read_u8(one_spec!(
                 fields,
                 schema::transport_snapshot::STATE
             )?)?)?,
-            position: crate::SampleTime(read_u64(one_spec!(
-                fields,
-                schema::transport_snapshot::POSITION
-            )?)?),
             effective_sample: crate::SampleTime(read_u64(one_spec!(
                 fields,
                 schema::transport_snapshot::EFFECTIVE_SAMPLE
@@ -1695,9 +1688,9 @@ impl ProtocolCodec {
     /// Return the exact caller-output size for a reliable typed transport-state event.
     pub const fn encoded_transport_state_event_len(&self, value: TransportStateEvent) -> usize {
         if value.origin_request_id.is_some() {
-            80
-        } else {
             64
+        } else {
+            48
         }
     }
 
@@ -1722,8 +1715,11 @@ impl ProtocolCodec {
         payload: &[u8],
         count: u32,
     ) -> Result<TransportStateEvent, DecodeError> {
-        let fields = Message::top_level(payload, count, self.limits())?
-            .schema_spec(&schema::transport_state_event::SPEC)?;
+        // Field 3, the stored position, is retired (#1635).
+        let fields = Message::top_level(payload, count, self.limits())?.schema_spec_retiring(
+            &schema::transport_state_event::SPEC,
+            &schema::transport_state_event::RETIRED,
+        )?;
         Ok(TransportStateEvent {
             event_sequence: read_u64(one_spec!(
                 fields,
@@ -1733,10 +1729,6 @@ impl ProtocolCodec {
                 fields,
                 schema::transport_state_event::STATE
             )?)?)?,
-            position: crate::SampleTime(read_u64(one_spec!(
-                fields,
-                schema::transport_state_event::POSITION
-            )?)?),
             effective_sample: crate::SampleTime(read_u64(one_spec!(
                 fields,
                 schema::transport_state_event::EFFECTIVE_SAMPLE
@@ -2550,19 +2542,8 @@ pub(crate) fn write_transport_set(
     sink: &mut dyn Sink,
     value: TransportSetRequest,
 ) -> Result<(), EncodeError> {
-    sink.check_field_count(schema::transport_set::SPEC.field_count(&[(
-        schema::transport_set::POSITION,
-        usize::from(value.position.is_some()),
-    )])?)?;
-    write_spec!(sink, schema::transport_set::STATE, &[value.state as u8])?;
-    if let Some(position) = value.position {
-        write_spec!(
-            sink,
-            schema::transport_set::POSITION,
-            &position.0.to_le_bytes()
-        )?;
-    }
-    Ok(())
+    sink.check_field_count(schema::transport_set::SPEC.field_count(&[])?)?;
+    write_spec!(sink, schema::transport_set::STATE, &[value.state as u8])
 }
 
 pub(crate) fn write_transport_snapshot(
@@ -2574,11 +2555,6 @@ pub(crate) fn write_transport_snapshot(
         sink,
         schema::transport_snapshot::STATE,
         &[value.state as u8]
-    )?;
-    write_spec!(
-        sink,
-        schema::transport_snapshot::POSITION,
-        &value.position.0.to_le_bytes()
     )?;
     write_spec!(
         sink,
@@ -2604,11 +2580,6 @@ pub(crate) fn write_transport_state_event(
         sink,
         schema::transport_state_event::STATE,
         &[value.state as u8]
-    )?;
-    write_spec!(
-        sink,
-        schema::transport_state_event::POSITION,
-        &value.position.0.to_le_bytes()
     )?;
     write_spec!(
         sink,

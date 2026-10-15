@@ -127,7 +127,10 @@ about 6 dB more than the mute, and over twice that length it clicks as the mute 
 `FINDINGS.md` 9.2). *Matrix coefficients through zero.* A raw matrix coefficient (in `[-1, 1]`) or a
 send matrix coefficient (any finite value) that crosses zero is a polarity flip of that path on the
 `pan_ms` ramp; at the defaults `pan_ms` is twice `mute_ms`, so it clicks as the mute does, and a
-session whose explicit `pan_ms` is below twice its `mute_ms` gets a louder crossing.
+session whose explicit `pan_ms` is below twice its `mute_ms` gets a louder crossing. The same row
+lengths are the jump ramps of stored automation (#1058 README A3): every plan holds the three lengths
+in one cell, and a live change of them is written there when the session has an automation on a row
+of this table (#1639).
 
 On the wire the `control_smoothing` record carries `kind` 1 (`default` 1, `explicit` 2), then, for
 `explicit`, `mute_ms` 2, `fader_ms` 3 and `pan_ms` 4.

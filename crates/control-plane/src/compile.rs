@@ -930,6 +930,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         track_count,
         effect_controls,
         route_controls,
+        jump_lengths,
         ..
     } = handles;
     let strips = StripLanes {
@@ -937,6 +938,8 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         track_count,
         // #1557 D4: the send producers, at exactly one entry per route lane the plan attached.
         routes: route_controls.into_boxed_slice(),
+        // #1639 D1: the plan's jump-length cell writer.
+        jump_lengths,
     };
     // #1263 D2: likewise one entry per effect instance, built at exactly that capacity, so the
     // boxed slice is the allocation host-core walked for `effect_control_resources`.
