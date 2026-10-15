@@ -1143,3 +1143,59 @@ fn the_reserve_follows_the_slots_and_a_shrunk_plan_keeps_the_larger_reserve() {
         "the shrunk plan charges the larger plan's reserve"
     );
 }
+
+/// A batch that names one tap twice is refused at the second naming, before the cap and the room
+/// are judged, and moves nothing (#1676, batch 13b fold). The cap counts each tap's state once, so
+/// `[disarm A, arm A, arm B]` with the cap full and `A` armed counts the disarm as a removal, does
+/// not count the re-arm, and admits `B`: `cap + 1` taps armed. The shipped effects declare one tap
+/// each, so the queue's one slot happens to refuse that batch as `Full`; an effect with two taps,
+/// or a C ABI edit that names a tap twice, would not.
+///
+/// Red if the core does not refuse a second naming of a tap itself (the batch is then refused as
+/// `Full` at change 0, or as `Limit` at change 0 for `[arm B, arm B]`), or names the wrong change.
+#[test]
+fn a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming() {
+    let cap = {
+        let mut small = limits();
+        small.maximum_control_frame_bytes = 1_024;
+        Rig::with_limits(small).session.observation_cap()
+    };
+    let (mut rig, positions) = long_rig(cap + 1);
+    for position in &positions[..cap] {
+        rig.observe(*position, true).expect("under the cap");
+    }
+    rig.render();
+    let room = |rig: &Rig| -> Vec<usize> {
+        rig.session
+            .effect_producers()
+            .iter()
+            .map(host_core::EffectControlProducer::observe_available_capacity)
+            .collect()
+    };
+    let free = room(&rig);
+    assert_eq!(
+        rig.batch(&[
+            change(positions[0], false),
+            change(positions[0], true),
+            change(positions[cap], true),
+        ]),
+        Err(ObservationRefusal::Duplicate { index: 1 }),
+        "the re-arm of a tap the batch disarms is its second naming"
+    );
+    assert_eq!(
+        rig.batch(&[change(positions[cap], true), change(positions[cap], true)]),
+        Err(ObservationRefusal::Duplicate { index: 1 }),
+        "two arms of one tap are refused as such, not as the cap"
+    );
+    assert_eq!(
+        rig.session.observation_armed(),
+        cap,
+        "a refusal moves nothing"
+    );
+    assert_eq!(room(&rig), free, "a refusal queues nothing");
+    // The same taps named once each, in later batches, are admitted: the marks of a refused batch
+    // do not leak into the next one.
+    rig.batch(&[change(positions[cap], true), change(positions[0], false)])
+        .expect("each tap named once");
+    assert_eq!(rig.session.observation_armed(), cap);
+}

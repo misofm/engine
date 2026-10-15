@@ -325,6 +325,8 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         // producer (one entry past the last).
         checked_layout::<crate::control::ObservationSlot>(observation.slots)?,
         checked_layout::<u32>(observation.producers + 1)?,
+        // #1676 batch 13b fold: the per-producer admission scratch, one count per producer.
+        checked_layout::<crate::control::ObservationBatchCount>(observation.producers)?,
         checked_layout::<RenderDiagnosticSlot>(RENDER_DIAGNOSTIC_SLOTS)?,
         checked_layout::<u8>(RENDER_DIAGNOSTIC_CODE.len() * RENDER_DIAGNOSTIC_SLOTS)?,
         // ProtocolController and SessionControlProvider each retain their own telemetry config.
@@ -1188,15 +1190,18 @@ where
         observation: controls::ObservationBindings::new(),
         observation_pending: Box::default(),
         observation_offsets: Box::default(),
+        observation_batch_counts: Box::default(),
+        observation_batch_mark: 0,
         observation_armed: 0,
         observation_cap: observation_binding_cap(limits.maximum_control_frame_bytes)?,
         observation_slots_high_water: 0,
     };
-    let (offsets, pending, armed) =
+    let (offsets, pending, counts, armed) =
         crate::control::observation_slots(&session.providers.effects, &session.observation)
             .map_err(|_| failure(ResourceFault::Allocation))?;
     session.observation_offsets = offsets;
     session.observation_pending = pending;
+    session.observation_batch_counts = counts;
     session.observation_armed = armed;
     session.observation_slots_high_water = session.observation_pending.len();
     Ok(CompiledChildren {

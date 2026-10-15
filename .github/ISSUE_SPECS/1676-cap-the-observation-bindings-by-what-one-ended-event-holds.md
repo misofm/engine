@@ -206,3 +206,32 @@ departures 1 (the cap reported as `backpressure`) and 3 (an uncapped public push
 **Docs.** `docs/CONTROL_PROTOCOL_SEMANTICS.md` (observation paragraph) now says the browser reports
 the cap as `RESULT_UNSUPPORTED` with reason `observationLimit` and that the core admits and queues a
 batch in one call. `hosts/host-web/MUTATIONS.md` lists the new mutations.
+
+**Review fold (batch 13b).** Three MINOR findings on attempt 2 (`fba4eeab8`, PASS).
+
+1. *The core only documented "each tap named once".* `admit_and_push_observation_batch` now
+   refuses a second naming of a (producer position, tap index) in one batch with the new
+   `ObservationRefusal::Duplicate { index }`, at the second naming and before anything is pushed;
+   the precondition sentence is gone from the doc. The browser maps it to `MALFORMED` at that
+   record, the answer its own pass one already gives a duplicate, so browser behaviour does not
+   change. Test: `a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming`
+   (`crates/control-plane/tests/observation_bindings.rs`), at the 1 KiB frame with the cap full:
+   `[disarm A, arm A, arm B]` and `[arm B, arm B]` are each `Duplicate { index: 1 }`, move nothing
+   and queue nothing, and a later batch naming each tap once is admitted. Every shipped effect
+   declares one tap, so its queue has one slot and the cap+1 outcome itself is not reachable from a
+   test: the batch is reached through the public core call, and the room check masks the
+   undercount. **Red without the fix:** with the check disabled, the first batch is `Full
+   { index: 0 }` and the second `Limit { index: 0 }`; both run and observed red, then restored.
+2. *The room check was O(n^2).* Admission is now three linear passes over the batch with no
+   allocation: pass 1 marks each change's slot and counts each producer's records, pass 2 is the
+   cap, pass 3 the room, reading one count per producer. The scratch is a per-slot `mark` in
+   `ObservationSlot` and a per-producer `ObservationBatchCount { mark, needed }` box built with the
+   plan's slots in `observation_slots` (and charged as a retained row beside the offsets); a batch
+   stamp makes stale marks invalid without clearing, and on the stamp's wrap every mark is reset
+   (bounded, allocation-free). Refusal order: **duplicate** (the first second-naming in batch
+   order, over the whole batch), then **cap** (the arm that crosses), then **no producer or full**
+   (one check, the first offending record in order). A duplicate therefore wins over a cap or room
+   refusal at an earlier record, because the cap count is only sound once duplicates are out.
+3. *`hosts/host-web/MUTATIONS.md` was stale.* The vocabulary self-test row now says thirty-one
+   in-memory mutations (the script reports 31 plus 8 dense-rule cases), and the metadata self-test
+   row says reason 11 is renumbered to 16, and lists #1676's four new mutations.

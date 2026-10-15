@@ -431,6 +431,16 @@ pub struct SessionState<A: ControlAdapter> {
     /// carry in one control frame, so the commit that ends every binding can always say so
     /// (#1676 D1). Fixed by the session's frame limit when it compiles.
     pub(crate) observation_cap: usize,
+    /// For each position of the newest plan's effect producers, the records of the batch being
+    /// admitted that name it (#1676, batch 13b fold): the room check reads one count per producer
+    /// instead of counting the batch again for each record. Sized with
+    /// [`Self::observation_offsets`], when the plan's slots are built, so admission allocates
+    /// nothing.
+    pub(crate) observation_batch_counts: Box<[ObservationBatchCount]>,
+    /// The stamp of the batch being admitted: a slot's or a producer count's `mark` equal to it
+    /// belongs to this batch, any other value to an earlier one, so the scratch needs no clearing
+    /// between batches.
+    pub(crate) observation_batch_mark: u32,
     /// The most observation slots any committed plan has had; the ended-event cells and the
     /// binding table are charged for it (#1676 D2).
     pub(crate) observation_slots_high_water: usize,
@@ -515,6 +525,14 @@ pub enum ObservationRefusal {
         /// The change's position in the batch.
         index: usize,
     },
+    /// The change at `index` names a tap an earlier change of the same batch already names. A
+    /// change sets its tap's whole state and the batch drains in one block, so a second change
+    /// would supersede the first, which an observation record never is (D15-2). Not retryable as
+    /// sent.
+    Duplicate {
+        /// The position in the batch of the second change that names the tap.
+        index: usize,
+    },
 }
 
 /// The index in `descriptor`'s observation menu of the tap with ID `tap_id`, the one the render side
@@ -541,8 +559,14 @@ pub fn resolve_observation_tap(
     u32::try_from(index).map_err(|_| ObservationKeyError::UnknownTap)
 }
 
-/// A plan's observation slot offsets, its slot storage and how many of its slots are armed.
-pub(crate) type ObservationSlots = (Box<[u32]>, Box<[ObservationSlot]>, usize);
+/// A plan's observation slot offsets, its slot storage, its per-producer admission scratch and how
+/// many of its slots are armed.
+pub(crate) type ObservationSlots = (
+    Box<[u32]>,
+    Box<[ObservationSlot]>,
+    Box<[ObservationBatchCount]>,
+    usize,
+);
 
 /// The slot storage for `producers`, the newest plan's: the first slot of each producer (and one
 /// past the last), and one slot per declared tap (#1584 D6a), each armed when `bindings` holds its
@@ -562,6 +586,9 @@ pub(crate) fn observation_slots(
             total.saturating_add(u32::try_from(producer.observe_capacity()).unwrap_or(u32::MAX));
     }
     offsets.push(total);
+    let mut counts = Vec::new();
+    counts.try_reserve_exact(producers.len())?;
+    counts.resize(producers.len(), ObservationBatchCount::default());
     let mut slots = Vec::new();
     slots.try_reserve_exact(total as usize)?;
     let mut armed = 0_usize;
@@ -586,11 +613,27 @@ pub(crate) fn observation_slots(
                 slots.push(ObservationSlot {
                     armed: is_armed,
                     pending: PendingArm::None,
+                    mark: 0,
                 });
             }
         }
     }
-    Ok((offsets.into_boxed_slice(), slots.into_boxed_slice(), armed))
+    Ok((
+        offsets.into_boxed_slice(),
+        slots.into_boxed_slice(),
+        counts.into_boxed_slice(),
+        armed,
+    ))
+}
+
+/// One producer's share of the batch being admitted (#1676, batch 13b fold): how many of its
+/// records name the producer, valid while `mark` is the session's batch stamp.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ObservationBatchCount {
+    /// The batch stamp `needed` was counted under.
+    pub(crate) mark: u32,
+    /// Records of that batch that name the producer.
+    pub(crate) needed: u32,
 }
 
 /// One observation slot: whether its tap is armed now, and what the host pushed to it since the
@@ -602,6 +645,9 @@ pub(crate) struct ObservationSlot {
     pub(crate) armed: bool,
     /// The push waiting to be folded into the table.
     pub(crate) pending: PendingArm,
+    /// The stamp of the last batch that named this slot (#1676, batch 13b fold): a change whose
+    /// slot already carries the current stamp is the batch's second naming of the tap.
+    pub(crate) mark: u32,
 }
 
 /// What the host last pushed to one observation slot (#1584 D6a).
@@ -1808,6 +1854,7 @@ where
                 (
                     self.observation_offsets,
                     self.observation_pending,
+                    self.observation_batch_counts,
                     self.observation_armed,
                 ) = slots;
                 self.observation_slots_high_water = self
@@ -2627,24 +2674,28 @@ where
     /// Admits a batch of subscription changes, then queues it: the one way a host arms or disarms
     /// an observation tap (#1676 D1, attempt 2). A change names the producer's position in
     /// [`Self::effect_producers`] and the tap, as [`Self::resolve_observation_key`] returns them.
-    /// Each tap is named at most once, as a submission does.
     ///
-    /// Two checks run before anything is written, in this order, and a refusal names the first
+    /// Three checks run before anything is written, in this order, and a refusal names the first
     /// change in the iterator's order that breaks the first check that fails:
     ///
-    /// 1. **The cap.** The batch is judged by the state it leaves: arms of taps that are not
+    /// 1. **One naming per tap.** A change that names a tap an earlier change of the batch named
+    ///    is [`ObservationRefusal::Duplicate`], at the second naming. The cap below counts each
+    ///    tap once, so it is only sound for a batch that names each tap once.
+    /// 2. **The cap.** The batch is judged by the state it leaves: arms of taps that are not
     ///    armed add, disarms of armed taps remove, and the rest change nothing. A batch that would
     ///    leave more than [`Self::observation_cap`] taps armed is
     ///    [`ObservationRefusal::Limit`], at the arm that crosses after every removal of the batch
     ///    is counted. A retry of the same batch never succeeds until another tap is disarmed.
-    /// 2. **The room.** Each producer's observation queue holds one record per declared tap until
+    /// 3. **The room.** Each producer's observation queue holds one record per declared tap until
     ///    a render drains it; a batch that needs more than the free room of a producer is
     ///    [`ObservationRefusal::Full`] (retryable after a render), and a position past the list is
-    ///    [`ObservationRefusal::NoProducer`].
+    ///    [`ObservationRefusal::NoProducer`]. These two are one check: the first change in order
+    ///    that names no producer or a producer without the room the batch needs is refused.
     ///
-    /// Then every change is queued. A refusal writes nothing, so it is whole and precedes every
-    /// acknowledgement. The call reads the per-slot state the pushes keep and allocates nothing,
-    /// so it runs inside the browser's `process()`.
+    /// Then every change is queued. A refusal writes nothing observable, so it is whole and
+    /// precedes every acknowledgement. The call is linear in the batch, reads the per-slot state
+    /// the pushes keep and per-producer scratch sized with the plan, and allocates nothing, so it
+    /// runs inside the browser's `process()`.
     ///
     /// # Errors
     ///
@@ -2659,17 +2710,37 @@ where
         &mut self,
         changes: impl Iterator<Item = ObservationChange> + Clone,
     ) -> Result<(), ObservationRefusal> {
+        let mark = self.next_observation_batch_mark();
+        // Pass 1: the second naming of a tap, and each producer's record count for pass 3.
+        for (index, change) in changes.clone().enumerate() {
+            if let Some(count) = self.observation_batch_counts.get_mut(change.position) {
+                if count.mark != mark {
+                    *count = ObservationBatchCount { mark, needed: 0 };
+                }
+                count.needed = count.needed.saturating_add(1);
+            }
+            if let Some(slot) = self.observation_slot(change.position, change.tap_index) {
+                let entry = &mut self.observation_pending[slot];
+                if entry.mark == mark {
+                    return Err(ObservationRefusal::Duplicate { index });
+                }
+                entry.mark = mark;
+            }
+        }
+        // Pass 2: the cap.
         self.admit_observation_changes(changes.clone())
             .map_err(ObservationRefusal::Limit)?;
+        // Pass 3: the room, one count per producer from pass 1.
         let producers = &self.newest_providers().effects;
         for (index, change) in changes.clone().enumerate() {
             let Some(producer) = producers.get(change.position) else {
                 return Err(ObservationRefusal::NoProducer { index });
             };
-            let needed = changes
-                .clone()
-                .filter(|other| other.position == change.position)
-                .count();
+            let needed = self
+                .observation_batch_counts
+                .get(change.position)
+                .filter(|count| count.mark == mark)
+                .map_or(0, |count| count.needed as usize);
             if needed > producer.observe_available_capacity() {
                 return Err(ObservationRefusal::Full { index });
             }
@@ -2693,16 +2764,40 @@ where
         Ok(())
     }
 
-    /// The cap check of [`Self::admit_and_push_observation_batch`]: moves nothing.
+    /// A fresh stamp for the batch about to be admitted. A stamp of `0` is what new scratch
+    /// holds, so it is never handed out; when the counter wraps, every mark is cleared first (a
+    /// bounded pass over storage sized with the plan, which allocates nothing).
+    fn next_observation_batch_mark(&mut self) -> u32 {
+        self.observation_batch_mark = self.observation_batch_mark.wrapping_add(1);
+        if self.observation_batch_mark == 0 {
+            for slot in &mut self.observation_pending {
+                slot.mark = 0;
+            }
+            for count in &mut self.observation_batch_counts {
+                *count = ObservationBatchCount::default();
+            }
+            self.observation_batch_mark = 1;
+        }
+        self.observation_batch_mark
+    }
+
+    /// The index in [`Self::observation_pending`] of the tap at `tap_index` of the producer at
+    /// `position`, if both name one.
+    fn observation_slot(&self, position: usize, tap_index: u32) -> Option<usize> {
+        let first = *self.observation_offsets.get(position)?;
+        let end = *self.observation_offsets.get(position + 1)?;
+        let slot = first.checked_add(tap_index).filter(|slot| *slot < end)?;
+        Some(slot as usize).filter(|slot| *slot < self.observation_pending.len())
+    }
+
+    /// The cap check of [`Self::admit_and_push_observation_batch`]: moves nothing. Sound only
+    /// for a batch that names each tap once, which the caller checks first.
     fn admit_observation_changes(
         &self,
         changes: impl Iterator<Item = ObservationChange> + Clone,
     ) -> Result<(), ObservationLimit> {
         let state = |position: usize, tap_index: u32| -> Option<bool> {
-            let first = *self.observation_offsets.get(position)?;
-            let end = *self.observation_offsets.get(position + 1)?;
-            let slot = first.checked_add(tap_index).filter(|slot| *slot < end)?;
-            Some(self.observation_pending.get(slot as usize)?.armed)
+            Some(self.observation_pending[self.observation_slot(position, tap_index)?].armed)
         };
         let removed = changes
             .clone()

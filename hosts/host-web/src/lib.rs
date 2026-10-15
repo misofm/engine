@@ -4310,6 +4310,9 @@ fn admit_commands(
             ObservationRefusal::Limit(limit) => (COMMAND_REASON_OBSERVATION_LIMIT, limit.index),
             ObservationRefusal::Full { index } => (COMMAND_REASON_BACKPRESSURE, index),
             ObservationRefusal::NoProducer { index } => (COMMAND_REASON_UNSUPPORTED_KIND, index),
+            // Pass one already refuses a second naming of a tap as malformed at that record; the
+            // core's own check gives the same answer, so the browser's outcome is one.
+            ObservationRefusal::Duplicate { index } => (COMMAND_REASON_MALFORMED, index),
         };
         let wire = staged
             .get(index)
