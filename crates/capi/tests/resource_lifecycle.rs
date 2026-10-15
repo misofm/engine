@@ -1218,6 +1218,8 @@ impl Budget {
 /// #1676 charges that reserve by the slots the session has had, capped by the keys one frame carries,
 /// and not by the frame size. `capi_retained_bytes` measured 165,782 (x86-64; the rows do not depend
 /// on the lane width), so its ceiling is 165,782 plus 10 %, rounded up to 64: 182,360.2 -> 182,400.
+/// Batch 13b adds #1639's jump-length cell to every plan: measured 165,934 on the integrated tree
+/// (x86-64), within the ceiling, so the ceiling stays.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
