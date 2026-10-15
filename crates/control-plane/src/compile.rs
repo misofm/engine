@@ -308,17 +308,19 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         // event popped for egress keeps its cell until its frame is delivered), and the heap the
         // events in them own. A cell can hold the keys of any earlier plan's subscriptions (a
         // successor that removed producers still holds their keys), so the ceiling follows the
-        // most slots any plan of the session has had, capped by the keys one control frame
-        // carries (`ended_event_ceiling`, #1676 D2), and not this plan's producers or the frame
-        // size. The heap is allocated when a transaction prepares, never at the commit.
+        // most slots any plan of the session has had, and the admitted keys' encoded bytes
+        // bound their count and text (`ended_event_ceiling`, #1676 D2, #1685 D4), not this
+        // plan's producers. The heap is allocated when a transaction prepares, never at the
+        // commit.
         checked_layout::<Option<protocol::ObservationEnded>>(
             queue_config.reliable_event_slots.get() + 1,
         )?,
         checked_byte_layout(cell_heap)?,
         // #1584 D6a: the binding table the session keeps for the newest plan and the transient
         // copies `ObservationBindings::after` makes of it while a rebuild prepares: at most one
-        // binding per observation slot, so at most `slots` bindings kept or ended, and as many
-        // protocol keys for the ended ones. A binding owns the text of its two IDs.
+        // binding per observation slot and no more than one ended event carries, kept or
+        // ended, and as many protocol keys for the ended ones. A binding owns the text of its two
+        // IDs (#1685 D4).
         checked_byte_layout(bindings_table)?,
         checked_byte_layout(bindings_transient)?,
         // #1584 D6a: the newest plan's pending-subscription slots and the first slot of each
@@ -480,27 +482,81 @@ pub(crate) fn observation_resources(
     })
 }
 
-/// How many armed taps one session can hold (#1676 D1): the keys one `OBSERVATION_ENDED` event
-/// can carry in one control frame when every key is as large as the session's IDs allow (a strip
-/// ID and an effect ID of [`session::STABLE_ID_MAXIMUM_BYTES`] each). A subscription past it is
-/// refused before it is acknowledged, so a commit that ends every binding can always say so.
-///
-/// The event's size is measured with the real codec, not estimated: the frame with one key, and
-/// what a second adds. Computed on a control thread, once per plan; the session keeps the figure.
-pub(crate) fn observation_binding_cap(frame_bytes: u64) -> Result<usize, CompileFailure> {
+/// The encoded size of an `OBSERVATION_ENDED` frame as a function of its keys (#1685 D1, D2): the
+/// frame with no key, plus each key's own bytes. A key's bytes are a fixed part and the text of its
+/// strip ID and effect ID, each padded to the codec's eight-byte value alignment; the tap ID and the
+/// section are fixed width, and so are the frame header, the revision and the event sequence. The
+/// fixed parts are measured with the real codec when the session compiles, and the model is checked
+/// against the codec there ([`observation_wire`]), so admission computes a key's size from its two
+/// lengths alone, allocating nothing, in the browser worklet's message handler.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ObservationWire {
+    /// The control frame limit: an event frame larger than this cannot be sent.
+    frame: usize,
+    /// The frame with no key.
+    base: usize,
+    /// A key's bytes besides the padded text of its two IDs.
+    key_fixed: usize,
+}
+
+impl ObservationWire {
+    /// The encoded bytes of one key whose strip ID and effect ID are `strip` and `effect` bytes
+    /// long.
+    pub(crate) const fn key_bytes(self, strip: usize, effect: usize) -> usize {
+        self.key_fixed + strip.next_multiple_of(8) + effect.next_multiple_of(8)
+    }
+
+    /// The encoded bytes of the frame that carries keys of `keys` bytes in all, or `0` for no key
+    /// (a commit that ends nothing emits no event).
+    pub(crate) const fn event_bytes(self, keys: usize) -> usize {
+        if keys == 0 {
+            0
+        } else {
+            self.base.saturating_add(keys)
+        }
+    }
+
+    /// Whether keys of `keys` bytes in all fit one frame.
+    pub(crate) const fn fits(self, keys: usize) -> bool {
+        self.event_bytes(keys) <= self.frame
+    }
+
+    /// The control frame limit.
+    pub(crate) const fn frame(self) -> usize {
+        self.frame
+    }
+
+    /// The bytes the keys of one frame may take in all.
+    const fn room(self) -> usize {
+        self.frame.saturating_sub(self.base)
+    }
+
+    /// The most keys one frame carries: every key at its shortest.
+    const fn max_keys(self) -> usize {
+        self.room() / self.key_bytes(1, 1)
+    }
+}
+
+/// Measures [`ObservationWire`] for a control frame of `frame_bytes` with the real codec (#1685
+/// D2): the frame with one key and with two keys of eight-byte IDs give the fixed parts, and the
+/// model is then checked against the codec for IDs that need padding and for IDs at the grammar's
+/// longest. A codec whose sizes the model does not predict fails the compile, so admission can never
+/// trust a wrong size. Control thread, once per session.
+pub(crate) fn observation_wire(frame_bytes: u64) -> Result<ObservationWire, CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
     let codec = protocol::ProtocolCodec::default();
-    let id = "a".repeat(session::STABLE_ID_MAXIMUM_BYTES);
-    let size = |count: usize| -> Option<usize> {
+    let size = |lengths: &[(usize, usize)]| -> Option<usize> {
         let event = protocol::ObservationEnded {
             event_sequence: u64::MAX,
-            // Keys are strictly ascending on the wire; the tap ID, a fixed four bytes, orders
-            // otherwise equal keys.
-            keys: (0..count)
-                .map(|tap| protocol::ObservationTapKey {
-                    strip_id: id.clone(),
+            // Keys are strictly ascending on the wire; the tap ID, fixed width, orders keys
+            // whose IDs are equal.
+            keys: lengths
+                .iter()
+                .enumerate()
+                .map(|(tap, &(strip, effect))| protocol::ObservationTapKey {
+                    strip_id: "a".repeat(strip),
                     section: protocol::ObservationSection::Inserts,
-                    effect_id: id.clone(),
+                    effect_id: "a".repeat(effect),
                     tap_id: u32::try_from(tap).unwrap_or(u32::MAX),
                 })
                 .collect(),
@@ -516,17 +572,60 @@ pub(crate) fn observation_binding_cap(frame_bytes: u64) -> Result<usize, Compile
             Err(_) | Ok(_) => None,
         }
     };
-    let (one, two) = (
-        size(1).ok_or_else(arithmetic)?,
-        size(2).ok_or_else(arithmetic)?,
-    );
-    let key = two
-        .checked_sub(one)
-        .filter(|bytes| *bytes > 0)
-        .ok_or_else(arithmetic)?;
-    let frame = usize::try_from(frame_bytes).map_err(|_| failure(ResourceFault::Platform))?;
-    // A frame too small for one key holds none: every subscription is refused.
-    Ok(frame.checked_sub(one).map_or(0, |room| 1 + room / key))
+    let one = size(&[(8, 8)]).ok_or_else(arithmetic)?;
+    let two = size(&[(8, 8), (8, 8)]).ok_or_else(arithmetic)?;
+    let key = two.checked_sub(one).ok_or_else(arithmetic)?;
+    let wire = ObservationWire {
+        frame: usize::try_from(frame_bytes).map_err(|_| failure(ResourceFault::Platform))?,
+        base: one.checked_sub(key).ok_or_else(arithmetic)?,
+        key_fixed: key.checked_sub(16).ok_or_else(arithmetic)?,
+    };
+    let longest = session::STABLE_ID_MAXIMUM_BYTES;
+    for lengths in [
+        // In wire order: strip, then effect (an ID of `a`s orders by its length).
+        &[(1, 1)][..],
+        &[(1, 127), (9, 16)],
+        &[(15, longest), (longest, 7), (longest, longest)],
+    ] {
+        let keys = lengths
+            .iter()
+            .map(|&(strip, effect)| wire.key_bytes(strip, effect))
+            .sum::<usize>();
+        if size(lengths) != Some(wire.base + keys) {
+            return Err(arithmetic());
+        }
+    }
+    Ok(wire)
+}
+
+/// The largest of `f` over `0..=keys` (#1685 D4), for an `f` that is linear between its
+/// breakpoints: none, the four a table never holds fewer than, the counts on each side of the point
+/// where the frame, not the longest IDs, starts to bound the text ([`admitted_text`]), and `keys`;
+/// each clipped to `keys`. A piecewise-linear function peaks at a breakpoint or an end.
+fn peak_over_keys(
+    wire: ObservationWire,
+    keys: usize,
+    f: impl Fn(usize) -> Option<usize>,
+) -> Result<u64, CompileFailure> {
+    // `admitted_text` turns where `count` longest IDs' text meets the frame's room less `count`
+    // fixed parts; the integers on each side of it.
+    let turn = wire.room() / (wire.key_fixed + 2 * session::STABLE_ID_MAXIMUM_BYTES);
+    let mut peak = 0_usize;
+    for count in [0, 4, turn, turn + 1, keys] {
+        peak = peak.max(f(count.min(keys)).ok_or_else(|| failure(ResourceFault::Arithmetic))?);
+    }
+    u64::try_from(peak).map_err(|_| failure(ResourceFault::Platform))
+}
+
+/// The ID text `count` admitted keys can own, at most (#1685 D4): two IDs of the grammar's longest
+/// each, and never more than the frame's room leaves after their fixed parts, because an ID's text
+/// is at most its padded encoded length and every admitted key fits one frame together.
+fn admitted_text(wire: ObservationWire, count: usize) -> Option<usize> {
+    let longest = count.checked_mul(2 * session::STABLE_ID_MAXIMUM_BYTES)?;
+    let framed = wire
+        .room()
+        .saturating_sub(count.checked_mul(wire.key_fixed)?);
+    Some(longest.min(framed))
 }
 
 /// The observation rows that are bounds, not allocations: nothing holds them until a host arms a
@@ -546,16 +645,18 @@ fn observation_reserve(
     frame_bytes: u64,
     slots: usize,
 ) -> Result<ObservationReserve, CompileFailure> {
-    // The table never holds more bindings than a plan has slots or an event can carry (#1676).
-    let bindings = slots.min(observation_binding_cap(frame_bytes)?);
-    let ended_event = ended_event_ceiling(bindings)?;
+    // The table never holds more bindings than a plan has slots, and every binding it holds was
+    // admitted, so all of them together fit one ended event (#1685 D1).
+    let wire = observation_wire(frame_bytes)?;
+    let keys = slots.min(wire.max_keys());
+    let ended_event = ended_event_ceiling(wire, keys)?;
     let cell_heap = ended_event
         .checked_mul(
             u64::try_from(RELIABLE_EVENT_SLOTS + 1)
                 .map_err(|_| failure(ResourceFault::Platform))?,
         )
         .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
-    let (bindings_table, bindings_transient) = observation_binding_rows(bindings)?;
+    let (bindings_table, bindings_transient) = observation_binding_rows(wire, keys)?;
     Ok(ObservationReserve {
         ended_event,
         cell_heap,
@@ -588,47 +689,44 @@ pub fn observation_reserve_bytes(
     ))
 }
 
-/// The heap one `OBSERVATION_ENDED` event can own when it ends at most `bindings` taps: its key
-/// list, one `protocol::ObservationTapKey` each, and the text of the two IDs every key owns
-/// (#1584 D6a, #1676 D2). The count is what the session can hold, the smaller of the plan's
-/// observation slots and the cap one frame allows, never the frame size itself. It does not
-/// depend on any plan's producers: a cell can hold the keys of an earlier plan.
-pub(crate) fn ended_event_ceiling(bindings: usize) -> Result<u64, CompileFailure> {
-    let arithmetic = || failure(ResourceFault::Arithmetic);
-    let key = size_of::<protocol::ObservationTapKey>()
-        .checked_add(2 * session::STABLE_ID_MAXIMUM_BYTES)
-        .ok_or_else(arithmetic)?;
-    let heap = bindings.checked_mul(key).ok_or_else(arithmetic)?;
-    u64::try_from(heap).map_err(|_| failure(ResourceFault::Platform))
+/// The heap one `OBSERVATION_ENDED` event can own when it ends at most `keys` taps (#1584 D6a,
+/// #1685 D4): its key list, one `protocol::ObservationTapKey` each, and the text of the two IDs
+/// every key owns, at most [`admitted_text`]. `keys` is what the session can hold, the smaller of
+/// the observation slots it has had and the keys one frame carries. It does not depend on any
+/// plan's producers: a cell can hold the keys of an earlier plan.
+fn ended_event_ceiling(wire: ObservationWire, keys: usize) -> Result<u64, CompileFailure> {
+    peak_over_keys(wire, keys, |count| {
+        count
+            .checked_mul(size_of::<protocol::ObservationTapKey>())?
+            .checked_add(admitted_text(wire, count)?)
+    })
 }
 
-/// What the binding table and a rebuild's transient copies of it hold for a plan with `slots`
-/// observation slots, as `(table, transient)` bytes (#1584 D6a). The table's `Vec` grows by
+/// What the binding table and a rebuild's transient copies of it hold for at most `keys` admitted
+/// bindings, as `(table, transient)` bytes (#1584 D6a, #1685 D4). The table's `Vec` grows by
 /// insertion, so its capacity is at most twice its length (and at least four entries). The
 /// transient is what `ObservationBindings::after` builds from the table: each binding goes to the
-/// kept table or the ended list, so at most `slots` of them together, and the protocol keys the
-/// ended ones are copied into. Every binding and key owns the text of two IDs.
-fn observation_binding_rows(slots: usize) -> Result<(u64, u64), CompileFailure> {
-    let arithmetic = || failure(ResourceFault::Arithmetic);
-    let text = 2 * session::STABLE_ID_MAXIMUM_BYTES;
-    let binding = size_of::<controls::ObservationBinding>()
-        .checked_add(text)
-        .ok_or_else(arithmetic)?;
-    let key = size_of::<protocol::ObservationTapKey>()
-        .checked_add(text)
-        .ok_or_else(arithmetic)?;
-    let table = if slots == 0 { 0 } else { slots.max(4) }
-        .checked_mul(2)
-        .and_then(|capacity| capacity.checked_mul(binding))
-        .ok_or_else(arithmetic)?;
-    let transient = slots
-        .checked_mul(binding)
-        .and_then(|bytes| bytes.checked_add(slots.checked_mul(key)?))
-        .ok_or_else(arithmetic)?;
-    Ok((
-        u64::try_from(table).map_err(|_| failure(ResourceFault::Platform))?,
-        u64::try_from(transient).map_err(|_| failure(ResourceFault::Platform))?,
-    ))
+/// kept table or the ended list, so at most `keys` of them together, and the protocol keys the
+/// ended ones are copied into. The bindings' ID text and the keys' copy of it are each at most
+/// [`admitted_text`].
+fn observation_binding_rows(
+    wire: ObservationWire,
+    keys: usize,
+) -> Result<(u64, u64), CompileFailure> {
+    let binding = size_of::<controls::ObservationBinding>();
+    let key = size_of::<protocol::ObservationTapKey>();
+    let table = peak_over_keys(wire, keys, |count| {
+        if count == 0 { 0 } else { count.max(4) }
+            .checked_mul(2)?
+            .checked_mul(binding)?
+            .checked_add(admitted_text(wire, count)?)
+    })?;
+    let transient = peak_over_keys(wire, keys, |count| {
+        count
+            .checked_mul(binding.checked_add(key)?)?
+            .checked_add(admitted_text(wire, count)?.checked_mul(2)?)
+    })?;
+    Ok((table, transient))
 }
 
 pub(crate) fn controller_retained_capacity(
@@ -1205,16 +1303,21 @@ where
         observation_batch_counts: Box::default(),
         observation_batch_mark: 0,
         observation_armed: 0,
-        observation_cap: observation_binding_cap(limits.maximum_control_frame_bytes)?,
+        observation_wire: observation_wire(limits.maximum_control_frame_bytes)?,
+        observation_armed_bytes: 0,
         observation_slots_high_water: 0,
     };
-    let (offsets, pending, counts, armed) =
-        crate::control::observation_slots(&session.providers.effects, &session.observation)
-            .map_err(|_| failure(ResourceFault::Allocation))?;
+    let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
+        &session.providers.effects,
+        &session.observation,
+        session.observation_wire,
+    )
+    .map_err(|_| failure(ResourceFault::Allocation))?;
     session.observation_offsets = offsets;
     session.observation_pending = pending;
     session.observation_batch_counts = counts;
     session.observation_armed = armed;
+    session.observation_armed_bytes = armed_bytes;
     session.observation_slots_high_water = session.observation_pending.len();
     Ok(CompiledChildren {
         session,

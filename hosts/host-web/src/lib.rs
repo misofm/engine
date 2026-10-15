@@ -864,7 +864,7 @@ pub const COMMAND_REASON_DOMAIN: u32 = 6;
 /// exists, and this session has no post-preparation write path for it.
 pub const COMMAND_REASON_UNSUPPORTED_KIND: u32 = 7;
 /// A bounded control queue had no room for the submission; nothing was admitted. Retryable: the
-/// queue drains at the next render. Never the answer to the cap on armed taps, which is
+/// queue drains at the next render. Never the answer to a full observation event, which is
 /// [`COMMAND_REASON_OBSERVATION_LIMIT`].
 pub const COMMAND_REASON_BACKPRESSURE: u32 = 8;
 /// The host is not `STATE_READY`.
@@ -885,14 +885,15 @@ pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
 // Reasons 12-14 (`notSoloable`, `unknownRoute`, `unknownVca`) belonged to the value kinds #1565A
 // deleted. They are retired and never reallocated, so the vocabulary is dense from 0 except for
 // them, and the next reason is 15.
-/// The subscription would leave more taps armed than one `OBSERVATION_ENDED` event can name in one
-/// control frame (#1676), so the engine could not tell the app honestly when a later edit ends
-/// them all. The record named is the arm that crossed the cap, after every unsubscribe of the same
-/// submission is counted; nothing was admitted.
+/// The subscription would leave armed taps whose one `OBSERVATION_ENDED` event, every key with its
+/// real IDs, does not fit one control frame (#1676, #1685): the frame is full, so the engine could
+/// not tell the app honestly when a later edit ends them all. The record named is the arm that
+/// made the event outgrow the frame, after every unsubscribe of the same submission is counted;
+/// nothing was admitted.
 ///
 /// Not retryable as sent, and deliberately **not** `BACKPRESSURE`: no render makes room. The
-/// submission is admitted only after the app unsubscribes another tap. The cap is the control
-/// plane's (`observation_cap`, 51 taps at the browser's 16 KiB frame), so the result is
+/// submission is admitted only after the app unsubscribes another tap. The admission is the control
+/// plane's, by the event's exact encoded bytes against the browser's 16 KiB frame, so the result is
 /// `RESULT_UNSUPPORTED`, as for [`COMMAND_REASON_OBSERVATION_UNBOUND`].
 pub const COMMAND_REASON_OBSERVATION_LIMIT: u32 = 15;
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
@@ -4193,7 +4194,7 @@ fn admit_commands(
             // `ObservationUnbound` is "this preparation cannot deliver it", which is exactly what
             // `RESULT_UNSUPPORTED` means; `UnknownTap` is a bad address, like every other unknown.
             // `ObservationLimit` is the same answer for the configuration: this session's control
-            // frame cannot end one more tap honestly, and only an unsubscribe changes that.
+            // frame cannot carry the end of one more tap, and only an unsubscribe changes that.
             COMMAND_REASON_UNSUPPORTED_KIND
             | COMMAND_REASON_OBSERVATION_UNBOUND
             | COMMAND_REASON_OBSERVATION_LIMIT => RESULT_UNSUPPORTED,
@@ -4284,11 +4285,12 @@ fn admit_commands(
             ));
         }
     }
-    // The cap, the room and the push are one core call (#1676): the control plane judges the whole
-    // submission by the taps it leaves armed, then by the room of every effect's observation queue,
-    // and only then queues it. A subscription past what one `OBSERVATION_ENDED` event can name in a
-    // control frame is refused there, before any record is queued and so before any is
-    // acknowledged, and the adapter reports it as `observationLimit` at the record that crossed it.
+    // The frame, the room and the push are one core call (#1676, #1685): the control plane judges
+    // the whole submission by the encoded bytes of the one `OBSERVATION_ENDED` event the taps it
+    // leaves armed would need, then by the room of every effect's observation queue, and only then
+    // queues it. A subscription whose event would outgrow the control frame is refused there,
+    // before any record is queued and so before any is acknowledged, and the adapter reports it as
+    // `observationLimit` at the record that crossed it.
     // A change's index in the batch is its staged index, and the staged index names the record's
     // wire index.
     let staged = &ready.command_decoded[..staged_count];
@@ -4324,10 +4326,10 @@ fn admit_commands(
         return Err(refuse(reason, wire));
     }
     debug_assert!(
-        ready.control.observation_armed() <= ready.control.observation_cap(),
-        "a browser admission left {} taps armed past the cap {}",
-        ready.control.observation_armed(),
-        ready.control.observation_cap()
+        ready.control.observation_ended_bytes() <= ready.control.observation_frame_bytes(),
+        "a browser admission left an ended event of {} bytes past the frame of {}",
+        ready.control.observation_ended_bytes(),
+        ready.control.observation_frame_bytes()
     );
     for entry in 0..staged_count {
         let staged = ready.command_decoded[entry];

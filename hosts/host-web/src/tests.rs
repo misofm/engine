@@ -8037,41 +8037,137 @@ mod structural_apply {
     }
 }
 
-/// A subscription past the engine's cap on armed taps (#1676) is refused as a whole before any
-/// record is queued, so the acknowledgement never promises a tap the engine could not end honestly;
-/// unsubscribing one tap makes room for the next. The cap is the control plane's, shared with the C
-/// ABI: the browser only reports the refusal, as its own non-retryable reason `observationLimit`
-/// with `RESULT_UNSUPPORTED`, never as backpressure, at the record that crossed it.
+/// The encoded bytes of the one `OBSERVATION_ENDED` frame that ends the insert taps keyed by
+/// `(strip, insert)` (tap 1), by the real codec: the oracle the control plane's exact-byte
+/// admission is held to (#1685).
+fn ended_frame_bytes(keys: &[(String, String)]) -> usize {
+    let mut keys: Vec<protocol::ObservationTapKey> = keys
+        .iter()
+        .map(|(strip, effect)| protocol::ObservationTapKey {
+            strip_id: strip.clone(),
+            section: protocol::ObservationSection::Inserts,
+            effect_id: effect.clone(),
+            tap_id: 1,
+        })
+        .collect();
+    keys.sort_by(|a, b| (&a.strip_id, &a.effect_id).cmp(&(&b.strip_id, &b.effect_id)));
+    let event = protocol::ObservationEnded {
+        event_sequence: u64::MAX,
+        keys,
+    };
+    match protocol::ProtocolCodec::default().encode_event_frame_into(
+        &protocol::TypedEventFrame {
+            revision: protocol::SessionRevision(u64::MAX),
+            payload: protocol::EventPayload::ObservationEnded(&event),
+        },
+        &mut [],
+    ) {
+        Err(protocol::EncodeError::OutputTooSmall { required }) => required,
+        other => panic!("an ended event is measured: {other:?}"),
+    }
+}
+
+/// The large session (#1685 gate 1) on the browser: a 64-track session with one compressor insert
+/// per track subscribes the compressor's meter tap on every insert, in one submission, at the
+/// browser's 16 KiB control frame: all 64 are admitted, and the ended event they would need is the
+/// real codec's size for their keys.
 ///
-/// Red if the browser admits a subscription past the cap (the later removal of every subscribed tap
-/// could not be told to its subscribers), if it reports the cap as backpressure (the SDK would
-/// resend it after every render), if the refusal still queues or arms the tap, if a refused batch
-/// moves the armed count or keeps part of itself, if the refusal names a record other than the arm
-/// that crossed (index 2 of a batch that first unsubscribes), or if an unsubscribe does not give its
-/// place back.
+/// Red if admission still assumes the longest IDs (the cap of #1676 held 51 taps at this frame and
+/// refused record 51).
 #[test]
-fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
+fn every_insert_of_a_sixty_four_track_session_subscribes() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 64;
+    let mut document: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/browser-v1/observation-session.json"))
+            .expect("fixture");
+    let track = document["tracks"][0].clone();
+    let route = document["routes"][0].clone();
+    let name = |index: usize| format!("t{index:02}");
+    document["tracks"] = (0..TRACKS)
+        .map(|index| {
+            let mut track = track.clone();
+            track["id"] = serde_json::Value::String(name(index));
+            track
+        })
+        .collect();
+    document["routes"] = (0..TRACKS)
+        .map(|index| {
+            let mut route = route.clone();
+            route["id"] = serde_json::Value::String(format!("{}-main", name(index)));
+            route["source"]["track_id"] = serde_json::Value::String(name(index));
+            route
+        })
+        .collect();
+    let document = serde_json::to_string_pretty(&document).expect("document");
+    let options = WebBootOptions {
+        live_control_observation_taps: 1,
+        live_control_master_track_plus_one: 1,
+        ..boot_options(QUANTUM)
+    };
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
+    for track in 0..TRACKS {
+        stage_command(
+            &mut host,
+            track,
+            COMMAND_OBSERVE_SUBSCRIBE,
+            1,
+            track as u32,
+            0,
+            1,
+            2,
+        );
+    }
+    host.submit_commands(TRACKS as u32);
+    let report = *host.command_report();
+    assert_eq!(report.result, RESULT_OK, "{report:?}");
+    let control = &host.ready.as_ref().expect("ready").control;
+    assert_eq!(control.observation_armed(), TRACKS);
+    let keys: Vec<(String, String)> = (0..TRACKS)
+        .map(|index| (name(index), "comp".to_owned()))
+        .collect();
+    assert_eq!(control.observation_ended_bytes(), ended_frame_bytes(&keys));
+    assert!(control.observation_ended_bytes() <= CONTROL_FRAME_BYTES as usize);
+}
+
+/// A subscription whose `OBSERVATION_ENDED` event would outgrow the browser's 16 KiB control frame
+/// (#1676, #1685) is refused as a whole before any record is queued, so the acknowledgement never
+/// promises a tap the engine could not end honestly; unsubscribing one tap makes room for the
+/// next. The admission is the control plane's, by the event's exact encoded bytes, shared with the
+/// C ABI: the browser only reports the refusal, as its own non-retryable reason `observationLimit`
+/// with `RESULT_UNSUPPORTED`, never as backpressure, at the record that crossed it. The insert IDs
+/// are of the grammar's longest length, so the frame holds `k` of them by the real codec.
+///
+/// Red if the browser admits a subscription past the frame (the later removal of every subscribed
+/// tap could not be told to its subscribers), if it reports the refusal as backpressure (the SDK
+/// would resend it after every render), if the refusal still queues or arms the tap, if a refused
+/// batch moves the armed count or keeps part of itself, if the refusal names a record other than
+/// the arm that crossed (index 2 of a batch that first unsubscribes), or if an unsubscribe does not
+/// give its place back.
+#[test]
+fn a_subscription_past_the_frame_is_refused_and_an_unsubscribe_makes_room() {
     const QUANTUM: u32 = 128;
     let document: serde_json::Value =
         serde_json::from_str(include_str!("../tests/browser-v1/observation-session.json"))
             .expect("fixture");
-    let probe_cap = {
-        let options = WebBootOptions {
-            live_control_observation_taps: 1,
-            live_control_master_track_plus_one: 1,
-            ..boot_options(QUANTUM)
-        };
-        let host = AudioWorkletEngineHost::boot(
-            include_bytes!("../tests/browser-v1/observation-session.json"),
-            options,
-        )
-        .expect("boot");
-        host.ready
-            .as_ref()
-            .expect("ready")
-            .control
-            .observation_cap()
+    let insert_id = |index: usize| {
+        let id = format!(
+            "i{index:03}{}",
+            "x".repeat(session::STABLE_ID_MAXIMUM_BYTES - 4)
+        );
+        assert_eq!(id.len(), session::STABLE_ID_MAXIMUM_BYTES);
+        id
     };
+    let keys = |count: usize| -> Vec<(String, String)> {
+        (0..count)
+            .map(|index| ("track".to_owned(), insert_id(index)))
+            .collect()
+    };
+    let frame = CONTROL_FRAME_BYTES as usize;
+    let probe_cap = (1..)
+        .take_while(|count| ended_frame_bytes(&keys(*count)) <= frame)
+        .last()
+        .expect("one key fits");
     let inserts = probe_cap + 2;
     let mut document = document;
     let template = document["tracks"][0]["inserts"]["effects"][0].clone();
@@ -8079,7 +8175,7 @@ fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
         (0..inserts)
             .map(|index| {
                 let mut effect = template.clone();
-                effect["id"] = serde_json::Value::String(format!("ins{index:03}"));
+                effect["id"] = serde_json::Value::String(insert_id(index));
                 effect
             })
             .collect(),
@@ -8128,6 +8224,14 @@ fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
         assert_eq!(report.result, RESULT_OK, "{effect}: {report:?}");
     }
     assert_eq!(armed(&host), probe_cap);
+    assert_eq!(
+        host.ready
+            .as_ref()
+            .expect("ready")
+            .control
+            .observation_ended_bytes(),
+        ended_frame_bytes(&keys(probe_cap))
+    );
     let refused = submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, probe_cap as u32);
     assert_eq!(
         (
@@ -8145,7 +8249,7 @@ fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
         "a refused subscription arms nothing"
     );
     render(&mut host);
-    // A batch that unsubscribes one tap, takes its place and then crosses the cap is refused whole,
+    // A batch that unsubscribes one tap, takes its place and then crosses the frame is refused whole,
     // at the record that crossed: wire index 2, not the first record or the first arm.
     let cap = probe_cap as u32;
     stage_command(&mut host, 0, COMMAND_OBSERVE_UNSUBSCRIBE, 1, 0, 0, 1, 2);

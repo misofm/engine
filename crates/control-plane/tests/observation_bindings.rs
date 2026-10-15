@@ -619,8 +619,8 @@ fn a_strip_removed_with_many_subscribed_inserts_gives_one_event_with_every_key()
 /// backpressure) before anything changes: the revision, the canonical session, the bindings, the
 /// plan epoch and the event lane are as they were. A strip with two subscribed inserts (an end
 /// that fits) commits under the same small limit. This is the defensive path: a subscription
-/// is admitted against the cap (#1676), so a valid removal never reaches it; the test pushes
-/// past the cap on purpose, through the test-only `test_push_observe_unadmitted`, the one way
+/// is admitted against the frame (#1676, #1685), so a valid removal never reaches it; the test
+/// pushes past the frame on purpose, through the test-only `test_push_observe_unadmitted`, the one way
 /// past admission.
 ///
 /// Red if the commit goes ahead and drops the end (an acked removal whose subscribers never hear),
@@ -675,7 +675,7 @@ fn an_end_event_over_one_control_frame_refuses_the_removal_and_changes_nothing()
                 .iter()
                 .position(|producer| &*producer.track_id == "comp1" && &*producer.effect_id == id)
                 .expect("the insert has a producer");
-            // Past the cap on purpose: the defence below is only reachable without admission.
+            // Past the frame on purpose: the defence below is only reachable without admission.
             rig.session
                 .test_push_observe_unadmitted(position, 0, true, WINDOW_BLOCKS)
                 .expect("a producer")
@@ -881,59 +881,84 @@ impl Rig {
     }
 }
 
-/// The cap is the number of keys one control frame carries with every ID at its longest: the event
-/// of exactly that many such keys fits the frame, and one more does not.
-///
-/// Red if the cap is computed from short IDs (a removal of that many long-named taps could not be
-/// sent), from the wrong frame limit, or rounds up.
-#[test]
-fn the_cap_is_what_one_frame_carries_with_the_longest_ids() {
-    let id = "a".repeat(session::STABLE_ID_MAXIMUM_BYTES);
-    let encoded = |count: usize, frame: usize| {
-        let event = protocol::ObservationEnded {
-            event_sequence: u64::MAX,
-            keys: (0..count)
-                .map(|tap| protocol::ObservationTapKey {
-                    strip_id: id.clone(),
-                    section: ObservationSection::Inserts,
-                    effect_id: id.clone(),
-                    tap_id: u32::try_from(tap).expect("tap"),
-                })
-                .collect(),
-        };
-        let codec = ProtocolCodec::new(protocol::ProtocolLimits {
-            max_frame_bytes: frame,
-            ..protocol::ProtocolLimits::default()
-        });
-        codec.encode_event_frame_into(
-            &protocol::TypedEventFrame {
-                revision: SessionRevision(u64::MAX),
-                payload: protocol::EventPayload::ObservationEnded(&event),
-            },
-            &mut [],
-        )
+/// The encoded bytes of the one `OBSERVATION_ENDED` frame that ends the taps keyed by
+/// `(strip, insert)` (tap 1, the compressor's gain reduction), measured with the real codec: the
+/// oracle the session's exact-byte admission is held to (#1685).
+fn ended_frame_bytes(keys: &[(String, String)]) -> usize {
+    let mut keys: Vec<protocol::ObservationTapKey> = keys
+        .iter()
+        .map(|(strip, effect)| protocol::ObservationTapKey {
+            strip_id: strip.clone(),
+            section: ObservationSection::Inserts,
+            effect_id: effect.clone(),
+            tap_id: 1,
+        })
+        .collect();
+    keys.sort_by(|a, b| (&a.strip_id, &a.effect_id).cmp(&(&b.strip_id, &b.effect_id)));
+    let event = protocol::ObservationEnded {
+        event_sequence: u64::MAX,
+        keys,
     };
-    let mut previous = 0;
-    for frame in [1_024_u64, 4_096, 16_384] {
-        let mut small = limits();
-        small.maximum_control_frame_bytes = frame;
-        let cap = Rig::with_limits(small).session.observation_cap();
-        assert!(cap > previous, "{frame}: the cap grows with the frame");
-        previous = cap;
-        let frame = usize::try_from(frame).expect("frame");
-        assert!(
-            matches!(encoded(cap, frame), Err(protocol::EncodeError::OutputTooSmall { required }) if required <= frame),
-            "{frame}: {cap} longest keys fit"
-        );
-        assert!(
-            !matches!(encoded(cap + 1, frame), Err(protocol::EncodeError::OutputTooSmall { required }) if required <= frame),
-            "{frame}: one more does not"
-        );
+    match ProtocolCodec::default().encode_event_frame_into(
+        &protocol::TypedEventFrame {
+            revision: SessionRevision(u64::MAX),
+            payload: protocol::EventPayload::ObservationEnded(&event),
+        },
+        &mut [],
+    ) {
+        Err(protocol::EncodeError::OutputTooSmall { required }) => required,
+        other => panic!("an ended event is measured: {other:?}"),
     }
 }
 
+/// The session's ended-event size is the real codec's size of the event that ends every armed
+/// tap, whatever the IDs' lengths (#1685 D1, D2): IDs on each side of the codec's eight-byte
+/// alignment and at the grammar's longest, after every arm and after a disarm; `0` with none armed.
+///
+/// Red if the session sizes a key by a fixed or longest-ID estimate, misses the padding of an ID,
+/// leaves out or double-counts the frame's own bytes, or does not give a disarmed key's bytes back.
+#[test]
+fn the_ended_bytes_are_the_encoded_event_of_the_armed_keys() {
+    let mut rig = Rig::new();
+    let ids: Vec<String> = [
+        0_usize,
+        6,
+        7,
+        8,
+        15,
+        40,
+        session::STABLE_ID_MAXIMUM_BYTES - 1,
+    ]
+    .iter()
+    .map(|extra| format!("i{}", "x".repeat(*extra)))
+    .collect();
+    rig.add_inserts(&ids);
+    assert_eq!(rig.session.observation_ended_bytes(), 0, "nothing armed");
+    let mut armed = Vec::new();
+    for id in &ids {
+        let position = rig.insert_position("comp1", id);
+        rig.observe(position, true).expect("the frame has room");
+        armed.push(("comp1".to_owned(), id.clone()));
+        assert_eq!(
+            rig.session.observation_ended_bytes(),
+            ended_frame_bytes(&armed),
+            "{} armed keys",
+            armed.len()
+        );
+        rig.render();
+    }
+    let position = rig.insert_position("comp1", &ids[3]);
+    rig.observe(position, false).expect("a disarm");
+    armed.retain(|(_, id)| id != &ids[3]);
+    assert_eq!(
+        rig.session.observation_ended_bytes(),
+        ended_frame_bytes(&armed)
+    );
+    assert_eq!(rig.session.observation_frame_bytes(), 65_536);
+}
+
 /// `comp1` renamed to a strip ID of the longest length, so its ended keys are as long as the keys
-/// the cap is computed from.
+/// a frame can carry.
 fn long_strip() -> String {
     let id = format!("comp1{}", "x".repeat(session::STABLE_ID_MAXIMUM_BYTES - 5));
     assert_eq!(id.len(), session::STABLE_ID_MAXIMUM_BYTES);
@@ -989,37 +1014,59 @@ fn long_rig(count: usize) -> (Rig, Vec<usize>) {
     (rig, positions)
 }
 
-/// A subscription past the cap is refused before it is acknowledged and changes nothing; removing
-/// every subscribed target afterwards commits, with one event holding every key. Every ID is of the
-/// longest length, so the event that ends `cap` taps fills the frame: the cap is exactly what one
-/// frame carries, and one tap more (pushed past admission) reaches the over-frame defence.
-///
-/// Red if the cap is not enforced at admission, or is one too high (the `cap + 1`-th arm is then
-/// admitted, and the removal of `cap + 1` longest keys is refused for its event); if a refused batch
-/// moves the armed count or queues a record; if an arm of an armed tap counts as a new one; if the
-/// refusal names the wrong change of the batch; or if a disarm in the batch is not counted against
-/// its arms.
-#[test]
-fn a_subscription_past_the_cap_is_refused_and_the_removal_of_all_still_commits() {
-    let cap = {
-        let mut small = limits();
-        small.maximum_control_frame_bytes = 1_024;
-        Rig::with_limits(small).session.observation_cap()
+/// How many of [`long_rig`]'s taps one 1 KiB frame's ended event carries, by the real codec, and
+/// the event's bytes for that many and for one more.
+fn long_capacity() -> (usize, usize, usize) {
+    let keys = |count: usize| -> Vec<(String, String)> {
+        (0..count)
+            .map(|index| (long_strip(), long_insert(index)))
+            .collect()
     };
-    assert!(cap >= 2, "the small frame still holds some keys: {cap}");
-    let (mut rig, positions) = long_rig(cap + 1);
-    // Arm the first `cap` taps.
-    for position in &positions[..cap] {
-        rig.observe(*position, true).expect("under the cap");
+    let k = (1..)
+        .take_while(|count| ended_frame_bytes(&keys(*count)) <= 1_024)
+        .last()
+        .expect("one longest key fits 1 KiB");
+    (
+        k,
+        ended_frame_bytes(&keys(k)),
+        ended_frame_bytes(&keys(k + 1)),
+    )
+}
+
+/// The edge (#1685 gate 2). Keys are sized so that one 1 KiB frame holds exactly `k` of them, by
+/// the real codec: `k` arms are admitted, arm `k + 1` is refused `Limit` at its index, naming the
+/// bytes it would need and the frame, before it is acknowledged and with nothing moved or queued;
+/// a disarm later in the same batch makes room; and removing the strip commits with one
+/// `OBSERVATION_ENDED` that holds all `k` keys and fits the frame. One tap more, pushed past
+/// admission, reaches the over-frame defence.
+///
+/// Red if the byte count is off by one key or by the frame header (arm `k + 1` is admitted, or arm
+/// `k` refused), if a refused batch moves the armed bytes or queues a record, if an arm of an armed
+/// tap counts again, if the refusal names the wrong change, if a disarm in the batch is not counted
+/// against its arms, or if the commit can emit an event over one frame.
+#[test]
+fn a_subscription_past_the_frame_is_refused_and_the_removal_of_all_still_commits() {
+    let (k, fits, over) = long_capacity();
+    assert!(k >= 2, "the small frame still holds some keys: {k}");
+    assert!(fits <= 1_024 && over > 1_024);
+    let limit = |index: usize| {
+        Err(ObservationRefusal::Limit(ObservationLimit {
+            index,
+            event_bytes: over,
+            frame_bytes: 1_024,
+        }))
+    };
+    let (mut rig, positions) = long_rig(k + 1);
+    for position in &positions[..k] {
+        rig.observe(*position, true).expect("the frame has room");
     }
-    assert_eq!(rig.session.observation_armed(), cap);
+    assert_eq!(rig.session.observation_armed(), k);
+    assert_eq!(rig.session.observation_ended_bytes(), fits);
     rig.render();
     // Re-arming an armed tap adds nothing.
     rig.observe(positions[0], true)
         .expect("a window change adds no tap");
     rig.render();
-    // One more tap is past the cap, alone or after a change that adds nothing; the refusal names
-    // the arm that crossed, and nothing moves or is queued.
     let room = |rig: &Rig| -> Vec<usize> {
         rig.session
             .effect_producers()
@@ -1028,67 +1075,59 @@ fn a_subscription_past_the_cap_is_refused_and_the_removal_of_all_still_commits()
             .collect()
     };
     let (bindings, free) = (rig.session.observation_bindings().clone(), room(&rig));
+    assert_eq!(rig.observe(positions[k], true), limit(0));
     assert_eq!(
-        rig.observe(positions[cap], true),
-        Err(ObservationRefusal::Limit(ObservationLimit {
-            index: 0,
-            cap
-        }))
-    );
-    assert_eq!(
-        rig.batch(&[change(positions[1], true), change(positions[cap], true)]),
-        Err(ObservationRefusal::Limit(ObservationLimit {
-            index: 1,
-            cap
-        })),
+        rig.batch(&[change(positions[1], true), change(positions[k], true)]),
+        limit(1),
         "the second change crosses: the first re-arms an armed tap"
     );
     assert_eq!(
         rig.session.observation_armed(),
-        cap,
+        k,
         "a refusal moves nothing"
     );
+    assert_eq!(rig.session.observation_ended_bytes(), fits);
     assert_eq!(room(&rig), free, "a refusal queues nothing");
     rig.render();
     assert_eq!(rig.session.observation_bindings(), &bindings);
     // A disarm later in the batch makes room for an arm earlier in it.
-    rig.batch(&[change(positions[cap], true), change(positions[0], false)])
+    rig.batch(&[change(positions[k], true), change(positions[0], false)])
         .expect("a disarm in the batch makes room");
-    assert_eq!(rig.session.observation_armed(), cap);
+    assert_eq!(rig.session.observation_armed(), k);
     rig.render();
-    // Remove every subscribed target: `cap` keys of the longest IDs, in one event in one frame.
+    // Remove every subscribed target: `k` keys in one event that fits one frame.
     let before = rig.revision();
     rig.apply(&remove_long_strip())
         .expect("the removal of every subscribed tap commits");
     assert_eq!(rig.revision(), before + 1);
     assert_eq!(rig.session.observation_armed(), 0);
+    assert_eq!(rig.session.observation_ended_bytes(), 0);
     let events = rig.drain();
     let ended = ended(&events);
     assert_eq!(ended.len(), 1, "one event");
-    assert_eq!(ended[0].1.keys.len(), cap, "holding every key");
-    assert!(
-        ended[0]
-            .1
-            .keys
-            .iter()
-            .all(|key| key.strip_id.len() == session::STABLE_ID_MAXIMUM_BYTES
-                && key.effect_id.len() == session::STABLE_ID_MAXIMUM_BYTES),
-        "every key is of the longest length"
-    );
+    assert_eq!(ended[0].1.keys.len(), k, "holding every key");
+    let keys: Vec<(String, String)> = ended[0]
+        .1
+        .keys
+        .iter()
+        .map(|key| (key.strip_id.clone(), key.effect_id.clone()))
+        .collect();
+    assert_eq!(ended_frame_bytes(&keys), fits, "the event fits the frame");
 
-    // One tap more than the cap, pushed past admission: its end does not fit one frame, so the
-    // same removal reaches the over-frame defence and is refused whole.
-    let (mut over, positions) = long_rig(cap + 1);
+    // One tap more, pushed past admission: its end does not fit one frame, so the same removal
+    // reaches the over-frame defence and is refused whole.
+    let (mut over_rig, positions) = long_rig(k + 1);
     for position in &positions {
-        over.session
+        over_rig
+            .session
             .test_push_observe_unadmitted(*position, 0, true, WINDOW_BLOCKS)
             .expect("a producer")
             .expect("room in the queue");
     }
-    assert_eq!(over.session.observation_armed(), cap + 1);
-    over.render();
-    let revision = over.revision();
-    let refused = over.apply(&remove_long_strip());
+    assert_eq!(over_rig.session.observation_ended_bytes(), over);
+    over_rig.render();
+    let revision = over_rig.revision();
+    let refused = over_rig.apply(&remove_long_strip());
     assert!(
         matches!(
             refused,
@@ -1096,15 +1135,133 @@ fn a_subscription_past_the_cap_is_refused_and_the_removal_of_all_still_commits()
                 ResourceFault::Limit
             )))
         ),
-        "cap + 1 longest keys do not fit one frame: {refused:?}"
+        "k + 1 longest keys do not fit one frame: {refused:?}"
     );
-    assert_eq!(over.revision(), revision);
+    assert_eq!(over_rig.revision(), revision);
 }
 
-/// A rebuild keeps the armed count of the taps it carries, so the cap holds across plans.
+/// The fixture grown to 64 tracks, `t00` to `t63`, each with the compressor insert `comp` and a
+/// route to the output, as a mixer session with a compressor on every track.
+fn sixty_four_track_session() -> String {
+    let mut model = session::parse_session_json(SESSION).expect("fixture");
+    let track = model.tracks[0].clone();
+    let route = model.routes[0].clone();
+    model.tracks = (0..64)
+        .map(|index| {
+            let mut track = track.clone();
+            track.id = StableId::parse(&format!("t{index:02}")).expect("track");
+            track
+        })
+        .collect();
+    model.routes = (0..64)
+        .map(|index| {
+            let mut route = route.clone();
+            route.id = StableId::parse(&format!("t{index:02}-main")).expect("route");
+            route.source = session::RouteSource::Track {
+                track_id: StableId::parse(&format!("t{index:02}")).expect("track"),
+                tap: session::SendTap::PostPan,
+            };
+            route
+        })
+        .collect();
+    model.automation.clear();
+    session::canonical_session_json(&model).expect("a valid session")
+}
+
+/// The large session (#1685 gate 1), at the core every host calls: a 64-track session with one
+/// compressor insert per track subscribes the compressor's meter tap on every insert, in one batch,
+/// at the browser's 16 KiB frame: all 64 are admitted. At a 4 KiB frame, which a C ABI host may
+/// configure, the event of 64 such keys does not fit (a key is at least 80 encoded bytes), so the
+/// arm that crosses is refused at its index and exactly the taps whose keys fit are admitted
+/// one by one.
 ///
-/// Red if a successor starts with an empty count (the cap would then admit twice the taps) or
-/// counts a tap whose target the transaction removed.
+/// Red if admission still assumes the longest IDs (the cap of #1676 refuses the 52nd tap at
+/// 16 KiB), or if it admits an event over the frame at 4 KiB.
+#[test]
+fn every_insert_of_a_sixty_four_track_session_subscribes_at_the_browser_frame() {
+    let document = sixty_four_track_session();
+    for frame in [16_384_u64, 4_096] {
+        let mut small = limits();
+        small.maximum_control_frame_bytes = frame;
+        let mut rig = Rig::with_session(&document, small);
+        let positions: Vec<usize> = (0..64)
+            .map(|index| rig.insert_position(&format!("t{index:02}"), "comp"))
+            .collect();
+        let keys: Vec<(String, String)> = (0..64)
+            .map(|index| (format!("t{index:02}"), "comp".to_owned()))
+            .collect();
+        let fit = (1..=64)
+            .take_while(|count| ended_frame_bytes(&keys[..*count]) <= frame as usize)
+            .last()
+            .expect("one key fits");
+        let all: Vec<ObservationChange> = positions.iter().map(|p| change(*p, true)).collect();
+        if fit == 64 {
+            rig.batch(&all).expect("every insert subscribes");
+        } else {
+            assert_eq!(
+                rig.batch(&all),
+                Err(ObservationRefusal::Limit(ObservationLimit {
+                    index: fit,
+                    event_bytes: ended_frame_bytes(&keys[..=fit]),
+                    frame_bytes: frame as usize,
+                })),
+                "{frame}"
+            );
+            assert_eq!(rig.session.observation_armed(), 0, "{frame}");
+            rig.batch(&all[..fit]).expect("the taps that fit");
+        }
+        assert_eq!(rig.session.observation_armed(), fit, "{frame}");
+        assert_eq!(
+            rig.session.observation_ended_bytes(),
+            ended_frame_bytes(&keys[..fit]),
+            "{frame}"
+        );
+        if frame == 16_384 {
+            assert_eq!(fit, 64, "the browser's frame holds every insert's tap");
+        }
+    }
+}
+
+/// Admission allocates nothing (#1685 gate 3): the browser runs it in the worklet's message
+/// handler, on the audio thread. Arms, a refusal at the frame and disarms are admitted under the
+/// calling thread's allocation counters, after one warm-up batch.
+///
+/// Red if admission sizes a key by encoding it (into a buffer, or into owned keys), or allocates
+/// scratch per batch.
+#[test]
+fn admission_allocates_nothing() {
+    let mut small = limits();
+    small.maximum_control_frame_bytes = 4_096;
+    let mut rig = Rig::with_session(&sixty_four_track_session(), small);
+    let positions: Vec<usize> = (0..64)
+        .map(|index| rig.insert_position(&format!("t{index:02}"), "comp"))
+        .collect();
+    let arms: Vec<ObservationChange> = positions.iter().map(|p| change(*p, true)).collect();
+    let disarms: Vec<ObservationChange> = positions.iter().map(|p| change(*p, false)).collect();
+    // Warm the statics and the queues' first touch.
+    rig.batch(&arms[..1]).expect("one arm");
+    rig.render();
+    rig.batch(&disarms[..1]).expect("one disarm");
+    rig.render();
+    let mark = bench_support::alloc::current_thread_counters();
+    let refused = rig.batch(&arms);
+    let first = rig.batch(&arms[..32]);
+    // Disarms of other producers: a queue holds one record per tap until a render drains it.
+    let second = rig.batch(&disarms[32..48]);
+    let allocations = bench_support::alloc::current_thread_delta_since(mark).allocations;
+    assert!(
+        matches!(refused, Err(ObservationRefusal::Limit(_))),
+        "{refused:?}"
+    );
+    assert_eq!((first, second), (Ok(()), Ok(())));
+    assert_eq!(allocations, 0, "admission allocated");
+}
+
+/// A rebuild keeps the armed count and bytes of the taps it carries, so the frame bound holds across
+/// plans.
+///
+/// Red if a successor starts with an empty count or no bytes (admission would then let the event
+/// outgrow the frame) or counts a tap whose target the transaction removed.
 #[test]
 fn the_armed_count_follows_the_bindings_across_a_rebuild() {
     let mut rig = Rig::new();
@@ -1124,6 +1281,15 @@ fn the_armed_count_follows_the_bindings_across_a_rebuild() {
     .expect("the insert is removed");
     assert_eq!(rig.session.observation_armed(), 2);
     assert_eq!(rig.session.observation_bindings().len(), 2);
+    let kept: Vec<(String, String)> = ["ins01", "ins02"]
+        .iter()
+        .map(|id| ("comp1".to_owned(), (*id).to_owned()))
+        .collect();
+    assert_eq!(
+        rig.session.observation_ended_bytes(),
+        ended_frame_bytes(&kept),
+        "the successor's bytes are the kept keys'"
+    );
     // The successor knows them armed: disarming one lowers the count, a second disarm does not.
     let position = rig.insert_position("comp1", "ins01");
     for expected in [1, 1] {
@@ -1187,9 +1353,9 @@ fn the_reserve_follows_the_slots_and_a_shrunk_plan_keeps_the_larger_reserve() {
 }
 
 /// A batch that names one tap twice is refused at the second naming, before the cap and the room
-/// are judged, and moves nothing (#1676, batch 13b fold). The cap counts each tap's state once, so
-/// `[disarm A, arm A, arm B]` with the cap full and `A` armed counts the disarm as a removal, does
-/// not count the re-arm, and admits `B`: `cap + 1` taps armed. The shipped effects declare one tap
+/// are judged, and moves nothing (#1676, batch 13b fold). The frame check counts each tap's state
+/// once, so `[disarm A, arm A, arm B]` with the frame full and `A` armed counts the disarm as a
+/// removal, does not count the re-arm, and admits `B`: an event over the frame. The shipped effects declare one tap
 /// each, so the queue's one slot happens to refuse that batch as `Full`; an effect with two taps,
 /// or a C ABI edit that names a tap twice, would not.
 ///
@@ -1197,11 +1363,7 @@ fn the_reserve_follows_the_slots_and_a_shrunk_plan_keeps_the_larger_reserve() {
 /// `Full` at change 0, or as `Limit` at change 0 for `[arm B, arm B]`), or names the wrong change.
 #[test]
 fn a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming() {
-    let cap = {
-        let mut small = limits();
-        small.maximum_control_frame_bytes = 1_024;
-        Rig::with_limits(small).session.observation_cap()
-    };
+    let (cap, _, _) = long_capacity();
     let (mut rig, positions) = long_rig(cap + 1);
     for position in &positions[..cap] {
         rig.observe(*position, true).expect("under the cap");
@@ -1227,7 +1389,7 @@ fn a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming() {
     assert_eq!(
         rig.batch(&[change(positions[cap], true), change(positions[cap], true)]),
         Err(ObservationRefusal::Duplicate { index: 1 }),
-        "two arms of one tap are refused as such, not as the cap"
+        "two arms of one tap are refused as such, not as the frame"
     );
     assert_eq!(
         rig.session.observation_armed(),
