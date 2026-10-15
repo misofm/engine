@@ -68,6 +68,9 @@ const OUTER_VCA: VcaRef = VcaRef { id: "outer" };
 const MATRIX_MODE_ROW: u32 = 1;
 /// The builtin row of a strip's `delay_samples`.
 const DELAY_SAMPLES_ROW: u32 = 11;
+/// The builtin rows of a strip's `pan` and `matrix_ll`.
+const PAN_ROW: u32 = 12;
+const MATRIX_LL_ROW: u32 = 7;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
 /// Which lane(s) of a dual-mono value an edit writes.
@@ -1230,6 +1233,35 @@ impl CAbi {
 
     /// Send one frame and decode the answer.
     fn send(&mut self, payload: CommandPayload<'_>, expected: ExpectedRevision) -> Vec<u8> {
+        let (code, response) = self.send_status(payload, expected);
+        assert_eq!(code, C_RESULT_OK, "C ABI command");
+        response
+    }
+
+    /// The session's last diagnostic, through `miso_engine_v1_last_error`.
+    fn last_error(&self) -> Vec<u8> {
+        let mut storage = vec![0_u8; 4_096];
+        let mut out = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: storage.as_mut_ptr(),
+            capacity_bytes: storage.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; the buffer is owned.
+        let code = unsafe { capi::miso_engine_v1_last_error(self.session.cast(), &mut out) };
+        assert_eq!(code, C_RESULT_OK, "C ABI last error");
+        storage.truncate(out.required_bytes as usize);
+        storage
+    }
+
+    /// [`Self::send`] for a command that may be refused: the entry's result, and the response frame
+    /// after `RESULT_OK` or else the refusal's diagnostic.
+    fn send_status(
+        &mut self,
+        payload: CommandPayload<'_>,
+        expected: ExpectedRevision,
+    ) -> (u32, Vec<u8>) {
         self.request += 1;
         let mut bytes = vec![0_u8; 4_096];
         let length = ProtocolCodec::default()
@@ -1260,10 +1292,13 @@ impl CAbi {
                 &mut out,
             )
         };
-        assert_eq!(code, C_RESULT_OK, "C ABI command");
         response.truncate(out.required_bytes as usize);
+        // Before the drain: a later entry clears the diagnostic.
+        if code != C_RESULT_OK {
+            response = self.last_error();
+        }
         self.drain_reliable();
-        response
+        (code, response)
     }
 
     /// One scripted edit as one transaction at the committed revision, and the reply frame's bytes.
@@ -2373,6 +2408,94 @@ fn both_hosts_refuse_a_source_of_more_than_two_channels_alike() {
             browser.host.session_source_count(),
             1,
             "{rate}: nothing committed"
+        );
+    }
+}
+
+/// #1631. A `matrix_mode` switch under a stored pan entry is refused alike by both hosts: the same
+/// refusal and the same diagnostic (`control.inactive` at the entry's path, the row rule's
+/// own, through the rebuild route), and nothing commits -- the same expected revision still
+/// commits the switch together with the entry's retarget to the matrix row, without a rebuild, on both.
+///
+/// Red mutation: run the classifier's row rule only when the automation table changes -> the switch
+/// commits live on both hosts and the first assertion fails.
+#[test]
+fn a_mode_switch_under_a_stored_pan_entry_is_refused_alike_on_both_hosts() {
+    for rate in RATES {
+        let mut model = model_at(rate);
+        model.automation.push(session::Automation {
+            id: id("t2-pan-ride"),
+            target: address(
+                Owner::Strip(id(T2.id)),
+                Section::Builtins,
+                PAN_ROW,
+                ParameterChannel::Left,
+            ),
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 960,
+                start_value: 0.0,
+                end_value: 0.5,
+                unit: session::ParameterUnit::Linear,
+            }],
+        });
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let switch = CAbi::edits(
+            Edit::MatrixMode {
+                strip: T2,
+                matrix: true,
+            },
+            None,
+        );
+
+        let frame = browser.encode(
+            CommandPayload::SessionTransactionApply(&switch),
+            ExpectedRevision::Exact(SessionRevision(browser.revision)),
+        );
+        let (b_code, b_diagnostic) = browser.send_frame(&frame);
+        let (c_code, c_diagnostic) = c_abi.send_status(
+            CommandPayload::SessionTransactionApply(&switch),
+            ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
+        );
+        assert_ne!(
+            b_code, C_RESULT_OK,
+            "{rate}: the browser refuses the switch"
+        );
+        // Each host has its own result numbering; the diagnostic is the shared contract.
+        assert_ne!(c_code, C_RESULT_OK, "{rate}: the C ABI refuses the switch");
+        assert_eq!(b_diagnostic, c_diagnostic, "{rate}: one diagnostic");
+        let diagnostic = String::from_utf8_lossy(&c_diagnostic);
+        assert!(
+            diagnostic.contains("control.inactive")
+                && diagnostic.contains("$.automation[id=t2-pan-ride].target"),
+            "{rate}: {diagnostic}"
+        );
+
+        // Nothing committed: the revision the refused transaction named still commits, with the
+        // entry moved to the matrix row in the same transaction.
+        let mut retargeted = switch.clone();
+        retargeted.push(SessionEdit::SetAutomationTarget {
+            automation_id: id("t2-pan-ride"),
+            target: address(
+                Owner::Strip(id(T2.id)),
+                Section::Builtins,
+                MATRIX_LL_ROW,
+                ParameterChannel::Both,
+            ),
+        });
+        let (b_verdict, b_reply) = browser.transaction_reply(&retargeted);
+        let c_reply = c_abi.send(
+            CommandPayload::SessionTransactionApply(&retargeted),
+            ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
+        );
+        assert_eq!(b_reply, c_reply, "{rate}: the same reply bytes");
+        assert!(
+            // The switch keeps the effective 2x2 the plan holds, so it writes no record.
+            matches!(&b_verdict, Verdict::Applied { path: EditPath::ModelOnly, revision }
+                if *revision == model.revision + 1),
+            "{rate}: committed without a rebuild at the next revision, got {b_verdict:?}"
         );
     }
 }

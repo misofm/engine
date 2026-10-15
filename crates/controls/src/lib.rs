@@ -46,7 +46,9 @@ mod view;
 
 pub use automation::{ControlDiagnostic, automation_diagnostics};
 pub use descriptor::{Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, check};
-pub use diff::{ChangedControl, changed_controls, changed_rows, writes_only_its_row};
+pub use diff::{
+    ChangedControl, activity_changed, changed_controls, changed_rows, writes_only_its_row,
+};
 pub use effect_contract::control::{
     ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper,
 };

@@ -219,9 +219,11 @@ pub use crate::prepare::LiveRebuild;
 ///    [`controls::mask_values`] copied from `current`, has canonical JSON bytes other than
 ///    `current`'s. Bytes, never `PartialEq`: the canonical `f32` spelling keeps a zero's sign. A
 ///    canonical JSON error is structural too.
-/// 2. [`LiveRebuild::AutomationTarget`] if `current.automation != next.automation` and
-///    [`controls::automation_diagnostics`] refuses one of `next`'s automations (decision 15 E1,
-///    #1335 D4, #1566 D6). An unchanged automation table is never re-checked: it was prepared. An accepted
+/// 2. [`LiveRebuild::AutomationTarget`] if `current.automation != next.automation` or a row's
+///    activity changed ([`controls::activity_changed`]: a strip's `matrix_mode` switch flips which
+///    of its pan and matrix rows are active, #1631) and [`controls::automation_diagnostics`]
+///    refuses one of `next`'s automations (decision 15 E1, #1335 D4, #1566 D6). An unchanged
+///    automation table over unchanged activity is never re-checked: it was prepared. An accepted
 ///    change stays live with no records, as #1260 D2 made it.
 /// 3. With the structure equal, the two models list the same controls in the same order. For each
 ///    control whose value bits differ ([`controls::changed_controls`]): a row that is
@@ -341,7 +343,7 @@ pub fn classify_live_delta_with_monitor<'a>(
     drop(masked);
 
     // Step 2.
-    if current.automation != next.automation
+    if (current.automation != next.automation || controls::activity_changed(current, next))
         && !controls::automation_diagnostics(next, next.sample_rate_hz).is_empty()
     {
         return Err(LiveRebuild::AutomationTarget);
