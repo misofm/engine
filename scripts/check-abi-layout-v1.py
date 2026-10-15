@@ -226,7 +226,7 @@ STRUCTURES = {
     "bootOptions": 64,
     "status": 80,
     "resourceReport": 224,
-    "meterHeader": 72,
+    "meterHeader": 80,
     "commandReport": 48,
     "planWatermark": 96,
     "observationSelection": 32,

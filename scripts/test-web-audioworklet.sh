@@ -165,7 +165,7 @@ echo "web AudioWorklet transitive process-policy mutations passed"
 # "a pinned post disappears" and "the clock leaves its one pinned site".
 live_control_mutations=(
   # A pinned post is renamed: the occurrence count still matches, the pinned line does not.
-  's/this\.port\.postMessage(this\.meterMessage);/this.port.postMessage(this.telemetryMessage);/'
+  's/this\.port\.postMessage(set\.message);/this.port.postMessage(this.telemetryMessage);/'
   # The telemetry post is dropped from the window: the count no longer matches.
   's/this\.port\.postMessage(frame);/frame.sequence += 0;/'
   # The lease guard is removed from the meter call site: the frame is posted unconditionally.

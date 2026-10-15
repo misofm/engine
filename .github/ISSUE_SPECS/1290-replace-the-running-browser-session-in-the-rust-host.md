@@ -477,3 +477,80 @@ commits (control side, counted on a non-isolated page), and `process()` switches
 reference at the swap block. `process()` never cuts a view or allocates. Gate: a strip-count change
 publishes a correctly shaped frame on the first block after adoption, with zero render
 allocations. (d1) lands in batch 12a; (d2) in batch 12b after #1395.
+
+## Decision record: (d1) meters (batch 12, lane W)
+
+**Shipped.** A strip-count change no longer leaves the browser publishing nothing. The meter frame and
+its header travel with the `PlanShape` (root's ruling); the page cuts its views over the successor's
+frame in the message handler that commits, and `process()` switches to them by reference.
+
+- **Frame and header in the shape.** `PlanShape` owns `meter_frame` (`3(T + S) + 3` words, built by
+  `build_plan_shape`), `meter_header` (counts, master index and frame address from the plan; the poll's
+  stream fields at run time) and `meter_carried_from`. `ReadyOwnership` lost its own frame and header.
+  `adopt_shape` copies the stream fields (`windows`, `first/end_sample`, `sequence`, `master_gr_present`,
+  `reserved[0..1]`) into the adopted header: the same stream continues in a frame of the new size. A
+  pointer exchange and scalar writes; nothing allocates in the swap block.
+- **`WebMeterHeader` 72 -> 80 bytes, nothing moved.** `reserved_pad` (68) became `retired`; appended
+  `frame_pointer` (72) and `successor_pointer` (76). A commit writes the newest candidate's header
+  address into the rendering plan's `successor_pointer` (`run_command`); the adopting block marks the
+  header it leaves `retired = 1`, names the adopted header in its `successor_pointer`, and points the
+  adopted header at any candidate still waiting. ABI mirrors regenerated (`abi_layout.rs`,
+  `sdk/assets`, `sdk/src/generated/abi.ts`, `check-abi-layout-v1.py`, its self-test fixture, the
+  direct oracle, `docs/BUILTINS_AND_METERING_V1.md`).
+- **Worklet.** The views are per meter set (`meterSet`, `pendingMeterSet`), cut by `cutMeterSet` in
+  `syncMeterViews`, which every message handler runs last (and `rebindMemoryViews` re-cuts both sets
+  on a memory growth). `postMeterFrame` reads the active header's `retired` word; if set it switches
+  `meterSet = pendingMeterSet` (a reference assignment) before the poll; a retired header with no set
+  cut for the header it names is sticky `RESULT_INTERNAL` (cannot happen in single mode). A lease
+  released across a swap is caught by `syncMeterViews`, which compares the host's current header
+  address with the page's. The pinned post spelling in `check-web-audioworklet.sh` and its mutation in
+  `test-web-audioworklet.sh` follow (`this.port.postMessage(set.message)`: the set's message is
+  allocated with its views, in the handler).
+- **Handle shift.** A meter's handle is its position, so a strip added or removed in front shifts the
+  survivors' handles. The hook records both handles per carried meter (`CarriedReader`), the shape keeps
+  the predecessor's in `meter_carried_from[successor]`, and the poll accepts a snapshot named by either.
+  A queue is one strip's, so the second handle names the same strip (by carry identity, not position).
+  Not kept: a window two swaps old still names a handle the table no longer holds and is dropped with a
+  count; it needs a second swap between two polls.
+- **Counted loss kept.** A window the predecessor closed before an added strip existed cannot be
+  described by the successor's frame (that strip has no data for it): it is dropped with a count by the
+  poll that finds it, as before. A removed strip's window is published without it (gate below).
+- **Charging.** The frame was an uncharged allocation at boot. It is now a row of the shape
+  (`ShapeRows::frame_bytes`, `carried_bytes`): the boot adds it to the bridge rows, a replacement to its
+  plan row. `observation_staging_resource_is_exact_for_the_taps_off_and_on_modes` gained the frame
+  term. Boot high-water growth 20,447,232 bytes (before: 20,447,232); `check-browser-expected-resources`
+  green with no re-pin.
+
+**Departures.** None from root's ruling. Mechanical edits outside lane W's own files, listed for the
+coordinator: `tools/realtime-policy/render-thread-exports.json` and `src/policy.rs` (the handler now
+calls `meter_header_ptr` after construction: one table row and one named unwrapped export),
+`scripts/check-web-audioworklet.sh` and `scripts/test-web-audioworklet.sh` (the pinned post), the ABI
+mirrors named above.
+
+**Gates -> tests.**
+- Root's gate (a strip-count change publishes a correctly shaped frame on the first block after
+  adoption, zero render allocations): `tests/structural_apply_realtime.rs`
+  `a_strip_count_change_publishes_the_successors_frame_on_the_first_block_after_adoption` (render and
+  `meter_poll` under the render-locked counters, adoption block included; every frame after it equals a
+  fresh boot of the committed model for the same window); `structural_apply::
+  a_strip_count_change_publishes_the_successors_frame_from_the_adoption_block` (the same in the lib, with
+  the retired/successor words).
+- #1381 gate 3 (changed strip count, `track_count` 10, shifted words): the two tests above.
+- Handle shift: `a_window_closed_before_a_handle_shift_is_published_by_its_carried_strip` (remove the
+  first strip, poll every second block so the window is polled after the swap: published, sequence
+  continues, no counted loss; red when the carried-from acceptance is disabled, checked).
+  `an_aligned_poll_every_second_block_loses_nothing_across_an_added_strip` is gate 7's cadence variant.
+- Counted loss: `windows_an_added_strip_cannot_describe_are_counted_and_the_next_frame_is_the_successors`
+  (replaces `meter_windows_a_strip_count_change_leaves_unpublished_are_counted`);
+  `meter_delivery_carries_through_a_swap_that_keeps_the_strips` (first half of the old
+  `..._never_publishes_a_misshaped_frame`).
+- Worklet: three blocks in `scripts/test-web-audioworklet.mjs` (views cut in the handler and switched by
+  reference at the adopting block, sequence continues; lease released across a swap; retired header with
+  no pending set is sticky).
+
+**Limits found.** (1) The shipped module cannot run a rebuild until #1562b, so the real-wasm pointer
+chain (`retired`, `successor_pointer`) is covered by the hermetic worklet fake and, on native, by
+equality with `address_word` (which is `0` for a 64-bit address); the chromium leg proves the boot
+`frame_pointer` path with real addresses. (2) The SDK's `meterProjection` still checks a frame against
+its own session map, so after a structural apply it refuses the successor's frame until the SDK map
+follows the apply (#1296's); the engine side is complete.

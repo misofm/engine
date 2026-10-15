@@ -284,8 +284,10 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(MAXIMUM_OBSERVATION_TAPS, 16);
     // The meter header is a new fixed structure, not a change to an existing one.
     // Issue #1209 D2 appended `submix_count` and its pad: 64 bytes became 72, nothing moved.
-    assert_eq!(size_of::<WebMeterHeader>(), 72);
-    assert_eq!(METER_HEADER_BYTES, 72);
+    // Issue #1290d1 turned the pad into `retired` and appended the frame and successor pointers:
+    // 72 bytes became 80, nothing moved.
+    assert_eq!(size_of::<WebMeterHeader>(), 80);
+    assert_eq!(METER_HEADER_BYTES, 80);
     assert_eq!(offset_of!(WebMeterHeader, track_count), 8);
     assert_eq!(offset_of!(WebMeterHeader, windows), 12);
     assert_eq!(offset_of!(WebMeterHeader, first_sample), 16);
@@ -295,7 +297,9 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebMeterHeader, master_gr_present), 44);
     assert_eq!(offset_of!(WebMeterHeader, reserved), 48);
     assert_eq!(offset_of!(WebMeterHeader, submix_count), 64);
-    assert_eq!(offset_of!(WebMeterHeader, reserved_pad), 68);
+    assert_eq!(offset_of!(WebMeterHeader, retired), 68);
+    assert_eq!(offset_of!(WebMeterHeader, frame_pointer), 72);
+    assert_eq!(offset_of!(WebMeterHeader, successor_pointer), 76);
     assert_eq!(offset_of!(WebCommandReport, result), 8);
     assert_eq!(offset_of!(WebCommandReport, rejected_index), 16);
     assert_eq!(offset_of!(WebCommandReport, applied_at_sample), 24);
@@ -918,17 +922,23 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
                     + host_core::LiveValuesSuperseded::retained_bytes(),
             "{name}: the control plane's row holds the rows an independent preparation reports"
         );
+        // The published meter frame is part of the plan's tables, charged with them (#1290d1):
+        // `3(T + S) + 3` words, held whether or not metering is on.
+        let model = compiled.normalized_model();
+        let frame_bytes = (3 * (model.tracks.len() + model.submixes.len()) as u64 + 3) * 4;
         let expected_bridge_metadata = projection
             .report
             .bridge_metadata_bytes
-            .checked_add(control_retained)
+            .checked_add(frame_bytes)
+            .and_then(|bytes| bytes.checked_add(control_retained))
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .expect("bridge metadata arithmetic");
         let expected_bridge_retained = projection
             .report
             .bridge_retained_bytes
-            .checked_add(control_retained)
+            .checked_add(frame_bytes)
+            .and_then(|bytes| bytes.checked_add(control_retained))
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .expect("bridge retained arithmetic");
@@ -3387,10 +3397,11 @@ fn the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix() {
     let mut host = bus_meter_host(QUANTUM, true);
     let frame = bus_meter_frame(&mut host, BLOCKS);
     let header = *host.meter_header();
-    assert_eq!(header.struct_size, 72);
+    assert_eq!(header.struct_size, 80);
     assert_eq!(header.track_count, 3);
     assert_eq!(header.submix_count, 2);
-    assert_eq!(header.reserved_pad, 0);
+    assert_eq!(header.retired, 0);
+    assert_eq!(header.successor_pointer, 0);
     let (tracks, strips) = (3_usize, 5_usize);
     assert_eq!(frame.len(), 3 * strips + 3, "3(T + S) + 3 words");
 
@@ -6645,22 +6656,48 @@ mod structural_apply {
         windows
     }
 
-    /// The meter delivery across a swap (#1381b): a swap that keeps the strip count carries the
-    /// predecessor's meters, so the delivery epoch the page sees does not change and the windows
-    /// follow each other without a gap, and a swap that changes the count publishes nothing rather
-    /// than a frame whose words name other strips (the worklet's views over the frame keep the
-    /// boot's size, #1290d).
+    /// One published meter frame: the header and the frame's words.
+    type Published = (WebMeterHeader, Vec<f32>);
+
+    /// Drive `blocks` more blocks with the lease on, polling after the blocks whose zero-based
+    /// index leaves `phase` modulo `every`; every frame published, in order.
+    fn poll_cadence(rig: &mut Rig, blocks: u64, every: u64, phase: u64) -> Vec<Published> {
+        let mut frames = Vec::new();
+        for _ in 0..blocks {
+            let index = rig.block;
+            rig.step();
+            if index % every == phase && rig.host.poll_meters() > 0 {
+                frames.push((*rig.host.meter_header(), rig.host.meter_frame().to_vec()));
+            }
+        }
+        frames
+    }
+
+    /// The frames a fresh boot of `model` publishes over `blocks` blocks, polled after each, keyed
+    /// by the window's first sample: what the swapped host must publish for the same window.
+    fn fresh_windows(model: &SessionModel, blocks: u64) -> Vec<Published> {
+        let mut rig = Rig::boot(model, options(), None);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        poll_cadence(&mut rig, blocks, 1, 0)
+    }
+
+    fn window_of(frames: &[Published], first_sample: u64) -> &Published {
+        frames
+            .iter()
+            .find(|(header, _)| header.first_sample == first_sample)
+            .unwrap_or_else(|| panic!("no window opens at sample {first_sample}"))
+    }
+
+    /// The meter delivery across a swap that keeps the strips (#1381b): the predecessor's meters
+    /// carry, so the delivery epoch the page sees does not change and the windows follow each
+    /// other without a gap.
     ///
     /// Test value: red if the swap block's hook does not pair the meter consumers (the successor's
     /// meters would sit on observers the retiring plan owns and no window would ever fold again),
-    /// if the swap restarts the delivery epoch or discards the windows waiting for a poll, or if
-    /// the poll reads past the boot-sized frame or the successor's meters after a swap that adds a
-    /// strip.
+    /// or if the swap restarts the delivery epoch or discards the windows waiting for a poll.
     #[test]
-    fn meter_delivery_carries_through_a_swap_and_never_publishes_a_misshaped_frame() {
+    fn meter_delivery_carries_through_a_swap_that_keeps_the_strips() {
         let model = gate_model();
-
-        // A swap that keeps the strips: an unused source is added.
         let mut source = model.sources[0].clone();
         source.id = StableId::parse("a-unused").expect("source ID");
         let mut rig = Rig::boot(&model, options(), None);
@@ -6695,13 +6732,31 @@ mod structural_apply {
             published.reserved[1],
             "no window was lost to the swap"
         );
+    }
 
-        // A swap that adds a strip.
+    /// A swap that adds a strip publishes the successor's frame (#1290d1): the frame travels with
+    /// the plan, so the window the adoption block closes is described by a `3(T + S) + 3` frame for
+    /// the plan's own strips, bit for bit what a fresh boot of the committed model publishes for
+    /// that window, in the same stream (generation, sequence, no counted loss).
+    ///
+    /// Test value: red if the frame keeps the boot's size (the poll would publish nothing, or a
+    /// frame whose words name other strips), if the header keeps the predecessor's strip counts,
+    /// if the swap restarts the stream, or if the added strip's words land at the wrong index.
+    #[test]
+    fn a_strip_count_change_publishes_the_successors_frame_from_the_adoption_block() {
+        let model = gate_model();
+        let committed = with_muted_track(&model, ADDED);
+        // Windows close after the odd blocks. The transaction runs before block 5, so the block
+        // that adopts the successor is the one that closes the window opening at sample 512.
+        let apply_before = 5;
+        let reference = fresh_windows(&committed, 8);
+
         let mut rig = Rig::boot(&model, options(), None);
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
-        assert!(poll_blocks(&mut rig, 6) > 0);
-        let frame = rig.host.meter_frame().to_vec();
-        let header = *rig.host.meter_header();
+        let before = poll_cadence(&mut rig, apply_before, 1, 0);
+        let last = before.last().expect("the boot plan published windows");
+        assert_eq!(last.0.track_count, 9);
+        assert_eq!(last.1.len(), 3 * 9 + 3);
         let base = rig.host.committed_revision();
         assert_eq!(
             rig.apply(&add_muted_track(&model, ADDED), 1),
@@ -6710,10 +6765,203 @@ mod structural_apply {
                 revision: base + 1
             }
         );
-        assert_eq!(poll_blocks(&mut rig, 8), 0, "no frame describes ten strips");
-        assert_eq!(rig.host.live_control_tracks().len(), 10);
-        assert_eq!(rig.host.meter_frame(), &frame[..], "the frame is untouched");
-        assert_eq!(rig.host.meter_header().sequence, header.sequence);
+        // The candidate's header is named by the one that renders, before the adoption block.
+        {
+            let ready = rig.host.ready.as_ref().expect("ready");
+            let waiting = ready.pending_shapes.last().expect("the candidate's tables");
+            assert_eq!(waiting.shape.meter_header.track_count, 10);
+            assert_eq!(waiting.shape.meter_frame.len(), 3 * 10 + 3);
+            assert_eq!(
+                ready.shape.meter_header.successor_pointer,
+                address_word(core::ptr::from_ref(&waiting.shape.meter_header))
+            );
+            assert_eq!(ready.shape.meter_header.retired, 0);
+        }
+        let after = poll_cadence(&mut rig, 1, 1, 0);
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(
+            after.len(),
+            1,
+            "the first block after adoption publishes: the successor's frame is not too small"
+        );
+        let (header, frame) = &after[0];
+        assert_eq!(header.track_count, 10);
+        assert_eq!(header.submix_count, 0);
+        assert_eq!(header.master_track_plus_one, 0);
+        assert_eq!(
+            frame.len(),
+            3 * 10 + 3,
+            "a frame sized for the successor's strips"
+        );
+        assert_eq!(header.first_sample, 512);
+        assert_eq!(
+            header.reserved[0], last.0.reserved[0],
+            "the stream's generation is the plan's predecessor's"
+        );
+        assert_eq!(
+            header.sequence,
+            last.0.sequence + 1,
+            "the sequence continues"
+        );
+        assert_eq!(header.reserved[1] >> 32, 0, "no window was counted lost");
+        let (expected_header, expected) = window_of(&reference, 512);
+        assert_eq!(header.reserved[1], expected_header.reserved[1]);
+        assert_eq!(
+            frame.iter().map(|word| word.to_bits()).collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|word| word.to_bits())
+                .collect::<Vec<_>>(),
+            "the window is what a fresh boot of the committed model publishes"
+        );
+        assert!(
+            frame.iter().any(|word| *word != 0.0),
+            "the frame is not silence"
+        );
+
+        // The header the swap retired says so and names the one that replaced it; the adopted
+        // header carries no successor (nothing waits).
+        let ready = rig.host.ready.as_ref().expect("ready");
+        let retired = ready
+            .pending_shapes
+            .iter()
+            .find(|entry| entry.adopted)
+            .expect("the retired tables wait for the service step");
+        assert_eq!(retired.shape.meter_header.retired, 1);
+        assert_eq!(retired.shape.meter_header.track_count, 9);
+        assert_eq!(
+            retired.shape.meter_header.successor_pointer,
+            address_word(core::ptr::from_ref(&ready.shape.meter_header))
+        );
+        assert_eq!(ready.shape.meter_header.retired, 0);
+        assert_eq!(ready.shape.meter_header.successor_pointer, 0);
+
+        // And the stream goes on in the successor's frame.
+        let later = poll_cadence(&mut rig, 3, 1, 0);
+        assert!(!later.is_empty());
+        for (header, frame) in &later {
+            assert_eq!(header.track_count, 10);
+            assert_eq!(frame.len(), 33);
+            let (_, expected) = window_of(&reference, header.first_sample);
+            assert_eq!(frame, expected);
+        }
+    }
+
+    /// A window the predecessor closed before the swap and the poll finds after it belongs to the
+    /// strip it was carried to (#1290d1). Removing the first strip shifts every survivor's meter
+    /// handle down by one, so the windows queued under the old handles must still be accepted:
+    /// published in the successor's smaller frame with the stream's sequence, nothing counted.
+    ///
+    /// Test value: red if the poll matches a queued or pending window by the meter's current
+    /// handle only (the whole window is dropped and counted, nine times), or if the carried strips
+    /// are matched by position instead of identity (the frame would name other strips' peaks).
+    #[test]
+    fn a_window_closed_before_a_handle_shift_is_published_by_its_carried_strip() {
+        let model = gate_model();
+        let with_added = with_muted_track(&model, ADDED);
+        let reference = fresh_windows(&model, 10);
+
+        let mut rig = Rig::boot(&with_added, options(), None);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        // Windows close after the odd blocks; polling after the even blocks leaves each window
+        // queued for one block. The transaction runs before block 6, which adopts the successor
+        // and is polled: the window that closed after block 5 is polled after the swap.
+        let before = poll_cadence(&mut rig, 6, 2, 0);
+        let last = before.last().expect("the boot plan published windows");
+        assert_eq!(last.0.track_count, 10);
+        assert_eq!(last.0.first_sample, 256, "the window of blocks 2 and 3");
+        let base = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(
+                &[
+                    SessionEdit::RemoveRoute {
+                        route_id: StableId::parse(&format!("{ADDED}-main")).expect("route ID"),
+                    },
+                    SessionEdit::RemoveTrack {
+                        track_id: StableId::parse(ADDED).expect("track ID"),
+                    },
+                ],
+                1
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 1
+            }
+        );
+        let after = poll_cadence(&mut rig, 4, 2, 0);
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(
+            after.len(),
+            2,
+            "the windows of blocks 4-5 and 6-7 are published"
+        );
+        let (header, frame) = &after[0];
+        assert_eq!(
+            header.first_sample, 512,
+            "the window the predecessor closed"
+        );
+        assert_eq!(header.track_count, 9);
+        assert_eq!(frame.len(), 3 * 9 + 3);
+        assert_eq!(header.sequence, last.0.sequence + 1);
+        assert_eq!(header.reserved[0], last.0.reserved[0]);
+        assert_eq!(
+            header.reserved[1] >> 32,
+            0,
+            "no window was counted lost to the handle shift"
+        );
+        let (_, expected) = window_of(&reference, 512);
+        assert_eq!(
+            frame.iter().map(|word| word.to_bits()).collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|word| word.to_bits())
+                .collect::<Vec<_>>(),
+            "each survivor's peaks are at its own index of the smaller frame"
+        );
+        assert!(frame.iter().any(|word| *word != 0.0));
+        let (next, next_frame) = &after[1];
+        assert_eq!(next.sequence, header.sequence + 1);
+        assert_eq!(next.reserved[1] >> 32, 0);
+        assert_eq!(next_frame, &window_of(&reference, 768).1);
+    }
+
+    /// The same stream across a swap that adds a strip in front, polled every second block with
+    /// the polls aligned to the windows (#1290d1, gate 7): nothing is counted lost, the sequence
+    /// continues, and every window is the fresh boot's.
+    ///
+    /// Test value: red if the swap restarts or loses a window the aligned cadence leaves nothing
+    /// to lose (the stream's generation, sequence or loss count moving across the swap).
+    #[test]
+    fn an_aligned_poll_every_second_block_loses_nothing_across_an_added_strip() {
+        let model = gate_model();
+        let committed = with_muted_track(&model, ADDED);
+        let reference = fresh_windows(&committed, 12);
+
+        let mut rig = Rig::boot(&model, options(), None);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        let before = poll_cadence(&mut rig, 6, 2, 1);
+        let last = before.last().expect("the boot plan published windows");
+        let base = rig.host.committed_revision();
+        assert!(matches!(
+            rig.apply(&add_muted_track(&model, ADDED), 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        let after = poll_cadence(&mut rig, 6, 2, 1);
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(rig.host.committed_revision(), base + 1);
+        assert_eq!(after.len(), 3);
+        let mut sequence = last.0.sequence;
+        for (header, frame) in &after {
+            sequence += 1;
+            assert_eq!(header.sequence, sequence);
+            assert_eq!(header.reserved[0], last.0.reserved[0]);
+            assert_eq!(header.reserved[1] >> 32, 0, "no counted loss");
+            assert_eq!(header.track_count, 10);
+            assert_eq!(frame, &window_of(&reference, header.first_sample).1);
+        }
     }
 
     /// An acknowledged subscription survives a swap (#1381b): the tap's armed bit and arm sample
@@ -6829,19 +7077,22 @@ mod structural_apply {
         rig.host.ready.as_ref().expect("ready").meter_loss_count
     }
 
-    /// Telemetry is dropped only with a count. A swap that changes the strip count publishes no
-    /// frame (the carried meters keep the delivery state, #1381b), so every window it leaves
-    /// unpublished is counted when the poll finds it unpublishable and added to the loss count
-    /// the next published frame reports, and the swap does not zero what was counted before it.
+    /// Telemetry is dropped only with a count. The windows the predecessor closed before a swap
+    /// that adds a strip and nobody polled before it cannot be described by the successor's frame
+    /// (the added strip did not exist to measure them): the poll that finds them drops them with a
+    /// count, the swap does not zero what was counted before it, the next frame published is the
+    /// successor's, and it reports the loss.
     ///
-    /// Test value: red if the unpublished windows of a strip-count change vanish without a count
-    /// (a page would see a silent gap), or if the swap zeroes the loss count.
+    /// Test value: red if the windows the successor cannot describe vanish without a count (a page
+    /// would see a silent gap), if the swap zeroes the loss count, or if a frame is published
+    /// that mixes the two plans' strips.
     #[test]
-    fn meter_windows_a_strip_count_change_leaves_unpublished_are_counted() {
+    fn windows_an_added_strip_cannot_describe_are_counted_and_the_next_frame_is_the_successors() {
         let model = gate_model();
         let mut rig = Rig::boot(&model, options(), None);
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         assert!(poll_blocks(&mut rig, 6) > 0);
+        let published = *rig.host.meter_header();
         // Windows rendered and not polled when the swap comes, and a loss counted before it.
         for _ in 0..4 {
             rig.step();
@@ -6860,31 +7111,35 @@ mod structural_apply {
         );
         rig.step();
         assert_eq!(rig.epoch(), 1);
-        let after_swap = meter_loss(&rig);
+        assert_eq!(meter_loss(&rig), 5, "the swap keeps the count");
         assert_eq!(
-            after_swap, 5,
-            "the swap keeps the count; the {waiting} windows waiting are counted by the poll"
+            rig.host.meter_header().sequence,
+            published.sequence,
+            "nothing was published meanwhile"
         );
 
-        // Every window closed afterwards is polled, found unpublishable and counted.
-        let windows_before = rig.host.ready.as_ref().expect("ready").master_count as u64;
-        let mut counted = after_swap;
+        let mut first = None;
         for _ in 0..8 {
             rig.step();
-            let closed = rig.host.ready.as_ref().expect("ready").master_count as u64;
-            assert_eq!(rig.host.poll_meters(), 0);
-            let ready = rig.host.ready.as_ref().expect("ready");
-            assert_eq!(
-                ready.master_count, 0,
-                "the poll drains what it cannot publish"
-            );
-            assert_eq!(meter_loss(&rig), counted + closed);
-            counted += closed;
+            if rig.host.poll_meters() > 0 {
+                first = Some((*rig.host.meter_header(), rig.host.meter_frame().to_vec()));
+                break;
+            }
         }
+        let (header, frame) = first.expect("the successor's window is published");
+        assert_eq!(header.track_count, 10);
+        assert_eq!(frame.len(), 33);
         assert!(
-            counted > after_swap + windows_before,
-            "windows were closed and counted"
+            header.first_sample >= 10 * 128,
+            "a window from the adoption block on, not one of the predecessor's"
         );
+        assert!(header.reserved[1] & METER_VALID_LOSS != 0);
+        assert!(
+            header.reserved[1] >> 32 >= 5 + waiting,
+            "the windows left behind are counted ({} for {waiting} waiting and 5 before)",
+            header.reserved[1] >> 32
+        );
+        assert_eq!(header.sequence, published.sequence + 1);
     }
 
     /// Run the production control entry on a record the preparer cannot leave its tables in: the

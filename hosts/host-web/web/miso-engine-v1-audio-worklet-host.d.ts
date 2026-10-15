@@ -99,7 +99,11 @@
 // construction whose four arrays are a `Float32Array` of `2 * trackCount + 2` peaks, one of
 // `trackCount` gain-reduction magnitudes, and the buses' `2 * submixCount` peaks and
 // `submixCount` magnitudes, all allocated at construction and overwritten in place; nothing is
-// transferred, so the caller keeps no ownership obligation. The single allocation left is the
+// transferred, so the caller keeps no ownership obligation. The counts are the plan's: a structural
+// apply that adds or removes a strip gives its successor a frame of its own size, whose body and
+// views are made in the message handler that committed it (never in the render callback), and the
+// first window the successor closes is published in it, in the same stream (`sequence`,
+// `generation` and `lossCount` continue). The single allocation left is the
 // structured clone `postMessage` performs, which is `4 * (3 * (trackCount + submixCount) + 2)`
 // bytes plus a handful of small numbers -- 392 bytes for a 32-track console with no buses. That cost has not been separately benchmarked in a browser; the telemetry
 // lease measures the render export, not the post around it.
@@ -506,6 +510,8 @@ export interface MisoMeterFrame {
   readonly lossCount: number;
   /// Complete windows folded into this frame; normally `1`.
   readonly windows: number;
+  /// The tracks of the plan that rendered the window. A structural apply that adds or removes a
+  /// track changes it between two frames of one stream; every array below is sized for it.
   readonly trackCount: number;
   /// `[track0 L, track0 R, .., trackN L, trackN R, master L, master R]` peak magnitudes.
   readonly peaks: Float32Array;

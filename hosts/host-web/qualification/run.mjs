@@ -31,6 +31,10 @@ const MUTATIONS = [
   "sdk-observation-window-reversed", "sdk-observation-window-malformed",
   "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
   "sdk-spectrum-hop-wrong", "sdk-spectrum-recovery-loss",
+  // Issue #1106: a hop probe whose audio start was not delayed, one that never waited, one that
+  // spun, and a never-publishing wait that outlived its deadline.
+  "sdk-spectrum-hop-wait-fast-start", "sdk-spectrum-hop-wait-early", "sdk-spectrum-hop-wait-spin",
+  "sdk-spectrum-hop-wait-never-unbounded",
   "sdk-spectrum-recovery-unavailable", "sdk-spectrum-recovery-identity",
   // Issue #1097 gate 4: a live bypass that reached no instance, or the wrong one.
   "sdk-live-bypass-console", "sdk-live-bypass-insert", "sdk-live-bypass-address",
@@ -812,6 +816,25 @@ function validateSdkResponse(browserName, response) {
     && configuredHop?.resultSmoothingMs === 37.5
     && configuredHop?.ownedArrays === true,
   "actual browser H1024 did not preserve Worklet metadata, Worker results, overlap, smoothing, and ownership");
+  // Issue #1106: the probe waits on its deadline, not a poll count. Its audio starts late by a
+  // planted delay, so both windows arrive only after the audio start (a publication
+  // before that means the delay was not in effect); a wait that can never be satisfied ends at
+  // its own deadline and polls no faster than its timer.
+  const hopWait = configuredHop?.wait;
+  const neverPublishes = hopWait?.neverPublishes;
+  gate(browserName, "sdk-spectrum-hop-wait", hopWait?.startDelayMs >= 500
+    && hopWait?.deadlineMs === 10_000
+    && hopWait?.pollMs > 0
+    && hopWait?.firstPublicationAfterMs >= hopWait?.startDelayMs - 100
+    && hopWait?.secondPublicationAfterMs >= hopWait.firstPublicationAfterMs
+    && hopWait?.elapsedMs < hopWait.deadlineMs
+    && hopWait?.polls <= 2 * Math.ceil(hopWait.elapsedMs / hopWait.pollMs) + 2
+    && neverPublishes?.count === 0
+    && neverPublishes?.elapsedMs >= neverPublishes.deadlineMs
+    && neverPublishes?.elapsedMs < neverPublishes.deadlineMs + 2_000
+    && neverPublishes?.polls >= 1
+    && neverPublishes?.polls <= 2 * Math.ceil(neverPublishes.deadlineMs / hopWait.pollMs) + 2,
+  `the hop probe's wait did not outlast a planted slow audio start or was not bounded by its deadline: ${JSON.stringify(hopWait)}`);
 }
 
 function mutate(result, mutation) {
@@ -847,6 +870,18 @@ function mutate(result, mutation) {
   }
   if (mutation === "sdk-spectrum-hop-wrong") {
     copy.sdkResponse.spectrum.continuous.first.hopFrames = 2_048;
+  }
+  if (mutation === "sdk-spectrum-hop-wait-fast-start") {
+    copy.sdkResponse.spectrum.configuredHop.wait.startDelayMs = 0;
+  }
+  if (mutation === "sdk-spectrum-hop-wait-early") {
+    copy.sdkResponse.spectrum.configuredHop.wait.firstPublicationAfterMs = 1;
+  }
+  if (mutation === "sdk-spectrum-hop-wait-spin") {
+    copy.sdkResponse.spectrum.configuredHop.wait.polls = 100_000;
+  }
+  if (mutation === "sdk-spectrum-hop-wait-never-unbounded") {
+    copy.sdkResponse.spectrum.configuredHop.wait.neverPublishes.elapsedMs = 100;
   }
   if (mutation === "sdk-spectrum-recovery-loss") {
     copy.sdkResponse.spectrum.continuous.recoveryDelivery.nativeMissedWindows = "0";
@@ -910,6 +945,7 @@ function mutationProofs(browserName, result) {
       (error) => error instanceof Error && error.message.startsWith(
         mutation.startsWith("resume-clicks-") ? `${browserName}: resume-clicks:`
           : mutation.startsWith("sdk-observation-wait-") ? `${browserName}: sdk-observation-wait:`
+            : mutation.startsWith("sdk-spectrum-hop-wait-") ? `${browserName}: sdk-spectrum-hop-wait:`
             : `${browserName}:`,
       ),
       `${browserName}: ${mutation}: red mutation escaped its gate`,
