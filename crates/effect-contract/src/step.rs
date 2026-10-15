@@ -925,7 +925,7 @@ mod tests {
             maximum: Some(20_000.0),
             default_value: 80.0,
             mapping: ParameterMapping::Logarithmic,
-            automation_rate: AutomationRate::Sample,
+            automation_rate: AutomationRate::Block,
             channel_policy: ParameterChannelPolicy::PerLane,
             smoothing: SmoothingRule::Linear,
             smoothing_samples: 16,

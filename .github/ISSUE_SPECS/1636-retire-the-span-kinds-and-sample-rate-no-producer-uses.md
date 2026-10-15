@@ -165,3 +165,39 @@ Checked against `12d4a4f9d`.
   add `crates/controls/src/effect_rows.rs` to the authorized paths.
 - **Anchors.** `AutomationRate` is now `crates/effect-contract/src/lib.rs:415`; re-read the rest at
   filing. Batch P1, ready.
+
+## Decision record: #1636 (batch 13b)
+
+**Shipped.** `AutomationSpanKind` is `{Point=1}` and `AutomationRate` is `{Block=2, None=3}`;
+`from_raw` refuses 2 to 4 and 1 (comments name the values retired, never reallocated).
+`automation_segment_value` is deleted; `valid_runtime_span` checks only a `Point`; the descriptor
+check (`parameter_automation_smoothing_valid`) accepts only `Block` for an automatable parameter;
+`validate_automation_block` no longer re-checks the kind. The metadata tool's rate name and the
+independent gate's `RATES` lose `sample`; the gate's self-test gains the mutation "the retired
+sample automation rate returns". `controls`' `parameter_class` loses its `Sample` arm and the test
+that existed only for it. The conformance reference mock keeps only `Point` spans: its per-lane
+`active` span state is gone, so its state payload is 20 bytes per lane (was 56). The randomized
+generator draws only `Point` spans at the block's first sample. The delay's malformed-span test
+uses a `Point` whose end sample differs from its start. Fixtures that declared `Sample` declare
+`Block` (`live_window.rs` loses its `Sample` row: `NOT_LIVE` is 2). The policy manifest row, the
+docs (`EFFECT_CONTRACT_V1.md`, `CONTROL_PROTOCOL_SEMANTICS.md`) and two comments are updated.
+
+**Departures.**
+- The protocol half was already gone (amendment): no `ParameterAutomationRate`, no parameter
+  descriptor frame, so D3 has nothing to re-pin. `COMPLETE_SCHEMA_HASH` and the wasm-parity strings
+  do not move (`check-protocol-wasm-parity.sh` passes unchanged), and `retired_code_rows` gains no
+  row: there is no frame that can carry rate 1. Gate 1 is held by `retired_automation_values_are_refused`
+  and the truth table in `crates/effect-contract/src/lib.rs`.
+- Mechanical edits outside the listed paths: `crates/effect-contract/tests/live_window.rs`,
+  `crates/host-core/src/prepare.rs` (a comment), `docs/CONTROL_PROTOCOL_SEMANTICS.md`.
+- The registry has no rate line any more, so `CONTROL_PROTOCOL_REGISTRY.md` is unchanged.
+
+**Gates.** `cargo test --locked` for effect-contract, effect-compiler, conformance (randomized
+included), controls, delay, parameter-metadata, compressor, gate-expander, soft-clip,
+true-peak-limiter, parametric-eq, multiband-compressor, transient-shaper, protocol and host-core
+(`--features test-support`) and `capi --lib runtime`: all pass. `check-effect-runtime-policy.sh`,
+`test-effect-runtime-policy.sh`, `check-protocol-wasm-parity.sh`, `check-sdk-generated.sh`,
+`check-workspace-policy.sh`, `check-parameter-metadata-v1.py --self-test`: pass. Clippy
+`-D warnings` (all-targets, all-features) on the touched crates and `cargo fmt --all`: clean.
+`audit capi`: `pcm_digest` `bf7dcedd1d92621f` (same as base), zero allocations, locks and
+syscalls; protocol allocation audit ok.

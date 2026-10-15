@@ -1875,30 +1875,9 @@ fn draw_spans(
         for _ in 0..=draw.below(capacity) {
             let index = draw.pick(&automatable);
             let parameter = &descriptor.parameters[index];
-            let (kind, start, end) = if parameter.automation_rate == AutomationRate::Block {
-                (AutomationSpanKind::Point, first, first)
-            } else {
-                let offset = if draw.chance(1, 3) {
-                    draw.pick(&[0, frames - 1])
-                } else {
-                    draw.below(frames)
-                };
-                let start = first + offset as u64;
-                let kind = draw.pick(&[
-                    AutomationSpanKind::Point,
-                    AutomationSpanKind::Point,
-                    AutomationSpanKind::Step,
-                    AutomationSpanKind::Linear,
-                    AutomationSpanKind::Linear,
-                    AutomationSpanKind::Exponential,
-                ]);
-                let end = if kind == AutomationSpanKind::Point {
-                    start
-                } else {
-                    start + 1 + draw.below(2 * frames) as u64
-                };
-                (kind, start, end)
-            };
+            // An automatable parameter is `Block` rate: one `Point` span at the block's first
+            // sample (#1636 retired the other rates and span kinds).
+            let start = first;
             // One span per parameter and start sample: two would sort as `L L R R`, which is no
             // longer twin pairs.
             if spans.iter().any(|span: &PreparedAutomationSpan| {
@@ -1907,20 +1886,7 @@ fn draw_spans(
                 continue;
             }
             let start_value = draw_value(draw, parameter);
-            let end_value = if kind == AutomationSpanKind::Point {
-                start_value
-            } else {
-                draw_value(draw, parameter)
-            };
-            let kind = if kind == AutomationSpanKind::Exponential
-                && !(start_value != 0.0
-                    && end_value != 0.0
-                    && start_value.is_sign_positive() == end_value.is_sign_positive())
-            {
-                AutomationSpanKind::Linear
-            } else {
-                kind
-            };
+            let end_value = start_value;
             let channels: &[ParameterChannel] = match parameter.channel_policy {
                 ParameterChannelPolicy::Shared => &[ParameterChannel::Both],
                 ParameterChannelPolicy::PerLane if mono => {
@@ -1936,11 +1902,11 @@ fn draw_spans(
             };
             for channel in channels {
                 spans.push(PreparedAutomationSpan {
-                    kind,
+                    kind: AutomationSpanKind::Point,
                     channel: *channel,
                     parameter_index: index as u32,
                     start_sample: start,
-                    end_sample: end,
+                    end_sample: start,
                     start_value,
                     end_value,
                 });
@@ -1978,7 +1944,7 @@ fn draw_spans(
         let parameter = draw.below(descriptor.parameters.len() + 1) as u32;
         let value = draw.pick(&[f32::NAN, f32::INFINITY, 1.0e30, -1.0e30, -0.0, 0.5]);
         spans.push(PreparedAutomationSpan {
-            kind: draw.pick(&[AutomationSpanKind::Point, AutomationSpanKind::Linear]),
+            kind: AutomationSpanKind::Point,
             channel: draw.pick(&[
                 ParameterChannel::Left,
                 ParameterChannel::Right,

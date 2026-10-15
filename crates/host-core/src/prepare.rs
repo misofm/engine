@@ -4315,9 +4315,9 @@ fn parameter_records(
         }
         let parameter = &descriptor.parameters[value_after.parameter_index as usize];
         // A row is live only when the plan keeps a block-rate cell for it, and the control rows
-        // say so: only a `Block`-rate parameter is `Live` (`controls::effect_rows`), a `Sample`-rate
-        // one is rebuild-only for correctness. This guard keeps the classifier from trusting a row
-        // that ever claimed more than the plan holds.
+        // say so: only a `Block`-rate parameter is `Live` (`controls::effect_rows`), a `None`-rate
+        // one is prepared. This guard keeps the classifier from trusting a row that ever claimed
+        // more than the plan holds.
         if parameter.automation_rate != AutomationRate::Block {
             return Err(LiveRebuild::RebuildOnly(RebuildReason::Correctness));
         }

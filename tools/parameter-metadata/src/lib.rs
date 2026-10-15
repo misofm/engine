@@ -1084,7 +1084,6 @@ const fn mapping_name(mapping: ParameterMapping) -> &'static str {
 
 const fn automation_rate_name(rate: AutomationRate) -> &'static str {
     match rate {
-        AutomationRate::Sample => "sample",
         AutomationRate::Block => "block",
         AutomationRate::None => "none",
     }
