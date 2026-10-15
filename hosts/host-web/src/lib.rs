@@ -3086,7 +3086,7 @@ impl AudioWorkletEngineHost {
     }
 
     /// Whether the host was prepared with a meter window (issue #137 D2). It is the
-    /// configuration's word, not the plan's strip count: a session with no strip (TBD30) is
+    /// configuration's word, not the plan's strip count: a session with no strip (#1682) is
     /// metered by the master alone, and takes the lease so that the first strip's meters are
     /// delivered from the block that adopts them.
     #[must_use]
@@ -3583,7 +3583,7 @@ impl AudioWorkletEngineHost {
         let mut folded_end = 0_u64;
         let mut folded = false;
         if meter_count == 0 {
-            // A plan with no strip (TBD30) has no strip window to pair the master with, so the
+            // A plan with no strip (#1682) has no strip window to pair the master with, so the
             // master's own windows are the stream: the frame is the master's three words.
             let Some(front) = ready
                 .master_windows
@@ -6246,7 +6246,7 @@ fn compile_ready(
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(report.largest_bridge_allocation_bytes);
-    // The master windows queue as deep as a strip meter's. A session with no strip (TBD30) has no
+    // The master windows queue as deep as a strip meter's. A session with no strip (#1682) has no
     // meter to size it from, and still meters its master when a window is configured: the
     // ring is the boot's, so it must already hold the depth the first strip will use.
     let master_capacity = companions.meters().first().map_or_else(

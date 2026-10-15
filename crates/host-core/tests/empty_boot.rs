@@ -1,4 +1,4 @@
-//! TBD30 D1 and D2: a session with no source and no track prepares through the shared facade and
+//! #1682 D1 and D2: a session with no source and no track prepares through the shared facade and
 //! renders silence, with no special path for a host adapter.
 //!
 //! The browser and the C ABI both prepare through `prepare_host_runtime`, so this is the one core

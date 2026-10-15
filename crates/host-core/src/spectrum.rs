@@ -919,8 +919,10 @@ impl SpectrumCapture {
         // entry. A later producer publication belongs to a later read and cannot extend this
         // budget.
         self.recovery_pending = false;
-        // Only control changes the epoch (`commit_continuous`; render's failure path moves it
-        // forward before it publishes anything of the new epoch), so one load covers the loop.
+        // Control moves the epoch at a restart (`commit_continuous`) and render's failure path
+        // moves it forward before it publishes anything of the new epoch. One load covers the
+        // loop: it returns at the first record of this epoch, and a failure that lands during the
+        // loop is reported as `Failed` by the next read.
         let epoch = self.shared.epoch.load(Ordering::Acquire);
         for _ in 0..available {
             match self.consumer.try_pop() {
