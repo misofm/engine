@@ -68,6 +68,9 @@ pub struct InputRef {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DelaySpec {
     pub samples: u64,
+    /// The position in `GraphSpec::edges` of the edge this line delays (#1283): what names the
+    /// line to a successor plan's carry, which joins lines by edge ID and endpoints.
+    pub edge: u32,
 }
 
 /// One executable step.
@@ -686,7 +689,10 @@ fn lower_with(
                 .ok_or(ProgramError::UnknownNode)? as usize;
             let buffer = logical_of_node[source].ok_or(ProgramError::NotTopological)?;
             let delay = edge_delay(edge_index).map(|samples| {
-                delay_specs.push(DelaySpec { samples });
+                delay_specs.push(DelaySpec {
+                    samples,
+                    edge: edge_index as u32,
+                });
                 (delay_specs.len() - 1) as u32
             });
             inputs.push(InputRef {
@@ -707,7 +713,10 @@ fn lower_with(
                     .ok_or(ProgramError::UnknownNode)? as usize;
                 let buffer = logical_of_node[source].ok_or(ProgramError::NotTopological)?;
                 let delay = edge_delay(edge_index).map(|samples| {
-                    delay_specs.push(DelaySpec { samples });
+                    delay_specs.push(DelaySpec {
+                        samples,
+                        edge: edge_index as u32,
+                    });
                     (delay_specs.len() - 1) as u32
                 });
                 lifetimes[buffer as usize].last_use = ops.len();

@@ -152,3 +152,61 @@ Checked against `12d4a4f9d`.
   (#1277 D8), then copy the ramp, its position and its mute. No engine edit.
 - **Authorized paths** gain `crates/host-core/src/live_delta.rs` (D3's extraction only).
 - **Dependencies.** #1283 (shared files). #1225 is removed.
+
+## Decision record: #1284 (batch 8)
+
+**Shipped.** D1, D2 and the amended D3 (carry, then retarget; #1225 D8), as frozen.
+
+- `graph`: `TrackDelayLine::lanes_match` / `adopt` (equal rings and cursors swap, lane by lane),
+  `LiveRoute::adopt` (ramp, position, mute), `Runtime::{can_carry,carry}_{strip_delays,live_routes}`,
+  all in policy regions and bounded by the move table. The route carry first applies the
+  predecessor's pending cell value under `LiveSnapshot::ALL`, then copies. New API:
+  `GraphStripDelayLine` / `GraphStripDelayMove` (lane mask `STRIP_DELAY_LEFT|RIGHT`),
+  `GraphLiveRoute` / `GraphRouteMove` (by runtime unit), `take_strip_delay_lines`, `take_live_routes`
+  (read once after bind, as `take_compensation_lines`), `install_strip_delay_carry`,
+  `install_route_carry`, the two `*_carry_retained_bytes`, six install errors; both moves join the
+  "every section checks before any section moves" list. `build_sequential` now also returns the bind
+  identities.
+- `host-core`: `PlanStateInventory::{strip_delays, live_routes}`; `join_strip_delays` and
+  `resolve_strip_delay_carry` (the key is strip and lane; a lane that carries has an equal
+  `delay_samples` and a line in both plans; a strip with a changed lane, or whose line one plan lacks,
+  goes into `restarted`); `join_routes` and `resolve_route_carry` (a route into a submix with the same
+  ID, source (strip and tap) and destination, and a live route in both plans). D3: the per-route
+  function is `route_record_between` (+ `RouteEditRamps`, moved from `live_delta.rs`); the classifier
+  and the join both call it, on effective values (`EffectiveDiff::route_gates`, `gate_length`,
+  `source_strips`, un-gated from `control-provider`). The retarget is written with
+  `stamp_held_gate(base.revision)` in the strips' block. `join_strips` takes the `EffectiveDiff`, built
+  once per preparation. The late carry program (names the predecessor, moves no source) now also
+  covers a plan whose only carry is a strip delay or a send.
+
+**Departures.**
+
+- `LiveRoute::drain` is renamed `apply_pending`. The call rule of the realtime policy refused
+  `from.drain(..)` in the move loop, because other functions named `drain` pop a queue. `apply_pending`
+  holds no pop (it reads a latest-target cell); its one other caller is the block drain in `execute_op`.
+- A route carries only if its source and destination are equal. The text says "source, tap and
+  destination"; the tap is part of `RouteSource`.
+- Test harness: `EffectValue::SendGain` and `CellRecord::Route` write a send record. The two
+  `a_followed_mute_change_*` oracles (the "written to A" run) now also write the send's gate record, as
+  a live commit does (#1558 D1): with sends carried, a strip mute written to A without the following
+  send's record is not the state the committed model describes.
+
+**Gates and tests** (`crates/host-core/tests/successor_swap.rs` unless noted):
+
+| Gate | Test |
+|---|---|
+| 1 | `strip_delays_and_a_send_ramp_cross_the_swap_at_{eight,four}_lanes` (track lanes 37/53, a lane with no delay, submix 41/29, a ramp from block 4 and a record pending at the swap) |
+| 2 | `a_changed_lane_delay_restarts_only_its_lane_at_*` (restart set `["eq0"]`, left lane carried, right plane silent), `a_repointed_send_starts_at_its_prepared_value_at_*` (no restart, equals B without records), `only_the_delay_changed_strip_is_restarted_at_*` |
+| 3 | `assert_clean_swap` in every case: zero allocations and frees on the swap block |
+| 5 | `a_carried_send_is_retargeted_to_the_successors_gain_at_*` (run 1 retarget equals run 2 live write; not vacuous against a stale level) |
+| unit | `graph::runtime::tests::a_strip_delay_line_hands_over_the_lanes_of_its_mask`, `prepare::tests::strip_delay_lanes_join_by_strip_and_lane`, `prepare::tests::live_routes_join_by_route_id` |
+
+Red under mutation (each run once, reverted): no strip delay move (gates 1, 2 red), no route move
+(gates 1, 2b red), no predecessor drain (gates 1, 5 red), no retarget write (gate 5 red), route join
+without the destination (gate 2b red), lanes keyed together (gate 2a red).
+
+**Measured.** Browser boot high-water growth 20,447,232 bytes (before: 20,447,232). No pin moved.
+`realtime-policy`, `check-bench-policy.sh`, `check-workspace-policy.sh`, `check-builtins-fixtures.sh`,
+`check-graph-determinism.sh`, `check-cross-targets.sh`, `check-web-audioworklet.sh`, rustdoc
+`-D warnings` and clippy `-D warnings` (host-core no features, default, all features; graph) pass.
+`trace-graph-audit.sh` was not run.

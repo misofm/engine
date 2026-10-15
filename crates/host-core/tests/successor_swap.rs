@@ -2520,6 +2520,9 @@ enum Form {
 enum CellRecord {
     Fader(TrackFaderRecord),
     Matrix(TrackControlRecord),
+    /// A live send's record, written to the cell of the route with this ID (#1284): the record a
+    /// live commit writes to a send that follows its source strip's mute.
+    Route(&'static str, host_core::RouteControlRecord),
 }
 
 /// A record written to `strip`'s cells before block `block` renders.
@@ -2658,6 +2661,13 @@ impl CellPlan {
         let revision = self.next;
         let stamp = self.live.gate.stamp(revision).expect("a legal revision");
         for (strip, record) in writes {
+            if let CellRecord::Route(route, record) = *record {
+                let position =
+                    host_core::route_producer_position(&self.live.handles.route_controls, route)
+                        .unwrap_or_else(|| panic!("route {route} is a live send"));
+                self.live.handles.route_controls[position].write(stamp, record);
+                continue;
+            }
             let index = self
                 .live
                 .handles
@@ -2669,6 +2679,7 @@ impl CellPlan {
             match *record {
                 CellRecord::Fader(record) => producer.fader.write(stamp, record),
                 CellRecord::Matrix(record) => producer.producer.write(stamp, record),
+                CellRecord::Route(..) => unreachable!("written above"),
             }
         }
         self.live.gate.publish(revision);
@@ -3475,6 +3486,37 @@ fn with_send_through_submix(
     model
 }
 
+/// The writes of a live mute of [`MOVED`] on `lanes` (the lanes whose mute turns on) at the swap
+/// block: the strip's mute record and, when the send through the submix follows the strip's mute,
+/// the send's gate record over the same ramp (#1558 D1: a live commit writes both).
+fn followed_mute_writes(follows_mute: bool, lanes: [bool; 2], mute_samples: u32) -> Vec<CellWrite> {
+    let selector = match lanes {
+        [true, true] => BuiltinLaneSelector::Both,
+        [true, false] => BuiltinLaneSelector::Left,
+        [false, true] => BuiltinLaneSelector::Right,
+        [false, false] => panic!("a mute on no lane"),
+    };
+    let mut writes = vec![CellWrite {
+        block: SWAP_BLOCK,
+        strip: MOVED,
+        record: CellRecord::Fader(TrackFaderRecord::Mute {
+            lanes: selector,
+            muted: true,
+            smoothing_samples: mute_samples,
+        }),
+    }];
+    if follows_mute {
+        let record = host_core::route_record(0.0, [1.0, 0.0, 0.0, 1.0], false, lanes, mute_samples)
+            .expect("a send record");
+        writes.push(CellWrite {
+            block: SWAP_BLOCK,
+            strip: MOVED,
+            record: CellRecord::Route("eq0-main", record),
+        });
+    }
+    writes
+}
+
 /// A mute change on a track that a `follows_mute` route follows is a live difference like any other
 /// (#1558 D4): the strip's stage carries and is retargeted over the session's mute length, and the
 /// strip is not in the restart set, whether or not a route follows it. The following route is
@@ -3530,11 +3572,7 @@ fn a_followed_mute_change_carries_and_retargets_the_stage(backend: Backend, form
                 edit_ramps: &EditRamps::new(),
             }),
             &feed,
-            &[CellWrite {
-                block: SWAP_BLOCK,
-                strip: MOVED,
-                record: CellRecord::Fader(mute_both(true, mute_samples)),
-            }],
+            &followed_mute_writes(follows_mute, [true; 2], mute_samples),
             backend,
         );
         assert_eq!(
@@ -3679,22 +3717,15 @@ fn a_followed_mute_change_retargets_the_fused_stage_whole(backend: Backend) {
             edit_ramps: &EditRamps::new(),
         }),
         &feed,
-        &[
-            CellWrite {
-                block: SWAP_BLOCK,
-                strip: MOVED,
-                record: CellRecord::Fader(TrackFaderRecord::Mute {
-                    lanes: BuiltinLaneSelector::Left,
-                    muted: true,
-                    smoothing_samples: mute_samples,
-                }),
-            },
-            CellWrite {
+        &{
+            let mut writes = followed_mute_writes(true, [true, false], mute_samples);
+            writes.push(CellWrite {
                 block: SWAP_BLOCK,
                 strip: MOVED,
                 record: CellRecord::Matrix(pan_record([0.8, 0.6], 300)),
-            },
-        ],
+            });
+            writes
+        },
         backend,
     );
     assert_eq!(run.carry, CarryOutcome::Carried);
@@ -4937,6 +4968,14 @@ enum EffectValue {
     BandGainBoth(f32),
     /// The bypass cell with its crossfade ramp.
     Bypass(BypassSwitch),
+    /// A live send's gain (#1284), as one record over `length` samples: the route's other values
+    /// stay the identity matrix, unmuted, with no source lane muted. The write's `strip` and
+    /// `address` are not read.
+    SendGain {
+        route: &'static str,
+        gain_db: f32,
+        length: u32,
+    },
 }
 
 /// A value written to one effect's cells before block `block` renders.
@@ -4952,6 +4991,28 @@ struct EffectWrite {
 /// its revision is published.
 fn write_effect_value(plan: &mut LivePlan, write: &EffectWrite) {
     let LivePlan { handles, gate, .. } = plan;
+    if let EffectValue::SendGain {
+        route,
+        gain_db,
+        length,
+    } = write.value
+    {
+        let position = host_core::route_producer_position(&handles.route_controls, route)
+            .unwrap_or_else(|| panic!("route {route} is a live send"));
+        let producer = &mut handles.route_controls[position];
+        gate.write_published(|stamp| {
+            producer.set(
+                stamp,
+                gain_db,
+                [1.0, 0.0, 0.0, 1.0],
+                false,
+                [false; 2],
+                length,
+            )
+        })
+        .expect("a send record the cell holds");
+        return;
+    }
     let producer = handles
         .effect_control_mut(write.strip, write.address)
         .expect("a control channel for the addressed effect");
@@ -4987,6 +5048,7 @@ fn write_effect_value(plan: &mut LivePlan, write: &EffectWrite) {
             effect_contract::ParameterChannel::Both,
             value,
         ),
+        EffectValue::SendGain { .. } => unreachable!("written above"),
         EffectValue::Bypass(switch) => {
             producer
                 .preflight(EffectControlRecord::Bypass(switch))
@@ -7890,4 +7952,655 @@ mod observation_carry {
         assert_eq!(run.carries.len(), subscribed.len());
         assert_eq!(run.allocator, ((0, 0, 0), (0, 0)));
     }
+}
+
+// Issue #1283 (slice 13 of #1269): the plug-in delay compensation lines. PDC delays each edge into
+// a node with several inputs by that node's latest arrival minus the edge's own, so one strip with
+// a latency insert gives every other route into the same node a line. A line is keyed by its edge
+// ID and the edge's endpoints: it carries when both survive, at the output and inside a submix
+// alike, and a re-pointed route carries nothing.
+
+/// The tracks `eq0` to `eq3` with `limited` strips behind a true-peak limiter insert. The
+/// limiter reports `Fs / 100 + 6` samples of latency, so every route into a node the limited
+/// strip also reaches has a compensation line.
+fn pdc_session(rate: u32, limited: &[&str]) -> SessionModel {
+    let mut model = filtered_session(false);
+    model.sample_rate_hz = rate;
+    let cut: Vec<String> = model
+        .tracks
+        .iter()
+        .skip(4)
+        .map(|track| track.id.as_str().to_owned())
+        .collect();
+    for track in cut {
+        remove_track(&mut model, &track);
+    }
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        if limited.contains(&track.id.as_str()) {
+            track.inserts.effects.push(Effect {
+                id: id("lim"),
+                identity: EffectIdentity::Native {
+                    effect_id: id("miso.true-peak-limiter"),
+                },
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::Maximum,
+                params: console_params("limiter", index, false),
+                sidechain: SidechainDeclaration::None,
+            });
+        }
+    }
+    model
+}
+
+/// `model` with the route of `track` sent to submix `bus` instead of where it went.
+fn send_route_to(model: &mut SessionModel, track: &str, bus: &str) {
+    let main = format!("{track}-main");
+    let route = model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == main)
+        .expect("the track's main route");
+    route.destination = session::RouteDestination::SubmixInput { submix_id: id(bus) };
+}
+
+/// A unity submix `bus` that forwards to the output.
+fn add_bus(model: &mut SessionModel, bus: &str) {
+    let template = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "eq0-main")
+        .expect("a track route")
+        .clone();
+    let mut onward = template.clone();
+    let RouteSource::Track { tap, .. } = template.source else {
+        panic!("a track route");
+    };
+    onward.id = id(&format!("{bus}-main"));
+    onward.source = RouteSource::Submix {
+        submix_id: id(bus),
+        tap,
+    };
+    onward.follows_mute = false;
+    model.routes.push(onward);
+    model
+        .submixes
+        .push(session::Submix::unity(id(bus), &model.console));
+}
+
+/// The rates the launch supports.
+const PDC_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+
+/// A swapped run of `a` into `b` and the fresh reference of `b`, with live controls attached (the
+/// form whose inserts carry), and the checks every case shares: the hand-over carried, the swap
+/// block made no allocator call and no restore was refused.
+fn pdc_runs(
+    a: &Session,
+    b: &Session,
+    feed: &Feed,
+    backend: Backend,
+    what: &str,
+) -> (EffectRun, EffectRun) {
+    use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+    struct RestoreMode(Mode);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    assert_installed();
+    let _restore = RestoreMode(mode());
+    set_mode(Mode::Count);
+    engine::realtime::audit::warm_up();
+    let reference = effect_run(b, None, feed, &[], &[], backend);
+    let run = effect_run(a, Some((b, &a.model)), feed, &[], &[], backend);
+    assert_clean_swap(&run, what);
+    (run, reference)
+}
+
+/// Gate 1: three tracks, the first behind a limiter, so the other two routes into the output
+/// carry lines. B adds a muted track with no latent effect, so no arrival moves. The swapped run
+/// equals B rendered from frame 0 in every block, at every launch rate. Red if a line is keyed by
+/// its index in the delay vector (the added track sorts first and shifts every index) or left at
+/// rest: the two compensated tracks drop out for the length of their line.
+fn compensated_output_lines_keep_their_audio(backend: Backend, rate: u32) {
+    let what = format!("{backend:?} at {rate} Hz");
+    let mut a_model = pdc_session(rate, &["eq0"]);
+    remove_track(&mut a_model, "eq3");
+    let mut b_model = a_model.clone();
+    add_track(&mut b_model, "eq1", MUTED_TRACK, SOURCE, true);
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    assert_eq!(
+        a.prepare(backend).inventory.delay_line_count(),
+        2,
+        "{what}: the two tracks without the limiter are compensated"
+    );
+    let feed = Feed::new(SOURCE, 1);
+    let (run, reference) = pdc_runs(&a, &b, &feed, backend, &what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals the post-edit session rendered from frame 0"
+    );
+    // At 96 kHz the limiter's lookahead is longer than the blocks before the swap, so the first
+    // audio comes out after it; the lines hold what was fed before.
+    assert!(
+        reference.blocks[SWAP_BLOCK + 2..]
+            .iter()
+            .flatten()
+            .any(|bits| *bits != 0),
+        "{what}: the reference plays after the swap block"
+    );
+}
+
+#[test]
+fn compensated_output_lines_keep_their_audio_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            compensated_output_lines_keep_their_audio(backend, rate);
+        }
+    }
+}
+
+/// The submix `bus1` takes `eq0` (behind a limiter) and `eq1`; the output takes `bus1` and `eq2`.
+/// The edge of `eq1` into the bus and the edge of `eq2` into the output both carry a line.
+fn bus_session(rate: u32) -> SessionModel {
+    let mut model = pdc_session(rate, &["eq0"]);
+    remove_track(&mut model, "eq3");
+    add_bus(&mut model, "bus1");
+    send_route_to(&mut model, "eq0", "bus1");
+    send_route_to(&mut model, "eq1", "bus1");
+    model
+}
+
+/// Gate 2: B adds a muted zero-latency track to the submix. The submix's own line and the output's
+/// line both carry. Red if the carry handles only the edges into the output: the submix input
+/// line starts at rest and `eq1` drops out of the bus for the length of its line.
+fn compensated_submix_lines_keep_their_audio(backend: Backend, rate: u32) {
+    let what = format!("{backend:?} at {rate} Hz");
+    let a_model = bus_session(rate);
+    let mut b_model = a_model.clone();
+    add_track(&mut b_model, "eq1", MUTED_TRACK, SOURCE, true);
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    assert_eq!(
+        a.prepare(backend).inventory.delay_line_count(),
+        2,
+        "{what}: eq1 into the bus and eq2 into the output are compensated"
+    );
+    let feed = Feed::new(SOURCE, 1);
+    let (run, reference) = pdc_runs(&a, &b, &feed, backend, &what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals the post-edit session rendered from frame 0"
+    );
+}
+
+#[test]
+fn compensated_submix_lines_keep_their_audio_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            compensated_submix_lines_keep_their_audio(backend, rate);
+        }
+    }
+}
+
+/// Two submixes, each with a limited and an unlimited track: `eq0` (limited) and `eq1` into
+/// `bus1`, `eq3` (limited) and `eq2` into `bus2`. Both unlimited routes carry a line.
+fn two_bus_session(rate: u32, silent: Option<&str>) -> SessionModel {
+    let mut model = pdc_session(rate, &["eq0", "eq3"]);
+    add_bus(&mut model, "bus1");
+    add_bus(&mut model, "bus2");
+    send_route_to(&mut model, "eq0", "bus1");
+    send_route_to(&mut model, "eq1", "bus1");
+    send_route_to(&mut model, "eq2", "bus2");
+    send_route_to(&mut model, "eq3", "bus2");
+    if let Some(track) = silent {
+        model = with_mute(model, track, true);
+    }
+    model
+}
+
+/// Gate 4: B re-points `eq1`'s route from `bus1` to `bus2`. The route keeps its ID and gets
+/// another destination, so its line does not carry and its strip is not restarted.
+///
+/// With `eq1` muted in both sessions the re-pointed line holds only zeros, so the run equals B
+/// from frame 0 exactly when every other line carried: `eq2`'s line into `bus2` is the one that
+/// does. With `eq1` playing, the new route's line starts at rest and the swap block misses the
+/// audio B's line holds: red if the line followed the route ID into the other bus, where it
+/// would play the old pending audio and match B.
+fn a_repointed_route_does_not_carry_its_line(backend: Backend, rate: u32) {
+    let what = format!("{backend:?} at {rate} Hz");
+    let feed = Feed::new(SOURCE, 1);
+    for silent in [Some("eq1"), None] {
+        let a_model = two_bus_session(rate, silent);
+        let mut b_model = a_model.clone();
+        send_route_to(&mut b_model, "eq1", "bus2");
+        let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+        let (run, reference) = pdc_runs(&a, &b, &feed, backend, &what);
+        assert_eq!(
+            run.restarted,
+            Vec::<Box<str>>::new(),
+            "{what}: the re-pointed route's strip keeps its state"
+        );
+        // Before the swap A renders, and A routes `eq1` through the other bus.
+        let difference = run.blocks[SWAP_BLOCK..]
+            .iter()
+            .zip(&reference.blocks[SWAP_BLOCK..])
+            .position(|(swapped, fresh)| swapped != fresh);
+        if silent.is_some() {
+            assert_eq!(
+                difference, None,
+                "{what}: every other line carried, and the re-pointed one held silence"
+            );
+        } else {
+            assert!(
+                difference.is_some(),
+                "{what}: the new route's line starts at rest, so B's audio is missing after the swap"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_repointed_route_does_not_carry_its_line_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            a_repointed_route_does_not_carry_its_line(backend, rate);
+        }
+    }
+}
+
+// Issue #1284 (slice 14 of #1269): the strip input alignment lines (`delay_samples` of a track and
+// of a submix) and the live sends. A line is keyed by its strip and lane, a send by its route ID;
+// a lane whose delay changed starts at rest and its strip goes into the restart set, and a
+// re-pointed send is a route removed and a route added (#1363), which restarts nothing.
+
+/// The send whose level the cases move.
+const SEND: &str = "eq3-main";
+/// A send's ramp, in samples: it spans six blocks, so it is in flight at the swap block.
+const LONG_RAMP: u32 = 6 * QUANTUM as u32;
+
+/// Set the declared input delay of strip `strip` (a track or a submix).
+fn with_strip_delay(mut model: SessionModel, strip: &str, delays: [u32; 2]) -> SessionModel {
+    let builtins = if let Some(track) = model.tracks.iter_mut().find(|t| t.id.as_str() == strip) {
+        &mut track.builtins
+    } else {
+        &mut model
+            .submixes
+            .iter_mut()
+            .find(|s| s.id.as_str() == strip)
+            .expect("a strip")
+            .builtins
+    };
+    builtins.left.delay_samples = delays[0];
+    builtins.right.delay_samples = delays[1];
+    model
+}
+
+/// Gate 1's session: the track `eq0` with two different lane delays straight to the output; `eq1`
+/// and `eq2` (a delay on its right lane only) and `eq3` into the submix `bus1`, which has its own
+/// input delay; `eq3`'s route [`SEND`] is the live send the cases move. `bus2` is a second submix
+/// that nothing feeds. `bus_delays` gives the submixes their input delays (zero for a case that
+/// needs a memoryless bus).
+fn send_session(bus_delays: bool) -> SessionModel {
+    let mut model = pdc_session(48_000, &[]);
+    add_bus(&mut model, "bus1");
+    add_bus(&mut model, "bus2");
+    for track in ["eq1", "eq2", "eq3"] {
+        send_route_to(&mut model, track, "bus1");
+    }
+    let model = with_strip_delay(model, "eq0", [37, 53]);
+    let model = with_strip_delay(model, "eq2", [0, 19]);
+    if bus_delays {
+        with_strip_delay(model, "bus1", [41, 29])
+    } else {
+        model
+    }
+}
+
+/// `model` plus [`MUTED_TRACK`], a muted copy of `eq0` that sorts first and goes to the output.
+fn with_muted_output_track(mut model: SessionModel) -> SessionModel {
+    add_track(&mut model, "eq0", MUTED_TRACK, SOURCE, true);
+    model
+}
+
+fn route_mut<'a>(model: &'a mut SessionModel, route: &str) -> &'a mut session::Route {
+    model
+        .routes
+        .iter_mut()
+        .find(|candidate| candidate.id.as_str() == route)
+        .expect("a route")
+}
+
+fn send_writes() -> Vec<EffectWrite> {
+    // One ramp in flight at the swap block, and a second record admitted after the last block A
+    // renders, which is pending at the swap.
+    let write = |block, gain_db, length| EffectWrite {
+        block,
+        strip: "",
+        address: EQ_ADDRESS,
+        value: EffectValue::SendGain {
+            route: SEND,
+            gain_db,
+            length,
+        },
+    };
+    vec![
+        write(SWAP_BLOCK - 2, -9.0, LONG_RAMP),
+        write(SWAP_BLOCK, -2.5, 3 * QUANTUM as u32 + 5),
+    ]
+}
+
+/// Gate 1: every block of the swapped run equals the post-edit session rendered from frame 0 and
+/// fed the same records at the same blocks. Red if any strip delay line (a track's two unequal
+/// lanes, a lane with no delay, the submix's) is left at rest (the delayed strip drops out for the
+/// length of its line), if the send's ramp restarts from its target (the level steps), or if the
+/// record pending at the swap is lost (the copy ran before the drain).
+fn strip_delays_and_a_send_ramp_cross_the_swap(backend: Backend) {
+    let a = Session::compile(send_session(true));
+    let b = Session::compile(with_muted_output_track(send_session(true)));
+    let feed = Feed::new(SOURCE, 1);
+    let writes = send_writes();
+    let probe = LivePlan::fresh(&a, backend).prepared;
+    assert_eq!(
+        probe.inventory.strip_delay_count(),
+        3,
+        "eq0, eq2 and bus1 declare delays"
+    );
+    assert_eq!(
+        probe.inventory.live_route_count(),
+        3,
+        "the three sends into bus1; the routes into the output are not live"
+    );
+    drop(probe);
+    let reference = effect_run(&b, None, &feed, &writes, &[], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &writes, &[], backend);
+    assert_clean_swap(&run, &format!("{backend:?}"));
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{backend:?}");
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{backend:?}: every block equals the post-edit session fed the same records"
+    );
+    // Not vacuous: the records are audible in the blocks after the swap, and so are the lines.
+    let unmoved = effect_run(&b, None, &feed, &[], &[], backend);
+    assert_ne!(
+        unmoved.blocks[SWAP_BLOCK + 1],
+        reference.blocks[SWAP_BLOCK + 1],
+        "{backend:?}: the ramp is in flight after the swap block"
+    );
+    let undelayed = Session::compile(with_muted_output_track(undelayed_send_session()));
+    let undelayed = effect_run(&undelayed, None, &feed, &writes, &[], backend);
+    assert_ne!(
+        undelayed.blocks[SWAP_BLOCK], reference.blocks[SWAP_BLOCK],
+        "{backend:?}: the delays are audible in the swap block"
+    );
+}
+
+/// [`send_session`] with no delay at all, for the case that shows the delays matter.
+fn undelayed_send_session() -> SessionModel {
+    let model = with_strip_delay(send_session(false), "eq0", [0, 0]);
+    with_strip_delay(model, "eq2", [0, 0])
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn strip_delays_and_a_send_ramp_cross_the_swap_at_eight_lanes() {
+    strip_delays_and_a_send_ramp_cross_the_swap(Backend::Simd8);
+}
+
+#[test]
+fn strip_delays_and_a_send_ramp_cross_the_swap_at_four_lanes() {
+    strip_delays_and_a_send_ramp_cross_the_swap(Backend::Simd4);
+}
+
+/// The left and the right plane of one rendered block.
+fn lane_planes(bits: &[u32]) -> (&[u32], &[u32]) {
+    bits.split_at(QUANTUM)
+}
+
+/// Gate 2a: B moves `eq0`'s right lane from 53 to 60 samples of delay and leaves its left lane at
+/// 37. The strip is in the restart set and nothing else is. The left lane's ring carries, so the
+/// output's left plane equals the post-edit session rendered from frame 0 in every block; the right
+/// lane starts at rest, so the swap block plays silence for the length of the new delay. Red if the
+/// right ring is carried across a length change (the old alignment plays), if the lanes are keyed
+/// together (the left lane restarts as well), or if the strip is not listed.
+fn a_changed_lane_delay_restarts_only_its_lane(backend: Backend) {
+    let mut one = pdc_session(48_000, &[]);
+    for track in ["eq1", "eq2", "eq3"] {
+        remove_track(&mut one, track);
+    }
+    let builtins = &mut one.tracks[0].builtins;
+    for channel in [&mut builtins.left, &mut builtins.right] {
+        channel.hpf_hz = 0.0;
+        channel.lpf_hz = 0.0;
+    }
+    // The lanes reach the output independently, so a plane shows one lane's line.
+    one.tracks[0].matrix_or_pan = session::MatrixOrPan::Matrix {
+        ll: 1.0,
+        lr: 0.0,
+        rl: 0.0,
+        rr: 1.0,
+        smoothing_samples: 0,
+    };
+    let a_model = with_strip_delay(one, "eq0", [37, 53]);
+    let b_model = with_strip_delay(a_model.clone(), "eq0", [37, 60]);
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    let feed = Feed::new(SOURCE, 1);
+    let reference = effect_run(&b, None, &feed, &[], &[], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &[], &[], backend);
+    assert_clean_swap(&run, &format!("{backend:?}"));
+    assert_eq!(run.restarted, vec![Box::<str>::from("eq0")], "{backend:?}");
+    for block in SWAP_BLOCK..BLOCKS {
+        let (swapped_left, swapped_right) = lane_planes(&run.blocks[block]);
+        let (fresh_left, fresh_right) = lane_planes(&reference.blocks[block]);
+        assert_eq!(
+            swapped_left
+                .iter()
+                .zip(fresh_left)
+                .position(|(a, b)| a != b),
+            None,
+            "{backend:?}: block {block}: the left lane's ring carried ({} samples)",
+            swapped_left.len()
+        );
+        if block == SWAP_BLOCK {
+            assert!(
+                swapped_right[..60]
+                    .iter()
+                    .all(|bits| f32::from_bits(*bits) == 0.0),
+                "{backend:?}: the right lane's new line starts at rest"
+            );
+            assert_ne!(
+                swapped_right, fresh_right,
+                "{backend:?}: the right lane differs"
+            );
+        }
+    }
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_changed_lane_delay_restarts_only_its_lane_at_eight_lanes() {
+    a_changed_lane_delay_restarts_only_its_lane(Backend::Simd8);
+}
+
+#[test]
+fn a_changed_lane_delay_restarts_only_its_lane_at_four_lanes() {
+    a_changed_lane_delay_restarts_only_its_lane(Backend::Simd4);
+}
+
+/// Gate 2b: B re-points the send [`SEND`] from `bus1` to `bus2` (no submix has a delay and the
+/// buses hold no state, so the route's ramp is the only memory). `restarted_strips()` is empty: the
+/// re-pointed send's source strip `eq3` is not in it. The send does not carry its ramp: every block
+/// from the swap block on equals B rendered from frame 0 without any record, where B's send is at
+/// its prepared value. The control keeps the send where it was, carries the ramp and differs from
+/// that reference. Red if the ramp is carried into the other bus, or if the re-pointed send ducks
+/// its source strip.
+fn a_repointed_send_starts_at_its_prepared_value(backend: Backend) {
+    let feed = Feed::new(SOURCE, 1);
+    let writes = send_writes();
+    let a_model = send_session(false);
+    let mut b_model = with_muted_output_track(a_model.clone());
+    route_mut(&mut b_model, SEND).destination = session::RouteDestination::SubmixInput {
+        submix_id: id("bus2"),
+    };
+    // The control keeps the send where it was.
+    let kept_model = with_muted_output_track(a_model.clone());
+    let (a, b, kept) = (
+        Session::compile(a_model),
+        Session::compile(b_model),
+        Session::compile(kept_model),
+    );
+    let no_writes = effect_run(&b, None, &feed, &[], &[], backend);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &writes, &[], backend);
+    assert_clean_swap(&run, &format!("{backend:?}"));
+    assert_eq!(
+        run.restarted,
+        Vec::<Box<str>>::new(),
+        "{backend:?}: the re-pointed send's source strip keeps its state"
+    );
+    for block in SWAP_BLOCK..BLOCKS {
+        assert_eq!(
+            run.blocks[block], no_writes.blocks[block],
+            "{backend:?}: block {block}: the re-pointed send is at its prepared value"
+        );
+    }
+    let carried = effect_run(&a, Some((&kept, &a.model)), &feed, &writes, &[], backend);
+    assert_clean_swap(&carried, &format!("{backend:?} control"));
+    assert_ne!(
+        carried.blocks[SWAP_BLOCK + 1],
+        no_writes.blocks[SWAP_BLOCK + 1],
+        "{backend:?}: a send that keeps its destination carries its ramp"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_repointed_send_starts_at_its_prepared_value_at_eight_lanes() {
+    a_repointed_send_starts_at_its_prepared_value(Backend::Simd8);
+}
+
+#[test]
+fn a_repointed_send_starts_at_its_prepared_value_at_four_lanes() {
+    a_repointed_send_starts_at_its_prepared_value(Backend::Simd4);
+}
+
+/// Gate 2c: B changes `eq0`'s delay and re-points `eq3`'s send. The restart set is exactly the
+/// delay-changed strip.
+fn only_the_delay_changed_strip_is_restarted(backend: Backend) {
+    let feed = Feed::new(SOURCE, 1);
+    let a_model = send_session(true);
+    let mut b_model = with_strip_delay(a_model.clone(), "eq0", [37, 60]);
+    route_mut(&mut b_model, SEND).destination = session::RouteDestination::SubmixInput {
+        submix_id: id("bus2"),
+    };
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    let run = effect_run(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &send_writes(),
+        &[],
+        backend,
+    );
+    assert_clean_swap(&run, &format!("{backend:?}"));
+    assert_eq!(run.restarted, vec![Box::<str>::from("eq0")], "{backend:?}");
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn only_the_delay_changed_strip_is_restarted_at_eight_lanes() {
+    only_the_delay_changed_strip_is_restarted(Backend::Simd8);
+}
+
+#[test]
+fn only_the_delay_changed_strip_is_restarted_at_four_lanes() {
+    only_the_delay_changed_strip_is_restarted(Backend::Simd4);
+}
+
+/// Gate 5 (#1225 D8): B is A plus a muted track that sorts first, and changes the carried send's
+/// gain. Run 1 is the structural swap, whose successor retargets the carried send to B's gain over
+/// the session's send ramp. Run 2 writes the same value to A just before the swap and prepares B
+/// from a base that already holds it. Every block of the two runs is bit-identical. Red if a
+/// carried send keeps the predecessor's level (a missing retarget), or if the retarget lands a
+/// block early or late.
+fn a_carried_send_is_retargeted_to_the_successors_gain(backend: Backend) {
+    const GAIN: f32 = -7.5;
+    let feed = Feed::new(SOURCE, 1);
+    let a_model = send_session(true);
+    let mut changed = a_model.clone();
+    route_mut(&mut changed, SEND).gain_db = GAIN;
+    let b_model = with_muted_output_track(changed.clone());
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    let holds = Session::compile(changed);
+    let length = LiveRamps::for_session(&b.model).resolve(LiveRampRow::SendGain, None);
+    assert!(length > 0, "the session's send ramp is not a step");
+    // The record in flight at the swap, as in gate 1.
+    let mut run_one_writes = send_writes();
+    run_one_writes.pop();
+    let mut run_two_writes = run_one_writes.clone();
+    run_two_writes.push(EffectWrite {
+        block: SWAP_BLOCK,
+        strip: "",
+        address: EQ_ADDRESS,
+        value: EffectValue::SendGain {
+            route: SEND,
+            gain_db: GAIN,
+            length,
+        },
+    });
+    let one = effect_run(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &run_one_writes,
+        &[],
+        backend,
+    );
+    let two = effect_run(
+        &a,
+        Some((&b, &holds.model)),
+        &feed,
+        &run_two_writes,
+        &[],
+        backend,
+    );
+    assert_clean_swap(&one, &format!("{backend:?} run 1"));
+    assert_clean_swap(&two, &format!("{backend:?} run 2"));
+    assert_eq!(one.restarted, Vec::<Box<str>>::new(), "{backend:?}");
+    assert_eq!(two.restarted, Vec::<Box<str>>::new(), "{backend:?}");
+    assert_eq!(
+        first_effect_difference(&one, &two),
+        None,
+        "{backend:?}: the retarget equals a live write before the swap"
+    );
+    // Not vacuous: a swap that leaves the send at the predecessor's level differs.
+    let stale_b = Session::compile(with_muted_output_track(send_session(true)));
+    let stale = effect_run(
+        &a,
+        Some((&stale_b, &a.model)),
+        &feed,
+        &run_one_writes,
+        &[],
+        backend,
+    );
+    assert_ne!(
+        stale.blocks[SWAP_BLOCK + 1],
+        one.blocks[SWAP_BLOCK + 1],
+        "{backend:?}: the new gain is audible after the swap block"
+    );
+}
+
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_carried_send_is_retargeted_to_the_successors_gain_at_eight_lanes() {
+    a_carried_send_is_retargeted_to_the_successors_gain(Backend::Simd8);
+}
+
+#[test]
+fn a_carried_send_is_retargeted_to_the_successors_gain_at_four_lanes() {
+    a_carried_send_is_retargeted_to_the_successors_gain(Backend::Simd4);
 }

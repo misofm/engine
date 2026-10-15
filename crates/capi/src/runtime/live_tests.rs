@@ -1092,10 +1092,26 @@ fn rebuild_run(document: &str, mute: Mute, ramp: Option<u32>) -> Vec<Vec<f32>> {
 /// run, or unlike a rebuild that bakes the mute into its own transaction from the same history).
 #[test]
 fn a_live_mute_survives_a_later_rebuild() {
-    let blocks = |run: Vec<Vec<f32>>| run.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>();
+    // The rebuild carries the compensation lines (#1283), so the audio a line held at the swap
+    // plays out after it: the live mute silenced the last block of the muted strips' lines, and
+    // the baked mute takes effect at the swap, so the lines of those strips still hold that block
+    // unmuted, as a live mute at the swap would. The two runs agree once the lines are flushed,
+    // which is the session's latency after the swap block.
+    let (latency, quantum) = {
+        let rig = Rig::new(&long_session_with(10, 48_000, HARD_SWITCH));
+        (rig.latency(), rig.quantum)
+    };
+    let flushed = usize::try_from(u64::from(latency).div_ceil(quantum as u64)).expect("blocks");
+    let blocks = |run: Vec<Vec<f32>>| {
+        run[flushed..]
+            .iter()
+            .map(|pcm| bits(pcm))
+            .collect::<Vec<_>>()
+    };
     let live = blocks(persistence_run(Mute::Live));
     let baked = blocks(persistence_run(Mute::Baked));
     let unmuted = blocks(persistence_run(Mute::Unmuted));
+    assert!(!live.is_empty(), "blocks remain after the lines flush");
     assert_eq!(
         live, baked,
         "the rebuild after a live mute renders like a rebuild that bakes it"
@@ -4331,6 +4347,12 @@ fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
         rebuilt
     };
     let mut rig = Rig::new(&document);
+    // The rebuild carries the compensation lines (#1283), and the swap block feeds them from a
+    // carried source ring here and from a fresh, silent one in the control (whose content edit
+    // replaces the ring). So the lines differ by that block until they flush: the session's
+    // latency after the swap block.
+    let flushed =
+        usize::try_from(u64::from(rig.latency()).div_ceil(rig.quantum as u64)).expect("blocks");
     rig.step();
     for (rebuilds, bypass) in [(1, true), (2, false)] {
         let (revision, _, epoch, pending) = rig.summary();
@@ -4363,13 +4385,18 @@ fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
         assert_eq!(pending, 0, "bypass {bypass}: the candidate was taken");
         assert_ne!(swapped, epoch, "bypass {bypass}: a new epoch renders");
         let reference = control(bypass, rebuilds);
+        assert!(
+            rebuilt.len() > flushed,
+            "blocks remain after the lines flush"
+        );
         assert_eq!(
-            rebuilt, reference,
+            rebuilt[flushed..],
+            reference[flushed..],
             "bypass {bypass}: the rebuilt plan renders the committed model"
         );
         assert_ne!(
-            reference,
-            control(!bypass, rebuilds),
+            reference[flushed..],
+            control(!bypass, rebuilds)[flushed..],
             "bypass {bypass}: the change is audible"
         );
     }
