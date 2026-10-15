@@ -271,7 +271,8 @@ pub struct TestTransactionSnapshot<Row> {
     pub effect_cells: Vec<EffectCellRow>,
     /// Every EQ owner's state, current epoch first, then each pending candidate: `(epoch, strip
     /// ID, effect instance ID, committed revision, phase, committed value bits, candidate value
-    /// bits)`.
+    /// bits)`. The candidate is empty while the owner is idle: it exists only between `begin` and
+    /// `commit` or `discard` (#1624).
     pub effect_owners: Vec<TestOwnerState>,
 }
 

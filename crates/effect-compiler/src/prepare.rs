@@ -1297,8 +1297,7 @@ mod owner_tests {
         let values = preparation().initial_values.len();
         let owner_box = size_of::<EffectControlOwner>() as u64;
         let row_backing = (values * size_of::<InitialParameterValue>()) as u64;
-        let dirty_backing = (values * size_of::<bool>()) as u64;
-        let owner_payload = owner_box + (2 * row_backing) + dirty_backing;
+        let owner_payload = owner_box + row_backing;
         // The EQ lane's writer holds one cell writer per `(slot, channel)` of its target cells and
         // none for parameters: its parameters ride its targets.
         let writer_backing = (2
@@ -1328,7 +1327,6 @@ mod owner_tests {
             "effect-b".len() as u64,
             owner_box,
             row_backing,
-            dirty_backing,
             writer_backing,
             factory_layout,
         ]
@@ -1387,8 +1385,7 @@ mod owner_tests {
         }
         let values = preparation().initial_values.len();
         let owner_payload = size_of::<EffectControlOwner>() as u64
-            + (2 * (values * size_of::<InitialParameterValue>()) as u64)
-            + (values * size_of::<bool>()) as u64
+            + (values * size_of::<InitialParameterValue>()) as u64
             + (2 * EQ_SLOTS
                 * size_of::<CellWriter<{ effect_contract::PREPARED_EFFECT_TARGET_WORDS }>>())
                 as u64;
