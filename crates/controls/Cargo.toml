@@ -10,9 +10,11 @@ publish.workspace = true
 name = "controls"
 
 # The control core (decision 17): it sits on the session model, the builtin rows and the launch
-# effect registry (`effect-compiler`, for the effect rows) and on nothing above them.
+# effect registry (`effect-compiler`, for the effect rows), and on `automation` for the one
+# evaluation law the filter order rule reads (#1645); on nothing above them.
 # `builtins-compiler`, `host-core`, `protocol` and the hosts depend on it, never the reverse.
 [dependencies]
+automation.workspace = true
 builtins.workspace = true
 effect-compiler.workspace = true
 effect-contract.workspace = true

@@ -235,7 +235,7 @@ export const enum MisoCommandReason {
   /// code, not a backpressure one, when the plan's revision gate refuses the batch's stamp (a
   /// revision past the gate's ceiling); that batch wrote nothing.
   ///
-  /// Never the answer to the cap on armed taps, which is `ObservationLimit`.
+  /// Never the answer to a full observation event, which is `ObservationLimit`.
   Backpressure = 8,
   /// The engine is not `STATE_READY`.
   WrongState = 9,
@@ -252,9 +252,9 @@ export const enum MisoCommandReason {
   // Reasons 12-14 (`NotSoloable`, `UnknownRoute`, `UnknownVca`) were deleted with the value kinds
   // (issue #1565); their numbers are never reused.
   /// The subscription would leave more taps armed than the engine can end honestly in one
-  /// `OBSERVATION_ENDED` event in one control frame (issue 1676: 51 taps at the browser's 16 KiB
-  /// frame). `rejectedIndex` names the subscription that crossed the cap, after every unsubscribe
-  /// of the same submission is counted; nothing was admitted. The result is `RESULT_UNSUPPORTED`.
+  /// `OBSERVATION_ENDED` event in one control frame (issue 1685: the event's exact encoded bytes
+  /// against the browser's 16 KiB frame). `rejectedIndex` names the subscription that crossed it,
+  /// after every unsubscribe of the same submission is counted; nothing was admitted. The result is `RESULT_UNSUPPORTED`.
   ///
   /// A render does not make room, so retrying the same submission will not help, which is why this
   /// is its own reason and not `Backpressure`: unsubscribe another tap first.

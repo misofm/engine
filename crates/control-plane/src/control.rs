@@ -428,13 +428,16 @@ pub struct SessionState<A: ControlAdapter> {
     /// `offsets[position]..offsets[position + 1]`, one per declared tap in declaration order.
     pub(crate) observation_offsets: Box<[u32]>,
     /// How many of [`Self::observation_pending`]'s slots are armed now, pushes not yet folded
-    /// included: the figure a subscription is admitted against (#1676 D1). Never above
-    /// [`Self::observation_cap`].
+    /// included.
     pub(crate) observation_armed: usize,
-    /// The most taps the host may have armed at once: the keys one `OBSERVATION_ENDED` event can
-    /// carry in one control frame, so the commit that ends every binding can always say so
-    /// (#1676 D1). Fixed by the session's frame limit when it compiles.
-    pub(crate) observation_cap: usize,
+    /// The encoded bytes of the armed slots' keys in an `OBSERVATION_ENDED` event, pushes not yet
+    /// folded included: the figure a subscription is admitted against (#1685 D1). With the frame's
+    /// own bytes, never above the control frame limit.
+    pub(crate) observation_armed_bytes: usize,
+    /// The encoded size of an `OBSERVATION_ENDED` frame as a function of its keys, and the control
+    /// frame limit it must fit, so the commit that ends every binding can always say so (#1685
+    /// D1). Fixed by the session's frame limit when it compiles.
+    pub(crate) observation_wire: crate::compile::ObservationWire,
     /// For each position of the newest plan's effect producers, the records of the batch being
     /// admitted that name it (#1676, batch 13b fold): the room check reads one count per producer
     /// instead of counting the batch again for each record. Sized with
@@ -488,14 +491,17 @@ pub enum ObservationKeyError {
     ComputedTap,
 }
 
-/// A subscription batch would leave more taps armed than one `OBSERVATION_ENDED` event can name in
-/// one control frame (#1676 D1). Nothing was written.
+/// A subscription batch would leave armed taps whose keys one `OBSERVATION_ENDED` event cannot
+/// carry in one control frame (#1676 D1, #1685 D1): the frame is full. Nothing was written.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationLimit {
-    /// The position, in the batch, of the first change that adds a tap past the cap.
+    /// The position, in the batch, of the first change whose arm makes the event outgrow the
+    /// frame.
     pub index: usize,
-    /// The most taps the session may have armed at once.
-    pub cap: usize,
+    /// The encoded bytes the event would need with that arm, every removal of the batch counted.
+    pub event_bytes: usize,
+    /// The control frame limit.
+    pub frame_bytes: usize,
 }
 
 /// One subscription change of a batch handed to
@@ -515,8 +521,8 @@ pub struct ObservationChange {
 /// Why [`SessionState::admit_and_push_observation_batch`] refused a batch. Nothing was queued.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObservationRefusal {
-    /// The batch would leave more taps armed than the cap. Not retryable as sent: a tap must be
-    /// disarmed first.
+    /// The batch would leave armed taps whose ended event outgrows one control frame. Not
+    /// retryable as sent: a tap must be disarmed first.
     Limit(ObservationLimit),
     /// The change at `index` needs more room than its producer's observation queue has free.
     /// Retryable once a render drains the queue.
@@ -578,16 +584,19 @@ pub(crate) type ObservationSlots = (
     Box<[ObservationSlot]>,
     Box<[ObservationBatchCount]>,
     usize,
+    usize,
 );
 
 /// The slot storage for `producers`, the newest plan's: the first slot of each producer (and one
 /// past the last), and one slot per declared tap (#1584 D6a), each armed when `bindings` holds its
-/// tap (#1676). Built when a plan is prepared, fallibly and before anything commits; the session
-/// takes it after the commit and after the fold, so nothing pending is lost to a change of
-/// positions.
+/// tap (#1676), and each slot carries its key's encoded bytes in an `OBSERVATION_ENDED` event
+/// (#1685 D2), from the producer's two IDs. The last two figures are the armed slots and their keys'
+/// bytes. Built when a plan is prepared, fallibly and before anything commits; the session takes it
+/// after the commit and after the fold, so nothing pending is lost to a change of positions.
 pub(crate) fn observation_slots(
     producers: &[host_core::EffectControlProducer],
     bindings: &controls::ObservationBindings,
+    wire: crate::compile::ObservationWire,
 ) -> Result<ObservationSlots, std::collections::TryReserveError> {
     let mut offsets = Vec::new();
     offsets.try_reserve_exact(producers.len() + 1)?;
@@ -604,12 +613,14 @@ pub(crate) fn observation_slots(
     let mut slots = Vec::new();
     slots.try_reserve_exact(total as usize)?;
     let mut armed = 0_usize;
-    if bindings.is_empty() {
-        slots.resize(total as usize, ObservationSlot::default());
-    } else {
-        for producer in producers {
-            for tap in 0..producer.observe_capacity() {
-                let is_armed = producer
+    let mut armed_bytes = 0_usize;
+    for producer in producers {
+        // Every ID is at most `STABLE_ID_MAXIMUM_BYTES`, so a key is a few hundred bytes.
+        let key_bytes = wire.key_bytes(producer.track_id.len(), producer.effect_id.len());
+        let key_bytes = u16::try_from(key_bytes).unwrap_or(u16::MAX);
+        for tap in 0..producer.observe_capacity() {
+            let is_armed = !bindings.is_empty()
+                && producer
                     .descriptor
                     .observations
                     .get(tap)
@@ -621,13 +632,16 @@ pub(crate) fn observation_slots(
                             declared.id.0,
                         )
                     });
-                armed += usize::from(is_armed);
-                slots.push(ObservationSlot {
-                    armed: is_armed,
-                    pending: PendingArm::None,
-                    mark: 0,
-                });
+            armed += usize::from(is_armed);
+            if is_armed {
+                armed_bytes += usize::from(key_bytes);
             }
+            slots.push(ObservationSlot {
+                armed: is_armed,
+                pending: PendingArm::None,
+                mark: 0,
+                key_bytes,
+            });
         }
     }
     Ok((
@@ -635,6 +649,7 @@ pub(crate) fn observation_slots(
         slots.into_boxed_slice(),
         counts.into_boxed_slice(),
         armed,
+        armed_bytes,
     ))
 }
 
@@ -653,13 +668,16 @@ pub(crate) struct ObservationBatchCount {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ObservationSlot {
     /// Armed now: the table's state with every push since folded in. Lets a subscription be
-    /// admitted against the cap without a key lookup, on the audio thread between quanta.
+    /// admitted against the frame without a key lookup, on the audio thread between quanta.
     pub(crate) armed: bool,
     /// The push waiting to be folded into the table.
     pub(crate) pending: PendingArm,
     /// The stamp of the last batch that named this slot (#1676, batch 13b fold): a change whose
     /// slot already carries the current stamp is the batch's second naming of the tap.
     pub(crate) mark: u32,
+    /// The encoded bytes of the tap's key in an `OBSERVATION_ENDED` event (#1685 D2): what arming
+    /// it adds to the event that would end every armed tap. Set when the plan's slots are built.
+    pub(crate) key_bytes: u16,
 }
 
 /// What the host last pushed to one observation slot (#1584 D6a).
@@ -1817,6 +1835,7 @@ where
                 let slots = match observation_slots(
                     &candidate_provider.effects,
                     &observation_change.bindings,
+                    self.observation_wire,
                 ) {
                     Ok(slots) => slots,
                     Err(_) => {
@@ -1868,6 +1887,7 @@ where
                     self.observation_pending,
                     self.observation_batch_counts,
                     self.observation_armed,
+                    self.observation_armed_bytes,
                 ) = slots;
                 self.observation_slots_high_water = self
                     .observation_slots_high_water
@@ -2674,12 +2694,20 @@ where
         })
     }
 
-    /// The most taps the host may have armed at once (#1676 D1): the keys one `OBSERVATION_ENDED`
-    /// event carries in one control frame with every ID at its longest. Fixed when the session
-    /// compiles, from its control frame limit.
+    /// The encoded bytes of the one `OBSERVATION_ENDED` frame that would end every armed tap,
+    /// pushes the table has not folded yet included, or `0` when none is armed (#1685 D1). A
+    /// subscription is admitted only while this is at most [`Self::observation_frame_bytes`].
     #[must_use]
-    pub fn observation_cap(&self) -> usize {
-        self.observation_cap
+    pub fn observation_ended_bytes(&self) -> usize {
+        self.observation_wire
+            .event_bytes(self.observation_armed_bytes)
+    }
+
+    /// The control frame limit the ended event must fit (#1685 D1), the session's
+    /// `maximum_control_frame_bytes`.
+    #[must_use]
+    pub fn observation_frame_bytes(&self) -> usize {
+        self.observation_wire.frame()
     }
 
     /// How many taps are armed now, pushes the table has not folded yet included.
@@ -2698,13 +2726,15 @@ where
     /// 1. **A slot per tap, and one naming per tap.** A change whose producer has no observation
     ///    slot for its tap (a tap index past the menu, or a producer with no observation queue) is
     ///    [`ObservationRefusal::Unbound`]. A change that names a tap an earlier change of the
-    ///    batch named is [`ObservationRefusal::Duplicate`], at the second naming. The cap below counts each
-    ///    tap once, so it is only sound for a batch that names each tap once.
-    /// 2. **The cap.** The batch is judged by the state it leaves: arms of taps that are not
-    ///    armed add, disarms of armed taps remove, and the rest change nothing. A batch that would
-    ///    leave more than [`Self::observation_cap`] taps armed is
-    ///    [`ObservationRefusal::Limit`], at the arm that crosses after every removal of the batch
-    ///    is counted. A retry of the same batch never succeeds until another tap is disarmed.
+    ///    batch named is [`ObservationRefusal::Duplicate`], at the second naming. The frame check
+    ///    below counts each tap once, so it is only sound for a batch that names each tap once.
+    /// 2. **The frame.** The batch is judged by the state it leaves: arms of taps that are not
+    ///    armed add their key's encoded bytes, disarms of armed taps remove theirs, and the rest
+    ///    change nothing (#1685 D1). A batch that would leave armed taps whose one
+    ///    `OBSERVATION_ENDED` event, every key with its real IDs, outgrows the control frame
+    ///    ([`Self::observation_frame_bytes`]) is [`ObservationRefusal::Limit`], at the arm that
+    ///    crosses after every removal of the batch is counted. A retry of the same batch never
+    ///    succeeds until another tap is disarmed.
     /// 3. **The room.** Each producer's observation queue holds one record per declared tap until
     ///    a render drains it; a batch that needs more than the free room of a producer is
     ///    [`ObservationRefusal::Full`] (retryable after a render), and a position past the list is
@@ -2754,7 +2784,7 @@ where
                 entry.mark = mark;
             }
         }
-        // Pass 2: the cap.
+        // Pass 2: the frame.
         self.admit_observation_changes(changes.clone())
             .map_err(ObservationRefusal::Limit)?;
         // Pass 3: the room, one count per producer from pass 1.
@@ -2783,10 +2813,10 @@ where
             .expect("the room check found room for every record of the batch");
         }
         debug_assert!(
-            self.observation_armed <= self.observation_cap,
-            "an admitted batch leaves {} taps armed past the cap {}",
-            self.observation_armed,
-            self.observation_cap
+            self.observation_wire.fits(self.observation_armed_bytes),
+            "an admitted batch leaves an ended event of {} bytes past the frame of {}",
+            self.observation_ended_bytes(),
+            self.observation_frame_bytes()
         );
         Ok(())
     }
@@ -2817,29 +2847,32 @@ where
         Some(slot as usize).filter(|slot| *slot < self.observation_pending.len())
     }
 
-    /// The cap check of [`Self::admit_and_push_observation_batch`]: moves nothing. Sound only
-    /// for a batch that names each tap once, which the caller checks first.
+    /// The frame check of [`Self::admit_and_push_observation_batch`] (#1685 D1): moves nothing and
+    /// allocates nothing; each key's bytes are its slot's. Sound only for a batch that names each
+    /// tap once, which the caller checks first.
     fn admit_observation_changes(
         &self,
         changes: impl Iterator<Item = ObservationChange> + Clone,
     ) -> Result<(), ObservationLimit> {
-        let state = |position: usize, tap_index: u32| -> Option<bool> {
-            Some(self.observation_pending[self.observation_slot(position, tap_index)?].armed)
+        let slot = |change: &ObservationChange| -> Option<&ObservationSlot> {
+            self.observation_pending
+                .get(self.observation_slot(change.position, change.tap_index)?)
         };
         let removed = changes
             .clone()
-            .filter(|change| {
-                !change.armed && state(change.position, change.tap_index) == Some(true)
-            })
-            .count();
-        let mut armed_after = self.observation_armed.saturating_sub(removed);
+            .filter(|change| !change.armed)
+            .filter_map(|change| slot(&change).filter(|slot| slot.armed))
+            .map(|slot| usize::from(slot.key_bytes))
+            .sum::<usize>();
+        let mut bytes_after = self.observation_armed_bytes.saturating_sub(removed);
         for (index, change) in changes.enumerate() {
-            if change.armed && state(change.position, change.tap_index) == Some(false) {
-                armed_after += 1;
-                if armed_after > self.observation_cap {
+            if let Some(slot) = slot(&change).filter(|slot| change.armed && !slot.armed) {
+                bytes_after = bytes_after.saturating_add(usize::from(slot.key_bytes));
+                if !self.observation_wire.fits(bytes_after) {
                     return Err(ObservationLimit {
                         index,
-                        cap: self.observation_cap,
+                        event_bytes: self.observation_wire.event_bytes(bytes_after),
+                        frame_bytes: self.observation_wire.frame(),
                     });
                 }
             }
@@ -2848,7 +2881,7 @@ where
     }
 
     /// Queues one observation record past every admission check, the over-frame defence's only
-    /// way in (#1676 attempt 2): a test arms more taps than the cap to prove that a commit whose
+    /// way in (#1676 attempt 2): a test arms taps past the frame to prove that a commit whose
     /// ended event would not fit one frame is still refused.
     ///
     /// # Errors
@@ -2867,7 +2900,7 @@ where
 
     /// Queues one observation record on the newest plan's effect producer at `position` of
     /// [`Self::effect_producers`]. Private to the crate: a host reaches it only through
-    /// [`Self::admit_and_push_observation_batch`], so no record is queued without the cap check
+    /// [`Self::admit_and_push_observation_batch`], so no record is queued without the frame check
     /// (#1676 attempt 2).
     ///
     /// # Errors
@@ -2906,11 +2939,19 @@ where
                 } else {
                     PendingArm::Disarm
                 };
-                // The count follows the slot's state (#1676): an arm of an armed tap only changes
-                // its window, and a disarm of a tap that is not armed removes nothing.
+                // The count and the bytes follow the slot's state (#1676, #1685): an arm of an
+                // armed tap only changes its window, and a disarm of a tap that is not armed
+                // removes nothing.
+                let key_bytes = usize::from(entry.key_bytes);
                 match (entry.armed, armed) {
-                    (false, true) => self.observation_armed += 1,
-                    (true, false) => self.observation_armed -= 1,
+                    (false, true) => {
+                        self.observation_armed += 1;
+                        self.observation_armed_bytes += key_bytes;
+                    }
+                    (true, false) => {
+                        self.observation_armed -= 1;
+                        self.observation_armed_bytes -= key_bytes;
+                    }
                     _ => {}
                 }
                 entry.armed = armed;

@@ -160,6 +160,9 @@ is `schema.unknown_field`; out of range is `numeric.out_of_schema_range` at
 | Two discontinuities of one entry less than 64 samples apart, at the later one's `start_sample` or `end_sample` | `automation.discontinuity_spacing` | typed-model |
 | A repeated entry `id` | `id.duplicate` | typed-model |
 | Segments out of order, overlapping or empty | `automation.out_of_order`, `automation.segment_overlap`, `automation.invalid_range` | typed-model |
+| A segment whose unit is not the row's, or a value the row refuses (a fader above 24 dB, a filter above the rate's maximum), at `$.automation[id=<id>].segments[<k>]` | `control.domain` | prepare-effects |
+| A `linear` or `exponential` segment on a toggle (polarity, mute) or enumeration row; `exponential` on a dB row or a row whose minimum is not above 0; a `linear` or `exponential` filter segment from or to `0` ("off" is reached only by a `step`) | `control.automation.shape` | prepare-effects |
+| An HPF that can reach or pass an enabled LPF on a lane, at any time, with stored automation on either filter, at the LPF entry's (else the HPF entry's) segment | `control.automation.order` | prepare-effects |
 
 ## Buses: submix strips and their taps
 

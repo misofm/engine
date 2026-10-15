@@ -1221,6 +1221,115 @@ fn a_mode_switch_that_strands_an_automation_needs_a_rebuild() {
     );
 }
 
+/// #1645 gate 7. A delta that only adds a builtin entry the row rule refuses routes to the rebuild,
+/// whose preparation refuses it: a fader ride in `linear` units (`control.domain`), a mute that
+/// ramps (`control.automation.shape`) and an HPF ride that reaches a static LPF
+/// (`control.automation.order`). The same delta with a valid fader ride stays live.
+///
+/// Red if the classifier's row-rule check misses the shape or order rule: the edit commits live,
+/// acked, and its next rebuild refuses it.
+#[test]
+fn an_automation_the_builtin_rows_refuse_needs_a_rebuild() {
+    let mut declared = two_tracks();
+    declared.tracks[0].builtins.left.lpf_hz = 1_000.0;
+    declared.tracks[0].builtins.right.lpf_hz = 1_000.0;
+    let current = normalized(&declared);
+    type Make = fn(&mut Automation);
+    let refused: [(&str, Make); 3] = [
+        ("fader in linear units", |ride| {
+            ride.segments[0].unit = ParameterUnit::Linear;
+        }),
+        ("mute ramp", |ride| {
+            ride.target.control = 6;
+            ride.segments[0].unit = ParameterUnit::Linear;
+            ride.segments[0].start_value = 0.0;
+            ride.segments[0].end_value = 1.0;
+        }),
+        ("HPF ride to the LPF", |ride| {
+            ride.target.control = 3;
+            ride.segments[0].unit = ParameterUnit::Hz;
+            ride.segments[0].start_value = 200.0;
+            ride.segments[0].end_value = 1_000.0;
+        }),
+    ];
+    for (name, make) in refused {
+        assert_eq!(
+            classify(&current, |next| {
+                let mut ride = fader_ride(next);
+                make(&mut ride);
+                next.automation.push(ride);
+            }),
+            Err(LiveRebuild::AutomationTarget),
+            "{name}"
+        );
+    }
+    assert!(
+        classify(&current, |next| {
+            let ride = fader_ride(next);
+            next.automation.push(ride);
+        })
+        .is_ok(),
+        "a valid fader ride stays live"
+    );
+}
+
+/// #1645 fold. A delta that only moves a static LPF under a stored HPF ride (the automation table
+/// unchanged) routes to the rebuild when the order rule refuses `next`: an LPF of 500 Hz under a
+/// ride to 900 Hz. An LPF of 2 kHz, an LPF edit on a strip with no filter automation, and the same
+/// crossing edit on a strip whose ride is on the fader stay live.
+///
+/// Red if step 2 re-checks the row rule only when the automation table or a row's activity
+/// changes: the edit commits live, acked, and its next rebuild refuses it.
+#[test]
+fn a_static_filter_edit_that_crosses_an_automated_curve_needs_a_rebuild() {
+    let hpf_ride = |model: &SessionModel| {
+        let mut ride = fader_ride(model);
+        ride.id = id("hpf-ride");
+        ride.target.control = 3;
+        ride.segments[0].unit = ParameterUnit::Hz;
+        ride.segments[0].start_value = 100.0;
+        ride.segments[0].end_value = 900.0;
+        ride
+    };
+    let lpf_both = |hz: f32| {
+        move |next: &mut SessionModel| {
+            next.tracks[0].builtins.left.lpf_hz = hz;
+            next.tracks[0].builtins.right.lpf_hz = hz;
+        }
+    };
+    let mut declared = two_tracks();
+    declared.tracks[0].builtins.left.lpf_hz = 1_000.0;
+    declared.tracks[0].builtins.right.lpf_hz = 1_000.0;
+    let mut automated = declared.clone();
+    let ride = hpf_ride(&automated);
+    automated.automation.push(ride);
+    let automated = normalized(&automated);
+    assert_eq!(
+        classify(&automated, lpf_both(500.0)),
+        Err(LiveRebuild::AutomationTarget),
+        "a static LPF below the HPF ride"
+    );
+    assert_eq!(
+        classify(&automated, |next| {
+            next.tracks[0].builtins.right.lpf_hz = 500.0;
+        }),
+        Err(LiveRebuild::AutomationTarget),
+        "one lane is enough"
+    );
+    assert!(
+        classify(&automated, lpf_both(2_000.0)).is_ok(),
+        "a static LPF above the ride"
+    );
+    let mut fader = declared;
+    let ride = fader_ride(&fader);
+    fader.automation.push(ride);
+    let fader = normalized(&fader);
+    assert!(
+        classify(&fader, lpf_both(500.0)).is_ok(),
+        "no filter automation: the static rule alone"
+    );
+}
+
 /// The model-only edits: #1260 D1's four and #1365 D4's `control_smoothing`.
 fn model_only_edits() -> [(&'static str, Edit); 5] {
     [
