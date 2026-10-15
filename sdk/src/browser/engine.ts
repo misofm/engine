@@ -1,3 +1,4 @@
+import { decodeObservationEnded } from "../core/observation-ended.ts";
 import { MisoEngineAsset } from "../core/asset.ts";
 import { WasmBoundary } from "../core/boundary.ts";
 import type { EngineCallResult, SessionShape } from "../core/boundary.ts";
@@ -1098,6 +1099,12 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         observationMap,
         readObservations,
         liveControls: getObservationControls,
+        // The core ends a subscription whose effect a rebuild removed with a reliable event; the
+        // owner forgets the tap and tells its subscriber (#1562b-K).
+        observationEnded: (listener) => host.onControlEvent((event) => {
+          const ended = event.lane === 0 ? decodeObservationEnded(event.frame) : undefined;
+          if (ended !== undefined) listener(ended);
+        }),
         // The audio thread renders on its own clock, so a subscription refused with backpressure
         // (an earlier one is not yet drained) may wait for the host's render count to move and be
         // sent again. The wait is bounded by the engine's request deadline and ends in the same

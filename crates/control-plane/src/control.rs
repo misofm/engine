@@ -1338,15 +1338,6 @@ where
                     // `commit_live` materializes an in-place token before it returns.
                     LiveCommit::NeedsFull(_) => return Err(CommandError::Internal),
                 };
-                // #1562a D9: an adapter that cannot take a rebuild yet refuses here, with the
-                // token dropped unsent (nothing is stamped, prepared or queued, so the frame has
-                // no acknowledgement to drop). The C ABI's preparer takes every rebuild.
-                if let Some(code) = self.preparer.refuse_rebuild() {
-                    drop(prepared);
-                    return Err(CommandError::CompileRejected(crate::error::diagnostic(
-                        code,
-                    )));
-                }
                 // #1290a: a plan's rate and quantum are fixed for its session: the plan exchange
                 // admits a replacement only at the same envelope, and would hand a different one
                 // back as retryable backpressure. A transaction that changes either is refused

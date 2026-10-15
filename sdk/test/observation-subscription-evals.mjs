@@ -75,6 +75,7 @@ function injectedOwner() {
     }],
   };
   const liveControls = {
+    async syncStructure() {},
     edit: {
       strip: () => ({
         effect: () => ({
@@ -508,6 +509,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
         slotFull = true;
         return ack(0, 0, request.commands.length);
       },
+      onControlEvent() { return () => {}; },
       async observationMap() {
         return {
           tag: "miso.observationmap.v1", requestId: 1, result: 0, structureEpoch: 1,

@@ -5,7 +5,7 @@ import { controlCallFailure, decodeControlLimits, encodeRevisionProbe } from "..
 import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
 import { readControlStripOrder } from "../core/control-list.ts";
 import type { ControlListTransport, ControlStripOrder } from "../core/control-list.ts";
-import { EngineLiveControls } from "../core/live-controls.ts";
+import { EngineLiveControls, effectRowResolver } from "../core/live-controls.ts";
 import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
 import type { SessionLike } from "../core/session.ts";
@@ -92,6 +92,17 @@ const HELD_STRIP_ORDERS = 8;
  * createBrowserStripOrder} makes: a probe, and the whole list only when the epoch moved.
  */
 export function createBrowserStripOrders(host: MisoAudioWorkletHost): BrowserStripOrders {
+  const known = hostStripOrders.get(host);
+  if (known !== undefined) return known;
+  const created = newBrowserStripOrders(host);
+  hostStripOrders.set(host, created);
+  return created;
+}
+
+/** One reader per host: the queue's effect-row check, the live controls and the feeds share its cache. */
+const hostStripOrders = new WeakMap<object, BrowserStripOrders>();
+
+function newBrowserStripOrders(host: MisoAudioWorkletHost): BrowserStripOrders {
   const orders = new Map<bigint, ControlStripOrder>();
   let newest: ControlStripOrder | undefined;
   const current = async (): Promise<ControlStripOrder> => {
@@ -160,6 +171,9 @@ async function openBrowserControlQueue(host: MisoAudioWorkletHost): Promise<Cont
     requestIds,
     limits: decodeControlLimits(first.response),
     readRevision: async () => (await probe()).revision,
+    // An edit that names an effect's row is checked against the core's list before it is sent
+    // (#1562b-K); the reader is the page's one, so a probe of the structure epoch is all it costs.
+    prepare: effectRowResolver(() => createBrowserStripOrders(host).current()),
   });
 }
 
@@ -181,7 +195,8 @@ export async function createBrowserLiveControls(
   // The strip order is the core's control list (#1564 D5), not the worklet's index exports: the
   // map keeps the worklet's sources and meter lease, and takes the tracks and submixes from the
   // owner headers.
-  const order = await readControlStripOrder({ send: hostControlSend(host), requestIds: queue.requestIds });
+  const orders = createBrowserStripOrders(host);
+  const order = await orders.current();
   const map: SessionMap = Object.freeze({
     tracks: order.tracks,
     sources: Object.freeze(remoteMap.sources.map((source) => Object.freeze({ ...source }))),
@@ -190,6 +205,8 @@ export async function createBrowserLiveControls(
   });
   return new EngineLiveControls(map, {
     queue,
+    stripOrder: orders.current,
+    order,
     observe: async (edits): Promise<CommandReport> => {
       const ack = await host.command({ commands: edits.map(browserCommand) });
       return Object.freeze({

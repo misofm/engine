@@ -682,10 +682,18 @@ describe("#1564A gate 4 -- edit.set reaches any row", () => {
       assert.throws(() => edit.set({ ...address, control: "no_such_row" }, 0), MisoUsageError);
       assert.throws(() => edit.set({ ...address, owner: { kind: "strip", id: 7 } }, 0), MisoUsageError);
       assert.throws(() => edit.set(address, "loud"), MisoUsageError);
-      // A named row of an insert depends on the effect it runs, which a document-text boot does not
-      // tell the SDK: the message says to use the numeric row.
+      // A named row of an insert depends on the effect it runs. The SDK reads that from the core's
+      // section header (#1562b-K), so a document-text boot resolves it; an insert the list does not
+      // have cannot be resolved, and the message says to use the numeric row.
+      const named = edit.set({
+        owner: strip("t1"), section: { kind: "inserts", effect: "comp" }, control: "threshold_db", lane: "both",
+      }, -20);
+      const compressorRow = find(await engine.controls({ pageLimit: 50 }), (e) => owned(e, "strip", "t1")
+        && e.address.section.kind === "inserts" && e.address.section.effect === "comp" && e.name === "threshold_db",
+      "the comp insert's threshold_db");
+      assert.equal(named.edits[0].address.control, compressorRow.address.control);
       assert.throws(
-        () => edit.set({ owner: strip("t1"), section: { kind: "inserts", effect: "comp" }, control: "threshold_db", lane: "both" }, -20),
+        () => edit.set({ owner: strip("t1"), section: { kind: "inserts", effect: "ghost" }, control: "threshold_db", lane: "both" }, -20),
         /numeric/,
       );
       assert.equal(edit.set(address, 0, { rampSamples: 0 }).edits[0].rampSamples, 0);

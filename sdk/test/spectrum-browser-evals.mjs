@@ -163,6 +163,7 @@ function encodedSpectrumResult(buffer) {
 
 function hostWithCapture(overrides = {}) {
   return {
+    onControlEvent() { return () => {}; },
     async armSpectrum() { return { result: 0 }; },
     async readSpectrum() { return { result: 0, snapshot: new Uint8Array([1]) }; },
     async status() { return { result: 0, state: 2, lastResult: 0 }; },
@@ -351,6 +352,7 @@ test("browser spectrum invalidates a dead Worker and permits a fresh managed lif
     async sessionMap() {
       return { sources: [], metersAttached: false };
     },
+    onControlEvent() { return () => {}; },
     async observationMap() {
       return {
         result: 0,

@@ -14,6 +14,7 @@ import {
   type ObservationSelection,
 } from "./observation.ts";
 import type { LaneEdit } from "./writer.ts";
+import type { ObservationEnded } from "./observation-ended.ts";
 import { normalizeTrackResponseQuery } from "./live-response.ts";
 import type {
   TrackResponseLimits,
@@ -70,6 +71,26 @@ export interface ObservationSubscriptionRequest {
   readonly cadenceMs?: number;
   /** Receives availability notifications; call `handle.readLatest()` for owned rows. */
   readonly onUpdate?: (notification: ObservationSubscriptionNotification) => void;
+  /**
+   * Receives the end of selections the engine ended (#1562b-K): a rebuild removed the effect that
+   * owned the tap, or the ID now names an effect without it. The core announces it with a reliable
+   * event and the SDK reports it here once for each commit. A subscription whose selections have all
+   * ended is closed.
+   */
+  readonly onEnd?: (end: ObservationSubscriptionEnd) => void;
+}
+
+/** What `onEnd` receives: the selections of one subscription that one commit ended. */
+export interface ObservationSubscriptionEnd {
+  readonly handle: ObservationSubscription;
+  readonly owner: bigint;
+  readonly epoch: bigint;
+  /** The revision of the commit that ended them. */
+  readonly revision: bigint;
+  /** The selections of this subscription that this commit ended, as the subscription asked for them. */
+  readonly ended: readonly ObservationSelection[];
+  /** The selections still subscribed; empty when the whole subscription ended and was closed. */
+  readonly remaining: readonly ObservationSelection[];
 }
 
 export interface ObservationSubscriptionConfiguration {
@@ -117,6 +138,8 @@ export interface ObservationSubscription {
   readonly configuration: ObservationSubscriptionConfiguration;
   readonly appliedAtSample: bigint;
   readonly bounds: ObservationSubscriptionBounds;
+  /** Every selection of this subscription the engine has ended so far, in the order it ended them. */
+  readonly ended: readonly ObservationSelection[];
   readLatest(): readonly ObservationReadResult[];
   pump(): Promise<ObservationSubscriptionNotification | undefined>;
   /**
@@ -142,6 +165,13 @@ export interface ObservationSubscriptionTransport {
   observationMap(): MaybePromise<ObservationMap>;
   readObservations(selections: readonly ObservationSelection[]): MaybePromise<readonly ObservationReadResult[]>;
   liveControls(): MaybePromise<EngineLiveControls>;
+  /**
+   * Subscribe to the core's `OBSERVATION_ENDED` events (#1584): the listener gets each one, once,
+   * as decoded from the reliable lane. Returns the unsubscribe function. A transport that cannot
+   * read the lane leaves this absent, and a managed subscription then ends only when its owner
+   * closes it.
+   */
+  observationEnded?(listener: (ended: ObservationEnded) => void): () => void;
   /**
    * A transport whose renders run on their own clock (a browser's audio thread) lets a managed
    * submission that was refused with `backpressure` wait for a render and be sent again. A
@@ -197,6 +227,7 @@ interface EffectiveLimits {
 interface ResolvedSelection {
   readonly selection: ObservationSelection;
   readonly binding: ObservationBinding;
+  readonly windowBlocks: number;
   readonly baseKey: string;
   readonly key: string;
   readonly nativeSelection: ObservationSelection;
@@ -207,7 +238,8 @@ interface BindingState {
   readonly baseKey: string;
   readonly selection: ObservationSelection;
   readonly nativeSelection: ObservationSelection;
-  readonly binding: ObservationBinding;
+  /** The owner's address as the newest map gave it: a rebuild can move the effect's index. */
+  binding: ObservationBinding;
   readonly windowBlocks: number;
   refs: number;
   latest: ObservationReadResult | undefined;
@@ -222,7 +254,10 @@ interface HandleState {
   epoch: bigint;
   configuration: ObservationSubscriptionConfiguration;
   entries: readonly ResolvedSelection[];
+  /** The selections the engine ended. */
+  ended: readonly ObservationSelection[];
   callback: ((notification: ObservationSubscriptionNotification) => void) | undefined;
+  onEnd: ((end: ObservationSubscriptionEnd) => void) | undefined;
   appliedAtSample: bigint;
   readonly cursor: Map<string, bigint>;
   readonly nativeMissedSeen: Map<string, bigint>;
@@ -280,7 +315,11 @@ function canonicalLimits(overrides: ObservationSubscriptionLimits | undefined): 
 function normalizedRequest(
   request: ObservationSubscriptionRequest,
   subscriptionLimits: EffectiveLimits,
-): { readonly configuration: ObservationSubscriptionConfiguration; readonly callback: ((notification: ObservationSubscriptionNotification) => void) | undefined } {
+): {
+  readonly configuration: ObservationSubscriptionConfiguration;
+  readonly callback: ((notification: ObservationSubscriptionNotification) => void) | undefined;
+  readonly onEnd: ((end: ObservationSubscriptionEnd) => void) | undefined;
+} {
   if (request === null || typeof request !== "object") {
     throw new MisoUsageError("observation subscription request must be an object");
   }
@@ -309,6 +348,9 @@ function normalizedRequest(
   if (request.onUpdate !== undefined && typeof request.onUpdate !== "function") {
     throw new MisoUsageError("observation onUpdate must be a function");
   }
+  if (request.onEnd !== undefined && typeof request.onEnd !== "function") {
+    throw new MisoUsageError("observation onEnd must be a function");
+  }
   return {
     configuration: Object.freeze({
       selections: Object.freeze(selections),
@@ -316,6 +358,7 @@ function normalizedRequest(
       cadenceMs,
     }),
     callback: request.onUpdate,
+    onEnd: request.onEnd,
   };
 }
 
@@ -333,6 +376,7 @@ function mapSelection(map: ObservationMap, selection: ObservationSelection, wind
   return Object.freeze({
     selection,
     binding,
+    windowBlocks,
     baseKey: keyFor(selection),
     key: bindingKey(selection, windowBlocks),
     nativeSelection: cloneSelection(selection, "both"),
@@ -420,6 +464,7 @@ class ObservationSubscriptionImpl implements ObservationSubscription {
   get configuration(): ObservationSubscriptionConfiguration { return this.#state.configuration; }
   get appliedAtSample(): bigint { return this.#state.appliedAtSample; }
   get bounds(): ObservationSubscriptionBounds { return this.#owner.bounds; }
+  get ended(): readonly ObservationSelection[] { return this.#state.ended; }
 
   readLatest(): readonly ObservationReadResult[] {
     return this.#owner.readLatest(this.#state);
@@ -498,6 +543,9 @@ export class ObservationSubscriptionOwner {
   #timer: unknown;
   #timerCadence: number | undefined;
   #disposed = false;
+  #unsubscribeEnded: (() => void) | undefined;
+  /** `OBSERVATION_ENDED` events that arrived while a mutation was in flight; applied after it. */
+  #endedWhileBusy: ObservationEnded[] = [];
 
   constructor(
     transport: ObservationSubscriptionTransport,
@@ -514,6 +562,7 @@ export class ObservationSubscriptionOwner {
       || transport.spectrumRead === undefined || transport.spectrumStop === undefined
       ? undefined
       : canonicalSpectrumSubscriptionLimits(spectrumSubscriptionLimits);
+    this.#unsubscribeEnded = transport.observationEnded?.((ended) => this.#onEnded(ended));
   }
 
   get bounds(): ObservationSubscriptionBounds {
@@ -577,12 +626,17 @@ export class ObservationSubscriptionOwner {
       this.#assertCommandSize(newEntries.length);
       const liveControls = newEntries.length === 0 ? undefined : await this.#transport.liveControls();
       this.#assertEpoch(epoch);
+      // A rebuild can have moved the strips: the records name them by the core's list as it is now.
+      await liveControls?.syncStructure();
+      this.#assertEpoch(epoch);
       const edits = newEntries.map((entry) =>
         this.#edit(liveControls!, entry, true, normalized.configuration.windowBlocks));
       const report = await this.#submit(liveControls, edits, epoch);
       this.#assertEpoch(epoch);
       const appliedAtSample = report?.appliedAtSample ?? this.#existingSample(entries);
-      const state = this.#newHandle(normalized.configuration, entries, normalized.callback, appliedAtSample);
+      const state = this.#newHandle(
+        normalized.configuration, entries, normalized.callback, normalized.onEnd, appliedAtSample,
+      );
       newEntries.forEach((entry) => {
         const row = preflight.get(entry.key);
         this.#bindings.set(entry.key, {
@@ -600,7 +654,8 @@ export class ObservationSubscriptionOwner {
         });
       });
       entries.filter((entry) => !newEntries.includes(entry)).forEach((entry) => {
-        this.#bindings.get(entry.key)!.refs += 1;
+        const held = this.#bindings.get(entry.key);
+        if (held !== undefined) held.refs += 1;
       });
       this.#handles.set(state.id, state);
       this.#startTimer();
@@ -616,6 +671,7 @@ export class ObservationSubscriptionOwner {
       await this.#waitForPoll();
       const map = await this.#transport.observationMap();
       this.#assertEpoch(epoch);
+      this.#remap(map);
       const entries = normalized.configuration.selections.map((selection) =>
         mapSelection(map, selection, normalized.configuration.windowBlocks));
       const currentByKey = new Map(state.entries.map((entry) => [entry.key, entry] as const));
@@ -654,10 +710,10 @@ export class ObservationSubscriptionOwner {
         ? undefined
         : await this.#transport.liveControls();
       this.#assertEpoch(epoch);
+      await liveControls?.syncStructure();
+      this.#assertEpoch(epoch);
       const edits: LaneEdit[] = [
-        ...disarm.map((entry) => this.#edit(
-          liveControls!, entry, false, this.#bindings.get(entry.key)!.windowBlocks,
-        )),
+        ...disarm.map((entry) => this.#edit(liveControls!, entry, false, entry.windowBlocks)),
         ...newEntries.map((entry) => this.#edit(
           liveControls!, entry, true, normalized.configuration.windowBlocks,
         )),
@@ -687,11 +743,13 @@ export class ObservationSubscriptionOwner {
         });
       });
       add.filter((entry) => !newEntries.includes(entry)).forEach((entry) => {
-        this.#bindings.get(entry.key)!.refs += 1;
+        const held = this.#bindings.get(entry.key);
+        if (held !== undefined) held.refs += 1;
       });
       state.configuration = normalized.configuration;
       state.entries = entries;
       state.callback = normalized.callback;
+      state.onEnd = normalized.onEnd;
       state.appliedAtSample = appliedAtSample;
       state.cursor.clear();
       state.nativeMissedSeen.clear();
@@ -718,16 +776,24 @@ export class ObservationSubscriptionOwner {
       this.#assertHandle(state);
       const epoch = this.#epoch;
       await this.#waitForPoll();
-      const disarm = state.entries.filter((entry) => {
+      let disarm = state.entries.filter((entry) => {
         const binding = this.#bindings.get(entry.key);
         return binding !== undefined && binding.refs === 1;
       });
       this.#assertCommandSize(disarm.length);
       const liveControls = disarm.length === 0 ? undefined : await this.#transport.liveControls();
       this.#assertEpoch(epoch);
-      const edits = disarm.map((entry) => this.#edit(
-        liveControls!, entry, false, this.#bindings.get(entry.key)!.windowBlocks,
-      ));
+      if (liveControls !== undefined) {
+        // The records name the tap by the indices of the plan that renders now, which a rebuild can
+        // have changed since the subscription was made.
+        const map = await this.#transport.observationMap();
+        this.#assertEpoch(epoch);
+        this.#remap(map);
+        await liveControls.syncStructure();
+        this.#assertEpoch(epoch);
+        disarm = state.entries.filter((entry) => disarm.some((held) => held.key === entry.key));
+      }
+      const edits = disarm.map((entry) => this.#edit(liveControls!, entry, false, entry.windowBlocks));
       const report = await this.#submit(liveControls, edits, epoch);
       this.#assertEpoch(epoch);
       if (report !== undefined && !report.ok) throw commandFailure("observation close was refused", report);
@@ -775,7 +841,84 @@ export class ObservationSubscriptionOwner {
     this.#spectrumHandles.clear();
     this.#spectrumJob = undefined;
     this.#stopTimer();
-    if (disposed) this.#disposed = true;
+    this.#endedWhileBusy = [];
+    if (disposed) {
+      this.#disposed = true;
+      this.#unsubscribeEnded?.();
+      this.#unsubscribeEnded = undefined;
+    }
+  }
+
+  /**
+   * The engine ended taps (`OBSERVATION_ENDED`): the commit removed the effect that owned them, or
+   * the ID now names an effect without that tap. The core decided it and has already dropped the
+   * arms, so nothing is sent; the owner forgets the bindings and tells each subscription once what
+   * it lost (#1562b-K). A subscription left with no selection is closed.
+   */
+  #onEnded(ended: ObservationEnded): void {
+    if (this.#disposed) return;
+    if (this.#mutationBusy) {
+      this.#endedWhileBusy.push(ended);
+      return;
+    }
+    const lost = new Set(ended.keys.map((key) => keyFor({
+      trackId: key.stripId, rack: key.rack, effectSlotId: key.effectSlotId, tapId: key.tapId, channels: "both",
+    })));
+    const gone = new Set<string>();
+    for (const binding of [...this.#bindings.values()]) {
+      if (!lost.has(binding.baseKey)) continue;
+      this.#bindings.delete(binding.key);
+      gone.add(binding.baseKey);
+    }
+    if (gone.size === 0) return;
+    for (const state of [...this.#handles.values()]) {
+      const dropped = state.entries.filter((entry) => gone.has(entry.baseKey));
+      if (dropped.length === 0) continue;
+      const remaining = state.entries.filter((entry) => !gone.has(entry.baseKey));
+      for (const entry of dropped) {
+        state.cursor.delete(entry.key);
+        state.nativeMissedSeen.delete(entry.key);
+      }
+      state.entries = Object.freeze(remaining);
+      const droppedSelections = Object.freeze(dropped.map((entry) => entry.selection));
+      state.ended = Object.freeze([...state.ended, ...droppedSelections]);
+      if (remaining.length === 0) {
+        state.closed = true;
+        this.#handles.delete(state.id);
+      }
+      if (state.publicHandle === undefined) continue;
+      const end: ObservationSubscriptionEnd = Object.freeze({
+        handle: state.publicHandle,
+        owner: this.#owner,
+        epoch: this.#epoch,
+        revision: ended.revision,
+        ended: droppedSelections,
+        remaining: Object.freeze(remaining.map((entry) => entry.selection)),
+      });
+      try { state.onEnd?.(end); } catch { /* callbacks cannot break the owner */ }
+    }
+    this.#stopTimerIfIdle();
+  }
+
+  /**
+   * Take the newest map's address for every held tap. A rebuild can move an effect to another index
+   * or strip; a tap is held by its stable IDs, and only the records that arm and disarm it name the
+   * index. A tap the map no longer has keeps its last address: the core ends it with its own event.
+   */
+  #remap(map: ObservationMap): void {
+    const current = (selection: ObservationSelection): ObservationBinding | undefined => map.bindings.find((candidate) =>
+      candidate.trackId === selection.trackId && candidate.rack === selection.rack
+        && candidate.effectSlotId === selection.effectSlotId);
+    for (const binding of this.#bindings.values()) {
+      const fresh = current(binding.selection);
+      if (fresh !== undefined) binding.binding = fresh;
+    }
+    for (const state of this.#handles.values()) {
+      state.entries = Object.freeze(state.entries.map((entry) => {
+        const fresh = current(entry.selection);
+        return fresh === undefined || fresh === entry.binding ? entry : Object.freeze({ ...entry, binding: fresh });
+      }));
+    }
   }
 
   /** Invalidate only the spectrum lifetime after its analysis transport has failed. */
@@ -804,6 +947,7 @@ export class ObservationSubscriptionOwner {
     configuration: ObservationSubscriptionConfiguration,
     entries: readonly ResolvedSelection[],
     callback: ((notification: ObservationSubscriptionNotification) => void) | undefined,
+    onEnd: ((end: ObservationSubscriptionEnd) => void) | undefined,
     appliedAtSample: bigint,
   ): HandleState {
     const state: HandleState = {
@@ -812,7 +956,9 @@ export class ObservationSubscriptionOwner {
       epoch: this.#epoch,
       configuration,
       entries: Object.freeze([...entries]),
+      ended: Object.freeze([]),
       callback,
+      onEnd,
       appliedAtSample,
       cursor: new Map(),
       nativeMissedSeen: new Map(),
@@ -1075,6 +1221,9 @@ export class ObservationSubscriptionOwner {
   #assertHandle(state: HandleState): void {
     this.#assertOpen();
     if (state.closed || state.epoch !== this.#epoch || this.#handles.get(state.id) !== state) {
+      if (state.ended.length > 0 && state.entries.length === 0 && state.epoch === this.#epoch) {
+        throw new MisoUsageError("the observation subscription ended: the engine removed every tap it held");
+      }
       throw new MisoUsageError("the observation subscription handle is closed or stale");
     }
   }
@@ -1086,7 +1235,13 @@ export class ObservationSubscriptionOwner {
     this.#mutationBusy = true;
     const run = this.#mutation.then(operation, operation);
     this.#mutation = run.then(() => undefined, () => undefined);
-    return run.finally(() => { this.#mutationBusy = false; });
+    return run.finally(() => {
+      this.#mutationBusy = false;
+      // An end that arrived mid-operation applies now, to the state the operation left.
+      const waiting = this.#endedWhileBusy;
+      this.#endedWhileBusy = [];
+      for (const ended of waiting) this.#onEnded(ended);
+    });
   }
 
   /** Subscribe to one selected track response while sharing this owner's lifetime and poll. */

@@ -313,9 +313,14 @@ reads draw their request IDs from the same allocator as value edits.
 as the typed builders (`faderDb`, `gainDb`, `parameter`, ...) and returns it for `submit()` or a
 writer. `address` is either a generated `ControlAddress` (owner, section, the row's machine name,
 lane) or the `address` of a list entry, which names the row by its numeric `control`. A row of an
-insert or console slot depends on the effect it runs, so name it by its machine name only for a
-session the SDK built (`withSession()`); the list entry's numeric address always works. `set`
-checks only that the edit can be encoded. The value's domain, the lane, the owner and whether the
+insert or console slot depends on the effect it runs, and the SDK reads that from the control list's
+section headers, not from the session it booted: an insert or console slot that is in the list can
+be named by its machine name, and a rebuild that makes an insert run another effect is followed. The
+effect row is checked again against the list when the transaction is sent (a probe of the structure
+epoch, and the list only when it moved): a name follows the header, and a builder typed for an effect
+that insert no longer runs (`insert("comp", "miso.compressor")` after `comp` became a soft clip) is
+refused with `MisoUsageError` and sends nothing. A section the list does not have cannot be named;
+use the list entry's numeric address. `set` checks only that the edit can be encoded. The value's domain, the lane, the owner and whether the
 row can be set are the core's: an edit of a derived row rejects `control.read_only`, and one of a
 rebuild-only row is committed on the rebuild path, as on the C ABI: the core prepares a replacement
 plan and the engine adopts it at a block boundary.
@@ -354,8 +359,8 @@ instead of growing with stem duration.
 
 | Observation | API and meaning of its time |
 | --- | --- |
-| Track/master peaks | Browser `subscribeMeters()`; headless `meters(true)` then `pollMeters()`. Linear peak magnitudes cover `[firstSample, endSample)`. This span timestamps peaks only, not an exact gain-reduction join. |
-| Resident effect values | `observationMap()`, `readObservations()`, or `subscribeObservations()`. Select stable track/rack/effect-slot/tap IDs. Ready values retain the effect owner's own window and native unit. |
+| Track/master peaks | Browser `subscribeMeters()`; headless `meters(true)` then `pollMeters()`. Linear peak magnitudes cover `[firstSample, endSample)`. This span timestamps peaks only, not an exact gain-reduction join. A headless frame names its own strips (`trackIds`, `submixIds`) by the control list of the `structureEpoch` it carries, so it stays right across a rebuild, including one that keeps the strip count. |
+| Resident effect values | `observationMap()`, `readObservations()`, or `subscribeObservations()`. Select stable track/rack/effect-slot/tap IDs. Ready values retain the effect owner's own window and native unit. A managed subscription follows a rebuild (the core keeps the tap armed on the effect that carries on). When a commit removes the effect, the core ends the tap with `OBSERVATION_ENDED`: pass `onEnd` to `subscribeObservations()` to be told which selections ended and which remain, once for each commit; `handle.ended` lists them, and a subscription left with no selection is closed. |
 | Live EQ/filter response | `queryTrackResponse()` or `subscribeTrackResponse()`. `capturedSample` marks capture of applied target state at a block boundary. The curve is a stationary EQ/input-filter subtotal; fader, pan, routing, and unsupported processors are excluded. |
 | Spectrum | Browser `querySpectrum()`; headless `armSpectrum()`, explicit renders, then `readSpectrum()`. Each result covers 2,048 captured PCM samples, `[capturedSample, endSample)`, with dBFS bins and a graph-wide source-underrun flag. |
 | Continuous spectrum | `subscribeSpectrum()` retains one managed stream. Metadata carries the capture span, hop, epochs, drops, and smoothing history. The default 100 ms power smoothing includes earlier windows; set `smoothingMs: 0` for unsmoothed analysis. |
