@@ -26,7 +26,7 @@ const STATE_READY = 2;
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 
 // Issue #137 D1/D2/D3.
-const COMMAND_RECORD_BYTES = 48;
+const COMMAND_RECORD_BYTES = 272;
 const MAXIMUM_COMMAND_RECORDS = 256;
 const COMMAND_REPORT_BYTES = 48;
 const OBSERVATION_SELECTION_BYTES = 32;

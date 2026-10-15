@@ -151,7 +151,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
       assert.deepEqual(first.readLatest().map((row) => row.status), ["pending", "pending"]);
       const liveControls = engine.liveControls();
       await assert.rejects(
-        () => liveControls.submit(liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
+        () => liveControls.submit(liveControls.edit.track("t").insert("comp", "miso.compressor")
           .observe("Gain Reduction", false, 2)),
         /conflict/,
       );
@@ -237,7 +237,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     });
     try {
       const liveControls = engine.liveControls();
-      const edit = (on, window) => liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
+      const edit = (on, window) => liveControls.edit.track("t").insert("comp", "miso.compressor")
         .observe("Gain Reduction", on, window);
       assert.equal((await liveControls.submit(edit(true, 4))).ok, true);
       feed(engine, 0); engine.render();

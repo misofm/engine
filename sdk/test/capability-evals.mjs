@@ -236,13 +236,11 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       });
       writer.stage({
         kind: "observeSubscribe",
-        trackIndex: 0,
-        rack: 3, // console slot 0
-        channel: 255,
-        effectIndex: 0,
-        parameterId: 1,
-        smoothingSamples: meterBlocks,
-        values: [0, 0, 0, 0],
+        rack: 3, // console slot "compressor"
+        stripId: engine.sessionMap().tracks[0],
+        effectId: "compressor",
+        tapId: 1,
+        windowBlocks: meterBlocks,
       });
       assert.equal((await writer.flush()).admitted, 1);
 
@@ -400,7 +398,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     }
   });
 
-  test("a selected read of a bus tap names the bus, unarmed and then armed at its strip index", async () => {
+  test("a selected read of a bus tap names the bus, unarmed and then armed by its stable key", async () => {
     // Issue #1213 (K2 verdict requirement (a)). The SDK resolves a bus tap to its strip index
     // `T + j`, and host-web must resolve that index per strip -- tracks, then submixes. Red if the
     // host looks the index up among the tracks only: the read then fails with `invalidArgument`.
@@ -429,13 +427,11 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       });
       writer.stage({
         kind: "observeSubscribe",
-        trackIndex: busIndex,
         rack: binding.rack === "console" ? 3 : 1,
-        channel: 255,
-        effectIndex: 0,
-        parameterId: binding.tapIds[0],
-        smoothingSamples: 1,
-        values: [0, 0, 0, 0],
+        stripId: "bus",
+        effectId: "bus-comp",
+        tapId: binding.tapIds[0],
+        windowBlocks: 1,
       });
       assert.equal((await writer.flush()).admitted, 1);
       for (let block = 0; block < 4; block += 1) {
@@ -444,7 +440,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       }
       const [armed] = engine.readObservations(selection);
       assert.equal(armed.trackId, "bus");
-      assert.notEqual(armed.status, "unarmed", "kind 7 at the bus's strip index armed its tap");
+      assert.notEqual(armed.status, "unarmed", "kind 7 naming the bus's strip armed its tap");
     } finally {
       engine.dispose();
     }

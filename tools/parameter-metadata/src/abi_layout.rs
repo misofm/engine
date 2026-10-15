@@ -704,19 +704,17 @@ fn observation_result_fields() -> [Field; 19] {
 /// is no Rust type to take `offset_of!` of — so the rows are transcribed from that function and
 /// pinned against it by `tests/abi_layout.rs`, which encodes a record at these offsets and
 /// requires the engine to decode exactly the values written.
-fn command_record_fields() -> [Field; 11] {
+fn command_record_fields() -> [Field; 9] {
     [
         ("kind", 0, "u8"),
         ("rack", 1, "u8"),
-        ("channel", 2, "u8"),
-        ("reserved0", 3, "u8"),
-        ("trackIndex", 4, "u32"),
-        ("effectIndex", 8, "u32"),
-        ("parameterId", 12, "u32"),
-        ("smoothingSamples", 16, "u32"),
-        ("reserved1", 20, "u32"),
-        ("values", 24, "f32[4]"),
-        ("reserved2", 40, "u8[8]"),
+        ("stripIdBytes", 2, "u8"),
+        ("effectIdBytes", 3, "u8"),
+        ("tapId", 4, "u32"),
+        ("windowBlocks", 8, "u32"),
+        ("reserved0", 12, "u32"),
+        ("stripId", 16, "u8[128]"),
+        ("effectId", 144, "u8[128]"),
     ]
 }
 

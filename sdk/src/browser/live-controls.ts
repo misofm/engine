@@ -10,7 +10,6 @@ import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
 import type { SessionLike } from "../core/session.ts";
 import type { LaneEdit } from "../core/writer.ts";
-import { laneEditWord } from "../internal/ramp.ts";
 import type {
   MisoAudioWorkletHost,
   MisoCommand,
@@ -27,12 +26,10 @@ function browserCommand(edit: LaneEdit): MisoCommand {
   return {
     kind: kindValue(edit.kind),
     rack: edit.rack,
-    channel: edit.channel,
-    trackIndex: edit.trackIndex,
-    effectIndex: edit.effectIndex ?? 0,
-    parameterId: edit.parameterId ?? 0,
-    smoothingSamples: laneEditWord(edit),
-    values: [...edit.values],
+    stripId: edit.stripId,
+    effectId: edit.effectId,
+    tapId: edit.tapId,
+    windowBlocks: edit.windowBlocks,
   };
 }
 
@@ -205,7 +202,6 @@ export async function createBrowserLiveControls(
   });
   return new EngineLiveControls(map, {
     queue,
-    stripOrder: orders.current,
     order,
     observe: async (edits): Promise<CommandReport> => {
       const ack = await host.command({ commands: edits.map(browserCommand) });

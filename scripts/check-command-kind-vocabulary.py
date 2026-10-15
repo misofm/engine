@@ -7,7 +7,7 @@ already drifted -- silently, in the shipped artifact:
 
 * `hosts/host-web/src/lib.rs` -- the `COMMAND_*` constants. This is the authority.
 * the same file's `CommandRecord::decode` whitelist -- the `matches!` arm that decides what the
-  48-byte wire actually accepts. A constant the whitelist does not name is a kind no caller can
+  command-record wire actually accepts. A constant the whitelist does not name is a kind no caller can
   send; a whitelist entry the constants do not name cannot exist.
 * `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` -- the `COMMAND_KINDS` set
   `validCommand` gates every submitted record through.
@@ -150,7 +150,7 @@ def rust_constants(text: str) -> list[tuple[int, str]]:
 
 
 def rust_decode_whitelist(text: str) -> list[str]:
-    """The `matches!` arm in `CommandRecord::decode` -- what the 48-byte wire actually accepts."""
+    """The `matches!` arm in `CommandRecord::decode` -- what the command-record wire actually accepts."""
     block = block_after(text, "let kind = u32::from(bytes[0]);", "(", ")")
     names = [
         camel_from_screaming(name)

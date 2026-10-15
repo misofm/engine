@@ -135,7 +135,6 @@ fn command_exports(handle: u32, before: u32) {
     let mut record = [0_u8; COMMAND_RECORD_BYTES as usize];
     record[0] = 3;
     record[1] = RACK_NOT_APPLICABLE;
-    record[2] = 0;
     assert!(native_staging::command_records(handle, &record));
     unchanged(
         before,
@@ -143,16 +142,19 @@ fn command_exports(handle: u32, before: u32) {
         submit(handle, 1),
         RESULT_INVALID_ARGUMENT,
     );
-    // An observe record for a tap the console EQ does not declare is refused at the tap.
+    // An observe record naming a key the plan does not have is refused at the key.
     let mut record = [0_u8; COMMAND_RECORD_BYTES as usize];
     record[0] = COMMAND_OBSERVE_SUBSCRIBE as u8;
     record[1] = RACK_CONSOLE;
-    record[2] = 255;
-    record[12..16].copy_from_slice(&1_u32.to_le_bytes());
+    record[2] = 5;
+    record[3] = 4;
+    record[4..8].copy_from_slice(&1_u32.to_le_bytes());
+    record[16..21].copy_from_slice(b"track");
+    record[144..148].copy_from_slice(b"slot");
     assert!(native_staging::command_records(handle, &record));
     unchanged(
         before,
-        "command_submit (refused: unknown tap)",
+        "command_submit (refused: unknown key)",
         submit(handle, 1),
         RESULT_INVALID_ARGUMENT,
     );

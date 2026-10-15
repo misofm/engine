@@ -30,13 +30,15 @@
 // `liveControlObservationTaps === 0n` is that session: it has no command staging, so `command()`
 // acknowledges every batch `UnsupportedKind`.
 //
-// ## Addressing is session-stable and string-free
+// ## Addressing is by stable key (issue 1677)
 //
-// A command names a strip by its strip index -- the compiled session's canonical normalized tracks
-// first, then its submixes in canonical order (issue 1213), as the core's control list names them
-// (the owner header rows, track rows first) -- plus a rack, an effect index and a numeric tap ID.
-// No string crosses the command path. The identity mapping is the control list for the session
-// and the build-time metadata JSON for the effect vocabulary.
+// A command names its tap by the stable key the engine's `OBSERVATION_ENDED` event uses: the
+// strip's ID (a track or a submix), the rack (`1` inserts, `3` console), the insert's or the
+// console slot's ID, and the effect-local tap ID. It carries no position, so a rebuild cannot make
+// a record arm another effect's tap. The engine resolves the key on the newest committed plan --
+// the successor between a rebuild's commit and the block that adopts it -- and refuses a key that
+// plan does not have with a typed reason (`UnknownTrack`, `UnknownEffect`, `UnknownTap`) before it
+// queues anything. The build-time metadata JSON is the vocabulary of the tap IDs.
 //
 // ## One batch is one transaction
 //
@@ -189,10 +191,9 @@ export interface MisoUnsupportedBrowser {
 export const enum MisoCommandKind {
   /// Arm one declared observation tap of one effect instance. Applied (issue #143).
   ///
-  /// `parameterId` carries the effect-local **tap id** from the metadata JSON's per-effect
-  /// `observations` array, `smoothingSamples` carries the window length in render blocks (`0` for
-  /// the plan's default), and every `values` word must be `0`: a subscription changes what is read,
-  /// never what is rendered.
+  /// `tapId` carries the effect-local **tap id** from the metadata JSON's per-effect
+  /// `observations` array and `windowBlocks` the window length in render blocks (`0` for the
+  /// plan's default): a subscription changes what is read, never what is rendered.
   ///
   /// Applied on the `miso.observe.v1` plane: it binds an entry in the subscription map. The
   /// metadata JSON reports it as `"plane": "observation"`.
@@ -208,18 +209,19 @@ export const enum MisoCommandKind {
 export const enum MisoCommandReason {
   /// The submission was admitted whole.
   None = 0,
-  /// Unknown kind, nonzero reserved word, non-finite value, a field set for the wrong kind, or a
-  /// submission that names one observation tap more than once.
+  /// Unknown kind, nonzero reserved word, an ID field that is not its length's bytes followed by
+  /// zeros, or a submission that names one observation tap more than once.
   Malformed = 1,
-  /// `trackIndex` is not a strip of the compiled session: it is at or past the control list's
-  /// track and submix owner rows together. The spelling is kept (issue 1213, DESIGN P17).
+  /// `stripId` is not a track or a submix of the newest committed plan. The spelling is kept (issue
+  /// 1213, DESIGN P17).
   UnknownTrack = 2,
   /// `rack` is not an effect rack (`1` inserts or `3` console) on an effect-addressed kind. The
   /// retired `simd1` (`0`) and `simd2` (`2`) codes are refused with it only on the raw export
   /// path (issue #1096); `MisoAudioWorkletHost.command()` refuses them locally, before the port,
   /// by rejecting with a `miso.error.v1` invalid argument, as it refuses any out-of-set code.
   UnknownRack = 3,
-  /// `effectIndex` is not an effect of the addressed rack: no such console slot or insert.
+  /// `effectId` is not a console slot or insert (per `rack`) of the addressed strip on the newest
+  /// committed plan.
   UnknownEffect = 4,
   /// `parameterId` is not a parameter of the addressed effect.
   UnknownParameter = 5,
@@ -235,7 +237,7 @@ export const enum MisoCommandReason {
   Backpressure = 8,
   /// The engine is not `STATE_READY`.
   WrongState = 9,
-  /// `parameterId` is not a declared observation tap of the addressed effect (issue 143).
+  /// `tapId` is not a declared observation tap of the addressed effect (issue 143).
   ///
   /// Deliberately not `UnknownParameter`: a parameter and a tap are different namespaces on the
   /// same effect, and a caller that confuses them learns which one it got wrong.
@@ -249,31 +251,26 @@ export const enum MisoCommandReason {
   // (issue #1565); their numbers are never reused.
 }
 
-/// One live-control command record. `255` means "not applicable to this kind".
+/// One live-control command record: the subscription or withdrawal of one tap, named by its stable
+/// key (issue 1677).
 ///
 /// Only the two observation kinds are carried (issue #1565). An effect is addressed in the
-/// session's terms (decision 12, issue #1096): a console slot as `rack` `3` with `effectIndex` the
-/// slot's index in the session's slot order (`pre_insert`, then `post_insert`, which is its index in
-/// the track's `console` entries), and an insert as `rack` `1` with `effectIndex` its index in the
-/// track's `inserts`. The retired `simd1` (`0`) and `simd2` (`2`) codes are refused and never
-/// reallocated; the layout JSON's `racks` table is the vocabulary.
+/// session's terms (decision 12, issue #1096): a console slot as `rack` `3` with `effectId` the
+/// slot's ID, and an insert as `rack` `1` with `effectId` the insert's ID. The retired `simd1` (`0`)
+/// and `simd2` (`2`) codes are refused and never reallocated; the layout JSON's `racks` table is the
+/// vocabulary. An ID is at most 127 UTF-8 bytes; a longer one rejects locally.
 export interface MisoCommand {
   kind: MisoCommandKind;
   /// `1` inserts, `3` console.
   rack: number;
-  /// `0` left, `1` right, `2` both, `255` for a kind with no lane (both observation kinds).
-  channel: number;
-  /// Strip index: the control list's track owner rows first, then its submix owner rows, each in
-  /// list order (issue 1213).
-  trackIndex: number;
-  /// A console slot's index in the session's slot order, or an insert's index.
-  effectIndex: number;
+  /// The strip's ID: a track's or a submix's.
+  stripId: string;
+  /// The console slot's ID or the insert's ID.
+  effectId: string;
   /// The effect-local observation tap id.
-  parameterId: number;
+  tapId: number;
   /// The observation window length in render blocks, or `0` for the plan's default.
-  smoothingSamples: number;
-  /// Every word `0` for the observation kinds.
-  values: [number, number, number, number];
+  windowBlocks: number;
 }
 
 export interface MisoCommandRequest {
@@ -584,13 +581,13 @@ export interface MisoMeterFrame {
 /// unknown field with `RESULT_INVALID_ARGUMENT` (1) before anything reaches the port, so an
 /// optional-looking extra property is a local refusal rather than a field the engine ignores.
 export interface MisoObservationSubscription {
-  /// Strip index, as `MisoCommand.trackIndex`: tracks first, then submixes (issue 1213), so a
-  /// bus effect's tap is armed at `tracks.length + j`.
-  trackIndex: number;
+  /// The strip's ID, as `MisoCommand.stripId`: a track's or a submix's.
+  stripId: string;
   /// `1` inserts or `3` console, as `MisoCommand` addresses an effect. There is no `255` here:
   /// a tap always names a rack.
   rack: number;
-  effectIndex: number;
+  /// The console slot's ID or the insert's ID, as `MisoCommand.effectId`.
+  effectId: string;
   /// The effect-local tap id from the metadata JSON's per-effect `observations[].id`. Never `0`.
   ///
   /// This is a *tap* id, not a parameter id: they are different namespaces on one effect, and a
@@ -617,16 +614,15 @@ export interface MisoObservationRequest {
 /// This is where "which tracks have an observed effect at all" lives. `trackGrDb` is positional
 /// and cannot express absence; this can.
 export interface MisoObservationBinding {
-  readonly trackIndex: number;
+  /// The strip's ID. The strip's gain-reduction entry in a meter frame is at its position in the
+  /// control list's strip order (tracks, then submixes).
+  readonly stripId: string;
   /// `1` inserts or `3` console.
   readonly rack: number;
-  readonly effectIndex: number;
+  /// The console slot's ID or the insert's ID.
+  readonly effectId: string;
   /// The effect-local tap id, matching the metadata JSON's per-effect `observations[].id`.
   readonly tapId: number;
-  /// The strip index of the gain-reduction entry this tap folds into, equal to `trackIndex`
-  /// (issue 1213). Below `MisoMeterFrame.trackCount` it indexes `trackGrDb`; from there it is
-  /// `submixGrDb[frameSlot - trackCount]`.
-  readonly frameSlot: number;
   /// Render blocks per published window, as it is actually in force.
   readonly windowBlocks: number;
 }
@@ -645,18 +641,18 @@ export interface MisoObservationBinding {
 /// further `observe()` calls all keep working. Only a locally malformed request rejects, with
 /// `MisoError` and `result: 1`, before anything is sent.
 ///
-/// # Subscriptions are per plan
+/// # Subscriptions follow the key
 ///
-/// A structural session edit replaces the plan, and subscriptions belong to the plan they were
-/// applied to: the replacement's lanes exist and are unarmed, and the readers the old plan handed
-/// out simply stop advancing. An app re-subscribes against the new plan and receives a fresh map
-/// whose sequences restart at `1`. Nothing carries over, and nothing has to be torn down.
+/// A tap is named by its stable key, so a structural session edit does not move it: the core keeps
+/// the tap armed on the replacement plan while the strip, the effect and the tap still exist, and
+/// announces a tap it ended with an `OBSERVATION_ENDED` event. `bindings` is this host's own record
+/// of what it armed and withdrew; it does not drop a tap the engine ended.
 export interface MisoObservationAck {
   readonly tag: "miso.observe.v1";
   readonly requestId: number;
   readonly result: number;
   readonly reason: MisoCommandReason;
-  /// Every armed tap of the current plan, in canonical `(track, rack, effectIndex, tapId)` order.
+  /// Every tap this host armed and has not withdrawn, in `(stripId, rack, effectId, tapId)` order.
   readonly bindings: MisoObservationBinding[];
 }
 

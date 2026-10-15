@@ -425,6 +425,68 @@ pub struct SessionState<A: ControlAdapter> {
     pub(crate) observation_offsets: Box<[u32]>,
 }
 
+/// The stable key of one observation tap, borrowed from the bytes that name it (#1677): the strip's
+/// ID, the rack, the console slot's or insert's ID and the effect-local tap ID. The same key
+/// `OBSERVATION_ENDED` names ([`controls::TapKey`]), in a form a host can build from its staging
+/// without allocating.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationKeyRef<'a> {
+    /// The ID of the track or submix.
+    pub strip_id: &'a [u8],
+    /// The console slot or the insert section.
+    pub rack: host_core::LiveEffectRack,
+    /// The console slot's or the insert's ID.
+    pub effect_id: &'a [u8],
+    /// The effect-local tap ID.
+    pub tap_id: u32,
+}
+
+/// Where [`SessionState::resolve_observation_key`] found a tap, on the newest plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedObservationTap {
+    /// The position of the tap's effect in [`SessionState::effect_producers`].
+    pub producer: usize,
+    /// The tap's index in its effect's declared menu, which the render side arms.
+    pub tap_index: u32,
+}
+
+/// Why a key names no tap of the newest plan (#1677). Nothing was written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservationKeyError {
+    /// The strip ID is no track or submix of the plan.
+    UnknownStrip,
+    /// The strip has no console slot or insert of that ID.
+    UnknownEffect,
+    /// The effect declares no tap of that ID.
+    UnknownTap,
+    /// The tap is declared and its cost is not resident; V1 binds no lane for one.
+    ComputedTap,
+}
+
+/// The index in `descriptor`'s observation menu of the tap with ID `tap_id`, the one the render side
+/// arms (#1677). A tap the menu does not declare is [`ObservationKeyError::UnknownTap`], and a
+/// declared tap that is not resident is [`ObservationKeyError::ComputedTap`]: V1 ships no
+/// implementation for one, and saying so is better than binding a lane that would never publish.
+///
+/// # Errors
+///
+/// As above.
+pub fn resolve_observation_tap(
+    descriptor: &effect_contract::EffectDescriptor,
+    tap_id: u32,
+) -> Result<u32, ObservationKeyError> {
+    let (index, tap) = descriptor
+        .observations
+        .iter()
+        .enumerate()
+        .find(|(_, tap)| tap.id.0 == tap_id)
+        .ok_or(ObservationKeyError::UnknownTap)?;
+    if !matches!(tap.cost, effect_contract::ObservationCost::Resident) {
+        return Err(ObservationKeyError::ComputedTap);
+    }
+    u32::try_from(index).map_err(|_| ObservationKeyError::UnknownTap)
+}
+
 /// A plan's observation slot offsets and its pending-subscription storage.
 pub(crate) type ObservationSlots = (Box<[u32]>, Box<[PendingArm]>);
 
@@ -2391,6 +2453,57 @@ where
     #[must_use]
     pub fn effect_producers(&self) -> &[host_core::EffectControlProducer] {
         &self.newest_providers().effects
+    }
+
+    /// Resolves the stable key of an observation tap on the newest committed plan (#1677): the
+    /// plan [`Self::effect_producers`] lists, the pending candidate's while one waits for its swap.
+    /// A subscribe or unsubscribe names its tap by this key and no position of any plan, so a
+    /// rebuild between a client's last read and the record cannot make it arm another effect's
+    /// tap. The one function the browser's record and the C ABI's observe edit both call.
+    ///
+    /// The strip is looked up in the committed model, so a strip with no effect is still an
+    /// unknown effect and not an unknown strip. The effect is the producer of the strip's console
+    /// slot or insert of that ID. The comparison is by bytes and the call allocates nothing: the
+    /// browser admits a record inside `process()`.
+    ///
+    /// # Errors
+    ///
+    /// The first of [`ObservationKeyError`] that applies, in the order strip, effect, tap. Nothing
+    /// is written.
+    pub fn resolve_observation_key(
+        &self,
+        key: &ObservationKeyRef<'_>,
+    ) -> Result<ResolvedObservationTap, ObservationKeyError> {
+        let model = self.committed_session().normalized_model();
+        let strip_known = model
+            .tracks
+            .binary_search_by(|track| track.id.as_str().as_bytes().cmp(key.strip_id))
+            .is_ok()
+            || model
+                .submixes
+                .binary_search_by(|submix| submix.id.as_str().as_bytes().cmp(key.strip_id))
+                .is_ok()
+            || model
+                .strips()
+                .any(|strip| strip.id.as_str().as_bytes() == key.strip_id);
+        if !strip_known {
+            return Err(ObservationKeyError::UnknownStrip);
+        }
+        let (producer, found) = self
+            .newest_providers()
+            .effects
+            .iter()
+            .enumerate()
+            .find(|(_, producer)| {
+                producer.address.rack == key.rack
+                    && producer.track_id.as_bytes() == key.strip_id
+                    && producer.effect_id.as_bytes() == key.effect_id
+            })
+            .ok_or(ObservationKeyError::UnknownEffect)?;
+        Ok(ResolvedObservationTap {
+            producer,
+            tap_index: resolve_observation_tap(found.descriptor, key.tap_id)?,
+        })
     }
 
     /// Queues one observation record on the newest plan's effect producer at `position` of

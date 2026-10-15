@@ -560,9 +560,9 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     }),
   });
   const subscription = {
-    trackIndex: 0,
+    stripId: "track",
     rack: 1,
-    effectIndex: 0,
+    effectId: "comp",
     tapId: OBSERVATION_TAP_ID,
     windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
     armed: true,
@@ -591,7 +591,7 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     subscribeResult: subscribed === null ? null : subscribed.result,
     subscribeReason: subscribed === null ? null : subscribed.reason,
     bindings: subscribed === null ? 0 : subscribed.bindings.length,
-    frameSlot: subscribed?.bindings[0]?.frameSlot ?? -1,
+    stripId: subscribed?.bindings[0]?.stripId ?? null,
     windowBlocks: subscribed?.bindings[0]?.windowBlocks ?? -1,
     frames: frames.length,
     trackGrDbWidth: frames.length === 0 ? -1 : frames[0].trackGrDb.length,
@@ -791,9 +791,9 @@ async function runStagingReadRun(createHost, sessionDocument, streaming) {
   } else {
     const subscribed = await host.observe({
       subscriptions: [{
-        trackIndex: 0,
+        stripId: "track",
         rack: 1,
-        effectIndex: 0,
+        effectId: "comp",
         tapId: OBSERVATION_TAP_ID,
         windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
         armed: true,

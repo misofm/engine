@@ -252,7 +252,7 @@ function validate(browserName, result) {
   const observation = result.observation;
   gate(browserName, "observation", observation?.armed?.meterLeaseResult === 0
     && observation?.armed?.subscribeResult === 0 && observation?.armed?.subscribeReason === 0
-    && observation?.armed?.bindings === 1 && observation?.armed?.frameSlot === 0
+    && observation?.armed?.bindings === 1 && observation?.armed?.stripId === "track"
     && observation?.armed?.windowBlocks === 2,
   "the subscription was not acknowledged with a usable map");
   gate(browserName, "observation", observation?.armed?.frames >= 1

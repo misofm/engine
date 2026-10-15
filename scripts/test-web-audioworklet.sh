@@ -257,7 +257,7 @@ echo "web AudioWorklet command-reason vocabulary gates passed"
 
 # Issue #210 phase 0: the same discipline for the command-KIND vocabulary. Its own red mutations
 # run first -- 26 of them, one per rule -- then the shipped drift class is performed on disk: a
-# kind the 48-byte wire decodes that the host JS `COMMAND_KINDS` set does not admit. That is the
+# kind the command-record wire decodes that the host JS `COMMAND_KINDS` set does not admit. That is the
 # defect shape the metadata JSON shipped for two releases (six kinds declared, eight decoded).
 python3 -B "$repo_root/scripts/check-command-kind-vocabulary.py" --self-test
 python3 -B "$repo_root/scripts/check-command-kind-vocabulary.py"

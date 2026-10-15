@@ -208,7 +208,7 @@ def validate(document: dict) -> None:
         }, "controls keys")
     require(document["schema"] == SCHEMA, "schema tag")
     require(document["abiVersion"] == ABI_VERSION, "abi version")
-    require(document["commandRecordBytes"] == 48, "command record bytes")
+    require(document["commandRecordBytes"] == 272, "command record bytes")
     require(document["maximumCommandRecords"] >= 1, "maximum command records")
 
     kinds = document["commandKinds"]

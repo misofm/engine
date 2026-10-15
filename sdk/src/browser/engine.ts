@@ -696,11 +696,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       const stripIds = Object.freeze([...order.tracks, ...order.submixes]);
       return Object.freeze({
-        map: enrichObservationMap(
-          stripIds,
-          reply.bindings as readonly RawObservationBinding[],
-          BigInt(reply.structureEpoch),
-        ),
+        map: enrichObservationMap(stripIds, reply.bindings as readonly RawObservationBinding[]),
         stripIds,
       });
     };
@@ -743,7 +739,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       return semanticLiveControls;
     };
-    // An observation subscription is the one 48-byte command record left, and the host stages
+    // An observation subscription is the one command record left, and the host stages
     // records only when `observationTaps` is nonzero.
     const getObservationControls = (): Promise<EngineLiveControls> =>
       (policy.liveControls?.observationTaps ?? 0) === 0

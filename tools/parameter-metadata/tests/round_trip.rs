@@ -289,27 +289,22 @@ fn session_with_every_effect(effects: &[&str]) -> String {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn stage(
-    host: &mut AudioWorkletEngineHost,
-    kind: u32,
-    rack: u8,
-    channel: u8,
-    effect_index: u32,
-    parameter_id: u32,
-    value: f32,
-) {
+/// Stage one observation record that names insert `e{effect_index}` of track `t` and the tap
+/// `tap_id` (#1677): the record carries the stable key, not a position.
+fn stage(host: &mut AudioWorkletEngineHost, kind: u32, rack: u8, effect_index: u32, tap_id: u32) {
     let staging = host
         .command_staging_mut()
         .expect("prepared command staging");
     let record = &mut staging[..COMMAND_RECORD_BYTES as usize];
     record.fill(0);
+    let effect = format!("e{effect_index}");
     record[0] = u8::try_from(kind).expect("frozen kind");
     record[1] = rack;
-    record[2] = channel;
-    record[8..12].copy_from_slice(&effect_index.to_le_bytes());
-    record[12..16].copy_from_slice(&parameter_id.to_le_bytes());
-    record[24..28].copy_from_slice(&value.to_le_bytes());
+    record[2] = 1;
+    record[3] = u8::try_from(effect.len()).expect("effect ID length");
+    record[4..8].copy_from_slice(&tap_id.to_le_bytes());
+    record[16] = b't';
+    record[144..144 + effect.len()].copy_from_slice(effect.as_bytes());
 }
 
 /// Issue #137 E7, rebuilt for the control plane (#1565A): every ID the metadata declares for an
@@ -440,7 +435,7 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
         let index = u32::try_from(effect_index).expect("effect index");
         for tap in descriptor.observations {
             for kind in [COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE] {
-                stage(&mut host, kind, 1, 255, index, tap.id.0, 0.0);
+                stage(&mut host, kind, 1, index, tap.id.0);
                 let result = host.submit_commands(1);
                 let reason = host.command_report().reason;
                 // Every launch tap is resident, so every one of them binds. The rule the test
@@ -470,7 +465,7 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
     }
 
     // The negative case: a tap id no effect declares does not resolve, and says so as a *tap*.
-    stage(&mut host, COMMAND_OBSERVE_SUBSCRIBE, 1, 255, 0, 4_242, 0.0);
+    stage(&mut host, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, 4_242);
     assert_eq!(host.submit_commands(1), host_web::RESULT_INVALID_ARGUMENT);
     assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
 }

@@ -257,8 +257,8 @@ POLICY_WORDS = [
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 
 COMMAND_RECORD_FIELDS = [
-    "kind", "rack", "channel", "reserved0", "trackIndex", "effectIndex", "parameterId",
-    "smoothingSamples", "reserved1", "values", "reserved2",
+    "kind", "rack", "stripIdBytes", "effectIdBytes", "tapId", "windowBlocks", "reserved0",
+    "stripId", "effectId",
 ]
 # The applied-revision watermark record (#1381a D5): the C ABI's `miso_engine_v1_watermark`, field
 # for field and in its order (#1314 D6), without a pre-roll counter.
@@ -440,8 +440,8 @@ def validate(document: object) -> None:
     require(isinstance(record, dict) and set(record) == {"bytes", "endianness", "fields"},
             "commandRecord keys are exactly bytes/endianness/fields")
     require(record["endianness"] == "little", "the command record is little-endian")
-    require(record["bytes"] == 48, f"the command record is 48 bytes, not {record['bytes']}")
-    check_fields("commandRecord", record["fields"], 48)
+    require(record["bytes"] == 272, f"the command record is 272 bytes, not {record['bytes']}")
+    check_fields("commandRecord", record["fields"], 272)
     require([row["name"] for row in record["fields"]] == COMMAND_RECORD_FIELDS,
             f"commandRecord names exactly {COMMAND_RECORD_FIELDS}")
 

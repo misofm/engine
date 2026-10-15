@@ -89,8 +89,12 @@ const SOURCE_FIELDS = [
 ];
 
 const SEEK_FIELDS = ["sourceId", "generation", "sourceFrame"];
-// Issue #137 D1: the frozen 48-byte little-endian command record.
-const COMMAND_RECORD_BYTES = 48;
+// Issue #137 D1, #1677: the frozen 272-byte little-endian command record. It names its tap by
+// stable key: a one-byte length and a 128-byte zero-padded field for each of the strip's and the
+// effect's ID. The IDs are at most 127 UTF-8 bytes (`session::STABLE_ID_MAXIMUM_BYTES`).
+const COMMAND_RECORD_BYTES = 272;
+const RECORD_ID_FIELD_BYTES = 128;
+const RECORD_ID_MAXIMUM_BYTES = RECORD_ID_FIELD_BYTES - 1;
 const MAXIMUM_COMMAND_RECORDS = 256;
 // Issue #1562a D1: the control frames in flight on the port at once. The worklet answers them in
 // arrival order; a flood is refused here with `RESULT_BACKPRESSURE` before any transfer.
@@ -105,7 +109,7 @@ const MAXIMUM_OBSERVATION_TAPS = 16;
 const OBSERVE_SUBSCRIBE_KIND = 7;
 const OBSERVE_UNSUBSCRIBE_KIND = 8;
 const SUBSCRIPTION_FIELDS = [
-  "trackIndex", "rack", "effectIndex", "tapId", "windowBlocks", "armed",
+  "stripId", "rack", "effectId", "tapId", "windowBlocks", "armed",
 ];
 const OBSERVATION_ADDRESS_FIELDS = ["trackIndex", "rack", "effectIndex", "tapId", "channels"];
 const MAXIMUM_OBSERVATION_READS = MAXIMUM_COMMAND_RECORDS;
@@ -168,11 +172,27 @@ const RACK_INSERTS = 1;
 const RACK_CONSOLE = 3;
 const effectRack = (rack) => rack === RACK_INSERTS || rack === RACK_CONSOLE;
 
+/// Order two IDs by their code units, which is their byte order for the ASCII IDs a session holds.
+function compareIds(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/// The UTF-8 bytes of a record's ID field. It runs on the caller's thread, never in `process()`.
+function idBytes(id) {
+  return new TextEncoder().encode(id);
+}
+
+/// A record's ID: a string whose UTF-8 form fits the 127 bytes of its field. Whether it names
+/// anything is the engine's to say, with a typed reason.
+function validRecordId(id) {
+  return typeof id === "string" && idBytes(id).length <= RECORD_ID_MAXIMUM_BYTES;
+}
+
 function validSubscription(subscription) {
   return hasExactFields(subscription, SUBSCRIPTION_FIELDS)
-    && validU32(subscription.trackIndex)
+    && validRecordId(subscription.stripId)
     && effectRack(subscription.rack)
-    && validU32(subscription.effectIndex)
+    && validRecordId(subscription.effectId)
     && validU32(subscription.tapId) && subscription.tapId > 0
     && validU32(subscription.windowBlocks)
     && typeof subscription.armed === "boolean";
@@ -246,10 +266,7 @@ function validCommandReason(reason) {
   return validU32(reason) && reason < COMMAND_REASONS.length;
 }
 
-const COMMAND_FIELDS = [
-  "kind", "rack", "channel", "trackIndex", "effectIndex", "parameterId", "smoothingSamples",
-  "values",
-];
+const COMMAND_FIELDS = ["kind", "rack", "stripId", "effectId", "tapId", "windowBlocks"];
 // Issue #143 added kinds 7 and 8, the two observation subscribe/unsubscribe records. Issue #1565a
 // deleted every value kind (1-6 and 9-17): a value goes through the `control` message, and a record
 // of a deleted kind is refused here as an unknown kind is. Kind numbers are never reallocated.
@@ -258,36 +275,32 @@ const COMMAND_FIELDS = [
 // the spellings `scripts/check-command-kind-vocabulary.py` holds to the Rust `COMMAND_*`
 // constants, so a kind that exists on the wire and not here is red before it ships.
 const COMMAND_KINDS = new Set([7, 8]);
-const NOT_APPLICABLE = 255;
 
 function validCommand(command) {
   return hasExactFields(command, COMMAND_FIELDS)
     && COMMAND_KINDS.has(command.kind)
-    && (effectRack(command.rack) || command.rack === NOT_APPLICABLE)
-    && (validU32(command.channel) && (command.channel <= 2 || command.channel === NOT_APPLICABLE))
-    && validU32(command.trackIndex) && validU32(command.effectIndex)
-    && validU32(command.parameterId) && validU32(command.smoothingSamples)
-    && Array.isArray(command.values) && command.values.length === 4
-    && command.values.every((value) => typeof value === "number" && Number.isFinite(value));
+    && effectRack(command.rack)
+    && validRecordId(command.stripId) && validRecordId(command.effectId)
+    && validU32(command.tapId) && validU32(command.windowBlocks);
 }
 
-/// Encode one live-control submission into the existing 48-byte semantic wire record.
+/// Encode one live-control submission into the 272-byte semantic wire record (#1677).
 function encodeCommands(commands) {
   const records = new Uint8Array(commands.length * COMMAND_RECORD_BYTES);
   const view = new DataView(records.buffer);
   for (let index = 0; index < commands.length; index += 1) {
     const command = commands[index];
     const offset = index * COMMAND_RECORD_BYTES;
+    const stripId = idBytes(command.stripId);
+    const effectId = idBytes(command.effectId);
     records[offset] = command.kind;
     records[offset + 1] = command.rack;
-    records[offset + 2] = command.channel;
-    view.setUint32(offset + 4, command.trackIndex, true);
-    view.setUint32(offset + 8, command.effectIndex, true);
-    view.setUint32(offset + 12, command.parameterId, true);
-    view.setUint32(offset + 16, command.smoothingSamples, true);
-    for (let slot = 0; slot < 4; slot += 1) {
-      view.setFloat32(offset + 24 + slot * 4, command.values[slot], true);
-    }
+    records[offset + 2] = stripId.length;
+    records[offset + 3] = effectId.length;
+    view.setUint32(offset + 4, command.tapId, true);
+    view.setUint32(offset + 8, command.windowBlocks, true);
+    records.set(stripId, offset + 16);
+    records.set(effectId, offset + 16 + RECORD_ID_FIELD_BYTES);
   }
   return records;
 }
@@ -1423,28 +1436,24 @@ class MisoAudioWorkletHost {
         ? OBSERVE_SUBSCRIBE_KIND
         : OBSERVE_UNSUBSCRIBE_KIND,
       rack: subscription.rack,
-      channel: 255,
-      trackIndex: subscription.trackIndex,
-      effectIndex: subscription.effectIndex,
-      parameterId: subscription.tapId,
-      smoothingSamples: subscription.windowBlocks,
-      values: [0, 0, 0, 0],
+      stripId: subscription.stripId,
+      effectId: subscription.effectId,
+      tapId: subscription.tapId,
+      windowBlocks: subscription.windowBlocks,
     }));
     const ack = await this.command({ commands });
     if (ack.result === 0) {
       for (const subscription of request.subscriptions) {
-        const key = [
-          subscription.trackIndex, subscription.rack, subscription.effectIndex, subscription.tapId,
-        ].join("/");
+        // The tap's stable key, the one the core's `OBSERVATION_ENDED` names.
+        const key = JSON.stringify([
+          subscription.stripId, subscription.rack, subscription.effectId, subscription.tapId,
+        ]);
         if (subscription.armed) {
           this.#observations.set(key, {
-            trackIndex: subscription.trackIndex,
+            stripId: subscription.stripId,
             rack: subscription.rack,
-            effectIndex: subscription.effectIndex,
+            effectId: subscription.effectId,
             tapId: subscription.tapId,
-            // The frame carries one gain-reduction entry per strip (trackGrDb, then submixGrDb),
-            // so the slot is the strip index (issue #1213).
-            frameSlot: subscription.trackIndex,
             windowBlocks: subscription.windowBlocks === 0
               ? Number(this.#liveControlMeterBlocks)
               : subscription.windowBlocks,
@@ -1460,9 +1469,9 @@ class MisoAudioWorkletHost {
       result: ack.result,
       reason: ack.reason,
       bindings: Object.freeze([...this.#observations.values()]
-        .sort((left, right) => left.trackIndex - right.trackIndex
+        .sort((left, right) => compareIds(left.stripId, right.stripId)
           || left.rack - right.rack
-          || left.effectIndex - right.effectIndex
+          || compareIds(left.effectId, right.effectId)
           || left.tapId - right.tapId)
         .map(Object.freeze)),
     });
@@ -1471,8 +1480,9 @@ class MisoAudioWorkletHost {
   /// Read the compiled session's canonical track order (issue #137 D1), its sources (issue #207)
   /// and its canonical submix order (issue #1210 D3).
   ///
-  /// This is the addressing authority for `trackIndex`: the app never guesses an index, and never
-  /// sends a string on the command path.
+  /// This is the addressing authority for the strip positions the meter frame and the observation
+  /// map use: the app never guesses an index. A command record does not use one: it names its tap
+  /// by stable key (#1677).
   sessionMap() {
     return this.#request({ tag: "miso.sessionmap.v1" }, [], "sessionMap", false, undefined, "sessionMap");
   }

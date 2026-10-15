@@ -737,27 +737,24 @@ function renderControlBuilders(catalog) {
     + `export class TrackEdits extends StripEdits {\n`
     + `  constructor(\n`
     + `    trackId: string,\n`
-    + `    trackIndex: number | undefined,\n`
     + `    layout: LiveControlLayout | undefined,\n`
     + `    context: StripContext,\n`
     + `  ) {\n`
-    + `    super("track", trackId, trackIndex, layout, context);\n`
+    + `    super("track", trackId, layout, context);\n`
     + `  }\n\n`
     + strip(trackOnly)
     + `}\n\n`
     + `/**\n`
     + ` * A submix strip's live edits: every strip edit and no \`solo\` (a bus is solo-safe; the core refuses\n`
-    + ` * the solo of a submix). \`LiveControlEdits.submix(id)\` also finds the submix's strip index,\n`
-    + ` * \`T + j\`, for observation.\n`
+    + ` * the solo of a submix).\n`
     + ` */\n`
     + `export class SubmixEdits extends StripEdits {\n`
     + `  constructor(\n`
     + `    submixId: string,\n`
-    + `    stripIndex: number | undefined,\n`
     + `    layout: LiveControlLayout | undefined,\n`
     + `    context: StripContext,\n`
     + `  ) {\n`
-    + `    super("submix", submixId, stripIndex, layout, context);\n`
+    + `    super("submix", submixId, layout, context);\n`
     + `  }\n`
     + `}\n\n`
     + renderOwnedClass("RouteEdits", "route",

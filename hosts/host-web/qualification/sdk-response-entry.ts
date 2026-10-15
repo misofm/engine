@@ -2124,7 +2124,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
     const map = await browser.observationMap();
     const pendingBeforeArm = await browser.readObservations(selections);
     const subscriptions = await browser.host.observe({ subscriptions: [
-      { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 2, armed: true },
+      { stripId: "track", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 2, armed: true },
     ] });
     const pendingAfterArm = await browser.readObservations(selections);
     for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {

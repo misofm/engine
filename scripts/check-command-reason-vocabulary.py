@@ -462,19 +462,23 @@ def self_test() -> int:
             ),
         ),
         (
-            "the declared binding drops frameSlot",
-            mutate(HOST_DTS, "  readonly frameSlot: number;\n", ""),
+            "the declared binding drops windowBlocks",
+            mutate(
+                HOST_DTS,
+                "  /// Render blocks per published window, as it is actually in force.\n  readonly windowBlocks: number;\n}",
+                "}",
+            ),
         ),
         (
             "the declared acknowledgement drops reason",
-            mutate(HOST_DTS, "  readonly reason: MisoCommandReason;\n  /// Every armed tap", "  /// Every armed tap"),
+            mutate(HOST_DTS, "  readonly reason: MisoCommandReason;\n  /// Every tap this host armed", "  /// Every tap this host armed"),
         ),
         (
             "the implementation gains a binding field the .d.ts does not declare",
             mutate(
                 HOST_JS,
-                "            frameSlot: subscription.trackIndex,",
-                "            frameSlot: subscription.trackIndex,\n            armed: true,",
+                "            effectId: subscription.effectId,\n            tapId: subscription.tapId,\n            windowBlocks:",
+                "            effectId: subscription.effectId,\n            tapId: subscription.tapId,\n            armed: true,\n            windowBlocks:",
             ),
         ),
     ]

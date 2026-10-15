@@ -270,8 +270,10 @@ batches through the queue, for gesture loops; the core's `backpressure` status i
 never an error. The root entry's `parameter()` helper provides exact decimal/lattice edits for
 agent-facing controls.
 
-Observation subscriptions (`effect(...).observe(...)`) are the one edit that is still a 48-byte
-command record: they resolve with a `CommandReport` and need a positive
+Observation subscriptions (`console(...)` or `insert(...)` then `.observe(...)`) are the one edit that
+is still a command record: it names its tap by stable key (the strip's ID, the console slot's or
+insert's ID, the tap's ID), which the core resolves on the newest committed plan and refuses with a
+typed reason when it has no such tap. They resolve with a `CommandReport` and need a positive
 `liveControls.observationTaps` at boot, passed to `createOfflineEngine` directly or under
 `policy` to `createEngine`. Value edits are `SET_CONTROL` transactions and need no boot word.
 

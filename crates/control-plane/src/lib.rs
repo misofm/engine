@@ -61,7 +61,9 @@ mod plan;
 pub use adapter::{ControlAdapter, ControlLimits, PlanResources};
 pub use compile::{CompiledChildren, RuntimePreparer, compile_children};
 pub use control::{
-    CommandError, EventError, EventLane, REPREPARE_REQUIRED, SessionState, SourceFailure,
+    CommandError, EventError, EventLane, ObservationKeyError, ObservationKeyRef,
+    REPREPARE_REQUIRED, ResolvedObservationTap, SessionState, SourceFailure,
+    resolve_observation_tap,
 };
 pub use error::{CompileFailure, ResourceFault};
 /// One planar chunk a host submits to a source of the session ([`SessionState::submit`]).

@@ -186,12 +186,14 @@ export function engineHost(engine, { frames = [] } = {}) {
         const base = index * ABI_LAYOUT.commandRecord.bytes;
         view.setUint8(base + at("kind"), command.kind);
         view.setUint8(base + at("rack"), command.rack);
-        view.setUint8(base + at("channel"), command.channel);
-        view.setUint32(base + at("trackIndex"), command.trackIndex, true);
-        view.setUint32(base + at("effectIndex"), command.effectIndex, true);
-        view.setUint32(base + at("parameterId"), command.parameterId, true);
-        view.setUint32(base + at("smoothingSamples"), command.smoothingSamples, true);
-        command.values.forEach((v, slot) => view.setFloat32(base + at("values") + slot * 4, v, true));
+        const strip = new TextEncoder().encode(command.stripId);
+        const effect = new TextEncoder().encode(command.effectId);
+        view.setUint8(base + at("stripIdBytes"), strip.length);
+        view.setUint8(base + at("effectIdBytes"), effect.length);
+        view.setUint32(base + at("tapId"), command.tapId, true);
+        view.setUint32(base + at("windowBlocks"), command.windowBlocks, true);
+        bytes.set(strip, base + at("stripId"));
+        bytes.set(effect, base + at("effectId"));
       });
       const report = engine.submitCommands(bytes, value.commands.length);
       return {

@@ -538,7 +538,7 @@ test("browser live controls retain the managed observation conflict hook", async
       windowBlocks: 1,
     });
     const liveControls = await engine.liveControls();
-    const manual = liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
+    const manual = liveControls.edit.track("t").insert("comp", "miso.compressor")
       .observe("Gain Reduction", false, 1);
     await assert.rejects(liveControls.submit(manual), /conflict/);
     assert.equal(commands.length, 1, "the manual conflicting edit is stopped by the existing hook");
@@ -552,10 +552,10 @@ test("browser live controls retain the managed observation conflict hook", async
 });
 
 
-test("the browser engine sends an observation record only for the map of the list's epoch (batch 12b M1)", async () => {
+test("the browser engine sends an observation record that names its tap by key, whatever the map says (#1677)", async () => {
   // A rebuild is committed: the control list is already epoch 2 (comp moved from effect 1 to 0),
   // and the plan that renders still reports epoch 1 and comp at effect 1 until a block adopts the
-  // replacement. A record built from that map would name effect 1 of the newest plan.
+  // replacement. The record carries no index, so it is sent at once and names the same tap.
   const host = fakeHost();
   const strips = { tracks: ["t"], submixes: [], structureEpoch: 1n };
   let rendered = 0n;
@@ -575,10 +575,9 @@ test("the browser engine sends an observation record only for the map of the lis
     },
     onControlEvent() { return () => {}; },
     async observationMap() {
-      const adopted = rendered >= 3n;
       return {
-        tag: "miso.observationmap.v1", result: 0, structureEpoch: adopted ? 2 : 1,
-        bindings: [{ trackIndex: 0, rack: 1, effectIndex: adopted ? 0 : 1, effectSlotId: "comp",
+        tag: "miso.observationmap.v1", result: 0, structureEpoch: 1,
+        bindings: [{ trackIndex: 0, rack: 1, effectIndex: 1, effectSlotId: "comp",
           nativeEffectId: "miso.compressor", tapIds: [1] }],
       };
     },
@@ -599,9 +598,11 @@ test("the browser engine sends an observation record only for the map of the lis
       selections: [{ trackId: "t", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }],
       windowBlocks: 1,
     });
-    assert.ok(rendered >= 3n, "the subscribe waited for the plan of the newest list to render");
-    assert.equal(commands.length, 1, "one record batch, sent after the wait");
-    assert.equal(commands[0][0].effectIndex, 0, "the record names the effect of the newest plan");
+    assert.equal(commands.length, 1, "one record batch");
+    assert.deepEqual(commands[0], [{
+      kind: ABI_LAYOUT.constants.wireCommandKinds.find((row) => row.name === "observeSubscribe").value,
+      rack: 1, stripId: "t", effectId: "comp", tapId: 1, windowBlocks: 1,
+    }], "the record names the tap by its key, and no index of any plan");
     await managed.close();
   } finally {
     await engine.close();

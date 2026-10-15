@@ -9,13 +9,14 @@
 
 use control_plane::{
     CommandError, CompileFailure, CompiledChildren, ControlAdapter, ControlLimits, EventLane,
-    PlanResources, PlanState, ResourceFault, RuntimePreparer, SessionState, compile_children,
+    ObservationKeyError, ObservationKeyRef, PlanResources, PlanState, ResolvedObservationTap,
+    ResourceFault, RuntimePreparer, SessionState, compile_children,
 };
 use controls::{TapKey, TapSection};
 use host_core::{
     CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
-    HostPrepareCaps, LiveEffectAddress, LiveValuesSuperseded, PrepareDiagnostics, PreparedHost,
-    SuccessorBase, prepare_host_runtime_with_live_lanes,
+    HostPrepareCaps, LiveEffectAddress, LiveEffectRack, LiveValuesSuperseded, PrepareDiagnostics,
+    PreparedHost, SuccessorBase, prepare_host_runtime_with_live_lanes,
     prepare_host_runtime_with_live_lanes_successor,
 };
 use protocol::{
@@ -653,4 +654,100 @@ fn an_end_event_over_one_control_frame_refuses_the_removal_and_changes_nothing()
         "no plan was published"
     );
     assert!(rig.drain().is_empty(), "no event was queued");
+}
+
+/// A stable key names one tap on the newest committed plan, whatever position the plan gives its
+/// effect, and a key the plan has not is refused with its own reason before anything is written
+/// (#1677): the one function the browser's record and the C ABI's observe edit share.
+///
+/// Red if the key resolves to a position of an older plan (after the removal the producers move up
+/// and `comp2` is another position), if a strip without the effect is reported as an unknown strip
+/// (or an unknown strip as an unknown effect), or if the rack, the effect ID or the tap ID is not
+/// part of the key.
+#[test]
+fn a_stable_key_resolves_on_the_newest_plan_and_an_unknown_key_is_refused() {
+    let resolve = |rig: &Rig, strip: &str, rack: LiveEffectRack, effect: &str, tap: u32| {
+        rig.session.resolve_observation_key(&ObservationKeyRef {
+            strip_id: strip.as_bytes(),
+            rack,
+            effect_id: effect.as_bytes(),
+            tap_id: tap,
+        })
+    };
+    let mut rig = Rig::new();
+    let before = rig.position("comp2");
+    assert_eq!(
+        resolve(&rig, "comp2", LiveEffectRack::Inserts, "comp", 1),
+        Ok(ResolvedObservationTap {
+            producer: before,
+            tap_index: 0
+        })
+    );
+    for (what, found, expected) in [
+        (
+            "an unknown strip",
+            resolve(&rig, "nowhere", LiveEffectRack::Inserts, "comp", 1),
+            ObservationKeyError::UnknownStrip,
+        ),
+        (
+            "an unknown insert",
+            resolve(&rig, "comp2", LiveEffectRack::Inserts, "gone", 1),
+            ObservationKeyError::UnknownEffect,
+        ),
+        (
+            "the insert's ID in the console rack",
+            resolve(&rig, "comp2", LiveEffectRack::Console, "comp", 1),
+            ObservationKeyError::UnknownEffect,
+        ),
+        (
+            "an undeclared tap",
+            resolve(&rig, "comp2", LiveEffectRack::Inserts, "comp", 99),
+            ObservationKeyError::UnknownTap,
+        ),
+        (
+            "the reserved tap zero",
+            resolve(&rig, "comp2", LiveEffectRack::Inserts, "comp", 0),
+            ObservationKeyError::UnknownTap,
+        ),
+    ] {
+        assert_eq!(found, Err(expected), "{what}");
+    }
+
+    // A rebuild is committed and not rendered: the newest plan has no insert on comp1, and comp2's
+    // producer has moved up one position. The key follows the effect, not the position.
+    rig.apply(&[remove_insert("comp1")]).expect("a rebuild");
+    let after = rig.position("comp2");
+    assert_ne!(after, before, "the removal moved comp2's producer");
+    assert_eq!(
+        resolve(&rig, "comp2", LiveEffectRack::Inserts, "comp", 1),
+        Ok(ResolvedObservationTap {
+            producer: after,
+            tap_index: 0
+        })
+    );
+    assert_eq!(
+        &*rig.session.effect_producers()[after].track_id,
+        "comp2",
+        "the position names the producer of the key's strip"
+    );
+    assert_eq!(
+        resolve(&rig, "comp1", LiveEffectRack::Inserts, "comp", 1),
+        Err(ObservationKeyError::UnknownEffect),
+        "comp1 is still a strip, with no such insert"
+    );
+    // The block that adopts it, then a rebuild that removes the whole strip.
+    rig.render();
+    rig.apply(&[
+        SessionEdit::RemoveRoute {
+            route_id: StableId::parse("comp1-main").expect("route"),
+        },
+        SessionEdit::RemoveTrack {
+            track_id: StableId::parse("comp1").expect("strip"),
+        },
+    ])
+    .expect("a strip removed");
+    assert_eq!(
+        resolve(&rig, "comp1", LiveEffectRack::Inserts, "comp", 1),
+        Err(ObservationKeyError::UnknownStrip)
+    );
 }

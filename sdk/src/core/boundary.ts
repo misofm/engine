@@ -742,7 +742,7 @@ export class WasmBoundary {
         tapIds,
       });
     }
-    return enrichObservationMap(strips, raw, order.structureEpoch);
+    return enrichObservationMap(strips, raw);
   }
 
   /** Internal managed-subscription view of the optional prepared spectrum query. */
@@ -1457,7 +1457,7 @@ export class WasmBoundary {
   }
 
   /**
-   * Stage `count` already-encoded 48-byte command records and submit them as one transaction.
+   * Stage `count` already-encoded command records (`ABI_LAYOUT.commandRecord.bytes` each) and submit them as one transaction.
    *
    * Only the observation records (kinds 7 and 8) are command records any more; a value edit is a
    * `SET_CONTROL` transaction (`controlFrame`).

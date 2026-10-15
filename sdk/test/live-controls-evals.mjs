@@ -378,8 +378,13 @@ describe("#1563B -- a builder is a set of SET_CONTROL edits at the core's addres
     const byIndex = edits.track("t").effect("console", 0, "miso.compressor");
     assert.throws(() => byIndex.parameter("threshold", -18), /stable ID/);
     assert.throws(() => byIndex.bypass(true), /stable ID/);
-    assert.throws(() => edits.track("t").console("slot", "miso.compressor")
-      .observe("Gain Reduction", true, 1), /names its effect by index/);
+    assert.throws(() => byIndex.observe("Gain Reduction", true, 1), /stable ID/);
+    // An observation record names its effect by the stable ID, which console() gives without a session.
+    const named = edits.track("t").console("slot", "miso.compressor").observe("Gain Reduction", true, 1);
+    assert.deepEqual(
+      { kind: named.kind, stripId: named.stripId, rack: named.rack, effectId: named.effectId, tapId: named.tapId },
+      { kind: "observeSubscribe", stripId: "t", rack: 3, effectId: "slot", tapId: 1 },
+    );
     assert.throws(() => edits.track("t").insert(0, "miso.compressor"), /nothing to resolve an index against/);
   });
 });
@@ -811,7 +816,7 @@ describe("#1563B -- the browser transport posts the same frames and decodes the 
     try {
       const host = engineHost(engine);
       const controls = await createBrowserLiveControls(host, undefined, undefined, undefined);
-      const compressor = controls.edit.track("t").effect("console", 0, "miso.compressor");
+      const compressor = controls.edit.track("t").console("compressor", "miso.compressor");
       const report = await controls.submit(compressor.observe("Gain Reduction", true, 2));
       assert.equal(report.ok, true);
       assert.equal(report.admitted, 1);
@@ -1007,7 +1012,7 @@ describe("#1563B -- a torn acknowledgement is rejected after, never before, the 
         },
       },
     );
-    const compressor = liveControls.edit.track("t").effect("console", 0, "miso.compressor");
+    const compressor = liveControls.edit.track("t").console("compressor", "miso.compressor");
     await assert.rejects(
       () => liveControls.submit(compressor.observe("Gain Reduction", true, 1)),
       /violated whole-batch admission/,

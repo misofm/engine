@@ -294,7 +294,6 @@ export class OfflineEngine {
       queue: this.controlTransactions(),
       observe: (edits) => this.submitCommands(encodeLaneEdits(edits), edits.length),
       // The boundary caches the order by structure epoch: a probe each call, the list when it moved.
-      stripOrder: () => this.#boundary.stripOrder(),
       order: this.#boundary.stripOrder(),
     },
       (edits, managed) => this.#observationSubscriptions?.beforeLiveControlSubmit(edits, managed),

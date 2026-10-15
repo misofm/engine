@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
-import { LiveControlWriter } from "../src/core/writer.ts";
+import { LiveControlWriter, encodeLaneEdits } from "../src/core/writer.ts";
 import { CONTROL_TRANSACTION_HEADER_BYTES, controlEditBytes } from "../src/core/control-frame.ts";
 import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
@@ -130,7 +130,7 @@ async function observedEngine(count = 1) {
 /** The subscription (or its withdrawal) of compressor `index`'s tap, as the SDK's own builder makes it. */
 function observeEdit(engine, index, armed, windowBlocks = 0) {
   return engine.liveControls().edit.track("t")
-    .effect("inserts", index, "miso.compressor")
+    .insert(`compressor${index}`, "miso.compressor")
     .observe("Gain Reduction", armed, windowBlocks);
 }
 
@@ -386,9 +386,43 @@ describe("the writer contract -- coalescing and escalation", () => {
     assert.equal(writer.pending, 0);
   });
 
+  test("an observation record carries its tap's stable key and nothing positional (#1677)", async () => {
+    const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
+    const edit = (stripId, effectId, tapId = 1) => ({
+      kind: "observeSubscribe", rack: 1, stripId, effectId, tapId, windowBlocks: 9,
+    });
+    const bytes = encodeLaneEdits([edit("kick", "comp", 7), edit("snare", "gate")]);
+    assert.equal(bytes.byteLength, 2 * ABI_LAYOUT.commandRecord.bytes);
+    const view = new DataView(bytes.buffer);
+    const text = (offset, length) => new TextDecoder().decode(bytes.subarray(offset, offset + length));
+    assert.equal(view.getUint8(at("stripIdBytes")), 4);
+    assert.equal(view.getUint8(at("effectIdBytes")), 4);
+    assert.equal(text(at("stripId"), 4), "kick");
+    assert.equal(text(at("effectId"), 4), "comp");
+    assert.equal(view.getUint32(at("tapId"), true), 7);
+    assert.equal(view.getUint32(at("windowBlocks"), true), 9);
+    // The field is zero padded after the ID: a byte of the previous record never shows through.
+    const second = ABI_LAYOUT.commandRecord.bytes;
+    assert.equal(text(second + at("stripId"), 5), "snare");
+    assert.ok(bytes.subarray(second + at("stripId") + 5, second + at("stripId") + 128).every((byte) => byte === 0));
+    // An ID the field cannot hold is refused before anything is staged.
+    assert.throws(() => encodeLaneEdits([edit("x".repeat(128), "comp")]), MisoUsageError);
+    assert.throws(() => encodeLaneEdits([edit("kick", "é".repeat(64))]), MisoUsageError);
+    assert.equal(encodeLaneEdits([edit("x".repeat(127), "y".repeat(127))]).byteLength, ABI_LAYOUT.commandRecord.bytes);
+    // Two taps that differ in the strip, the effect or the tap do not coalesce into one record.
+    const sent = [];
+    const writer = new LiveControlWriter({
+      submit: (records, count) => { sent.push(count); return { ok: true, result: 0, admitted: count }; },
+    });
+    for (const staged of [edit("a", "bc"), edit("ab", "c"), edit("a", "bc", 2), edit("a", "bc")]) writer.stage(staged);
+    assert.equal(writer.stats.coalesced, 1, "only the repeat of the first tap coalesces");
+    await writer.flush();
+    assert.deepEqual(sent, [3]);
+  });
+
   test("one writer sends one kind of edit", () => {
     const control = new LiveControlWriter({ queue: { submit: () => assert.fail("not reached") } });
-    assert.throws(() => control.stage({ kind: "observeSubscribe", trackIndex: 0, rack: 1, channel: 255, values: [0, 0, 0, 0] }), MisoUsageError);
+    assert.throws(() => control.stage({ kind: "observeSubscribe", rack: 1, stripId: "t", effectId: "comp", tapId: 1, windowBlocks: 0 }), MisoUsageError);
     const records = new LiveControlWriter({ submit: () => assert.fail("not reached") });
     assert.throws(() => records.stage(faderEdit(0, -1)), MisoUsageError);
     assert.throws(() => control.stage({ ...faderEdit(0, -1), rampSamples: 1.5 }), MisoUsageError);

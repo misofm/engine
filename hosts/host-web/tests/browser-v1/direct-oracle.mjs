@@ -110,22 +110,24 @@ const commandField = (name) => ABI_LAYOUT.commandRecord.fields
   .find((field) => field.name === name).offset;
 const structureField = (structure, name) => ABI_LAYOUT.structures[structure].fields
   .find((field) => field.name === name).offset;
-/// Encode only the generated wire record. Preparation and admission stay in the shared helper.
+/// Encode only the generated wire record: a record names its tap by stable key (#1677).
+/// Preparation and admission stay in the shared helper.
 function encodeCommands(records) {
   const bytes = new Uint8Array(records.length * COMMAND_RECORD_BYTES);
   const view = new DataView(bytes.buffer);
+  const encoder = new TextEncoder();
   for (const [index, record] of records.entries()) {
     const offset = index * COMMAND_RECORD_BYTES;
+    const stripId = encoder.encode(record.stripId);
+    const effectId = encoder.encode(record.effectId);
     view.setUint8(offset + commandField("kind"), record.kind);
-    view.setUint8(offset + commandField("rack"), record.rack ?? 255);
-    view.setUint8(offset + commandField("channel"), record.channel ?? 255);
-    view.setUint32(offset + commandField("trackIndex"), record.trackIndex, true);
-    view.setUint32(offset + commandField("effectIndex"), record.effectIndex ?? 0, true);
-    view.setUint32(offset + commandField("parameterId"), record.parameterId ?? 0, true);
-    view.setUint32(offset + commandField("smoothingSamples"), record.smoothingSamples ?? 0, true);
-    for (let slot = 0; slot < 4; slot += 1) {
-      view.setFloat32(offset + commandField("values") + slot * 4, record.values[slot], true);
-    }
+    view.setUint8(offset + commandField("rack"), record.rack);
+    view.setUint8(offset + commandField("stripIdBytes"), stripId.length);
+    view.setUint8(offset + commandField("effectIdBytes"), effectId.length);
+    view.setUint32(offset + commandField("tapId"), record.tapId, true);
+    view.setUint32(offset + commandField("windowBlocks"), record.windowBlocks, true);
+    bytes.set(stripId, offset + commandField("stripId"));
+    bytes.set(effectId, offset + commandField("effectId"));
   }
   return bytes;
 }
@@ -421,11 +423,10 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
     );
   };
   const subscribe = {
-    kind: COMMAND_OBSERVE_SUBSCRIBE, rack: 1, channel: 255, trackIndex: 0,
-    effectIndex: 0, parameterId: 1, smoothingSamples: OBSERVATION_WINDOW_BLOCKS,
-    values: [0, 0, 0, 0],
+    kind: COMMAND_OBSERVE_SUBSCRIBE, rack: 1, stripId: "track", effectId: "comp", tapId: 1,
+    windowBlocks: OBSERVATION_WINDOW_BLOCKS,
   };
-  const unsubscribe = { ...subscribe, kind: COMMAND_OBSERVE_UNSUBSCRIBE, smoothingSamples: 0 };
+  const unsubscribe = { ...subscribe, kind: COMMAND_OBSERVE_UNSUBSCRIBE, windowBlocks: 0 };
   const blocks = [];
   const step = (block) => {
     assert.equal(feed(block), 0);
@@ -434,7 +435,7 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
   };
 
   const reports = {};
-  reports.unknownTap = submitCommands(exports, handle, [{ ...subscribe, parameterId: 9 }]);
+  reports.unknownTap = submitCommands(exports, handle, [{ ...subscribe, tapId: 9 }]);
   reports.subscribe = submitCommands(exports, handle, [subscribe]);
   for (let block = 0; block < 8; block += 1) step(block);
   const armed = {

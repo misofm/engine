@@ -64,37 +64,12 @@ export { EffectControlBuilders, RouteEdits, SessionEdits, StripEdits, SubmixEdit
   from "../generated/control-builders.ts";
 export type { InputFilterValues, MatrixValues } from "../generated/control-builders.ts";
 
-/**
- * A managed observation record cannot be addressed yet: the plan that renders is older than the
- * newest committed one, so the effect indices it reports belong to another plan than the one the
- * core admits the record against. It is `backpressure`, the typed retryable refusal: a render adopts
- * the newer plan, and the caller sends the request again (a browser engine waits for that render
- * itself, within its request deadline).
- */
-export function structureBehindError(detail: string): MisoEngineError {
-  return new MisoEngineError(
-    `the plan that renders is older than the newest committed plan; render and try again: ${detail}`,
-    {
-      phase: "lifecycle",
-      code: "backpressure",
-      result: constantValue("resultCodes", "backpressure"),
-      diagnostics: [{ code: "sdk.observation.structure_behind", path: "" }],
-    },
-  );
-}
-
 /** What live controls send through: the engine's one transaction queue, and the observation records. */
 export interface LiveControlTransport {
   /** Every value edit goes here, as a `SET_CONTROL` transaction. */
   readonly queue: ControlTransactionQueue;
-  /** Observation records (kinds 7 and 8) stay 48-byte commands until the browser-feature phase. */
+  /** Observation records (kinds 7 and 8): command records that name their tap by stable key (#1677). */
   readonly observe: (edits: readonly LaneEdit[]) => CommandReport | Promise<CommandReport>;
-  /**
-   * The strips and effects of the core's control list as they are now (#1562b-K): a probe of the
-   * structure epoch, and a read of the list only when it moved. Absent for a scripted transport
-   * that has no list; live controls then keep the order they were made with.
-   */
-  readonly stripOrder?: StripOrderSource;
   /** The order the transport read when it made these live controls. */
   readonly order?: ControlStripOrder;
 }
@@ -121,8 +96,6 @@ interface RowProvenance {
 }
 
 const PROVENANCE = new WeakMap<object, RowProvenance>();
-/** The strip an observation edit names by index, to name it again after a rebuild. */
-const OBSERVED_STRIP = new WeakMap<object, string>();
 
 function noteRow(set: ControlEditSet, row: RowProvenance): ControlEditSet {
   for (const edit of set.edits) PROVENANCE.set(edit, row);
@@ -205,7 +178,6 @@ const RACKS: Readonly<Record<LiveControlRack, number>> = Object.freeze({
   console: rackCode("console"),
   inserts: rackCode("inserts"),
 });
-const NONE = rackCode("notApplicable");
 
 function modelOf(session: SessionLike): SessionModel {
   const candidate = session as { readonly toJSON?: unknown; readonly schema_version?: unknown };
@@ -330,29 +302,31 @@ function controlEdit(
   });
 }
 
-function observationEdit(
-  kind: LaneEdit["kind"],
-  stripId: string,
-  stripIndex: number,
-  options: {
-    readonly rack: number;
-    readonly effectIndex: number;
-    readonly parameterId: number;
-    readonly smoothingSamples: number;
+/**
+ * One observation record: the subscription or withdrawal of the tap `tapId` of the console slot or
+ * insert `effectId` (its ID in the session) of strip `stripId`. The record names its tap by this
+ * stable key and no position, so the core resolves it on the plan it admits the record against and
+ * a rebuild cannot make it arm another effect's tap (#1677). Whether the key names a tap is the
+ * core's to say, with a typed reason.
+ */
+export function observationEdit(
+  armed: boolean,
+  key: {
+    readonly stripId: string;
+    readonly rack: LiveControlRack;
+    readonly effectId: string;
+    readonly tapId: number;
   },
+  windowBlocks: number,
 ): LaneEdit {
-  const edit: LaneEdit = Object.freeze({
-    kind,
-    trackIndex: stripIndex,
-    rack: options.rack,
-    channel: NONE,
-    effectIndex: options.effectIndex,
-    parameterId: options.parameterId,
-    smoothingSamples: options.smoothingSamples,
-    values: Object.freeze([0, 0, 0, 0]) as unknown as readonly [number, number, number, number],
+  return Object.freeze({
+    kind: armed ? "observeSubscribe" : "observeUnsubscribe",
+    rack: RACKS[key.rack],
+    stripId: id(key.stripId, "a strip ID"),
+    effectId: id(key.effectId, "an effect ID"),
+    tapId: requireU32(key.tapId, "tapId"),
+    windowBlocks: requireU32(windowBlocks, "windowBlocks"),
   });
-  OBSERVED_STRIP.set(edit, stripId);
-  return edit;
 }
 
 /**
@@ -361,26 +335,25 @@ function observationEdit(
  * Builders address by stable ID and build `SET_CONTROL` edits; they check no value, no lane's
  * meaning and no index, and send nothing. An ID the engine does not have, a value outside a row's
  * domain and a lane a row does not allow come back from the core as its own `control.*` code, the
- * same on the browser and on the headless engine. The session map supplies only the strip order,
- * for observation records, which address a strip by index.
+ * same on the browser and on the headless engine. An observation record names its tap by the
+ * strip's ID, the effect's ID in the session and the tap's ID, and the core resolves them (#1677).
  *
  * Given the session the SDK built for this engine, it also resolves console slot IDs and insert IDs
  * on every strip (`console()`, `insert()`) against the booted session, and an effect addressed by
  * index (`effect()`) to its stable ID.
  */
 export class LiveControlEdits {
-  #tracks: ReadonlyMap<string, number>;
-  #submixes: ReadonlyMap<string, number>;
-  #layout: LiveControlLayout | undefined;
-  /** The core's strips and effects as last read; supplies the effect of a named section. */
-  #order: ControlStripOrder | undefined;
+  readonly #tracks: ReadonlySet<string>;
+  readonly #submixes: ReadonlySet<string>;
+  readonly #layout: LiveControlLayout | undefined;
+  /** The core's strips and effects as the live controls were made; supplies the effect of a named section. */
+  readonly #order: ControlStripOrder | undefined;
   /** What a strip reaches `set` and its effect builders through. */
   readonly #context: StripContext;
 
   constructor(map: SessionMap, session?: SessionLike, order?: ControlStripOrder) {
-    this.#tracks = new Map(map.tracks.map((trackId, index) => [trackId, index] as const));
-    const trackCount = map.tracks.length;
-    this.#submixes = new Map(map.submixes.map((submixId, index) => [submixId, trackCount + index] as const));
+    this.#tracks = new Set(map.tracks);
+    this.#submixes = new Set(map.submixes);
     this.#layout = session === undefined ? undefined : layoutOf(session, map);
     this.#order = order;
     this.#context = {
@@ -390,26 +363,6 @@ export class LiveControlEdits {
         (address, value, options) => this.set(address, value, options),
       ),
     };
-  }
-
-  /**
-   * Follow the core's control list (#1562b-K): the strip indices that observation records name, and
-   * the effect each named section runs, are the list's after a rebuild. Builders made before this
-   * call keep what they were made with. A session the SDK built that no longer describes the strips
-   * is dropped from the layout, since the engine is no longer that session.
-   */
-  update(order: ControlStripOrder): void {
-    if (order === this.#order) return;
-    this.#order = order;
-    this.#tracks = new Map(order.tracks.map((trackId, index) => [trackId, index] as const));
-    this.#submixes = new Map(
-      order.submixes.map((submixId, index) => [submixId, order.tracks.length + index] as const),
-    );
-    const layout = this.#layout;
-    if (layout !== undefined
-      && !(sameIds(layout.tracks.keys(), order.tracks) && sameIds(layout.submixes.keys(), order.submixes))) {
-      this.#layout = undefined;
-    }
   }
 
   /**
@@ -544,7 +497,6 @@ export class LiveControlEdits {
   track(trackId: string): TrackEdits {
     return new TrackEdits(
       id(trackId, "a track ID"),
-      this.#tracks.get(trackId),
       this.#layout,
       this.#context,
     );
@@ -557,7 +509,6 @@ export class LiveControlEdits {
   submix(submixId: string): SubmixEdits {
     return new SubmixEdits(
       id(submixId, "a submix ID"),
-      this.#submixes.get(submixId),
       this.#layout,
       this.#context,
     );
@@ -566,14 +517,14 @@ export class LiveControlEdits {
   /**
    * Either kind of strip by its ID -- a track, else a submix (strip IDs are unique across both) --
    * for an edit every strip shares, such as arming an effect observation. It never offers `solo`.
-   * Observation addresses a strip by its index, so an ID that is neither is refused here.
+   * An ID that is neither is refused here.
    */
   strip(stripId: string): StripEdits {
     if (this.#tracks.has(stripId)) return this.track(stripId);
     if (this.#submixes.has(stripId)) return this.submix(stripId);
     throw new MisoUsageError(
       `the compiled session has no track or submix '${stripId}'; expected one of `
-        + `${[...this.#tracks.keys(), ...this.#submixes.keys()].join(", ")}`,
+        + `${[...this.#tracks, ...this.#submixes].join(", ")}`,
     );
   }
 
@@ -605,18 +556,15 @@ export class LiveControlEdits {
  */
 export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
   readonly #stripId: string;
-  readonly #stripIndex: number | undefined;
   readonly #rack: LiveControlRack;
-  readonly #effectIndex: number | undefined;
   readonly #stableId: string | undefined;
   readonly #set: ControlSetter;
   protected readonly effectId: E;
 
   /**
-   * `instance.stableId` is the instance's console slot ID or insert ID, which the control address
-   * names it by; `effectIndex` is its live index, which observation records name it by. Either may
-   * be unknown: an instance named by ID without a session has no index, and one named by index
-   * without a session has no ID.
+   * `instance.stableId` is the instance's console slot ID or insert ID, which a control address and
+   * an observation record name it by. It is unknown for an instance named by index without a
+   * session to resolve the index against.
    */
   constructor(
     instance: EffectInstance<E>,
@@ -624,9 +572,7 @@ export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
   ) {
     super();
     this.#stripId = instance.stripId;
-    this.#stripIndex = instance.stripIndex;
     this.#rack = instance.rack;
-    this.#effectIndex = instance.effectIndex;
     this.#stableId = instance.stableId;
     this.effectId = instance.effectId;
     this.#set = set;
@@ -684,18 +630,16 @@ export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
     if (observation === undefined || !observation.subscribable) {
       throw new MisoUsageError(`${this.effectId} has no subscribable tap '${String(tap)}'`);
     }
-    if (this.#stripIndex === undefined || this.#effectIndex === undefined) {
+    const stable = this.#stableId;
+    if (stable === undefined) {
       throw new MisoUsageError(
-        `an observation record names its effect by index, and this ${this.effectId} has none: `
-          + "address it with liveControls().withSession(session) or effect(rack, index, effectId)",
+        `an observation record names its effect by its stable ID, and this ${this.effectId} was `
+          + `addressed by index with nothing to resolve it against: ${NO_LAYOUT}`,
       );
     }
-    return observationEdit(armed ? "observeSubscribe" : "observeUnsubscribe", this.#stripId, this.#stripIndex, {
-      rack: RACKS[this.#rack],
-      effectIndex: this.#effectIndex,
-      parameterId: observation.id,
-      smoothingSamples: requireU32(windowBlocks, "windowBlocks"),
-    });
+    return observationEdit(armed, {
+      stripId: this.#stripId, rack: this.#rack, effectId: stable, tapId: observation.id,
+    }, windowBlocks);
   }
 }
 
@@ -762,20 +706,6 @@ export class EngineLiveControls {
     );
   }
 
-  /**
-   * Follow the core's control list: read the structure epoch, and when a rebuild moved it, take the
-   * list's strips and effects (#1562b-K). Builders made afterwards address the new order. A
-   * transport without a list keeps the order these controls were made with. Resolves the structure
-   * epoch of the list it followed, or `undefined` for a transport without one.
-   */
-  async syncStructure(): Promise<bigint | undefined> {
-    const source = this.#transport.stripOrder;
-    if (source === undefined) return undefined;
-    const order = await source();
-    this.edit.update(order);
-    return order.structureEpoch;
-  }
-
   /** The engine's one transaction queue, which every value edit goes through. */
   get queue(): ControlTransactionQueue {
     return this.#transport.queue;
@@ -816,22 +746,7 @@ export class EngineLiveControls {
     return this.#submitObservation(edits, true);
   }
 
-  /**
-   * @internal Managed submission whose effect indices come from the plan that renders at
-   * `structureEpoch`. A record names its strip by the newest list and its effect by an index, and
-   * the core admits it against the newest plan; so when the newest list is not of that epoch, the
-   * indices belong to another plan and the record is refused with the retryable
-   * {@link structureBehindError} before it is sent.
-   */
-  async submitManagedAt(structureEpoch: bigint | undefined, edits: readonly LaneEdit[]): Promise<CommandReport> {
-    return this.#submitObservation(edits, true, structureEpoch);
-  }
-
-  async #submitObservation(
-    edits: readonly LaneEdit[],
-    managed: boolean,
-    structureEpoch?: bigint,
-  ): Promise<CommandReport> {
+  async #submitObservation(edits: readonly LaneEdit[], managed: boolean): Promise<CommandReport> {
     if (edits.length === 0 || edits.length > ABI_LAYOUT.constants.maximumCommandRecords) {
       throw new MisoUsageError(
         `an observation submit must contain 1..${ABI_LAYOUT.constants.maximumCommandRecords} edits`,
@@ -842,29 +757,7 @@ export class EngineLiveControls {
     }
     const beforeSubmit = this.#beforeSubmit?.(edits, managed);
     if (beforeSubmit !== undefined) await beforeSubmit;
-    // A record names its strip by index, and a rebuild can move the strips: name each again from the
-    // core's list as it is now.
-    const source = this.#transport.stripOrder;
-    let sent = edits;
-    if (source !== undefined) {
-      const order = await source();
-      if (structureEpoch !== undefined && order.structureEpoch !== structureEpoch) {
-        throw structureBehindError(
-          `the records were addressed at structure epoch ${structureEpoch}, and the control list is at ${order.structureEpoch}`,
-        );
-      }
-      this.edit.update(order);
-      const strips = [...order.tracks, ...order.submixes];
-      sent = edits.map((edit) => {
-        const stripId = OBSERVED_STRIP.get(edit);
-        const index = stripId === undefined ? -1 : strips.indexOf(stripId);
-        if (stripId === undefined || index < 0 || index === edit.trackIndex) return edit;
-        const moved: LaneEdit = Object.freeze({ ...edit, trackIndex: index });
-        OBSERVED_STRIP.set(moved, stripId);
-        return moved;
-      });
-    }
-    const report = await this.#transport.observe(sent);
+    const report = await this.#transport.observe(edits);
     const resultConsistent = report.ok === (report.result === 0);
     const wholeBatch = report.ok
       ? report.admitted === edits.length

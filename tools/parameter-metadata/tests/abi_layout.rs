@@ -127,13 +127,13 @@ fn scalar_after(document: &str, after: &str, name: &str) -> u64 {
 /// The emitted command-record offsets decode, on the live engine, to exactly the values written.
 ///
 /// The record is an `observeSubscribe` (kind 7), the one kind with a field at every address the
-/// document publishes that the engine reads: `kind`, `rack`, `channel`, `trackIndex`,
-/// `effectIndex`, `parameterId` (the tap ID) and `smoothingSamples`. The fixture is the observed
-/// compressor insert, whose tap 1 is resident.
+/// document publishes that the engine reads: `kind`, `rack`, the two ID lengths and fields,
+/// `tapId` and `windowBlocks`. The fixture is the observed compressor insert `comp` of strip `t0`,
+/// whose tap 1 is resident.
 ///
-/// Red mutation: move any row in `command_record_fields` -- say `parameterId` to 16 -- and the
-/// engine reads the smoothing word as the tap ID (or the tap ID as zero); the acknowledgement stops
-/// being `RESULT_OK` and becomes `UNKNOWN_TAP`.
+/// Red mutation: move any row in `command_record_fields` -- say `tapId` to 8 -- and the engine reads
+/// the window word as the tap ID (or the tap ID as zero); the acknowledgement stops being
+/// `RESULT_OK` and becomes `UNKNOWN_TAP`.
 #[test]
 fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
     let document = render();
@@ -161,11 +161,12 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
 
     let kind = field_offset(&document, "commandRecord", "kind");
     let rack = field_offset(&document, "commandRecord", "rack");
-    let channel = field_offset(&document, "commandRecord", "channel");
-    let track_index = field_offset(&document, "commandRecord", "trackIndex");
-    let effect_index = field_offset(&document, "commandRecord", "effectIndex");
-    let parameter_id = field_offset(&document, "commandRecord", "parameterId");
-    let smoothing = field_offset(&document, "commandRecord", "smoothingSamples");
+    let strip_bytes = field_offset(&document, "commandRecord", "stripIdBytes");
+    let effect_bytes = field_offset(&document, "commandRecord", "effectIdBytes");
+    let tap_id = field_offset(&document, "commandRecord", "tapId");
+    let window = field_offset(&document, "commandRecord", "windowBlocks");
+    let strip_id = field_offset(&document, "commandRecord", "stripId");
+    let effect_id = field_offset(&document, "commandRecord", "effectId");
 
     let staging = host
         .command_staging_mut()
@@ -174,12 +175,13 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
     staging[kind] = u8::try_from(COMMAND_OBSERVE_SUBSCRIBE).expect("kind is a byte");
     // Rack 1 is the inserts, where the fixture put its compressor.
     staging[rack] = 1;
-    staging[channel] = 255;
-    staging[track_index..track_index + 4].copy_from_slice(&0_u32.to_le_bytes());
-    staging[effect_index..effect_index + 4].copy_from_slice(&0_u32.to_le_bytes());
+    staging[strip_bytes] = 2;
+    staging[effect_bytes] = 4;
+    staging[strip_id..strip_id + 2].copy_from_slice(b"t0");
+    staging[effect_id..effect_id + 4].copy_from_slice(b"comp");
     // Tap 1 is the compressor's resident gain-reduction tap.
-    staging[parameter_id..parameter_id + 4].copy_from_slice(&1_u32.to_le_bytes());
-    staging[smoothing..smoothing + 4].copy_from_slice(&2_u32.to_le_bytes());
+    staging[tap_id..tap_id + 4].copy_from_slice(&1_u32.to_le_bytes());
+    staging[window..window + 4].copy_from_slice(&2_u32.to_le_bytes());
 
     let result = host.submit_commands(1);
     let report = *host.command_report();
