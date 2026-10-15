@@ -652,6 +652,32 @@ fn every_reachable_refusal_is_typed_and_changes_nothing() {
             "response.grid",
         ),
         (
+            "draft quality",
+            ResponseGetRequest {
+                target: ResponseTarget::Configuration(ResponseConfiguration::Effect {
+                    effect: EQ.to_owned(),
+                    quality: session::EffectQuality::Draft,
+                    link_mode: session::LinkMode::DualMono,
+                }),
+                ..request(eq_target(), 64)
+            },
+            StatusCode::ValidationFailed,
+            "effect.quality.unsupported",
+        ),
+        (
+            "high quality",
+            ResponseGetRequest {
+                target: ResponseTarget::Configuration(ResponseConfiguration::Effect {
+                    effect: EQ.to_owned(),
+                    quality: session::EffectQuality::High,
+                    link_mode: session::LinkMode::DualMono,
+                }),
+                ..request(eq_target(), 64)
+            },
+            StatusCode::ValidationFailed,
+            "effect.quality.unsupported",
+        ),
+        (
             "an unknown effect",
             ResponseGetRequest {
                 target: ResponseTarget::Configuration(ResponseConfiguration::Effect {

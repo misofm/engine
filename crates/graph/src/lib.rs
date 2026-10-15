@@ -8284,6 +8284,33 @@ mod tests {
         }
     }
 
+    /// The gain fixture's prepared metadata, at the four-frame quantum.
+    fn gain_metadata(latency: u64, automation_capacity: u32) -> PreparedEffectMetadata {
+        PreparedEffectMetadata {
+            descriptor: &GAIN_DESCRIPTOR,
+            sample_rate: 48_000,
+            quantum: 4,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            ports: PreparedPorts {
+                sidechain: PreparedSidechainPort::None,
+            },
+            latency: LatencySamples(latency),
+            tail: TailSamples::Finite(0),
+            tail_every_peak: TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
+            state_sizes: StatePayloadSizes {
+                common_bytes: 0,
+                left_bytes: 0,
+                right_bytes: 0,
+            },
+            scratch_bytes: 0,
+            automation_capacity,
+        }
+    }
+
     /// One track: source input -> one dynamic-rack effect -> output, at a four-frame quantum.
     ///
     /// `control` is the consumer half of the effect's live-control channel, or `None` for the
@@ -8311,29 +8338,7 @@ mod tests {
             quantum: QuantumFrames(4),
             output_channels: core::num::NonZeroUsize::new(2).expect("two"),
         };
-        let metadata = PreparedEffectMetadata {
-            descriptor: &GAIN_DESCRIPTOR,
-            sample_rate: 48_000,
-            quantum: 4,
-            quality: EffectQuality::Normal,
-            bypass: false,
-            link_mode: LinkMode::DualMono,
-            ports: PreparedPorts {
-                sidechain: PreparedSidechainPort::None,
-            },
-            latency: LatencySamples(latency),
-            tail: TailSamples::Finite(0),
-            tail_every_peak: TailSamples::Infinite,
-            rest: effect_contract::RestBound::Unstated,
-            composition: effect_contract::CompositionBound::Unstated,
-            state_sizes: StatePayloadSizes {
-                common_bytes: 0,
-                left_bytes: 0,
-                right_bytes: 0,
-            },
-            scratch_bytes: 0,
-            automation_capacity: 2,
-        };
+        let metadata = gain_metadata(latency, 2);
         let main_edge = GraphEdge {
             id: GraphEdgeId::TrackMain {
                 target: effect_node.clone(),
@@ -8491,6 +8496,80 @@ mod tests {
         )
         .expect("the gain fixture's lane");
         (writer, Box::new(lane))
+    }
+
+    /// #1621 D1 / gate 1: a per-node live-control effect's staging window is its lane's live
+    /// parameter cells, whatever automation capacity the effect was prepared with. A lane with no
+    /// parameter cell -- the parametric EQ's shape, whose parameters ride prepared targets, and a
+    /// channel-less session bypass -- holds no span storage; a compressor-shaped lane (shared and
+    /// per-lane parameters) holds exactly its cells. Every window holds every cell the lane reads
+    /// and stays within the capacity, so no staged value is dropped and no twin pair is cut off.
+    ///
+    /// Test value: red if `LiveControlEffect::new` sizes the window by `automation_capacity`
+    /// again (4,096 spans here), the defect #1621 removes; the other lanes' assertions are the
+    /// bank stage's rule (#1611 D3) stated for the per-node owner.
+    #[test]
+    fn a_per_node_window_is_its_lanes_cells_not_the_capacity() {
+        use effect_contract::{EffectLaneShape, EffectLaneSpec, ParameterChannelPolicy};
+        const CAPACITY: u32 = 4096;
+        let superseded = engine::realtime::LiveValuesSuperseded::new();
+        let window = |lane: EffectControlLane| {
+            let effect_id = EffectNodeId {
+                track_id: StableGraphId::parse("track").expect("ID"),
+                rack: RackId::Dynamic,
+                effect_id: StableGraphId::parse("gain").expect("ID"),
+            };
+            let metadata = gain_metadata(0, CAPACITY);
+            let node = runtime::LiveControlEffect::new(
+                GraphPreparedEffect {
+                    id: effect_id,
+                    metadata,
+                    processor: Box::new(LiveGain::new(metadata)),
+                    response_snapshot_declared: false,
+                    native_id: "miso.test.live-gain",
+                },
+                Box::new(lane),
+                None,
+                4,
+            );
+            node.window_spans()
+        };
+        let live = |shape: EffectLaneShape| {
+            let (_writer, lane) = effect_contract::effect_control_lane(
+                EffectLaneSpec {
+                    shape,
+                    bypass: false,
+                    observation_depth: 0,
+                },
+                &superseded,
+            )
+            .expect("lane");
+            lane
+        };
+
+        // The parametric EQ's shape: no parameter cell, four prepared-target slots.
+        let eq = live(EffectLaneShape::from_live_parameters([], 4));
+        assert_eq!(eq.parameter_cells(), 0);
+        assert_eq!(window(eq), 0, "an unbanked EQ holds no span window");
+
+        // A compressor's shape: two shared parameters and one per-lane one, four cells.
+        let compressor = live(EffectLaneShape::from_live_parameters(
+            [
+                (0, ParameterChannelPolicy::Shared),
+                (1, ParameterChannelPolicy::PerLane),
+                (3, ParameterChannelPolicy::Shared),
+            ],
+            0,
+        ));
+        assert_eq!(compressor.parameter_cells(), 4);
+        assert_eq!(window(compressor), 4, "a compressor's window is its cells");
+
+        // The gain fixture's descriptor-derived lane: one per-lane parameter.
+        let (_writer, gain) = control_pair();
+        assert_eq!(window(*gain), 2);
+
+        // A channel-less session bypass stages nothing.
+        assert_eq!(window(EffectControlLane::without_channel(true)), 0);
     }
 
     /// Control's end of the fixture: its cell writer and the plan's gate handle. A push is one

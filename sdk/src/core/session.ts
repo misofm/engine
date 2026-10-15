@@ -463,10 +463,36 @@ export function parameterRows(
   path: string,
 ): readonly ModelRecord[] {
   const row = effectParameter(descriptor, name, path);
-  const pair = row.channelPolicyName === "perLane" ? lanePair(raw) : undefined;
   if (row.channelPolicyName === "shared" && channel !== "both") {
     fail(path, `${name} is a shared parameter and must be addressed as 'both'`);
   }
+  return wireRows(row, raw, channel, path, true);
+}
+
+/**
+ * The same rows as `parameterRows`, with only the refusals of a value that has no wire spelling: a
+ * name the descriptor does not hold, a label it does not declare, a value that is not a number. The
+ * lane a shared parameter is addressed on and the parameter's domain are the engine's to refuse
+ * (a response preview sends them as given, #1623).
+ */
+export function parameterWireRows(
+  descriptor: EffectDescriptor,
+  name: string,
+  raw: unknown,
+  channel: Channel,
+  path: string,
+): readonly ModelRecord[] {
+  return wireRows(effectParameter(descriptor, name, path), raw, channel, path, false);
+}
+
+function wireRows(
+  row: EffectParameterRow,
+  raw: unknown,
+  channel: Channel,
+  path: string,
+  checkDomain: boolean,
+): readonly ModelRecord[] {
+  const pair = row.channelPolicyName === "perLane" ? lanePair(raw) : undefined;
   const addressed: readonly (readonly [Channel, unknown])[] = pair === undefined
     ? [[channel, raw]]
     : [["left", pair[0]], ["right", pair[1]]];
@@ -474,12 +500,20 @@ export function parameterRows(
     parameter_id: row.id,
     channel: lane,
     unit: row.unitName,
-    value: parameterScalar(row, value, `${path}${pair === undefined ? "" : `.${lane}`}`),
+    value: parameterScalar(row, value, `${path}${pair === undefined ? "" : `.${lane}`}`, checkDomain),
   }));
 }
 
-/** Map a display-unit value onto the `f32` the wire carries, per the row's declared domain. */
-function parameterScalar(row: EffectParameterRow, value: unknown, path: string): number {
+/**
+ * Map a display-unit value onto the `f32` the wire carries, per the row's declared domain. With
+ * `checkDomain` false a number outside the domain, or not finite, is carried as given.
+ */
+function parameterScalar(
+  row: EffectParameterRow,
+  value: unknown,
+  path: string,
+  checkDomain: boolean,
+): number {
   if (row.domainName === "boolean") return bool(value, path) ? 1 : 0;
   if (row.domainName === "enumeration") {
     if (typeof value !== "string") fail(path, "expected an enumeration label");
@@ -488,6 +522,10 @@ function parameterScalar(row: EffectParameterRow, value: unknown, path: string):
       fail(path, `'${value}' is not a declared choice for ${row.name}`);
     }
     return Math.fround(choice.value);
+  }
+  if (!checkDomain) {
+    if (typeof value !== "number") fail(path, "expected a number");
+    return Math.fround(value);
   }
   const normalized = f32(value, path);
   if (normalized < Math.fround(row.minimum) || normalized > Math.fround(row.maximum)) {

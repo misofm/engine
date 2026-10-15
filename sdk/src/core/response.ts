@@ -8,7 +8,7 @@ import {
   responseRefusalResult,
 } from "./response-frame.ts";
 import type { ResponseFrameCurves, ResponseFrameOverride, ResponseFrameRequest } from "./response-frame.ts";
-import { parameterRows } from "./session.ts";
+import { parameterWireRows } from "./session.ts";
 import type { Channel, EffectDecl } from "./types.ts";
 
 /** An explicit stopped input-filter configuration. */
@@ -99,8 +99,6 @@ export interface ResponsePreviewResult {
 
 type RawExports = Record<string, unknown> & { readonly memory: WebAssembly.Memory };
 
-/** The most request frame bytes the engine's session-less response entry takes. */
-const MAXIMUM_REQUEST_FRAME_BYTES = 1 << 20;
 const FRAME_EXPORTS = [
   "miso_engine_web_v1_response_frame_ptr",
   "miso_engine_web_v1_response_frame_submit",
@@ -167,16 +165,9 @@ function finiteInteger(value: number, name: string, minimum: number, maximum: nu
   return value;
 }
 
+/** A limit as the `u64` it travels as; a number with no such spelling is a usage error. */
 function u64(value: number | bigint, name: string): bigint {
-  const normalized = typeof value === "bigint" ? value : BigInt(finiteInteger(value, name, 0, Number.MAX_SAFE_INTEGER));
-  if (normalized < 0n || normalized > 0xffff_ffff_ffff_ffffn) throw new MisoUsageError(`${name} must fit u64`);
-  return normalized;
-}
-
-function channelName(channel: Channel | undefined): Channel {
-  if (channel === undefined) return "both";
-  if (channel === "left" || channel === "right" || channel === "both") return channel;
-  throw new MisoUsageError("channels must be left, right, or both");
+  return typeof value === "bigint" ? value : BigInt(finiteInteger(value, name, 0, Number.MAX_SAFE_INTEGER));
 }
 
 function wantsSections(fields: ResponsePreviewQuery["fields"]): boolean {
@@ -185,26 +176,9 @@ function wantsSections(fields: ResponsePreviewQuery["fields"]): boolean {
   throw new MisoUsageError("fields must be total or totalAndSections");
 }
 
-function gridName(kind: unknown): "linear" | "logarithmic" {
-  if (kind === "linear" || kind === "logarithmic") return kind;
-  throw new MisoUsageError("grid.kind must be linear or logarithmic");
-}
-
-function qualityName(value: EffectDecl["options"]["quality"]): "normal" {
-  if (value !== "normal") throw new MisoUsageError("response previews support only normal native quality");
-  return "normal";
-}
-
-function linkModeName(value: EffectDecl["options"]["linkMode"]): "dual_mono" | "maximum" | "average" {
-  if (value === "dual_mono") return "dual_mono";
-  if (value === "maximum") return "maximum";
-  return "average";
-}
-
-function asF32(value: number | undefined, name: string): number {
-  const normalized = value ?? 0;
-  if (!Number.isFinite(normalized)) throw new MisoUsageError(`${name} must be finite`);
-  return Math.fround(normalized);
+/** An input-filter cutoff as the `f32` the frame carries; a cutoff left out is 0, filter off. */
+function cutoff(value: number | undefined): number {
+  return Math.fround(value ?? 0);
 }
 
 function isInputFilters(
@@ -230,15 +204,14 @@ function normalizedConfiguration(configuration: ResponsePreviewConfiguration): R
   if (isInputFilters(configuration)) {
     return Object.freeze({
       kind: "inputFilters",
-      left: Object.freeze({ hpfHz: asF32(configuration.left.hpfHz, "left.hpfHz"), lpfHz: asF32(configuration.left.lpfHz, "left.lpfHz") }),
-      right: Object.freeze({ hpfHz: asF32(configuration.right.hpfHz, "right.hpfHz"), lpfHz: asF32(configuration.right.lpfHz, "right.lpfHz") }),
+      left: Object.freeze({ hpfHz: cutoff(configuration.left.hpfHz), lpfHz: cutoff(configuration.left.lpfHz) }),
+      right: Object.freeze({ hpfHz: cutoff(configuration.right.hpfHz), lpfHz: cutoff(configuration.right.lpfHz) }),
     });
   }
   const descriptor = CATALOG.effects.find((candidate) => candidate.id === configuration.effectId);
-  if (descriptor === undefined) throw new MisoUsageError(`unknown generated effect ${configuration.effectId}`);
-  if (descriptor.response === null) {
-    throw new MisoUsageError(`effect ${configuration.effectId} does not publish a response capability`);
-  }
+  // An effect the catalog does not hold, or one with no response, is the core's refusal to make
+  // (`response.effect.unknown`, `response.effect.unsupported`): the frame names it as given.
+  if (descriptor === undefined) return Object.freeze({ ...configuration });
   const parameters = Object.fromEntries(descriptor.parameters.map((row) => {
     const supplied = configuration.parameters[row.name];
     if (supplied !== undefined) return [row.name, supplied];
@@ -257,13 +230,13 @@ function normalizedConfiguration(configuration: ResponsePreviewConfiguration): R
 /** A synchronous query client around one analysis-only Wasm instance. */
 export class ResponsePreviewModule {
   readonly #exports: RawExports;
+  /** The limits the caller set; one left out is left out of the frame, for the core's default. */
   readonly #responseLimits: {
-    readonly maximumPreparedBytes: bigint;
-    readonly maximumTotalStateBytes: bigint;
-    readonly maximumScratchBytes: bigint;
-    readonly maximumAutomationSpansPerBlock: number;
-    readonly maximumResultBytes: number;
-    readonly requestDeadlineMs: number;
+    readonly maximumPreparedBytes: bigint | undefined;
+    readonly maximumTotalStateBytes: bigint | undefined;
+    readonly maximumScratchBytes: bigint | undefined;
+    readonly maximumAutomationSpansPerBlock: number | undefined;
+    readonly maximumResultBytes: number | undefined;
   };
   #closed = false;
   #busy = false;
@@ -271,13 +244,17 @@ export class ResponsePreviewModule {
 
   constructor(instance: WebAssembly.Instance, responseLimits: ResponsePreviewLimits = {}) {
     this.#exports = rawExports(instance);
+    // The deadline is the SDK's own timer; every other limit is the core's to bound.
+    finiteInteger(responseLimits.requestDeadlineMs ?? 5000, "requestDeadlineMs", 1, 2_147_483_647);
     this.#responseLimits = {
-      maximumPreparedBytes: u64(responseLimits.maximumPreparedBytes ?? (1 << 20), "maximumPreparedBytes"),
-      maximumTotalStateBytes: u64(responseLimits.maximumTotalStateBytes ?? (1 << 30), "maximumTotalStateBytes"),
-      maximumScratchBytes: u64(responseLimits.maximumScratchBytes ?? (1 << 30), "maximumScratchBytes"),
-      maximumAutomationSpansPerBlock: finiteInteger(responseLimits.maximumAutomationSpansPerBlock ?? 4096, "maximumAutomationSpansPerBlock", 1, 0xffff_ffff),
-      maximumResultBytes: finiteInteger(responseLimits.maximumResultBytes ?? (16 << 20), "maximumResultBytes", 1, 16 << 20),
-      requestDeadlineMs: finiteInteger(responseLimits.requestDeadlineMs ?? 5000, "requestDeadlineMs", 1, 2_147_483_647),
+      maximumPreparedBytes: responseLimits.maximumPreparedBytes === undefined
+        ? undefined : u64(responseLimits.maximumPreparedBytes, "maximumPreparedBytes"),
+      maximumTotalStateBytes: responseLimits.maximumTotalStateBytes === undefined
+        ? undefined : u64(responseLimits.maximumTotalStateBytes, "maximumTotalStateBytes"),
+      maximumScratchBytes: responseLimits.maximumScratchBytes === undefined
+        ? undefined : u64(responseLimits.maximumScratchBytes, "maximumScratchBytes"),
+      maximumAutomationSpansPerBlock: responseLimits.maximumAutomationSpansPerBlock,
+      maximumResultBytes: responseLimits.maximumResultBytes,
     };
     for (const name of FRAME_EXPORTS) callable(this.#exports, name);
   }
@@ -302,26 +279,20 @@ export class ResponsePreviewModule {
   }
 
   #query(request: ResponsePreviewQuery): ResponsePreviewResult {
-    if (request.configurationId < 0n || request.configurationId > 0xffff_ffff_ffff_ffffn) throw new MisoUsageError("configurationId must fit u64");
-    finiteInteger(request.sampleRateHz, "sampleRateHz", 1, 0xffff_ffff);
-    finiteInteger(request.quantumFrames, "quantumFrames", 1, 0xffff_ffff);
-    finiteInteger(request.grid.points, "grid.points", 2, 0xffff_ffff);
-    const grid = gridName(request.grid.kind);
-    if (!Number.isFinite(request.grid.minimumHz) || !Number.isFinite(request.grid.maximumHz)) throw new MisoUsageError("grid endpoints must be finite");
-    if (grid === "logarithmic" && request.grid.minimumHz <= 0) throw new MisoUsageError("logarithmic grid minimumHz must be positive");
-    const channels = channelName(request.channels);
     const sections = wantsSections(request.fields);
     const configuration = normalizedConfiguration(request.configuration);
     const requestId = this.#nextRequestId;
     this.#nextRequestId += 1n;
+    // Nothing of the request is checked here but what has no spelling on the wire: the grid, the
+    // axis, the rate, the quality and every lane are the core's to accept or refuse.
     const frame = encodeResponseRequest({
       requestId,
       ...this.#target(configuration),
-      grid,
+      grid: request.grid.kind,
       points: request.grid.points,
-      minimumHz: asF32(request.grid.minimumHz, "grid.minimumHz"),
-      maximumHz: asF32(request.grid.maximumHz, "grid.maximumHz"),
-      channels,
+      minimumHz: Math.fround(request.grid.minimumHz),
+      maximumHz: Math.fround(request.grid.maximumHz),
+      channels: request.channels ?? "both",
       sections,
       configurationId: request.configurationId,
       sampleRateHz: request.sampleRateHz,
@@ -332,7 +303,6 @@ export class ResponsePreviewModule {
       maximumAutomationSpans: this.#responseLimits.maximumAutomationSpansPerBlock,
       maximumReplyBytes: this.#responseLimits.maximumResultBytes,
     });
-    if (frame.length > MAXIMUM_REQUEST_FRAME_BYTES) throw new MisoUsageError("the response request exceeds the frame bound");
     const memory = this.#exports.memory;
     const requestPtr = callable(this.#exports, "miso_engine_web_v1_response_frame_ptr")(frame.length);
     if (requestPtr === 0) throw responseError(resultValue("refusedBudget"));
@@ -370,7 +340,7 @@ export class ResponsePreviewModule {
         throw new MisoUsageError("the generated catalog has no input-filter rows");
       }
       const row = (control: number, lane: "left" | "right", value: number | undefined): ResponseFrameOverride => ({
-        control, lane, value: asF32(value, `${lane}.cutoff`),
+        control, lane, value: cutoff(value),
       });
       return {
         target: { kind: "inputFilters" },
@@ -383,23 +353,26 @@ export class ResponsePreviewModule {
       };
     }
     const descriptor = CATALOG.effects.find((candidate) => candidate.id === configuration.effectId);
-    if (descriptor === undefined) throw new MisoUsageError(`unknown generated effect ${configuration.effectId}`);
-    const overrides: ResponseFrameOverride[] = Object.entries(configuration.parameters)
-      .flatMap(([name, value]) => parameterRows(
-        descriptor,
-        name,
-        value,
-        configuration.options.channel,
-        `response.${name}`,
-      ))
-      .map((row) => ({ control: Number(row.parameter_id), lane: row.channel as Channel, value: Number(row.value) }));
+    const named = Object.entries(configuration.parameters);
+    const overrides: ResponseFrameOverride[] = [];
+    if (descriptor === undefined && named.length > 0) {
+      // The catalog has no parameter names for this effect, so a name cannot be spelled as an ID.
+      throw new MisoUsageError(`unknown generated effect ${configuration.effectId} has no parameter names`);
+    }
+    if (descriptor !== undefined) {
+      for (const [name, value] of named) {
+        for (const row of parameterWireRows(descriptor, name, value, configuration.options.channel, `response.${name}`)) {
+          overrides.push({ control: Number(row.parameter_id), lane: row.channel as Channel, value: Number(row.value) });
+        }
+      }
+    }
     if (configuration.options.bypass) overrides.push({ control: BYPASS_CONTROL, lane: "both", value: 1 });
     return {
       target: {
         kind: "effect",
         effect: configuration.effectId,
-        quality: qualityName(configuration.options.quality),
-        linkMode: linkModeName(configuration.options.linkMode),
+        quality: configuration.options.quality,
+        linkMode: configuration.options.linkMode,
       },
       overrides,
     };

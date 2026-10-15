@@ -4,6 +4,11 @@
 //!   a message that is not `RESPONSE_GET` and a header that does not decode are each answered or
 //!   refused as the entry documents.
 //! * **The caller's limits.** The request's own `maximum_reply_bytes` lowers the reply bound.
+//! * **The core's refusals, not the client's (#1623).** A logarithmic axis from zero, a quality the
+//!   effect does not publish, a lane given twice and a non-finite endpoint are each refused with a
+//!   status and code of the core. The browser SDK sends them as given and shows exactly these
+//!   (`sdk/test/response-evals.mjs`); `crates/capi/tests/response_get.rs` holds the C ABI session
+//!   to the same codes.
 //!
 //! The byte equality with a C ABI session is `crates/capi/tests/response_get.rs`.
 
@@ -13,7 +18,7 @@ use host_core::{ResponseFrameError, serve_response_frame};
 use protocol::{
     CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
     ExpectedRevision, MessageId, ParameterChannel, ProtocolCodec, RequestId, ResponseConfiguration,
-    ResponseGetRequest, ResponseGrid, ResponseResult, ResponseTarget, StatusCode,
+    ResponseGetRequest, ResponseGrid, ResponseOverride, ResponseResult, ResponseTarget, StatusCode,
     TypedCommandFrame,
 };
 
@@ -152,6 +157,107 @@ fn a_request_the_entry_cannot_resolve_is_refused_with_its_code() {
         );
         assert_eq!(codes, [code], "{name}");
     }
+}
+
+/// The refusals a client sends as given, with the status and code the core answers. The SDK's
+/// `response-evals.mjs` lists the same rows; `crates/capi/tests/response_get.rs` lists them for a
+/// C ABI session.
+///
+/// Red if a client-side check is put back in front of one of them and the core's answer drifts, or
+/// if the core stops refusing one: nothing then stands between a client and the engine.
+#[test]
+fn the_core_refuses_what_a_thin_client_sends_as_given() {
+    let mut zero_log = request();
+    zero_log.minimum_hz = 0.0;
+    let with_quality = |quality| {
+        let mut query = request();
+        query.target = ResponseTarget::Configuration(ResponseConfiguration::Effect {
+            effect: "miso.parametric-eq".to_owned(),
+            quality,
+            link_mode: session::LinkMode::DualMono,
+        });
+        query
+    };
+    let mut twice = request();
+    twice.overrides = vec![
+        ResponseOverride {
+            control: 4,
+            lane: ParameterChannel::Both,
+            value: 1.0,
+        },
+        ResponseOverride {
+            control: 4,
+            lane: ParameterChannel::Left,
+            value: 2.0,
+        },
+    ];
+    let mut one_point = request();
+    one_point.points = 1;
+    for (name, query, status, code) in [
+        (
+            "a logarithmic axis from zero",
+            zero_log,
+            StatusCode::InvalidField,
+            "response.grid",
+        ),
+        (
+            "one point",
+            one_point,
+            StatusCode::InvalidField,
+            "response.points",
+        ),
+        (
+            "draft quality",
+            with_quality(session::EffectQuality::Draft),
+            StatusCode::ValidationFailed,
+            "effect.quality.unsupported",
+        ),
+        (
+            "high quality",
+            with_quality(session::EffectQuality::High),
+            StatusCode::ValidationFailed,
+            "effect.quality.unsupported",
+        ),
+        (
+            "a lane given twice",
+            twice,
+            StatusCode::InvalidField,
+            "response.override.duplicate",
+        ),
+    ] {
+        let reply = serve(&query);
+        let (got_status, message, codes) = refusal(&reply).unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(
+            (got_status, message),
+            (status, MessageId::ResponseGet),
+            "{name}"
+        );
+        assert_eq!(codes, [code], "{name}");
+    }
+}
+
+/// A frame the Rust encoder refuses to write (a NaN endpoint) is still a frame a client can send;
+/// the decoder refuses it with the protocol's own code.
+#[test]
+fn a_non_finite_endpoint_sent_raw_is_refused_by_the_decoder() {
+    let mut frame = encode(CommandPayload::ResponseGet(&request()));
+    let finite = 20.0_f32.to_le_bytes();
+    let at = frame
+        .windows(4)
+        .position(|window| window == finite)
+        .expect("the minimum endpoint is in the frame");
+    frame[at..at + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+    let mut reply = Vec::new();
+    serve_response_frame(&frame, &mut reply).expect("a command frame");
+    let (status, message, codes) = refusal(&reply).expect("a refusal");
+    assert_eq!(
+        (status, message, codes),
+        (
+            StatusCode::InvalidField,
+            MessageId::ResponseGet,
+            vec!["protocol.failure".to_owned()]
+        )
+    );
 }
 
 #[test]
