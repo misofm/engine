@@ -1066,7 +1066,7 @@ impl LivePlan {
                 SourceSubmission {
                     generation: 1,
                     start_frame: range.start as u64,
-                    sample_rate_hz: 48_000,
+                    sample_rate_hz: self.prepared.report.sample_rate_hz,
                     planes: &[&feed.planes[0][range.clone()], &feed.planes[1][range]],
                     frames: quantum as u32,
                     end_of_region: false,
@@ -5018,6 +5018,9 @@ struct EffectRun {
     refusals: u64,
     /// Effect lanes the predecessor's inventory records.
     effect_lanes: usize,
+    /// Bytes of effect state the swap block's carry passed through the payload scratch (#1282
+    /// gate 4); an instance moved by pointer adds none.
+    payload_bytes: u64,
 }
 
 /// Render `a` for [`SWAP_BLOCK`] blocks and write `writes` to the plan that renders their block
@@ -5032,18 +5035,32 @@ fn effect_run(
     successor_writes: &[EffectWrite],
     backend: Backend,
 ) -> EffectRun {
+    effect_run_blocks(a, b, feed, writes, successor_writes, backend, BLOCKS)
+}
+
+/// [`effect_run`] over `blocks` blocks; `feed` holds at least that many.
+fn effect_run_blocks(
+    a: &Session,
+    b: Option<(&Session, &SessionModel)>,
+    feed: &Feed,
+    writes: &[EffectWrite],
+    successor_writes: &[EffectWrite],
+    backend: Backend,
+    blocks: usize,
+) -> EffectRun {
     use bench_support::alloc as bench_alloc;
     let quantum = a.model.quantum_frames as usize;
     let mut plan = LivePlan::fresh(a, backend);
     let effect_lanes = plan.prepared.inventory.effect_lane_count();
-    let mut blocks = Vec::with_capacity(BLOCKS);
+    let mut rendered = Vec::with_capacity(blocks);
     let mut carry = CarryOutcome::NotRequested;
     let mut restarted = Vec::new();
     let mut swap_allocator = ((0, 0, 0), (0, 0));
     let mut superseded = 0;
     let mut refusals = 0;
+    let mut payload_bytes = 0;
     plan.submit(feed, quantum, 0);
-    for block in 0..BLOCKS {
+    for block in 0..blocks {
         for write in writes.iter().filter(|write| write.block == block) {
             write_effect_value(&mut plan, write);
         }
@@ -5061,11 +5078,12 @@ fn effect_run(
                     .adopt_persisting(&mut plan.prepared.sources),
                 1
             );
-            if block + 1 < BLOCKS {
+            if block + 1 < blocks {
                 successor.submit(feed, quantum, block + 1);
             }
             let mut output = vec![f32::NAN; quantum * 2];
             engine::realtime::audit::reset();
+            graph::test_only_reset_carry_payload_bytes();
             let mark = bench_alloc::current_thread_counters();
             carry = successor
                 .prepared
@@ -5078,10 +5096,11 @@ fn effect_run(
                 (delta.allocations, delta.reallocations, delta.deallocations),
                 (audit.allocations, audit.deallocations),
             );
+            payload_bytes = graph::test_only_carry_payload_bytes();
             superseded = successor.handles.live_values_superseded.get();
             refusals =
                 graph::carry_refusal_count(&mut successor.prepared.plan).expect("a graph plan");
-            blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
+            rendered.push(output.iter().map(|sample| sample.to_bits()).collect());
             plan = successor;
             continue;
         }
@@ -5090,22 +5109,23 @@ fn effect_run(
                 write_effect_value(&mut plan, write);
             }
         }
-        if block + 1 < BLOCKS {
+        if block + 1 < blocks {
             plan.submit(feed, quantum, block + 1);
         }
-        blocks.push(plan.render(quantum));
+        rendered.push(plan.render(quantum));
         if block == SWAP_BLOCK {
             superseded = plan.handles.live_values_superseded.get();
         }
     }
     EffectRun {
-        blocks,
+        blocks: rendered,
         carry,
         restarted,
         swap_allocator,
         superseded,
         refusals,
         effect_lanes,
+        payload_bytes,
     }
 }
 
@@ -6379,5 +6399,453 @@ fn pending_observe_records_cross_the_form_change_at_eight_lanes() {
             pending,
             Some((false, true)),
         );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1282: per-node effect instances move by pointer across a plan swap.
+// ---------------------------------------------------------------------------------------------
+
+/// Blocks of the tail runs: long enough for a 50 ms delay at high feedback to ring through
+/// several repeats after the swap.
+const TAIL_BLOCKS: usize = 64;
+
+/// A native insert `instance` of `effect` with `params`, dual-mono linked.
+fn native_insert(instance: &str, effect: &str, params: Vec<EffectParam>) -> Effect {
+    Effect {
+        id: id(instance),
+        identity: EffectIdentity::Native {
+            effect_id: id(effect),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::DualMono,
+        params,
+        sidechain: SidechainDeclaration::None,
+    }
+}
+
+/// Three tracks, each with one insert that no plan banks (a group of one never fills a bank, and
+/// the delay has no bank kernel): `eq0` a 50 ms delay at high feedback, `eq1` a multiband
+/// compressor, `eq2` a compressor.
+fn tail_session() -> SessionModel {
+    use ParameterUnit::{Linear, Milliseconds};
+    let mut model = filtered_session(false);
+    let cut: Vec<String> = model
+        .tracks
+        .iter()
+        .skip(3)
+        .map(|track| track.id.as_str().to_owned())
+        .collect();
+    for track in cut {
+        remove_track(&mut model, &track);
+    }
+    let inserts = [
+        native_insert(
+            "dly",
+            "miso.delay",
+            vec![
+                param(1, Milliseconds, 50.0),
+                param(2, Linear, 0.85),
+                param(3, Linear, 0.2),
+                param(4, Linear, 0.5),
+            ],
+        ),
+        native_insert("mb", "miso.multiband-compressor", Vec::new()),
+        native_insert("comp", "miso.compressor", console_params("comp", 0, false)),
+    ];
+    for (track, insert) in model.tracks.iter_mut().zip(inserts) {
+        track.inserts.effects.push(insert);
+    }
+    model
+}
+
+/// [`tail_session`] and its successor: the same session plus the muted track [`MUTED_TRACK`],
+/// which sorts first and holds no insert.
+fn tail_pair() -> (Session, Session) {
+    let mut b = with_muted_track(tail_session());
+    track_mut(&mut b, MUTED_TRACK).inserts.effects.clear();
+    (Session::compile(tail_session()), Session::compile(b))
+}
+
+/// The source plays for four blocks, then drops to a deterministic noise near -80 dBFS that is
+/// never an exact zero, so no stage skips its work for silence.
+fn tail_feed() -> Feed {
+    let mut feed = Feed::with_blocks(SOURCE, 9, TAIL_BLOCKS);
+    for plane in &mut feed.planes {
+        for sample in &mut plane[4 * QUANTUM..] {
+            *sample *= 0.0002;
+        }
+    }
+    assert!(feed.planes.iter().flatten().all(|sample| *sample != 0.0));
+    feed
+}
+
+/// Every insert of `session` is a per-node instance.
+fn assert_inserts_per_node(session: &Session, backend: Backend, count: usize, what: &str) {
+    assert_eq!(
+        insert_forms(session, backend),
+        vec![true; count],
+        "{what}: every insert renders per node"
+    );
+}
+
+fn loudest(block: &[u32]) -> f32 {
+    block
+        .iter()
+        .map(|bits| f32::from_bits(*bits).abs())
+        .fold(0.0, f32::max)
+}
+
+/// Gate 1: a delay's echoes and a multiband compressor's envelope ring on through a swap that
+/// adds a muted track, at the sixth block, while the source is down at the noise floor. The
+/// swapped run is bit-identical to B fed the same PCM from frame 0, nothing restarts, the swap
+/// block makes no allocator call, and the carry passes nothing through the payload scratch. The
+/// same swap with every strip restarted loses the echoes.
+fn a_delay_tail_rings_on_through_the_swap(backend: Backend) {
+    let what = format!("{backend:?}");
+    let (a, b) = tail_pair();
+    assert_inserts_per_node(&a, backend, 3, &what);
+    assert_inserts_per_node(&b, backend, 3, &what);
+    let feed = tail_feed();
+    let reference = effect_run_blocks(&b, None, &feed, &[], &[], backend, TAIL_BLOCKS);
+    let run = effect_run_blocks(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &[],
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_clean_swap(&run, &what);
+    assert_eq!(run.effect_lanes, 3, "{what}: three per-node instances");
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        run.payload_bytes, 0,
+        "{what}: nothing passed through the scratch"
+    );
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals B rendered from frame 0"
+    );
+    // Not vacuous. The first echo of the source's loud blocks is audible long after the swap...
+    assert!(
+        loudest(&reference.blocks[20]) > 1e-3,
+        "{what}: the echo rings above the noise floor"
+    );
+    // ...and a swap whose strips all restart cuts it.
+    let mut committed = a.model.clone();
+    for track in &mut committed.tracks {
+        for entry in &mut track.inserts.effects {
+            entry.quality = session::EffectQuality::High;
+        }
+    }
+    let restarted = effect_run_blocks(
+        &a,
+        Some((&b, &committed)),
+        &feed,
+        &[],
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_eq!(restarted.restarted.len(), 3, "{what}: the strips restart");
+    let cut = first_effect_difference(&restarted, &reference).expect("the echoes are cut");
+    assert!(cut <= 20, "{what}: the echo is lost at block {cut}");
+}
+
+#[test]
+fn a_delay_tail_rings_on_through_the_swap_at_every_width() {
+    for backend in backends() {
+        a_delay_tail_rings_on_through_the_swap(backend);
+    }
+}
+
+/// Gate 2: a delay-time value written to A's cell just before the swap (never rendered by A) and
+/// a ramped live bypass of the per-node compressor a block earlier both reach the successor. The
+/// reference is B fed the same writes at the same blocks.
+fn unread_values_and_a_live_bypass_cross_the_swap(backend: Backend) {
+    let what = format!("{backend:?}");
+    let (a, b) = tail_pair();
+    let feed = tail_feed();
+    let writes = [
+        EffectWrite {
+            block: SWAP_BLOCK - 1,
+            strip: "eq2",
+            address: LiveEffectAddress::insert(0),
+            value: EffectValue::Bypass(BypassSwitch {
+                bypassed: true,
+                ramp_samples: 300,
+            }),
+        },
+        EffectWrite {
+            block: SWAP_BLOCK,
+            strip: "eq0",
+            address: LiveEffectAddress::insert(0),
+            // The delay time, in milliseconds.
+            value: EffectValue::Parameter {
+                index: 0,
+                value: 80.0,
+            },
+        },
+    ];
+    let reference = effect_run_blocks(&b, None, &feed, &writes, &[], backend, TAIL_BLOCKS);
+    let run = effect_run_blocks(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &writes,
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_clean_swap(&run, &what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(run.payload_bytes, 0, "{what}");
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals B fed the same values at the same blocks"
+    );
+    // Not vacuous: each write is audible after the swap on its own.
+    for kept in 0..writes.len() {
+        let one = [writes[kept]];
+        let alone = effect_run_blocks(&b, None, &feed, &one, &[], backend, TAIL_BLOCKS);
+        let other = [writes[1 - kept]];
+        let without = effect_run_blocks(&b, None, &feed, &other, &[], backend, TAIL_BLOCKS);
+        assert_ne!(
+            first_effect_difference(&alone, &without),
+            None,
+            "{what}: write {kept} changes the output"
+        );
+    }
+}
+
+#[test]
+fn unread_values_and_a_live_bypass_cross_the_swap_at_every_width() {
+    for backend in backends() {
+        unread_values_and_a_live_bypass_cross_the_swap(backend);
+    }
+}
+
+/// Gate 3: a committed bypass change on the delay is a prepared one (the delay lowers no live
+/// bypass), so its owner restarts and its strip, and only it, is in the restart set. The other
+/// two per-node instances still move.
+fn a_prepared_bypass_change_restarts_its_strip(backend: Backend) {
+    let what = format!("{backend:?}");
+    let (a, _) = tail_pair();
+    let mut b_model = tail_session();
+    track_mut(&mut b_model, "eq0").inserts.effects[0].bypass = true;
+    let b = Session::compile(b_model);
+    let feed = tail_feed();
+    let run = effect_run_blocks(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &[],
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_clean_swap(&run, &what);
+    assert_eq!(
+        run.restarted,
+        vec![Box::<str>::from("eq0")],
+        "{what}: exactly the delay's strip restarts"
+    );
+    assert_eq!(run.payload_bytes, 0, "{what}");
+    // The restarted strip starts at rest, so the swapped run is not B rendered from frame 0.
+    let reference = effect_run_blocks(&b, None, &feed, &[], &[], backend, TAIL_BLOCKS);
+    assert_ne!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: the restarted strip starts at rest"
+    );
+}
+
+#[test]
+fn a_prepared_bypass_change_restarts_its_strip_at_every_width() {
+    for backend in backends() {
+        a_prepared_bypass_change_restarts_its_strip(backend);
+    }
+}
+
+/// D3: a plan that holds the owners without live controls has no row for them, so a successor
+/// built from live-controlled predecessor lanes restarts their strips.
+fn an_owner_without_live_controls_on_one_side_restarts(backend: Backend) {
+    let what = format!("{backend:?}");
+    let (a, b) = tail_pair();
+    let mut plan = LivePlan::fresh(&a, backend);
+    let successor = b
+        .prepare_successor(&plan.prepared.inventory, &a.model, &caps(), backend)
+        .unwrap_or_else(|failure| panic!("{what}: {failure:?}"));
+    let mut restarted = successor.restarted_strips().to_vec();
+    restarted.sort();
+    assert_eq!(
+        restarted,
+        ["eq0", "eq1", "eq2"].map(Box::<str>::from).to_vec(),
+        "{what}: every strip with a per-node insert restarts"
+    );
+    drop(plan.prepared.plan.take_revision_gate());
+}
+
+#[test]
+fn an_owner_without_live_controls_on_one_side_restarts_at_every_width() {
+    for backend in backends() {
+        an_owner_without_live_controls_on_one_side_restarts(backend);
+    }
+}
+
+/// Gate 4: at 96 kHz the delay holds two seconds a channel, about 1.5 MiB. Its owner moves by
+/// pointer, so the carry passes no byte of it through the payload scratch, and the swap block
+/// makes no allocation and no free. The bits equal B's from frame 0.
+fn a_delay_moves_by_pointer_at_96_khz(backend: Backend) {
+    let what = format!("{backend:?}");
+    let at_96k = |mut model: SessionModel| {
+        model.sample_rate_hz = 96_000;
+        model
+    };
+    let a = Session::compile(at_96k(tail_session()));
+    let mut b_model = with_muted_track(tail_session());
+    track_mut(&mut b_model, MUTED_TRACK).inserts.effects.clear();
+    let b = Session::compile(at_96k(b_model));
+    let feed = tail_feed();
+    let reference = effect_run_blocks(&b, None, &feed, &[], &[], backend, TAIL_BLOCKS);
+    let run = effect_run_blocks(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        &[],
+        &[],
+        backend,
+        TAIL_BLOCKS,
+    );
+    assert_clean_swap(&run, &what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        run.payload_bytes, 0,
+        "{what}: the delay's state was not copied"
+    );
+    assert_eq!(first_effect_difference(&run, &reference), None, "{what}");
+}
+
+#[test]
+fn a_delay_moves_by_pointer_at_96_khz_at_every_width() {
+    for backend in backends() {
+        a_delay_moves_by_pointer_at_96_khz(backend);
+    }
+}
+
+/// The payload counter reads what a lane move passes through the scratch: a per-node compressor
+/// that joins a bank is copied, so the counter is nonzero there (gate 4's oracle can fail).
+#[cfg(target_feature = "avx2")]
+#[test]
+fn the_payload_counter_counts_a_lane_move() {
+    let backend = Backend::Simd8;
+    let (a, b) = form_pair(Insert::Compressor, backend, true);
+    let feed = bursty_feed(SOURCE, 5);
+    let run = effect_run(&a, Some((&b, &a.model)), &feed, &[], &[], backend);
+    assert_clean_swap(&run, "per node to bank");
+    assert!(
+        run.payload_bytes > 0,
+        "a state that changes form goes through the scratch"
+    );
+}
+
+/// A live difference on a moved per-node instance retargets it (#1280c D4): the delay's time and
+/// a compressor's session bypass, each as one committed edit whose successor takes the instance
+/// by pointer and then writes the new value. Run 1 is the structural swap with the retarget;
+/// run 2 writes the same edit to A before the swap and prepares B from a base that holds it.
+fn a_live_difference_on_a_moved_instance_is_retargeted(backend: Backend) {
+    let ramp = LiveRamps::for_session(&tail_session()).for_row(LiveRampRow::BypassCrossfade);
+    type Edit = fn(SessionModel) -> SessionModel;
+    let edits: [(&str, Edit, EffectWrite); 2] = [
+        (
+            "delay time",
+            |model| with_insert_param_all(model, "eq0", "dly", 1, 80.0),
+            EffectWrite {
+                block: SWAP_BLOCK,
+                strip: "eq0",
+                address: LiveEffectAddress::insert(0),
+                value: EffectValue::Parameter {
+                    index: 0,
+                    value: 80.0,
+                },
+            },
+        ),
+        (
+            "compressor bypass",
+            |mut model| {
+                track_mut(&mut model, "eq2").inserts.effects[0].bypass = true;
+                model
+            },
+            EffectWrite {
+                block: SWAP_BLOCK,
+                strip: "eq2",
+                address: LiveEffectAddress::insert(0),
+                value: EffectValue::Bypass(BypassSwitch {
+                    bypassed: true,
+                    ramp_samples: ramp,
+                }),
+            },
+        ),
+    ];
+    let feed = tail_feed();
+    for (name, edit, write) in edits {
+        let what = format!("{backend:?} {name}");
+        let (a, b) = tail_pair();
+        let b_edited = Session::compile(edit(b.model.clone()));
+        let a_edited = edit(a.model.clone());
+        let run = effect_run_blocks(
+            &a,
+            Some((&b_edited, &a.model)),
+            &feed,
+            &[],
+            &[],
+            backend,
+            TAIL_BLOCKS,
+        );
+        assert_clean_swap(&run, &what);
+        assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+        assert_eq!(run.payload_bytes, 0, "{what}");
+        let reference = effect_run_blocks(
+            &a,
+            Some((&b_edited, &a_edited)),
+            &feed,
+            &[write],
+            &[],
+            backend,
+            TAIL_BLOCKS,
+        );
+        assert_clean_swap(&reference, &format!("{what} reference"));
+        assert_eq!(
+            first_effect_difference(&run, &reference),
+            None,
+            "{what}: move, then retarget equals live edit, then structural edit"
+        );
+        // Not vacuous: the moved instance keeps its old value without the retarget.
+        let stale = effect_run_blocks(
+            &a,
+            Some((&b, &a.model)),
+            &feed,
+            &[],
+            &[],
+            backend,
+            TAIL_BLOCKS,
+        );
+        assert_ne!(
+            first_effect_difference(&stale, &run),
+            None,
+            "{what}: the edit is audible after the swap"
+        );
+    }
+}
+
+#[test]
+fn a_live_difference_on_a_moved_instance_is_retargeted_at_every_width() {
+    for backend in backends() {
+        a_live_difference_on_a_moved_instance_is_retargeted(backend);
     }
 }

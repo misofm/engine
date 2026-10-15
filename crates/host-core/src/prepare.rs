@@ -4077,9 +4077,10 @@ fn prepare_effect_retarget(
 /// strip moves, and which strips restart.
 ///
 /// An owner carries when its difference is not a prepared one, and both plans hold it as a lane
-/// of an effect bank stage, of one kind (a plain stage, or a live-control stage whose lane has
-/// cells, only a lowered bypass or nothing), with equal layouts (prepared bypass, latency, state
-/// sizes and state layout version). A live difference also needs `retarget` to accept it (the
+/// of an effect bank stage or as a live-controlled per-node instance, of one kind (a plain stage,
+/// or a live-control stage whose lane has cells, only a lowered bypass or nothing), with equal
+/// layouts (prepared bypass, latency, state sizes and state layout version). An owner that one
+/// plan holds with live controls and the other without has no row on one side, and restarts. A live difference also needs `retarget` to accept it (the
 /// successor's producer has a cell for every record); a lane it refuses restarts. A console slot's
 /// key is (strip, `Simd1` or `Simd2`, slot ID), a surviving insert's is (strip,
 /// [`graph::RackId::Dynamic`], insert ID). A strip with an owner that does not carry, or whose
@@ -4113,15 +4114,7 @@ fn resolve_effect_carry(
             let rows = effect_lane_row(own, join.id, rack, effect_id)
                 .zip(predecessor.effect_lane(join.id, rack, effect_id));
             let Some((own, before)) = rows.filter(|(own, before)| {
-                !state.is_prepared()
-                    && own.layout == before.layout
-                    && own.kind == before.kind
-                    // A move between two per-node instances is #1282's; until it lands, a strip
-                    // that holds one restarts, as it always did.
-                    && !matches!(
-                        (own.location, before.location),
-                        (graph::GraphEffectSite::Node(_), graph::GraphEffectSite::Node(_))
-                    )
+                !state.is_prepared() && own.layout == before.layout && own.kind == before.kind
             }) else {
                 restart = true;
                 continue;
@@ -4136,7 +4129,17 @@ fn resolve_effect_carry(
                 }
                 _ => None,
             };
-            carry.scratch_bytes = carry.scratch_bytes.max(own.layout.payload_bytes());
+            // Two per-node instances change places by pointer (#1282 D2): their state goes through
+            // no scratch, so they add nothing to it.
+            if !matches!(
+                (own.location, before.location),
+                (
+                    graph::GraphEffectSite::Node(_),
+                    graph::GraphEffectSite::Node(_)
+                )
+            ) {
+                carry.scratch_bytes = carry.scratch_bytes.max(own.layout.payload_bytes());
+            }
             carry.moves.push(graph::GraphEffectMove {
                 successor: own.location,
                 predecessor: before.location,

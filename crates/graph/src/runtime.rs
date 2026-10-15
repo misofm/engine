@@ -57,6 +57,32 @@ thread_local! {
     static TEST_ONLY_BANK_METER_DECLINED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     static TEST_ONLY_BANK_METER_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_ONLY_CARRY_PAYLOAD_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Zero the count of payload bytes a plan swap's effect carry has passed through the payload
+/// scratch (#1282 D2, gate 4).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_reset_carry_payload_bytes() {
+    TEST_ONLY_CARRY_PAYLOAD_BYTES.with(|value| value.set(0));
+}
+
+/// The bytes of effect state the carry has moved through the payload scratch since the last
+/// [`test_only_reset_carry_payload_bytes`], on this thread: each lane move that snapshots into the
+/// scratch and restores from it adds its layout's payload. An instance moved by pointer
+/// ([`LiveControlEffect::move_from`]) adds nothing.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_carry_payload_bytes() -> u64 {
+    TEST_ONLY_CARRY_PAYLOAD_BYTES.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[inline]
+fn test_only_note_carry_payload(bytes: u64) {
+    TEST_ONLY_CARRY_PAYLOAD_BYTES.with(|value| value.set(value.get().saturating_add(bytes)));
 }
 
 /// Decline (`true`) or restore (`false`) the banked sample-peak pass of issue #943, and reset its
@@ -1276,6 +1302,39 @@ impl LiveControlEffect {
             shunt: &mut self.shunt,
         }
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// Whether [`Self::move_from`] would take `predecessor` into this instance at a plan swap
+    /// (#1282 D2): one effect, one state layout, prepared bypass and latency; control lanes of one
+    /// kind and one cell shape, this one holding its carried slots (#1633); and shunts allocated
+    /// for the same block and latency. Allocation-free and constant time.
+    fn can_move_from(&self, predecessor: &Self) -> bool {
+        self.layout == predecessor.layout
+            && rack::EffectLaneKind::of_instance(&self.control)
+                == rack::EffectLaneKind::of_instance(&predecessor.control)
+            && self.control.can_carry_from(&predecessor.control)
+            && self.shunt.same_shape(&predecessor.shunt)
+    }
+
+    /// Take `predecessor`'s whole instance at the swap block, by pointer (#1282 D2): the two
+    /// processor boxes and the two shunts are exchanged, so this plan's instance continues the
+    /// predecessor's state exactly (a ramp in flight, a delay's line) with no payload, no copy and
+    /// no allocation, and the predecessor's plan keeps this plan's at-rest ones to retire with it.
+    /// The control lane takes the predecessor's live state through
+    /// [`EffectControlLane::carry_from`]. The staging window and the observation lane stay: each
+    /// plan sized its own, and the tap state is the observer carry's (#1327).
+    ///
+    /// The caller has checked [`Self::can_move_from`], and `predecessor` never renders again.
+    fn move_from(&mut self, predecessor: &mut Self) {
+        let carried = self.control.carry_from(&predecessor.control);
+        debug_assert!(carried, "a checked control lane carries");
+        core::mem::swap(
+            &mut self.effect.processor,
+            &mut predecessor.effect.processor,
+        );
+        core::mem::swap(&mut self.shunt, &mut predecessor.shunt);
+    }
+    // REALTIME_POLICY_END
 
     /// This instance's pending-`Observe` drain for a plan swap's carry (#1281, #1280 D3): its
     /// queue and its tap. Pops nothing; the carry pops in a loop of its own. `None` when the
@@ -4927,8 +4986,9 @@ impl crate::runtime::Runtime {
     /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,
     /// to two effect instances a carry would join, with a scratch of `scratch_bytes` (issues #1279
     /// D3, #1281): two lanes of stages [`rack::EffectBankStage::can_carry_lane_from`] or its live
-    /// twin would join, or a lane of a live stage and a per-node instance it
-    /// [`rack::LiveControlEffectBankStage::can_carry_instance`] accepts. Checked before anything
+    /// twin would join, a lane of a live stage and a per-node instance it
+    /// [`rack::LiveControlEffectBankStage::can_carry_instance`] accepts, or two per-node instances
+    /// [`LiveControlEffect::can_move_from`] accepts (#1282). Checked before anything
     /// moves, so the carry is all or nothing. Allocation-free.
     pub(crate) fn can_carry_effect_lanes(
         &mut self,
@@ -4986,7 +5046,13 @@ impl crate::runtime::Runtime {
                             if from.can_carry_lane_into_instance(predecessor_lane, &node.control, scratch_bytes)
                     )
                 }
-                (Node(_), Node(_)) => false,
+                (Node(successor), Node(before)) => {
+                    let Some(from) = effect_node_mut(&mut predecessor.units, before) else {
+                        return false;
+                    };
+                    effect_node_mut(&mut self.units, successor)
+                        .is_some_and(|into| into.can_move_from(from))
+                }
             })
     }
 
@@ -5042,6 +5108,8 @@ impl crate::runtime::Runtime {
                     let Some(mut into) = effect_stage_mut(chain, slot) else {
                         continue;
                     };
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_note_carry_payload(into.layout().payload_bytes());
                     if into.carry_lane_from(lane, &from, predecessor_lane, scratch) {
                         chain.inherit_channel_agreement(agree);
                     }
@@ -5055,6 +5123,8 @@ impl crate::runtime::Runtime {
                         continue;
                     };
                     if let Some(EffectStageMut::Live(into)) = effect_stage_mut(chain, slot) {
+                        #[cfg(any(test, feature = "test-support"))]
+                        test_only_note_carry_payload(into.layout().payload_bytes());
                         into.carry_lane_from_instance(lane, node.instance(), scratch);
                     }
                 }
@@ -5074,6 +5144,8 @@ impl crate::runtime::Runtime {
                     let Some(node) = effect_node_mut(&mut self.units, successor) else {
                         continue;
                     };
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_note_carry_payload(node.layout.payload_bytes());
                     if let EffectStageMut::Live(stage) = &from
                         && !stage.carry_lane_into_instance(
                             predecessor_lane,
@@ -5084,7 +5156,15 @@ impl crate::runtime::Runtime {
                         node_refused = node_refused.saturating_add(1);
                     }
                 }
-                (Node(_), Node(_)) => {}
+                (Node(successor), Node(before)) => {
+                    let Some(from) = effect_node_mut(&mut predecessor.units, before) else {
+                        continue;
+                    };
+                    let Some(into) = effect_node_mut(&mut self.units, successor) else {
+                        continue;
+                    };
+                    into.move_from(from);
+                }
             }
         }
         // The predecessor never renders again: an `Observe` record admitted after its last block

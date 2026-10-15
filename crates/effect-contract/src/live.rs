@@ -1898,6 +1898,17 @@ impl BypassShunt {
         !self.line_left.is_empty()
     }
 
+    /// Whether `other` was allocated for the same block and the same latency, so a plan swap can
+    /// exchange the two shunts whole (#1282 D2): every buffer of one has the length of the
+    /// matching buffer of the other. Allocation-free and constant time.
+    #[must_use]
+    pub fn same_shape(&self, other: &Self) -> bool {
+        self.dry_left.len() == other.dry_left.len()
+            && self.dry_right.len() == other.dry_right.len()
+            && self.line_left.len() == other.line_left.len()
+            && self.line_right.len() == other.line_right.len()
+    }
+
     /// Capture this block's input and advance the latency line, returning nothing.
     ///
     /// Called on every block whenever [`feeds_line`](Self::feeds_line) is true, bypassed or not:

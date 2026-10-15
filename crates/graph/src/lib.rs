@@ -20,9 +20,10 @@ pub use runtime::{
 pub use runtime::{
     TestOnlyFailedBufferCapture, TestOnlySelectedSplitFader, TestOnlySplitPairTableWitness,
     test_only_arm_failed_buffer_capture, test_only_bank_meter_passes,
-    test_only_bank_sample_peak_passes, test_only_completion_disabled,
-    test_only_failed_buffer_capture, test_only_meter_input_counts, test_only_meter_input_reset,
-    test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
+    test_only_bank_sample_peak_passes, test_only_carry_payload_bytes,
+    test_only_completion_disabled, test_only_failed_buffer_capture, test_only_meter_input_counts,
+    test_only_meter_input_reset, test_only_observation_dispatch_counts,
+    test_only_observation_dispatch_reset, test_only_reset_carry_payload_bytes,
     test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
     test_only_resident_input_counts, test_only_resident_input_reset,
     test_only_route_activity_built, test_only_route_drain_calls, test_only_route_drain_snapshots,
@@ -3058,8 +3059,6 @@ pub enum GraphCarryInstallError {
     EffectLaneOutOfRange,
     /// A successor or predecessor effect lane appears twice.
     DuplicateEffectLane,
-    /// An effect move names a per-node instance on both sides (#1282 moves those).
-    EffectMoveBetweenNodes,
 }
 
 /// Where one builtin bank lane sits in a bound graph plan: its runtime unit, its bank chain slot
@@ -3217,7 +3216,8 @@ pub enum GraphEffectSite {
 /// One effect lane a successor takes from its predecessor at the swap block: the whole state of
 /// the instance at `predecessor` in the displaced plan is moved into `successor` (issue #1279 D3).
 /// A lane may change representation in the move: a bank lane to a per-node instance or back
-/// (#1281); a move between two per-node instances is not installed (#1282).
+/// (#1281). A move between two per-node instances exchanges the processor and the dry shunt by
+/// pointer and passes nothing through the payload scratch (#1282).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GraphEffectMove {
     /// The instance in the successor, the plan the move is installed in.
@@ -3267,9 +3267,9 @@ pub fn bank_effect_lanes(
 ///
 /// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
 /// program, a successor site is not a populated lane of an effect bank or a live-controlled
-/// per-node effect, a move is between two per-node instances, or a successor or predecessor site
-/// repeats. Predecessor sites and layouts are checked against the predecessor at the swap block,
-/// where one that does not resolve refuses the whole hand-over. The moves are kept sorted by
+/// per-node effect, or a successor or predecessor site repeats. Predecessor sites and layouts are
+/// checked against the predecessor at the swap block, where one that does not resolve refuses the
+/// whole hand-over. The moves are kept sorted by
 /// predecessor site, so the swap block disengages each predecessor chain once.
 pub fn install_effect_carry(
     plan: &mut PreparedRenderPlan,
@@ -3287,12 +3287,6 @@ pub fn install_effect_carry(
     for (index, step) in moves.iter().enumerate() {
         if !executor.runtime.has_effect_site(step.successor) {
             return Err(GraphCarryInstallError::EffectLaneOutOfRange);
-        }
-        if matches!(
-            (step.successor, step.predecessor),
-            (GraphEffectSite::Node(_), GraphEffectSite::Node(_))
-        ) {
-            return Err(GraphCarryInstallError::EffectMoveBetweenNodes);
         }
         if let GraphEffectSite::Lane(at) = step.successor {
             let Some(layout) = executor.runtime.effect_lane_layout(at) else {
