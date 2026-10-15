@@ -44,7 +44,9 @@ exactly as before. The fader row leaves the classifier's mask in #1648, in the s
      `GraphPreparedBuiltinBankProcessor` (`process_timed`, which forwards to `process` by default),
      and the processor reads `timeline_block(s0 - a(n))` into #1637's `NodeSpan`. The same call
      passes the block's jump lengths, the three words #1639's read gives the graph for that
-     block, which each cell's events resolve its `Word(Fader)` key against (#1637 D4);
+     block; for each cell the processor resolves the fader row's jump length from them with
+     `LiveRamps::for_row` and passes it to `CellEvents::new` as one `u32` (#1637 D4, as shipped:
+     #1637 stores no jump key and writes no row rule);
   2. tells each cell the end of a ramp in flight it did not start (a live mute ramp) through
      `hold_until`, from the stage's `remaining` (#1638 D2);
   3. pulls each lane's events (#1637, `SeekMode::Exact`) and merges them by offset across lanes

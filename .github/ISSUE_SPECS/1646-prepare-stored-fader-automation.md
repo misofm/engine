@@ -65,9 +65,10 @@ admission path remains that could write a live record onto an automated lane.
 - **D1. Cells.** Host-core preparation compiles one cell per automated fader lane (target rack
   `builtins`, parameter 5; `both` gives two cells) with #1637's builder:
   - `a(n)` is the floored input arrival of the strip's `PostFader` node (#1285 D2);
-  - grid period 64, grid ramp 64, completion `End`; jump-length key `Word(Fader)` (#1637 D2):
-    each jump reads the `fader` word of #1639's plan cell for its block, so the program stores
-    no jump length; no `no_restart`;
+  - grid period 64, grid ramp 64, completion `End`; jump length `JumpLength::Block` (#1637 D2,
+    as shipped): the program stores no jump length; at render the caller resolves the fader
+    row's jump length for the block with `LiveRamps::for_row` from #1639's plan cell and passes
+    it to `CellEvents::new` as one `u32` (#1637's decision record); no `no_restart`;
   - **the offsets cell** (layout 4 of README finding F16). Preparation builds
     #1649's offsets cell for every automated fader lane, in every session, with or without
     VCAs: a #1312 latest-target cell of three words, the lane's offset sum `S` as one `f64` (two
