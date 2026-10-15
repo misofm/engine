@@ -375,3 +375,125 @@ Checked against `ea336c039`.
    room-checked with `SESSION_COMMITTED` before the commit; no room is `BACKPRESSURE` and nothing
    changes. The same on both hosts, with a parity row.
 3. **Order.** D6a (core, lane K) lands in batch 12a; D6b (browser arm bits, lane W) in batch 12b.
+
+## Decision record: #1584 D6a (batch 8, lane K, batch 12)
+
+What shipped, on `codex/controls-batch-12k`:
+
+- **The bindings type** (`crates/controls/src/observation.rs`): `ObservationBindings` (a sorted table of
+  `TapKey { strip, section: TapSection::{Console, Inserts}, tap_id }` to the window as asked for),
+  apart from `MonitorOverlay`. `after(next_model)` drops the bindings whose target the model lacks and
+  returns their keys (`ObservationChange { bindings, ended }`); a target is the strip, the console slot
+  or insert, and a resident tap with that ID (`effect_rows::resident_observation_tap`). The window is
+  stored as asked (`0` = the plan's meter window, which each plan resolves for itself); refs and the
+  conflict codes (D3) belong to the slice that writes the table from the core's `Observe` edit.
+- **Owner and carry**: `SessionState.observation` beside `monitor`; `SuccessorBase.observation:
+  &ObservationBindings` (field, no new preparer argument; `host_core::NO_OBSERVATION` for a host
+  without subscriptions). The rebuild arm computes `after()` from the prospective model, passes the
+  result as the base's field and writes it with the commit, after the last fallible step.
+- **Prepared arm**: `ObservationLane::arm_prepared(tap, window)` (`start_pending`); `accumulate` takes
+  the first accumulated block's `first_sample` as the window start and clears the flag; `arm` and
+  `disarm_all` clear it; `swap_state` moves it with the tap, so a carried tap's state replaces it. No
+  record is queued. `attach_effect_observation` takes `&[ObservationArm]` (strip, console flag, ID, tap
+  ID, window) and arms by tap ID; host-core builds the arms from the base's bindings.
+- **`OBSERVATION_ENDED` (`8011`)**: reliable event, `observation_ended` schema (sequence 1, strip 2,
+  section 3 = rack code inserts `2` or console `5`, effect/slot ID 4, tap ID 5; revision in the event
+  header), advertised with `8001` (`ProviderFeatures::observation_events`, in `ALL`). The key is text, so
+  the queue slot holds a cell index and the controller keeps `slots + 1` prepared cells (an event popped
+  for egress keeps its cell until delivered). The host attaches the ends to the prepared token with
+  `ProtocolController::attach_observation_ended`, which reserves the room with the token's own
+  `SESSION_COMMITTED` and refuses with `NoRoom`; the control plane returns `BACKPRESSURE` with the token
+  dropped, before anything is prepared or published. The commit emits the ends after `SESSION_COMMITTED`
+  at the committing revision, in key order, sequences following the commit's. One control plane serves
+  both hosts, so the event is the same on both; the wire parity row is `event.observation_ended` in the
+  conformance corpus (and the capabilities row in its capabilities frame).
+- **`push_effect_observe`** records the pushed state per observation slot (`observation_pending`, sized
+  when a plan is published) and the next `service()` folds it into the table. Departure from "writes the
+  bindings after a successful push": the browser admits a subscription inside `process()`
+  (`a_bus_observation_admits_and_renders_without_allocating`, #1213 gate 7), and a binding owns its key's
+  text, so the write cannot allocate there. The push is still the acknowledgement; the fold runs before
+  any rebuild reads the table (`command()` services first) and before the successor's slots replace the
+  pending ones. `observation_bindings()` takes `&mut self` for the same reason.
+- **Resource row**: `capi_resources` charges the cell store (`Option<ObservationEnded>` x slots + 1).
+
+Gates (D6a's seven) and tests:
+
+1. Restarted owner, subscribe applied: `observation_carry::a_restarted_effects_subscription_survives_the_rebuild_at_eight_lanes`
+   (pending=false), and E13 rewritten as `a_plan_replacement_keeps_the_subscriptions_the_host_armed`
+   (`effect_observation.rs`; the replacement changes the slot's link mode so nothing carries). The
+   reference is a record applied at the adoption block in the successor's own queue: same state and input,
+   windows equal field for field, first window at `SWAP_SAMPLE`.
+2. Pending subscribe: the same test with pending=true (the record waits in the predecessor's queue).
+3. Pending disarm: `a_pending_disarm_leaves_the_restarted_tap_unarmed_at_eight_lanes`.
+4. Removed owner: `a_removed_effect_ends_its_binding_with_an_event` (insert removed, strip removed, ID
+   reused for `miso.delay`: one `OBSERVATION_ENDED`, committing revision, stable key, sequence after the
+   commit's, successor has no tap); `controls/tests/observation.rs` (`after()` incl. console slot and an
+   unknown tap); host-core `a_stale_binding_arms_nothing`.
+5. No room: `no_room_for_the_end_refuses_the_removal_and_changes_nothing` (model, revision, table, plan
+   epoch, lane unchanged; the same request commits after a drain); protocol
+   `the_ends_need_room_with_the_commit_and_a_dropped_token_releases_it` and
+   `attached_observation_ends_follow_their_commit_in_order`.
+6. Carried owner: `a_carried_tap_is_not_restarted_by_the_prepared_arm` (NodeToNode, BankToBank,
+   NodeToBank; streams equal the empty-table run, sequences 1, 2, 3); the #1327b tests are green.
+7. Realtime: the swap-block allocator and render-audit counters are `((0,0,0),(0,0))` in gates 1, 2 and
+   6; `realtime-policy` passes (141 regions); the browser admission allocation gate stays at zero.
+
+Re-pins: `COMPLETE_SCHEMA_HASH` `0x4b21_d9e6_f520_afd9` to `0x33e4_b1ce_bcbf_d902` (reason: #1584 D6a adds
+the event `8011`, so the corpus gains `event.observation_ended`, 46 frames, and the capabilities frame
+lists `8011`), with the history line, the parity script's self-test strings, the manifest and the
+conformance record; two C ABI capabilities vectors in `capi/src/runtime/tests.rs` (the capabilities
+response lists `8011`; same length). No rendered bit moved: the audit's `pcm_digest` is
+`bf7dcedd1d92621f`.
+
+Departures and limits:
+
+- The reliable lane of both hosts has two slots (`protocol_queue_config`), so a transaction can end at
+  most one binding (the commit takes the other). A transaction that ends more can never fit and is
+  `BACKPRESSURE` forever; the app disarms first. Successor: size the lane for the largest ended set, or
+  carry the ends in one event.
+- The C ABI keeps `observation_taps` 0, so its table is empty; the Observe edit (D1-D5, D7, D8) writes the
+  same table through the core.
+- The capi race test and `tools/audit` do not cover the new event (not in D6a's paths).
+
+## Fold (root ruling A, batch 12)
+
+Root ruling A replaces D6a's one event per ended binding with one `OBSERVATION_ENDED` per commit. Commit
+"Fold #1584 D6a: one OBSERVATION_ENDED per commit carries every ended key (root ruling A)".
+
+- **Wire**: `OBSERVATION_ENDED` (`8011`) is the sequence (field 1) and one repeated `key` message (field 2,
+  mandatory, at least one); a key holds strip ID 1, section 2 (inserts `2`, console `5`), effect or slot ID 3 and
+  tap ID 4. Keys are strictly ascending (strip, console before inserts, effect ID, tap ID), so the encoder and the
+  decoder both refuse an empty list, an out-of-order list and a repeated key. Revision stays in the event header.
+  Typed `ObservationEnded { event_sequence, keys: Vec<ObservationTapKey> }`; schema modules `observation_tap_key`
+  and `observation_ended`; codecs, typed frame, registry and semantics docs follow.
+- **Room**: `ProtocolController::attach_observation_ended` reserves ONE reliable slot beside the token's
+  `SESSION_COMMITTED` whatever the number of keys, and returns the event frame's length. `BACKPRESSURE` now means
+  only that the lane holds unread events. The commit moves the prepared event into its cell: it allocates
+  nothing (the keys are built and sized when the transaction prepares, off the commit).
+- **Size at preparation**: the event is encoded for size by `attach` against the endpoint's codec, whose frame limit
+  is the control frame. A frame over that limit (or an unencodable list) is `AttachObservationEndedError::Unencodable`,
+  and the control plane refuses the transaction as `CompileRejected(resource limit)` and not as backpressure: a retry
+  could never succeed. `capi_resources` charges the heap a cell can own, one key per observation slot of the plan
+  (`observation_ended_heap_bytes`, from the producers' `observe_capacity`, their strip and effect ID text and the key
+  struct), for every cell (slots + 1) and for the token.
+- **Gates**: `a_strip_removed_with_many_subscribed_inserts_gives_one_event_with_every_key` (control plane: N = 1, 2,
+  7 and 40 subscribed inserts of a removed strip commit, one event, N keys in key order; the lane has two slots);
+  `no_room_for_the_end_refuses_the_removal_and_changes_nothing` (gate 5, now stated as unread events only);
+  protocol `attached_observation_ends_follow_their_commit_in_one_event`,
+  `the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it` and
+  `observation_ended_round_trips_every_key_and_refuses_anything_else`; the corpus row `event.observation_ended` now
+  carries two keys (console, then insert) and is the cross-host wire parity row (one control plane serves both
+  hosts; the native and Wasm corpus runs pin the same bytes).
+- **Re-pin**: `COMPLETE_SCHEMA_HASH` `0x33e4_b1ce_bcbf_d902` to `0xcc9a_7bcc_502c_4936` (history line "#1584 D6a
+  fold: one OBSERVATION_ENDED per commit"), the parity script's self-test strings, the fuzz manifest and the
+  conformance record. The capabilities frame is unchanged, so the C ABI vectors stay. No rendered bit moved
+  (audit `pcm_digest` `bf7dcedd1d92621f`, checked below).
+- **Limit that remains**: one event must fit one control frame. A commit that ends so many keys that their event
+  exceeds `maximum_control_frame_bytes` (hundreds of keys at the browser's 16 KiB) is refused as a resource limit;
+  the app disarms some first. Successor candidate: cap the table at admission by the keys one frame holds.
+- **Charge made exact (capi)**: at D6a (97233c465) `cargo test -p capi` failed `capi_retained_bytes_charge_every_byte_the_compile_retains`
+  (parametric-eq-nine-track: observed 165710, charged 165670) and `tiny_control_frame_still_accounts_three_provider_counters_exactly`,
+  both 40 bytes over the charge: the session's `observation_offsets` table (`(producers + 1) x u32`, here 10 x 4) and its
+  `observation_pending` slots were allocated and never charged. `capi_resources` now charges both
+  (`ObservationResources { producers, slots, ended_heap_bytes }`), beside the fold's ended-event heap; the whole
+  `cargo test -p capi` passes (132 passed). Audit capi `pcm_digest` `bf7dcedd1d92621f`, allocations 0.

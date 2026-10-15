@@ -1369,7 +1369,7 @@ impl SessionRuntime {
         let observations = if config.observation == ObservationArm::Absent {
             Vec::new()
         } else {
-            attach_effect_observation(&mut effects, MAXIMUM_OBSERVATION_TAPS, WINDOW_BLOCKS)
+            attach_effect_observation(&mut effects, MAXIMUM_OBSERVATION_TAPS, WINDOW_BLOCKS, &[])
                 .expect("effect observation capacity")
         };
         let input = workload.input();

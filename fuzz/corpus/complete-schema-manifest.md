@@ -1,13 +1,13 @@
 # Issue-005 complete typed BTLV corpus
 
-The shared `complete_schema_corpus()` fixture has 45 canonical frames: all 11 commands (the
+The shared `complete_schema_corpus()` fixture has 46 canonical frames: all 11 commands (the
 session transaction contains all 35 allocated `SessionEditOpcode` values), all 13 successful
-responses, all 16 registered non-OK statuses (including typed `BACKPRESSURE`), and all five event
+responses, all 16 registered non-OK statuses (including typed `BACKPRESSURE`), and all six event
 schemas. Optional/boundary values are represented by the transaction's nested fixture, optional
 transport position, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`4b21d9e6f520afd9`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`cc9a7bcc502c4936`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -66,6 +66,11 @@ Issue #1628 (draft 21b) re-pinned it from `cfa58ab7b7bbb7c4`: the event `AUTOMAT
 (`0x8002`) is retired and never reallocated, so the corpus loses `event.automation_canceled` (the
 frame count is 45 and the events are five), and the capabilities response lists no event `0x8002`.
 `retired_code_rows()` gains a row for `0x8002`.
+Issue #1584 (D6a) re-pinned it from `4b21d9e6f520afd9`: the reliable event `OBSERVATION_ENDED` (`0x8011`)
+is added, so the corpus gains `event.observation_ended` (the frame count is 46 and the events are six),
+and the capabilities response lists event `0x8011`.
+#1584 D6a fold: one OBSERVATION_ENDED per commit (root ruling A) re-pinned it from `33e4b1cebcbfd902`: the
+event carries a repeated key message and the corpus frame carries two keys (the frame count stays 46).
 
 The value stood at `88a8ee6a6d9e4acc` here until #274. It was correct until `b454b230`, and the
 two re-pins that followed (`b454b230`, then #241's `04d291dd`) did not reach this file or the

@@ -1505,6 +1505,12 @@ struct ObservationTap {
     /// The declared fold, copied once at bind so the render path never walks the descriptor.
     fold: ObservationFold,
     armed: bool,
+    /// Armed at preparation ([`ObservationLane::arm_prepared`]) and not yet accumulated: the
+    /// window's first sample is the first sample of the first block that folds into it, which is
+    /// not known before the plan renders. Cleared by that block, by [`ObservationLane::arm`] and by
+    /// [`ObservationLane::disarm_all`]. Part of the tap's state, so [`ObservationLane::swap_state`]
+    /// moves it with the rest and a carried tap's own state replaces it whole.
+    start_pending: bool,
     /// Blocks per published window; never zero once armed.
     window_blocks: u32,
     blocks: u32,
@@ -1562,6 +1568,7 @@ impl ObservationLane {
                 publisher,
                 fold: descriptor.fold,
                 armed: false,
+                start_pending: false,
                 window_blocks: default_window_blocks,
                 blocks: 0,
                 first_sample: 0,
@@ -1649,6 +1656,7 @@ impl ObservationLane {
             _ => {}
         }
         tap.armed = armed;
+        tap.start_pending = false;
         tap.window_blocks = if window_blocks == 0 {
             default
         } else {
@@ -1662,6 +1670,40 @@ impl ObservationLane {
         true
     }
 
+    /// Arm `tap_index` at preparation, before the plan has rendered a block (#1584 D6a).
+    ///
+    /// A successor plan is prepared from the monitor state the host acknowledged, so a subscription
+    /// survives a rebuild that restarts its effect. The adoption sample is not known here, so the
+    /// tap's first window opens at the first sample of the first block that accumulates into it
+    /// (`accumulate` takes it), exactly as if a record had armed it at that block. No record is
+    /// queued: a queued record would re-arm a *carried* tap at its first block and restart its
+    /// window. A carried tap exchanges its whole state with the predecessor's at the swap
+    /// ([`Self::swap_state`]), so this arm never wins over a carried tap's own.
+    ///
+    /// A zero `window_blocks` means the lane's default, as in [`Self::arm`]. Returns `false` for an
+    /// index this lane has no tap for. Off the render thread, before the plan is published.
+    pub fn arm_prepared(&mut self, tap_index: u32, window_blocks: u32) -> bool {
+        if !self.arm(tap_index, true, window_blocks, 0) {
+            return false;
+        }
+        if let Some(tap) = usize::try_from(tap_index)
+            .ok()
+            .and_then(|index| self.taps.get_mut(index))
+        {
+            tap.start_pending = true;
+        }
+        true
+    }
+
+    /// Whether `tap_index` is armed at preparation and has not yet folded a block. Off-thread
+    /// introspection for the structural gates.
+    #[must_use]
+    pub fn is_prepared_arm_pending(&self, tap_index: usize) -> bool {
+        self.taps
+            .get(tap_index)
+            .is_some_and(|tap| tap.armed && tap.start_pending)
+    }
+
     /// Release every subscription without touching the published windows (issue #143 D7).
     ///
     /// A plan replacement drops subscriptions because the plan they addressed is gone; the app
@@ -1671,6 +1713,7 @@ impl ObservationLane {
         self.armed_count = 0;
         for tap in self.taps.iter_mut() {
             tap.armed = false;
+            tap.start_pending = false;
             tap.blocks = 0;
             tap.peak_left = 0.0;
             tap.peak_right = 0.0;
@@ -1751,9 +1794,16 @@ impl ObservationLane {
         if !tap.armed {
             return;
         }
-        // `first_sample` is **not** taken from the block. It was set when the tap was armed and it
-        // is set again to `end_sample` when a window closes, so consecutive windows tile with no
-        // gap as a property of this type rather than of whatever the caller happens to pass.
+        // A tap armed at preparation opens its first window here, at the first block it folds
+        // (#1584 D6a). Every other window's start is set below.
+        if tap.start_pending {
+            tap.start_pending = false;
+            tap.first_sample = first_sample;
+        }
+        // `first_sample` is otherwise **not** taken from the block. It was set when the tap was
+        // armed and it is set again to `end_sample` when a window closes, so consecutive windows
+        // tile with no gap as a property of this type rather than of whatever the caller happens
+        // to pass.
         tap.end_sample = first_sample.saturating_add(frames);
         match tap.fold {
             // `max(|x|)` is what turns an effect's own negative-for-reduction convention into the

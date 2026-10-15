@@ -70,6 +70,13 @@ pub enum ReliablePayload {
         /// Originating transport-set command, when any.
         origin_request_id: Option<RequestId>,
     },
+    /// A reference to a reliable `OBSERVATION_ENDED` event (#1584 D6a). The event's key is
+    /// variable-length text, so it stays in prepared endpoint storage until its complete event
+    /// frame has reached caller output, as a diagnostic does.
+    ObservationEnded {
+        /// Index into the endpoint's bounded observation-ended store.
+        cell: u32,
+    },
     /// A bounded controller-owned typed diagnostic reference. The diagnostic itself remains in
     /// prepared endpoint storage until its complete event frame has reached caller output.
     Diagnostic {
@@ -111,6 +118,18 @@ impl ReliableSlot {
                 previous_revision,
                 applied_operations,
             },
+        }
+    }
+
+    /// Construct a reliable `OBSERVATION_ENDED` event referencing prepared storage `cell`, with
+    /// zero outer-header request ID. `revision` is the revision that removed the tap.
+    #[must_use]
+    pub const fn observation_ended(revision: SessionRevision, cell: u32) -> Self {
+        Self {
+            header: ReliableHeader::Event,
+            revision,
+            message_id: MessageId::ObservationEnded,
+            payload: ReliablePayload::ObservationEnded { cell },
         }
     }
 

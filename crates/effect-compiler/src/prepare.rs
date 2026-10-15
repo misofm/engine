@@ -1751,6 +1751,26 @@ pub struct EffectObservationHandle {
     pub readers: Box<[ObservationReader]>,
 }
 
+/// One observation tap a successor plan is prepared with armed (#1584 D6a): the host acknowledged
+/// the subscription before the rebuild, and the rebuild must not drop it.
+///
+/// An instance is addressed by its strip, its section (a console slot or an insert) and its
+/// session ID, and the tap by its effect-local ID. Prefer building these from the host's
+/// subscription table; an arm whose instance or tap the plan does not have is ignored.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationArm<'a> {
+    /// The strip (a track or a submix) the instance belongs to.
+    pub strip_id: &'a str,
+    /// Whether the instance is a console slot (`true`) or an insert (`false`).
+    pub console: bool,
+    /// The console slot ID or the insert's effect ID.
+    pub effect_id: &'a str,
+    /// The effect-local tap ID ([`effect_contract::ObservationTapId`]).
+    pub tap_id: u32,
+    /// The window length in blocks; `0` is the plan's meter window.
+    pub window_blocks: u32,
+}
+
 /// Attach observation capacity to every prepared effect that declares at least one tap.
 ///
 /// # Level 1 of the two-level zero (issue #143 D3)
@@ -1777,8 +1797,19 @@ pub fn attach_effect_observation(
     prepared: &mut EffectPreparedSession,
     maximum_taps: u32,
     window_blocks: u32,
+    arms: &[ObservationArm<'_>],
 ) -> Result<Vec<EffectObservationHandle>, EffectDiagnosticSet> {
     let declared = declared_live_addresses(&prepared.session);
+    // The arms by instance, so each entry finds its own in one lookup.
+    // (strip, console, instance ID) -> (tap ID, window blocks) of each armed tap.
+    type ArmedTaps<'a> = BTreeMap<(&'a str, bool, &'a str), Vec<(u32, u32)>>;
+    let mut armed = ArmedTaps::new();
+    for arm in arms {
+        armed
+            .entry((arm.strip_id, arm.console, arm.effect_id))
+            .or_default()
+            .push((arm.tap_id, arm.window_blocks));
+    }
     let mut handles = Vec::new();
     let mut diagnostics = Vec::new();
     for entry in &mut prepared.entries {
@@ -1812,7 +1843,8 @@ pub fn attach_effect_observation(
             publishers.push(publisher);
             readers.push(reader);
         }
-        let Some(lane) = ObservationLane::new(descriptor.observations, publishers, window_blocks)
+        let Some(mut lane) =
+            ObservationLane::new(descriptor.observations, publishers, window_blocks)
         else {
             diagnostics.push(EffectDiagnostic {
                 code: "effect.observation.prepare",
@@ -1820,6 +1852,22 @@ pub fn attach_effect_observation(
             });
             continue;
         };
+        // #1584 D6a: a tap the host acknowledged a subscription for is armed here, to open its
+        // first window at its first rendered block. An arm for a tap the effect does not declare
+        // is ignored: the host drops such a binding before it reaches here.
+        let console = !matches!(entry.rack, EffectRack::Dynamic);
+        if let Some(taps) = armed.get(&(entry.track_id.as_str(), console, entry.effect_id.as_str()))
+        {
+            for &(tap_id, window) in taps {
+                if let Some(index) = descriptor
+                    .observations
+                    .iter()
+                    .position(|tap| tap.id.0 == tap_id)
+                {
+                    lane.arm_prepared(index as u32, window);
+                }
+            }
+        }
         handles.push(EffectObservationHandle {
             track_id: entry.track_id.as_str().into(),
             address,
