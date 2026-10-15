@@ -4986,7 +4986,6 @@ fn prepare_caps(
             quantum_frames,
         },
         source_ring_frames,
-        maximum_source_channels: None,
         maximum_automation_spans_per_block: automation_spans,
         maximum_tracks: u64::MAX,
         maximum_submixes: u64::MAX,

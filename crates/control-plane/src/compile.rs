@@ -787,7 +787,7 @@ pub fn validate_live_peak(
 ///
 /// This is the only place the mapping is spelled. `AnyLaunchRate`: the C ABI compiles whatever
 /// launch rate the session declares (issue 032), unlike the browser host which is pinned to its
-/// `AudioContext`. `maximum_source_channels: None`: the C ABI has no such limit field.
+/// `AudioContext`.
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
@@ -795,7 +795,6 @@ pub fn prepare_caps(limits: ControlLimits) -> HostPrepareCaps {
     HostPrepareCaps {
         shape: HostShapePolicy::AnyLaunchRate,
         source_ring_frames: limits.source_ring_frames,
-        maximum_source_channels: None,
         maximum_automation_spans_per_block: limits.maximum_automation_spans_per_block,
         maximum_tracks: limits.maximum_tracks,
         // #1206 D2: zero is every pre-#1206 caller's value, and means "bound submixes by tracks".
