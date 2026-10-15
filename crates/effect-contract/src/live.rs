@@ -902,6 +902,14 @@ impl EffectControlLane {
         self.observe.take()
     }
 
+    /// The observation queue's consumer, borrowed, when the lane still holds it (a per-node lane
+    /// does; a bank lane's was taken at bind). A plan swap's carry pops it in a loop of its own
+    /// (#1280 D3); this pops nothing.
+    #[must_use]
+    pub fn observe_queue_mut(&mut self) -> Option<&mut Consumer<EffectControlRecord>> {
+        self.observe.as_mut()
+    }
+
     /// Exact heap this lane and its shared cells retain, each allocation counted once, including
     /// the observation queue if the lane still holds it. The lane's own struct is charged by its
     /// owner. The writer's arrays are [`EffectCellWriter::retained_resources`].

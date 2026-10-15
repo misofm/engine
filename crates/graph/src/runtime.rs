@@ -1274,16 +1274,17 @@ impl LiveControlEffect {
         }
     }
 
-    // REALTIME_POLICY_BEGIN
-    /// Apply the `Observe` records still queued for this instance to its tap state, at `sample`,
-    /// the first sample of the block it would have rendered next (#1281, #1280 D3). Bounded by the
-    /// queue's count at entry; called once per move by the carry, in no loop of its own.
-    #[inline]
-    fn settle_observations(&mut self, sample: u64) {
-        self.control
-            .drain_observations(sample, self.observation.as_deref_mut());
+    /// This instance's pending-`Observe` drain for a plan swap's carry (#1281, #1280 D3): its
+    /// queue, its tap, and `sample`, the first sample of the block it would have rendered next.
+    /// Pops nothing; the carry pops in a loop of its own. `None` when the instance holds no queue.
+    fn observe_target_mut(&mut self, sample: u64) -> Option<rack::ObserveTarget<'_>> {
+        Some(rack::ObserveTarget {
+            queue: self.control.observe_queue_mut()?,
+            tap: self.observation.as_deref_mut(),
+            first_sample: sample,
+            unbound: None,
+        })
     }
-    // REALTIME_POLICY_END
 
     fn new(
         effect: GraphPreparedEffect,
@@ -4406,18 +4407,6 @@ impl EffectStageMut<'_> {
         }
     }
 
-    /// Applies the `Observe` records a live stage's lane still has queued (#1280 D3). A stage with
-    /// no control lane has no queue.
-    ///
-    /// The carry's per-move loop calls this, not the stage's drain: each call is bounded by the
-    /// queue's count at entry and the loop by the number of moves, as `begin_block` bounds a
-    /// block's drain from the chain's loop over slots.
-    fn settle_observations(&mut self, lane: usize) {
-        if let Self::Live(stage) = self {
-            stage.apply_pending_observations(lane);
-        }
-    }
-
     /// [`rack::EffectBankStage::carry_lane_from`] or its live twin, for a checked pair.
     fn carry_lane_from(
         &mut self,
@@ -4434,6 +4423,36 @@ impl EffectStageMut<'_> {
                 into.carry_lane_from(lane, from, predecessor_lane, scratch)
             }
             _ => false,
+        }
+    }
+}
+
+impl<'a> EffectStageMut<'a> {
+    /// The pending-`Observe` drain of a live stage's lane (#1280 D3). A plain stage has no
+    /// control lane, so no queue. Pops nothing.
+    fn into_observe_target(self, lane: usize) -> Option<rack::ObserveTarget<'a>> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Live(stage) => stage.observe_target_mut(lane),
+        }
+    }
+}
+
+/// The pending-`Observe` drain of the predecessor instance at `site`: its queue, tap and the first
+/// sample of the block it would have rendered next (`node_sample` for a per-node instance, the
+/// bank stage's own for a lane). Pops nothing (#1280 D3).
+fn observe_target_at(
+    units: &mut [crate::runtime::RuntimeUnit],
+    site: crate::GraphEffectSite,
+    node_sample: u64,
+) -> Option<rack::ObserveTarget<'_>> {
+    match site {
+        crate::GraphEffectSite::Lane(at) => {
+            let (chain, slot, lane) = effect_lane_mut(units, at)?;
+            effect_stage_mut(chain, slot)?.into_observe_target(lane)
+        }
+        crate::GraphEffectSite::Node(unit) => {
+            effect_node_mut(units, unit)?.observe_target_mut(node_sample)
         }
     }
 }
@@ -4939,10 +4958,11 @@ impl crate::runtime::Runtime {
     /// count them. A refused lane carries no agreement, being at rest.
     ///
     /// The pending `Observe` records of every moved predecessor instance are applied to its tap
-    /// as its next block would have (#1280 D3): a bank stage at its own `next_block_sample`, a
-    /// per-node instance at `predecessor_next_sample`. The caller has checked
-    /// [`Self::can_carry_effect_lanes`]. Bounded by `moves.len()` and the prepared state sizes;
-    /// allocation-free, and never panics.
+    /// as its next block would have (#1280 D3), by a second loop over `moves` after the first has
+    /// moved every state: a bank stage at its own `next_block_sample`, a per-node instance at
+    /// `predecessor_next_sample`. That loop pops each queue at most as many times as its count at
+    /// entry. The caller has checked [`Self::can_carry_effect_lanes`]. Bounded by `moves.len()`,
+    /// the prepared state sizes and those counts; allocation-free, and never panics.
     pub(crate) fn carry_effect_lanes(
         &mut self,
         predecessor: &mut Self,
@@ -4966,7 +4986,7 @@ impl crate::runtime::Runtime {
                         disengaged = Some(before.unit);
                     }
                     let agree = chain.carried_channel_agreement();
-                    let Some(mut from) = effect_stage_mut(chain, slot) else {
+                    let Some(from) = effect_stage_mut(chain, slot) else {
                         continue;
                     };
                     let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, successor)
@@ -4979,10 +4999,6 @@ impl crate::runtime::Runtime {
                     if into.carry_lane_from(lane, &from, predecessor_lane, scratch) {
                         chain.inherit_channel_agreement(agree);
                     }
-                    // The predecessor never renders again: an Observe record admitted after its
-                    // last block is applied to its tap now, as its next block would have (#1280
-                    // D3).
-                    from.settle_observations(predecessor_lane);
                 }
                 (Lane(successor), Node(before)) => {
                     let Some(node) = effect_node_mut(&mut predecessor.units, before) else {
@@ -4995,7 +5011,6 @@ impl crate::runtime::Runtime {
                     if let Some(EffectStageMut::Live(into)) = effect_stage_mut(chain, slot) {
                         into.carry_lane_from_instance(lane, node.instance(), scratch);
                     }
-                    node.settle_observations(predecessor_next_sample);
                 }
                 (Node(successor), Lane(before)) => {
                     let Some((chain, slot, predecessor_lane)) =
@@ -5007,7 +5022,7 @@ impl crate::runtime::Runtime {
                         chain.disengage_for_carry();
                         disengaged = Some(before.unit);
                     }
-                    let Some(mut from) = effect_stage_mut(chain, slot) else {
+                    let Some(from) = effect_stage_mut(chain, slot) else {
                         continue;
                     };
                     let Some(node) = effect_node_mut(&mut self.units, successor) else {
@@ -5022,9 +5037,43 @@ impl crate::runtime::Runtime {
                     {
                         node_refused = node_refused.saturating_add(1);
                     }
-                    from.settle_observations(predecessor_lane);
                 }
                 (Node(_), Node(_)) => {}
+            }
+        }
+        // The predecessor never renders again: an `Observe` record admitted after its last block
+        // is applied to its tap now, as its next block would have (#1280 D3). A loop of its own
+        // over the same program, so each pop is bounded where it stands: the queue's count at
+        // entry, one pass per move.
+        for step in moves.iter() {
+            let Some(target) = observe_target_at(
+                &mut predecessor.units,
+                step.predecessor,
+                predecessor_next_sample,
+            ) else {
+                continue;
+            };
+            let rack::ObserveTarget {
+                queue,
+                mut tap,
+                first_sample,
+                unbound,
+            } = target;
+            let mut available = queue.available_at_entry();
+            let mut unapplied = 0_u64;
+            while available != 0 {
+                available -= 1;
+                let Ok(record) = queue.try_pop() else {
+                    // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep
+                    // the drain bounded if a malformed test double violates that invariant.
+                    break;
+                };
+                if !effect_contract::apply_observe(record, first_sample, tap.as_deref_mut()) {
+                    unapplied = unapplied.saturating_add(1);
+                }
+            }
+            if let Some(count) = unbound {
+                *count = count.saturating_add(unapplied);
             }
         }
         node_refused

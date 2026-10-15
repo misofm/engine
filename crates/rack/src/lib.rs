@@ -1241,6 +1241,19 @@ const fn lane_witness(designed: bool, restored: bool) -> ChannelSymmetryWitness 
     }
 }
 
+/// One lane's pending-`Observe` drain, split into the parts a caller needs to pop and apply (#1280
+/// D3): see [`LiveControlEffectBankStage::observe_target_mut`].
+pub struct ObserveTarget<'a> {
+    /// The lane's observation queue.
+    pub queue: &'a mut Consumer<EffectControlRecord>,
+    /// The lane's observation tap, if its plan declares observation capacity.
+    pub tap: Option<&'a mut ObservationLane>,
+    /// The first sample of the block the lane would have rendered next.
+    pub first_sample: u64,
+    /// Where a record the lane has no tap for is counted, when the owner keeps such a count.
+    pub unbound: Option<&'a mut u64>,
+}
+
 /// The live-control twin of [`EffectBankStage`] (issue #140 A), and the stage of every bank slot
 /// with a lane bypassed at preparation (issue #1087).
 ///
@@ -1979,47 +1992,29 @@ impl LiveControlEffectBankStage {
         Ok(())
     }
 
-    /// Applies every `Observe` record queued for lane `lane` to the lane's observation tap, at the
-    /// first sample of the block this stage would have rendered next (#1280 D3). A plan swap's
-    /// carry calls it on the predecessor, which never renders again: an acknowledged subscribe
-    /// that was admitted after the predecessor's last block would otherwise be lost with the
-    /// retired queue.
+    /// The parts of lane `lane`'s pending-`Observe` drain a plan swap's carry needs (#1280 D3):
+    /// the lane's queue, its observation tap, the sample its next block would have started at,
+    /// and this stage's unbound counter. `None` when the lane has no queue.
     ///
-    /// The same bounded drain as [`Self::drain`]: the queue's count at entry, and nothing else.
-    /// A record the lane has no tap for counts in [`Self::unbound_observations`]. Returns the
-    /// number of records popped. Allocation-, lock- and syscall-free.
-    pub fn apply_pending_observations(&mut self, lane: usize) -> u64 {
-        let first_sample = self.next_block_sample.unwrap_or(0);
-        let Some(position) = self
+    /// The predecessor never renders again, so an acknowledged subscribe admitted after its last
+    /// block would be lost with the retired queue unless the carry applies it. The carry pops the
+    /// queue itself, in a loop of its own that states the bound at the loop (the queue's count at
+    /// entry): this accessor pops nothing. Allocation-, lock- and syscall-free.
+    pub fn observe_target_mut(&mut self, lane: usize) -> Option<ObserveTarget<'_>> {
+        let position = self
             .observe_queues
             .iter()
-            .position(|(index, _)| *index == lane)
-        else {
-            return 0;
-        };
-        let mut observations = self.observations.as_deref_mut();
-        let queue = &mut self.observe_queues[position].1;
-        let mut available = queue.available_at_entry();
-        let mut popped = 0_u64;
-        let mut unbound = 0_u64;
-        while available != 0 {
-            available -= 1;
-            let Ok(record) = queue.try_pop() else {
-                // The entry snapshot and SPSC ownership guarantee this cannot happen. Keep the
-                // drain bounded if a malformed test double violates that invariant.
-                break;
-            };
-            popped = popped.saturating_add(1);
-            let observation = observations
+            .position(|(index, _)| *index == lane)?;
+        Some(ObserveTarget {
+            queue: &mut self.observe_queues[position].1,
+            tap: self
+                .observations
                 .as_deref_mut()
                 .and_then(|lanes| lanes.get_mut(lane))
-                .and_then(Option::as_mut);
-            if !apply_observe(record, first_sample, observation) {
-                unbound = unbound.saturating_add(1);
-            }
-        }
-        self.unbound = self.unbound.saturating_add(unbound);
-        popped
+                .and_then(Option::as_mut),
+            first_sample: self.next_block_sample.unwrap_or(0),
+            unbound: Some(&mut self.unbound),
+        })
     }
     // REALTIME_POLICY_END
 
