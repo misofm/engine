@@ -199,3 +199,60 @@ and `k = 3`.
   `crates/source/src/lib.rs` land first.
 - *Report held source blocks apart from underruns* (#1318).
 - *Test held seeks across swaps and supersession, and add a seek to audit capi* (#1319).
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `228fca26c`.
+
+**Anchors.**
+- Unchanged: `TransferBlock` (`crates/source/src/lib.rs:450`), `prepare_at_source_frame`
+  (`:568`), `RETAINED_TRANSFER_BLOCKS` (`:654`), `validate_submission_metadata` (`:924`),
+  `PcmSourceConsumer` (`:993`), `held_seek` (`:1018`), `begin_block_at` (`:1115`),
+  `begin_block_observe` (`:1127`), `begin_block_play` (`:1135`) and
+  `observe_seek_at_block_boundary` (`:1323`).
+- Moved: `acquire_current_block` is `:1394`. Its early return is `:1395-1397`, its pop of an
+  unobserved generation `:1408-1411`, and the observe after it `:1431`. It pops at most
+  `transfer_block_count` blocks per call (`:1398-1401`).
+- The underrun branch is `:1154-1177`; the `next_frame` advance is still `:1164-1168`. The
+  short-block zeroing in `play` is `:1518-1527`.
+- Graph driver: `begin_block` is `:1752`, its `consumer.begin_block_at` `:1772`, and
+  `played_planes` `:1844`.
+- SPSC (`crates/engine/src/realtime/spsc.rs`): `Consumer` `:217`, `bounded_spsc_move` `:250`,
+  `available_at_entry` `:421`, `try_pop` `:441`. The consumer's realtime region is `:296-460`.
+- `SeekClock` (`:1031`) already has `Hold`, and `prepare_seek` (`:1049`) uses it. D3 needs no new
+  clock.
+- The loom CI step is now `.github/workflows/qualification.yml:734-735`. The command is unchanged.
+
+**Already done.** `bench-support` is a `crates/source` dev-dependency
+(`crates/source/Cargo.toml:18`). Deliverable 4 is done. `crates/source/Cargo.toml` and
+`Cargo.lock` need no change.
+
+**What landed around this slice.**
+- #1311 (closed) added the plan-side hook. `PlanAdoption::Primed { not_before, lead_blocks }`
+  (`spsc.rs:532`) asks `PreparedPlanExecutor::prime_ready(block_start, lead_blocks)`
+  (`crates/engine/src/realtime/plan.rs:349`, default `false`). This slice's
+  `PcmSourceConsumer::prime_ready` is the per-ring check that #1355 calls from that hook.
+  `block_start` is a render sample, and #1355 adds the source-read offset `O` (#1396).
+- Since #1639 (code landed; issue still open), the graph's block entry reads the jump lengths
+  (`crates/graph/src/lib.rs:4824-4826`) and then calls `source_set.begin_block` (`:4844`). Where
+  the prime goes in that entry is still #1355's.
+- #1681: a ring has one or two channels. No effect here.
+
+**Decisions.** D1-D5 hold against the code. Decision 17 changes nothing here: source transport
+is not a control.
+
+**Authorized paths and gates.**
+- `scripts/check-realtime-policy.sh` is gone. Gate 7's `cargo run ... -p realtime-policy` still
+  works. If D1-D3 add a marked region instead of using an existing one, `marked_regions_floor`
+  (`tools/realtime-policy/src/policy.rs:227`) goes up. That file joins the paths for that line
+  only.
+- The browser's resource record carries `source_overhead_bytes` (`hosts/host-web/src/lib.rs:1252`).
+  D4's flag changes it. `hosts/host-web/src/tests.rs` and `hosts/host-web/tests/` join the paths
+  for any assertion of that row.
+- `crates/source/tests/prime.rs` is new. Every other named file and script exists.
+
+**Later work, not this slice.** #1640 (open) factors the seek state machine after this slice.
+#1641 (open) adds a timeline consumer that carries like a source. Whether a warm adoption primes
+the timeline consumer is for #1355 or #1641 to decide.
+
+**Dependencies.** #1316, #1318 and #1319 are open and in the batch. Nothing outside the batch.
