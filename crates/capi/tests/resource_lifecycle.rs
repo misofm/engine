@@ -812,8 +812,10 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         sources,
         report: host_report,
         inventory,
+        carried_base,
         control_catalog,
     } = prepared;
+    assert!(carried_base.is_none(), "a boot plan has no carried base");
     let owners = HostOwners {
         routes: freed_by_drop(routes),
         effects: freed_by_drop(effects),
