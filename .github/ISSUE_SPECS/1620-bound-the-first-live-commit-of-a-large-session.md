@@ -102,3 +102,53 @@ work stopped here; no code changed.
   model and canonical snapshot equal the full path's, bit for bit. (2) The first-call peak at 64
   and 256 tracks is measured and recorded, with a ceiling near the steady peak. (3) The first
   call's allocation count does not depend on the track count.
+
+### Implementation (batch 14b)
+
+**What shipped (C1).** `session::owners_counts_equal` is replaced by `session::owners_growth`
+(`crates/session/src/in_place.rs`): `Some(OwnersGrowth)` when the edited owners hold as many
+console entries, inserts and VCA members as the committed ones and no effect's parameter list is
+shorter, with the entries added and the longest grown list; `None` for any other change of a count
+(a shorter list included, so every item the estimate takes a maximum over only grows). The new
+`ResourceEstimate::after_owners_edit` (`crates/session/src/estimate.rs`) charges the growth exactly
+as `estimate_session_resources` and `with_canonical_bytes` do: per added entry one
+`size_of::<EffectParam>()` in the model and one structural item (1,024 bytes, now the named
+constant `CANONICAL_BYTES_PER_ITEM`) in the canonical bound; the single largest allocation is the
+largest of the committed one, the new canonical bound and the grown lists. It runs the compile's
+own `check_caps` (now `pub(crate)`, its unused model argument dropped) and the platform and
+canonical-bound checks on the result. `SessionStore::prepare_in_place`
+(`crates/protocol/src/model.rs`) uses both and passes the store's caps: a growth that does not fit
+returns `None` and the full path gives its typed refusal before any commit (no ack before a drop).
+The entries land where the full path puts them: `controls`' parameter write already keeps the list
+in canonical `(ID, channel)` order, the order `compile_session` sorts into.
+
+Outside the listed paths (mechanical): the in-place admission comment in
+`crates/control-plane/src/control.rs` (the in-place transaction may now add parameter entries, never
+a count `check_counts` reads); `crates/session/tests/in_place.rs` moved to the new function; the
+differential gate lives in `crates/host-core/tests/in_place_commit.rs`, the home of the #1613 `Pair`
+harness that compares the two paths.
+
+**Gates.**
+
+1. Differential: `in_place_commit::edits_that_add_parameter_entries_commit_in_place_as_the_full_path_does`
+   (console EQ above IDs 1 to 6 on one lane and both; an empty insert EQ list gaining an entry, then
+   one below and one between; a split of a `both` entry; one transaction over seven owners of tracks
+   and the submix, console and inserts; an abandoned one). Every transaction is prepared and
+   classified in place and the stores (model, canonical snapshot, estimate, revision) equal the
+   full path's after each. Refusal: `an_added_entry_over_the_caps_is_refused_before_any_commit`
+   (a store whose compiled-model or single-allocation cap is the committed figure: a fader commits
+   in place, an added entry is refused by both entries with the same `Validation` error and the
+   store is unchanged). Session unit: `owners_with_values_the_compiler_refuses_are_not_valid_and_counts_are_compared`.
+2. `tools/parameter-metadata/tests/control_command_heap.rs` (debug): the first call is gated at
+   every size, `FIRST_PEAK_CEILING` 74,000 and `FIRST_REQUESTED_CEILING` 105,000 (was 78,000 peak
+   at one track only); `first.left <= 256` (was 4,096). Re-pinned for #1620 from these
+   measurements, on this head before and after the change:
+
+   | tracks | first call before: allocations / requested / peak / left | first call after | steady (unchanged) |
+   |---|---|---|---|
+   | 1 | 839 / 130,294 / 77,600 / 1,078 | 757 / 103,033 / 72,865 / 80 | 758 / 103,918 / 72,841 / 80 |
+   | 64 | 1,853 / 550,437 / 198,182 / 1,078 | 757 / 103,033 / 72,865 / 80 | the same |
+   | 256 | 4,927 / 1,867,749 / 663,179 / 1,078 | 757 / 103,033 / 72,865 / 80 | the same |
+
+   The steady ceilings (73,000 peak, 104,000 requested) are kept.
+3. The same test asserts the first call's allocation count equal at 1, 64 and 256 tracks.
