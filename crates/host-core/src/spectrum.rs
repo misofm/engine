@@ -816,7 +816,6 @@ impl SpectrumCapture {
         self.shared.failure_epoch.store(epoch, Ordering::Release);
         self.shared.drops.store(0, Ordering::Release);
         self.shared.drop_epoch.store(epoch, Ordering::Release);
-        self.shared.invalidated.store(0, Ordering::Release);
         self.seen_failures = 0;
         self.seen_drops = 0;
         self.recovery_pending = false;
@@ -920,15 +919,17 @@ impl SpectrumCapture {
         // entry. A later producer publication belongs to a later read and cannot extend this
         // budget.
         self.recovery_pending = false;
+        // Only control changes the epoch (`commit_continuous`; render's failure path moves it
+        // forward before it publishes anything of the new epoch), so one load covers the loop.
+        let epoch = self.shared.epoch.load(Ordering::Acquire);
         for _ in 0..available {
             match self.consumer.try_pop() {
-                Ok(record)
-                    if self.shared.invalidated.load(Ordering::Acquire) != 0
-                        && record.stream_epoch
-                            <= self.shared.invalidated_epoch.load(Ordering::Acquire) =>
-                {
-                    self.shared.invalidated.store(0, Ordering::Release);
-                }
+                // A record of another epoch is never a window of this stream: a one-shot window
+                // (epoch 0, below every continuous epoch) that render completed while control
+                // switched modes, a window of an epoch a failure or a restart ended, or a
+                // window published against an epoch read before a restart. Discarding it spends
+                // one pop of the bound frozen above, so it never delays a read past the next one.
+                Ok(record) if record.stream_epoch != epoch => {}
                 Ok(record) => {
                     return Ok(record);
                 }
@@ -1598,8 +1599,6 @@ struct SpectrumContinuousShared {
     sample_rate_hz: AtomicU64,
     quantum_frames: AtomicU64,
     hop_frames: AtomicU64,
-    invalidated: AtomicU8,
-    invalidated_epoch: AtomicU64,
 }
 
 impl SpectrumContinuousShared {
@@ -1615,8 +1614,6 @@ impl SpectrumContinuousShared {
             sample_rate_hz: AtomicU64::new(0),
             quantum_frames: AtomicU64::new(0),
             hop_frames: AtomicU64::new(0),
-            invalidated: AtomicU8::new(0),
-            invalidated_epoch: AtomicU64::new(0),
         })
     }
 }
@@ -2592,11 +2589,6 @@ fn continuous_fail(state: &mut SpectrumContinuousState) {
         return;
     }
     let current_epoch = state.shared.epoch.load(Ordering::Acquire);
-    state
-        .shared
-        .invalidated_epoch
-        .store(current_epoch, Ordering::Release);
-    state.shared.invalidated.store(1, Ordering::Release);
     let Some(next_epoch) = current_epoch.checked_add(1) else {
         state.shared.active.store(0, Ordering::Release);
         return;
@@ -3764,6 +3756,86 @@ mod tests {
             SpectrumContinuousReadError::Warming
         );
         assert_eq!(capture.consumer.available_at_entry(), 0);
+    }
+
+    /// A record of the one-shot epoch (0) left in the queue by a mode switch.
+    fn stale_record(stream_epoch: u64, arm_generation: u64) -> super::SpectrumCapturedRecord {
+        super::SpectrumCapturedRecord {
+            window: window(0.75),
+            stream_epoch,
+            sequence: 7,
+            dropped_captures: 0,
+            arm_generation,
+        }
+    }
+
+    /// Issue #1616: a one-shot window that render pushes after the switch's drain and before its
+    /// mode store reaches the queue of a continuous stream. The queue holds exactly that record
+    /// after the switch returns (the observer owns the producer, so the test pushes it as render
+    /// would). The continuous read must discard it and answer `Warming`, then return the first
+    /// window of the new epoch.
+    #[test]
+    fn a_one_shot_record_that_lands_after_the_mode_switch_is_never_a_continuous_window() {
+        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
+        capture.arm().expect("one-shot arm");
+        let (left, right) = ramp_block(0, SPECTRUM_WINDOW_FRAMES);
+        observer.capture(&left, &right, 0, super::GraphObservationValidity::CLEAR);
+        assert!(
+            observer.one_shot.held,
+            "the one-shot window is complete and held"
+        );
+        let generation = super::word_generation(observer.one_shot.latched);
+        // The collection's replacement path switches an armed capture: drain, park, mode store.
+        let cadence = SpectrumCadence::new(48_000, 128).expect("cadence");
+        capture
+            .begin_continuous(cadence, true)
+            .expect("replace the armed one-shot capture");
+        assert!(
+            observer
+                .producer
+                .try_push(stale_record(0, generation))
+                .is_ok(),
+            "render's block end publishes the one-shot window after the drain"
+        );
+        assert_eq!(
+            capture
+                .try_read_continuous()
+                .expect_err("a one-shot window is not a continuous window"),
+            SpectrumContinuousReadError::Warming
+        );
+        assert_eq!(capture.consumer.available_at_entry(), 0);
+        // The stream proceeds: its first window carries the new epoch.
+        feed_blocks(&mut observer, 0, SPECTRUM_WINDOW_FRAMES);
+        let window = capture
+            .try_read_continuous()
+            .expect("the first window of the new epoch");
+        assert_eq!(window.stream_epoch, 1);
+        assert_eq!(window.sequence, 0);
+    }
+
+    /// A record an earlier epoch left behind (a restart does not stop render) is discarded the
+    /// same way, and it neither fails nor delays the read of the current epoch's window.
+    #[test]
+    fn a_record_of_an_older_epoch_is_discarded_by_the_continuous_read() {
+        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
+        capture.start_continuous(48_000, 128).expect("start");
+        capture.restart_continuous().expect("restart");
+        assert_eq!(capture.stream_epoch(), Some(2));
+        assert!(observer.producer.try_push(stale_record(1, 0)).is_ok());
+        assert_eq!(
+            capture
+                .try_read_continuous()
+                .expect_err("an epoch 1 window is not an epoch 2 window"),
+            SpectrumContinuousReadError::Warming
+        );
+        feed_blocks(&mut observer, 0, SPECTRUM_WINDOW_FRAMES);
+        assert_eq!(
+            capture
+                .try_read_continuous()
+                .expect("the epoch 2 window")
+                .stream_epoch,
+            2
+        );
     }
 
     /// A capture around a `slots`-slot queue whose producer the test holds, built as
@@ -5890,6 +5962,59 @@ mod tests {
         #[test]
         fn spectrum_handoff_loom() {
             loom::model(|| spawn_with_stack(handoff).join().expect("handoff driver"));
+        }
+
+        /// Issue #1616: a mode switch racing a one-shot completion.
+        ///
+        /// Render completes and publishes an armed one-shot window while control replaces the
+        /// armed capture with a continuous stream (drain, park, epoch, mode store). The `mode`
+        /// word is a plain `std` atomic, but render reads it before its first modelled operation
+        /// and control stores it after its last, so loom still explores every position of the
+        /// push relative to the drain: before it, between it and the mode store, and after both.
+        /// The continuous read must never return the one-shot window, in any of them.
+        #[test]
+        fn spectrum_mode_switch_loom() {
+            loom::model(|| {
+                spawn_with_stack(mode_switch)
+                    .join()
+                    .expect("mode switch driver")
+            });
+        }
+
+        fn mode_switch() {
+            let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
+            capture.arm().expect("one-shot arm");
+            let render = spawn_with_stack(move || {
+                let left = [0.25_f32; SPECTRUM_WINDOW_FRAMES];
+                let right = [-0.5_f32; SPECTRUM_WINDOW_FRAMES];
+                observer.capture(
+                    &left,
+                    &right,
+                    0,
+                    crate::spectrum::GraphObservationValidity::CLEAR,
+                );
+                observer.block_end();
+                observer
+            });
+            let cadence = crate::spectrum::SpectrumCadence::new(48_000, 128).expect("cadence");
+            capture
+                .begin_continuous(cadence, true)
+                .expect("the replacement is never Busy");
+            // Render may also have seen the new mode and published a continuous window of the
+            // same samples, which is a correct result; only another epoch is not.
+            let read = |capture: &mut crate::spectrum::SpectrumCapture| {
+                if let Ok(window) = capture.try_read_continuous() {
+                    assert_eq!(
+                        window.stream_epoch, 1,
+                        "a continuous read returned a window of another epoch"
+                    );
+                }
+            };
+            read(&mut capture);
+            let _observer = render.join().expect("render thread");
+            // The one-shot window may now sit in the queue: it is discarded, never returned.
+            read(&mut capture);
+            read(&mut capture);
         }
 
         fn handoff() {
