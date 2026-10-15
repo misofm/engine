@@ -28,7 +28,7 @@ const MUTATIONS = [
   // moved the output off the declared delay, or whose meter stream was not the successor's.
   "structural-apply-path", "structural-apply-early", "structural-apply-output",
   "structural-apply-meter",
-  // TBD30: an empty session that did not boot silent and empty, one whose first stem was not a
+  // #1682: an empty session that did not boot silent and empty, one whose first stem was not a
   // rebuild heard unchanged, and one whose meter stream did not follow the strip count.
   "empty-boot-silence", "empty-boot-shape", "empty-boot-first-stem", "empty-boot-meter",
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
@@ -249,7 +249,7 @@ function validate(browserName, result) {
     && Number.isSafeInteger(structural.structureEpochs[0]) && structural.structureEpochs[0] >= 1,
   `the meter stream after the swap was not the successor's with one structure epoch: ${JSON.stringify(structural)}`);
 
-  // TBD30: an empty session in a real browser. It boots and renders exact silence with no source
+  // #1682: an empty session in a real browser. It boots and renders exact silence with no source
   // and no strip in the session map and the control list, the meter stream is the master's two
   // peaks alone, and one structural transaction adds the source, the track and the route: the fed
   // PCM then comes out unchanged from the swap block, the applied revision was not early, and the

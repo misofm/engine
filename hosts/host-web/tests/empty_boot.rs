@@ -1,4 +1,4 @@
-//! TBD30 (browser part): a session with no source and no track boots on the browser module, and a
+//! #1682 (browser part): a session with no source and no track boots on the browser module, and a
 //! structural transaction adds the first stereo stem and its track.
 //!
 //! Both gates run through the module's exports on a fresh thread, as the worklet makes the calls,

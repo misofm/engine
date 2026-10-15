@@ -203,7 +203,7 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   C calls themselves (engine create and destroy, compile, command submit, session and plan
   destroy), each with the handle and storage contract stated beside it; it installs no allocator
   and calls no render entry.
-- `crates/capi/tests/empty_boot.rs` (TBD30): the exported-C evidence that a session with no source
+- `crates/capi/tests/empty_boot.rs` (#1682): the exported-C evidence that a session with no source
   and no track boots, renders silence and grows by a structural transaction, with zero allocator
   calls in the render entry. Its unsafe is the C calls themselves (engine create and destroy,
   compile, command submit, service, event dequeue, source seek and submit, plan resource and

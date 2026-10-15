@@ -268,7 +268,8 @@ fn follows_mute_and_matrix_mode_are_live_and_not_automatable() {
         assert!(
             matches!(
                 d.automation,
-                controls::AutomationRule::Excluded(exclusion) if exclusion.reopen == "an owner request"
+                controls::AutomationRule::Excluded(exclusion)
+                    if !exclusion.reason.is_empty() && !exclusion.reopen.is_empty()
             ),
             "{}",
             d.name

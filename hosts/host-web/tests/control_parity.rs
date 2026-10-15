@@ -2634,7 +2634,7 @@ fn a_mode_switch_under_a_stored_pan_entry_is_refused_alike_on_both_hosts() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// An empty session boots and grows by a structural transaction (TBD30)
+// An empty session boots and grows by a structural transaction (#1682)
 // ---------------------------------------------------------------------------------------------
 
 /// Both hosts boot a session with no source and no track (one console slot stays declared), render

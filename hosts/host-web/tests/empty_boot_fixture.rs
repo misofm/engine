@@ -1,4 +1,4 @@
-//! TBD30: the empty-boot leg of the browser qualification boots the live-control session with its
+//! #1682: the empty-boot leg of the browser qualification boots the live-control session with its
 //! source, its track and its route taken out, then adds them back by one structural transaction.
 //!
 //! The SDK has no encoder for a structural edit, so the page sends the frame the protocol codec

@@ -506,7 +506,7 @@ async function runStructuralApplyQualification(createHost, sessionDocument) {
   };
 }
 
-/// TBD30: an empty session in a real browser. The live-control session with no source, no track and
+/// #1682: an empty session in a real browser. The live-control session with no source, no track and
 /// no route boots and renders silence, and one structural transaction adds the source, the track
 /// and the route back, after which the fed PCM comes out of the output unchanged.
 ///
@@ -1001,7 +1001,7 @@ export async function runQualification() {
   // Issue #143 E12: the live-control session plus one compressor, so an armed tap has a real
   // reduction.
   const observationDocument = new TextEncoder().encode(await observationResponse.text());
-  // TBD30: the live-control session with no source, track or route, and the frame that adds them.
+  // #1682: the live-control session with no source, track or route, and the frame that adds them.
   const emptyDocument = new TextEncoder().encode(await emptyResponse.text());
   const emptyFrame = await emptyFrameResponse.json();
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
