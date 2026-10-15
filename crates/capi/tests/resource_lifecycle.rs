@@ -2732,6 +2732,7 @@ impl RaceEdits {
     fn solo(&mut self, track: usize, on: bool) -> SessionEdit {
         self.soloed = on.then_some(track);
         SessionEdit::SetControl {
+            expected_effect: None,
             address: protocol::control_core::ControlAddress {
                 owner: protocol::control_core::Owner::Strip(self.tracks[track].clone()),
                 section: protocol::control_core::Section::Own,
@@ -2779,6 +2780,7 @@ impl RaceEdits {
             3 => {
                 self.follows = !self.follows;
                 SessionEdit::SetControl {
+                    expected_effect: None,
                     address: protocol::control_core::ControlAddress {
                         owner: protocol::control_core::Owner::Route(
                             StableId::parse("race-send").expect("stable id"),

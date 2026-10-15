@@ -1684,6 +1684,7 @@ fn set_control_timeline_frames() -> Vec<Vec<u8>> {
     let eq = || Section::Inserts(session::StableId::parse("eq").expect("effect ID"));
     let set =
         |address: ControlAddress, value: f32, ramp_samples: Option<u32>| SessionEdit::SetControl {
+            expected_effect: None,
             address,
             value,
             ramp_samples,
@@ -6637,6 +6638,7 @@ mod structural_apply {
     /// A live fader edit of strip `id` through the production control entry, as the SDK sends it.
     fn live_fader(rig: &mut Rig, id: &str, db: f32, request: u64) {
         let edits = [SessionEdit::SetControl {
+            expected_effect: None,
             address: controls::ControlAddress {
                 owner: controls::Owner::Strip(StableId::parse(id).expect("strip ID")),
                 section: controls::Section::Builtins,
@@ -7134,6 +7136,7 @@ mod structural_apply {
         let boot = rig.host.meter_header().structure_epoch;
         assert_eq!(boot, 1, "the boot list is the first structure");
         let delay = SessionEdit::SetControl {
+            expected_effect: None,
             address: controls::ControlAddress {
                 owner: controls::Owner::Strip(model.tracks[0].id.clone()),
                 section: controls::Section::Builtins,

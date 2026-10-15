@@ -4912,6 +4912,7 @@ fn a_live_matrix_mode_switch_advances_the_epoch_and_a_fader_move_does_not() {
 /// The `SET_CONTROL` edit that writes `value` to the control that `entry` lists.
 fn set_listed(entry: &protocol::ControlEntry, value: f32) -> SessionEdit {
     SessionEdit::SetControl {
+        expected_effect: None,
         address: protocol::control_core::ControlAddress::try_from(&entry.address)
             .expect("a listed address"),
         value,
@@ -5200,6 +5201,7 @@ mod set_control {
 
     fn set(address: ControlAddress, value: f32, ramp_samples: Option<u32>) -> SessionEdit {
         SessionEdit::SetControl {
+            expected_effect: None,
             address,
             value,
             ramp_samples,
@@ -7970,6 +7972,7 @@ fn in_place_commands_equal_full_commands_through_the_c_abi() {
             let ramp =
                 (row.ramp_row.is_some() && draw.next(3) == 0).then(|| [0, 64, 480][draw.next(3)]);
             edits.push(SessionEdit::SetControl {
+                expected_effect: None,
                 address: protocol::control_core::ControlAddress::try_from(&entry.address)
                     .expect("a listed address"),
                 value,

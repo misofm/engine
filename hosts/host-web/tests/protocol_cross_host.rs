@@ -92,6 +92,7 @@ fn frame(request: u64, expected: ExpectedRevision, payload: CommandPayload<'_>) 
 
 fn fader_edit(db: f32) -> [SessionEdit; 1] {
     [SessionEdit::SetControl {
+        expected_effect: None,
         address: ControlAddress {
             owner: Owner::Strip(StableId::parse(TRACK_ID).expect("track ID")),
             section: Section::Builtins,

@@ -436,6 +436,34 @@ fn identity_of<'a>(
     }
 }
 
+/// Hold an effect-section edit to the effect it was written for: `Ok` when the insert or console
+/// slot `address` names runs the native effect `expected` in `model`, or when `address` names no
+/// instance at all (the validator that follows answers [`ControlError::AddressUnknown`] with its own
+/// code).
+///
+/// # Errors
+///
+/// [`ControlError::EffectChanged`] when the instance runs another native effect or a `cid` one, and
+/// when `address` is not in an effect section: an expected effect on a row that has none cannot be
+/// honoured, so it is refused rather than ignored.
+pub fn check_expected_effect(
+    model: &SessionModel,
+    address: &ControlAddress,
+    expected: &StableId,
+) -> Result<(), ControlError> {
+    let Owner::Strip(strip) = &address.owner else {
+        return Err(ControlError::EffectChanged);
+    };
+    if matches!(address.section, Section::Own | Section::Builtins) {
+        return Err(ControlError::EffectChanged);
+    }
+    match identity_of(model, strip, &address.section) {
+        None => Ok(()),
+        Some(EffectIdentity::Native { effect_id }) if effect_id == expected => Ok(()),
+        Some(_) => Err(ControlError::EffectChanged),
+    }
+}
+
 /// The declared observation tap `tap_id` of the effect at `section` of strip `id`, if the strip,
 /// the instance and the tap exist and the tap is [`ObservationCost::Resident`] (a computed tap has
 /// no subscription path). `None` for a `cid` effect, an unknown effect and a section that is not

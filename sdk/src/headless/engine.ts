@@ -42,7 +42,7 @@ import type {
   ControlListTransport,
   ControlState,
 } from "../core/control-list.ts";
-import { EngineLiveControls, effectRowResolver, sessionDescribesStrips } from "../core/live-controls.ts";
+import { EngineLiveControls, sessionDescribesStrips } from "../core/live-controls.ts";
 import { decodeObservationEnded } from "../core/observation-ended.ts";
 import { SessionBuilder } from "../core/session.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
@@ -326,8 +326,6 @@ export class OfflineEngine {
           requestIds,
           limits,
           readRevision: () => this.#boundary.controlRevision(),
-          // An edit that names an effect's row is checked against the core's list before it is sent.
-          prepare: effectRowResolver(() => this.#boundary.stripOrder()),
         },
       );
     }

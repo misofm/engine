@@ -78,6 +78,7 @@ fn nine_edits(flip: bool) -> Vec<SessionEdit> {
     let mut edits: Vec<SessionEdit> = EQ_PARAMETERS
         .iter()
         .map(|&(control, value)| SessionEdit::SetControl {
+            expected_effect: None,
             address: ControlAddress {
                 owner: strip(),
                 section: Section::Console(id("eq-simd1")),
@@ -94,6 +95,7 @@ fn nine_edits(flip: bool) -> Vec<SessionEdit> {
         .collect();
     for (control, value) in [(HPF_HZ, 80.0_f32), (LPF_HZ, 12_000.0)] {
         edits.push(SessionEdit::SetControl {
+            expected_effect: None,
             address: ControlAddress {
                 owner: strip(),
                 section: Section::Builtins,

@@ -74,87 +74,6 @@ export interface LiveControlTransport {
   readonly order?: ControlStripOrder;
 }
 
-/** Reads the core's strip order and effects; the caller caches by structure epoch. */
-export type StripOrderSource = () => ControlStripOrder | Promise<ControlStripOrder>;
-
-/** What a built edit remembers of the effect row it names, to name it again after a rebuild. */
-interface RowProvenance {
-  readonly stripId: string;
-  readonly section:
-    | { readonly kind: "console"; readonly slot: string }
-    | { readonly kind: "inserts"; readonly effect: string };
-  /** The row's machine name in its effect's control table. */
-  readonly name: string;
-  /** The effect the numeric `control` was resolved for. */
-  readonly effectId: string;
-  /**
-   * `true` when the caller typed the effect (`insert("c", "miso.compressor")`): the edit is refused
-   * if the core's section header now names another. `false` for an address named by the section
-   * alone, which follows the header.
-   */
-  readonly strict: boolean;
-}
-
-const PROVENANCE = new WeakMap<object, RowProvenance>();
-
-function noteRow(set: ControlEditSet, row: RowProvenance): ControlEditSet {
-  for (const edit of set.edits) PROVENANCE.set(edit, row);
-  return set;
-}
-
-/**
- * The hook that resolves the effect rows of a transaction against the core's control list
- * (#1562b-K). A rebuild can change the effect an insert or console slot runs, and the numeric row
- * of an effect's control depends on the effect, so an edit built before the rebuild could land on
- * another effect's row with the same number. Before each transaction is encoded, an edit that names
- * an effect row is checked against the section header the core lists now (a probe of the structure
- * epoch, and the list again only when it moved): an address named by its section follows the header,
- * and one built for a typed effect that is no longer there is refused. Edits that name no effect row
- * cost nothing.
- */
-export function effectRowResolver(
-  source: StripOrderSource,
-): (edits: readonly ControlFrameEdit[]) => readonly ControlFrameEdit[] | Promise<readonly ControlFrameEdit[]> {
-  return (edits) => {
-    if (!edits.some((edit) => PROVENANCE.has(edit))) return edits;
-    return (async () => {
-      const order = await source();
-      return edits.map((edit) => {
-        const row = PROVENANCE.get(edit);
-        if (row === undefined) return edit;
-        const actual = stripEffectOf(order, row.stripId, row.section);
-        // No such section in the list: the core refuses the address with its own code.
-        if (actual === undefined || actual === row.effectId) return edit;
-        const where = `${row.section.kind === "console" ? "console slot" : "insert"} `
-          + `'${row.section.kind === "console" ? row.section.slot : row.section.effect}' of strip '${row.stripId}'`;
-        if (row.strict) {
-          throw new MisoUsageError(
-            `${where} runs ${actual} now, and this edit was built for ${row.effectId}`,
-          );
-        }
-        const control = effectControlIdIfRow(actual, row.name);
-        if (control === undefined) {
-          throw new MisoUsageError(`${where} runs ${actual} now, which has no control '${row.name}'`);
-        }
-        const resolved = Object.freeze({
-          ...edit,
-          address: Object.freeze({ ...edit.address, control }),
-        });
-        PROVENANCE.set(resolved, { ...row, effectId: actual });
-        return resolved;
-      });
-    })();
-  };
-}
-
-function effectControlIdIfRow(effectId: string, name: string): number | undefined {
-  try {
-    return effectControlId(effectId, name);
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * Optional owner hook used to serialize observation edits with managed subscriptions. It sees the
  * observation edits as the builders made them.
@@ -293,9 +212,17 @@ function controlEdit(
   value: number,
   lane: ControlLane,
   rampSamples: number | undefined,
+  expectedEffect: string | undefined,
 ): ControlFrameEdit {
   return Object.freeze({
-    address: Object.freeze({ owner, section, control, lane }),
+    address: Object.freeze({
+      owner,
+      section,
+      control,
+      lane,
+      // The effect the edit was written for; the core refuses it if the slot runs another (#1678).
+      ...(expectedEffect === undefined ? {} : { expectedEffect }),
+    }),
     value,
     // Absent when none was given: the core resolves the row's ramp.
     ...(rampSamples === undefined ? {} : { rampSamples }),
@@ -376,6 +303,11 @@ export class LiveControlEdits {
    * is named by its machine name only when the effect it runs is known, which it is for a session
    * the SDK built (`withSession()`); otherwise name it by its numeric ID.
    *
+   * An edit of a console slot or insert row carries the effect it was written for (the typed effect of
+   * an effect builder, the effect of the section a row is named by, or `expectedEffect` of a numeric
+   * address), and the core refuses it with `control.effect.changed` when the slot or insert runs
+   * another effect now (#1678); an address that names no effect applies to whatever runs there.
+   *
    * It checks only that the edit can be encoded (a name that is a row, an ID that is a string, a
    * ramp that is a `u32`). The value's domain, the lane, the owner and whether the row can be set
    * are the core's to say, and its refusal (`control.domain`, `control.read_only`,
@@ -393,33 +325,25 @@ export class LiveControlEdits {
       ? undefined
       : requireU32(options.rampSamples, "rampSamples");
     const named = typeof address.control !== "number";
+    const { owner, section } = address;
+    // A row of a console slot or an insert is sent with the effect it was resolved for: the typed
+    // effect of an effect builder, the effect of the named section, or the one a numeric address
+    // names itself. The core refuses the edit when the section runs another effect now (#1678).
+    const expectedEffect = named && owner.kind === "strip"
+      && (section.kind === "console" || section.kind === "inserts")
+      ? this.#effectOf(owner, section)
+      : (address as ControlWireAddress).expectedEffect;
     const edit = controlEdit(
-      address.owner,
-      address.section,
+      owner,
+      section,
       named ? this.#rowId(address as ControlAddress) : address.control as number,
       value,
       address.lane,
       rampSamples,
+      expectedEffect,
     );
     validateControlEdit(edit);
-    const set = editSet(edit);
-    const { owner, section } = address;
-    if (named && owner.kind === "strip" && (section.kind === "console" || section.kind === "inserts")) {
-      // A row named by its section follows the core's header for that section at send time.
-      const effectId = this.#effectOf(owner, section);
-      if (effectId !== undefined) {
-        noteRow(set, {
-          stripId: owner.id,
-          section: section.kind === "console"
-            ? { kind: "console", slot: section.slot }
-            : { kind: "inserts", effect: section.effect },
-          name: address.control as string,
-          effectId,
-          strict: false,
-        });
-      }
-    }
-    return set;
+    return editSet(edit);
   }
 
   /** The numeric ID of the row a named address names. */
@@ -598,29 +522,18 @@ export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
     options?: SetControlOptions,
   ): ControlEditSet {
     // The row is one of this effect's, by the machine name the generated table gives it; the
-    // instance knows its effect, so the address carries the row's number. The edit also keeps the
-    // effect it was typed for, so a send after a rebuild checks it against the core's header.
-    const section = this.#section();
-    return noteRow(
-      this.#set(
-        {
-          owner: { kind: "strip", id: this.#stripId },
-          section,
-          control: effectControlId(this.effectId, control),
-          lane,
-        },
-        value,
-        options,
-      ),
+    // instance knows its effect, so the address carries the row's number and the effect it was
+    // resolved for, which the core holds the edit to (#1678).
+    return this.#set(
       {
-        stripId: this.#stripId,
-        section: section.kind === "console"
-          ? { kind: "console", slot: section.slot }
-          : { kind: "inserts", effect: (section as { readonly effect: string }).effect },
-        name: control,
-        effectId: this.effectId,
-        strict: true,
+        owner: { kind: "strip", id: this.#stripId },
+        section: this.#section(),
+        control: effectControlId(this.effectId, control),
+        lane,
+        expectedEffect: this.effectId,
       },
+      value,
+      options,
     );
   }
 

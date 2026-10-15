@@ -312,10 +312,11 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
     // One below the fixture's own edit count: #241 took the corpus from 42 edits to 39 by
     // deleting opcodes 0x0006/0x0102/0x0104, #1094 appended `SetConsole` and
     // `SetTrackConsole`, #1241 the VCA edits and #1553 `SetControl`, and decision 17 (#1561)
-    // retired thirteen value ops, so the boundary this row exists to probe is now 34. A smaller
-    // number still refuses, but it stops being a boundary.
-    assert_eq!(conformance::complete_all_opcode_fixture().len(), 35);
-    limited.config.maximum_transaction_edits = 34;
+    // retired thirteen value ops, and #1678 appended a second `SetControl` (an insert row with an
+    // expected effect), so the boundary this row exists to probe is now 35. A smaller number still
+    // refuses, but it stops being a boundary.
+    assert_eq!(conformance::complete_all_opcode_fixture().len(), 36);
+    limited.config.maximum_transaction_edits = 35;
     assert_eq!(
         limited.process_b1b_btlv(
             &transaction.bytes,
@@ -1602,6 +1603,7 @@ fn builtin_edit(
 
 fn solo_edit(track: &session::StableId, on: bool, ramp: Option<u32>) -> SessionEdit {
     SessionEdit::SetControl {
+        expected_effect: None,
         address: crate::control_core::ControlAddress {
             owner: crate::control_core::Owner::Strip(track.clone()),
             section: crate::control_core::Section::Own,

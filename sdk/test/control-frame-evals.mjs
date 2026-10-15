@@ -49,6 +49,7 @@ function editOf(row) {
       section: row.section,
       control: row.control,
       lane: row.lane,
+      ...(row.expectedEffect === null ? {} : { expectedEffect: row.expectedEffect }),
     },
     value: floatFromBits(row.valueBits),
     ...(row.rampSamples === null ? {} : { rampSamples: row.rampSamples }),
@@ -80,6 +81,10 @@ describe("the transaction encoder equals the protocol codec's bytes", () => {
       [...seen((row) => row.rampSamples)].sort((a, b) => (a ?? -1) - (b ?? -1)),
       [null, 0, 480, 4294967295],
     );
+    // #1678: an insert and a console edit carry the expected effect; the others carry none.
+    const withEffect = edits.filter((row) => row.expectedEffect !== null);
+    assert.deepEqual([...new Set(withEffect.map((row) => row.section.kind))].sort(), ["console", "inserts"]);
+    assert.ok(edits.some((row) => row.expectedEffect === null));
   });
 });
 
@@ -185,6 +190,17 @@ describe("the encoder refuses only what it cannot encode, before any byte", () =
       "lane unknown": {
         ...request,
         edits: [{ ...edit, address: { ...edit.address, lane: "middle" } }],
+      },
+      "expected effect on a builtin row": {
+        ...request,
+        edits: [{ ...edit, address: { ...edit.address, section: { kind: "builtins" }, expectedEffect: "miso.parametric-eq" } }],
+      },
+      "expected effect a number": {
+        ...request,
+        edits: [{
+          ...edit,
+          address: { ...edit.address, section: { kind: "inserts", effect: "eq" }, expectedEffect: 3 },
+        }],
       },
       "control row fractional": {
         ...request,

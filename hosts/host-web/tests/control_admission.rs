@@ -92,6 +92,7 @@ fn vca_row(control: u32, lane: Lane) -> ControlAddress {
 
 fn set(address: ControlAddress, value: f32, ramp: Option<u32>) -> SessionEdit {
     SessionEdit::SetControl {
+        expected_effect: None,
         address,
         value,
         ramp_samples: ramp,

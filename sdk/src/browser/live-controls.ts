@@ -5,7 +5,7 @@ import { controlCallFailure, decodeControlLimits, encodeRevisionProbe } from "..
 import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
 import { readControlStripOrder } from "../core/control-list.ts";
 import type { ControlListTransport, ControlStripOrder } from "../core/control-list.ts";
-import { EngineLiveControls, effectRowResolver } from "../core/live-controls.ts";
+import { EngineLiveControls } from "../core/live-controls.ts";
 import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
 import type { SessionLike } from "../core/session.ts";
@@ -168,9 +168,6 @@ async function openBrowserControlQueue(host: MisoAudioWorkletHost): Promise<Cont
     requestIds,
     limits: decodeControlLimits(first.response),
     readRevision: async () => (await probe()).revision,
-    // An edit that names an effect's row is checked against the core's list before it is sent
-    // (#1562b-K); the reader is the page's one, so a probe of the structure epoch is all it costs.
-    prepare: effectRowResolver(() => createBrowserStripOrders(host).current()),
   });
 }
 

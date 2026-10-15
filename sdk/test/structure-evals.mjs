@@ -5,7 +5,7 @@
  * the taps a subscription holds can all change under a running engine. The SDK maps and reports; the
  * core decides. These evals send the structural frames the Rust codec wrote (`control-support.mjs`)
  * to a real core, on the headless engine and through the browser transport over the same core, and
- * hold what the SDK names -- the strips of a meter frame, the row of a named effect control, the
+ * hold what the SDK names -- the strips of a meter frame, the effect an effect-row edit is held to, the
  * index an observation record carries, the end of a subscription -- to what the core now says.
  */
 
@@ -19,7 +19,7 @@ import { MisoEngineAsset } from "../src/core/asset.ts";
 import { decodeControlReply } from "../src/core/control-frame.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { decodeObservationEnded } from "../src/core/observation-ended.ts";
-import { MisoUsageError } from "../src/core/errors.ts";
+import { MisoControlRefusal } from "../src/core/errors.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { structuralFrame } from "./control-support.mjs";
 import { engineHost, moduleBytes, ramp } from "./support.mjs";
@@ -168,13 +168,42 @@ describe("#1562b-K -- a meter frame names its own strips", () => {
   });
 });
 
-describe("#1562b-K -- a named effect control follows the effect the core now lists", () => {
+describe("#1678 -- the core holds an effect-row edit to the effect it was written for", () => {
   const named = (controls, name, value) => controls.edit.set({
     owner: STRIP("t1"), section: { kind: "inserts", effect: "comp" }, control: name, lane: "both",
   }, value);
+  const refusalOf = async (controls, set) => {
+    const refusal = await controls.submit(set).then(() => undefined, (error) => error);
+    assert.ok(refusal instanceof MisoControlRefusal, "the core refused");
+    return refusal;
+  };
+
+  test("the SDK keeps no resolver of its own", async () => {
+    const live = await import("../src/core/live-controls.ts");
+    assert.equal(live.effectRowResolver, undefined, "the resolver hook is gone");
+  });
+
+  test("the builders send the effect an edit was written for", async () => {
+    const engine = await boot();
+    try {
+      const controls = engine.liveControls();
+      const insert = controls.edit.track("t1").insert("comp", "miso.compressor").parameter("mix", 0.25);
+      assert.equal(insert.edits[0].address.expectedEffect, "miso.compressor");
+      assert.equal(named(controls, "mix", 0.25).edits[0].address.expectedEffect, "miso.compressor",
+        "a row named by its section carries the effect the section runs");
+      const numeric = controls.edit.set({
+        owner: STRIP("t1"), section: { kind: "inserts", effect: "comp" }, control: 7, lane: "both",
+      }, 0.25);
+      assert.equal("expectedEffect" in numeric.edits[0].address, false, "a bare numeric address names no effect");
+      assert.equal("expectedEffect" in controls.edit.track("t1").faderDb(-3).edits[0].address, false,
+        "a row outside an effect section names none");
+    } finally {
+      engine.dispose();
+    }
+  });
 
   for (const path of ["headless", "browser"]) {
-    test(`${path}: a row named before an insert changed effect lands on the new effect's row`, async () => {
+    test(`${path}: an edit written for the old effect is refused by the core after a rebuild`, async () => {
       const engine = await boot();
       try {
         run(engine, 0, 2);
@@ -193,33 +222,34 @@ describe("#1562b-K -- a named effect control follows the effect the core now lis
         controls.queue.reset(engine.controlRevision());
         run(engine, 2, 4);
         const list = await engine.controls();
-        const clipMix = insertRow(list, "t1", "comp", "mix");
-        assert.equal(clipMix.address.control, 3, "the soft clip's mix row");
+        assert.equal(insertRow(list, "t1", "comp", "mix").address.control, 3, "the soft clip's mix row");
+        const untouched = insertRow(list, "t1", "comp", "mix").value;
+        const revision = engine.controlRevision();
 
-        // Built before the swap, from the old view: the number is the compressor's, and it is sent
-        // as the soft clip's.
-        const stale = named(controls, "mix", 0.5);
-        assert.equal((await controls.submit(stale)).ok, true);
-        assert.equal(insertRow(await engine.controls(), "t1", "comp", "mix").value, 0.5);
-
-        // A row the new effect does not have is refused by the SDK, not sent to another row.
-        await assert.rejects(
-          () => controls.submit(named(controls, "threshold_db", -20)),
-          (error) => error instanceof MisoUsageError && /runs miso\.soft-clip now, which has no control 'threshold_db'/.test(error.message),
-        );
-
-        // An edit typed for the compressor is not sent to the soft clip.
-        const typed = controls.edit.track("t1").insert("comp", "miso.compressor").parameter("mix", 0.75);
-        await assert.rejects(
-          () => controls.submit(typed),
-          (error) => error instanceof MisoUsageError && /runs miso\.soft-clip now, and this edit was built for miso\.compressor/.test(error.message),
-        );
-        assert.equal(insertRow(await engine.controls(), "t1", "comp", "mix").value, 0.5, "nothing was sent");
+        // Built from the old view: row 7 of the compressor. The core refuses it with its own code.
+        for (const stale of [
+          named(controls, "mix", 0.5),
+          named(controls, "threshold_db", -20),
+          controls.edit.track("t1").insert("comp", "miso.compressor").parameter("mix", 0.75),
+        ]) {
+          const refusal = await refusalOf(controls, stale);
+          assert.equal(refusal.code, "control.effect.changed");
+          assert.equal(refusal.editIndex, 0);
+        }
+        assert.equal(insertRow(await engine.controls(), "t1", "comp", "mix").value, untouched, "nothing changed");
+        assert.equal(engine.controlRevision(), revision, "nothing committed");
 
         // The same insert typed for the effect it runs now goes through.
         const typedNow = controls.edit.track("t1").insert("comp", "miso.soft-clip").parameter("mix", 0.75);
         assert.equal((await controls.submit(typedNow)).ok, true);
         assert.equal(insertRow(await engine.controls(), "t1", "comp", "mix").value, 0.75);
+
+        // A numeric address names no effect, so it lands on whatever runs there: as before.
+        const bare = controls.edit.set({
+          owner: STRIP("t1"), section: { kind: "inserts", effect: "comp" }, control: 3, lane: "both",
+        }, 0.5);
+        assert.equal((await controls.submit(bare)).ok, true);
+        assert.equal(insertRow(await engine.controls(), "t1", "comp", "mix").value, 0.5);
       } finally {
         engine.dispose();
       }

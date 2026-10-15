@@ -225,6 +225,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         },
         // #1553: the first fader of the track by its stable address, with a ramp of 240 samples.
         SessionEdit::SetControl {
+            expected_effect: None,
             address: control_core::ControlAddress {
                 owner: control_core::Owner::Strip(track_id.clone()),
                 section: control_core::Section::Builtins,
@@ -233,6 +234,18 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             },
             value: -3.0,
             ramp_samples: Some(240),
+        },
+        // #1678: an insert's parameter, with the native effect the edit was written for.
+        SessionEdit::SetControl {
+            address: control_core::ControlAddress {
+                owner: control_core::Owner::Strip(track_id.clone()),
+                section: control_core::Section::Inserts(id("eq1")),
+                control: 2,
+                lane: control_core::Lane::Both,
+            },
+            value: 1.5,
+            ramp_samples: None,
+            expected_effect: Some(id("miso.parametric-eq")),
         },
     ]
 }
@@ -867,7 +880,11 @@ pub enum ConformanceDecoder {
 /// `33e4b1cebcbfd902`: the event carries a repeated `key` message (the wire shape is the sequence
 /// and one nested key per ended tap), so `event.observation_ended` carries two keys. The frame
 /// count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xcc9a_7bcc_502c_4936;
+/// #1678: an optional seventh field of the `SET_CONTROL` address message names the native effect an
+/// effect-row edit was written for. Repinned from `cc9a7bcc502c4936`: the transaction's last
+/// `SetControl` is an insert edit that carries the expected effect `miso.parametric-eq` (36 edits). The
+/// frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x63ff_2e60_976e_0e21;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

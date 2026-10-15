@@ -7,7 +7,7 @@ schemas. Optional/boundary values are represented by the transaction's nested fi
 transport position, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`cc9a7bcc502c4936`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`63ff2e60976e0e21`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -71,6 +71,9 @@ is added, so the corpus gains `event.observation_ended` (the frame count is 46 a
 and the capabilities response lists event `0x8011`.
 #1584 D6a fold: one OBSERVATION_ENDED per commit (root ruling A) re-pinned it from `33e4b1cebcbfd902`: the
 event carries a repeated key message and the corpus frame carries two keys (the frame count stays 46).
+Issue #1678 re-pinned it from `cc9a7bcc502c4936`: the `SET_CONTROL` address message gains an optional
+seventh field, the native effect the edit was written for, and the transaction appends a `SetControl`
+on an insert row that carries it (the frame count stays 46).
 
 The value stood at `88a8ee6a6d9e4acc` here until #274. It was correct until `b454b230`, and the
 two re-pins that followed (`b454b230`, then #241's `04d291dd`) did not reach this file or the

@@ -355,6 +355,34 @@ pub(crate) mod control_address {
     };
 }
 
+/// The address message of a `SET_CONTROL` edit (#1678): the control list's address fields, and a
+/// seventh, the native effect the edit was written for. The list's own rows and an automation target
+/// use [`control_address`], which has no seventh field.
+pub(crate) mod set_control_address {
+    use super::*;
+    pub(crate) const OWNER_KIND: FieldSpec = control_address::OWNER_KIND;
+    pub(crate) const OWNER_ID: FieldSpec = control_address::OWNER_ID;
+    pub(crate) const SECTION: FieldSpec = control_address::SECTION;
+    pub(crate) const SLOT_ID: FieldSpec = control_address::SLOT_ID;
+    pub(crate) const CONTROL: FieldSpec = control_address::CONTROL;
+    pub(crate) const LANE: FieldSpec = control_address::LANE;
+    /// The native effect ID the edit was written for; present only in an `inserts` or `console`
+    /// section. The core refuses the edit when that insert or slot runs another effect.
+    pub(crate) const EXPECTED_EFFECT: FieldSpec = FieldSpec::opt(7, Wire::Utf8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "SetControlAddress",
+        fields: &[
+            OWNER_KIND,
+            OWNER_ID,
+            SECTION,
+            SLOT_ID,
+            CONTROL,
+            LANE,
+            EXPECTED_EFFECT,
+        ],
+    };
+}
+
 pub(crate) mod control_entry {
     use super::{FieldSpec, MessageSpec, Wire, control_address, enum_choice};
 
@@ -1593,11 +1621,12 @@ pub(crate) mod session {
     }
 
     /// `SET_CONTROL` (decision 17, C5): any control by its stable address (#1553 D2). The address is
-    /// the control address message of the control list; a set requires its `control` and `lane`.
+    /// the control address message of the control list, with an optional seventh field, the native
+    /// effect the edit was written for (#1678); a set requires its `control` and `lane`.
     pub(crate) mod set_control {
         use super::*;
         pub(crate) const ADDRESS: FieldSpec =
-            FieldSpec::msg(1, true, false, &crate::schema::control_address::SPEC);
+            FieldSpec::msg(1, true, false, &crate::schema::set_control_address::SPEC);
         pub(crate) const VALUE: FieldSpec = FieldSpec::req(2, Wire::F32);
         /// This edit's own ramp length in samples, absent for the row's default.
         pub(crate) const RAMP_SAMPLES: FieldSpec = FieldSpec::opt(3, Wire::U32);
@@ -1789,6 +1818,7 @@ mod tests {
             &session_committed::SPEC,
             &control_list_request::SPEC,
             &control_address::SPEC,
+            &set_control_address::SPEC,
             &control_entry::SPEC,
             &control_list_page::SPEC,
             &control_state_page::SPEC,

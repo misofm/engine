@@ -12,7 +12,7 @@ use crate::{
     },
     schema::{
         self, control_address, control_entry, control_list_page, control_list_request,
-        control_state_page, enum_choice,
+        control_state_page, enum_choice, set_control_address,
     },
 };
 
@@ -3169,27 +3169,45 @@ fn write_control_address(sink: &mut dyn Sink, address: &ControlAddress) -> Resul
     })
 }
 
-/// The fields of one address message, the one encoder of the address: the control list's rows and
-/// the `SET_CONTROL` edit both write it. The caller has validated the address.
+/// The fields of one list-style address message: the control list's rows and a response target
+/// write it. The caller has validated the address.
 fn write_control_address_fields(
     sink: &mut dyn Sink,
     address: &ControlAddress,
 ) -> Result<(), EncodeError> {
-    let fields = control_address::SPEC.field_count(&[
-        (
-            control_address::OWNER_ID,
-            usize::from(address.owner_id.is_some()),
-        ),
-        (
-            control_address::SLOT_ID,
-            usize::from(address.slot_id.is_some()),
-        ),
-        (
-            control_address::CONTROL,
-            usize::from(address.control.is_some()),
-        ),
-        (control_address::LANE, usize::from(address.lane.is_some())),
-    ])?;
+    write_address_fields(sink, &control_address::SPEC, address, None)
+}
+
+/// The one encoder of the address fields: `spec` is the list's address message, or the set-control
+/// address message with `expected_effect` as its seventh field. The caller has validated the
+/// address.
+fn write_address_fields(
+    sink: &mut dyn Sink,
+    spec: &'static schema::MessageSpec,
+    address: &ControlAddress,
+    expected_effect: Option<&str>,
+) -> Result<(), EncodeError> {
+    let mut variable = [(control_address::OWNER_ID, 0); 5];
+    variable[0] = (
+        control_address::OWNER_ID,
+        usize::from(address.owner_id.is_some()),
+    );
+    variable[1] = (
+        control_address::SLOT_ID,
+        usize::from(address.slot_id.is_some()),
+    );
+    variable[2] = (
+        control_address::CONTROL,
+        usize::from(address.control.is_some()),
+    );
+    variable[3] = (control_address::LANE, usize::from(address.lane.is_some()));
+    let mut count = 4;
+    if let Some(expected) = expected_effect {
+        debug_assert!(!expected.is_empty());
+        variable[count] = (set_control_address::EXPECTED_EFFECT, 1);
+        count += 1;
+    }
+    let fields = spec.field_count(&variable[..count])?;
     sink.message_header(fields)?;
     write_spec!(
         sink,
@@ -3213,12 +3231,19 @@ fn write_control_address_fields(
             &[schema::parameter_channel_wire(lane)]
         )?;
     }
+    if let Some(expected) = expected_effect {
+        write_spec!(
+            sink,
+            set_control_address::EXPECTED_EFFECT,
+            expected.as_bytes()
+        )?;
+    }
     Ok(())
 }
 
-/// The address message of a `SET_CONTROL` edit (the body of its `address` field): the control
-/// list's one address encoding, with `control` and `lane` present. An address that breaks the
-/// list's rules is `InvalidField`.
+/// The address message of a stored automation target: the control list's one address encoding with
+/// `control` and `lane` present, and no expected effect (the target is a row, not an edit). An
+/// address that breaks the list's rules is `InvalidField`.
 pub(crate) fn write_set_control_address(
     sink: &mut dyn Sink,
     address: &controls::ControlAddress,
@@ -3230,9 +3255,9 @@ pub(crate) fn write_set_control_address(
     write_control_address_fields(sink, &address)
 }
 
-/// The address message of a `SET_CONTROL` edit, decoded by the control list's one address decoder
-/// and held to the list's rules for a control row: every refusal is `InvalidField`, an
-/// unallocated owner, section or lane code included.
+/// A stored automation target, decoded by the control list's one address decoder and held to the
+/// list's rules for a control row: every refusal is `InvalidField`, an unallocated owner, section
+/// or lane code included.
 pub(crate) fn decode_set_control_address(
     message: Message<'_>,
 ) -> Result<controls::ControlAddress, DecodeError> {
@@ -3242,6 +3267,56 @@ pub(crate) fn decode_set_control_address(
         return Err(DecodeError::InvalidField);
     }
     controls::ControlAddress::try_from(&address)
+}
+
+/// The address message of a `SET_CONTROL` edit (the body of its `address` field): the control
+/// list's one address encoding, with `control` and `lane` present, and the native effect the edit
+/// was written for as an optional seventh field (#1678). An address that breaks the list's rules,
+/// or an expected effect on a section that runs no effect, is `InvalidField`.
+pub(crate) fn write_set_control_edit_address(
+    sink: &mut dyn Sink,
+    address: &controls::ControlAddress,
+    expected_effect: Option<&session::StableId>,
+) -> Result<(), EncodeError> {
+    let address = ControlAddress::from(address);
+    if !control_address_is_valid(sink.limits(), &address, ControlRowKind::Control)
+        || expected_effect.is_some_and(|effect| {
+            !has_slot(address.section) || !stable_id_fits(sink.limits(), effect.as_str())
+        })
+    {
+        return Err(EncodeError::InvalidField);
+    }
+    write_address_fields(
+        sink,
+        &set_control_address::SPEC,
+        &address,
+        expected_effect.map(session::StableId::as_str),
+    )
+}
+
+/// The address message of a `SET_CONTROL` edit, decoded by the control list's one address decoder
+/// and held to the list's rules for a control row: every refusal is `InvalidField`, an
+/// unallocated owner, section or lane code included. The second value is the native effect the edit
+/// was written for (#1678); it is refused unless the section is an `inserts` or `console` one.
+pub(crate) fn decode_set_control_edit_address(
+    message: Message<'_>,
+) -> Result<(controls::ControlAddress, Option<session::StableId>), DecodeError> {
+    let limits = message.limits();
+    let message = message.schema_spec(&set_control_address::SPEC)?;
+    let address = decode_control_address_fields(limits, &message)?;
+    if !control_address_is_valid(limits, &address, ControlRowKind::Control) {
+        return Err(DecodeError::InvalidField);
+    }
+    let expected = optional_spec!(message, set_control_address::EXPECTED_EFFECT)?
+        .map(|value| {
+            let text = read_string_within(limits, value)?;
+            if !has_slot(address.section) {
+                return Err(DecodeError::InvalidField);
+            }
+            session::StableId::parse(text).ok_or(DecodeError::InvalidField)
+        })
+        .transpose()?;
+    Ok((controls::ControlAddress::try_from(&address)?, expected))
 }
 
 fn write_control_entry(sink: &mut dyn Sink, entry: &ControlEntry) -> Result<(), EncodeError> {
@@ -3415,6 +3490,15 @@ fn decode_control_address(
     message: Message<'_>,
 ) -> Result<ControlAddress, DecodeError> {
     let message = message.schema_spec(&control_address::SPEC)?;
+    decode_control_address_fields(limits, &message)
+}
+
+/// The fields of an address message whose schema is already selected: the list's address or the
+/// set-control address, which share fields 1 to 6.
+fn decode_control_address_fields(
+    limits: crate::ProtocolLimits,
+    message: &Message<'_>,
+) -> Result<ControlAddress, DecodeError> {
     let text = |spec: schema::FieldSpec| {
         optional_spec!(message, spec)?
             .map(|value| read_string_within(limits, value).map(str::to_owned))

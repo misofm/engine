@@ -241,6 +241,7 @@ fn run(script: Script) -> Run {
             {
                 request += 1;
                 let edit = [SessionEdit::SetControl {
+                    expected_effect: None,
                     address: ControlAddress {
                         owner: Owner::Strip(StableId::parse(&edited).expect("strip ID")),
                         section: Section::Builtins,
