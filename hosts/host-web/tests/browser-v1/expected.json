@@ -36,7 +36,7 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "0",
         "renderedQuanta": "0",
-        "memoryBytes": 2883584
+        "memoryBytes": 2818048
       },
       "beforeDisposeStatus": {
         "state": 2,
@@ -46,7 +46,7 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "384",
         "renderedQuanta": "3",
-        "memoryBytes": 2883584
+        "memoryBytes": 2818048
       },
       "resources": {
         "sampleRateHz": 48000,
