@@ -8477,8 +8477,7 @@ fn with_fader_automation(document: &str) -> String {
 /// the prepared lengths held.
 ///
 /// Test value: red if the commit does not write the cell (the next block still holds the prepared
-/// lengths), writes it to a plan that is not the newest, or reports the path from anything but the
-/// classifier's jump-length value.
+/// lengths), or reports the path from anything but the classifier's jump-length value.
 #[test]
 fn a_control_smoothing_edit_on_an_automated_session_writes_the_jump_lengths_live() {
     bench_support::alloc::assert_installed();
@@ -8541,4 +8540,71 @@ fn a_control_smoothing_edit_on_an_automated_session_writes_the_jump_lengths_live
         rig.step();
         assert_eq!(graph::test_only_block_jump_lengths(), Some(held));
     }
+}
+
+/// #1639 D4. One transaction adds a track (a structural edit, so a successor plan) and changes the
+/// three `control_smoothing` rows: the path is `rebuild`, and once render adopts the successor
+/// (the watermark covers the revision, the provider epoch moves) the plan holds the new lengths.
+/// The session has no stored automation, so no live write reaches any plan's cell: only the
+/// successor's seed can carry the new lengths.
+///
+/// Test value: red if the successor's cell is seeded from anything but the committed model that
+/// holds the edit (the model before the transaction, or a constant), so a rebuild silently drops
+/// a `control_smoothing` change that came with it.
+#[test]
+fn a_successor_prepared_with_a_control_smoothing_edit_holds_the_new_lengths() {
+    let fast = ControlSmoothing {
+        mute_ms: 1.0,
+        fader_ms: 2.0,
+        pan_ms: 3.0,
+    };
+    // The default table at 48 kHz: fader 20 ms, mute 10 ms, pan 20 ms.
+    let prepared = graph::GraphJumpLengths {
+        fader_samples: 960,
+        mute_samples: 480,
+        pan_samples: 960,
+    };
+    let written = graph::GraphJumpLengths {
+        fader_samples: 96,
+        mute_samples: 48,
+        pan_samples: 144,
+    };
+    let document = long_session(10, 48_000);
+    let model = parse_session_json(&document).expect("model");
+    let mut rig = Rig::new(&document);
+    for _ in 0..2 {
+        rig.step();
+    }
+    assert_eq!(
+        graph::test_only_block_jump_lengths(),
+        Some(prepared),
+        "a fresh plan holds the prepared lengths"
+    );
+    let (revision, _, epoch, _) = rig.summary();
+    let mut edits = add_muted_track(&model, "added").to_vec();
+    edits.extend(smoothing_edits(fast));
+    let bytes = rig.transaction(&edits);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+    assert_eq!(
+        rig.summary().3,
+        1,
+        "the structural edit prepares a candidate"
+    );
+    let mut guard = 0;
+    while rig.summary().3 != 0 {
+        rig.step();
+        guard += 1;
+        assert!(guard < 16, "the candidate is adopted");
+    }
+    let (after, _, after_epoch, _) = rig.summary();
+    assert_eq!(after, revision + 1, "one revision");
+    assert_ne!(after_epoch, epoch, "the successor renders");
+    rig.step();
+    assert_eq!(
+        graph::test_only_block_jump_lengths(),
+        Some(written),
+        "the successor's cell holds the committed lengths"
+    );
 }

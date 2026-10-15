@@ -933,6 +933,15 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         jump_lengths,
         ..
     } = handles;
+    // #1639 D1: every prepared plan has a jump-length cell, so a handle set without its writer is
+    // a preparation failure, with the code and stage of the cell's own attach failure; the epoch
+    // then holds the writer unconditionally.
+    let jump_lengths = jump_lengths.ok_or_else(|| {
+        prepare_failure(PrepareDiagnostics::fixed(
+            host_core::PrepareRejection::Graph,
+            "host.jump_lengths.attach",
+        ))
+    })?;
     let strips = StripLanes {
         controls: strip_controls.into_boxed_slice(),
         track_count,

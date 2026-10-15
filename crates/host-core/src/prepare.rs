@@ -39,19 +39,6 @@ use graph::{
     TrackStage,
 };
 pub use graph::{GraphJumpLengthProducer, GraphJumpLengths, jump_length_retained_bytes};
-
-/// The jump lengths a plan's cell holds for `model` (#1639 D1): its `control_smoothing` keys in
-/// samples, the values of [`LiveRamps::for_session`]. Preparation seeds every plan's cell with
-/// them, and a live `control_smoothing` change writes them ([`crate::LiveDelta::jump_lengths`]).
-#[must_use]
-pub fn session_jump_lengths(model: &SessionModel) -> GraphJumpLengths {
-    let ramps = LiveRamps::for_session(model);
-    GraphJumpLengths {
-        fader_samples: ramps.fader_samples,
-        mute_samples: ramps.mute_samples,
-        pan_samples: ramps.pan_samples,
-    }
-}
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM;
 use session::{
@@ -79,6 +66,19 @@ use crate::spectrum::{
     SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumPrepareError,
     prepare_capture_collection, spectrum_capture_collection_resources,
 };
+
+/// The jump lengths a plan's cell holds for `model` (#1639 D1): its `control_smoothing` keys in
+/// samples, the values of [`LiveRamps::for_session`]. Preparation seeds every plan's cell with
+/// them, and a live `control_smoothing` change writes them ([`crate::LiveDelta::jump_lengths`]).
+#[must_use]
+pub fn session_jump_lengths(model: &SessionModel) -> GraphJumpLengths {
+    let ramps = LiveRamps::for_session(model);
+    GraphJumpLengths {
+        fader_samples: ramps.fader_samples,
+        mute_samples: ramps.mute_samples,
+        pan_samples: ramps.pan_samples,
+    }
+}
 
 #[derive(Clone, Copy)]
 enum SpectrumPreparationRequest<'a> {
