@@ -2046,6 +2046,15 @@ impl LiveControlEffectBankStage {
             unbound: Some(&mut self.unbound),
         })
     }
+
+    /// Lane `lane`'s observation tap state, if the slot has observation capacity and the lane has
+    /// a tap (#1327 D2): the part of the lane a plan swap exchanges. Allocation-free.
+    pub fn observation_mut(&mut self, lane: usize) -> Option<&mut ObservationLane> {
+        self.observations
+            .as_deref_mut()
+            .and_then(|lanes| lanes.get_mut(lane))
+            .and_then(Option::as_mut)
+    }
     // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN

@@ -148,7 +148,7 @@ pub use prepare::{
     MAXIMUM_VCA_REACH_PAIRS, MAXIMUM_VCAS_BOUNDED, MonitorBase, PlanStateInventory, PreparedHost,
     SOURCE_STALL_TOLERANCE_MS, SourceInventoryRow, SuccessorBase, check_counts, compile_host_model,
     compile_host_session, count_effects, default_source_ring_frames, effect_producer_position,
-    pair_carried_meters, parse_host_session, prepare_host_runtime,
+    pair_carried_meters, pair_carried_observations, parse_host_session, prepare_host_runtime,
     prepare_host_runtime_between_render_calls, prepare_host_runtime_successor,
     prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,

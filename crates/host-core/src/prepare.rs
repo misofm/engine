@@ -20,7 +20,7 @@ use builtins_compiler::{
 };
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectControlResources, EffectObservationHandle,
-    LiveEffectAddress, attach_effect_live_controls, attach_effect_observation,
+    LiveEffectAddress, LiveEffectRack, attach_effect_live_controls, attach_effect_observation,
     effect_control_resources, launch_native_effect_registry, lowers_session_bypass,
     prepare_native_session_effects, resolve_initial_values,
 };
@@ -702,6 +702,10 @@ pub struct PlanStateInventory {
     /// One row per meter, in the order of the plan's meter readers
     /// ([`HostLiveControlHandles::meters`]), so a row's `entry` is its position (#1327 D1).
     meters: Box<[MeterInventoryRow]>,
+    /// One row per effect instance that has observation taps, in the order of the plan's
+    /// observation readers ([`HostLiveControlHandles::effect_observations`]), so a row's `entry`
+    /// is its position (#1327 D1).
+    observations: Box<[ObservationInventoryRow]>,
     /// The strips this plan restarts relative to the plan it was prepared to displace (#1277 D6):
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
@@ -748,6 +752,20 @@ pub(crate) struct EffectLaneInventoryRow {
     pub(crate) layout: graph::EffectLaneLayout,
     /// The kind of stage and control lane the lane has: the successor's must be the same (#1280).
     pub(crate) kind: graph::EffectLaneKind,
+}
+
+/// One effect instance of a prepared plan whose observation taps a swap can carry, owner key `(strip
+/// ID, rack, effect ID)` (#1327 D1): the instance's taps follow the instance, so the key is the
+/// effect lane's.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObservationInventoryRow {
+    /// The reader set's index in the plan's observation readers.
+    pub(crate) entry: usize,
+    /// Where the effect instance sits in this plan: the key a successor's effect move names it by.
+    /// Meaningful only to this plan's successor's carry program.
+    pub(crate) location: graph::GraphEffectSite,
+    /// How many taps (readers) the instance declares.
+    pub(crate) taps: usize,
 }
 
 /// A meter's [`MeterConfig`] as plain comparable data: equal exactly when the configurations are
@@ -847,6 +865,12 @@ impl PlanStateInventory {
         self.meters.len()
     }
 
+    /// Observation rows, one per effect observation reader set (#1327).
+    #[must_use]
+    pub fn observation_count(&self) -> usize {
+        self.observations.len()
+    }
+
     /// Strip stage rows, one per banked fader or matrix lane (issue #1277).
     #[must_use]
     pub fn strip_stage_count(&self) -> usize {
@@ -907,6 +931,7 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[StripStageInventoryRow]>(&self.strip_stages)
                 + core::mem::size_of_val::<[EffectLaneInventoryRow]>(&self.effect_lanes)
                 + core::mem::size_of_val::<[MeterInventoryRow]>(&self.meters)
+                + core::mem::size_of_val::<[ObservationInventoryRow]>(&self.observations)
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
                 + ids,
         )
@@ -2598,9 +2623,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         Some(base) => resolve_meter_carry(&base.inventory.meters, &meter_rows),
         None => MeterCarry::default(),
     };
-    let meter_carry_bytes =
-        graph::observer_carry_retained_bytes(meter_carry.moves.len(), meter_carry.joins.len())
-            .ok_or_else(|| resource("host.resource.arithmetic"))?;
     // Issue #1277 D1: this plan's own fader and matrix lanes, sorted by strip ID and owner: the
     // inventory its successor joins with, and the table the join below looks this plan's lanes up
     // in.
@@ -2675,6 +2697,41 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         ),
         None => EffectCarry::default(),
     };
+    // Issue #1327 D1: this plan's own effect observation readers, in reader order: the inventory
+    // its successor joins with. A tap follows its effect instance, so a row is keyed by the
+    // instance's lane, and its successor's carry follows the effect moves resolved above.
+    let observation_rows: Vec<ObservationInventoryRow> = effect_observations
+        .iter()
+        .enumerate()
+        .filter_map(|(entry, handle)| {
+            let racks: &[graph::RackId] = match handle.address.rack {
+                LiveEffectRack::Console => &[graph::RackId::Simd1, graph::RackId::Simd2],
+                LiveEffectRack::Inserts => &[graph::RackId::Dynamic],
+            };
+            let lane = racks.iter().find_map(|&rack| {
+                effect_lane_row(&effect_lanes, &handle.track_id, rack, &handle.effect_id)
+            })?;
+            Some(ObservationInventoryRow {
+                entry,
+                location: lane.location,
+                taps: handle.readers.len(),
+            })
+        })
+        .collect();
+    let observation_carry = match successor {
+        Some(base) => resolve_observation_carry(
+            &base.inventory.observations,
+            &observation_rows,
+            &effect_carry.moves,
+        ),
+        None => Vec::new(),
+    };
+    let meter_carry_bytes = graph::observer_carry_retained_bytes(
+        meter_carry.moves.len(),
+        meter_carry.joins.len(),
+        observation_carry.len(),
+    )
+    .ok_or_else(|| resource("host.resource.arithmetic"))?;
     // The effect moves' table and payload scratch are charged at their exact size, against the
     // same cap as the rest of the plan, and the scratch is one allocation (#1279 D3).
     // The carried slots of the successor lanes the moves name are allocated with the table, and
@@ -2712,6 +2769,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_observer_carry(&mut plan, meter_carry.moves, meter_carry.joins)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
+    if !observation_carry.is_empty() {
+        graph::install_observation_carry(&mut plan, observation_carry)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
     debug_assert_eq!(
         carry_program_retained_bytes,
@@ -2730,6 +2791,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         strip_stages: strip_stages.into_boxed_slice(),
         effect_lanes: effect_lanes.into_boxed_slice(),
         meters: meter_rows.into_boxed_slice(),
+        observations: observation_rows.into_boxed_slice(),
         restarted: restarted.into_boxed_slice(),
     };
     let report = HostPrepareReport {
@@ -2977,6 +3039,62 @@ fn resolve_meter_carry(predecessor: &[MeterInventoryRow], own: &[MeterInventoryR
         }
     }
     carry
+}
+
+/// Join the successor's effect observation rows `own` with the predecessor's (#1327 D1): a tap
+/// set carries when its effect instance carried (`moves` names the successor instance's site) and
+/// both instances declare as many taps, with a row on each side. Every other instance's taps start
+/// fresh.
+fn resolve_observation_carry(
+    predecessor: &[ObservationInventoryRow],
+    own: &[ObservationInventoryRow],
+    moves: &[graph::GraphEffectMove],
+) -> Vec<graph::GraphTapMove> {
+    let from: BTreeMap<graph::GraphEffectSite, graph::GraphEffectSite> = moves
+        .iter()
+        .map(|step| (step.successor, step.predecessor))
+        .collect();
+    let before: BTreeMap<graph::GraphEffectSite, &ObservationInventoryRow> =
+        predecessor.iter().map(|row| (row.location, row)).collect();
+    own.iter()
+        .filter_map(|row| {
+            let site = *from.get(&row.location)?;
+            let earlier = before.get(&site)?;
+            (earlier.taps == row.taps).then_some(graph::GraphTapMove {
+                successor: row.location,
+                predecessor: site,
+                successor_entry: row.entry,
+                predecessor_entry: earlier.entry,
+            })
+        })
+        .collect()
+}
+
+/// Swap each carried effect observation reader set between the plans' reader vectors, at the swap
+/// block (#1327 D3): for each record of kind [`engine::realtime::ObserverKind::Observation`], the
+/// successor handle at `successor` and the predecessor handle at `predecessor` exchange their
+/// readers, so a reader the host already holds follows the tap state that renders on, and the
+/// retiring predecessor holds the successor's fresh one. Each handle keeps its own track, address
+/// and effect ID: they are equal for a carried pair.
+///
+/// Allocation-free, drops nothing, and may run on the render thread. A record whose index is out of
+/// range of its vector is skipped.
+pub fn pair_carried_observations(
+    successor: &mut [EffectObservationHandle],
+    predecessor: &mut [EffectObservationHandle],
+    carries: &[engine::realtime::ObserverCarry],
+) {
+    for carry in carries {
+        if carry.kind != engine::realtime::ObserverKind::Observation {
+            continue;
+        }
+        if let (Some(into), Some(from)) = (
+            successor.get_mut(carry.successor),
+            predecessor.get_mut(carry.predecessor),
+        ) {
+            core::mem::swap(&mut into.readers, &mut from.readers);
+        }
+    }
 }
 
 /// Swap each carried meter's reader between the plans' reader vectors, at the swap block
@@ -4551,6 +4669,7 @@ mod tests {
             strip_stages: Box::default(),
             effect_lanes: Box::new([row]),
             meters: Box::default(),
+            observations: Box::default(),
             restarted: Box::default(),
         }
     }

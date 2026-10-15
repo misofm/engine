@@ -5929,7 +5929,6 @@ fn pending_observe_swap(
                 handle.track_id.as_ref() == strip && handle.address == LiveEffectAddress::insert(0)
             })
             .and_then(|handle| handle.readers[0].read())
-            .map(|window| (window.first_sample, window.end_sample, window.blocks))
     };
 
     // The swap: A renders its blocks, the records are admitted, B is prepared and adopts.
@@ -5984,7 +5983,7 @@ fn pending_observe_swap(
         "{what}: no restore was refused"
     );
 
-    // A's queues read empty and A's taps hold what its next block would have reached.
+    // A's queues read empty: the carry popped every record.
     for strip in &strips {
         let producer = plan
             .handles
@@ -5996,14 +5995,38 @@ fn pending_observe_swap(
             "{what}: {strip}: the retired queue reads empty"
         );
     }
+    // The acknowledged subscribe is not dropped at the swap (#1327b): the carry applied it to
+    // A's tap as A's next block would have, and the tap then moved to the successor with its
+    // window and its publisher, so A keeps the successor's fresh, unarmed taps.
+    assert_eq!(
+        successor.prepared.plan.observation_binding_counts()[2],
+        armed_at_reference,
+        "{what}: every admitted subscribe is armed on the successor's tap"
+    );
     assert_eq!(
         plan.prepared.plan.observation_binding_counts()[2],
-        armed_at_reference,
-        "{what}: every admitted subscribe is armed on A's tap"
+        0,
+        "{what}: the retiring predecessor holds the fresh taps"
     );
-    // One more block of A's own (its sources moved on, so it renders silence) closes the windows
-    // the records opened: they open at the sample A's next block starts at, as the reference's do.
-    plan.render(quantum);
+    let carries = successor.prepared.plan.observer_carries().to_vec();
+    assert_eq!(
+        carries.len(),
+        strips.len(),
+        "{what}: one record per carried instance"
+    );
+    assert!(
+        carries
+            .iter()
+            .all(|carry| carry.kind == engine::realtime::ObserverKind::Observation),
+        "{what}"
+    );
+    host_core::pair_carried_observations(
+        &mut successor.handles.effect_observations,
+        &mut plan.handles.effect_observations,
+        &carries,
+    );
+    // The successor's swap block published the window the predecessor's next block would have:
+    // the reference's, field for field, from the reader the host now holds for the successor.
     for strip in &strips {
         let expected = window_of(&reference, strip);
         assert_eq!(
@@ -6012,9 +6035,9 @@ fn pending_observe_swap(
             "{what}: {strip}: the reference publishes exactly the subscribed windows"
         );
         assert_eq!(
-            window_of(&plan, strip),
+            window_of(&successor, strip),
             expected,
-            "{what}: {strip}: A's window opens at the sample its next block starts at"
+            "{what}: {strip}: the successor publishes the window the predecessor would have"
         );
     }
 }
@@ -7401,5 +7424,470 @@ mod meter_carry {
             assert_eq!(block.allocator, (0, 0, 0), "block {index}: allocator calls");
             assert_eq!(block.audit, (0, 0), "block {index}: render audit");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1327b: an effect's observation taps follow their effect instance across a swap.
+//
+// The tap's whole state moves with the instance: its arm state, its open window, its sequence and
+// its publisher. The reader the host holds for the predecessor's tap is paired with the
+// successor's in the swap block, so it keeps receiving, and a subscribe that was acknowledged
+// before the swap is armed on the successor's tap after it.
+
+mod observation_carry {
+    use std::collections::BTreeMap;
+
+    use engine::realtime::{HostAttachment, ObservationWindow, ObserverCarry, ObserverKind};
+    use host_core::{EffectObservationHandle, pair_carried_observations};
+
+    use super::*;
+
+    /// Blocks per window. The swap block (6) falls inside the window of blocks 4..8, so a window
+    /// is open across the swap and it publishes after it.
+    const WINDOW_BLOCKS: u32 = 4;
+
+    /// The test's host attachment, as the browser's is: it holds the plan's observation readers
+    /// and pairs them with the predecessor's in the swap block.
+    struct Rig {
+        observations: Vec<EffectObservationHandle>,
+        carries: Vec<ObserverCarry>,
+    }
+
+    impl Rig {
+        fn new(observations: Vec<EffectObservationHandle>) -> Box<Self> {
+            let capacity = observations.len() + 8;
+            Box::new(Self {
+                observations,
+                carries: Vec::with_capacity(capacity),
+            })
+        }
+
+        /// The strip of each reader set, in reader order.
+        fn strips(&self) -> Vec<String> {
+            self.observations
+                .iter()
+                .map(|handle| handle.track_id.to_string())
+                .collect()
+        }
+    }
+
+    impl HostAttachment for Rig {
+        fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+            self
+        }
+
+        fn adopt_predecessor(
+            &mut self,
+            predecessor: &mut dyn HostAttachment,
+            carries: &[ObserverCarry],
+        ) {
+            let Some(predecessor) = predecessor.as_any_mut().downcast_mut::<Self>() else {
+                return;
+            };
+            pair_carried_observations(
+                &mut self.observations,
+                &mut predecessor.observations,
+                carries,
+            );
+            // Within the capacity reserved at construction: no allocation.
+            self.carries.extend_from_slice(carries);
+        }
+    }
+
+    type Streams = BTreeMap<String, Vec<ObservationWindow>>;
+
+    /// The windows the readers of `plan` hold that they have not shown before, by strip.
+    fn read_all(plan: &mut LivePlan, streams: &mut Streams) {
+        let rig = plan
+            .prepared
+            .plan
+            .host_attachment_mut::<Rig>()
+            .expect("the plan's attachment");
+        for handle in &rig.observations {
+            let Some(window) = handle.readers[0].read() else {
+                continue;
+            };
+            let stream = streams.entry(handle.track_id.to_string()).or_default();
+            if stream
+                .last()
+                .is_none_or(|last| last.sequence != window.sequence)
+            {
+                stream.push(window);
+            }
+        }
+    }
+
+    /// Subscribe to the gain-reduction tap of each of `strips`' compressor insert, as an app
+    /// does: a record in the insert's observation queue, acknowledged when it is queued.
+    fn subscribe(plan: &mut LivePlan, strips: &[String]) {
+        for strip in strips {
+            plan.handles
+                .effect_control_mut(strip, LiveEffectAddress::insert(0))
+                .expect("a control channel for the insert")
+                .try_push_observe(0, true, WINDOW_BLOCKS)
+                .expect("room in the queue");
+        }
+    }
+
+    /// Attach `plan`'s observation readers to it, as the browser does.
+    fn attach(plan: &mut LivePlan) {
+        let observations = core::mem::take(&mut plan.handles.effect_observations);
+        plan.prepared
+            .plan
+            .set_host_attachment(Rig::new(observations));
+    }
+
+    /// `session` prepared fresh, subscribed to `subscribed` at its first block, and fed from
+    /// frame 0: every window each strip's tap publishes.
+    fn reference(backend: Backend, session: &Session, subscribed: &[String]) -> Streams {
+        let feed = bursty_feed(SOURCE, 5);
+        let mut plan = LivePlan::fresh_with(session, &observed_request(), backend);
+        subscribe(&mut plan, subscribed);
+        attach(&mut plan);
+        let mut streams = Streams::new();
+        for block in 0..BLOCKS {
+            plan.submit(&feed, QUANTUM, block);
+            plan.render(QUANTUM);
+            read_all(&mut plan, &mut streams);
+        }
+        streams
+    }
+
+    struct Swapped {
+        streams: Streams,
+        carry: CarryOutcome,
+        /// The successor's carry record, as its attachment's hook saw it in the swap block.
+        carries: Vec<ObserverCarry>,
+        /// The strip of each reader set of A and of B.
+        a_strips: Vec<String>,
+        b_strips: Vec<String>,
+        restarted: Vec<Box<str>>,
+        /// Armed taps of the successor and of the predecessor after the swap block.
+        armed: [u64; 2],
+        /// The allocator's `(allocations, reallocations, deallocations)` and the render audit's
+        /// `(allocations, deallocations)` over the swap block: hand-over, hook and render.
+        allocator: ((u64, u64, u64), (u64, u64)),
+    }
+
+    /// A rendered for [`SWAP_BLOCK`] blocks with `subscribed` acknowledged before its first, B
+    /// prepared as its successor and swapped in at [`SWAP_BLOCK`], rendered to [`BLOCKS`]. B
+    /// subscribes to nothing: whatever its taps hold at the swap is what the carry brought.
+    fn swapped(backend: Backend, a: &Session, b: &Session, subscribed: &[String]) -> Swapped {
+        use bench_support::alloc as bench_alloc;
+        let feed = bursty_feed(SOURCE, 5);
+        let request = observed_request();
+        let mut streams = Streams::new();
+        let mut plan = LivePlan::fresh_with(a, &request, backend);
+        subscribe(&mut plan, subscribed);
+        attach(&mut plan);
+        for block in 0..SWAP_BLOCK {
+            plan.submit(&feed, QUANTUM, block);
+            plan.render(QUANTUM);
+            read_all(&mut plan, &mut streams);
+        }
+        let mut successor =
+            LivePlan::successor_with(b, &request, &plan.prepared.inventory, &a.model, backend);
+        attach(&mut successor);
+        assert_eq!(
+            successor
+                .prepared
+                .sources
+                .adopt_persisting(&mut plan.prepared.sources),
+            1
+        );
+        successor.submit(&feed, QUANTUM, SWAP_BLOCK);
+        let mut output = vec![f32::NAN; QUANTUM * 2];
+        engine::realtime::audit::reset();
+        let mark = bench_alloc::current_thread_counters();
+        let carry = successor
+            .prepared
+            .plan
+            .adopt_predecessor_plan(&mut plan.prepared.plan);
+        successor.render_into(&mut output, QUANTUM);
+        let delta = bench_alloc::current_thread_delta_since(mark);
+        let audit = engine::realtime::audit::snapshot();
+        read_all(&mut successor, &mut streams);
+        for block in SWAP_BLOCK + 1..BLOCKS {
+            successor.submit(&feed, QUANTUM, block);
+            successor.render(QUANTUM);
+            read_all(&mut successor, &mut streams);
+        }
+        let strips = |plan: &mut LivePlan| {
+            plan.prepared
+                .plan
+                .host_attachment_mut::<Rig>()
+                .expect("attachment")
+                .strips()
+        };
+        Swapped {
+            streams,
+            carry,
+            carries: successor
+                .prepared
+                .plan
+                .host_attachment_mut::<Rig>()
+                .expect("attachment")
+                .carries
+                .clone(),
+            a_strips: strips(&mut plan),
+            b_strips: strips(&mut successor),
+            restarted: successor.prepared.restarted_strips().to_vec(),
+            armed: [
+                successor.prepared.plan.observation_binding_counts()[2],
+                plan.prepared.plan.observation_binding_counts()[2],
+            ],
+            allocator: (
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (audit.allocations, audit.deallocations),
+            ),
+        }
+    }
+
+    fn strips_of(session: &Session) -> Vec<String> {
+        session
+            .model
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str().to_owned())
+            .collect()
+    }
+
+    /// Which sessions the swap runs between.
+    #[derive(Clone, Copy, Debug)]
+    enum Form {
+        /// Per-node instances on both sides: A's inserts and B's, with one more.
+        NodeToNode,
+        /// A bank of lanes on both sides: B adds a track with no insert.
+        BankToBank,
+        /// Per-node instances become a bank of lanes.
+        NodeToBank,
+        /// A bank of lanes becomes per-node instances.
+        BankToNode,
+    }
+
+    fn pair(backend: Backend, form: Form) -> (Session, Session) {
+        let width = bank_width(backend);
+        match form {
+            Form::NodeToNode => {
+                let short = compressor_insert_session(width - 2);
+                let (a, b) = (
+                    Session::compile(short.clone()),
+                    Session::compile(with_muted_track(short)),
+                );
+                assert_eq!(insert_forms(&a, backend), vec![true; width - 2]);
+                assert_eq!(insert_forms(&b, backend), vec![true; width - 1]);
+                (a, b)
+            }
+            Form::BankToBank => {
+                let full = compressor_insert_session(width);
+                let mut bare = with_muted_track(full.clone());
+                track_mut(&mut bare, MUTED_TRACK).inserts.effects.clear();
+                let (a, b) = (Session::compile(full), Session::compile(bare));
+                assert_eq!(insert_forms(&a, backend), vec![false; width]);
+                assert_eq!(insert_forms(&b, backend), vec![false; width]);
+                (a, b)
+            }
+            Form::NodeToBank => form_pair(Insert::Compressor, backend, true),
+            Form::BankToNode => form_pair(Insert::Compressor, backend, false),
+        }
+    }
+
+    /// Gate 4, and the acknowledged subscribe: a tap subscribed before the swap publishes the
+    /// windows a fresh B subscribed from frame 0 does, field for field, across the swap, with
+    /// no restart and no gap in its sequence; the host's reader was paired by the record, which
+    /// names each tap by its effect owner, not its position.
+    fn taps_carry(backend: Backend, form: Form) {
+        let what = format!("{backend:?} {form:?}");
+        let (a, b) = pair(backend, form);
+        let subscribed = strips_of(&a);
+        // A strip B removes has no instance to carry, and its tap goes with it.
+        let kept: Vec<String> = subscribed
+            .iter()
+            .filter(|strip| strips_of(&b).contains(strip))
+            .cloned()
+            .collect();
+        let expected = reference(backend, &b, &kept);
+        let run = swapped(backend, &a, &b, &subscribed);
+        assert_eq!(run.carry, CarryOutcome::Carried, "{what}");
+        assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+        assert_eq!(
+            run.armed,
+            [kept.len() as u64, (subscribed.len() - kept.len()) as u64],
+            "{what}: the subscribes are armed on the successor's taps; the retiring predecessor \
+             holds fresh unarmed ones and the tap of a removed strip"
+        );
+        assert_eq!(
+            run.allocator,
+            ((0, 0, 0), (0, 0)),
+            "{what}: allocator and render audit over the swap block"
+        );
+
+        assert_eq!(
+            run.carries.len(),
+            kept.len(),
+            "{what}: one record per tap set"
+        );
+        let mut shifted = false;
+        for carry in &run.carries {
+            assert_eq!(carry.kind, ObserverKind::Observation, "{what}");
+            assert_eq!(
+                run.a_strips[carry.predecessor], run.b_strips[carry.successor],
+                "{what}: the record joins the two reader sets of one strip"
+            );
+            shifted |= carry.predecessor != carry.successor;
+        }
+        assert_eq!(
+            shifted,
+            matches!(form, Form::NodeToNode | Form::NodeToBank | Form::BankToNode),
+            "{what}: the added track shifts every reader index, or this swap shifts none"
+        );
+
+        for strip in &kept {
+            let got = &run.streams[strip];
+            let want = &expected[strip];
+            assert_eq!(
+                got, want,
+                "{what} {strip}: the windows equal a fresh B's, the one open at the swap included"
+            );
+            assert_eq!(
+                got.iter().map(|window| window.sequence).collect::<Vec<_>>(),
+                vec![1, 2, 3],
+                "{what} {strip}: no gap and no restart"
+            );
+            assert!(
+                got.iter()
+                    .any(|window| window.left > 0.0 || window.right > 0.0),
+                "{what} {strip}: the compressor reduces gain, or the readings are vacuous"
+            );
+        }
+        assert!(
+            expected
+                .values()
+                .any(|windows| windows[1].first_sample < SWAP_SAMPLE
+                    && windows[1].end_sample > SWAP_SAMPLE),
+            "{what}: a window spans the swap"
+        );
+        // The added track's tap was not subscribed and is no carried one's: it publishes nothing.
+        for strip in run
+            .b_strips
+            .iter()
+            .filter(|strip| !subscribed.contains(strip))
+        {
+            assert!(!run.streams.contains_key(strip), "{what}: {strip} is fresh");
+        }
+    }
+
+    const SWAP_SAMPLE: u64 = (SWAP_BLOCK * QUANTUM) as u64;
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn taps_follow_their_effect_through_every_form_at_eight_lanes() {
+        for form in [
+            Form::NodeToNode,
+            Form::BankToBank,
+            Form::NodeToBank,
+            Form::BankToNode,
+        ] {
+            taps_carry(Backend::Simd8, form);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(any(target_feature = "neon", target_feature = "simd128")),
+        ignore = "a console effect bank binds only at the width its build executes, and four \
+                  lanes is the NEON and simd128 width (#1017)"
+    )]
+    fn taps_follow_their_effect_through_every_form_at_four_lanes() {
+        for form in [
+            Form::NodeToNode,
+            Form::BankToBank,
+            Form::NodeToBank,
+            Form::BankToNode,
+        ] {
+            taps_carry(Backend::Simd4, form);
+        }
+    }
+
+    /// Gate 4, second case: a compressor whose prepared setup changed (its link mode) restarts,
+    /// and so does its tap: it is not in the record, and its successor reader receives nothing
+    /// while every other strip's tap carries.
+    fn a_restarted_effect_starts_its_tap_fresh(backend: Backend) {
+        let what = format!("{backend:?}");
+        let width = bank_width(backend);
+        let base = compressor_insert_session(width - 2);
+        let mut changed = with_muted_track(base.clone());
+        track_mut(&mut changed, "eq1").inserts.effects[0].link_mode = LinkMode::Average;
+        let (a, b) = (Session::compile(base), Session::compile(changed));
+        let subscribed = strips_of(&a);
+        let run = swapped(backend, &a, &b, &subscribed);
+        assert_eq!(run.carry, CarryOutcome::Carried, "{what}");
+        assert_eq!(run.restarted, vec![Box::<str>::from("eq1")], "{what}");
+        assert_eq!(run.carries.len(), subscribed.len() - 1, "{what}");
+        assert!(
+            run.carries
+                .iter()
+                .all(|carry| run.a_strips[carry.predecessor] != "eq1"
+                    && run.b_strips[carry.successor] != "eq1"),
+            "{what}: eq1's taps are not in the record"
+        );
+        let expected = reference(backend, &b, &subscribed);
+        for strip in subscribed.iter().filter(|strip| *strip != "eq1") {
+            assert_eq!(run.streams[strip], expected[strip], "{what} {strip}");
+        }
+        assert_eq!(
+            run.streams["eq1"]
+                .iter()
+                .map(|window| window.sequence)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "{what}: eq1 published its first window in A, and its fresh tap publishes none"
+        );
+        assert_eq!(
+            run.armed[0],
+            subscribed.len() as u64 - 1,
+            "{what}: the restarted effect's tap starts unarmed"
+        );
+    }
+
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn a_restarted_effect_starts_its_tap_fresh_at_eight_lanes() {
+        a_restarted_effect_starts_its_tap_fresh(Backend::Simd8);
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(any(target_feature = "neon", target_feature = "simd128")),
+        ignore = "a console effect bank binds only at the width its build executes, and four \
+                  lanes is the NEON and simd128 width (#1017)"
+    )]
+    fn a_restarted_effect_starts_its_tap_fresh_at_four_lanes() {
+        a_restarted_effect_starts_its_tap_fresh(Backend::Simd4);
+    }
+
+    /// Gate 5 for the taps: the swap block -- carry, the attachment hook's pairing and the first
+    /// render -- allocates and frees nothing, counted rather than aborted.
+    #[test]
+    fn the_tap_swap_block_allocates_and_frees_nothing() {
+        use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+        struct RestoreMode(Mode);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                set_mode(self.0);
+            }
+        }
+        assert_installed();
+        let _restore = RestoreMode(mode());
+        set_mode(Mode::Count);
+        engine::realtime::audit::warm_up();
+        let backend = Backend::current();
+        let (a, b) = pair(backend, Form::NodeToNode);
+        let subscribed = strips_of(&a);
+        let run = swapped(backend, &a, &b, &subscribed);
+        assert_eq!(run.carry, CarryOutcome::Carried);
+        assert_eq!(run.carries.len(), subscribed.len());
+        assert_eq!(run.allocator, ((0, 0, 0), (0, 0)));
     }
 }

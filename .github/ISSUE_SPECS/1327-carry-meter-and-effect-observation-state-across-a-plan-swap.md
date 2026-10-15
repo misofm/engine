@@ -346,3 +346,67 @@ one-attempt rule, so it was not made.
 ### Known red test until #1381b (batch 11)
 
 `hosts/host-web` `tests::structural_apply::meter_delivery_restarts_on_the_successor_and_never_publishes_a_misshaped_frame` fails after this slice: the browser's successor meter readers sit on observers the swap hands to the retiring plan until #1381b's attachment hook pairs them (the browser rebuild path is test-support only until #1562b). #1381b, in this batch, turns the test from "restart" to "carry"; the batch lands only with it green (root, 2026-10-15). Root accepted the `crates/engine/src/realtime/mod.rs` re-export and a doc-only fix of `plan.rs` (a link to the crate-private `PreparedRenderPlan::carry_from` is plain code).
+
+## Decision record: #1327b observation taps (batch 8, worktree b8k)
+
+**Shipped.** No edit under `crates/engine/src/realtime`: #1327a's `ObserverKind::Observation`, `ObserverCarry`,
+`observer_carries` and `HostAttachment::adopt_predecessor` are enough.
+
+- **effect-contract.** `ObservationLane::{same_taps, swap_state}`. `swap_state` exchanges the two lanes' tap
+  tables (arm state, open window, sequence, peaks, publisher) and armed count by pointer, and refuses unless both
+  lanes declare the same number of taps with the same fold at each index. Each lane keeps its own
+  `default_window_blocks`: a carried tap keeps the window length it was armed with.
+- **rack.** `LiveControlEffectBankStage::observation_mut(lane)`.
+- **graph.**
+  - `GraphTapMove` (the sites of one effect move, plus the two reader entries) and `install_observation_carry`.
+    A tap move binds to its effect move in the sorted effect table, so it is installed after
+    `install_effect_carry`, and refused if it names no effect move, if its successor holds no observation lane, or
+    if a site or entry repeats.
+  - `ObserverCarryProgram` gains the tap table. Its record holds one slot per meter move and per tap move, and
+    `observer_carry_retained_bytes` takes a third argument, the tap count.
+  - The effect section marks each tap move `taken` where its effect move actually carried (lane to lane, lane to
+    per-node, per-node to lane, per-node to per-node; a refused restore marks nothing).
+  - `Runtime::carry_taps` runs after the section's own pending-`Observe` loop (#1280 D3), so the predecessor's tap
+    already holds every acknowledged subscribe as its next block would have applied it. It then swaps the two
+    lanes' tap state and appends one `ObserverCarry { kind: Observation, successor, predecessor }` per swap after the
+    meter records.
+- **host-core.**
+  - `ObservationInventoryRow` (reader entry, effect site, tap count) in `PlanStateInventory`, in the order of
+    `HostLiveControlHandles::effect_observations`.
+  - `resolve_observation_carry`: a reader set carries when its effect instance's move is in the effect carry and both
+    plans' sets have as many taps. A restarting effect, or one a rebuild removes, carries nothing.
+  - `pair_carried_observations(successor, predecessor, carries)`: swaps the `readers` of the two
+    `EffectObservationHandle`s the record names. Allocation-free.
+
+**The acknowledged subscribe.** A subscribe admitted before the swap sits in the predecessor's observe queue. The
+carry pops it into the predecessor's tap at `predecessor_next_sample`, the sample the successor's first block
+starts at, and the tap then moves to the successor with its window and publisher. The successor arms nothing
+itself and publishes the window the predecessor would have. Today's red test `pending_observe_swap` asserted the
+tap armed on A; it now asserts it armed on the successor, with the successor's reader (paired) equal to the
+reference's window field by field, per-node and bank forms in both directions.
+
+**Departures from the text.**
+
+- **The tap is keyed by its effect owner, not by its own table.** D1 says the same, but the carried state moves in
+  the effect section's loop (a tap is a field of the effect instance, not a graph observer), so it has its own
+  small table beside the meters' instead of rows in `observer_rows`.
+- **A restarted or removed owner's subscribe is dropped, as #143 D7 says.** The fresh tap starts unarmed. Arming the
+  successor's taps at preparation is #1584 D6 (open). The removed strip's tap stays armed on the retiring
+  predecessor.
+- **Gate 4's "restart" case uses a prepared change (link mode).** With live controls attached, a threshold change
+  on an insert is a live difference and carries (#1280c), so it cannot start the tap fresh.
+
+**Gates -> tests.**
+
+| Gate | Tests |
+|---|---|
+| 4 and the acknowledged subscribe, per-node, bank, both form changes, eight lanes | `successor_swap`: `observation_carry::taps_follow_their_effect_through_every_form_at_eight_lanes`, `pending_observe_records_are_applied_at_the_carry_at_eight_lanes`, `full_observe_queues_are_applied_at_the_carry_at_eight_lanes`, `pending_observe_records_cross_the_form_change_at_eight_lanes` |
+| 4, the same at four lanes | `..._at_four_lanes` twins: ignored where the build does not execute four lanes (#1017), as every console-effect test |
+| 4, restart starts fresh | `observation_carry::a_restarted_effect_starts_its_tap_fresh_at_{eight,four}_lanes` |
+| 5, swap block and the hook's pairing | `observation_carry::the_tap_swap_block_allocates_and_frees_nothing` (and the allocator/audit assertion inside the form tests) |
+| lane exchange | `effect-contract/tests/observation_lane`: `a_lane_swap_carries_the_open_window_and_the_publisher`, `a_lane_swap_refuses_another_menu` |
+
+**Known state.** `host-web` `structural_apply::meter_delivery_restarts_on_the_successor_...` is still red, as the
+#1327a record says (#1381b). No other `host-web` test changed: the browser's rebuild path is test-support only and
+no host-web test swaps observation taps. #1381b pairs the browser's observation handles with
+`pair_carried_observations` from the attachment hook, through its host-core-index-to-slot map.

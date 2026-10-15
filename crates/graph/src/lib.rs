@@ -3520,33 +3520,94 @@ pub struct GraphObserverJoin {
     pub donor: GraphObserverLocation,
 }
 
-/// The observer section of a hand-over: the moves, the grid joins and the preallocated carry
-/// record (#1327 D2, D3, D6).
+/// One effect instance's observation taps a successor takes from its predecessor at the swap
+/// block (#1327 D1, D2): the taps follow the effect owner, so a move is named by the sites of the
+/// two effect instances and applies only if that effect move carried.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphTapMove {
+    /// The effect instance in the successor, the plan the move is installed in. Must be the
+    /// successor of one of the plan's [`GraphEffectMove`]s and hold an observation lane.
+    pub successor: GraphEffectSite,
+    /// The effect instance in the plan the successor displaces: the predecessor of that same
+    /// effect move.
+    pub predecessor: GraphEffectSite,
+    /// The successor reader's index in the observation reader vector ([`ObserverCarry::successor`]).
+    pub successor_entry: usize,
+    /// The predecessor reader's index ([`ObserverCarry::predecessor`]).
+    pub predecessor_entry: usize,
+}
+
+/// A [`GraphTapMove`] bound to the effect move it follows (#1327 D1).
+#[derive(Clone, Copy)]
+struct ObserverTapMove {
+    step: GraphTapMove,
+    /// The index of the effect move in the plan's sorted effect table.
+    effect_move: usize,
+    /// Whether that effect move carried at the swap block: written by the effect section, read by
+    /// the tap section that follows it.
+    taken: bool,
+}
+
+/// The observer section of a hand-over: the meter moves, the grid joins, the effect tap moves and
+/// the preallocated carry record (#1327 D2, D3, D6).
 struct ObserverCarryProgram {
     moves: Box<[GraphObserverMove]>,
     joins: Box<[GraphObserverJoin]>,
-    /// One slot per move, written at the swap block, `carried` of them.
+    /// Sorted by `effect_move`.
+    taps: Box<[ObserverTapMove]>,
+    /// One slot per move and per tap move, written at the swap block, `carried` of them.
     record: Box<[ObserverCarry]>,
     carried: usize,
 }
 
 impl ObserverCarryProgram {
+    /// A program of these tables, or `None` for no section at all.
+    fn assemble(
+        moves: Box<[GraphObserverMove]>,
+        joins: Box<[GraphObserverJoin]>,
+        taps: Box<[ObserverTapMove]>,
+    ) -> Option<Box<Self>> {
+        if moves.is_empty() && joins.is_empty() && taps.is_empty() {
+            return None;
+        }
+        let placeholder = ObserverCarry {
+            kind: ObserverKind::Meter,
+            successor: 0,
+            predecessor: 0,
+        };
+        let record = vec![placeholder; moves.len() + taps.len()].into_boxed_slice();
+        Some(Box::new(Self {
+            moves,
+            joins,
+            taps,
+            record,
+            carried: 0,
+        }))
+    }
+
     fn retained_bytes(&self) -> u64 {
-        observer_carry_retained_bytes(self.moves.len(), self.joins.len()).unwrap_or(u64::MAX)
+        observer_carry_retained_bytes(self.moves.len(), self.joins.len(), self.taps.len())
+            .unwrap_or(u64::MAX)
     }
 }
 
-/// The bytes an observer section of `moves` moves and `joins` joins retains in its plan (#1327):
-/// the section, its two tables and the carry record. `None` on overflow; zero for no section.
+/// The bytes an observer section of `moves` meter moves, `joins` grid joins and `taps` effect tap
+/// moves retains in its plan (#1327): the section, its three tables and the carry record. `None`
+/// on overflow; zero for no section.
 #[must_use]
-pub fn observer_carry_retained_bytes(moves: usize, joins: usize) -> Option<u64> {
-    if moves == 0 && joins == 0 {
+pub fn observer_carry_retained_bytes(moves: usize, joins: usize, taps: usize) -> Option<u64> {
+    if moves == 0 && joins == 0 && taps == 0 {
         return Some(0);
     }
     let bytes = core::mem::size_of::<ObserverCarryProgram>()
         .checked_add(moves.checked_mul(core::mem::size_of::<GraphObserverMove>())?)?
         .checked_add(joins.checked_mul(core::mem::size_of::<GraphObserverJoin>())?)?
-        .checked_add(moves.checked_mul(core::mem::size_of::<ObserverCarry>())?)?;
+        .checked_add(taps.checked_mul(core::mem::size_of::<ObserverTapMove>())?)?
+        .checked_add(
+            moves
+                .checked_add(taps)?
+                .checked_mul(core::mem::size_of::<ObserverCarry>())?,
+        )?;
     u64::try_from(bytes).ok()
 }
 
@@ -3613,24 +3674,77 @@ pub fn install_observer_carry(
             return Err(GraphCarryInstallError::DuplicateObserver);
         }
     }
-    executor.observer_carry = if moves.is_empty() && joins.is_empty() {
-        None
-    } else {
-        let record = moves
-            .iter()
-            .map(|step| ObserverCarry {
-                kind: step.kind,
-                successor: step.successor_entry,
-                predecessor: step.predecessor_entry,
-            })
-            .collect();
-        Some(Box::new(ObserverCarryProgram {
-            moves: moves.into_boxed_slice(),
-            joins: joins.into_boxed_slice(),
-            record,
-            carried: 0,
-        }))
-    };
+    // The tap moves of an earlier `install_observation_carry` stay.
+    let taps = executor
+        .observer_carry
+        .take()
+        .map_or_else(Box::default, |program| program.taps);
+    executor.observer_carry =
+        ObserverCarryProgram::assemble(moves.into_boxed_slice(), joins.into_boxed_slice(), taps);
+    Ok(())
+}
+
+/// Install the effect tap section of the hand-over this graph plan runs when it displaces its
+/// predecessor (#1327 D1, D2), after its [`GraphCarryProgram`] and [`install_effect_carry`], whose
+/// sorted move table the tap moves bind to: calling `install_effect_carry` again afterwards
+/// invalidates them.
+///
+/// Each tap move is the observation lane of one effect move. At the swap block it applies only if
+/// that effect move carried, after the predecessor's pending `Observe` records were applied to its
+/// tap, and exchanges the two lanes' whole tap state ([`effect_contract::ObservationLane::swap_state`]),
+/// publisher included. A lane pair with different tap menus exchanges nothing.
+///
+/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
+/// program, a tap move names no effect move of the plan (by both sites), its successor holds no
+/// observation lane, or a successor or predecessor site or entry repeats. Allocates the record
+/// here, off the render thread.
+pub fn install_observation_carry(
+    plan: &mut PreparedRenderPlan,
+    taps: Vec<GraphTapMove>,
+) -> Result<(), GraphCarryInstallError> {
+    let executor = plan
+        .executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
+    if executor.carry.is_none() {
+        return Err(GraphCarryInstallError::NoObserverCarryProgram);
+    }
+    let mut bound = Vec::with_capacity(taps.len());
+    let mut successors = BTreeSet::new();
+    let mut predecessors = BTreeSet::new();
+    let mut entries = BTreeSet::new();
+    for step in taps {
+        let Ok(effect_move) = executor
+            .carry_effects
+            .binary_search_by_key(&step.predecessor, |effect| effect.predecessor)
+        else {
+            return Err(GraphCarryInstallError::ObserverOutOfRange);
+        };
+        if executor.carry_effects[effect_move].successor != step.successor
+            || !executor.runtime.has_observation_lane(step.successor)
+        {
+            return Err(GraphCarryInstallError::ObserverOutOfRange);
+        }
+        if !successors.insert(step.successor)
+            || !predecessors.insert(step.predecessor)
+            || !entries.insert((true, step.successor_entry))
+            || !entries.insert((false, step.predecessor_entry))
+        {
+            return Err(GraphCarryInstallError::DuplicateObserver);
+        }
+        bound.push(ObserverTapMove {
+            step,
+            effect_move,
+            taken: false,
+        });
+    }
+    bound.sort_unstable_by_key(|tap| tap.effect_move);
+    let (moves, joins) = executor.observer_carry.take().map_or_else(
+        || (Box::default(), Box::default()),
+        |program| (program.moves, program.joins),
+    );
+    executor.observer_carry =
+        ObserverCarryProgram::assemble(moves, joins, bound.into_boxed_slice());
     Ok(())
 }
 
@@ -3976,15 +4090,26 @@ impl PreparedPlanExecutor for GraphExecutor {
             &self.carry_effects,
             &mut self.carry_scratch,
             predecessor.next_block_sample,
+            self.observer_carry
+                .as_deref_mut()
+                .map_or(&mut [][..], |observers| &mut observers.taps[..]),
         );
         self.node_carry_refused = self.node_carry_refused.saturating_add(refused);
         if let Some(observers) = self.observer_carry.as_deref_mut() {
-            observers.carried = self.runtime.carry_observers(
+            // The meters' observers first, then the effect taps, which the effect section above
+            // already brought up to date with the predecessor's pending subscriptions (#1280 D3).
+            let meters = self.runtime.carry_observers(
                 &mut predecessor.runtime,
                 &observers.moves,
                 &observers.joins,
                 &mut observers.record,
             );
+            let taps = self.runtime.carry_taps(
+                &mut predecessor.runtime,
+                &observers.taps,
+                observers.record.get_mut(meters..).unwrap_or(&mut []),
+            );
+            observers.carried = meters + taps;
         }
         CarryOutcome::Carried
     }

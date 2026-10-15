@@ -4501,6 +4501,48 @@ impl<'a> EffectStageMut<'a> {
             Self::Live(stage) => stage.observe_target_mut(lane),
         }
     }
+
+    /// The observation tap state of a live stage's lane (#1327 D2). A plain stage has no control
+    /// lane, so no tap.
+    fn into_observation(self, lane: usize) -> Option<&'a mut ObservationLane> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Live(stage) => stage.observation_mut(lane),
+        }
+    }
+}
+
+/// The observation tap state of the effect instance at `site` (#1327 D2): a live stage's lane, or
+/// a per-node instance. Allocation-free.
+fn observation_at_mut(
+    units: &mut [crate::runtime::RuntimeUnit],
+    site: crate::GraphEffectSite,
+) -> Option<&mut ObservationLane> {
+    match site {
+        crate::GraphEffectSite::Lane(at) => {
+            let (chain, slot, lane) = effect_lane_mut(units, at)?;
+            effect_stage_mut(chain, slot)?.into_observation(lane)
+        }
+        crate::GraphEffectSite::Node(unit) => {
+            effect_node_mut(units, unit)?.observation.as_deref_mut()
+        }
+    }
+}
+
+/// Note that effect move `index` carried, for the tap move bound to it (#1327 D1). `taps` is
+/// sorted by effect move and `cursor` only advances, so a whole carry is one pass over it. The
+/// carry marks moves in ascending index order.
+fn mark_effect_move_taken(taps: &mut [crate::ObserverTapMove], cursor: &mut usize, index: usize) {
+    while let Some(tap) = taps.get_mut(*cursor) {
+        if tap.effect_move < index {
+            *cursor += 1;
+        } else {
+            if tap.effect_move == index {
+                tap.taken = true;
+            }
+            return;
+        }
+    }
 }
 
 /// The pending-`Observe` drain of the predecessor instance at `site`: its queue, tap and unbound
@@ -5096,11 +5138,13 @@ impl crate::runtime::Runtime {
         moves: &[crate::GraphEffectMove],
         scratch: &mut [u8],
         predecessor_next_sample: u64,
+        taps: &mut [crate::ObserverTapMove],
     ) -> u64 {
         use crate::GraphEffectSite::{Lane, Node};
         let mut disengaged: Option<u32> = None;
         let mut node_refused = 0_u64;
-        for step in moves {
+        let mut tap_cursor = 0_usize;
+        for (index, step) in moves.iter().enumerate() {
             match (step.successor, step.predecessor) {
                 (Lane(successor), Lane(before)) => {
                     let Some((chain, slot, predecessor_lane)) =
@@ -5127,6 +5171,7 @@ impl crate::runtime::Runtime {
                     test_only_note_carry_payload(into.layout().payload_bytes());
                     if into.carry_lane_from(lane, &from, predecessor_lane, scratch) {
                         chain.inherit_channel_agreement(agree);
+                        mark_effect_move_taken(taps, &mut tap_cursor, index);
                     }
                 }
                 (Lane(successor), Node(before)) => {
@@ -5140,7 +5185,9 @@ impl crate::runtime::Runtime {
                     if let Some(EffectStageMut::Live(into)) = effect_stage_mut(chain, slot) {
                         #[cfg(any(test, feature = "test-support"))]
                         test_only_note_carry_payload(into.layout().payload_bytes());
-                        into.carry_lane_from_instance(lane, node.instance(), scratch);
+                        if into.carry_lane_from_instance(lane, node.instance(), scratch) {
+                            mark_effect_move_taken(taps, &mut tap_cursor, index);
+                        }
                     }
                 }
                 (Node(successor), Lane(before)) => {
@@ -5161,14 +5208,16 @@ impl crate::runtime::Runtime {
                     };
                     #[cfg(any(test, feature = "test-support"))]
                     test_only_note_carry_payload(node.layout.payload_bytes());
-                    if let EffectStageMut::Live(stage) = &from
-                        && !stage.carry_lane_into_instance(
+                    if let EffectStageMut::Live(stage) = &from {
+                        if stage.carry_lane_into_instance(
                             predecessor_lane,
                             node.instance_mut(),
                             scratch,
-                        )
-                    {
-                        node_refused = node_refused.saturating_add(1);
+                        ) {
+                            mark_effect_move_taken(taps, &mut tap_cursor, index);
+                        } else {
+                            node_refused = node_refused.saturating_add(1);
+                        }
                     }
                 }
                 (Node(successor), Node(before)) => {
@@ -5179,6 +5228,7 @@ impl crate::runtime::Runtime {
                         continue;
                     };
                     into.move_from(from);
+                    mark_effect_move_taken(taps, &mut tap_cursor, index);
                 }
             }
         }
@@ -5217,6 +5267,49 @@ impl crate::runtime::Runtime {
             }
         }
         node_refused
+    }
+
+    /// Whether the effect instance at `site` holds an observation lane (#1327 D1), which a tap
+    /// move needs of its successor. Off the render thread.
+    pub(crate) fn has_observation_lane(&mut self, site: crate::GraphEffectSite) -> bool {
+        observation_at_mut(&mut self.units, site).is_some()
+    }
+
+    /// Run the effect tap section of a carry program at the swap block (#1327 D1, D2): for each
+    /// tap move whose effect move carried (`taken`), the successor instance's observation lane and
+    /// the predecessor's exchange their whole tap state, publisher included. It runs after
+    /// [`Self::carry_effect_lanes`], which applied the predecessor's pending `Observe` records to
+    /// its taps as their next block would have, so the successor continues the window the
+    /// predecessor would have published. Each carried move is written to `record` in order, and
+    /// the count written is returned. A pair of lanes with different tap menus exchanges nothing
+    /// and is not recorded. Bounded by `taps.len()`; allocation-free, and never panics.
+    pub(crate) fn carry_taps(
+        &mut self,
+        predecessor: &mut Self,
+        taps: &[crate::ObserverTapMove],
+        record: &mut [engine::realtime::ObserverCarry],
+    ) -> usize {
+        let mut carried = 0;
+        for tap in taps.iter().filter(|tap| tap.taken) {
+            let (Some(into), Some(from)) = (
+                observation_at_mut(&mut self.units, tap.step.successor),
+                observation_at_mut(&mut predecessor.units, tap.step.predecessor),
+            ) else {
+                continue;
+            };
+            let Some(slot) = record.get_mut(carried) else {
+                continue;
+            };
+            if into.swap_state(from) {
+                *slot = engine::realtime::ObserverCarry {
+                    kind: engine::realtime::ObserverKind::Observation,
+                    successor: tap.step.successor_entry,
+                    predecessor: tap.step.predecessor_entry,
+                };
+                carried += 1;
+            }
+        }
+        carried
     }
 
     /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,

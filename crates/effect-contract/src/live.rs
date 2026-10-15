@@ -1691,6 +1691,36 @@ impl ObservationLane {
         self.armed_count != 0
     }
 
+    /// Whether [`Self::swap_state`] would exchange this lane's taps with `other`'s: both declare
+    /// the same number of taps, with the same fold at each index (the same effect's menu, #1327
+    /// D1). One load and one compare per tap; allocation-free.
+    #[must_use]
+    pub fn same_taps(&self, other: &Self) -> bool {
+        self.taps.len() == other.taps.len()
+            && self
+                .taps
+                .iter()
+                .zip(other.taps.iter())
+                .all(|(own, theirs)| own.fold == theirs.fold)
+    }
+
+    /// Exchange every tap's whole state with `other`'s at a plan swap (#1327 D2): arm state, open
+    /// window, sequence, accumulated peaks and the publisher, so a reader that holds the carried
+    /// tap's slot stays connected to the tap that renders on. The two lanes' default window
+    /// lengths stay where they are: each plan sized its own, and a carried tap keeps the length
+    /// it was armed with.
+    ///
+    /// Returns `false` and exchanges nothing unless [`Self::same_taps`]. Two pointer exchanges and
+    /// a scalar one: no allocation, free, lock or syscall, and constant time.
+    pub fn swap_state(&mut self, other: &mut Self) -> bool {
+        if !self.same_taps(other) {
+            return false;
+        }
+        core::mem::swap(&mut self.taps, &mut other.taps);
+        core::mem::swap(&mut self.armed_count, &mut other.armed_count);
+        true
+    }
+
     /// Whether tap `tap_index` should be read for this block at all.
     ///
     /// The whole of level-2 zero: one bounds check and one flag load. An unarmed tap's effect state
