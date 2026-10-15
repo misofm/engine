@@ -1194,9 +1194,9 @@ pub struct PreparedStructuralCommand {
     event_reservations: Option<crate::ReliableEventReservations>,
     event_sequence: u64,
     applied_operations: u32,
-    /// The `OBSERVATION_ENDED` events this commit emits after its `SESSION_COMMITTED`, in order,
-    /// with their sequences (#1584 D6a). Empty unless the host attached some.
-    observation_ended: Vec<ObservationEnded>,
+    /// The one `OBSERVATION_ENDED` event this commit emits after its `SESSION_COMMITTED`, carrying
+    /// every ended key, with its sequence (#1584 D6a fold). `None` unless the host attached keys.
+    observation_ended: Option<ObservationEnded>,
     /// The reliable-event room held for `observation_ended`, checked and reserved before the
     /// host commits anything.
     ended_reservations: Option<crate::ReliableEventReservations>,
@@ -1275,9 +1275,13 @@ pub enum PreparedCommandCommitError {
 pub enum AttachObservationEndedError {
     /// The token is not this controller's current one.
     Token(PreparedCommandCommitError),
-    /// The reliable event queue has no room for the token's `SESSION_COMMITTED` and these events
-    /// together. Nothing changed; a drain makes room.
+    /// The reliable event queue has no room for the token's `SESSION_COMMITTED` and the event
+    /// together: it holds unread events. Nothing changed; a drain makes room.
     NoRoom(QueueReport),
+    /// The event cannot be encoded: its frame is over the endpoint's frame limit, a key is not a
+    /// stable ID, or the keys are not in strictly ascending order. No drain helps, so the host
+    /// refuses the transaction for good and never as backpressure.
+    Unencodable,
     /// A token of monitor writes only commits no revision and so emits no event.
     MonitorOnly,
 }
@@ -1870,7 +1874,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             event_reservations: Some(event_reservations),
             event_sequence: plan.event_sequence,
             applied_operations: plan.applied_operations,
-            observation_ended: Vec::new(),
+            observation_ended: None,
             ended_reservations: None,
             armed: true,
         })
@@ -2181,53 +2185,66 @@ impl<P: ControlProvider> ProtocolController<P> {
         Ok(())
     }
 
-    /// Reserve room for the `OBSERVATION_ENDED` events that `prepared`'s commit emits after its
-    /// `SESSION_COMMITTED`, one per key in order (#1584 D6a, the acked-batch question).
+    /// Reserve room for the one `OBSERVATION_ENDED` event that `prepared`'s commit emits after its
+    /// `SESSION_COMMITTED`, carrying every key in `ended` (#1584 D6a fold, the acked-batch
+    /// question), and return the event frame's encoded length.
     ///
     /// The host knows which subscriptions the transaction ends, the controller does not, so the
-    /// host calls this after it prepares the token and before it commits anything. The room is
-    /// checked together with the `SESSION_COMMITTED` the token already holds: a queue that cannot
-    /// take them all refuses here, with nothing changed, and the host refuses the transaction as
-    /// backpressure. After an `Ok` the commit cannot fail for room. A second call replaces the
-    /// first. An empty list attaches nothing.
+    /// host calls this after it prepares the token and before it commits anything. `ended` is in
+    /// strictly ascending key order (the wire's: strip, console before inserts, effect ID, tap
+    /// ID). The event is encoded for size now, off the commit: a frame over the endpoint's limit is
+    /// [`AttachObservationEndedError::Unencodable`]. The room is checked together with the
+    /// `SESSION_COMMITTED` the token already holds, one slot for the event whatever the number of
+    /// keys: a queue holding unread events that leave less room refuses here, with nothing
+    /// changed, and the host refuses the transaction as backpressure. After an `Ok` the commit
+    /// cannot fail for room and allocates nothing. A second call replaces the first. An empty list
+    /// attaches nothing and returns 0.
     ///
     /// # Errors
     ///
     /// [`AttachObservationEndedError`]: the token is another controller's or stale, it is a token of
-    /// monitor writes (which emits no event), or the queue has no room.
+    /// monitor writes (which emits no event), the queue has no room, or the event cannot be
+    /// encoded.
     pub fn attach_observation_ended(
         &mut self,
         prepared: &mut PreparedStructuralCommand,
         ended: Vec<ObservationTapKey>,
-    ) -> Result<(), AttachObservationEndedError> {
+    ) -> Result<usize, AttachObservationEndedError> {
         self.check_prepared_structural(prepared)
             .map_err(AttachObservationEndedError::Token)?;
         // Drop an earlier attachment first, so its room counts as free for this one.
-        prepared.observation_ended.clear();
+        prepared.observation_ended = None;
         prepared.ended_reservations = None;
         if ended.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         if prepared.prospective_session().is_monitor_only() {
             return Err(AttachObservationEndedError::MonitorOnly);
         }
-        let count = ended.len();
+        let event = ObservationEnded {
+            // `event_sequence` is the `SESSION_COMMITTED` sequence; this event follows it.
+            event_sequence: prepared.event_sequence.saturating_add(1),
+            keys: ended,
+        };
+        // The size of the frame, which an empty output reports without writing one.
+        let revision = prepared.prospective_session().revision();
+        let required = match self.codec.encode_event_frame_into(
+            &TypedEventFrame {
+                revision,
+                payload: EventPayload::ObservationEnded(&event),
+            },
+            &mut [],
+        ) {
+            Err(EncodeError::OutputTooSmall { required }) => required,
+            Err(_) | Ok(_) => return Err(AttachObservationEndedError::Unencodable),
+        };
         let reservations = self
             .queues
-            .reserve_reliable_events(count)
+            .reserve_reliable_events(1)
             .map_err(AttachObservationEndedError::NoRoom)?;
-        let first = prepared.event_sequence;
-        prepared.observation_ended = ended
-            .into_iter()
-            .enumerate()
-            .map(|(index, key)| ObservationEnded {
-                // `first` is the `SESSION_COMMITTED` sequence.
-                event_sequence: first.saturating_add(1 + index as u64),
-                key,
-            })
-            .collect();
+        prepared.observation_ended = Some(event);
         prepared.ended_reservations = Some(reservations);
-        Ok(())
+        Ok(required)
     }
 
     /// Validate token affinity/currentness, then apply every prepared controller mutation without
@@ -2289,12 +2306,13 @@ impl<P: ControlProvider> ProtocolController<P> {
                 ),
             );
             self.next_reliable_event_sequence = prepared.event_sequence.saturating_add(1);
-            // #1584 D6a: the events of the subscriptions this commit ended follow it, in the
-            // order the host attached them. The room was reserved before the host committed.
-            let mut reservations = prepared.ended_reservations.take();
-            for event in core::mem::take(&mut prepared.observation_ended) {
-                let reservations = reservations
-                    .as_mut()
+            // #1584 D6a fold: the one event of the subscriptions this commit ended follows it. Its
+            // room was reserved before the host committed, and the event was built and sized
+            // then, so this moves it and allocates nothing.
+            if let Some(event) = prepared.observation_ended.take() {
+                let mut reservations = prepared
+                    .ended_reservations
+                    .take()
                     .expect("an attached observation-ended event holds its reserved room");
                 let cell = self
                     .observation_ended_cells
@@ -2304,7 +2322,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 self.next_reliable_event_sequence = event.event_sequence.saturating_add(1);
                 self.observation_ended_cells[cell] = Some(event);
                 self.queues.commit_reserved_reliable_event(
-                    reservations,
+                    &mut reservations,
                     ReliableSlot::observation_ended(
                         commit.revision,
                         u32::try_from(cell).expect("cell count is a queue length"),

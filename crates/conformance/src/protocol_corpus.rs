@@ -863,7 +863,11 @@ pub enum ConformanceDecoder {
 /// Issue #1584 (D6a) repinned it from `4b21d9e6f520afd9`: the reliable event `OBSERVATION_ENDED`
 /// (`0x8011`) is added, so the corpus gains `event.observation_ended` (the frame count is 46 and the
 /// events are six) and the capabilities response lists event `0x8011`.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x33e4_b1ce_bcbf_d902;
+/// #1584 D6a fold: one OBSERVATION_ENDED per commit. Root ruling A repinned it from
+/// `33e4b1cebcbfd902`: the event carries a repeated `key` message (the wire shape is the sequence
+/// and one nested key per ended tap), so `event.observation_ended` carries two keys. The frame
+/// count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xcc9a_7bcc_502c_4936;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1236,12 +1240,21 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         "event.observation_ended",
         EventPayload::ObservationEnded(&ObservationEnded {
             event_sequence: 2,
-            key: ObservationTapKey {
-                strip_id: "vocal".to_owned(),
-                section: ObservationSection::Inserts,
-                effect_id: "comp".to_owned(),
-                tap_id: 1,
-            },
+            // Two keys of one commit: a console slot, then an insert (console sorts first).
+            keys: vec![
+                ObservationTapKey {
+                    strip_id: "vocal".to_owned(),
+                    section: ObservationSection::Console,
+                    effect_id: "glue".to_owned(),
+                    tap_id: 3,
+                },
+                ObservationTapKey {
+                    strip_id: "vocal".to_owned(),
+                    section: ObservationSection::Inserts,
+                    effect_id: "comp".to_owned(),
+                    tap_id: 1,
+                },
+            ],
         })
     );
     event!(

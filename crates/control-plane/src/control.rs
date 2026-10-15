@@ -1405,10 +1405,12 @@ where
                 // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
                 // transaction leaves unchanged is prepared to carry that plan's ring.
                 // #1584 D6a: the subscriptions the successor is prepared with, and those the
-                // transaction ends. The room for their `OBSERVATION_ENDED` events is reserved with
-                // the token's `SESSION_COMMITTED`, before anything is prepared, published or
-                // queued: no room is retryable backpressure and nothing has changed (the
-                // acked-batch rule: a subscription is never dropped without its event).
+                // transaction ends. The room for their one `OBSERVATION_ENDED` event (every ended
+                // key in it) is reserved with the token's `SESSION_COMMITTED`, before anything is
+                // prepared, published or queued: a lane holding unread events is retryable
+                // backpressure and nothing has changed (the acked-batch rule: a subscription is
+                // never dropped without its event). An event over one control frame can never
+                // be sent, so it is a resource refusal, not backpressure.
                 let observation_change = self.observation.after(
                     prepared
                         .get()
@@ -1427,10 +1429,16 @@ where
                         .controller
                         .attach_observation_ended(prepared.get_mut(), ended)
                     {
-                        Ok(()) => {}
+                        Ok(_) => {}
                         Err(protocol::AttachObservationEndedError::NoRoom(_)) => {
                             drop(prepared);
                             return Err(CommandError::Backpressure);
+                        }
+                        Err(protocol::AttachObservationEndedError::Unencodable) => {
+                            drop(prepared);
+                            return Err(CommandError::CompileRejected(failure(
+                                ResourceFault::Limit,
+                            )));
                         }
                         Err(_) => return Err(CommandError::Internal),
                     }

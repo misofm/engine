@@ -454,3 +454,46 @@ Departures and limits:
 - The C ABI keeps `observation_taps` 0, so its table is empty; the Observe edit (D1-D5, D7, D8) writes the
   same table through the core.
 - The capi race test and `tools/audit` do not cover the new event (not in D6a's paths).
+
+## Fold (root ruling A, batch 12)
+
+Root ruling A replaces D6a's one event per ended binding with one `OBSERVATION_ENDED` per commit. Commit
+"Fold #1584 D6a: one OBSERVATION_ENDED per commit carries every ended key (root ruling A)".
+
+- **Wire**: `OBSERVATION_ENDED` (`8011`) is the sequence (field 1) and one repeated `key` message (field 2,
+  mandatory, at least one); a key holds strip ID 1, section 2 (inserts `2`, console `5`), effect or slot ID 3 and
+  tap ID 4. Keys are strictly ascending (strip, console before inserts, effect ID, tap ID), so the encoder and the
+  decoder both refuse an empty list, an out-of-order list and a repeated key. Revision stays in the event header.
+  Typed `ObservationEnded { event_sequence, keys: Vec<ObservationTapKey> }`; schema modules `observation_tap_key`
+  and `observation_ended`; codecs, typed frame, registry and semantics docs follow.
+- **Room**: `ProtocolController::attach_observation_ended` reserves ONE reliable slot beside the token's
+  `SESSION_COMMITTED` whatever the number of keys, and returns the event frame's length. `BACKPRESSURE` now means
+  only that the lane holds unread events. The commit moves the prepared event into its cell: it allocates
+  nothing (the keys are built and sized when the transaction prepares, off the commit).
+- **Size at preparation**: the event is encoded for size by `attach` against the endpoint's codec, whose frame limit
+  is the control frame. A frame over that limit (or an unencodable list) is `AttachObservationEndedError::Unencodable`,
+  and the control plane refuses the transaction as `CompileRejected(resource limit)` and not as backpressure: a retry
+  could never succeed. `capi_resources` charges the heap a cell can own, one key per observation slot of the plan
+  (`observation_ended_heap_bytes`, from the producers' `observe_capacity`, their strip and effect ID text and the key
+  struct), for every cell (slots + 1) and for the token.
+- **Gates**: `a_strip_removed_with_many_subscribed_inserts_gives_one_event_with_every_key` (control plane: N = 1, 2,
+  7 and 40 subscribed inserts of a removed strip commit, one event, N keys in key order; the lane has two slots);
+  `no_room_for_the_end_refuses_the_removal_and_changes_nothing` (gate 5, now stated as unread events only);
+  protocol `attached_observation_ends_follow_their_commit_in_one_event`,
+  `the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it` and
+  `observation_ended_round_trips_every_key_and_refuses_anything_else`; the corpus row `event.observation_ended` now
+  carries two keys (console, then insert) and is the cross-host wire parity row (one control plane serves both
+  hosts; the native and Wasm corpus runs pin the same bytes).
+- **Re-pin**: `COMPLETE_SCHEMA_HASH` `0x33e4_b1ce_bcbf_d902` to `0xcc9a_7bcc_502c_4936` (history line "#1584 D6a
+  fold: one OBSERVATION_ENDED per commit"), the parity script's self-test strings, the fuzz manifest and the
+  conformance record. The capabilities frame is unchanged, so the C ABI vectors stay. No rendered bit moved
+  (audit `pcm_digest` `bf7dcedd1d92621f`, checked below).
+- **Limit that remains**: one event must fit one control frame. A commit that ends so many keys that their event
+  exceeds `maximum_control_frame_bytes` (hundreds of keys at the browser's 16 KiB) is refused as a resource limit;
+  the app disarms some first. Successor candidate: cap the table at admission by the keys one frame holds.
+- **Charge made exact (capi)**: at D6a (97233c465) `cargo test -p capi` failed `capi_retained_bytes_charge_every_byte_the_compile_retains`
+  (parametric-eq-nine-track: observed 165710, charged 165670) and `tiny_control_frame_still_accounts_three_provider_counters_exactly`,
+  both 40 bytes over the charge: the session's `observation_offsets` table (`(producers + 1) x u32`, here 10 x 4) and its
+  `observation_pending` slots were allocated and never charged. `capi_resources` now charges both
+  (`ObservationResources { producers, slots, ended_heap_bytes }`), beside the fold's ended-event heap; the whole
+  `cargo test -p capi` passes (132 passed). Audit capi `pcm_digest` `bf7dcedd1d92621f`, allocations 0.

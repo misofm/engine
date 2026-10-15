@@ -2040,24 +2040,43 @@ fn b3a_transport_goldens_truncation_and_direct_codec_are_strict() {
     );
 }
 
-/// #1584: `OBSERVATION_ENDED` round-trips its stable key exactly, every truncation of it fails,
-/// and an ID that is not a stable ID or a section that holds no effect is refused on both sides.
+fn ended_key(
+    strip: &str,
+    section: ObservationSection,
+    effect: &str,
+    tap: u32,
+) -> ObservationTapKey {
+    ObservationTapKey {
+        strip_id: strip.to_owned(),
+        section,
+        effect_id: effect.to_owned(),
+        tap_id: tap,
+    }
+}
+
+/// #1584 (root ruling A): `OBSERVATION_ENDED` carries every ended key of one commit and round-trips
+/// them exactly, every truncation fails, and the codec refuses on both sides an ID that is not a
+/// stable ID, a section that holds no effect, no key, and keys out of strict ascending order
+/// (console slots before inserts, so a duplicate is out of order too).
 ///
-/// Red if the key loses a field in the round trip, a builtins or own section is taken for an
-/// effect section, or an event the codec cannot decode is encodable.
+/// Red if a key loses a field or its place in the round trip, a builtins or own section is taken
+/// for an effect section, an empty event decodes, or a list the decoder cannot read as one ordered
+/// set is encodable.
 #[test]
-fn observation_ended_round_trips_its_stable_key_and_refuses_anything_else() {
+fn observation_ended_round_trips_every_key_and_refuses_anything_else() {
+    use ObservationSection::{Console, Inserts};
     let codec = codec();
     let event = ObservationEnded {
         event_sequence: 7,
-        key: ObservationTapKey {
-            strip_id: "vocal".to_owned(),
-            section: ObservationSection::Console,
-            effect_id: "glue".to_owned(),
-            tap_id: 3,
-        },
+        keys: vec![
+            ended_key("bass", Inserts, "comp", 1),
+            ended_key("vocal", Console, "glue", 3),
+            ended_key("vocal", Inserts, "comp", 1),
+            ended_key("vocal", Inserts, "comp", 2),
+            ended_key("vocal", Inserts, "eq", 1),
+        ],
     };
-    let mut bytes = vec![0_u8; 256];
+    let mut bytes = vec![0_u8; 1024];
     let length = codec
         .encode_observation_ended(&event, &mut bytes)
         .expect("encode");
@@ -2066,55 +2085,103 @@ fn observation_ended_round_trips_its_stable_key_and_refuses_anything_else() {
         codec.encoded_observation_ended_len(&event).expect("length")
     );
     bytes.truncate(length);
-    assert_eq!(codec.decode_observation_ended(&bytes, 5), Ok(event.clone()));
+    // The field count is the sequence and one key message per key.
+    let count = 1 + event.keys.len() as u32;
+    assert_eq!(
+        codec.decode_observation_ended(&bytes, count),
+        Ok(event.clone())
+    );
     for end in 0..bytes.len() {
         assert!(
-            codec.decode_observation_ended(&bytes[..end], 5).is_err(),
+            codec
+                .decode_observation_ended(&bytes[..end], count)
+                .is_err(),
             "{end}"
         );
     }
-    let inserts = ObservationEnded {
-        key: ObservationTapKey {
-            section: ObservationSection::Inserts,
-            ..event.key.clone()
-        },
-        ..event.clone()
+    // A single key is the smallest event; the section is on the wire.
+    let one = |section| ObservationEnded {
+        event_sequence: 7,
+        keys: vec![ended_key("vocal", section, "glue", 3)],
     };
     let mut other = vec![0_u8; 256];
-    let other_length = codec
-        .encode_observation_ended(&inserts, &mut other)
-        .expect("encode");
-    assert_ne!(
-        &other[..other_length],
-        &bytes[..],
-        "the section is on the wire"
-    );
-    assert_eq!(
-        codec.decode_observation_ended(&other[..other_length], 5),
-        Ok(inserts)
-    );
+    let mut encoded = Vec::new();
+    for section in [Console, Inserts] {
+        let written = codec
+            .encode_observation_ended(&one(section), &mut other)
+            .expect("encode");
+        assert_eq!(
+            codec.decode_observation_ended(&other[..written], 2),
+            Ok(one(section))
+        );
+        encoded.push(other[..written].to_vec());
+    }
+    assert_ne!(encoded[0], encoded[1]);
 
-    // Not a stable ID: encode refuses it, and so does decode of a frame that carries one.
+    // Not a stable ID, no key, or out of order: encode refuses it.
     for bad in ["", "Vocal", "9lives", "has space"] {
-        let mut invalid = event.clone();
-        invalid.key.strip_id = bad.to_owned();
+        let mut invalid = one(Console);
+        invalid.keys[0].strip_id = bad.to_owned();
         assert_eq!(
             codec.encode_observation_ended(&invalid, &mut other),
             Err(EncodeError::InvalidField),
             "{bad:?}"
         );
     }
-    // The section byte is the third field's value: 2 and 5 name an effect, anything else does not.
-    let section_offset = bytes
-        .windows(2)
-        .position(|pair| pair == [3, 0])
-        .expect("the section field header");
-    let value = section_offset + 8;
+    let mut empty = one(Console);
+    empty.keys.clear();
+    assert_eq!(
+        codec.encode_observation_ended(&empty, &mut other),
+        Err(EncodeError::InvalidField)
+    );
+    for keys in [
+        // Inserts before a console slot of the same strip.
+        vec![
+            ended_key("vocal", Inserts, "comp", 1),
+            ended_key("vocal", Console, "glue", 3),
+        ],
+        // A repeated key.
+        vec![
+            ended_key("vocal", Console, "glue", 3),
+            ended_key("vocal", Console, "glue", 3),
+        ],
+        // A lower tap after a higher one.
+        vec![
+            ended_key("vocal", Inserts, "comp", 2),
+            ended_key("vocal", Inserts, "comp", 1),
+        ],
+    ] {
+        assert_eq!(
+            codec.encode_observation_ended(
+                &ObservationEnded {
+                    event_sequence: 7,
+                    keys
+                },
+                &mut other
+            ),
+            Err(EncodeError::InvalidField)
+        );
+    }
+
+    // Decode refuses what encode would: the section byte of the first key is 2 or 5, anything else
+    // names no effect. (A key message's section field is its second field, id 2, type U8.)
+    let written = codec
+        .encode_observation_ended(&one(Console), &mut other)
+        .expect("encode");
+    let mut section_values = Vec::new();
+    for (index, window) in other[..written].windows(2).enumerate() {
+        // Field header: id (u16 LE) then the wire type byte; a U8 section is `2, 0, 1`.
+        if window == [2, 0] && other[..written].get(index + 2) == Some(&1) {
+            section_values.push(index + 8);
+        }
+    }
+    let value = *section_values.last().expect("the section field header");
+    assert_eq!(other[value], 5, "console");
     for code in [0_u8, 1, 3, 4, 6] {
-        let mut forged = bytes.clone();
+        let mut forged = other[..written].to_vec();
         forged[value] = code;
         assert_eq!(
-            codec.decode_observation_ended(&forged, 5),
+            codec.decode_observation_ended(&forged, 2),
             Err(DecodeError::InvalidField),
             "section {code}"
         );

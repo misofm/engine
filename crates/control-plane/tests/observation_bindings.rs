@@ -3,8 +3,8 @@
 //!
 //! The session holds the table of armed taps next to the monitor overlay. A push to a tap's queue
 //! writes it; a rebuild prepares its successor from it and drops the bindings whose target the
-//! transaction removed, emitting one reliable `OBSERVATION_ENDED` per binding after the
-//! transaction's `SESSION_COMMITTED`, the room for all of them reserved before the commit.
+//! transaction removed, emitting ONE reliable `OBSERVATION_ENDED` per commit, carrying every ended
+//! key, after the transaction's `SESSION_COMMITTED`, the room for it reserved before the commit.
 #![cfg(feature = "test-support")]
 
 use control_plane::{
@@ -400,10 +400,11 @@ fn a_removed_effect_ends_its_binding_with_an_event() {
         assert_eq!(ended.len(), 1, "{what}");
         let (event_revision, event) = &ended[0];
         assert_eq!(*event_revision, revision, "{what}: the committing revision");
-        assert_eq!(event.key.strip_id, "comp1", "{what}");
-        assert_eq!(event.key.section, ObservationSection::Inserts, "{what}");
-        assert_eq!(event.key.effect_id, "comp", "{what}");
-        assert_eq!(event.key.tap_id, 1, "{what}");
+        assert_eq!(event.keys.len(), 1, "{what}");
+        assert_eq!(event.keys[0].strip_id, "comp1", "{what}");
+        assert_eq!(event.keys[0].section, ObservationSection::Inserts, "{what}");
+        assert_eq!(event.keys[0].effect_id, "comp", "{what}");
+        assert_eq!(event.keys[0].tap_id, 1, "{what}");
         // Sequences are endpoint-monotonic: the end follows the commit's by one.
         let DecodedEventPayload::SessionCommitted(commit) = &events[0].1 else {
             panic!("{what}: first event");
@@ -412,10 +413,11 @@ fn a_removed_effect_ends_its_binding_with_an_event() {
     }
 }
 
-/// The room for the ends is checked with the commit's own event before anything changes (the
-/// acked-batch rule): a lane with room for `SESSION_COMMITTED` and not for the end refuses the
-/// transaction as backpressure, and the model, the revision, the table and the lane are as they
-/// were; after a drain the same request commits.
+/// The room for the end event is checked with the commit's own event before anything changes (the
+/// acked-batch rule): a lane that holds an unread event, leaving room for `SESSION_COMMITTED` and
+/// not for the end, refuses the transaction as backpressure, and the model, the revision, the table
+/// and the lane are as they were; after a drain the same request commits. Backpressure shows only
+/// while the lane holds unread events: the empty lane takes the same removal.
 ///
 /// Red if the commit goes ahead and drops the end, or if a refusal leaves the table emptied or
 /// the revision moved.
@@ -423,7 +425,7 @@ fn a_removed_effect_ends_its_binding_with_an_event() {
 fn no_room_for_the_end_refuses_the_removal_and_changes_nothing() {
     let mut rig = Rig::new();
     rig.subscribe("comp1");
-    // One committed event waiting in the two-slot lane: one slot is free.
+    // One committed event unread in the two-slot lane: one slot is free, the removal needs two.
     rig.apply(&[SessionEdit::SetSessionId {
         session_id: StableId::parse("another-session").expect("ID"),
     }])
@@ -462,4 +464,88 @@ fn no_room_for_the_end_refuses_the_removal_and_changes_nothing() {
     let events = rig.drain();
     assert_eq!(committed(&events), 1);
     assert_eq!(ended(&events).len(), 1);
+}
+
+/// Root ruling A: a transaction that removes a strip with N subscribed inserts commits whatever N is
+/// (the lane has two slots), and gives exactly one `OBSERVATION_ENDED` after its
+/// `SESSION_COMMITTED`, at the committing revision, with the N stable keys in key order.
+///
+/// Red if the keys are split across events (the second no longer fits the two-slot lane and the
+/// removal is refused as backpressure forever), if the event holds fewer or more keys than the
+/// commit ended, or if the keys are out of key order.
+#[test]
+fn a_strip_removed_with_many_subscribed_inserts_gives_one_event_with_every_key() {
+    fn put_compressor(strip: &str, id: &str) -> SessionEdit {
+        SessionEdit::PutTrackEffect {
+            track_id: StableId::parse(strip).expect("strip"),
+            rack_name: RackName::Inserts,
+            final_position: 1,
+            effect: Effect {
+                id: StableId::parse(id).expect("insert"),
+                identity: EffectIdentity::Native {
+                    effect_id: StableId::parse("miso.compressor").expect("compressor"),
+                },
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::DualMono,
+                params: Vec::new(),
+                sidechain: SidechainDeclaration::None,
+            },
+        }
+    }
+    for count in [1_u32, 2, 7, 40] {
+        let mut rig = Rig::new();
+        let ids: Vec<String> = (0..count).map(|index| format!("ins{index:02}")).collect();
+        let puts: Vec<SessionEdit> = ids.iter().map(|id| put_compressor("comp1", id)).collect();
+        rig.apply(&puts).expect("the inserts are added");
+        // The plan with the inserts is adopted at a block, so the next rebuild has room.
+        rig.render();
+        rig.render();
+        rig.drain();
+        for id in &ids {
+            let position = rig
+                .session
+                .effect_producers()
+                .iter()
+                .position(|producer| &*producer.track_id == "comp1" && &*producer.effect_id == id)
+                .expect("the insert has a producer");
+            rig.session
+                .push_effect_observe(position, 0, true, WINDOW_BLOCKS)
+                .expect("a producer")
+                .expect("room in the queue");
+        }
+        assert_eq!(rig.session.observation_bindings().len(), ids.len());
+        let before = rig.revision();
+        rig.apply(&[
+            SessionEdit::RemoveRoute {
+                route_id: StableId::parse("comp1-main").expect("route"),
+            },
+            SessionEdit::RemoveTrack {
+                track_id: StableId::parse("comp1").expect("strip"),
+            },
+        ])
+        .unwrap_or_else(|error| panic!("{count} subscribed inserts: {error:?}"));
+        assert_eq!(rig.revision(), before + 1, "{count}");
+        assert!(rig.session.observation_bindings().is_empty(), "{count}");
+        let events = rig.drain();
+        assert_eq!(events.len(), 2, "{count}: SESSION_COMMITTED and one end");
+        let ended = ended(&events);
+        assert_eq!(ended.len(), 1, "{count}: exactly one event");
+        let (revision, event) = &ended[0];
+        assert_eq!(*revision, before + 1, "{count}");
+        let got: Vec<(&str, &str, u32)> = event
+            .keys
+            .iter()
+            .map(|key| (&*key.strip_id, &*key.effect_id, key.tap_id))
+            .collect();
+        let want: Vec<(&str, &str, u32)> = ids.iter().map(|id| ("comp1", id.as_str(), 1)).collect();
+        assert_eq!(got, want, "{count}: every key, in key order");
+        assert!(
+            event
+                .keys
+                .iter()
+                .all(|key| key.section == ObservationSection::Inserts),
+            "{count}"
+        );
+    }
 }

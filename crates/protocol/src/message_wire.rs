@@ -929,15 +929,30 @@ pub struct ObservationTapKey {
     pub tap_id: u32,
 }
 
-/// Typed reliable `OBSERVATION_ENDED` event payload (#1584 D6a): a tap a host had armed no longer
-/// exists, because a transaction removed its strip, its insert or its console slot, or reused the ID
-/// for an effect without that tap. The event's revision is the revision that removed it.
+impl ObservationTapKey {
+    /// The order keys travel in on the wire: the strip, then console slots before inserts, then
+    /// the effect ID, then the tap ID. It is the order of the host's binding table.
+    fn wire_order(&self) -> (&str, bool, &str, u32) {
+        (
+            &self.strip_id,
+            self.section == ObservationSection::Inserts,
+            &self.effect_id,
+            self.tap_id,
+        )
+    }
+}
+
+/// Typed reliable `OBSERVATION_ENDED` event payload (#1584 D6a, folded to one event per commit): the
+/// taps a host had armed no longer exist, because a transaction removed their strips, inserts or
+/// console slots, or reused the IDs for effects without those taps. The event's revision is the
+/// revision that removed them, and `keys` is every tap that commit ended.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservationEnded {
     /// Endpoint-monotonic reliable event sequence.
     pub event_sequence: u64,
-    /// The tap that ended.
-    pub key: ObservationTapKey,
+    /// The taps that ended: at least one, in strictly ascending wire order (the strip, console
+    /// slots before inserts, the effect ID, the tap ID), so no key repeats.
+    pub keys: Vec<ObservationTapKey>,
 }
 
 /// Frozen meter component registry for one fixed telemetry record.
@@ -1764,35 +1779,52 @@ impl ProtocolCodec {
         checked_writer_len(&writer, required)
     }
 
-    /// Strictly decode a reliable typed observation-ended event payload. Both IDs must be stable
-    /// IDs and the section an effect section.
+    /// Strictly decode a reliable typed observation-ended event payload. Every ID must be a stable
+    /// ID, every section an effect section, and the keys at least one and strictly ascending.
     pub fn decode_observation_ended(
         &self,
         payload: &[u8],
         count: u32,
     ) -> Result<ObservationEnded, DecodeError> {
-        let fields = Message::top_level(payload, count, self.limits())?
+        let message = Message::top_level(payload, count, self.limits())?
             .schema_spec(&schema::observation_ended::SPEC)?;
-        let id = |spec: schema::FieldSpec| -> Result<String, DecodeError> {
-            let text = read_string(self, one_spec!(fields, spec)?)?;
-            session::StableId::parse(text).ok_or(DecodeError::InvalidField)?;
-            Ok(text.to_owned())
-        };
-        Ok(ObservationEnded {
-            event_sequence: read_u64(one_spec!(
-                fields,
-                schema::observation_ended::EVENT_SEQUENCE
-            )?)?,
-            key: ObservationTapKey {
-                strip_id: id(schema::observation_ended::STRIP_ID)?,
+        let raw_keys = values_spec!(message, schema::observation_ended::KEY)?;
+        let mut keys = Vec::with_capacity(raw_keys.count());
+        for raw in values_spec!(message, schema::observation_ended::KEY)? {
+            let fields = Message::nested_at_depth(raw, self.limits(), 1)?;
+            let fields = fields.schema_spec(&schema::observation_tap_key::SPEC)?;
+            let id = |spec: schema::FieldSpec| -> Result<String, DecodeError> {
+                let text = read_string(self, one_spec!(fields, spec)?)?;
+                session::StableId::parse(text).ok_or(DecodeError::InvalidField)?;
+                Ok(text.to_owned())
+            };
+            let key = ObservationTapKey {
+                strip_id: id(schema::observation_tap_key::STRIP_ID)?,
                 section: ObservationSection::from_code(read_u8(one_spec!(
                     fields,
-                    schema::observation_ended::SECTION
+                    schema::observation_tap_key::SECTION
                 )?)?)
                 .ok_or(DecodeError::InvalidField)?,
-                effect_id: id(schema::observation_ended::EFFECT_ID)?,
-                tap_id: read_u32(one_spec!(fields, schema::observation_ended::TAP_ID)?)?,
-            },
+                effect_id: id(schema::observation_tap_key::EFFECT_ID)?,
+                tap_id: read_u32(one_spec!(fields, schema::observation_tap_key::TAP_ID)?)?,
+            };
+            if keys
+                .last()
+                .is_some_and(|last: &ObservationTapKey| last.wire_order() >= key.wire_order())
+            {
+                return Err(DecodeError::InvalidField);
+            }
+            keys.push(key);
+        }
+        if keys.is_empty() {
+            return Err(DecodeError::InvalidField);
+        }
+        Ok(ObservationEnded {
+            event_sequence: read_u64(one_spec!(
+                message,
+                schema::observation_ended::EVENT_SEQUENCE
+            )?)?,
+            keys,
         })
     }
 
@@ -2597,37 +2629,53 @@ pub(crate) fn write_observation_ended(
     sink: &mut dyn Sink,
     value: &ObservationEnded,
 ) -> Result<(), EncodeError> {
-    if session::StableId::parse(&value.key.strip_id).is_none()
-        || session::StableId::parse(&value.key.effect_id).is_none()
+    if value.keys.is_empty()
+        || value.keys.iter().any(|key| {
+            session::StableId::parse(&key.strip_id).is_none()
+                || session::StableId::parse(&key.effect_id).is_none()
+        })
+        || !value
+            .keys
+            .windows(2)
+            .all(|pair| pair[0].wire_order() < pair[1].wire_order())
     {
         return Err(EncodeError::InvalidField);
     }
-    sink.check_field_count(schema::observation_ended::SPEC.field_count(&[])?)?;
+    sink.check_field_count(
+        schema::observation_ended::SPEC
+            .field_count(&[(schema::observation_ended::KEY, value.keys.len())])?,
+    )?;
     write_spec!(
         sink,
         schema::observation_ended::EVENT_SEQUENCE,
         &value.event_sequence.to_le_bytes()
     )?;
-    write_spec!(
-        sink,
-        schema::observation_ended::STRIP_ID,
-        value.key.strip_id.as_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::observation_ended::SECTION,
-        &[value.key.section.code()]
-    )?;
-    write_spec!(
-        sink,
-        schema::observation_ended::EFFECT_ID,
-        value.key.effect_id.as_bytes()
-    )?;
-    write_spec!(
-        sink,
-        schema::observation_ended::TAP_ID,
-        &value.key.tap_id.to_le_bytes()
-    )
+    for key in &value.keys {
+        sink.nested_spec(schema::observation_ended::KEY, &mut |sink| {
+            sink.message_header(schema::observation_tap_key::SPEC.field_count(&[])?)?;
+            write_spec!(
+                sink,
+                schema::observation_tap_key::STRIP_ID,
+                key.strip_id.as_bytes()
+            )?;
+            write_spec!(
+                sink,
+                schema::observation_tap_key::SECTION,
+                &[key.section.code()]
+            )?;
+            write_spec!(
+                sink,
+                schema::observation_tap_key::EFFECT_ID,
+                key.effect_id.as_bytes()
+            )?;
+            write_spec!(
+                sink,
+                schema::observation_tap_key::TAP_ID,
+                &key.tap_id.to_le_bytes()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 pub(crate) fn write_meter_batch(
