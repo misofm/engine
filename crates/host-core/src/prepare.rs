@@ -699,6 +699,9 @@ pub struct PlanStateInventory {
     strip_stages: Box<[StripStageInventoryRow]>,
     /// Sorted by strip ID, rack, then effect ID.
     effect_lanes: Box<[EffectLaneInventoryRow]>,
+    /// One row per meter, in the order of the plan's meter readers
+    /// ([`HostLiveControlHandles::meters`]), so a row's `entry` is its position (#1327 D1).
+    meters: Box<[MeterInventoryRow]>,
     /// The strips this plan restarts relative to the plan it was prepared to displace (#1277 D6):
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
@@ -747,6 +750,49 @@ pub(crate) struct EffectLaneInventoryRow {
     pub(crate) kind: graph::EffectLaneKind,
 }
 
+/// A meter's [`MeterConfig`] as plain comparable data: equal exactly when the configurations are
+/// equal word for word (#1327 D1), which `MeterConfig` itself cannot say because it holds a float.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct MeterConfigKey {
+    period_frames: u32,
+    peak_hold_frames: u32,
+    peak_decay_bits: u32,
+    queue_capacity: usize,
+    reset_generation: u64,
+}
+
+impl MeterConfigKey {
+    pub(crate) fn of(config: &MeterConfig) -> Self {
+        Self {
+            period_frames: config.period_frames.get(),
+            peak_hold_frames: config.peak_hold_frames,
+            peak_decay_bits: config.peak_decay_db_per_second.to_bits(),
+            queue_capacity: config.queue_capacity.get(),
+            reset_generation: config.reset_generation,
+        }
+    }
+}
+
+/// One meter of a prepared plan, owner key `(strip ID, tap, metric set)` with its configuration,
+/// as its successor's preparation sees it (#1327 D1). Two meters of one key (a caller may select
+/// the same tap twice) are told apart by their order, `entry`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MeterInventoryRow {
+    /// The strip ID: a track's or a submix's.
+    pub(crate) id: Box<str>,
+    /// The chain boundary the meter observes.
+    pub(crate) tap: MeterTap,
+    /// The numeric groups the meter keeps.
+    pub(crate) metrics: MeterMetricSet,
+    /// The meter's configuration.
+    pub(crate) config: MeterConfigKey,
+    /// The meter's index in the plan's meter readers.
+    pub(crate) entry: usize,
+    /// Where the meter's observer sits in this plan. Meaningful only to this plan's successor's
+    /// carry program, which names it as the observer to take.
+    pub(crate) location: graph::GraphObserverLocation,
+}
+
 /// One banked strip input section of a prepared plan, owner key `(strip ID,
 /// PostInputBuiltins)`, as its successor's preparation sees it (issue #1276 D1).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -793,6 +839,12 @@ impl PlanStateInventory {
     #[must_use]
     pub(crate) fn input_section(&self, id: &str) -> Option<&InputSectionInventoryRow> {
         input_section_row(&self.input_sections, id)
+    }
+
+    /// Meter rows, one per meter reader (#1327).
+    #[must_use]
+    pub fn meter_count(&self) -> usize {
+        self.meters.len()
     }
 
     /// Strip stage rows, one per banked fader or matrix lane (issue #1277).
@@ -847,12 +899,14 @@ impl PlanStateInventory {
                 .iter()
                 .map(|row| row.id.len() + row.effect_id.len())
                 .sum::<usize>()
+            + self.meters.iter().map(|row| row.id.len()).sum::<usize>()
             + self.restarted.iter().map(|id| id.len()).sum::<usize>();
         u64::try_from(
             core::mem::size_of_val::<[SourceInventoryRow]>(&self.sources)
                 + core::mem::size_of_val::<[InputSectionInventoryRow]>(&self.input_sections)
                 + core::mem::size_of_val::<[StripStageInventoryRow]>(&self.strip_stages)
                 + core::mem::size_of_val::<[EffectLaneInventoryRow]>(&self.effect_lanes)
+                + core::mem::size_of_val::<[MeterInventoryRow]>(&self.meters)
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
                 + ids,
         )
@@ -1364,6 +1418,33 @@ pub fn test_only_prepare_host_runtime_with_live_controls_successor_on(
     )
 }
 
+/// Test-support width seam (#1327): [`prepare_host_runtime_with_selected_meters`], or its
+/// successor form with `base`, on an explicit bank width.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_prepare_host_runtime_with_selected_meters_on(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    meters: &[HostMeterRequest],
+    base: Option<SuccessorBase<'_>>,
+    backend: Backend,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
+        compiled,
+        caps,
+        Some(live_controls),
+        Some(meters),
+        false,
+        backend,
+        None,
+        base,
+        HostLiveLanes::ALL,
+        None,
+    )?;
+    Ok((prepared, handles))
+}
+
 /// Test-support width seam: [`prepare_host_runtime`] on an explicit bank width, with no live
 /// controls.
 #[cfg(feature = "test-support")]
@@ -1843,10 +1924,21 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     };
     // The hand-over the successor runs at its swap block, built here so the plan charge below
     // counts it; installed after bind.
+    // Issue #1327 D1: a meter carries when its key and configuration are the predecessor's; the
+    // joins that follow bind find the observers, this only decides that a program is needed.
+    let meters_may_carry = match (successor, requested_meter_config(live_controls)) {
+        (Some(base), Some(config)) => meters_may_carry(
+            &base.inventory.meters,
+            &requested_meter_owners(model, live_controls, selected_meters),
+            MeterConfigKey::of(&config),
+        ),
+        _ => false,
+    };
     let carry_program = match successor {
         Some(base)
             if !carried_sources.is_empty()
                 || !carried_inputs.is_empty()
+                || meters_may_carry
                 || strip_joins.iter().any(StripJoin::may_carry)
                 || chain_joins.iter().any(ChainJoin::may_carry) =>
         {
@@ -2056,7 +2148,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             }),
         "every effect producer is found by its sorted position"
     );
-    let live_control_tracks = &live_control_strips[..live_control_track_count];
     let control_requests: Vec<TrackControlRequest> = if attach_live {
         live_control_strips
             .iter()
@@ -2075,19 +2166,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         return Err(shape("host.meter.period"));
     }
     // A selected meter may name any strip (issue #1208 D1); the default set stays one per track.
-    let meter_tracks: Vec<(&str, MeterTap, MeterMetricSet)> = match selected_meters {
-        Some(meters) => meters
-            .iter()
-            .map(|meter| (meter.strip_id.as_ref(), meter.tap, meter.metrics))
-            .collect(),
-        None => live_control_tracks
-            .iter()
-            .map(|track| (track.as_ref(), live_controls.meter_tap, MeterMetricSet::ALL))
-            .collect(),
-    };
-    let meter_requests: Vec<SelectedMeterRequest> = match live_controls.meter_period_frames {
+    let meter_tracks = requested_meter_owners(model, live_controls, selected_meters);
+    let meter_requests: Vec<SelectedMeterRequest> = match requested_meter_config(live_controls) {
         None => Vec::new(),
-        Some(period) => meter_tracks
+        Some(config) => meter_tracks
             .iter()
             .enumerate()
             .map(|(index, (track, tap, metrics))| {
@@ -2101,15 +2183,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 Ok(SelectedMeterRequest {
                     request: MeterRequest {
                         handle: MeterHandle(handle),
-                        track_id: track.to_string(),
+                        track_id: (*track).to_string(),
                         tap: *tap,
-                        config: MeterConfig {
-                            period_frames: period,
-                            peak_hold_frames: 0,
-                            peak_decay_db_per_second: 0.0,
-                            queue_capacity: live_controls.meter_queue_depth,
-                            reset_generation: 0,
-                        },
+                        config,
                     },
                     metrics: *metrics,
                 })
@@ -2482,6 +2558,49 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_builtin_input_carry(&mut plan, moves)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
+    // Issue #1327 D1: this plan's own meters, in reader order: the inventory its successor joins
+    // with, and the rows the join below looks this plan's observers up in.
+    let meter_rows: Vec<MeterInventoryRow> = {
+        let locations: BTreeMap<u64, graph::GraphObserverLocation> =
+            graph::observer_rows(&mut plan)
+                .ok_or_else(|| graph_failure("host.inventory.identity"))?
+                .into_iter()
+                .filter(|row| row.kind == engine::realtime::ObserverKind::Meter)
+                .map(|row| (row.handle, row.location))
+                .collect();
+        let requested: BTreeMap<u64, &SelectedMeterRequest> = meter_requests
+            .iter()
+            .map(|item| (item.request.handle.0.get(), item))
+            .collect();
+        meters
+            .iter()
+            .enumerate()
+            .filter_map(|(entry, consumer)| {
+                let handle = consumer.handle.0.get();
+                let item = requested.get(&handle)?;
+                Some(MeterInventoryRow {
+                    id: consumer.track_id.clone(),
+                    tap: consumer.tap,
+                    metrics: item.metrics,
+                    config: MeterConfigKey::of(&item.request.config),
+                    entry,
+                    location: *locations.get(&handle)?,
+                })
+            })
+            .collect()
+    };
+    debug_assert_eq!(
+        meter_rows.len(),
+        meters.len(),
+        "every meter has an observer"
+    );
+    let meter_carry = match successor {
+        Some(base) => resolve_meter_carry(&base.inventory.meters, &meter_rows),
+        None => MeterCarry::default(),
+    };
+    let meter_carry_bytes =
+        graph::observer_carry_retained_bytes(meter_carry.moves.len(), meter_carry.joins.len())
+            .ok_or_else(|| resource("host.resource.arithmetic"))?;
     // Issue #1277 D1: this plan's own fader and matrix lanes, sorted by strip ID and owner: the
     // inventory its successor joins with, and the table the join below looks this plan's lanes up
     // in.
@@ -2575,6 +2694,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     if admitted_graph_and_model
         .checked_add(strip_carry_bytes)
         .and_then(|bytes| bytes.checked_add(effect_carry_bytes))
+        .and_then(|bytes| bytes.checked_add(meter_carry_bytes))
         .ok_or_else(|| resource("host.resource.arithmetic"))?
         > caps.maximum_graph_session_plus_plan_bytes
     {
@@ -2588,10 +2708,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_effect_carry(&mut plan, effect_carry.moves, effect_carry_scratch_bytes)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
+    if !meter_carry.moves.is_empty() || !meter_carry.joins.is_empty() {
+        graph::install_observer_carry(&mut plan, meter_carry.moves, meter_carry.joins)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
     debug_assert_eq!(
         carry_program_retained_bytes,
-        carry_program_bytes + strip_carry_bytes + effect_carry_bytes
+        carry_program_bytes + strip_carry_bytes + effect_carry_bytes + meter_carry_bytes
     );
     inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     let mut restarted = strip_carry.restarted;
@@ -2605,6 +2729,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         input_sections: input_sections.into_boxed_slice(),
         strip_stages: strip_stages.into_boxed_slice(),
         effect_lanes: effect_lanes.into_boxed_slice(),
+        meters: meter_rows.into_boxed_slice(),
         restarted: restarted.into_boxed_slice(),
     };
     let report = HostPrepareReport {
@@ -2739,6 +2864,147 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         },
         spectrum_capture,
     ))
+}
+
+/// The meters a preparation builds, as `(strip ID, tap, metric set)` in reader order (#1327): the
+/// caller's selection, else one all-metric meter per track at the request's tap.
+fn requested_meter_owners<'a>(
+    model: &'a SessionModel,
+    live_controls: &HostLiveControlRequest,
+    selected_meters: Option<&'a [HostMeterRequest]>,
+) -> Vec<(&'a str, MeterTap, MeterMetricSet)> {
+    match selected_meters {
+        Some(meters) => meters
+            .iter()
+            .map(|meter| (meter.strip_id.as_ref(), meter.tap, meter.metrics))
+            .collect(),
+        None => model
+            .tracks
+            .iter()
+            .map(|track| {
+                (
+                    track.id.as_str(),
+                    live_controls.meter_tap,
+                    MeterMetricSet::ALL,
+                )
+            })
+            .collect(),
+    }
+}
+
+/// The configuration every meter of a preparation shares, or `None` when it builds no meter.
+fn requested_meter_config(live_controls: &HostLiveControlRequest) -> Option<MeterConfig> {
+    live_controls
+        .meter_period_frames
+        .map(|period_frames| MeterConfig {
+            period_frames,
+            peak_hold_frames: 0,
+            peak_decay_db_per_second: 0.0,
+            queue_capacity: live_controls.meter_queue_depth,
+            reset_generation: 0,
+        })
+}
+
+/// Whether any of `owners` has a meter in `predecessor` with its key and `config` (#1327 D1).
+fn meters_may_carry(
+    predecessor: &[MeterInventoryRow],
+    owners: &[(&str, MeterTap, MeterMetricSet)],
+    config: MeterConfigKey,
+) -> bool {
+    let keys: BTreeSet<(&str, MeterTap, MeterMetricSet)> = predecessor
+        .iter()
+        .filter(|row| row.config == config)
+        .map(|row| (row.id.as_ref(), row.tap, row.metrics))
+        .collect();
+    owners.iter().any(|owner| keys.contains(owner))
+}
+
+/// What a successor's preparation takes from the meters of its predecessor (#1327).
+#[derive(Default)]
+struct MeterCarry {
+    moves: Vec<graph::GraphObserverMove>,
+    joins: Vec<graph::GraphObserverJoin>,
+}
+
+/// Join the successor's meter rows `own` with the predecessor's (#1327 D1, D6).
+///
+/// A meter carries when its strip ID, tap, metric set and configuration equal a predecessor
+/// meter's; two meters of one key pair in reader order. Every other meter is fresh, and a fresh
+/// meter whose configuration equals a carried one's joins the window grid of the first such
+/// carried meter, the one with the lowest successor entry (D6).
+fn resolve_meter_carry(predecessor: &[MeterInventoryRow], own: &[MeterInventoryRow]) -> MeterCarry {
+    let mut available: BTreeMap<(&str, MeterTap, MeterMetricSet), Vec<&MeterInventoryRow>> =
+        BTreeMap::new();
+    for row in predecessor {
+        available
+            .entry((row.id.as_ref(), row.tap, row.metrics))
+            .or_default()
+            .push(row);
+    }
+    // Each key's candidates are taken in reader order: reverse once so `pop` yields the lowest.
+    for rows in available.values_mut() {
+        rows.sort_unstable_by_key(|row| core::cmp::Reverse(row.entry));
+    }
+    let mut carry = MeterCarry::default();
+    let mut donors: BTreeMap<MeterConfigKey, graph::GraphObserverLocation> = BTreeMap::new();
+    let mut fresh: Vec<&MeterInventoryRow> = Vec::new();
+    let mut ordered: Vec<&MeterInventoryRow> = own.iter().collect();
+    ordered.sort_unstable_by_key(|row| row.entry);
+    for row in ordered {
+        let taken = available
+            .get_mut(&(row.id.as_ref(), row.tap, row.metrics))
+            .and_then(Vec::pop);
+        match taken {
+            Some(before) if before.config == row.config => {
+                carry.moves.push(graph::GraphObserverMove {
+                    kind: engine::realtime::ObserverKind::Meter,
+                    successor: row.location,
+                    predecessor: before.location,
+                    successor_entry: row.entry,
+                    predecessor_entry: before.entry,
+                });
+                donors.entry(row.config).or_insert(row.location);
+            }
+            _ => fresh.push(row),
+        }
+    }
+    for row in fresh {
+        if let Some(&donor) = donors.get(&row.config) {
+            carry.joins.push(graph::GraphObserverJoin {
+                fresh: row.location,
+                donor,
+            });
+        }
+    }
+    carry
+}
+
+/// Swap each carried meter's reader between the plans' reader vectors, at the swap block
+/// (#1327 D3): for each record of kind [`engine::realtime::ObserverKind::Meter`], the successor
+/// reader at `successor` and the predecessor reader at `predecessor` exchange their consumers, so
+/// a reader the host already holds follows the observer that renders on, and the retiring
+/// predecessor holds the successor's fresh one. Each reader keeps its own handle, track and tap:
+/// the carried observer takes the successor's handle at the swap, so its snapshots name the
+/// reader that now receives them.
+///
+/// Allocation-free, drops nothing, and may run on the render thread. A record whose index is out
+/// of range of its vector is skipped.
+pub fn pair_carried_meters(
+    successor: &mut [MeterConsumer],
+    predecessor: &mut [MeterConsumer],
+    carries: &[engine::realtime::ObserverCarry],
+) {
+    for carry in carries {
+        if carry.kind != engine::realtime::ObserverKind::Meter {
+            continue;
+        }
+        if let (Some(into), Some(from)) = (
+            successor.get_mut(carry.successor),
+            predecessor.get_mut(carry.predecessor),
+        ) {
+            core::mem::swap(&mut into.consumer, &mut from.consumer);
+        }
+    }
 }
 
 /// Strip `id`'s row of `rows`, which are sorted by strip ID.
@@ -4284,6 +4550,7 @@ mod tests {
             input_sections: Box::default(),
             strip_stages: Box::default(),
             effect_lanes: Box::new([row]),
+            meters: Box::default(),
             restarted: Box::default(),
         }
     }

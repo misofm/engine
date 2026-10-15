@@ -131,8 +131,9 @@ pub use diagnostics::{
 };
 pub use engine::LAUNCH_SAMPLE_RATES;
 pub use engine::realtime::{
-    ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
-    ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
+    ObserverCarry, ObserverKind, ResponseSnapshotAvailability, ResponseSnapshotCapture,
+    ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotSection,
+    ResponseSnapshotSink,
 };
 #[cfg(feature = "control-provider")]
 pub use live_delta::{
@@ -147,9 +148,9 @@ pub use prepare::{
     MAXIMUM_VCA_REACH_PAIRS, MAXIMUM_VCAS_BOUNDED, MonitorBase, PlanStateInventory, PreparedHost,
     SOURCE_STALL_TOLERANCE_MS, SourceInventoryRow, SuccessorBase, check_counts, compile_host_model,
     compile_host_session, count_effects, default_source_ring_frames, effect_producer_position,
-    parse_host_session, prepare_host_runtime, prepare_host_runtime_between_render_calls,
-    prepare_host_runtime_successor, prepare_host_runtime_with_live_controls,
-    prepare_host_runtime_with_live_controls_and_spectrum,
+    pair_carried_meters, parse_host_session, prepare_host_runtime,
+    prepare_host_runtime_between_render_calls, prepare_host_runtime_successor,
+    prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,
     prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
     prepare_host_runtime_with_live_controls_and_spectrum_successor,
@@ -221,6 +222,7 @@ pub use prepare::{
     test_only_prepare_host_runtime_on, test_only_prepare_host_runtime_successor_on,
     test_only_prepare_host_runtime_with_live_controls_on,
     test_only_prepare_host_runtime_with_live_controls_successor_on,
+    test_only_prepare_host_runtime_with_selected_meters_on,
 };
 #[cfg(feature = "test-support")]
 pub use spectrum::{

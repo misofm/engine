@@ -5963,6 +5963,36 @@ impl GraphRuntimeObserver for MeterObserver {
             .banked_seed(first_sample, usize::try_from(frames).ok()?)
     }
 
+    /// A meter's window, cumulative counters and producer are state a swap carries (#1327 D1).
+    fn carry_kind(&self) -> Option<engine::realtime::ObserverKind> {
+        Some(engine::realtime::ObserverKind::Meter)
+    }
+
+    /// The state moved into this binding is named by this binding's handle, as the snapshots it
+    /// publishes show (#1327 D2). Binding handles of meters are meter handles, never zero.
+    fn adopt_binding_handle(&mut self, handle: u64) {
+        if let Some(handle) = core::num::NonZeroU64::new(handle) {
+            self.0.rebind_handle(MeterHandle(handle));
+        }
+    }
+
+    fn window_position(&self) -> Option<graph::ObserverWindow> {
+        let position = self.0.window_position();
+        Some(graph::ObserverWindow {
+            start: position.start,
+            frames: position.frames,
+            sequence: position.sequence,
+        })
+    }
+
+    fn join_window(&mut self, position: graph::ObserverWindow) -> bool {
+        self.0.join_window(builtins::MeterWindowPosition {
+            start: position.start,
+            frames: position.frames,
+            sequence: position.sequence,
+        })
+    }
+
     fn observe(&mut self, block: GraphObservationBlock<'_>) -> Result<(), RenderError> {
         self.0
             .observe(block.left, block.right, block.first_sample)

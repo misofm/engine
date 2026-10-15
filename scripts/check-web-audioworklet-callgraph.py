@@ -180,11 +180,15 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
         # swap decision is in the closure. The plan's own `render` entry is not: the owner calls
         # `render_inner` and counts a failed block itself.
         "_RNvMs6_NtNtCs_6engine8realtime13plan_exchangeNtB5_17RealtimePlanOwner11enter_block": (
-            2,
+            4,
             "`running.prime_ready(...)`, the running plan's readiness hook, asked for a `Primed` "
             "candidate only (#1311), and `carry_from`'s executor hand-over at an adopted swap "
-            "(#1273), both through the plan's `Box<dyn PreparedPlanExecutor>`; the runtime "
-            "render-locked count covers them",
+            "(#1273), both through the plan's `Box<dyn PreparedPlanExecutor>`; and, at the same "
+            "adopted swap, `carry_from`'s attachment hand-over (#1381 D3: "
+            "`HostAttachment::adopt_predecessor(...)` through the plan's `Box<dyn HostAttachment>`, "
+            "which pairs the host's readers with the observers the executors carried, #1327) and "
+            "its read of the successor executor's `observer_carries()` record (#1327 D3); the "
+            "runtime render-locked count covers them",
         ),
         "_RNvMs4_NtNtCs_6engine8realtime4planNtB5_18PreparedRenderPlan12render_inner": (
             2,

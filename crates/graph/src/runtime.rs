@@ -4572,6 +4572,21 @@ fn effect_node_mut(
         crate::runtime::RuntimeUnit::Bank { .. } => None,
     }
 }
+
+/// The observer binding at `at` (#1327 D2): a bounds-checked unit, member and index lookup.
+/// Allocation-free. `None` when `at` names no observer, including a member of a unit that is one
+/// op and no member of a bank.
+fn observer_at_mut(
+    units: &mut [RuntimeUnit],
+    at: crate::GraphObserverLocation,
+) -> Option<&mut GraphNodeObserverBinding> {
+    let op = match units.get_mut(at.unit as usize)? {
+        RuntimeUnit::Op(op) if at.member == crate::GraphObserverLocation::NO_MEMBER => op,
+        RuntimeUnit::Op(_) => return None,
+        RuntimeUnit::Bank { members, .. } => members.get_mut(at.member as usize)?,
+    };
+    op.observers.get_mut(at.index as usize)
+}
 // REALTIME_POLICY_END
 
 impl crate::runtime::Runtime {
@@ -5203,7 +5218,113 @@ impl crate::runtime::Runtime {
         }
         node_refused
     }
+
+    /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,
+    /// to an observer that answers the move's kind (#1327 D2). Checked before anything moves, so
+    /// the carry is all or nothing. Allocation-free.
+    pub(crate) fn can_carry_observers(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphObserverMove],
+    ) -> bool {
+        moves.iter().all(|step| {
+            observer_at_mut(&mut self.units, step.successor)
+                .is_some_and(|into| into.observer.carry_kind() == Some(step.kind))
+                && observer_at_mut(&mut predecessor.units, step.predecessor)
+                    .is_some_and(|from| from.observer.carry_kind() == Some(step.kind))
+        })
+    }
+
+    /// Run the observer section of a carry program at the swap block (#1327 D2, D3, D6).
+    ///
+    /// For each move the two boxed observers exchange places, so the successor's binding holds
+    /// the predecessor's whole state, producer included, and the predecessor's binding holds the
+    /// fresh observer; each then takes the handle of the binding that holds it. Each carried move
+    /// is written to `record` in order. Then every join opens its fresh observer's first window
+    /// where its donor's open window is. Returns how many moves carried, which is how many
+    /// entries of `record` are written. The caller has checked [`Self::can_carry_observers`].
+    /// Bounded by `moves.len() + joins.len()`; allocation-free, and never panics.
+    pub(crate) fn carry_observers(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphObserverMove],
+        joins: &[crate::GraphObserverJoin],
+        record: &mut [engine::realtime::ObserverCarry],
+    ) -> usize {
+        let mut carried = 0;
+        for step in moves {
+            let (Some(into), Some(from)) = (
+                observer_at_mut(&mut self.units, step.successor),
+                observer_at_mut(&mut predecessor.units, step.predecessor),
+            ) else {
+                continue;
+            };
+            let Some(slot) = record.get_mut(carried) else {
+                continue;
+            };
+            core::mem::swap(&mut into.observer, &mut from.observer);
+            into.observer.adopt_binding_handle(into.handle);
+            from.observer.adopt_binding_handle(from.handle);
+            *slot = engine::realtime::ObserverCarry {
+                kind: step.kind,
+                successor: step.successor_entry,
+                predecessor: step.predecessor_entry,
+            };
+            carried += 1;
+        }
+        for join in joins {
+            let Some(position) = observer_at_mut(&mut self.units, join.donor)
+                .and_then(|donor| donor.observer.window_position())
+            else {
+                continue;
+            };
+            if let Some(fresh) = observer_at_mut(&mut self.units, join.fresh) {
+                fresh.observer.join_window(position);
+            }
+        }
+        carried
+    }
     // REALTIME_POLICY_END
+
+    /// Every observer a swap can carry: those that answer
+    /// [`crate::GraphRuntimeObserver::carry_kind`], in program order (#1327 D2). Read off the
+    /// render thread, after bind.
+    pub(crate) fn observer_rows(&mut self) -> Vec<crate::GraphObserverRow> {
+        let mut rows = Vec::new();
+        for (unit, runtime_unit) in self.units.iter().enumerate() {
+            let Ok(unit) = u32::try_from(unit) else {
+                continue;
+            };
+            let mut visit = |member: u32, op: &RuntimeOp| {
+                for (index, binding) in op.observers.iter().enumerate() {
+                    if let (Some(kind), Ok(index)) =
+                        (binding.observer.carry_kind(), u32::try_from(index))
+                    {
+                        rows.push(crate::GraphObserverRow {
+                            kind,
+                            handle: binding.handle,
+                            location: crate::GraphObserverLocation {
+                                unit,
+                                member,
+                                index,
+                            },
+                        });
+                    }
+                }
+            };
+            match runtime_unit {
+                RuntimeUnit::Op(op) => visit(crate::GraphObserverLocation::NO_MEMBER, op),
+                RuntimeUnit::Bank { members, .. } => {
+                    for (member, op) in members.iter().enumerate() {
+                        if let Ok(member) = u32::try_from(member) {
+                            visit(member, op);
+                        }
+                    }
+                }
+            }
+        }
+        rows
+    }
 }
 
 /// A padded group's active mask **is** its membership: the planner emits `Some` members before

@@ -255,3 +255,94 @@ issue: an acknowledged subscribe can be dropped at a swap (an ack that precedes 
 gates include that case: a subscribe admitted and acknowledged before a swap is armed on the
 successor's tap after the swap, and the successor publishes the window the predecessor would have
 published, with zero allocations and frees on the swap block.
+
+## Decision record: #1327a meters (batch 8, worktree b8k)
+
+**Shipped.**
+
+- **Engine, one `plan.rs` edit (root ruling).**
+  - `ObserverKind { Meter, Observation, Spectrum }` and `ObserverCarry { kind, successor, predecessor }`
+    (`usize` entry indices).
+  - `PreparedPlanExecutor::observer_carries()` with an empty default, and
+    `PreparedRenderPlan::observer_carries()`.
+  - `HostAttachment::adopt_predecessor(&mut self, predecessor: &mut dyn HostAttachment, carries:
+    &[ObserverCarry])` with an empty default. `PreparedRenderPlan::carry_from` calls it after the
+    executor hand-over when both plans have an attachment, with the successor executor's record.
+    Both the exchange's swap block and `adopt_predecessor_plan` reach it.
+  - The two new types are re-exported from `crates/engine/src/realtime/mod.rs` (one line). They
+    cannot be named outside `engine` without it.
+- **`scripts/check-web-audioworklet-callgraph.py`.** `enter_block` pins 4 indirect sites, from 2:
+  the attachment hook and the `observer_carries()` read are new, with #1381 D3's reason.
+- **builtins.** `MeterWindowPosition`, `MeterAccumulator::{config, window_position, join_window,
+  rebind_handle}`.
+- **builtins-compiler.** `MeterObserver` answers the four new `GraphRuntimeObserver` methods.
+- **graph.**
+  - `GraphRuntimeObserver::{carry_kind, adopt_binding_handle, window_position, join_window}` and
+    `ObserverWindow`.
+  - `GraphObserverLocation`, `GraphObserverRow`, `GraphObserverMove`, `GraphObserverJoin`,
+    `observer_rows`, `install_observer_carry`, `observer_carry_retained_bytes`.
+  - The executor's observer section is one boxed program (moves, joins, preallocated record), so
+    `GraphExecutor` grows by one pointer.
+  - The swap block checks every move first (all or nothing), then exchanges the boxed observers
+    between the two bindings, then runs the D6 joins.
+- **host-core.**
+  - `MeterInventoryRow` and `MeterConfigKey` in `PlanStateInventory`, `resolve_meter_carry`,
+    `pair_carried_meters`, and the carry program now exists when a meter may carry.
+  - Test seam `test_only_prepare_host_runtime_with_selected_meters_on`.
+  - The meter request and its configuration are built by `requested_meter_owners` and
+    `requested_meter_config`, shared with the carry decision.
+
+**Departures from the text.**
+
+- **Only the reader's consumer is swapped.** `pair_carried_meters` exchanges the `consumer` field,
+  not the whole `MeterConsumer`. Handles are `index + 1`, so an added strip shifts every handle.
+  The swapped-in observer takes its binding's handle (`adopt_binding_handle`), so a snapshot
+  published after the swap names the reader that receives it. A snapshot published before the
+  swap keeps the predecessor's handle.
+- **`pair_carried_observations` is not here.** It is #1327b.
+- **Gate 2 is split.** A meter's window length is the preparation's one `meter_period_frames`, so no
+  caller can change one meter's configuration alone.
+  - Test A changes the length for every meter: nothing carries, the record is empty and each
+    meter's first window opens at the adoption block (sequence 0).
+  - Test B changes one meter's metric set: it alone is missing from the record. By D6 it joins the
+    carried grid, so its first snapshot after the swap is window 1, not a new sequence.
+- **Gate 1's added muted track.** Its meters share the carried boundaries and sequence numbers
+  at every tap. They equal the reference field by field at the post-fader and post-matrix taps
+  only. A pre-fader tap sees the source in the reference from sample 0, while D6 holds the added
+  strip as silent before adoption, so that first window's energy cannot equal the reference's.
+  This is what D6 says (the strip did not exist before adoption). The gate text over-claimed.
+
+**Gates -> tests** (`crates/host-core/tests/successor_swap.rs`, module `meter_carry`):
+
+| Gate | Tests |
+|---|---|
+| 1 | `meters_carry_through_the_predecessors_readers_at_{eight,four}_lanes` |
+| 2 | `a_changed_meter_starts_fresh_and_the_others_carry` |
+| 3 | `paired_readers_follow_the_record_at_{eight,four}_lanes` |
+| 5 | `the_meter_swap_block_allocates_and_frees_nothing` |
+
+- Gate 1 reads A's own consumers.
+- Gate 3 pairs in a test attachment's hook, so the swap block includes the pairing.
+- With the D6 join removed, gates 1 and 3 turn red at the added strip's first snapshot (checked).
+
+**Measured.**
+
+- Web AudioWorklet module: 3,924,130 B shipped, 4,491,023 B named twin.
+- Boot high-water growth: 20,447,232 B, unchanged.
+- Callgraph: the one pin row above.
+
+**Known interim state.** `host-web` test
+`structural_apply::meter_delivery_restarts_on_the_successor_and_never_publishes_a_misshaped_frame`
+is red. The browser's successor meter consumers now sit on fresh observers that the swap hands to
+the retiring plan until #1381b's attachment hook pairs them, so no window folds after a swap.
+#1381b and #1290d replace that test's "restart" expectation with "no restart".
+
+**Open item for root.** `HostAttachment::adopt_predecessor`'s doc in `plan.rs` links
+`[PreparedRenderPlan::carry_from]`, which is `pub(crate)`. `RUSTDOCFLAGS='-D warnings' cargo doc -p
+engine` fails on that link (`rustdoc::private_intra_doc_links`). It needs a one-line doc fix to
+plain backticks in `crates/engine/src/realtime/plan.rs`. That is a second edit under the
+one-attempt rule, so it was not made.
+
+### Known red test until #1381b (batch 11)
+
+`hosts/host-web` `tests::structural_apply::meter_delivery_restarts_on_the_successor_and_never_publishes_a_misshaped_frame` fails after this slice: the browser's successor meter readers sit on observers the swap hands to the retiring plan until #1381b's attachment hook pairs them (the browser rebuild path is test-support only until #1562b). #1381b, in this batch, turns the test from "restart" to "carry"; the batch lands only with it green (root, 2026-10-15). Root accepted the `crates/engine/src/realtime/mod.rs` re-export and a doc-only fix of `plan.rs` (a link to the crate-private `PreparedRenderPlan::carry_from` is plain code).
