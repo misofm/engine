@@ -146,6 +146,20 @@ impl ObservationBindings {
         }
     }
 
+    /// Whether the tap named by its parts is armed: the strip, the effect section (a console slot
+    /// when `console`, else an insert), the section's ID and the tap ID. It compares text and
+    /// allocates nothing, so a caller that holds only borrowed IDs can ask.
+    #[must_use]
+    pub fn is_armed_by_parts(&self, strip: &str, console: bool, effect: &str, tap_id: u32) -> bool {
+        self.bindings.iter().any(|binding| {
+            let key = &binding.key;
+            key.tap_id == tap_id
+                && key.strip.as_str() == strip
+                && key.section.is_console() == console
+                && key.section.id().as_str() == effect
+        })
+    }
+
     fn search(&self, key: &TapKey) -> Result<usize, usize> {
         self.bindings
             .binary_search_by(|binding| binding.key.cmp(key))

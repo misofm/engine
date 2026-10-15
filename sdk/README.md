@@ -270,8 +270,10 @@ batches through the queue, for gesture loops; the core's `backpressure` status i
 never an error. The root entry's `parameter()` helper provides exact decimal/lattice edits for
 agent-facing controls.
 
-Observation subscriptions (`effect(...).observe(...)`) are the one edit that is still a 48-byte
-command record: they resolve with a `CommandReport` and need a positive
+Observation subscriptions (`console(...)` or `insert(...)` then `.observe(...)`) are the one edit that
+is still a command record: it names its tap by stable key (the strip's ID, the console slot's or
+insert's ID, the tap's ID), which the core resolves on the newest committed plan and refuses with a
+typed reason when it has no such tap. They resolve with a `CommandReport` and need a positive
 `liveControls.observationTaps` at boot, passed to `createOfflineEngine` directly or under
 `policy` to `createEngine`. Value edits are `SET_CONTROL` transactions and need no boot word.
 
@@ -315,12 +317,16 @@ writer. `address` is either a generated `ControlAddress` (owner, section, the ro
 lane) or the `address` of a list entry, which names the row by its numeric `control`. A row of an
 insert or console slot depends on the effect it runs, and the SDK reads that from the control list's
 section headers, not from the session it booted: an insert or console slot that is in the list can
-be named by its machine name, and a rebuild that makes an insert run another effect is followed. The
-effect row is checked again against the list when the transaction is sent (a probe of the structure
-epoch, and the list only when it moved): a name follows the header, and a builder typed for an effect
-that insert no longer runs (`insert("comp", "miso.compressor")` after `comp` became a soft clip) is
-refused with `MisoUsageError` and sends nothing. A section the list does not have cannot be named;
-use the list entry's numeric address. `set` checks only that the edit can be encoded. The value's domain, the lane, the owner and whether the
+be named by its machine name. A named row takes its effect from the list when the edit is staged,
+a typed effect builder takes the effect it is typed for, and the SDK sends that effect in field 7
+(`expected-effect`) of the `SET_CONTROL` address. If that insert or slot runs another effect when the core applies the edit
+(`insert("comp", "miso.compressor")` after a rebuild made `comp` a soft clip), the core refuses
+the transaction with `control.effect.changed`, which `submit()` rejects as `MisoControlRefusal`, and
+nothing changes. A named row stays bound to the effect it was resolved for: after a rebuild, call
+`engine.liveControls()` again so that names resolve against the new list. A numeric address names
+no effect unless it carries `expectedEffect`, and without it the edit applies to whatever runs
+there. A section the list does not have cannot be named; use the list entry's numeric address.
+`set` checks only that the edit can be encoded. The value's domain, the lane, the owner and whether the
 row can be set are the core's: an edit of a derived row rejects `control.read_only`, and one of a
 rebuild-only row is committed on the rebuild path, as on the C ABI: the core prepares a replacement
 plan and the engine adopts it at a block boundary.

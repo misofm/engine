@@ -81,10 +81,14 @@ BUFFER_KINDS = [
 # values instead of positional from 1.
 COMMAND_KINDS = [(7, "observeSubscribe"), (8, "observeUnsubscribe")]
 RETIRED_COMMAND_KINDS = set(range(1, 7)) | set(range(9, 18))
+# Reasons 12-14 belonged to the deleted value kinds (#1565A) and are retired, never reallocated;
+# issue #1676 added `observationLimit` (15) after them. The values are explicit for that reason.
 COMMAND_REASONS = [
-    "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
-    "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
+    (0, "none"), (1, "malformed"), (2, "unknownTrack"), (3, "unknownRack"), (4, "unknownEffect"),
+    (5, "unknownParameter"), (6, "domain"), (7, "unsupportedKind"), (8, "backpressure"),
+    (9, "wrongState"), (10, "unknownTap"), (11, "observationUnbound"), (15, "observationLimit"),
 ]
+RETIRED_COMMAND_REASONS = {12, 13, 14}
 RESPONSE_GRIDS = [(1, "linear"), (2, "logarithmic")]
 RESPONSE_CHANNELS = [(1, "left"), (2, "right"), (3, "both")]
 # Decision 12 (#1096): the track targets follow the tap rename; their codes are unchanged.
@@ -257,8 +261,8 @@ POLICY_WORDS = [
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 
 COMMAND_RECORD_FIELDS = [
-    "kind", "rack", "channel", "reserved0", "trackIndex", "effectIndex", "parameterId",
-    "smoothingSamples", "reserved1", "values", "reserved2",
+    "kind", "rack", "stripIdBytes", "effectIdBytes", "tapId", "windowBlocks", "reserved0",
+    "stripId", "effectId",
 ]
 # The applied-revision watermark record (#1381a D5): the C ABI's `miso_engine_v1_watermark`, field
 # for field and in its order (#1314 D6), without a pre-roll counter.
@@ -382,14 +386,6 @@ def check_named(document: dict, group: str, expected: list[tuple[int, str]]) -> 
     require(actual == expected, f"constants.{group} is {actual}, expected {expected}")
 
 
-def check_positional(document: dict, group: str, names: list[str]) -> None:
-    """A vocabulary whose row position stands for its value, contiguous from 0."""
-    rows = document["constants"].get(group)
-    require(isinstance(rows, list), f"constants.{group} is a list")
-    actual = [(row["value"], row["name"]) for row in rows]
-    require(actual == list(enumerate(names)),
-            f"constants.{group} is not the contiguous vocabulary {names}")
-
 
 def validate(document: object) -> None:
     require(isinstance(document, dict), "the document is a JSON object")
@@ -440,8 +436,8 @@ def validate(document: object) -> None:
     require(isinstance(record, dict) and set(record) == {"bytes", "endianness", "fields"},
             "commandRecord keys are exactly bytes/endianness/fields")
     require(record["endianness"] == "little", "the command record is little-endian")
-    require(record["bytes"] == 48, f"the command record is 48 bytes, not {record['bytes']}")
-    check_fields("commandRecord", record["fields"], 48)
+    require(record["bytes"] == 272, f"the command record is 272 bytes, not {record['bytes']}")
+    check_fields("commandRecord", record["fields"], 272)
     require([row["name"] for row in record["fields"]] == COMMAND_RECORD_FIELDS,
             f"commandRecord names exactly {COMMAND_RECORD_FIELDS}")
 
@@ -500,7 +496,11 @@ def validate(document: object) -> None:
     check_named(document, "wireCommandKinds", COMMAND_KINDS)
     require(not RETIRED_COMMAND_KINDS & {row["value"] for row in constants["wireCommandKinds"]},
             "constants.wireCommandKinds reallocates a retired value-command number")
-    check_positional(document, "commandReasons", COMMAND_REASONS)
+    check_named(document, "commandReasons", COMMAND_REASONS)
+    reason_values = [row["value"] for row in constants["commandReasons"]]
+    require(reason_values == [value for value in range(max(reason_values, default=-1) + 1)
+                              if value not in RETIRED_COMMAND_REASONS],
+            "constants.commandReasons is not dense from 0 except the retired 12-14")
     check_named(document, "responseGrids", RESPONSE_GRIDS)
     check_named(document, "responseChannels", RESPONSE_CHANNELS)
     check_named(document, "spectrumTargets", SPECTRUM_TARGETS)
@@ -713,6 +713,11 @@ def self_test() -> int:
         ("a retired rack code is reallocated to console", reallocate_retired_rack),
         ("a retired owner-record rack code returns", retired_owner_rack_returns),
         ("a spectrum target keeps its pre-rename spelling", stale_spectrum_target),
+        # Issue #1676: `observationLimit` is 15, after the retired 12-14.
+        ("observationLimit reallocates a retired reason number",
+         lambda d: d["constants"]["commandReasons"][-1].update(value=12)),
+        ("the reason vocabulary drops observationLimit",
+         lambda d: d["constants"]["commandReasons"].pop()),
     ]
     for name, mutate in mutations:
         broken = copy.deepcopy(sample)

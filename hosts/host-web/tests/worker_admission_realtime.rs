@@ -42,6 +42,7 @@ const FADER_DB: u32 = 5;
 
 fn frame(request: u64, revision: u64, strip: &str, db: f32) -> Vec<u8> {
     let edits = [SessionEdit::SetControl {
+        expected_effect: None,
         address: ControlAddress {
             owner: Owner::Strip(StableId::parse(strip).expect("strip ID")),
             section: Section::Builtins,
@@ -221,6 +222,7 @@ fn owner_edit(kind: u64, high: bool) -> SessionEdit {
         ),
     };
     SessionEdit::SetControl {
+        expected_effect: None,
         address: ControlAddress {
             owner,
             section,

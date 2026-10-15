@@ -5,7 +5,7 @@
  * the taps a subscription holds can all change under a running engine. The SDK maps and reports; the
  * core decides. These evals send the structural frames the Rust codec wrote (`control-support.mjs`)
  * to a real core, on the headless engine and through the browser transport over the same core, and
- * hold what the SDK names -- the strips of a meter frame, the row of a named effect control, the
+ * hold what the SDK names -- the strips of a meter frame, the effect an effect-row edit is held to, the
  * index an observation record carries, the end of a subscription -- to what the core now says.
  */
 
@@ -14,11 +14,12 @@ import { readFileSync } from "node:fs";
 import { before, describe, test } from "node:test";
 
 import { createBrowserLiveControls } from "../src/browser/live-controls.ts";
+import { observationEdit } from "../src/core/live-controls.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { decodeControlReply } from "../src/core/control-frame.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { decodeObservationEnded } from "../src/core/observation-ended.ts";
-import { MisoUsageError } from "../src/core/errors.ts";
+import { MisoControlRefusal } from "../src/core/errors.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { structuralFrame } from "./control-support.mjs";
 import { engineHost, moduleBytes, ramp } from "./support.mjs";
@@ -167,13 +168,37 @@ describe("#1562b-K -- a meter frame names its own strips", () => {
   });
 });
 
-describe("#1562b-K -- a named effect control follows the effect the core now lists", () => {
+describe("#1678 -- the core holds an effect-row edit to the effect it was written for", () => {
   const named = (controls, name, value) => controls.edit.set({
     owner: STRIP("t1"), section: { kind: "inserts", effect: "comp" }, control: name, lane: "both",
   }, value);
+  const refusalOf = async (controls, set) => {
+    const refusal = await controls.submit(set).then(() => undefined, (error) => error);
+    assert.ok(refusal instanceof MisoControlRefusal, "the core refused");
+    return refusal;
+  };
+
+  test("the builders send the effect an edit was written for", async () => {
+    const engine = await boot();
+    try {
+      const controls = engine.liveControls();
+      const insert = controls.edit.track("t1").insert("comp", "miso.compressor").parameter("mix", 0.25);
+      assert.equal(insert.edits[0].address.expectedEffect, "miso.compressor");
+      assert.equal(named(controls, "mix", 0.25).edits[0].address.expectedEffect, "miso.compressor",
+        "a row named by its section carries the effect the section runs");
+      const numeric = controls.edit.set({
+        owner: STRIP("t1"), section: { kind: "inserts", effect: "comp" }, control: 7, lane: "both",
+      }, 0.25);
+      assert.equal("expectedEffect" in numeric.edits[0].address, false, "a bare numeric address names no effect");
+      assert.equal("expectedEffect" in controls.edit.track("t1").faderDb(-3).edits[0].address, false,
+        "a row outside an effect section names none");
+    } finally {
+      engine.dispose();
+    }
+  });
 
   for (const path of ["headless", "browser"]) {
-    test(`${path}: a row named before an insert changed effect lands on the new effect's row`, async () => {
+    test(`${path}: an edit written for the old effect is refused by the core after a rebuild`, async () => {
       const engine = await boot();
       try {
         run(engine, 0, 2);
@@ -192,33 +217,34 @@ describe("#1562b-K -- a named effect control follows the effect the core now lis
         controls.queue.reset(engine.controlRevision());
         run(engine, 2, 4);
         const list = await engine.controls();
-        const clipMix = insertRow(list, "t1", "comp", "mix");
-        assert.equal(clipMix.address.control, 3, "the soft clip's mix row");
+        assert.equal(insertRow(list, "t1", "comp", "mix").address.control, 3, "the soft clip's mix row");
+        const untouched = insertRow(list, "t1", "comp", "mix").value;
+        const revision = engine.controlRevision();
 
-        // Built before the swap, from the old view: the number is the compressor's, and it is sent
-        // as the soft clip's.
-        const stale = named(controls, "mix", 0.5);
-        assert.equal((await controls.submit(stale)).ok, true);
-        assert.equal(insertRow(await engine.controls(), "t1", "comp", "mix").value, 0.5);
-
-        // A row the new effect does not have is refused by the SDK, not sent to another row.
-        await assert.rejects(
-          () => controls.submit(named(controls, "threshold_db", -20)),
-          (error) => error instanceof MisoUsageError && /runs miso\.soft-clip now, which has no control 'threshold_db'/.test(error.message),
-        );
-
-        // An edit typed for the compressor is not sent to the soft clip.
-        const typed = controls.edit.track("t1").insert("comp", "miso.compressor").parameter("mix", 0.75);
-        await assert.rejects(
-          () => controls.submit(typed),
-          (error) => error instanceof MisoUsageError && /runs miso\.soft-clip now, and this edit was built for miso\.compressor/.test(error.message),
-        );
-        assert.equal(insertRow(await engine.controls(), "t1", "comp", "mix").value, 0.5, "nothing was sent");
+        // Built from the old view: row 7 of the compressor. The core refuses it with its own code.
+        for (const stale of [
+          named(controls, "mix", 0.5),
+          named(controls, "threshold_db", -20),
+          controls.edit.track("t1").insert("comp", "miso.compressor").parameter("mix", 0.75),
+        ]) {
+          const refusal = await refusalOf(controls, stale);
+          assert.equal(refusal.code, "control.effect.changed");
+          assert.equal(refusal.editIndex, 0);
+        }
+        assert.equal(insertRow(await engine.controls(), "t1", "comp", "mix").value, untouched, "nothing changed");
+        assert.equal(engine.controlRevision(), revision, "nothing committed");
 
         // The same insert typed for the effect it runs now goes through.
         const typedNow = controls.edit.track("t1").insert("comp", "miso.soft-clip").parameter("mix", 0.75);
         assert.equal((await controls.submit(typedNow)).ok, true);
         assert.equal(insertRow(await engine.controls(), "t1", "comp", "mix").value, 0.75);
+
+        // A numeric address names no effect, so it lands on whatever runs there: as before.
+        const bare = controls.edit.set({
+          owner: STRIP("t1"), section: { kind: "inserts", effect: "comp" }, control: 3, lane: "both",
+        }, 0.5);
+        assert.equal((await controls.submit(bare)).ok, true);
+        assert.equal(insertRow(await engine.controls(), "t1", "comp", "mix").value, 0.5);
       } finally {
         engine.dispose();
       }
@@ -429,16 +455,15 @@ describe("#1562b-K -- a managed observation subscription follows a rebuild", () 
   });
 });
 
-// Batch 12b review, M1. A rebuild's commit moves the control list at once, and the plan that renders
-// keeps its own indices until the block that adopts the replacement. An observation record names a
-// strip by the newest list and an effect by an index of the map, and the core admits it against the
-// newest plan, so a record built in that window can arm another effect's tap and be acked for it.
-// `swap_t3_multi_and_limiter` puts two effects with the same tap (`Gain Reduction`, ID 1) at each
-// other's index: the record for `multi` built from the rendering plan's map names index 0, which is
-// `limiter` in the newest plan.
-describe("batch 12b review M1 -- an observation record waits for the map of its epoch", () => {
+// #1677 (the successor of batch 12b review M1). A rebuild's commit moves the control list at once,
+// and the plan that renders keeps its own positions until the block that adopts the replacement. An
+// observation record names its tap by stable key (the strip, the effect and the tap) and the core
+// resolves it on the newest committed plan, so a record sent in that window arms the tap it names
+// and no client keeps an index space to get wrong. `swap_t3_multi_and_limiter` puts two effects with
+// the same tap (`Gain Reduction`, ID 1) at each other's index: a record that named `multi` by the
+// rendering plan's index 0 would arm `limiter`, which is index 0 in the newest plan.
+describe("#1677 -- an observation record names its tap by stable key", () => {
   const armed = (engine, effectSlotId) => engine.readObservations([tap("t3", "inserts", effectSlotId)])[0].status;
-  const behind = (error) => error.code === "backpressure" && error.diagnosticCode === "sdk.observation.structure_behind";
 
   /** An engine whose rebuild is committed and not yet adopted. */
   async function committedNotAdopted() {
@@ -448,117 +473,133 @@ describe("batch 12b review M1 -- an observation record waits for the map of its 
     return engine;
   }
 
-  test("a subscribe in the window is refused, arms nothing, and arms the right tap once a render adopted the plan", async () => {
-    const engine = await committedNotAdopted();
-    try {
-      await assert.rejects(
-        () => engine.subscribeObservations({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 }),
-        behind,
-        "the headless engine renders only when its caller does: the refusal is typed and retryable",
-      );
-      assert.equal(armed(engine, "multi"), "unarmed");
-      assert.equal(armed(engine, "limiter"), "unarmed", "the other effect's tap is not armed in its place");
-      run(engine, 4, 2);
-      const handle = await engine.subscribeObservations({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 });
-      run(engine, 6, 4);
-      await handle.pump();
-      assert.equal(handle.readLatest()[0].status, "ready");
-      assert.notEqual(armed(engine, "multi"), "unarmed", "multi's own tap is armed");
-      assert.equal(armed(engine, "limiter"), "unarmed", "limiter's tap is not");
-      await handle.close();
-    } finally {
-      engine.dispose();
-    }
-  });
+  /** The same subscriptions through the headless engine and through the browser transport. */
+  const transports = [
+    ["headless", (engine) => engine],
+    ["browser", (engine) => {
+      const host = engineHost(engine);
+      let controls;
+      const owner = new ObservationSubscriptionOwner({
+        observationMap: () => engine.observationMap(),
+        readObservations: (selections) => engine.readObservations(selections),
+        liveControls: async () => (controls ??= await createBrowserLiveControls(host)),
+      });
+      return {
+        subscribeObservations: async (request) => (await owner.subscribe(request)).handle,
+        readObservations: (selections) => engine.readObservations(selections),
+      };
+    }],
+  ];
 
-  test("a close in the window is refused and disarms the right tap after the adoption", async () => {
-    const engine = await boot();
-    try {
-      const handle = await engine.subscribeObservations({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 });
-      run(engine, 0, 4);
-      rebuild(engine, "swap_t3_multi_and_limiter");
-      await assert.rejects(() => handle.close(), behind);
-      assert.notEqual(armed(engine, "multi"), "unarmed", "the refused close left the subscription as it was");
-      run(engine, 4, 2);
-      await handle.close();
-      run(engine, 6, 2);
-      assert.equal(armed(engine, "multi"), "unarmed", "multi is disarmed where it is now");
-      assert.equal(armed(engine, "limiter"), "unarmed");
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("an update in the window is refused and arms the right tap after the adoption", async () => {
-    const engine = await boot();
-    try {
-      const handle = await engine.subscribeObservations({ selections: [tap("t3", "inserts", "limiter")], windowBlocks: 2 });
-      run(engine, 0, 4);
-      rebuild(engine, "swap_t3_multi_and_limiter");
-      await assert.rejects(() => handle.update({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 }), behind);
-      run(engine, 4, 2);
-      await handle.update({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 });
-      run(engine, 6, 4);
-      await handle.pump();
-      assert.equal(handle.readLatest()[0].status, "ready");
-      assert.notEqual(armed(engine, "multi"), "unarmed");
-      assert.equal(armed(engine, "limiter"), "unarmed", "limiter was released where it is now");
-      await handle.close();
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  /** An owner over the engine whose renders run on a clock of their own: a wait renders one block. */
-  function ownerRenderingOnWait(engine, { rendered = true } = {}) {
-    let block = 20;
-    const waits = [];
-    const owner = new ObservationSubscriptionOwner({
-      observationMap: () => engine.observationMap(),
-      readObservations: (selections) => engine.readObservations(selections),
-      liveControls: () => engine.liveControls(),
-      renderWait: {
-        boundMs: 1_000,
-        mark: async () => engine.status().renderedQuanta,
-        next: async () => {
-          waits.push(block);
-          if (rendered) run(engine, block, 1);
-          block += 1;
-          return rendered;
-        },
-      },
+  for (const [transport, open] of transports) {
+    test(`${transport}: a subscribe in the window is accepted and arms the named tap, not its neighbour`, async () => {
+      const engine = await committedNotAdopted();
+      try {
+        const handle = await open(engine).subscribeObservations({
+          selections: [tap("t3", "inserts", "multi")],
+          windowBlocks: 2,
+        });
+        assert.equal(armed(engine, "limiter"), "unarmed", "the other effect's tap is not armed in its place");
+        run(engine, 4, 6);
+        await handle.pump();
+        assert.equal(handle.readLatest()[0].status, "ready");
+        assert.notEqual(armed(engine, "multi"), "unarmed", "multi's own tap is armed");
+        assert.equal(armed(engine, "limiter"), "unarmed", "limiter's tap is not");
+        await handle.close();
+      } finally {
+        engine.dispose();
+      }
     });
-    return { owner, waits };
+
+    test(`${transport}: a close in the window disarms the named tap, not its neighbour`, async () => {
+      const engine = await boot();
+      try {
+        const handle = await open(engine).subscribeObservations({
+          selections: [tap("t3", "inserts", "multi")],
+          windowBlocks: 2,
+        });
+        run(engine, 0, 4);
+        rebuild(engine, "swap_t3_multi_and_limiter");
+        await handle.close();
+        run(engine, 4, 4);
+        assert.equal(armed(engine, "multi"), "unarmed", "multi is disarmed where it is now");
+        assert.equal(armed(engine, "limiter"), "unarmed");
+      } finally {
+        engine.dispose();
+      }
+    });
+
+    test(`${transport}: an update in the window moves the arm to the named tap`, async () => {
+      const engine = await boot();
+      try {
+        const handle = await open(engine).subscribeObservations({
+          selections: [tap("t3", "inserts", "limiter")],
+          windowBlocks: 2,
+        });
+        run(engine, 0, 4);
+        rebuild(engine, "swap_t3_multi_and_limiter");
+        await handle.update({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 });
+        run(engine, 4, 6);
+        await handle.pump();
+        assert.equal(handle.readLatest()[0].status, "ready");
+        assert.notEqual(armed(engine, "multi"), "unarmed");
+        assert.equal(armed(engine, "limiter"), "unarmed", "limiter was released where it is now");
+        await handle.close();
+      } finally {
+        engine.dispose();
+      }
+    });
   }
 
-  test("an engine that renders on its own clock waits for a render and sends the record of the adopted plan", async () => {
-    const engine = await committedNotAdopted();
-    const { owner, waits } = ownerRenderingOnWait(engine);
+  test("a key the plan does not have is refused with its typed reason, and nothing changes", async () => {
+    const engine = await boot();
     try {
-      const { handle } = await owner.subscribe({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 });
-      assert.ok(waits.length >= 1, "it waited for a render");
-      assert.notEqual(armed(engine, "multi"), "unarmed", "the tap of multi is armed");
-      assert.equal(armed(engine, "limiter"), "unarmed", "the tap of limiter is not");
-      await handle.close();
-      run(engine, 30, 2);
-      assert.equal(armed(engine, "multi"), "unarmed");
+      run(engine, 0, 4);
+      const controls = engine.liveControls();
+      const edits = controls.edit.track("t3");
+      const known = edits.insert("multi", "miso.multiband-compressor").observe("Gain Reduction", true, 2);
+      const refusals = [
+        ["unknownEffect", edits.insert("no-such-insert", "miso.compressor").observe("Gain Reduction", true, 2)],
+        ["unknownTrack", controls.edit.track("no-such-strip").insert("multi", "miso.multiband-compressor")
+          .observe("Gain Reduction", true, 2)],
+        ["unknownTap", observationEdit(true, { stripId: "t3", rack: "inserts", effectId: "multi", tapId: 99 }, 2)],
+        ["unknownRack", { ...known, rack: 0 }],
+      ];
+      for (const [reasonName, bad] of refusals) {
+        // The valid record rides in front of the refused one: the batch is one transaction.
+        const report = await controls.submit(known, bad);
+        assert.equal(report.ok, false, reasonName);
+        assert.equal(report.reasonName, reasonName);
+        assert.equal(report.rejectedIndex, 1, `${reasonName} names the record that broke the rule`);
+        assert.equal(report.admitted, 0);
+        run(engine, 4, 3);
+        assert.equal(armed(engine, "multi"), "unarmed", `${reasonName}: the valid record in front was not armed`);
+        assert.equal(armed(engine, "limiter"), "unarmed");
+      }
+      // The same key, alone, is admitted: the refusals changed no state.
+      assert.equal((await controls.submit(known)).ok, true);
     } finally {
-      owner.invalidate(true);
       engine.dispose();
     }
   });
 
-  test("a map that does not catch up within the wait is refused, and nothing was sent", async () => {
-    const engine = await committedNotAdopted();
-    const { owner, waits } = ownerRenderingOnWait(engine, { rendered: false });
+  test("a key is resolved on the newest plan: a tap the replacement no longer has is refused", async () => {
+    // `swap_comp_for_soft_clip` makes the insert `comp` of `t1` a soft clipper in the replacement.
+    // Between its commit and its adoption the rendering plan still runs the compressor, whose map
+    // lists the tap; the core refuses the key against the newest plan.
+    const engine = await boot();
     try {
-      await assert.rejects(() => owner.subscribe({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 }), behind);
-      assert.equal(waits.length, 1);
-      run(engine, 20, 4);
-      assert.equal(armed(engine, "multi"), "unarmed");
-      assert.equal(armed(engine, "limiter"), "unarmed");
+      run(engine, 0, 4);
+      rebuild(engine, "swap_comp_for_soft_clip");
+      assert.equal(engine.observationMap().bindings.some((b) => b.trackId === "t1" && b.effectSlotId === "comp"), true);
+      const controls = engine.liveControls();
+      const report = await controls.submit(
+        controls.edit.track("t1").insert("comp", "miso.compressor").observe("Gain Reduction", true, 2),
+      );
+      assert.equal(report.ok, false);
+      assert.equal(report.reasonName, "unknownTap");
+      assert.equal(report.admitted, 0);
     } finally {
-      owner.invalidate(true);
       engine.dispose();
     }
   });

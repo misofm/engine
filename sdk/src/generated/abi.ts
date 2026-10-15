@@ -1402,7 +1402,7 @@ export const ABI_LAYOUT = deepFreeze(
     }
   },
   "commandRecord": {
-    "bytes": 48,
+    "bytes": 272,
     "endianness": "little",
     "fields": [
       {
@@ -1416,49 +1416,39 @@ export const ABI_LAYOUT = deepFreeze(
         "type": "u8"
       },
       {
-        "name": "channel",
+        "name": "stripIdBytes",
         "offset": 2,
         "type": "u8"
       },
       {
-        "name": "reserved0",
+        "name": "effectIdBytes",
         "offset": 3,
         "type": "u8"
       },
       {
-        "name": "trackIndex",
+        "name": "tapId",
         "offset": 4,
         "type": "u32"
       },
       {
-        "name": "effectIndex",
+        "name": "windowBlocks",
         "offset": 8,
         "type": "u32"
       },
       {
-        "name": "parameterId",
+        "name": "reserved0",
         "offset": 12,
         "type": "u32"
       },
       {
-        "name": "smoothingSamples",
+        "name": "stripId",
         "offset": 16,
-        "type": "u32"
+        "type": "u8[128]"
       },
       {
-        "name": "reserved1",
-        "offset": 20,
-        "type": "u32"
-      },
-      {
-        "name": "values",
-        "offset": 24,
-        "type": "f32[4]"
-      },
-      {
-        "name": "reserved2",
-        "offset": 40,
-        "type": "u8[8]"
+        "name": "effectId",
+        "offset": 144,
+        "type": "u8[128]"
       }
     ]
   },
@@ -1635,6 +1625,10 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 11,
         "name": "observationUnbound"
+      },
+      {
+        "value": 15,
+        "name": "observationLimit"
       }
     ],
     "racks": [

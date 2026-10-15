@@ -35,6 +35,12 @@ pub enum ControlError {
     /// the session's `control_smoothing`). The row can carry one length, so the later edit is
     /// refused rather than silently deciding for both.
     RampConflict,
+    /// `control.effect.changed`: an edit of an effect section's row named the native effect it was
+    /// written for (`SET_CONTROL`'s expected effect), and the insert or console slot it addresses
+    /// now runs another effect (a rebuild replaced it), or a `cid` one. The numeric row of an
+    /// effect's control depends on the effect, so the edit is refused before anything is written,
+    /// never applied to the row with the same number of another effect.
+    EffectChanged,
 }
 
 impl ControlError {
@@ -51,6 +57,7 @@ impl ControlError {
             Self::RampFixed => "control.ramp.fixed",
             Self::Monitor => "control.monitor",
             Self::RampConflict => "control.ramp.conflict",
+            Self::EffectChanged => "control.effect.changed",
         }
     }
 }

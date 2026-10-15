@@ -263,7 +263,8 @@ fn browser_identity_fixture_retained_rows_stay_within_their_budgets() {
 /// The browser's graph row charges the allocation the plan makes for itself and not the session's
 /// (#1502 m1, #1312 m3, #1399). The browser copies host-core's graph row unchanged, and the graph
 /// compiler's row is its incremental row plus the session bytes the facade does not pass it, so the
-/// row less the incremental row is the plan's own: its revision gate. The session's
+/// row less the incremental row is the plan's own: its revision gate and its jump-length cell
+/// (#1639 D1), whose reader holds the session's count and does not own it. The session's
 /// `live_values_superseded` count is one allocation every plan of the session shares, so the
 /// browser charges it once, in its bridge rows (the exact-decomposition tests in `src/tests.rs`
 /// add it there), and the plan's row must not charge it again. A row that leaves the gate out would
@@ -277,7 +278,10 @@ fn the_graph_row_charges_the_plans_gate_and_not_the_sessions_superseded_count() 
     let report = *host.resources();
     assert_eq!(
         report.graph_session_plus_plan_bytes - report.graph_incremental_plan_bytes,
-        engine::realtime::plan_revision_gate_retained_bytes(),
-        "the browser's graph row: the graph's own bytes and the plan's revision gate"
+        // The jump-length cell, #1639 D1.
+        engine::realtime::plan_revision_gate_retained_bytes()
+            + host_core::jump_length_retained_bytes(),
+        "the browser's graph row: the graph's own bytes, the plan's revision gate and its \
+         jump-length cell"
     );
 }

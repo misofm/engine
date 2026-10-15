@@ -65,9 +65,10 @@ admission path remains that could write a live record onto an automated lane.
 - **D1. Cells.** Host-core preparation compiles one cell per automated fader lane (target rack
   `builtins`, parameter 5; `both` gives two cells) with #1637's builder:
   - `a(n)` is the floored input arrival of the strip's `PostFader` node (#1285 D2);
-  - grid period 64, grid ramp 64, completion `End`; jump-length key `Word(Fader)` (#1637 D2):
-    each jump reads the `fader` word of #1639's plan cell for its block, so the program stores
-    no jump length; no `no_restart`;
+  - grid period 64, grid ramp 64, completion `End`; jump length `JumpLength::Block` (#1637 D2,
+    as shipped): the program stores no jump length; at render the caller resolves the fader
+    row's jump length for the block with `LiveRamps::for_row` from #1639's plan cell and passes
+    it to `CellEvents::new` as one `u32` (#1637's decision record); no `no_restart`;
   - **the offsets cell** (layout 4 of README finding F16). Preparation builds
     #1649's offsets cell for every automated fader lane, in every session, with or without
     VCAs: a #1312 latest-target cell of three words, the lane's offset sum `S` as one `f64` (two
@@ -164,6 +165,10 @@ admission path remains that could write a live record onto an automated lane.
 - `crates/capi/src/runtime/tests.rs`, `hosts/host-web/src/tests.rs` (one new test, and the two
   oracles of D6 at `:13358-13371` and `:13697-13715`)
 - `crates/host-core/tests/vca.rs` (`reference_db`, `:268-279`, only)
+- `crates/automation/src/events.rs` (one method that seeds a `CellState`'s target, and its test,
+  only if D2's event state needs a target at preparation: `CellState::new` leaves it empty and no
+  setter exists; #1648's batch 13b amendment authorizes the same method, and whichever lands first
+  adds it)
 - `crates/engine/src/realtime/latest_cell.rs` (a three-word cell form and its loom case, only if
   #1312's module has none)
 - `crates/session/src/vca.rs` (D6), `crates/session/src/lib.rs` (the `pub use` at `:31` only),
@@ -271,8 +276,9 @@ admission path remains that could write a live record onto an automated lane.
 - #1645 *Validate builtin automation targets against their rows at preparation*.
 - #1637 *Compile stored automation into per-cell events in node time*.
 - #1638 *Apply timed operations inside a block on the strip fader stage*.
-- #1639 *Hold the automation jump lengths in a plan cell*: the `fader` word the jump-length key
-  reads.
+- #1639 *Hold the automation jump lengths in a plan cell*: the lengths from which a caller resolves
+  the fader row's jump length with `LiveRamps::for_row` (#1637 as shipped, departure 1 of its
+  decision record; no program holds a jump-length key).
 - *Session controlSmoothing: configurable ramp lengths for live mute, fader and pan changes*
   (#1054): the fader jump length.
 - *Keep every node's latency from dropping during playback* (#1285): `a(n)`.

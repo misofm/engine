@@ -2694,13 +2694,13 @@ mod tests {
             point(9, ParameterChannel::Left, 0, 0.5),
             // Outside the domain.
             point(4, ParameterChannel::Both, 0, 2.0),
-            // Not a point.
+            // A point whose end sample differs from its start sample.
             PreparedAutomationSpan {
-                kind: AutomationSpanKind::Linear,
+                kind: AutomationSpanKind::Point,
                 channel: ParameterChannel::Both,
                 parameter_index: 4,
                 start_sample: 0,
-                end_sample: 0,
+                end_sample: 1,
                 start_value: 0.5,
                 end_value: 0.5,
             },

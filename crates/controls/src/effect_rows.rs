@@ -146,18 +146,12 @@ fn class_of(reason: Option<PreparedReason>) -> ControlClass {
 
 /// The class of one effect parameter's row. A row is `Live` only when the plan keeps a cell that
 /// render reads each block, and that is a `Block`-rate parameter (`effect_contract::live`): a
-/// `None`-rate parameter is prepared (its descriptor states why), and a `Sample`-rate one has no
-/// render-path delivery yet, so a change to it rebuilds (`EFFECT_CONTRACT_V1.md`, "V1 runtime
-/// automation"). A value is automatable only if it is live (decision 14 rule 4).
+/// `None`-rate parameter is prepared (its descriptor states why). The sample rate is retired
+/// (#1636). A value is automatable only if it is live (decision 14 rule 4).
 fn parameter_class(parameter: &ParameterDescriptor) -> ControlClass {
     match parameter.automation_rate {
         AutomationRate::Block => ControlClass::Live,
         AutomationRate::None => class_of(parameter.prepared_reason),
-        AutomationRate::Sample => ControlClass::RebuildOnly {
-            reason: RebuildReason::Correctness,
-            reopen: "sample-accurate render-path delivery, a later protocol capability \
-                     (EFFECT_CONTRACT_V1.md, V1 runtime automation)",
-        },
     }
 }
 
@@ -438,6 +432,34 @@ fn identity_of<'a>(
     }
 }
 
+/// Hold an effect-section edit to the effect it was written for: `Ok` when the insert or console
+/// slot `address` names runs the native effect `expected` in `model`, or when `address` names no
+/// instance at all (the validator that follows answers [`ControlError::AddressUnknown`] with its own
+/// code).
+///
+/// # Errors
+///
+/// [`ControlError::EffectChanged`] when the instance runs another native effect or a `cid` one, and
+/// when `address` is not in an effect section: an expected effect on a row that has none cannot be
+/// honoured, so it is refused rather than ignored.
+pub fn check_expected_effect(
+    model: &SessionModel,
+    address: &ControlAddress,
+    expected: &StableId,
+) -> Result<(), ControlError> {
+    let Owner::Strip(strip) = &address.owner else {
+        return Err(ControlError::EffectChanged);
+    };
+    if matches!(address.section, Section::Own | Section::Builtins) {
+        return Err(ControlError::EffectChanged);
+    }
+    match identity_of(model, strip, &address.section) {
+        None => Ok(()),
+        Some(EffectIdentity::Native { effect_id }) if effect_id == expected => Ok(()),
+        Some(_) => Err(ControlError::EffectChanged),
+    }
+}
+
 /// The declared observation tap `tap_id` of the effect at `section` of strip `id`, if the strip,
 /// the instance and the tap exist and the tap is [`ObservationCost::Resident`] (a computed tap has
 /// no subscription path). `None` for a `cid` effect, an unknown effect and a section that is not
@@ -597,62 +619,4 @@ fn write_parameter(
             .cmp(&right.parameter_id)
             .then(left.channel.cmp(&right.channel))
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use effect_contract::{ParameterId, SmoothingRule};
-
-    use super::*;
-
-    const fn double(automation_rate: AutomationRate) -> ParameterDescriptor {
-        ParameterDescriptor {
-            id: ParameterId(1),
-            display_name: "Gain",
-            name: "gain_db",
-            display_unit: "dB",
-            unit: ParameterUnit::Db,
-            domain: ParameterDomain::Continuous,
-            minimum: Some(-24.0),
-            maximum: Some(24.0),
-            default_value: 0.0,
-            mapping: ParameterMapping::Linear,
-            automation_rate,
-            channel_policy: ParameterChannelPolicy::Shared,
-            smoothing: SmoothingRule::Linear,
-            smoothing_samples: 8,
-            readable: true,
-            automatable: true,
-            enum_choices: &[],
-            lattice: ParameterLattice::arithmetic(0.1, 1),
-            prepared_reason: None,
-        }
-    }
-
-    static BLOCK: ParameterDescriptor = double(AutomationRate::Block);
-    static SAMPLE: ParameterDescriptor = double(AutomationRate::Sample);
-
-    /// Automation is allowed only on a live row, and a row is live only when render reads a cell for
-    /// it each block (`Block` rate); no launch effect declares a `Sample`-rate parameter, so the
-    /// case is held by a double. It replaces the deleted effect-compiler test
-    /// `an_automatable_sample_rate_target_is_refused`.
-    ///
-    /// Red if a `Sample`-rate parameter's row is `Live` again: it would advertise an automation
-    /// target that no render path delivers.
-    #[test]
-    fn a_sample_rate_parameter_is_rebuild_only_and_not_automatable() {
-        let block = parameter_descriptor(&BLOCK);
-        assert_eq!(block.class, ControlClass::Live);
-        assert!(block.automatable());
-
-        let sample = parameter_descriptor(&SAMPLE);
-        assert!(matches!(
-            sample.class,
-            ControlClass::RebuildOnly {
-                reason: RebuildReason::Correctness,
-                ..
-            }
-        ));
-        assert!(!sample.automatable());
-    }
 }

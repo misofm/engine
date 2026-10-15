@@ -114,7 +114,9 @@ it yet; #1645's order check (`value_at`) and #1646 and #1647 are its first users
   - The cursor advances one segment per boundary crossed and never moves backwards except at a seek
     or a reposition.
   - Bound: at most `⌈q/G⌉ + 1` grid events, `⌈q/64⌉ + 1` jumps (#1626's spacing rule) and one
-    seek: `2⌈q/64⌉ + 3` per cell and block.
+    seek: `2⌈q/64⌉ + 3` per cell and block, plus one for a `no_restart` cell (a jump deferred from
+    the previous block); `CellProgram::max_events(q)` returns it. Amended at attempt 2, which has
+    the proof (decision record, "Attempt 2", finding 1).
 - **D5. Builder.** `ProgramBuilder` takes neutral cell descriptions (segments and D2's parameters;
   no session type) and reports the exact bytes it will allocate (`bytes(&cells) -> u64`) before it
   allocates them with fallible reservations. It refuses, typed, a description that breaks D2's
@@ -184,7 +186,8 @@ it yet; #1645's order check (`value_at`) and #1646 and #1647 are its first users
   offset and at offset 0; a `Word` key's jump ramps over the word passed for the block, so two
   blocks with different words give two jump lengths.
 3. **Bound.** An adversarial table (a discontinuity every 64 samples, every segment moving) and a
-   seek in the block give at most `2⌈q/64⌉ + 3` events per block at `q` in {64, 100, 128, 1024}.
+   seek in the block give at most `2⌈q/64⌉ + 3` events per block at `q` in {64, 100, 128, 1024},
+   plus one for a `no_restart` cell (D4, amended at attempt 2).
 4. **Quantum and seek invariance.** The same table rendered through mappings of quantum 128 and
    quantum 100, and with one seek to the same timeline sample landing at two different render
    samples, gives the same sequence of `(node time, kind, ramp, value bits)` events from the first
@@ -247,3 +250,172 @@ Checked against `12d4a4f9d`.
   so nothing else changes.
 - **OQ1 = C** adds no evaluator work: the caller adds the offset after `value_at` (#1650 D6,
   #1658).
+
+## Decision record: #1637 (batch 13b)
+
+**Shipped.** `crates/automation` (package, lib and directory `automation`; `#![no_std]` + `alloc`
+for the builder; depends on `math` only): `value_at`, `ProgramBuilder` (neutral `CellDescription`,
+typed `BuildError`, `bytes()` report), `CellProgram`, `CellState`, `NodeSpan`, `CellEvents`, and
+`automation::corpus` (six scalar G5 cases and their pins). The G5 block is appended after the
+builtins tail in `tools/wasm-gate-corpus`, scalar (not width dependent); `g5_native_corpus.rs`
+checks its layout and `g6_full_corpus_ftz.rs` counts it as width independent. Realtime regions
+mark `value_at` (`evaluate.rs`) and the event generator (`events.rs`).
+
+**Departures from the filed text (each a code-truth or correctness call).**
+
+1. **The jump-length key.** The amendment replaces `JumpWord` with `LiveRampRow` resolved by
+   `controls::LiveRamps::for_row`. `effect-contract` is `std` and pulls `engine` and `lane`
+   (the AVX2-pinned crate), and `controls` pulls `session`; either would break D1 ("`math` alone").
+   `JumpLength` is `Block | Fixed(u32)`: a `Block` cell takes one resolved `u32` per block
+   (`CellEvents::new(..., jump)`). The caller resolves the cell's row through `for_row` (which owns
+   the polarity doubling and every other row rule), so no row's rule is written here and the program
+   still stores no copy of `J`. `jump_lengths: [u32; 3]` became that single `jump: u32`.
+2. **A grid or jump ramp never aims past the next discontinuity.** D4 says a grid event aims at
+   `value_at(completion(τ, L))`. Taken literally, a grid event up to 63 samples before an off-grid
+   step aims at the post-step value, the step's own `Jump` then has the same target and change-only
+   drops it, so the step lands on the grid's ramp and not at its exact offset (gate 2 cannot hold).
+   The aim time is `min(completion, d - 1)` for the first discontinuity `d` in `(τ, completion]`;
+   the `Jump` at `d` retargets from there. The same clamp applies to a `Jump` and a ramped seek
+   landing. Test `jump_at_off_grid_discontinuity_at_its_exact_offset` is red without it.
+3. **The discontinuity list is built and stored.** The cursor indexes a per-cell list of
+   discontinuity times (value just before the time differs from the value at it, bit for bit; built
+   by the builder, charged in `bytes`), not the raw segment boundaries. Scanning raw boundaries for
+   "the next discontinuity" is unbounded when continuous segments are dense (one-sample segments);
+   the list makes every lookup `O(1)` and the reposition one binary search.
+4. **`no_restart` also holds grid events.** A jump off the grid starts a ramp that a later grid
+   event (not completing before it) would restart; for a `no_restart` cell every grid event inside
+   a ramp in flight is `held`. The jump itself is deferred to `completion + 1` (`End`) or
+   `completion` (`After`), carried in `CellState` across blocks.
+5. **Held bookkeeping.** `CellState::held` means "a held value is outstanding at the stage": the
+   next retarget or held event emits even when its value equals the target, once, so the stage's
+   remembered value is refreshed (otherwise a curve that leaves the target and returns inside a
+   long ramp leaves a stale value). `CellState` is 32 bytes (limit 48). The spec's "last seek
+   boundary" field has no user and is not stored.
+6. **`NodeSpan::new` is fallible** (`StepOutsideBlock` when the step offset is not below `frames`),
+   so a seek cannot be silently dropped in render. A fresh `CellState` has no target, so its first
+   retarget always emits; `reposition(&program, t)` places the cursor at the first discontinuity at
+   or after `t`, keeps the target, and drops the in-flight ramp, any deferred jump and an outstanding
+   held event (batch 13b review: the earlier "cursor only" wording left out the held event), so a
+   retarget to the value the cell already targets then emits nothing.
+7. **Builder limits** beyond D5: `start < end`, every time below `2^53` (the evaluator's exactness
+   bound), finite values, at least one segment per cell. `value_at` on an empty table returns `0.0`
+   and never panics.
+8. **Realtime floors.** `scripts/check-realtime-policy.sh` is gone; `marked_files_floor` and
+   `marked_regions_floor` in `tools/realtime-policy/src/policy.rs` were 28 and 129 but the tree
+   held 29 and 141 before this change (the floors had fallen behind). They are now 31 and 143, the
+   tree's counts with this crate's two files and two regions.
+
+**Observation for successors.** A seek `Set` in `Exact` mode clears the in-flight ramp in the
+state, so the stage must treat `Set` as an immediate assignment. `CellState::hold_until` takes the completion node time in the cell's own `Completion`
+convention; on a `no_restart` cell it must not be earlier than the ramp in flight (the caller
+does not restart a busy lane), or a deferred jump lands late (attempt-3 review, MINOR).
+A seek landing in `Ramp` mode restarts a busy `no_restart` lane, as D4's `Set` rule says, with no
+`no_restart` exception. #1646 and #1647 use `no_restart = false`. The first issue that automates
+a `no_restart` target (delay time) decides whether a seek landing waits for the lane.
+
+**Gates and tests.**
+
+| Gate | Test (`cargo test --locked -p automation`) | Result |
+|---|---|---|
+| 1 Evaluation | `evaluate`: `hold_rule_before_inside_after_and_between`, `step_end_value_applies_only_from_its_end`, `linear_at_zero_half_and_one`, `exponential_is_scalar_f64_through_math_pow` (bit equal to the `f64` formula, differs from the `f32` one), `empty_table_is_zero` | pass |
+| 2 Event rules | `events`: `grid_events_sit_on_node_time_multiples_of_64` (quantum 100, start -37), `jump_at_off_grid_discontinuity_at_its_exact_offset`, `end_and_after_completions`, `change_only`, `held_inside_a_reported_ramp_and_the_grid_resumes`, `a_held_value_back_at_the_target_still_emits_once`, `no_restart_jump_waits_for_the_ramp_to_end`, `set_at_a_seek_step_for_exact_and_a_ramped_jump_for_ramp` (offsets 0 and 37), `set_always_emits`, `a_block_keyed_jump_ramps_over_the_blocks_length`, `a_fixed_key_ignores_the_blocks_length`, `a_step_outside_the_block_is_refused` | pass |
+| 3 Bound | `events_per_block_are_bounded` (a discontinuity every 64 samples, every segment moving, seeks mid-block, q in {64, 100, 128, 1024}, at most `2⌈q/64⌉ + 3`) | pass |
+| 4 Invariance | `quantum_invariance` (128 vs 100, both modes), `seek_invariance` (one timeline sample reached at three render positions after three histories, both modes) | pass |
+| 5 No allocation | `allocation::ten_thousand_blocks_allocate_nothing` (0 allocations, 0 frees, seeks every 97th block); `build::bytes_report_equals_the_live_bytes` (`requested - released == bytes()`, 3 reservations, 0 reallocations); `build::refusals_are_typed`, `build::discontinuities_are_the_steps_of_the_hold_rule` | pass |
+| 6 G5 | `cargo test --release -p wasm-gates --test g5_native_corpus --features math/lane` (7 tests incl. `g5_delegated_cases_use_the_owning_crates_pins` for the block, `g5_native_digests_match_pins`); wasm leg `scripts/run-wasm-gates.sh --without-v8-spill --without-native`; `automation::corpus` self-check `corpus::cases_produce_events_and_match_their_pins` | native pass; wasm leg pass (`wasm gates: ok`, no mismatch) |
+| 7 Policy | `./target/release/realtime_policy` (143 regions in 31 files), `scripts/check-workspace-policy.sh` | ok |
+
+**AArch64** cannot run on this host. The pins are scalar `f64` through `math::pow` (no fused
+operations, no lane type), generated on x86-64, and must match on the `aarch64-release` job.
+
+**Measured.** `Segment` 32 bytes, `CellState` 32 bytes (assertion at most 48). The six corpus cases
+yield 20+ events each (case 5, `no_restart`, 42).
+
+### Attempt 2
+
+The adversarial verdict on attempt 1 (`63741fb3c`) failed it on two MEDIUM, two LOW and one INFO
+finding. Each is fixed below with the test that is red without the fix.
+
+1. **MEDIUM: the bound `2⌈q/64⌉ + 3` was false for a `no_restart` cell.** A jump deferred from
+   the previous block (its ramp, or a ramp the caller reported through `hold_until`, ran past the
+   discontinuity) fires in the run before a seek step, on top of that run's own discontinuities.
+   A tighter rule is not possible without changing what the cell renders: the deferred jump and
+   the next discontinuity are both real value changes (in the verifier's case value 2 holds for
+   three samples, 131 to 133, before the step to 3 at 134). Proof of the new bound
+   (`CellProgram::max_events` documents it): a block is at most two runs, `a + b = q - 1`; each run
+   holds at most `⌈run/64⌉` grid points (`G >= 64`) and `⌈run/64⌉` discontinuities (spacing at
+   least 64), and `⌈a/64⌉ + ⌈b/64⌉ <= ⌈q/64⌉ + 1`; the seek adds one; only a `no_restart` cell
+   defers, at most one deferral is outstanding (later covered discontinuities fold into it), a seek
+   clears it, so it adds one jump to the run before the step only. The bound is `2⌈q/64⌉ + 3`, and
+   `2⌈q/64⌉ + 4` for a `no_restart` cell; the verifier's case reaches `+ 4` exactly, so it is tight.
+   The per-cell capacity follows it: new `CellProgram::max_events(frames)`. The verifier's fuzzer,
+   with its bound read from `max_events`, over 173,438 spaced tables (seeks, caller ramps, forward
+   node-time moves) finds no excess, and its quantum-invariance and jump-oracle checks still pass.
+   - **The spacing dependency.** The 64-sample spacing is a session contract: #1626 D3 refuses
+     closer discontinuities (`automation.discontinuity_spacing`, `crates/session/src/validate.rs`,
+     `docs/SESSION_SCHEMA_V1.md`) with the same hold-rule definition the builder uses. So the
+     builder refuses them again, typed: `BuildError::Spacing { cell, time }` (the later
+     discontinuity of the first close pair), with `automation::DISCONTINUITY_SPACING = 64`. A valid
+     session never meets it; a caller that bypasses the session cannot break the bound silently.
+     The crate docs state the bound and the rule. Corpus case 2 had discontinuities at 3190 and
+     3250 (60 apart), a table the session refuses; its step now starts at 3180, so **case 2's G5
+     pin moved** (regenerated with `print_pins`). With attempt 1's `events.rs` and the new table the
+     regenerated digest is the same, so the move comes from the table alone; no event-rule change
+     below moves any of the six pins.
+   - Tests: `events::events_per_block_are_bounded` now asserts the stated bound for each cell
+     (`max_events(q)` equals `2⌈q/64⌉ + 3 + no_restart`, every block at most that, every offset in
+     the block), over a plain cell and a `no_restart` cell with caller ramps, seeks and
+     q in {1, 63, 64, 100, 128, 1024}; `events::a_carried_deferral_reaches_the_no_restart_bound` is
+     the verifier's case (six events, equal to `max_events(64)`), red against attempt 1's `+ 3`;
+     `build::closer_discontinuities_are_refused` (163 refused, 164 built, a step's own end counts),
+     red on attempt 1 (no refusal).
+2. **MEDIUM: an offset outside the block.** A deferral below the span start (the caller moved node
+   time forward with no seek step) gave a negative distance that `as u32` wrapped. A deferred jump
+   is a jump already owed, so it is now **due at the run's first sample**, aimed at the curve
+   there (`target_at`), not dropped: dropping it would leave the old target until the next grid
+   event. Inside a run a deferral is always ahead, so only that case changes. The distance is now
+   converted with `u32::try_from`. Discontinuities behind the run are still dropped (the next grid
+   event retargets along the curve), now with one `partition_point` over the rest of the list
+   (`skip_behind`) instead of a linear loop. Test
+   `events::a_deferral_behind_a_forward_span_is_due_at_its_start` (one `Jump` at offset 0 to 3.0),
+   red on attempt 1 (`offset: 4294966927`).
+3. **LOW: a second owner of the G5 pins.** `tests/corpus.rs` no longer compares digests;
+   `g5_native_digests_match_pins` is the single owner. The non-vacuity check stays as
+   `corpus::cases_produce_events`.
+4. **LOW: clamp plus change only dropped a real jump.** When `value(d - 1) == value(d)` but the
+   left limit at `d` differs, the grid ramp aimed at `d - 1` has the jump's target, and change only
+   dropped the jump while that ramp was still short of it. `jump_event` now emits whenever the ramp
+   in flight completes after `completion(d, J)`, even with an unchanged value. Test
+   `events::a_jump_to_the_in_flight_target_still_lands_at_its_time` (the verifier's table: a `Jump`
+   at 32 to 32.0, ramp 0), red on attempt 1.
+5. **LOW: render-reachable code outside the regions.** The `events.rs` region now begins at
+   `NodeSpan` and covers `NodeSpan::new`, `CellState`, `to_cursor` and `completion_of`; a new
+   region in `program.rs` covers the `CellProgram` accessors, `max_events`, `Program::{len,
+   is_empty, cell}` and `range`. The tool reports 144 regions in 32 files; the floors in
+   `tools/realtime-policy/src/policy.rs` are 32 and 144 (departure 8's 31 and 143 are superseded).
+6. **INFO.** The `tools/wasm-gate-corpus` header names the automation block at the end of the
+   layout. `quantum_invariance` runs once: its blocks hold no seek, so the mode loop added nothing.
+
+### Attempt 3
+
+The adversarial verdict on attempt 2 (`40514b1fc`) failed it on one MEDIUM finding.
+
+1. **MEDIUM: a deferral fired inside a caller ramp reported after it.** `next_in_run` checked the
+   lane (`next < free_at()`) only for a fresh discontinuity. A deferral fired at its stored time
+   even when the caller had called `hold_until(later)` between blocks; with a jump ramp of 0,
+   `commit` then set the lane idle, so the next discontinuity also fired inside the caller's ramp.
+   That broke D4: a `no_restart` cell whose ramp is in flight takes the jump at the ramp's last
+   sample plus one. Fix: a deferral that is due (`is_deferred`) meets the same lane check as a
+   discontinuity; while the lane is busy it is deferred again to `free_at()` (the cursor advances
+   only for a discontinuity). The check also covers a deferral behind a forward span, which is due
+   at the run's first sample (attempt 2, finding 2). A deferral only moves forward, so the loop
+   ends. The bound is unchanged: at most one deferral is outstanding.
+   - Test `events::a_deferral_waits_for_a_caller_ramp_reported_after_it` (the verifier's case on
+     `deferral_table`): `hold_until(130)`, block at 64, `hold_until(200)`, block at 128 gives only
+     held grid events (attempt 2 gave a `Jump` at 131 and at 134), and the next block gives one
+     `Jump` at 201 to 3.0. Its second half carries the deferral behind a forward span to 500 with
+     the caller's ramp to 600: no jump before 601, one `Jump` at 601 to 3.0. Each half is red on
+     attempt 2's `events.rs` and green after the fix.
+   - `events::events_per_block_are_bounded` again proves the tables stress the bound: for
+     `q >= 64` the most events in one block exceeds `⌈q/64⌉`.
+   - D4's bound bullet and gate 3 now state the `no_restart` term.

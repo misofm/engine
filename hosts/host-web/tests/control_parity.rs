@@ -980,6 +980,7 @@ impl CAbi {
     /// The `SET_CONTROL` edits of one scripted edit.
     fn edits(edit: Edit, ramp: Option<u32>) -> Vec<SessionEdit> {
         let set = |address: ControlAddress, value: f32| SessionEdit::SetControl {
+            expected_effect: None,
             address,
             value,
             ramp_samples: ramp,
@@ -1168,6 +1169,7 @@ impl CAbi {
             Edit::FaderLaneRamps { strip } => [(Lanes::Left, 64), (Lanes::Right, 480)]
                 .into_iter()
                 .map(|(lanes, length)| SessionEdit::SetControl {
+                    expected_effect: None,
                     address: Self::strip_address(strip, FADER_DB, lanes),
                     value: -5.0,
                     ramp_samples: Some(length),
@@ -1303,9 +1305,13 @@ impl CAbi {
 
     /// One scripted edit as one transaction at the committed revision, and the reply frame's bytes.
     fn edit(&mut self, edit: Edit, ramp: Option<u32>) -> (Verdict, Vec<u8>) {
-        let edits = Self::edits(edit, ramp);
+        self.transaction(&Self::edits(edit, ramp))
+    }
+
+    /// `edits` as one transaction at the committed revision, and the reply frame's bytes.
+    fn transaction(&mut self, edits: &[SessionEdit]) -> (Verdict, Vec<u8>) {
         let response = self.send(
-            CommandPayload::SessionTransactionApply(&edits),
+            CommandPayload::SessionTransactionApply(edits),
             ExpectedRevision::Exact(SessionRevision(self.revision)),
         );
         let verdict = decode_verdict(&response);
@@ -1839,6 +1845,134 @@ fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
                 status_watermark(&browser),
                 c_abi.watermark(),
                 "{rate} Hz: block {block}"
+            );
+        }
+    }
+}
+
+/// A reply frame with its request ID (header bytes 24 to 32) zeroed: each host numbers its own
+/// requests, and nothing else of a reply depends on the count.
+fn without_request_id(mut reply: Vec<u8>) -> Vec<u8> {
+    reply[24..32].fill(0);
+    reply
+}
+
+/// Blocks `range` on both hosts, equal bit for bit.
+fn same_blocks(browser: &mut Rig, c_abi: &mut CAbi, range: std::ops::Range<u64>, label: &str) {
+    for block in range {
+        let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(b, c, "block {block} {label}");
+    }
+}
+
+/// #1678: an effect-row edit that names the native effect it was written for is refused by the
+/// core, with `control.effect.changed`, once a rebuild has replaced that effect, and nothing
+/// changes; the same edit without the expected effect, and one that names the effect that runs now,
+/// commit live as before. Both hosts answer alike: one verdict, the same reply bytes, the same
+/// control rows and document bytes before and after the refusal, the same bits of every block.
+///
+/// Test value: red if either host skips the check (the bypass row 0 exists on every effect, so
+/// the stale edit would land on the new effect's bypass and commit), if a host reports a different
+/// code, or if the refused edit leaves the document or the rendered blocks different from the C ABI.
+#[test]
+fn a_stale_effect_row_edit_is_refused_alike_on_both_hosts() {
+    let replace = SessionEdit::SetEffectIdentity {
+        track_id: id(SHAPER.track.id),
+        rack_name: session::RackName::Inserts,
+        effect_id: id(SHAPER.id),
+        identity: session::EffectIdentity::Native {
+            effect_id: id(CLIP.native),
+        },
+    };
+    let bypass = |expected: Option<&str>, bypassed: bool| {
+        let edit = SessionEdit::set_control(
+            address(
+                Owner::Strip(id(SHAPER.track.id)),
+                Section::Inserts(id(SHAPER.id)),
+                controls::BYPASS_CONTROL,
+                ParameterChannel::Both,
+            ),
+            f32::from(u8::from(bypassed)),
+            None,
+        );
+        match expected {
+            Some(effect) => edit.with_expected_effect(id(effect)),
+            None => edit,
+        }
+    };
+    for rate in RATES {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..3, "before the rebuild");
+        // The rebuild replaces the transient shaper with the soft clip; the swap is block 3.
+        let (b, b_reply) = browser.transaction_reply(std::slice::from_ref(&replace));
+        let (c, c_reply) = c_abi.transaction(std::slice::from_ref(&replace));
+        assert_eq!(b, c, "{rate} Hz: one verdict for the rebuild");
+        assert_eq!(b_reply, c_reply);
+        assert!(matches!(
+            c,
+            Verdict::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        same_blocks(&mut browser, &mut c_abi, 3..6, "after the swap");
+        let before_b = dump(|payload, expected| browser.command(payload, expected));
+        let before_c = dump(|payload, expected| c_abi.send(payload, expected));
+        assert_eq!(before_b, before_c);
+        let revision = browser.revision;
+        // Written for the shaper, the insert runs the soft clip now.
+        let stale = [bypass(Some(SHAPER.native), true)];
+        let (b, b_reply) = browser.transaction_reply(&stale);
+        let (c, c_reply) = c_abi.transaction(&stale);
+        assert_eq!(b, c, "{rate} Hz: one verdict for the stale edit");
+        assert_eq!(
+            without_request_id(b_reply),
+            without_request_id(c_reply),
+            "{rate} Hz: one reply for the stale edit"
+        );
+        assert!(
+            matches!(&c, Verdict::Refused { codes, revision: got }
+                if codes.iter().any(|code| code == "control.effect.changed") && *got == revision),
+            "{rate} Hz: refused as an effect change at the committed revision, got {c:?}"
+        );
+        // Nothing changed: the control rows and the document are the bytes they were.
+        assert_eq!(
+            dump(|payload, expected| browser.command(payload, expected)),
+            before_b
+        );
+        assert_eq!(
+            dump(|payload, expected| c_abi.send(payload, expected)),
+            before_c
+        );
+        same_blocks(&mut browser, &mut c_abi, 6..8, "after the refusal");
+        // Without an expected effect the same edit lands on whatever runs there: as before.
+        for (round, (expected, bypassed)) in [(None, true), (Some(CLIP.native), false)]
+            .into_iter()
+            .enumerate()
+        {
+            let edits = [bypass(expected, bypassed)];
+            let (b, b_reply) = browser.transaction_reply(&edits);
+            let (c, c_reply) = c_abi.transaction(&edits);
+            assert_eq!(b, c, "{rate} Hz: one verdict for {expected:?}");
+            assert_eq!(without_request_id(b_reply), without_request_id(c_reply));
+            assert!(
+                matches!(
+                    &c,
+                    Verdict::Applied {
+                        path: EditPath::Live,
+                        ..
+                    }
+                ),
+                "{rate} Hz: {expected:?} commits live, got {c:?}"
+            );
+            let first = 8 + 2 * round as u64;
+            same_blocks(
+                &mut browser,
+                &mut c_abi,
+                first..first + 2,
+                "after a live edit",
             );
         }
     }

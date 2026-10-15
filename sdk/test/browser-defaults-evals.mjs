@@ -488,12 +488,15 @@ test("a browser engine's live controls address a submix by its strip index", asy
     assert.ok(ids[0].includes("bus"), "the transaction names the bus by its stable ID");
     assert.equal((await controls.submit(controls.edit.submix("aaa").mute(true))).ok, true);
     assert.ok(new TextDecoder().decode(frames[4]).includes("aaa"));
-    // Observation records address a strip by index: the track, then the submixes in the host's order.
-    const record = controls.edit.submix("bus").effect("inserts", 0, "miso.compressor")
+    // Observation records name their tap by stable key: the strip's ID, the insert's ID and the tap.
+    const record = controls.edit.submix("bus").insert("comp", "miso.compressor")
       .observe("Gain Reduction", true, 1);
-    assert.equal(record.trackIndex, 2, "bus is SessionMap.submixes[1], strip index 1 + 1");
-    assert.equal(controls.edit.submix("aaa").effect("inserts", 0, "miso.compressor")
-      .observe("Gain Reduction", true, 1).trackIndex, 1, "aaa is SessionMap.submixes[0], strip index 1 + 0");
+    assert.deepEqual(
+      { stripId: record.stripId, effectId: record.effectId, rack: record.rack, windowBlocks: record.windowBlocks },
+      { stripId: "bus", effectId: "comp", rack: 1, windowBlocks: 1 },
+    );
+    assert.equal(controls.edit.submix("aaa").insert("comp", "miso.compressor")
+      .observe("Gain Reduction", true, 1).stripId, "aaa", "no position of any plan is in the record");
   } finally {
     await engine.close();
   }

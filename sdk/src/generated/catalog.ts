@@ -16,7 +16,7 @@ export const CATALOG = deepFreeze(
 {
   "schema": "miso.web.parameter-metadata.v1",
   "abiVersion": 65536,
-  "commandRecordBytes": 48,
+  "commandRecordBytes": 272,
   "maximumCommandRecords": 256,
   "commandKinds": [
     {
@@ -80,6 +80,10 @@ export const CATALOG = deepFreeze(
     {
       "value": 11,
       "name": "observationUnbound"
+    },
+    {
+      "value": 15,
+      "name": "observationLimit"
     }
   ],
   "observationVocabularies": {

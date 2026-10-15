@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
+import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
@@ -151,7 +152,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
       assert.deepEqual(first.readLatest().map((row) => row.status), ["pending", "pending"]);
       const liveControls = engine.liveControls();
       await assert.rejects(
-        () => liveControls.submit(liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
+        () => liveControls.submit(liveControls.edit.track("t").insert("comp", "miso.compressor")
           .observe("Gain Reduction", false, 2)),
         /conflict/,
       );
@@ -237,7 +238,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     });
     try {
       const liveControls = engine.liveControls();
-      const edit = (on, window) => liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
+      const edit = (on, window) => liveControls.edit.track("t").insert("comp", "miso.compressor")
         .observe("Gain Reduction", on, window);
       assert.equal((await liveControls.submit(edit(true, 4))).ok, true);
       feed(engine, 0); engine.render();
@@ -489,6 +490,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
     let rendered = 0n;
     let slotFull = false;
     let nextMalformed = false;
+    let nextRefusal = null;
     let sticky = false;
     const ack = (result, reason, admitted) => ({
       tag: "miso.ack.v1", requestId: 1, result, reason, rejectedIndex: 0, admitted,
@@ -505,6 +507,11 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       async command(request) {
         log.commands.push({ at: rendered, kinds: request.commands.map((command) => command.kind) });
         if (nextMalformed) { nextMalformed = false; return ack(1, 1, 0); }
+        if (nextRefusal !== null) {
+          const { result, reason } = nextRefusal;
+          nextRefusal = null;
+          return ack(result, reason, 0);
+        }
         if (slotFull || sticky) return ack(6, 8, 0);
         slotFull = true;
         return ack(0, 0, request.commands.length);
@@ -539,6 +546,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       log,
       render() { rendered += 1n; slotFull = false; },
       refuseNextAsMalformed() { nextMalformed = true; },
+      refuseNextWith(result, reason) { nextRefusal = { result, reason }; },
       // Another writer takes the slot again after every render, so no render ever frees it.
       keepRefusing() { sticky = true; },
     };
@@ -678,6 +686,32 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       });
       assert.ok(Date.now() - started < 500, "a malformed refusal does not wait for a render");
       assert.equal(rig.log.commands.length, 2, "the subscribe and the one refused close, no resend");
+    } finally {
+      await engine.close();
+    }
+  });
+
+  // #1676: the cap on armed taps is its own reason, never backpressure. Red if the SDK treats it as
+  // flow control (it would wait for a render and send the same subscription again) or if the
+  // thrown error does not carry the cap as its diagnostic code.
+  test("a subscription past the cap is refused with observationLimit at once, never resent, and the error names it", async () => {
+    const rig = slotHost();
+    const engine = await browserEngine(rig, { requestDeadlineMs: 2_000 });
+    try {
+      const reason = ABI_LAYOUT.constants.commandReasons.find((row) => row.name === "observationLimit");
+      assert.equal(reason?.value, 15, "observationLimit follows the retired 12-14");
+      rig.refuseNextWith(7, reason.value);
+      const started = Date.now();
+      setTimeout(() => rig.render(), 30);
+      await assert.rejects(() => engine.subscribeObservations(request), (error) => {
+        assert.ok(error instanceof MisoEngineError);
+        assert.equal(error.code, "unsupported");
+        assert.equal(error.diagnosticCode, "observationLimit");
+        assert.match(error.message, /unsubscribe another tap/);
+        return true;
+      });
+      assert.ok(Date.now() - started < 500, "the cap refusal does not wait for a render");
+      assert.equal(rig.log.commands.length, 1, "the one refused subscription, no resend");
     } finally {
       await engine.close();
     }

@@ -42,7 +42,7 @@ import type {
   ControlListTransport,
   ControlState,
 } from "../core/control-list.ts";
-import { EngineLiveControls, effectRowResolver, sessionDescribesStrips } from "../core/live-controls.ts";
+import { EngineLiveControls, sessionDescribesStrips } from "../core/live-controls.ts";
 import { decodeObservationEnded } from "../core/observation-ended.ts";
 import { SessionBuilder } from "../core/session.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
@@ -294,7 +294,6 @@ export class OfflineEngine {
       queue: this.controlTransactions(),
       observe: (edits) => this.submitCommands(encodeLaneEdits(edits), edits.length),
       // The boundary caches the order by structure epoch: a probe each call, the list when it moved.
-      stripOrder: () => this.#boundary.stripOrder(),
       order: this.#boundary.stripOrder(),
     },
       (edits, managed) => this.#observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
@@ -327,8 +326,6 @@ export class OfflineEngine {
           requestIds,
           limits,
           readRevision: () => this.#boundary.controlRevision(),
-          // An edit that names an effect's row is checked against the core's list before it is sent.
-          prepare: effectRowResolver(() => this.#boundary.stripOrder()),
         },
       );
     }

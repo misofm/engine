@@ -48,6 +48,7 @@ fn edit_json(edit: &SessionEdit) -> String {
         address,
         value,
         ramp_samples,
+        expected_effect,
     } = edit
     else {
         panic!("the fixture holds SET_CONTROL edits only");
@@ -73,9 +74,13 @@ fn edit_json(edit: &SessionEdit) -> String {
         }
     };
     let ramp = ramp_samples.map_or_else(|| "null".to_owned(), |ramp| ramp.to_string());
+    let expected = expected_effect.as_ref().map_or_else(
+        || "null".to_owned(),
+        |effect| format!("\"{}\"", effect.as_str()),
+    );
     format!(
         "{{ \"owner\": {owner}, \"section\": {section}, \"control\": {}, \"lane\": \"{}\", \
-         \"valueBits\": \"{:08x}\", \"rampSamples\": {ramp} }}",
+         \"valueBits\": \"{:08x}\", \"rampSamples\": {ramp}, \"expectedEffect\": {expected} }}",
         address.control,
         lane_name(address.lane),
         value.to_bits(),
@@ -91,6 +96,7 @@ fn set_control(
     ramp_samples: Option<u32>,
 ) -> SessionEdit {
     SessionEdit::SetControl {
+        expected_effect: None,
         address: ControlAddress {
             owner,
             section,
@@ -199,6 +205,32 @@ fn commands() -> Vec<Command> {
         )
     })
     .collect();
+    // #1678: an insert and a console edit that name the native effect they were written for; the
+    // identifiers' lengths cover the padding residues of the seventh field.
+    let expected_effect: Vec<SessionEdit> = [
+        ("insert", "miso.parametric-eq"),
+        ("console", "miso.compressor"),
+        ("insert", "miso.true-peak-limiter"),
+        ("console", "miso.transient-shaper"),
+    ]
+    .into_iter()
+    .map(|(rack, effect)| {
+        let section = if rack == "insert" {
+            Section::Inserts(id("eq"))
+        } else {
+            Section::Console(id("desk-eq"))
+        };
+        set_control(
+            Owner::Strip(id("vocal")),
+            section,
+            4,
+            ParameterChannel::Both,
+            -2.0,
+            None,
+        )
+        .with_expected_effect(id(effect))
+    })
+    .collect();
     vec![
         Command {
             name: "one_edit_no_ramp",
@@ -252,6 +284,12 @@ fn commands() -> Vec<Command> {
             edits: odd_values,
         },
         Command {
+            name: "expected_effect",
+            request_id: 101,
+            expected_revision: 13,
+            edits: expected_effect,
+        },
+        Command {
             name: "every_shape_lane_and_ramp",
             request_id: 100,
             expected_revision: 12,
@@ -288,16 +326,19 @@ fn command_frame(command: &Command) -> Vec<u8> {
                     address: got_address,
                     value: got_value,
                     ramp_samples: got_ramp,
+                    expected_effect: got_effect,
                 },
                 SessionEdit::SetControl {
                     address: want_address,
                     value: want_value,
                     ramp_samples: want_ramp,
+                    expected_effect: want_effect,
                 },
             ) => {
                 assert_eq!(got_address, want_address);
                 assert_eq!(got_value.to_bits(), want_value.to_bits());
                 assert_eq!(got_ramp, want_ramp);
+                assert_eq!(got_effect, want_effect);
             }
             _ => panic!("a SET_CONTROL edit decodes as itself"),
         }

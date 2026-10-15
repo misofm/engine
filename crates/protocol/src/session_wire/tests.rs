@@ -1789,6 +1789,7 @@ fn control_edit(
     ramp_samples: Option<u32>,
 ) -> SessionEdit {
     SessionEdit::SetControl {
+        expected_effect: None,
         address: controls::ControlAddress {
             owner,
             section,
@@ -1935,13 +1936,137 @@ fn set_control_refuses_an_address_that_breaks_its_rules() {
     }
 }
 
-/// #1566 D4: a stored automation target is the `SET_CONTROL` address message, minus the session
-/// owner. No session row is automatable, so a session address has no spelling as a target: the
-/// decoder refuses it and the encoder refuses to write one, while the same address is valid for a
-/// `SET_CONTROL` write.
+/// #1678: the expected effect of a `SET_CONTROL` edit is the seventh field of its address message,
+/// accepted only in an `inserts` or `console` section and only as a stable ID; the encoder refuses
+/// the same shapes. (A stored automation target refuses the field in every section:
+/// `an_automation_target_carries_no_expected_effect`.)
 ///
-/// Red if the target codec accepts what the control list accepts (a session-owned row) or stops
-/// being the one address codec.
+/// Red if an expected effect on a builtin row is skipped at decode (the edit would be acknowledged
+/// with a check that never ran), if a malformed ID reaches the core, or if the encoder writes a
+/// field the decoder refuses.
+#[test]
+fn set_control_expected_effect_is_held_to_its_section() {
+    use schema::set_control_address as a;
+    let field =
+        |spec: FieldSpec, value: &[u8]| (spec.id, spec.wire.raw(), spec.mandatory, value.to_vec());
+    let parse = |section: u8, slot: Option<&str>, expected: Option<&str>| {
+        let mut fields = vec![
+            field(a::OWNER_KIND, &[2]),
+            field(a::OWNER_ID, b"vocal"),
+            field(a::SECTION, &[section]),
+        ];
+        if let Some(slot) = slot {
+            fields.push(field(a::SLOT_ID, slot.as_bytes()));
+        }
+        fields.push(field(a::CONTROL, &5_u32.to_le_bytes()));
+        fields.push(field(a::LANE, &[1]));
+        if let Some(expected) = expected {
+            fields.push(field(a::EXPECTED_EFFECT, expected.as_bytes()));
+        }
+        parse_control_address(Message::nested(&raw_message(fields)).expect("nested"))
+    };
+    for section in [2, 5] {
+        let (address, expected) = parse(section, Some("eq"), Some("miso.compressor"))
+            .expect("an effect section carries an expected effect");
+        assert_eq!(expected, Some(id("miso.compressor")));
+        assert!(matches!(
+            address.section,
+            controls::Section::Inserts(_) | controls::Section::Console(_)
+        ));
+        assert_eq!(parse(section, Some("eq"), None).map(|(_, e)| e), Ok(None));
+        assert_eq!(
+            parse(section, Some("eq"), Some("Not A Stable Id")),
+            Err(DecodeError::InvalidField)
+        );
+        assert_eq!(
+            parse(section, Some("eq"), Some("")),
+            Err(DecodeError::InvalidField)
+        );
+    }
+    assert!(parse(4, None, None).is_ok() && parse(6, None, None).is_ok());
+    assert_eq!(
+        parse(4, None, Some("miso.compressor")),
+        Err(DecodeError::InvalidField),
+        "builtins run no effect"
+    );
+    assert_eq!(
+        parse(6, None, Some("miso.compressor")),
+        Err(DecodeError::InvalidField),
+        "a strip's own rows run no effect"
+    );
+    // The encoder refuses what the decoder refuses.
+    let builtins = controls::ControlAddress {
+        owner: controls::Owner::Strip(id("vocal")),
+        section: controls::Section::Builtins,
+        control: 5,
+        lane: ParameterChannel::Left,
+    };
+    let edits = [SessionEdit::set_control(builtins, 0.0, None).with_expected_effect(id("a"))];
+    let transaction = SessionTransactionFrame {
+        request_id: RequestId::new(1).expect("request ID"),
+        expected_revision: ExpectedRevision::Exact(crate::SessionRevision(0)),
+        edits: &edits,
+    };
+    assert_eq!(
+        ProtocolCodec::default().encoded_session_transaction_len(&transaction),
+        Err(EncodeError::InvalidField)
+    );
+}
+
+/// #1566 D4: a stored automation target is the control list's address message with `control` and
+/// `lane` present, minus the session owner. No session row is automatable, so a session address has
+/// no spelling as a target: the decoder refuses it and the encoder refuses to write one, while the
+/// same address is valid for a `SET_CONTROL` write.
+///
+/// Red if the target codec accepts what the control list accepts (a session-owned row).
+/// A stored automation target holds no expected effect: the `SET_CONTROL` address's seventh field is
+/// refused in a target in every section, as `SET_CONTROL` refuses it outside an effect section
+/// (`InvalidField` in the optional flag form, `InvalidTlv` in the mandatory one).
+///
+/// Red if the target decoder skips the field as an unknown optional field, so a target written
+/// with an effect check that never runs would be stored as if it had none.
+#[test]
+fn an_automation_target_carries_no_expected_effect() {
+    use schema::set_control_address as a;
+    let field =
+        |spec: FieldSpec, value: &[u8]| (spec.id, spec.wire.raw(), spec.mandatory, value.to_vec());
+    let target = |section: u8, slot: Option<&str>, expected: Option<bool>| {
+        let mut fields = vec![
+            field(a::OWNER_KIND, &[2]),
+            field(a::OWNER_ID, b"vocal"),
+            field(a::SECTION, &[section]),
+        ];
+        if let Some(slot) = slot {
+            fields.push(field(a::SLOT_ID, slot.as_bytes()));
+        }
+        fields.push(field(a::CONTROL, &5_u32.to_le_bytes()));
+        fields.push(field(a::LANE, &[1]));
+        if let Some(mandatory) = expected {
+            fields.push((
+                a::EXPECTED_EFFECT.id,
+                a::EXPECTED_EFFECT.wire.raw(),
+                mandatory,
+                b"miso.compressor".to_vec(),
+            ));
+        }
+        let bytes = raw_message(fields);
+        parse_automation_target(Message::nested(&bytes).expect("nested"))
+    };
+    for (section, slot) in [(2, Some("eq")), (5, Some("eq")), (4, None), (6, None)] {
+        assert!(target(section, slot, None).is_ok(), "section {section}");
+        assert_eq!(
+            target(section, slot, Some(false)),
+            Err(DecodeError::InvalidField),
+            "section {section}, optional form"
+        );
+        assert_eq!(
+            target(section, slot, Some(true)),
+            Err(DecodeError::InvalidTlv),
+            "section {section}, mandatory form"
+        );
+    }
+}
+
 #[test]
 fn an_automation_target_cannot_be_owned_by_the_session() {
     use schema::control_address as a;

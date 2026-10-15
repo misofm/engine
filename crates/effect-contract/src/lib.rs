@@ -412,13 +412,18 @@ macro_rules! scalar_enum { ($name:ident {$($v:ident=$n:expr),+$(,)?})=>{#[repr(u
 scalar_enum!(ParameterUnit {Db=1,Hz=2,Milliseconds=3,Samples=4,Linear=5,Ratio=6});
 scalar_enum!(ParameterDomain {Continuous=1,Boolean=2,Enumeration=3});
 scalar_enum!(ParameterMapping {Linear=1,Logarithmic=2,Exponential=3,Stepped=4});
-scalar_enum!(AutomationRate {Sample=1,Block=2,None=3});
+// Value 1 (`Sample`) is retired (#1636): no effect declares it and the engine delivers no
+// sample-rate automation. `from_raw(1)` is `None`; the value is never reallocated.
+scalar_enum!(AutomationRate {Block=2,None=3});
 scalar_enum!(ParameterChannel {Left=1,Right=2,Both=3});
 scalar_enum!(EffectQuality {Draft=1,Normal=2,High=3});
 pub type Quality = EffectQuality;
 scalar_enum!(LinkMode {DualMono=1,Maximum=2,Average=3});
 scalar_enum!(ResetKind {FullToDefaults=1,DiscontinuityKeepParameters=2});
-scalar_enum!(AutomationSpanKind {Point=1,Step=2,Linear=3,Exponential=4});
+// Values 2 (`Step`), 3 (`Linear`) and 4 (`Exponential`) are retired (#1636): no producer stages
+// them and no effect accepts them. `from_raw(2..=4)` is `None`; the values are never reallocated
+// and never renumbered.
+scalar_enum!(AutomationSpanKind {Point=1});
 pub type AutomationKind = AutomationSpanKind;
 scalar_enum!(ParameterChannelPolicy {Shared=1,PerLane=2});
 scalar_enum!(StepSize {Xs=1,Sm=2,Md=3,Lg=4,Xl=5});
@@ -476,7 +481,7 @@ pub fn parameter_automation_smoothing_valid(
 ) -> bool {
     let automation_valid = match automation_rate {
         AutomationRate::None => !automatable && smoothing == SmoothingRule::None,
-        AutomationRate::Sample | AutomationRate::Block => automatable,
+        AutomationRate::Block => automatable,
     };
     let smoothing_valid = match smoothing {
         SmoothingRule::None => smoothing_samples == 0,
@@ -1825,13 +1830,6 @@ pub fn valid_runtime_span(
             s.start_sample == s.end_sample
                 && canonical_bits(s.start_value) == canonical_bits(s.end_value)
         }
-        AutomationSpanKind::Step | AutomationSpanKind::Linear => s.end_sample > s.start_sample,
-        AutomationSpanKind::Exponential => {
-            s.end_sample > s.start_sample
-                && s.start_value != 0.0
-                && s.end_value != 0.0
-                && s.start_value.is_sign_positive() == s.end_value.is_sign_positive()
-        }
     }
 }
 
@@ -1877,7 +1875,7 @@ pub fn validate_automation_block(
         let parameter = &metadata.descriptor.parameters[span.parameter_index as usize];
         if parameter.automation_rate == AutomationRate::None
             || (parameter.automation_rate == AutomationRate::Block
-                && (span.kind != AutomationSpanKind::Point || span.start_sample != first_sample))
+                && span.start_sample != first_sample)
         {
             return Err(ProcessBlockError::Automation);
         }
@@ -2016,32 +2014,6 @@ impl ParameterSmoother {
     }
 }
 
-/// Evaluate a prepared linear or exponential segment at one absolute sample.
-pub fn automation_segment_value(span: PreparedAutomationSpan, sample: u64) -> Option<f32> {
-    if sample < span.start_sample
-        || sample > span.end_sample
-        || span.end_sample <= span.start_sample
-    {
-        return None;
-    }
-    if sample == span.end_sample {
-        return Some(span.end_value);
-    }
-    let x = (sample - span.start_sample) as f32 / (span.end_sample - span.start_sample) as f32;
-    match span.kind {
-        AutomationSpanKind::Linear => {
-            Some(span.start_value + x * (span.end_value - span.start_value))
-        }
-        AutomationSpanKind::Exponential
-            if span.start_value != 0.0
-                && span.end_value != 0.0
-                && span.start_value.is_sign_positive() == span.end_value.is_sign_positive() =>
-        {
-            Some(span.start_value * math::powf(span.end_value / span.start_value, x))
-        }
-        _ => None,
-    }
-}
 pub struct StatePayloadOutput<'a> {
     pub common: &'a mut [u8],
     pub left: &'a mut [u8],
@@ -3239,15 +3211,30 @@ mod bank_width_tests {
 
 #[cfg(test)]
 mod automation_smoothing_validity_tests {
-    use super::{AutomationRate, SmoothingRule, parameter_automation_smoothing_valid};
+    use super::{
+        AutomationRate, AutomationSpanKind, SmoothingRule, parameter_automation_smoothing_valid,
+    };
+
+    /// Red if a retired automation value parses again (#1636): a descriptor could declare a rate
+    /// the engine never delivers, or a producer could stage a span no effect accepts.
+    #[test]
+    fn retired_automation_values_are_refused() {
+        assert_eq!(AutomationRate::from_raw(1), None);
+        assert_eq!(AutomationRate::from_raw(2), Some(AutomationRate::Block));
+        assert_eq!(AutomationRate::from_raw(3), Some(AutomationRate::None));
+        assert_eq!(AutomationRate::from_raw(4), None);
+        assert_eq!(
+            AutomationSpanKind::from_raw(1),
+            Some(AutomationSpanKind::Point)
+        );
+        for raw in 2..=4 {
+            assert_eq!(AutomationSpanKind::from_raw(raw), None, "{raw}");
+        }
+    }
 
     #[test]
     fn exhaustive_automation_smoothing_truth_table() {
-        for automation_rate in [
-            AutomationRate::Sample,
-            AutomationRate::Block,
-            AutomationRate::None,
-        ] {
+        for automation_rate in [AutomationRate::Block, AutomationRate::None] {
             for automatable in [false, true] {
                 for smoothing in [
                     SmoothingRule::None,
@@ -3258,9 +3245,6 @@ mod automation_smoothing_validity_tests {
                         let expected = matches!(
                             (automation_rate, automatable, smoothing, smoothing_samples),
                             (AutomationRate::None, false, SmoothingRule::None, 0)
-                                | (AutomationRate::Sample, true, SmoothingRule::None, 0)
-                                | (AutomationRate::Sample, true, SmoothingRule::Linear, 1..)
-                                | (AutomationRate::Sample, true, SmoothingRule::OnePole99, 1..)
                                 | (AutomationRate::Block, true, SmoothingRule::None, 0)
                                 | (AutomationRate::Block, true, SmoothingRule::Linear, 1..)
                                 | (AutomationRate::Block, true, SmoothingRule::OnePole99, 1..)
@@ -3356,7 +3340,7 @@ mod continuous_mapping_validity_tests {
         maximum: Some(1.0),
         default_value: 0.0,
         mapping: ParameterMapping::Linear,
-        automation_rate: AutomationRate::Sample,
+        automation_rate: AutomationRate::Block,
         channel_policy: ParameterChannelPolicy::PerLane,
         smoothing: SmoothingRule::Linear,
         smoothing_samples: 1,

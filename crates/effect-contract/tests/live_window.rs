@@ -23,9 +23,9 @@ use lane_rig::{Rig, parameter};
 const PER_LANE: usize = 40;
 /// `Shared` `Block` parameters.
 const SHARED: usize = 5;
-/// Parameters that are not live: a `Sample`-rate one, a `None`-rate one, and a `Block`-rate one
-/// that is not automatable.
-const NOT_LIVE: usize = 3;
+/// Parameters that are not live: a `None`-rate one and a `Block`-rate one that is not
+/// automatable.
+const NOT_LIVE: usize = 2;
 const TOTAL: usize = PER_LANE + SHARED + NOT_LIVE;
 /// The least window the synthetic effect needs: two cells per `PerLane` parameter, one per
 /// `Shared` one.
@@ -76,12 +76,6 @@ const PARAMETERS: [ParameterDescriptor; TOTAL] = {
         table[index] = if index < NOT_LIVE {
             match index {
                 0 => parameter_descriptor(
-                    id,
-                    AutomationRate::Sample,
-                    ParameterChannelPolicy::Shared,
-                    true,
-                ),
-                1 => parameter_descriptor(
                     id,
                     AutomationRate::None,
                     ParameterChannelPolicy::Shared,
@@ -180,7 +174,7 @@ static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
 /// The live parameter cell count is one per `Shared` `Block`-rate parameter and two per `PerLane`
 /// one, whatever the others are: it is what preparation raises an instance's capacity to.
 ///
-/// Test value: a count that includes a `Sample`-rate, `None`-rate or non-automatable parameter,
+/// Test value: a count that includes a `None`-rate or non-automatable parameter,
 /// or one channel of a `PerLane` pair (an effect would then refuse the twin of a staged span).
 #[test]
 fn the_live_cell_count_is_one_per_shared_and_two_per_per_lane_block_parameter() {

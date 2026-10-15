@@ -324,11 +324,8 @@ export const NO_LAYOUT = "this engine was not booted from a session the SDK buil
 /** What an effect instance is made from: the strip, the rack and the two ways to name it. */
 export interface EffectInstance<E extends EffectId> {
   readonly stripId: string;
-  readonly stripIndex: number | undefined;
   readonly rack: LiveControlRack;
-  /** Its live index, which observation records name it by. */
-  readonly effectIndex: number | undefined;
-  /** Its console slot ID or insert ID, which a control address names it by. */
+  /** Its console slot ID or insert ID, which a control address and an observation record name it by. */
   readonly stableId: string | undefined;
   readonly effectId: E;
 }
@@ -345,8 +342,6 @@ export interface StripContext {
  * The generated `StripEdits` extends this with one builder per row of the strip's tables.
  */
 export abstract class StripAddressing {
-  /** The strip's index in the session map (the tracks, then the submixes), for observation. */
-  protected readonly stripIndex: number | undefined;
   protected readonly stripId: string;
   /** `track 'kick'` or `submix 'drums'`, for messages. */
   readonly #label: string;
@@ -357,12 +352,10 @@ export abstract class StripAddressing {
   protected constructor(
     kind: StripKind,
     stripId: string,
-    stripIndex: number | undefined,
     layout: LiveControlLayout | undefined,
     context: StripContext,
   ) {
     this.stripId = stripId;
-    this.stripIndex = stripIndex;
     this.#label = `${kind} '${stripId}'`;
     this.#layout = layout;
     this.#instances = (kind === "track" ? layout?.tracks : layout?.submixes)?.get(stripId);
@@ -381,10 +374,9 @@ export abstract class StripAddressing {
 
   /**
    * Address an effect by its live index: a console slot by its index in the session's slot order
-   * (`pre_insert`, then `post_insert`), or an insert by its index in the strip's chain. Observation
-   * records address an effect this way. Value edits address it by its stable ID, so the index must
-   * resolve against the session the SDK built (`withSession()`); use `console()` or `insert()`
-   * with an ID otherwise.
+   * (`pre_insert`, then `post_insert`), or an insert by its index in the strip's chain. Value edits
+   * and observation records address an effect by its stable ID, so the index must resolve against
+   * the session the SDK built (`withSession()`); use `console()` or `insert()` with an ID otherwise.
    */
   effect<E extends EffectId>(
     rack: LiveControlRack,
@@ -399,9 +391,7 @@ export abstract class StripAddressing {
     const index = requireU32(effectIndex, "effectIndex");
     return this.#context.effect({
       stripId: this.stripId,
-      stripIndex: this.stripIndex,
       rack,
-      effectIndex: index,
       stableId: this.#instances?.[rack][index]?.id,
       effectId,
     });
@@ -416,9 +406,7 @@ export abstract class StripAddressing {
     if (this.#layout === undefined) {
       return this.#context.effect({
         stripId: this.stripId,
-        stripIndex: this.stripIndex,
         rack: "console",
-        effectIndex: undefined,
         stableId: slot,
         effectId,
       });
@@ -448,9 +436,7 @@ export abstract class StripAddressing {
     if (this.#layout === undefined) {
       return this.#context.effect({
         stripId: this.stripId,
-        stripIndex: this.stripIndex,
         rack: "inserts",
-        effectIndex: undefined,
         stableId: insert,
         effectId,
       });

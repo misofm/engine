@@ -272,7 +272,8 @@ fn frozen_layouts_and_values_are_exact() {
     // already sets it to zero, so the layout and every existing caller stand.
     assert_eq!(size_of::<WebCommandReport>(), 48);
     assert_eq!(COMMAND_REPORT_BYTES, 48);
-    assert_eq!(COMMAND_RECORD_BYTES, 48);
+    assert_eq!(COMMAND_RECORD_BYTES, 272);
+    assert_eq!(RECORD_ID_FIELD_BYTES, 128);
     assert_eq!(MAXIMUM_COMMAND_RECORDS, 256);
     assert_eq!(DEFAULT_METER_BLOCKS, 12);
     // Kinds 1-6 and 9-17 are deleted (#1565A) and their numbers are never reallocated.
@@ -1683,6 +1684,7 @@ fn set_control_timeline_frames() -> Vec<Vec<u8>> {
     let eq = || Section::Inserts(session::StableId::parse("eq").expect("effect ID"));
     let set =
         |address: ControlAddress, value: f32, ramp_samples: Option<u32>| SessionEdit::SetControl {
+            expected_effect: None,
             address,
             value,
             ramp_samples,
@@ -1937,21 +1939,22 @@ mod serde_pin {
     }
 }
 
-/// Stage one `miso.command.v1` record into the fixed command buffer at `index`.
+/// Stage one `miso.command.v1` record into the fixed command buffer at `index`, naming its tap by
+/// the raw key bytes (#1677). The bytes are written as given, so a test can stage an ID the plan
+/// does not have, or one that does not fit the field.
 #[allow(clippy::too_many_arguments)]
-fn stage_command(
+fn stage_record(
     host: &mut AudioWorkletEngineHost,
     index: usize,
     kind: u32,
     rack: u8,
-    channel: u8,
-    track_index: u32,
-    effect_index: u32,
-    parameter_id: u32,
-    smoothing_samples: u32,
-    values: [f32; 4],
+    strip_id: &[u8],
+    effect_id: &[u8],
+    tap_id: u32,
+    window_blocks: u32,
 ) {
     let record_bytes = COMMAND_RECORD_BYTES as usize;
+    let field = RECORD_ID_FIELD_BYTES as usize;
     let staging = host
         .command_staging_mut()
         .expect("prepared command staging");
@@ -1959,14 +1962,63 @@ fn stage_command(
     record.fill(0);
     record[0] = u8::try_from(kind).expect("frozen kind");
     record[1] = rack;
-    record[2] = channel;
-    record[4..8].copy_from_slice(&track_index.to_le_bytes());
-    record[8..12].copy_from_slice(&effect_index.to_le_bytes());
-    record[12..16].copy_from_slice(&parameter_id.to_le_bytes());
-    record[16..20].copy_from_slice(&smoothing_samples.to_le_bytes());
-    for (slot, value) in values.iter().enumerate() {
-        record[24 + slot * 4..28 + slot * 4].copy_from_slice(&value.to_le_bytes());
-    }
+    record[2] = u8::try_from(strip_id.len()).expect("strip ID length");
+    record[3] = u8::try_from(effect_id.len()).expect("effect ID length");
+    record[4..8].copy_from_slice(&tap_id.to_le_bytes());
+    record[8..12].copy_from_slice(&window_blocks.to_le_bytes());
+    let strip_field = &mut record[16..16 + field];
+    strip_field[..strip_id.len().min(field)]
+        .copy_from_slice(&strip_id[..strip_id.len().min(field)]);
+    let effect_field = &mut record[16 + field..16 + 2 * field];
+    effect_field[..effect_id.len().min(field)]
+        .copy_from_slice(&effect_id[..effect_id.len().min(field)]);
+}
+
+/// The stable key of the strip at `track` (tracks, then submixes) and of the console slot or insert
+/// at `effect` of `rack` on the host's rendering plan; an index the plan does not have names an ID
+/// it does not have either.
+fn key_at(host: &AudioWorkletEngineHost, track: u32, rack: u8, effect: u32) -> (Vec<u8>, Vec<u8>) {
+    let ready = host.ready.as_ref().expect("ready");
+    let strips = ready.shape.tracks.iter().chain(ready.shape.submixes.iter());
+    let strip = strips.clone().nth(track as usize).map_or_else(
+        || format!("no-strip-{track}").into_bytes(),
+        |id| id.as_bytes().to_vec(),
+    );
+    let effect_id = live_effect_address(u32::from(rack), effect)
+        .and_then(|address| ready.effect_slot(track as usize, address))
+        .and_then(|slot| ready.shape.effect_instances.get(slot)?.as_ref())
+        .map_or_else(
+            || format!("no-effect-{effect}").into_bytes(),
+            |instance| instance.effect_id.as_bytes().to_vec(),
+        );
+    (strip, effect_id)
+}
+
+/// Stage one record that names its tap by the position the fixture's plan gives it, translated to
+/// the stable key the record carries: the strip at `track_index` and the console slot or insert at
+/// `effect_index`.
+#[allow(clippy::too_many_arguments)]
+fn stage_command(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    kind: u32,
+    rack: u8,
+    track_index: u32,
+    effect_index: u32,
+    tap_id: u32,
+    window_blocks: u32,
+) {
+    let (strip, effect) = key_at(host, track_index, rack, effect_index);
+    stage_record(
+        host,
+        index,
+        kind,
+        rack,
+        &strip,
+        &effect,
+        tap_id,
+        window_blocks,
+    );
 }
 
 /// A live-control host over the browser identity fixture: one track, unity everything, one-quantum
@@ -2078,12 +2130,10 @@ fn stage_observe_subscribe_at(
         index,
         COMMAND_OBSERVE_SUBSCRIBE,
         RACK_INSERTS,
-        255,
         track,
         effect,
         1,
         2,
-        [0.0; 4],
     );
 }
 
@@ -2119,8 +2169,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     // The observed compressor declares one tap, so its observation queue holds one subscription
     // between two renders (#1345 D2: one slot per declared tap).
     let ready = host.ready.as_ref().expect("ready");
-    let queue_depth = ready
-        .effect_producer_position(0)
+    let queue_depth = ReadyOwnership::effect_producer_position(&ready.shape, 0)
         .and_then(|position| ready.control.effect_producers().get(position))
         .map(|producer| producer.observe_capacity())
         .expect("the compressor's producer");
@@ -2265,18 +2314,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     // names one observation tap twice included (a single submission cannot overfill the queue, so
     // that is the only way for one to be refused here).
     let mut refused = observed_effect_live_control_host(QUANTUM);
-    stage_command(
-        &mut refused,
-        0,
-        3,
-        255,
-        2,
-        0,
-        0,
-        0,
-        0,
-        [-6.0, 0.0, 0.0, 0.0],
-    );
+    stage_command(&mut refused, 0, 3, 255, 0, 0, 0, 0);
     assert_eq!(refused.submit_commands(1), RESULT_INVALID_ARGUMENT);
     assert!(
         !refused
@@ -2322,18 +2360,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     // A refusal after accepted records preserves those records and the dirty flag.
     stage_observe_subscribe(&mut refused, 0);
     assert_eq!(refused.submit_commands(1), RESULT_OK);
-    stage_command(
-        &mut refused,
-        0,
-        3,
-        255,
-        2,
-        0,
-        0,
-        0,
-        0,
-        [-6.0, 0.0, 0.0, 0.0],
-    );
+    stage_command(&mut refused, 0, 3, 255, 0, 0, 0, 0);
     assert_eq!(refused.submit_commands(1), RESULT_INVALID_ARGUMENT);
     assert!(
         refused
@@ -2435,6 +2462,42 @@ fn a_live_control_free_host_refuses_every_live_kind_as_unsupported() {
     );
 }
 
+/// A record whose strip ID or effect ID has length zero is refused `MALFORMED` at its index in pass
+/// one, before anything is admitted: a stable ID is 1..=127 bytes, so an empty one names nothing.
+///
+/// Test value: red if an empty ID decodes (the record then reaches key resolution and is refused
+/// as an unknown strip or effect, a reason that says the record named something the plan lacks).
+#[test]
+fn a_record_with_an_empty_id_is_refused_malformed_at_its_index() {
+    const QUANTUM: u32 = 128;
+    let mut host = observed_effect_live_control_host(QUANTUM);
+    feed_and_render(&mut host, 1, 0, 0.75);
+    let (strip, effect) = key_at(&host, 0, RACK_INSERTS, 0);
+    for (strip_id, effect_id) in [(&[][..], &effect[..]), (&strip[..], &[][..])] {
+        stage_observe_subscribe(&mut host, 0);
+        stage_record(
+            &mut host,
+            1,
+            COMMAND_OBSERVE_SUBSCRIBE,
+            RACK_INSERTS,
+            strip_id,
+            effect_id,
+            1,
+            QUANTUM,
+        );
+        assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
+        let report = *host.command_report();
+        assert_eq!(report.reason, COMMAND_REASON_MALFORMED);
+        assert_eq!(report.rejected_index, 1);
+        assert_eq!(report.admitted, 0);
+        assert_eq!(host.observation_armed_taps(), 0);
+        assert!(
+            !host.ready.as_ref().expect("ready").has_in_flight_commands,
+            "nothing was queued"
+        );
+    }
+}
+
 /// #1565A gate 1: a record of a deleted value kind (1-6 and 9-17) is refused `MALFORMED` at its
 /// index, before anything is admitted, and changes no cell. The browser keeps no value admission of
 /// its own: every value goes through `control_command`, so these numbers are only retired.
@@ -2459,18 +2522,7 @@ fn every_deleted_kind_is_refused_malformed_at_its_index_and_changes_no_cell() {
 
     for kind in (1..=6_u32).chain(9..=17) {
         // Alone: refused at index 0.
-        stage_command(
-            &mut host,
-            0,
-            kind,
-            255,
-            2,
-            0,
-            0,
-            0,
-            QUANTUM,
-            [-6.0, 0.0, 0.0, 0.0],
-        );
+        stage_command(&mut host, 0, kind, 255, 0, 0, 0, QUANTUM);
         assert_eq!(
             host.submit_commands(1),
             RESULT_INVALID_ARGUMENT,
@@ -2482,18 +2534,7 @@ fn every_deleted_kind_is_refused_malformed_at_its_index_and_changes_no_cell() {
         assert_eq!(report.admitted, 0, "kind {kind}");
         // Behind a valid subscription: refused at index 1, and the subscription is not armed.
         stage_observe_subscribe(&mut host, 0);
-        stage_command(
-            &mut host,
-            1,
-            kind,
-            255,
-            2,
-            0,
-            0,
-            0,
-            QUANTUM,
-            [-6.0, 0.0, 0.0, 0.0],
-        );
+        stage_command(&mut host, 1, kind, 255, 0, 0, 0, QUANTUM);
         assert_eq!(
             host.submit_commands(2),
             RESULT_INVALID_ARGUMENT,
@@ -2510,7 +2551,7 @@ fn every_deleted_kind_is_refused_malformed_at_its_index_and_changes_no_cell() {
         );
     }
     // An unknown kind byte is malformed, not an unknown target.
-    stage_command(&mut host, 0, 0, 255, 255, 0, 0, 0, 0, [0.0; 4]);
+    stage_command(&mut host, 0, 0, 255, 0, 0, 0, 0);
     assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
     assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
 
@@ -3838,19 +3879,50 @@ fn observe(
     } else {
         COMMAND_OBSERVE_UNSUBSCRIBE
     };
-    stage_command(
+    stage_command(host, 0, kind, rack, track, effect, tap_id, window_blocks);
+    host.submit_commands(1)
+}
+
+/// [`observe`] naming the tap by its stable key: the strip's ID, the console slot's or insert's ID
+/// and the tap's ID (#1677), whatever the plan that renders calls its position.
+fn observe_key(
+    host: &mut AudioWorkletEngineHost,
+    strip_id: &str,
+    rack: u8,
+    effect_id: &str,
+    tap_id: u32,
+    window_blocks: u32,
+    armed: bool,
+) -> u32 {
+    let kind = if armed {
+        COMMAND_OBSERVE_SUBSCRIBE
+    } else {
+        COMMAND_OBSERVE_UNSUBSCRIBE
+    };
+    stage_record(
         host,
         0,
         kind,
         rack,
-        255,
-        track,
-        effect,
+        strip_id.as_bytes(),
+        effect_id.as_bytes(),
         tap_id,
         window_blocks,
-        [0.0; 4],
     );
     host.submit_commands(1)
+}
+
+/// The armed-tap mask of the insert `insert_id` of strip `strip_id` on the plan that renders, or
+/// `None` when the plan has no such insert.
+fn armed_mask(host: &AudioWorkletEngineHost, strip_id: &str, insert_id: &str) -> Option<u32> {
+    let ready = host.ready.as_ref().expect("ready");
+    let strip = strip_index(
+        &ready.shape.tracks,
+        &ready.shape.submixes,
+        strip_id.as_bytes(),
+    )?;
+    let effect = ready.effect_by_id(strip, LiveEffectRack::Inserts, insert_id.as_bytes())?;
+    ready.shape.observation_armed.get(effect).copied()
 }
 
 /// The frame's gain-reduction section: one non-negative magnitude per track, then the master's.
@@ -4097,21 +4169,34 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
     );
     assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
 
-    // A nonzero value word on a subscription is a caller mistake, not a meaningful field.
-    stage_command(
-        &mut host,
-        0,
-        COMMAND_OBSERVE_SUBSCRIBE,
-        1,
-        255,
-        0,
-        0,
-        1,
-        2,
-        [1.0, 0.0, 0.0, 0.0],
-    );
-    assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
-    assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
+    // A record that does not say what it names is malformed, not an unknown target: a nonzero
+    // reserved word, a byte after the end of an ID, a length that fills the whole field.
+    let (strip, effect) = key_at(&host, 0, RACK_INSERTS, 0);
+    let field = RECORD_ID_FIELD_BYTES as usize;
+    for (name, offset, value) in [
+        ("reserved word", 12, 1_u8),
+        ("byte after the strip ID", 16 + strip.len(), 1),
+        ("byte after the effect ID", 16 + field + effect.len(), 1),
+        (
+            "strip ID length fills the field",
+            2,
+            RECORD_ID_FIELD_BYTES as u8,
+        ),
+        (
+            "effect ID length fills the field",
+            3,
+            RECORD_ID_FIELD_BYTES as u8,
+        ),
+    ] {
+        stage_command(&mut host, 0, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, 0, 1, 2);
+        host.command_staging_mut().expect("staging")[offset] = value;
+        assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT, "{name}");
+        assert_eq!(
+            host.command_report().reason,
+            COMMAND_REASON_MALFORMED,
+            "{name}"
+        );
+    }
 
     // Unknown rack and unknown effect keep their own reasons on the observe kinds. The retired
     // `simd1`/`simd2` codes are unknown racks (issue #1096); this session has no console slot, so
@@ -4184,18 +4269,7 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
     let before = host.meter_frame().to_vec();
     assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
     for index in 0..2 {
-        stage_command(
-            &mut host,
-            index,
-            COMMAND_OBSERVE_SUBSCRIBE,
-            1,
-            255,
-            0,
-            0,
-            1,
-            4,
-            [0.0; 4],
-        );
+        stage_command(&mut host, index, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, 0, 1, 4);
     }
     assert_eq!(
         host.submit_commands(2),
@@ -4267,12 +4341,10 @@ fn a_submission_names_each_observation_tap_once() {
         1,
         COMMAND_OBSERVE_UNSUBSCRIBE,
         RACK_INSERTS,
-        255,
         0,
         0,
         1,
         2,
-        [0.0; 4],
     );
     assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
     let report = *host.command_report();
@@ -4399,7 +4471,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
         let subscribe = |host: &mut AudioWorkletEngineHost, kind: u32, tap: u32, window: u32| {
             // A boot with no taps has no command staging; its submission is refused as such.
             if host.command_staging_mut().is_some() {
-                stage_command(host, 0, kind, 1, 255, 0, 0, tap, window, [0.0; 4]);
+                stage_command(host, 0, kind, 1, 0, 0, tap, window);
             }
             host.submit_commands(1);
             *host.command_report()
@@ -4560,40 +4632,19 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
         observations: &MENU,
     };
 
-    let record = |tap_id: u32| CommandRecord {
-        kind: COMMAND_OBSERVE_SUBSCRIBE,
-        rack: 1,
-        channel: 255,
-        track_index: 0,
-        effect_index: 0,
-        parameter_id: tap_id,
-        smoothing_samples: 2,
-        values: [0.0; 4],
+    // The control plane resolves the tap (#1677); the host maps its refusal to the wire's reason.
+    let reason = |tap_id: u32| {
+        control_plane::resolve_observation_tap(&DESCRIPTOR, tap_id).map_err(crate::key_refusal)
     };
-
     // The resident tap resolves and binds.
-    assert!(record(1).into_observe_record(&DESCRIPTOR, true).is_ok());
+    assert_eq!(reason(1), Ok(0));
     // The computed tap resolves and is refused for what it is -- never `UnknownTap`, which would
     // say the address was wrong, and never silently bound.
-    assert_eq!(
-        record(2).into_observe_record(&DESCRIPTOR, true).err(),
-        Some(COMMAND_REASON_UNSUPPORTED_KIND)
-    );
-    // A tap id the menu does not declare stays `UnknownTap` on the same descriptor.
-    assert_eq!(
-        record(3).into_observe_record(&DESCRIPTOR, true).err(),
-        Some(COMMAND_REASON_UNKNOWN_TAP)
-    );
-    // And with no bound lane, the resident tap is `ObservationUnbound` while the computed one is
-    // still `UnsupportedKind`: the cost class is a property of the *effect*, checked first.
-    assert_eq!(
-        record(1).into_observe_record(&DESCRIPTOR, false).err(),
-        Some(COMMAND_REASON_OBSERVATION_UNBOUND)
-    );
-    assert_eq!(
-        record(2).into_observe_record(&DESCRIPTOR, false).err(),
-        Some(COMMAND_REASON_UNSUPPORTED_KIND)
-    );
+    assert_eq!(reason(2), Err(COMMAND_REASON_UNSUPPORTED_KIND));
+    // A tap id the menu does not declare stays `UnknownTap` on the same descriptor, and so does
+    // the reserved zero.
+    assert_eq!(reason(3), Err(COMMAND_REASON_UNKNOWN_TAP));
+    assert_eq!(reason(0), Err(COMMAND_REASON_UNKNOWN_TAP));
 }
 
 /// Issue #143 R4: the one unit conversion the design permits, and where it happens.
@@ -5565,12 +5616,10 @@ fn a_bus_observation_admits_and_renders_without_allocating() {
         0,
         COMMAND_OBSERVE_SUBSCRIBE,
         RACK_INSERTS,
-        255,
         STRIP_BUS,
         0,
         1,
         2,
-        [0.0; 4],
     );
     let planes: Vec<[Vec<f32>; 2]> = (0..3).map(|feeder| strip_planes(feeder, 2)).collect();
     for (feeder, planes) in planes.iter().enumerate() {
@@ -6624,6 +6673,7 @@ mod structural_apply {
     /// A live fader edit of strip `id` through the production control entry, as the SDK sends it.
     fn live_fader(rig: &mut Rig, id: &str, db: f32, request: u64) {
         let edits = [SessionEdit::SetControl {
+            expected_effect: None,
             address: controls::ControlAddress {
                 owner: controls::Owner::Strip(StableId::parse(id).expect("strip ID")),
                 section: controls::Section::Builtins,
@@ -6928,11 +6978,43 @@ mod structural_apply {
         assert_eq!(rig.host.session_source_id(1), Some("fixture-source"));
         assert_eq!(ids(&rig.host), ["track"]);
         assert_eq!(binding_tracks(&rig.host), [0]);
-        // An observation record is admitted against the successor, as a live value is: index 1
-        // exists only in the successor's tables (the old track's compressor, shifted by the added
-        // track), and nothing is armed on the plan that renders.
+        // An observation record is admitted against the successor, as a live value is, and names
+        // its tap by key (#1677): "track"'s compressor, which sits at index 1 in the successor
+        // (the added "a-track", with a compressor of the same ID, took index 0), is the one that
+        // arms. Nothing is armed on the plan that renders.
+        let key = |host: &mut AudioWorkletEngineHost, strip: &str| {
+            observe_key(host, strip, RACK_INSERTS, "comp", 1, 2, true)
+        };
+        // A key the successor does not have is refused with its typed code and queues nothing,
+        // whichever plan has it: "gone" has no strip anywhere, "a-track" is the successor's.
+        assert_eq!(key(&mut rig.host, "gone"), RESULT_INVALID_ARGUMENT);
         assert_eq!(
-            observe(&mut rig.host, 1, RACK_INSERTS, 0, 1, 2, true),
+            rig.host.command_report().reason,
+            COMMAND_REASON_UNKNOWN_TRACK
+        );
+        assert_eq!(
+            observe_key(&mut rig.host, "track", RACK_INSERTS, "gone", 1, 2, true),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            rig.host.command_report().reason,
+            COMMAND_REASON_UNKNOWN_EFFECT
+        );
+        assert_eq!(
+            observe_key(&mut rig.host, "track", RACK_INSERTS, "comp", 9, 2, true),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(rig.host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
+        assert!(
+            !rig.host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .has_in_flight_commands,
+            "a refused key queued nothing"
+        );
+        assert_eq!(
+            key(&mut rig.host, "track"),
             RESULT_OK,
             "an observation record between the commit and the adoption block is admitted"
         );
@@ -6943,7 +7025,7 @@ mod structural_apply {
             "the plan that renders is not armed by a record addressed to its successor"
         );
         assert_eq!(
-            observe(&mut rig.host, 1, RACK_INSERTS, 0, 1, 2, true),
+            key(&mut rig.host, "track"),
             RESULT_BACKPRESSURE,
             "the record is queued on the successor: its one-slot queue is full until its block"
         );
@@ -6960,6 +7042,14 @@ mod structural_apply {
             rig.host.observation_armed_taps(),
             1,
             "the record took effect on the successor: the old track's compressor is armed"
+        );
+        assert_eq!(
+            (
+                armed_mask(&rig.host, "track", "comp"),
+                armed_mask(&rig.host, "a-track", "comp")
+            ),
+            (Some(1), Some(0)),
+            "the record armed the compressor it named, not the one that took its old index"
         );
         assert_eq!(rig.host.service(None), RESULT_OK);
         for _ in 0..4 {
@@ -7081,6 +7171,7 @@ mod structural_apply {
         let boot = rig.host.meter_header().structure_epoch;
         assert_eq!(boot, 1, "the boot list is the first structure");
         let delay = SessionEdit::SetControl {
+            expected_effect: None,
             address: controls::ControlAddress {
                 owner: controls::Owner::Strip(model.tracks[0].id.clone()),
                 section: controls::Section::Builtins,
@@ -7533,7 +7624,7 @@ mod structural_apply {
             }
         ));
         assert_eq!(
-            observe(&mut rig.host, 1, RACK_INSERTS, 0, 1, 2, false),
+            observe_key(&mut rig.host, "track", RACK_INSERTS, "comp", 1, 2, false),
             RESULT_OK,
             "the disarm is admitted against the successor, still at sample zero"
         );
@@ -7944,4 +8035,156 @@ mod structural_apply {
             "the successor has no insert, so no slot to read"
         );
     }
+}
+
+/// A subscription past the engine's cap on armed taps (#1676) is refused as a whole before any
+/// record is queued, so the acknowledgement never promises a tap the engine could not end honestly;
+/// unsubscribing one tap makes room for the next. The cap is the control plane's, shared with the C
+/// ABI: the browser only reports the refusal, as its own non-retryable reason `observationLimit`
+/// with `RESULT_UNSUPPORTED`, never as backpressure, at the record that crossed it.
+///
+/// Red if the browser admits a subscription past the cap (the later removal of every subscribed tap
+/// could not be told to its subscribers), if it reports the cap as backpressure (the SDK would
+/// resend it after every render), if the refusal still queues or arms the tap, if a refused batch
+/// moves the armed count or keeps part of itself, if the refusal names a record other than the arm
+/// that crossed (index 2 of a batch that first unsubscribes), or if an unsubscribe does not give its
+/// place back.
+#[test]
+fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
+    const QUANTUM: u32 = 128;
+    let document: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/browser-v1/observation-session.json"))
+            .expect("fixture");
+    let probe_cap = {
+        let options = WebBootOptions {
+            live_control_observation_taps: 1,
+            live_control_master_track_plus_one: 1,
+            ..boot_options(QUANTUM)
+        };
+        let host = AudioWorkletEngineHost::boot(
+            include_bytes!("../tests/browser-v1/observation-session.json"),
+            options,
+        )
+        .expect("boot");
+        host.ready
+            .as_ref()
+            .expect("ready")
+            .control
+            .observation_cap()
+    };
+    let inserts = probe_cap + 2;
+    let mut document = document;
+    let template = document["tracks"][0]["inserts"]["effects"][0].clone();
+    document["tracks"][0]["inserts"]["effects"] = serde_json::Value::Array(
+        (0..inserts)
+            .map(|index| {
+                let mut effect = template.clone();
+                effect["id"] = serde_json::Value::String(format!("ins{index:03}"));
+                effect
+            })
+            .collect(),
+    );
+    let document = serde_json::to_string_pretty(&document).expect("document");
+    let options = WebBootOptions {
+        live_control_observation_taps: 1,
+        live_control_master_track_plus_one: 1,
+        ..boot_options(QUANTUM)
+    };
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
+    let submit = |host: &mut AudioWorkletEngineHost, kind: u32, effect: u32| {
+        stage_command(host, 0, kind, 1, 0, effect, 1, 2);
+        host.submit_commands(1);
+        *host.command_report()
+    };
+    // A render drains the effects' observation queues, one slot per tap.
+    let mut block = 0_u64;
+    let mut render = |host: &mut AudioWorkletEngineHost| {
+        let plane = vec![0.5_f32; QUANTUM as usize];
+        let planes: [&[f32]; 2] = [&plane, &plane];
+        assert_eq!(
+            host.submit_source(
+                b"fixture-source",
+                1,
+                block * u64::from(QUANTUM),
+                48_000,
+                &planes,
+                QUANTUM,
+                false,
+            ),
+            RESULT_OK,
+        );
+        assert_eq!(host.render_next(), RESULT_OK);
+        block += 1;
+    };
+    let armed = |host: &AudioWorkletEngineHost| {
+        host.ready
+            .as_ref()
+            .expect("ready")
+            .control
+            .observation_armed()
+    };
+    for effect in 0..probe_cap {
+        let report = submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, effect as u32);
+        assert_eq!(report.result, RESULT_OK, "{effect}: {report:?}");
+    }
+    assert_eq!(armed(&host), probe_cap);
+    let refused = submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, probe_cap as u32);
+    assert_eq!(
+        (
+            refused.result,
+            refused.reason,
+            refused.rejected_index,
+            refused.admitted
+        ),
+        (RESULT_UNSUPPORTED, COMMAND_REASON_OBSERVATION_LIMIT, 0, 0),
+        "{refused:?}"
+    );
+    assert_eq!(
+        armed(&host),
+        probe_cap,
+        "a refused subscription arms nothing"
+    );
+    render(&mut host);
+    // A batch that unsubscribes one tap, takes its place and then crosses the cap is refused whole,
+    // at the record that crossed: wire index 2, not the first record or the first arm.
+    let cap = probe_cap as u32;
+    stage_command(&mut host, 0, COMMAND_OBSERVE_UNSUBSCRIBE, 1, 0, 0, 1, 2);
+    stage_command(&mut host, 1, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, cap, 1, 2);
+    stage_command(&mut host, 2, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, cap + 1, 1, 2);
+    host.submit_commands(3);
+    let refused = *host.command_report();
+    assert_eq!(
+        (
+            refused.result,
+            refused.reason,
+            refused.rejected_index,
+            refused.admitted
+        ),
+        (RESULT_UNSUPPORTED, COMMAND_REASON_OBSERVATION_LIMIT, 2, 0),
+        "{refused:?}"
+    );
+    assert_eq!(
+        armed(&host),
+        probe_cap,
+        "the refused batch's unsubscribe and first arm are not kept"
+    );
+    render(&mut host);
+    // A window change on an armed tap adds no tap.
+    assert_eq!(
+        submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, 0).result,
+        RESULT_OK
+    );
+    render(&mut host);
+    // An unsubscribe gives its place back.
+    assert_eq!(
+        submit(&mut host, COMMAND_OBSERVE_UNSUBSCRIBE, 0).result,
+        RESULT_OK
+    );
+    assert_eq!(armed(&host), probe_cap - 1);
+    render(&mut host);
+    assert_eq!(
+        submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, probe_cap as u32).result,
+        RESULT_OK
+    );
+    assert_eq!(armed(&host), probe_cap);
 }

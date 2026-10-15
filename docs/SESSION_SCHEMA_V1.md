@@ -127,7 +127,10 @@ about 6 dB more than the mute, and over twice that length it clicks as the mute 
 `FINDINGS.md` 9.2). *Matrix coefficients through zero.* A raw matrix coefficient (in `[-1, 1]`) or a
 send matrix coefficient (any finite value) that crosses zero is a polarity flip of that path on the
 `pan_ms` ramp; at the defaults `pan_ms` is twice `mute_ms`, so it clicks as the mute does, and a
-session whose explicit `pan_ms` is below twice its `mute_ms` gets a louder crossing.
+session whose explicit `pan_ms` is below twice its `mute_ms` gets a louder crossing. The same row
+lengths are the jump ramps of stored automation (#1058 README A3): every plan holds the three lengths
+in one cell, and a live change of them is written there when the session has an automation on a row
+of this table (#1639).
 
 On the wire the `control_smoothing` record carries `kind` 1 (`default` 1, `explicit` 2), then, for
 `explicit`, `mute_ms` 2, `fader_ms` 3 and `pan_ms` 4.
@@ -250,17 +253,19 @@ model's field registry keeps every ID: track field 7 is now `inserts` (was `dyna
 field 15 and track field 11, with registries of its own for the slot declaration (`slot` 1,
 `identity` 2, `quality` 3, `link_mode` 4) and the track entry (`slot` 1, `bypass` 2, `params` 3).
 
-An automation target is a control address (#1566, decision 17 C2): the address `SET_CONTROL` and the
-control list use, as a record tagged by `section`, with the keys `owner` (`strip`, `route` or `vca`;
+An automation target is a control address (#1566, decision 17 C2): the plain address the control
+list uses (fields 1 to 6), as a record tagged by `section`, with the keys `owner` (`strip`, `route` or `vca`;
 `session` is not a token, because no session row is automatable), `owner_id` (the strip, route or VCA
 ID), `section` (`own`, `builtins`, `console` or `inserts`), `slot_id` (the console slot or the insert),
 `control` (a `u32`, the row ID inside the section) and `lane` (`left`, `right` or `both`). `slot_id`
 is required in a `console` or `inserts` section and refused (`schema.unknown_field`) in `own` and
 `builtins`; every other key is required. The old keys (`entity_id`, `rack`, `effect_id`,
-`parameter_id`, `channel`) are unknown keys. The wire message is the `SET_CONTROL` address message
-(fields `owner` 1, `owner_id` 2, `section` 3, `slot_id` 4, `control` 5 and `lane` 6; owner kind
-strip 2, route 3, VCA 4 and section inserts 2, builtins 4, console 5, own 6, the retired rack codes
-1 and 3 never allocated), and the session wire refuses owner kind session.
+`parameter_id`, `channel`) are unknown keys. The wire message is the control list's address
+message, `ControlAddress` (fields `owner` 1, `owner_id` 2, `section` 3, `slot_id` 4, `control` 5 and
+`lane` 6; owner kind strip 2, route 3, VCA 4 and section inserts 2, builtins 4, console 5, own 6, the
+retired rack codes 1 and 3 never allocated), and the session wire refuses owner kind session. A
+target carries no expected effect: field 7 belongs to `SET_CONTROL`'s own address message,
+`SetControlAddress` (#1678), and a stored target is refused with it.
 
 Session validation checks the structure of a target, and nothing about its row: the `strip` owner is
 a declared track or submix (`reference.missing_entity` at `target.owner_id` otherwise; a VCA ID is

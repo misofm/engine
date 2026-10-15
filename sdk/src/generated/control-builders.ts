@@ -191,11 +191,10 @@ export abstract class StripEdits extends StripAddressing {
 export class TrackEdits extends StripEdits {
   constructor(
     trackId: string,
-    trackIndex: number | undefined,
     layout: LiveControlLayout | undefined,
     context: StripContext,
   ) {
-    super("track", trackId, trackIndex, layout, context);
+    super("track", trackId, layout, context);
   }
 
   /** `solo`: Solo. */
@@ -209,17 +208,15 @@ export class TrackEdits extends StripEdits {
 
 /**
  * A submix strip's live edits: every strip edit and no `solo` (a bus is solo-safe; the core refuses
- * the solo of a submix). `LiveControlEdits.submix(id)` also finds the submix's strip index,
- * `T + j`, for observation.
+ * the solo of a submix).
  */
 export class SubmixEdits extends StripEdits {
   constructor(
     submixId: string,
-    stripIndex: number | undefined,
     layout: LiveControlLayout | undefined,
     context: StripContext,
   ) {
-    super("submix", submixId, stripIndex, layout, context);
+    super("submix", submixId, layout, context);
   }
 }
 

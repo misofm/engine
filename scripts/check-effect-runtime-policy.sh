@@ -58,7 +58,6 @@ fn\s+flushed\(                           0  95
 fn\s+recover\(                           0  95
 struct\s+Ramp\b                          0  95
 fn\s+valid_runtime_span\(                1  95
-fn\s+automation_segment_value\(          1  95
 fn\s+canonical_bits\(                    1  95
 struct\s+ParameterSmoother\b             1  95
 struct\s+LinearRamp\b                    1  95

@@ -346,13 +346,19 @@ pub enum SessionEdit {
         /// This edit's own ramp length in samples; absent means the row's default. A row whose
         /// ramp is fixed refuses an explicit length. Transaction metadata, never model state.
         ramp_samples: Option<u32>,
+        /// The native effect this edit was written for (#1678); only in an `inserts` or `console`
+        /// section. A row's numeric ID depends on its effect, and a rebuild can change the effect
+        /// an insert or console slot runs, so the core refuses the edit with
+        /// [`controls::ControlError::EffectChanged`], before anything is written, when the
+        /// instance it names runs another. Absent applies the edit to whatever runs there now.
+        expected_effect: Option<StableId>,
     },
 }
 
 impl SessionEdit {
     /// A [`SessionEdit::SetControl`] of `address` to `value`: the one way to set a value
     /// (decision 17, #1561). `ramp_samples` is the edit's own ramp length, or `None` for the
-    /// row's default.
+    /// row's default. It names no expected effect; see [`Self::with_expected_effect`].
     #[must_use]
     pub const fn set_control(
         address: controls::ControlAddress,
@@ -363,7 +369,21 @@ impl SessionEdit {
             address,
             value,
             ramp_samples,
+            expected_effect: None,
         }
+    }
+
+    /// This edit with the native effect it was written for (#1678). Only a
+    /// [`SessionEdit::SetControl`] carries one; any other edit is returned unchanged.
+    #[must_use]
+    pub fn with_expected_effect(mut self, effect: StableId) -> Self {
+        if let Self::SetControl {
+            expected_effect, ..
+        } = &mut self
+        {
+            *expected_effect = Some(effect);
+        }
+        self
     }
 
     /// Return the stable numeric opcode for this typed edit.
@@ -875,7 +895,12 @@ pub fn apply_session_edit(
             address,
             value,
             ramp_samples,
+            expected_effect,
         } => {
+            if let Some(expected) = expected_effect {
+                controls::check_expected_effect(session, address, expected)
+                    .map_err(SessionEditError::Control)?;
+            }
             let sample_rate_hz = session.sample_rate_hz;
             controls::set(session, address, *value, *ramp_samples, sample_rate_hz)
                 .map_err(SessionEditError::Control)?;
@@ -1288,8 +1313,14 @@ impl SessionStore {
                     address,
                     value,
                     ramp_samples,
+                    expected_effect,
                 } = edit
             {
+                // A monitor row runs no effect: an expected effect on it is refused (#1678).
+                if let Some(expected) = expected_effect {
+                    controls::check_expected_effect(&candidate, address, expected)
+                        .map_err(|error| refused(SessionEditError::Control(error)))?;
+                }
                 let rate = candidate.sample_rate_hz;
                 // The monitor sort of #1559 D3: a monitor row is checked here and written to
                 // the overlay by the host; a model row goes through `set`.
@@ -1405,10 +1436,16 @@ impl SessionStore {
                 address,
                 value,
                 ramp_samples,
+                expected_effect,
             } = edit
             else {
                 return None;
             };
+            // An edit written for another effect than the one that runs is the full path's to
+            // refuse, with its typed code (#1678).
+            if let Some(expected) = expected_effect {
+                controls::check_expected_effect(committed, address, expected).ok()?;
+            }
             // The monitor sort of #1559 D3, as the full path makes it.
             if let Some(write) =
                 controls::check_monitor(committed, address, *value, *ramp_samples, rate).ok()?

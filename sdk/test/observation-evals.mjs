@@ -143,9 +143,9 @@ describe("issue 777 -- selected resident observations", () => {
 
       const liveControls = engine.liveControls();
       const armed = await liveControls.submit(
-        liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
+        liveControls.edit.track("t").insert("comp", "miso.compressor")
           .observe("Gain Reduction", true, 2),
-        liveControls.edit.track("t").effect("inserts", 1, "miso.gate-expander")
+        liveControls.edit.track("t").insert("gate", "miso.gate-expander")
           .observe("Gain Reduction", true, 2),
       );
       assert.equal(armed.ok, true);
@@ -171,7 +171,7 @@ describe("issue 777 -- selected resident observations", () => {
       // The prior resident cell survives a re-arm, but is historical for that new arm. A re-arm of
       // an armed tap is one record: it restarts the window, and no withdrawal comes first.
       const rearmed = await liveControls.submit(
-        liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
+        liveControls.edit.track("t").insert("comp", "miso.compressor")
           .observe("Gain Reduction", true, 2),
       );
       assert.equal(rearmed.ok, true);

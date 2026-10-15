@@ -23,9 +23,8 @@ use effect_contract::{
     ParameterId, ParameterMapping, ParameterSmoother, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedPorts,
     PreparedSidechainPort, QualityDescriptor, RegisteredTailBound, SmoothingRule,
-    automation_segment_value, expected_prepared_metadata, inverse_map_normalized,
-    inverse_map_stepped_normalized, map_normalized, map_stepped_normalized,
-    validate_automation_block, validate_descriptor,
+    expected_prepared_metadata, inverse_map_normalized, inverse_map_stepped_normalized,
+    map_normalized, map_stepped_normalized, validate_automation_block, validate_descriptor,
 };
 
 /// The mock's 48 kHz `Normal` entry, read from a registry that admitted it (issue #1462).
@@ -143,7 +142,7 @@ fn normalized_mapping_endpoints_ties_and_round_trips_are_stable() {
 }
 
 #[test]
-fn smoothers_and_segments_finish_on_the_exact_update_or_endpoint() {
+fn smoothers_finish_on_the_exact_update() {
     let mut linear = ParameterSmoother::new(0.0, SmoothingRule::Linear, 4).unwrap();
     assert!(linear.set_target(1.0));
     assert_eq!(
@@ -161,18 +160,6 @@ fn smoothers_and_segments_finish_on_the_exact_update_or_endpoint() {
         assert!(pole.next_value() < 1.0);
     }
     assert_eq!(pole.next_value(), 1.0);
-    let span = PreparedAutomationSpan {
-        kind: AutomationSpanKind::Linear,
-        channel: ParameterChannel::Left,
-        parameter_index: 0,
-        start_sample: 10,
-        end_sample: 14,
-        start_value: 2.0,
-        end_value: 6.0,
-    };
-    assert_eq!(automation_segment_value(span, 10), Some(2.0));
-    assert_eq!(automation_segment_value(span, 12), Some(4.0));
-    assert_eq!(automation_segment_value(span, 14), Some(6.0));
 }
 
 #[test]

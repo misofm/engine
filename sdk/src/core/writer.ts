@@ -10,7 +10,7 @@ import {
 import type { ControlFrameEdit } from "./control-frame.ts";
 import type { ControlAppliedReport } from "./control-queue.ts";
 import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "./errors.ts";
-import { laneEditWord } from "../internal/ramp.ts";
+import { requireU32 } from "../internal/ramp.ts";
 
 /**
  * The live-control writer (issue #243, adopted ruling 5462139867 finding 5).
@@ -58,22 +58,19 @@ import { laneEditWord } from "../internal/ramp.ts";
  */
 export interface LaneEdit {
   readonly kind: "observeSubscribe" | "observeUnsubscribe";
-  /** The strip index: the tracks, then the submixes. */
-  readonly trackIndex: number;
   /**
    * The record's rack byte: `1` inserts, `3` console (S1c). The retired `0` and `2` are refused by
    * the engine with `unknownRack`.
    */
   readonly rack: number;
-  /** `255`, not applicable. */
-  readonly channel: number;
-  /** A console slot's index in the session's slot order, or an insert's index on its strip. */
-  readonly effectIndex?: number;
+  /** The strip's ID, a track's or a submix's. */
+  readonly stripId: string;
+  /** The console slot's ID or the insert's ID. */
+  readonly effectId: string;
   /** The tap's ID. */
-  readonly parameterId?: number;
+  readonly tapId: number;
   /** The subscription window in blocks, `0` for the default. Any `u32`. */
-  readonly smoothingSamples?: number | undefined;
-  readonly values: readonly [number, number, number, number];
+  readonly windowBlocks: number;
 }
 
 export interface FlushOutcome {
@@ -188,10 +185,33 @@ function isControlEdit(edit: ControlFrameEdit | LaneEdit): edit is ControlFrameE
  */
 function coalescingKey(edit: ControlFrameEdit | LaneEdit): string {
   if (isControlEdit(edit)) return controlEditKey(edit);
+  // The key is the tap's stable key; the strip and effect IDs are length-prefixed so no pair of
+  // IDs can spell another pair.
   return [
-    edit.kind, edit.trackIndex, edit.rack, edit.channel,
-    edit.effectIndex ?? 0, edit.parameterId ?? 0,
+    edit.kind, edit.rack, edit.stripId.length, edit.stripId, edit.effectId.length, edit.effectId,
+    edit.tapId,
   ].join("/");
+}
+
+const ID_ENCODER = new TextEncoder();
+const ID_FIELD_BYTES = 128;
+
+/** One record ID's UTF-8 bytes; the field holds 127 of them and a zero after the last. */
+function recordId(id: string, what: string): Uint8Array {
+  if (typeof id !== "string") throw new MisoUsageError(`${what} must be a string`);
+  const bytes = ID_ENCODER.encode(id);
+  if (bytes.length >= ID_FIELD_BYTES) {
+    throw new MisoUsageError(`${what} is ${bytes.length} bytes; a record holds at most ${ID_FIELD_BYTES - 1}`);
+  }
+  return bytes;
+}
+
+/** Check that an observation edit can be encoded; the core judges what it names. */
+function checkLaneEdit(edit: LaneEdit): void {
+  recordId(edit.stripId, "an observation record's strip ID");
+  recordId(edit.effectId, "an observation record's effect ID");
+  requireU32(edit.tapId, "tapId");
+  requireU32(edit.windowBlocks, "windowBlocks");
 }
 
 export function encodeLaneEdits(edits: readonly LaneEdit[]): Uint8Array {
@@ -199,17 +219,16 @@ export function encodeLaneEdits(edits: readonly LaneEdit[]): Uint8Array {
   const view = new DataView(records.buffer);
   edits.forEach((edit, index) => {
     const base = index * RECORD_BYTES;
+    const strip = recordId(edit.stripId, "an observation record's strip ID");
+    const effect = recordId(edit.effectId, "an observation record's effect ID");
     view.setUint8(base + offsetOf("kind"), kindValue(edit.kind));
     view.setUint8(base + offsetOf("rack"), edit.rack);
-    view.setUint8(base + offsetOf("channel"), edit.channel);
-    view.setUint32(base + offsetOf("trackIndex"), edit.trackIndex, true);
-    view.setUint32(base + offsetOf("effectIndex"), edit.effectIndex ?? 0, true);
-    view.setUint32(base + offsetOf("parameterId"), edit.parameterId ?? 0, true);
-    view.setUint32(base + offsetOf("smoothingSamples"), laneEditWord(edit), true);
-    const values = offsetOf("values");
-    edit.values.forEach((value, slot) => {
-      view.setFloat32(base + values + slot * 4, value, true);
-    });
+    view.setUint8(base + offsetOf("stripIdBytes"), strip.length);
+    view.setUint8(base + offsetOf("effectIdBytes"), effect.length);
+    view.setUint32(base + offsetOf("tapId"), requireU32(edit.tapId, "tapId"), true);
+    view.setUint32(base + offsetOf("windowBlocks"), requireU32(edit.windowBlocks, "windowBlocks"), true);
+    records.set(strip, base + offsetOf("stripId"));
+    records.set(effect, base + offsetOf("effectId"));
   });
   return records;
 }
@@ -337,7 +356,7 @@ export class LiveControlWriter {
       );
     }
     if (isControlEdit(edit)) validateControlEdit(edit);
-    else laneEditWord(edit);
+    else checkLaneEdit(edit);
     const key = coalescingKey(edit);
     if (this.#pending.has(key)) this.#coalesced += 1;
     // Delete before set so a superseded edit also moves to the back of the insertion order: the

@@ -18,7 +18,7 @@ import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from ".
  * `id:u16, wire:u8, flags:u8, length:u32`, the value, and zero padding to 8 bytes. A nested message
  * starts with `count:u32, reserved:u32`. The field numbers below are the protocol schema's
  * (`crates/protocol/src/schema.rs`: `session::transaction`, `session::edit`, `session::set_control`,
- * `control_address`); `crates/protocol/tests/fixtures/set-control-frames.json` holds the Rust codec's
+ * `set_control_address`); `crates/protocol/tests/fixtures/set-control-frames.json` holds the Rust codec's
  * bytes for a fixed list of edits and `sdk/test/control-frame-evals.mjs` compares this encoder to it.
  */
 
@@ -72,6 +72,14 @@ export interface ControlWireAddress {
   readonly control: number;
   /** `left`, `right`, or `both` lanes at once. */
   readonly lane: ControlLane;
+  /**
+   * The native effect (its catalog ID, `miso.compressor`) the edit was written for, in a console or
+   * insert section only (#1678). The numeric `control` of such a row depends on the effect, and a
+   * rebuild can replace the effect an insert or slot runs: the core refuses the edit with
+   * `control.effect.changed` when what runs there now is another effect, and applies it to whatever
+   * runs there when this is absent.
+   */
+  readonly expectedEffect?: string;
 }
 
 /** One `SET_CONTROL` edit: a value for one lane of one control, with an optional ramp length. */
@@ -227,6 +235,12 @@ function addressMessage(address: ControlWireAddress): Uint8Array {
   }
   fields.push(field(5, WIRE_U32, false, u32(requireU32(address.control, "a control row ID"))));
   fields.push(field(6, WIRE_U8, false, u8(lookup(LANE_CODES, address.lane, "a lane"))));
+  if (address.expectedEffect !== undefined) {
+    if (section.kind !== "console" && section.kind !== "inserts") {
+      throw new MisoUsageError("an expected effect names the effect of a console slot or an insert");
+    }
+    fields.push(field(7, WIRE_UTF8, false, text(requireId(address.expectedEffect, "an expected effect ID"))));
+  }
   return messageBody(fields);
 }
 
@@ -275,9 +289,14 @@ export function controlEditBytes(edit: ControlFrameEdit): number {
   return editField(edit).length;
 }
 
-/** The address an edit writes: two edits with one key write the same lane of the same control. */
+/**
+ * The address an edit writes: two edits with one key write the same lane of the same control, for
+ * the same expected effect. The expected effect is part of the key: an edit written for one effect
+ * and an edit written for another (or for none) are different requests, which the core may answer
+ * differently, so neither may supersede the other.
+ */
 export function controlEditKey(edit: ControlFrameEdit): string {
-  const { owner, section, control, lane } = edit.address;
+  const { owner, section, control, lane, expectedEffect } = edit.address;
   return JSON.stringify([
     owner.kind,
     "id" in owner ? owner.id : "",
@@ -285,6 +304,7 @@ export function controlEditKey(edit: ControlFrameEdit): string {
     section.kind === "console" ? section.slot : section.kind === "inserts" ? section.effect : "",
     control,
     lane,
+    expectedEffect ?? null,
   ]);
 }
 

@@ -19,6 +19,9 @@ pub(crate) struct StripLanes {
     /// One producer per route into a submix, in canonical route-ID order; empty when the plan
     /// carries no route lane.
     pub(crate) routes: Box<[host_core::RouteControlProducer]>,
+    /// The writer of the plan's jump-length cell (#1639 D1), held inline; every prepared plan has
+    /// one, and preparation refuses a handle set without it.
+    pub(crate) jump_lengths: host_core::GraphJumpLengthProducer,
 }
 
 /// One epoch's worth of host-owned source producers, strip live-control producers and effect
@@ -413,27 +416,178 @@ pub struct SessionState<A: ControlAdapter> {
     /// acknowledged survives a rebuild that restarts its effect.
     pub(crate) observation: controls::ObservationBindings,
     /// The subscription state each observation slot of the newest plan was last pushed, waiting
-    /// to be folded into [`Self::observation`] (#1584 D6a). The browser admits a subscription
-    /// inside `process()`, where nothing may allocate, and a binding owns its key's text, so the
+    /// to be folded into [`Self::observation`] (#1584 D6a). The browser admits a subscription in
+    /// the worklet's message handler between render quanta, on the audio thread, where nothing may
+    /// allocate, and a binding owns its key's text, so the
     /// push records the absolute state here, in storage sized when the plan is published, and the
     /// next service step folds it into the table. A rebuild folds first: it only starts from
     /// [`Self::command`], which services.
-    pub(crate) observation_pending: Box<[PendingArm]>,
+    pub(crate) observation_pending: Box<[ObservationSlot]>,
     /// For each position of the newest plan's effect producers, the first of its slots in
     /// `observation_pending`, and one entry past the last: a producer's slots are
     /// `offsets[position]..offsets[position + 1]`, one per declared tap in declaration order.
     pub(crate) observation_offsets: Box<[u32]>,
+    /// How many of [`Self::observation_pending`]'s slots are armed now, pushes not yet folded
+    /// included: the figure a subscription is admitted against (#1676 D1). Never above
+    /// [`Self::observation_cap`].
+    pub(crate) observation_armed: usize,
+    /// The most taps the host may have armed at once: the keys one `OBSERVATION_ENDED` event can
+    /// carry in one control frame, so the commit that ends every binding can always say so
+    /// (#1676 D1). Fixed by the session's frame limit when it compiles.
+    pub(crate) observation_cap: usize,
+    /// For each position of the newest plan's effect producers, the records of the batch being
+    /// admitted that name it (#1676, batch 13b fold): the room check reads one count per producer
+    /// instead of counting the batch again for each record. Sized with
+    /// [`Self::observation_offsets`], when the plan's slots are built, so admission allocates
+    /// nothing.
+    pub(crate) observation_batch_counts: Box<[ObservationBatchCount]>,
+    /// The stamp of the batch being admitted: a slot's or a producer count's `mark` equal to it
+    /// belongs to this batch, any other value to an earlier one, so the scratch needs no clearing
+    /// between batches.
+    pub(crate) observation_batch_mark: u32,
+    /// The most observation slots any committed plan has had; the ended-event cells and the
+    /// binding table are charged for it (#1676 D2).
+    pub(crate) observation_slots_high_water: usize,
 }
 
-/// A plan's observation slot offsets and its pending-subscription storage.
-pub(crate) type ObservationSlots = (Box<[u32]>, Box<[PendingArm]>);
+/// The stable key of one observation tap, borrowed from the bytes that name it (#1677): the strip's
+/// ID, the rack, the console slot's or insert's ID and the effect-local tap ID. The same key
+/// `OBSERVATION_ENDED` names ([`controls::TapKey`]), in a form a host can build from its staging
+/// without allocating.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationKeyRef<'a> {
+    /// The ID of the track or submix.
+    pub strip_id: &'a [u8],
+    /// The console slot or the insert section.
+    pub rack: host_core::LiveEffectRack,
+    /// The console slot's or the insert's ID.
+    pub effect_id: &'a [u8],
+    /// The effect-local tap ID.
+    pub tap_id: u32,
+}
 
-/// The pending-subscription storage for `producers`, the newest plan's: the first slot of each
-/// producer (and one past the last), and one slot per declared tap (#1584 D6a). Built when a plan
-/// is prepared, fallibly and before anything commits; the session takes it after the commit and
-/// after the fold, so nothing pending is lost to a change of positions.
+/// Where [`SessionState::resolve_observation_key`] found a tap, on the newest plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedObservationTap {
+    /// The position of the tap's effect in [`SessionState::effect_producers`].
+    pub producer: usize,
+    /// The tap's index in its effect's declared menu, which the render side arms.
+    pub tap_index: u32,
+}
+
+/// Why a key names no tap of the newest plan (#1677). Nothing was written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservationKeyError {
+    /// The strip ID is no track or submix of the plan.
+    UnknownStrip,
+    /// The strip has no console slot or insert of that ID.
+    UnknownEffect,
+    /// The effect declares no tap of that ID.
+    UnknownTap,
+    /// The tap is declared and its cost is not resident; V1 binds no lane for one.
+    ComputedTap,
+}
+
+/// A subscription batch would leave more taps armed than one `OBSERVATION_ENDED` event can name in
+/// one control frame (#1676 D1). Nothing was written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationLimit {
+    /// The position, in the batch, of the first change that adds a tap past the cap.
+    pub index: usize,
+    /// The most taps the session may have armed at once.
+    pub cap: usize,
+}
+
+/// One subscription change of a batch handed to
+/// [`SessionState::admit_and_push_observation_batch`] (#1676).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationChange {
+    /// The producer's position in [`SessionState::effect_producers`].
+    pub position: usize,
+    /// The tap's index in the producer's observation menu.
+    pub tap_index: u32,
+    /// `true` arms the tap, `false` disarms it.
+    pub armed: bool,
+    /// Render blocks per published window; ignored by a disarm.
+    pub window_blocks: u32,
+}
+
+/// Why [`SessionState::admit_and_push_observation_batch`] refused a batch. Nothing was queued.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservationRefusal {
+    /// The batch would leave more taps armed than the cap. Not retryable as sent: a tap must be
+    /// disarmed first.
+    Limit(ObservationLimit),
+    /// The change at `index` needs more room than its producer's observation queue has free.
+    /// Retryable once a render drains the queue.
+    Full {
+        /// The change's position in the batch.
+        index: usize,
+    },
+    /// The change at `index` names a position past [`SessionState::effect_producers`].
+    NoProducer {
+        /// The change's position in the batch.
+        index: usize,
+    },
+    /// The change at `index` names a tap an earlier change of the same batch already names. A
+    /// change sets its tap's whole state and the batch drains in one block, so a second change
+    /// would supersede the first, which an observation record never is (D15-2). Not retryable as
+    /// sent.
+    Duplicate {
+        /// The position in the batch of the second change that names the tap.
+        index: usize,
+    },
+    /// The change at `index` names a producer whose observation queue has no slot for its tap:
+    /// the tap index is past the producer's observation menu, or the plan bound the producer no
+    /// observation queue at all (capacity `0`). Such a record would be acknowledged and never
+    /// applied, so it is refused before anything is queued. Not retryable as sent.
+    Unbound {
+        /// The change's position in the batch.
+        index: usize,
+    },
+}
+
+/// The index in `descriptor`'s observation menu of the tap with ID `tap_id`, the one the render side
+/// arms (#1677). A tap the menu does not declare is [`ObservationKeyError::UnknownTap`], and a
+/// declared tap that is not resident is [`ObservationKeyError::ComputedTap`]: V1 ships no
+/// implementation for one, and saying so is better than binding a lane that would never publish.
+///
+/// # Errors
+///
+/// As above.
+pub fn resolve_observation_tap(
+    descriptor: &effect_contract::EffectDescriptor,
+    tap_id: u32,
+) -> Result<u32, ObservationKeyError> {
+    let (index, tap) = descriptor
+        .observations
+        .iter()
+        .enumerate()
+        .find(|(_, tap)| tap.id.0 == tap_id)
+        .ok_or(ObservationKeyError::UnknownTap)?;
+    if !matches!(tap.cost, effect_contract::ObservationCost::Resident) {
+        return Err(ObservationKeyError::ComputedTap);
+    }
+    u32::try_from(index).map_err(|_| ObservationKeyError::UnknownTap)
+}
+
+/// A plan's observation slot offsets, its slot storage, its per-producer admission scratch and how
+/// many of its slots are armed.
+pub(crate) type ObservationSlots = (
+    Box<[u32]>,
+    Box<[ObservationSlot]>,
+    Box<[ObservationBatchCount]>,
+    usize,
+);
+
+/// The slot storage for `producers`, the newest plan's: the first slot of each producer (and one
+/// past the last), and one slot per declared tap (#1584 D6a), each armed when `bindings` holds its
+/// tap (#1676). Built when a plan is prepared, fallibly and before anything commits; the session
+/// takes it after the commit and after the fold, so nothing pending is lost to a change of
+/// positions.
 pub(crate) fn observation_slots(
     producers: &[host_core::EffectControlProducer],
+    bindings: &controls::ObservationBindings,
 ) -> Result<ObservationSlots, std::collections::TryReserveError> {
     let mut offsets = Vec::new();
     offsets.try_reserve_exact(producers.len() + 1)?;
@@ -444,10 +598,68 @@ pub(crate) fn observation_slots(
             total.saturating_add(u32::try_from(producer.observe_capacity()).unwrap_or(u32::MAX));
     }
     offsets.push(total);
-    let mut pending = Vec::new();
-    pending.try_reserve_exact(total as usize)?;
-    pending.resize(total as usize, PendingArm::None);
-    Ok((offsets.into_boxed_slice(), pending.into_boxed_slice()))
+    let mut counts = Vec::new();
+    counts.try_reserve_exact(producers.len())?;
+    counts.resize(producers.len(), ObservationBatchCount::default());
+    let mut slots = Vec::new();
+    slots.try_reserve_exact(total as usize)?;
+    let mut armed = 0_usize;
+    if bindings.is_empty() {
+        slots.resize(total as usize, ObservationSlot::default());
+    } else {
+        for producer in producers {
+            for tap in 0..producer.observe_capacity() {
+                let is_armed = producer
+                    .descriptor
+                    .observations
+                    .get(tap)
+                    .is_some_and(|declared| {
+                        bindings.is_armed_by_parts(
+                            &producer.track_id,
+                            producer.address.rack == host_core::LiveEffectRack::Console,
+                            &producer.effect_id,
+                            declared.id.0,
+                        )
+                    });
+                armed += usize::from(is_armed);
+                slots.push(ObservationSlot {
+                    armed: is_armed,
+                    pending: PendingArm::None,
+                    mark: 0,
+                });
+            }
+        }
+    }
+    Ok((
+        offsets.into_boxed_slice(),
+        slots.into_boxed_slice(),
+        counts.into_boxed_slice(),
+        armed,
+    ))
+}
+
+/// One producer's share of the batch being admitted (#1676, batch 13b fold): how many of its
+/// records name the producer, valid while `mark` is the session's batch stamp.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ObservationBatchCount {
+    /// The batch stamp `needed` was counted under.
+    pub(crate) mark: u32,
+    /// Records of that batch that name the producer.
+    pub(crate) needed: u32,
+}
+
+/// One observation slot: whether its tap is armed now, and what the host pushed to it since the
+/// last fold (#1584 D6a, #1676).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ObservationSlot {
+    /// Armed now: the table's state with every push since folded in. Lets a subscription be
+    /// admitted against the cap without a key lookup, on the audio thread between quanta.
+    pub(crate) armed: bool,
+    /// The push waiting to be folded into the table.
+    pub(crate) pending: PendingArm,
+    /// The stamp of the last batch that named this slot (#1676, batch 13b fold): a change whose
+    /// slot already carries the current stamp is the batch's second naming of the tap.
+    pub(crate) mark: u32,
 }
 
 /// What the host last pushed to one observation slot (#1584 D6a).
@@ -1470,6 +1682,7 @@ where
                         observation: &observation_change.bindings,
                     }),
                     &self.live_values_superseded,
+                    self.observation_slots_high_water,
                 )
                 .map_err(CommandError::CompileRejected)?;
                 let PreparedRuntime {
@@ -1601,7 +1814,10 @@ where
                 // #1584 D6a: the newest plan's pending-subscription storage is built here, with
                 // the other fallible steps, so no allocation follows the commit; the commit then
                 // only assigns it. A refusal drops what was built and changes nothing.
-                let slots = match observation_slots(&candidate_provider.effects) {
+                let slots = match observation_slots(
+                    &candidate_provider.effects,
+                    &observation_change.bindings,
+                ) {
                     Ok(slots) => slots,
                     Err(_) => {
                         drop(reports);
@@ -1647,7 +1863,15 @@ where
                 self.pending_providers.push(candidate_provider);
                 // #1584 D6a: the newest plan's slots, built above. The fold ran when this command
                 // was serviced and nothing has been pushed since (one thread), so none is lost.
-                (self.observation_offsets, self.observation_pending) = slots;
+                (
+                    self.observation_offsets,
+                    self.observation_pending,
+                    self.observation_batch_counts,
+                    self.observation_armed,
+                ) = slots;
+                self.observation_slots_high_water = self
+                    .observation_slots_high_water
+                    .max(self.observation_pending.len());
                 reports.push((epoch, A::Row::from(resources)));
                 reservation.commit();
                 #[cfg(feature = "test-support")]
@@ -1888,6 +2112,9 @@ where
             };
             resolved_routes.push(index);
         }
+        // 2a'. A delta with new jump lengths writes them to the newest plan's cell (#1639 D3),
+        // which every epoch holds (D1).
+        let jump_lane = &mut strips.jump_lengths;
 
         // 2b. A strip with input records has an input writer, and every filter target passes the
         // contract the writer assumes (#1556 D5). Both are checked before the first write: the
@@ -2041,6 +2268,10 @@ where
             }
             for (route, &index) in delta.routes.iter().zip(&resolved_routes) {
                 route_lanes[index].write(stamp, route.record);
+            }
+            // #1639 D3: the new jump lengths, in the same block as the records.
+            if let Some(lengths) = delta.jump_lengths {
+                jump_lane.write(stamp, lengths);
             }
             for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
                 let producer = &mut owners.effects[index];
@@ -2379,8 +2610,9 @@ where
     /// The newest plan's effect producers, in `HostLiveControlHandles::effect_controls` order
     /// (#1381a), for reading: each producer's identity and descriptor, and the free room of its
     /// observation queue. The adapter reaches an effect's observation queue for the browser's
-    /// observe kinds 7 and 8 (ruling C9) through [`Self::push_effect_observe`], and nothing
-    /// else of a producer, so it cannot write a live value or open an owner behind the commit.
+    /// observe kinds 7 and 8 (ruling C9) through [`Self::admit_and_push_observation_batch`], and
+    /// nothing else of a producer, so it cannot write a live value or open an owner behind the
+    /// commit.
     ///
     /// These are the producers of the newest committed plan (#1290a, batch 10 review): the
     /// pending candidate's while one waits for its swap, else the current plan's. That is the plan
@@ -2393,13 +2625,255 @@ where
         &self.newest_providers().effects
     }
 
+    /// Resolves the stable key of an observation tap on the newest committed plan (#1677): the
+    /// plan [`Self::effect_producers`] lists, the pending candidate's while one waits for its swap.
+    /// A subscribe or unsubscribe names its tap by this key and no position of any plan, so a
+    /// rebuild between a client's last read and the record cannot make it arm another effect's
+    /// tap. The browser's record calls it, and the future C ABI observe edit (#1584) must call it.
+    ///
+    /// The strip is looked up in the committed model, so a strip with no effect is still an
+    /// unknown effect and not an unknown strip. The effect is the producer of the strip's console
+    /// slot or insert of that ID. The comparison is by bytes and the call allocates nothing: the
+    /// browser admits a record in the worklet's message handler, on the audio thread between
+    /// render quanta.
+    ///
+    /// # Errors
+    ///
+    /// The first of [`ObservationKeyError`] that applies, in the order strip, effect, tap. Nothing
+    /// is written.
+    pub fn resolve_observation_key(
+        &self,
+        key: &ObservationKeyRef<'_>,
+    ) -> Result<ResolvedObservationTap, ObservationKeyError> {
+        let model = self.committed_session().normalized_model();
+        let strip_known = model
+            .tracks
+            .binary_search_by(|track| track.id.as_str().as_bytes().cmp(key.strip_id))
+            .is_ok()
+            || model
+                .submixes
+                .binary_search_by(|submix| submix.id.as_str().as_bytes().cmp(key.strip_id))
+                .is_ok();
+        if !strip_known {
+            return Err(ObservationKeyError::UnknownStrip);
+        }
+        let (producer, found) = self
+            .newest_providers()
+            .effects
+            .iter()
+            .enumerate()
+            .find(|(_, producer)| {
+                producer.address.rack == key.rack
+                    && producer.track_id.as_bytes() == key.strip_id
+                    && producer.effect_id.as_bytes() == key.effect_id
+            })
+            .ok_or(ObservationKeyError::UnknownEffect)?;
+        Ok(ResolvedObservationTap {
+            producer,
+            tap_index: resolve_observation_tap(found.descriptor, key.tap_id)?,
+        })
+    }
+
+    /// The most taps the host may have armed at once (#1676 D1): the keys one `OBSERVATION_ENDED`
+    /// event carries in one control frame with every ID at its longest. Fixed when the session
+    /// compiles, from its control frame limit.
+    #[must_use]
+    pub fn observation_cap(&self) -> usize {
+        self.observation_cap
+    }
+
+    /// How many taps are armed now, pushes the table has not folded yet included.
+    #[must_use]
+    pub fn observation_armed(&self) -> usize {
+        self.observation_armed
+    }
+
+    /// Admits a batch of subscription changes, then queues it: the one way a host arms or disarms
+    /// an observation tap (#1676 D1, attempt 2). A change names the producer's position in
+    /// [`Self::effect_producers`] and the tap, as [`Self::resolve_observation_key`] returns them.
+    ///
+    /// Three checks run before anything is written, in this order, and a refusal names the first
+    /// change in the iterator's order that breaks the first check that fails:
+    ///
+    /// 1. **A slot per tap, and one naming per tap.** A change whose producer has no observation
+    ///    slot for its tap (a tap index past the menu, or a producer with no observation queue) is
+    ///    [`ObservationRefusal::Unbound`]. A change that names a tap an earlier change of the
+    ///    batch named is [`ObservationRefusal::Duplicate`], at the second naming. The cap below counts each
+    ///    tap once, so it is only sound for a batch that names each tap once.
+    /// 2. **The cap.** The batch is judged by the state it leaves: arms of taps that are not
+    ///    armed add, disarms of armed taps remove, and the rest change nothing. A batch that would
+    ///    leave more than [`Self::observation_cap`] taps armed is
+    ///    [`ObservationRefusal::Limit`], at the arm that crosses after every removal of the batch
+    ///    is counted. A retry of the same batch never succeeds until another tap is disarmed.
+    /// 3. **The room.** Each producer's observation queue holds one record per declared tap until
+    ///    a render drains it; a batch that needs more than the free room of a producer is
+    ///    [`ObservationRefusal::Full`] (retryable after a render), and a position past the list is
+    ///    [`ObservationRefusal::NoProducer`]. These two are one check: the first change in order
+    ///    that names no producer or a producer without the room the batch needs is refused.
+    ///
+    /// Then every change is queued. A refusal writes nothing observable, so it is whole and
+    /// precedes every acknowledgement. The call is linear in the batch, reads the per-slot state
+    /// the pushes keep and per-producer scratch sized with the plan, and allocates nothing, so it
+    /// runs in the browser worklet's message handler, on the audio thread between render quanta.
+    ///
+    /// # Errors
+    ///
+    /// [`ObservationRefusal`], as above. Nothing was queued and no state moved.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: the room check covers every push of the batch on the one control thread,
+    /// so a push that is refused after it is an engine fault, which would break the whole-batch
+    /// promise and is not returned as a typed refusal.
+    pub fn admit_and_push_observation_batch(
+        &mut self,
+        changes: impl Iterator<Item = ObservationChange> + Clone,
+    ) -> Result<(), ObservationRefusal> {
+        let mark = self.next_observation_batch_mark();
+        // Pass 1: a tap the producer has no slot for, the second naming of a tap, and each
+        // producer's record count for pass 3. A position past the list is pass 3's `NoProducer`.
+        for (index, change) in changes.clone().enumerate() {
+            if change.position < self.newest_providers().effects.len()
+                && self
+                    .observation_slot(change.position, change.tap_index)
+                    .is_none()
+            {
+                return Err(ObservationRefusal::Unbound { index });
+            }
+            if let Some(count) = self.observation_batch_counts.get_mut(change.position) {
+                if count.mark != mark {
+                    *count = ObservationBatchCount { mark, needed: 0 };
+                }
+                count.needed = count.needed.saturating_add(1);
+            }
+            if let Some(slot) = self.observation_slot(change.position, change.tap_index) {
+                let entry = &mut self.observation_pending[slot];
+                if entry.mark == mark {
+                    return Err(ObservationRefusal::Duplicate { index });
+                }
+                entry.mark = mark;
+            }
+        }
+        // Pass 2: the cap.
+        self.admit_observation_changes(changes.clone())
+            .map_err(ObservationRefusal::Limit)?;
+        // Pass 3: the room, one count per producer from pass 1.
+        let producers = &self.newest_providers().effects;
+        for (index, change) in changes.clone().enumerate() {
+            let Some(producer) = producers.get(change.position) else {
+                return Err(ObservationRefusal::NoProducer { index });
+            };
+            let needed = self
+                .observation_batch_counts
+                .get(change.position)
+                .filter(|count| count.mark == mark)
+                .map_or(0, |count| count.needed as usize);
+            if needed > producer.observe_available_capacity() {
+                return Err(ObservationRefusal::Full { index });
+            }
+        }
+        for change in changes {
+            self.push_effect_observe(
+                change.position,
+                change.tap_index,
+                change.armed,
+                change.window_blocks,
+            )
+            .expect("the room check found the producer")
+            .expect("the room check found room for every record of the batch");
+        }
+        debug_assert!(
+            self.observation_armed <= self.observation_cap,
+            "an admitted batch leaves {} taps armed past the cap {}",
+            self.observation_armed,
+            self.observation_cap
+        );
+        Ok(())
+    }
+
+    /// A fresh stamp for the batch about to be admitted. A stamp of `0` is what new scratch
+    /// holds, so it is never handed out; when the counter wraps, every mark is cleared first (a
+    /// bounded pass over storage sized with the plan, which allocates nothing).
+    fn next_observation_batch_mark(&mut self) -> u32 {
+        self.observation_batch_mark = self.observation_batch_mark.wrapping_add(1);
+        if self.observation_batch_mark == 0 {
+            for slot in &mut self.observation_pending {
+                slot.mark = 0;
+            }
+            for count in &mut self.observation_batch_counts {
+                *count = ObservationBatchCount::default();
+            }
+            self.observation_batch_mark = 1;
+        }
+        self.observation_batch_mark
+    }
+
+    /// The index in [`Self::observation_pending`] of the tap at `tap_index` of the producer at
+    /// `position`, if both name one.
+    fn observation_slot(&self, position: usize, tap_index: u32) -> Option<usize> {
+        let first = *self.observation_offsets.get(position)?;
+        let end = *self.observation_offsets.get(position + 1)?;
+        let slot = first.checked_add(tap_index).filter(|slot| *slot < end)?;
+        Some(slot as usize).filter(|slot| *slot < self.observation_pending.len())
+    }
+
+    /// The cap check of [`Self::admit_and_push_observation_batch`]: moves nothing. Sound only
+    /// for a batch that names each tap once, which the caller checks first.
+    fn admit_observation_changes(
+        &self,
+        changes: impl Iterator<Item = ObservationChange> + Clone,
+    ) -> Result<(), ObservationLimit> {
+        let state = |position: usize, tap_index: u32| -> Option<bool> {
+            Some(self.observation_pending[self.observation_slot(position, tap_index)?].armed)
+        };
+        let removed = changes
+            .clone()
+            .filter(|change| {
+                !change.armed && state(change.position, change.tap_index) == Some(true)
+            })
+            .count();
+        let mut armed_after = self.observation_armed.saturating_sub(removed);
+        for (index, change) in changes.enumerate() {
+            if change.armed && state(change.position, change.tap_index) == Some(false) {
+                armed_after += 1;
+                if armed_after > self.observation_cap {
+                    return Err(ObservationLimit {
+                        index,
+                        cap: self.observation_cap,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Queues one observation record past every admission check, the over-frame defence's only
+    /// way in (#1676 attempt 2): a test arms more taps than the cap to prove that a commit whose
+    /// ended event would not fit one frame is still refused.
+    ///
+    /// # Errors
+    ///
+    /// As the queue push: `None` for a position past the list, else the producer's refusal.
+    #[cfg(feature = "test-support")]
+    pub fn test_push_observe_unadmitted(
+        &mut self,
+        position: usize,
+        tap_index: u32,
+        armed: bool,
+        window_blocks: u32,
+    ) -> Option<Result<(), effect_contract::ObservePushError>> {
+        self.push_effect_observe(position, tap_index, armed, window_blocks)
+    }
+
     /// Queues one observation record on the newest plan's effect producer at `position` of
-    /// [`Self::effect_producers`]: the only write the adapter makes to a producer.
+    /// [`Self::effect_producers`]. Private to the crate: a host reaches it only through
+    /// [`Self::admit_and_push_observation_batch`], so no record is queued without the cap check
+    /// (#1676 attempt 2).
     ///
     /// # Errors
     ///
     /// `None` for a position past the list, else the producer's refusal (no queue, or full).
-    pub fn push_effect_observe(
+    pub(crate) fn push_effect_observe(
         &mut self,
         position: usize,
         tap_index: u32,
@@ -2416,8 +2890,8 @@ where
         if pushed.is_ok() {
             // #1584 D6a: the push is the acknowledgement, so the state every later successor is
             // prepared from is recorded with it, after the only fallible step and without
-            // allocating: this runs inside the browser's `process()`. A record the lane refused
-            // records nothing. The next service step folds it into the table.
+            // allocating: this runs on the browser's audio thread, between quanta. A record the
+            // lane refused records nothing. The next service step folds it into the table.
             let slots = self
                 .observation_offsets
                 .get(position)
@@ -2425,13 +2899,21 @@ where
                 .zip(self.observation_offsets.get(position + 1).copied());
             if let Some((first, end)) = slots
                 && let Some(slot) = first.checked_add(tap_index).filter(|slot| *slot < end)
-                && let Some(pending) = self.observation_pending.get_mut(slot as usize)
+                && let Some(entry) = self.observation_pending.get_mut(slot as usize)
             {
-                *pending = if armed {
+                entry.pending = if armed {
                     PendingArm::Arm(window_blocks)
                 } else {
                     PendingArm::Disarm
                 };
+                // The count follows the slot's state (#1676): an arm of an armed tap only changes
+                // its window, and a disarm of a tap that is not armed removes nothing.
+                match (entry.armed, armed) {
+                    (false, true) => self.observation_armed += 1,
+                    (true, false) => self.observation_armed -= 1,
+                    _ => {}
+                }
+                entry.armed = armed;
             }
         }
         Some(pushed)
@@ -2443,7 +2925,7 @@ where
         if self
             .observation_pending
             .iter()
-            .all(|arm| *arm == PendingArm::None)
+            .all(|slot| slot.pending == PendingArm::None)
         {
             return;
         }
@@ -2460,7 +2942,7 @@ where
                 break;
             };
             for slot in first..end {
-                let arm = core::mem::take(&mut self.observation_pending[slot as usize]);
+                let arm = core::mem::take(&mut self.observation_pending[slot as usize].pending);
                 let Some(key) = tap_key_of(producer, slot - first) else {
                     continue;
                 };

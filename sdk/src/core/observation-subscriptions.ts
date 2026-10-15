@@ -2,7 +2,7 @@ import { ABI_LAYOUT } from "../generated/abi.ts";
 import { constantValue } from "./abi.ts";
 import { CATALOG } from "../generated/catalog.ts";
 import type { CommandReport } from "./boundary.ts";
-import { EngineLiveControls, structureBehindError } from "./live-controls.ts";
+import { EngineLiveControls, observationEdit } from "./live-controls.ts";
 import { MisoEngineError, MisoUsageError } from "./errors.ts";
 import {
   MAXIMUM_OBSERVATION_READS,
@@ -45,14 +45,6 @@ import type { EngineCallResult } from "./boundary.ts";
  * drains an effect's observation queue, so more than one means another writer keeps refilling it.
  */
 const MAXIMUM_ADMISSION_RETRIES = 8;
-
-/**
- * How many renders a subscribe, update or close waits through for the plan that renders to catch
- * up with the newest committed one, so that the map's effect indices and the list's strip indices
- * belong to one plan. A commit is adopted within a block or two, so more than a few means commits
- * keep arriving faster than renders.
- */
-const MAXIMUM_STRUCTURE_WAITS = 8;
 
 /** The bounded configuration accepted by `subscribeObservations`. */
 export interface ObservationSubscriptionLimits {
@@ -157,10 +149,9 @@ export interface ObservationSubscription {
    * engine refuses at once, so the caller renders and calls again. The browser engine first waits
    * for a render, up to `requestDeadlineMs`, and ends in the same error when none comes.
    *
-   * The same holds between a rebuild's commit and the block that adopts the replacement plan: the
-   * records of a subscribe, update or close name effects of the plan that renders, and the core
-   * admits them against the newest plan, so none is sent until a render has adopted it. The wait
-   * ends in the typed, retryable `backpressure` error (`sdk.observation.structure_behind`).
+   * A record names its tap by stable key (the strip, the effect and the tap), and the core resolves
+   * it on the newest committed plan, so a record sent between a rebuild's commit and the block that
+   * adopts the replacement plan arms the tap it names.
    */
   update(request: ObservationSubscriptionRequest): Promise<ObservationSubscriptionReceipt>;
   close(): Promise<void>;
@@ -251,8 +242,6 @@ interface BindingState {
   readonly baseKey: string;
   readonly selection: ObservationSelection;
   readonly nativeSelection: ObservationSelection;
-  /** The owner's address as the newest map gave it: a rebuild can move the effect's index. */
-  binding: ObservationBinding;
   readonly windowBlocks: number;
   refs: number;
   latest: ObservationReadResult | undefined;
@@ -457,10 +446,18 @@ function projectRow(row: ObservationReadResult, channels: ObservationChannels): 
 }
 
 function commandFailure(message: string, report: CommandReport): MisoEngineError {
-  return new MisoEngineError(message, {
+  // The result code alone does not say which rule refused the record, so the error carries the
+  // reason as its diagnostic code and the message names the reason and the record. `observationLimit`
+  // (#1676) is the cap on armed taps: no render makes room, so it is never resent, and the message
+  // says what does.
+  const hint = report.reasonName === "observationLimit"
+    ? " (the cap on armed observation taps is full; unsubscribe another tap first)"
+    : "";
+  return new MisoEngineError(`${message}: ${report.reasonName} at record ${report.rejectedIndex}${hint}`, {
     phase: report.code === "wrongState" ? "lifecycle" : "output",
     code: report.code,
     result: report.result,
+    diagnostics: [{ code: report.reasonName, path: "" }],
   });
 }
 
@@ -627,7 +624,7 @@ export class ObservationSubscriptionOwner {
         throw new MisoUsageError(`observation subscriptions are capped at ${this.#subscriptionLimits.maximumHandles}`);
       }
       await this.#waitForPoll();
-      const settled = await this.#settle(epoch, (map) => {
+      const settled = await this.#prepare(epoch, (map) => {
         const entries = normalized.configuration.selections.map((selection) =>
           mapSelection(map, selection, normalized.configuration.windowBlocks));
         if (entries.some((entry) => {
@@ -647,9 +644,9 @@ export class ObservationSubscriptionOwner {
       const { liveControls } = settled;
       const preflight = await this.#preflight(newEntries, epoch);
       const edits = newEntries.map((entry) =>
-        this.#edit(liveControls!, entry, true, normalized.configuration.windowBlocks));
+        this.#edit(entry, true, normalized.configuration.windowBlocks));
       const armRevision = await this.#committedRevision(liveControls);
-      const report = await this.#submit(liveControls, edits, epoch, settled.structureEpoch);
+      const report = await this.#submit(liveControls, edits, epoch);
       this.#assertEpoch(epoch);
       const appliedAtSample = report?.appliedAtSample ?? this.#existingSample(entries);
       const state = this.#newHandle(
@@ -662,7 +659,6 @@ export class ObservationSubscriptionOwner {
           baseKey: entry.baseKey,
           selection: entry.selection,
           nativeSelection: entry.nativeSelection,
-          binding: entry.binding,
           windowBlocks: normalized.configuration.windowBlocks,
           refs: 1,
           latest: row === undefined ? undefined : pendingRow(row),
@@ -688,8 +684,7 @@ export class ObservationSubscriptionOwner {
       this.#assertHandle(state);
       const epoch = this.#epoch;
       await this.#waitForPoll();
-      const settled = await this.#settle(epoch, (map) => {
-        this.#remap(map);
+      const settled = await this.#prepare(epoch, (map) => {
         const entries = normalized.configuration.selections.map((selection) =>
           mapSelection(map, selection, normalized.configuration.windowBlocks));
         const currentByKey = new Map(state.entries.map((entry) => [entry.key, entry] as const));
@@ -729,13 +724,11 @@ export class ObservationSubscriptionOwner {
       }));
       const preflight = await this.#preflight(preflightEntries, epoch);
       const edits: LaneEdit[] = [
-        ...disarm.map((entry) => this.#edit(liveControls!, entry, false, entry.windowBlocks)),
-        ...newEntries.map((entry) => this.#edit(
-          liveControls!, entry, true, normalized.configuration.windowBlocks,
-        )),
+        ...disarm.map((entry) => this.#edit(entry, false, entry.windowBlocks)),
+        ...newEntries.map((entry) => this.#edit(entry, true, normalized.configuration.windowBlocks)),
       ];
       const armRevision = await this.#committedRevision(liveControls);
-      const report = await this.#submit(liveControls, edits, epoch, settled.structureEpoch);
+      const report = await this.#submit(liveControls, edits, epoch);
       this.#assertEpoch(epoch);
       const appliedAtSample = report?.appliedAtSample ?? this.#existingSample(entries);
       release.forEach((entry) => this.#bindings.delete(entry.key));
@@ -750,7 +743,6 @@ export class ObservationSubscriptionOwner {
           baseKey: entry.baseKey,
           selection: entry.selection,
           nativeSelection: entry.nativeSelection,
-          binding: entry.binding,
           windowBlocks: normalized.configuration.windowBlocks,
           refs: 1,
           latest: row === undefined ? undefined : pendingRow(row),
@@ -794,27 +786,15 @@ export class ObservationSubscriptionOwner {
       this.#assertHandle(state);
       const epoch = this.#epoch;
       await this.#waitForPoll();
-      let disarm = state.entries.filter((entry) => {
+      const disarm = state.entries.filter((entry) => {
         const binding = this.#bindings.get(entry.key);
         return binding !== undefined && binding.refs === 1;
       });
       this.#assertCommandSize(disarm.length);
-      let liveControls: EngineLiveControls | undefined;
-      let structureEpoch: bigint | undefined;
-      if (disarm.length !== 0) {
-        // The records name the tap by the indices of the plan that renders now, which a rebuild can
-        // have changed since the subscription was made.
-        const held = disarm;
-        const settled = await this.#settle(epoch, (map) => {
-          this.#remap(map);
-          return { records: held.length };
-        });
-        liveControls = settled.liveControls;
-        structureEpoch = settled.structureEpoch;
-        disarm = state.entries.filter((entry) => held.some((kept) => kept.key === entry.key));
-      }
-      const edits = disarm.map((entry) => this.#edit(liveControls!, entry, false, entry.windowBlocks));
-      const report = await this.#submit(liveControls, edits, epoch, structureEpoch);
+      const liveControls = disarm.length === 0 ? undefined : await this.#transport.liveControls();
+      this.#assertEpoch(epoch);
+      const edits = disarm.map((entry) => this.#edit(entry, false, entry.windowBlocks));
+      const report = await this.#submit(liveControls, edits, epoch);
       this.#assertEpoch(epoch);
       if (report !== undefined && !report.ok) throw commandFailure("observation close was refused", report);
       disarm.forEach((entry) => this.#bindings.delete(entry.key));
@@ -923,27 +903,6 @@ export class ObservationSubscriptionOwner {
     this.#stopTimerIfIdle();
   }
 
-  /**
-   * Take the newest map's address for every held tap. A rebuild can move an effect to another index
-   * or strip; a tap is held by its stable IDs, and only the records that arm and disarm it name the
-   * index. A tap the map no longer has keeps its last address: the core ends it with its own event.
-   */
-  #remap(map: ObservationMap): void {
-    const current = (selection: ObservationSelection): ObservationBinding | undefined => map.bindings.find((candidate) =>
-      candidate.trackId === selection.trackId && candidate.rack === selection.rack
-        && candidate.effectSlotId === selection.effectSlotId);
-    for (const binding of this.#bindings.values()) {
-      const fresh = current(binding.selection);
-      if (fresh !== undefined) binding.binding = fresh;
-    }
-    for (const state of this.#handles.values()) {
-      state.entries = Object.freeze(state.entries.map((entry) => {
-        const fresh = current(entry.selection);
-        return fresh === undefined || fresh === entry.binding ? entry : Object.freeze({ ...entry, binding: fresh });
-      }));
-    }
-  }
-
   /** Invalidate only the spectrum lifetime after its analysis transport has failed. */
   invalidateSpectrum(): void {
     for (const state of this.#spectrumHandles.values()) state.closed = true;
@@ -1038,72 +997,39 @@ export class ObservationSubscriptionOwner {
     return result;
   }
 
-  #edit(
-    liveControls: EngineLiveControls,
-    entry: ResolvedSelection,
-    armed: boolean,
-    windowBlocks: number,
-  ): LaneEdit {
-    // `effect` and tap names come from the generated catalog after map validation. The live
-    // controls' generic type cannot express a runtime catalog row, so this is the one narrow cast
-    // at the seam.
-    // A binding's `trackId` names its strip, a track or a submix (#1214 MINOR-1).
-    return liveControls.edit.strip(entry.selection.trackId)
-      .effect(entry.selection.rack, entry.binding.effectIndex, entry.binding.nativeEffectId as never)
-      .observe(tapName(entry.binding, entry.selection.tapId) as never, armed, windowBlocks);
+  #edit(entry: ResolvedSelection, armed: boolean, windowBlocks: number): LaneEdit {
+    // The record names its tap by stable key, which the selection already is: the strip, the
+    // console slot or insert, the tap. The core resolves it on the plan it admits the record
+    // against, so nothing here can address another effect after a rebuild (#1677). The catalog
+    // says whether the tap is subscribable at all, which is refused before anything is sent.
+    tapName(entry.binding, entry.selection.tapId);
+    return observationEdit(armed, {
+      stripId: entry.selection.trackId,
+      rack: entry.selection.rack,
+      effectId: entry.selection.effectSlotId,
+      tapId: entry.selection.tapId,
+    }, windowBlocks);
   }
 
   /**
-   * Read the map of the plan that renders and the newest control list until both name one structure
-   * epoch, so that the effect index of a record (from the map) and its strip index (from the list)
-   * are of the plan the core admits the record against: the newest (M1 of the batch 12b review).
+   * Read the map of the plan that renders and resolve the request against it. `resolve` says how
+   * many records the request needs; one that needs none returns at once, with no live controls.
    *
-   * `resolve` maps the request against a map and says how many records it needs. A request that
-   * needs none returns at once, with no live controls and no wait. Between a rebuild's commit and
-   * the block that adopts its replacement the map is older than the list: a browser engine waits
-   * for a render (within its render-wait bound) and reads again, and an engine that renders only
-   * when its caller does throws the retryable `backpressure` error at once. Either way, a map that
-   * does not catch up in {@link MAXIMUM_STRUCTURE_WAITS} renders or the bound refuses with that
-   * error, and no misaddressed record is sent.
+   * The map describes the plan that renders and validates the selection (the effect and its tap
+   * exist, a read can reach them). It does not address a record: the record names the tap by stable
+   * key and the core resolves it on the newest committed plan (#1677).
    */
-  async #settle<T extends { readonly records: number }>(
+  async #prepare<T extends { readonly records: number }>(
     epoch: bigint,
     resolve: (map: ObservationMap) => T,
-  ): Promise<{
-    readonly resolved: T;
-    readonly liveControls: EngineLiveControls | undefined;
-    /** The epoch the records are addressed at, or `undefined` when nothing could be compared. */
-    readonly structureEpoch: bigint | undefined;
-  }> {
-    const wait = this.#transport.renderWait;
-    let deadline: number | undefined;
-    for (let waits = 0; ; waits += 1) {
-      // The position is read before the map, so a block rendered after the map was read counts.
-      const since = wait?.mark();
-      since?.catch(() => undefined);
-      const map = await this.#transport.observationMap();
-      this.#assertEpoch(epoch);
-      const resolved = resolve(map);
-      if (resolved.records === 0) return { resolved, liveControls: undefined, structureEpoch: undefined };
-      const liveControls = await this.#transport.liveControls();
-      this.#assertEpoch(epoch);
-      // A rebuild can have moved the strips: the records name them by the core's list as it is now.
-      const listEpoch = await liveControls.syncStructure();
-      this.#assertEpoch(epoch);
-      if (map.structureEpoch === undefined || listEpoch === undefined || map.structureEpoch === listEpoch) {
-        return { resolved, liveControls, structureEpoch: listEpoch };
-      }
-      const behind = structureBehindError(
-        `the map is of structure epoch ${map.structureEpoch} and the control list is at ${listEpoch}`,
-      );
-      if (wait === undefined || since === undefined || waits >= MAXIMUM_STRUCTURE_WAITS) throw behind;
-      deadline ??= Date.now() + wait.boundMs;
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) throw behind;
-      const rendered = await wait.next(remaining, await since);
-      this.#assertEpoch(epoch);
-      if (!rendered) throw behind;
-    }
+  ): Promise<{ readonly resolved: T; readonly liveControls: EngineLiveControls | undefined }> {
+    const map = await this.#transport.observationMap();
+    this.#assertEpoch(epoch);
+    const resolved = resolve(map);
+    if (resolved.records === 0) return { resolved, liveControls: undefined };
+    const liveControls = await this.#transport.liveControls();
+    this.#assertEpoch(epoch);
+    return { resolved, liveControls };
   }
 
   /**
@@ -1125,15 +1051,8 @@ export class ObservationSubscriptionOwner {
     liveControls: EngineLiveControls | undefined,
     edits: readonly LaneEdit[],
     epoch: bigint,
-    structureEpoch?: bigint,
   ): Promise<CommandReport | undefined> {
     if (edits.length === 0) return undefined;
-    const managedAt = (liveControls as EngineLiveControls & {
-      readonly submitManagedAt?: (
-        structureEpoch: bigint | undefined,
-        edits: readonly LaneEdit[],
-      ) => Promise<CommandReport>;
-    } | undefined)?.submitManagedAt;
     const managedSubmit = (liveControls as EngineLiveControls & {
       readonly submitManaged?: (...edits: readonly LaneEdit[]) => Promise<CommandReport>;
     } | undefined)?.submitManaged;
@@ -1145,16 +1064,15 @@ export class ObservationSubscriptionOwner {
       // answers it first. A block rendered after it and before the refusal returns is then seen.
       const since = wait?.mark();
       since?.catch(() => undefined);
-      const report = managedAt !== undefined
-        ? await managedAt.call(liveControls, structureEpoch, edits)
-        : managedSubmit === undefined
-          ? await liveControls!.submit(...edits)
-          : await managedSubmit.call(liveControls, ...edits);
+      const report = managedSubmit === undefined
+        ? await liveControls!.submit(...edits)
+        : await managedSubmit.call(liveControls, ...edits);
       if (report.ok) return report;
       // A submission names each tap once, so a refusal for room means a record of an earlier
       // submission still holds the tap's slot, and a render drains it. That refusal alone is flow
-      // control: it is typed and retryable. Anything else, a malformed or unbound request
-      // included, never succeeds on resend and is thrown at once.
+      // control: it is typed and retryable. Anything else, a malformed or unbound request or one
+      // past the cap on armed taps (`observationLimit`, #1676) included, never succeeds on resend
+      // and is thrown at once.
       if (report.reasonName !== "backpressure" || wait === undefined
           || attempt >= MAXIMUM_ADMISSION_RETRIES) {
         throw commandFailure("observation transaction was refused", report);

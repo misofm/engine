@@ -36,16 +36,11 @@ export interface ObservationBinding {
   readonly tapIds: readonly number[];
 }
 
-/** The current owner map used to resolve stable selections to numeric Wasm addresses. */
+/**
+ * The current owner map used to resolve stable selections to numeric Wasm addresses for a read.
+ * An observation record does not use it: it names its tap by stable key and the core resolves it.
+ */
 export interface ObservationMap {
-  /**
-   * The structure epoch of the control list whose strip order `bindings` follow (#1562b): the plan
-   * that renders. A rebuild changes it at the block that adopts the replacement, so between the
-   * rebuild's commit and that block it is older than the newest list's, and a binding's effect
-   * index is not the one the core admits a record against. A transport that cannot say leaves it
-   * out, and nothing is checked against it.
-   */
-  readonly structureEpoch?: bigint;
   readonly bindings: readonly ObservationBinding[];
 }
 
@@ -209,7 +204,6 @@ export function validateObservationSelections(selections: readonly ObservationSe
 export function enrichObservationMap(
   strips: readonly string[],
   raw: readonly RawObservationBinding[],
-  structureEpoch?: bigint,
 ): ObservationMap {
   const bindings = raw.map((binding, index) => {
     if (!Number.isSafeInteger(binding.trackIndex) || binding.trackIndex < 0
@@ -237,9 +231,7 @@ export function enrichObservationMap(
       tapIds: Object.freeze([...binding.tapIds]),
     });
   });
-  return Object.freeze(structureEpoch === undefined
-    ? { bindings: Object.freeze(bindings) }
-    : { structureEpoch, bindings: Object.freeze(bindings) });
+  return Object.freeze({ bindings: Object.freeze(bindings) });
 }
 
 /**

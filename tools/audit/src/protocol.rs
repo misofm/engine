@@ -182,7 +182,6 @@ fn prepare_corpus() -> Corpus {
         expected_revision: revision,
         payload: CommandPayload::TransportSet(protocol::TransportSetRequest {
             state: protocol::TransportState::Stopped,
-            position: None,
         }),
     });
     corpus.push_command(TypedCommandFrame {

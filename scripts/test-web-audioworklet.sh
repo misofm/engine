@@ -241,7 +241,7 @@ cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
   "$vocabulary_dir/hosts/host-web/web/"
 cp "$repo_root/tools/parameter-metadata/src/lib.rs" \
   "$vocabulary_dir/tools/parameter-metadata/src/"
-sed 's/^pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;/&\npub const COMMAND_REASON_FUTURE_TAP: u32 = 15;/' \
+sed 's/^pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;/&\npub const COMMAND_REASON_FUTURE_TAP: u32 = 16;/' \
   "$repo_root/hosts/host-web/src/lib.rs" \
   >"$vocabulary_dir/hosts/host-web/src/lib.rs"
 if diff -q "$repo_root/hosts/host-web/src/lib.rs" \
@@ -257,7 +257,7 @@ echo "web AudioWorklet command-reason vocabulary gates passed"
 
 # Issue #210 phase 0: the same discipline for the command-KIND vocabulary. Its own red mutations
 # run first -- 26 of them, one per rule -- then the shipped drift class is performed on disk: a
-# kind the 48-byte wire decodes that the host JS `COMMAND_KINDS` set does not admit. That is the
+# kind the command-record wire decodes that the host JS `COMMAND_KINDS` set does not admit. That is the
 # defect shape the metadata JSON shipped for two releases (six kinds declared, eight decoded).
 python3 -B "$repo_root/scripts/check-command-kind-vocabulary.py" --self-test
 python3 -B "$repo_root/scripts/check-command-kind-vocabulary.py"

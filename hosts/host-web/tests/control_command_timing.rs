@@ -29,6 +29,7 @@ const CALLS: u64 = 200;
 
 fn frame(request: u64, revision: u64, strip: &str, db: f32) -> Vec<u8> {
     let edits = [SessionEdit::SetControl {
+        expected_effect: None,
         address: ControlAddress {
             owner: Owner::Strip(StableId::parse(strip).expect("strip ID")),
             section: Section::Builtins,
@@ -191,6 +192,7 @@ fn a_vca_move_at_the_bound_fits_a_quantum_in_release() {
         let mut times = Vec::new();
         for (revision, call) in (model.revision..).zip(0..CALLS) {
             let edits = [SessionEdit::SetControl {
+                expected_effect: None,
                 address: ControlAddress {
                     owner: Owner::Vca(StableId::parse("v0000").expect("VCA ID")),
                     section: Section::Own,

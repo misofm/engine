@@ -191,7 +191,7 @@ describe("#1564B gate 3 -- every effect row", () => {
   });
 
   for (const [rack, instance, section] of instances) {
-    test(`${rack}: parameter, bypass and link mode stage what set stages`, () => {
+    test(`${rack}: parameter, bypass and link mode stage what set stages, with the effect they were written for (#1678)`, () => {
       const strip = edit.track("t");
       let checked = 0;
       for (const [effectId, rows] of Object.entries(EFFECT_PARAMETER_ROWS)) {
@@ -211,12 +211,12 @@ describe("#1564B gate 3 -- every effect row", () => {
             ]) {
               assert.deepEqual(
                 builders.parameter(name, given, options).edits,
-                edit.set({ owner, section, control, lane }, scalar, rampSamples === undefined ? {} : { rampSamples }).edits,
+                edit.set({ owner, section, control, lane, expectedEffect: effectId }, scalar, rampSamples === undefined ? {} : { rampSamples }).edits,
                 `${effectId}.${name} ${JSON.stringify(options)}`,
               );
               assert.deepEqual(
                 builders.parameter({ key: name, value: given, ...options }).edits,
-                edit.set({ owner, section, control, lane }, scalar, rampSamples === undefined ? {} : { rampSamples }).edits,
+                edit.set({ owner, section, control, lane, expectedEffect: effectId }, scalar, rampSamples === undefined ? {} : { rampSamples }).edits,
               );
               checked += 1;
             }
@@ -225,7 +225,7 @@ describe("#1564B gate 3 -- every effect row", () => {
         for (const [enabled, scalar] of [[true, 1], [false, 0]]) {
           assert.deepEqual(
             builders.bypass(enabled).edits,
-            edit.set({ owner, section, control: numeric(effectId, "bypass"), lane: "both" }, scalar).edits,
+            edit.set({ owner, section, control: numeric(effectId, "bypass"), lane: "both", expectedEffect: effectId }, scalar).edits,
             `${effectId} bypass`,
           );
         }
@@ -234,7 +234,7 @@ describe("#1564B gate 3 -- every effect row", () => {
           for (const [label, scalar] of linkMode.choices) {
             assert.deepEqual(
               builders.linkMode(label).edits,
-              edit.set({ owner, section, control: numeric(effectId, linkMode.control), lane: "both" }, scalar).edits,
+              edit.set({ owner, section, control: numeric(effectId, linkMode.control), lane: "both", expectedEffect: effectId }, scalar).edits,
               `${effectId} link mode ${label}`,
             );
           }

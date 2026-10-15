@@ -1,0 +1,26 @@
+[package]
+name = "automation"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "automation"
+
+# A leaf: the stored-automation evaluator and event generator (#1637). It reads a segment table
+# and writes a fixed state, so it depends on `math` alone (`pow`, scalar `f64`) and links `alloc`
+# for the builder only.
+[dependencies]
+math.workspace = true
+
+[dev-dependencies]
+# The audited allocator's thread-scoped counters: event generation allocates nothing, and the
+# builder's byte report is what it leaves live.
+bench-support.workspace = true
+# The corpus pins are SHA-256 digests of the result words.
+sha2.workspace = true
+
+[lints]
+workspace = true

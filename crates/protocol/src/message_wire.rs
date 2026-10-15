@@ -12,7 +12,7 @@ use crate::{
     },
     schema::{
         self, control_address, control_entry, control_list_page, control_list_request,
-        control_state_page, enum_choice,
+        control_state_page, enum_choice, set_control_address,
     },
 };
 
@@ -851,13 +851,12 @@ pub enum TransportState {
     Playing = 2,
 }
 
-/// Typed `TRANSPORT_SET` command. An absent position retains the provider's current position.
+/// Typed `TRANSPORT_SET` command: the absolute target state. The stored position is retired
+/// (#1635); the engine has one playhead, which the host moves with source seeks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransportSetRequest {
     /// Absolute target state.
     pub state: TransportState,
-    /// Absolute target position, when changing it.
-    pub position: Option<crate::SampleTime>,
 }
 
 /// Typed `TRANSPORT_GET`/`TRANSPORT_SET` success payload.
@@ -865,8 +864,6 @@ pub struct TransportSetRequest {
 pub struct TransportSnapshot {
     /// Effective absolute state.
     pub state: TransportState,
-    /// Effective absolute position.
-    pub position: crate::SampleTime,
     /// Engine sample at which this observation/change is effective.
     pub effective_sample: crate::SampleTime,
 }
@@ -878,8 +875,6 @@ pub struct TransportStateEvent {
     pub event_sequence: u64,
     /// Effective absolute state.
     pub state: TransportState,
-    /// Effective absolute position.
-    pub position: crate::SampleTime,
     /// Effective engine sample.
     pub effective_sample: crate::SampleTime,
     /// Originating set request, when this state change came from a command.
@@ -1612,8 +1607,8 @@ impl ProtocolCodec {
     }
 
     /// Return the exact caller-output size for a typed absolute transport set request.
-    pub const fn encoded_transport_set_request_len(&self, value: TransportSetRequest) -> usize {
-        if value.position.is_some() { 32 } else { 16 }
+    pub const fn encoded_transport_set_request_len(&self, _value: TransportSetRequest) -> usize {
+        16
     }
 
     /// Encode a typed absolute transport-state set request without allocation.
@@ -1637,21 +1632,20 @@ impl ProtocolCodec {
         payload: &[u8],
         count: u32,
     ) -> Result<TransportSetRequest, DecodeError> {
-        let fields = Message::top_level(payload, count, self.limits())?
-            .schema_spec(&schema::transport_set::SPEC)?;
+        // Field 2, the stored position, is retired (#1635): refused in either flag form.
+        let fields = Message::top_level(payload, count, self.limits())?.schema_spec_retiring(
+            &schema::transport_set::SPEC,
+            &schema::transport_set::RETIRED,
+        )?;
         Ok(TransportSetRequest {
             state: parse_transport_state(read_u8(one_spec!(
                 fields,
                 schema::transport_set::STATE
             )?)?)?,
-            position: optional_spec!(fields, schema::transport_set::POSITION)?
-                .map(read_u64)
-                .transpose()?
-                .map(crate::SampleTime),
         })
     }
 
-    /// Encode a typed three-field transport snapshot directly into caller output.
+    /// Encode a typed two-field transport snapshot directly into caller output.
     pub fn encode_transport_snapshot(
         &self,
         value: TransportSnapshot,
@@ -1668,23 +1662,22 @@ impl ProtocolCodec {
         checked_writer_len(&writer, required)
     }
 
-    /// Strictly decode a typed three-field transport snapshot without allocation.
+    /// Strictly decode a typed two-field transport snapshot without allocation.
     pub fn decode_transport_snapshot(
         &self,
         payload: &[u8],
         count: u32,
     ) -> Result<TransportSnapshot, DecodeError> {
-        let fields = Message::top_level(payload, count, self.limits())?
-            .schema_spec(&schema::transport_snapshot::SPEC)?;
+        // Field 2, the stored position, is retired (#1635).
+        let fields = Message::top_level(payload, count, self.limits())?.schema_spec_retiring(
+            &schema::transport_snapshot::SPEC,
+            &schema::transport_snapshot::RETIRED,
+        )?;
         Ok(TransportSnapshot {
             state: parse_transport_state(read_u8(one_spec!(
                 fields,
                 schema::transport_snapshot::STATE
             )?)?)?,
-            position: crate::SampleTime(read_u64(one_spec!(
-                fields,
-                schema::transport_snapshot::POSITION
-            )?)?),
             effective_sample: crate::SampleTime(read_u64(one_spec!(
                 fields,
                 schema::transport_snapshot::EFFECTIVE_SAMPLE
@@ -1695,9 +1688,9 @@ impl ProtocolCodec {
     /// Return the exact caller-output size for a reliable typed transport-state event.
     pub const fn encoded_transport_state_event_len(&self, value: TransportStateEvent) -> usize {
         if value.origin_request_id.is_some() {
-            80
-        } else {
             64
+        } else {
+            48
         }
     }
 
@@ -1722,8 +1715,11 @@ impl ProtocolCodec {
         payload: &[u8],
         count: u32,
     ) -> Result<TransportStateEvent, DecodeError> {
-        let fields = Message::top_level(payload, count, self.limits())?
-            .schema_spec(&schema::transport_state_event::SPEC)?;
+        // Field 3, the stored position, is retired (#1635).
+        let fields = Message::top_level(payload, count, self.limits())?.schema_spec_retiring(
+            &schema::transport_state_event::SPEC,
+            &schema::transport_state_event::RETIRED,
+        )?;
         Ok(TransportStateEvent {
             event_sequence: read_u64(one_spec!(
                 fields,
@@ -1733,10 +1729,6 @@ impl ProtocolCodec {
                 fields,
                 schema::transport_state_event::STATE
             )?)?)?,
-            position: crate::SampleTime(read_u64(one_spec!(
-                fields,
-                schema::transport_state_event::POSITION
-            )?)?),
             effective_sample: crate::SampleTime(read_u64(one_spec!(
                 fields,
                 schema::transport_state_event::EFFECTIVE_SAMPLE
@@ -2550,19 +2542,8 @@ pub(crate) fn write_transport_set(
     sink: &mut dyn Sink,
     value: TransportSetRequest,
 ) -> Result<(), EncodeError> {
-    sink.check_field_count(schema::transport_set::SPEC.field_count(&[(
-        schema::transport_set::POSITION,
-        usize::from(value.position.is_some()),
-    )])?)?;
-    write_spec!(sink, schema::transport_set::STATE, &[value.state as u8])?;
-    if let Some(position) = value.position {
-        write_spec!(
-            sink,
-            schema::transport_set::POSITION,
-            &position.0.to_le_bytes()
-        )?;
-    }
-    Ok(())
+    sink.check_field_count(schema::transport_set::SPEC.field_count(&[])?)?;
+    write_spec!(sink, schema::transport_set::STATE, &[value.state as u8])
 }
 
 pub(crate) fn write_transport_snapshot(
@@ -2574,11 +2555,6 @@ pub(crate) fn write_transport_snapshot(
         sink,
         schema::transport_snapshot::STATE,
         &[value.state as u8]
-    )?;
-    write_spec!(
-        sink,
-        schema::transport_snapshot::POSITION,
-        &value.position.0.to_le_bytes()
     )?;
     write_spec!(
         sink,
@@ -2604,11 +2580,6 @@ pub(crate) fn write_transport_state_event(
         sink,
         schema::transport_state_event::STATE,
         &[value.state as u8]
-    )?;
-    write_spec!(
-        sink,
-        schema::transport_state_event::POSITION,
-        &value.position.0.to_le_bytes()
     )?;
     write_spec!(
         sink,
@@ -3169,27 +3140,45 @@ fn write_control_address(sink: &mut dyn Sink, address: &ControlAddress) -> Resul
     })
 }
 
-/// The fields of one address message, the one encoder of the address: the control list's rows and
-/// the `SET_CONTROL` edit both write it. The caller has validated the address.
+/// The fields of one list-style address message: the control list's rows and a response target
+/// write it. The caller has validated the address.
 fn write_control_address_fields(
     sink: &mut dyn Sink,
     address: &ControlAddress,
 ) -> Result<(), EncodeError> {
-    let fields = control_address::SPEC.field_count(&[
-        (
-            control_address::OWNER_ID,
-            usize::from(address.owner_id.is_some()),
-        ),
-        (
-            control_address::SLOT_ID,
-            usize::from(address.slot_id.is_some()),
-        ),
-        (
-            control_address::CONTROL,
-            usize::from(address.control.is_some()),
-        ),
-        (control_address::LANE, usize::from(address.lane.is_some())),
-    ])?;
+    write_address_fields(sink, &control_address::SPEC, address, None)
+}
+
+/// The one encoder of the address fields: `spec` is the list's address message, or the set-control
+/// address message with `expected_effect` as its seventh field. The caller has validated the
+/// address.
+fn write_address_fields(
+    sink: &mut dyn Sink,
+    spec: &'static schema::MessageSpec,
+    address: &ControlAddress,
+    expected_effect: Option<&str>,
+) -> Result<(), EncodeError> {
+    let mut variable = [(control_address::OWNER_ID, 0); 5];
+    variable[0] = (
+        control_address::OWNER_ID,
+        usize::from(address.owner_id.is_some()),
+    );
+    variable[1] = (
+        control_address::SLOT_ID,
+        usize::from(address.slot_id.is_some()),
+    );
+    variable[2] = (
+        control_address::CONTROL,
+        usize::from(address.control.is_some()),
+    );
+    variable[3] = (control_address::LANE, usize::from(address.lane.is_some()));
+    let mut count = 4;
+    if let Some(expected) = expected_effect {
+        debug_assert!(!expected.is_empty());
+        variable[count] = (set_control_address::EXPECTED_EFFECT, 1);
+        count += 1;
+    }
+    let fields = spec.field_count(&variable[..count])?;
     sink.message_header(fields)?;
     write_spec!(
         sink,
@@ -3213,13 +3202,20 @@ fn write_control_address_fields(
             &[schema::parameter_channel_wire(lane)]
         )?;
     }
+    if let Some(expected) = expected_effect {
+        write_spec!(
+            sink,
+            set_control_address::EXPECTED_EFFECT,
+            expected.as_bytes()
+        )?;
+    }
     Ok(())
 }
 
-/// The address message of a `SET_CONTROL` edit (the body of its `address` field): the control
-/// list's one address encoding, with `control` and `lane` present. An address that breaks the
-/// list's rules is `InvalidField`.
-pub(crate) fn write_set_control_address(
+/// The address message of a stored automation target: the control list's one address encoding with
+/// `control` and `lane` present, and no expected effect (the target is a row, not an edit). An
+/// address that breaks the list's rules is `InvalidField`.
+pub(crate) fn write_automation_target_address(
     sink: &mut dyn Sink,
     address: &controls::ControlAddress,
 ) -> Result<(), EncodeError> {
@@ -3230,18 +3226,75 @@ pub(crate) fn write_set_control_address(
     write_control_address_fields(sink, &address)
 }
 
-/// The address message of a `SET_CONTROL` edit, decoded by the control list's one address decoder
-/// and held to the list's rules for a control row: every refusal is `InvalidField`, an
-/// unallocated owner, section or lane code included.
-pub(crate) fn decode_set_control_address(
+/// A stored automation target, decoded by the control list's one address decoder and held to the
+/// list's rules for a control row: every refusal is `InvalidField`, an unallocated owner, section
+/// or lane code included. A target holds no expected effect in any section: the `SET_CONTROL`
+/// address's seventh field is refused here as `SET_CONTROL` refuses it outside an effect section
+/// (`InvalidField` in its optional form, `InvalidTlv` in its mandatory form), never skipped as an
+/// unknown optional field.
+pub(crate) fn decode_automation_target_address(
     message: Message<'_>,
 ) -> Result<controls::ControlAddress, DecodeError> {
     let limits = message.limits();
-    let address = decode_control_address(limits, message)?;
+    let message = message.schema_spec(&set_control_address::SPEC)?;
+    if optional_spec!(message, set_control_address::EXPECTED_EFFECT)?.is_some() {
+        return Err(DecodeError::InvalidField);
+    }
+    let address = decode_control_address_fields(limits, &message)?;
     if !control_address_is_valid(limits, &address, ControlRowKind::Control) {
         return Err(DecodeError::InvalidField);
     }
     controls::ControlAddress::try_from(&address)
+}
+
+/// The address message of a `SET_CONTROL` edit (the body of its `address` field): the control
+/// list's one address encoding, with `control` and `lane` present, and the native effect the edit
+/// was written for as an optional seventh field (#1678). An address that breaks the list's rules,
+/// or an expected effect on a section that runs no effect, is `InvalidField`.
+pub(crate) fn write_set_control_edit_address(
+    sink: &mut dyn Sink,
+    address: &controls::ControlAddress,
+    expected_effect: Option<&session::StableId>,
+) -> Result<(), EncodeError> {
+    let address = ControlAddress::from(address);
+    if !control_address_is_valid(sink.limits(), &address, ControlRowKind::Control)
+        || expected_effect.is_some_and(|effect| {
+            !has_slot(address.section) || !stable_id_fits(sink.limits(), effect.as_str())
+        })
+    {
+        return Err(EncodeError::InvalidField);
+    }
+    write_address_fields(
+        sink,
+        &set_control_address::SPEC,
+        &address,
+        expected_effect.map(session::StableId::as_str),
+    )
+}
+
+/// The address message of a `SET_CONTROL` edit, decoded by the control list's one address decoder
+/// and held to the list's rules for a control row: every refusal is `InvalidField`, an
+/// unallocated owner, section or lane code included. The second value is the native effect the edit
+/// was written for (#1678); it is refused unless the section is an `inserts` or `console` one.
+pub(crate) fn decode_set_control_edit_address(
+    message: Message<'_>,
+) -> Result<(controls::ControlAddress, Option<session::StableId>), DecodeError> {
+    let limits = message.limits();
+    let message = message.schema_spec(&set_control_address::SPEC)?;
+    let address = decode_control_address_fields(limits, &message)?;
+    if !control_address_is_valid(limits, &address, ControlRowKind::Control) {
+        return Err(DecodeError::InvalidField);
+    }
+    let expected = optional_spec!(message, set_control_address::EXPECTED_EFFECT)?
+        .map(|value| {
+            let text = read_string_within(limits, value)?;
+            if !has_slot(address.section) {
+                return Err(DecodeError::InvalidField);
+            }
+            session::StableId::parse(text).ok_or(DecodeError::InvalidField)
+        })
+        .transpose()?;
+    Ok((controls::ControlAddress::try_from(&address)?, expected))
 }
 
 fn write_control_entry(sink: &mut dyn Sink, entry: &ControlEntry) -> Result<(), EncodeError> {
@@ -3415,6 +3468,15 @@ fn decode_control_address(
     message: Message<'_>,
 ) -> Result<ControlAddress, DecodeError> {
     let message = message.schema_spec(&control_address::SPEC)?;
+    decode_control_address_fields(limits, &message)
+}
+
+/// The fields of an address message whose schema is already selected: the list's address or the
+/// set-control address, which share fields 1 to 6.
+fn decode_control_address_fields(
+    limits: crate::ProtocolLimits,
+    message: &Message<'_>,
+) -> Result<ControlAddress, DecodeError> {
     let text = |spec: schema::FieldSpec| {
         optional_spec!(message, spec)?
             .map(|value| read_string_within(limits, value).map(str::to_owned))

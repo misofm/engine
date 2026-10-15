@@ -130,10 +130,10 @@ an app's `Math.max(0, x ?? 0)` is a **no-op** rather than a silent zeroing.
 `MisoMeterFrame.trackGrDb` is positional and `trackCount` long, and every entry is finite.
 `0` deliberately conflates "not reducing" with "no observed effect on this track", because the
 array is read without null checks. The distinction lives in the `miso.observe.v1` acknowledgement's
-subscription map — `{ trackIndex, rack, effectIndex, tapId, frameSlot, windowBlocks }` — which is
-the only place that can express it.
-`frameSlot` is the strip index (issue #1213): below `trackCount` it indexes `trackGrDb`, and from
-there a bus's reading is `submixGrDb[frameSlot - trackCount]`.
+subscription map — `{ stripId, rack, effectId, tapId, windowBlocks }` — which is the only place
+that can express it. A record names its tap by this stable key (issue #1677) and no position of any
+plan. The strip's reading is at its position in the control list's strip order: below `trackCount`
+it indexes `trackGrDb`, and from there a bus's reading is `submixGrDb[position - trackCount]`.
 
 Several armed taps on one track fold max-magnitude into the one slot, on the control plane. Each
 tap keeps its own cell.

@@ -110,10 +110,10 @@ use effect_contract::{
 use host_web::{
     ABI_VERSION, COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE,
     COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN, COMMAND_REASON_MALFORMED,
-    COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_UNBOUND, COMMAND_REASON_UNKNOWN_EFFECT,
-    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TAP,
-    COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE,
-    COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS,
+    COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_LIMIT, COMMAND_REASON_OBSERVATION_UNBOUND,
+    COMMAND_REASON_UNKNOWN_EFFECT, COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK,
+    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
+    COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact.
@@ -199,6 +199,8 @@ pub fn render() -> String {
         // the host JS bound, the `.d.ts` enum and the schema gate's list to one another.
         (COMMAND_REASON_UNKNOWN_TAP, "unknownTap"),
         (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
+        // 12-14 are retired with the value kinds (#1565A) and never reallocated; #1676 added 15.
+        (COMMAND_REASON_OBSERVATION_LIMIT, "observationLimit"),
     ];
     for (index, (value, name)) in reasons.iter().enumerate() {
         append!(
@@ -1084,7 +1086,6 @@ const fn mapping_name(mapping: ParameterMapping) -> &'static str {
 
 const fn automation_rate_name(rate: AutomationRate) -> &'static str {
     match rate {
-        AutomationRate::Sample => "sample",
         AutomationRate::Block => "block",
         AutomationRate::None => "none",
     }

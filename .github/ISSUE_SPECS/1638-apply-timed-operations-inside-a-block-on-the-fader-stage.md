@@ -173,3 +173,112 @@ Checked against `12d4a4f9d`.
 - **Anchors moved.** `FaderRampStage`'s setters are now near `crates/builtins/src/lib.rs:3083-3140`,
   `BuiltinFaderBank` `:4314`, `FaderMuteRampBuiltins` `:4732`; re-read at filing. #1408 has landed.
 - **Realtime policy** as in #1637's amendment.
+
+## Decision record: #1638 (batch 13b)
+
+**Shipped** (`crates/builtins/src/lib.rs`). `FaderOperation` (D1), `FaderOperationError`
+(`Lane`, `Gain`, `Duplicate`), `FaderOperationSink` (fixed size, on the render stack; one gain and
+one mute slot per lane and channel; `push` refuses a padding lane, a gain that is not finite or is
+negative, and a second operation of one kind at one offset, and a refusal queues nothing on either
+channel), and the pull trait `FaderOperationSource { next_offset, apply }`. `FaderRampStage` gains
+one flag per lane and channel, `mute_ramp` (D2): set by a mute change with a nonzero window, cleared
+by a zero-window mute change, in the bookkeeping step that ends the countdown, by a live gain
+retarget, and by `reset`; it is carried by `export_lane`/`import_lane` (a new private field of
+`FaderChannelState`), so a plan swap during a mute ramp keeps the hold. `process_with` cuts the
+block at each offset and runs `process_plane` over each piece, so a split moves no bit (D6); the
+sink applies gains before mutes, left before right, whatever the push order (D4). Exposure (D5):
+`BuiltinFaderBank::{process_with, apply_fader_operation, gain_held, ramp_remaining,
+try_process_settled_with_matrix_and_operations}` and `FaderMuteRampBuiltins::{process_with,
+apply_fader_operation, gain_held, ramp_remaining}`. No production path calls `process_with`.
+
+**Live rule (amendment, README F22).** `set_fader_gain` on a muted lane (settled or ramping toward
+`0`) now only remembers the gain; on an unmuted lane, including one in an unmute ramp, it retargets
+and clears `mute_ramp`. Timed `RetargetGain`/`SetGain` remember only while the gain is held (muted
+or `mute_ramp`), so they also remember during an unmute ramp, as D2 says.
+
+**Departures.**
+- Offsets: an offset at or past the block is not pulled and stays with the source; offsets must
+  rise strictly, and a repeated or lower offset stops pulling for the block (debug assertion),
+  which bounds the loop at `frames` pieces.
+- D5's decline is a new method, `try_process_settled_with_matrix_and_operations`, which declines
+  when the source has an operation inside the block and otherwise forwards; the existing method and
+  its callers are unchanged.
+- Gate 4 "every existing test passes unchanged" cannot hold with the amended live rule: in
+  `crates/builtins-compiler/src/lib.rs`,
+  `the_drain_applies_the_fader_before_the_mute_whatever_the_write_order` relied on a fader move
+  after a *mute* being observable; under F22 both orders are now alike. The test now starts the lane
+  muted and writes an *unmute*, where the order is still observable (fader-then-unmute ramps to the
+  new gain; unmute-then-fader cuts the unmute ramp short). Test-only edit; no wiring.
+- `tools/realtime-policy/src/policy.rs`: `marked_regions_floor` 144 -> 147 (the sink, the bank's and
+  the scalar track's `process_with`); files stay 32.
+
+**Gates.**
+1. `an_operation_inside_a_block_renders_the_split_blocks_bits` (Simd4, Simd8, scalar; q 128 at
+   o in {1, 63, 64, 127} and q 100 at o in {1, 50, 99}; six operations; settled, ramping, ramp
+   ending before o, muted, mute ramp, unmute ramp; one lane and two lanes at different offsets;
+   the next block compared too), `an_operation_at_offset_zero_is_block_entry_and_one_past_the_block_waits`.
+2. `gain_moves_during_a_mute_ramp_are_remembered_and_never_restart_it` (timed `RetargetGain`,
+   `RememberGain` and the live setter, every 64 samples in a 480-sample mute ramp).
+3. `at_one_offset_the_gain_applies_before_the_mute`.
+4. Existing `fader_ramp.rs` tests unchanged and green; builtins-compiler as above.
+5. `process_with_operations_never_allocates` (1,000 blocks per subject, thread counters: 0 and 0).
+- D2 flag: `the_held_flag_follows_the_mute_ramp`; sink refusals:
+  `the_fader_operation_sink_refuses_without_queuing` (in-crate).
+- Red on revert (copied aside, not stashed): live muted retarget restored -> gate 2 red; timed held
+  retarget -> gate 2 red; mutes applied before gains -> gate 3 red; operations one sample late ->
+  gate 1 red; flag not cleared at the countdown end -> gate 2 and the flag test red.
+
+**Successor obligation (#1647).** D2 holds a lane's gain during an *unmute* ramp too: a
+`SetMute` with a nonzero window sets `mute_ramp`, and a timed `RetargetGain` or `SetGain` on a held
+lane only remembers the gain (`FaderRampStage::timed_gain`, `crates/builtins/src/lib.rs`), while a
+live gain change during an unmute ramp retargets. #1637 holds only `Grid` events: a `Jump` (on a
+cell that is not `no_restart`) and a seek `Set` always emit and commit the cell's target with
+`held = false`. So when #1647 converts a `Jump` or a `Set` that lands inside an unmute ramp to
+`RetargetGain` or `SetGain`, the stage only remembers it; the unmute ramp settles at the
+pre-unmute gain while `fader_gain` and the cell hold the new value, and on a flat curve the cell
+emits nothing more (its target equals the curve and `held` is false), so the lane stays wrong with
+no end. #1647 D1.2 (`hold_until`) covers only `Grid` events. #1647's amendment from this review
+records the obligation and its gate.
+
+**Attempt 2 (review fold).**
+- Docs: the successor obligation above; #1647 gains an amendment (the reissue at the end of a held
+  ramp, and its gate). `CellState::hold_until` only sets the in-flight completion, and `held` is set
+  only by a held `Grid` event whose value differs from the cell's target, so #1637 cannot re-emit a
+  committed `Jump` or `Set`; the amendment therefore makes #1647 reissue the cell's target itself.
+- `FaderOperationSource` rustdoc states the contract: strictly rising offsets, and a source keeps
+  every operation it did not apply. `BuiltinProcessReport` gains `fader_operations_stopped` (`1`
+  when a `process_with` block stopped pulling on a repeated or lower offset, else `0`), set by both
+  `process_with` methods from a `bool` the stage now returns; the debug assertion stays. Not
+  tested: a debug test build fails the assertion first. No rendered bit moves.
+- Test: `the_fused_settled_path_declines_only_an_operation_inside_the_block`
+  (`crates/builtins/tests/fader_ramp.rs`; Simd4, and Simd8 with AVX2): an operation inside the
+  block (declines, the block and every fader and matrix word unchanged, the source keeps the
+  operation, then `process_with` equals a twin), at `offset == frames` (forwards: equals a twin on
+  `try_process_settled_with_matrix`, the source keeps it), and no operation (forwards). Red, file
+  copied aside and restored with `cp`: `<=` for `<` (the block-end case), no decline (the inside
+  case), a decline that first runs the fused path (block untouched fails), a decline that applies
+  the operation (stage words fail).
+
+**Attempt 3 (record fold, coordinator).** The attempt-2 review measured that #1647's D1.6 as first
+written was not quantum-invariant: refreshing `hold_until` at every block entry inside a held ramp
+overwrote a cell `Jump`'s own ramp end. #1647's amendment now says when D1.2 reports the hold (once,
+at the block entry that starts or restarts the ramp, and after an adoption that carries it), holds
+the grid for the reissue's own ramp, composes the reissued gain as D1.4, and adds the moving-curve
+cases to gate 8 (cases (c) and (e), whose samples `[E, E + J - 1]` equal one direct `RetargetGain`
+at `E` over `J`). No code change. The counter `fader_operations_stopped` is to be summed by #1647
+when it wires `process_with` into production.
+
+**Attempt 3 review and rescope (coordinator).** The attempt-3 review confirmed the hold rule is
+quantum-invariant and found two more design gaps in #1647's D1.6 (a grid event that is not held
+inside the hold's last 64 samples; stopping the cell exactly at the ramp end). Three reviews found
+this slice's code correct; every failure was in the successor's mechanism. The mechanism is
+therefore #1647's design: #1647's amendment now states the requirement, the measured constraints and
+gate 8, and #1648's amendment the carry. This slice's obligation is that record.
+
+**Gates 6 and 7 on the integrated tree (batch 13b, cddff37d9).** Gate 6: `audit capi` gives
+`pcm_digest` `bf7dcedd1d92621f`, as on main; the browser fixtures' digests and exact rows are
+unchanged (`check-browser-expected-resources`), and chromium 151, firefox 153 and webkit 26.5
+qualification pass with 0 render allocations. No fixture moves a fader on a muted lane, so the F22
+live rule moves no pinned digest; its behaviour is held by gate 2. Gate 7: the batch gate set
+(workspace tests, clippy, `check-cross-targets.sh`, the policies) passes. The AArch64 legs
+(`aarch64-debug`, Simd4 on NEON) run only in CI: this host has no AArch64 toolchain.

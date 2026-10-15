@@ -250,3 +250,31 @@ Checked against `12d4a4f9d`.
   `crates/capi/src/runtime/live_tests.rs`. Realtime policy as in #1637's amendment.
 - **Dependencies.** #1277, #1313, #1314 and #1335 have landed; add #1562b. Must-land group: #1646,
   #1647, #1648, #1649, #1650.
+
+## Amendment (controls coordinator, batch 13b, from #1638's reviews)
+
+- **D2 also carries #1647 D1.6's state.** The per-lane, per-channel obligation to move to the
+  automation value at a held ramp's end carries with the cell's event state, and the successor
+  re-reports a carried held ramp to the cell with `hold_until` at adoption (`CellState::reposition`
+  drops it).
+- **Release cells too.** A release cell (D2, "A cell lost") takes the same carried obligation and
+  the same `hold_until` report at adoption. Its jump to the static value is a gain event: inside a
+  held ramp the stage only remembers it, so the obligation must move the lane to the static value at
+  the ramp's end, as #1647 D1.6 does for a carried cell.
+- **Seeding a cell's target.** D2 starts a gained cell from the carried stage target and a release
+  cell from the carried state, and #1646 D2 starts each cell at its prepared value. #1637's
+  `CellState` (`crates/automation/src/events.rs:106-155`) has no way to set its current target from
+  outside: `new` leaves it empty and `reposition` keeps it. Authorized paths gain
+  `crates/automation/src/events.rs` (one seeding method on `CellState` that sets the current
+  target, and its test), because no other path can give a cell the target these rules start it
+  from.
+
+## Amendment (controls coordinator, batch 13b, from #1639's review; root ruling 2026-10-15)
+
+- **Jump lengths follow a rebuild.** #1648 D1 makes every automation edit on a row that renders
+  a rebuild, which seeds the plan's jump-length cell from the committed model (#1639 D4). A row that
+  does not render yet reads no length, and its rendering slice (#1651, #1657, #1658) makes its
+  edits rebuilds the same way, so the cell is right from the first block any row reads it.
+- **Gate.** Add to the objective gates: `control_smoothing` changed on a session with no reading
+  automation, then a fader entry added: from the adoption block, the block holds the new lengths
+  (`graph::test_only_block_jump_lengths`).

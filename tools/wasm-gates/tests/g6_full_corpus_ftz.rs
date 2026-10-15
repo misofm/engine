@@ -194,11 +194,14 @@ mod pinned {
     fn g6_the_guard_is_an_identity_for_a_caller_who_never_set_ftz() {
         let saved = read_word();
         let clear = saved & !FLUSH_BITS;
-        let expected_rows =
-            (corpus::CASE_COUNT - corpus::MATH_CASE_COUNT - corpus::DELAY_CASE_COUNT)
-                * corpus::WIDTHS
-                + corpus::MATH_CASE_COUNT
-                + corpus::DELAY_CASE_COUNT;
+        let expected_rows = (corpus::CASE_COUNT
+            - corpus::MATH_CASE_COUNT
+            - corpus::DELAY_CASE_COUNT
+            - corpus::AUTOMATION_CASE_COUNT)
+            * corpus::WIDTHS
+            + corpus::MATH_CASE_COUNT
+            + corpus::DELAY_CASE_COUNT
+            + corpus::AUTOMATION_CASE_COUNT;
 
         let without = render_with_word(clear);
         let with = {

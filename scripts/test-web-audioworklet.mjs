@@ -1154,8 +1154,7 @@ async function testMainRealm() {
           // Issue #1565: the in-flight bound is the fixed `maximumCommandRecords` (256), not a boot
           // word, so 256 commands hold and the 257th is refused locally.
           const localCommand = {
-            kind: 7, rack: 1, channel: 255, trackIndex: 0, effectIndex: 0, parameterId: 1,
-            smoothingSamples: 0, values: [0, 0, 0, 0],
+            kind: 7, rack: 1, stripId: "track-0", effectId: "comp", tapId: 1, windowBlocks: 0,
           };
           holdAll = true;
           const heldCommands = Array.from({ length: 256 }, () =>
@@ -1171,7 +1170,7 @@ async function testMainRealm() {
             "command capacity refusal did not burn an ID");
           const observeAck = await hostValue.observe({
             subscriptions: [{
-              trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true,
+              stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: true,
             }],
           });
           assert.equal(observeAck.result, 0, "captured observation default command accepted");
@@ -1883,8 +1882,7 @@ async function testMainRealm() {
 
     // Issue #1565: the only kinds `command()` carries are the two observation kinds.
     const sub = {
-      kind: 7, rack: 1, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 1,
-      smoothingSamples: 64, values: [0, 0, 0, 0],
+      kind: 7, rack: 1, stripId: "track-1", effectId: "comp", tapId: 1, windowBlocks: 64,
     };
     // Issue #393: one real host fixture owns every request ID across interleaved request classes.
     // Twenty-five rounds cover 250 successful calls, including both lease orderings around a
@@ -1892,7 +1890,7 @@ async function testMainRealm() {
     const mixedAcks = [];
     const mixedSendStart = events.length;
     const mixedSubscription = {
-      trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 1, armed: true,
+      stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 1, armed: true,
     };
     for (let round = 0; round < 25; round += 1) {
       mixedAcks.push((await liveControlHost.command({ commands: [sub] })).requestId);
@@ -1957,7 +1955,7 @@ async function testMainRealm() {
     // Issue #1565: the host's own command path carries observation records only, so the SDK edit
     // that rides it is an observation subscription; a value edit goes through `control()`.
     const sdkReport = await browserLiveControls.submit(
-      browserLiveControls.edit.track("kick").effect("console", 0, "miso.compressor")
+      browserLiveControls.edit.track("kick").console("comp", "miso.compressor")
         .observe("Gain Reduction", true, 1),
     );
     assert.equal(sdkReport.ok, true, "SDK live controls submit through the real host after direct meters");
@@ -1997,7 +1995,7 @@ async function testMainRealm() {
     assert.equal(commandAck.appliedAtSample, 512n, "the ack names the exact application sample");
     const staged = events.findLast((event) => event[1] === "miso.command.v1");
     assert.equal(staged[3], 1, "the record block is transferred, never copied");
-    assert.equal(commandAck.records.byteLength, 48, "the block comes straight back to the caller");
+    assert.equal(commandAck.records.byteLength, 272, "the block comes straight back to the caller");
     const decoded = new DataView(
       commandAck.records.buffer,
       commandAck.records.byteOffset,
@@ -2005,10 +2003,15 @@ async function testMainRealm() {
     );
     assert.equal(decoded.getUint8(0), 7, "kind");
     assert.equal(decoded.getUint8(1), 1, "rack");
-    assert.equal(decoded.getUint32(4, true), 1, "track index");
-    assert.equal(decoded.getUint32(12, true), 1, "tap id");
-    assert.equal(decoded.getUint32(16, true), 64, "window blocks");
-    assert.equal(decoded.getFloat32(24, true), 0, "value0");
+    assert.equal(decoded.getUint8(2), 7, "strip ID length");
+    assert.equal(decoded.getUint8(3), 4, "effect ID length");
+    assert.equal(decoded.getUint32(4, true), 1, "tap id");
+    assert.equal(decoded.getUint32(8, true), 64, "window blocks");
+    const idText = (offset, length) => new TextDecoder().decode(
+      new Uint8Array(commandAck.records.buffer, commandAck.records.byteOffset + offset, length));
+    assert.equal(idText(16, 7), "track-1", "strip ID");
+    assert.equal(idText(16 + 128, 4), "comp", "effect ID");
+    assert.equal(decoded.getUint8(16 + 7), 0, "the strip ID field is zero padded");
 
     // A malformed command never reaches the port.
     const beforeMalformed = events.length;
@@ -2020,21 +2023,28 @@ async function testMainRealm() {
     for (const kind of [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17]) {
       await errorResult(liveControlHost.command({ commands: [{ ...sub, kind }] }), 1);
     }
+    // An ID that does not fit its 127-byte field, or is not a string, never reaches the port.
+    for (const broken of [
+      { stripId: "x".repeat(128) }, { effectId: "é".repeat(64) }, { stripId: 3 }, { effectId: null },
+      { tapId: -1 }, { windowBlocks: 1.5 }, { channel: 255 }, { trackIndex: 0 },
+    ]) {
+      await errorResult(liveControlHost.command({ commands: [{ ...sub, ...broken }] }), 1);
+    }
     await errorResult(
-      liveControlHost.command({ commands: [{ ...sub, values: [0, 0, 0, NaN] }] }),
+      liveControlHost.command({ commands: [{ kind: 7, rack: 1, stripId: "a", effectId: "b", tapId: 1 }] }),
       1,
     );
     await errorResult(liveControlHost.command({ commands: [] }), 1);
     // The retired `simd1`/`simd2` rack codes and an unallocated one never reach the port (#1096).
-    for (const rack of [0, 2, 4]) {
+    for (const rack of [0, 2, 4, 255]) {
       await errorResult(
-        liveControlHost.command({ commands: [{ ...sub, rack, effectIndex: 0 }] }),
+        liveControlHost.command({ commands: [{ ...sub, rack }] }),
         1,
       );
     }
     await localErrorResult(liveControlHost.command({ requestId: 999, commands: [sub] }), 1);
     await localErrorResult(liveControlHost.observe({ requestId: 999, subscriptions: [{
-      trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 1, armed: true,
+      stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 1, armed: true,
     }] }), 1);
     const oldShapeBuffer = new ArrayBuffer(256);
     await localErrorResult(liveControlHost.submitSource({
@@ -2209,53 +2219,40 @@ async function testMainRealm() {
     // removes exactly one entry.
     const observeAck = await liveControlHost.observe({
       subscriptions: [
-        { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true },
-        { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 8, armed: true },
+        { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: true },
+        { stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 8, armed: true },
       ],
     });
     assert.equal(observeAck.tag, "miso.observe.v1");
     assert.equal(observeAck.result, 0);
-    assert.deepEqual(observeAck.bindings.map((binding) => binding.trackIndex), [0, 1],
-      "the map is canonically ordered by (track, rack, effectIndex, tapId)");
+    assert.deepEqual(observeAck.bindings.map((binding) => binding.stripId), ["track-0", "track-1"],
+      "the map is canonically ordered by (stripId, rack, effectId, tapId)");
     assert.deepEqual(observeAck.bindings[0], {
-      trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, frameSlot: 0, windowBlocks: 8,
+      stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 8,
     });
     assert.equal(observeAck.bindings[1].windowBlocks, Number(limits.liveControlMeterBlocks),
       "`windowBlocks: 0` resolves to the plan default, and the map says which one it got");
     assert.equal(Object.isFrozen(observeAck.bindings), true);
     const unsubscribed = await liveControlHost.observe({
       subscriptions: [
-        { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: false },
+        { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: false },
       ],
     });
     assert.equal(unsubscribed.bindings.length, 1, "an unsubscribe removes exactly one entry");
-    assert.equal(unsubscribed.bindings[0].trackIndex, 0);
-    // Issue #1213 (attempt 2, verdict MAJOR-1): a bus tap's binding. `frameSlot` is the strip
-    // index, so it resolves into `trackGrDb` below `trackCount` and into
-    // `submixGrDb[frameSlot - trackCount]` from there; for bus `0` that is the frame's
-    // `submixGrDb[0]`. Red if `observe()` reports a bus `frameSlot` the documented mapping does not
-    // land on the bus's entry, or if the mapping is read as a plain `trackGrDb` index (the
-    // pre-#1213 contract), where a bus slot falls past the end.
+    assert.equal(unsubscribed.bindings[0].stripId, "track-0");
+    // Issue #1213 (attempt 2, verdict MAJOR-1), as #1677 leaves it: a bus tap is named by its
+    // submix's ID like a track's, and the binding carries no position of any plan.
     {
-      const frameReading = (frame, frameSlot) => frameSlot < frame.trackCount
-        ? frame.trackGrDb[frameSlot]
-        : frame.submixGrDb[frameSlot - frame.trackCount];
       const busSubscription = {
-        trackIndex: fakeTrackCount, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0,
+        stripId: "bus-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0,
       };
       const busAck = await liveControlHost.observe({
         subscriptions: [{ ...busSubscription, armed: true }],
       });
       assert.equal(busAck.result, 0);
-      const busBinding = busAck.bindings.find(
-        (binding) => binding.trackIndex === fakeTrackCount,
-      );
-      assert.equal(busBinding.frameSlot, fakeTrackCount, "a bus's frameSlot is its strip index");
-      assert.equal(meterFrames[0].trackCount, fakeTrackCount);
-      assert.equal(frameReading(meterFrames[0], busBinding.frameSlot), meterFrames[0].submixGrDb[0],
-        "the documented mapping lands on the bus's submixGrDb entry");
-      assert.equal(frameReading(meterFrames[0], busAck.bindings[0].frameSlot),
-        meterFrames[0].trackGrDb[0], "and a track's frameSlot still indexes trackGrDb");
+      const busBinding = busAck.bindings.find((binding) => binding.stripId === "bus-0");
+      assert.deepEqual(busBinding, { ...busSubscription, windowBlocks: Number(limits.liveControlMeterBlocks) });
+      assert.deepEqual(Object.keys(busBinding).sort(), ["effectId", "rack", "stripId", "tapId", "windowBlocks"]);
       const busOff = await liveControlHost.observe({
         subscriptions: [{ ...busSubscription, armed: false }],
       });
@@ -2263,12 +2260,13 @@ async function testMainRealm() {
     }
     for (const broken of [
       // The retired `simd1`/`simd2` codes (`0`, `2`) and an unallocated one are refused (#1096).
-      { trackIndex: -1 }, { rack: 0 }, { rack: 2 }, { rack: 4 }, { tapId: 0 }, { armed: "yes" },
-      { windowBlocks: -1 },
+      { stripId: 0 }, { stripId: "x".repeat(128) }, { effectId: "x".repeat(128) }, { rack: 0 },
+      { rack: 2 }, { rack: 4 }, { tapId: 0 }, { armed: "yes" }, { windowBlocks: -1 },
+      { trackIndex: 0 }, { effectIndex: 0 },
     ]) {
       await errorResult(liveControlHost.observe({
         subscriptions: [{
-          trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true,
+          stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: true,
           ...broken,
         }],
       }), 1);
@@ -2297,12 +2295,15 @@ async function testMainRealm() {
       // The tap is declared and correctly addressed; this preparation bound no observation
       // capacity, which is what `RESULT_UNSUPPORTED` means. Retrying will never help.
       { reason: 11, result: 7, what: "a session that bound no observation capacity" },
+      // Issue #1676: past the cap on armed taps. The value follows the retired 12-14, so a table
+      // bound that stopped at 12 or accepted a retired hole would read it as malformed.
+      { reason: 15, result: 7, what: "a subscription past the cap on armed taps" },
     ]) {
       commandResult = result;
       commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
       const refused = await liveControlHost.observe({
         subscriptions: [
-          { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 9, windowBlocks: 0, armed: true },
+          { stripId: "track-0", rack: 1, effectId: "comp", tapId: 9, windowBlocks: 0, armed: true },
         ],
       });
       commandMutation = null;
@@ -2351,15 +2352,15 @@ async function testMainRealm() {
       // And a *correct* subscription still arms, so nothing about the map machinery was poisoned.
       const recovered = await liveControlHost.observe({
         subscriptions: [
-          { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 4, armed: true },
+          { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 4, armed: true },
         ],
       });
       assert.equal(recovered.result, 0, `${what}: a correct subscription still arms after it`);
       assert.equal(recovered.reason, 0);
-      assert.deepEqual(recovered.bindings.map((binding) => binding.trackIndex), [0, 1]);
+      assert.deepEqual(recovered.bindings.map((binding) => binding.stripId), ["track-0", "track-1"]);
       const undo = await liveControlHost.observe({
         subscriptions: [
-          { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 4, armed: false },
+          { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 4, armed: false },
         ],
       });
       assert.deepEqual(undo.bindings, mapBeforeRefusal, "the map returns to where it started");
@@ -2448,41 +2449,41 @@ async function testMainRealm() {
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
-    const tap = (trackIndex, effectIndex, armed) => ({
-      trackIndex, rack: 1, effectIndex, tapId: 1, windowBlocks: 0, armed,
+    const tap = (stripId, effectId, armed) => ({
+      stripId, rack: 1, effectId, tapId: 1, windowBlocks: 0, armed,
     });
 
     const beforeEdit = await prepare("{\"schema_version\":0}");
     const armedBefore = await beforeEdit.observe({
-      subscriptions: [tap(0, 0, true), tap(1, 0, true)],
+      subscriptions: [tap("track-0", "comp", true), tap("track-1", "comp", true)],
     });
     assert.equal(armedBefore.result, 0);
-    assert.deepEqual(armedBefore.bindings.map((binding) => binding.trackIndex), [0, 1]);
+    assert.deepEqual(armedBefore.bindings.map((binding) => binding.stripId), ["track-0", "track-1"]);
     await beforeEdit.dispose();
 
     const afterEdit = await prepare("format_version = 0 # one effect inserted");
     // The replacement's map starts empty: request ids restart at 1 and nothing carried over.
-    // The app's first re-arm uses the *old* effect index, which the replacement no longer has.
+    // The app's first re-arm names the *old* effect, which the replacement no longer has.
     commandResult = 1;
     commandMutation = (response) => ({ ...response, reason: 10, rejectedIndex: 0, admitted: 0 });
     const staleRearm = await afterEdit.observe({
-      subscriptions: [tap(0, 0, true), tap(1, 0, true)],
+      subscriptions: [tap("track-0", "comp", true), tap("track-1", "comp", true)],
     });
     commandMutation = null;
     commandResult = 0;
     assert.equal(staleRearm.tag, "miso.observe.v1");
-    assert.equal(staleRearm.reason, 10, "a stale tap address is refused, per request");
+    assert.equal(staleRearm.reason, 10, "a stale tap key is refused, per request");
     assert.deepEqual(staleRearm.bindings, [], "the replacement plan's map is still empty");
 
-    // The app reads the new addressing and re-arms. The host was never sticky, so this is a plain
-    // second call rather than a rebuild.
+    // The app names the replacement's effects and re-arms. The host was never sticky, so this is a
+    // plain second call rather than a rebuild.
     assert.equal((await afterEdit.sessionMap()).result, 0, "the session map still answers");
     const rearmed = await afterEdit.observe({
-      subscriptions: [tap(0, 1, true), tap(1, 1, true)],
+      subscriptions: [tap("track-0", "comp-2", true), tap("track-1", "comp-2", true)],
     });
     assert.equal(rearmed.result, 0, "the replacement plan re-arms after the refusal");
-    assert.deepEqual(rearmed.bindings.map((binding) => binding.effectIndex), [1, 1],
-      "the map holds the replacement's addressing, not the retired plan's");
+    assert.deepEqual(rearmed.bindings.map((binding) => binding.effectId), ["comp-2", "comp-2"],
+      "the map holds the replacement's keys, not the retired plan's");
     assert.deepEqual(rearmed.bindings.map((binding) => binding.windowBlocks),
       [Number(limits.liveControlMeterBlocks), Number(limits.liveControlMeterBlocks)],
       "`windowBlocks: 0` resolves against the replacement's own default");
@@ -2553,7 +2554,8 @@ async function testMainRealm() {
 // meter header's `submix_count` and the frame layout follow it, so a caller can run the worklet
 // with no submix (the production case before K2) or with several (their order is observable).
 function createFakeExports(quantum, backend = 1, liveControlsAttached = true, submixIds = ["drums-bus"]) {
-  const memory = { buffer: new ArrayBuffer(65536) };
+  // Three pages: the 272-byte command records stage 69,632 bytes, beyond the first page.
+  const memory = { buffer: new ArrayBuffer(196608) };
   const statusPointer = 16384;
   const resourcePointer = 17000;
   let status = new DataView(memory.buffer, statusPointer, 80);
@@ -2593,7 +2595,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   const controlRequestPointer = 50000;
   const controlResponsePointer = 56000;
   // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
-  const commandPointer = 24000;
+  const commandPointer = 70000;
   const meterFramePointer = 40000;
   const reportPointer = 41000;
   const meterHeaderPointer = 41100;
@@ -2656,7 +2658,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   };
   const capacities = {
     2: 64, 3: 2 * quantum * 4, 5: 2 * quantum * 4,
-    6: liveControlsAttached ? 256 * 48 : 0,
+    6: liveControlsAttached ? 256 * 272 : 0,
     7: meterFrameFloats * 4,
   };
   // Issue #143: the additive observation ABI is present even in this hermetic processor fake.
@@ -2743,7 +2745,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     },
     miso_engine_web_v1_command_report_ptr: () => reportPointer,
     miso_engine_web_v1_command_submit: (_handle, count) => {
-      calls.commands.push(new Uint8Array(memory.buffer, commandPointer, count * 48).slice());
+      calls.commands.push(new Uint8Array(memory.buffer, commandPointer, count * 272).slice());
       report.setUint32(8, calls.commandResult, true);
       report.setUint32(12, calls.commandResult === 0 ? 0 : 8, true);
       report.setUint32(16, 0, true);
@@ -3473,7 +3475,7 @@ async function testProcessor() {
       const processor = construct(fake);
       assert.deepEqual(processor.port.posts[0].message, {
         tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128",
-        resources: processor.resources, memoryBytes: 65536,
+        resources: processor.resources, memoryBytes: 196608,
       });
       return { processor, fake };
     };
@@ -3662,7 +3664,7 @@ async function testProcessor() {
       assert(right.every((sample) => sample === -0.25));
       processor.receive({ tag: "miso.status.v1", requestId: 1 });
       const status = processor.port.posts.at(-1).message;
-      assert.equal(status.memoryBytes, 65536);
+      assert.equal(status.memoryBytes, 196608);
       assert.equal(status.nextAbsoluteSample, 64n);
       assert.equal(
         status.singleModeControlAllocations,
@@ -3846,7 +3848,7 @@ async function testProcessor() {
       const status = processor.port.posts.map((post) => post.message)
         .filter((message) => message.tag === "miso.status.v1").at(-1);
       assert.equal(status.result, 0);
-      assert.equal(status.memoryBytes, 65536 * 4, "the status reports the grown memory");
+      assert.equal(status.memoryBytes, 196608 * 4, "the status reports the grown memory");
       assert.equal(status.renderedQuanta, 1n, "the status reads the grown memory");
       assert.equal(status.staleViewQuanta, 0, "no quantum ran on a detached view");
       assert.equal(processor.process([], [[left.fill(1), right.fill(1)]]), true);
@@ -4041,7 +4043,7 @@ async function testProcessor() {
       const status = processor.port.posts.map((post) => post.message)
         .filter((message) => message.tag === "miso.status.v1").at(-1);
       assert.equal(status.staleViewQuanta, 2, "the status reports the silenced quanta");
-      assert.equal(status.memoryBytes, 131072);
+      assert.equal(status.memoryBytes, 393216);
       left.fill(1);
       right.fill(1);
       assert.equal(processor.process([], [[left, right]]), true);
@@ -4130,19 +4132,20 @@ async function testProcessor() {
       // Issue #137 D1: the worklet copies a staged batch into Wasm, admits it, and hands the
       // record block straight back with the typed report.
       const { processor, fake } = makeProcessor();
-      const records = new Uint8Array(2 * 48);
+      const records = new Uint8Array(2 * 272);
       const view = new DataView(records.buffer);
-      records[0] = 2; // matrix
-      records[1] = 255;
-      records[2] = 255;
+      records[0] = 7; // subscribe
+      records[1] = 1;
+      records[2] = 5;
+      records[3] = 4;
       view.setUint32(4, 1, true);
-      view.setFloat32(24, 0.5, true);
-      records[48] = 1; // pan
-      records[49] = 255;
-      records[50] = 255;
-      view.setUint32(52, 0, true);
-      view.setFloat32(72, -1, true);
-      view.setFloat32(76, 1, true);
+      records.set(Buffer.from("track"), 16);
+      records.set(Buffer.from("comp0"), 16 + 128);
+      records[272] = 8; // unsubscribe
+      records[273] = 1;
+      records[274] = 5;
+      records[275] = 4;
+      view.setUint32(272 + 4, 1, true);
       processor.receive(structuredClone(
         { tag: "miso.command.v1", requestId: 1, count: 2, records },
         { transfer: [records.buffer] },
@@ -4154,12 +4157,12 @@ async function testProcessor() {
       assert.equal(ack.message.reason, 0);
       assert.equal(ack.transferCount, 1, "the record block goes back to the caller");
       assert.equal(fake.calls.commands.length, 1);
-      assert.equal(fake.calls.commands[0].length, 96, "exactly the staged bytes are submitted");
-      assert.equal(fake.calls.commands[0][0], 2);
-      assert.equal(fake.calls.commands[0][48], 1);
+      assert.equal(fake.calls.commands[0].length, 544, "exactly the staged bytes are submitted");
+      assert.equal(fake.calls.commands[0][0], 7);
+      assert.equal(fake.calls.commands[0][272], 8);
 
       // A record block whose length disagrees with `count` is sticky-invalid, never truncated.
-      const short = new Uint8Array(48);
+      const short = new Uint8Array(272);
       processor.receive({ tag: "miso.command.v1", requestId: 2, count: 2, records: short });
       assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
       assert.equal(processor.port.posts.at(-1).message.result, 1);

@@ -106,6 +106,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "automation"
+version = "0.1.0"
+dependencies = [
+ "bench-support",
+ "math",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2354,6 +2363,7 @@ dependencies = [
 name = "wasm-gate-corpus"
 version = "0.1.0"
 dependencies = [
+ "automation",
  "builtins",
  "compressor",
  "delay",
@@ -2381,6 +2391,7 @@ dependencies = [
 name = "wasm-gates"
 version = "0.1.0"
 dependencies = [
+ "automation",
  "bench-support",
  "builtins",
  "compressor",

@@ -147,11 +147,13 @@ already in flight keeps the length it started with.
 
 ## Test value
 
-- Gate 1: red if the graph reads the cell only at preparation, a block late, or reads an older
-  write.
+- Gate 1: red if the graph reads the cell only at preparation, under no snapshot, or reads an
+  older write, or if the cell's allocations drift from its retained row.
 - Gate 2: red if the edit is `live` with no entry that reads a word (a needless write), `model_only`
   with one (the new lengths never reach render), or if equal sample counts still write.
-- Gate 3: red if the commit does not write the cell, or writes it to a plan that is not the newest.
+- Gate 3: red if the commit does not write the cell, or reports the path from anything but the
+  classifier's value; with a structural edit beside it (D4), red if the successor's cell is not
+  seeded from the committed model.
 - Gate 4: red if the block-entry read or the hand-off to the stages allocates on render.
 
 ## Dependencies
@@ -180,3 +182,97 @@ Checked against `12d4a4f9d`.
   (amended) says. D1's row-to-word list is replaced by that function.
 - **Context.** #1054 and #1365 have landed; `LiveRamps` moved from host-core to `controls`.
 - **The browser** is the same `SessionState` (#1562a); D5 holds by construction.
+
+## Decision record: #1639 (batch 13b)
+
+**Shipped.** `crates/graph`: `GraphJumpLengths { fader_samples, mute_samples, pan_samples }` (the
+three `LiveRamps` key values), one `LatestCell<3>` per plan with its dirty word in one `Arc`, the
+boxed one reader in the executor (`JumpLengthReader`, not `Clone`, built only by
+`graph::attach_jump_lengths`), the writer `GraphJumpLengthProducer::write(stamp, lengths)`, and
+`jump_length_retained_bytes` / `jump_length_largest_allocation_bytes`. `render` reads the cell once
+per block right after it takes the block's live snapshot, beside the source set's `begin_block`
+(`read_counted`, so a replaced write joins `live_values_superseded`), and holds the three values for
+the block. The test-support reader is `graph::test_only_block_jump_lengths()` (a thread-local the
+block entry sets). `crates/host-core`: `session_jump_lengths(model)` (from
+`LiveRamps::for_session`), preparation attaches and seeds the cell on every plan after bind and
+charges it in the graph row, `HostLiveControlHandles::jump_lengths`; the classifier's
+`LiveDelta::jump_lengths: Option<GraphJumpLengths>` (read by `is_empty`) and
+`automation_jump_row(target)`. `crates/control-plane`: the epoch's `StripLanes` holds the writer (preparation refuses a plan
+without one, review fold 1); `commit_live_once` writes the value with the records, under the stamp,
+before the revision's publication. D7's sentence is in `docs/SESSION_SCHEMA_V1.md`.
+
+**Departures and choices (code truth).**
+
+1. **Attach after bind, not in `PreparedGraphPlan`.** The cell is attached to the bound plan by
+   `graph::attach_jump_lengths(&mut PreparedRenderPlan, ...)` (a downcast, as the carry installers
+   do), so no builtins-compiler pass-through and no change to `bind` were needed. The seed is the
+   reader's initial held value, not a cell write: a fresh plan holds the prepared lengths at its
+   first block with no stamp at preparation.
+2. **D3's row set** is `automation_jump_row`: a builtin, strip-own, route or VCA row whose live
+   motion is `Motion::Ramp(row)` (`controls::row_motion`), plus an effect's bypass row
+   (`BYPASS_CONTROL` -> `LiveRampRow::BypassCrossfade`, the `mute_ms` crossfade; its descriptor's
+   motion is `Fixed` because it takes no per-edit length). No hard-coded row-number list. Filters,
+   the delay, effect parameters and the (rebuild-only) link mode read no length.
+3. **The count is charged on every plan that made its own.** The cell's reader holds a clone of
+   `live_values_superseded` in every plan, so the graph row now charges the preparation's own count
+   whenever the host passed none (before: only with strip controls).
+4. **The fast classifier** (`classify_rows`) never sees a `control_smoothing` change
+   (`changed_rows` refuses session rows, so the full classifier runs); it leaves `jump_lengths`
+   `None`, with a comment.
+5. **Known gap, by the spec's design:** a `control_smoothing` change committed while the session has
+   no reading entry is not written; an entry added later (model-only until #1648 classifies
+   automation edits) reads the cell's older lengths. The hazard section's rebuild rule (#1648 D1)
+   closes it for rendered rows.
+6. **D3's field type.** D3 names `jump_lengths: Option<[u32; 3]>`; the shipped field is
+   `LiveDelta::jump_lengths: Option<GraphJumpLengths>`, the same three lengths with a name for each
+   key (`fader_samples`, `mute_samples`, `pan_samples`), so no caller depends on the word order.
+   The cell still holds three `u32` words (`GraphJumpLengths::to_words`).
+
+**Re-pinned rows** (each "the jump-length cell, #1639 D1"; measured: the cell's two allocations are
+168 bytes, a count 24 bytes, the revision gate 72 bytes; since the review fold gate 1 measures the
+cell's bytes and its two allocations against `jump_length_retained_bytes()` with the thread
+counters):
+
+| Test | Row | Before | After |
+|---|---|---|---|
+| `host-core` `tests/prepare.rs` `the_graph_row_counts_the_plans_gate_and_a_count_it_made_and_holds` | plain preparation (no strip controls), graph row less incremental | 72 (gate) | 264 (gate + cell + its own count) |
+| same | strip controls, the preparation's own count | 96 | 264 |
+| same | strip controls, the session's count | 72 | 240 |
+| `host-core` `tests/live_routes.rs` `live_send_lanes_are_charged_against_the_graph_cap` | live total less idle total | route lanes + 24 (count) | route lanes (both plans hold the cell and their count); the test pins no total; live total 118304 at head (read from a failing run), 168 bytes (one cell) above the base it derives from |
+| `host-web` `tests/retained_ceilings.rs` `the_graph_row_charges_the_plans_gate_and_not_the_sessions_superseded_count` | browser graph row less incremental | 72 | 240 |
+
+`capi` `model_only_edits_commit_without_a_plan_rebuild`: the `control_smoothing` edit now comes
+before the automation upsert (on a session with a fader entry it is `live` by D3); not a byte row.
+
+**Gates.**
+
+| Gate | Test | Result |
+|---|---|---|
+| 1 Block-entry read | `graph` `tests/jump_lengths.rs` `the_block_entry_holds_the_newest_published_lengths` (prepared lengths at block 0; an unpublished write not held; held from the first block after publication; two writes give the last and count one superseded; a second attach refused; the attach leaves exactly `jump_length_retained_bytes()` live in 2 allocations, 0 frees). The probe is set right after the block's snapshot, so the test does not show where in the block the read is | pass |
+| 2 Classifier | `host-core` `tests/live_delta.rs` `a_control_smoothing_change_writes_the_jump_lengths_only_for_automation_that_reads_them` (fader, mute, pan entries live; none, EQ parameter entry and 10.0 -> 10.001 ms empty; effect bypass entry live), `the_rows_that_read_a_jump_length_are_the_ramped_rows` | pass |
+| 3 C ABI | `capi` `runtime::live_tests::a_control_smoothing_edit_on_an_automated_session_writes_the_jump_lengths_live` (SET_CONTROL of the three smoothing rows: `live`, same epoch, no candidate, next block holds 96/48/144; without automation `model_only`, prepared 960/480/960 held). Red with the commit's write removed. No candidate is pending, so it does not show which plan a write with a candidate reaches. D4: `a_successor_prepared_with_a_control_smoothing_edit_holds_the_new_lengths` (an added track and the three rows in one transaction: `rebuild`, one candidate; after adoption, a new epoch, the next block holds 96/48/144). Red with the seed made a constant 960/480/960: the successor held 960/480/960. | pass |
+| 4 Realtime | gates 1 and 3 count 0 allocations and 0 frees in the block that applies the write; `audit capi`: every violation count 0 | pass |
+| 5 Commands | `graph --features test-support`, `host-core` (all features), `capi`, `control-plane`, `host-web` suites; the `test-debug-a` workspace leg (2228 passed, 0 failed); `realtime_policy` (149 regions in 32 files; floor 147 -> 149 for this issue's two regions), graph, host-core and workspace policy scripts; `check-cross-targets.sh` (PASS, iOS memset only the known #1018 builtins/lane calls); workspace clippy `-D warnings`; `fmt --check` | pass |
+| 6 No bit moves | `audit capi` `pcm_digest` `bf7dcedd1d92621f` at base and head. Browser legs (batch 13b integration, cddff37d9): `check-browser-expected-resources` digests and exact rows unchanged; chromium 151, firefox 153 and webkit 26.5 qualification pass | pass |
+
+**Review fold (batch 13b).** Five minor findings of the adversarial review, folded:
+
+1. **The invariant is typed.** The epoch's `StripLanes::jump_lengths` holds the writer, not an
+   `Option`: `prepare_runtime` refuses a handle set without it with the cell's own attach failure
+   (`host.jump_lengths.attach`, stage `Graph`), and `commit_live_once` lost its unreachable
+   `Internal` refusal. `HostLiveControlHandles::jump_lengths` stays an `Option` (handle sets built
+   without a preparation) and converts at the control-plane boundary.
+2. **The cell's bytes are measured.** Gate 1 counts the attach with the thread counters (statics
+   warmed on a throwaway plan): requested less released bytes equal
+   `jump_length_retained_bytes()`, in 2 allocations and 0 frees. The counters carry no largest
+   allocation, so `jump_length_largest_allocation_bytes()` is not measured.
+3. **Two claims removed.** Gate 1 no longer claims "a block late": its probe is set right after the
+   block's snapshot. Gate 3 no longer claims "a plan that is not the newest": that test has no
+   candidate.
+4. **D4 has a C ABI test** (gate 3's row): `a_successor_prepared_with_a_control_smoothing_edit_holds_the_new_lengths`,
+   red with the seed made a constant.
+5. **`session_jump_lengths`** moved out of the `use` block in `crates/host-core/src/prepare.rs`.
+   `prepare.rs` also moves the graph row's charge (the superseded count charged when the
+   preparation made its own), the largest-allocation row and a `HostLiveControlHandles` field,
+   past the authorized "the seed only": all three are needed for D1 and are covered by the root
+   ruling on byte rows.

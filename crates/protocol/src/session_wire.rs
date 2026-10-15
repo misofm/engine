@@ -539,8 +539,15 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         }
         SessionEdit::UpsertVca { vca } => tx_message(sink, fields[0], |v| tx_vca(v, vca)),
         SessionEdit::RemoveVca { vca_id } => tx_id(sink, fields[0], vca_id),
-        SessionEdit::SetControl { address, value, .. } => {
-            tx_message(sink, fields[0], |v| tx_control_address(v, address))?;
+        SessionEdit::SetControl {
+            address,
+            value,
+            expected_effect,
+            ..
+        } => {
+            tx_message(sink, fields[0], |v| {
+                tx_control_address(v, address, expected_effect.as_ref())
+            })?;
             tx_f32(sink, fields[1], *value)
         }
     }?;
@@ -1008,8 +1015,9 @@ fn tx_route(sink: &mut dyn Sink, value: &Route) -> Result<(), EncodeError> {
         value.follows_mute,
     )
 }
-/// A stored automation target is the control address `SET_CONTROL` carries (#1566 D4), written by
-/// the same encoder; no session row is automatable, so a session owner has no spelling here.
+/// A stored automation target is the control list's address message with `control` and `lane`
+/// present (#1566 D4), and no expected effect; no session row is automatable, so a session owner
+/// has no spelling here.
 fn tx_automation_target(
     sink: &mut dyn Sink,
     value: &controls::ControlAddress,
@@ -1017,7 +1025,7 @@ fn tx_automation_target(
     if value.owner == controls::Owner::Session {
         return Err(EncodeError::InvalidField);
     }
-    tx_control_address(sink, value)
+    crate::message_wire::write_automation_target_address(sink, value)
 }
 fn tx_automation_segment(
     sink: &mut dyn Sink,
@@ -1262,26 +1270,35 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
         crate::SessionEditOpcode::RemoveVca => Ok(SessionEdit::RemoveVca {
             vca_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
-        crate::SessionEditOpcode::SetControl => Ok(SessionEdit::SetControl {
-            address: parse_control_address(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
-            // Not required to be finite here: the control validator refuses it, naming the edit.
-            value: read_f32(one_spec!(payload, fields[1])?)?,
-            ramp_samples,
-        }),
+        crate::SessionEditOpcode::SetControl => {
+            let (address, expected_effect) =
+                parse_control_address(payload.nested_value(one_spec!(payload, fields[0])?)?)?;
+            Ok(SessionEdit::SetControl {
+                address,
+                // Not required to be finite here: the control validator refuses it, naming the edit.
+                value: read_f32(one_spec!(payload, fields[1])?)?,
+                ramp_samples,
+                expected_effect,
+            })
+        }
     }
 }
 
-/// The control address of a `SetControl` edit: the control list's address message, in which a set
-/// requires the `control` and the `lane`. Its encoder and decoder are the list's (`message_wire`).
+/// The control address of a `SetControl` edit: the control list's address fields, in which a set
+/// requires the `control` and the `lane`, and the optional expected effect (#1678) as a seventh
+/// field. Its encoder and decoder are `message_wire`'s set-control edit address codec.
 fn tx_control_address(
     sink: &mut dyn Sink,
     address: &controls::ControlAddress,
+    expected_effect: Option<&StableId>,
 ) -> Result<(), EncodeError> {
-    crate::message_wire::write_set_control_address(sink, address)
+    crate::message_wire::write_set_control_edit_address(sink, address, expected_effect)
 }
 
-fn parse_control_address(message: Message<'_>) -> Result<controls::ControlAddress, DecodeError> {
-    crate::message_wire::decode_set_control_address(message)
+fn parse_control_address(
+    message: Message<'_>,
+) -> Result<(controls::ControlAddress, Option<StableId>), DecodeError> {
+    crate::message_wire::decode_set_control_edit_address(message)
 }
 
 fn parse_render_profile(message: Message<'_>) -> Result<RenderProfile, DecodeError> {
@@ -1667,7 +1684,7 @@ fn parse_route(message: Message<'_>) -> Result<Route, DecodeError> {
     })
 }
 fn parse_automation_target(message: Message<'_>) -> Result<controls::ControlAddress, DecodeError> {
-    let address = parse_control_address(message)?;
+    let address = crate::message_wire::decode_automation_target_address(message)?;
     if address.owner == controls::Owner::Session {
         return Err(DecodeError::InvalidField);
     }
