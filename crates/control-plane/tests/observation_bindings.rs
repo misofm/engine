@@ -8,8 +8,8 @@
 #![cfg(feature = "test-support")]
 
 use control_plane::{
-    CommandError, CompiledChildren, ControlAdapter, ControlLimits, EventLane, PlanResources,
-    PlanState, RuntimePreparer, SessionState, compile_children,
+    CommandError, CompileFailure, CompiledChildren, ControlAdapter, ControlLimits, EventLane,
+    PlanResources, PlanState, ResourceFault, RuntimePreparer, SessionState, compile_children,
 };
 use controls::{TapKey, TapSection};
 use host_core::{
@@ -103,8 +103,12 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
+        Self::with_limits(limits())
+    }
+
+    fn with_limits(limits: ControlLimits) -> Self {
         let CompiledChildren { session, plan } =
-            compile_children::<Adapter>(SESSION, limits(), Box::new(ObservingPreparer))
+            compile_children::<Adapter>(SESSION, limits, Box::new(ObservingPreparer))
                 .expect("boot compile");
         Self {
             session,
@@ -548,4 +552,105 @@ fn a_strip_removed_with_many_subscribed_inserts_gives_one_event_with_every_key()
             "{count}"
         );
     }
+}
+
+/// An `OBSERVATION_ENDED` event that cannot fit one control frame can never be sent, so the removal
+/// that would end that many subscriptions is refused as a resource limit (not retryable
+/// backpressure) before anything changes: the revision, the canonical session, the bindings, the
+/// plan epoch and the event lane are as they were. A strip with two subscribed inserts (an end
+/// that fits) commits under the same small limit.
+///
+/// Red if the commit goes ahead and drops the end (an acked removal whose subscribers never hear),
+/// if the refusal is backpressure (the host would retry forever), or if the refusal leaves the
+/// table emptied, a plan published or an event queued.
+#[test]
+fn an_end_event_over_one_control_frame_refuses_the_removal_and_changes_nothing() {
+    fn put_compressor(strip: &str, id: &str) -> SessionEdit {
+        SessionEdit::PutTrackEffect {
+            track_id: StableId::parse(strip).expect("strip"),
+            rack_name: RackName::Inserts,
+            final_position: 1,
+            effect: Effect {
+                id: StableId::parse(id).expect("insert"),
+                identity: EffectIdentity::Native {
+                    effect_id: StableId::parse("miso.compressor").expect("compressor"),
+                },
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::DualMono,
+                params: Vec::new(),
+                sidechain: SidechainDeclaration::None,
+            },
+        }
+    }
+    let remove_strip = || {
+        vec![
+            SessionEdit::RemoveRoute {
+                route_id: StableId::parse("comp1-main").expect("route"),
+            },
+            SessionEdit::RemoveTrack {
+                track_id: StableId::parse("comp1").expect("strip"),
+            },
+        ]
+    };
+    let mut small = limits();
+    small.maximum_control_frame_bytes = 1_024;
+    // The strip with `count` subscribed inserts, under the small frame.
+    let build = |count: u32| {
+        let mut rig = Rig::with_limits(small);
+        let ids: Vec<String> = (0..count).map(|index| format!("ins{index:02}")).collect();
+        // One insert per request: the small frame holds one put, not sixty.
+        for id in &ids {
+            rig.apply(&[put_compressor("comp1", id)])
+                .expect("the insert is added");
+            rig.render();
+            rig.render();
+            rig.drain();
+            let position = rig
+                .session
+                .effect_producers()
+                .iter()
+                .position(|producer| &*producer.track_id == "comp1" && &*producer.effect_id == id)
+                .expect("the insert has a producer");
+            rig.session
+                .push_effect_observe(position, 0, true, WINDOW_BLOCKS)
+                .expect("a producer")
+                .expect("room in the queue");
+        }
+        assert_eq!(rig.session.observation_bindings().len(), ids.len());
+        rig
+    };
+
+    // A few keys fit the frame: the same removal commits under the same limit.
+    let mut fits = build(2);
+    let before = fits.revision();
+    fits.apply(&remove_strip())
+        .expect("two ended keys fit one frame");
+    assert_eq!(fits.revision(), before + 1);
+    assert_eq!(ended(&fits.drain()).len(), 1);
+
+    let mut rig = build(60);
+    let revision = rig.revision();
+    let canonical = rig.session.test_transaction_snapshot().canonical;
+    let bindings = rig.session.observation_bindings().clone();
+    let epoch = rig.session.newest_plan_epoch();
+    let refused = rig.apply(&remove_strip());
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::CompileRejected(CompileFailure::Resource(
+                ResourceFault::Limit
+            )))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(rig.revision(), revision);
+    assert_eq!(rig.session.test_transaction_snapshot().canonical, canonical);
+    assert_eq!(rig.session.observation_bindings(), &bindings);
+    assert_eq!(
+        rig.session.newest_plan_epoch(),
+        epoch,
+        "no plan was published"
+    );
+    assert!(rig.drain().is_empty(), "no event was queued");
 }

@@ -339,3 +339,8 @@ host-core with no features, default and all features (all targets); the host-cor
 (`spectrum_handoff_loom`); `realtime-policy`; `check-bench-policy.sh`; `cargo fmt --all --check`;
 `check-cross-targets.sh`; `RUSTDOCFLAGS='-D warnings' cargo doc -p host-core --no-deps
 --all-features`. All pass.
+
+## Fold (batch 12a review)
+
+`PlanStateInventory::spectrum_count` had no caller and no gate that it would defend (the capture
+rows are read through `spectrum_carry_pairs`, which the carry gates pin), so it is deleted.

@@ -3462,7 +3462,9 @@ pub extern "C" fn miso_engine_web_v1_meter_poll(handle: u32) -> u32 {
     render_locked(|| with_host_mut(handle, 0, AudioWorkletEngineHost::poll_meters))
 }
 
-/// Return the stable meter-header address, or zero for an invalid handle (issue #143 D5).
+/// Return the address of the header that describes the plan now rendering, or zero for an invalid
+/// handle (issue #143 D5). The address changes at a plan swap (issue #1290d1: each plan carries its
+/// own header), so a page reads it again after a swap or follows `successor_pointer`.
 ///
 /// The `f32` meter frame carries numbers a meter draws; the window those numbers describe is a
 /// pair of absolute sample counts, which an `f32` cannot hold. They ride this fixed structure, read

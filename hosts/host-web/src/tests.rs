@@ -6772,9 +6772,13 @@ mod structural_apply {
             let waiting = ready.pending_shapes.last().expect("the candidate's tables");
             assert_eq!(waiting.shape.meter_header.track_count, 10);
             assert_eq!(waiting.shape.meter_frame.len(), 3 * 10 + 3);
+            // Full width: the `u32` word reads 0 for an address above 4 GiB on a native host, so
+            // the check is on the pointer the commit set beside it.
+            assert_ne!(rig.host.meter_successor_address(), 0);
             assert_eq!(
-                ready.shape.meter_header.successor_pointer,
-                address_word(core::ptr::from_ref(&waiting.shape.meter_header))
+                rig.host.meter_successor_address(),
+                core::ptr::from_ref(&waiting.shape.meter_header).addr(),
+                "the rendering plan names the newest candidate's header"
             );
             assert_eq!(ready.shape.meter_header.retired, 0);
         }
@@ -6830,12 +6834,23 @@ mod structural_apply {
             .expect("the retired tables wait for the service step");
         assert_eq!(retired.shape.meter_header.retired, 1);
         assert_eq!(retired.shape.meter_header.track_count, 9);
+        assert_ne!(retired.shape.successor_address, 0);
         assert_eq!(
-            retired.shape.meter_header.successor_pointer,
-            address_word(core::ptr::from_ref(&ready.shape.meter_header))
+            retired.shape.successor_address,
+            core::ptr::from_ref(&ready.shape.meter_header).addr(),
+            "the retired header names the adopted one"
+        );
+        assert_ne!(
+            retired.shape.successor_address,
+            core::ptr::from_ref(&retired.shape.meter_header).addr()
         );
         assert_eq!(ready.shape.meter_header.retired, 0);
         assert_eq!(ready.shape.meter_header.successor_pointer, 0);
+        assert_eq!(
+            rig.host.meter_successor_address(),
+            0,
+            "the adopted header names no successor"
+        );
 
         // And the stream goes on in the successor's frame.
         let later = poll_cadence(&mut rig, 3, 1, 0);

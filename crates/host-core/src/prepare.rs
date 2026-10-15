@@ -909,12 +909,6 @@ impl PlanStateInventory {
         self.observations.len()
     }
 
-    /// Spectrum capture rows: one for a single capture, one per entry for a collection (#1395).
-    #[must_use]
-    pub fn spectrum_count(&self) -> usize {
-        self.spectrum.len()
-    }
-
     /// The captures this plan takes over from the plan it was prepared to displace (#1395 D1,
     /// D3): the pairs the control side applies at promotion with
     /// [`SpectrumService::adopt_successor`](crate::SpectrumService::adopt_successor), when the

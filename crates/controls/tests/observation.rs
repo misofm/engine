@@ -90,7 +90,7 @@ fn a_binding_ends_when_its_target_goes() {
         (insert_key("guitar", GAIN_REDUCTION), 8),
         (console_key("vocal"), 4),
     ]);
-    let unchanged = bindings.after(&model);
+    let unchanged = bindings.after(&model).expect("room");
     assert_eq!(unchanged.bindings, bindings);
     assert!(unchanged.ended.is_empty());
 
@@ -99,7 +99,7 @@ fn a_binding_ends_when_its_target_goes() {
     without_guitar
         .tracks
         .retain(|track| track.id.as_str() != "guitar");
-    let change = bindings.after(&without_guitar);
+    let change = bindings.after(&without_guitar).expect("room");
     assert_eq!(change.ended, vec![insert_key("guitar", GAIN_REDUCTION)]);
     assert_eq!(change.bindings.len(), 2);
 
@@ -109,7 +109,7 @@ fn a_binding_ends_when_its_target_goes() {
         .inserts
         .effects
         .retain(|effect| effect.id != insert_id("miso.compressor"));
-    let change = bindings.after(&without_insert);
+    let change = bindings.after(&without_insert).expect("room");
     assert_eq!(change.ended, vec![insert_key("vocal", GAIN_REDUCTION)]);
     assert_eq!(
         change
@@ -129,7 +129,7 @@ fn a_binding_ends_when_its_target_goes() {
         .identity = EffectIdentity::Native {
         effect_id: id("miso.delay"),
     };
-    let change = bindings.after(&reused);
+    let change = bindings.after(&reused).expect("room");
     assert_eq!(change.ended, vec![insert_key("guitar", GAIN_REDUCTION)]);
 
     // A console slot removed from the session (and every strip's entry for it).
@@ -141,11 +141,14 @@ fn a_binding_ends_when_its_target_goes() {
     for strip in &mut without_slot.submixes {
         strip.console.retain(|entry| entry.slot != id("glue"));
     }
-    let change = bindings.after(&without_slot);
+    let change = bindings.after(&without_slot).expect("room");
     assert_eq!(change.ended, vec![console_key("vocal")]);
 
     // A tap the effect does not declare ends too.
     let unknown = bound(&[(insert_key("vocal", 99), 4)]);
-    assert_eq!(unknown.after(&model).ended, vec![insert_key("vocal", 99)]);
-    assert!(unknown.after(&model).bindings.is_empty());
+    assert_eq!(
+        unknown.after(&model).expect("room").ended,
+        vec![insert_key("vocal", 99)]
+    );
+    assert!(unknown.after(&model).expect("room").bindings.is_empty());
 }

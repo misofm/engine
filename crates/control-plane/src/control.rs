@@ -425,13 +425,18 @@ pub struct SessionState<A: ControlAdapter> {
     pub(crate) observation_offsets: Box<[u32]>,
 }
 
+/// A plan's observation slot offsets and its pending-subscription storage.
+pub(crate) type ObservationSlots = (Box<[u32]>, Box<[PendingArm]>);
+
 /// The pending-subscription storage for `producers`, the newest plan's: the first slot of each
-/// producer (and one past the last), and one slot per declared tap (#1584 D6a). Called when a plan
-/// is published, after the fold, so nothing pending is lost to a change of positions.
+/// producer (and one past the last), and one slot per declared tap (#1584 D6a). Built when a plan
+/// is prepared, fallibly and before anything commits; the session takes it after the commit and
+/// after the fold, so nothing pending is lost to a change of positions.
 pub(crate) fn observation_slots(
     producers: &[host_core::EffectControlProducer],
-) -> (Box<[u32]>, Box<[PendingArm]>) {
-    let mut offsets = Vec::with_capacity(producers.len() + 1);
+) -> Result<ObservationSlots, std::collections::TryReserveError> {
+    let mut offsets = Vec::new();
+    offsets.try_reserve_exact(producers.len() + 1)?;
     let mut total = 0_u32;
     for producer in producers {
         offsets.push(total);
@@ -439,10 +444,10 @@ pub(crate) fn observation_slots(
             total.saturating_add(u32::try_from(producer.observe_capacity()).unwrap_or(u32::MAX));
     }
     offsets.push(total);
-    (
-        offsets.into_boxed_slice(),
-        vec![PendingArm::None; total as usize].into_boxed_slice(),
-    )
+    let mut pending = Vec::new();
+    pending.try_reserve_exact(total as usize)?;
+    pending.resize(total as usize, PendingArm::None);
+    Ok((offsets.into_boxed_slice(), pending.into_boxed_slice()))
 }
 
 /// What the host last pushed to one observation slot (#1584 D6a).
@@ -786,6 +791,7 @@ pub(crate) fn map_event_egress_error(error: EventEgressError) -> EventError {
         EventEgressError::ReliableQueueFull(_) => EventError::Backpressure,
         EventEgressError::Disabled
         | EventEgressError::DiagnosticStorageFull
+        | EventEgressError::ObservationEndedCellMissing
         | EventEgressError::Encode(_) => EventError::Internal,
     }
 }
@@ -1411,20 +1417,27 @@ where
                 // backpressure and nothing has changed (the acked-batch rule: a subscription is
                 // never dropped without its event). An event over one control frame can never
                 // be sent, so it is a resource refusal, not backpressure.
-                let observation_change = self.observation.after(
-                    prepared
-                        .get()
-                        .prospective_session()
-                        .compiled()
-                        .ok_or(CommandError::Internal)?
-                        .normalized_model(),
-                );
+                let observation_change = self
+                    .observation
+                    .after(
+                        prepared
+                            .get()
+                            .prospective_session()
+                            .compiled()
+                            .ok_or(CommandError::Internal)?
+                            .normalized_model(),
+                    )
+                    .map_err(|_| {
+                        CommandError::CompileRejected(failure(ResourceFault::Allocation))
+                    })?;
                 if !observation_change.ended.is_empty() {
-                    let ended = observation_change
-                        .ended
-                        .iter()
-                        .map(ended_key)
-                        .collect::<Vec<_>>();
+                    let mut ended = Vec::new();
+                    ended
+                        .try_reserve_exact(observation_change.ended.len())
+                        .map_err(|_| {
+                            CommandError::CompileRejected(failure(ResourceFault::Allocation))
+                        })?;
+                    ended.extend(observation_change.ended.iter().map(ended_key));
                     match self
                         .controller
                         .attach_observation_ended(prepared.get_mut(), ended)
@@ -1594,6 +1607,21 @@ where
                     drop(prepared);
                     return Err(CommandError::Internal);
                 }
+                // #1584 D6a: the newest plan's pending-subscription storage is built here, with
+                // the other fallible steps, so no allocation follows the commit; the commit then
+                // only assigns it. A refusal drops what was built and changes nothing.
+                let slots = match observation_slots(&candidate_provider.effects) {
+                    Ok(slots) => slots,
+                    Err(_) => {
+                        drop(reports);
+                        drop(reservation);
+                        drop(candidate_provider);
+                        drop(prepared);
+                        return Err(CommandError::CompileRejected(failure(
+                            ResourceFault::Allocation,
+                        )));
+                    }
+                };
                 // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
                 let committed = prepared
                     .commit(&mut self.controller, protocol::EditPath::Rebuild)
@@ -1626,15 +1654,9 @@ where
                 );
                 candidate_provider.revision_gate.publish(revision);
                 self.pending_providers.push(candidate_provider);
-                // #1584 D6a: the newest plan's slots. The fold ran when this command was
-                // serviced and nothing has been pushed since (one thread), so none is lost.
-                (self.observation_offsets, self.observation_pending) = observation_slots(
-                    &self
-                        .pending_providers
-                        .last()
-                        .unwrap_or(&self.providers)
-                        .effects,
-                );
+                // #1584 D6a: the newest plan's slots, built above. The fold ran when this command
+                // was serviced and nothing has been pushed since (one thread), so none is lost.
+                (self.observation_offsets, self.observation_pending) = slots;
                 reports.push((epoch, A::Row::from(resources)));
                 reservation.commit();
                 #[cfg(feature = "test-support")]

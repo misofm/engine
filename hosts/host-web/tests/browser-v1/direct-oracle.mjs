@@ -22,7 +22,8 @@ const COMMAND_RECORD_BYTES = ABI_LAYOUT.commandRecord.bytes;
 const COMMAND_OBSERVE_SUBSCRIBE = 7;
 const COMMAND_OBSERVE_UNSUBSCRIBE = 8;
 const BUFFER_METER_FRAME = 7;
-// Issue #1209 D2: 72 since `submix_count` and its pad were appended at 64 and 68.
+// 80 bytes: `submix_count` at 64 and `retired` at 68 (issue #1209 D2, #1290d1), then
+// `frame_pointer` at 72 and `successor_pointer` at 76 (issue #1290d1).
 const METER_HEADER_BYTES = 80;
 const OBSERVATION_WINDOW_BLOCKS = 2;
 const RESOURCE_NAMES = [

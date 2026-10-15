@@ -7,6 +7,8 @@
 //! in the successor from its first rendered block. A binding whose target the next model no longer
 //! has ends, and [`ObservationChange::ended`] names it, so the host tells its subscribers.
 
+use std::collections::TryReserveError;
+
 use session::{Section, SessionModel, StableId};
 
 use crate::effect_rows::resident_observation_tap;
@@ -160,10 +162,18 @@ impl ObservationBindings {
 
     /// The bindings on a session whose strips and effects are `next`'s: each binding whose target
     /// `next` no longer has is dropped and its key returned in [`ObservationChange::ended`].
-    #[must_use]
-    pub fn after(&self, next: &SessionModel) -> ObservationChange {
-        let mut kept = Vec::with_capacity(self.bindings.len());
+    ///
+    /// Both lists are reserved exactly before anything is copied, so a refusal leaves `self`
+    /// untouched and a caller can refuse the transaction before it commits anything.
+    ///
+    /// # Errors
+    ///
+    /// The allocation failed.
+    pub fn after(&self, next: &SessionModel) -> Result<ObservationChange, TryReserveError> {
+        let mut kept = Vec::new();
+        kept.try_reserve_exact(self.bindings.len())?;
         let mut ended = Vec::new();
+        ended.try_reserve_exact(self.bindings.len())?;
         for binding in &self.bindings {
             if Self::has_target(next, &binding.key) {
                 kept.push(binding.clone());
@@ -171,9 +181,9 @@ impl ObservationBindings {
                 ended.push(binding.key.clone());
             }
         }
-        ObservationChange {
+        Ok(ObservationChange {
             bindings: Self { bindings: kept },
             ended,
-        }
+        })
     }
 }

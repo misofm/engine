@@ -554,3 +554,18 @@ equality with `address_word` (which is `0` for a 64-bit address); the chromium l
 `frame_pointer` path with real addresses. (2) The SDK's `meterProjection` still checks a frame against
 its own session map, so after a structural apply it refuses the successor's frame until the SDK map
 follows the apply (#1296's); the engine side is complete.
+
+## Fold (batch 12a review)
+
+- **Pointer checks at full width.** The native check of `successor_pointer` compared two
+  `address_word` results, and `address_word` is `0` for any address above 4 GiB, so on a 64-bit
+  host both sides were `0` and the check was always true (the "Limits found" note above recorded
+  the weakness and left it). `PlanShape` now keeps the full-width address beside the header word
+  (`name_successor` sets both where the commit and `adopt_shape` set the word; test builds only),
+  and the gate `a_strip_count_change_publishes_the_successors_frame_from_the_adoption_block`
+  compares that address with the candidate's and the adopted plan's header addresses
+  (`AudioWorkletEngineHost::meter_successor_address`). Quick mutation, reverted: with the
+  address not recorded the gate fails (`assertion left != right`, tests.rs:6777).
+- **Doc fixes.** `miso_engine_web_v1_meter_header_ptr` no longer says "stable" (the address changes
+  at each swap, each plan carrying its own header); the browser oracle's header size comment says
+  80 bytes.

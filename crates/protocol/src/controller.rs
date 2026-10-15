@@ -1302,6 +1302,10 @@ pub enum EventEgressError {
     Disabled,
     /// Prepared reliable diagnostic storage has no free slot.
     DiagnosticStorageFull,
+    /// A reliable `OBSERVATION_ENDED` slot names a cell that holds no event. An internal
+    /// invariant: the commit fills the cell before it queues the slot, and the cell stays until
+    /// the slot's frame is delivered. Reported, never expected.
+    ObservationEndedCellMissing,
     /// A reliable queue rejected the original event without dropping or coalescing it.
     ReliableQueueFull(QueueReport),
     /// The typed caller-buffer encoder rejected the requested event/output.
@@ -3034,7 +3038,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                     .ok()
                     .and_then(|index| self.observation_ended_cells.get(index))
                     .and_then(Option::as_ref)
-                    .ok_or(EventEgressError::DiagnosticStorageFull)?;
+                    .ok_or(EventEgressError::ObservationEndedCellMissing)?;
                 self.codec.encode_event_frame_into(
                     &TypedEventFrame {
                         revision: slot.revision,

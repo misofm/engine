@@ -1403,6 +1403,13 @@ struct PlanShape {
     /// window the poll published. The swap block copies the stream's fields from the retiring
     /// plan's header into the adopted plan's.
     meter_header: WebMeterHeader,
+    /// The full-width address of the header [`WebMeterHeader::successor_pointer`] names, or `0`.
+    /// The header word is a `u32` linear-memory address, which reads `0` for an address above
+    /// 4 GiB (a native test host), so a gate that compares the word with the same conversion
+    /// would pass vacuously. This is the pointer itself, set beside the word by
+    /// [`Self::name_successor`], and a gate compares it with `core::ptr::eq`.
+    #[cfg(any(test, feature = "test-support"))]
+    successor_address: usize,
     /// Whether each strip contributed a gain-reduction reading to the most recent poll. Allocated
     /// at compilation, one entry per strip; it is what makes `masterGrDb` absent rather than zero.
     observation_present: Box<[bool]>,
@@ -1564,8 +1571,8 @@ impl ReadyOwnership {
             // The rendering plan's header names the newest replacement's, so the page cuts its
             // views over the successor's frame in the handler that committed it (#1290d1).
             if let Some(entry) = self.pending_shapes.last() {
-                self.shape.meter_header.successor_pointer =
-                    address_word(core::ptr::from_ref(&entry.shape.meter_header));
+                self.shape
+                    .name_successor(core::ptr::from_ref(&entry.shape.meter_header));
             }
             self.blocking_rebuilds = self.blocking_rebuilds.saturating_add(1);
         }
@@ -1627,8 +1634,9 @@ impl ReadyOwnership {
                 // the page's render path switches to the views it cut in advance.
                 let stream = entry.shape.meter_header;
                 entry.shape.meter_header.retired = 1;
-                entry.shape.meter_header.successor_pointer =
-                    address_word(core::ptr::from_ref(&self.shape.meter_header));
+                entry
+                    .shape
+                    .name_successor(core::ptr::from_ref(&self.shape.meter_header));
                 self.shape.meter_header.windows = stream.windows;
                 self.shape.meter_header.first_sample = stream.first_sample;
                 self.shape.meter_header.end_sample = stream.end_sample;
@@ -1674,14 +1682,15 @@ impl ReadyOwnership {
         }
         if taken {
             // A replacement committed after this one waits behind it (#1290d1).
-            self.shape.meter_header.successor_pointer = self
+            let waiting = self
                 .pending_shapes
                 .iter()
                 .rev()
                 .find(|entry| !entry.adopted)
-                .map_or(0, |entry| {
-                    address_word(core::ptr::from_ref(&entry.shape.meter_header))
+                .map_or(core::ptr::null(), |entry| {
+                    core::ptr::from_ref(&entry.shape.meter_header)
                 });
+            self.shape.name_successor(waiting);
             if meters_carried {
                 // The delivery epoch is the stream's, not the plan's: the page sees the same
                 // generation, and the poll finds the carried windows where it left them.
@@ -2543,6 +2552,17 @@ impl AudioWorkletEngineHost {
         self.ready
             .as_ref()
             .map_or(&EMPTY_METER_HEADER, |ready| &ready.shape.meter_header)
+    }
+
+    /// The full-width address of the header the rendering plan's header names as its successor,
+    /// or `0` when none waits (a gate compares it with the candidate's or the adopted header's
+    /// address; the header's own `u32` word reads `0` above 4 GiB on a native host).
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn meter_successor_address(&self) -> usize {
+        self.ready
+            .as_ref()
+            .map_or(0, |ready| ready.shape.successor_address)
     }
 
     /// Armed taps, in the dense effect-slot order. Off-ABI introspection for the tests.
@@ -5704,8 +5724,23 @@ fn build_plan_shape(
             .into_boxed_slice(),
         meter_frame,
         meter_header,
+        #[cfg(any(test, feature = "test-support"))]
+        successor_address: 0,
         observation_present: observation_present.into_boxed_slice(),
     })
+}
+
+impl PlanShape {
+    /// Name `successor` as the header that replaces this plan's (null for none): the `u32` word
+    /// the page reads, and beside it the full-width pointer a gate compares.
+    #[inline]
+    fn name_successor(&mut self, successor: *const WebMeterHeader) {
+        self.meter_header.successor_pointer = address_word(successor);
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.successor_address = successor.addr();
+        }
+    }
 }
 
 /// `3(T + S) + 3` words: two peak lanes and one gain-reduction magnitude per strip, then the

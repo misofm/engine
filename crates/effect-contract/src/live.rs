@@ -1695,15 +1695,6 @@ impl ObservationLane {
         true
     }
 
-    /// Whether `tap_index` is armed at preparation and has not yet folded a block. Off-thread
-    /// introspection for the structural gates.
-    #[must_use]
-    pub fn is_prepared_arm_pending(&self, tap_index: usize) -> bool {
-        self.taps
-            .get(tap_index)
-            .is_some_and(|tap| tap.armed && tap.start_pending)
-    }
-
     /// Release every subscription without touching the published windows (issue #143 D7).
     ///
     /// A plan replacement drops subscriptions because the plan they addressed is gone; the app

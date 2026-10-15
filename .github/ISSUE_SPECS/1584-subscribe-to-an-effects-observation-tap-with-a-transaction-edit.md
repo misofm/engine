@@ -497,3 +497,39 @@ Root ruling A replaces D6a's one event per ended binding with one `OBSERVATION_E
   `observation_pending` slots were allocated and never charged. `capi_resources` now charges both
   (`ObservationResources { producers, slots, ended_heap_bytes }`), beside the fold's ended-event heap; the whole
   `cargo test -p capi` passes (132 passed). Audit capi `pcm_digest` `bf7dcedd1d92621f`, allocations 0.
+
+## Fold (batch 12a review)
+
+- **Ended-event charge is a frame bound.** The `OBSERVATION_ENDED` cells were charged as the
+  active plan's producers' key heap times the cell count. After a removal the successor (fewer
+  producers) was charged while its cells could still hold the predecessor's keys. The charge is
+  now `ended_event_ceiling(maximum_control_frame_bytes)`: an event must fit one control frame, so
+  its text is at most the frame and its key count at most the frame over the smallest encoded key
+  (measured by encoding one key and two, so it follows the wire), times `size_of::<ObservationTapKey>()`.
+  The token row uses the same ceiling. `capi_resources` also charges the `ObservationBindings`
+  table (capacity at most twice its length, each binding with the text of two IDs at 127 bytes)
+  and the transient copy `after()` makes (each binding is kept or ended, so at most `slots`
+  together, plus the ended protocol keys), per plan, so both the active plan and a candidate
+  carry them. `ObservationResources` lost `ended_heap_bytes`.
+- **Measured (capi, x86-64, control frame 4,096):** `capi_retained_bytes` of the reference
+  session 165,758 -> 186,614; the budget ceiling is 186,614 plus 10 %, rounded to 64: 205,312.
+  `capi_retained_bytes_charge_every_byte_the_compile_retains` and the tiny-frame test stay exact:
+  they add `control_plane::observation_reserve_bytes` (test-support) to the observed side beside
+  the send producers' bound, since nothing holds those bytes until a tap is armed. The two peak
+  tests add the token's ceiling to the prepared-protocol term.
+- **No allocation after the commit.** The pending-subscription slots are built before the
+  protocol commit (`observation_slots` reserves with `try_reserve_exact` from the candidate's
+  producers; a failure is a `CompileRejected(Allocation)` refusal with nothing changed) and the
+  commit only assigns them. `ObservationBindings::after` returns `Result` and reserves both
+  lists exactly before it copies, as does the ended-key list; the text clones of a key remain
+  ordinary `String` allocations (before the commit, in a refusable step, but not fallible).
+- **Over-frame refusal gate.** `an_end_event_over_one_control_frame_refuses_the_removal_and_changes_nothing`
+  (control-plane, frame 1,024 bytes, 60 subscribed inserts on the removed strip): the removal is
+  `CompileRejected(Resource(Limit))` and the revision, canonical session, bindings, plan epoch and
+  event lane are as they were; a strip with two subscribed inserts commits under the same limit.
+  Red when the refusal is turned into backpressure (checked, reverted).
+- **Dead API.** `ObservationLane::is_prepared_arm_pending` had no caller (its doc said gates use
+  it) and is deleted.
+- **Internal invariant spelled accurately.** A reliable `OBSERVATION_ENDED` slot whose cell is
+  empty is now `EventEgressError::ObservationEndedCellMissing` (was `DiagnosticStorageFull`);
+  behaviour (an internal error) is unchanged.
