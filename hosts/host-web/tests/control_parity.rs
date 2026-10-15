@@ -2173,8 +2173,7 @@ fn longest_id() -> String {
 }
 
 /// A session whose only source is mono (ID `m`), with one track and one route, no console slot,
-/// no submix and no VCA, and the fixture's stereo source, track and route to add later. (A session
-/// with no source or track does not prepare: its graph is empty.)
+/// no submix and no VCA, and the fixture's stereo source, track and route to add later.
 fn mono_model(
     rate: u32,
 ) -> (
@@ -2497,5 +2496,124 @@ fn a_mode_switch_under_a_stored_pan_entry_is_refused_alike_on_both_hosts() {
                 if *revision == model.revision + 1),
             "{rate}: committed without a rebuild at the next revision, got {b_verdict:?}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// An empty session boots and grows by a structural transaction (TBD30)
+// ---------------------------------------------------------------------------------------------
+
+/// Both hosts boot a session with no source and no track (one console slot stays declared), render
+/// silence, and report one empty mixer; one structural transaction then adds a stereo stem, its
+/// track and its route, and both hosts render the same bits for the fed stem. The C ABI leg alone
+/// is `crates/capi/tests/empty_boot.rs`.
+///
+/// Test value: red if the browser has a boot-time size that fails at zero (a strip order, a meter
+/// frame, a source map, an observation table or a staging buffer sized for the first strip), if its
+/// silence or its session map, control list or snapshot differ from the C ABI's, or if the first
+/// strip cannot arrive through the successor paths and be heard bit for bit like the C ABI's.
+#[test]
+fn both_hosts_boot_an_empty_session_and_add_the_first_stem_alike() {
+    for rate in RATES {
+        let mut model = model_at(rate);
+        let (mut source, mut track, mut route) = (
+            model.sources[0].clone(),
+            model.tracks[0].clone(),
+            model.routes[0].clone(),
+        );
+        model.sources.clear();
+        model.tracks.clear();
+        model.routes.clear();
+        model.vcas.clear();
+        assert_eq!(model.console.pre_insert.len(), 1, "a declared console slot");
+        source.id = id("stem");
+        source.frames = u64::from(QUANTUM) * (BLOCKS + 8);
+        track.id = id("t1");
+        track.source_id = source.id.clone();
+        route.id = id("t1-main");
+        let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("the fixture routes a track")
+        };
+        *track_id = track.id.clone();
+        let edits = [
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ];
+
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        assert_eq!(browser.host.session_source_count(), 0, "{rate} Hz: empty");
+        for block in 0..3 {
+            assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+            let b = bits(browser.host.output_pcm().expect("browser output"));
+            let c = c_abi.render(block);
+            assert_eq!(b, c, "{rate} Hz: block {block}: the empty mixers agree");
+            assert!(b.iter().all(|word| *word == 0), "{rate} Hz: silence");
+        }
+        let (b_rows, b_snapshot) = dump(|payload, expected| browser.command(payload, expected));
+        let (c_rows, c_snapshot) = dump(|payload, expected| c_abi.send(payload, expected));
+        assert_eq!(b_rows, c_rows, "{rate} Hz: the empty control list agrees");
+        assert_eq!(
+            b_snapshot, c_snapshot,
+            "{rate} Hz: the empty snapshot agrees"
+        );
+
+        let (rebuilt, _) = browser.transaction_reply(&edits);
+        let c_reply = c_abi.send(
+            CommandPayload::SessionTransactionApply(&edits),
+            ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
+        );
+        // The two legs have sent different numbers of frames, so their request IDs differ: the
+        // verdicts are compared, not the bytes.
+        assert_eq!(
+            rebuilt,
+            decode_verdict(&c_reply),
+            "{rate} Hz: the same verdict"
+        );
+        assert!(
+            matches!(
+                rebuilt,
+                Verdict::Applied {
+                    path: EditPath::Rebuild,
+                    ..
+                }
+            ),
+            "{rate} Hz: the first stem is a rebuild, got {rebuilt:?}"
+        );
+        assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+        let _ = c_abi.render(3);
+        assert_eq!(browser.host.session_source_count(), 1, "{rate} Hz: the map");
+        assert_eq!(browser.host.session_source_id(0), Some("stem"));
+
+        assert_eq!(browser.host.seek_source(b"stem", 2, 0), host_web::RESULT_OK);
+        // SAFETY: The session is live and used by this thread alone; the name outlives the call.
+        let code =
+            unsafe { capi::miso_engine_v1_source_seek(c_abi.session, b"stem".as_ptr(), 4, 2, 0) };
+        assert_eq!(code, C_RESULT_OK, "{rate} Hz: C ABI seek");
+        let mut heard = false;
+        for block in 4..12 {
+            let [left, right] = planes(0, block);
+            assert_eq!(
+                browser.host.submit_source(
+                    b"stem",
+                    2,
+                    (block - 4) * u64::from(QUANTUM),
+                    rate,
+                    &[&left, &right],
+                    QUANTUM,
+                    false,
+                ),
+                host_web::RESULT_OK,
+                "{rate} Hz: the browser takes the first stem's PCM"
+            );
+            c_abi.submit_from("stem", 0, block, block - 4, 2);
+            assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+            let b = bits(browser.host.output_pcm().expect("browser output"));
+            let c = c_abi.render(block);
+            assert_eq!(b, c, "{rate} Hz: block {block}: the two hosts render alike");
+            heard |= b.iter().any(|word| f32::from_bits(*word) != 0.0);
+        }
+        assert!(heard, "{rate} Hz: the first stem is heard");
     }
 }
