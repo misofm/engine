@@ -862,7 +862,10 @@ pub const COMMAND_REASON_DOMAIN: u32 = 6;
 /// This is not "malformed" and it is not "unknown target": the record is well formed and the tap
 /// exists, and this session has no post-preparation write path for it.
 pub const COMMAND_REASON_UNSUPPORTED_KIND: u32 = 7;
-/// A bounded control queue had no room for the submission; nothing was admitted.
+/// A bounded control queue had no room for the submission; nothing was admitted. Also the answer
+/// to a subscription that would leave more taps armed than the engine can end honestly in one
+/// event (#1676): the control plane's cap on armed taps is full, and a retry succeeds once the
+/// app unsubscribes another tap.
 pub const COMMAND_REASON_BACKPRESSURE: u32 = 8;
 /// The host is not `STATE_READY`.
 pub const COMMAND_REASON_WRONG_STATE: u32 = 9;
@@ -4264,6 +4267,27 @@ fn admit_commands(
             window_blocks,
         };
         staged_count += 1;
+    }
+    // The cap pass (#1676): the control plane judges the whole submission by the taps it leaves
+    // armed, so a subscription past what one `OBSERVATION_ENDED` event can name in a control frame
+    // is refused here, before any record is queued and so before any is acknowledged. The cap is
+    // the core's; the adapter only reports the refusal as the record that crossed it.
+    if let Err(limit) =
+        ready
+            .control
+            .admit_observation_changes(ready.command_decoded[..staged_count].iter().map(|staged| {
+                // Pass one resolved every record to a producer; a position that vanished would
+                // name no slot and change nothing, and keeps the indices aligned.
+                let position = ready
+                    .effect_producer_position(staged.effect as usize)
+                    .unwrap_or(usize::MAX);
+                (position, staged.tap_index, staged.armed)
+            }))
+    {
+        let index = ready.command_decoded[..staged_count]
+            .get(limit.index)
+            .map_or(0, |staged| staged.original_wire_index as usize);
+        return Err(refuse(COMMAND_REASON_BACKPRESSURE, index));
     }
     // The room pass: an effect's observation queue holds one subscription per declared tap, and
     // the subscriptions this submission queues must fit it.

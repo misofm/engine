@@ -418,11 +418,22 @@ pub struct SessionState<A: ControlAdapter> {
     /// push records the absolute state here, in storage sized when the plan is published, and the
     /// next service step folds it into the table. A rebuild folds first: it only starts from
     /// [`Self::command`], which services.
-    pub(crate) observation_pending: Box<[PendingArm]>,
+    pub(crate) observation_pending: Box<[ObservationSlot]>,
     /// For each position of the newest plan's effect producers, the first of its slots in
     /// `observation_pending`, and one entry past the last: a producer's slots are
     /// `offsets[position]..offsets[position + 1]`, one per declared tap in declaration order.
     pub(crate) observation_offsets: Box<[u32]>,
+    /// How many of [`Self::observation_pending`]'s slots are armed now, pushes not yet folded
+    /// included: the figure a subscription is admitted against (#1676 D1). Never above
+    /// [`Self::observation_cap`].
+    pub(crate) observation_armed: usize,
+    /// The most taps the host may have armed at once: the keys one `OBSERVATION_ENDED` event can
+    /// carry in one control frame, so the commit that ends every binding can always say so
+    /// (#1676 D1). Fixed by the session's frame limit when it compiles.
+    pub(crate) observation_cap: usize,
+    /// The most observation slots any committed plan has had; the ended-event cells and the
+    /// binding table are charged for it (#1676 D2).
+    pub(crate) observation_slots_high_water: usize,
 }
 
 /// The stable key of one observation tap, borrowed from the bytes that name it (#1677): the strip's
@@ -463,6 +474,16 @@ pub enum ObservationKeyError {
     ComputedTap,
 }
 
+/// A subscription batch would leave more taps armed than one `OBSERVATION_ENDED` event can name in
+/// one control frame (#1676 D1). Nothing was written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationLimit {
+    /// The position, in the batch, of the first change that adds a tap past the cap.
+    pub index: usize,
+    /// The most taps the session may have armed at once.
+    pub cap: usize,
+}
+
 /// The index in `descriptor`'s observation menu of the tap with ID `tap_id`, the one the render side
 /// arms (#1677). A tap the menu does not declare is [`ObservationKeyError::UnknownTap`], and a
 /// declared tap that is not resident is [`ObservationKeyError::ComputedTap`]: V1 ships no
@@ -487,15 +508,17 @@ pub fn resolve_observation_tap(
     u32::try_from(index).map_err(|_| ObservationKeyError::UnknownTap)
 }
 
-/// A plan's observation slot offsets and its pending-subscription storage.
-pub(crate) type ObservationSlots = (Box<[u32]>, Box<[PendingArm]>);
+/// A plan's observation slot offsets, its slot storage and how many of its slots are armed.
+pub(crate) type ObservationSlots = (Box<[u32]>, Box<[ObservationSlot]>, usize);
 
-/// The pending-subscription storage for `producers`, the newest plan's: the first slot of each
-/// producer (and one past the last), and one slot per declared tap (#1584 D6a). Built when a plan
-/// is prepared, fallibly and before anything commits; the session takes it after the commit and
-/// after the fold, so nothing pending is lost to a change of positions.
+/// The slot storage for `producers`, the newest plan's: the first slot of each producer (and one
+/// past the last), and one slot per declared tap (#1584 D6a), each armed when `bindings` holds its
+/// tap (#1676). Built when a plan is prepared, fallibly and before anything commits; the session
+/// takes it after the commit and after the fold, so nothing pending is lost to a change of
+/// positions.
 pub(crate) fn observation_slots(
     producers: &[host_core::EffectControlProducer],
+    bindings: &controls::ObservationBindings,
 ) -> Result<ObservationSlots, std::collections::TryReserveError> {
     let mut offsets = Vec::new();
     offsets.try_reserve_exact(producers.len() + 1)?;
@@ -506,10 +529,46 @@ pub(crate) fn observation_slots(
             total.saturating_add(u32::try_from(producer.observe_capacity()).unwrap_or(u32::MAX));
     }
     offsets.push(total);
-    let mut pending = Vec::new();
-    pending.try_reserve_exact(total as usize)?;
-    pending.resize(total as usize, PendingArm::None);
-    Ok((offsets.into_boxed_slice(), pending.into_boxed_slice()))
+    let mut slots = Vec::new();
+    slots.try_reserve_exact(total as usize)?;
+    let mut armed = 0_usize;
+    if bindings.is_empty() {
+        slots.resize(total as usize, ObservationSlot::default());
+    } else {
+        for producer in producers {
+            for tap in 0..producer.observe_capacity() {
+                let is_armed = producer
+                    .descriptor
+                    .observations
+                    .get(tap)
+                    .is_some_and(|declared| {
+                        bindings.is_armed_by_parts(
+                            &producer.track_id,
+                            producer.address.rack == host_core::LiveEffectRack::Console,
+                            &producer.effect_id,
+                            declared.id.0,
+                        )
+                    });
+                armed += usize::from(is_armed);
+                slots.push(ObservationSlot {
+                    armed: is_armed,
+                    pending: PendingArm::None,
+                });
+            }
+        }
+    }
+    Ok((offsets.into_boxed_slice(), slots.into_boxed_slice(), armed))
+}
+
+/// One observation slot: whether its tap is armed now, and what the host pushed to it since the
+/// last fold (#1584 D6a, #1676).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ObservationSlot {
+    /// Armed now: the table's state with every push since folded in. Lets a subscription be
+    /// admitted against the cap without a key lookup, inside `process()`.
+    pub(crate) armed: bool,
+    /// The push waiting to be folded into the table.
+    pub(crate) pending: PendingArm,
 }
 
 /// What the host last pushed to one observation slot (#1584 D6a).
@@ -1532,6 +1591,7 @@ where
                         observation: &observation_change.bindings,
                     }),
                     &self.live_values_superseded,
+                    self.observation_slots_high_water,
                 )
                 .map_err(CommandError::CompileRejected)?;
                 let PreparedRuntime {
@@ -1663,7 +1723,10 @@ where
                 // #1584 D6a: the newest plan's pending-subscription storage is built here, with
                 // the other fallible steps, so no allocation follows the commit; the commit then
                 // only assigns it. A refusal drops what was built and changes nothing.
-                let slots = match observation_slots(&candidate_provider.effects) {
+                let slots = match observation_slots(
+                    &candidate_provider.effects,
+                    &observation_change.bindings,
+                ) {
                     Ok(slots) => slots,
                     Err(_) => {
                         drop(reports);
@@ -1709,7 +1772,14 @@ where
                 self.pending_providers.push(candidate_provider);
                 // #1584 D6a: the newest plan's slots, built above. The fold ran when this command
                 // was serviced and nothing has been pushed since (one thread), so none is lost.
-                (self.observation_offsets, self.observation_pending) = slots;
+                (
+                    self.observation_offsets,
+                    self.observation_pending,
+                    self.observation_armed,
+                ) = slots;
+                self.observation_slots_high_water = self
+                    .observation_slots_high_water
+                    .max(self.observation_pending.len());
                 reports.push((epoch, A::Row::from(resources)));
                 reservation.commit();
                 #[cfg(feature = "test-support")]
@@ -2506,6 +2576,65 @@ where
         })
     }
 
+    /// The most taps the host may have armed at once (#1676 D1): the keys one `OBSERVATION_ENDED`
+    /// event carries in one control frame with every ID at its longest. Fixed when the session
+    /// compiles, from its control frame limit.
+    #[must_use]
+    pub fn observation_cap(&self) -> usize {
+        self.observation_cap
+    }
+
+    /// How many taps are armed now, pushes the table has not folded yet included.
+    #[must_use]
+    pub fn observation_armed(&self) -> usize {
+        self.observation_armed
+    }
+
+    /// Admits a batch of subscription changes against the cap (#1676 D1), before any is pushed. A
+    /// change is `(position, tap_index, armed)`: the producer's position in
+    /// [`Self::effect_producers`] and the tap, as [`Self::resolve_observation_key`] returns them.
+    /// The batch is judged by the state it leaves: arms of taps that are not armed add, disarms of
+    /// armed taps remove, and the rest change nothing. Each tap is named at most once, as a
+    /// submission does. It reads the per-slot state the pushes keep, so it allocates nothing and
+    /// runs inside the browser's `process()`.
+    ///
+    /// The caller pushes the batch with [`Self::push_effect_observe`] only when this admits it;
+    /// nothing is queued and no state moves here, so a refusal is whole.
+    ///
+    /// # Errors
+    ///
+    /// [`ObservationLimit`] when the batch would leave more taps armed than the cap. It names the
+    /// first change in the iterator's order that adds a tap past the cap, after every removal of
+    /// the batch is counted.
+    pub fn admit_observation_changes(
+        &self,
+        changes: impl Iterator<Item = (usize, u32, bool)> + Clone,
+    ) -> Result<(), ObservationLimit> {
+        let state = |position: usize, tap_index: u32| -> Option<bool> {
+            let first = *self.observation_offsets.get(position)?;
+            let end = *self.observation_offsets.get(position + 1)?;
+            let slot = first.checked_add(tap_index).filter(|slot| *slot < end)?;
+            Some(self.observation_pending.get(slot as usize)?.armed)
+        };
+        let removed = changes
+            .clone()
+            .filter(|&(position, tap, armed)| !armed && state(position, tap) == Some(true))
+            .count();
+        let mut armed_after = self.observation_armed.saturating_sub(removed);
+        for (index, (position, tap, armed)) in changes.enumerate() {
+            if armed && state(position, tap) == Some(false) {
+                armed_after += 1;
+                if armed_after > self.observation_cap {
+                    return Err(ObservationLimit {
+                        index,
+                        cap: self.observation_cap,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Queues one observation record on the newest plan's effect producer at `position` of
     /// [`Self::effect_producers`]: the only write the adapter makes to a producer.
     ///
@@ -2538,13 +2667,21 @@ where
                 .zip(self.observation_offsets.get(position + 1).copied());
             if let Some((first, end)) = slots
                 && let Some(slot) = first.checked_add(tap_index).filter(|slot| *slot < end)
-                && let Some(pending) = self.observation_pending.get_mut(slot as usize)
+                && let Some(entry) = self.observation_pending.get_mut(slot as usize)
             {
-                *pending = if armed {
+                entry.pending = if armed {
                     PendingArm::Arm(window_blocks)
                 } else {
                     PendingArm::Disarm
                 };
+                // The count follows the slot's state (#1676): an arm of an armed tap only changes
+                // its window, and a disarm of a tap that is not armed removes nothing.
+                match (entry.armed, armed) {
+                    (false, true) => self.observation_armed += 1,
+                    (true, false) => self.observation_armed -= 1,
+                    _ => {}
+                }
+                entry.armed = armed;
             }
         }
         Some(pushed)
@@ -2556,7 +2693,7 @@ where
         if self
             .observation_pending
             .iter()
-            .all(|arm| *arm == PendingArm::None)
+            .all(|slot| slot.pending == PendingArm::None)
         {
             return;
         }
@@ -2573,7 +2710,7 @@ where
                 break;
             };
             for slot in first..end {
-                let arm = core::mem::take(&mut self.observation_pending[slot as usize]);
+                let arm = core::mem::take(&mut self.observation_pending[slot as usize].pending);
                 let Some(key) = tap_key_of(producer, slot - first) else {
                     continue;
                 };

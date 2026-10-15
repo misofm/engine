@@ -8001,3 +8001,127 @@ mod structural_apply {
         );
     }
 }
+
+/// A subscription past the engine's cap on armed taps (#1676) is refused as a whole before any
+/// record is queued, so the acknowledgement never promises a tap the engine could not end honestly;
+/// unsubscribing one tap makes room for the next. The cap is the control plane's, shared with the C
+/// ABI: the browser only reports the refusal, as backpressure, at the record that crossed it.
+///
+/// Red if the browser admits a subscription past the cap (the later removal of every subscribed tap
+/// could not be told to its subscribers), if the refusal still queues or arms the tap, if a refused
+/// batch moves the armed count, or if an unsubscribe does not give its place back.
+#[test]
+fn a_subscription_past_the_cap_is_refused_and_an_unsubscribe_makes_room() {
+    const QUANTUM: u32 = 128;
+    let document: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/browser-v1/observation-session.json"))
+            .expect("fixture");
+    let probe_cap = {
+        let options = WebBootOptions {
+            live_control_observation_taps: 1,
+            live_control_master_track_plus_one: 1,
+            ..boot_options(QUANTUM)
+        };
+        let host = AudioWorkletEngineHost::boot(
+            include_bytes!("../tests/browser-v1/observation-session.json"),
+            options,
+        )
+        .expect("boot");
+        host.ready
+            .as_ref()
+            .expect("ready")
+            .control
+            .observation_cap()
+    };
+    let inserts = probe_cap + 2;
+    let mut document = document;
+    let template = document["tracks"][0]["inserts"]["effects"][0].clone();
+    document["tracks"][0]["inserts"]["effects"] = serde_json::Value::Array(
+        (0..inserts)
+            .map(|index| {
+                let mut effect = template.clone();
+                effect["id"] = serde_json::Value::String(format!("ins{index:03}"));
+                effect
+            })
+            .collect(),
+    );
+    let document = serde_json::to_string_pretty(&document).expect("document");
+    let options = WebBootOptions {
+        live_control_observation_taps: 1,
+        live_control_master_track_plus_one: 1,
+        ..boot_options(QUANTUM)
+    };
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
+    let submit = |host: &mut AudioWorkletEngineHost, kind: u32, effect: u32| {
+        stage_command(host, 0, kind, 1, 0, effect, 1, 2);
+        host.submit_commands(1);
+        *host.command_report()
+    };
+    // A render drains the effects' observation queues, one slot per tap.
+    let mut block = 0_u64;
+    let mut render = |host: &mut AudioWorkletEngineHost| {
+        let plane = vec![0.5_f32; QUANTUM as usize];
+        let planes: [&[f32]; 2] = [&plane, &plane];
+        assert_eq!(
+            host.submit_source(
+                b"fixture-source",
+                1,
+                block * u64::from(QUANTUM),
+                48_000,
+                &planes,
+                QUANTUM,
+                false,
+            ),
+            RESULT_OK,
+        );
+        assert_eq!(host.render_next(), RESULT_OK);
+        block += 1;
+    };
+    let armed = |host: &AudioWorkletEngineHost| {
+        host.ready
+            .as_ref()
+            .expect("ready")
+            .control
+            .observation_armed()
+    };
+    for effect in 0..probe_cap {
+        let report = submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, effect as u32);
+        assert_eq!(report.result, RESULT_OK, "{effect}: {report:?}");
+    }
+    assert_eq!(armed(&host), probe_cap);
+    let refused = submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, probe_cap as u32);
+    assert_eq!(
+        (
+            refused.result,
+            refused.reason,
+            refused.rejected_index,
+            refused.admitted
+        ),
+        (RESULT_BACKPRESSURE, COMMAND_REASON_BACKPRESSURE, 0, 0),
+        "{refused:?}"
+    );
+    assert_eq!(
+        armed(&host),
+        probe_cap,
+        "a refused subscription arms nothing"
+    );
+    render(&mut host);
+    // A window change on an armed tap adds no tap.
+    assert_eq!(
+        submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, 0).result,
+        RESULT_OK
+    );
+    render(&mut host);
+    // An unsubscribe gives its place back.
+    assert_eq!(
+        submit(&mut host, COMMAND_OBSERVE_UNSUBSCRIBE, 0).result,
+        RESULT_OK
+    );
+    assert_eq!(armed(&host), probe_cap - 1);
+    render(&mut host);
+    assert_eq!(
+        submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, probe_cap as u32).result,
+        RESULT_OK
+    );
+    assert_eq!(armed(&host), probe_cap);
+}

@@ -234,6 +234,9 @@ export const enum MisoCommandReason {
   /// drained; nothing was admitted, and a render clears it. The reason is also returned with the internal result
   /// code, not a backpressure one, when the plan's revision gate refuses the batch's stamp (a
   /// revision past the gate's ceiling); that batch wrote nothing.
+  ///
+  /// It is also the answer to a subscription that would leave more taps armed than the engine can
+  /// end honestly in one `OBSERVATION_ENDED` event (issue 1676): unsubscribe another tap, then retry.
   Backpressure = 8,
   /// The engine is not `STATE_READY`.
   WrongState = 9,

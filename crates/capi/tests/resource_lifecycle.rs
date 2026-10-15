@@ -1214,6 +1214,10 @@ impl Budget {
 /// can hold (4,096 bytes here), the binding table and its transient copies. `capi_retained_bytes`
 /// measured 165,758 before and 186,614 after (x86-64; the rows do not depend on the lane width),
 /// so its ceiling is 186,614 plus 10 %, rounded up to 64: 205,275.4 -> 205,312.
+///
+/// #1676 charges that reserve by the slots the session has had, capped by the keys one frame carries,
+/// and not by the frame size. `capi_retained_bytes` measured 165,782 (x86-64; the rows do not depend
+/// on the lane width), so its ceiling is 165,782 plus 10 %, rounded up to 64: 182,360.2 -> 182,400.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1320,8 +1324,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 205_312,
-        four_lanes: 205_312,
+        eight_lanes: 182_400,
+        four_lanes: 182_400,
     },
     Budget {
         row: "largest_named_allocation_bytes",

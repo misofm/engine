@@ -61,7 +61,7 @@ mod plan;
 pub use adapter::{ControlAdapter, ControlLimits, PlanResources};
 pub use compile::{CompiledChildren, RuntimePreparer, compile_children};
 pub use control::{
-    CommandError, EventError, EventLane, ObservationKeyError, ObservationKeyRef,
+    CommandError, EventError, EventLane, ObservationKeyError, ObservationKeyRef, ObservationLimit,
     REPREPARE_REQUIRED, ResolvedObservationTap, SessionState, SourceFailure,
     resolve_observation_tap,
 };

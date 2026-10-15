@@ -9,8 +9,8 @@
 
 use control_plane::{
     CommandError, CompileFailure, CompiledChildren, ControlAdapter, ControlLimits, EventLane,
-    ObservationKeyError, ObservationKeyRef, PlanResources, PlanState, ResolvedObservationTap,
-    ResourceFault, RuntimePreparer, SessionState, compile_children,
+    ObservationKeyError, ObservationKeyRef, ObservationLimit, PlanResources, PlanState,
+    ResolvedObservationTap, ResourceFault, RuntimePreparer, SessionState, compile_children,
 };
 use controls::{TapKey, TapSection};
 use host_core::{
@@ -559,7 +559,9 @@ fn a_strip_removed_with_many_subscribed_inserts_gives_one_event_with_every_key()
 /// that would end that many subscriptions is refused as a resource limit (not retryable
 /// backpressure) before anything changes: the revision, the canonical session, the bindings, the
 /// plan epoch and the event lane are as they were. A strip with two subscribed inserts (an end
-/// that fits) commits under the same small limit.
+/// that fits) commits under the same small limit. This is the defensive path: a subscription
+/// is admitted against the cap (#1676), so a valid removal never reaches it; the test pushes
+/// past the cap on purpose, as a caller that skipped admission would.
 ///
 /// Red if the commit goes ahead and drops the end (an acked removal whose subscribers never hear),
 /// if the refusal is backpressure (the host would retry forever), or if the refusal leaves the
@@ -749,5 +751,289 @@ fn a_stable_key_resolves_on_the_newest_plan_and_an_unknown_key_is_refused() {
     assert_eq!(
         resolve(&rig, "comp1", LiveEffectRack::Inserts, "comp", 1),
         Err(ObservationKeyError::UnknownStrip)
+    );
+}
+
+fn put_compressor(strip: &str, id: &str) -> SessionEdit {
+    SessionEdit::PutTrackEffect {
+        track_id: StableId::parse(strip).expect("strip"),
+        rack_name: RackName::Inserts,
+        final_position: 1,
+        effect: Effect {
+            id: StableId::parse(id).expect("insert"),
+            identity: EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("compressor"),
+            },
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            params: Vec::new(),
+            sidechain: SidechainDeclaration::None,
+        },
+    }
+}
+
+impl Rig {
+    /// The position of the producer of `strip`'s insert `id`.
+    fn insert_position(&self, strip: &str, id: &str) -> usize {
+        self.session
+            .effect_producers()
+            .iter()
+            .position(|producer| &*producer.track_id == strip && &*producer.effect_id == id)
+            .expect("the insert has a producer")
+    }
+
+    /// Add one compressor insert per ID, one request each, and let the plan adopt each.
+    fn add_inserts(&mut self, ids: &[String]) {
+        for id in ids {
+            self.apply(&[put_compressor("comp1", id)])
+                .expect("the insert is added");
+            self.render();
+            self.render();
+            self.drain();
+        }
+    }
+
+    /// Every observation slot of the newest plan.
+    fn slots(&self) -> usize {
+        self.session
+            .effect_producers()
+            .iter()
+            .map(host_core::EffectControlProducer::observe_capacity)
+            .sum()
+    }
+
+    fn last_retained(&self) -> u64 {
+        self.session
+            .test_transaction_snapshot()
+            .resource_rows
+            .last()
+            .expect("a plan row")
+            .1
+            .control_retained_bytes
+    }
+}
+
+/// The cap is the number of keys one control frame carries with every ID at its longest: the event
+/// of exactly that many such keys fits the frame, and one more does not.
+///
+/// Red if the cap is computed from short IDs (a removal of that many long-named taps could not be
+/// sent), from the wrong frame limit, or rounds up.
+#[test]
+fn the_cap_is_what_one_frame_carries_with_the_longest_ids() {
+    let id = "a".repeat(session::STABLE_ID_MAXIMUM_BYTES);
+    let encoded = |count: usize, frame: usize| {
+        let event = protocol::ObservationEnded {
+            event_sequence: u64::MAX,
+            keys: (0..count)
+                .map(|tap| protocol::ObservationTapKey {
+                    strip_id: id.clone(),
+                    section: ObservationSection::Inserts,
+                    effect_id: id.clone(),
+                    tap_id: u32::try_from(tap).expect("tap"),
+                })
+                .collect(),
+        };
+        let codec = ProtocolCodec::new(protocol::ProtocolLimits {
+            max_frame_bytes: frame,
+            ..protocol::ProtocolLimits::default()
+        });
+        codec.encode_event_frame_into(
+            &protocol::TypedEventFrame {
+                revision: SessionRevision(u64::MAX),
+                payload: protocol::EventPayload::ObservationEnded(&event),
+            },
+            &mut [],
+        )
+    };
+    let mut previous = 0;
+    for frame in [1_024_u64, 4_096, 16_384] {
+        let mut small = limits();
+        small.maximum_control_frame_bytes = frame;
+        let cap = Rig::with_limits(small).session.observation_cap();
+        assert!(cap > previous, "{frame}: the cap grows with the frame");
+        previous = cap;
+        let frame = usize::try_from(frame).expect("frame");
+        assert!(
+            matches!(encoded(cap, frame), Err(protocol::EncodeError::OutputTooSmall { required }) if required <= frame),
+            "{frame}: {cap} longest keys fit"
+        );
+        assert!(
+            !matches!(encoded(cap + 1, frame), Err(protocol::EncodeError::OutputTooSmall { required }) if required <= frame),
+            "{frame}: one more does not"
+        );
+    }
+}
+
+/// A subscription past the cap is refused before it is acknowledged and changes nothing; removing
+/// every subscribed target afterwards commits, with one event holding every key. Disarming one tap
+/// in the same batch makes room for another.
+///
+/// Red if the cap is not enforced at admission (the removal would then be refused for its event),
+/// if a refused batch moves the armed count, if an arm of an armed tap counts twice, or if a
+/// disarm in the batch is not counted against the arms.
+#[test]
+fn a_subscription_past_the_cap_is_refused_and_the_removal_of_all_still_commits() {
+    let mut small = limits();
+    small.maximum_control_frame_bytes = 1_024;
+    let mut rig = Rig::with_limits(small);
+    let cap = rig.session.observation_cap();
+    assert!(cap >= 2, "the small frame still holds some keys: {cap}");
+    let ids: Vec<String> = (0..=cap).map(|index| format!("ins{index:02}")).collect();
+    rig.add_inserts(&ids);
+    let positions: Vec<usize> = ids
+        .iter()
+        .map(|id| rig.insert_position("comp1", id))
+        .collect();
+    let arm = |position: usize| (position, 0_u32, true);
+    // Arm the first `cap` taps.
+    for position in &positions[..cap] {
+        rig.session
+            .admit_observation_changes([arm(*position)].into_iter())
+            .expect("under the cap");
+        rig.session
+            .push_effect_observe(*position, 0, true, WINDOW_BLOCKS)
+            .expect("a producer")
+            .expect("room in the queue");
+    }
+    assert_eq!(rig.session.observation_armed(), cap);
+    // Re-arming an armed tap adds nothing.
+    rig.session
+        .admit_observation_changes([arm(positions[0])].into_iter())
+        .expect("a window change adds no tap");
+    // One more tap is past the cap.
+    let over = rig
+        .session
+        .admit_observation_changes([arm(positions[cap])].into_iter());
+    assert_eq!(over, Err(ObservationLimit { index: 0, cap }));
+    // A batch that disarms one and arms one leaves the count where it was; the error names the
+    // arm that crosses when the batch only adds.
+    rig.session
+        .admit_observation_changes([arm(positions[cap]), (positions[0], 0, false)].into_iter())
+        .expect("a disarm in the batch makes room");
+    assert_eq!(
+        rig.session.admit_observation_changes(
+            [
+                (positions[0], 0, false),
+                arm(positions[cap]),
+                arm(positions[1])
+            ]
+            .into_iter()
+        ),
+        Ok(()),
+        "an arm of an armed tap adds nothing"
+    );
+    assert_eq!(
+        rig.session.observation_armed(),
+        cap,
+        "admission moves nothing"
+    );
+    // Remove every subscribed target: the strip goes with its inserts.
+    let before = rig.revision();
+    rig.apply(&[
+        SessionEdit::RemoveRoute {
+            route_id: StableId::parse("comp1-main").expect("route"),
+        },
+        SessionEdit::RemoveTrack {
+            track_id: StableId::parse("comp1").expect("strip"),
+        },
+    ])
+    .expect("the removal of every subscribed tap commits");
+    assert_eq!(rig.revision(), before + 1);
+    assert_eq!(rig.session.observation_armed(), 0);
+    let events = rig.drain();
+    let ended = ended(&events);
+    assert_eq!(ended.len(), 1, "one event");
+    assert_eq!(ended[0].1.keys.len(), cap, "holding every key");
+}
+
+/// A rebuild keeps the armed count of the taps it carries, so the cap holds across plans.
+///
+/// Red if a successor starts with an empty count (the cap would then admit twice the taps) or
+/// counts a tap whose target the transaction removed.
+#[test]
+fn the_armed_count_follows_the_bindings_across_a_rebuild() {
+    let mut rig = Rig::new();
+    let ids: Vec<String> = (0..3).map(|index| format!("ins{index:02}")).collect();
+    rig.add_inserts(&ids);
+    for id in &ids {
+        let position = rig.insert_position("comp1", id);
+        rig.session
+            .push_effect_observe(position, 0, true, WINDOW_BLOCKS)
+            .expect("a producer")
+            .expect("room in the queue");
+    }
+    assert_eq!(rig.session.observation_armed(), 3);
+    // Remove one subscribed insert: the other two stay armed in the successor.
+    rig.apply(&[SessionEdit::RemoveTrackEffect {
+        track_id: StableId::parse("comp1").expect("strip"),
+        rack_name: RackName::Inserts,
+        effect_id: StableId::parse("ins00").expect("insert"),
+    }])
+    .expect("the insert is removed");
+    assert_eq!(rig.session.observation_armed(), 2);
+    assert_eq!(rig.session.observation_bindings().len(), 2);
+    // The successor knows them armed: disarming one lowers the count, a second disarm does not.
+    let position = rig.insert_position("comp1", "ins01");
+    for expected in [1, 1] {
+        rig.session
+            .push_effect_observe(position, 0, false, 0)
+            .expect("a producer")
+            .expect("room in the queue");
+        rig.render();
+        assert_eq!(rig.session.observation_armed(), expected);
+    }
+}
+
+/// The memory reserved for the ended-event cells follows the observation slots the session has had,
+/// not the frame: the same plan reserves the same at a 4 KiB and a 16 KiB frame, and a plan that
+/// shrank keeps the reserve of the larger plan whose event may still wait in a cell.
+///
+/// Red if the reserve scales with the frame size again, or if a shrunk plan charges less than the
+/// event of its larger predecessor can hold.
+#[test]
+fn the_reserve_follows_the_slots_and_a_shrunk_plan_keeps_the_larger_reserve() {
+    let reserve = |frame: u64, slots: usize| {
+        control_plane::observation_reserve_bytes(frame, slots).expect("reserve")
+    };
+    assert_eq!(
+        reserve(4_096, 4),
+        reserve(16_384, 4),
+        "a few slots do not scale with the frame"
+    );
+    assert!(
+        reserve(16_384, 100_000).0 > reserve(4_096, 100_000).0,
+        "many slots are capped by the frame"
+    );
+
+    let mut grown = Rig::new();
+    let baseline = Rig::new();
+    let (small_slots, small_retained) = (baseline.slots(), baseline.last_retained());
+    let ids: Vec<String> = (0..6).map(|index| format!("ins{index:02}")).collect();
+    grown.add_inserts(&ids);
+    let big_slots = grown.slots();
+    assert!(big_slots > small_slots);
+    let removals: Vec<SessionEdit> = ids
+        .iter()
+        .map(|id| SessionEdit::RemoveTrackEffect {
+            track_id: StableId::parse("comp1").expect("strip"),
+            rack_name: RackName::Inserts,
+            effect_id: StableId::parse(id).expect("insert"),
+        })
+        .collect();
+    grown.apply(&removals).expect("the inserts are removed");
+    assert_eq!(
+        grown.slots(),
+        small_slots,
+        "the plan shrank to the boot plan"
+    );
+    let frame = limits().maximum_control_frame_bytes;
+    let extra = reserve(frame, big_slots).0 - reserve(frame, small_slots).0;
+    assert!(extra > 0);
+    // Other rows carry a little history (the shrunk plan's graph differs from the boot plan's by
+    // a few bytes), so the charge is at least the larger reserve, not exactly it.
+    assert!(
+        grown.last_retained() - small_retained >= extra,
+        "the shrunk plan charges the larger plan's reserve"
     );
 }
