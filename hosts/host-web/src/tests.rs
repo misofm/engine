@@ -5772,7 +5772,9 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
         CompanionCapture::Single,
         CompanionCapture::Collection,
     ] {
-        let preparer = WebRuntimePreparer::new(options, companion_request(capture));
+        let record = Arc::new(Mutex::new(BootRecord::default()));
+        let preparer = WebRuntimePreparer::new(options, companion_request(capture))
+            .recording(Arc::clone(&record));
         let superseded = host_core::LiveValuesSuperseded::new();
         let check =
             |host: &mut PreparedHost, handles: &host_core::HostLiveControlHandles, at: &str| {
@@ -5793,16 +5795,15 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
                     strips,
                     "{capture:?} {at}: one meter per strip"
                 );
-                let shape = match companions.spectrum_capture {
+                // #1290d2: the captures are control-side; the preparer leaves them, with the
+                // plan's pairing, in the record.
+                let handover = record.lock().expect("the record").spectrum.take();
+                let shape = match handover.as_ref().map(|handover| &handover.captures) {
                     None => CompanionCapture::None,
                     Some(PreparedSpectrumCaptures::Single(_)) => CompanionCapture::Single,
                     Some(PreparedSpectrumCaptures::Collection(_)) => CompanionCapture::Collection,
                 };
                 assert_eq!(shape, capture, "{capture:?} {at}: the branch's capture");
-                assert_eq!(
-                    companions.has_spectrum_capture(),
-                    capture != CompanionCapture::None
-                );
             };
 
         let (mut boot, boot_handles) = preparer
@@ -6263,6 +6264,277 @@ mod structural_apply {
     fn a_rebuild_swaps_with_a_spectrum_capture_or_a_collection_configured() {
         gap_free_acceptance(single_capture);
         gap_free_acceptance(capture_collection);
+    }
+
+    // Issue #1290d2: the spectrum part of gate 7. A rebuild keeps a running stream, an armed
+    // one-shot and a collection's selection, because the host installs the successor's prepared
+    // captures at the plan's promotion (the service step after the adoption block) through
+    // `SpectrumService::adopt_successor`, with the plan's pairing and the engine's carry outcome.
+
+    /// A run long enough for several windows of the 2048-frame capture (16 blocks each).
+    const SPECTRUM_BLOCKS: u64 = 48;
+    /// The block before which the rebuild runs: inside the window that opened before it.
+    const SPECTRUM_APPLY_BEFORE: u64 = 21;
+
+    fn other_track_id() -> String {
+        gate_model().tracks[4].id.as_str().to_owned()
+    }
+
+    fn two_entry_collection() -> Option<SpectrumPreparationRequest> {
+        let entry = |id: String| host_core::SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix(id.into()),
+            channels: SpectrumChannels::Stereo,
+        };
+        Some(SpectrumPreparationRequest::Collection(
+            SpectrumCaptureCollectionRequest {
+                entries: vec![entry(model_track_id()), entry(other_track_id())],
+                maximum_capture_bytes: u64::MAX,
+            },
+        ))
+    }
+
+    /// One read of the managed stream: the result word, the metadata and the held window.
+    #[derive(Clone, Copy, Debug)]
+    struct StreamRead {
+        result: u32,
+        metadata: SpectrumStreamMetadata,
+        window: Option<SpectrumContinuousWindow>,
+    }
+
+    impl Rig {
+        fn read_stream(&mut self) -> StreamRead {
+            let result = self.host.read_spectrum_stream(None);
+            StreamRead {
+                result,
+                metadata: *self
+                    .host
+                    .spectrum_stream_metadata()
+                    .expect("a spectrum service"),
+                window: self.host.spectrum_stream_window().copied(),
+            }
+        }
+
+        /// Whether the spectrum service still waits for the promotion of an adopted plan.
+        fn spectrum_promotions_waiting(&self) -> usize {
+            self.host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .pending_shapes
+                .iter()
+                .filter(|entry| entry.spectrum.is_some())
+                .count()
+        }
+    }
+
+    fn assert_same_stream(got: &[StreamRead], want: &[StreamRead], label: &str) {
+        assert_eq!(got.len(), want.len());
+        for (block, (got, want)) in got.iter().zip(want).enumerate() {
+            let at = format!("{label}: block {block}");
+            assert_eq!(got.result, want.result, "{at}: result");
+            let (g, w) = (&got.metadata, &want.metadata);
+            assert_eq!(g.status, w.status, "{at}: status");
+            assert_eq!(g.capture_epoch, w.capture_epoch, "{at}: capture epoch");
+            assert_eq!(g.sequence, w.sequence, "{at}: sequence");
+            assert_eq!(g.windows, w.windows, "{at}: windows");
+            assert_eq!(g.dropped_captures, w.dropped_captures, "{at}: dropped");
+            assert_eq!(g.captured_sample, w.captured_sample, "{at}: captured");
+            assert_eq!(g.target_kind, w.target_kind, "{at}: target");
+            assert_eq!(g.channels, w.channels, "{at}: channels");
+            match (&got.window, &want.window) {
+                (None, None) => {}
+                (Some(g), Some(w)) => {
+                    assert_eq!(g.first_sample, w.first_sample, "{at}: window start");
+                    assert_eq!(g.sequence, w.sequence, "{at}: window sequence");
+                    assert_eq!(g.stream_epoch, w.stream_epoch, "{at}: window epoch");
+                    assert!(
+                        g.left
+                            .iter()
+                            .zip(&w.left)
+                            .all(|(a, b)| a.to_bits() == b.to_bits())
+                            && g.right
+                                .iter()
+                                .zip(&w.right)
+                                .all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "{at}: the planes equal the reference's bit for bit"
+                    );
+                }
+                _ => panic!("{at}: one side holds a window and the other does not"),
+            }
+        }
+    }
+
+    /// `model` booted with `spectrum`, `setup` run on the host, then the stream read after every
+    /// block of [`SPECTRUM_BLOCKS`]. With `rebuild`, the muted track is added before block
+    /// [`SPECTRUM_APPLY_BEFORE`] (it sorts first, so every strip index shifts) and the service
+    /// step runs after block `service_after`.
+    fn run_stream(
+        model: &SessionModel,
+        spectrum: &impl Fn() -> Option<SpectrumPreparationRequest>,
+        setup: &impl Fn(&mut Rig),
+        rebuild: Option<u64>,
+    ) -> (Rig, Vec<StreamRead>) {
+        let mut rig = Rig::boot(model, options(), spectrum());
+        setup(&mut rig);
+        let mut reads = Vec::new();
+        for block in 0..SPECTRUM_BLOCKS {
+            if rebuild.is_some() && block == SPECTRUM_APPLY_BEFORE {
+                let base = rig.host.committed_revision();
+                assert_eq!(
+                    rig.apply(&add_muted_track(model, ADDED), 1),
+                    Outcome::Applied {
+                        path: EditPath::Rebuild,
+                        revision: base + 1
+                    }
+                );
+            }
+            rig.step();
+            if rebuild == Some(block) {
+                assert_eq!(rig.host.service(), RESULT_OK);
+            }
+            reads.push(rig.read_stream());
+        }
+        (rig, reads)
+    }
+
+    fn start_stream(rig: &mut Rig) {
+        rig.host
+            .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("start the stream");
+    }
+
+    /// The swap leaves every read of a running stream equal to a fresh boot of the committed
+    /// model's: same epoch, no gap, no failure, and the same planes.
+    fn stream_continues(
+        spectrum: impl Fn() -> Option<SpectrumPreparationRequest>,
+        setup: impl Fn(&mut Rig),
+        service_after: u64,
+    ) {
+        let model = gate_model();
+        let committed = with_muted_track(&model, ADDED);
+        let (_, reference) = run_stream(&committed, &spectrum, &setup, None);
+        let (mut rig, reads) = run_stream(&model, &spectrum, &setup, Some(service_after));
+        assert_eq!(rig.epoch(), 1);
+        assert_same_stream(&reads, &reference, "the stream across the swap");
+        for read in &reads {
+            assert!(
+                !matches!(
+                    read.metadata.status,
+                    SpectrumStreamStatus::Failed
+                        | SpectrumStreamStatus::Gap
+                        | SpectrumStreamStatus::Inactive
+                        | SpectrumStreamStatus::Stopped
+                ),
+                "no failed epoch, no gap: {:?}",
+                read.metadata
+            );
+            assert_eq!(
+                read.metadata.capture_epoch, reads[0].metadata.capture_epoch,
+                "one capture epoch throughout"
+            );
+        }
+        let last = reads.last().expect("reads");
+        assert_eq!(last.metadata.status, SpectrumStreamStatus::Ready);
+        assert!(
+            last.window.expect("a window").first_sample
+                >= (SPECTRUM_APPLY_BEFORE + 1) * u64::from(QUANTUM),
+            "the stream delivers windows from after the swap"
+        );
+        assert_eq!(
+            rig.spectrum_promotions_waiting(),
+            0,
+            "promoted at the service step"
+        );
+        assert_eq!(rig.host.service(), RESULT_OK);
+        assert_eq!(
+            rig.host.ready.as_ref().expect("ready").carried_swaps_seen,
+            1,
+            "the engine carried the swap"
+        );
+    }
+
+    /// Gate 7, spectrum part (single capture). Test value: red if the successor's capture is not
+    /// installed at promotion or the carry outcome is read wrong, or if the stream restarts at the
+    /// swap (a new epoch, a gap or a failed read). The service step runs right after the adoption
+    /// block and long after it: between the two the carried capture is served by the reader the
+    /// service already holds.
+    #[test]
+    fn a_running_spectrum_stream_continues_across_a_rebuild() {
+        stream_continues(single_capture, start_stream, SPECTRUM_APPLY_BEFORE);
+        stream_continues(single_capture, start_stream, SPECTRUM_BLOCKS - 3);
+    }
+
+    /// Gate 7, spectrum part (collection). Test value: red if a collection's selection or its
+    /// stream is lost at promotion: the second entry is selected and streamed before the swap, and
+    /// the stream reads like the committed model's.
+    #[test]
+    fn a_collection_selection_and_its_stream_continue_across_a_rebuild() {
+        let select_second = |rig: &mut Rig| {
+            let other: StableId = StableId::parse(&other_track_id()).expect("track ID");
+            assert_eq!(
+                rig.host.select_spectrum_target(
+                    SpectrumTarget::TrackPostMatrix(other.as_str().into()).as_ref(),
+                    SpectrumChannels::Stereo,
+                    None,
+                    None
+                ),
+                Ok(false)
+            );
+            start_stream(rig);
+        };
+        stream_continues(two_entry_collection, select_second, SPECTRUM_APPLY_BEFORE);
+        stream_continues(two_entry_collection, select_second, SPECTRUM_BLOCKS - 3);
+    }
+
+    /// Gate 7, spectrum part (one-shot). Test value: red if an armed one-shot is lost at the swap:
+    /// armed before it, completed after it, equal to the committed model's.
+    #[test]
+    fn an_armed_one_shot_completes_across_a_rebuild() {
+        const ARM_BEFORE: u64 = 12;
+        let model = gate_model();
+        let committed = with_muted_track(&model, ADDED);
+        let shot = |model: &SessionModel, rebuild: bool| {
+            let mut rig = Rig::boot(model, options(), single_capture());
+            let mut found = None;
+            for block in 0..SPECTRUM_BLOCKS {
+                if block == ARM_BEFORE {
+                    assert_eq!(rig.host.arm_spectrum(), RESULT_OK);
+                }
+                if rebuild && block == SPECTRUM_APPLY_BEFORE {
+                    rig.apply(&add_muted_track(model, ADDED), 1);
+                }
+                rig.step();
+                if rebuild && block == SPECTRUM_APPLY_BEFORE {
+                    assert_eq!(rig.host.service(), RESULT_OK);
+                }
+                if found.is_none() && block >= ARM_BEFORE {
+                    found = rig
+                        .host
+                        .read_spectrum(SpectrumChannels::Stereo)
+                        .expect("read the one-shot");
+                }
+            }
+            found.expect("the one-shot completed")
+        };
+        let reference = shot(&committed, false);
+        let got = shot(&model, true);
+        assert!(
+            got.window.first_sample < SPECTRUM_APPLY_BEFORE * u64::from(QUANTUM)
+                && got.window.end_sample().expect("end")
+                    > SPECTRUM_APPLY_BEFORE * u64::from(QUANTUM),
+            "the window spans the swap"
+        );
+        assert_eq!(got.window.first_sample, reference.window.first_sample);
+        assert_eq!(got.token, reference.token);
+        assert!(
+            got.window
+                .left
+                .iter()
+                .chain(&got.window.right)
+                .zip(reference.window.left.iter().chain(&reference.window.right))
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the planes equal the committed model's bit for bit"
+        );
     }
 
     /// The ramp of the live fader edit, in samples: longer than the blocks between the edit and
