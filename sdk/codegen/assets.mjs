@@ -39,20 +39,25 @@ const sdkRoot = resolve(here, "..");
 const repoRoot = resolve(sdkRoot, "..");
 const assets = resolve(sdkRoot, "assets");
 
-/** Each asset, and the generator mode that renders it. One generator, three documents. */
+/** Each asset, and the generator mode that renders it. One generator, four documents. */
 const documents = [
   ["miso-engine-v1-parameter-metadata.json", "--print"],
   ["miso-engine-v1-abi-layout.json", "--print-abi-layout"],
   ["miso-engine-v1-session-keys.json", "--print-session-keys"],
+  ["miso-engine-v1-response-frame.json", "--print-response-frame"],
 ];
 
 /**
  * The documents an engine artifact directory does not carry. The session key tables are a source
- * of the SDK's canonical session writer, not a member of the release artifact set, so a check
- * against an artifact directory leaves them out; `cargo test -p parameter-metadata`
- * (`session_keys_asset_is_current`) holds them to the generator there.
+ * of the SDK's canonical session writer, and the response frame table (#1623) is a source of its
+ * response codec; neither is a member of the release artifact set, so a check against an artifact
+ * directory leaves them out. `cargo test -p parameter-metadata` (`session_keys_asset_is_current`,
+ * `response_frame_asset_is_current`) holds them to the generator there.
  */
-const SOURCE_ONLY = new Set(["miso-engine-v1-session-keys.json"]);
+const SOURCE_ONLY = new Set([
+  "miso-engine-v1-session-keys.json",
+  "miso-engine-v1-response-frame.json",
+]);
 
 function render(mode) {
   return execFileSync(

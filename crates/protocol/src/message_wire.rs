@@ -389,8 +389,9 @@ macro_rules! control_code_table {
 
 mod response;
 pub use response::{
-    RESPONSE_BYPASS_CONTROL, ResponseConfiguration, ResponseCurves, ResponseGetRequest,
-    ResponseGrid, ResponseOverride, ResponseResult, ResponseTarget, response_result_encoded_len,
+    RESPONSE_BYPASS_CONTROL, ResponseConfiguration, ResponseConfigurationKind, ResponseCurves,
+    ResponseGetRequest, ResponseGrid, ResponseOverride, ResponseResult, ResponseTarget,
+    response_result_encoded_len,
 };
 pub(crate) use response::{write_response_request, write_response_result};
 

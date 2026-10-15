@@ -135,6 +135,27 @@ impl Wire {
         self as u8
     }
 
+    /// The type's spelling in the frame table a client generates its codec from.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::I64 => "i64",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+            Self::Bool => "bool",
+            Self::Utf8 => "utf8",
+            Self::Bytes => "bytes",
+            Self::Message => "message",
+            Self::PackedU16 => "packedU16",
+            Self::PackedU32 => "packedU32",
+            Self::PackedU64 => "packedU64",
+            Self::PackedF32 => "packedF32",
+        }
+    }
+
     pub(crate) const fn from_raw(value: u8) -> Option<Self> {
         match value {
             1 => Some(Self::U8),

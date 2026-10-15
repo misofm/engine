@@ -8,6 +8,7 @@ mod btlv;
 #[cfg(any(test, feature = "test-support"))]
 mod control_rows;
 mod controller;
+mod frame_table;
 mod message_wire;
 mod model;
 mod queue;
@@ -27,11 +28,11 @@ pub use message_wire::{
     Diagnostic, DiagnosticEvent, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest, EditPath,
     EnumChoice, MeterBatch, MeterComponent, MeterRecord, NonOkResponse, ObservationEnded,
     ObservationSection, ObservationTapKey, ParameterChannel, ParameterRack, ParameterUnit,
-    PathSegment, RESPONSE_BYPASS_CONTROL, ResponseConfiguration, ResponseCurves,
-    ResponseGetRequest, ResponseGrid, ResponseOverride, ResponseResult, ResponseTarget,
-    SessionCommitted, SessionSnapshot, SessionSnapshotRequest, TelemetryConfiguration,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportState,
-    TransportStateEvent, response_result_encoded_len,
+    PathSegment, RESPONSE_BYPASS_CONTROL, ResponseConfiguration, ResponseConfigurationKind,
+    ResponseCurves, ResponseGetRequest, ResponseGrid, ResponseOverride, ResponseResult,
+    ResponseTarget, SessionCommitted, SessionSnapshot, SessionSnapshotRequest,
+    TelemetryConfiguration, TransactionApplied, TransportSetRequest, TransportSnapshot,
+    TransportState, TransportStateEvent, response_result_encoded_len,
 };
 /// The control core's address types, to name the address of a [`SessionEdit::SetControl`].
 pub mod control_core {
@@ -45,6 +46,9 @@ pub mod control_core {
         MonitorRow, MonitorWrite, Owner, Section,
     };
 }
+pub use frame_table::{
+    FrameCode, FrameCodeTable, FrameField, FrameMessage, ResponseFrameTable, response_frame_table,
+};
 pub use model::{
     PreparedSessionTransaction, SessionCommit, SessionEdit, SessionEditError, SessionEditOpcode,
     SessionStore, SessionStoreError, apply_session_edit,

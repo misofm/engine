@@ -28,6 +28,15 @@ control_code_table! {
     }
 }
 
+control_code_table! {
+    /// What kind of target a response configuration names.
+    #[allow(missing_docs)]
+    ResponseConfigurationKind {
+        Effect = 1,
+        InputFilters = 2,
+    }
+}
+
 /// The control ID that a response override uses for the effect-wide bypass: lane `both`, value
 /// exactly `0` or `1`.
 pub const RESPONSE_BYPASS_CONTROL: u32 = 0;
@@ -374,7 +383,11 @@ pub(crate) fn write_response_request(
                         quality,
                         link_mode,
                     } => {
-                        write_spec!(sink, response_configuration::KIND, &[1])?;
+                        write_spec!(
+                            sink,
+                            response_configuration::KIND,
+                            &[ResponseConfigurationKind::Effect.code()]
+                        )?;
                         write_spec!(sink, response_configuration::EFFECT, effect.as_bytes())?;
                         write_spec!(
                             sink,
@@ -388,7 +401,11 @@ pub(crate) fn write_response_request(
                         )
                     }
                     ResponseConfiguration::InputFilters => {
-                        write_spec!(sink, response_configuration::KIND, &[2])
+                        write_spec!(
+                            sink,
+                            response_configuration::KIND,
+                            &[ResponseConfigurationKind::InputFilters.code()]
+                        )
                     }
                 }
             })?;
@@ -568,9 +585,12 @@ fn decode_response_configuration(
     let effect = optional_spec!(message, response_configuration::EFFECT)?;
     let quality = optional_spec!(message, response_configuration::QUALITY)?;
     let link_mode = optional_spec!(message, response_configuration::LINK_MODE)?;
-    match read_u8(one_spec!(message, response_configuration::KIND)?)? {
+    match ResponseConfigurationKind::from_code(read_u8(one_spec!(
+        message,
+        response_configuration::KIND
+    )?)?)? {
         // The effect, its quality and its link mode are present exactly together.
-        1 => {
+        ResponseConfigurationKind::Effect => {
             let (Some(effect), Some(quality), Some(link_mode)) = (effect, quality, link_mode)
             else {
                 return Err(DecodeError::InvalidField);
@@ -583,10 +603,12 @@ fn decode_response_configuration(
                     .map_err(|_| DecodeError::InvalidField)?,
             })
         }
-        2 if effect.is_none() && quality.is_none() && link_mode.is_none() => {
+        ResponseConfigurationKind::InputFilters
+            if effect.is_none() && quality.is_none() && link_mode.is_none() =>
+        {
             Ok(ResponseConfiguration::InputFilters)
         }
-        _ => Err(DecodeError::InvalidField),
+        ResponseConfigurationKind::InputFilters => Err(DecodeError::InvalidField),
     }
 }
 
