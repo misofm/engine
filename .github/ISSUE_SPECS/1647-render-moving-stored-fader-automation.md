@@ -193,3 +193,38 @@ Checked against `12d4a4f9d`.
   (`validate.rs:868-870`). D4 rewrites those.
 - **Composition.** Each event's gain is #1646 D1's with `S` that includes the hand offset (#1650).
 - **Must-land group** is #1646, #1647, #1648, #1649 and #1650.
+
+## Amendment (controls coordinator, batch 13b, from #1638's review)
+
+Checked against `d5b9410df`.
+
+- **The gap.** #1638 D2 holds a lane's gain during an unmute ramp as well as a mute ramp: a timed
+  `RetargetGain` or `SetGain` on a lane whose `gain_held` is true only remembers the gain. D1.2's
+  `hold_until` makes #1637 hold its `Grid` events, but a `Jump` (cell not `no_restart`) and a seek
+  `Set` (D3) always emit and commit the cell's target with `held = false`. Converted to
+  `RetargetGain` or `SetGain` inside an unmute ramp, such an event is only remembered; the ramp
+  settles at the pre-unmute gain, and on a flat curve the cell emits nothing more, so the lane stays
+  wrong with no end.
+- **Why #1637's held bookkeeping does not close it.** `CellState::hold_until` only sets the
+  completion of the ramp in flight; `held` is set only by a held `Grid` event whose value differs
+  from the cell's target, and a `Jump` or `Set` commits its value as that target. After the ramp,
+  a grid event on an unchanged curve is suppressed. So calling `hold_until` with the ramp's end
+  does not re-emit a remembered `Jump` or `Set`.
+- **D1.6 (new). Reissue after a held ramp.** While the stage reports `gain_held` for a lane, a
+  `Jump` or a `Set` converts to `RememberGain`, and #1647 sets one bit per lane and channel in the
+  lane's fixed event state ("a jump was remembered"). At the sample the held ramp ends with the gain
+  free (offset `ramp_remaining` from the block-entry read, after the live drain, when it lies inside
+  the block; else a later block), if the bit is set, #1647 pushes one `RetargetGain` toward the
+  cell's current target (`CellState::target()`, read after the cell's own events at that offset)
+  over the fader row's jump length for that block, in place of any gain operation the cell gives at
+  that offset, and clears the bit. A ramp that ends with the lane muted leaves `gain_held` true and
+  keeps the bit; the later unmute ramps to the remembered gain, and its end reissues the target
+  once more, which moves no bit when the target is unchanged. The reissue sits at the stage's own
+  ramp end, so it does not depend on the quantum (gate 5). The bit is event state that #1648
+  carries across a swap. No allocation; one byte per lane and channel.
+- **Gate 8 (new).** A `Jump`, and separately a seek `Set`, landing inside an unmute ramp, on a flat
+  curve after it: the stage takes a `RetargetGain` toward the new automation value at the sample
+  the unmute ramp ends, so the lane settles at that value one fader jump length later (at once
+  with `control_smoothing` explicit 0); the same bits at quantum 128 and 100; and the lane never
+  settles at the pre-unmute gain. Test value: red if a remembered `Jump` or `Set` is never reissued,
+  or if the reissue follows the block entry instead of the ramp's end.

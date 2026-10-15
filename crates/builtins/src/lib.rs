@@ -151,6 +151,13 @@ pub struct BuiltinProcessReport {
     /// Right-channel lane-blocks whose output failed the boundary check; see
     /// [`BuiltinProcessReport::recovered_left_state`].
     pub recovered_right_state: u64,
+    /// `1` when a timed fader block stopped pulling operations early because its
+    /// [`FaderOperationSource`] broke the strictly rising offset order (issue #1638), else `0`.
+    ///
+    /// The operation at the offending offset stays with the source and the rest of the block
+    /// renders with no further operation. An offset at or past the block's length is the normal
+    /// end of a block's operations and is not counted.
+    pub fader_operations_stopped: u64,
 }
 
 /// A shape-validated dual-mono render block.
@@ -2004,6 +2011,7 @@ impl<L: Lane> InputStage<L> {
             sanitized_output: 0,
             recovered_left_state: recovered[0],
             recovered_right_state: recovered[1],
+            fader_operations_stopped: 0,
         }
     }
     // REALTIME_POLICY_END
@@ -2148,6 +2156,7 @@ impl<L: Lane> InputStage<L> {
             sanitized_output: 0,
             recovered_left_state: recovered,
             recovered_right_state: recovered,
+            fader_operations_stopped: 0,
         }
     }
     // REALTIME_POLICY_END
@@ -3267,7 +3276,8 @@ impl<L: Lane> FaderRampStage<L> {
     /// An offset at or past `frames` is not pulled: it stays with the source for a later block.
     /// Offsets must rise strictly; a source that repeats or lowers one breaks its contract and the
     /// stage stops pulling for this block (the operation stays with the source), which bounds the
-    /// loop at `frames` pieces.
+    /// loop at `frames` pieces. Returns `true` when pulling stopped that way, so the caller can
+    /// report it ([`BuiltinProcessReport::fader_operations_stopped`]).
     fn process_with<S: FaderOperationSource + ?Sized>(
         &mut self,
         left: &mut [f32],
@@ -3275,12 +3285,14 @@ impl<L: Lane> FaderRampStage<L> {
         frames: usize,
         lanes: usize,
         operations: &mut S,
-    ) {
+    ) -> bool {
         let mut position = 0_usize;
         let mut applied: Option<u32> = None;
+        let mut stopped = false;
         while let Some(offset) = operations.next_offset() {
             if applied.is_some_and(|last| offset <= last) {
                 debug_assert!(false, "fader operation offsets must rise strictly");
+                stopped = true;
                 break;
             }
             let at = offset as usize;
@@ -3299,6 +3311,7 @@ impl<L: Lane> FaderRampStage<L> {
         if position < frames {
             self.process_range(left, right, position, frames);
         }
+        stopped
     }
     // REALTIME_POLICY_END
 
@@ -4559,10 +4572,13 @@ impl BuiltinFaderBank {
         debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
         debug_assert_eq!(right.len(), frames * self.width.lanes() as usize);
         let lanes = self.members;
-        per_width!(FaderStageKernel(stage) in &mut self.stage => {
-            stage.process_with(left, right, frames, lanes, operations);
+        let stopped = per_width!(FaderStageKernel(stage) in &mut self.stage => {
+            stage.process_with(left, right, frames, lanes, operations)
         });
-        BuiltinProcessReport::default()
+        BuiltinProcessReport {
+            fader_operations_stopped: u64::from(stopped),
+            ..BuiltinProcessReport::default()
+        }
     }
     // REALTIME_POLICY_END
 
@@ -5034,8 +5050,20 @@ impl FaderOperationSink {
 ///
 /// Offsets are frames from the block's first frame. The stage calls [`Self::next_offset`] to
 /// learn where the next operations sit, renders up to that frame, then calls [`Self::apply`] with
-/// that offset. Offsets must rise strictly within a block. An offset at or past the block's length
-/// is never applied by that block: the stage stops pulling and leaves it with the source.
+/// that offset. An offset at or past the block's length is never applied by that block: the stage
+/// stops pulling and leaves it with the source.
+///
+/// # Contract
+///
+/// - Offsets must rise strictly within a block: each [`Self::next_offset`] after an
+///   [`Self::apply`] is greater than the offset just applied. A source that repeats or lowers an
+///   offset breaks this contract: the stage stops pulling for the rest of the block (a
+///   `debug_assert` fails in debug builds) and sets
+///   [`BuiltinProcessReport::fader_operations_stopped`].
+/// - A source must keep every operation it did not apply. [`Self::next_offset`] consumes
+///   nothing; only [`Self::apply`] consumes, and only the operations at the offset it is given.
+///   An operation the stage did not pull (at or past the block's end, or after a stop) belongs to
+///   the source, which offers it again, rebased to the next block, or reports it lost.
 pub trait FaderOperationSource {
     /// The offset of the next operations, without consuming them; `None` when there are none.
     fn next_offset(&mut self) -> Option<u32>;
@@ -5152,9 +5180,13 @@ impl FaderMuteRampBuiltins {
         operations: &mut S,
     ) -> BuiltinProcessReport {
         let frames = block.left.len();
-        self.stage
+        let stopped = self
+            .stage
             .process_with(block.left, block.right, frames, 1, operations);
-        BuiltinProcessReport::default()
+        BuiltinProcessReport {
+            fader_operations_stopped: u64::from(stopped),
+            ..BuiltinProcessReport::default()
+        }
     }
     // REALTIME_POLICY_END
 
