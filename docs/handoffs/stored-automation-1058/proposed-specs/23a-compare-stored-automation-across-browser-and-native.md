@@ -145,3 +145,13 @@ timeline and every source from the browser module export and the headless SDK* a
 *Compile stored automation into per-cell events in node time* (D5's plant, G5's case) arrive
 through those drafts. Draft 23b *Compare stored automation bits on AArch64 and across seek times*
 depends on this draft.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **The cross-host harness** is `hosts/host-web/tests/control_parity.rs` (#1560);
+  `strip_cells_cross_host.rs` is gone. #1399 has landed.
+- **The fixtures add** a fader offset (11b), a hand mute over a mute curve (13a amended) and a send
+  ride (13d); depend on 11b and 13d.
+- Native pin tests in `hosts/host-web/src/tests.rs` have moved; re-read at filing.

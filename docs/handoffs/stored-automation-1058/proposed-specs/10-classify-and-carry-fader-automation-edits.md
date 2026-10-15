@@ -99,7 +99,7 @@ drafts 09a and 09b render fader automation, an edit would be acked and never hea
     "acknowledged with no effect" in #1315's sense: the edit sets the committed document's fallback
     value, the response names the path, and the value is rendered when the automation goes.
 - **D4. Docs.** The sentences that say automation edits are model-only, in the text that P1
-  (draft 21a D5) and *Report each transaction's edit path in its response* (#1313, which rewrites
+  (#1627 D5) and *Report each transaction's edit path in its response* (#1313, which rewrites
   the header paragraph) leave in the C ABI header, `CONTROL_PROTOCOL_SEMANTICS.md` and
   `C_ABI_V1_QUALIFICATION.md` (on `6ee64f484`: `miso_engine_v1.h:41-43`,
   `CONTROL_PROTOCOL_SEMANTICS.md:15`, `C_ABI_V1_QUALIFICATION.md:268-274`), say: a fader automation edit rebuilds and carries; a
@@ -218,3 +218,35 @@ drafts 09a and 09b render fader automation, an edit would be acked and never hea
   the `FaderDb` that a VCA ride gives an automated member, and draft 11 adds the offsets-cell write
   that makes the ride heard. *Admit browser live edits in the Worker through the committed model*
   (#1382) arrives through draft 09a.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **The classifier changed shape** (decision 17 C6, #1554). `classify_live_delta` masks control
+  values with `controls::mask_values`, diffs rows with `controls::changed_controls` and lowers by
+  family (`crates/host-core/src/live_delta.rs:240-300`); the stored automation is masked whole at
+  `:359-361` and re-checked by the row rule at `:372-376`. D1's predicate becomes
+  `controls::automation_row_renders(address: &ControlAddress) -> bool` (classification rules live in
+  `controls`, C1), true only for builtins control 5 in this slice. D1's new step compares the
+  entries whose rows render; `LiveRebuild` gains `Automation` beside `AutomationTarget`.
+- **D3 is split by OQ1 = C.** For the fader row, the static edit is no longer `model_only`: slice
+  11b makes `SET_CONTROL fader_db` on an automated lane write the lane's offset (live). D3's rule
+  ("a static edit of an automated cell gives no record and commits `model_only`") stays the rule
+  for the rows where automation wins, and its predicate `automated_cell` (in `controls`, over
+  `ControlAddress`) is the one later slices use (13d, 14b, 15 for polarity, 16b, 19, 20). Gate 1's
+  "static `left_db` change ... gives `Ok` with no records" and gate 5 move: the fader case becomes
+  11b's gate 2; the first automation-wins row that renders (pan, draft 14b) takes gate 5's
+  `model_only` case on both hosts.
+- **VCA rides.** #1247's step is now the effective diff (`EffectiveDiff`, C6 step 3); D3's note on
+  VCA moves reads against it.
+- **The browser** commits through the same `SessionState` (#1562a). An automation edit is a rebuild,
+  which the browser refuses with `web.apply.rebuild_pending` until #1562b; so #1562b is a dependency
+  of batch R1, and gate 5's browser leg runs after it, through
+  `hosts/host-web/tests/control_parity.rs`.
+- **Moved files.** `crates/capi/src/runtime/{control.rs,compile.rs}` are in `crates/control-plane/src/`.
+  The tests that pin today's model-only automation edit are `model_only_edits`
+  (`crates/host-core/tests/live_delta.rs:1125-1154`) and its C ABI twin in
+  `crates/capi/src/runtime/live_tests.rs`. Realtime policy as in draft 07's amendment.
+- **Dependencies.** #1277, #1313, #1314 and #1335 have landed; add #1562b. Must-land group: 09a,
+  09b, 10, 11, 11b.

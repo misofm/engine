@@ -193,3 +193,26 @@ of a session without stored automation (draft 09a D6 is the one order change).
   `resolve` gives the ramp word, arrives through #1382.
 - Batch: R1, in one push with drafts 09a, 09b and 10.
 
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Composition** is `controls::effective` over `session::VcaSum` (draft 09a's amendment); D4's
+  "#1247's strip step" is the classifier's effective diff (`EffectiveDiff`,
+  `crates/host-core/src/live_delta.rs`, C6 step 3).
+- **`S` includes the hand offset** (OQ1 = C, slice 11b D6): `S = offset + Σ reaching VCA offsets`,
+  the lane's own offset first. The cell, its write and the jump rule are unchanged; 11b reuses them.
+- **VCA automation** is no longer out of scope by decision 13: decision 17 computes `automatable`
+  from the row, and #1566 accepts a VCA `offset_db` or `mute` target (the fixture holds `vca-ride`).
+  No slice renders it yet (README F20); if root files one, it composes into this slice's `S`.
+- **Moved files.** `crates/host-core/tests/vca_live.rs` is gone (use `crates/host-core/tests/vca.rs`);
+  `hosts/host-web/src/tests.rs`'s VCA oracles were deleted (#1565): the browser leg goes through
+  `hosts/host-web/tests/control_parity.rs`.
+- **Must-land group** is 09a, 09b, 10, 11 and 11b.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+- **VCA automation renders in draft 13e** (root's F20 ruling, README "Root's rulings
+  (2026-10-14)"). It extends this slice's offsets cell and write: automated VCA curves add to `S` at
+  each event. This slice's non-goal stands for itself.

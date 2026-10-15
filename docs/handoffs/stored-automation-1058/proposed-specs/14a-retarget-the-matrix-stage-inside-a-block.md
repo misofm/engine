@@ -97,3 +97,10 @@ Batch R2. Direct dependency:
   fused path's fader half).
 
 Draft 14b depends on this draft.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- No design change. Anchors in `crates/builtins/src/lib.rs` and `crates/builtins-compiler/src/lib.rs`
+  have moved; re-read them at filing. #1408 has landed. Realtime policy as in draft 07's amendment.

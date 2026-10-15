@@ -186,3 +186,19 @@ Batch R2. Direct dependencies:
 Draft 07's events, the cells of *Hold live values in latest-target cells on both hosts* (#1312) and
 *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes* (#1054)
 arrive through drafts 10 and 12.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Automation wins on pan and matrix** (OQ1 = C, "other rows"): D2's static-edit rule stands. This
+  is the first rendering row where it applies, so this slice takes draft 10's former gate 5 (a
+  static edit of an automated pan is `model_only` on both hosts, through
+  `hosts/host-web/tests/control_parity.rs`).
+- **`matrix_mode` is live** (C12). A live switch on a strip with pan or matrix automation makes the
+  automated rows inactive (README F21: today it commits a model its next preparation refuses).
+  This slice must not depend on that path; root files F21's fix first, or this slice refuses the
+  switch while the strip has an entry on its pan or matrix rows.
+- **Browser commands** `COMMAND_PAN` and `COMMAND_MATRIX` are deleted (#1565); browser edits are
+  `SET_CONTROL` (#1563). The ramp of a group-cell write is `LiveRamps::resolve(Matrix or Pan, edit
+  ramp)` in `controls` (the strip's own pan window first, as #1054 D5 set).

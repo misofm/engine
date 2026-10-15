@@ -65,7 +65,7 @@ the table yet.
 - **The hold rule has no home in the schema doc.** `docs/SESSION_SCHEMA_V1.md:220-225` says only
   that the table renders nothing. The protocol's record rule ("holds its end value until
   replaced", `docs/CONTROL_PROTOCOL_REGISTRY.md:45`) leaves the registry with *Delete the
-  protocol automation queue, its records and counters* (draft 21c).
+  protocol automation queue, its records and counters* (#1629).
 
 ## Decisions frozen for this slice
 
@@ -214,6 +214,32 @@ the table yet.
 ## Dependencies
 
 - None.
-- Batch: P1, first in it. Drafts 21a-21c (the hold rule's new home before 21c deletes the old one),
+- Batch: P1, first in it. #1627-#1629 (the hold rule's new home before #1629 deletes the old one),
   02, 03a and 03b and draft 07 (the evaluator crate) build on it. It is a product outcome alone:
   it refuses automation lanes that no rendering could honour.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Target shape.** A target is a `ControlAddress` `{owner, owner_id, section, slot_id, control,
+  lane}` (#1566; `crates/session/src/model.rs:969-977`). D1's lane key becomes `(owner, owner_id,
+  section, slot_id, control)` with lane overlap as written (`both` overlaps `left` and `right`); the
+  diagnostic path is `$.automation[<i>].target.lane`. Routes and VCAs are owners now, so the rule
+  covers them too.
+- **D2 is done.** The pan or matrix rule is #1566's row rule: `controls::automation_diagnostics`
+  refuses a row the strip's shape does not use with `control.inactive`
+  (`crates/controls/src/automation.rs:96-100`). Drop D2, its gate 1 case and its validator row; the
+  `reference.missing_entity` code is not used for it.
+- **D5 is done.** #1566 migrated `fixtures/session/v1/builtins-automation.json`: it now holds a
+  `pan` ride on `vocal` and no matrix ride, and adds `route-ride` and `vca-ride`. Drop D5 and its
+  fixture paths. Gate 3's mutations use the fixture as it is.
+- **Where the rules live.** Session validation is structural (`validate_automation`,
+  `crates/session/src/validate.rs:963-1042`); D1 and D3 are structural (they read no row), so they
+  stay in the session crate as written.
+- **Anchors gone.** `crates/host-core/src/solo.rs` is deleted (its change test is
+  `controls::changed_controls`, which compares value bits). The `-0.0` hazard stands.
+- **Docs.** `docs/SESSION_SCHEMA_V1.md`'s inert sentence is now near `:278-279`; the registry's
+  record rule ("holds its end value until replaced") is `docs/CONTROL_PROTOCOL_REGISTRY.md:93`.
+- **Gates.** `bash scripts/check-session-policy.sh` and the other commands stand; there is no
+  `test-debug-a` change. Batch P1, first, as written (section "Batch P1 readiness" of the README).

@@ -20,7 +20,7 @@ it yet; draft 02's order check (`value_at`) and drafts 09a and 09b are its first
 - **The table.** `Automation { id, target, segments }` with `AutomationSegment { shape,
   start_sample: u64, end_sample: u64, start_value: f32, end_value: f32, unit }` and the shapes
   `step`, `linear`, `exponential` (`crates/session/src/model.rs:874-955`). Session validation
-  orders segments and refuses overlap (`crates/session/src/validate.rs:972-1000`); draft 01 adds
+  orders segments and refuses overlap (`crates/session/src/validate.rs:972-1000`); #1626 adds
   one entry per lane, the hold rule and discontinuities at least 64 samples apart.
 - **The evaluation law** (README A1.4): `linear` `v0 + (v1 - v0)·x`, `exponential`
   `v0·(v1/v0)^x`, `step` `v0`, with `x = (t - t0)/(t1 - t0)`; these are the Web Audio ramp formulas.
@@ -113,7 +113,7 @@ it yet; draft 02's order check (`value_at`) and drafts 09a and 09b are its first
     `Set` always emits.
   - The cursor advances one segment per boundary crossed and never moves backwards except at a seek
     or a reposition.
-  - Bound: at most `⌈q/G⌉ + 1` grid events, `⌈q/64⌉ + 1` jumps (draft 01's spacing rule) and one
+  - Bound: at most `⌈q/G⌉ + 1` grid events, `⌈q/64⌉ + 1` jumps (#1626's spacing rule) and one
     seek: `2⌈q/64⌉ + 3` per cell and block.
 - **D5. Builder.** `ProgramBuilder` takes neutral cell descriptions (segments and D2's parameters;
   no session type) and reports the exact bytes it will allocate (`bytes(&cells) -> u64`) before it
@@ -223,9 +223,27 @@ it yet; draft 02's order check (`value_at`) and drafts 09a and 09b are its first
 
 ## Dependencies
 
-- Draft 01 *Validate stored automation lanes in the session crate and state the hold rule*.
+- #1626 *Validate stored automation lanes in the session crate and state the hold rule*.
 - Batch: R1, with draft 02 *Validate builtin automation targets against their rows at
   preparation* and drafts 09a *Prepare stored fader automation and render it flat* and 09b *Render
   moving stored fader automation, seeks and latency*, its first users. The key names the words of
   draft 12's plan cell, but this crate reads no cell: the caller passes the words, so draft 12 is
   not a dependency.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Jump lengths follow the ramp rows.** Decision 17 gives every row a `LiveRampRow`
+  (`crates/effect-contract/src/control.rs:70-102`); polarity ramps over twice `mute_ms`
+  (`PolarityInvert`), and sends and VCAs have rows of their own. Replace D2's `JumpWord { Fader,
+  Mute, Pan }` with the row's `LiveRampRow`, resolved per block against draft 12's three key
+  lengths by `controls::LiveRamps::for_row` (`crates/controls/src/live_ramps.rs`), so no row's rule
+  is written twice. `Fixed(n)` stays for filter, EQ and effect cells.
+- **Realtime policy.** D7 and gate 7: `scripts/check-realtime-policy.sh` is deleted; raise
+  `marked_files_floor` and `marked_regions_floor` in `tools/realtime-policy/src/policy.rs` and run
+  `./target/release/realtime_policy`. Authorized paths change to that file.
+- **The table.** `Automation.target` is a `ControlAddress` (#1566); the crate reads no session type,
+  so nothing else changes.
+- **OQ1 = C** adds no evaluator work: the caller adds the offset after `value_at` (slice 11b D6,
+  draft 15).

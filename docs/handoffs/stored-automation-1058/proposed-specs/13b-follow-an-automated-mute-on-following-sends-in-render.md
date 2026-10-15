@@ -192,3 +192,26 @@ Batch R2. Direct dependencies:
 
 Draft 08's split model, draft 07's per-cell events and #1285's arrivals arrive through draft 13a.
 Draft 13c depends on this draft and lands in the same push.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **Route lanes exist on every plan** (C6, #1557): every route into a submix has a live lane and a
+  `ROUTE_CELL_WORDS = 6` cell (`crates/graph/src/lib.rs:1004-1047`). D1's "attach a route lane" is
+  done; D1 keeps the seven-word layout for a route whose source mute is automated.
+- **`terms` includes the source's static mute** (OQ1 = C, draft 13a amended): for an automated
+  source lane, `terms = static_mute || VCA mute || solo term`.
+- **Slice 13d** (OQ2 = yes) reuses this slice's seven-word cell and in-block route retarget for a
+  route whose own rows are automated; build them so the transform words can come from curves too.
+- **Moved files.** The follow gate is computed by `controls::effective` (C7); route records come
+  from `route_records` (`crates/host-core/src/live_delta.rs:1416`) and `RouteControlProducer`
+  (`crates/host-core/src/route_controls.rs:201`); `live_route_state.rs` is gone.
+- **Dependencies.** #1284 is open; #1347 has landed.
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+- **Automated VCA mutes** (draft 13e): a route into a submix whose source lane is reached by a VCA
+  with an automated mute also uses this slice's seven-word cell, and its follow term ORs those VCA
+  curves, evaluated in the tap's node time. Draft 13e adds it on this slice's route op; this slice
+  needs no change for it.

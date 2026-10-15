@@ -25,7 +25,7 @@ with #1306, which sizes the span windows.
   `channel` (`crates/session/src/model.rs:874-955`). The session crate checks that it names a
   declared `(parameter_id, channel)` (`crates/session/src/validate.rs:890-967`).
 - #1335 refuses a target that is not `automatable` with `AutomationRate::Block`. Draft 03a adds the
-  unit, domain and shape rules. Draft 01 adds one entry per lane and the hold rule.
+  unit, domain and shape rules. #1626 adds one entry per lane and the hold rule.
 - Nothing renders the table (`docs/SESSION_SCHEMA_V1.md:220-225`).
 
 **The launch `Block` parameters** (`sdk/assets/miso-engine-v1-parameter-metadata.json`): 56 in
@@ -155,7 +155,7 @@ and 09b give it to the fader stage.
 - The classifier, the one rule for a live edit of an automated cell on both hosts, and carry across a swap
   (draft 19). Until draft 19, an effect automation edit stays model-only.
 - The window sizing function itself (#1306).
-- `AUTOMATION_ENQUEUE` (drafts 21a, 21c, 22). Sample-rate parameters (none at launch, #1335 D1).
+- `AUTOMATION_ENQUEUE` (#1627, #1629, draft 22). Sample-rate parameters (none at launch, #1335 D1).
 
 ## Hazards
 
@@ -246,3 +246,20 @@ during playback* (#1285) and *Refuse automation on effect parameters that are no
 (#1335) arrive through drafts 03a, 10 and 17b. Draft 18b *Render stored effect parameter
 automation across seeks and on both hosts* and draft 19 *Classify and carry effect automation
 edits* depend on this draft and land in the same push.
+
+## Amendment (controls coordinator, 2026-10-14)
+
+Checked against `12d4a4f9d`.
+
+- **D4 is superseded by #1611 and #1621.** Every live effect window already holds the lane's
+  parameter cells (#1611 D3 for banks, `crates/rack/src/lib.rs:1248-1264`; #1621 D1 per node), and
+  every effect has its live lane on every plan (C6). So: no `capacity = live + stored`, no
+  channel-less lane, and no #1306 in this push (README F23). The must-land group is 18a, 18b and 19.
+- **Validation** is #1566's row rule (`controls::automation_diagnostics`) plus amended draft 02's
+  shape rule; #1335's `effect_automation_diagnostics` is deleted. A cell is addressed by
+  `ControlAddress` (owner strip, section `console(slot)` or `inserts(effect)`, control = parameter
+  ID, lane).
+- **The `Block` table** must be re-counted at filing: `Sample`-rate rows are rebuild-only, and
+  #1336 (gate-expander times) and #1337 (EQ enabled and kind) are open.
+- **The browser's S** derivation is now `hosts/host-web/src/lib.rs:4447-4455`; #1306 D3 deletes it,
+  outside this push.

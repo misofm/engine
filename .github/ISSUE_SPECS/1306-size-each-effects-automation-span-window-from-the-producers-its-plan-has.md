@@ -214,3 +214,49 @@ D1-D6.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309)
 - *Tighten the four-lane reference graph ceilings from measured AArch64 rows* (#1304), for the
   four-lane rows in D6
+
+## Amendment (controls coordinator, batch 10, 2026-10-14)
+
+Root's ruling on finding F23 of the stored-automation check (`docs/handoffs/stored-automation-1058/README.md`,
+"Root's rulings (2026-10-14)"). Code anchors read on `2e6343a99`. **This issue is now its D3 only.**
+
+- **The window term is done elsewhere.** #1611 sizes the live bank stage's span window by the widest
+  lane's parameter cells, and #1621 sizes the per-node window the same way (its D1); every effect
+  has its live lane on every plan (decision 17 C6). Effect preparation already gives each instance
+  a capacity of at least its descriptor's live parameter cells
+  (`crates/effect-compiler/src/prepare.rs:510-526`), and the lane attach checks it (`:1659-1695`).
+  #1058 answered A7 and A8: a window holds one span per cell, automated or not, and
+  `AUTOMATION_ENQUEUE` stages no span (it is retired by #1627-#1629). So D1, D2, D4 and D5, the
+  "Not ready" paragraph, the A7 and A8 terms, gate 2's D1 unit test and gate 3's 60,480-byte
+  prediction are void.
+- **What remains: D3, S leaves the preparation caps.**
+  - Remove `HostPrepareCaps::maximum_automation_spans_per_block` (`crates/host-core/src/prepare.rs:129`)
+    and its copy into `EffectCompileCaps` (`:1903`); every `HostPrepareCaps` literal loses the line.
+  - Each instance's `automation_capacity` is `max(1, EffectLaneShape::live_parameter_cells(descriptor))`:
+    the `caps.maximum_automation_spans_per_block.max(..)` term at
+    `crates/effect-compiler/src/prepare.rs:521-526` loses its S operand. It depends on the
+    descriptor alone, so a cohort never splits (old D2 holds by construction).
+    `EffectCompileCaps` keeps its shape and `Copy`; its field becomes a ceiling, a capacity above it
+    or a ceiling of 0 is refused `effect.resource.limit` (`:358`), and host-core passes `u32::MAX`.
+  - capi: `prepare_caps` (`crates/control-plane/src/compile.rs:601`) drops the field. Its other read,
+    the protocol's `per_block_automation_density` (`:202`), is deleted by #1629 in batch P1; draft 22
+    of the #1058 program then reserves the C field.
+  - Browser: the derivation from the stored segment count (`hosts/host-web/src/lib.rs:4447-4455`) and
+    its two uses (`:4463`, `:4494`) go.
+- **Gates now.** (1) No rendered bit moved (PR evidence): `audit capi` gives the same `pcm_digest`
+  at base and head, and the browser legs pass with unchanged digests. (2) A committed test in
+  `crates/capi/tests/resource_lifecycle.rs`: the reference session compiled at S = 128 and at
+  S = 4,096 gives equal graph rows and equal prepared `automation_capacity` per instance. (3) An
+  effect-compiler unit test: an instance's capacity is its live parameter cells (at least 1), and a
+  ceiling of 0 is refused. (4) Any resource ceiling that moves is re-pinned from measured numbers,
+  recorded. (5) Gate 5's policy commands, unchanged.
+- **Test value.** Gate 2 turns red if any capacity or window follows the caller's S again; gate 3
+  turns red if preparation keeps S as a capacity term.
+- **Authorized paths** are old D3's: `crates/host-core/src/prepare.rs` and its literals,
+  `crates/effect-compiler/src/prepare.rs` and its tests, `crates/control-plane/src/compile.rs`
+  (`prepare_caps`), `hosts/host-web/src/lib.rs` (the derivation and its uses),
+  `crates/capi/tests/resource_lifecycle.rs`, `docs/C_ABI_V1_QUALIFICATION.md` (the formula bullet,
+  if #1611 and #1621 have not rewritten it), this spec.
+- **Dependencies.** #1611 (landed) and #1621 (the per-node window; this issue lands after it). #1629
+  (batch P1) removes S's protocol read; this issue and draft 22 form batch P2, after P1. The #1058
+  rendering slices no longer depend on this issue.
