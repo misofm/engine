@@ -459,9 +459,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// exports, or `null` for a row the engine cannot have written. Every read is checked against
   /// something the engine already guarantees, so a mis-wired export fails here rather than
   /// surfacing as a plausible-looking wrong number: compilation refuses a zero channel count or
-  /// full-source frame count, and preparation refuses a channel count above
-  /// `maximumSourceChannels`. The sources are the committed model's, so a rebuild that adds or
-  /// removes one is seen by the next read. Control side only; allocates.
+  /// full-source frame count, and the staging holds the most channels a source can
+  /// declare (`maximumSourceChannels`), so a channel count above it is a mis-wired export. The
+  /// sources are the committed model's, so a rebuild that adds or removes one is seen by the next
+  /// read. Control side only; allocates.
   readSourceRows() {
     const count = this.exports.miso_engine_web_v1_source_count(this.handle);
     if (!u32(count)) return null;
