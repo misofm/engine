@@ -286,3 +286,67 @@ fn a_lane_refuses_a_publisher_count_that_does_not_match_the_menu() {
     assert!(ObservationLane::new(&MENU, vec![publisher], 4).is_none());
     assert!(ObservationLane::new(&MENU, Vec::new(), 4).is_none());
 }
+
+/// A plan swap exchanges two lanes' whole tap state (#1327 D2): the open window, the arm state
+/// and the publisher, so the reader the host holds for the old lane receives the windows the
+/// carried tap goes on to publish. Each lane keeps its own default window length.
+///
+/// Test value: a swap that copies the window but keeps the successor's publisher leaves the host's
+/// reader on a dead cell; one that restarts the window loses the blocks already folded.
+#[test]
+fn a_lane_swap_carries_the_open_window_and_the_publisher() {
+    let (mut old, old_readers) = lane(4);
+    let (mut fresh, fresh_readers) = lane(8);
+    assert!(old.arm(0, true, 2, 0));
+    old.accumulate(0, sample(-3.0, 1.0), 0, 128);
+    assert!(fresh.swap_state(&mut old));
+    assert!(fresh.is_armed(0) && fresh.any_armed());
+    assert!(!old.is_armed(0) && !old.any_armed());
+    assert_eq!(
+        (old.default_window_blocks(), fresh.default_window_blocks()),
+        (4, 8)
+    );
+
+    fresh.accumulate(0, sample(-5.0, 0.5), 128, 128);
+    let window = old_readers[0]
+        .read()
+        .expect("the window arrives on the reader of the lane it left");
+    assert_eq!(
+        (
+            window.first_sample,
+            window.end_sample,
+            window.sequence,
+            window.blocks,
+            window.left,
+            window.right
+        ),
+        (0, 256, 1, 2, 5.0, 1.0)
+    );
+    assert!(
+        fresh_readers[0].read().is_none(),
+        "the other reader sees nothing"
+    );
+}
+
+/// Two lanes of different menus exchange nothing.
+#[test]
+fn a_lane_swap_refuses_another_menu() {
+    static ONE_TAP: [ObservationDescriptor; 1] = [tap(1, ObservationFold::PeakMagnitude)];
+    static FOLDED: [ObservationDescriptor; 2] = [
+        tap(1, ObservationFold::PeakMagnitude),
+        tap(2, ObservationFold::PeakMagnitude),
+    ];
+    let (mut two, _readers) = lane(4);
+    let (publisher, _reader) = observation_slot();
+    let mut one = ObservationLane::new(&ONE_TAP, vec![publisher], 4).expect("lane");
+    let mut publishers = Vec::new();
+    for _ in 0..FOLDED.len() {
+        publishers.push(observation_slot().0);
+    }
+    let mut folded = ObservationLane::new(&FOLDED, publishers, 4).expect("lane");
+    assert!(two.arm(0, true, 1, 0));
+    assert!(!two.swap_state(&mut one), "another tap count");
+    assert!(!two.swap_state(&mut folded), "another fold at tap 1");
+    assert!(two.is_armed(0), "nothing was exchanged");
+    assert!(!one.is_armed(0) && !folded.is_armed(0));
+}

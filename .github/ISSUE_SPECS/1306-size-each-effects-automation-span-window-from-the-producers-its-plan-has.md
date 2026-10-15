@@ -239,7 +239,7 @@ Root's ruling on finding F23 of the stored-automation check (`docs/handoffs/stor
     `EffectCompileCaps` keeps its shape and `Copy`; its field becomes a ceiling, a capacity above it
     or a ceiling of 0 is refused `effect.resource.limit` (`:358`), and host-core passes `u32::MAX`.
   - capi: `prepare_caps` (`crates/control-plane/src/compile.rs:601`) drops the field. Its other read,
-    the protocol's `per_block_automation_density` (`:202`), is deleted by #1629 in batch P1; draft 22
+    the protocol's `per_block_automation_density` (`:202`), is deleted by #1629 in batch P1; #1668
     of the #1058 program then reserves the C field.
   - Browser: the derivation from the stored segment count (`hosts/host-web/src/lib.rs:4447-4455`) and
     its two uses (`:4463`, `:4494`) go.
@@ -258,5 +258,5 @@ Root's ruling on finding F23 of the stored-automation check (`docs/handoffs/stor
   `crates/capi/tests/resource_lifecycle.rs`, `docs/C_ABI_V1_QUALIFICATION.md` (the formula bullet,
   if #1611 and #1621 have not rewritten it), this spec.
 - **Dependencies.** #1611 (landed) and #1621 (the per-node window; this issue lands after it). #1629
-  (batch P1) removes S's protocol read; this issue and draft 22 form batch P2, after P1. The #1058
+  (batch P1) removes S's protocol read; this issue and #1668 form batch P2, after P1. The #1058
   rendering slices no longer depend on this issue.

@@ -1029,10 +1029,10 @@ enum Mute {
 }
 
 /// Gate 2 run: three blocks, every other track muted per `mute`, one more block, then a content
-/// edit rebuilds; the swap, a seek, and six blocks, which it returns. Every run feeds the same
-/// source over the same blocks and swaps at the same block, so whatever the swap carries (the
-/// strip input sections, #1276) is the same in every run, and the rebuilt blocks differ only by
-/// what the successor was prepared from.
+/// edit rebuilds; the swap, a seek, and the blocks until the carried lines flush plus six, which it
+/// returns. Every run feeds the same source over the same blocks and swaps at the same block, so
+/// whatever the swap carries (the strip input sections, #1276) is the same in every run, and the
+/// rebuilt blocks differ only by what the successor was prepared from.
 fn persistence_run(mute: Mute) -> Vec<Vec<f32>> {
     // A hard switch (#1054 D6): the live mute steps one block before the rebuild and the baked
     // mute is the rebuild's own retarget, so with a ramp the two would start it a block apart.
@@ -1078,7 +1078,10 @@ fn rebuild_run(document: &str, mute: Mute, ramp: Option<u32>) -> Vec<Vec<f32>> {
     // The render call swaps the candidate in; its fresh ring then waits for a seek.
     rig.render();
     rig.seek_to_start();
-    let rebuilt = (0..6).map(|_| rig.step()).collect();
+    // The lines flush `flushed` blocks after the swap; six more are compared.
+    let flushed =
+        usize::try_from(u64::from(rig.latency()).div_ceil(rig.quantum as u64)).expect("blocks");
+    let rebuilt = (0..flushed + 6).map(|_| rig.step()).collect();
     assert_eq!(
         crate::ffi::test_plan_carry_counts(rig.plan),
         (1, 0),
@@ -1092,10 +1095,26 @@ fn rebuild_run(document: &str, mute: Mute, ramp: Option<u32>) -> Vec<Vec<f32>> {
 /// run, or unlike a rebuild that bakes the mute into its own transaction from the same history).
 #[test]
 fn a_live_mute_survives_a_later_rebuild() {
-    let blocks = |run: Vec<Vec<f32>>| run.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>();
+    // The rebuild carries the compensation lines (#1283), so the audio a line held at the swap
+    // plays out after it: the live mute silenced the last block of the muted strips' lines, and
+    // the baked mute takes effect at the swap, so the lines of those strips still hold that block
+    // unmuted, as a live mute at the swap would. The two runs agree once the lines are flushed,
+    // which is the session's latency after the swap block.
+    let (latency, quantum) = {
+        let rig = Rig::new(&long_session_with(10, 48_000, HARD_SWITCH));
+        (rig.latency(), rig.quantum)
+    };
+    let flushed = usize::try_from(u64::from(latency).div_ceil(quantum as u64)).expect("blocks");
+    let blocks = |run: Vec<Vec<f32>>| {
+        run[flushed..]
+            .iter()
+            .map(|pcm| bits(pcm))
+            .collect::<Vec<_>>()
+    };
     let live = blocks(persistence_run(Mute::Live));
     let baked = blocks(persistence_run(Mute::Baked));
     let unmuted = blocks(persistence_run(Mute::Unmuted));
+    assert!(!live.is_empty(), "blocks remain after the lines flush");
     assert_eq!(
         live, baked,
         "the rebuild after a live mute renders like a rebuild that bakes it"
@@ -4280,27 +4299,67 @@ fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
     };
     let document = with_bypass(false);
     // The blocks after the swap of `rebuilds` successive rebuilds, each one block, the swap, a
-    // seek and six blocks, by content edits from a document holding the multiband at `bypass`.
+    // seek and `flushed + 6` blocks, by content edits from a document holding the multiband at
+    // `bypass`.
+    // A content edit alone moves a per-node multiband across the swap (#1282), as the bypass
+    // rebuild does not, so each control rebuild also replaces the multiband by a fresh instance
+    // of the same declaration under a new ID: a prepared change of that owner, which restarts it
+    // and its strip exactly as the bypass rebuild does.
+    let mut rig = Rig::new(&document);
+    // The lines flush after the session's latency: `flushed` blocks after the swap block.
+    let flushed =
+        usize::try_from(u64::from(rig.latency()).div_ceil(rig.quantum as u64)).expect("blocks");
     let control = |bypass: bool, rebuilds: u8| {
         let document = with_bypass(bypass);
         let model = parse_session_json(&document).expect("control model");
+        let multiband = model.tracks[0]
+            .inserts
+            .effects
+            .last()
+            .expect("multiband")
+            .clone();
+        let position = u32::try_from(model.tracks[0].inserts.effects.len() - 1).expect("position");
         let mut control = Rig::new(&document);
         control.step();
         let mut rebuilt = Vec::new();
+        let mut previous = multiband.id.clone();
         for tag in 0..rebuilds {
             let mut edit = content_edit(&model);
             if let SessionEdit::SetSourceContent { content, .. } = &mut edit {
                 *content = format!("blake3:{}", format!("{:02x}", 0xc0 + tag).repeat(32));
             }
-            assert_eq!(control.apply(&[edit]), crate::RESULT_OK);
+            let mut renamed = multiband.clone();
+            renamed.id = StableId::parse(&format!("mb{tag}")).expect("renamed multiband");
+            let track_id = model.tracks[0].id.clone();
+            let replace = [
+                SessionEdit::RemoveTrackEffect {
+                    track_id: track_id.clone(),
+                    rack_name: session::RackName::Inserts,
+                    effect_id: previous,
+                },
+                SessionEdit::PutTrackEffect {
+                    track_id,
+                    rack_name: session::RackName::Inserts,
+                    final_position: position,
+                    effect: renamed.clone(),
+                },
+            ];
+            previous = renamed.id;
+            let [remove, put] = replace;
+            assert_eq!(control.apply(&[edit, remove, put]), crate::RESULT_OK);
             assert_eq!(control.summary().3, 1, "the control rebuilds");
             control.render();
             control.seek_to_start();
-            rebuilt = (0..6).map(|_| bits(&control.step())).collect::<Vec<_>>();
+            rebuilt = (0..flushed + 6)
+                .map(|_| bits(&control.step()))
+                .collect::<Vec<_>>();
         }
         rebuilt
     };
-    let mut rig = Rig::new(&document);
+    // The rebuild carries the compensation lines (#1283). Until they flush, the window holds the
+    // source ring's audio AND audio rendered under the predecessor's bypass in the carried lines,
+    // which no control built from the committed model reproduces. Only the blocks after the
+    // flush are compared: `flushed + 6` are rendered, so six are.
     rig.step();
     for (rebuilds, bypass) in [(1, true), (2, false)] {
         let (revision, _, epoch, pending) = rig.summary();
@@ -4328,18 +4387,20 @@ fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
         // The render call swaps the candidate in; the host then restarts the source.
         rig.render();
         rig.seek_to_start();
-        let rebuilt: Vec<_> = (0..6).map(|_| bits(&rig.step())).collect();
+        let rebuilt: Vec<_> = (0..flushed + 6).map(|_| bits(&rig.step())).collect();
         let (_, _, swapped, pending) = rig.summary();
         assert_eq!(pending, 0, "bypass {bypass}: the candidate was taken");
         assert_ne!(swapped, epoch, "bypass {bypass}: a new epoch renders");
         let reference = control(bypass, rebuilds);
+        assert_eq!(rebuilt[flushed..].len(), 6, "six blocks are compared");
         assert_eq!(
-            rebuilt, reference,
+            rebuilt[flushed..],
+            reference[flushed..],
             "bypass {bypass}: the rebuilt plan renders the committed model"
         );
         assert_ne!(
-            reference,
-            control(!bypass, rebuilds),
+            reference[flushed..],
+            control(!bypass, rebuilds)[flushed..],
             "bypass {bypass}: the change is audible"
         );
     }

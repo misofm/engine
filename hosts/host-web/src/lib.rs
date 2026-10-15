@@ -39,7 +39,9 @@ use control_plane::{
     SessionState, SourceFailure,
 };
 use effect_contract::{ObservationCost, ObservationDescriptor};
-use engine::realtime::{HostAttachment, ObservationWindow, PlanarBufferMut};
+use engine::realtime::{
+    HostAttachment, ObservationWindow, ObserverCarry, ObserverKind, PlanarBufferMut,
+};
 use host_core::{
     CompiledSession, EffectObservationHandle, HostLiveControlRequest, HostLiveLanes,
     HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
@@ -1312,6 +1314,11 @@ struct PlanShape {
     /// for a slot with no taps. Built once at compilation, so the poll's fold is arithmetic rather
     /// than a search.
     observation_tracks: Box<[u32]>,
+    /// The dense effect slot of each observation reader, in the companions' reader order (host-core's
+    /// `effect_observations` order): entry `r` is the slot whose [`EffectInstance::reader`] is `r`.
+    /// It is the inverse of that field, built in the same preparation loop, so the swap block's
+    /// carry record, which names readers (#1327 D3), reaches the per-slot tap state below (#1381b).
+    reader_slots: Box<[u32]>,
     /// Armed-tap bitmask per effect slot, maintained at **admission**.
     ///
     /// A conflating cell holds its last window forever -- that is what makes it wait-free -- so
@@ -1324,8 +1331,15 @@ struct PlanShape {
     /// Admission sample at which each tap's current arm was acknowledged. A resident cell keeps
     /// its previous window forever, so a read is fresh for a re-arm only when the whole returned
     /// window starts at or after this sample. The nested index is the dense effect slot followed
-    /// by that descriptor's tap index; zero means no command has changed the tap yet.
+    /// by that descriptor's tap index; zero is a valid sample (a command admitted before the first
+    /// block), so `observation_commanded` says whether a command named the tap.
     observation_arm_samples: Box<[Box<[u64]>]>,
+    /// Commanded-taps bitmask per effect slot: bit `t` is set when a tap command (arm or disarm)
+    /// was admitted against this shape's plan for tap `t`, whatever sample it was admitted at, so
+    /// sample zero is not "no command". The swap's hand-over reads it to keep a command admitted
+    /// against the successor from being overwritten by the predecessor's state, then clears it
+    /// at the commit of that hand-over (#1381b).
+    observation_commanded: Box<[u32]>,
     /// The designated master strip index (tracks first, then submixes), or `None` (issue #143
     /// D6, issue #1213 D5).
     master_track: Option<u32>,
@@ -1530,13 +1544,27 @@ impl ReadyOwnership {
         self.pending_shapes.retain(|entry| !entry.adopted);
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Take the tables of the plan whose epoch is `epoch` (#1290a), at the block that adopted it.
     /// The tables it retires stay in the entry for [`Self::reclaim_shapes`]; an entry of an
     /// earlier epoch was superseded and is marked the same way. A pointer exchange: it allocates
     /// and frees nothing, and indexes nothing, so it adds no trap to the render export.
-    fn adopt_shape(&mut self, epoch: u64) {
+    ///
+    /// `carried` is the pairing the swap block's attachment hook made (#1381b): the readers the
+    /// executors carried, which this hand-over follows with the per-reader state the tables hold.
+    /// A swap that carried a meter keeps the meter delivery running, because the carried meters
+    /// keep their window grid and the host's master windows are continuous; one that carried none
+    /// restarts it, because its meters open their first window at the adoption block. The poll
+    /// finds the carried pending windows where it left them only while the meter handles are
+    /// unchanged: a swap that removes one strip and adds another shifts handles, so a carried
+    /// pending snapshot fails the poll's handle check, is dropped, and is added to the meter loss
+    /// count.
+    fn adopt_shape(&mut self, epoch: u64, carried: &[CarriedReader]) {
         self.shape_epoch = epoch;
-        // The windows a swap discards unpublished (the master intervals waiting for a poll and
+        let meters_carried = carried
+            .iter()
+            .any(|reader| reader.kind == ObserverKind::Meter);
+        // The windows a restart discards unpublished (the master intervals waiting for a poll and
         // the group of track snapshots a poll had begun to assemble) are lost telemetry, counted
         // with the others (#1290a, batch 10 review).
         let discarded = u64::try_from(self.master_count)
@@ -1553,17 +1581,45 @@ impl ReadyOwnership {
                 core::mem::swap(&mut self.shape, &mut entry.shape);
                 entry.adopted = true;
                 taken = true;
+                // `self.shape` is the adopted plan's and `entry.shape` the retired one's. The
+                // pending track snapshots and the tap state follow their readers.
+                for reader in carried {
+                    let (Ok(successor), Ok(predecessor)) = (
+                        usize::try_from(reader.successor),
+                        usize::try_from(reader.predecessor),
+                    ) else {
+                        continue;
+                    };
+                    match reader.kind {
+                        ObserverKind::Meter => {
+                            if let (Some(into), Some(from)) = (
+                                self.shape.meter_pending.get_mut(successor),
+                                entry.shape.meter_pending.get_mut(predecessor),
+                            ) {
+                                core::mem::swap(into, from);
+                            }
+                        }
+                        ObserverKind::Observation => {
+                            self.shape
+                                .carry_tap_state(&mut entry.shape, successor, predecessor);
+                        }
+                        ObserverKind::Spectrum => {}
+                    }
+                }
             } else if entry.epoch < epoch {
                 entry.adopted = true;
             }
         }
         if taken {
-            // A swap restarts the meter delivery state, as a producer reset does (#1290d carries
-            // it).
-            let lost = self.meter_loss_count.saturating_add(discarded);
-            self.reset_meter_delivery(false);
-            self.meter_loss_count = lost;
-            self.meter_generation = self.meter_generation.saturating_add(1);
+            if meters_carried {
+                // The delivery epoch is the stream's, not the plan's: the page sees the same
+                // generation, and the poll finds the carried windows where it left them.
+            } else {
+                let lost = self.meter_loss_count.saturating_add(discarded);
+                self.reset_meter_delivery(false);
+                self.meter_loss_count = lost;
+                self.meter_generation = self.meter_generation.saturating_add(1);
+            }
             // The tables hold the admissions made against the plan before it rendered; the block
             // that adopted it drained its observation queues at its top, so the pass that follows
             // the swap clears the counts (a block that did not adopt cleared only the tables of
@@ -1571,6 +1627,8 @@ impl ReadyOwnership {
             self.has_in_flight_commands = true;
         }
     }
+
+    // REALTIME_POLICY_END
 
     /// Run `admit` with the tables of the newest committed plan in place of the rendering plan's
     /// (#1290a, batch 10 review): the rendering plan's while no replacement is waiting for its
@@ -1725,6 +1783,9 @@ impl ReadyOwnership {
                 && let Some(sample) = samples.get_mut(staged.tap_index as usize)
             {
                 *sample = applied_at_sample;
+            }
+            if let Some(commanded) = self.shape.observation_commanded.get_mut(effect) {
+                *commanded |= bit;
             }
         }
         Ok(())
@@ -3142,7 +3203,11 @@ impl AudioWorkletEngineHost {
                 // drops the retired ones at its next step.
                 let epoch = plan.owner().active_epoch().0;
                 if epoch != ready.shape_epoch {
-                    ready.adopt_shape(epoch);
+                    // #1381b: what the swap block's hook paired travels with the tables.
+                    let carried = plan
+                        .active_attachment_mut::<RenderCompanions>()
+                        .map_or(&[][..], |companions| companions.carried());
+                    ready.adopt_shape(epoch, carried);
                 }
                 self.status.next_absolute_sample = next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
@@ -4992,6 +5057,32 @@ pub struct RenderCompanions {
     meters: Vec<MeterConsumer>,
     /// One reader set per observed effect instance, in `HostLiveControlHandles` order.
     effect_observations: Vec<EffectObservationHandle>,
+    /// What the swap block that adopted this plan carried (#1381b): one move per paired meter or
+    /// observation reader, written by [`HostAttachment::adopt_predecessor`] and read once by the
+    /// block's table hand-over ([`ReadyOwnership::adopt_shape`]). Its length is fixed at
+    /// preparation, one entry per reader, so the hook never grows it.
+    carried: Box<[CarriedReader]>,
+    /// How many entries of `carried` the last swap block wrote.
+    carried_len: u32,
+}
+
+/// One reader the swap block paired with the predecessor's (#1381b): `successor` and `predecessor`
+/// are positions in the two plans' own reader vectors (host-core's order), the indices of the
+/// engine's carry record.
+#[derive(Clone, Copy)]
+struct CarriedReader {
+    kind: ObserverKind,
+    successor: u32,
+    predecessor: u32,
+}
+
+impl CarriedReader {
+    /// The value of an unused entry.
+    const UNUSED: Self = Self {
+        kind: ObserverKind::Meter,
+        successor: 0,
+        predecessor: 0,
+    };
 }
 
 impl RenderCompanions {
@@ -5017,16 +5108,24 @@ impl RenderCompanions {
             spectrum_capture: _,
             meters,
             effect_observations,
+            carried,
+            carried_len: _,
         } = self;
         let shell = u64::try_from(size_of::<Self>()).ok()?;
+        let carried = u64::try_from(carried.len())
+            .ok()?
+            .checked_mul(u64::try_from(size_of::<CarriedReader>()).ok()?)?;
         let meters = u64::try_from(meters.capacity())
             .ok()?
             .checked_mul(u64::try_from(size_of::<MeterConsumer>()).ok()?)?;
         let observations = u64::try_from(effect_observations.capacity())
             .ok()?
             .checked_mul(u64::try_from(size_of::<EffectObservationHandle>()).ok()?)?;
-        let total = shell.checked_add(meters)?.checked_add(observations)?;
-        Some((total, shell.max(meters).max(observations)))
+        let total = shell
+            .checked_add(meters)?
+            .checked_add(observations)?
+            .checked_add(carried)?;
+        Some((total, shell.max(meters).max(observations).max(carried)))
     }
 
     /// Whether the plan was prepared with a spectrum capture (one, or a collection).
@@ -5081,10 +5180,75 @@ struct BootRecord {
     shape: Option<PlanShape>,
 }
 
+impl RenderCompanions {
+    /// What the swap block that adopted this plan paired (#1381b); empty when nothing was.
+    fn carried(&self) -> &[CarriedReader] {
+        self.carried.get(..self.carried_len as usize).unwrap_or(&[])
+    }
+}
+
 impl HostAttachment for RenderCompanions {
     fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
         self
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// Pair the readers the executors carried (#1381 D3; #1327 D3): the successor's meter
+    /// consumers and observation reader sets swap with the predecessor's at the records the
+    /// engine's carry names, through host-core's [`host_core::pair_carried_meters`] and
+    /// [`host_core::pair_carried_observations`]. The browser keeps both vectors in host-core's
+    /// order, so the record's indices address them directly. The pairs are noted for the block's
+    /// table hand-over, which moves the per-slot tap state with them.
+    ///
+    /// Render thread, in the swap block: swaps and scalar writes into storage sized at
+    /// preparation. A predecessor of another type, or a record with no reader, pairs nothing.
+    fn adopt_predecessor(
+        &mut self,
+        predecessor: &mut dyn HostAttachment,
+        carries: &[ObserverCarry],
+    ) {
+        self.carried_len = 0;
+        let Some(previous) = predecessor.as_any_mut().downcast_mut::<Self>() else {
+            return;
+        };
+        host_core::pair_carried_meters(&mut self.meters, &mut previous.meters, carries);
+        host_core::pair_carried_observations(
+            &mut self.effect_observations,
+            &mut previous.effect_observations,
+            carries,
+        );
+        let mut written = 0;
+        for carry in carries {
+            let (successor_len, predecessor_len) = match carry.kind {
+                ObserverKind::Meter => (self.meters.len(), previous.meters.len()),
+                ObserverKind::Observation => (
+                    self.effect_observations.len(),
+                    previous.effect_observations.len(),
+                ),
+                ObserverKind::Spectrum => continue,
+            };
+            if carry.successor >= successor_len || carry.predecessor >= predecessor_len {
+                continue;
+            }
+            let (Ok(successor), Ok(predecessor)) = (
+                u32::try_from(carry.successor),
+                u32::try_from(carry.predecessor),
+            ) else {
+                continue;
+            };
+            let Some(entry) = self.carried.get_mut(written) else {
+                break;
+            };
+            *entry = CarriedReader {
+                kind: carry.kind,
+                successor,
+                predecessor,
+            };
+            written += 1;
+        }
+        self.carried_len = u32::try_from(written).unwrap_or(0);
+    }
+    // REALTIME_POLICY_END
 }
 
 /// The diagnostic code of a preparation that could not leave the plan's tables for the host (a
@@ -5208,10 +5372,24 @@ impl WebRuntimePreparer {
             };
             PrepareDiagnostics::fixed(rejection, code)
         })?;
+        let meters = core::mem::take(&mut handles.meters);
+        let effect_observations = core::mem::take(&mut handles.effect_observations);
+        let mut carried: Vec<CarriedReader> = Vec::new();
+        carried
+            .try_reserve_exact(meters.len() + effect_observations.len())
+            .map_err(|_| {
+                PrepareDiagnostics::fixed(PrepareRejection::Platform, "web.resource.allocation")
+            })?;
+        carried.resize(
+            meters.len() + effect_observations.len(),
+            CarriedReader::UNUSED,
+        );
         let companions = RenderCompanions {
             spectrum_capture,
-            meters: core::mem::take(&mut handles.meters),
-            effect_observations: core::mem::take(&mut handles.effect_observations),
+            meters,
+            effect_observations,
+            carried: carried.into_boxed_slice(),
+            carried_len: 0,
         };
         // The attachment is the plan's own allocation, so the plan's rows charge it: the control
         // plane builds its plan resource row from this report, and nothing else would count the
@@ -5371,6 +5549,10 @@ fn build_plan_shape(
     // `observation_tracks[slot]` is the strip index of that effect slot's observed instance, or
     // `u32::MAX` for a slot with no taps. Built once, here, so the poll's fold is arithmetic.
     let mut observation_tracks = vec![u32::MAX; total_effects as usize];
+    let mut reader_slots: Vec<u32> = Vec::new();
+    reader_slots
+        .try_reserve_exact(observations.len())
+        .map_err(|_| "web.resource.allocation")?;
     let observation_present = vec![false; strip_count];
     for (reader, handle) in observations.iter().enumerate() {
         let Some(strip) = strip_index(&tracks, &submixes, &handle.track_id) else {
@@ -5400,6 +5582,7 @@ fn build_plan_shape(
         arm_samples.resize(tap_count, 0);
         observation_arm_samples[slot] = arm_samples.into_boxed_slice();
         instance.reader = Some(u32::try_from(reader).map_err(|_| "web.live_controls.observation")?);
+        reader_slots.push(u32::try_from(slot).map_err(|_| "web.live_controls.observation")?);
     }
     Ok(PlanShape {
         tracks,
@@ -5408,8 +5591,10 @@ fn build_plan_shape(
         effect_base: effect_base.into_boxed_slice(),
         effect_instances: effect_instances.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),
+        reader_slots: reader_slots.into_boxed_slice(),
         observation_armed: zero_u32(total_effects as usize)?,
         observation_arm_samples: observation_arm_samples.into_boxed_slice(),
+        observation_commanded: zero_u32(total_effects as usize)?,
         master_track,
         command_wanted: zero_u32(total_effects as usize)?,
         observe_named: zero_u32(total_effects as usize)?,
@@ -5452,6 +5637,64 @@ struct ShapeRows {
 }
 
 impl PlanShape {
+    // REALTIME_POLICY_BEGIN
+    /// Take the tap state of the predecessor's reader `predecessor` into this shape's reader
+    /// `successor` (#1381b), for a pair the swap block carried: the armed bits and the arm
+    /// samples of the effect slot each reader sits at (`reader_slots`).
+    ///
+    /// A tap a command named after this plan was committed already holds that command's state
+    /// here (its `observation_commanded` bit is set, whatever sample the command was admitted at)
+    /// and keeps it, so a subscription admitted against the successor is not overwritten by the
+    /// predecessor's older one. Every other tap takes the predecessor's. The bits are cleared once
+    /// the hand-over has read them. Slot tables of different tap counts are left alone: a carried
+    /// reader never has them. Swaps and scalar writes only.
+    fn carry_tap_state(&mut self, predecessor: &mut Self, successor_reader: usize, reader: usize) {
+        let (Some(into), Some(from)) = (
+            self.reader_slots.get(successor_reader).copied(),
+            predecessor.reader_slots.get(reader).copied(),
+        ) else {
+            return;
+        };
+        let (into, from) = (into as usize, from as usize);
+        let (Some(new_samples), Some(old_samples)) = (
+            self.observation_arm_samples.get_mut(into),
+            predecessor.observation_arm_samples.get(from),
+        ) else {
+            return;
+        };
+        if new_samples.len() != old_samples.len() {
+            return;
+        }
+        let old_armed = predecessor
+            .observation_armed
+            .get(from)
+            .copied()
+            .unwrap_or(0);
+        let mut armed = self.observation_armed.get(into).copied().unwrap_or(0);
+        let commanded = self.observation_commanded.get(into).copied().unwrap_or(0);
+        for (tap, (new, old)) in new_samples.iter_mut().zip(old_samples.iter()).enumerate() {
+            let Some(bit) = u32::try_from(tap)
+                .ok()
+                .and_then(|tap| 1_u32.checked_shl(tap))
+            else {
+                continue;
+            };
+            if commanded & bit != 0 {
+                continue;
+            }
+            *new = *old;
+            armed = (armed & !bit) | (old_armed & bit);
+        }
+        if let Some(slot) = self.observation_armed.get_mut(into) {
+            *slot = armed;
+        }
+        if let Some(slot) = self.observation_commanded.get_mut(into) {
+            *slot = 0;
+        }
+    }
+
+    // REALTIME_POLICY_END
+
     /// The rows this shape is charged, or `None` on arithmetic overflow.
     fn bridge_rows(&self) -> Option<ShapeRows> {
         // The IDs the dense instance table copies out of the producers are retained beside the arm
@@ -5486,7 +5729,15 @@ impl PlanShape {
                 })?;
         let arm_table_bytes = u64::try_from(self.effect_instances.len())
             .ok()?
-            .checked_mul((size_of::<Box<[u64]>>() + size_of::<Option<EffectInstance>>()) as u64)?;
+            .checked_mul(
+                (size_of::<Box<[u64]>>() + size_of::<Option<EffectInstance>>() + size_of::<u32>())
+                    as u64,
+            )?
+            .checked_add(
+                u64::try_from(self.reader_slots.len())
+                    .ok()?
+                    .checked_mul(size_of::<u32>() as u64)?,
+            )?;
         let pending_bytes = u64::try_from(self.meter_pending.len())
             .ok()?
             .checked_mul(size_of::<Option<MeterSnapshot>>() as u64)?;

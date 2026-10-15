@@ -57,6 +57,32 @@ thread_local! {
     static TEST_ONLY_BANK_METER_DECLINED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     static TEST_ONLY_BANK_METER_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_ONLY_CARRY_PAYLOAD_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Zero the count of payload bytes a plan swap's effect carry has passed through the payload
+/// scratch (#1282 D2, gate 4).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_reset_carry_payload_bytes() {
+    TEST_ONLY_CARRY_PAYLOAD_BYTES.with(|value| value.set(0));
+}
+
+/// The bytes of effect state the carry has moved through the payload scratch since the last
+/// [`test_only_reset_carry_payload_bytes`], on this thread: each lane move that snapshots into the
+/// scratch and restores from it adds its layout's payload. An instance moved by pointer
+/// ([`LiveControlEffect::move_from`]) adds nothing.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_carry_payload_bytes() -> u64 {
+    TEST_ONLY_CARRY_PAYLOAD_BYTES.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[inline]
+fn test_only_note_carry_payload(bytes: u64) {
+    TEST_ONLY_CARRY_PAYLOAD_BYTES.with(|value| value.set(value.get().saturating_add(bytes)));
 }
 
 /// Decline (`true`) or restore (`false`) the banked sample-peak pass of issue #943, and reset its
@@ -896,10 +922,10 @@ impl LiveRoute {
     ///
     /// The cell holds the newest value whose revision is `<= S`, never a newer or torn one, and
     /// never skips it (#1312 D1). When it applies sequence `s` after `p`, the `s - p - 1` writes
-    /// it replaced are added to the session's `live_values_superseded` (#1312 D2). The drain runs
+    /// it replaced are added to the session's `live_values_superseded` (#1312 D2). The read runs
     /// in every block, active route or not (#1504 D3). It allocates nothing and takes no lock.
     #[inline]
-    fn drain(&mut self, snapshot: LiveSnapshot) -> usize {
+    fn apply_pending(&mut self, snapshot: LiveSnapshot) -> usize {
         let control = &mut *self.control;
         let mut applied = 0;
         if control.dirty.pending(&control.lane.dirty) & 1 != 0
@@ -945,6 +971,17 @@ impl LiveRoute {
         route_mix_ramp_block::<FrameLane>(left, right, &self.ramp, self.position);
         let frames = u32::try_from(left.len()).unwrap_or(u32::MAX);
         self.position = core::cmp::min(self.position.saturating_add(frames), self.ramp.length);
+    }
+
+    /// Take the ramp state of `from`, the live route of the same ID in the plan this one displaces
+    /// (#1284 D2): the ramp, how far into it the route is, and its mute. The caller has applied the
+    /// predecessor's pending value ([`Self::apply_pending`] under every snapshot) first, so the successor
+    /// continues exactly where the predecessor's next block would have. The lane, the route index
+    /// and the compensation flag stay: they are this plan's own. A bounded copy of three fields.
+    fn adopt(&mut self, from: &Self) {
+        self.ramp = from.ramp;
+        self.position = from.position;
+        self.mute = from.mute;
     }
 }
 
@@ -1011,6 +1048,41 @@ impl CompensationDelay {
             offset += take;
         }
     }
+
+    /// Take the pending samples of `from`, the line of the same edge in the plan this one
+    /// displaces (#1283 D2, D4).
+    ///
+    /// Two lines of one length exchange their rings and cursors, so the successor emits exactly
+    /// what the predecessor would have and no word is copied. Lines of another length take a
+    /// head-aligned copy ([`carry_head_aligned`]) of each channel: the successor emits the
+    /// predecessor's pending samples first, oldest first, cut short or followed by `+0.0`.
+    /// Allocation-free; `from` is left in an unspecified state, for it retires.
+    pub(crate) fn adopt(&mut self, from: &mut Self) {
+        if self.left.len() == from.left.len() {
+            core::mem::swap(&mut self.left, &mut from.left);
+            core::mem::swap(&mut self.right, &mut from.right);
+            core::mem::swap(&mut self.cursor, &mut from.cursor);
+            return;
+        }
+        carry_head_aligned(&mut self.left, &from.left, from.cursor);
+        carry_head_aligned(&mut self.right, &from.right, from.cursor);
+        self.cursor = 0;
+    }
+}
+
+/// One channel of [`CompensationDelay::adopt`] between rings of different lengths (#1283 D4, D5).
+///
+/// `from` is a delay ring whose oldest pending word sits at `cursor` and whose age order wraps
+/// there. The first `into.len()` words of that order land at the front of `into`, and any words
+/// `into` has beyond that are `+0.0`. At most two slice copies and one fill, in either direction
+/// of the length change.
+fn carry_head_aligned(into: &mut [f32], from: &[f32], cursor: usize) {
+    let take = core::cmp::min(into.len(), from.len());
+    let first = core::cmp::min(take, from.len() - cursor);
+    into[..first].copy_from_slice(&from[cursor..cursor + first]);
+    let wrapped = take - first;
+    into[first..take].copy_from_slice(&from[..wrapped]);
+    into[take..].fill(0.0);
 }
 // REALTIME_POLICY_END
 
@@ -1082,6 +1154,29 @@ impl TrackDelayLine {
     pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         delay_lane(&mut self.left, &mut self.left_cursor, left);
         delay_lane(&mut self.right, &mut self.right_cursor, right);
+    }
+
+    /// Whether each lane of `lanes` (bit 0 the left, bit 1 the right) is a ring of the length
+    /// `from`'s is (#1284 D1): the only case a ring and its cursor can change hands.
+    pub(crate) const fn lanes_match(&self, from: &Self, lanes: u8) -> bool {
+        (lanes & crate::STRIP_DELAY_LEFT == 0 || self.left.len() == from.left.len())
+            && (lanes & crate::STRIP_DELAY_RIGHT == 0 || self.right.len() == from.right.len())
+    }
+
+    /// Take the pending samples of the lanes of `lanes` from `from`, the line of the same strip in
+    /// the plan this one displaces (#1284 D1). Two rings of one length exchange their words and
+    /// their cursors, so the successor emits exactly what the predecessor would have, and no word
+    /// is copied. The caller has checked [`Self::lanes_match`]. Allocation-free; `from` is left in
+    /// an unspecified state, for it retires.
+    pub(crate) fn adopt(&mut self, from: &mut Self, lanes: u8) {
+        if lanes & crate::STRIP_DELAY_LEFT != 0 {
+            core::mem::swap(&mut self.left, &mut from.left);
+            core::mem::swap(&mut self.left_cursor, &mut from.left_cursor);
+        }
+        if lanes & crate::STRIP_DELAY_RIGHT != 0 {
+            core::mem::swap(&mut self.right, &mut from.right);
+            core::mem::swap(&mut self.right_cursor, &mut from.right_cursor);
+        }
     }
 }
 
@@ -1276,6 +1371,39 @@ impl LiveControlEffect {
             shunt: &mut self.shunt,
         }
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// Whether [`Self::move_from`] would take `predecessor` into this instance at a plan swap
+    /// (#1282 D2): one effect, one state layout, prepared bypass and latency; control lanes of one
+    /// kind and one cell shape, this one holding its carried slots (#1633); and shunts allocated
+    /// for the same block and latency. Allocation-free and constant time.
+    fn can_move_from(&self, predecessor: &Self) -> bool {
+        self.layout == predecessor.layout
+            && rack::EffectLaneKind::of_instance(&self.control)
+                == rack::EffectLaneKind::of_instance(&predecessor.control)
+            && self.control.can_carry_from(&predecessor.control)
+            && self.shunt.same_shape(&predecessor.shunt)
+    }
+
+    /// Take `predecessor`'s whole instance at the swap block, by pointer (#1282 D2): the two
+    /// processor boxes and the two shunts are exchanged, so this plan's instance continues the
+    /// predecessor's state exactly (a ramp in flight, a delay's line) with no payload, no copy and
+    /// no allocation, and the predecessor's plan keeps this plan's at-rest ones to retire with it.
+    /// The control lane takes the predecessor's live state through
+    /// [`EffectControlLane::carry_from`]. The staging window and the observation lane stay: each
+    /// plan sized its own, and the tap state is the observer carry's (#1327).
+    ///
+    /// The caller has checked [`Self::can_move_from`], and `predecessor` never renders again.
+    fn move_from(&mut self, predecessor: &mut Self) {
+        let carried = self.control.carry_from(&predecessor.control);
+        debug_assert!(carried, "a checked control lane carries");
+        core::mem::swap(
+            &mut self.effect.processor,
+            &mut predecessor.effect.processor,
+        );
+        core::mem::swap(&mut self.shunt, &mut predecessor.shunt);
+    }
+    // REALTIME_POLICY_END
 
     /// This instance's pending-`Observe` drain for a plan swap's carry (#1281, #1280 D3): its
     /// queue and its tap. Pops nothing; the carry pops in a loop of its own. `None` when the
@@ -3546,7 +3674,7 @@ fn execute_op(
     // (an inactive op that skipped the drain would never see its unmute), then decides this
     // block's activity once and writes it before its destination, a later unit, reduces.
     if let NodeKind::LiveRoute(live) = &mut op.kind {
-        let _applied = live.drain(snapshot);
+        let _applied = live.apply_pending(snapshot);
         let active = live.active();
         if let Some((activity, _)) = routes.as_mut() {
             activity.set_active(live.route as usize, active);
@@ -4442,6 +4570,48 @@ impl<'a> EffectStageMut<'a> {
             Self::Live(stage) => stage.observe_target_mut(lane),
         }
     }
+
+    /// The observation tap state of a live stage's lane (#1327 D2). A plain stage has no control
+    /// lane, so no tap.
+    fn into_observation(self, lane: usize) -> Option<&'a mut ObservationLane> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Live(stage) => stage.observation_mut(lane),
+        }
+    }
+}
+
+/// The observation tap state of the effect instance at `site` (#1327 D2): a live stage's lane, or
+/// a per-node instance. Allocation-free.
+fn observation_at_mut(
+    units: &mut [crate::runtime::RuntimeUnit],
+    site: crate::GraphEffectSite,
+) -> Option<&mut ObservationLane> {
+    match site {
+        crate::GraphEffectSite::Lane(at) => {
+            let (chain, slot, lane) = effect_lane_mut(units, at)?;
+            effect_stage_mut(chain, slot)?.into_observation(lane)
+        }
+        crate::GraphEffectSite::Node(unit) => {
+            effect_node_mut(units, unit)?.observation.as_deref_mut()
+        }
+    }
+}
+
+/// Note that effect move `index` carried, for the tap move bound to it (#1327 D1). `taps` is
+/// sorted by effect move and `cursor` only advances, so a whole carry is one pass over it. The
+/// carry marks moves in ascending index order.
+fn mark_effect_move_taken(taps: &mut [crate::ObserverTapMove], cursor: &mut usize, index: usize) {
+    while let Some(tap) = taps.get_mut(*cursor) {
+        if tap.effect_move < index {
+            *cursor += 1;
+        } else {
+            if tap.effect_move == index {
+                tap.taken = true;
+            }
+            return;
+        }
+    }
 }
 
 /// The pending-`Observe` drain of the predecessor instance at `site`: its queue, tap and unbound
@@ -4513,9 +4683,90 @@ fn effect_node_mut(
         crate::runtime::RuntimeUnit::Bank { .. } => None,
     }
 }
+
+/// The live route whose op sits in runtime unit `unit` (#1284 D2). Allocation-free: a
+/// bounds-checked unit borrow and a match.
+fn live_route_of(units: &[RuntimeUnit], unit: u32) -> Option<&LiveRoute> {
+    match units.get(unit as usize)? {
+        RuntimeUnit::Op(op) => match &op.kind {
+            NodeKind::LiveRoute(live) => Some(live),
+            _ => None,
+        },
+        RuntimeUnit::Bank { .. } => None,
+    }
+}
+
+/// [`live_route_of`], mutably.
+fn live_route_mut(units: &mut [RuntimeUnit], unit: u32) -> Option<&mut LiveRoute> {
+    match units.get_mut(unit as usize)? {
+        RuntimeUnit::Op(op) => match &mut op.kind {
+            NodeKind::LiveRoute(live) => Some(live),
+            _ => None,
+        },
+        RuntimeUnit::Bank { .. } => None,
+    }
+}
+
+/// The observer binding at `at` (#1327 D2): a bounds-checked unit, member and index lookup.
+/// Allocation-free. `None` when `at` names no observer, including a member of a unit that is one
+/// op and no member of a bank.
+fn observer_at_mut(
+    units: &mut [RuntimeUnit],
+    at: crate::GraphObserverLocation,
+) -> Option<&mut GraphNodeObserverBinding> {
+    let op = match units.get_mut(at.unit as usize)? {
+        RuntimeUnit::Op(op) if at.member == crate::GraphObserverLocation::NO_MEMBER => op,
+        RuntimeUnit::Op(_) => return None,
+        RuntimeUnit::Bank { members, .. } => members.get_mut(at.member as usize)?,
+    };
+    op.observers.get_mut(at.index as usize)
+}
 // REALTIME_POLICY_END
 
 impl crate::runtime::Runtime {
+    /// The bytes of carried slots the effect instance at `site` holds once a carry is installed
+    /// into it (#1633 D1): the cell tables of its control lane. Zero for a stage without control
+    /// lanes and for a lane without cells; `None` when `site` resolves to no instance.
+    pub(crate) fn effect_site_carry_slot_bytes(
+        &mut self,
+        site: crate::GraphEffectSite,
+    ) -> Option<u64> {
+        match site {
+            crate::GraphEffectSite::Lane(at) => {
+                let (chain, slot, lane) = effect_lane_mut(&mut self.units, at)?;
+                Some(match effect_stage_mut(chain, slot)? {
+                    EffectStageMut::Plain(_) => 0,
+                    EffectStageMut::Live(stage) => stage.carry_slot_bytes(lane),
+                })
+            }
+            crate::GraphEffectSite::Node(unit) => Some(
+                effect_node_mut(&mut self.units, unit)?
+                    .control
+                    .carry_slot_bytes(),
+            ),
+        }
+    }
+
+    /// Allocate the carried slots of the successor instance at `site` (#1633 D1). Off the render
+    /// thread. A site that resolves to a stage without control lanes or a lane without cells
+    /// takes none.
+    pub(crate) fn install_effect_carry_slots(&mut self, site: crate::GraphEffectSite) {
+        match site {
+            crate::GraphEffectSite::Lane(at) => {
+                if let Some((chain, slot, lane)) = effect_lane_mut(&mut self.units, at)
+                    && let Some(EffectStageMut::Live(stage)) = effect_stage_mut(chain, slot)
+                {
+                    stage.install_carry_slots(lane);
+                }
+            }
+            crate::GraphEffectSite::Node(unit) => {
+                if let Some(node) = effect_node_mut(&mut self.units, unit) {
+                    node.control.install_carry_slots();
+                }
+            }
+        }
+    }
+
     /// Every banked strip input section of this runtime: `(strip ID, location)`, in program order
     /// (issue #1276 D6). Read off the render thread, after bind.
     pub(crate) fn builtin_input_lanes(&mut self) -> Vec<(Box<str>, crate::GraphLaneLocation)> {
@@ -4881,11 +5132,128 @@ impl crate::runtime::Runtime {
         }
     }
 
+    /// Whether every move of `moves` names a compensation line of this (successor) runtime and a
+    /// compensation line of `predecessor` (#1283). Checked before anything moves, so the carry is
+    /// all or nothing. Allocation-free.
+    pub(crate) fn can_carry_delay_lines(
+        &self,
+        predecessor: &Self,
+        moves: &[crate::GraphDelayMove],
+    ) -> bool {
+        moves.iter().all(|step| {
+            (step.successor as usize) < self.delays.len()
+                && (step.predecessor as usize) < predecessor.delays.len()
+        })
+    }
+
+    /// Run the compensation-line section of a carry program at the swap block (#1283 D2, D4):
+    /// each successor line takes the pending samples of its predecessor line
+    /// ([`CompensationDelay::adopt`]). Bounded by `moves.len()`; allocation-free. The caller has
+    /// checked [`Self::can_carry_delay_lines`].
+    pub(crate) fn carry_delay_lines(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphDelayMove],
+    ) {
+        for step in moves.iter() {
+            let (Some(into), Some(from)) = (
+                self.delays.get_mut(step.successor as usize),
+                predecessor.delays.get_mut(step.predecessor as usize),
+            ) else {
+                continue;
+            };
+            into.adopt(from);
+        }
+    }
+
+    /// Whether the unit `unit` of this runtime is a live route's op (#1284 D2).
+    pub(crate) fn is_live_route(&self, unit: u32) -> bool {
+        live_route_of(&self.units, unit).is_some()
+    }
+
+    /// Whether every move of `moves` names a strip delay line of this (successor) runtime and one
+    /// of `predecessor` whose carried lanes have the same length (#1284 D1). Checked before
+    /// anything moves, so the carry is all or nothing. Allocation-free.
+    pub(crate) fn can_carry_strip_delays(
+        &self,
+        predecessor: &Self,
+        moves: &[crate::GraphStripDelayMove],
+    ) -> bool {
+        moves.iter().all(|step| {
+            match (
+                self.track_delays.get(step.successor as usize),
+                predecessor.track_delays.get(step.predecessor as usize),
+            ) {
+                (Some(into), Some(from)) => into.lanes_match(from, step.lanes),
+                _ => false,
+            }
+        })
+    }
+
+    /// Run the strip-delay section of a carry program at the swap block (#1284 D1): each successor
+    /// line takes the pending samples of the lanes of its predecessor line
+    /// ([`TrackDelayLine::adopt`]). Bounded by `moves.len()`; allocation-free. The caller has
+    /// checked [`Self::can_carry_strip_delays`].
+    pub(crate) fn carry_strip_delays(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphStripDelayMove],
+    ) {
+        for step in moves.iter() {
+            let (Some(into), Some(from)) = (
+                self.track_delays.get_mut(step.successor as usize),
+                predecessor.track_delays.get_mut(step.predecessor as usize),
+            ) else {
+                continue;
+            };
+            into.adopt(from, step.lanes);
+        }
+    }
+
+    /// Whether every move of `moves` names a live route unit of this (successor) runtime and one
+    /// of `predecessor` (#1284 D2). Checked before anything moves, so the carry is all or nothing.
+    /// Allocation-free.
+    pub(crate) fn can_carry_live_routes(
+        &self,
+        predecessor: &Self,
+        moves: &[crate::GraphRouteMove],
+    ) -> bool {
+        moves.iter().all(|step| {
+            live_route_of(&self.units, step.successor).is_some()
+                && live_route_of(&predecessor.units, step.predecessor).is_some()
+        })
+    }
+
+    /// Run the live-send section of a carry program at the swap block (#1284 D2): the
+    /// predecessor's pending value is applied under every snapshot, as its next block would apply
+    /// it ([`LiveRoute::apply_pending`]), and then the successor takes its ramp, position and mute
+    /// ([`LiveRoute::adopt`]). Bounded by `moves.len()`; allocation-free and lock-free. The
+    /// caller has checked [`Self::can_carry_live_routes`].
+    pub(crate) fn carry_live_routes(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphRouteMove],
+    ) {
+        for step in moves.iter() {
+            let (Some(into), Some(from)) = (
+                live_route_mut(&mut self.units, step.successor),
+                live_route_mut(&mut predecessor.units, step.predecessor),
+            ) else {
+                continue;
+            };
+            // Admission validated the cell's words; the count of values this applies is the
+            // drain's own, added to the session's `live_values_superseded` as at a block.
+            from.apply_pending(LiveSnapshot::ALL);
+            into.adopt(from);
+        }
+    }
+
     /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,
     /// to two effect instances a carry would join, with a scratch of `scratch_bytes` (issues #1279
     /// D3, #1281): two lanes of stages [`rack::EffectBankStage::can_carry_lane_from`] or its live
-    /// twin would join, or a lane of a live stage and a per-node instance it
-    /// [`rack::LiveControlEffectBankStage::can_carry_instance`] accepts. Checked before anything
+    /// twin would join, a lane of a live stage and a per-node instance it
+    /// [`rack::LiveControlEffectBankStage::can_carry_instance`] accepts, or two per-node instances
+    /// [`LiveControlEffect::can_move_from`] accepts (#1282). Checked before anything
     /// moves, so the carry is all or nothing. Allocation-free.
     pub(crate) fn can_carry_effect_lanes(
         &mut self,
@@ -4940,10 +5308,16 @@ impl crate::runtime::Runtime {
                     matches!(
                         effect_stage_mut(chain, slot),
                         Some(EffectStageMut::Live(from))
-                            if from.can_carry_instance(predecessor_lane, &node.control, scratch_bytes)
+                            if from.can_carry_lane_into_instance(predecessor_lane, &node.control, scratch_bytes)
                     )
                 }
-                (Node(_), Node(_)) => false,
+                (Node(successor), Node(before)) => {
+                    let Some(from) = effect_node_mut(&mut predecessor.units, before) else {
+                        return false;
+                    };
+                    effect_node_mut(&mut self.units, successor)
+                        .is_some_and(|into| into.can_move_from(from))
+                }
             })
     }
 
@@ -4972,11 +5346,13 @@ impl crate::runtime::Runtime {
         moves: &[crate::GraphEffectMove],
         scratch: &mut [u8],
         predecessor_next_sample: u64,
+        taps: &mut [crate::ObserverTapMove],
     ) -> u64 {
         use crate::GraphEffectSite::{Lane, Node};
         let mut disengaged: Option<u32> = None;
         let mut node_refused = 0_u64;
-        for step in moves {
+        let mut tap_cursor = 0_usize;
+        for (index, step) in moves.iter().enumerate() {
             match (step.successor, step.predecessor) {
                 (Lane(successor), Lane(before)) => {
                     let Some((chain, slot, predecessor_lane)) =
@@ -4999,8 +5375,11 @@ impl crate::runtime::Runtime {
                     let Some(mut into) = effect_stage_mut(chain, slot) else {
                         continue;
                     };
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_note_carry_payload(into.layout().payload_bytes());
                     if into.carry_lane_from(lane, &from, predecessor_lane, scratch) {
                         chain.inherit_channel_agreement(agree);
+                        mark_effect_move_taken(taps, &mut tap_cursor, index);
                     }
                 }
                 (Lane(successor), Node(before)) => {
@@ -5012,7 +5391,11 @@ impl crate::runtime::Runtime {
                         continue;
                     };
                     if let Some(EffectStageMut::Live(into)) = effect_stage_mut(chain, slot) {
-                        into.carry_lane_from_instance(lane, node.instance(), scratch);
+                        #[cfg(any(test, feature = "test-support"))]
+                        test_only_note_carry_payload(into.layout().payload_bytes());
+                        if into.carry_lane_from_instance(lane, node.instance(), scratch) {
+                            mark_effect_move_taken(taps, &mut tap_cursor, index);
+                        }
                     }
                 }
                 (Node(successor), Lane(before)) => {
@@ -5031,17 +5414,30 @@ impl crate::runtime::Runtime {
                     let Some(node) = effect_node_mut(&mut self.units, successor) else {
                         continue;
                     };
-                    if let EffectStageMut::Live(stage) = &from
-                        && !stage.carry_lane_into_instance(
+                    #[cfg(any(test, feature = "test-support"))]
+                    test_only_note_carry_payload(node.layout.payload_bytes());
+                    if let EffectStageMut::Live(stage) = &from {
+                        if stage.carry_lane_into_instance(
                             predecessor_lane,
                             node.instance_mut(),
                             scratch,
-                        )
-                    {
-                        node_refused = node_refused.saturating_add(1);
+                        ) {
+                            mark_effect_move_taken(taps, &mut tap_cursor, index);
+                        } else {
+                            node_refused = node_refused.saturating_add(1);
+                        }
                     }
                 }
-                (Node(_), Node(_)) => {}
+                (Node(successor), Node(before)) => {
+                    let Some(from) = effect_node_mut(&mut predecessor.units, before) else {
+                        continue;
+                    };
+                    let Some(into) = effect_node_mut(&mut self.units, successor) else {
+                        continue;
+                    };
+                    into.move_from(from);
+                    mark_effect_move_taken(taps, &mut tap_cursor, index);
+                }
             }
         }
         // The predecessor never renders again: an `Observe` record admitted after its last block
@@ -5080,7 +5476,156 @@ impl crate::runtime::Runtime {
         }
         node_refused
     }
+
+    /// Whether the effect instance at `site` holds an observation lane (#1327 D1), which a tap
+    /// move needs of its successor. Off the render thread.
+    pub(crate) fn has_observation_lane(&mut self, site: crate::GraphEffectSite) -> bool {
+        observation_at_mut(&mut self.units, site).is_some()
+    }
+
+    /// Run the effect tap section of a carry program at the swap block (#1327 D1, D2): for each
+    /// tap move whose effect move carried (`taken`), the successor instance's observation lane and
+    /// the predecessor's exchange their whole tap state, publisher included. It runs after
+    /// [`Self::carry_effect_lanes`], which applied the predecessor's pending `Observe` records to
+    /// its taps as their next block would have, so the successor continues the window the
+    /// predecessor would have published. Each carried move is written to `record` in order, and
+    /// the count written is returned. A pair of lanes with different tap menus exchanges nothing
+    /// and is not recorded. Bounded by `taps.len()`; allocation-free, and never panics.
+    pub(crate) fn carry_taps(
+        &mut self,
+        predecessor: &mut Self,
+        taps: &[crate::ObserverTapMove],
+        record: &mut [engine::realtime::ObserverCarry],
+    ) -> usize {
+        let mut carried = 0;
+        for tap in taps.iter().filter(|tap| tap.taken) {
+            let (Some(into), Some(from)) = (
+                observation_at_mut(&mut self.units, tap.step.successor),
+                observation_at_mut(&mut predecessor.units, tap.step.predecessor),
+            ) else {
+                continue;
+            };
+            let Some(slot) = record.get_mut(carried) else {
+                continue;
+            };
+            if into.swap_state(from) {
+                *slot = engine::realtime::ObserverCarry {
+                    kind: engine::realtime::ObserverKind::Observation,
+                    successor: tap.step.successor_entry,
+                    predecessor: tap.step.predecessor_entry,
+                };
+                carried += 1;
+            }
+        }
+        carried
+    }
+
+    /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,
+    /// to an observer that answers the move's kind (#1327 D2). Checked before anything moves, so
+    /// the carry is all or nothing. Allocation-free.
+    pub(crate) fn can_carry_observers(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphObserverMove],
+    ) -> bool {
+        moves.iter().all(|step| {
+            observer_at_mut(&mut self.units, step.successor)
+                .is_some_and(|into| into.observer.carry_kind() == Some(step.kind))
+                && observer_at_mut(&mut predecessor.units, step.predecessor)
+                    .is_some_and(|from| from.observer.carry_kind() == Some(step.kind))
+        })
+    }
+
+    /// Run the observer section of a carry program at the swap block (#1327 D2, D3, D6).
+    ///
+    /// For each move the two boxed observers exchange places, so the successor's binding holds
+    /// the predecessor's whole state, producer included, and the predecessor's binding holds the
+    /// fresh observer; each then takes the handle of the binding that holds it. Each carried move
+    /// is written to `record` in order. Then every join opens its fresh observer's first window
+    /// where its donor's open window is. Returns how many moves carried, which is how many
+    /// entries of `record` are written. The caller has checked [`Self::can_carry_observers`].
+    /// Bounded by `moves.len() + joins.len()`; allocation-free, and never panics.
+    pub(crate) fn carry_observers(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphObserverMove],
+        joins: &[crate::GraphObserverJoin],
+        record: &mut [engine::realtime::ObserverCarry],
+    ) -> usize {
+        let mut carried = 0;
+        for step in moves {
+            let (Some(into), Some(from)) = (
+                observer_at_mut(&mut self.units, step.successor),
+                observer_at_mut(&mut predecessor.units, step.predecessor),
+            ) else {
+                continue;
+            };
+            let Some(slot) = record.get_mut(carried) else {
+                continue;
+            };
+            core::mem::swap(&mut into.observer, &mut from.observer);
+            into.observer.adopt_binding_handle(into.handle);
+            from.observer.adopt_binding_handle(from.handle);
+            *slot = engine::realtime::ObserverCarry {
+                kind: step.kind,
+                successor: step.successor_entry,
+                predecessor: step.predecessor_entry,
+            };
+            carried += 1;
+        }
+        for join in joins {
+            let Some(position) = observer_at_mut(&mut self.units, join.donor)
+                .and_then(|donor| donor.observer.window_position())
+            else {
+                continue;
+            };
+            if let Some(fresh) = observer_at_mut(&mut self.units, join.fresh) {
+                fresh.observer.join_window(position);
+            }
+        }
+        carried
+    }
     // REALTIME_POLICY_END
+
+    /// Every observer a swap can carry: those that answer
+    /// [`crate::GraphRuntimeObserver::carry_kind`], in program order (#1327 D2). Read off the
+    /// render thread, after bind.
+    pub(crate) fn observer_rows(&mut self) -> Vec<crate::GraphObserverRow> {
+        let mut rows = Vec::new();
+        for (unit, runtime_unit) in self.units.iter().enumerate() {
+            let Ok(unit) = u32::try_from(unit) else {
+                continue;
+            };
+            let mut visit = |member: u32, op: &RuntimeOp| {
+                for (index, binding) in op.observers.iter().enumerate() {
+                    if let (Some(kind), Ok(index)) =
+                        (binding.observer.carry_kind(), u32::try_from(index))
+                    {
+                        rows.push(crate::GraphObserverRow {
+                            kind,
+                            handle: binding.handle,
+                            location: crate::GraphObserverLocation {
+                                unit,
+                                member,
+                                index,
+                            },
+                        });
+                    }
+                }
+            };
+            match runtime_unit {
+                RuntimeUnit::Op(op) => visit(crate::GraphObserverLocation::NO_MEMBER, op),
+                RuntimeUnit::Bank { members, .. } => {
+                    for (member, op) in members.iter().enumerate() {
+                        if let Ok(member) = u32::try_from(member) {
+                            visit(member, op);
+                        }
+                    }
+                }
+            }
+        }
+        rows
+    }
 }
 
 /// A padded group's active mask **is** its membership: the planner emits `Some` members before
@@ -5356,6 +5901,9 @@ pub(crate) struct RuntimeParts {
     track_delays: BTreeMap<GraphNodeId, [u32; 2]>,
     /// The lines `node_kind` allocated, in the order it allocated them.
     track_delay_lines: Vec<TrackDelayLine>,
+    /// The `Input` node each line of [`Self::track_delay_lines`] was allocated for, in the same
+    /// order (#1284 D1): the identity a successor's preparation joins its lines by.
+    track_delay_nodes: Vec<GraphNodeId>,
     banks: Vec<Option<GraphPreparedEffectBank>>,
     builtin_banks: Vec<Option<GraphPreparedBuiltinBank>>,
     membership: BankMembership,
@@ -5476,6 +6024,7 @@ impl RuntimeParts {
                 .map(|delay| (delay.node, [delay.left_samples, delay.right_samples]))
                 .collect(),
             track_delay_lines: Vec::new(),
+            track_delay_nodes: Vec::new(),
             banks: banks.into_iter().map(Some).collect(),
             builtin_banks: builtin_banks.into_iter().map(Some).collect(),
             membership,
@@ -5515,6 +6064,7 @@ impl RuntimeParts {
                         u32::try_from(self.track_delay_lines.len()).expect("delay line index");
                     self.track_delay_lines
                         .push(TrackDelayLine::new(left as usize, right as usize));
+                    self.track_delay_nodes.push(node.clone());
                     NodeKind::TrackDelay {
                         line,
                         channels_agree: left == right,
@@ -5558,6 +6108,7 @@ impl RuntimeParts {
             let line = u32::try_from(self.track_delay_lines.len()).expect("delay line index");
             self.track_delay_lines
                 .push(TrackDelayLine::new(left as usize, right as usize));
+            self.track_delay_nodes.push(node.clone());
             NodeKind::SumDelay {
                 line,
                 channels_agree: left == right,
@@ -6614,7 +7165,7 @@ pub(crate) fn build_sequential(
     frames: usize,
     planning: SequentialPlan,
     source_claims: &[GraphNodeId],
-) -> Runtime {
+) -> (Runtime, BindIdentities) {
     #[cfg(any(test, feature = "test-support"))]
     test_only_reset_selected_split_fader();
     let mut parts = parts;
@@ -6836,6 +7387,7 @@ pub(crate) fn build_sequential(
         bind_live_routes(&mut units, &activity, &delayed);
         activity
     });
+    let live_routes = live_route_rows(&units, &route_gates);
     #[cfg(any(test, feature = "test-support"))]
     test_only_record_route_activity(route_activity.is_some(), &route_gates);
     let arena = DisjointArena::try_new(
@@ -6859,6 +7411,7 @@ pub(crate) fn build_sequential(
         source_claims,
         &mut identity,
     );
+    let strip_delays = strip_delay_rows(&parts.track_delay_nodes, &parts.track_delay_lines);
     let mut runtime = Runtime::new_with_output_unit(
         arena,
         delays,
@@ -6875,7 +7428,72 @@ pub(crate) fn build_sequential(
     );
     runtime.source_plane_of_buffer = source_plane_of_buffer;
     runtime.route_activity = route_activity;
-    runtime
+    (
+        runtime,
+        BindIdentities {
+            strip_delays,
+            live_routes,
+        },
+    )
+}
+
+/// What bind knows about the state a successor can take from this plan and the runtime does not
+/// keep (#1284): who owns each strip delay line and each live route. Read once, off the render
+/// thread, right after bind ([`crate::take_strip_delay_lines`], [`crate::take_live_routes`]);
+/// the plan retains none of it.
+#[derive(Default)]
+pub(crate) struct BindIdentities {
+    pub(crate) strip_delays: Vec<crate::GraphStripDelayLine>,
+    pub(crate) live_routes: Vec<crate::GraphLiveRoute>,
+}
+
+/// The strip delay lines of a bind, in line order (#1284 D1): `nodes[line]` is the `Input` node the
+/// line was allocated for.
+fn strip_delay_rows(
+    nodes: &[GraphNodeId],
+    lines: &[TrackDelayLine],
+) -> Vec<crate::GraphStripDelayLine> {
+    nodes
+        .iter()
+        .zip(lines)
+        .enumerate()
+        .map(|(line, (node, delay))| crate::GraphStripDelayLine {
+            strip: node_track(node),
+            line: u32::try_from(line).expect("a delay line index fits the program's index width"),
+            samples: [
+                u32::try_from(delay.left.len()).expect("a lane's delay fits the schema's maximum"),
+                u32::try_from(delay.right.len()).expect("a lane's delay fits the schema's maximum"),
+            ],
+        })
+        .collect()
+}
+
+/// The live routes of a bind, in unit order (#1284 D2): the route's session ID and its runtime
+/// unit. `route_gates` are the prepared routes in canonical route-ID order, which a live route's
+/// index points into.
+fn live_route_rows(
+    units: &[RuntimeUnit],
+    route_gates: &[(GraphNodeId, RouteGate)],
+) -> Vec<crate::GraphLiveRoute> {
+    units
+        .iter()
+        .enumerate()
+        .filter_map(|(unit, owner)| {
+            let RuntimeUnit::Op(op) = owner else {
+                return None;
+            };
+            let NodeKind::LiveRoute(live) = &op.kind else {
+                return None;
+            };
+            let GraphNodeId::Route { route_id } = &route_gates.get(live.route as usize)?.0 else {
+                return None;
+            };
+            Some(crate::GraphLiveRoute {
+                route_id: Box::from(route_id.as_str()),
+                unit: u32::try_from(unit).expect("a unit index fits the op index width"),
+            })
+        })
+        .collect()
 }
 
 /// Issue #1217 D5: the executor's [`RouteActivity`], or `None` when no route gate silences.
@@ -11666,6 +12284,115 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #1283 gate 3: a successor line emits the predecessor's pending samples first, oldest
+    /// first, then (for a longer line) `+0.0`, then its own input; a shorter line cuts the
+    /// pending samples off. The predecessor has taken every number of frames from zero to two
+    /// lines and a block, so its cursor sits at every position and has wrapped, and its blocks
+    /// are not a multiple of its length. Red mutation: start the copy at the write position
+    /// (`cursor`) of the successor, or at index 0 of the predecessor's ring instead of its
+    /// cursor, and the pending order is wrong at every cursor but zero.
+    #[test]
+    fn a_successor_line_continues_the_predecessors_pending_samples_head_aligned() {
+        const BLOCK: usize = 5;
+        // The sample a channel carries at time `t`: distinct, never zero, and different on the
+        // two channels.
+        let sample = |t: usize, channel: usize| (t + 1) as f32 * 0.5 + channel as f32 * 1_000.0;
+        for (predecessor, successor) in
+            [(7, 7), (7, 10), (7, 4), (7, 1), (1, 7), (16, 40), (40, 16)]
+        {
+            for taken in 0..(2 * predecessor + BLOCK + 1) {
+                let mut before = CompensationDelay::new(predecessor);
+                let mut time = 0;
+                while time < taken {
+                    let take = BLOCK.min(taken - time);
+                    let mut left: Vec<f32> = (time..time + take).map(|t| sample(t, 0)).collect();
+                    let mut right: Vec<f32> = (time..time + take).map(|t| sample(t, 1)).collect();
+                    before.process(&mut left, &mut right);
+                    time += take;
+                }
+                let mut after = CompensationDelay::new(successor);
+                after.adopt(&mut before);
+                // `successor` frames of silence in, so the output is the line's whole content in
+                // age order, and then the input.
+                let mut left = vec![0.0f32; successor + 3];
+                let mut right = vec![0.0f32; successor + 3];
+                after.process(&mut left, &mut right);
+                for (channel, plane) in [left, right].into_iter().enumerate() {
+                    for (index, word) in plane.iter().enumerate() {
+                        let expected = if index >= successor || index >= predecessor {
+                            // Past the pending samples the line holds `+0.0`, then it has
+                            // emitted the zeros it was fed.
+                            0.0
+                        } else {
+                            // Pending sample `index` of the predecessor: the one it took
+                            // `predecessor - index` frames ago, or rest if it took fewer.
+                            let age = predecessor - index;
+                            if taken >= age {
+                                sample(taken - age, channel)
+                            } else {
+                                0.0
+                            }
+                        };
+                        assert_eq!(
+                            word.to_bits(),
+                            expected.to_bits(),
+                            "line {predecessor} to {successor}, taken {taken}, channel \
+                             {channel}, word {index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// #1284 D1. A strip delay line hands over its rings and cursors lane by lane: the lanes of
+    /// the mask continue exactly where the predecessor stood, at independent cursors (the two
+    /// lanes of a line have two lengths), and a lane outside the mask stays at rest. A mask over
+    /// lanes of unlike length is not a match, so the swap block refuses it.
+    ///
+    /// Red mutation: swap the rings without the cursors, or both lanes whatever the mask.
+    #[test]
+    fn a_strip_delay_line_hands_over_the_lanes_of_its_mask() {
+        let sample = |t: usize, channel: usize| (t + 1) as f32 * 0.25 + channel as f32 * 1_000.0;
+        let mut before = TrackDelayLine::new(5, 9);
+        let mut time = 0;
+        for take in [3, 4, 2, 7] {
+            let mut left: Vec<f32> = (time..time + take).map(|t| sample(t, 0)).collect();
+            let mut right: Vec<f32> = (time..time + take).map(|t| sample(t, 1)).collect();
+            before.process(&mut left, &mut right);
+            time += take;
+        }
+        let mut twin = TrackDelayLine::new(5, 9);
+        let mut twin_time = 0;
+        for take in [3, 4, 2, 7] {
+            let mut left: Vec<f32> = (twin_time..twin_time + take)
+                .map(|t| sample(t, 0))
+                .collect();
+            let mut right: Vec<f32> = (twin_time..twin_time + take)
+                .map(|t| sample(t, 1))
+                .collect();
+            twin.process(&mut left, &mut right);
+            twin_time += take;
+        }
+        let both = crate::STRIP_DELAY_LEFT | crate::STRIP_DELAY_RIGHT;
+        assert!(!TrackDelayLine::new(5, 8).lanes_match(&before, both));
+        assert!(TrackDelayLine::new(5, 8).lanes_match(&before, crate::STRIP_DELAY_LEFT));
+        let mut after = TrackDelayLine::new(5, 9);
+        assert!(after.lanes_match(&before, both));
+        after.adopt(&mut before, crate::STRIP_DELAY_LEFT);
+        let mut left: Vec<f32> = (time..time + 11).map(|t| sample(t, 0)).collect();
+        let mut right: Vec<f32> = (time..time + 11).map(|t| sample(t, 1)).collect();
+        let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
+        after.process(&mut left, &mut right);
+        twin.process(&mut twin_left, &mut twin_right);
+        assert_eq!(left, twin_left, "the left lane continues the predecessor's");
+        assert!(
+            right[..9].iter().all(|word| *word == 0.0),
+            "a lane outside the mask starts at rest"
+        );
+        assert_ne!(right, twin_right);
     }
 
     /// E10. The route is two multiplies plus one add per output word, with the gain

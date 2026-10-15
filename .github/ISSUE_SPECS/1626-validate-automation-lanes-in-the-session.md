@@ -18,7 +18,8 @@ stage `typed-model`), refuses three shapes it accepts today:
 - two discontinuities of one entry closer than 64 samples.
 
 `docs/SESSION_SCHEMA_V1.md` states what the table means: the hold rule of A3, and these rules.
-This slice reads no descriptor; unit, domain and shape rules are drafts 02 and 03a. Nothing renders
+This slice reads no descriptor; unit, domain and shape rules are #1645 and
+#1566's row rule (`controls::automation_diagnostics`). Nothing renders
 the table yet.
 
 ## Context
@@ -109,8 +110,8 @@ the table yet.
     segment's `end_value`. A `step` segment holds `start_value` on `[start, end)`, and the lane
     takes `end_value` at `end`.
   - D1-D3 with their codes, and a pointer to the preparation rules (unit, domain, shape and filter
-    order against the target's row: drafts 02 and 03a).
-  - The sentence that the table renders nothing stays; slice 09b changes it.
+    order against the target's row: #1645 and #1566's row rule).
+  - The sentence that the table renders nothing stays; #1647 changes it.
   - The skill's automation paragraph gains the hold rule, and a new "Automation refusals, by
     code" table, in the form of the VCA table, lists D1-D3.
 - **D5. Fixture migration.** `builtins-automation.json` gains a second track, `keys`, that
@@ -139,9 +140,10 @@ the table yet.
 
 ## Non-goals
 
-- Any descriptor check: builtin rows are draft 02, effect parameters draft 03a and #1335.
-- The SDK builder's mirror of these rules (draft 03b).
-- Rendering any automation (slices 07 to 20). The live classifier.
+- Any descriptor check: builtin rows are #1645, effect parameters
+  #1566's row rule (`controls::automation_diagnostics`) and #1335.
+- The SDK builder's mirror of these rules (obsolete draft 03b, not filed).
+- Rendering any automation (#1637-#1639 and #1646-#1667). The live classifier.
 - New shapes, fields or per-segment ramp lengths (A3 keeps the table as it is).
 
 ## Hazards
@@ -215,7 +217,7 @@ the table yet.
 
 - None.
 - Batch: P1, first in it. #1627-#1629 (the hold rule's new home before #1629 deletes the old one),
-  02, 03a and 03b and draft 07 (the evaluator crate) build on it. It is a product outcome alone:
+  #1645 and #1637 (the evaluator crate) build on it. It is a product outcome alone:
   it refuses automation lanes that no rendering could honour.
 
 ## Amendment (controls coordinator, 2026-10-14)

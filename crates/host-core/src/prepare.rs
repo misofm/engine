@@ -20,7 +20,7 @@ use builtins_compiler::{
 };
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectControlResources, EffectObservationHandle,
-    LiveEffectAddress, attach_effect_live_controls, attach_effect_observation,
+    LiveEffectAddress, LiveEffectRack, attach_effect_live_controls, attach_effect_observation,
     effect_control_resources, launch_native_effect_registry, lowers_session_bypass,
     prepare_native_session_effects, resolve_initial_values,
 };
@@ -55,7 +55,10 @@ use crate::control_preparation::{
     EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, EqTargetPreparerError,
 };
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
-use crate::route_controls::{RouteControlProducer, RouteControlResources};
+use crate::route_controls::{
+    RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
+    route_producer_position, route_record,
+};
 use crate::source::{ControlSourceBuilder, SourceControlSet};
 use crate::spectrum::{
     SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionRequest,
@@ -699,6 +702,19 @@ pub struct PlanStateInventory {
     strip_stages: Box<[StripStageInventoryRow]>,
     /// Sorted by strip ID, rack, then effect ID.
     effect_lanes: Box<[EffectLaneInventoryRow]>,
+    /// One row per meter, in the order of the plan's meter readers
+    /// ([`HostLiveControlHandles::meters`]), so a row's `entry` is its position (#1327 D1).
+    meters: Box<[MeterInventoryRow]>,
+    /// One row per effect instance that has observation taps, in the order of the plan's
+    /// observation readers ([`HostLiveControlHandles::effect_observations`]), so a row's `entry`
+    /// is its position (#1327 D1).
+    observations: Box<[ObservationInventoryRow]>,
+    /// One row per compensation line of the plan (#1283 D1), sorted by edge ID.
+    delay_lines: Box<[graph::GraphDelayLine]>,
+    /// One row per strip input alignment line of the plan (#1284 D1), sorted by strip ID.
+    strip_delays: Box<[graph::GraphStripDelayLine]>,
+    /// One row per live send of the plan (#1284 D2), sorted by route ID.
+    live_routes: Box<[graph::GraphLiveRoute]>,
     /// The strips this plan restarts relative to the plan it was prepared to displace (#1277 D6):
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
@@ -747,6 +763,63 @@ pub(crate) struct EffectLaneInventoryRow {
     pub(crate) kind: graph::EffectLaneKind,
 }
 
+/// One effect instance of a prepared plan whose observation taps a swap can carry, owner key `(strip
+/// ID, rack, effect ID)` (#1327 D1): the instance's taps follow the instance, so the key is the
+/// effect lane's.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObservationInventoryRow {
+    /// The reader set's index in the plan's observation readers.
+    pub(crate) entry: usize,
+    /// Where the effect instance sits in this plan: the key a successor's effect move names it by.
+    /// Meaningful only to this plan's successor's carry program.
+    pub(crate) location: graph::GraphEffectSite,
+    /// How many taps (readers) the instance declares.
+    pub(crate) taps: usize,
+}
+
+/// A meter's [`MeterConfig`] as plain comparable data: equal exactly when the configurations are
+/// equal word for word (#1327 D1), which `MeterConfig` itself cannot say because it holds a float.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct MeterConfigKey {
+    period_frames: u32,
+    peak_hold_frames: u32,
+    peak_decay_bits: u32,
+    queue_capacity: usize,
+    reset_generation: u64,
+}
+
+impl MeterConfigKey {
+    pub(crate) fn of(config: &MeterConfig) -> Self {
+        Self {
+            period_frames: config.period_frames.get(),
+            peak_hold_frames: config.peak_hold_frames,
+            peak_decay_bits: config.peak_decay_db_per_second.to_bits(),
+            queue_capacity: config.queue_capacity.get(),
+            reset_generation: config.reset_generation,
+        }
+    }
+}
+
+/// One meter of a prepared plan, owner key `(strip ID, tap, metric set)` with its configuration,
+/// as its successor's preparation sees it (#1327 D1). Two meters of one key (a caller may select
+/// the same tap twice) are told apart by their order, `entry`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MeterInventoryRow {
+    /// The strip ID: a track's or a submix's.
+    pub(crate) id: Box<str>,
+    /// The chain boundary the meter observes.
+    pub(crate) tap: MeterTap,
+    /// The numeric groups the meter keeps.
+    pub(crate) metrics: MeterMetricSet,
+    /// The meter's configuration.
+    pub(crate) config: MeterConfigKey,
+    /// The meter's index in the plan's meter readers.
+    pub(crate) entry: usize,
+    /// Where the meter's observer sits in this plan. Meaningful only to this plan's successor's
+    /// carry program, which names it as the observer to take.
+    pub(crate) location: graph::GraphObserverLocation,
+}
+
 /// One banked strip input section of a prepared plan, owner key `(strip ID,
 /// PostInputBuiltins)`, as its successor's preparation sees it (issue #1276 D1).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -793,6 +866,36 @@ impl PlanStateInventory {
     #[must_use]
     pub(crate) fn input_section(&self, id: &str) -> Option<&InputSectionInventoryRow> {
         input_section_row(&self.input_sections, id)
+    }
+
+    /// Meter rows, one per meter reader (#1327).
+    #[must_use]
+    pub fn meter_count(&self) -> usize {
+        self.meters.len()
+    }
+
+    /// Observation rows, one per effect observation reader set (#1327).
+    #[must_use]
+    pub fn observation_count(&self) -> usize {
+        self.observations.len()
+    }
+
+    /// Compensation line rows, one per delayed edge of the plan (#1283).
+    #[must_use]
+    pub fn delay_line_count(&self) -> usize {
+        self.delay_lines.len()
+    }
+
+    /// Strip input alignment line rows, one per strip that declares a `delay_samples` (#1284).
+    #[must_use]
+    pub fn strip_delay_count(&self) -> usize {
+        self.strip_delays.len()
+    }
+
+    /// Live send rows, one per route into a submix with a live lane (#1284).
+    #[must_use]
+    pub fn live_route_count(&self) -> usize {
+        self.live_routes.len()
     }
 
     /// Strip stage rows, one per banked fader or matrix lane (issue #1277).
@@ -847,12 +950,33 @@ impl PlanStateInventory {
                 .iter()
                 .map(|row| row.id.len() + row.effect_id.len())
                 .sum::<usize>()
+            + self.meters.iter().map(|row| row.id.len()).sum::<usize>()
+            + self
+                .delay_lines
+                .iter()
+                .map(graph::GraphDelayLine::heap_bytes)
+                .sum::<usize>()
+            + self
+                .strip_delays
+                .iter()
+                .map(graph::GraphStripDelayLine::heap_bytes)
+                .sum::<usize>()
+            + self
+                .live_routes
+                .iter()
+                .map(graph::GraphLiveRoute::heap_bytes)
+                .sum::<usize>()
             + self.restarted.iter().map(|id| id.len()).sum::<usize>();
         u64::try_from(
             core::mem::size_of_val::<[SourceInventoryRow]>(&self.sources)
                 + core::mem::size_of_val::<[InputSectionInventoryRow]>(&self.input_sections)
                 + core::mem::size_of_val::<[StripStageInventoryRow]>(&self.strip_stages)
                 + core::mem::size_of_val::<[EffectLaneInventoryRow]>(&self.effect_lanes)
+                + core::mem::size_of_val::<[MeterInventoryRow]>(&self.meters)
+                + core::mem::size_of_val::<[ObservationInventoryRow]>(&self.observations)
+                + core::mem::size_of_val::<[graph::GraphDelayLine]>(&self.delay_lines)
+                + core::mem::size_of_val::<[graph::GraphStripDelayLine]>(&self.strip_delays)
+                + core::mem::size_of_val::<[graph::GraphLiveRoute]>(&self.live_routes)
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
                 + ids,
         )
@@ -1364,6 +1488,33 @@ pub fn test_only_prepare_host_runtime_with_live_controls_successor_on(
     )
 }
 
+/// Test-support width seam (#1327): [`prepare_host_runtime_with_selected_meters`], or its
+/// successor form with `base`, on an explicit bank width.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_prepare_host_runtime_with_selected_meters_on(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    meters: &[HostMeterRequest],
+    base: Option<SuccessorBase<'_>>,
+    backend: Backend,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
+        compiled,
+        caps,
+        Some(live_controls),
+        Some(meters),
+        false,
+        backend,
+        None,
+        base,
+        HostLiveLanes::ALL,
+        None,
+    )?;
+    Ok((prepared, handles))
+}
+
 /// Test-support width seam: [`prepare_host_runtime`] on an explicit bank width, with no live
 /// controls.
 #[cfg(feature = "test-support")]
@@ -1824,15 +1975,33 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // predecessor's base and this model: the join's model half, resolved against the plans' rows
     // once this plan is bound.
     let live_strips = attach_live;
-    let strip_joins: Vec<StripJoin<'_>> = match successor {
-        None => Vec::new(),
-        Some(base) => join_strips(
+    // The effective values of both models, computed once: the strip join and the send join read
+    // the same rules (#1558 D1).
+    let effective = successor.map(|base| {
+        EffectiveDiff::new(
             base.committed,
             model,
-            live_strips,
+            LiveRamps::for_session(model),
             base.edit_ramps,
             base.monitor,
-        ),
+        )
+    });
+    let strip_joins: Vec<StripJoin<'_>> = match (successor, &effective) {
+        (Some(base), Some(diff)) => {
+            join_strips(base.committed, model, live_strips, base.edit_ramps, diff)
+        }
+        _ => Vec::new(),
+    };
+    // Issue #1284 D1, D2: how each strip's input alignment delay and each send differ between the
+    // predecessor's base and this model, resolved against the plans' lines and live routes once
+    // this plan is bound.
+    let delay_joins: Vec<StripDelayJoin<'_>> = match successor {
+        None => Vec::new(),
+        Some(base) => join_strip_delays(base.committed, model),
+    };
+    let route_joins: Vec<RouteJoin<'_>> = match (successor, &effective) {
+        (Some(base), Some(diff)) => join_routes(base.committed, model, base.edit_ramps, diff),
+        _ => Vec::new(),
     };
     // Issue #1279 D1: how each strip's console slots and effect chain differ between the
     // predecessor's base and this model, resolved against the plans' lanes once this plan is
@@ -1843,10 +2012,21 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     };
     // The hand-over the successor runs at its swap block, built here so the plan charge below
     // counts it; installed after bind.
+    // Issue #1327 D1: a meter carries when its key and configuration are the predecessor's; the
+    // joins that follow bind find the observers, this only decides that a program is needed.
+    let meters_may_carry = match (successor, requested_meter_config(live_controls)) {
+        (Some(base), Some(config)) => meters_may_carry(
+            &base.inventory.meters,
+            &requested_meter_owners(model, live_controls, selected_meters),
+            MeterConfigKey::of(&config),
+        ),
+        _ => false,
+    };
     let carry_program = match successor {
         Some(base)
             if !carried_sources.is_empty()
                 || !carried_inputs.is_empty()
+                || meters_may_carry
                 || strip_joins.iter().any(StripJoin::may_carry)
                 || chain_joins.iter().any(ChainJoin::may_carry) =>
         {
@@ -2056,7 +2236,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             }),
         "every effect producer is found by its sorted position"
     );
-    let live_control_tracks = &live_control_strips[..live_control_track_count];
     let control_requests: Vec<TrackControlRequest> = if attach_live {
         live_control_strips
             .iter()
@@ -2075,19 +2254,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         return Err(shape("host.meter.period"));
     }
     // A selected meter may name any strip (issue #1208 D1); the default set stays one per track.
-    let meter_tracks: Vec<(&str, MeterTap, MeterMetricSet)> = match selected_meters {
-        Some(meters) => meters
-            .iter()
-            .map(|meter| (meter.strip_id.as_ref(), meter.tap, meter.metrics))
-            .collect(),
-        None => live_control_tracks
-            .iter()
-            .map(|track| (track.as_ref(), live_controls.meter_tap, MeterMetricSet::ALL))
-            .collect(),
-    };
-    let meter_requests: Vec<SelectedMeterRequest> = match live_controls.meter_period_frames {
+    let meter_tracks = requested_meter_owners(model, live_controls, selected_meters);
+    let meter_requests: Vec<SelectedMeterRequest> = match requested_meter_config(live_controls) {
         None => Vec::new(),
-        Some(period) => meter_tracks
+        Some(config) => meter_tracks
             .iter()
             .enumerate()
             .map(|(index, (track, tap, metrics))| {
@@ -2101,15 +2271,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 Ok(SelectedMeterRequest {
                     request: MeterRequest {
                         handle: MeterHandle(handle),
-                        track_id: track.to_string(),
+                        track_id: (*track).to_string(),
                         tap: *tap,
-                        config: MeterConfig {
-                            period_frames: period,
-                            peak_hold_frames: 0,
-                            peak_decay_db_per_second: 0.0,
-                            queue_capacity: live_controls.meter_queue_depth,
-                            reset_generation: 0,
-                        },
+                        config,
                     },
                     metrics: *metrics,
                 })
@@ -2234,6 +2398,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         Vec::new()
     };
     let route_control_resources = graph::route_control_resources(&graph_route_controls);
+    // The producers in canonical route-ID order; a carried send's retarget is written through them.
+    let mut route_controls: Vec<RouteControlProducer> = graph_route_controls
+        .into_iter()
+        .map(RouteControlProducer::new)
+        .collect();
     let output_latency = artifact.report().output_latency;
     let output_tail = artifact.report().output_tail;
     let mut graph_resources = artifact.graph_resource_estimate().clone();
@@ -2450,6 +2619,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let mut plan = bound.plan;
     // Issue #1272 D4: the join's program goes in before the plan leaves preparation.
+    let has_carry_program = carry_program.is_some();
     if let Some(program) = carry_program {
         graph::install_carry_program(&mut plan, program)
             .map_err(|_| graph_failure("host.carry.install"))?;
@@ -2482,6 +2652,46 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_builtin_input_carry(&mut plan, moves)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
+    // Issue #1327 D1: this plan's own meters, in reader order: the inventory its successor joins
+    // with, and the rows the join below looks this plan's observers up in.
+    let meter_rows: Vec<MeterInventoryRow> = {
+        let locations: BTreeMap<u64, graph::GraphObserverLocation> =
+            graph::observer_rows(&mut plan)
+                .ok_or_else(|| graph_failure("host.inventory.identity"))?
+                .into_iter()
+                .filter(|row| row.kind == engine::realtime::ObserverKind::Meter)
+                .map(|row| (row.handle, row.location))
+                .collect();
+        let requested: BTreeMap<u64, &SelectedMeterRequest> = meter_requests
+            .iter()
+            .map(|item| (item.request.handle.0.get(), item))
+            .collect();
+        meters
+            .iter()
+            .enumerate()
+            .filter_map(|(entry, consumer)| {
+                let handle = consumer.handle.0.get();
+                let item = requested.get(&handle)?;
+                Some(MeterInventoryRow {
+                    id: consumer.track_id.clone(),
+                    tap: consumer.tap,
+                    metrics: item.metrics,
+                    config: MeterConfigKey::of(&item.request.config),
+                    entry,
+                    location: *locations.get(&handle)?,
+                })
+            })
+            .collect()
+    };
+    debug_assert_eq!(
+        meter_rows.len(),
+        meters.len(),
+        "every meter has an observer"
+    );
+    let meter_carry = match successor {
+        Some(base) => resolve_meter_carry(&base.inventory.meters, &meter_rows),
+        None => MeterCarry::default(),
+    };
     // Issue #1277 D1: this plan's own fader and matrix lanes, sorted by strip ID and owner: the
     // inventory its successor joins with, and the table the join below looks this plan's lanes up
     // in.
@@ -2556,11 +2766,87 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         ),
         None => EffectCarry::default(),
     };
+    // Issue #1327 D1: this plan's own effect observation readers, in reader order: the inventory
+    // its successor joins with. A tap follows its effect instance, so a row is keyed by the
+    // instance's lane, and its successor's carry follows the effect moves resolved above.
+    let observation_rows: Vec<ObservationInventoryRow> = effect_observations
+        .iter()
+        .enumerate()
+        .filter_map(|(entry, handle)| {
+            let racks: &[graph::RackId] = match handle.address.rack {
+                LiveEffectRack::Console => &[graph::RackId::Simd1, graph::RackId::Simd2],
+                LiveEffectRack::Inserts => &[graph::RackId::Dynamic],
+            };
+            let lane = racks.iter().find_map(|&rack| {
+                effect_lane_row(&effect_lanes, &handle.track_id, rack, &handle.effect_id)
+            })?;
+            Some(ObservationInventoryRow {
+                entry,
+                location: lane.location,
+                taps: handle.readers.len(),
+            })
+        })
+        .collect();
+    let observation_carry = match successor {
+        Some(base) => resolve_observation_carry(
+            &base.inventory.observations,
+            &observation_rows,
+            &effect_carry.moves,
+        ),
+        None => Vec::new(),
+    };
+    let meter_carry_bytes = graph::observer_carry_retained_bytes(
+        meter_carry.moves.len(),
+        meter_carry.joins.len(),
+        observation_carry.len(),
+    )
+    .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    // Issue #1283 D1: this plan's own compensation lines, sorted by edge ID: the inventory its
+    // successor joins with, and the lines its own moves are resolved from.
+    let mut delay_lines = graph::take_compensation_lines(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    delay_lines.sort_unstable_by(|left, right| left.edge.cmp(&right.edge));
+    let delay_carry = match successor {
+        Some(base) => resolve_delay_carry(&base.inventory.delay_lines, &delay_lines),
+        None => Vec::new(),
+    };
+    let delay_carry_bytes = graph::delay_carry_retained_bytes(delay_carry.len())
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    // Issue #1284 D1, D2: this plan's own strip input alignment lines and live sends, sorted by ID:
+    // the inventory its successor joins with, and the rows its own moves are resolved from.
+    let mut strip_delays = graph::take_strip_delay_lines(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    strip_delays.sort_unstable_by(|left, right| left.strip.cmp(&right.strip));
+    let mut live_routes = graph::take_live_routes(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    live_routes.sort_unstable_by(|left, right| left.route_id.cmp(&right.route_id));
+    let strip_delay_carry = match successor {
+        Some(base) => {
+            resolve_strip_delay_carry(&base.inventory.strip_delays, &strip_delays, &delay_joins)
+        }
+        None => StripDelayCarry::default(),
+    };
+    let route_carry = match successor {
+        Some(base) => resolve_route_carry(&base.inventory.live_routes, &live_routes, &route_joins),
+        None => RouteCarry::default(),
+    };
+    let strip_delay_carry_bytes =
+        graph::strip_delay_carry_retained_bytes(strip_delay_carry.moves.len())
+            .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    let route_carry_bytes = graph::route_carry_retained_bytes(route_carry.moves.len())
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
     // The effect moves' table and payload scratch are charged at their exact size, against the
     // same cap as the rest of the plan, and the scratch is one allocation (#1279 D3).
-    let effect_carry_bytes =
-        graph::effect_carry_retained_bytes(effect_carry.moves.len(), effect_carry.scratch_bytes)
-            .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    // The carried slots of the successor lanes the moves name are allocated with the table, and
+    // only for those lanes (#1633 D1).
+    let effect_carry_slot_bytes = graph::effect_carry_slot_bytes(&mut plan, &effect_carry.moves)
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    let effect_carry_bytes = graph::effect_carry_retained_bytes(
+        effect_carry.moves.len(),
+        effect_carry.scratch_bytes,
+        effect_carry_slot_bytes,
+    )
+    .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let effect_carry_scratch_bytes = effect_carry.scratch_bytes;
     if effect_carry_scratch_bytes > caps.maximum_named_allocation_bytes {
         return Err(resource("host.resource.limit"));
@@ -2568,6 +2854,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     if admitted_graph_and_model
         .checked_add(strip_carry_bytes)
         .and_then(|bytes| bytes.checked_add(effect_carry_bytes))
+        .and_then(|bytes| bytes.checked_add(meter_carry_bytes))
+        .and_then(|bytes| bytes.checked_add(delay_carry_bytes))
+        .and_then(|bytes| bytes.checked_add(strip_delay_carry_bytes))
+        .and_then(|bytes| bytes.checked_add(route_carry_bytes))
         .ok_or_else(|| resource("host.resource.arithmetic"))?
         > caps.maximum_graph_session_plus_plan_bytes
     {
@@ -2581,14 +2871,60 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_effect_carry(&mut plan, effect_carry.moves, effect_carry_scratch_bytes)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
+    if !meter_carry.moves.is_empty() || !meter_carry.joins.is_empty() {
+        graph::install_observer_carry(&mut plan, meter_carry.moves, meter_carry.joins)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
+    if !observation_carry.is_empty() {
+        graph::install_observation_carry(&mut plan, observation_carry)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
+    if let Some(base) = successor
+        && !(delay_carry.is_empty()
+            && strip_delay_carry.moves.is_empty()
+            && route_carry.moves.is_empty())
+    {
+        // A line or a send carries between two plans whose strips all restart or differ in a
+        // prepared value, so the join above may have found nothing else to carry: the program then
+        // names the predecessor and moves no source (it retains no byte).
+        if !has_carry_program {
+            graph::install_carry_program(
+                &mut plan,
+                graph::GraphCarryProgram {
+                    predecessor: base.inventory.plan_identity(),
+                    sources: Box::default(),
+                },
+            )
+            .map_err(|_| graph_failure("host.carry.install"))?;
+        }
+        if !delay_carry.is_empty() {
+            graph::install_delay_carry(&mut plan, delay_carry)
+                .map_err(|_| graph_failure("host.carry.install"))?;
+        }
+        if !strip_delay_carry.moves.is_empty() {
+            graph::install_strip_delay_carry(&mut plan, strip_delay_carry.moves)
+                .map_err(|_| graph_failure("host.carry.install"))?;
+        }
+        if !route_carry.moves.is_empty() {
+            graph::install_route_carry(&mut plan, route_carry.moves)
+                .map_err(|_| graph_failure("host.carry.install"))?;
+        }
+    }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
     debug_assert_eq!(
         carry_program_retained_bytes,
-        carry_program_bytes + strip_carry_bytes + effect_carry_bytes
+        carry_program_bytes
+            + strip_carry_bytes
+            + effect_carry_bytes
+            + meter_carry_bytes
+            + delay_carry_bytes
+            + strip_delay_carry_bytes
+            + route_carry_bytes
     );
     inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     let mut restarted = strip_carry.restarted;
     restarted.extend(effect_carry.restarted);
+    restarted.extend(strip_delay_carry.restarted);
     restarted.sort_unstable();
     restarted.dedup();
     let inventory = PlanStateInventory {
@@ -2598,6 +2934,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         input_sections: input_sections.into_boxed_slice(),
         strip_stages: strip_stages.into_boxed_slice(),
         effect_lanes: effect_lanes.into_boxed_slice(),
+        meters: meter_rows.into_boxed_slice(),
+        observations: observation_rows.into_boxed_slice(),
+        delay_lines: delay_lines.into_boxed_slice(),
+        strip_delays: strip_delays.into_boxed_slice(),
+        live_routes: live_routes.into_boxed_slice(),
         restarted: restarted.into_boxed_slice(),
     };
     let report = HostPrepareReport {
@@ -2670,7 +3011,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // publishes it. A preparation that writes no retarget does not stamp.
     if let (Some(base), false) = (
         successor,
-        strip_carry.retargets.is_empty() && effect_carry.retargets.is_empty(),
+        strip_carry.retargets.is_empty()
+            && effect_carry.retargets.is_empty()
+            && route_carry.retargets.is_empty(),
     ) {
         let Some(Ok(stamp)) = plan.stamp_held_gate(base.revision) else {
             return Err(successor_revision_refusal());
@@ -2692,6 +3035,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                     .map_err(|_| fault())?;
                 producer.commit_owner().map_err(|_| fault())?;
             }
+        }
+        // Issue #1284 D3: the carried sends' live differences, through the successor's own
+        // producers, in the same block as the strips', with the ramp the record carries. A write
+        // to a latest-target cell cannot fail (#1347), and every send of the table has a producer.
+        for &(route_id, record) in &route_carry.retargets {
+            let Some(position) = route_producer_position(&route_controls, route_id) else {
+                return Err(graph_failure("host.control.order"));
+            };
+            route_controls[position].write(stamp, record);
         }
         for retarget in &strip_carry.retargets {
             let Some(&index) = canonical_index.get(retarget.id) else {
@@ -2723,16 +3075,239 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             effect_controls,
             meters,
             effect_observations,
-            route_controls: graph_route_controls
-                .into_iter()
-                .map(RouteControlProducer::new)
-                .collect(),
+            route_controls,
             master_track,
             live_values_superseded: live_superseded,
         },
         spectrum_capture,
     ))
 }
+
+/// The meters a preparation builds, as `(strip ID, tap, metric set)` in reader order (#1327): the
+/// caller's selection, else one all-metric meter per track at the request's tap.
+fn requested_meter_owners<'a>(
+    model: &'a SessionModel,
+    live_controls: &HostLiveControlRequest,
+    selected_meters: Option<&'a [HostMeterRequest]>,
+) -> Vec<(&'a str, MeterTap, MeterMetricSet)> {
+    match selected_meters {
+        Some(meters) => meters
+            .iter()
+            .map(|meter| (meter.strip_id.as_ref(), meter.tap, meter.metrics))
+            .collect(),
+        None => model
+            .tracks
+            .iter()
+            .map(|track| {
+                (
+                    track.id.as_str(),
+                    live_controls.meter_tap,
+                    MeterMetricSet::ALL,
+                )
+            })
+            .collect(),
+    }
+}
+
+/// The configuration every meter of a preparation shares, or `None` when it builds no meter.
+fn requested_meter_config(live_controls: &HostLiveControlRequest) -> Option<MeterConfig> {
+    live_controls
+        .meter_period_frames
+        .map(|period_frames| MeterConfig {
+            period_frames,
+            peak_hold_frames: 0,
+            peak_decay_db_per_second: 0.0,
+            queue_capacity: live_controls.meter_queue_depth,
+            reset_generation: 0,
+        })
+}
+
+/// Whether any of `owners` has a meter in `predecessor` with its key and `config` (#1327 D1).
+fn meters_may_carry(
+    predecessor: &[MeterInventoryRow],
+    owners: &[(&str, MeterTap, MeterMetricSet)],
+    config: MeterConfigKey,
+) -> bool {
+    let keys: BTreeSet<(&str, MeterTap, MeterMetricSet)> = predecessor
+        .iter()
+        .filter(|row| row.config == config)
+        .map(|row| (row.id.as_ref(), row.tap, row.metrics))
+        .collect();
+    owners.iter().any(|owner| keys.contains(owner))
+}
+
+/// What a successor's preparation takes from the meters of its predecessor (#1327).
+#[derive(Default)]
+struct MeterCarry {
+    moves: Vec<graph::GraphObserverMove>,
+    joins: Vec<graph::GraphObserverJoin>,
+}
+
+/// Join the successor's meter rows `own` with the predecessor's (#1327 D1, D6).
+///
+/// A meter carries when its strip ID, tap, metric set and configuration equal a predecessor
+/// meter's; two meters of one key pair in reader order. Every other meter is fresh, and a fresh
+/// meter whose configuration equals a carried one's joins the window grid of the first such
+/// carried meter, the one with the lowest successor entry (D6).
+fn resolve_meter_carry(predecessor: &[MeterInventoryRow], own: &[MeterInventoryRow]) -> MeterCarry {
+    let mut available: BTreeMap<(&str, MeterTap, MeterMetricSet), Vec<&MeterInventoryRow>> =
+        BTreeMap::new();
+    for row in predecessor {
+        available
+            .entry((row.id.as_ref(), row.tap, row.metrics))
+            .or_default()
+            .push(row);
+    }
+    // Each key's candidates are taken in reader order: reverse once so `pop` yields the lowest.
+    for rows in available.values_mut() {
+        rows.sort_unstable_by_key(|row| core::cmp::Reverse(row.entry));
+    }
+    let mut carry = MeterCarry::default();
+    let mut donors: BTreeMap<MeterConfigKey, graph::GraphObserverLocation> = BTreeMap::new();
+    let mut fresh: Vec<&MeterInventoryRow> = Vec::new();
+    let mut ordered: Vec<&MeterInventoryRow> = own.iter().collect();
+    ordered.sort_unstable_by_key(|row| row.entry);
+    for row in ordered {
+        let taken = available
+            .get_mut(&(row.id.as_ref(), row.tap, row.metrics))
+            .and_then(Vec::pop);
+        match taken {
+            Some(before) if before.config == row.config => {
+                carry.moves.push(graph::GraphObserverMove {
+                    kind: engine::realtime::ObserverKind::Meter,
+                    successor: row.location,
+                    predecessor: before.location,
+                    successor_entry: row.entry,
+                    predecessor_entry: before.entry,
+                });
+                donors.entry(row.config).or_insert(row.location);
+            }
+            _ => fresh.push(row),
+        }
+    }
+    for row in fresh {
+        if let Some(&donor) = donors.get(&row.config) {
+            carry.joins.push(graph::GraphObserverJoin {
+                fresh: row.location,
+                donor,
+            });
+        }
+    }
+    carry
+}
+
+/// Join the successor's effect observation rows `own` with the predecessor's (#1327 D1): a tap
+/// set carries when its effect instance carried (`moves` names the successor instance's site) and
+/// both instances declare as many taps, with a row on each side. Every other instance's taps start
+/// fresh.
+fn resolve_observation_carry(
+    predecessor: &[ObservationInventoryRow],
+    own: &[ObservationInventoryRow],
+    moves: &[graph::GraphEffectMove],
+) -> Vec<graph::GraphTapMove> {
+    let from: BTreeMap<graph::GraphEffectSite, graph::GraphEffectSite> = moves
+        .iter()
+        .map(|step| (step.successor, step.predecessor))
+        .collect();
+    let before: BTreeMap<graph::GraphEffectSite, &ObservationInventoryRow> =
+        predecessor.iter().map(|row| (row.location, row)).collect();
+    own.iter()
+        .filter_map(|row| {
+            let site = *from.get(&row.location)?;
+            let earlier = before.get(&site)?;
+            (earlier.taps == row.taps).then_some(graph::GraphTapMove {
+                successor: row.location,
+                predecessor: site,
+                successor_entry: row.entry,
+                predecessor_entry: earlier.entry,
+            })
+        })
+        .collect()
+}
+
+/// The compensation-line moves of a successor (#1283 D1): a line carries when the predecessor
+/// has a line on an edge of the same ID whose endpoints are the same. Both slices are sorted by
+/// edge ID. A line has no live value, so there is no retarget; a re-pointed route has other
+/// endpoints, so its line starts at rest and nothing about its strip changes. Lines of other
+/// lengths carry too: the swap block aligns their heads (D4).
+fn resolve_delay_carry(
+    predecessor: &[graph::GraphDelayLine],
+    own: &[graph::GraphDelayLine],
+) -> Vec<graph::GraphDelayMove> {
+    own.iter()
+        .filter_map(|line| {
+            let index = predecessor
+                .binary_search_by(|earlier| earlier.edge.cmp(&line.edge))
+                .ok()?;
+            let earlier = &predecessor[index];
+            (earlier.source == line.source && earlier.destination == line.destination).then_some(
+                graph::GraphDelayMove {
+                    successor: line.line,
+                    predecessor: earlier.line,
+                },
+            )
+        })
+        .collect()
+}
+
+// REALTIME_POLICY_BEGIN: #1327 D3, the pairing runs in the plan-swap block.
+/// Swap each carried effect observation reader set between the plans' reader vectors, at the swap
+/// block (#1327 D3): for each record of kind [`engine::realtime::ObserverKind::Observation`], the
+/// successor handle at `successor` and the predecessor handle at `predecessor` exchange their
+/// readers, so a reader the host already holds follows the tap state that renders on, and the
+/// retiring predecessor holds the successor's fresh one. Each handle keeps its own track, address
+/// and effect ID: they are equal for a carried pair.
+///
+/// Allocation-free, drops nothing, and may run on the render thread. A record whose index is out of
+/// range of its vector is skipped.
+pub fn pair_carried_observations(
+    successor: &mut [EffectObservationHandle],
+    predecessor: &mut [EffectObservationHandle],
+    carries: &[engine::realtime::ObserverCarry],
+) {
+    for carry in carries {
+        if carry.kind != engine::realtime::ObserverKind::Observation {
+            continue;
+        }
+        if let (Some(into), Some(from)) = (
+            successor.get_mut(carry.successor),
+            predecessor.get_mut(carry.predecessor),
+        ) {
+            core::mem::swap(&mut into.readers, &mut from.readers);
+        }
+    }
+}
+// REALTIME_POLICY_END
+
+// REALTIME_POLICY_BEGIN: #1327 D3, the pairing runs in the plan-swap block.
+/// Swap each carried meter's reader between the plans' reader vectors, at the swap block
+/// (#1327 D3): for each record of kind [`engine::realtime::ObserverKind::Meter`], the successor
+/// reader at `successor` and the predecessor reader at `predecessor` exchange their consumers, so
+/// a reader the host already holds follows the observer that renders on, and the retiring
+/// predecessor holds the successor's fresh one. Each reader keeps its own handle, track and tap:
+/// the carried observer takes the successor's handle at the swap, so its snapshots name the
+/// reader that now receives them.
+///
+/// Allocation-free, drops nothing, and may run on the render thread. A record whose index is out
+/// of range of its vector is skipped.
+pub fn pair_carried_meters(
+    successor: &mut [MeterConsumer],
+    predecessor: &mut [MeterConsumer],
+    carries: &[engine::realtime::ObserverCarry],
+) {
+    for carry in carries {
+        if carry.kind != engine::realtime::ObserverKind::Meter {
+            continue;
+        }
+        if let (Some(into), Some(from)) = (
+            successor.get_mut(carry.successor),
+            predecessor.get_mut(carry.predecessor),
+        ) {
+            core::mem::swap(&mut into.consumer, &mut from.consumer);
+        }
+    }
+}
+// REALTIME_POLICY_END
 
 /// Strip `id`'s row of `rows`, which are sorted by strip ID.
 fn input_section_row<'a>(
@@ -2820,6 +3395,91 @@ impl StripEditRamps {
             input: edit_ramps.get(&target, EditRampRow::Input),
         }
     }
+}
+
+/// The per-edit ramp lengths of one route's three rows, looked up once from the transaction's
+/// [`EditRamps`] (#1557 D3): the `(Route, RouteGain)`, `(Route, RouteMute)` and
+/// `(Route, RouteMatrix)` entries. `None` is "the edit gave no length": the session's applies.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RouteEditRamps {
+    pub(crate) gain: Option<u32>,
+    pub(crate) mute: Option<u32>,
+    pub(crate) matrix: Option<u32>,
+}
+
+impl RouteEditRamps {
+    pub(crate) fn of(edit_ramps: &EditRamps, id: &session::StableId) -> Self {
+        if edit_ramps.is_empty() {
+            return Self::default();
+        }
+        let target = EditRampTarget::Route(id.clone());
+        Self {
+            gain: edit_ramps.get(&target, EditRampRow::RouteGain),
+            mute: edit_ramps.get(&target, EditRampRow::RouteMute),
+            matrix: edit_ramps.get(&target, EditRampRow::RouteMatrix),
+        }
+    }
+}
+
+/// The record that brings a send from `before`'s live values to `after`'s (#1557 D2, D3), when the
+/// target the render plane holds changes: the per-route function of a send (#1284 D3). The
+/// classifier derives a live delta's route records with it, and a successor's preparation derives
+/// its carried sends' retargets with it, so the two cannot disagree.
+///
+/// The target is `graph_compiler::route_coefficients` of the route's gain, matrix and mute with
+/// its effective gate ([`route_record`]), exactly what preparation folds into the route's
+/// constants, so a settled send is bit-identical to a prepared one. It is compared as bits, with
+/// the gate: a gain or matrix edit on a muted send leaves the silenced `+0.0` target as it was and
+/// gives no record, and the later unmute carries the new values.
+///
+/// `gates` is the route's effective gate per source lane, in `[before, after]`
+/// (`controls::effective`). The ramp is `gate_length` when the gate changes in either lane
+/// (`EffectiveDiff::gate_length`, #1558 D7), else the longest of the changed rows' lengths
+/// (`SendGain`, `SendMatrix`), each through [`LiveRamps::resolve`] (an explicit `0` is a step).
+///
+/// # Errors
+///
+/// [`LiveRebuild::Domain`] when either value set is outside the route domain, or a ramp is longer
+/// than the cell's maximum.
+pub(crate) fn route_record_between(
+    ramps: LiveRamps,
+    before: &session::Route,
+    after: &session::Route,
+    gates: [[bool; 2]; 2],
+    gate_length: u32,
+    edit: RouteEditRamps,
+) -> Result<Option<RouteControlRecord>, LiveRebuild> {
+    let matrix = |route: &session::Route| {
+        let matrix = &route.channel_matrix;
+        [matrix.ll, matrix.lr, matrix.rl, matrix.rr]
+    };
+    let build = |route: &session::Route, gate: [bool; 2], length: u32| {
+        route_record(route.gain_db, matrix(route), route.mute, gate, length).map_err(|error| {
+            match error {
+                RouteControlError::Domain | RouteControlError::Length => LiveRebuild::Domain,
+            }
+        })
+    };
+    let prior = build(before, gates[0], 0)?;
+    let current = build(after, gates[1], 0)?;
+    let bits = |record: &RouteControlRecord| record.target().map(f32::to_bits);
+    let gate_changed = gates[0] != gates[1];
+    if prior.mute() == current.mute() && bits(&prior) == bits(&current) {
+        return Ok(None);
+    }
+    let length = if gate_changed {
+        gate_length
+    } else {
+        let gain = (before.gain_db.to_bits() != after.gain_db.to_bits())
+            .then(|| ramps.resolve(LiveRampRow::SendGain, edit.gain));
+        let matrix = (matrix(before).map(f32::to_bits) != matrix(after).map(f32::to_bits))
+            .then(|| ramps.resolve(LiveRampRow::SendMatrix, edit.matrix));
+        gain.into_iter()
+            .chain(matrix)
+            .max()
+            .unwrap_or_else(|| ramps.resolve(LiveRampRow::SendMute, edit.mute))
+    };
+    build(after, gates[1], length).map(Some)
 }
 
 /// A fader or pan value outside the domain its render-side setter accepts.
@@ -3062,7 +3722,6 @@ impl LevelRules<'_> {
         }
     }
 
-    #[cfg(feature = "control-provider")]
     /// The ramp length of a route record whose gate changed (#1558 D7): the route's own `mute` or
     /// `follows_mute` edit when one of them changed (rows `SendMute`, `SendFollowsMute`, with
     /// `own_edit` the route's `RouteMute` length), else the length that its source strip's `Mute`
@@ -3193,13 +3852,19 @@ impl<'a> EffectiveDiff<'a> {
     #[cfg(feature = "control-provider")]
     /// The effective gate of route `index`, per source lane, in `[current, next]`.
     pub(crate) fn gates(&self, index: usize) -> [[bool; 2]; 2] {
+        self.route_gates(index, index)
+    }
+
+    /// The effective gate of the route at `before` in `current` and at `after` in `next`, per
+    /// source lane, in `[current, next]` (#1284 D3): a successor's routes need not sit at the same
+    /// index in the two models.
+    pub(crate) fn route_gates(&self, before: usize, after: usize) -> [[bool; 2]; 2] {
         [
-            self.before.routes[index].gate,
-            self.after.routes[index].gate,
+            self.before.routes[before].gate,
+            self.after.routes[after].gate,
         ]
     }
 
-    #[cfg(feature = "control-provider")]
     /// The ramp length of a route record whose gate changed (#1558 D7); see
     /// [`LevelRules::gate_length`].
     pub(crate) fn gate_length(
@@ -3219,7 +3884,6 @@ impl<'a> EffectiveDiff<'a> {
         )
     }
 
-    #[cfg(feature = "control-provider")]
     /// The strip index of a route's source in the two models, or `None` if it names no strip in
     /// one of them.
     pub(crate) fn source_strips(
@@ -3235,8 +3899,7 @@ impl<'a> EffectiveDiff<'a> {
 }
 
 /// The index in [`SessionModel::strips`] of the strip `route` takes its source from, or `None` if
-/// the model has no such strip. Only the live paths (`control-provider`) resolve route sources.
-#[cfg(feature = "control-provider")]
+/// the model has no such strip.
 pub(crate) fn route_source_strip(model: &SessionModel, route: &session::Route) -> Option<usize> {
     let id = match &route.source {
         session::RouteSource::Track { track_id, .. } => track_id,
@@ -3614,10 +4277,9 @@ fn join_strips<'a>(
     model: &'a SessionModel,
     live: bool,
     edit_ramps: &'a EditRamps,
-    monitor: MonitorBase<'a>,
+    diff: &EffectiveDiff<'a>,
 ) -> Vec<StripJoin<'a>> {
     let ramps = LiveRamps::for_session(model);
-    let diff = EffectiveDiff::new(committed, model, ramps, edit_ramps, monitor);
     let mut joins = Vec::new();
     for (index, strip) in model.strips().enumerate() {
         let id = strip.id.as_str();
@@ -3656,6 +4318,219 @@ fn join_strips<'a>(
         joins.push(StripJoin { id, fader, matrix });
     }
     joins
+}
+
+/// One strip present in both models, with the lanes whose `delay_samples` are equal (#1284 D1).
+struct StripDelayJoin<'a> {
+    id: &'a str,
+    /// The lanes whose declared delay is the same in both models: [`graph::STRIP_DELAY_LEFT`] and
+    /// [`graph::STRIP_DELAY_RIGHT`] bits. Each carries its pending samples when both plans hold the
+    /// strip's line.
+    equal: u8,
+    /// The two lanes' declared delays in the successor's model.
+    delays: [u32; 2],
+}
+
+/// The model half of the strip delay join (#1284 D1): for every strip of `model` that `committed`
+/// also has as a strip of the same kind, which lanes declare the same `delay_samples`. A strip
+/// whose kind changed has no counterpart and is not listed: it is a new strip.
+fn join_strip_delays<'a>(
+    committed: &'a SessionModel,
+    model: &'a SessionModel,
+) -> Vec<StripDelayJoin<'a>> {
+    model
+        .strips()
+        .filter_map(|strip| {
+            let before = committed_input_section(committed, &strip)?;
+            let lanes = [
+                (&before.left, &strip.builtins.left),
+                (&before.right, &strip.builtins.right),
+            ];
+            let equal = lanes
+                .iter()
+                .enumerate()
+                .filter(|(_, (before, after))| before.delay_samples == after.delay_samples)
+                .fold(0, |mask, (lane, _)| mask | (1_u8 << lane));
+            Some(StripDelayJoin {
+                id: strip.id.as_str(),
+                equal,
+                delays: [
+                    strip.builtins.left.delay_samples,
+                    strip.builtins.right.delay_samples,
+                ],
+            })
+        })
+        .collect()
+}
+
+/// What the strip delay join resolved against both plans' lines (#1284 D1).
+#[derive(Default)]
+struct StripDelayCarry {
+    moves: Vec<graph::GraphStripDelayMove>,
+    restarted: Vec<Box<str>>,
+}
+
+/// The line half of the strip delay join (#1284 D1): a lane carries when its `delay_samples` is the
+/// same in both models and both plans hold the strip's line, whose lane rings are then equally long.
+/// A strip with a lane whose delay changed starts that lane at rest and is listed in `restarted`
+/// (decision 15, D15-9): the duck-swap removes the click of the alignment that moves. Both slices
+/// are sorted by strip ID.
+fn resolve_strip_delay_carry(
+    predecessor: &[graph::GraphStripDelayLine],
+    own: &[graph::GraphStripDelayLine],
+    joins: &[StripDelayJoin<'_>],
+) -> StripDelayCarry {
+    let row = |rows: &[graph::GraphStripDelayLine], id: &str| {
+        rows.binary_search_by(|row| (*row.strip).cmp(id))
+            .ok()
+            .map(|index| rows[index].clone())
+    };
+    let mut carry = StripDelayCarry::default();
+    for join in joins {
+        let both = graph::STRIP_DELAY_LEFT | graph::STRIP_DELAY_RIGHT;
+        let mut restarts = join.equal != both;
+        // A lane with no delay in the successor has nothing to take; a lane of a line the
+        // predecessor never had starts at rest.
+        let needed = [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
+            .into_iter()
+            .zip(join.delays)
+            .filter(|&(bit, samples)| join.equal & bit != 0 && samples != 0)
+            .fold(0, |mask, (bit, _)| mask | bit);
+        if needed != 0 {
+            match (row(predecessor, join.id), row(own, join.id)) {
+                (Some(before), Some(after)) => {
+                    let lanes = [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
+                        .into_iter()
+                        .enumerate()
+                        .filter(|&(lane, bit)| {
+                            needed & bit != 0 && before.samples[lane] == after.samples[lane]
+                        })
+                        .fold(0, |mask, (_, bit)| mask | bit);
+                    restarts |= lanes != needed;
+                    if lanes != 0 {
+                        carry.moves.push(graph::GraphStripDelayMove {
+                            successor: after.line,
+                            predecessor: before.line,
+                            lanes,
+                        });
+                    }
+                }
+                _ => restarts = true,
+            }
+        }
+        if restarts {
+            carry.restarted.push(join.id.into());
+        }
+    }
+    carry
+}
+
+/// One send present in both models whose source and destination are the same and whose values the
+/// plans can continue from (#1284 D2, D3): the route into a submix, and the record that brings the
+/// carried send from the predecessor's live values to the successor's, when they differ.
+struct RouteJoin<'a> {
+    id: &'a str,
+    retarget: Option<RouteControlRecord>,
+}
+
+/// The model half of the send join (#1284 D2, D3): for every route of `model` into a submix that
+/// `committed` also has with the same source (strip and tap) and the same destination, the record
+/// of the difference of their live values. A re-pointed route is not listed: it is a route removed
+/// and a route added, which #1363 ramps at route level, and its source strip is not restarted.
+///
+/// The difference is judged on the effective values of both models ([`EffectiveDiff`]; the route's
+/// gate follows its source strip's effective mute, #1558 D1) by [`route_record_between`], the
+/// function the classifier calls for the same send, so a carry cannot disagree with a live commit.
+/// A send whose values the function refuses is prepared: it is not listed and starts at its prepared
+/// value.
+fn join_routes<'a>(
+    committed: &'a SessionModel,
+    model: &'a SessionModel,
+    edit_ramps: &'a EditRamps,
+    diff: &EffectiveDiff<'a>,
+) -> Vec<RouteJoin<'a>> {
+    let ramps = LiveRamps::for_session(model);
+    let before_at: BTreeMap<&str, usize> = committed
+        .routes
+        .iter()
+        .enumerate()
+        .map(|(index, route)| (route.id.as_str(), index))
+        .collect();
+    let mut joins = Vec::new();
+    for (after_index, after) in model.routes.iter().enumerate() {
+        if !matches!(
+            after.destination,
+            session::RouteDestination::SubmixInput { .. }
+        ) {
+            continue;
+        }
+        let Some(&before_index) = before_at.get(after.id.as_str()) else {
+            continue;
+        };
+        let before = &committed.routes[before_index];
+        if before.source != after.source || before.destination != after.destination {
+            continue;
+        }
+        let gates = diff.route_gates(before_index, after_index);
+        let edit = RouteEditRamps::of(edit_ramps, &after.id);
+        let gate_length = if gates[0] == gates[1] {
+            0
+        } else {
+            let Some(length) = diff
+                .source_strips(before, after)
+                .map(|source| diff.gate_length(before, after, edit.mute, source, gates))
+            else {
+                continue;
+            };
+            length
+        };
+        let Ok(retarget) = route_record_between(ramps, before, after, gates, gate_length, edit)
+        else {
+            continue;
+        };
+        joins.push(RouteJoin {
+            id: after.id.as_str(),
+            retarget,
+        });
+    }
+    joins
+}
+
+/// What the send join resolved against both plans' live routes (#1284 D2, D3).
+#[derive(Default)]
+struct RouteCarry<'a> {
+    moves: Vec<graph::GraphRouteMove>,
+    /// The carried sends whose live values differ, by route ID, with the record to write to the
+    /// successor's cell.
+    retargets: Vec<(&'a str, RouteControlRecord)>,
+}
+
+/// The route half of the send join (#1284 D2): a send carries when both plans hold a live route of
+/// its ID. Both slices are sorted by route ID.
+fn resolve_route_carry<'a>(
+    predecessor: &[graph::GraphLiveRoute],
+    own: &[graph::GraphLiveRoute],
+    joins: &[RouteJoin<'a>],
+) -> RouteCarry<'a> {
+    let row = |rows: &[graph::GraphLiveRoute], id: &str| {
+        rows.binary_search_by(|row| (*row.route_id).cmp(id))
+            .ok()
+            .map(|index| rows[index].unit)
+    };
+    let mut carry = RouteCarry::default();
+    for join in joins {
+        let (Some(before), Some(after)) = (row(predecessor, join.id), row(own, join.id)) else {
+            continue;
+        };
+        carry.moves.push(graph::GraphRouteMove {
+            successor: after,
+            predecessor: before,
+        });
+        if let Some(record) = join.retarget {
+            carry.retargets.push((join.id, record));
+        }
+    }
+    carry
 }
 
 /// One carried strip's retarget records, to write into the successor's cells (#1277 D5).
@@ -4070,9 +4945,10 @@ fn prepare_effect_retarget(
 /// strip moves, and which strips restart.
 ///
 /// An owner carries when its difference is not a prepared one, and both plans hold it as a lane
-/// of an effect bank stage, of one kind (a plain stage, or a live-control stage whose lane has
-/// cells, only a lowered bypass or nothing), with equal layouts (prepared bypass, latency, state
-/// sizes and state layout version). A live difference also needs `retarget` to accept it (the
+/// of an effect bank stage or as a live-controlled per-node instance, of one kind (a plain stage,
+/// or a live-control stage whose lane has cells, only a lowered bypass or nothing), with equal
+/// layouts (prepared bypass, latency, state sizes and state layout version). An owner that one
+/// plan holds with live controls and the other without has no row on one side, and restarts. A live difference also needs `retarget` to accept it (the
 /// successor's producer has a cell for every record); a lane it refuses restarts. A console slot's
 /// key is (strip, `Simd1` or `Simd2`, slot ID), a surviving insert's is (strip,
 /// [`graph::RackId::Dynamic`], insert ID). A strip with an owner that does not carry, or whose
@@ -4106,15 +4982,7 @@ fn resolve_effect_carry(
             let rows = effect_lane_row(own, join.id, rack, effect_id)
                 .zip(predecessor.effect_lane(join.id, rack, effect_id));
             let Some((own, before)) = rows.filter(|(own, before)| {
-                !state.is_prepared()
-                    && own.layout == before.layout
-                    && own.kind == before.kind
-                    // A move between two per-node instances is #1282's; until it lands, a strip
-                    // that holds one restarts, as it always did.
-                    && !matches!(
-                        (own.location, before.location),
-                        (graph::GraphEffectSite::Node(_), graph::GraphEffectSite::Node(_))
-                    )
+                !state.is_prepared() && own.layout == before.layout && own.kind == before.kind
             }) else {
                 restart = true;
                 continue;
@@ -4129,7 +4997,17 @@ fn resolve_effect_carry(
                 }
                 _ => None,
             };
-            carry.scratch_bytes = carry.scratch_bytes.max(own.layout.payload_bytes());
+            // Two per-node instances change places by pointer (#1282 D2): their state goes through
+            // no scratch, so they add nothing to it.
+            if !matches!(
+                (own.location, before.location),
+                (
+                    graph::GraphEffectSite::Node(_),
+                    graph::GraphEffectSite::Node(_)
+                )
+            ) {
+                carry.scratch_bytes = carry.scratch_bytes.max(own.layout.payload_bytes());
+            }
             carry.moves.push(graph::GraphEffectMove {
                 successor: own.location,
                 predecessor: before.location,
@@ -4267,6 +5145,204 @@ mod tests {
         }
     }
 
+    fn stable(id: &str) -> graph::StableGraphId {
+        graph::StableGraphId::parse(id).expect("graph ID")
+    }
+
+    fn strip(id: &str) -> graph::GraphNodeId {
+        graph::GraphNodeId::TrackStage {
+            track_id: stable(id),
+            stage: graph::TrackStage::PostMatrix,
+        }
+    }
+
+    fn submix(id: &str) -> graph::GraphNodeId {
+        graph::GraphNodeId::Submix {
+            submix_id: stable(id),
+        }
+    }
+
+    /// A line of the route `route`, whose endpoints are `from` and `to`, at index `line`.
+    fn route_line(
+        route: &str,
+        from: &str,
+        to: &str,
+        line: u32,
+        samples: u64,
+    ) -> graph::GraphDelayLine {
+        graph::GraphDelayLine {
+            edge: graph::GraphEdgeId::RouteDestination {
+                route_id: stable(route),
+            },
+            source: strip(from),
+            destination: submix(to),
+            line,
+            samples,
+        }
+    }
+
+    fn strip_delay(strip: &str, line: u32, samples: [u32; 2]) -> graph::GraphStripDelayLine {
+        graph::GraphStripDelayLine {
+            strip: strip.into(),
+            line,
+            samples,
+        }
+    }
+
+    /// #1284 D1: a lane carries when its delay is the same in both models and both plans hold the
+    /// strip's line; a strip with a lane that changed, or whose line one plan lacks, restarts. A
+    /// lane with no delay has nothing to take.
+    #[test]
+    fn strip_delay_lanes_join_by_strip_and_lane() {
+        use super::{StripDelayJoin, resolve_strip_delay_carry};
+        let (left, right) = (graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT);
+        let before = [
+            strip_delay("eq0", 0, [37, 53]),
+            strip_delay("eq2", 1, [0, 19]),
+        ];
+        let own = [
+            strip_delay("eq0", 1, [37, 60]),
+            strip_delay("eq2", 0, [0, 19]),
+            strip_delay("eq5", 2, [4, 4]),
+        ];
+        let joins = [
+            // The right lane changed: the left carries and the strip restarts.
+            StripDelayJoin {
+                id: "eq0",
+                equal: left,
+                delays: [37, 60],
+            },
+            // Unchanged, with no delay on the left: only the right takes its ring.
+            StripDelayJoin {
+                id: "eq2",
+                equal: left | right,
+                delays: [0, 19],
+            },
+            // Unchanged and undelayed: no line on either side, nothing to do.
+            StripDelayJoin {
+                id: "eq3",
+                equal: left | right,
+                delays: [0, 0],
+            },
+            // Unchanged, but the predecessor has no line: it restarts.
+            StripDelayJoin {
+                id: "eq5",
+                equal: left | right,
+                delays: [4, 4],
+            },
+        ];
+        let carry = resolve_strip_delay_carry(&before, &own, &joins);
+        assert_eq!(
+            carry.moves,
+            vec![
+                graph::GraphStripDelayMove {
+                    successor: 1,
+                    predecessor: 0,
+                    lanes: left,
+                },
+                graph::GraphStripDelayMove {
+                    successor: 0,
+                    predecessor: 1,
+                    lanes: right,
+                },
+            ]
+        );
+        assert_eq!(
+            carry.restarted,
+            vec![Box::<str>::from("eq0"), Box::<str>::from("eq5")]
+        );
+    }
+
+    /// #1284 D2: a send carries when both plans hold a live route of its ID, whatever unit it sits
+    /// in; its retarget travels with it, and a send one plan lacks is neither moved nor written.
+    #[test]
+    fn live_routes_join_by_route_id() {
+        use super::{RouteJoin, resolve_route_carry};
+        let live = |route: &str, unit| graph::GraphLiveRoute {
+            route_id: route.into(),
+            unit,
+        };
+        let before = [live("a-main", 3), live("b-main", 5)];
+        let own = [live("a-main", 4), live("b-main", 2), live("c-main", 9)];
+        let record =
+            crate::route_controls::route_record(-6.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2], 64)
+                .expect("a record");
+        let joins = [
+            RouteJoin {
+                id: "a-main",
+                retarget: Some(record),
+            },
+            RouteJoin {
+                id: "b-main",
+                retarget: None,
+            },
+            // Present in the successor only.
+            RouteJoin {
+                id: "c-main",
+                retarget: Some(record),
+            },
+            // Present in the predecessor's model but not a live route of either plan.
+            RouteJoin {
+                id: "d-main",
+                retarget: Some(record),
+            },
+        ];
+        let carry = resolve_route_carry(&before, &own, &joins);
+        assert_eq!(
+            carry.moves,
+            vec![
+                graph::GraphRouteMove {
+                    successor: 4,
+                    predecessor: 3,
+                },
+                graph::GraphRouteMove {
+                    successor: 2,
+                    predecessor: 5,
+                },
+            ]
+        );
+        assert_eq!(carry.retargets, vec![("a-main", record)]);
+    }
+
+    /// #1283 D1: lines join by edge ID and endpoints, never by index. A line moves when its
+    /// edge exists on both sides with the same endpoints, whatever its length and whatever
+    /// index either side gave it; a route re-pointed to another destination or another source
+    /// keeps its route ID, and its line does not move; an edge with a line on one side only
+    /// moves nothing. Red if the join keys by index (the added track shifts every index) or by
+    /// route ID alone (a re-pointed route's line would continue into the wrong bus).
+    #[test]
+    fn delay_lines_join_by_edge_and_endpoints() {
+        let mut before = vec![
+            route_line("a-main", "a", "bus", 0, 480),
+            route_line("b-main", "b", "bus", 1, 480),
+            route_line("c-main", "c", "bus", 2, 480),
+            route_line("d-main", "d", "bus", 3, 480),
+            route_line("e-main", "e", "bus", 4, 480),
+        ];
+        let mut own = vec![
+            // New route: no predecessor line.
+            route_line("new-main", "new", "bus", 0, 480),
+            // Unchanged, but at another index and another length.
+            route_line("a-main", "a", "bus", 1, 512),
+            // Re-pointed to another destination.
+            route_line("b-main", "b", "other", 2, 480),
+            // Re-pointed to another source.
+            route_line("c-main", "x", "bus", 3, 480),
+            // Unchanged.
+            route_line("d-main", "d", "bus", 4, 480),
+            // `e-main` has no line in this plan.
+        ];
+        before.sort_by(|l, r| l.edge.cmp(&r.edge));
+        own.sort_by(|l, r| l.edge.cmp(&r.edge));
+        let moves = super::resolve_delay_carry(&before, &own);
+        let mut moves: Vec<(u32, u32)> = moves
+            .iter()
+            .map(|step| (step.successor, step.predecessor))
+            .collect();
+        moves.sort_unstable();
+        assert_eq!(moves, vec![(1, 0), (4, 3)]);
+    }
+
     fn inventory_with(row: super::EffectLaneInventoryRow) -> super::PlanStateInventory {
         super::PlanStateInventory {
             plan_identity: 1,
@@ -4274,6 +5350,11 @@ mod tests {
             input_sections: Box::default(),
             strip_stages: Box::default(),
             effect_lanes: Box::new([row]),
+            meters: Box::default(),
+            observations: Box::default(),
+            delay_lines: Box::default(),
+            strip_delays: Box::default(),
+            live_routes: Box::default(),
             restarted: Box::default(),
         }
     }

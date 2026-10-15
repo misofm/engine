@@ -137,3 +137,66 @@ Checked against `12d4a4f9d`.
 - **Edit order with #1621** (`runtime.rs`, the per-node window): whichever is scheduled first lands
   first; the other rebases. They change different lines.
 - **Dependencies.** #1281, #1280c (for D1's retarget).
+
+## Decision record: #1282 (batch 11)
+
+**Shipped.** A live-controlled per-node effect instance that survives a swap with its prepared
+layout unchanged moves by pointer: D1-D3 as frozen.
+
+- `graph`: `LiveControlEffect::can_move_from` / `move_from` (`runtime.rs`, in a realtime-policy
+  region). The check compares the prepared layout, the control kind and cell shape (the successor
+  holds its carried slots, #1633) and the shunt shape. The move takes the control state through
+  `EffectControlLane::carry_from` (unread cells, bypass crossfade, symmetry terms, #1280a), then
+  exchanges the two processor boxes and the two `BypassShunt`s with `core::mem::swap`. The `spans`
+  window and the `observation` lane stay (#1621 sizes the window; the tap state is #1327b's), and
+  the pending `Observe` records of the predecessor are applied at the carry by the second marked
+  loop, as for every other move. `Runtime::can_carry_effect_lanes` and `carry_effect_lanes` gain the
+  node-to-node arm. `install_effect_carry` no longer refuses a node-to-node move and
+  `GraphCarryInstallError::EffectMoveBetweenNodes` is deleted.
+- `host-core`: `resolve_effect_carry` drops the node-to-node exclusion, and a node-to-node move
+  adds nothing to the payload scratch (`carry.scratch_bytes` counts only moves that go through it),
+  so the carry's retained charge for a session of delays is the move table and the carried slots.
+  D3 needs no code: a per-node effect without live controls has no inventory row, so its owner
+  restarts its strip.
+- `effect-contract` (outside the authorized list, one mechanical helper): `BypassShunt::same_shape`.
+- `graph` test-support: `test_only_carry_payload_bytes` / `test_only_reset_carry_payload_bytes`, a
+  thread-local count of the layout payload each lane move passes through the scratch.
+- Test harness: `effect_run_blocks` (a run of more than `BLOCKS` blocks), `Feed::with_blocks`,
+  `EffectRun::payload_bytes`; `LivePlan::submit` submits at the plan's own sample rate.
+
+**Departures.** None from the frozen decisions. D1's "prepared bypass" needs no new code: the
+inventory layout already carries `bypass`, and `effect_instance_records` refuses a bypass change of
+an effect that does not lower it.
+
+**Gates and tests** (`crates/host-core/tests/successor_swap.rs`):
+
+| Gate | Test |
+|---|---|
+| 1 | `a_delay_tail_rings_on_through_the_swap_at_every_width` (64 blocks; restart run loses the echo) |
+| 2 | `unread_values_and_a_live_bypass_cross_the_swap_at_every_width` |
+| 3 | `a_prepared_bypass_change_restarts_its_strip_at_every_width` (`restarted_strips() == ["eq0"]`) |
+| 4 | `a_delay_moves_by_pointer_at_96_khz_at_every_width` (payload bytes 0, swap block clean); `the_payload_counter_counts_a_lane_move` (the counter reads nonzero for a bank move) |
+| D3 | `an_owner_without_live_controls_on_one_side_restarts_at_every_width` |
+| D1 live | `a_live_difference_on_a_moved_instance_is_retargeted_at_every_width` (delay time, compressor bypass) |
+
+Red under mutation (each run once, reverted): no processor exchange (gates 1, 2, 4 red), no
+`carry_from` (gate 2 red).
+
+**Consequence outside the slice.** `capi`'s `a_prepared_bypass_change_rebuilds_and_renders_the_committed_model`
+(#1266 gate 3) used a control that rebuilt by content edits, which restarted the per-node multiband
+as a side effect. A content edit now moves the multiband, so the control's rebuilds also replace
+the multiband by a fresh instance of the same declaration under a new ID (a prepared change of
+that owner), which restarts it and its strip as the bypass rebuild does. The oracle is otherwise
+unchanged.
+
+**Measured.** Browser boot high-water growth 20,447,232 bytes (before: 20,447,232; the pin is
+20,971,520). No resource estimate or pin moved: `cargo test -p host-core --all-features` (428),
+`effect-contract`, `rack`, `graph`, `graph-compiler`, `capi`, `engine`, `host-web --features
+host-web/test-support` green; clippy `-D warnings` on `host-core` (no features, default,
+all features) and `host-core graph effect-contract rack capi --all-targets --all-features`;
+`realtime-policy`, `check-bench-policy.sh`, `check-builtins-fixtures.sh`, `check-cross-targets.sh`,
+`check-web-audioworklet.sh`, `trace-graph-audit.sh` (1,000,000 blocks) and rustdoc `-D warnings` pass.
+
+### `audit capi` digest (batch 11)
+
+The C ABI render audit commits one structural transaction after its first call (it adds a muted track). Its session also holds a per-node live effect instance (the audit editor reaches a non-EQ effect lane). Before this slice that instance restarted at the swap; now it moves by pointer and keeps its state. So `audit capi`'s `pcm_digest` moves from `9bc5ec3d8a4c223c` to `bf7dcedd1d92621f`, measured by building the audit at `405221f8d` (#1633, the parent: `9bc5ec3d8a4c223c`) and at `067d145ec` (this slice: `bf7dcedd1d92621f`); the later batch 11 slices leave it at `bf7dcedd1d92621f`. Allocations, frees and render errors stay 0.

@@ -81,7 +81,7 @@ never holds a queue that nothing calls.
 - **D4. The C ABI** builds no automation queue and reads neither S nor the quantum for it; the
   test-support report loses its row. `capi_retained_bytes` falls by the removed rows; the
   exact-charge oracle stays exact, and the reference budgets are ceilings that still hold. The
-  compile limit S keeps its validation until draft 22 reserves it.
+  compile limit S keeps its validation until #1668 reserves it.
 - **D5. Tests.** The queue-only tests above are deleted; the wrap test keeps its other queues.
 - **D6. Docs.** The registry lists queue kind 2 and the five counters as retired with this slice
   as the reason, and removes the record line (`:45`); the semantics, sizing and realtime-memory
@@ -111,7 +111,7 @@ never holds a queue that nothing calls.
 ## Non-goals
 
 - Wire identities, dispatch, capabilities and the corpus hash (#1627 and #1628).
-- The C limit `maximum_automation_spans_per_block` (draft 22).
+- The C limit `maximum_automation_spans_per_block` (#1668).
 - The other queues and their configuration.
 
 ## Hazards
@@ -170,7 +170,7 @@ Batch P1. Direct dependency:
 - #1628 *Retire the AUTOMATION_CANCELED event and the cancellation path*, which brings #1627.
 
 *Extract the C ABI control plane into a portable crate both hosts call* (#1309) arrives through
-#1627. Draft 22 *Reserve the C ABI's automation span limit* follows this draft.
+#1627. #1668 *Reserve the C ABI's automation span limit* follows this draft.
 
 ## Amendment (controls coordinator, 2026-10-14)
 
@@ -211,7 +211,7 @@ codes below changed.
   builds no automation row; the quantum is no longer read for the queue and `capi_resources` loses
   its `quantum_frames` argument; the test-support report loses its `automation` row. Both hosts
   build the queue here (the browser through `control_limits`), so D4 applies to both. The compile
-  limit S (`maximum_automation_spans_per_block`) keeps its validation, untouched (draft 22).
+  limit S (`maximum_automation_spans_per_block`) keeps its validation, untouched (#1668).
 - host-core: `SERVED_COUNTERS` is four IDs (`TELEMETRY_COALESCED`, `TELEMETRY_DROPPED`,
   `LIVE_VALUES_SUPERSEDED`, `TRANSITION_REPREPARE_REFUSALS`); `CANCELED_AUTOMATION` is no longer
   served.
@@ -278,7 +278,7 @@ and the C ABI counters tests and the pinned counters response vector (request 8:
   conformance record's frame count is unchanged (45).
 - **The hold rule has no new home yet.** The spec deletes the registry's record line; its one rule
   not stated elsewhere, "a segment applies on `[start,end)` and holds its end value until replaced",
-  was waiting for draft 01 (#1626) to give it a home in `docs/SESSION_SCHEMA_V1.md`, which has not
+  was waiting for #1626 to give it a home in `docs/SESSION_SCHEMA_V1.md`, which has not
   landed on this base. The registry keeps that sentence alone, pointing at #1626; #1626 moves it.
 - Mechanical edits outside the authorized paths: `crates/host-core/src/control_provider.rs`
   (the served counter set and its test), `tools/realtime-policy/src/policy.rs` (the allowlist row),

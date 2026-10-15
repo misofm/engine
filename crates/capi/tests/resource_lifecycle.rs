@@ -1179,6 +1179,14 @@ impl Budget {
 /// high per row). #1629 removed the protocol automation queue: `capi_retained_bytes` measured
 /// 165,166 at both widths (that print, and x86-64), so its ceiling is 165,166 plus 10 %, rounded
 /// up to 64: 181,682.6 -> 181,696 (was 216,832).
+///
+/// #1633 (batch 11) moved the effect lanes' carried slots out of the build: a lane holds them only
+/// when a successor carries into it. The first-compile reference session carries nothing, so the
+/// three graph rows fall by the slots the batch 10 carry added at eight lanes (`graph_session_plus_plan_bytes`
+/// 321,846 -> 315,798, `graph_incremental_plan_bytes` 321,774 -> 315,726, `graph_metadata_bytes`
+/// 113,601 -> 107,553: 6,048 each, x86-64). `capi_retained_bytes` charges capi's own allocations
+/// and stays 165,166. The graph ceilings stand until the next `aarch64-debug` print tightens them
+/// (AArch64 runs only in CI); the rows only shrank, so they still bound them.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
