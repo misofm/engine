@@ -137,3 +137,65 @@ Checked against `12d4a4f9d`.
 - **Dependency on #1282.** The lines hold no effect state; the dependency orders the shared files
   (`graph/src/{lib.rs,runtime.rs}`, `host-core/src/prepare.rs`, `successor_swap.rs`) only. This
   slice can land before #1327 or after it.
+
+## Decision record: #1283 (batch 11)
+
+**Shipped.** D1-D5 as frozen: a compensation line carries when its edge ID exists in both plans
+with the same endpoints; equal lengths swap the rings and the cursor, other lengths take a
+head-aligned copy.
+
+- `graph/program.rs`: `DelaySpec` gains `edge` (the delayed edge's position in `GraphSpec::edges`),
+  so the lowered program says which edge each line delays.
+- `graph/runtime.rs` (policy regions): `CompensationDelay::adopt` (D2 swap, else D4 copy through
+  `carry_head_aligned`, one routine for both channels and both directions), and
+  `Runtime::can_carry_delay_lines` / `carry_delay_lines`, bounded by the move table.
+- `graph/lib.rs`: `GraphDelayLine` (edge, source, destination, line, length), `GraphDelayMove`,
+  `take_compensation_lines`, `install_delay_carry`, `delay_carry_retained_bytes`, three install
+  errors, `GraphExecutor::carry_delays`, and the check and the carry in `adopt_predecessor` (the
+  check joins the "every section checks before any section moves" list). `carry_program_retained_bytes`
+  counts the move table.
+- `host-core/prepare.rs`: `PlanStateInventory::delay_lines` (counted in `retained_bytes`),
+  `resolve_delay_carry` (the join), the table charged against the graph cap, and a program that
+  names the predecessor and moves no source when a line is the only thing that carries.
+
+**Decisions taken where the text left room.**
+
+- A route's two edges (`RouteSource`, `RouteDestination`) report the route's own endpoints (its
+  source strip and its destination node), not the edge's. The destination edge's own endpoints do
+  not change when only the route's source is re-pointed, so the text's "same source and destination
+  nodes" would have carried the old line there.
+- The identity of the lines (`GraphDelayLine`, with ID strings) is not retained in the plan: the
+  executor holds it until `take_compensation_lines` is called, once, right after bind, and the
+  inventory (control side, counted) keeps it. The plan retains only the move table.
+- The lookup is by successor edge to the predecessor edge of the same ID; #1363 D4 adds the alias.
+
+**Gates and tests.**
+
+| Gate | Test |
+|---|---|
+| 1 | `compensated_output_lines_keep_their_audio_at_every_rate_and_width` (44.1, 48, 88.2, 96 kHz; each asserts two compensated lines in the predecessor) |
+| 2 | `compensated_submix_lines_keep_their_audio_at_every_rate_and_width` |
+| 3 | `runtime::tests::a_successor_line_continues_the_predecessors_pending_samples_head_aligned` (equal, longer, shorter, one-word lines; a cursor at every position and wrapped) |
+| 4 | `a_repointed_route_does_not_carry_its_line_at_every_rate_and_width` (`restarted_strips()` empty; muted re-pointed strip equals B, audible one differs); `prepare::tests::delay_lines_join_by_edge_and_endpoints`; `tests::a_route_edge_names_the_endpoints_of_its_route` |
+| 5 | `assert_clean_swap` in every case above: allocator and render audit zero over the swap block |
+
+Red under mutation (each run once, reverted): no `install_delay_carry` (gates 1, 2, 4 red), join
+without endpoints (gate 4 red), copy from index 0 instead of the cursor (gate 3 red).
+
+**Consequence outside the slice.** Two `capi` live tests compared a rebuild with another history
+and relied on the lines restarting at rest: `a_live_mute_survives_a_later_rebuild` (live mute one
+block before the swap against a mute in the swap transaction) and
+`a_prepared_bypass_change_rebuilds_and_renders_the_committed_model` (carried source ring against a
+fresh one in the control). With carried lines the audio a line holds at the swap plays out after
+it, and in both pairs the held audio differs by one block. They now compare from the block after
+the lines flush (the session's latency, in blocks); the oracle is otherwise unchanged. Found, not
+from this slice: `host-web` `meter_delivery_restarts_on_the_successor_and_never_publishes_a_misshaped_frame`
+fails at the base (lane W's file).
+
+**Measured.** Browser boot high-water growth 20,447,232 bytes (before: 20,447,232; the pin is
+20,971,520). No pin moved. `host-core` (442 with all features), `graph` (105), `graph-compiler`
+(178), `rack` (67), `capi` (153), `control-plane` (5) green; clippy `-D warnings` on `host-core` (no
+features, default, all features) and `host-core graph capi` with all targets; `realtime-policy`,
+`check-bench-policy.sh`, `check-workspace-policy.sh`, `check-builtins-fixtures.sh`,
+`check-graph-determinism.sh`, `check-cross-targets.sh`, `check-web-audioworklet.sh`,
+`trace-graph-audit.sh` (1,000,000 blocks) and rustdoc `-D warnings` pass.

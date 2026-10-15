@@ -1037,6 +1037,41 @@ impl CompensationDelay {
             offset += take;
         }
     }
+
+    /// Take the pending samples of `from`, the line of the same edge in the plan this one
+    /// displaces (#1283 D2, D4).
+    ///
+    /// Two lines of one length exchange their rings and cursors, so the successor emits exactly
+    /// what the predecessor would have and no word is copied. Lines of another length take a
+    /// head-aligned copy ([`carry_head_aligned`]) of each channel: the successor emits the
+    /// predecessor's pending samples first, oldest first, cut short or followed by `+0.0`.
+    /// Allocation-free; `from` is left in an unspecified state, for it retires.
+    pub(crate) fn adopt(&mut self, from: &mut Self) {
+        if self.left.len() == from.left.len() {
+            core::mem::swap(&mut self.left, &mut from.left);
+            core::mem::swap(&mut self.right, &mut from.right);
+            core::mem::swap(&mut self.cursor, &mut from.cursor);
+            return;
+        }
+        carry_head_aligned(&mut self.left, &from.left, from.cursor);
+        carry_head_aligned(&mut self.right, &from.right, from.cursor);
+        self.cursor = 0;
+    }
+}
+
+/// One channel of [`CompensationDelay::adopt`] between rings of different lengths (#1283 D4, D5).
+///
+/// `from` is a delay ring whose oldest pending word sits at `cursor` and whose age order wraps
+/// there. The first `into.len()` words of that order land at the front of `into`, and any words
+/// `into` has beyond that are `+0.0`. At most two slice copies and one fill, in either direction
+/// of the length change.
+fn carry_head_aligned(into: &mut [f32], from: &[f32], cursor: usize) {
+    let take = core::cmp::min(into.len(), from.len());
+    let first = core::cmp::min(take, from.len() - cursor);
+    into[..first].copy_from_slice(&from[cursor..cursor + first]);
+    let wrapped = take - first;
+    into[first..take].copy_from_slice(&from[..wrapped]);
+    into[take..].fill(0.0);
 }
 // REALTIME_POLICY_END
 
@@ -5037,6 +5072,40 @@ impl crate::runtime::Runtime {
             };
             let adopted = into.adopt_strip_lane(step.owner, lane, from, predecessor_lane);
             debug_assert!(adopted, "a checked strip move is adopted");
+        }
+    }
+
+    /// Whether every move of `moves` names a compensation line of this (successor) runtime and a
+    /// compensation line of `predecessor` (#1283). Checked before anything moves, so the carry is
+    /// all or nothing. Allocation-free.
+    pub(crate) fn can_carry_delay_lines(
+        &self,
+        predecessor: &Self,
+        moves: &[crate::GraphDelayMove],
+    ) -> bool {
+        moves.iter().all(|step| {
+            (step.successor as usize) < self.delays.len()
+                && (step.predecessor as usize) < predecessor.delays.len()
+        })
+    }
+
+    /// Run the compensation-line section of a carry program at the swap block (#1283 D2, D4):
+    /// each successor line takes the pending samples of its predecessor line
+    /// ([`CompensationDelay::adopt`]). Bounded by `moves.len()`; allocation-free. The caller has
+    /// checked [`Self::can_carry_delay_lines`].
+    pub(crate) fn carry_delay_lines(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphDelayMove],
+    ) {
+        for step in moves.iter() {
+            let (Some(into), Some(from)) = (
+                self.delays.get_mut(step.successor as usize),
+                predecessor.delays.get_mut(step.predecessor as usize),
+            ) else {
+                continue;
+            };
+            into.adopt(from);
         }
     }
 
@@ -12001,6 +12070,67 @@ mod tests {
                     zero.iter().all(|sample| *sample == 0.0),
                     "reset clears the line"
                 );
+            }
+        }
+    }
+
+    /// #1283 gate 3: a successor line emits the predecessor's pending samples first, oldest
+    /// first, then (for a longer line) `+0.0`, then its own input; a shorter line cuts the
+    /// pending samples off. The predecessor has taken every number of frames from zero to two
+    /// lines and a block, so its cursor sits at every position and has wrapped, and its blocks
+    /// are not a multiple of its length. Red mutation: start the copy at the write position
+    /// (`cursor`) of the successor, or at index 0 of the predecessor's ring instead of its
+    /// cursor, and the pending order is wrong at every cursor but zero.
+    #[test]
+    fn a_successor_line_continues_the_predecessors_pending_samples_head_aligned() {
+        const BLOCK: usize = 5;
+        // The sample a channel carries at time `t`: distinct, never zero, and different on the
+        // two channels.
+        let sample = |t: usize, channel: usize| (t + 1) as f32 * 0.5 + channel as f32 * 1_000.0;
+        for (predecessor, successor) in
+            [(7, 7), (7, 10), (7, 4), (7, 1), (1, 7), (16, 40), (40, 16)]
+        {
+            for taken in 0..(2 * predecessor + BLOCK + 1) {
+                let mut before = CompensationDelay::new(predecessor);
+                let mut time = 0;
+                while time < taken {
+                    let take = BLOCK.min(taken - time);
+                    let mut left: Vec<f32> = (time..time + take).map(|t| sample(t, 0)).collect();
+                    let mut right: Vec<f32> = (time..time + take).map(|t| sample(t, 1)).collect();
+                    before.process(&mut left, &mut right);
+                    time += take;
+                }
+                let mut after = CompensationDelay::new(successor);
+                after.adopt(&mut before);
+                // `successor` frames of silence in, so the output is the line's whole content in
+                // age order, and then the input.
+                let mut left = vec![0.0f32; successor + 3];
+                let mut right = vec![0.0f32; successor + 3];
+                after.process(&mut left, &mut right);
+                for (channel, plane) in [left, right].into_iter().enumerate() {
+                    for (index, word) in plane.iter().enumerate() {
+                        let expected = if index >= successor || index >= predecessor {
+                            // Past the pending samples the line holds `+0.0`, then it has
+                            // emitted the zeros it was fed.
+                            0.0
+                        } else {
+                            // Pending sample `index` of the predecessor: the one it took
+                            // `predecessor - index` frames ago, or rest if it took fewer.
+                            let age = predecessor - index;
+                            if taken >= age {
+                                sample(taken - age, channel)
+                            } else {
+                                0.0
+                            }
+                        };
+                        assert_eq!(
+                            word.to_bits(),
+                            expected.to_bits(),
+                            "line {predecessor} to {successor}, taken {taken}, channel \
+                             {channel}, word {index}"
+                        );
+                    }
+                }
             }
         }
     }

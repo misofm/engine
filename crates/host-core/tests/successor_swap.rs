@@ -7891,3 +7891,262 @@ mod observation_carry {
         assert_eq!(run.allocator, ((0, 0, 0), (0, 0)));
     }
 }
+
+// Issue #1283 (slice 13 of #1269): the plug-in delay compensation lines. PDC delays each edge into
+// a node with several inputs by that node's latest arrival minus the edge's own, so one strip with
+// a latency insert gives every other route into the same node a line. A line is keyed by its edge
+// ID and the edge's endpoints: it carries when both survive, at the output and inside a submix
+// alike, and a re-pointed route carries nothing.
+
+/// The tracks `eq0` to `eq3` with `limited` strips behind a true-peak limiter insert. The
+/// limiter reports `Fs / 100 + 6` samples of latency, so every route into a node the limited
+/// strip also reaches has a compensation line.
+fn pdc_session(rate: u32, limited: &[&str]) -> SessionModel {
+    let mut model = filtered_session(false);
+    model.sample_rate_hz = rate;
+    let cut: Vec<String> = model
+        .tracks
+        .iter()
+        .skip(4)
+        .map(|track| track.id.as_str().to_owned())
+        .collect();
+    for track in cut {
+        remove_track(&mut model, &track);
+    }
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        if limited.contains(&track.id.as_str()) {
+            track.inserts.effects.push(Effect {
+                id: id("lim"),
+                identity: EffectIdentity::Native {
+                    effect_id: id("miso.true-peak-limiter"),
+                },
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::Maximum,
+                params: console_params("limiter", index, false),
+                sidechain: SidechainDeclaration::None,
+            });
+        }
+    }
+    model
+}
+
+/// `model` with the route of `track` sent to submix `bus` instead of where it went.
+fn send_route_to(model: &mut SessionModel, track: &str, bus: &str) {
+    let main = format!("{track}-main");
+    let route = model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == main)
+        .expect("the track's main route");
+    route.destination = session::RouteDestination::SubmixInput { submix_id: id(bus) };
+}
+
+/// A unity submix `bus` that forwards to the output.
+fn add_bus(model: &mut SessionModel, bus: &str) {
+    let template = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "eq0-main")
+        .expect("a track route")
+        .clone();
+    let mut onward = template.clone();
+    let RouteSource::Track { tap, .. } = template.source else {
+        panic!("a track route");
+    };
+    onward.id = id(&format!("{bus}-main"));
+    onward.source = RouteSource::Submix {
+        submix_id: id(bus),
+        tap,
+    };
+    onward.follows_mute = false;
+    model.routes.push(onward);
+    model
+        .submixes
+        .push(session::Submix::unity(id(bus), &model.console));
+}
+
+/// The rates the launch supports.
+const PDC_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+
+/// A swapped run of `a` into `b` and the fresh reference of `b`, with live controls attached (the
+/// form whose inserts carry), and the checks every case shares: the hand-over carried, the swap
+/// block made no allocator call and no restore was refused.
+fn pdc_runs(
+    a: &Session,
+    b: &Session,
+    feed: &Feed,
+    backend: Backend,
+    what: &str,
+) -> (EffectRun, EffectRun) {
+    use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+    struct RestoreMode(Mode);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    assert_installed();
+    let _restore = RestoreMode(mode());
+    set_mode(Mode::Count);
+    engine::realtime::audit::warm_up();
+    let reference = effect_run(b, None, feed, &[], &[], backend);
+    let run = effect_run(a, Some((b, &a.model)), feed, &[], &[], backend);
+    assert_clean_swap(&run, what);
+    (run, reference)
+}
+
+/// Gate 1: three tracks, the first behind a limiter, so the other two routes into the output
+/// carry lines. B adds a muted track with no latent effect, so no arrival moves. The swapped run
+/// equals B rendered from frame 0 in every block, at every launch rate. Red if a line is keyed by
+/// its index in the delay vector (the added track sorts first and shifts every index) or left at
+/// rest: the two compensated tracks drop out for the length of their line.
+fn compensated_output_lines_keep_their_audio(backend: Backend, rate: u32) {
+    let what = format!("{backend:?} at {rate} Hz");
+    let mut a_model = pdc_session(rate, &["eq0"]);
+    remove_track(&mut a_model, "eq3");
+    let mut b_model = a_model.clone();
+    add_track(&mut b_model, "eq1", MUTED_TRACK, SOURCE, true);
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    assert_eq!(
+        a.prepare(backend).inventory.delay_line_count(),
+        2,
+        "{what}: the two tracks without the limiter are compensated"
+    );
+    let feed = Feed::new(SOURCE, 1);
+    let (run, reference) = pdc_runs(&a, &b, &feed, backend, &what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals the post-edit session rendered from frame 0"
+    );
+    // At 96 kHz the limiter's lookahead is longer than the blocks before the swap, so the first
+    // audio comes out after it; the lines hold what was fed before.
+    assert!(
+        reference.blocks[SWAP_BLOCK + 2..]
+            .iter()
+            .flatten()
+            .any(|bits| *bits != 0),
+        "{what}: the reference plays after the swap block"
+    );
+}
+
+#[test]
+fn compensated_output_lines_keep_their_audio_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            compensated_output_lines_keep_their_audio(backend, rate);
+        }
+    }
+}
+
+/// The submix `bus1` takes `eq0` (behind a limiter) and `eq1`; the output takes `bus1` and `eq2`.
+/// The edge of `eq1` into the bus and the edge of `eq2` into the output both carry a line.
+fn bus_session(rate: u32) -> SessionModel {
+    let mut model = pdc_session(rate, &["eq0"]);
+    remove_track(&mut model, "eq3");
+    add_bus(&mut model, "bus1");
+    send_route_to(&mut model, "eq0", "bus1");
+    send_route_to(&mut model, "eq1", "bus1");
+    model
+}
+
+/// Gate 2: B adds a muted zero-latency track to the submix. The submix's own line and the output's
+/// line both carry. Red if the carry handles only the edges into the output: the submix input
+/// line starts at rest and `eq1` drops out of the bus for the length of its line.
+fn compensated_submix_lines_keep_their_audio(backend: Backend, rate: u32) {
+    let what = format!("{backend:?} at {rate} Hz");
+    let a_model = bus_session(rate);
+    let mut b_model = a_model.clone();
+    add_track(&mut b_model, "eq1", MUTED_TRACK, SOURCE, true);
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    assert_eq!(
+        a.prepare(backend).inventory.delay_line_count(),
+        2,
+        "{what}: eq1 into the bus and eq2 into the output are compensated"
+    );
+    let feed = Feed::new(SOURCE, 1);
+    let (run, reference) = pdc_runs(&a, &b, &feed, backend, &what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    assert_eq!(
+        first_effect_difference(&run, &reference),
+        None,
+        "{what}: every block equals the post-edit session rendered from frame 0"
+    );
+}
+
+#[test]
+fn compensated_submix_lines_keep_their_audio_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            compensated_submix_lines_keep_their_audio(backend, rate);
+        }
+    }
+}
+
+/// Two submixes, each with a limited and an unlimited track: `eq0` (limited) and `eq1` into
+/// `bus1`, `eq3` (limited) and `eq2` into `bus2`. Both unlimited routes carry a line.
+fn two_bus_session(rate: u32, silent: Option<&str>) -> SessionModel {
+    let mut model = pdc_session(rate, &["eq0", "eq3"]);
+    add_bus(&mut model, "bus1");
+    add_bus(&mut model, "bus2");
+    send_route_to(&mut model, "eq0", "bus1");
+    send_route_to(&mut model, "eq1", "bus1");
+    send_route_to(&mut model, "eq2", "bus2");
+    send_route_to(&mut model, "eq3", "bus2");
+    if let Some(track) = silent {
+        model = with_mute(model, track, true);
+    }
+    model
+}
+
+/// Gate 4: B re-points `eq1`'s route from `bus1` to `bus2`. The route keeps its ID and gets
+/// another destination, so its line does not carry and its strip is not restarted.
+///
+/// With `eq1` muted in both sessions the re-pointed line holds only zeros, so the run equals B
+/// from frame 0 exactly when every other line carried: `eq2`'s line into `bus2` is the one that
+/// does. With `eq1` playing, the new route's line starts at rest and the swap block misses the
+/// audio B's line holds: red if the line followed the route ID into the other bus, where it
+/// would play the old pending audio and match B.
+fn a_repointed_route_does_not_carry_its_line(backend: Backend, rate: u32) {
+    let what = format!("{backend:?} at {rate} Hz");
+    let feed = Feed::new(SOURCE, 1);
+    for silent in [Some("eq1"), None] {
+        let a_model = two_bus_session(rate, silent);
+        let mut b_model = a_model.clone();
+        send_route_to(&mut b_model, "eq1", "bus2");
+        let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+        let (run, reference) = pdc_runs(&a, &b, &feed, backend, &what);
+        assert_eq!(
+            run.restarted,
+            Vec::<Box<str>>::new(),
+            "{what}: the re-pointed route's strip keeps its state"
+        );
+        // Before the swap A renders, and A routes `eq1` through the other bus.
+        let difference = run.blocks[SWAP_BLOCK..]
+            .iter()
+            .zip(&reference.blocks[SWAP_BLOCK..])
+            .position(|(swapped, fresh)| swapped != fresh);
+        if silent.is_some() {
+            assert_eq!(
+                difference, None,
+                "{what}: every other line carried, and the re-pointed one held silence"
+            );
+        } else {
+            assert!(
+                difference.is_some(),
+                "{what}: the new route's line starts at rest, so B's audio is missing after the swap"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_repointed_route_does_not_carry_its_line_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            a_repointed_route_does_not_carry_its_line(backend, rate);
+        }
+    }
+}

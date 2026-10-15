@@ -3034,6 +3034,12 @@ struct GraphExecutor {
     node_carry_refused: u64,
     /// The observer section of the hand-over (#1327 D2, D3): `None` when no observer carries.
     observer_carry: Option<Box<ObserverCarryProgram>>,
+    /// The compensation-line section of the hand-over (#1283 D1), sorted by predecessor line;
+    /// empty (and never allocated) when no line carries.
+    carry_delays: Box<[GraphDelayMove]>,
+    /// The identity of every compensation line, read once by [`take_compensation_lines`] right
+    /// after bind and empty afterwards: a plan retains none of it.
+    compensation_lines: Vec<GraphDelayLine>,
     /// The live snapshot `S` of the block about to render (#1504 D1): stored by
     /// [`PreparedPlanExecutor::begin_live_block`] and taken by `render`, so a block that renders
     /// without its own snapshot is refused and never reads the previous block's.
@@ -3110,6 +3116,12 @@ pub enum GraphCarryInstallError {
     ObserverOutOfRange,
     /// A successor or predecessor observer appears twice, or a join's fresh observer is carried.
     DuplicateObserver,
+    /// A compensation-line carry was installed before the plan's [`GraphCarryProgram`].
+    NoDelayCarryProgram,
+    /// A successor line is not a compensation line of the plan.
+    DelayLineOutOfRange,
+    /// A successor or predecessor compensation line appears twice.
+    DuplicateDelayLine,
 }
 
 /// Where one builtin bank lane sits in a bound graph plan: its runtime unit, its bank chain slot
@@ -3748,6 +3760,160 @@ pub fn install_observation_carry(
     Ok(())
 }
 
+/// One compensation line of a bound graph plan, named by the edge it delays (#1283 D1): what a
+/// successor's preparation joins with its own lines, by edge ID and endpoints, never by `line`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphDelayLine {
+    /// The delayed edge.
+    pub edge: GraphEdgeId,
+    /// Where the edge's signal comes from. For a route's two edges (`RouteSource`,
+    /// `RouteDestination`) this is the route's own source, so a route whose source was
+    /// re-pointed does not match its predecessor on either edge.
+    pub source: GraphNodeId,
+    /// Where the edge's signal goes. For a route's two edges this is the route's own
+    /// destination.
+    pub destination: GraphNodeId,
+    /// The line's index in this plan. Meaningful only to this plan's successor's carry program,
+    /// which names it as the line to take.
+    pub line: u32,
+    /// The line's length in samples a channel.
+    pub samples: u64,
+}
+
+impl GraphDelayLine {
+    /// Bytes of ID text the row owns on the heap: the strings of its edge and its two endpoints.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        fn edge(id: &GraphEdgeId) -> usize {
+            match id {
+                GraphEdgeId::TrackMain { target } => node(target),
+                GraphEdgeId::RouteSource { route_id }
+                | GraphEdgeId::RouteDestination { route_id } => route_id.as_str().len(),
+                GraphEdgeId::EffectSidechain { effect, port } => {
+                    effect.track_id.as_str().len() + effect.effect_id.as_str().len() + port.len()
+                }
+            }
+        }
+        fn node(id: &GraphNodeId) -> usize {
+            match id {
+                GraphNodeId::TrackStage { track_id, .. } => track_id.as_str().len(),
+                GraphNodeId::Effect(effect) => {
+                    effect.track_id.as_str().len() + effect.effect_id.as_str().len()
+                }
+                GraphNodeId::Route { route_id } => route_id.as_str().len(),
+                GraphNodeId::Submix { submix_id } => submix_id.as_str().len(),
+                GraphNodeId::Output { output_id } => output_id.as_str().len(),
+                GraphNodeId::CompensationDelay { edge_id } => {
+                    core::mem::size_of::<GraphEdgeId>() + edge(edge_id)
+                }
+            }
+        }
+        edge(&self.edge) + node(&self.source) + node(&self.destination)
+    }
+}
+
+/// One compensation line a successor takes from its predecessor at the swap block (#1283 D1, D2):
+/// the pending samples of `predecessor` in the displaced plan continue in `successor`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphDelayMove {
+    /// The line in the successor, the plan the move is installed in.
+    pub successor: u32,
+    /// The line in the plan the successor displaces.
+    pub predecessor: u32,
+}
+
+/// The identity of every compensation line `program` lowered from `spec` (#1283 D1), in line order.
+fn compensation_lines_of(
+    spec: &GraphSpec,
+    program: &program::ExecutionProgram,
+) -> Vec<GraphDelayLine> {
+    // A route's two edges share one identity: the route's own endpoints.
+    let mut routes: BTreeMap<&StableGraphId, (Option<&GraphNodeId>, Option<&GraphNodeId>)> =
+        BTreeMap::new();
+    for edge in &spec.edges {
+        match &edge.id {
+            GraphEdgeId::RouteSource { route_id } => {
+                routes.entry(route_id).or_default().0 = Some(&edge.source.node);
+            }
+            GraphEdgeId::RouteDestination { route_id } => {
+                routes.entry(route_id).or_default().1 = Some(&edge.destination.node);
+            }
+            GraphEdgeId::TrackMain { .. } | GraphEdgeId::EffectSidechain { .. } => {}
+        }
+    }
+    program
+        .delays
+        .iter()
+        .enumerate()
+        .map(|(line, delay)| {
+            let edge = &spec.edges[delay.edge as usize];
+            let ends = match &edge.id {
+                GraphEdgeId::RouteSource { route_id }
+                | GraphEdgeId::RouteDestination { route_id } => routes.get(route_id).copied(),
+                GraphEdgeId::TrackMain { .. } | GraphEdgeId::EffectSidechain { .. } => None,
+            };
+            let (source, destination) = ends.unwrap_or_default();
+            GraphDelayLine {
+                edge: edge.id.clone(),
+                source: source.unwrap_or(&edge.source.node).clone(),
+                destination: destination.unwrap_or(&edge.destination.node).clone(),
+                line: u32::try_from(line).expect("a line index fits the program's index width"),
+                samples: delay.samples,
+            }
+        })
+        .collect()
+}
+
+/// The compensation lines of a bound graph plan, in line order (#1283 D1); `None` for any other
+/// plan, and empty on a second call. Read once, off the render thread, right after bind: a
+/// successor's preparation joins its own lines with its predecessor's (recorded when that plan
+/// was prepared), and a plan retains none of the identities it handed out.
+pub fn take_compensation_lines(plan: &mut PreparedRenderPlan) -> Option<Vec<GraphDelayLine>> {
+    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
+    Some(core::mem::take(&mut executor.compensation_lines))
+}
+
+/// Install the compensation-line section of the hand-over this graph plan runs when it displaces
+/// its predecessor (#1283 D1), after its [`GraphCarryProgram`], which names that predecessor.
+///
+/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
+/// program, a successor line is not a compensation line of the plan, or a successor or
+/// predecessor line repeats. Predecessor lines are checked against the predecessor at the swap
+/// block, where one that does not resolve refuses the whole hand-over.
+pub fn install_delay_carry(
+    plan: &mut PreparedRenderPlan,
+    mut moves: Vec<GraphDelayMove>,
+) -> Result<(), GraphCarryInstallError> {
+    let executor = plan
+        .executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
+    if executor.carry.is_none() {
+        return Err(GraphCarryInstallError::NoDelayCarryProgram);
+    }
+    let mut successors = BTreeSet::new();
+    let mut predecessors = BTreeSet::new();
+    for step in &moves {
+        if step.successor as usize >= executor.runtime.delays.len() {
+            return Err(GraphCarryInstallError::DelayLineOutOfRange);
+        }
+        if !successors.insert(step.successor) || !predecessors.insert(step.predecessor) {
+            return Err(GraphCarryInstallError::DuplicateDelayLine);
+        }
+    }
+    moves.sort_unstable_by_key(|step| step.predecessor);
+    executor.carry_delays = moves.into_boxed_slice();
+    Ok(())
+}
+
+/// The bytes a compensation-line section of `moves` lines retains in its plan (#1283): its move
+/// table. `None` on overflow. The one place the charge is spelled, so preparation's admission and
+/// [`carry_program_retained_bytes`] cannot disagree.
+#[must_use]
+pub fn delay_carry_retained_bytes(moves: usize) -> Option<u64> {
+    u64::try_from(moves.checked_mul(core::mem::size_of::<GraphDelayMove>())?).ok()
+}
+
 /// Bytes the plan's installed [`GraphCarryProgram`] retains; zero for a plan without one or for
 /// any other plan.
 pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
@@ -3787,7 +3953,10 @@ pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
                 .observer_carry
                 .as_deref()
                 .map_or(0, ObserverCarryProgram::retained_bytes);
+            let delays =
+                delay_carry_retained_bytes(executor.carry_delays.len()).unwrap_or(u64::MAX);
             sources
+                .saturating_add(delays)
                 .saturating_add(inputs)
                 .saturating_add(strips)
                 .saturating_add(effects)
@@ -3882,6 +4051,8 @@ struct GraphExecutorWithoutSplitPairTable {
     next_block_sample: u64,
     node_carry_refused: u64,
     observer_carry: Option<Box<ObserverCarryProgram>>,
+    carry_delays: Box<[GraphDelayMove]>,
+    compensation_lines: Vec<GraphDelayLine>,
     live_snapshot: Option<LiveSnapshot>,
 }
 
@@ -3984,6 +4155,7 @@ impl GraphExecutor {
             .collect();
         #[cfg(any(test, feature = "test-support"))]
         test_only_record_executor_tables(&active_units, &source_input_buffers);
+        let compensation_lines = compensation_lines_of(&plan.spec, program);
         Self {
             runtime,
             sample_rate_hz,
@@ -3999,6 +4171,8 @@ impl GraphExecutor {
             next_block_sample: 0,
             node_carry_refused: 0,
             observer_carry: None,
+            carry_delays: Box::default(),
+            compensation_lines,
             live_snapshot: None,
         }
     }
@@ -4068,6 +4242,13 @@ impl PreparedPlanExecutor for GraphExecutor {
         {
             return CarryOutcome::PredecessorMismatch;
         }
+        // Issue #1283: likewise every compensation-line move.
+        if !self
+            .runtime
+            .can_carry_delay_lines(&predecessor.runtime, &self.carry_delays)
+        {
+            return CarryOutcome::PredecessorMismatch;
+        }
         if !program.sources.is_empty() {
             let (Some(successor_set), Some(predecessor_set)) =
                 (self.source_set.as_mut(), predecessor.source_set.as_mut())
@@ -4085,6 +4266,8 @@ impl PreparedPlanExecutor for GraphExecutor {
             .carry_input_lanes(&mut predecessor.runtime, &self.carry_inputs);
         self.runtime
             .carry_strip_lanes(&mut predecessor.runtime, &self.carry_strips);
+        self.runtime
+            .carry_delay_lines(&mut predecessor.runtime, &self.carry_delays);
         let refused = self.runtime.carry_effect_lanes(
             &mut predecessor.runtime,
             &self.carry_effects,
@@ -4204,6 +4387,8 @@ impl PreparedPlanExecutor for GraphExecutor {
             next_block_sample,
             node_carry_refused: _,
             observer_carry: _,
+            carry_delays: _,
+            compensation_lines: _,
             live_snapshot,
         } = self;
         // One block's snapshot: taken here, so the next block cannot reuse it.
@@ -8695,5 +8880,71 @@ mod tests {
             None,
             "an index past the set's claims is refused"
         );
+    }
+
+    /// #1283 D1: the endpoints of a delayed route edge are the route's own, so a route whose
+    /// source was re-pointed has other endpoints on its destination edge too, though that edge's
+    /// own source (the route node) and destination did not move. Red if a route edge reports its
+    /// own two nodes: the carry would join the old line to the re-pointed route.
+    #[test]
+    fn a_route_edge_names_the_endpoints_of_its_route() {
+        let id = |value: &str| StableGraphId::parse(value).expect("graph ID");
+        let strip = |value: &str| GraphNodeId::TrackStage {
+            track_id: id(value),
+            stage: TrackStage::PostMatrix,
+        };
+        let port = |node: GraphNodeId, kind| GraphPortId {
+            node,
+            kind,
+            effect_port: None,
+        };
+        let route = GraphNodeId::Route { route_id: id("r") };
+        let output = GraphNodeId::Output {
+            output_id: id("out"),
+        };
+        let spec_of = |from: &str| GraphSpec {
+            nodes: Vec::new(),
+            ports: Vec::new(),
+            edges: vec![
+                GraphEdge {
+                    id: GraphEdgeId::RouteSource { route_id: id("r") },
+                    source: port(strip(from), GraphPortKind::MainOutput),
+                    destination: port(route.clone(), GraphPortKind::MainInput),
+                    path: String::new(),
+                },
+                GraphEdge {
+                    id: GraphEdgeId::RouteDestination { route_id: id("r") },
+                    source: port(route.clone(), GraphPortKind::MainOutput),
+                    destination: port(output.clone(), GraphPortKind::MainInput),
+                    path: String::new(),
+                },
+            ],
+        };
+        let program = program::ExecutionProgram {
+            ops: Box::new([]),
+            inputs: Box::new([]),
+            delays: Box::new([program::DelaySpec {
+                samples: 480,
+                edge: 1,
+            }]),
+            node_buffer: Box::new([]),
+            node_op: Box::new([]),
+            taps: Box::new([]),
+            buffers: 0,
+            output: program::BufferRef(0),
+        };
+        let before = compensation_lines_of(&spec_of("a"), &program);
+        let after = compensation_lines_of(&spec_of("b"), &program);
+        assert_eq!(before.len(), 1);
+        assert_eq!(
+            (&before[0].edge, &before[0].source, &before[0].destination),
+            (
+                &GraphEdgeId::RouteDestination { route_id: id("r") },
+                &strip("a"),
+                &output
+            )
+        );
+        assert_eq!(after[0].source, strip("b"));
+        assert_eq!(after[0].destination, output);
     }
 }

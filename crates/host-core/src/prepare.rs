@@ -706,6 +706,8 @@ pub struct PlanStateInventory {
     /// observation readers ([`HostLiveControlHandles::effect_observations`]), so a row's `entry`
     /// is its position (#1327 D1).
     observations: Box<[ObservationInventoryRow]>,
+    /// One row per compensation line of the plan (#1283 D1), sorted by edge ID.
+    delay_lines: Box<[graph::GraphDelayLine]>,
     /// The strips this plan restarts relative to the plan it was prepared to displace (#1277 D6):
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
@@ -871,6 +873,12 @@ impl PlanStateInventory {
         self.observations.len()
     }
 
+    /// Compensation line rows, one per delayed edge of the plan (#1283).
+    #[must_use]
+    pub fn delay_line_count(&self) -> usize {
+        self.delay_lines.len()
+    }
+
     /// Strip stage rows, one per banked fader or matrix lane (issue #1277).
     #[must_use]
     pub fn strip_stage_count(&self) -> usize {
@@ -924,6 +932,11 @@ impl PlanStateInventory {
                 .map(|row| row.id.len() + row.effect_id.len())
                 .sum::<usize>()
             + self.meters.iter().map(|row| row.id.len()).sum::<usize>()
+            + self
+                .delay_lines
+                .iter()
+                .map(graph::GraphDelayLine::heap_bytes)
+                .sum::<usize>()
             + self.restarted.iter().map(|id| id.len()).sum::<usize>();
         u64::try_from(
             core::mem::size_of_val::<[SourceInventoryRow]>(&self.sources)
@@ -932,6 +945,7 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[EffectLaneInventoryRow]>(&self.effect_lanes)
                 + core::mem::size_of_val::<[MeterInventoryRow]>(&self.meters)
                 + core::mem::size_of_val::<[ObservationInventoryRow]>(&self.observations)
+                + core::mem::size_of_val::<[graph::GraphDelayLine]>(&self.delay_lines)
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
                 + ids,
         )
@@ -2551,6 +2565,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let mut plan = bound.plan;
     // Issue #1272 D4: the join's program goes in before the plan leaves preparation.
+    let has_carry_program = carry_program.is_some();
     if let Some(program) = carry_program {
         graph::install_carry_program(&mut plan, program)
             .map_err(|_| graph_failure("host.carry.install"))?;
@@ -2732,6 +2747,17 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         observation_carry.len(),
     )
     .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    // Issue #1283 D1: this plan's own compensation lines, sorted by edge ID: the inventory its
+    // successor joins with, and the lines its own moves are resolved from.
+    let mut delay_lines = graph::take_compensation_lines(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    delay_lines.sort_unstable_by(|left, right| left.edge.cmp(&right.edge));
+    let delay_carry = match successor {
+        Some(base) => resolve_delay_carry(&base.inventory.delay_lines, &delay_lines),
+        None => Vec::new(),
+    };
+    let delay_carry_bytes = graph::delay_carry_retained_bytes(delay_carry.len())
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
     // The effect moves' table and payload scratch are charged at their exact size, against the
     // same cap as the rest of the plan, and the scratch is one allocation (#1279 D3).
     // The carried slots of the successor lanes the moves name are allocated with the table, and
@@ -2752,6 +2778,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .checked_add(strip_carry_bytes)
         .and_then(|bytes| bytes.checked_add(effect_carry_bytes))
         .and_then(|bytes| bytes.checked_add(meter_carry_bytes))
+        .and_then(|bytes| bytes.checked_add(delay_carry_bytes))
         .ok_or_else(|| resource("host.resource.arithmetic"))?
         > caps.maximum_graph_session_plus_plan_bytes
     {
@@ -2773,10 +2800,33 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_observation_carry(&mut plan, observation_carry)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
+    if let Some(base) = successor
+        && !delay_carry.is_empty()
+    {
+        // A line carries between two plans whose strips all restart or differ in a prepared value,
+        // so the join above may have found nothing else to carry: the program then names the
+        // predecessor and moves no source (it retains no byte).
+        if !has_carry_program {
+            graph::install_carry_program(
+                &mut plan,
+                graph::GraphCarryProgram {
+                    predecessor: base.inventory.plan_identity(),
+                    sources: Box::default(),
+                },
+            )
+            .map_err(|_| graph_failure("host.carry.install"))?;
+        }
+        graph::install_delay_carry(&mut plan, delay_carry)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
     debug_assert_eq!(
         carry_program_retained_bytes,
-        carry_program_bytes + strip_carry_bytes + effect_carry_bytes + meter_carry_bytes
+        carry_program_bytes
+            + strip_carry_bytes
+            + effect_carry_bytes
+            + meter_carry_bytes
+            + delay_carry_bytes
     );
     inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     let mut restarted = strip_carry.restarted;
@@ -2792,6 +2842,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         effect_lanes: effect_lanes.into_boxed_slice(),
         meters: meter_rows.into_boxed_slice(),
         observations: observation_rows.into_boxed_slice(),
+        delay_lines: delay_lines.into_boxed_slice(),
         restarted: restarted.into_boxed_slice(),
     };
     let report = HostPrepareReport {
@@ -3066,6 +3117,31 @@ fn resolve_observation_carry(
                 successor_entry: row.entry,
                 predecessor_entry: earlier.entry,
             })
+        })
+        .collect()
+}
+
+/// The compensation-line moves of a successor (#1283 D1): a line carries when the predecessor
+/// has a line on an edge of the same ID whose endpoints are the same. Both slices are sorted by
+/// edge ID. A line has no live value, so there is no retarget; a re-pointed route has other
+/// endpoints, so its line starts at rest and nothing about its strip changes. Lines of other
+/// lengths carry too: the swap block aligns their heads (D4).
+fn resolve_delay_carry(
+    predecessor: &[graph::GraphDelayLine],
+    own: &[graph::GraphDelayLine],
+) -> Vec<graph::GraphDelayMove> {
+    own.iter()
+        .filter_map(|line| {
+            let index = predecessor
+                .binary_search_by(|earlier| earlier.edge.cmp(&line.edge))
+                .ok()?;
+            let earlier = &predecessor[index];
+            (earlier.source == line.source && earlier.destination == line.destination).then_some(
+                graph::GraphDelayMove {
+                    successor: line.line,
+                    predecessor: earlier.line,
+                },
+            )
         })
         .collect()
 }
@@ -4661,6 +4737,81 @@ mod tests {
         }
     }
 
+    fn stable(id: &str) -> graph::StableGraphId {
+        graph::StableGraphId::parse(id).expect("graph ID")
+    }
+
+    fn strip(id: &str) -> graph::GraphNodeId {
+        graph::GraphNodeId::TrackStage {
+            track_id: stable(id),
+            stage: graph::TrackStage::PostMatrix,
+        }
+    }
+
+    fn submix(id: &str) -> graph::GraphNodeId {
+        graph::GraphNodeId::Submix {
+            submix_id: stable(id),
+        }
+    }
+
+    /// A line of the route `route`, whose endpoints are `from` and `to`, at index `line`.
+    fn route_line(
+        route: &str,
+        from: &str,
+        to: &str,
+        line: u32,
+        samples: u64,
+    ) -> graph::GraphDelayLine {
+        graph::GraphDelayLine {
+            edge: graph::GraphEdgeId::RouteDestination {
+                route_id: stable(route),
+            },
+            source: strip(from),
+            destination: submix(to),
+            line,
+            samples,
+        }
+    }
+
+    /// #1283 D1: lines join by edge ID and endpoints, never by index. A line moves when its
+    /// edge exists on both sides with the same endpoints, whatever its length and whatever
+    /// index either side gave it; a route re-pointed to another destination or another source
+    /// keeps its route ID, and its line does not move; an edge with a line on one side only
+    /// moves nothing. Red if the join keys by index (the added track shifts every index) or by
+    /// route ID alone (a re-pointed route's line would continue into the wrong bus).
+    #[test]
+    fn delay_lines_join_by_edge_and_endpoints() {
+        let mut before = vec![
+            route_line("a-main", "a", "bus", 0, 480),
+            route_line("b-main", "b", "bus", 1, 480),
+            route_line("c-main", "c", "bus", 2, 480),
+            route_line("d-main", "d", "bus", 3, 480),
+            route_line("e-main", "e", "bus", 4, 480),
+        ];
+        let mut own = vec![
+            // New route: no predecessor line.
+            route_line("new-main", "new", "bus", 0, 480),
+            // Unchanged, but at another index and another length.
+            route_line("a-main", "a", "bus", 1, 512),
+            // Re-pointed to another destination.
+            route_line("b-main", "b", "other", 2, 480),
+            // Re-pointed to another source.
+            route_line("c-main", "x", "bus", 3, 480),
+            // Unchanged.
+            route_line("d-main", "d", "bus", 4, 480),
+            // `e-main` has no line in this plan.
+        ];
+        before.sort_by(|l, r| l.edge.cmp(&r.edge));
+        own.sort_by(|l, r| l.edge.cmp(&r.edge));
+        let moves = super::resolve_delay_carry(&before, &own);
+        let mut moves: Vec<(u32, u32)> = moves
+            .iter()
+            .map(|step| (step.successor, step.predecessor))
+            .collect();
+        moves.sort_unstable();
+        assert_eq!(moves, vec![(1, 0), (4, 3)]);
+    }
+
     fn inventory_with(row: super::EffectLaneInventoryRow) -> super::PlanStateInventory {
         super::PlanStateInventory {
             plan_identity: 1,
@@ -4670,6 +4821,7 @@ mod tests {
             effect_lanes: Box::new([row]),
             meters: Box::default(),
             observations: Box::default(),
+            delay_lines: Box::default(),
             restarted: Box::default(),
         }
     }
