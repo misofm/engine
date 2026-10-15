@@ -24,6 +24,10 @@ const MUTATIONS = [
   "attestation", "boot", "native-corpus-digest", "main-thread-stall",
   // Issue #137 E8/E6: the live-control row and the live-control load carried across the stall.
   "control-path-applied", "control-path-meter", "control-path-command", "stall-live-controls-load",
+  // Issue #1562b: a structural apply that was not the rebuild path, that was applied early, that
+  // moved the output off the declared delay, or whose meter stream was not the successor's.
+  "structural-apply-path", "structural-apply-early", "structural-apply-output",
+  "structural-apply-meter",
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
@@ -218,6 +222,30 @@ function validate(browserName, result) {
   gate(browserName, "control-path", live?.telemetryFrames >= 1,
     "no render-telemetry frame arrived over a full window");
 
+  // Issue #1562b: a structural apply in a real browser. The core classifies a `delay_samples` edit
+  // as a rebuild and the browser prepares and publishes the replacement plan; the first quantum
+  // is the swap block, so what comes out is the declared delay of the input, exactly, the applied
+  // revision was not early, and the meter stream is the successor's from its first frame.
+  const structural = result.structuralApply;
+  gate(browserName, "structural-apply-path", structural?.commandOk === true
+    && structural?.commandPath === "rebuild" && structural?.commandApplied === 1
+    && /^[0-9]+$/.test(structural?.committedRevision ?? ""),
+  "the structural SET_CONTROL transaction was not committed on the rebuild path");
+  gate(browserName, "structural-apply-early", structural?.pendingRevision === structural?.initialRevision
+    && structural?.finalRevision === structural?.committedRevision
+    && BigInt(structural?.finalRevision ?? "0") > BigInt(structural?.initialRevision ?? "0")
+    && BigInt(structural?.finalSample ?? "-1") === 0n,
+  `the applied revision moved before the swap block or did not reach the committed one: ${JSON.stringify(structural)}`);
+  gate(browserName, "structural-apply-output", structural?.exactDelayedOutput === true
+    && structural?.renderedDigest === structural?.expectedDigest,
+  "the swapped plan did not render the input delayed by exactly the edit");
+  gate(browserName, "structural-apply-meter", structural?.meterLeaseResult === 0
+    && structural?.meterFrames >= 1 && structural?.meterFrameWidth === 4
+    && structural?.meterTrackCount === 1 && structural?.sequenceIncreasing === true
+    && Array.isArray(structural?.structureEpochs) && structural.structureEpochs.length === 1
+    && Number.isSafeInteger(structural.structureEpochs[0]) && structural.structureEpochs[0] >= 1,
+  `the meter stream after the swap was not the successor's with one structure epoch: ${JSON.stringify(structural)}`);
+
   // Issue #143 E12: subscribe -> nonzero `trackGrDb`, an unarmed tap publishes none, with `firstSample`
   // monotonic and the windows tiling. The two runs render the *same* sixteen blocks, so their
   // audio must be identical: arming a declared tap may not move a sample.
@@ -298,7 +326,7 @@ function validate(browserName, result) {
   // executor does behind its `call_indirect`, which the static gate cannot see.
   const allocations = result.renderAllocations;
   gate(browserName, "render-allocations", Array.isArray(allocations)
-    && allocations.length === 10
+    && allocations.length === 11
     && allocations.every((row) => typeof row?.workload === "string" && row.count === 0),
   `a worklet instance allocated on its render thread: ${JSON.stringify(allocations)}`);
   if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse);
@@ -847,6 +875,12 @@ function mutate(result, mutation) {
   if (mutation === "control-path-meter") copy.liveControls.masterPeak = 0;
   if (mutation === "control-path-command") copy.liveControls.commandApplied = 0;
   if (mutation === "stall-live-controls-load") copy.stall.liveControlMeterFrames = 0;
+  if (mutation === "structural-apply-path") copy.structuralApply.commandPath = "live";
+  if (mutation === "structural-apply-early") {
+    copy.structuralApply.pendingRevision = copy.structuralApply.committedRevision;
+  }
+  if (mutation === "structural-apply-output") copy.structuralApply.exactDelayedOutput = false;
+  if (mutation === "structural-apply-meter") copy.structuralApply.meterFrames = 0;
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
   if (mutation === "observation-disarmed") copy.observation.disarmed.maximumTrackGrDb = 1;

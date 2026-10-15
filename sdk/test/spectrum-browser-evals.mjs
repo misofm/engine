@@ -354,6 +354,7 @@ test("browser spectrum invalidates a dead Worker and permits a fresh managed lif
     async observationMap() {
       return {
         result: 0,
+        structureEpoch: 1,
         bindings: [{
           trackIndex: 0, rack: 1, effectIndex: 0, effectSlotId: "comp",
           nativeEffectId: "miso.compressor", tapIds: [1],

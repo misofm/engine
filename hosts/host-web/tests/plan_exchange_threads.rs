@@ -206,9 +206,9 @@ fn run(republish: bool) -> Run {
             feed(handle, block);
             if republish && block == PUBLISH_BEFORE {
                 assert_eq!(native_staging::active_plan_epoch(handle), Some(0));
-                let response = native_staging::structural_command(handle, &request)
-                    .expect("a live handle")
-                    .expect("the structural transaction publishes");
+                let (result, response) =
+                    native_staging::control_command(handle, &request).expect("a live handle");
+                assert_eq!(result, RESULT_OK, "the structural transaction publishes");
                 assert_rebuild_applied(&response, model.revision + 1);
                 assert_eq!(
                     native_staging::active_plan_epoch(handle),
@@ -349,9 +349,9 @@ fn the_watermark_export_copies_the_applied_revision_and_refuses_a_wrong_handle()
 
         // A published revision is not applied until render has adopted it.
         let request = transaction_bytes(&add_muted_track(&model, "a-muted"), model.revision);
-        let response = native_staging::structural_command(handle, &request)
-            .expect("a live handle")
-            .expect("the transaction publishes");
+        let (result, response) =
+            native_staging::control_command(handle, &request).expect("a live handle");
+        assert_eq!(result, RESULT_OK, "the structural transaction publishes");
         assert_rebuild_applied(&response, model.revision + 1);
         assert_eq!(
             host_web::miso_engine_web_v1_watermark_read(handle),

@@ -285,9 +285,9 @@ fn frozen_layouts_and_values_are_exact() {
     // The meter header is a new fixed structure, not a change to an existing one.
     // Issue #1209 D2 appended `submix_count` and its pad: 64 bytes became 72, nothing moved.
     // Issue #1290d1 turned the pad into `retired` and appended the frame and successor pointers:
-    // 72 bytes became 80, nothing moved.
-    assert_eq!(size_of::<WebMeterHeader>(), 80);
-    assert_eq!(METER_HEADER_BYTES, 80);
+    // 72 bytes became 80, nothing moved. Issue #1562b appended `structure_epoch`: 80 became 88.
+    assert_eq!(size_of::<WebMeterHeader>(), 88);
+    assert_eq!(METER_HEADER_BYTES, 88);
     assert_eq!(offset_of!(WebMeterHeader, track_count), 8);
     assert_eq!(offset_of!(WebMeterHeader, windows), 12);
     assert_eq!(offset_of!(WebMeterHeader, first_sample), 16);
@@ -300,6 +300,7 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebMeterHeader, retired), 68);
     assert_eq!(offset_of!(WebMeterHeader, frame_pointer), 72);
     assert_eq!(offset_of!(WebMeterHeader, successor_pointer), 76);
+    assert_eq!(offset_of!(WebMeterHeader, structure_epoch), 80);
     assert_eq!(offset_of!(WebCommandReport, result), 8);
     assert_eq!(offset_of!(WebCommandReport, rejected_index), 16);
     assert_eq!(offset_of!(WebCommandReport, applied_at_sample), 24);
@@ -3397,7 +3398,7 @@ fn the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix() {
     let mut host = bus_meter_host(QUANTUM, true);
     let frame = bus_meter_frame(&mut host, BLOCKS);
     let header = *host.meter_header();
-    assert_eq!(header.struct_size, 80);
+    assert_eq!(header.struct_size, 88);
     assert_eq!(header.track_count, 3);
     assert_eq!(header.submix_count, 2);
     assert_eq!(header.retired, 0);
@@ -5879,8 +5880,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
 // prepares the successor from the committed model, publishes it and returns; the render half
 // adopts it at a block boundary. The native gates run the one instance on one thread, the
 // message handler's place between render calls (decision 17, "single instance first"), through
-// the test-support switch that lets the rebuild arm run past `refuse_rebuild` (deleting that
-// refusal is #1562b's).
+// the production control entry (`control_request_mut` and `control_command`), as the page's
+// `control` message does (#1562b).
 //
 // The sessions here have no console slot and no insert: an effect's state carries across a swap
 // only with #1280a, and a session that holds one would not render the same bits after the swap.
@@ -6081,13 +6082,24 @@ mod structural_apply {
             self.block += 1;
         }
 
-        /// Apply a structural transaction through the control half and decode its response.
+        /// Run one frame through the production control entry, as the page's `control` message
+        /// does. Returns the entry's result word and what it left to read (the response frame
+        /// after an ok result, else the refusal's diagnostic text).
+        fn entry(&mut self, bytes: &[u8]) -> (u32, Vec<u8>) {
+            let staging = self
+                .host
+                .control_request_mut(bytes.len() as u32)
+                .expect("the control staging");
+            staging[..bytes.len()].copy_from_slice(bytes);
+            let result = self.host.control_command(bytes.len() as u32);
+            (result, self.host.control_response().to_vec())
+        }
+
+        /// Apply a structural transaction through the control entry and decode its response.
         fn apply(&mut self, edits: &[SessionEdit], request: u64) -> Outcome {
             let revision = self.host.committed_revision();
-            let response = self
-                .host
-                .structural_command_for_test(&frame(edits, request, revision))
-                .expect("the control plane answers the frame");
+            let (result, response) = self.entry(&frame(edits, request, revision));
+            assert_eq!(result, RESULT_OK, "the control plane answers the frame");
             outcome(&response)
         }
 
@@ -6702,33 +6714,10 @@ mod structural_apply {
                 rig.host.committed_revision(),
             );
             bytes.truncate(bytes.len() - 5);
-            let error = rig
-                .host
-                .structural_command_for_test(&bytes)
-                .expect_err("a truncated frame is refused");
-            format!("{error:?}")
+            let (result, response) = rig.entry(&bytes);
+            assert_ne!(result, RESULT_OK, "a truncated frame is refused");
+            format!("{result} {}", String::from_utf8_lossy(&response))
         });
-    }
-
-    /// Run one frame through the production control entry with the rebuild arm open, as the SDK's
-    /// `control` message will once #1562b deletes the refusal. Returns the entry's result word and
-    /// what it left to read.
-    fn entry_with_rebuild_open(
-        rig: &mut Rig,
-        edits: &[SessionEdit],
-        request: u64,
-    ) -> (u32, Vec<u8>) {
-        let bytes = frame(edits, request, rig.host.committed_revision());
-        let staging = rig
-            .host
-            .control_request_mut(bytes.len() as u32)
-            .expect("the control staging");
-        staging[..bytes.len()].copy_from_slice(&bytes);
-        let allow = Arc::clone(&rig.host.ready.as_ref().expect("ready").allow_rebuild);
-        allow.store(true, Ordering::Release);
-        let result = rig.host.control_command(bytes.len() as u32);
-        allow.store(false, Ordering::Release);
-        (result, rig.host.control_response().to_vec())
     }
 
     /// Gate 3, case two. Test value: red if a transaction that changes the rate or the quantum
@@ -6745,8 +6734,9 @@ mod structural_apply {
             },
         ] {
             assert_refusal_changes_nothing(options(), |rig, _| {
+                let revision = rig.host.committed_revision();
                 let (result, response) =
-                    entry_with_rebuild_open(rig, std::slice::from_ref(&edit), 1);
+                    rig.entry(&frame(std::slice::from_ref(&edit), 1, revision));
                 assert_eq!(result, RESULT_REPREPARE_REQUIRED, "{edit:?}");
                 let text = String::from_utf8(response).expect("diagnostic text");
                 assert!(
@@ -6774,18 +6764,13 @@ mod structural_apply {
         Rig::boot(&model, tight, None);
         // ... and refuses a second plan beside it.
         let refused = assert_refusal_changes_nothing(tight, |rig, model| {
-            let error = rig
-                .host
-                .structural_command_for_test(&frame(
-                    &add_muted_track(model, ADDED),
-                    1,
-                    rig.host.committed_revision(),
-                ))
-                .expect_err("a replacement that does not fit beside the running plan is refused");
-            let control_plane::CommandError::CompileRejected(failure) = &error else {
-                panic!("a typed refusal, not {error:?}")
-            };
-            String::from_utf8_lossy(&failure.diagnostic()).into_owned()
+            let revision = rig.host.committed_revision();
+            let (result, response) = rig.entry(&frame(&add_muted_track(model, ADDED), 1, revision));
+            assert_eq!(
+                result, RESULT_COMPILE_REJECTED,
+                "a replacement that does not fit beside the running plan is refused, typed"
+            );
+            String::from_utf8_lossy(&response).into_owned()
         });
         assert!(
             refused.contains("control.resource.replacement_peak"),
@@ -7007,6 +6992,64 @@ mod structural_apply {
         );
     }
 
+    /// The meter header's structure epoch is the control list's (#1562b): a rebuild that leaves
+    /// every address and descriptor alone (a strip's `delay_samples` value) keeps it, and the
+    /// header of the plan that renders reads the number `CONTROL_LIST_GET` pages carry.
+    ///
+    /// Test value: red if the header's epoch advances with the revision or the plan epoch rather
+    /// than with the list (a client would read the list again at every commit), or stays the boot's
+    /// when the list moved (the strip order of a frame would be named by a stale list).
+    #[test]
+    fn the_headers_structure_epoch_is_the_control_lists() {
+        let model = gate_model();
+        let mut rig = Rig::boot(&model, options(), None);
+        let boot = rig.host.meter_header().structure_epoch;
+        assert_eq!(boot, 1, "the boot list is the first structure");
+        let delay = SessionEdit::SetControl {
+            address: controls::ControlAddress {
+                owner: controls::Owner::Strip(model.tracks[0].id.clone()),
+                section: controls::Section::Builtins,
+                control: 11,
+                lane: session::ParameterChannel::Both,
+            },
+            value: 64.0,
+            ramp_samples: None,
+        };
+        let base = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(std::slice::from_ref(&delay), 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 1
+            },
+            "a delay is a rebuild"
+        );
+        for _ in 0..2 {
+            rig.step();
+        }
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(
+            rig.host.meter_header().structure_epoch,
+            boot,
+            "a value-only rebuild keeps the list's structure"
+        );
+        assert_eq!(
+            rig.apply(&add_muted_track(&model, ADDED), 2),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 2
+            }
+        );
+        assert_eq!(
+            rig.host.meter_header().structure_epoch,
+            boot,
+            "the plan that renders keeps its own list until the replacement is adopted"
+        );
+        rig.step();
+        assert_eq!(rig.epoch(), 2);
+        assert_eq!(rig.host.meter_header().structure_epoch, boot + 1);
+    }
+
     /// A swap that adds a strip publishes the successor's frame (#1290d1): the frame travels with
     /// the plan, so the window the adoption block closes is described by a `3(T + S) + 3` frame for
     /// the plan's own strips, bit for bit what a fresh boot of the committed model publishes for
@@ -7049,9 +7092,24 @@ mod structural_apply {
                 address_word(core::ptr::from_ref(&waiting.shape.meter_header))
             );
             assert_eq!(ready.shape.meter_header.retired, 0);
+            // The strip order changed, so the list's structure epoch did: the rendering plan keeps
+            // the epoch of its own list, the replacement carries the newer one (#1562b).
+            assert_eq!(
+                waiting.shape.meter_header.structure_epoch,
+                last.0.structure_epoch + 1
+            );
+            assert_eq!(
+                ready.shape.meter_header.structure_epoch,
+                last.0.structure_epoch
+            );
         }
         let after = poll_cadence(&mut rig, 1, 1, 0);
         assert_eq!(rig.epoch(), 1);
+        assert_eq!(
+            after[0].0.structure_epoch,
+            last.0.structure_epoch + 1,
+            "the adoption block's frame names the successor's list"
+        );
         assert_eq!(
             after.len(),
             1,
@@ -7431,18 +7489,13 @@ mod structural_apply {
                 panic!("poison the record");
             });
             assert!(poisoner.join().is_err());
-            let error = rig
-                .host
-                .structural_command_for_test(&frame(
-                    &add_muted_track(model, ADDED),
-                    1,
-                    rig.host.committed_revision(),
-                ))
-                .expect_err("the rebuild is refused");
-            let control_plane::CommandError::CompileRejected(failure) = &error else {
-                panic!("a typed refusal, not {error:?}")
-            };
-            String::from_utf8_lossy(&failure.diagnostic()).into_owned()
+            let revision = rig.host.committed_revision();
+            let (result, response) = rig.entry(&frame(&add_muted_track(model, ADDED), 1, revision));
+            assert_eq!(
+                result, RESULT_COMPILE_REJECTED,
+                "the rebuild is refused, typed"
+            );
+            String::from_utf8_lossy(&response).into_owned()
         });
         assert!(refused.contains("web.apply.shape_unavailable"), "{refused}");
     }

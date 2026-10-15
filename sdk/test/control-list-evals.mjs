@@ -636,7 +636,7 @@ describe("#1564A gate 4 -- edit.set reaches any row", () => {
       }
     });
 
-    test(`${transport}: set on a rebuild-only row passes the core's web.apply.rebuild_pending through`, async () => {
+    test(`${transport}: set on a rebuild-only row is committed on the rebuild path`, async () => {
       const engine = await boot();
       try {
         const { controls, list } = await endpoint(engine, transport);
@@ -644,12 +644,10 @@ describe("#1564A gate 4 -- edit.set reaches any row", () => {
           "t1 delay_samples");
         assert.equal(delay.class, "rebuildOnly");
         const before = engine.controlRevision();
-        await assert.rejects(controls.submit(controls.edit.set(delay.address, 64)), (error) => {
-          assert.ok(error instanceof MisoEngineError, "a refused call, not an SDK refusal");
-          assert.equal(error.diagnosticCode, "web.apply.rebuild_pending");
-          return true;
-        });
-        assert.equal(engine.controlRevision(), before, "nothing was committed");
+        const report = await controls.submit(controls.edit.set(delay.address, 64));
+        assert.equal(report.ok, true);
+        assert.equal(report.path, "rebuild", "the core prepares a replacement plan for a rebuild-only row");
+        assert.equal(engine.controlRevision(), before + 1n, "the rebuild is committed");
       } finally {
         engine.dispose();
       }

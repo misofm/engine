@@ -29,7 +29,6 @@
 
 use core::mem::{MaybeUninit, size_of};
 use core::num::{NonZeroU32, NonZeroUsize};
-use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
@@ -976,6 +975,15 @@ pub struct WebMeterHeader {
     /// header and its frame in the message handler that commits the plan, so the render path
     /// switches views by reference and never cuts one (issue #1290d1).
     pub successor_pointer: u32,
+    /// The structure epoch of the control list this plan's strip order belongs to (issue #1562b):
+    /// the `structure_epoch` that `CONTROL_LIST_GET` pages carry, as the commit that prepared the
+    /// plan left it, and as each later commit that rode the plan's live lanes left it. Strips
+    /// (tracks, then submixes) are listed in the order the frame carries them, so a client that
+    /// holds a list of another epoch reads the list again before it names a frame's strips. A
+    /// plan that renders keeps the epoch of its own commit while a replacement waits: the
+    /// replacement's header carries the newer one, and the page sees it in the adoption block.
+    /// Appended in place, so every earlier offset is unmoved.
+    pub structure_epoch: u64,
 }
 
 /// `WebMeterHeader::reserved[1]` validity bits. The high 32 bits carry a saturating loss count.
@@ -1015,6 +1023,7 @@ const fn empty_meter_header() -> WebMeterHeader {
         retired: 0,
         frame_pointer: 0,
         successor_pointer: 0,
+        structure_epoch: 0,
     }
 }
 
@@ -1464,9 +1473,6 @@ struct ReadyOwnership {
     /// and effect producers, the plan's revision gate, the plan publisher and the retirer. It is
     /// the one owner of the producers; the browser holds none of its own.
     control: WebSession,
-    /// The preparer's rebuild switch (#1562a D9), for the test-support republish.
-    #[cfg(feature = "test-support")]
-    allow_rebuild: Arc<AtomicBool>,
     /// The limits the control half was built with (#1570b D6), for the cross-host proof.
     #[cfg(feature = "test-support")]
     limits: ControlLimits,
@@ -1600,7 +1606,28 @@ impl ReadyOwnership {
             }
             self.blocking_rebuilds = self.blocking_rebuilds.saturating_add(1);
         }
+        if result.is_ok() {
+            self.stamp_structure_epoch();
+        }
         result
+    }
+
+    /// Stamp the structure epoch the control list holds now on the newest committed plan's meter
+    /// header (#1562b): the replacement's while one waits, else the rendering plan's. A commit that
+    /// rode the newest plan's live lanes may have changed a descriptor or an address (a VCA added,
+    /// a `matrix_mode` switch), and a rebuild's commit changes the strip order. Control side only.
+    fn stamp_structure_epoch(&mut self) {
+        let epoch = self.control.structure_epoch();
+        let header = match self
+            .pending_shapes
+            .iter_mut()
+            .rev()
+            .find(|entry| !entry.adopted)
+        {
+            Some(entry) => &mut entry.shape.meter_header,
+            None => &mut self.shape.meter_header,
+        };
+        header.structure_epoch = epoch;
     }
 
     /// Drop the tables of plans render has adopted past (#1290a): the host's own, retired by the
@@ -2218,32 +2245,6 @@ impl AudioWorkletEngineHost {
             .get(reader as usize)
     }
 
-    /// Run one structural command frame through the control plane (#1381a gates 2 and 4, #1290a):
-    /// it prepares a successor of the committed model through the browser's preparer and publishes
-    /// it, for the render of the next block to adopt, with the rebuild arm open past
-    /// [`REBUILD_PENDING`]. No export reaches it: the production entry keeps the refusal until
-    /// #1562b deletes it.
-    ///
-    /// Returns the control plane's response frame.
-    ///
-    /// # Errors
-    ///
-    /// The control plane's refusal of the frame.
-    #[cfg(feature = "test-support")]
-    pub fn structural_command_for_test(
-        &mut self,
-        request: &[u8],
-    ) -> Result<Vec<u8>, control_plane::CommandError> {
-        let ready = self
-            .ready
-            .as_mut()
-            .ok_or(control_plane::CommandError::Internal)?;
-        ready.allow_rebuild.store(true, Ordering::Release);
-        let length = ready.run_command(request, CONTROL_FRAME_BYTES);
-        ready.allow_rebuild.store(false, Ordering::Release);
-        Ok(ready.control.command_response(length?).to_vec())
-    }
-
     /// The [`ControlLimits`] the control half was built with (#1570b D6), read-only: the cross-host
     /// proof builds the C ABI's compile limits from it field for field, so both hosts advertise the
     /// same capabilities.
@@ -2291,16 +2292,16 @@ impl AudioWorkletEngineHost {
     /// length that is zero or over the frame ceiling, or a frame the control plane cannot
     /// correlate; [`RESULT_BUFFER_TOO_SMALL`] for a response over the control frame;
     /// [`RESULT_BACKPRESSURE`] for a queue or plan with no room now; [`RESULT_COMPILE_REJECTED`]
-    /// for a typed refusal before commit, `web.apply.rebuild_pending` for a transaction that needs
-    /// a plan rebuild (D9); [`RESULT_REPREPARE_REQUIRED`] for a transaction that changes the
+    /// for a typed refusal before commit (a transaction that needs a plan rebuild is prepared and
+    /// published like any other, #1562b); [`RESULT_REPREPARE_REQUIRED`] for a transaction that changes the
     /// session's sample rate or quantum (#1290a: the session is re-prepared from its document);
     /// [`RESULT_INTERNAL`] for a bookkeeping failure. For each failure the
     /// response is the refusal's diagnostic (`code\tpath\n` lines).
     ///
-    /// A frame refused after the core has seen it, `web.apply.rebuild_pending` included, has
-    /// consumed its request ID: the same bytes sent again are answered [`RESULT_OK`] with a non-ok
-    /// response frame whose code is `protocol.failure` (the replay cache), and a retry must take a
-    /// new request ID to meet the refusal again.
+    /// A frame refused after the core has seen it has consumed its request ID: the same bytes sent
+    /// again are answered [`RESULT_OK`] with a non-ok response frame whose code is
+    /// `protocol.failure` (the replay cache), and a retry must take a new request ID to meet the
+    /// refusal again.
     pub fn control_command(&mut self, len: u32) -> u32 {
         self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
@@ -5388,10 +5389,6 @@ impl HostAttachment for RenderCompanions {
 /// record another thread poisoned): refused before the transaction is committed (#1290a).
 const SHAPE_UNAVAILABLE: &str = "web.apply.shape_unavailable";
 
-/// The diagnostic code of a command frame whose transaction needs a plan rebuild, which the
-/// browser cannot apply in place yet (issue #1562a D9; #1562b removes the refusal).
-pub const REBUILD_PENDING: &str = "web.apply.rebuild_pending";
-
 /// The browser's [`control_plane::RuntimePreparer`] (issue #1400 D5): `prepare_web_host` for the
 /// session's boot options and spectrum request, with the render-side companions moved into the
 /// plan.
@@ -5404,11 +5401,6 @@ pub struct WebRuntimePreparer {
     /// Where the boot preparation leaves its facts for the host (#1381a), or `None` for a preparer
     /// that is only called.
     record: Option<Arc<Mutex<BootRecord>>>,
-    /// Whether the command path takes a structural transaction (issue #1562a D9). It is `false`:
-    /// the browser has no in-place structural edit until #1562b, so a frame that classifies as a
-    /// rebuild is refused `web.apply.rebuild_pending` before anything is committed. Only the
-    /// test-support republish of #1381a's gates opens it, for one call.
-    allow_rebuild: Arc<AtomicBool>,
 }
 
 impl WebRuntimePreparer {
@@ -5419,7 +5411,6 @@ impl WebRuntimePreparer {
             options,
             spectrum,
             record: None,
-            allow_rebuild: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -5431,10 +5422,6 @@ impl WebRuntimePreparer {
 }
 
 impl control_plane::RuntimePreparer for WebRuntimePreparer {
-    fn refuse_rebuild(&self) -> Option<&'static str> {
-        (!self.allow_rebuild.load(Ordering::Acquire)).then_some(REBUILD_PENDING)
-    }
-
     fn prepare(
         &self,
         compiled: &CompiledSession,
@@ -6092,8 +6079,6 @@ fn compile_ready(
     let record = Arc::new(Mutex::new(BootRecord::default()));
     let preparer =
         WebRuntimePreparer::new(options, spectrum_request.cloned()).recording(Arc::clone(&record));
-    #[cfg(feature = "test-support")]
-    let allow_rebuild = Arc::clone(&preparer.allow_rebuild);
     let limits = control_limits(caps, memory_budget);
     let control_plane::CompiledChildren {
         session: mut control,
@@ -6259,16 +6244,19 @@ fn compile_ready(
             .saturating_sub(report.bridge_retained_bytes)
             .saturating_add(engine.session_model_bytes),
     );
+    let structure_epoch = control.structure_epoch();
     let ready = ReadyOwnership {
         control,
         queries,
         #[cfg(feature = "test-support")]
-        allow_rebuild,
-        #[cfg(feature = "test-support")]
         limits,
         commands_enabled,
         live_values_superseded,
-        shape: Box::new(shape),
+        shape: {
+            let mut shape = Box::new(shape);
+            shape.meter_header.structure_epoch = structure_epoch;
+            shape
+        },
         shape_epoch: 0,
         carried_swaps_seen: 0,
         record,

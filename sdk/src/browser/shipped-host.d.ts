@@ -358,6 +358,14 @@ export interface MisoObservationMap {
   readonly tag: "miso.observationmap.v1";
   readonly requestId: number;
   readonly result: number;
+  /// The structure epoch of the control list whose strip order `bindings` follow (issue 1562b):
+  /// the `structureEpoch` of `CONTROL_LIST_GET` pages, as the plan that renders carries it. A
+  /// binding's `trackIndex` indexes the tracks, then the submixes, of the list of this epoch. A
+  /// rebuild that adds, removes or reorders a strip changes it at the block that adopts the
+  /// replacement plan; between that commit and the adoption the control list is already the
+  /// replacement's, so a client names the strips of this map by the list of this epoch and never
+  /// by the newest list. A positive safe integer.
+  readonly structureEpoch: number;
   readonly bindings: MisoObservationMapBinding[];
 }
 
@@ -513,6 +521,14 @@ export interface MisoMeterFrame {
   /// The tracks of the plan that rendered the window. A structural apply that adds or removes a
   /// track changes it between two frames of one stream; every array below is sized for it.
   readonly trackCount: number;
+  /// The structure epoch of the control list that the plan's strip order belongs to (issue
+  /// 1562b): the `structureEpoch` that `CONTROL_LIST_GET` pages carry, as the commit that prepared
+  /// the plan left it. The frame's strips (the tracks, then the submixes) are named by the list
+  /// of this epoch, so a page that holds a list of another epoch reads the list again before it
+  /// names a frame's strips. A structural apply that adds, removes or reorders a strip changes it
+  /// between two frames of one stream, in the frame of the block that adopted the plan, and a
+  /// replacement that keeps the structure keeps it. A positive safe integer.
+  readonly structureEpoch: number;
   /// `[track0 L, track0 R, .., trackN L, trackN R, master L, master R]` peak magnitudes.
   readonly peaks: Float32Array;
   /// Gain reduction per track, in **non-negative decibels**, `trackCount` long (issue 143).
@@ -778,9 +794,9 @@ export interface MisoRenderAllocations {
 
 /// The reply to one control frame (issue 1562a D1). `response` is the response frame the engine's
 /// control plane built, unchanged, when `result` is `0`; for another result it is the refusal's
-/// diagnostic text (`code\tpath\n` lines), for example `web.apply.rebuild_pending` with `result: 10`
-/// for a transaction that needs a plan rebuild, which this module cannot apply in place yet. A
-/// refused transaction is still `result: 0` with a non-ok response frame, as on the C ABI.
+/// diagnostic text (`code\tpath\n` lines), for example `web.apply.shape_unavailable` with `result: 10`
+/// for a preparation that could not hand its plan to the host. A transaction that needs a plan
+/// rebuild is prepared and published like any other (issue 1562b). A refused transaction is still `result: 0` with a non-ok response frame, as on the C ABI.
 /// `revision` is the committed session revision after the call.
 export interface MisoControlReply {
   readonly tag: "miso.control.v1";

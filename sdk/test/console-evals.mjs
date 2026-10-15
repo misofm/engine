@@ -1016,33 +1016,24 @@ function oneInsert(effectId, bypassed) {
 }
 
 describe("a live bypass edit is a SET_CONTROL on control 0 of the instance (#1563B)", () => {
-  test("lifting a session bypass is either applied or refused by the core, never acknowledged and ignored", async () => {
+  test("lifting a session bypass reaches the render, live or by a plan rebuild", async () => {
     // The SDK holds no list of effects that keep a prepared bypass any more (#1563 D3): it sends
-    // the lift and the core judges it. The core renders the unbypassed session on most effects, and
-    // refuses the lift of the two that keep a prepared bypass, the delay and the multiband, because
-    // that is a plan rebuild this module cannot apply in place yet (`web.apply.rebuild_pending`).
-    // Red mutation: a core that acknowledges the lift of either and renders the bypassed session.
+    // the lift and the core judges it. The core lifts it live on most effects, and on the two that
+    // keep a prepared bypass, the delay and the multiband, as a plan rebuild that the browser module
+    // now prepares and publishes like the C ABI does (#1562b). Either way the render is the
+    // unbypassed session's.
+    // Red mutation: a core that acknowledges the lift of any effect and renders the bypassed session.
     assert.deepEqual(Object.keys(AUDIBLE).sort(), CATALOG.effects.map((row) => row.id).sort());
-    const refused = [];
     for (const { id } of CATALOG.effects) {
       const bypassed = await renderBlocks(oneInsert(id, true));
       const enabled = await renderBlocks(oneInsert(id, false));
       assert.notDeepEqual(bypassed, enabled, `${id}: the fixture must hear the bypass`);
-      let rendered;
-      try {
-        rendered = await renderBlocks(
-          oneInsert(id, true),
-          (controls) => controls.edit.track("t").insert("fx", id).bypass(false),
-        );
-      } catch (error) {
-        assert.ok(error instanceof MisoEngineError, `${id}: ${error}`);
-        assert.equal(error.diagnostics[0]?.code, "web.apply.rebuild_pending", id);
-        refused.push(id);
-        continue;
-      }
-      assert.deepEqual(rendered, enabled, `${id}: the engine's live lift`);
+      const rendered = await renderBlocks(
+        oneInsert(id, true),
+        (controls) => controls.edit.track("t").insert("fx", id).bypass(false),
+      );
+      assert.deepEqual(rendered, enabled, `${id}: the engine's lift`);
     }
-    assert.deepEqual(refused.sort(), ["miso.delay", "miso.multiband-compressor"]);
   });
 });
 

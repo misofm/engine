@@ -15,6 +15,7 @@ const meterFrame = () => ({
   lossCount: 2,
   windows: 3,
   trackCount: 2,
+  structureEpoch: 1,
   peaks: new Float32Array([0.1, 0.2, 0.3, 0.4, 0.9, 0.8]),
   trackGrDb: new Float32Array([1.5, 2]),
   masterGrDb: null,
@@ -24,6 +25,15 @@ const meterFrame = () => ({
   submixPeaks: new Float32Array(0),
   submixGrDb: new Float32Array(0),
 });
+
+/** Strip orders that never change: one list, structure epoch 1. */
+function fixedOrders(tracks, submixes, epoch = 1) {
+  const order = { tracks, submixes };
+  return {
+    held: (wanted) => (wanted === epoch ? order : undefined),
+    of: async (wanted) => (wanted === epoch ? order : undefined),
+  };
+}
 
 const telemetryFrame = {
   tag: "miso.telemetry.v1",
@@ -101,7 +111,7 @@ function openBrowser(
 
 test("SDK measurement feeds use one shared lease and preserve copied projections", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, ["snare", "kick"], [], true);
+  const feeds = createMeasurementFeeds(host, fixedOrders(["snare", "kick"], []), true);
   const firstUpdates = [];
   const secondUpdates = [];
   const stopFirst = await feeds.meters((update) => firstUpdates.push(update));
@@ -160,11 +170,11 @@ const busFrame = () => ({
 
 test("a bus frame projects each submix's meter keyed by ID in canonical order", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, ["snare", "kick"], ["aaa-bus", "zzz-bus"], true);
+  const feeds = createMeasurementFeeds(host, fixedOrders(["snare", "kick"], ["aaa-bus", "zzz-bus"]), true);
   const updates = [];
   const stop = await feeds.meters((update) => updates.push(update));
   const frame = busFrame();
-  assert.equal(Object.keys(frame).length, 15, "the shipped 15-field miso.meter.v1 message");
+  assert.equal(Object.keys(frame).length, 16, "the shipped 16-field miso.meter.v1 message");
   host.emitMeter(frame);
   assert.equal(updates.length, 1);
   const [update] = updates;
@@ -210,7 +220,7 @@ test("the browser engine meters and observes a bus by its submix ID", async () =
     control: scriptedControl({ strips: { tracks: ["t"], submixes: ["bus"] } }),
     async observationMap() {
       return {
-        tag: "miso.observationmap.v1", result: 0,
+        tag: "miso.observationmap.v1", result: 0, structureEpoch: 1,
         bindings: [
           { trackIndex: 0, rack: 1, effectIndex: 0, effectSlotId: "comp",
             nativeEffectId: "miso.compressor", tapIds: [1] },
@@ -249,6 +259,8 @@ test("the browser engine meters and observes a bus by its submix ID", async () =
       trackGrDb: new Float32Array([1]), submixCount: 1, submixPeaks: new Float32Array([0.3, 0.4]),
       submixGrDb: new Float32Array([2.5]),
     });
+    // The first frame names its strips by a list the engine reads once, so it arrives a tick later.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(updates.length, 1);
     assert.deepEqual([...updates[0].submixes.keys()], ["bus"]);
     assert.equal(updates[0].submixes.get("bus").gainReductionDb, 2.5);
@@ -257,9 +269,91 @@ test("the browser engine meters and observes a bus by its submix ID", async () =
   }
 });
 
+// Issue #1562b: a rebuild that adds, removes or reorders a strip changes the structure epoch the
+// frames carry. A frame is named by the list of its own epoch.
+function epochOrders(lists) {
+  const reads = [];
+  return {
+    reads,
+    held: (epoch) => (reads.includes(epoch) ? lists[epoch] : undefined),
+    of: async (epoch) => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      reads.push(epoch);
+      return lists[epoch];
+    },
+  };
+}
+
+const frameOf = (epoch, trackCount) => ({
+  ...meterFrame(),
+  structureEpoch: epoch,
+  trackCount,
+  peaks: new Float32Array(trackCount * 2 + 2).fill(0.5),
+  trackGrDb: new Float32Array(trackCount),
+});
+
+test("a meter frame of a new structure epoch is named by the list of that epoch, in order", async () => {
+  const host = fakeHost();
+  const orders = epochOrders({
+    1: { tracks: ["kick", "snare"], submixes: [] },
+    2: { tracks: ["added", "kick", "snare"], submixes: [] },
+  });
+  const feeds = createMeasurementFeeds(host, orders, true);
+  const seen = [];
+  await feeds.meters((update) => seen.push([...update.tracks.keys()]));
+  host.emitMeter(frameOf(1, 2));
+  // The next two arrive while the first is still waiting for its list, and keep their order.
+  host.emitMeter(frameOf(2, 3));
+  host.emitMeter(frameOf(1, 2));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(seen, [["kick", "snare"], ["added", "kick", "snare"], ["kick", "snare"]]);
+  assert.deepEqual(orders.reads, [1, 2], "each list is read once, however many frames name it");
+  // Held lists are named at once, with no read.
+  host.emitMeter(frameOf(2, 3));
+  assert.equal(seen.length, 4);
+  assert.deepEqual(orders.reads, [1, 2]);
+  feeds.close();
+});
+
+test("a meter frame whose list the page cannot name is dropped and the stream goes on", async () => {
+  const host = fakeHost();
+  const orders = epochOrders({ 2: { tracks: ["kick", "snare"], submixes: [] } });
+  const feeds = createMeasurementFeeds(host, orders, true);
+  const seen = [];
+  await feeds.meters((update) => seen.push(update.sequence));
+  host.emitMeter({ ...frameOf(1, 2), sequence: 1 });
+  host.emitMeter({ ...frameOf(2, 2), sequence: 2 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(seen, [2n], "epoch 1 has no list: its frame is not named by another's");
+  feeds.close();
+});
+
+test("the browser engine follows a rebuild's new strip order in its meter frames", async () => {
+  const host = fakeHost();
+  const strips = { tracks: ["t"], submixes: [], structureEpoch: 1n };
+  Object.assign(host, { control: scriptedControl({ strips }) });
+  const engine = await openBrowser(host);
+  try {
+    const updates = [];
+    await engine.subscribeMeters((update) => updates.push([...update.tracks.keys()]));
+    host.emitMeter(frameOf(1, 1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // A rebuild adds a track in front: the list moves at the commit, and the plan that still
+    // renders keeps naming its strips by the list it carries, until the adoption block.
+    strips.tracks = ["a", "t"];
+    strips.structureEpoch = 2n;
+    host.emitMeter(frameOf(1, 1));
+    host.emitMeter(frameOf(2, 2));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(updates, [["t"], ["t"], ["a", "t"]]);
+  } finally {
+    await engine.close();
+  }
+});
+
 test("throwing one SDK listener does not suppress another listener", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, ["track"], [], true);
+  const feeds = createMeasurementFeeds(host, fixedOrders(["track"], []), true);
   let delivered = 0;
   await feeds.meters(() => { throw new Error("consumer callback"); });
   await feeds.meters(() => { delivered += 1; });
@@ -270,7 +364,7 @@ test("throwing one SDK listener does not suppress another listener", async () =>
 
 test("identical listener functions retain independent subscriptions", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, ["track"], [], true);
+  const feeds = createMeasurementFeeds(host, fixedOrders(["track"], []), true);
   let delivered = 0;
   const listener = () => { delivered += 1; };
   const stopFirst = await feeds.meters(listener);
@@ -286,7 +380,7 @@ test("identical listener functions retain independent subscriptions", async () =
 
 test("telemetry preserves every host measurement and shares its lease", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, ["track"], [], true);
+  const feeds = createMeasurementFeeds(host, fixedOrders(["track"], []), true);
   const updates = [];
   const stop = await feeds.telemetry((update) => updates.push(update));
   host.emitTelemetry(telemetryFrame);
@@ -300,7 +394,7 @@ test("telemetry preserves every host measurement and shares its lease", async ()
 test("a lease refusal is typed and does not reserve a later subscriber", async () => {
   const host = fakeHost();
   host.meterResult = 7;
-  const feeds = createMeasurementFeeds(host, ["track"], [], true);
+  const feeds = createMeasurementFeeds(host, fixedOrders(["track"], []), true);
   await assert.rejects(
     feeds.meters(() => undefined),
     (error) => error instanceof MisoEngineError && error.code === "unsupported" && error.result === 7,
@@ -324,7 +418,7 @@ test("a rejected numeric lease result is typed and recoverable", async () => {
     }
     return originalMeters(request);
   };
-  const feeds = createMeasurementFeeds(host, ["track"], [], true);
+  const feeds = createMeasurementFeeds(host, fixedOrders(["track"], []), true);
   await assert.rejects(
     feeds.meters(() => undefined),
     (error) => error instanceof MisoEngineError && error.code === "backpressure" && error.result === 6,
@@ -337,7 +431,7 @@ test("a rejected numeric lease result is typed and recoverable", async () => {
 });
 
 test("measurement admission without live controls is a typed SDK refusal", async () => {
-  const feeds = createMeasurementFeeds(fakeHost(), ["track"], [], false);
+  const feeds = createMeasurementFeeds(fakeHost(), fixedOrders(["track"], []), false);
   await assert.rejects(feeds.meters(() => undefined), (error) => error instanceof MisoUsageError);
   await assert.rejects(feeds.telemetry(() => undefined), (error) => error instanceof MisoUsageError);
   feeds.close();
@@ -345,7 +439,7 @@ test("measurement admission without live controls is a typed SDK refusal", async
 
 test("closing an already-armed feed rejects same-turn admission", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, ["track"], [], true);
+  const feeds = createMeasurementFeeds(host, fixedOrders(["track"], []), true);
   await feeds.meters(() => undefined);
   const admission = feeds.meters(() => undefined);
   feeds.close();
@@ -405,7 +499,7 @@ test("browser live controls retain the managed observation conflict hook", async
     },
     async observationMap() {
       return {
-        tag: "miso.observationmap.v1", result: 0,
+        tag: "miso.observationmap.v1", result: 0, structureEpoch: 1,
         bindings: [{ trackIndex: 0, rack: 1, effectIndex: 0, effectSlotId: "comp",
           nativeEffectId: "miso.compressor", tapIds: [1] }],
       };
@@ -444,7 +538,7 @@ test("browser live controls retain the managed observation conflict hook", async
 
 test("telemetry shares one lease until its last subscription and isolates throwing callbacks", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, [], [], true);
+  const feeds = createMeasurementFeeds(host, fixedOrders([], []), true);
   let deliveries = 0;
   const first = await feeds.telemetry(() => { throw new Error("consumer"); });
   const second = await feeds.telemetry(() => { deliveries += 1; });

@@ -62,11 +62,61 @@ export async function createBrowserControlListTransport(
  * epoch of the order returned last, so a structure change is followed and nothing is read twice.
  */
 export function createBrowserStripOrder(host: MisoAudioWorkletHost): () => Promise<ControlStripOrder> {
-  let known: ControlStripOrder | undefined;
-  return async () => {
-    known = await readControlStripOrder(await createBrowserControlListTransport(host), known);
-    return known;
+  return createBrowserStripOrders(host).current;
+}
+
+/** The strip orders the page holds for the host's running session (#1562b). */
+export interface BrowserStripOrders {
+  /** The order of the newest committed list, read again when its structure epoch moved. */
+  readonly current: () => Promise<ControlStripOrder>;
+  /** The order of the list of `epoch` if the page holds it now. */
+  readonly held: (epoch: number | bigint) => ControlStripOrder | undefined;
+  /**
+   * The order of the list whose structure epoch is `epoch`: a meter frame or an observation map
+   * names its strips by the list of the plan that produced it, which is not the newest list while
+   * a replacement plan waits for its block. It is a list this page read, or the newest list when
+   * that has this epoch. `undefined` when the list of that epoch is gone: the newest list is
+   * another one and this page never held it. The caller drops what it cannot name.
+   */
+  readonly of: (epoch: number | bigint) => Promise<ControlStripOrder | undefined>;
+}
+
+/** The lists the page remembers: a structural commit and its adoption are the two in flight. */
+const HELD_STRIP_ORDERS = 8;
+
+/**
+ * The strip orders of one host (#1562b). A rebuild that adds, removes or reorders a strip moves the
+ * list's structure epoch at its commit, and the plan that renders keeps naming its strips by the
+ * previous list until the block that adopts the replacement. So each order is kept by its epoch and
+ * a frame is named by the order of the epoch it carries. Reads are the ones {@link
+ * createBrowserStripOrder} makes: a probe, and the whole list only when the epoch moved.
+ */
+export function createBrowserStripOrders(host: MisoAudioWorkletHost): BrowserStripOrders {
+  const orders = new Map<bigint, ControlStripOrder>();
+  let newest: ControlStripOrder | undefined;
+  const current = async (): Promise<ControlStripOrder> => {
+    const read = await readControlStripOrder(await createBrowserControlListTransport(host), newest);
+    newest = read;
+    orders.delete(read.structureEpoch);
+    orders.set(read.structureEpoch, read);
+    while (orders.size > HELD_STRIP_ORDERS) {
+      const oldest = orders.keys().next();
+      if (oldest.done) break;
+      orders.delete(oldest.value);
+    }
+    return read;
   };
+  const held = (epoch: number | bigint): ControlStripOrder | undefined => orders.get(BigInt(epoch));
+  return Object.freeze({
+    current,
+    held,
+    of: async (epoch: number | bigint) => {
+      const known = held(epoch);
+      if (known !== undefined) return known;
+      const read = await current();
+      return read.structureEpoch === BigInt(epoch) ? read : undefined;
+    },
+  });
 }
 
 const hostQueues = new WeakMap<object, Promise<ControlTransactionQueue>>();

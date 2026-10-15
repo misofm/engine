@@ -4,10 +4,13 @@ const BOOT_OPTIONS_BYTES = 64;
 // Issue #1209 D2 appended `submix_count` at 64 and its pad at 68. Issue #1290d1 made the pad
 // `retired` and appended the frame and successor pointers: the frame travels with the plan, so the
 // header names its own frame and, while a replacement plan waits, the replacement's header.
-const METER_HEADER_BYTES = 80;
+// Issue #1562b appended `structure_epoch` (u64 at 80): the control list's structure epoch of the
+// plan's strip order.
+const METER_HEADER_BYTES = 88;
 const METER_HEADER_RETIRED = 68;
 const METER_HEADER_FRAME_POINTER = 72;
 const METER_HEADER_SUCCESSOR_POINTER = 76;
+const METER_HEADER_STRUCTURE_EPOCH = 80;
 const RESULT_OK = 0;
 const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_UNSUPPORTED = 7;
@@ -452,6 +455,106 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     return RESULT_OK;
   }
 
+  /// Issue #207, #1562b: the compiled session's sources in canonical order, read from the engine's
+  /// exports, or `null` for a row the engine cannot have written. Every read is checked against
+  /// something the engine already guarantees, so a mis-wired export fails here rather than
+  /// surfacing as a plausible-looking wrong number: compilation refuses a zero channel count or
+  /// full-source frame count, and preparation refuses a channel count above
+  /// `maximumSourceChannels`. The sources are the committed model's, so a rebuild that adds or
+  /// removes one is seen by the next read. Control side only; allocates.
+  readSourceRows() {
+    const count = this.exports.miso_engine_web_v1_source_count(this.handle);
+    if (!u32(count)) return null;
+    const rows = [];
+    for (let index = 0; index < count; index += 1) {
+      const length = this.exports.miso_engine_web_v1_source_id(this.handle, index);
+      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return null;
+      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
+      let id = "";
+      for (let byte = 0; byte < length; byte += 1) {
+        if (bytes[byte] > 0x7f) return null;
+        id += String.fromCharCode(bytes[byte]);
+      }
+      const channels = this.exports.miso_engine_web_v1_source_channels(this.handle, index);
+      const frames = this.exports.miso_engine_web_v1_source_frames(this.handle, index);
+      if (!u32(channels) || channels === 0 || channels > this.maximumSourceChannels
+          || !u64(frames) || frames === 0n) return null;
+      rows.push({ id, channels, frames });
+    }
+    return rows;
+  }
+
+  /// Issue #143, #1562b: the observation bindings of the plan that renders, in the prepared
+  /// owner's stable map order, or `null` for a binding the engine cannot have written. A binding
+  /// names a strip by its index in that plan's strip order (the tracks, then the submixes), which
+  /// is the control list's order at [`Self::renderingStructureEpoch`]. A rebuild changes the
+  /// bindings at the block that adopts it, so every map request reads them again: a reboot or a
+  /// swap cannot retain an old numeric owner address behind a stable SDK selection. Control side
+  /// only; allocates.
+  readObservationBindings() {
+    const count = this.exports.miso_engine_web_v1_observation_count(this.handle);
+    if (!u32(count)) return null;
+    const idPointer = this.exports.miso_engine_web_v1_observation_id_ptr();
+    const idCapacity = this.exports.miso_engine_web_v1_observation_id_capacity();
+    if (!u32(idPointer) || idPointer === 0 || !u32(idCapacity) || idCapacity === 0) return null;
+    const readId = (length) => {
+      if (!u32(length) || length === 0 || length > idCapacity) return null;
+      const bytes = new Uint8Array(this.memoryBuffer, idPointer, length);
+      let id = "";
+      for (let byte = 0; byte < length; byte += 1) {
+        if (bytes[byte] > 0x7f) return null;
+        id += String.fromCharCode(bytes[byte]);
+      }
+      return id;
+    };
+    const bindings = [];
+    for (let index = 0; index < count; index += 1) {
+      const trackIndex = this.exports.miso_engine_web_v1_observation_track_index(this.handle, index);
+      const rack = this.exports.miso_engine_web_v1_observation_rack(this.handle, index);
+      const effectIndex = this.exports.miso_engine_web_v1_observation_effect_index(this.handle, index);
+      const effectSlotId = readId(
+        this.exports.miso_engine_web_v1_observation_effect_slot_id(this.handle, index),
+      );
+      const nativeEffectId = readId(
+        this.exports.miso_engine_web_v1_observation_native_effect_id(this.handle, index),
+      );
+      const tapCount = this.exports.miso_engine_web_v1_observation_tap_count(this.handle, index);
+      if (!u32(trackIndex) || !effectRack(rack) || !u32(effectIndex)
+          || effectSlotId === null || nativeEffectId === null || !u32(tapCount)
+          || tapCount === 0 || tapCount > 32) return null;
+      const tapIds = [];
+      for (let tapIndex = 0; tapIndex < tapCount; tapIndex += 1) {
+        const tapId = this.exports.miso_engine_web_v1_observation_tap_id(
+          this.handle, index, tapIndex,
+        );
+        if (!u32(tapId) || tapId === 0) return null;
+        tapIds.push(tapId);
+      }
+      bindings.push(Object.freeze({
+        trackIndex,
+        rack,
+        effectIndex,
+        effectSlotId,
+        nativeEffectId,
+        tapIds: Object.freeze(tapIds),
+      }));
+    }
+    return Object.freeze(bindings);
+  }
+
+  /// Issue #1562b: the structure epoch of the plan that renders, read from its meter header (the
+  /// header the module publishes through `meter_header_ptr` is the rendering plan's, with or
+  /// without a meter lease). It is the number of the control list whose strip order the plan's
+  /// bindings and frames follow. `0` for a header the memory cannot hold. Control side only.
+  renderingStructureEpoch() {
+    const pointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
+    if (!u32(pointer) || pointer === 0
+        || pointer + METER_HEADER_BYTES > this.memoryBuffer.byteLength) return 0;
+    const header = new DataView(this.memoryBuffer, pointer, METER_HEADER_BYTES);
+    return header.getUint32(METER_HEADER_STRUCTURE_EPOCH, true)
+      + header.getUint32(METER_HEADER_STRUCTURE_EPOCH + 4, true) * 4294967296;
+  }
+
   /// Cut one persistent view over the module's memory and remember how, so a growth of that memory
   /// can cut it again. Control side only.
   bindView(field, Constructor, pointer, length) {
@@ -538,6 +641,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         lossCount: 0,
         windows: 0,
         trackCount,
+        // Issue #1562b: the structure epoch of the control list the frame's strip order belongs
+        // to, so a page that holds a list of another epoch reads the list again before it names
+        // a frame's strips. Refreshed with every post; a safe integer (it advances by one at a
+        // structural commit).
+        structureEpoch: 0,
         // The frozen `2T + 2` track and master peaks: an existing reader indexes it exactly as
         // before, whatever the submix count.
         peaks: new Float32Array(trackCount * 2 + 2),
@@ -745,88 +853,19 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return false;
     }
 
-    // Issue #207: source introspection, read once here for the same reason the other
-    // are -- the construction path is the one that may allocate, and `process()` never touches
-    // this. A headless consumer of the session map cannot otherwise learn which sources a compiled
-    // session declares, how many channels each carries, or which frames it is waiting for; the
-    // ABI exposed track discovery and nothing at all about sources.
-    //
-    // Every read is checked against something the engine already guarantees, so a mis-wired export
-    // fails initialization here rather than surfacing as a plausible-looking wrong number:
-    // compilation refuses a zero channel count or full-source frame count, and preparation refuses
-    // a channel count above `maximumSourceChannels`.
-    this.sourceCount = this.exports.miso_engine_web_v1_source_count(this.handle);
-    if (!u32(this.sourceCount)) return false;
-    this.sources = [];
-    for (let index = 0; index < this.sourceCount; index += 1) {
-      const length = this.exports.miso_engine_web_v1_source_id(this.handle, index);
-      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
-      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
-      let id = "";
-      for (let byte = 0; byte < length; byte += 1) {
-        if (bytes[byte] > 0x7f) return false;
-        id += String.fromCharCode(bytes[byte]);
-      }
-      const channels = this.exports.miso_engine_web_v1_source_channels(this.handle, index);
-      const frames = this.exports.miso_engine_web_v1_source_frames(this.handle, index);
-      if (!u32(channels) || channels === 0 || channels > this.maximumSourceChannels
-          || !u64(frames) || frames === 0n) return false;
-      this.sources.push({ id, channels, frames });
-    }
-
-    // Observation bindings and the fixed selection staging view are control-path state. They are
-    // read by request handlers only; the render callback never follows an observation pointer or
-    // allocates a reply row. The map is rebuilt at each boot so a reboot cannot retain an old
-    // numeric owner address behind a stable SDK selection.
-    const observationCount = this.exports.miso_engine_web_v1_observation_count(this.handle);
-    if (!u32(observationCount)) return false;
-    const observationIdPointer = this.exports.miso_engine_web_v1_observation_id_ptr();
-    const observationIdCapacity = this.exports.miso_engine_web_v1_observation_id_capacity();
-    if (!u32(observationIdPointer) || observationIdPointer === 0
-        || !u32(observationIdCapacity) || observationIdCapacity === 0) return false;
-    const readObservationId = (length) => {
-      if (!u32(length) || length === 0 || length > observationIdCapacity) return null;
-      const bytes = new Uint8Array(this.memoryBuffer, observationIdPointer, length);
-      let id = "";
-      for (let byte = 0; byte < length; byte += 1) {
-        if (bytes[byte] > 0x7f) return null;
-        id += String.fromCharCode(bytes[byte]);
-      }
-      return id;
-    };
-    const bindings = [];
-    for (let index = 0; index < observationCount; index += 1) {
-      const trackIndex = this.exports.miso_engine_web_v1_observation_track_index(this.handle, index);
-      const rack = this.exports.miso_engine_web_v1_observation_rack(this.handle, index);
-      const effectIndex = this.exports.miso_engine_web_v1_observation_effect_index(this.handle, index);
-      const effectSlotId = readObservationId(
-        this.exports.miso_engine_web_v1_observation_effect_slot_id(this.handle, index),
-      );
-      const nativeEffectId = readObservationId(
-        this.exports.miso_engine_web_v1_observation_native_effect_id(this.handle, index),
-      );
-      const tapCount = this.exports.miso_engine_web_v1_observation_tap_count(this.handle, index);
-      if (!u32(trackIndex) || !effectRack(rack) || !u32(effectIndex)
-          || effectSlotId === null || nativeEffectId === null || !u32(tapCount)
-          || tapCount === 0 || tapCount > 32) return false;
-      const tapIds = [];
-      for (let tapIndex = 0; tapIndex < tapCount; tapIndex += 1) {
-        const tapId = this.exports.miso_engine_web_v1_observation_tap_id(
-          this.handle, index, tapIndex,
-        );
-        if (!u32(tapId) || tapId === 0) return false;
-        tapIds.push(tapId);
-      }
-      bindings.push(Object.freeze({
-        trackIndex,
-        rack,
-        effectIndex,
-        effectSlotId,
-        nativeEffectId,
-        tapIds: Object.freeze(tapIds),
-      }));
-    }
-    this.observations = Object.freeze(bindings);
+    // Issue #207: source introspection and the observation bindings are control-path state, read
+    // here once at boot and again by the request handlers (a rebuild can change both, #1562b). The
+    // construction path and the handlers are the ones that may allocate; `process()` never touches
+    // them. A headless consumer of the session map cannot otherwise learn which sources a
+    // compiled session declares, how many channels each carries, or which frames it is waiting
+    // for; the ABI exposed track discovery and nothing at all about sources.
+    const sources = this.readSourceRows();
+    if (sources === null) return false;
+    this.sources = sources;
+    this.sourceCount = sources.length;
+    const observations = this.readObservationBindings();
+    if (observations === null) return false;
+    this.observations = observations;
     const observationSelectionPointer = this.exports.miso_engine_web_v1_observation_selection_ptr();
     const observationSelectionBytes = this.exports.miso_engine_web_v1_observation_selection_bytes();
     const observationSelectionCapacity = this.exports.miso_engine_web_v1_observation_selection_capacity();
@@ -1081,6 +1120,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.receiveTelemetryLease(message);
     } else if (message?.tag === "miso.sessionmap.v1"
         && exactFields(message, ["tag", "requestId"])) {
+      // The sources are the committed model's (a rebuild can change them), read again here.
+      const sources = this.readSourceRows();
+      if (sources === null) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      this.sources = sources;
+      this.sourceCount = sources.length;
       this.port.postMessage({
         tag: "miso.sessionmap.v1",
         requestId: message.requestId,
@@ -1094,10 +1141,19 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       });
     } else if (message?.tag === "miso.observationmap.v1"
         && exactFields(message, ["tag", "requestId"])) {
+      // The bindings are the rendering plan's (a rebuild changes them at its adoption block), and
+      // the reply names the structure epoch of the control list whose strip order they follow.
+      const bindings = this.readObservationBindings();
+      if (bindings === null) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      this.observations = bindings;
       this.port.postMessage({
         tag: "miso.observationmap.v1",
         requestId: message.requestId,
         result: RESULT_OK,
+        structureEpoch: this.renderingStructureEpoch(),
         bindings: this.observations,
       });
     } else if (message?.tag === "miso.observation.v1"
@@ -1806,6 +1862,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     message.validity = Number(metadata & 0xffffffffn);
     message.lossCount = Number(metadata >> 32n);
     message.windows = windows;
+    // Two 32-bit words, so the read allocates nothing.
+    message.structureEpoch = header.getUint32(METER_HEADER_STRUCTURE_EPOCH, true)
+      + header.getUint32(METER_HEADER_STRUCTURE_EPOCH + 4, true) * 4294967296;
     message.peaks.set(set.trackPeaks);
     message.peaks.set(set.masterPeaks, set.trackCount * 2);
     message.submixPeaks.set(set.submixPeaks);

@@ -264,12 +264,12 @@ fn run(script: Script) -> Run {
                 let revision = host_web::miso_engine_web_v1_control_revision(handle);
                 assert_eq!(native_staging::active_plan_epoch(handle), Some(0));
                 let control = host_web::miso_engine_web_v1_control_allocation_count();
-                let response = native_staging::structural_command(
+                let (result, response) = native_staging::control_command(
                     handle,
                     &frame(&add_muted_track(&base), request, revision),
                 )
-                .expect("a live handle")
-                .expect("the structural transaction publishes");
+                .expect("a live handle");
+                assert_eq!(result, RESULT_OK, "the structural transaction publishes");
                 run.control_calls_in_apply =
                     host_web::miso_engine_web_v1_control_allocation_count() - control;
                 assert_eq!(
@@ -449,12 +449,12 @@ fn run_metered(structural: bool) -> Metered {
             feed(handle, block);
             if structural && block == ADOPTION_WITH_WINDOW {
                 let revision = host_web::miso_engine_web_v1_control_revision(handle);
-                native_staging::structural_command(
+                let (result, _) = native_staging::control_command(
                     handle,
                     &frame(&add_muted_track(&base), 1, revision),
                 )
-                .expect("a live handle")
-                .expect("the structural transaction publishes");
+                .expect("a live handle");
+                assert_eq!(result, RESULT_OK, "the structural transaction publishes");
             }
             let allocations = host_web::miso_engine_web_v1_render_allocation_count();
             assert_eq!(

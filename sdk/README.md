@@ -317,8 +317,8 @@ insert or console slot depends on the effect it runs, so name it by its machine 
 session the SDK built (`withSession()`); the list entry's numeric address always works. `set`
 checks only that the edit can be encoded. The value's domain, the lane, the owner and whether the
 row can be set are the core's: an edit of a derived row rejects `control.read_only`, and one of a
-rebuild-only row is refused with the core's own code (on the browser host today,
-`web.apply.rebuild_pending`).
+rebuild-only row is committed on the rebuild path, as on the C ABI: the core prepares a replacement
+plan and the engine adopts it at a block boundary.
 
 The typed builders are generated from the same control tables (`src/generated/control-builders.ts`),
 one method per settable row: a strip's own rows and builtins (`faderDb`, `mute`, `trimDb`, `pan`,

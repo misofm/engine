@@ -2345,6 +2345,16 @@ where
         self.controller.session().compiled()
     }
 
+    /// The structure epoch of the committed control list (#1562b): the number the `CONTROL_LIST_GET`
+    /// pages carry. It advances when a commit changes an address, a header or a descriptor, a
+    /// rebuild that adds or removes a strip included. An adapter that publishes a plan's strip
+    /// order beside its meter frames stamps the plan with the epoch the commit left, so a client
+    /// that holds a list of another epoch knows to read it again.
+    #[must_use]
+    pub fn structure_epoch(&self) -> u64 {
+        self.controller.provider().structure_epoch()
+    }
+
     /// What the session's one control catalog holds (#1381a): the control plane's provider owns it,
     /// and an adapter that charges its own report reads the figures here, not from a catalog of its
     /// own.

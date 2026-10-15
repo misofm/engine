@@ -13,8 +13,12 @@
 //! codes. Per block it compares the bits of the two output planes. At the end the two hosts report
 //! the same `live_values_superseded` count, and every page of `CONTROL_LIST_GET` and
 //! `CONTROL_STATE_GET` and the `SESSION_SNAPSHOT_GET` bytes are byte-identical. The whole run
-//! repeats at 44.1, 48, 88.2 and 96 kHz. The rebuild part of the browser's parity (a
-//! `delay_samples` edit) is #1562b's: until then the browser refuses it `web.apply.rebuild_pending`.
+//! repeats at 44.1, 48, 88.2 and 96 kHz. The script holds the edits that take the rebuild arm (a
+//! route into the output, the prepared bypass of the delay and the multiband compressor, and
+//! `delay_samples`): the browser prepares and publishes the successor like the C ABI does, and the
+//! two hosts answer the same bytes and render the same bits across the swap (#1562b). No launch
+//! effect declares an audio-rate parameter, so that row of the batch 7 amendment has no edit to
+//! script.
 //!
 //! It absorbs #1364 gate 3 (the edits carry no per-edit ramp, so each host resolves the session's
 //! own length, and one pan carries a window of its own while another does not) and #1399 (a fader,
@@ -62,6 +66,8 @@ const EFFECTIVE_FADER_DB: u32 = 64;
 const ADDED_VCA: VcaRef = VcaRef { id: "w" };
 const OUTER_VCA: VcaRef = VcaRef { id: "outer" };
 const MATRIX_MODE_ROW: u32 = 1;
+/// The builtin row of a strip's `delay_samples`.
+const DELAY_SAMPLES_ROW: u32 = 11;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
 /// Which lane(s) of a dual-mono value an edit writes.
@@ -206,6 +212,19 @@ enum Edit {
     AddVca,
     /// A VCA that holds the VCA `v` and the added VCA `w`: a nested VCA.
     NestedVca,
+    /// The gain of the route from `t1` into the output (a rebuild: that route has no live lane).
+    OutputGain {
+        db: f32,
+    },
+    /// The mute of the route from `t1` into the output (a rebuild).
+    OutputMute {
+        muted: bool,
+    },
+    /// A strip's `delay_samples` on both lanes (a rebuild: it moves the plan's latency).
+    DelaySamples {
+        strip: Strip,
+        samples: f32,
+    },
 }
 
 /// How a scripted edit must end on both hosts.
@@ -213,6 +232,8 @@ enum Edit {
 enum Outcome {
     /// Accepted: `live` on both hosts (`monitor` for solo).
     Accepted,
+    /// Accepted by a plan rebuild: `rebuild` on both hosts (#1562b).
+    Rebuilt,
     /// Accepted and a no-op: the edit repeats the committed value, so both hosts answer
     /// `model_only` and write no record.
     Unchanged,
@@ -244,6 +265,15 @@ const fn live_ramped(block: u64, edit: Edit, ramp: u32) -> Step {
         edit,
         ramp: Some(ramp),
         outcome: Outcome::Accepted,
+    }
+}
+
+const fn rebuilt(block: u64, edit: Edit) -> Step {
+    Step {
+        block,
+        edit,
+        ramp: None,
+        outcome: Outcome::Rebuilt,
     }
 }
 
@@ -689,10 +719,35 @@ fn script() -> Vec<Step> {
             480,
         ),
         unchanged(39, Edit::SendMute { muted: false }, 480),
-        // A submix's trim and pan (switched from its matrix first), one lane of a high-pass. A
-        // route into the output has no live lane: its gain and mute are a plan rebuild, which the
-        // C ABI applies and the browser refuses `web.apply.rebuild_pending` until #1562b (D9), so
-        // its rows join this script with that issue.
+        // The rebuild arm (#1562b): a route into the output has no live lane, so its gain and
+        // mute rebuild the plan; so does the prepared bypass of the delay and of the multiband
+        // compressor, and a strip's `delay_samples`, which moves the plan's latency. Each is a
+        // swap at the next block on both hosts, with the watermark advancing at that block.
+        rebuilt(11, Edit::OutputGain { db: -3.0 }),
+        rebuilt(17, Edit::OutputMute { muted: true }),
+        rebuilt(19, Edit::OutputMute { muted: false }),
+        rebuilt(
+            21,
+            Edit::DelaySamples {
+                strip: T1,
+                samples: 64.0,
+            },
+        ),
+        rebuilt(
+            34,
+            Edit::Bypass {
+                insert: MULTIBAND,
+                bypassed: true,
+            },
+        ),
+        rebuilt(
+            43,
+            Edit::Bypass {
+                insert: DELAY,
+                bypassed: true,
+            },
+        ),
+        // A submix's trim and pan (switched from its matrix first), one lane of a high-pass.
         live(
             48,
             Edit::Trim {
@@ -1139,6 +1194,28 @@ impl CAbi {
                     members: vec![id(VCA.id), id(ADDED_VCA.id)],
                 },
             }],
+            Edit::OutputGain { db } => vec![set(
+                address(
+                    Owner::Route(id("t1-main")),
+                    Section::Own,
+                    ROUTE_GAIN_DB,
+                    ParameterChannel::Both,
+                ),
+                db,
+            )],
+            Edit::OutputMute { muted } => vec![set(
+                address(
+                    Owner::Route(id("t1-main")),
+                    Section::Own,
+                    ROUTE_MUTE,
+                    ParameterChannel::Both,
+                ),
+                toggle(muted),
+            )],
+            Edit::DelaySamples { strip, samples } => vec![set(
+                Self::strip_address(strip, DELAY_SAMPLES_ROW, Lanes::Both),
+                samples,
+            )],
             Edit::Solo { strip, on } => vec![set(
                 address(
                     Owner::Strip(id(strip.id)),
@@ -1435,6 +1512,18 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
                         "{label}: the path is {path:?}, got {c:?}"
                     );
                 }
+                Outcome::Rebuilt => {
+                    assert!(
+                        matches!(
+                            &c,
+                            Verdict::Applied {
+                                path: EditPath::Rebuild,
+                                ..
+                            }
+                        ),
+                        "{label}: the path is rebuild, got {c:?}"
+                    );
+                }
                 Outcome::Unchanged => {
                     let path = if solo {
                         EditPath::Monitor
@@ -1596,6 +1685,107 @@ fn the_status_words_carry_the_applied_revision_the_c_abi_reports() {
     }
 }
 
+/// #1349's rebuild leg (#1562b): a rebuild, then a live edit before the swap. The status words
+/// stay at the initial revision through the blocks before the swap block (neither commit is
+/// applied until a plan that carries it renders), then both revisions are in effect together from
+/// the swap block's first sample, and the words equal the C ABI's `miso_engine_v1_plan_watermark`
+/// after every block.
+///
+/// Test value: red if the browser publishes a rebuild's revision when it commits rather than when
+/// the swap block renders (the words would move before block 3), if the live edit committed behind
+/// a pending rebuild is reported at its own earlier block, or if the swap block's sample or
+/// outcome flags are the browser's own computation and not the plan's.
+#[test]
+fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
+    for rate in RATES {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let initial = (model.revision, 0, 1);
+        for block in 0..3 {
+            let _ = (browser.step(block), c_abi.step(block));
+            assert_eq!(status_watermark(&browser), initial, "{rate} Hz: {block}");
+            assert_eq!(c_abi.watermark(), initial);
+        }
+        let rebuild = Edit::DelaySamples {
+            strip: T1,
+            samples: 64.0,
+        };
+        let live_edit = Edit::Fader {
+            strip: T2,
+            lanes: Lanes::Both,
+            db: -6.0,
+        };
+        let (rebuilt, _) = browser.transaction_reply(&CAbi::edits(rebuild, None));
+        let (c_rebuilt, _) = c_abi.edit(rebuild, None);
+        assert_eq!(rebuilt, c_rebuilt);
+        assert!(matches!(
+            rebuilt,
+            Verdict::Applied {
+                path: EditPath::Rebuild,
+                revision
+            } if revision == model.revision + 1
+        ));
+        assert_eq!(
+            status_watermark(&browser),
+            initial,
+            "{rate} Hz: never early"
+        );
+        assert_eq!(c_abi.watermark(), initial);
+        // The live edit rides the pending successor's lanes.
+        let (edited, _) = browser.transaction_reply(&CAbi::edits(live_edit, None));
+        let (c_edited, _) = c_abi.edit(live_edit, None);
+        assert_eq!(edited, c_edited);
+        assert!(matches!(
+            edited,
+            Verdict::Applied {
+                path: EditPath::Live,
+                revision
+            } if revision == model.revision + 2
+        ));
+        assert_eq!(
+            status_watermark(&browser),
+            initial,
+            "{rate} Hz: still pending"
+        );
+        assert_eq!(c_abi.watermark(), initial);
+
+        let _ = (browser.step(3), c_abi.step(3));
+        assert_eq!(
+            status_watermark(&browser),
+            c_abi.watermark(),
+            "{rate} Hz: the swap block"
+        );
+        let (revision, first_sample, flags) = status_watermark(&browser);
+        assert_eq!(
+            revision,
+            model.revision + 2,
+            "{rate} Hz: both revisions apply"
+        );
+        assert_eq!(
+            first_sample,
+            3 * u64::from(QUANTUM),
+            "{rate} Hz: the swap block"
+        );
+        let _ = flags;
+        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+        let record = browser.host.watermark();
+        assert_eq!(
+            (record.revision, record.first_sample, record.outcome_flags),
+            c_abi.watermark(),
+            "{rate} Hz: the control-side record"
+        );
+        for block in 4..8 {
+            let _ = (browser.step(block), c_abi.step(block));
+            assert_eq!(
+                status_watermark(&browser),
+                c_abi.watermark(),
+                "{rate} Hz: block {block}"
+            );
+        }
+    }
+}
+
 /// Block the bypass of `a_live_bypass_crossfades_alike_on_both_hosts` is submitted before.
 const BYPASS_BLOCK: u64 = 6;
 
@@ -1726,7 +1916,7 @@ fn every_scripted_edit_is_heard() {
         // A step that a later step of the same block replaces (same strip's fader, same strip's
         // pan, same insert parameter) is superseded by design, before any render reads it: that
         // is what the equal superseded counts check, so it is never heard.
-        if !matches!(full[omitted].outcome, Outcome::Accepted)
+        if !matches!(full[omitted].outcome, Outcome::Accepted | Outcome::Rebuilt)
             || full[omitted + 1..].iter().any(|later| {
                 later.block == full[omitted].block && replaces(&full[omitted].edit, &later.edit)
             })

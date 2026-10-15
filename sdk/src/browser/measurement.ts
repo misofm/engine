@@ -58,6 +58,23 @@ export type TelemetryListener = (update: TelemetryUpdate) => void;
 
 type LeaseResult = { readonly result: number };
 
+/** The strip order a meter frame's strips are named by (#1562b). */
+export interface MeterStripOrders {
+  /** The order of the list of `epoch` if the page holds it now, else `undefined`. */
+  readonly held: (epoch: number) => StripNames | undefined;
+  /**
+   * The order of the list of `epoch`, read if it is not held, or `undefined` when the page cannot
+   * name that list's strips any more (a frame of a plan the page never saw the list of).
+   */
+  readonly of: (epoch: number) => Promise<StripNames | undefined>;
+}
+
+/** The strips of one list, tracks then submixes, by stable ID. */
+export interface StripNames {
+  readonly tracks: readonly string[];
+  readonly submixes: readonly string[];
+}
+
 type HostFeed<Frame, Update> = {
   readonly subscribe: (listener: (update: Update) => void) => Promise<() => void>;
   readonly close: () => void;
@@ -73,7 +90,11 @@ function createHostFeed<Frame, Update>(options: {
   readonly name: "meters" | "telemetry";
   readonly available: boolean;
   readonly lease: (onFrame: ((frame: Frame) => void) | null) => Promise<LeaseResult>;
-  readonly project: (frame: Frame) => Update;
+  /**
+   * The frame as an update. A projection that needs a read (a meter frame of a structure the page
+   * holds no strip order for) answers later; `undefined` drops the frame.
+   */
+  readonly project: (frame: Frame) => Update | undefined | Promise<Update | undefined>;
 }): HostFeed<Frame, Update> {
   const listeners = new Set<{ readonly listener: (update: Update) => void }>();
   const pendingAdmissions = new Map<
@@ -116,15 +137,8 @@ function createHostFeed<Frame, Update>(options: {
         const wanted = !closed && listeners.size > 0;
         if (wanted === armed) return;
         if (wanted) {
-          const ack = await lease((frame) => {
-            let update: Update;
-            try {
-              update = options.project(frame);
-            } catch {
-              // Host validation is authoritative. A malformed custom host frame must not make
-              // one callback prevent ownership reconciliation or another callback's delivery.
-              return;
-            }
+          const deliver = (update: Update | undefined): void => {
+            if (update === undefined) return;
             for (const subscription of [...listeners]) {
               if (closed || !listeners.has(subscription)) continue;
               try {
@@ -132,6 +146,40 @@ function createHostFeed<Frame, Update>(options: {
               } catch {
                 // Consumer callback failures are isolated from sibling listeners and the lease.
               }
+            }
+          };
+          // Frames are delivered in the order they arrived. A frame whose projection must read
+          // (the first frame of a new structure) holds the frames behind it until it settles.
+          let tail: Promise<void> | undefined;
+          const ack = await lease((frame) => {
+            const project = (): Promise<void> | undefined => {
+              let projected: Update | undefined | Promise<Update | undefined>;
+              try {
+                projected = options.project(frame);
+              } catch {
+                // Host validation is authoritative. A malformed custom host frame must not make
+                // one callback prevent ownership reconciliation or another callback's delivery.
+                return undefined;
+              }
+              if (projected instanceof Promise) {
+                return projected.then(deliver, () => undefined);
+              }
+              deliver(projected);
+              return undefined;
+            };
+            if (tail !== undefined) {
+              const chained: Promise<void> = tail.then(project).then(() => {
+                if (tail === chained) tail = undefined;
+              });
+              tail = chained;
+              return;
+            }
+            const waiting = project();
+            if (waiting !== undefined) {
+              const chained: Promise<void> = waiting.then(() => {
+                if (tail === chained) tail = undefined;
+              });
+              tail = chained;
             }
           });
           if (ack.result !== constantValue("resultCodes", "ok")) {
@@ -291,15 +339,24 @@ export interface BrowserMeasurementFeeds {
 
 export function createMeasurementFeeds(
   host: Pick<MisoAudioWorkletHost, "meters" | "telemetry">,
-  trackIds: readonly string[],
-  submixIds: readonly string[],
+  orders: MeterStripOrders,
   available: boolean,
 ): BrowserMeasurementFeeds {
   const meters = createHostFeed<MisoMeterFrame, MeterUpdate>({
     name: "meters",
     available,
     lease: (onFrame) => host.meters({ enabled: onFrame !== null, onFrame }),
-    project: (frame) => meterProjection(frame, trackIds, submixIds),
+    // A frame names its strips by the list of the structure epoch it carries (#1562b): a rebuild
+    // that adds, removes or reorders a strip changes the epoch in the frame of the block that
+    // adopted the plan, and the order is read once for the new epoch. Frames of an epoch whose list
+    // the page cannot name are dropped, as every telemetry frame the page cannot use is.
+    project: (frame) => {
+      const held = orders.held(frame.structureEpoch);
+      if (held !== undefined) return meterProjection(frame, held.tracks, held.submixes);
+      return orders.of(frame.structureEpoch).then((named) => (
+        named === undefined ? undefined : meterProjection(frame, named.tracks, named.submixes)
+      ));
+    },
   });
   const telemetry = createHostFeed<MisoTelemetryFrame, TelemetryUpdate>({
     name: "telemetry",
