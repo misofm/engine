@@ -674,3 +674,41 @@ features, control-plane, capi, host-web), fmt, `realtime-policy` (141 regions) a
 - **m3.** `BindingState.armRevision` is the committed revision read just before the arm was sent; an
   `OBSERVATION_ENDED` event with a revision at or before it is ignored (it ended an earlier arm).
   Eval: `an ended event older than the arm is ignored`.
+
+## Decision record: source staging sized by the launch maxima (batch 12b review B1)
+
+Since #1562b-W the browser accepts rebuilds, and a rebuild can add a source the boot session did not
+have. The browser sized its ID staging (longest ID of the boot session) and its source PCM and plane
+staging (`maximum_source_channels` of the boot session) at boot, so an acked rebuild that added a
+longer ID tripped a `debug_assert` and then indexed past the buffer inside the render-locked
+`miso_engine_web_v1_source_id` export (a wasm trap), and one that added a wider source made the
+worklet's `readSourceRows` return `null` (sticky `RESULT_INTERNAL`); either way the acked source
+could never be fed (an ack preceded a drop). Root ruling A: size the staging by what the grammar
+allows, so nothing depends on the boot session.
+
+- **Constants.** `session::STABLE_ID_MAXIMUM_BYTES` (127; the one literal `StableId::parse` and
+  control-plane's observation rows already used) and `session::SOURCE_CHANNELS_MAXIMUM` (255). The
+  grammar has no source-channel limit narrower than the `u8` of `Source::channels`, so the `u8` domain
+  is the maximum; no new limit was invented. `project_buffers` no longer takes the shape's two values.
+- **Typed error.** `copy_id_into_staging` returns `Result<u32, IdStagingError>` (`NoStaging`,
+  `TooLong`) and the export answers zero on either (its existing "no such source"), never a panic.
+  With the staging at the maximum the second cannot happen for a compiled session.
+- **Memory.** Staging grows by 129,536 bytes of source PCM, 4,048 of plane references and 113 of ID
+  staging (this fixture: `idStagingBytes` 14 to 127, `sourcePcmStagingBytes` 1,024 to 130,560;
+  `bridge_retained_bytes` 1,631,181 to 1,764,878, `bridge_metadata_bytes` 1,594,186 to 1,598,234;
+  wasm `memoryBytes` after boot 2,883,584 to 3,014,656, two pages). Re-pinned with the reason in
+  `retained_ceilings.rs` (`bridge_retained_bytes` ceiling `CAPTURE + 787,968`) and
+  `browser-v1/expected.json` (`bridgeRetainedBytes` 1,812,352 = 1,048,576 + 763,776, measured beyond
+  capture 694,314 plus 10 %, rounded up to 64; the two exact staging rows; `memoryBytes`).
+- **Boot budget.** The 1 MiB, 512-track worst document's high-water growth
+  (`scripts/check-web-boot-budget.mjs`) measures 20,447,232 bytes before and after the change, under
+  the 20 MiB pin plus one page (21,037,056): the parse transient dominates and the staging fits in
+  the memory the parse already grew.
+- **Gates.** `plan_exchange_threads::a_rebuild_adds_the_longest_id_with_more_channels_than_any_boot_source`
+  (exports: a rebuild adds a 127-byte ID with six channels; `source_id` returns 127 and the staged bytes
+  match, `source_channels` is 6, a six-plane chunk is accepted and heard; red on a staging sized from
+  the boot session, both for the ID and the PCM), `control_parity::a_rebuild_adds_the_longest_stereo_source_to_a_session_that_booted_with_a_mono_source_only`
+  (browser and C ABI render the same bits across the rebuild for the new source at 44.1, 48, 88.2 and
+  96 kHz), `host-web` unit `staging_holds_the_grammars_longest_id_and_widest_source_and_refuses_an_overlong_id`.
+- **Departure.** A session with no source or track does not prepare (`host.source.graph.prepare`), so
+  "start empty" is not reachable; the gates boot with one mono source.

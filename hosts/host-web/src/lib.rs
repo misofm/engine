@@ -57,7 +57,7 @@ use host_core::{
 };
 #[cfg(test)]
 use host_core::{SpectrumCaptureCollectionRequest, SpectrumCaptureRequest};
-use session::CompileCaps;
+use session::{CompileCaps, SOURCE_CHANNELS_MAXIMUM, STABLE_ID_MAXIMUM_BYTES};
 
 use host_core::EffectRack;
 /// Live effect addressing in the session's own terms (decision 12, issue #1096).
@@ -2126,11 +2126,6 @@ impl AudioWorkletEngineHost {
             document_bytes,
             shape.sample_rate_hz,
             shape.quantum_frames,
-            shape.maximum_source_channels,
-            shape
-                .longest_source_id_bytes
-                .max(shape.longest_track_id_bytes)
-                .max(shape.longest_submix_id_bytes),
             options,
             (
                 spectrum_request.is_some(),
@@ -3198,6 +3193,9 @@ impl AudioWorkletEngineHost {
     }
 
     /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).
+    ///
+    /// Zero means "no such source", and also a staging that cannot hold the ID: staging is sized
+    /// for the longest ID the grammar allows, so the second cannot happen for a compiled session.
     pub(crate) fn copy_session_source_id(&mut self, index: u32) -> u32 {
         let Some(ready) = self.ready.as_ref() else {
             return 0;
@@ -3211,17 +3209,21 @@ impl AudioWorkletEngineHost {
             return 0;
         };
         Self::copy_id_into_staging(self.buffers.as_mut(), source.id.as_str().as_bytes())
+            .unwrap_or(0)
     }
 
-    fn copy_id_into_staging(buffers: Option<&mut PreparedBuffers>, bytes: &[u8]) -> u32 {
-        let length = bytes.len();
-        let buffers = buffers.expect("a ready host owns its staging buffers");
-        debug_assert!(
-            length <= buffers.source_id.len(),
-            "compiled ID exceeds its projected staging capacity"
-        );
-        buffers.source_id[..length].copy_from_slice(bytes);
-        u32::try_from(length).expect("ID staging capacity is representable as u32")
+    /// Copy `bytes` into ID staging and return their length, or why they cannot be staged. Never
+    /// panics: this runs inside a render-locked export, where a panic is a trap.
+    fn copy_id_into_staging(
+        buffers: Option<&mut PreparedBuffers>,
+        bytes: &[u8],
+    ) -> Result<u32, IdStagingError> {
+        let buffers = buffers.ok_or(IdStagingError::NoStaging)?;
+        let Some(target) = buffers.source_id.get_mut(..bytes.len()) else {
+            return Err(IdStagingError::TooLong);
+        };
+        target.copy_from_slice(bytes);
+        u32::try_from(bytes.len()).map_err(|_| IdStagingError::TooLong)
     }
 
     pub(crate) fn diagnostic_buffer_mut(&mut self) -> Option<&mut [u8]> {
@@ -4681,15 +4683,28 @@ fn spectrum_collection_staging_bytes(
     Ok((entry_bytes, target_id_bytes))
 }
 
+/// Why an ID could not be copied into ID staging.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdStagingError {
+    /// The host owns no staging buffers.
+    NoStaging,
+    /// The ID is longer than the staging buffer.
+    TooLong,
+}
+
 fn project_buffers(
     document_bytes: u32,
     sample_rate_hz: u32,
     quantum_frames: u32,
-    maximum_source_channels: u32,
-    id_staging_bytes: u64,
     options: WebBootOptions,
     spectrum_staging: (bool, (u64, u64)),
 ) -> Result<PreparedBufferProjection, BootFailure> {
+    // The staging holds what a rebuild may add, not only what the boot session declares (#1562b):
+    // a source, track or submix ID of the longest length the grammar allows, and a source of the
+    // most channels it allows. Sizing from the boot session would let an acked rebuild declare a
+    // source the host could never stage or feed.
+    let maximum_source_channels = SOURCE_CHANNELS_MAXIMUM;
+    let id_staging_bytes = STABLE_ID_MAXIMUM_BYTES as u64;
     let (
         spectrum_configured,
         (spectrum_collection_entry_bytes, spectrum_collection_target_id_bytes),

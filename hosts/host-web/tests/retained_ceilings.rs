@@ -99,6 +99,14 @@ const CAPTURE: u64 = LIVE_RESPONSE_CAPTURE_BYTES as u64;
 /// because the plan's lanes are the control plane's (decision 17 C6), which attaches the strips'
 /// input lanes (trim, polarity and filters) where the browser's no-commands options attached none:
 /// 4,041 * 1.1 = 4,445.1, so 4,480. The four-lane values are inferred, as before.
+///
+/// **Re-pinned: `bridge_retained_bytes` (#1562b review B1).** The browser sizes its source PCM
+/// staging, its plane references and its ID staging by what the grammar allows (255 channels, 127
+/// ID bytes), not by the boot session, so a rebuild can add any valid source. For this fixture the
+/// retained row rose from 1,631,181 to 1,764,878 bytes (x86-64; +133,697: the PCM staging from 2
+/// to 255 channels of the quantum, the plane references and the ID staging); the metadata row rose
+/// by the plane references alone (1,594,186 to 1,598,234) and stays under its ceiling. The new
+/// beyond-capture figure is 716,302; plus 10 % is 787,932.2, rounded up to 64: 787,968.
 const BUDGETS: [Budget; 12] = [
     Budget {
         row: "bridge_metadata_bytes",
@@ -109,8 +117,8 @@ const BUDGETS: [Budget; 12] = [
     Budget {
         row: "bridge_retained_bytes",
         value: |report| report.bridge_retained_bytes,
-        eight_lanes: CAPTURE + 611_712,
-        four_lanes: CAPTURE + 611_712,
+        eight_lanes: CAPTURE + 787_968,
+        four_lanes: CAPTURE + 787_968,
     },
     Budget {
         row: "source_total_bytes",

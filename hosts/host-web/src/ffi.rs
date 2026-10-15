@@ -3213,7 +3213,7 @@ pub extern "C" fn miso_engine_web_v1_source_submit(
             let id_pointer = ids.as_ptr();
             for (channel, slot) in plane_slots[..channel_count].iter_mut().enumerate() {
                 let offset = channel * quantum;
-                // SAFETY: Preparation allocated `maximum_source_channels * quantum` stable PCM
+                // SAFETY: Preparation allocated `SOURCE_CHANNELS_MAXIMUM * quantum` stable PCM
                 // samples. The checked channel bound/product and `frames <= quantum` prove this
                 // exact plane prefix is readable for the synchronous source submission below.
                 let plane = unsafe { slice::from_raw_parts(pcm_pointer.add(offset), frame_count) };
@@ -3847,8 +3847,8 @@ pub extern "C" fn miso_engine_web_v1_source_count(handle: u32) -> u32 {
 
 /// Copy one canonical source ID into the ID staging buffer; returns its byte length.
 ///
-/// Zero means "no such source". [`BUFFER_SOURCE_ID`] is sized for the longest source or track ID
-/// in the compiled session.
+/// Zero means "no such source". [`BUFFER_SOURCE_ID`] is sized for the longest ID the grammar
+/// allows, so no session a rebuild commits outgrows it.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_id(handle: u32, index: u32) -> u32 {
     render_locked(|| with_host_mut(handle, 0, |host| host.copy_session_source_id(index)))
@@ -4033,6 +4033,17 @@ pub mod native_staging {
                 .and_then(|staging| staging.get_mut(..id.len()))
                 .map(|staging| staging.copy_from_slice(id))
                 .is_some()
+        })
+    }
+
+    /// Read back the first `length` bytes of the source-ID staging, as the worklet reads them after
+    /// `miso_engine_web_v1_source_id` returns that length. `None` when the handle owns no staging
+    /// or `length` exceeds it.
+    pub fn staged_source_id(handle: u32, length: u32) -> Option<Vec<u8>> {
+        super::with_host_mut(handle, None, |host| {
+            host.source_id_mut()
+                .and_then(|staging| staging.get(..length as usize))
+                .map(<[u8]>::to_vec)
         })
     }
 

@@ -57,6 +57,46 @@ fn boot_options(quantum: u32) -> WebBootOptions {
     }
 }
 
+/// The staging a boot allocates holds any ID and any source the grammar allows, whatever the boot
+/// session declared, and an ID that does not fit is a typed error, never a panic (a panic inside
+/// a render-locked export is a trap).
+///
+/// Test value: red if the projection goes back to sizing from the boot session (a rebuild that adds
+/// a longer ID or a wider source would then find no room), or if `copy_id_into_staging` indexes
+/// past its buffer. A boot of a short, mono session never meets either; only a rebuild does.
+#[test]
+fn staging_holds_the_grammars_longest_id_and_widest_source_and_refuses_an_overlong_id() {
+    let projection = project_buffers(1, 48_000, 128, boot_options(128), (false, (0, 0)))
+        .expect("bridge projection");
+    let mut buffers = allocate_buffers(projection).expect("staging");
+    assert_eq!(buffers.source_id.len(), session::STABLE_ID_MAXIMUM_BYTES);
+    assert_eq!(
+        buffers.source_pcm.len(),
+        session::SOURCE_CHANNELS_MAXIMUM as usize * 128
+    );
+    assert_eq!(
+        buffers.plane_references.len(),
+        session::SOURCE_CHANNELS_MAXIMUM as usize
+    );
+    let longest = [b'x'; session::STABLE_ID_MAXIMUM_BYTES];
+    assert_eq!(
+        AudioWorkletEngineHost::copy_id_into_staging(Some(&mut buffers), &longest),
+        Ok(session::STABLE_ID_MAXIMUM_BYTES as u32)
+    );
+    assert_eq!(&buffers.source_id[..], &longest[..]);
+    assert_eq!(
+        AudioWorkletEngineHost::copy_id_into_staging(
+            Some(&mut buffers),
+            &[b'x'; session::STABLE_ID_MAXIMUM_BYTES + 1]
+        ),
+        Err(IdStagingError::TooLong)
+    );
+    assert_eq!(
+        AudioWorkletEngineHost::copy_id_into_staging(None, b"a"),
+        Err(IdStagingError::NoStaging)
+    );
+}
+
 fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
     let model = parse_host_session(core::str::from_utf8(document).expect("UTF-8 session"))
         .expect("accepted host session");
@@ -82,13 +122,6 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
         u32::try_from(document.len()).expect("bounded fixture document"),
         shape.sample_rate_hz,
         shape.quantum_frames,
-        shape.maximum_source_channels,
-        shape
-            .longest_source_id_bytes
-            .max(shape.longest_track_id_bytes)
-            .max(shape.longest_submix_id_bytes)
-            .max(shape.longest_route_id_bytes)
-            .max(shape.longest_vca_id_bytes),
         options,
         (false, (0, 0)),
     )
@@ -467,9 +500,10 @@ fn preparation_accepts_explicit_64_128_and_256_quanta_with_stable_buffers() {
         let source_id_ptr = host.source_id_mut().expect("ID").as_ptr();
         let source_pcm_ptr = host.source_pcm_mut().expect("PCM").as_ptr();
         let output_ptr = host.output_pcm().expect("output").as_ptr();
+        // Source PCM staging holds the most channels a source can declare, not the boot session's.
         assert_eq!(
             host.source_pcm_mut().expect("PCM").len(),
-            2 * quantum as usize
+            session::SOURCE_CHANNELS_MAXIMUM as usize * quantum as usize
         );
         assert_eq!(
             host.output_pcm().expect("output").len(),
@@ -829,11 +863,6 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
             document.len() as u32,
             shape.sample_rate_hz,
             shape.quantum_frames,
-            shape.maximum_source_channels,
-            shape
-                .longest_source_id_bytes
-                .max(shape.longest_track_id_bytes)
-                .max(shape.longest_submix_id_bytes),
             options,
             (false, (0, 0)),
         )
