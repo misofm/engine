@@ -42,7 +42,8 @@ import type {
   ControlListTransport,
   ControlState,
 } from "../core/control-list.ts";
-import { EngineLiveControls } from "../core/live-controls.ts";
+import { EngineLiveControls, effectRowResolver, sessionDescribesStrips } from "../core/live-controls.ts";
+import { decodeObservationEnded } from "../core/observation-ended.ts";
 import { SessionBuilder } from "../core/session.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
@@ -234,7 +235,9 @@ export class OfflineEngine {
    * An effect's observation queue holds one subscription per tap until a block drains it. A
    * subscribe, update or close that finds the slot taken by an earlier one is refused at once with
    * the typed, retryable `backpressure` error. It never waits: this engine renders only when the
-   * caller does, so the caller calls `render()` and submits again.
+   * caller does, so the caller calls `render()` and submits again. The same refusal meets a request
+   * made between a rebuild's commit and the render that adopts its plan: the records would name
+   * effects of the plan that renders, and the core admits them against the newest plan.
    */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription> {
     return this.#observationOwner().subscribe(request).then((receipt) => receipt.handle);
@@ -281,12 +284,21 @@ export class OfflineEngine {
    * addressable by their stable IDs; otherwise use `withSession()` or address them by index.
    */
   liveControls(): EngineLiveControls {
-    return new EngineLiveControls(this.sessionMap(), {
+    const map = this.sessionMap();
+    // A rebuild can move the strips away from the session the SDK built; the engine is then no
+    // longer that session, and the core's control list is the only description of it.
+    const session = this.#session !== undefined && sessionDescribesStrips(this.#session, map)
+      ? this.#session
+      : undefined;
+    return new EngineLiveControls(map, {
       queue: this.controlTransactions(),
       observe: (edits) => this.submitCommands(encodeLaneEdits(edits), edits.length),
+      // The boundary caches the order by structure epoch: a probe each call, the list when it moved.
+      stripOrder: () => this.#boundary.stripOrder(),
+      order: this.#boundary.stripOrder(),
     },
       (edits, managed) => this.#observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
-      this.#session,
+      session,
       this.#booted);
   }
 
@@ -315,6 +327,8 @@ export class OfflineEngine {
           requestIds,
           limits,
           readRevision: () => this.#boundary.controlRevision(),
+          // An edit that names an effect's row is checked against the core's list before it is sent.
+          prepare: effectRowResolver(() => this.#boundary.stripOrder()),
         },
       );
     }
@@ -479,6 +493,11 @@ export class OfflineEngine {
       observationMap: () => this.observationMap(),
       readObservations: (selections) => this.readObservations(selections),
       liveControls: () => this.liveControls(),
+      observationEnded: (listener) => this.#boundary.onControlEvent((event) => {
+        // The reliable lane carries it; the core decides what ended, the SDK only reads the frame.
+        const ended = event.lane === 0 ? decodeObservationEnded(event.frame) : undefined;
+        if (ended !== undefined) listener(ended);
+      }),
       spectrumPrepared: () => this.#boundary.preparedSpectrumQuery(),
       spectrumPreparedCollection: () => this.#boundary.preparedSpectrumCollection(),
       spectrumSelect: (query) => this.#boundary.selectSpectrum(query),

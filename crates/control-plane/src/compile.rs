@@ -468,9 +468,6 @@ pub(crate) fn observation_resources(
     })
 }
 
-/// The longest a stable ID is (`[a-z][a-z0-9._-]{0,126}`), which bounds the text of a key.
-const STABLE_ID_MAXIMUM_BYTES: usize = 127;
-
 /// The smallest encoded size of one key of an `OBSERVATION_ENDED` event: two one-character IDs,
 /// the section and the tap ID with their field headers, measured as what a second key adds to the
 /// frame. It bounds how many keys fit one frame.
@@ -586,7 +583,7 @@ pub(crate) fn ended_event_ceiling(frame_bytes: u64) -> Result<u64, CompileFailur
 /// ended ones are copied into. Every binding and key owns the text of two IDs.
 fn observation_binding_rows(slots: usize) -> Result<(u64, u64), CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
-    let text = 2 * STABLE_ID_MAXIMUM_BYTES;
+    let text = 2 * session::STABLE_ID_MAXIMUM_BYTES;
     let binding = size_of::<controls::ObservationBinding>()
         .checked_add(text)
         .ok_or_else(arithmetic)?;
@@ -865,18 +862,6 @@ pub trait RuntimePreparer: Send {
         successor: Option<SuccessorBase<'_>>,
         superseded: &host_core::LiveValuesSuperseded,
     ) -> Result<(host_core::PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics>;
-
-    /// The code of the diagnostic this preparer refuses a structural transaction with, or `None`
-    /// to take it (issue #1562a D9).
-    ///
-    /// A command frame whose transaction the live classifier sends to the rebuild arm asks this
-    /// first, before the revision is stamped, the successor is prepared or anything is queued, so
-    /// a refusal here leaves the model, the revision, the overlay, the cells and the plan as they
-    /// were, and no acknowledgement has gone out. The code is one whole-session diagnostic line
-    /// (`code\t$\n`). The default takes every rebuild, as the C ABI does.
-    fn refuse_rebuild(&self) -> Option<&'static str> {
-        None
-    }
 }
 
 /// Prepare one plan plus its source producers, and project its resource accounting.

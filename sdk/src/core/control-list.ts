@@ -825,14 +825,49 @@ export interface ControlStripOrder {
   readonly structureEpoch: bigint;
   readonly tracks: readonly string[];
   readonly submixes: readonly string[];
+  /**
+   * The effect each console slot and insert of each strip runs, from the list's section headers
+   * (#1562b-K). Read it with {@link stripEffectOf}; a rebuild can change an insert's effect, so the
+   * map belongs to this order's `structureEpoch`.
+   */
+  readonly effects: ReadonlyMap<string, string>;
+}
+
+function effectKey(stripId: string, kind: "console" | "inserts", id: string): string {
+  return `${stripId}\u0000${kind}\u0000${id}`;
+}
+
+/**
+ * The effect a strip's console slot or insert runs, as the core's section header names it, or
+ * `undefined` when `order` has no such section.
+ */
+export function stripEffectOf(
+  order: ControlStripOrder,
+  stripId: string,
+  section: { readonly kind: "console"; readonly slot: string } | { readonly kind: "inserts"; readonly effect: string },
+): string | undefined {
+  return order.effects?.get(
+    section.kind === "console"
+      ? effectKey(stripId, "console", section.slot)
+      : effectKey(stripId, "inserts", section.effect),
+  );
 }
 
 /** The strip order of an already read list: its track and submix owner headers, in list order. */
 export function stripOrderOf(list: ControlList): ControlStripOrder {
   const tracks: string[] = [];
   const submixes: string[] = [];
+  const effects = new Map<string, string>();
   for (const header of list.headers) {
-    if (header.row !== "owner" || (header.kind !== "track" && header.kind !== "submix")) continue;
+    if (header.row === "section") {
+      const { owner, section } = header.address;
+      if (owner.kind === "strip" && header.effect !== undefined) {
+        if (section.kind === "console") effects.set(effectKey(owner.id, "console", section.slot), header.effect);
+        else if (section.kind === "inserts") effects.set(effectKey(owner.id, "inserts", section.effect), header.effect);
+      }
+      continue;
+    }
+    if (header.kind !== "track" && header.kind !== "submix") continue;
     const owner = header.address.owner;
     if (owner.kind !== "strip") throw malformed("a strip header does not name a strip");
     (header.kind === "track" ? tracks : submixes).push(owner.id);
@@ -841,6 +876,7 @@ export function stripOrderOf(list: ControlList): ControlStripOrder {
     structureEpoch: list.structureEpoch,
     tracks: Object.freeze(tracks),
     submixes: Object.freeze(submixes),
+    effects,
   });
 }
 

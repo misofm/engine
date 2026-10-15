@@ -1,3 +1,4 @@
+import { decodeObservationEnded } from "../core/observation-ended.ts";
 import { MisoEngineAsset } from "../core/asset.ts";
 import { WasmBoundary } from "../core/boundary.ts";
 import type { EngineCallResult, SessionShape } from "../core/boundary.ts";
@@ -29,7 +30,7 @@ import type { EngineLiveControls } from "../core/live-controls.ts";
 import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
 import { createDefaultHost, BrowserBootError } from "./default-host.ts";
-import { createBrowserControlListTransport, createBrowserLiveControls, createBrowserStripOrder } from "./live-controls.ts";
+import { createBrowserControlListTransport, createBrowserLiveControls, createBrowserStripOrders } from "./live-controls.ts";
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type { ControlList, ControlListFilter, ControlState } from "../core/control-list.ts";
 import { createTrackResponse } from "./response.ts";
@@ -657,21 +658,24 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     let spectrumStreamBuffer: ArrayBuffer | undefined;
     let spectrumActiveQuery: SpectrumQuery | undefined = preparedSpectrum;
     let closed = false;
+    // Issue #1210 D5: meter frames and observation bindings carry strip indices, the tracks then
+    // the submixes. The order is the core's control list (#1564 D5), read again whenever its
+    // structure epoch moves, and kept by epoch (#1562b): the plan that renders keeps naming its
+    // strips by the previous list until the block that adopts a rebuild's replacement, and its
+    // frames and map say which list that is.
+    const stripOrders = createBrowserStripOrders(host);
     const measurementFeeds = createMeasurementFeeds(
       host,
-      shape.tracks,
-      shape.submixes,
+      stripOrders,
       policy.liveControls !== undefined,
     );
-    // Issue #1210 D5: observation bindings carry strip indices, the tracks then the submixes. The
-    // order is the core's control list (#1564 D5), read again whenever its structure epoch moves.
-    const stripOrder = createBrowserStripOrder(host);
-    const strips = async (): Promise<readonly string[]> => {
-      const order = await stripOrder();
-      return [...order.tracks, ...order.submixes];
-    };
     let observationSubscriptions: ObservationSubscriptionOwner | undefined;
-    const observationMap = async (): Promise<ObservationMap> => {
+    // The map and the strip IDs that name its bindings' indices, from one plan: the map follows the
+    // plan that renders, whose list is the one the reply names (#1562b).
+    const observationMapWithStrips = async (): Promise<{
+      readonly map: ObservationMap;
+      readonly stripIds: readonly string[];
+    }> => {
       const reply = await host.observationMap();
       if (reply.result !== constantValue("resultCodes", "ok")) {
         throw new MisoEngineError("the browser host refused the observation map", {
@@ -680,14 +684,32 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           result: reply.result,
         });
       }
-      return enrichObservationMap(await strips(), reply.bindings as readonly RawObservationBinding[]);
+      const order = await stripOrders.of(reply.structureEpoch);
+      if (order === undefined) {
+        // The list of the rendering plan was replaced before this page ever read it. The plan is
+        // replaced too (a commit is adopted within a block or two), so a second ask is answered.
+        throw new MisoEngineError("the observation map belongs to a control list that is gone", {
+          phase: "lifecycle",
+          code: "control.list.stale",
+          diagnostics: [{ code: "control.list.stale", path: "structureEpoch" }],
+        });
+      }
+      const stripIds = Object.freeze([...order.tracks, ...order.submixes]);
+      return Object.freeze({
+        map: enrichObservationMap(
+          stripIds,
+          reply.bindings as readonly RawObservationBinding[],
+          BigInt(reply.structureEpoch),
+        ),
+        stripIds,
+      });
     };
+    const observationMap = async (): Promise<ObservationMap> => (await observationMapWithStrips()).map;
     const readObservations = async (
       selections: readonly ObservationSelection[],
     ): Promise<readonly ObservationReadResult[]> => {
       validateObservationSelections(selections);
-      const map = await observationMap();
-      const stripIds = await strips();
+      const { map, stripIds } = await observationMapWithStrips();
       const addresses = resolveObservationAddressesWithTracks(map, stripIds, selections);
       const reply = await host.readObservations({ selections: [...addresses] });
       if (reply.result !== constantValue("resultCodes", "ok")) {
@@ -1081,6 +1103,12 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         observationMap,
         readObservations,
         liveControls: getObservationControls,
+        // The core ends a subscription whose effect a rebuild removed with a reliable event; the
+        // owner forgets the tap and tells its subscriber (#1562b-K).
+        observationEnded: (listener) => host.onControlEvent((event) => {
+          const ended = event.lane === 0 ? decodeObservationEnded(event.frame) : undefined;
+          if (ended !== undefined) listener(ended);
+        }),
         // The audio thread renders on its own clock, so a subscription refused with backpressure
         // (an earlier one is not yet drained) may wait for the host's render count to move and be
         // sent again. The wait is bounded by the engine's request deadline and ends in the same

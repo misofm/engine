@@ -36,7 +36,7 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "0",
         "renderedQuanta": "0",
-        "memoryBytes": 2883584
+        "memoryBytes": 3014656
       },
       "beforeDisposeStatus": {
         "state": 2,
@@ -46,7 +46,7 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "384",
         "renderedQuanta": "3",
-        "memoryBytes": 2883584
+        "memoryBytes": 3014656
       },
       "resources": {
         "sampleRateHz": 48000,
@@ -56,8 +56,8 @@
         "statusBytes": "80",
         "sessionDocumentBytes": "2021",
         "diagnosticBytes": "16384",
-        "idStagingBytes": "14",
-        "sourcePcmStagingBytes": "1024",
+        "idStagingBytes": "127",
+        "sourcePcmStagingBytes": "130560",
         "outputPcmBytes": "1024",
         "largestBridgeAllocationBytes": "1048576",
         "effectScalarStateBytes": "0",
@@ -68,7 +68,7 @@
       },
       "resourceCeilings": {
         "bridgeMetadataBytes": "1628864",
-        "bridgeRetainedBytes": "1651520",
+        "bridgeRetainedBytes": "1812352",
         "sourceTotalBytes": "3648",
         "sourceOverheadBytes": "2496",
         "builtinRetainedBytes": "4288",
@@ -114,7 +114,7 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "1280",
         "renderedQuanta": "10",
-        "memoryBytes": 2883584
+        "memoryBytes": 3014656
       },
       "pcmF32leSha256": "c3659578f50d02030fcef19df98be88d70e89f2a0c9bade3e23e9570864d1cfd"
     },

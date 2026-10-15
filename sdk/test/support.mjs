@@ -157,6 +157,7 @@ export function engineHost(engine, { frames = [] } = {}) {
   // endpoint's one request-ID allocator.
   const forward = onEndpointIds(engine.controlTransactions().requestIds, (frame) => engine.controlFrame(frame));
   return {
+    onControlEvent(listener) { return engine.onControlEvent(listener); },
     async sessionMap() {
       return { tag: "miso.sessionmap.v1", requestId: (next += 1), result: 0, sources: engine.sessionMap().sources, metersAttached: engine.sessionMap().metersAttached };
     },

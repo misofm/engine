@@ -142,3 +142,25 @@ export function onEndpointIds(allocator, send) {
     return reply;
   };
 }
+
+const STRUCTURAL_FIXTURE = JSON.parse(readFileSync(
+  new URL("../../hosts/host-web/tests/fixtures/structural-frames.json", import.meta.url),
+  "utf8",
+));
+
+/**
+ * The structural command frames the Rust codec wrote beside the parity session
+ * (`hosts/host-web/tests/structural_frames_fixture.rs`): `replace_last_strip`, `add_first_strip`,
+ * `swap_comp_for_soft_clip`, `remove_comp`, `remove_eq` and `swap_t3_multi_and_limiter`, each applied to the booted session. The returned
+ * function stamps the frame with the endpoint's next request ID and the committed revision, which
+ * are the only header words that depend on the engine.
+ */
+export function structuralFrame(name, engine) {
+  const row = STRUCTURAL_FIXTURE.frames.find((candidate) => candidate.name === name);
+  if (row === undefined) throw new Error(`no structural frame ${name}`);
+  const frame = Uint8Array.from(Buffer.from(row.hex, "hex"));
+  const view = new DataView(frame.buffer);
+  view.setBigUint64(24, engine.controlTransactions().requestIds.next(), true);
+  view.setBigUint64(32, engine.controlRevision(), true);
+  return frame;
+}

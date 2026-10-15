@@ -206,9 +206,9 @@ fn run(republish: bool) -> Run {
             feed(handle, block);
             if republish && block == PUBLISH_BEFORE {
                 assert_eq!(native_staging::active_plan_epoch(handle), Some(0));
-                let response = native_staging::structural_command(handle, &request)
-                    .expect("a live handle")
-                    .expect("the structural transaction publishes");
+                let (result, response) =
+                    native_staging::control_command(handle, &request).expect("a live handle");
+                assert_eq!(result, RESULT_OK, "the structural transaction publishes");
                 assert_rebuild_applied(&response, model.revision + 1);
                 assert_eq!(
                     native_staging::active_plan_epoch(handle),
@@ -349,9 +349,9 @@ fn the_watermark_export_copies_the_applied_revision_and_refuses_a_wrong_handle()
 
         // A published revision is not applied until render has adopted it.
         let request = transaction_bytes(&add_muted_track(&model, "a-muted"), model.revision);
-        let response = native_staging::structural_command(handle, &request)
-            .expect("a live handle")
-            .expect("the transaction publishes");
+        let (result, response) =
+            native_staging::control_command(handle, &request).expect("a live handle");
+        assert_eq!(result, RESULT_OK, "the structural transaction publishes");
         assert_rebuild_applied(&response, model.revision + 1);
         assert_eq!(
             host_web::miso_engine_web_v1_watermark_read(handle),
@@ -398,4 +398,92 @@ fn the_watermark_export_copies_the_applied_revision_and_refuses_a_wrong_handle()
     })
     .join()
     .expect("the watermark phase completes");
+}
+
+/// A rebuild adds a source whose ID has the longest length the grammar allows and whose channel
+/// count exceeds every boot source's (#1562b review B1). Through the exports the worklet calls:
+/// `source_id` copies the ID into staging (it trapped on a staging sized from the boot session),
+/// the channel and frame queries answer the session map, and the source takes a six-plane chunk
+/// and is heard (the staging held two planes, so the worklet's source rows failed and the source
+/// could never be fed).
+///
+/// Test value: red if the browser's ID or PCM staging is sized from the boot session. The parity
+/// row in `control_parity.rs` compares the bits against the C ABI through the host's safe API,
+/// which bypasses the staging; only the exports exercise it.
+#[test]
+fn a_rebuild_adds_the_longest_id_with_more_channels_than_any_boot_source() {
+    let _turn = TURN.lock().expect("the turn");
+    std::thread::spawn(|| {
+        let handle = boot();
+        let model = parse_session_json(&document()).expect("the fixture parses");
+        let name = format!("s{}", "x".repeat(session::STABLE_ID_MAXIMUM_BYTES - 1));
+        let mut source = model.sources[0].clone();
+        source.id = StableId::parse(&name).expect("source ID");
+        source.channels = 6;
+        let mut track = model.tracks[0].clone();
+        track.id = StableId::parse("wide").expect("track ID");
+        track.source_id = source.id.clone();
+        track.left_source_channel = 4;
+        track.right_source_channel = 5;
+        let mut route = model.routes[0].clone();
+        route.id = StableId::parse("wide-main").expect("route ID");
+        let RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("a track route")
+        };
+        *track_id = track.id.clone();
+        let edits = [
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ];
+        let request = transaction_bytes(&edits, model.revision);
+        let (result, response) =
+            native_staging::control_command(handle, &request).expect("a live handle");
+        assert_eq!(result, RESULT_OK, "the structural transaction publishes");
+        assert_rebuild_applied(&response, model.revision + 1);
+        assert_eq!(
+            host_web::miso_engine_web_v1_render(handle, QUANTUM_FRAMES),
+            RESULT_OK,
+            "the swap block"
+        );
+
+        // The session map: canonical order puts the new ID after `fixture-source`.
+        assert_eq!(host_web::miso_engine_web_v1_source_count(handle), 2);
+        let length = host_web::miso_engine_web_v1_source_id(handle, 1);
+        assert_eq!(
+            length as usize,
+            name.len(),
+            "the ID is not truncated or refused"
+        );
+        assert_eq!(
+            native_staging::staged_source_id(handle, length).as_deref(),
+            Some(name.as_bytes())
+        );
+        assert_eq!(host_web::miso_engine_web_v1_source_channels(handle, 1), 6);
+
+        // Feed it a six-plane chunk of its own generation and hear it.
+        assert!(native_staging::source_id(handle, name.as_bytes()));
+        assert_eq!(
+            host_web::miso_engine_web_v1_source_seek(handle, length, 2, 0),
+            RESULT_OK
+        );
+        assert!(native_staging::source_pcm(handle, 0.5));
+        assert_eq!(
+            host_web::miso_engine_web_v1_source_submit(handle, length, 2, 0, 6, QUANTUM_FRAMES, 0),
+            RESULT_OK,
+            "a six-channel chunk fits the staging"
+        );
+        assert_eq!(
+            host_web::miso_engine_web_v1_render(handle, QUANTUM_FRAMES),
+            RESULT_OK
+        );
+        let heard = native_staging::output_pcm(handle)
+            .expect("output")
+            .iter()
+            .any(|sample| *sample != 0.0);
+        assert!(heard, "the new source is heard");
+        assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+    })
+    .join()
+    .expect("the run completes");
 }

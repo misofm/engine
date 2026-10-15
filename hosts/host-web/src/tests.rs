@@ -57,6 +57,46 @@ fn boot_options(quantum: u32) -> WebBootOptions {
     }
 }
 
+/// The staging a boot allocates holds any ID and any source the grammar allows, whatever the boot
+/// session declared, and an ID that does not fit is a typed error, never a panic (a panic inside
+/// a render-locked export is a trap).
+///
+/// Test value: red if the projection goes back to sizing from the boot session (a rebuild that adds
+/// a longer ID or a wider source would then find no room), or if `copy_id_into_staging` indexes
+/// past its buffer. A boot of a short, mono session never meets either; only a rebuild does.
+#[test]
+fn staging_holds_the_grammars_longest_id_and_widest_source_and_refuses_an_overlong_id() {
+    let projection = project_buffers(1, 48_000, 128, boot_options(128), (false, (0, 0)))
+        .expect("bridge projection");
+    let mut buffers = allocate_buffers(projection).expect("staging");
+    assert_eq!(buffers.source_id.len(), session::STABLE_ID_MAXIMUM_BYTES);
+    assert_eq!(
+        buffers.source_pcm.len(),
+        session::SOURCE_CHANNELS_MAXIMUM as usize * 128
+    );
+    assert_eq!(
+        buffers.plane_references.len(),
+        session::SOURCE_CHANNELS_MAXIMUM as usize
+    );
+    let longest = [b'x'; session::STABLE_ID_MAXIMUM_BYTES];
+    assert_eq!(
+        AudioWorkletEngineHost::copy_id_into_staging(Some(&mut buffers), &longest),
+        Ok(session::STABLE_ID_MAXIMUM_BYTES as u32)
+    );
+    assert_eq!(&buffers.source_id[..], &longest[..]);
+    assert_eq!(
+        AudioWorkletEngineHost::copy_id_into_staging(
+            Some(&mut buffers),
+            &[b'x'; session::STABLE_ID_MAXIMUM_BYTES + 1]
+        ),
+        Err(IdStagingError::TooLong)
+    );
+    assert_eq!(
+        AudioWorkletEngineHost::copy_id_into_staging(None, b"a"),
+        Err(IdStagingError::NoStaging)
+    );
+}
+
 fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
     let model = parse_host_session(core::str::from_utf8(document).expect("UTF-8 session"))
         .expect("accepted host session");
@@ -82,13 +122,6 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
         u32::try_from(document.len()).expect("bounded fixture document"),
         shape.sample_rate_hz,
         shape.quantum_frames,
-        shape.maximum_source_channels,
-        shape
-            .longest_source_id_bytes
-            .max(shape.longest_track_id_bytes)
-            .max(shape.longest_submix_id_bytes)
-            .max(shape.longest_route_id_bytes)
-            .max(shape.longest_vca_id_bytes),
         options,
         (false, (0, 0)),
     )
@@ -285,9 +318,9 @@ fn frozen_layouts_and_values_are_exact() {
     // The meter header is a new fixed structure, not a change to an existing one.
     // Issue #1209 D2 appended `submix_count` and its pad: 64 bytes became 72, nothing moved.
     // Issue #1290d1 turned the pad into `retired` and appended the frame and successor pointers:
-    // 72 bytes became 80, nothing moved.
-    assert_eq!(size_of::<WebMeterHeader>(), 80);
-    assert_eq!(METER_HEADER_BYTES, 80);
+    // 72 bytes became 80, nothing moved. Issue #1562b appended `structure_epoch`: 80 became 88.
+    assert_eq!(size_of::<WebMeterHeader>(), 88);
+    assert_eq!(METER_HEADER_BYTES, 88);
     assert_eq!(offset_of!(WebMeterHeader, track_count), 8);
     assert_eq!(offset_of!(WebMeterHeader, windows), 12);
     assert_eq!(offset_of!(WebMeterHeader, first_sample), 16);
@@ -300,6 +333,7 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebMeterHeader, retired), 68);
     assert_eq!(offset_of!(WebMeterHeader, frame_pointer), 72);
     assert_eq!(offset_of!(WebMeterHeader, successor_pointer), 76);
+    assert_eq!(offset_of!(WebMeterHeader, structure_epoch), 80);
     assert_eq!(offset_of!(WebCommandReport, result), 8);
     assert_eq!(offset_of!(WebCommandReport, rejected_index), 16);
     assert_eq!(offset_of!(WebCommandReport, applied_at_sample), 24);
@@ -466,9 +500,10 @@ fn preparation_accepts_explicit_64_128_and_256_quanta_with_stable_buffers() {
         let source_id_ptr = host.source_id_mut().expect("ID").as_ptr();
         let source_pcm_ptr = host.source_pcm_mut().expect("PCM").as_ptr();
         let output_ptr = host.output_pcm().expect("output").as_ptr();
+        // Source PCM staging holds the most channels a source can declare, not the boot session's.
         assert_eq!(
             host.source_pcm_mut().expect("PCM").len(),
-            2 * quantum as usize
+            session::SOURCE_CHANNELS_MAXIMUM as usize * quantum as usize
         );
         assert_eq!(
             host.output_pcm().expect("output").len(),
@@ -828,11 +863,6 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
             document.len() as u32,
             shape.sample_rate_hz,
             shape.quantum_frames,
-            shape.maximum_source_channels,
-            shape
-                .longest_source_id_bytes
-                .max(shape.longest_track_id_bytes)
-                .max(shape.longest_submix_id_bytes),
             options,
             (false, (0, 0)),
         )
@@ -1799,7 +1829,7 @@ fn native_set_control_timeline_digest_pins_the_wasm_parity() {
         host.control_request_mut(length)
             .expect("the control request staging")[..frame.len()]
             .copy_from_slice(frame);
-        assert_eq!(host.control_command(length), RESULT_OK);
+        assert_eq!(host.control_command(length, None), RESULT_OK);
         // A commit queues its reliable events; drain them the way the worklet does.
         for lane in [EVENT_LANE_RELIABLE, EVENT_LANE_LOSSY] {
             loop {
@@ -3397,7 +3427,7 @@ fn the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix() {
     let mut host = bus_meter_host(QUANTUM, true);
     let frame = bus_meter_frame(&mut host, BLOCKS);
     let header = *host.meter_header();
-    assert_eq!(header.struct_size, 80);
+    assert_eq!(header.struct_size, 88);
     assert_eq!(header.track_count, 3);
     assert_eq!(header.submix_count, 2);
     assert_eq!(header.retired, 0);
@@ -5772,7 +5802,9 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
         CompanionCapture::Single,
         CompanionCapture::Collection,
     ] {
-        let preparer = WebRuntimePreparer::new(options, companion_request(capture));
+        let record = Arc::new(Mutex::new(BootRecord::default()));
+        let preparer = WebRuntimePreparer::new(options, companion_request(capture))
+            .recording(Arc::clone(&record));
         let superseded = host_core::LiveValuesSuperseded::new();
         let check =
             |host: &mut PreparedHost, handles: &host_core::HostLiveControlHandles, at: &str| {
@@ -5793,16 +5825,15 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
                     strips,
                     "{capture:?} {at}: one meter per strip"
                 );
-                let shape = match companions.spectrum_capture {
+                // #1290d2: the captures are control-side; the preparer leaves them, with the
+                // plan's pairing, in the record.
+                let handover = record.lock().expect("the record").spectrum.take();
+                let shape = match handover.as_ref().map(|handover| &handover.captures) {
                     None => CompanionCapture::None,
                     Some(PreparedSpectrumCaptures::Single(_)) => CompanionCapture::Single,
                     Some(PreparedSpectrumCaptures::Collection(_)) => CompanionCapture::Collection,
                 };
                 assert_eq!(shape, capture, "{capture:?} {at}: the branch's capture");
-                assert_eq!(
-                    companions.has_spectrum_capture(),
-                    capture != CompanionCapture::None
-                );
             };
 
         let (mut boot, boot_handles) = preparer
@@ -5878,8 +5909,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
 // prepares the successor from the committed model, publishes it and returns; the render half
 // adopts it at a block boundary. The native gates run the one instance on one thread, the
 // message handler's place between render calls (decision 17, "single instance first"), through
-// the test-support switch that lets the rebuild arm run past `refuse_rebuild` (deleting that
-// refusal is #1562b's).
+// the production control entry (`control_request_mut` and `control_command`), as the page's
+// `control` message does (#1562b).
 //
 // The sessions here have no console slot and no insert: an effect's state carries across a swap
 // only with #1280a, and a session that holds one would not render the same bits after the swap.
@@ -6080,14 +6111,64 @@ mod structural_apply {
             self.block += 1;
         }
 
-        /// Apply a structural transaction through the control half and decode its response.
+        /// Run one frame through the production control entry, as the page's `control` message
+        /// does. Returns the entry's result word and what it left to read (the response frame
+        /// after an ok result, else the refusal's diagnostic text).
+        fn entry(&mut self, bytes: &[u8]) -> (u32, Vec<u8>) {
+            let staging = self
+                .host
+                .control_request_mut(bytes.len() as u32)
+                .expect("the control staging");
+            staging[..bytes.len()].copy_from_slice(bytes);
+            let result = self.host.control_command(bytes.len() as u32, None);
+            (result, self.host.control_response().to_vec())
+        }
+
+        /// Apply a structural transaction through the control entry and decode its response.
         fn apply(&mut self, edits: &[SessionEdit], request: u64) -> Outcome {
             let revision = self.host.committed_revision();
-            let response = self
-                .host
-                .structural_command_for_test(&frame(edits, request, revision))
-                .expect("the control plane answers the frame");
+            let (result, response) = self.entry(&frame(edits, request, revision));
+            assert_eq!(result, RESULT_OK, "the control plane answers the frame");
             outcome(&response)
+        }
+
+        /// The structure epoch a `CONTROL_LIST_GET` page carries now: the control list's own,
+        /// read through the production control entry as a client reads it.
+        fn list_epoch(&mut self, request: u64) -> u64 {
+            let codec = ProtocolCodec::default();
+            let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+            let length = codec
+                .encode_command_frame_into(
+                    &TypedCommandFrame {
+                        request_id: RequestId::new(request).expect("nonzero request"),
+                        expected_revision: ExpectedRevision::Any,
+                        payload: CommandPayload::ControlListGet(&protocol::ControlListRequest {
+                            structure_epoch: 0,
+                            after_handle: 0,
+                            limit: 1,
+                            owner: None,
+                        }),
+                    },
+                    &mut bytes,
+                )
+                .expect("a control list frame");
+            bytes.truncate(length);
+            let (result, response) = self.entry(&bytes);
+            assert_eq!(
+                result, RESULT_OK,
+                "the control plane answers the list frame"
+            );
+            let mut fields = [0_u16; 64];
+            let DecodedTypedResponseFrame::Success {
+                payload: DecodedSuccessResponsePayload::ControlListPage(page),
+                ..
+            } = codec
+                .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+                .expect("a control list page")
+            else {
+                panic!("expected a control list page")
+            };
+            page.structure_epoch
         }
 
         fn epoch(&self) -> u64 {
@@ -6166,7 +6247,7 @@ mod structural_apply {
         }
         assert_eq!(rig.epoch(), 1);
         assert!(!rig.pending(), "render adopted the plan");
-        assert_eq!(rig.host.service(), RESULT_OK);
+        assert_eq!(rig.host.service(None), RESULT_OK);
         assert!(!rig.pending());
         assert_eq!(
             rig.host.status().next_absolute_sample,
@@ -6265,6 +6346,277 @@ mod structural_apply {
         gap_free_acceptance(capture_collection);
     }
 
+    // Issue #1290d2: the spectrum part of gate 7. A rebuild keeps a running stream, an armed
+    // one-shot and a collection's selection, because the host installs the successor's prepared
+    // captures at the plan's promotion (the service step after the adoption block) through
+    // `SpectrumService::adopt_successor`, with the plan's pairing and the engine's carry outcome.
+
+    /// A run long enough for several windows of the 2048-frame capture (16 blocks each).
+    const SPECTRUM_BLOCKS: u64 = 48;
+    /// The block before which the rebuild runs: inside the window that opened before it.
+    const SPECTRUM_APPLY_BEFORE: u64 = 21;
+
+    fn other_track_id() -> String {
+        gate_model().tracks[4].id.as_str().to_owned()
+    }
+
+    fn two_entry_collection() -> Option<SpectrumPreparationRequest> {
+        let entry = |id: String| host_core::SpectrumCaptureCollectionEntry {
+            target: SpectrumTarget::TrackPostMatrix(id.into()),
+            channels: SpectrumChannels::Stereo,
+        };
+        Some(SpectrumPreparationRequest::Collection(
+            SpectrumCaptureCollectionRequest {
+                entries: vec![entry(model_track_id()), entry(other_track_id())],
+                maximum_capture_bytes: u64::MAX,
+            },
+        ))
+    }
+
+    /// One read of the managed stream: the result word, the metadata and the held window.
+    #[derive(Clone, Copy, Debug)]
+    struct StreamRead {
+        result: u32,
+        metadata: SpectrumStreamMetadata,
+        window: Option<SpectrumContinuousWindow>,
+    }
+
+    impl Rig {
+        fn read_stream(&mut self) -> StreamRead {
+            let result = self.host.read_spectrum_stream(None);
+            StreamRead {
+                result,
+                metadata: *self
+                    .host
+                    .spectrum_stream_metadata()
+                    .expect("a spectrum service"),
+                window: self.host.spectrum_stream_window().copied(),
+            }
+        }
+
+        /// Whether the spectrum service still waits for the promotion of an adopted plan.
+        fn spectrum_promotions_waiting(&self) -> usize {
+            self.host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .pending_shapes
+                .iter()
+                .filter(|entry| entry.spectrum.is_some())
+                .count()
+        }
+    }
+
+    fn assert_same_stream(got: &[StreamRead], want: &[StreamRead], label: &str) {
+        assert_eq!(got.len(), want.len());
+        for (block, (got, want)) in got.iter().zip(want).enumerate() {
+            let at = format!("{label}: block {block}");
+            assert_eq!(got.result, want.result, "{at}: result");
+            let (g, w) = (&got.metadata, &want.metadata);
+            assert_eq!(g.status, w.status, "{at}: status");
+            assert_eq!(g.capture_epoch, w.capture_epoch, "{at}: capture epoch");
+            assert_eq!(g.sequence, w.sequence, "{at}: sequence");
+            assert_eq!(g.windows, w.windows, "{at}: windows");
+            assert_eq!(g.dropped_captures, w.dropped_captures, "{at}: dropped");
+            assert_eq!(g.captured_sample, w.captured_sample, "{at}: captured");
+            assert_eq!(g.target_kind, w.target_kind, "{at}: target");
+            assert_eq!(g.channels, w.channels, "{at}: channels");
+            match (&got.window, &want.window) {
+                (None, None) => {}
+                (Some(g), Some(w)) => {
+                    assert_eq!(g.first_sample, w.first_sample, "{at}: window start");
+                    assert_eq!(g.sequence, w.sequence, "{at}: window sequence");
+                    assert_eq!(g.stream_epoch, w.stream_epoch, "{at}: window epoch");
+                    assert!(
+                        g.left
+                            .iter()
+                            .zip(&w.left)
+                            .all(|(a, b)| a.to_bits() == b.to_bits())
+                            && g.right
+                                .iter()
+                                .zip(&w.right)
+                                .all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "{at}: the planes equal the reference's bit for bit"
+                    );
+                }
+                _ => panic!("{at}: one side holds a window and the other does not"),
+            }
+        }
+    }
+
+    /// `model` booted with `spectrum`, `setup` run on the host, then the stream read after every
+    /// block of [`SPECTRUM_BLOCKS`]. With `rebuild`, the muted track is added before block
+    /// [`SPECTRUM_APPLY_BEFORE`] (it sorts first, so every strip index shifts) and the service
+    /// step runs after block `service_after`.
+    fn run_stream(
+        model: &SessionModel,
+        spectrum: &impl Fn() -> Option<SpectrumPreparationRequest>,
+        setup: &impl Fn(&mut Rig),
+        rebuild: Option<u64>,
+    ) -> (Rig, Vec<StreamRead>) {
+        let mut rig = Rig::boot(model, options(), spectrum());
+        setup(&mut rig);
+        let mut reads = Vec::new();
+        for block in 0..SPECTRUM_BLOCKS {
+            if rebuild.is_some() && block == SPECTRUM_APPLY_BEFORE {
+                let base = rig.host.committed_revision();
+                assert_eq!(
+                    rig.apply(&add_muted_track(model, ADDED), 1),
+                    Outcome::Applied {
+                        path: EditPath::Rebuild,
+                        revision: base + 1
+                    }
+                );
+            }
+            rig.step();
+            if rebuild == Some(block) {
+                assert_eq!(rig.host.service(None), RESULT_OK);
+            }
+            reads.push(rig.read_stream());
+        }
+        (rig, reads)
+    }
+
+    fn start_stream(rig: &mut Rig) {
+        rig.host
+            .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("start the stream");
+    }
+
+    /// The swap leaves every read of a running stream equal to a fresh boot of the committed
+    /// model's: same epoch, no gap, no failure, and the same planes.
+    fn stream_continues(
+        spectrum: impl Fn() -> Option<SpectrumPreparationRequest>,
+        setup: impl Fn(&mut Rig),
+        service_after: u64,
+    ) {
+        let model = gate_model();
+        let committed = with_muted_track(&model, ADDED);
+        let (_, reference) = run_stream(&committed, &spectrum, &setup, None);
+        let (mut rig, reads) = run_stream(&model, &spectrum, &setup, Some(service_after));
+        assert_eq!(rig.epoch(), 1);
+        assert_same_stream(&reads, &reference, "the stream across the swap");
+        for read in &reads {
+            assert!(
+                !matches!(
+                    read.metadata.status,
+                    SpectrumStreamStatus::Failed
+                        | SpectrumStreamStatus::Gap
+                        | SpectrumStreamStatus::Inactive
+                        | SpectrumStreamStatus::Stopped
+                ),
+                "no failed epoch, no gap: {:?}",
+                read.metadata
+            );
+            assert_eq!(
+                read.metadata.capture_epoch, reads[0].metadata.capture_epoch,
+                "one capture epoch throughout"
+            );
+        }
+        let last = reads.last().expect("reads");
+        assert_eq!(last.metadata.status, SpectrumStreamStatus::Ready);
+        assert!(
+            last.window.expect("a window").first_sample
+                >= (SPECTRUM_APPLY_BEFORE + 1) * u64::from(QUANTUM),
+            "the stream delivers windows from after the swap"
+        );
+        assert_eq!(
+            rig.spectrum_promotions_waiting(),
+            0,
+            "promoted at the service step"
+        );
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(
+            rig.host.ready.as_ref().expect("ready").carried_swaps_seen,
+            1,
+            "the engine carried the swap"
+        );
+    }
+
+    /// Gate 7, spectrum part (single capture). Test value: red if the successor's capture is not
+    /// installed at promotion or the carry outcome is read wrong, or if the stream restarts at the
+    /// swap (a new epoch, a gap or a failed read). The service step runs right after the adoption
+    /// block and long after it: between the two the carried capture is served by the reader the
+    /// service already holds.
+    #[test]
+    fn a_running_spectrum_stream_continues_across_a_rebuild() {
+        stream_continues(single_capture, start_stream, SPECTRUM_APPLY_BEFORE);
+        stream_continues(single_capture, start_stream, SPECTRUM_BLOCKS - 3);
+    }
+
+    /// Gate 7, spectrum part (collection). Test value: red if a collection's selection or its
+    /// stream is lost at promotion: the second entry is selected and streamed before the swap, and
+    /// the stream reads like the committed model's.
+    #[test]
+    fn a_collection_selection_and_its_stream_continue_across_a_rebuild() {
+        let select_second = |rig: &mut Rig| {
+            let other: StableId = StableId::parse(&other_track_id()).expect("track ID");
+            assert_eq!(
+                rig.host.select_spectrum_target(
+                    SpectrumTarget::TrackPostMatrix(other.as_str().into()).as_ref(),
+                    SpectrumChannels::Stereo,
+                    None,
+                    None
+                ),
+                Ok(false)
+            );
+            start_stream(rig);
+        };
+        stream_continues(two_entry_collection, select_second, SPECTRUM_APPLY_BEFORE);
+        stream_continues(two_entry_collection, select_second, SPECTRUM_BLOCKS - 3);
+    }
+
+    /// Gate 7, spectrum part (one-shot). Test value: red if an armed one-shot is lost at the swap:
+    /// armed before it, completed after it, equal to the committed model's.
+    #[test]
+    fn an_armed_one_shot_completes_across_a_rebuild() {
+        const ARM_BEFORE: u64 = 12;
+        let model = gate_model();
+        let committed = with_muted_track(&model, ADDED);
+        let shot = |model: &SessionModel, rebuild: bool| {
+            let mut rig = Rig::boot(model, options(), single_capture());
+            let mut found = None;
+            for block in 0..SPECTRUM_BLOCKS {
+                if block == ARM_BEFORE {
+                    assert_eq!(rig.host.arm_spectrum(), RESULT_OK);
+                }
+                if rebuild && block == SPECTRUM_APPLY_BEFORE {
+                    rig.apply(&add_muted_track(model, ADDED), 1);
+                }
+                rig.step();
+                if rebuild && block == SPECTRUM_APPLY_BEFORE {
+                    assert_eq!(rig.host.service(None), RESULT_OK);
+                }
+                if found.is_none() && block >= ARM_BEFORE {
+                    found = rig
+                        .host
+                        .read_spectrum(SpectrumChannels::Stereo)
+                        .expect("read the one-shot");
+                }
+            }
+            found.expect("the one-shot completed")
+        };
+        let reference = shot(&committed, false);
+        let got = shot(&model, true);
+        assert!(
+            got.window.first_sample < SPECTRUM_APPLY_BEFORE * u64::from(QUANTUM)
+                && got.window.end_sample().expect("end")
+                    > SPECTRUM_APPLY_BEFORE * u64::from(QUANTUM),
+            "the window spans the swap"
+        );
+        assert_eq!(got.window.first_sample, reference.window.first_sample);
+        assert_eq!(got.token, reference.token);
+        assert!(
+            got.window
+                .left
+                .iter()
+                .chain(&got.window.right)
+                .zip(reference.window.left.iter().chain(&reference.window.right))
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the planes equal the committed model's bit for bit"
+        );
+    }
+
     /// The ramp of the live fader edit, in samples: longer than the blocks between the edit and
     /// the adoption block, so the ramp is in flight when the plan swaps.
     const FADER_RAMP: u32 = 400;
@@ -6287,7 +6639,10 @@ mod structural_apply {
             .control_request_mut(bytes.len() as u32)
             .expect("the control staging");
         staging[..bytes.len()].copy_from_slice(&bytes);
-        assert_eq!(rig.host.control_command(bytes.len() as u32), RESULT_OK);
+        assert_eq!(
+            rig.host.control_command(bytes.len() as u32, None),
+            RESULT_OK
+        );
         assert_eq!(
             outcome(rig.host.control_response()),
             Outcome::Applied {
@@ -6430,33 +6785,10 @@ mod structural_apply {
                 rig.host.committed_revision(),
             );
             bytes.truncate(bytes.len() - 5);
-            let error = rig
-                .host
-                .structural_command_for_test(&bytes)
-                .expect_err("a truncated frame is refused");
-            format!("{error:?}")
+            let (result, response) = rig.entry(&bytes);
+            assert_ne!(result, RESULT_OK, "a truncated frame is refused");
+            format!("{result} {}", String::from_utf8_lossy(&response))
         });
-    }
-
-    /// Run one frame through the production control entry with the rebuild arm open, as the SDK's
-    /// `control` message will once #1562b deletes the refusal. Returns the entry's result word and
-    /// what it left to read.
-    fn entry_with_rebuild_open(
-        rig: &mut Rig,
-        edits: &[SessionEdit],
-        request: u64,
-    ) -> (u32, Vec<u8>) {
-        let bytes = frame(edits, request, rig.host.committed_revision());
-        let staging = rig
-            .host
-            .control_request_mut(bytes.len() as u32)
-            .expect("the control staging");
-        staging[..bytes.len()].copy_from_slice(&bytes);
-        let allow = Arc::clone(&rig.host.ready.as_ref().expect("ready").allow_rebuild);
-        allow.store(true, Ordering::Release);
-        let result = rig.host.control_command(bytes.len() as u32);
-        allow.store(false, Ordering::Release);
-        (result, rig.host.control_response().to_vec())
     }
 
     /// Gate 3, case two. Test value: red if a transaction that changes the rate or the quantum
@@ -6473,8 +6805,9 @@ mod structural_apply {
             },
         ] {
             assert_refusal_changes_nothing(options(), |rig, _| {
+                let revision = rig.host.committed_revision();
                 let (result, response) =
-                    entry_with_rebuild_open(rig, std::slice::from_ref(&edit), 1);
+                    rig.entry(&frame(std::slice::from_ref(&edit), 1, revision));
                 assert_eq!(result, RESULT_REPREPARE_REQUIRED, "{edit:?}");
                 let text = String::from_utf8(response).expect("diagnostic text");
                 assert!(
@@ -6502,18 +6835,13 @@ mod structural_apply {
         Rig::boot(&model, tight, None);
         // ... and refuses a second plan beside it.
         let refused = assert_refusal_changes_nothing(tight, |rig, model| {
-            let error = rig
-                .host
-                .structural_command_for_test(&frame(
-                    &add_muted_track(model, ADDED),
-                    1,
-                    rig.host.committed_revision(),
-                ))
-                .expect_err("a replacement that does not fit beside the running plan is refused");
-            let control_plane::CommandError::CompileRejected(failure) = &error else {
-                panic!("a typed refusal, not {error:?}")
-            };
-            String::from_utf8_lossy(&failure.diagnostic()).into_owned()
+            let revision = rig.host.committed_revision();
+            let (result, response) = rig.entry(&frame(&add_muted_track(model, ADDED), 1, revision));
+            assert_eq!(
+                result, RESULT_COMPILE_REJECTED,
+                "a replacement that does not fit beside the running plan is refused, typed"
+            );
+            String::from_utf8_lossy(&response).into_owned()
         });
         assert!(
             refused.contains("control.resource.replacement_peak"),
@@ -6633,7 +6961,7 @@ mod structural_apply {
             1,
             "the record took effect on the successor: the old track's compressor is armed"
         );
-        assert_eq!(rig.host.service(), RESULT_OK);
+        assert_eq!(rig.host.service(None), RESULT_OK);
         for _ in 0..4 {
             rig.step();
         }
@@ -6644,7 +6972,7 @@ mod structural_apply {
             rig.host.read_observation_addresses(&[address]).is_ok(),
             "the reader the catalog names is the successor's"
         );
-        assert_eq!(rig.host.service(), RESULT_OK);
+        assert_eq!(rig.host.service(None), RESULT_OK);
     }
 
     /// Drive `blocks` more blocks with the lease on, polling after each; the windows folded.
@@ -6735,6 +7063,120 @@ mod structural_apply {
         );
     }
 
+    /// The meter header's structure epoch is the control list's (#1562b): a rebuild that leaves
+    /// every address and descriptor alone (a strip's `delay_samples` value) keeps it, and the
+    /// header of the plan that renders reads the number `CONTROL_LIST_GET` pages carry, read here
+    /// through the control entry after a rebuild and after a live commit that moves the epoch (a
+    /// VCA added).
+    ///
+    /// Test value: red if the header's epoch advances with the revision or the plan epoch rather
+    /// than with the list (a client would read the list again at every commit), stays the boot's
+    /// when the list moved (the strip order of a frame would be named by a stale list), or is not
+    /// stamped by a live commit (`stamp_structure_epoch`): the header then keeps the epoch of the
+    /// last rebuild while the page's moved on.
+    #[test]
+    fn the_headers_structure_epoch_is_the_control_lists() {
+        let model = gate_model();
+        let mut rig = Rig::boot(&model, options(), None);
+        let boot = rig.host.meter_header().structure_epoch;
+        assert_eq!(boot, 1, "the boot list is the first structure");
+        let delay = SessionEdit::SetControl {
+            address: controls::ControlAddress {
+                owner: controls::Owner::Strip(model.tracks[0].id.clone()),
+                section: controls::Section::Builtins,
+                control: 11,
+                lane: session::ParameterChannel::Both,
+            },
+            value: 64.0,
+            ramp_samples: None,
+        };
+        let base = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(std::slice::from_ref(&delay), 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 1
+            },
+            "a delay is a rebuild"
+        );
+        for _ in 0..2 {
+            rig.step();
+        }
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(
+            rig.host.meter_header().structure_epoch,
+            boot,
+            "a value-only rebuild keeps the list's structure"
+        );
+        assert_eq!(
+            rig.apply(&add_muted_track(&model, ADDED), 2),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 2
+            }
+        );
+        assert_eq!(
+            rig.host.meter_header().structure_epoch,
+            boot,
+            "the plan that renders keeps its own list until the replacement is adopted"
+        );
+        rig.step();
+        assert_eq!(rig.epoch(), 2);
+        assert_eq!(rig.host.meter_header().structure_epoch, boot + 1);
+        let page = rig.list_epoch(3);
+        assert_eq!(
+            rig.host.meter_header().structure_epoch,
+            page,
+            "after a rebuild the header is the page's"
+        );
+
+        // A commit that rides the live lanes can move the list's epoch too (a VCA added: a new
+        // owner and new addresses), and stamps the plan that renders, which has no successor
+        // waiting. The header then reads what a `CONTROL_LIST_GET` page carries.
+        let vca = SessionEdit::UpsertVca {
+            vca: session::Vca {
+                id: StableId::parse("late-vca").expect("VCA ID"),
+                fader: session::DualMonoFader {
+                    left_db: -3.0,
+                    right_db: -3.0,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: vec![model.tracks[0].id.clone()],
+            },
+        };
+        // The two rebuilds above queued their events; a client drains them as it goes.
+        for lane in [EVENT_LANE_RELIABLE, EVENT_LANE_LOSSY] {
+            while rig.host.control_event(lane) == RESULT_OK
+                && !rig.host.control_response().is_empty()
+            {}
+        }
+        let before_vca = rig.list_epoch(4);
+        let revision = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(std::slice::from_ref(&vca), 5),
+            Outcome::Applied {
+                path: EditPath::Live,
+                revision: revision + 1
+            },
+            "a VCA added is a live commit"
+        );
+        assert!(
+            !rig.pending(),
+            "no replacement waits: the live commit rode the rendering plan"
+        );
+        let after_vca = rig.list_epoch(6);
+        assert!(
+            after_vca > before_vca,
+            "a VCA added moves the list's structure epoch"
+        );
+        assert_eq!(
+            rig.host.meter_header().structure_epoch,
+            after_vca,
+            "the rendering plan's header is stamped with the live commit's epoch"
+        );
+    }
+
     /// A swap that adds a strip publishes the successor's frame (#1290d1): the frame travels with
     /// the plan, so the window the adoption block closes is described by a `3(T + S) + 3` frame for
     /// the plan's own strips, bit for bit what a fresh boot of the committed model publishes for
@@ -6781,9 +7223,24 @@ mod structural_apply {
                 "the rendering plan names the newest candidate's header"
             );
             assert_eq!(ready.shape.meter_header.retired, 0);
+            // The strip order changed, so the list's structure epoch did: the rendering plan keeps
+            // the epoch of its own list, the replacement carries the newer one (#1562b).
+            assert_eq!(
+                waiting.shape.meter_header.structure_epoch,
+                last.0.structure_epoch + 1
+            );
+            assert_eq!(
+                ready.shape.meter_header.structure_epoch,
+                last.0.structure_epoch
+            );
         }
         let after = poll_cadence(&mut rig, 1, 1, 0);
         assert_eq!(rig.epoch(), 1);
+        assert_eq!(
+            after[0].0.structure_epoch,
+            last.0.structure_epoch + 1,
+            "the adoption block's frame names the successor's list"
+        );
         assert_eq!(
             after.len(),
             1,
@@ -7034,7 +7491,7 @@ mod structural_apply {
             1,
             "the subscription the plan had acknowledged is armed on the successor"
         );
-        assert_eq!(rig.host.service(), RESULT_OK);
+        assert_eq!(rig.host.service(None), RESULT_OK);
         for _ in 0..4 {
             rig.step();
         }
@@ -7174,19 +7631,217 @@ mod structural_apply {
                 panic!("poison the record");
             });
             assert!(poisoner.join().is_err());
-            let error = rig
-                .host
-                .structural_command_for_test(&frame(
-                    &add_muted_track(model, ADDED),
-                    1,
-                    rig.host.committed_revision(),
-                ))
-                .expect_err("the rebuild is refused");
-            let control_plane::CommandError::CompileRejected(failure) = &error else {
-                panic!("a typed refusal, not {error:?}")
-            };
-            String::from_utf8_lossy(&failure.diagnostic()).into_owned()
+            let revision = rig.host.committed_revision();
+            let (result, response) = rig.entry(&frame(&add_muted_track(model, ADDED), 1, revision));
+            assert_eq!(
+                result, RESULT_COMPILE_REJECTED,
+                "the rebuild is refused, typed"
+            );
+            String::from_utf8_lossy(&response).into_owned()
         });
         assert!(refused.contains("web.apply.shape_unavailable"), "{refused}");
+    }
+
+    /// The model of the observation gates: the command fixture with the observed compressor
+    /// (insert `comp`, tap 1) as the first track's only insert.
+    fn observed_model() -> SessionModel {
+        let mut model =
+            parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+                .expect("accepted command fixture");
+        model.tracks[0].inserts.effects[0] = observed_compressor_insert();
+        model
+    }
+
+    fn comp_address() -> ObservationAddress {
+        ObservationAddress {
+            track_index: 0,
+            rack: LiveEffectRack::Inserts,
+            effect_index: 0,
+            tap_id: 1,
+            channels: ObservationReadChannels::Both,
+        }
+    }
+
+    /// Every reliable event the control plane has queued, drained the way the worklet does, as
+    /// `(revision, payload)` for the two this gate reads.
+    fn drain_reliable(host: &mut AudioWorkletEngineHost) -> Vec<(u64, String)> {
+        let codec = ProtocolCodec::default();
+        let mut events = Vec::new();
+        loop {
+            assert_eq!(host.control_event(EVENT_LANE_RELIABLE), RESULT_OK);
+            if host.control_response().is_empty() {
+                return events;
+            }
+            let bytes = host.control_response().to_vec();
+            let mut fields = vec![0_u16; 4_096];
+            let decoded = codec
+                .decode_typed_event(&bytes, &mut DecodeScratch::new(&mut fields))
+                .expect("an event frame");
+            let revision = decoded.header.revision.0;
+            match decoded.payload {
+                protocol::DecodedEventPayload::SessionCommitted(_) => {
+                    events.push((revision, "committed".to_owned()));
+                }
+                protocol::DecodedEventPayload::ObservationEnded(ended) => {
+                    for key in &ended.keys {
+                        events.push((
+                            revision,
+                            format!(
+                                "ended {} {:?} {} {}",
+                                key.strip_id, key.section, key.effect_id, key.tap_id
+                            ),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// #1584 D6b, restart: a subscribed compressor whose link mode changes is prepared again (a
+    /// rebuild with no carry), and the successor's tables say what its lanes were armed with. The
+    /// tap is armed on the browser's side, the first window opens at the adoption block's first
+    /// sample, and the windows continue block after block.
+    ///
+    /// Test value: red if `build_plan_shape` leaves the successor's armed bits clear for a tap the
+    /// plan's lane armed (the read would answer `Unarmed` and the page's subscription would
+    /// silently stop at every restart of its effect, as `observation_armed_taps` reads zero).
+    #[test]
+    fn a_restarted_effects_subscription_keeps_publishing_windows_on_the_browser() {
+        let model = observed_model();
+        let mut rig = Rig::boot(&model, options(), None);
+        assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
+        rig.step();
+        assert_eq!(
+            observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_OK
+        );
+        for _ in 0..8 {
+            rig.step();
+        }
+        let before = rig
+            .host
+            .read_observation_addresses(&[comp_address()])
+            .expect("a read")[0]
+            .window
+            .expect("the armed tap published a window")
+            .sequence;
+        assert!(before > 1);
+
+        let mut restarted = model.tracks[0].inserts.effects[0].clone();
+        restarted.link_mode = session::LinkMode::Maximum;
+        let base = rig.host.committed_revision();
+        assert!(matches!(
+            rig.apply(
+                &[SessionEdit::PutTrackEffect {
+                    track_id: model.tracks[0].id.clone(),
+                    rack_name: session::RackName::Inserts,
+                    final_position: 0,
+                    effect: restarted,
+                }],
+                1
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision
+            } if revision == base + 1
+        ));
+        let adoption_sample = rig.block * u64::from(QUANTUM);
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(
+            rig.host.observation_armed_taps(),
+            1,
+            "the successor's tables carry the subscription the host had acknowledged"
+        );
+        rig.step();
+        let first = rig
+            .host
+            .read_observation_addresses(&[comp_address()])
+            .expect("a read")[0]
+            .window
+            .expect("the restarted tap published its first window");
+        assert_eq!(
+            first.first_sample, adoption_sample,
+            "from the adoption block on"
+        );
+        assert_eq!(
+            first.sequence, 1,
+            "a restarted tap numbers its windows afresh"
+        );
+        for _ in 0..4 {
+            rig.step();
+        }
+        let later = rig
+            .host
+            .read_observation_addresses(&[comp_address()])
+            .expect("a read")[0]
+            .window
+            .expect("the windows continue");
+        assert_eq!(later.sequence, 3);
+        assert!(rig.host.poll_meters() > 0);
+        assert!(
+            gain_reduction(&rig.host).0[0] > 0.0,
+            "the meter frame's gain-reduction word follows the restarted tap"
+        );
+    }
+
+    /// #1584 D6b, removal: the removed insert has no slot on the successor, the browser's read
+    /// finds no tap there, and the event drain returns the commit and one `OBSERVATION_ENDED`
+    /// that names the tap.
+    ///
+    /// Test value: red if the browser's drain loses the event (the page would keep a subscription
+    /// whose effect is gone and never be told), or if a removed insert's tap stays armed in the
+    /// successor's tables.
+    #[test]
+    fn a_removed_inserts_subscription_ends_with_an_event_and_has_no_slot() {
+        let model = observed_model();
+        let mut rig = Rig::boot(&model, options(), None);
+        rig.step();
+        assert_eq!(
+            observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
+            RESULT_OK
+        );
+        for _ in 0..4 {
+            rig.step();
+        }
+        assert_eq!(rig.host.observation_armed_taps(), 1);
+        assert!(
+            drain_reliable(&mut rig.host).is_empty(),
+            "nothing is queued yet"
+        );
+
+        let base = rig.host.committed_revision();
+        assert!(matches!(
+            rig.apply(
+                &[SessionEdit::RemoveTrackEffect {
+                    track_id: model.tracks[0].id.clone(),
+                    rack_name: session::RackName::Inserts,
+                    effect_id: model.tracks[0].inserts.effects[0].id.clone(),
+                }],
+                1
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision
+            } if revision == base + 1
+        ));
+        let events = drain_reliable(&mut rig.host);
+        assert_eq!(
+            events,
+            vec![
+                (base + 1, "committed".to_owned()),
+                (base + 1, "ended track Inserts comp 1".to_owned()),
+            ]
+        );
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(rig.host.observation_armed_taps(), 0);
+        assert!(
+            rig.host
+                .read_observation_addresses(&[comp_address()])
+                .is_err(),
+            "the successor has no insert, so no slot to read"
+        );
     }
 }

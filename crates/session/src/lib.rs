@@ -29,7 +29,7 @@ pub use diagnostic::{
 };
 pub use edit_ramp::{EditRampRow, EditRampTarget, EditRamps};
 pub use estimate::{ResourceEstimate, estimate_session_resources};
-pub use id::StableId;
+pub use id::{STABLE_ID_MAXIMUM_BYTES, StableId};
 pub use in_place::{
     OwnerRef, OwnerSlots, canonical_owner_bytes, owners_counts_equal, owners_values_valid,
 };

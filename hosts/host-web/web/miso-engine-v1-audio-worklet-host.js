@@ -878,9 +878,9 @@ class MisoAudioWorkletHost {
       // `submixPeaks` a pair per bus and `submixGrDb` one magnitude per bus, every value finite
       // and non-negative.
       if (!hasExactFields(message, [
-        "tag", "sequence", "generation", "validity", "lossCount", "windows", "trackCount", "peaks",
-        "trackGrDb", "masterGrDb", "firstSample", "endSample", "submixCount", "submixPeaks",
-        "submixGrDb",
+        "tag", "sequence", "generation", "validity", "lossCount", "windows", "trackCount",
+        "structureEpoch", "peaks", "trackGrDb", "masterGrDb", "firstSample", "endSample",
+        "submixCount", "submixPeaks", "submixGrDb",
       ])
           || !Number.isSafeInteger(message.sequence) || message.sequence <= 0
           || typeof message.generation !== "bigint" || message.generation <= 0n
@@ -891,6 +891,7 @@ class MisoAudioWorkletHost {
           || ((message.validity & 0x4) !== 0) !== (message.lossCount > 0)
           || !Number.isSafeInteger(message.windows) || message.windows <= 0
           || !Number.isSafeInteger(message.trackCount) || message.trackCount < 0
+          || !Number.isSafeInteger(message.structureEpoch) || message.structureEpoch <= 0
           || !(message.peaks instanceof Float32Array)
           || message.peaks.length !== message.trackCount * 2 + 2
           || !(message.trackGrDb instanceof Float32Array)
@@ -986,7 +987,7 @@ class MisoAudioWorkletHost {
         : pending.response === "sessionMap"
           ? ["tag", "requestId", "result", "sources", "metersAttached"]
           : pending.response === "observationMap"
-            ? ["tag", "requestId", "result", "bindings"]
+            ? ["tag", "requestId", "result", "structureEpoch", "bindings"]
             : pending.response === "observationRead"
               ? ["tag", "requestId", "result", "rows"]
               : pending.response === "trackResponse"
@@ -1060,6 +1061,9 @@ class MisoAudioWorkletHost {
     );
     const validObservationMap = pending.response !== "observationMap" || (
       message.result === RESULT_OK && Array.isArray(message.bindings)
+      // Issue #1562b: the structure epoch of the control list whose strip order the bindings
+      // follow (the rendering plan's), a positive safe integer.
+      && Number.isSafeInteger(message.structureEpoch) && message.structureEpoch > 0
       && message.bindings.every(validObservationMapBinding)
     );
     const validObservationRead = pending.response !== "observationRead" || (
@@ -1372,8 +1376,8 @@ class MisoAudioWorkletHost {
   /// The reply is `{ result, response, revision }`: `response` is the response frame bytes
   /// unchanged on `RESULT_OK` (a refused transaction is still an ok call with a non-ok response
   /// frame, as on the C ABI), else the refusal's diagnostic text (`code\tpath\n` lines), for
-  /// example `web.apply.rebuild_pending` for a transaction that needs a plan rebuild, which this
-  /// module cannot apply in place yet. `revision` is the committed revision after the call.
+  /// example `web.apply.shape_unavailable` for a preparation that could not hand its plan to the
+  /// host (a transaction that needs a plan rebuild is prepared and published, #1562b). `revision` is the committed revision after the call.
   ///
   /// **Request IDs.** The frame carries the sender's own request ID, and the engine's replay cache
   /// refuses a reused ID with different bytes. One allocator must therefore serve every frame sent

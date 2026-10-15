@@ -29,7 +29,6 @@
 
 use core::mem::{MaybeUninit, size_of};
 use core::num::{NonZeroU32, NonZeroUsize};
-use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
@@ -58,7 +57,7 @@ use host_core::{
 };
 #[cfg(test)]
 use host_core::{SpectrumCaptureCollectionRequest, SpectrumCaptureRequest};
-use session::CompileCaps;
+use session::{CompileCaps, SOURCE_CHANNELS_MAXIMUM, STABLE_ID_MAXIMUM_BYTES};
 
 use host_core::EffectRack;
 /// Live effect addressing in the session's own terms (decision 12, issue #1096).
@@ -976,6 +975,15 @@ pub struct WebMeterHeader {
     /// header and its frame in the message handler that commits the plan, so the render path
     /// switches views by reference and never cuts one (issue #1290d1).
     pub successor_pointer: u32,
+    /// The structure epoch of the control list this plan's strip order belongs to (issue #1562b):
+    /// the `structure_epoch` that `CONTROL_LIST_GET` pages carry, as the commit that prepared the
+    /// plan left it, and as each later commit that rode the plan's live lanes left it. Strips
+    /// (tracks, then submixes) are listed in the order the frame carries them, so a client that
+    /// holds a list of another epoch reads the list again before it names a frame's strips. A
+    /// plan that renders keeps the epoch of its own commit while a replacement waits: the
+    /// replacement's header carries the newer one, and the page sees it in the adoption block.
+    /// Appended in place, so every earlier offset is unmoved.
+    pub structure_epoch: u64,
 }
 
 /// `WebMeterHeader::reserved[1]` validity bits. The high 32 bits carry a saturating loss count.
@@ -1015,6 +1023,7 @@ const fn empty_meter_header() -> WebMeterHeader {
         retired: 0,
         frame_pointer: 0,
         successor_pointer: 0,
+        structure_epoch: 0,
     }
 }
 
@@ -1429,6 +1438,34 @@ struct PendingShape {
     /// Whether the adoption block has passed: the entry then holds tables nothing reads, which
     /// the service step drops on the control side.
     adopted: bool,
+    /// What the block that adopted this very plan took from its predecessor, set by that block
+    /// and `None` before it and for a candidate a later one superseded (#1290d2): `Some(true)`
+    /// when the engine reported the hand-over carried, `Some(false)` for a refused or unrequested
+    /// one. The promotion in [`ReadyOwnership::promote_spectrum`] reads it once.
+    adoption: Option<bool>,
+    /// The plan's prepared spectrum captures and the pairing list beside them, until the plan's
+    /// promotion installs them in the spectrum service (#1290d2); dropped with the entry when the
+    /// plan was superseded and never rendered.
+    spectrum: Option<SpectrumHandover>,
+}
+
+/// The spectrum captures a replacement plan was prepared with, and the pairing that names the
+/// observers its swap block moves (#1395; #1290d2). The captures are control-side objects: the
+/// plan holds the observers, the service holds the readers, so a plan's captures never ride in
+/// its attachment and cannot be lost with a retired plan.
+struct SpectrumHandover {
+    captures: PreparedSpectrumCaptures,
+    /// [`host_core::PlanStateInventory::spectrum_pairing`] of the plan, copied at preparation.
+    pairing: Box<[host_core::SpectrumPair]>,
+}
+
+/// The heap a handover's pairing list holds, charged to the plan's rows with its tables. A free
+/// function: an inherent impl before the host's own would renumber the mangled render symbols the
+/// call-graph gate pins.
+fn spectrum_pairing_bytes(handover: &SpectrumHandover) -> Option<u64> {
+    u64::try_from(handover.pairing.len())
+        .ok()?
+        .checked_mul(u64::try_from(size_of::<host_core::SpectrumPair>()).ok()?)
 }
 
 /// Everything one compiled session owns on the browser side.
@@ -1443,9 +1480,6 @@ struct ReadyOwnership {
     /// and effect producers, the plan's revision gate, the plan publisher and the retirer. It is
     /// the one owner of the producers; the browser holds none of its own.
     control: WebSession,
-    /// The preparer's rebuild switch (#1562a D9), for the test-support republish.
-    #[cfg(feature = "test-support")]
-    allow_rebuild: Arc<AtomicBool>,
     /// The limits the control half was built with (#1570b D6), for the cross-host proof.
     #[cfg(feature = "test-support")]
     limits: ControlLimits,
@@ -1457,6 +1491,9 @@ struct ReadyOwnership {
     shape: Box<PlanShape>,
     /// The epoch of the plan `shape` describes.
     shape_epoch: u64,
+    /// The plan owner's count of carried swaps as of the last adoption block the host handled
+    /// (#1290d2): a swap carried exactly when the count moved.
+    carried_swaps_seen: u64,
     /// Where the preparer leaves a replacement plan's tables (#1290a).
     record: Arc<Mutex<BootRecord>>,
     /// The tables of replacement plans between their commit and the service step after their
@@ -1542,8 +1579,9 @@ impl ReadyOwnership {
         &mut self,
         request: &[u8],
         output_capacity: u64,
+        analysis: Option<&mut SpectrumAnalysis>,
     ) -> Result<usize, control_plane::CommandError> {
-        self.reclaim_shapes();
+        self.reclaim_shapes(analysis);
         if self.pending_shapes.len() == self.pending_shapes.capacity() {
             return Err(control_plane::CommandError::Backpressure);
         }
@@ -1551,11 +1589,9 @@ impl ReadyOwnership {
         let result = self.control.command(request, output_capacity);
         // Whatever the preparer left is taken: a command refused after its preparation leaves
         // tables nothing will read.
-        let prepared = self
-            .record
-            .lock()
-            .ok()
-            .and_then(|mut record| record.shape.take());
+        let (prepared, handover) = self.record.lock().map_or((None, None), |mut record| {
+            (record.shape.take(), record.spectrum.take())
+        });
         let epoch = self.control.newest_plan_epoch();
         if result.is_ok() && epoch != before {
             // A rebuild commits only after the preparer returned `Ok`, and the preparer returns
@@ -1567,6 +1603,8 @@ impl ReadyOwnership {
                 epoch,
                 shape: Box::new(shape),
                 adopted: false,
+                adoption: None,
+                spectrum: handover,
             });
             // The rendering plan's header names the newest replacement's, so the page cuts its
             // views over the successor's frame in the handler that committed it (#1290d1).
@@ -1576,13 +1614,64 @@ impl ReadyOwnership {
             }
             self.blocking_rebuilds = self.blocking_rebuilds.saturating_add(1);
         }
+        if result.is_ok() {
+            self.stamp_structure_epoch();
+        }
         result
+    }
+
+    /// Stamp the structure epoch the control list holds now on the newest committed plan's meter
+    /// header (#1562b): the replacement's while one waits, else the rendering plan's. A commit that
+    /// rode the newest plan's live lanes may have changed a descriptor or an address (a VCA added,
+    /// a `matrix_mode` switch), and a rebuild's commit changes the strip order. Control side only.
+    fn stamp_structure_epoch(&mut self) {
+        let epoch = self.control.structure_epoch();
+        let header = match self
+            .pending_shapes
+            .iter_mut()
+            .rev()
+            .find(|entry| !entry.adopted)
+        {
+            Some(entry) => &mut entry.shape.meter_header,
+            None => &mut self.shape.meter_header,
+        };
+        header.structure_epoch = epoch;
     }
 
     /// Drop the tables of plans render has adopted past (#1290a): the host's own, retired by the
     /// adoption block, and those of a candidate that a later one superseded. Control side only.
-    fn reclaim_shapes(&mut self) {
+    fn reclaim_shapes(&mut self, analysis: Option<&mut SpectrumAnalysis>) {
+        self.promote_spectrum(analysis);
         self.pending_shapes.retain(|entry| !entry.adopted);
+    }
+
+    /// Promote the plans the render half has adopted (#1290d2; #1395 D3, D5): install each
+    /// adopted plan's spectrum captures in the service, paired with the service's current ones
+    /// by the plan's pairing list and the engine's carry outcome for that swap, and drop the
+    /// captures it displaces here, off the audio thread. Entries go in commit order, so two
+    /// adoptions before one service step promote one after the other, each against the captures
+    /// the one before left. A plan that was superseded before it rendered was never adopted
+    /// (`adoption` is `None`) and its captures drop with its entry. Control side only: it frees.
+    ///
+    /// `analysis` is the smoothing history of the instance that owns both halves (the ffi staging's
+    /// analysis, #1618): a promotion that does not keep the stream ends the stream's analysis in
+    /// the same call, so the analysis never reports facts of a stream that ended. The browser's
+    /// audio thread, which keeps none, passes `None`.
+    fn promote_spectrum(&mut self, mut analysis: Option<&mut SpectrumAnalysis>) {
+        for entry in &mut self.pending_shapes {
+            let (Some(carried), Some(handover)) = (entry.adoption, entry.spectrum.take()) else {
+                continue;
+            };
+            let Some(service) = self.spectrum.as_mut() else {
+                continue;
+            };
+            drop(service.adopt_successor(
+                handover.captures,
+                &handover.pairing,
+                carried,
+                analysis.as_deref_mut(),
+            ));
+        }
     }
 
     // REALTIME_POLICY_BEGIN
@@ -1590,6 +1679,9 @@ impl ReadyOwnership {
     /// The tables it retires stay in the entry for [`Self::reclaim_shapes`]; an entry of an
     /// earlier epoch was superseded and is marked the same way. A pointer exchange: it allocates
     /// and frees nothing, and indexes nothing, so it adds no trap to the render export.
+    ///
+    /// `swap_carried` is whether the engine reported this swap's hand-over as carried (the owner's
+    /// carried-swap count advanced), which the plan's spectrum promotion needs (#1290d2).
     ///
     /// `carried` is the pairing the swap block's attachment hook made (#1381b): the readers the
     /// executors carried, which this hand-over follows with the per-reader state the tables hold.
@@ -1605,7 +1697,7 @@ impl ReadyOwnership {
     /// the published ones from this block on. The retiring header is marked
     /// ([`WebMeterHeader::retired`]) and names the adopted one, so the page's render path switches
     /// to the views it cut over them in advance. Pointer exchanges and scalar writes only.
-    fn adopt_shape(&mut self, epoch: u64, carried: &[CarriedReader]) {
+    fn adopt_shape(&mut self, epoch: u64, swap_carried: bool, carried: &[CarriedReader]) {
         self.shape_epoch = epoch;
         let meters_carried = carried
             .iter()
@@ -1626,6 +1718,7 @@ impl ReadyOwnership {
             if entry.epoch == epoch {
                 core::mem::swap(&mut self.shape, &mut entry.shape);
                 entry.adopted = true;
+                entry.adoption = Some(swap_carried);
                 taken = true;
                 // `self.shape` is the adopted plan's and `entry.shape` the retired one's. The
                 // stream the page reads continues in the adopted plan's header (#1290d1): its
@@ -2033,11 +2126,6 @@ impl AudioWorkletEngineHost {
             document_bytes,
             shape.sample_rate_hz,
             shape.quantum_frames,
-            shape.maximum_source_channels,
-            shape
-                .longest_source_id_bytes
-                .max(shape.longest_track_id_bytes)
-                .max(shape.longest_submix_id_bytes),
             options,
             (
                 spectrum_request.is_some(),
@@ -2172,32 +2260,6 @@ impl AudioWorkletEngineHost {
             .get(reader as usize)
     }
 
-    /// Run one structural command frame through the control plane (#1381a gates 2 and 4, #1290a):
-    /// it prepares a successor of the committed model through the browser's preparer and publishes
-    /// it, for the render of the next block to adopt, with the rebuild arm open past
-    /// [`REBUILD_PENDING`]. No export reaches it: the production entry keeps the refusal until
-    /// #1562b deletes it.
-    ///
-    /// Returns the control plane's response frame.
-    ///
-    /// # Errors
-    ///
-    /// The control plane's refusal of the frame.
-    #[cfg(feature = "test-support")]
-    pub fn structural_command_for_test(
-        &mut self,
-        request: &[u8],
-    ) -> Result<Vec<u8>, control_plane::CommandError> {
-        let ready = self
-            .ready
-            .as_mut()
-            .ok_or(control_plane::CommandError::Internal)?;
-        ready.allow_rebuild.store(true, Ordering::Release);
-        let length = ready.run_command(request, CONTROL_FRAME_BYTES);
-        ready.allow_rebuild.store(false, Ordering::Release);
-        Ok(ready.control.command_response(length?).to_vec())
-    }
-
     /// The [`ControlLimits`] the control half was built with (#1570b D6), read-only: the cross-host
     /// proof builds the C ABI's compile limits from it field for field, so both hosts advertise the
     /// same capabilities.
@@ -2245,17 +2307,21 @@ impl AudioWorkletEngineHost {
     /// length that is zero or over the frame ceiling, or a frame the control plane cannot
     /// correlate; [`RESULT_BUFFER_TOO_SMALL`] for a response over the control frame;
     /// [`RESULT_BACKPRESSURE`] for a queue or plan with no room now; [`RESULT_COMPILE_REJECTED`]
-    /// for a typed refusal before commit, `web.apply.rebuild_pending` for a transaction that needs
-    /// a plan rebuild (D9); [`RESULT_REPREPARE_REQUIRED`] for a transaction that changes the
+    /// for a typed refusal before commit (a transaction that needs a plan rebuild is prepared and
+    /// published like any other, #1562b); [`RESULT_REPREPARE_REQUIRED`] for a transaction that changes the
     /// session's sample rate or quantum (#1290a: the session is re-prepared from its document);
     /// [`RESULT_INTERNAL`] for a bookkeeping failure. For each failure the
     /// response is the refusal's diagnostic (`code\tpath\n` lines).
     ///
-    /// A frame refused after the core has seen it, `web.apply.rebuild_pending` included, has
-    /// consumed its request ID: the same bytes sent again are answered [`RESULT_OK`] with a non-ok
-    /// response frame whose code is `protocol.failure` (the replay cache), and a retry must take a
-    /// new request ID to meet the refusal again.
-    pub fn control_command(&mut self, len: u32) -> u32 {
+    /// A frame refused after the core has seen it has consumed its request ID: the same bytes sent
+    /// again are answered [`RESULT_OK`] with a non-ok response frame whose code is
+    /// `protocol.failure` (the replay cache), and a retry must take a new request ID to meet the
+    /// refusal again.
+    ///
+    /// `analysis` is the smoothing history of an instance that owns both halves of the spectrum
+    /// stream (see [`Self::service`]); a plan this command's reclaim promotes ends it when the
+    /// stream is not kept.
+    pub fn control_command(&mut self, len: u32, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
         self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
@@ -2267,7 +2333,7 @@ impl AudioWorkletEngineHost {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let request = &buffers.control_request[..len as usize];
-        match ready.run_command(request, CONTROL_FRAME_BYTES) {
+        match ready.run_command(request, CONTROL_FRAME_BYTES, analysis) {
             Ok(length) => {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
@@ -2404,7 +2470,11 @@ impl AudioWorkletEngineHost {
     /// so a periodic tick never overwrites a refusal the host has yet to read.
     ///
     /// An epoch failure is sticky: the host fails with the session's diagnostic.
-    pub fn service(&mut self) -> u32 {
+    ///
+    /// `analysis` is the smoothing history of an instance that owns both halves of the spectrum
+    /// stream, which a promotion this step performs ends when it does not keep the stream (#1618);
+    /// the browser's audio thread passes `None`.
+    pub fn service(&mut self, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
@@ -2413,7 +2483,7 @@ impl AudioWorkletEngineHost {
         };
         match ready.control.service() {
             Ok(()) => {
-                ready.reclaim_shapes();
+                ready.reclaim_shapes(analysis);
                 RESULT_OK
             }
             Err(error) => {
@@ -3123,6 +3193,9 @@ impl AudioWorkletEngineHost {
     }
 
     /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).
+    ///
+    /// Zero means "no such source", and also a staging that cannot hold the ID: staging is sized
+    /// for the longest ID the grammar allows, so the second cannot happen for a compiled session.
     pub(crate) fn copy_session_source_id(&mut self, index: u32) -> u32 {
         let Some(ready) = self.ready.as_ref() else {
             return 0;
@@ -3136,17 +3209,21 @@ impl AudioWorkletEngineHost {
             return 0;
         };
         Self::copy_id_into_staging(self.buffers.as_mut(), source.id.as_str().as_bytes())
+            .unwrap_or(0)
     }
 
-    fn copy_id_into_staging(buffers: Option<&mut PreparedBuffers>, bytes: &[u8]) -> u32 {
-        let length = bytes.len();
-        let buffers = buffers.expect("a ready host owns its staging buffers");
-        debug_assert!(
-            length <= buffers.source_id.len(),
-            "compiled ID exceeds its projected staging capacity"
-        );
-        buffers.source_id[..length].copy_from_slice(bytes);
-        u32::try_from(length).expect("ID staging capacity is representable as u32")
+    /// Copy `bytes` into ID staging and return their length, or why they cannot be staged. Never
+    /// panics: this runs inside a render-locked export, where a panic is a trap.
+    fn copy_id_into_staging(
+        buffers: Option<&mut PreparedBuffers>,
+        bytes: &[u8],
+    ) -> Result<u32, IdStagingError> {
+        let buffers = buffers.ok_or(IdStagingError::NoStaging)?;
+        let Some(target) = buffers.source_id.get_mut(..bytes.len()) else {
+            return Err(IdStagingError::TooLong);
+        };
+        target.copy_from_slice(bytes);
+        u32::try_from(bytes.len()).map_err(|_| IdStagingError::TooLong)
     }
 
     pub(crate) fn diagnostic_buffer_mut(&mut self) -> Option<&mut [u8]> {
@@ -3296,11 +3373,16 @@ impl AudioWorkletEngineHost {
                 // drops the retired ones at its next step.
                 let epoch = plan.owner().active_epoch().0;
                 if epoch != ready.shape_epoch {
+                    // #1290d2: whether the engine carried this swap, from the owner's count of
+                    // carried swaps (a refused or unrequested hand-over does not advance it).
+                    let carried_swaps = plan.owner().carried_count();
+                    let swap_carried = carried_swaps != ready.carried_swaps_seen;
+                    ready.carried_swaps_seen = carried_swaps;
                     // #1381b: what the swap block's hook paired travels with the tables.
                     let carried = plan
                         .active_attachment_mut::<RenderCompanions>()
                         .map_or(&[][..], |companions| companions.carried());
-                    ready.adopt_shape(epoch, carried);
+                    ready.adopt_shape(epoch, swap_carried, carried);
                 }
                 self.status.next_absolute_sample = next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
@@ -4601,15 +4683,28 @@ fn spectrum_collection_staging_bytes(
     Ok((entry_bytes, target_id_bytes))
 }
 
+/// Why an ID could not be copied into ID staging.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdStagingError {
+    /// The host owns no staging buffers.
+    NoStaging,
+    /// The ID is longer than the staging buffer.
+    TooLong,
+}
+
 fn project_buffers(
     document_bytes: u32,
     sample_rate_hz: u32,
     quantum_frames: u32,
-    maximum_source_channels: u32,
-    id_staging_bytes: u64,
     options: WebBootOptions,
     spectrum_staging: (bool, (u64, u64)),
 ) -> Result<PreparedBufferProjection, BootFailure> {
+    // The staging holds what a rebuild may add, not only what the boot session declares (#1562b):
+    // a source, track or submix ID of the longest length the grammar allows, and a source of the
+    // most channels it allows. Sizing from the boot session would let an acked rebuild declare a
+    // source the host could never stage or feed.
+    let maximum_source_channels = SOURCE_CHANNELS_MAXIMUM;
+    let id_staging_bytes = STABLE_ID_MAXIMUM_BYTES as u64;
     let (
         spectrum_configured,
         (spectrum_collection_entry_bytes, spectrum_collection_target_id_bytes),
@@ -5122,21 +5217,21 @@ type WebSession = SessionState<WebAdapter>;
 type WebPlan = PlanState<WebAdapter>;
 
 /// The render-side halves a browser plan's preparation returns beside the plan (issue #1400 D5):
-/// the meter consumers, the effect observation handles and the spectrum capture.
+/// the meter consumers and the effect observation handles.
 ///
 /// They travel inside the plan as its [`HostAttachment`], so a plan the control plane prepares
 /// carries everything the render side reads, and they drop with the plan on the retirement path.
 /// The browser renders through the plan owner (#1381a D4) and reaches the active plan's companions
 /// through `PlanState::active_attachment_mut`: the meter poll and the observation reads read the
-/// readers there. The spectrum capture is the one companion the host does not read there:
-/// [`SpectrumService`] owns its captures, so boot moves the capture out into it
-/// (`take_spectrum_capture`) until the spectrum readers move to the control plane (#1596).
+/// readers there. A plan's spectrum captures are not among them: [`SpectrumService`] owns the
+/// captures, so the preparer leaves a plan's in the `BootRecord` (boot moves them into the
+/// service; a replacement's wait beside its tables for the promotion, #1290d2) until the spectrum
+/// readers move to the control plane (#1596).
 ///
-/// Field order is the drop order: the spectrum capture, then the meter consumers, then the effect
-/// observation handles, the relative order the same three fields have in `ReadyOwnership`. No one
-/// of them reads another while it drops; the order is kept so the two owners release alike.
+/// Field order is the drop order: the meter consumers, then the effect observation handles, the
+/// relative order the same two fields have in `ReadyOwnership`. Neither reads the other while it
+/// drops; the order is kept so the two owners release alike.
 pub struct RenderCompanions {
-    spectrum_capture: Option<PreparedSpectrumCaptures>,
     /// One consumer per selected meter, in strip order; empty when metering is off.
     meters: Vec<MeterConsumer>,
     /// One reader set per observed effect instance, in `HostLiveControlHandles` order.
@@ -5195,7 +5290,6 @@ impl RenderCompanions {
         // Every field is named, so a field added to the struct fails to compile here until its
         // heap is charged (or declared host-core's, as the capture is).
         let Self {
-            spectrum_capture: _,
             meters,
             effect_observations,
             carried,
@@ -5216,18 +5310,6 @@ impl RenderCompanions {
             .checked_add(observations)?
             .checked_add(carried)?;
         Some((total, shell.max(meters).max(observations).max(carried)))
-    }
-
-    /// Whether the plan was prepared with a spectrum capture (one, or a collection).
-    #[must_use]
-    pub fn has_spectrum_capture(&self) -> bool {
-        self.spectrum_capture.is_some()
-    }
-
-    /// Move the spectrum capture out, once, to the host's spectrum service (#1381a). Control side
-    /// only: boot calls it before the first render.
-    fn take_spectrum_capture(&mut self) -> Option<PreparedSpectrumCaptures> {
-        self.spectrum_capture.take()
     }
 }
 
@@ -5266,6 +5348,10 @@ struct BootRecord {
     /// plan's and every replacement plan's. Boot takes the first; a command that publishes a
     /// replacement takes that plan's, and one that fails after preparing leaves a table to drop.
     shape: Option<PlanShape>,
+    /// The spectrum captures of the plan the preparer prepared last, with its pairing list
+    /// (#1290d2). Boot moves them into the spectrum service; a command that publishes a
+    /// replacement keeps them beside the plan's tables until the plan's promotion.
+    spectrum: Option<SpectrumHandover>,
 }
 
 impl RenderCompanions {
@@ -5357,10 +5443,6 @@ impl HostAttachment for RenderCompanions {
 /// record another thread poisoned): refused before the transaction is committed (#1290a).
 const SHAPE_UNAVAILABLE: &str = "web.apply.shape_unavailable";
 
-/// The diagnostic code of a command frame whose transaction needs a plan rebuild, which the
-/// browser cannot apply in place yet (issue #1562a D9; #1562b removes the refusal).
-pub const REBUILD_PENDING: &str = "web.apply.rebuild_pending";
-
 /// The browser's [`control_plane::RuntimePreparer`] (issue #1400 D5): `prepare_web_host` for the
 /// session's boot options and spectrum request, with the render-side companions moved into the
 /// plan.
@@ -5373,11 +5455,6 @@ pub struct WebRuntimePreparer {
     /// Where the boot preparation leaves its facts for the host (#1381a), or `None` for a preparer
     /// that is only called.
     record: Option<Arc<Mutex<BootRecord>>>,
-    /// Whether the command path takes a structural transaction (issue #1562a D9). It is `false`:
-    /// the browser has no in-place structural edit until #1562b, so a frame that classifies as a
-    /// rebuild is refused `web.apply.rebuild_pending` before anything is committed. Only the
-    /// test-support republish of #1381a's gates opens it, for one call.
-    allow_rebuild: Arc<AtomicBool>,
 }
 
 impl WebRuntimePreparer {
@@ -5388,7 +5465,6 @@ impl WebRuntimePreparer {
             options,
             spectrum,
             record: None,
-            allow_rebuild: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -5400,10 +5476,6 @@ impl WebRuntimePreparer {
 }
 
 impl control_plane::RuntimePreparer for WebRuntimePreparer {
-    fn refuse_rebuild(&self) -> Option<&'static str> {
-        (!self.allow_rebuild.load(Ordering::Acquire)).then_some(REBUILD_PENDING)
-    }
-
     fn prepare(
         &self,
         compiled: &CompiledSession,
@@ -5446,7 +5518,12 @@ impl WebRuntimePreparer {
             effects: lanes.effects || live_controls.observation_taps != 0,
             ..lanes
         };
-        let (mut host, mut handles, spectrum_capture) = prepare_web_host(
+        // #1584 D6b: the taps the host had armed, which host-core arms the successor's lanes from;
+        // the plan's tables must say the same.
+        let bindings: &[controls::ObservationBinding] = successor
+            .map(|base| base.observation.bindings())
+            .unwrap_or_default();
+        let (mut host, mut handles, spectrum_captures) = prepare_web_host(
             compiled,
             caps,
             &live_controls,
@@ -5465,6 +5542,7 @@ impl WebRuntimePreparer {
             &handles.effect_observations,
             handles.meters.len(),
             handles.master_track,
+            bindings,
         )
         .map_err(|code| {
             let rejection = if code.starts_with("web.resource.") {
@@ -5486,8 +5564,25 @@ impl WebRuntimePreparer {
             meters.len() + effect_observations.len(),
             CarriedReader::UNUSED,
         );
+        // #1290d2: the captures and the pairing that names the observers this plan's swap block
+        // moves leave with the tables, so they can be installed in the service at the plan's
+        // promotion whatever the plan's attachment has become by then.
+        let spectrum = match spectrum_captures {
+            Some(captures) => {
+                let pairs = host.inventory.spectrum_pairing();
+                let mut pairing: Vec<host_core::SpectrumPair> = Vec::new();
+                pairing.try_reserve_exact(pairs.len()).map_err(|_| {
+                    PrepareDiagnostics::fixed(PrepareRejection::Platform, "web.resource.allocation")
+                })?;
+                pairing.extend_from_slice(pairs);
+                Some(SpectrumHandover {
+                    captures,
+                    pairing: pairing.into_boxed_slice(),
+                })
+            }
+            None => None,
+        };
         let companions = RenderCompanions {
-            spectrum_capture,
             meters,
             effect_observations,
             carried: carried.into_boxed_slice(),
@@ -5503,6 +5598,10 @@ impl WebRuntimePreparer {
             let (tables, tables_largest) = shape.retained_bytes().ok_or_else(arithmetic)?;
             retained = retained.checked_add(tables).ok_or_else(arithmetic)?;
             largest = largest.max(tables_largest);
+            if let Some(pairing) = spectrum.as_ref().and_then(spectrum_pairing_bytes) {
+                retained = retained.checked_add(pairing).ok_or_else(arithmetic)?;
+                largest = largest.max(pairing);
+            }
         }
         charge_attachment(&mut host.report, caps, retained, largest)?;
         host.plan.set_host_attachment(Box::new(companions));
@@ -5518,6 +5617,7 @@ impl WebRuntimePreparer {
                 record.superseded = Some(handles.live_values_superseded.clone());
             }
             record.shape = Some(shape);
+            record.spectrum = spectrum;
         }
         Ok((host, handles))
     }
@@ -5534,6 +5634,11 @@ impl WebRuntimePreparer {
 /// model's, the order host-core's addressing authority uses and the control plane's producers
 /// follow.
 ///
+/// `bindings` are the taps the host had armed when this plan was prepared (#1584 D6b): the same
+/// table host-core armed the plan's lanes from, so a bound tap's `observation_armed` bit is set
+/// here with arm sample 0 and its commanded bit clear (a fresh tap has no stale window). A binding
+/// whose effect or tap the plan lacks sets nothing, as host-core arms nothing for it.
+///
 /// Errors are the diagnostic code of the refusal.
 fn build_plan_shape(
     model: &session::SessionModel,
@@ -5541,6 +5646,7 @@ fn build_plan_shape(
     observations: &[EffectObservationHandle],
     meter_count: usize,
     master_track: Option<u32>,
+    bindings: &[controls::ObservationBinding],
 ) -> Result<PlanShape, &'static str> {
     let track_count = model.tracks.len();
     let submix_count = model.submixes.len();
@@ -5655,6 +5761,7 @@ fn build_plan_shape(
         .try_reserve_exact(observations.len())
         .map_err(|_| "web.resource.allocation")?;
     let observation_present = vec![false; strip_count];
+    let mut observation_armed = zero_u32(total_effects as usize)?;
     // The plan's published frame and the header that describes it (#1290d1). The frame's address
     // is the heap block's, so it stays put as the tables move.
     let meter_frame = zero_meter_frame(strip_count)?;
@@ -5692,6 +5799,29 @@ fn build_plan_shape(
             .map_err(|_| "web.resource.allocation")?;
         arm_samples.resize(tap_count, 0);
         observation_arm_samples[slot] = arm_samples.into_boxed_slice();
+        // #1584 D6b: the bits of the taps the host had armed, in the descriptor's tap order (the
+        // bit is the effect-local tap index, as `push_observe` sets it).
+        let console = handle.address.rack == LiveEffectRack::Console;
+        for binding in bindings {
+            if binding.key.section.is_console() != console
+                || binding.key.section.id().as_str() != &*handle.effect_id
+                || binding.key.strip.as_str() != &*handle.track_id
+            {
+                continue;
+            }
+            if let Some(index) = handle
+                .descriptor
+                .observations
+                .iter()
+                .position(|tap| tap.id.0 == binding.key.tap_id)
+                && let Some(bit) = u32::try_from(index)
+                    .ok()
+                    .and_then(|index| 1_u32.checked_shl(index))
+                && let Some(word) = observation_armed.get_mut(slot)
+            {
+                *word |= bit;
+            }
+        }
         instance.reader = Some(u32::try_from(reader).map_err(|_| "web.live_controls.observation")?);
         reader_slots.push(u32::try_from(slot).map_err(|_| "web.live_controls.observation")?);
     }
@@ -5703,7 +5833,7 @@ fn build_plan_shape(
         effect_instances: effect_instances.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),
         reader_slots: reader_slots.into_boxed_slice(),
-        observation_armed: zero_u32(total_effects as usize)?,
+        observation_armed,
         observation_arm_samples: observation_arm_samples.into_boxed_slice(),
         observation_commanded: zero_u32(total_effects as usize)?,
         master_track,
@@ -6018,15 +6148,13 @@ fn compile_ready(
     let record = Arc::new(Mutex::new(BootRecord::default()));
     let preparer =
         WebRuntimePreparer::new(options, spectrum_request.cloned()).recording(Arc::clone(&record));
-    #[cfg(feature = "test-support")]
-    let allow_rebuild = Arc::clone(&preparer.allow_rebuild);
     let limits = control_limits(caps, memory_budget);
     let control_plane::CompiledChildren {
         session: mut control,
         mut plan,
     } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer))
         .map_err(|failure| boot_refusal(&failure, &record))?;
-    let (engine, live_values_superseded, shape) = {
+    let (engine, live_values_superseded, shape, spectrum_boot) = {
         let mut record = record
             .lock()
             .map_err(|_| fixed_diagnostic("web.internal.boot_record"))?;
@@ -6035,7 +6163,9 @@ fn compile_ready(
             record.superseded.take(),
             record.shape.take(),
         ) {
-            (Some(engine), Some(superseded), Some(shape)) => (engine, superseded, shape),
+            (Some(engine), Some(superseded), Some(shape)) => {
+                (engine, superseded, shape, record.spectrum.take())
+            }
             _ => return Err(fixed_diagnostic("web.internal.boot_record").into()),
         }
     };
@@ -6088,12 +6218,11 @@ fn compile_ready(
     // prepared with `live_control_observation_taps == 0`.
     report.observation_retained_bytes = engine.observation_retained_bytes;
     // #1290a: the tables were built by the boot plan's own preparation (`build_plan_shape`), the
-    // same function every replacement plan's preparation runs. The companions' spectrum capture is
-    // the one thing moved out here, to the spectrum service.
+    // same function every replacement plan's preparation runs. The boot plan's spectrum captures
+    // go to the spectrum service below.
     let companions = plan
         .active_attachment_mut::<RenderCompanions>()
         .ok_or_else(|| fixed_diagnostic("web.internal.companions"))?;
-    let spectrum_capture = companions.take_spectrum_capture();
     let rows = shape
         .bridge_rows()
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
@@ -6184,17 +6313,21 @@ fn compile_ready(
             .saturating_sub(report.bridge_retained_bytes)
             .saturating_add(engine.session_model_bytes),
     );
+    let structure_epoch = control.structure_epoch();
     let ready = ReadyOwnership {
         control,
         queries,
         #[cfg(feature = "test-support")]
-        allow_rebuild,
-        #[cfg(feature = "test-support")]
         limits,
         commands_enabled,
         live_values_superseded,
-        shape: Box::new(shape),
+        shape: {
+            let mut shape = Box::new(shape);
+            shape.meter_header.structure_epoch = structure_epoch;
+            shape
+        },
         shape_epoch: 0,
+        carried_swaps_seen: 0,
         record,
         pending_shapes: {
             let mut pending = Vec::new();
@@ -6206,9 +6339,9 @@ fn compile_ready(
         blocking_rebuilds: 0,
         command_decoded: boxed_observe_staging(decoded_count)?,
         has_in_flight_commands: false,
-        spectrum: spectrum_capture.map(|captures| {
+        spectrum: spectrum_boot.map(|handover| {
             SpectrumService::new(
-                captures,
+                handover.captures,
                 session_sample_rate_hz,
                 session_quantum_frames,
                 spectrum_hop,

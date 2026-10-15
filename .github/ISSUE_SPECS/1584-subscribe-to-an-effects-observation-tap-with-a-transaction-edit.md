@@ -331,7 +331,7 @@ Checked against `ea336c039`.
   host-core and control-plane tests above, and `docs/CONTROL_PROTOCOL_{REGISTRY,SEMANTICS}.md`.
 - **D6b (lane W, after D6a).** `build_plan_shape` (`hosts/host-web/src/lib.rs:5437`) sets
   `observation_armed` for the bindings of `MonitorBase.next`, with arm sample 0 and the commanded bit
-  clear: a fresh tap has no stale window. Gates through `structural_command_for_test`:
+  clear: a fresh tap has no stale window. Gates through `control_command`, the host's production control entry:
   - After a restart of a subscribed compressor, the meter frame's gain-reduction word and the
     observation read return windows from the adoption block on.
   - After an insert removal, there is no slot for the removed insert, and the browser's event drain
@@ -533,3 +533,54 @@ Root ruling A replaces D6a's one event per ended binding with one `OBSERVATION_E
 - **Internal invariant spelled accurately.** A reliable `OBSERVATION_ENDED` slot whose cell is
   empty is now `EventEgressError::ObservationEndedCellMissing` (was `DiagnosticStorageFull`);
   behaviour (an internal error) is unchanged.
+
+## Decision record: #1584 D6b (batch 12b, lane W)
+
+What shipped, in `hosts/host-web/src/lib.rs`:
+
+- `build_plan_shape` takes the bindings (`&[controls::ObservationBinding]`, from the `SuccessorBase` the
+  preparer received; empty at boot) and sets `observation_armed` for each binding whose strip, section
+  (console or inserts), effect ID and tap ID match an observed instance of the plan. The bit is the tap's
+  index in the descriptor's observations, as `push_observe` sets it. The arm sample stays 0 and the
+  commanded bit stays clear. The match is the one host-core uses for the lane's prepared arm, so the
+  table and the lane cannot disagree; a binding the plan lacks sets nothing. A carried reader still
+  takes the predecessor's bits (`carry_tap_state`), so the prepared arm never wins over carried state.
+  Nothing new runs in `process()`: the bits are written on the control side while the shape is built.
+- Doc comment of `onControlEvent` names `OBSERVATION_ENDED` in
+  `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and its copy
+  `sdk/src/browser/shipped-host.d.ts` (equal). The worklet drain (`drainControlEvents`) copies any
+  frame it dequeues and decodes none, so the event passes through with no JS change (the reliable lane
+  holds `SESSION_COMMITTED` and `OBSERVATION_ENDED`, within the drain's 16-call bound). The SDK reaction
+  stays with #1562b-K.
+
+Gates (`structural_apply` in `hosts/host-web/src/tests.rs`, through `control_command`, the production control entry):
+
+1. `a_restarted_effects_subscription_keeps_publishing_windows_on_the_browser`: the subscribed compressor's
+   link mode changes (rebuild, no carry); the successor has `observation_armed_taps() == 1`, its first
+   window opens at the adoption block's first sample with sequence 1, the windows continue (sequence 3
+   after four more blocks), and the meter frame's gain-reduction word is positive. Red with the
+   bindings passed as `&[]` (armed taps 0 after the swap).
+2. `a_removed_inserts_subscription_ends_with_an_event_and_has_no_slot`: after the insert removal the
+   browser's event drain returns `SESSION_COMMITTED` then one `OBSERVATION_ENDED` with the committing
+   revision and the key (`track`, inserts, `comp`, tap 1); the successor has no armed tap and
+   `read_observation_addresses` refuses the removed insert's address.
+3. `tests/structural_apply_realtime.rs`: 3 passed, zero render-locked allocations.
+
+Runs: `cargo test -p host-web --features host-web/test-support` (all), `cargo test -p control-plane
+--features test-support`, clippy `-D warnings` on host-web, fmt, the wasm build, `check-web-audioworklet.sh`,
+`test-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`, `check-sdk-generated.sh`,
+`check-sdk-types.sh`, `check-sdk-headless.sh`, the chromium qualification (151.0.7922.34, all
+render-allocation rows 0), `realtime-policy` (141 regions) and `check-bench-policy.sh` all pass. The
+shipped module sha256 is `179a933a...c3c1ae`; no export, layout or JS file changed.
+
+## Fold (batch 12b review)
+
+- **n1.** The D6b gates run through `control_command`, the host's production control entry. The text
+  above said `structural_command_for_test`, which D9 of #1562 deleted.
+- **m1/m7 (shared with #1290).** `miso_engine_web_v1_service` and `miso_engine_web_v1_control_command`
+  now lend the ffi staging's `SpectrumAnalysis` to the promotion their reclaim performs, so a swap
+  that does not keep the stream ends the instance's analysis in the same call (see the #1290 fold).
+- **m3 (shared with #1562).** The SDK keeps the revision the core had committed when each managed
+  arm was sent and ignores an `OBSERVATION_ENDED` event of a commit at or before it: that event ended
+  an earlier arm of the same tap. `ControlTransactionQueue.readCommittedRevision()` reads it from the
+  core.

@@ -3213,7 +3213,7 @@ pub extern "C" fn miso_engine_web_v1_source_submit(
             let id_pointer = ids.as_ptr();
             for (channel, slot) in plane_slots[..channel_count].iter_mut().enumerate() {
                 let offset = channel * quantum;
-                // SAFETY: Preparation allocated `maximum_source_channels * quantum` stable PCM
+                // SAFETY: Preparation allocated `SOURCE_CHANNELS_MAXIMUM * quantum` stable PCM
                 // samples. The checked channel bound/product and `frames <= quantum` prove this
                 // exact plane prefix is readable for the synchronous source submission below.
                 let plane = unsafe { slice::from_raw_parts(pcm_pointer.add(offset), frame_count) };
@@ -3288,6 +3288,43 @@ pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> 
     })
 }
 
+/// Run a host operation that can promote an adopted plan's spectrum captures (`service`, and the
+/// reclaim every `control_command` starts with), with the staging's analysis for the promotion to
+/// end (#1618). A promotion that does not keep the stream ends the analysis with it; the staging's
+/// stream record and staged window then describe a stream that no longer exists, so the record is
+/// written from the service and the window is dropped, as `spectrum_stream_stop` does. Without
+/// that, `spectrum_stream_analysis` would adopt the stale record again and re-report the window.
+/// A staging that is borrowed has no analysis running: the operation gets `None`.
+fn with_promotion_analysis<R>(
+    host: &mut AudioWorkletEngineHost,
+    operation: impl FnOnce(&mut AudioWorkletEngineHost, Option<&mut SpectrumAnalysis>) -> R,
+) -> R {
+    with_spectrum_staging(|slot| {
+        let Ok(mut staging) = slot.try_borrow_mut() else {
+            return operation(host, None);
+        };
+        let staging = &mut *staging;
+        let was_running = staging
+            .analysis
+            .as_ref()
+            .is_some_and(SpectrumAnalysis::stream_active);
+        let result = operation(host, staging.analysis.as_mut());
+        let running = staging
+            .analysis
+            .as_ref()
+            .is_some_and(SpectrumAnalysis::stream_active);
+        if was_running && !running {
+            staging.capture_len = 0;
+            staging.result_len = 0;
+            if let Some(metadata) = host.spectrum_stream_metadata().copied() {
+                write_stream_metadata(&mut staging.stream_metadata, &metadata);
+            }
+            staging.stream_metadata.result = RESULT_OK;
+        }
+        result
+    })
+}
+
 /// Run the control plane's service step once (issue #1381a D5, #1348 D1): reclaim every plan and
 /// attachment render has displaced, in the caller's thread and never in render. Control side
 /// only: the control Worker, or in `single` mode the worklet's message handler, never `process()`.
@@ -3297,7 +3334,9 @@ pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> 
 /// that is not ready; an epoch failure as [`RESULT_INTERNAL`] with the session's diagnostic.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_service(handle: u32) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| host.service())
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        with_promotion_analysis(host, AudioWorkletEngineHost::service)
+    })
 }
 
 /// Return the control request staging address for a frame of `len` bytes (issue #1562a D1), or
@@ -3321,12 +3360,12 @@ pub extern "C" fn miso_engine_web_v1_control_request_ptr(handle: u32, len: u32) 
 /// and a refused transaction is still an ok call with a non-ok frame); [`RESULT_INVALID_ARGUMENT`]
 /// for a wrong handle, a bad length or a frame the core cannot correlate;
 /// [`RESULT_WRONG_STATE`]; [`RESULT_BUFFER_TOO_SMALL`]; [`RESULT_BACKPRESSURE`];
-/// [`crate::RESULT_COMPILE_REJECTED`] for a typed refusal before commit (`web.apply.rebuild_pending`);
+/// [`crate::RESULT_COMPILE_REJECTED`] for a typed refusal before commit (`web.apply.shape_unavailable`);
 /// [`RESULT_INTERNAL`]. After any failure the response is the refusal's diagnostic.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_control_command(handle: u32, len: u32) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.control_command(len)
+        with_promotion_analysis(host, |host, analysis| host.control_command(len, analysis))
     })
 }
 
@@ -3485,8 +3524,10 @@ pub extern "C" fn miso_engine_web_v1_meter_header_ptr(handle: u32) -> u32 {
 /// Return the number of prepared resident observation effects in the current owner map.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_count(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        u32::try_from(host.observation_binding_count()).unwrap_or(0)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            u32::try_from(host.observation_binding_count()).unwrap_or(0)
+        })
     })
 }
 
@@ -3535,21 +3576,23 @@ fn copy_observation_id(handle: u32, index: u32, native: bool) -> u32 {
 /// Copy one bound observation effect's stable local slot ID into the observation-ID staging area.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_effect_slot_id(handle: u32, index: u32) -> u32 {
-    copy_observation_id(handle, index, false)
+    render_locked(|| copy_observation_id(handle, index, false))
 }
 
 /// Copy one bound observation effect's native contract ID into the observation-ID staging area.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_native_effect_id(handle: u32, index: u32) -> u32 {
-    copy_observation_id(handle, index, true)
+    render_locked(|| copy_observation_id(handle, index, true))
 }
 
 /// One bound observation effect's strip index (tracks, then submixes), or zero when out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_track_index(handle: u32, index: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.observation_binding(index)
-            .map_or(0, |binding| binding.address.track_index)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.observation_binding(index)
+                .map_or(0, |binding| binding.address.track_index)
+        })
     })
 }
 
@@ -3557,9 +3600,11 @@ pub extern "C" fn miso_engine_web_v1_observation_track_index(handle: u32, index:
 /// range. Zero is the retired `simd1` code, so it names no rack (issue #1096).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_rack(handle: u32, index: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.observation_binding(index)
-            .map_or(0, |binding| observation_rack_raw(binding.address.rack))
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.observation_binding(index)
+                .map_or(0, |binding| observation_rack_raw(binding.address.rack))
+        })
     })
 }
 
@@ -3567,19 +3612,23 @@ pub extern "C" fn miso_engine_web_v1_observation_rack(handle: u32, index: u32) -
 /// console slot's index in the session's slot order, or an insert's index.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_effect_index(handle: u32, index: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.observation_binding(index)
-            .map_or(0, |binding| binding.address.effect_index)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.observation_binding(index)
+                .map_or(0, |binding| binding.address.effect_index)
+        })
     })
 }
 
 /// Return one bound observation effect's declared tap count, or zero when out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_tap_count(handle: u32, index: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.observation_binding(index)
-            .and_then(|binding| u32::try_from(binding.descriptors.len()).ok())
-            .unwrap_or(0)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.observation_binding(index)
+                .and_then(|binding| u32::try_from(binding.descriptors.len()).ok())
+                .unwrap_or(0)
+        })
     })
 }
 
@@ -3590,10 +3639,12 @@ pub extern "C" fn miso_engine_web_v1_observation_tap_id(
     index: u32,
     tap_index: u32,
 ) -> u32 {
-    with_host(handle, 0, |host| {
-        host.observation_binding(index)
-            .and_then(|binding| binding.descriptors.get(tap_index as usize))
-            .map_or(0, |tap| tap.id.0)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.observation_binding(index)
+                .and_then(|binding| binding.descriptors.get(tap_index as usize))
+                .map_or(0, |tap| tap.id.0)
+        })
     })
 }
 
@@ -3787,35 +3838,41 @@ pub extern "C" fn miso_engine_web_v1_observation_result_bytes() -> u32 {
 /// lower bound: an export that appears or disappears fails that gate.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_count(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        u32::try_from(host.session_source_count()).unwrap_or(0)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            u32::try_from(host.session_source_count()).unwrap_or(0)
+        })
     })
 }
 
 /// Copy one canonical source ID into the ID staging buffer; returns its byte length.
 ///
-/// Zero means "no such source". [`BUFFER_SOURCE_ID`] is sized for the longest source or track ID
-/// in the compiled session.
+/// Zero means "no such source". [`BUFFER_SOURCE_ID`] is sized for the longest ID the grammar
+/// allows, so no session a rebuild commits outgrows it.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_id(handle: u32, index: u32) -> u32 {
-    with_host_mut(handle, 0, |host| host.copy_session_source_id(index))
+    render_locked(|| with_host_mut(handle, 0, |host| host.copy_session_source_id(index)))
 }
 
 /// Return one source's declared channel count, or zero for an out-of-range index.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_channels(handle: u32, index: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.session_source_shape(index)
-            .map_or(0, |shape| shape.channel_count)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.session_source_shape(index)
+                .map_or(0, |shape| shape.channel_count)
+        })
     })
 }
 
 /// Return one source's exact length in source sample frames, or zero out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_frames(handle: u32, index: u32) -> u64 {
-    with_host(handle, 0, |host| {
-        host.session_source_shape(index)
-            .map_or(0, |shape| shape.frames)
+    render_locked(|| {
+        with_host(handle, 0, |host| {
+            host.session_source_shape(index)
+                .map_or(0, |shape| shape.frames)
+        })
     })
 }
 
@@ -3979,24 +4036,22 @@ pub mod native_staging {
         })
     }
 
+    /// Read back the first `length` bytes of the source-ID staging, as the worklet reads them after
+    /// `miso_engine_web_v1_source_id` returns that length. `None` when the handle owns no staging
+    /// or `length` exceeds it.
+    pub fn staged_source_id(handle: u32, length: u32) -> Option<Vec<u8>> {
+        super::with_host_mut(handle, None, |host| {
+            host.source_id_mut()
+                .and_then(|staging| staging.get(..length as usize))
+                .map(<[u8]>::to_vec)
+        })
+    }
+
     /// Fill the planar source-PCM staging with `value`, as the worklet copies a chunk's planes
     /// through `miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_PCM)`.
     pub fn source_pcm(handle: u32, value: f32) -> bool {
         super::with_host_mut(handle, false, |host| {
             host.source_pcm_mut().map(|pcm| pcm.fill(value)).is_some()
-        })
-    }
-
-    /// Run one structural command frame through the control plane of the host `handle` names
-    /// (#1381a gates 2 and 4), which publishes the successor plan. The result is the control
-    /// plane's refusal rendered as its debug text, or `None` for an unknown handle.
-    #[cfg(feature = "test-support")]
-    pub fn structural_command(handle: u32, request: &[u8]) -> Option<Result<Vec<u8>, String>> {
-        super::with_host_mut(handle, None, |host| {
-            Some(
-                host.structural_command_for_test(request)
-                    .map_err(|error| format!("{error:?}")),
-            )
         })
     }
 
@@ -5689,6 +5744,176 @@ mod spectrum_ffi_tests {
             SPECTRUM_STREAM_STATUS_STOPPED
         );
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    /// The nine-track fixture with a muted copy of its first track (whose ID sorts first) and the
+    /// copy's route to the output, as one rebuild transaction at `revision` (#1618, m7).
+    fn adding_a_strip_frame(request: u64, revision: u64) -> Vec<u8> {
+        use protocol::{
+            CommandPayload, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit,
+            SessionRevision, TypedCommandFrame,
+        };
+        let model = session::parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("the fixture parses");
+        let mut track = model.tracks[0].clone();
+        track.id = session::StableId::parse("a-muted").expect("track ID");
+        track.fader.left_mute = true;
+        track.fader.right_mute = true;
+        let mut route = model.routes[0].clone();
+        route.id = session::StableId::parse("a-muted-main").expect("route ID");
+        let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("a track route")
+        };
+        *track_id = track.id.clone();
+        let edits = [
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ];
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                    payload: CommandPayload::SessionTransactionApply(&edits),
+                },
+                &mut bytes,
+            )
+            .expect("a transaction frame");
+        bytes.truncate(length);
+        bytes
+    }
+
+    /// A rebuild whose promotion does not keep the spectrum stream ends the instance's analysis
+    /// with it (#1618, m1 and m7 of the batch 12b review), whichever control export runs the
+    /// promotion: the service step, or the reclaim a control command starts with. The swap carries
+    /// (the engine reports it so) but its pairing does not name the capture, so the successor's
+    /// fresh capture is installed and the service's stream ends.
+    ///
+    /// Test value: red if `miso_engine_web_v1_service` or `miso_engine_web_v1_control_command`
+    /// promotes without the staging's analysis: the stream ends but the analysis stays active, so
+    /// `spectrum_stream_reset` answers ok instead of a wrong state and `spectrum_stream_analysis`
+    /// re-analyzes the last window of a stream that no longer exists.
+    #[test]
+    fn a_promotion_that_drops_the_stream_ends_the_analysis() {
+        for by_service in [true, false] {
+            stage_left_output_request();
+            let document =
+                include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+            let handle = test_boot(
+                document.as_bytes(),
+                WebBootOptions {
+                    require_sample_rate_hz: 48_000,
+                    require_quantum_frames: 128,
+                    live_control_meter_blocks: 2,
+                    live_control_observation_taps: 4,
+                    ..WebBootOptions::explicit_defaults()
+                },
+            );
+            assert_ne!(handle, 0, "spectrum fixture must boot");
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_start(handle, 0.0),
+                RESULT_OK
+            );
+            assert_eq!(
+                test_copy_staging(handle, BUFFER_SOURCE_ID, b"fixture-source"),
+                RESULT_OK
+            );
+            assert_eq!(test_fill_source_pcm(handle, 0.25), RESULT_OK);
+            let mut block = 0_u64;
+            let mut render = |count: u64| {
+                for _ in 0..count {
+                    assert_eq!(
+                        miso_engine_web_v1_source_submit(handle, 14, 1, block * 128, 2, 128, 0),
+                        RESULT_OK,
+                        "source block {block}"
+                    );
+                    assert_eq!(miso_engine_web_v1_render(handle, 128), RESULT_OK);
+                    block += 1;
+                }
+            };
+            render(16);
+            assert_eq!(miso_engine_web_v1_spectrum_stream_read(handle), RESULT_OK);
+            assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
+            assert!(with_spectrum_staging(|slot| {
+                slot.borrow()
+                    .analysis
+                    .as_ref()
+                    .is_some_and(SpectrumAnalysis::stream_active)
+            }));
+
+            // A rebuild commits, and the block after it adopts the successor plan.
+            let revision = with_host(handle, 0, AudioWorkletEngineHost::committed_revision);
+            let (result, _) =
+                native_staging::control_command(handle, &adding_a_strip_frame(1, revision))
+                    .expect("the control staging");
+            assert_eq!(result, RESULT_OK);
+            render(2);
+            // The pairing names nothing: the swap carried, but not this capture.
+            with_host_mut(handle, (), |host| {
+                let ready = host.ready.as_mut().expect("ready");
+                let waiting = ready
+                    .pending_shapes
+                    .iter_mut()
+                    .filter(|entry| entry.adoption == Some(true))
+                    .filter_map(|entry| entry.spectrum.as_mut())
+                    .map(|handover| handover.pairing = Box::default())
+                    .count();
+                assert_eq!(waiting, 1, "the adopted plan waits for its promotion");
+            });
+            if by_service {
+                assert_eq!(miso_engine_web_v1_service(handle), RESULT_OK);
+            } else {
+                // Any control command reclaims first; a revision probe is the lightest.
+                let probe = {
+                    use protocol::{
+                        CommandPayload, ExpectedRevision, ProtocolCodec, RequestId,
+                        TypedCommandFrame,
+                    };
+                    let codec = ProtocolCodec::default();
+                    let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+                    let length = codec
+                        .encode_command_frame_into(
+                            &TypedCommandFrame {
+                                request_id: RequestId::new(2).expect("nonzero request"),
+                                expected_revision: ExpectedRevision::Any,
+                                payload: CommandPayload::CapabilitiesGet,
+                            },
+                            &mut bytes,
+                        )
+                        .expect("a capabilities frame");
+                    bytes.truncate(length);
+                    bytes
+                };
+                let (result, _) =
+                    native_staging::control_command(handle, &probe).expect("the control staging");
+                assert_eq!(result, RESULT_OK);
+            }
+
+            assert!(
+                with_spectrum_staging(|slot| {
+                    slot.borrow()
+                        .analysis
+                        .as_ref()
+                        .is_some_and(|analysis| !analysis.stream_active())
+                }),
+                "the analysis ended with the stream (by_service = {by_service})"
+            );
+            assert_eq!(
+                miso_engine_web_v1_spectrum_stream_reset(),
+                RESULT_WRONG_STATE,
+                "there is no stream to reset (by_service = {by_service})"
+            );
+            assert_ne!(
+                miso_engine_web_v1_spectrum_stream_analysis(),
+                RESULT_OK,
+                "the analysis does not re-report the last window (by_service = {by_service})"
+            );
+            assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+        }
     }
 
     /// Issue #1592 D4. Turns red if a stream start on a collection discards a caller's arm (the

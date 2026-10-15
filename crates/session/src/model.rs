@@ -211,6 +211,11 @@ closed_tokens! {
     }
 }
 
+/// The most channels one source can declare: `Source::channels` is a `u8`, and the grammar has no
+/// narrower launch limit. A host sizes any staging that must hold a source of a session it has not
+/// yet seen (a rebuild can add one) by this.
+pub const SOURCE_CHANNELS_MAXIMUM: u32 = u8::MAX as u32;
+
 /// Explicit PCM output profile.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutputProfile {

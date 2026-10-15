@@ -9,6 +9,7 @@ export type {
   ObservationSubscriptionBounds,
   ObservationSubscriptionConfiguration,
   ObservationSubscriptionLimits,
+  ObservationSubscriptionEnd,
   ObservationSubscriptionNotification,
   ObservationSubscriptionReceipt,
   ObservationSubscriptionRequest,

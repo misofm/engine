@@ -13,8 +13,12 @@
 //! codes. Per block it compares the bits of the two output planes. At the end the two hosts report
 //! the same `live_values_superseded` count, and every page of `CONTROL_LIST_GET` and
 //! `CONTROL_STATE_GET` and the `SESSION_SNAPSHOT_GET` bytes are byte-identical. The whole run
-//! repeats at 44.1, 48, 88.2 and 96 kHz. The rebuild part of the browser's parity (a
-//! `delay_samples` edit) is #1562b's: until then the browser refuses it `web.apply.rebuild_pending`.
+//! repeats at 44.1, 48, 88.2 and 96 kHz. The script holds the edits that take the rebuild arm (a
+//! route into the output, the prepared bypass of the delay and the multiband compressor, and
+//! `delay_samples`): the browser prepares and publishes the successor like the C ABI does, and the
+//! two hosts answer the same bytes and render the same bits across the swap (#1562b). No launch
+//! effect declares an audio-rate parameter, so that row of the batch 7 amendment has no edit to
+//! script.
 //!
 //! It absorbs #1364 gate 3 (the edits carry no per-edit ramp, so each host resolves the session's
 //! own length, and one pan carries a window of its own while another does not) and #1399 (a fader,
@@ -62,6 +66,8 @@ const EFFECTIVE_FADER_DB: u32 = 64;
 const ADDED_VCA: VcaRef = VcaRef { id: "w" };
 const OUTER_VCA: VcaRef = VcaRef { id: "outer" };
 const MATRIX_MODE_ROW: u32 = 1;
+/// The builtin row of a strip's `delay_samples`.
+const DELAY_SAMPLES_ROW: u32 = 11;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
 /// Which lane(s) of a dual-mono value an edit writes.
@@ -206,6 +212,19 @@ enum Edit {
     AddVca,
     /// A VCA that holds the VCA `v` and the added VCA `w`: a nested VCA.
     NestedVca,
+    /// The gain of the route from `t1` into the output (a rebuild: that route has no live lane).
+    OutputGain {
+        db: f32,
+    },
+    /// The mute of the route from `t1` into the output (a rebuild).
+    OutputMute {
+        muted: bool,
+    },
+    /// A strip's `delay_samples` on both lanes (a rebuild: it moves the plan's latency).
+    DelaySamples {
+        strip: Strip,
+        samples: f32,
+    },
 }
 
 /// How a scripted edit must end on both hosts.
@@ -213,6 +232,8 @@ enum Edit {
 enum Outcome {
     /// Accepted: `live` on both hosts (`monitor` for solo).
     Accepted,
+    /// Accepted by a plan rebuild: `rebuild` on both hosts (#1562b).
+    Rebuilt,
     /// Accepted and a no-op: the edit repeats the committed value, so both hosts answer
     /// `model_only` and write no record.
     Unchanged,
@@ -244,6 +265,15 @@ const fn live_ramped(block: u64, edit: Edit, ramp: u32) -> Step {
         edit,
         ramp: Some(ramp),
         outcome: Outcome::Accepted,
+    }
+}
+
+const fn rebuilt(block: u64, edit: Edit) -> Step {
+    Step {
+        block,
+        edit,
+        ramp: None,
+        outcome: Outcome::Rebuilt,
     }
 }
 
@@ -689,10 +719,35 @@ fn script() -> Vec<Step> {
             480,
         ),
         unchanged(39, Edit::SendMute { muted: false }, 480),
-        // A submix's trim and pan (switched from its matrix first), one lane of a high-pass. A
-        // route into the output has no live lane: its gain and mute are a plan rebuild, which the
-        // C ABI applies and the browser refuses `web.apply.rebuild_pending` until #1562b (D9), so
-        // its rows join this script with that issue.
+        // The rebuild arm (#1562b): a route into the output has no live lane, so its gain and
+        // mute rebuild the plan; so does the prepared bypass of the delay and of the multiband
+        // compressor, and a strip's `delay_samples`, which moves the plan's latency. Each is a
+        // swap at the next block on both hosts, with the watermark advancing at that block.
+        rebuilt(11, Edit::OutputGain { db: -3.0 }),
+        rebuilt(17, Edit::OutputMute { muted: true }),
+        rebuilt(19, Edit::OutputMute { muted: false }),
+        rebuilt(
+            21,
+            Edit::DelaySamples {
+                strip: T1,
+                samples: 64.0,
+            },
+        ),
+        rebuilt(
+            34,
+            Edit::Bypass {
+                insert: MULTIBAND,
+                bypassed: true,
+            },
+        ),
+        rebuilt(
+            43,
+            Edit::Bypass {
+                insert: DELAY,
+                bypassed: true,
+            },
+        ),
+        // A submix's trim and pan (switched from its matrix first), one lane of a high-pass.
         live(
             48,
             Edit::Trim {
@@ -1139,6 +1194,28 @@ impl CAbi {
                     members: vec![id(VCA.id), id(ADDED_VCA.id)],
                 },
             }],
+            Edit::OutputGain { db } => vec![set(
+                address(
+                    Owner::Route(id("t1-main")),
+                    Section::Own,
+                    ROUTE_GAIN_DB,
+                    ParameterChannel::Both,
+                ),
+                db,
+            )],
+            Edit::OutputMute { muted } => vec![set(
+                address(
+                    Owner::Route(id("t1-main")),
+                    Section::Own,
+                    ROUTE_MUTE,
+                    ParameterChannel::Both,
+                ),
+                toggle(muted),
+            )],
+            Edit::DelaySamples { strip, samples } => vec![set(
+                Self::strip_address(strip, DELAY_SAMPLES_ROW, Lanes::Both),
+                samples,
+            )],
             Edit::Solo { strip, on } => vec![set(
                 address(
                     Owner::Strip(id(strip.id)),
@@ -1273,41 +1350,64 @@ impl CAbi {
 
     fn step(&mut self, block: u64) -> Vec<u32> {
         for (feed, strip) in [T1, T2, T3].into_iter().enumerate() {
-            let [left, right] = planes(feed as u64, block);
-            let pointers = [left.as_ptr(), right.as_ptr()];
-            let chunk = SourceChunk {
-                struct_size: SOURCE_CHUNK_SIZE,
-                sample_rate_hz: self.rate,
-                generation: 1,
-                start_frame: block * u64::from(QUANTUM),
-                planes: pointers.as_ptr(),
-                plane_count: 2,
-                frames: QUANTUM,
-                end_of_region: 0,
-                reserved0: 0,
-            };
-            let mut report = SubmitReport {
-                struct_size: SUBMIT_REPORT_SIZE,
-                reserved0: 0,
-                accepted_frames: 0,
-                cumulative_written_frames: 0,
-                active_generation: 0,
-            };
-            let name = format!("src-{}", strip.id);
-            // SAFETY: The session is live and used by this thread alone; the chunk's planes and
-            // the report are owned storage that outlives the synchronous call.
-            let code = unsafe {
-                capi::miso_engine_v1_source_submit_planar_f32(
-                    self.session,
-                    name.as_ptr(),
-                    name.len() as u64,
-                    &chunk,
-                    &mut report,
-                )
-            };
-            assert_eq!(code, C_RESULT_OK, "C ABI source {}", strip.id);
-            assert_eq!(report.accepted_frames, u64::from(QUANTUM));
+            self.submit(&format!("src-{}", strip.id), feed as u64, block);
         }
+        self.render(block)
+    }
+
+    /// Submit block `block`'s PCM of feed `feed` to the source `name`, at the source's own position
+    /// `block`.
+    fn submit(&mut self, name: &str, feed: u64, block: u64) {
+        self.submit_from(name, feed, block, block, 1);
+    }
+
+    /// [`Self::submit`], with the chunk of `generation` starting at the source's frame
+    /// `start_block * QUANTUM`.
+    fn submit_from(
+        &mut self,
+        name: &str,
+        feed: u64,
+        block: u64,
+        start_block: u64,
+        generation: u64,
+    ) {
+        let [left, right] = planes(feed, block);
+        let pointers = [left.as_ptr(), right.as_ptr()];
+        let chunk = SourceChunk {
+            struct_size: SOURCE_CHUNK_SIZE,
+            sample_rate_hz: self.rate,
+            generation,
+            start_frame: start_block * u64::from(QUANTUM),
+            planes: pointers.as_ptr(),
+            plane_count: 2,
+            frames: QUANTUM,
+            end_of_region: 0,
+            reserved0: 0,
+        };
+        let mut report = SubmitReport {
+            struct_size: SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: 0,
+            cumulative_written_frames: 0,
+            active_generation: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; the chunk's planes and
+        // the report are owned storage that outlives the synchronous call.
+        let code = unsafe {
+            capi::miso_engine_v1_source_submit_planar_f32(
+                self.session,
+                name.as_ptr(),
+                name.len() as u64,
+                &chunk,
+                &mut report,
+            )
+        };
+        assert_eq!(code, C_RESULT_OK, "C ABI source {name}");
+        assert_eq!(report.accepted_frames, u64::from(QUANTUM));
+    }
+
+    /// Render block `block` and return the output's bits.
+    fn render(&mut self, block: u64) -> Vec<u32> {
         let mut pcm = vec![f32::NAN; QUANTUM as usize * 2];
         let output = PlanarOutput {
             struct_size: PLANAR_OUTPUT_SIZE,
@@ -1433,6 +1533,18 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
                     assert!(
                         matches!(&c, Verdict::Applied { path: got, .. } if *got == path),
                         "{label}: the path is {path:?}, got {c:?}"
+                    );
+                }
+                Outcome::Rebuilt => {
+                    assert!(
+                        matches!(
+                            &c,
+                            Verdict::Applied {
+                                path: EditPath::Rebuild,
+                                ..
+                            }
+                        ),
+                        "{label}: the path is rebuild, got {c:?}"
                     );
                 }
                 Outcome::Unchanged => {
@@ -1596,6 +1708,107 @@ fn the_status_words_carry_the_applied_revision_the_c_abi_reports() {
     }
 }
 
+/// #1349's rebuild leg (#1562b): a rebuild, then a live edit before the swap. The status words
+/// stay at the initial revision through the blocks before the swap block (neither commit is
+/// applied until a plan that carries it renders), then both revisions are in effect together from
+/// the swap block's first sample, and the words equal the C ABI's `miso_engine_v1_plan_watermark`
+/// after every block.
+///
+/// Test value: red if the browser publishes a rebuild's revision when it commits rather than when
+/// the swap block renders (the words would move before block 3), if the live edit committed behind
+/// a pending rebuild is reported at its own earlier block, or if the swap block's sample or
+/// outcome flags are the browser's own computation and not the plan's.
+#[test]
+fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
+    for rate in RATES {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let initial = (model.revision, 0, 1);
+        for block in 0..3 {
+            let _ = (browser.step(block), c_abi.step(block));
+            assert_eq!(status_watermark(&browser), initial, "{rate} Hz: {block}");
+            assert_eq!(c_abi.watermark(), initial);
+        }
+        let rebuild = Edit::DelaySamples {
+            strip: T1,
+            samples: 64.0,
+        };
+        let live_edit = Edit::Fader {
+            strip: T2,
+            lanes: Lanes::Both,
+            db: -6.0,
+        };
+        let (rebuilt, _) = browser.transaction_reply(&CAbi::edits(rebuild, None));
+        let (c_rebuilt, _) = c_abi.edit(rebuild, None);
+        assert_eq!(rebuilt, c_rebuilt);
+        assert!(matches!(
+            rebuilt,
+            Verdict::Applied {
+                path: EditPath::Rebuild,
+                revision
+            } if revision == model.revision + 1
+        ));
+        assert_eq!(
+            status_watermark(&browser),
+            initial,
+            "{rate} Hz: never early"
+        );
+        assert_eq!(c_abi.watermark(), initial);
+        // The live edit rides the pending successor's lanes.
+        let (edited, _) = browser.transaction_reply(&CAbi::edits(live_edit, None));
+        let (c_edited, _) = c_abi.edit(live_edit, None);
+        assert_eq!(edited, c_edited);
+        assert!(matches!(
+            edited,
+            Verdict::Applied {
+                path: EditPath::Live,
+                revision
+            } if revision == model.revision + 2
+        ));
+        assert_eq!(
+            status_watermark(&browser),
+            initial,
+            "{rate} Hz: still pending"
+        );
+        assert_eq!(c_abi.watermark(), initial);
+
+        let _ = (browser.step(3), c_abi.step(3));
+        assert_eq!(
+            status_watermark(&browser),
+            c_abi.watermark(),
+            "{rate} Hz: the swap block"
+        );
+        let (revision, first_sample, flags) = status_watermark(&browser);
+        assert_eq!(
+            revision,
+            model.revision + 2,
+            "{rate} Hz: both revisions apply"
+        );
+        assert_eq!(
+            first_sample,
+            3 * u64::from(QUANTUM),
+            "{rate} Hz: the swap block"
+        );
+        let _ = flags;
+        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+        let record = browser.host.watermark();
+        assert_eq!(
+            (record.revision, record.first_sample, record.outcome_flags),
+            c_abi.watermark(),
+            "{rate} Hz: the control-side record"
+        );
+        for block in 4..8 {
+            let _ = (browser.step(block), c_abi.step(block));
+            assert_eq!(
+                status_watermark(&browser),
+                c_abi.watermark(),
+                "{rate} Hz: block {block}"
+            );
+        }
+    }
+}
+
 /// Block the bypass of `a_live_bypass_crossfades_alike_on_both_hosts` is submitted before.
 const BYPASS_BLOCK: u64 = 6;
 
@@ -1726,7 +1939,7 @@ fn every_scripted_edit_is_heard() {
         // A step that a later step of the same block replaces (same strip's fader, same strip's
         // pan, same insert parameter) is superseded by design, before any render reads it: that
         // is what the equal superseded counts check, so it is never heard.
-        if !matches!(full[omitted].outcome, Outcome::Accepted)
+        if !matches!(full[omitted].outcome, Outcome::Accepted | Outcome::Rebuilt)
             || full[omitted + 1..].iter().any(|later| {
                 later.block == full[omitted].block && replaces(&full[omitted].edit, &later.edit)
             })
@@ -1902,4 +2115,168 @@ fn both_hosts_bound_the_vcas_alike() {
     let browser_diagnostics = browser_boot_refusal(&too_many_vcas).expect("the browser refuses");
     assert_eq!(c_diagnostics, browser_diagnostics, "VCA count");
     assert_eq!(c_diagnostics, b"host.resource.count\t$\n".to_vec());
+}
+
+// ---------------------------------------------------------------------------------------------
+// A rebuild adds a source the boot session did not declare (#1562b review B1)
+// ---------------------------------------------------------------------------------------------
+
+/// The longest source ID the grammar allows.
+fn longest_id() -> String {
+    format!("s{}", "x".repeat(session::STABLE_ID_MAXIMUM_BYTES - 1))
+}
+
+/// A session whose only source is mono (ID `m`), with one track and one route, no console slot,
+/// no submix and no VCA, and the fixture's stereo source, track and route to add later. (A session
+/// with no source or track does not prepare: its graph is empty.)
+fn mono_model(
+    rate: u32,
+) -> (
+    SessionModel,
+    session::Source,
+    session::Track,
+    session::Route,
+) {
+    let mut model = model_at(rate);
+    let (source, mut track, route) = (
+        model.sources[0].clone(),
+        model.tracks[0].clone(),
+        model.routes[0].clone(),
+    );
+    track.console.clear();
+    track.inserts.effects.clear();
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    model.submixes.clear();
+    model.vcas.clear();
+    let (mut mono_source, mut mono_track, mut mono_route) =
+        (source.clone(), track.clone(), route.clone());
+    mono_source.id = id("m");
+    mono_source.channels = 1;
+    mono_track.id = id("m");
+    mono_track.source_id = id("m");
+    mono_track.left_source_channel = 0;
+    mono_track.right_source_channel = 0;
+    mono_route.id = id("m-main");
+    let session::RouteSource::Track { track_id, .. } = &mut mono_route.source else {
+        panic!("the fixture routes a track")
+    };
+    *track_id = id("m");
+    model.sources = vec![mono_source];
+    model.tracks = vec![mono_track];
+    model.routes = vec![mono_route];
+    (model, source, track, route)
+}
+
+/// Both hosts boot a session whose only source is mono; a rebuild then adds a stereo source whose ID has the
+/// longest length the grammar allows; the browser lists it in its session map and takes its PCM,
+/// and both hosts render the same bits for it.
+///
+/// Test value: red if a rebuild that adds a source (the longest ID, stereo, after a mono-only boot)
+/// is rendered or fed differently by the browser than by the C ABI: the source rows, the swap, the
+/// fresh-generation seek and the chunk path agree bit for bit. The staging the exports use for the
+/// same session is gated in `plan_exchange_threads.rs`, since this row drives the host's safe API.
+#[test]
+fn a_rebuild_adds_the_longest_stereo_source_to_a_session_that_booted_with_a_mono_source_only() {
+    for rate in RATES {
+        let (model, mut source, mut track, mut route) = mono_model(rate);
+        let name = longest_id();
+        source.id = id(&name);
+        source.channels = 2;
+        source.frames = u64::from(QUANTUM) * (BLOCKS + 8);
+        track.id = id("t1");
+        track.source_id = source.id.clone();
+        route.id = id("t1-main");
+        let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("the fixture routes a track")
+        };
+        *track_id = track.id.clone();
+        let edits = [
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ];
+
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        assert_eq!(
+            browser.host.session_source_count(),
+            1,
+            "{rate} Hz: boots mono"
+        );
+        for block in 0..2 {
+            assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+            let _ = c_abi.render(block);
+        }
+        let (rebuilt, b_reply) = browser.transaction_reply(&edits);
+        let c_reply = c_abi.send(
+            CommandPayload::SessionTransactionApply(&edits),
+            ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
+        );
+        assert_eq!(b_reply, c_reply, "{rate} Hz: the same reply bytes");
+        assert!(
+            matches!(
+                rebuilt,
+                Verdict::Applied {
+                    path: EditPath::Rebuild,
+                    ..
+                }
+            ),
+            "{rate} Hz: adding a source is a rebuild, got {rebuilt:?}"
+        );
+        // The swap block: the successor adopts at the next block boundary.
+        assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+        let _ = c_abi.render(2);
+
+        assert_eq!(
+            browser.host.session_source_count(),
+            2,
+            "{rate} Hz: the map lists it"
+        );
+        // Canonical order is by ID: `m` then the long one.
+        assert_eq!(browser.host.session_source_id(1), Some(name.as_str()));
+        assert_eq!(
+            browser
+                .host
+                .session_source_shape(1)
+                .map(|shape| shape.channel_count),
+            Some(2)
+        );
+
+        // The source enters at the render clock the successor adopted at, so it starts at its own
+        // frame 0 from block 3 on: a seek to a new generation, then the chunks of that generation.
+        assert_eq!(
+            browser.host.seek_source(name.as_bytes(), 2, 0),
+            host_web::RESULT_OK
+        );
+        // SAFETY: The session is live and used by this thread alone; the name outlives the call.
+        let code = unsafe {
+            capi::miso_engine_v1_source_seek(c_abi.session, name.as_ptr(), name.len() as u64, 2, 0)
+        };
+        assert_eq!(code, C_RESULT_OK, "{rate} Hz: C ABI seek");
+        let mut heard = false;
+        for block in 3..11 {
+            let [left, right] = planes(0, block);
+            assert_eq!(
+                browser.host.submit_source(
+                    name.as_bytes(),
+                    2,
+                    (block - 3) * u64::from(QUANTUM),
+                    rate,
+                    &[&left, &right],
+                    QUANTUM,
+                    false,
+                ),
+                host_web::RESULT_OK,
+                "{rate} Hz: the browser takes the new source's PCM"
+            );
+            c_abi.submit_from(&name, 0, block, block - 3, 2);
+            assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+            let b = bits(browser.host.output_pcm().expect("browser output"));
+            let c = c_abi.render(block);
+            assert_eq!(b, c, "{rate} Hz: block {block}: the two hosts render alike");
+            heard |= b.iter().any(|word| f32::from_bits(*word) != 0.0);
+        }
+        assert!(heard, "{rate} Hz: the new source is heard");
+    }
 }

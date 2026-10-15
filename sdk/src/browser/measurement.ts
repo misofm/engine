@@ -26,6 +26,12 @@ export interface MeterUpdate {
   readonly sequence: bigint;
   readonly generation: bigint;
   readonly validity: number;
+  /**
+   * Meter windows dropped before this one, saturating: the host's own count plus the windows the
+   * SDK could not name and dropped (the frame carried a structure epoch whose strip list the page no
+   * longer held, #1562b). The first update after such a drop also sets the loss bit (`4`) in
+   * `validity`.
+   */
   readonly lossCount: number;
   readonly windows: number;
   /** This half-open span timestamps the peak window only. */
@@ -58,6 +64,23 @@ export type TelemetryListener = (update: TelemetryUpdate) => void;
 
 type LeaseResult = { readonly result: number };
 
+/** The strip order a meter frame's strips are named by (#1562b). */
+export interface MeterStripOrders {
+  /** The order of the list of `epoch` if the page holds it now, else `undefined`. */
+  readonly held: (epoch: number) => StripNames | undefined;
+  /**
+   * The order of the list of `epoch`, read if it is not held, or `undefined` when the page cannot
+   * name that list's strips any more (a frame of a plan the page never saw the list of).
+   */
+  readonly of: (epoch: number) => Promise<StripNames | undefined>;
+}
+
+/** The strips of one list, tracks then submixes, by stable ID. */
+export interface StripNames {
+  readonly tracks: readonly string[];
+  readonly submixes: readonly string[];
+}
+
 type HostFeed<Frame, Update> = {
   readonly subscribe: (listener: (update: Update) => void) => Promise<() => void>;
   readonly close: () => void;
@@ -73,7 +96,11 @@ function createHostFeed<Frame, Update>(options: {
   readonly name: "meters" | "telemetry";
   readonly available: boolean;
   readonly lease: (onFrame: ((frame: Frame) => void) | null) => Promise<LeaseResult>;
-  readonly project: (frame: Frame) => Update;
+  /**
+   * The frame as an update. A projection that needs a read (a meter frame of a structure the page
+   * holds no strip order for) answers later; `undefined` drops the frame.
+   */
+  readonly project: (frame: Frame) => Update | undefined | Promise<Update | undefined>;
 }): HostFeed<Frame, Update> {
   const listeners = new Set<{ readonly listener: (update: Update) => void }>();
   const pendingAdmissions = new Map<
@@ -116,15 +143,8 @@ function createHostFeed<Frame, Update>(options: {
         const wanted = !closed && listeners.size > 0;
         if (wanted === armed) return;
         if (wanted) {
-          const ack = await lease((frame) => {
-            let update: Update;
-            try {
-              update = options.project(frame);
-            } catch {
-              // Host validation is authoritative. A malformed custom host frame must not make
-              // one callback prevent ownership reconciliation or another callback's delivery.
-              return;
-            }
+          const deliver = (update: Update | undefined): void => {
+            if (update === undefined) return;
             for (const subscription of [...listeners]) {
               if (closed || !listeners.has(subscription)) continue;
               try {
@@ -132,6 +152,40 @@ function createHostFeed<Frame, Update>(options: {
               } catch {
                 // Consumer callback failures are isolated from sibling listeners and the lease.
               }
+            }
+          };
+          // Frames are delivered in the order they arrived. A frame whose projection must read
+          // (the first frame of a new structure) holds the frames behind it until it settles.
+          let tail: Promise<void> | undefined;
+          const ack = await lease((frame) => {
+            const project = (): Promise<void> | undefined => {
+              let projected: Update | undefined | Promise<Update | undefined>;
+              try {
+                projected = options.project(frame);
+              } catch {
+                // Host validation is authoritative. A malformed custom host frame must not make
+                // one callback prevent ownership reconciliation or another callback's delivery.
+                return undefined;
+              }
+              if (projected instanceof Promise) {
+                return projected.then(deliver, () => undefined);
+              }
+              deliver(projected);
+              return undefined;
+            };
+            if (tail !== undefined) {
+              const chained: Promise<void> = tail.then(project).then(() => {
+                if (tail === chained) tail = undefined;
+              });
+              tail = chained;
+              return;
+            }
+            const waiting = project();
+            if (waiting !== undefined) {
+              const chained: Promise<void> = waiting.then(() => {
+                if (tail === chained) tail = undefined;
+              });
+              tail = chained;
             }
           });
           if (ack.result !== constantValue("resultCodes", "ok")) {
@@ -289,17 +343,53 @@ export interface BrowserMeasurementFeeds {
   readonly close: () => void;
 }
 
+/** The shipped header's validity bit for "one or more windows were dropped before this one". */
+const METER_VALIDITY_LOSS = 4;
+const MAXIMUM_LOSS_COUNT = 0xffff_ffff;
+
 export function createMeasurementFeeds(
   host: Pick<MisoAudioWorkletHost, "meters" | "telemetry">,
-  trackIds: readonly string[],
-  submixIds: readonly string[],
+  orders: MeterStripOrders,
   available: boolean,
 ): BrowserMeasurementFeeds {
+  // The windows the page could not name (no list of their epoch is held), counted so the loss is
+  // reported and never silent: every update after a drop carries the total in `lossCount` (it
+  // saturates like the host's own count), and the first one sets the loss bit in `validity`.
+  let unnamedWindows = 0;
+  let unnamedReported = true;
+  const reportingUnnamed = (update: MeterUpdate): MeterUpdate => {
+    if (unnamedWindows === 0) return update;
+    const flagged = !unnamedReported;
+    unnamedReported = true;
+    return Object.freeze({
+      ...update,
+      lossCount: Math.min(update.lossCount + unnamedWindows, MAXIMUM_LOSS_COUNT),
+      validity: flagged ? update.validity | METER_VALIDITY_LOSS : update.validity,
+    });
+  };
   const meters = createHostFeed<MisoMeterFrame, MeterUpdate>({
     name: "meters",
     available,
     lease: (onFrame) => host.meters({ enabled: onFrame !== null, onFrame }),
-    project: (frame) => meterProjection(frame, trackIds, submixIds),
+    // A frame names its strips by the list of the structure epoch it carries (#1562b): a rebuild
+    // that adds, removes or reorders a strip changes the epoch in the frame of the block that
+    // adopted the plan, and the order is read once for the new epoch. A frame of an epoch whose
+    // list the page cannot name is dropped and counted (a frame named by another list would key its
+    // readings by the wrong strips); the count reaches the listener with the next update.
+    project: (frame) => {
+      const held = orders.held(frame.structureEpoch);
+      if (held !== undefined) {
+        return reportingUnnamed(meterProjection(frame, held.tracks, held.submixes));
+      }
+      return orders.of(frame.structureEpoch).then((named) => {
+        if (named === undefined) {
+          unnamedWindows = Math.min(unnamedWindows + Math.max(1, frame.windows), MAXIMUM_LOSS_COUNT);
+          unnamedReported = false;
+          return undefined;
+        }
+        return reportingUnnamed(meterProjection(frame, named.tracks, named.submixes));
+      });
+    },
   });
   const telemetry = createHostFeed<MisoTelemetryFrame, TelemetryUpdate>({
     name: "telemetry",
