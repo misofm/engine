@@ -60,6 +60,7 @@ exactly as before. The fader row leaves the classifier's mask in #1648, in the s
   A gain the conversion refuses is unreachable (#1645 bounds the curve to the fader domain and
   `vca_compose_db` clamps, #1646 D6); it keeps the current target, adds one to a render counter and fails a
   `debug_assert`.
+  *(Superseded by the U2 fold, MINOR-7: the counters were deleted; the condition is unreachable, keeps the stage's target and fails its `debug_assert`.)*
 - **D2. First blocks.** A fresh plan starts every automated lane at its prepared value (#1646
   D2), so its first block emits no `Set`. A lane a successor adds or restarts takes a `Set` at its
   first block when the curve at that block's node time differs from its prepared bits (README A1.4,
@@ -514,6 +515,7 @@ is #1647c.
   `RememberGain`, `Set` -> `SetGain`. A refused conversion or sink push keeps the target, adds one
   to the lane's `refused_events` and fails a `debug_assert` (unreachable). `finish` consumes any
   event a stopped stage did not pull, so the cell's state still advances.
+  *(Superseded by the U2 fold, MINOR-7: the counters were deleted; the condition is unreachable, keeps the stage's target and fails its `debug_assert`.)*
 - **Fader bank.** `process` renders through `BuiltinFaderBank::process_with(driver)` when the bank
   has automation, else the old `process` (a session without automation runs the same code). The
   fused fader-matrix bank fuses through `try_process_settled_with_matrix_and_operations`, so it
@@ -557,6 +559,7 @@ is #1647c.
    automated lanes). A bank field would grow `size_of::<FaderBankProcessor>()` for every session
    and move `fixtures/graph/v1/direct-route.resources.json` (#1647a's finding); the slot is paid
    only by automated sessions. They are read off render; no qualification row is added.
+   *(Superseded by the U2 fold, MINOR-7: the counters were deleted; the condition is unreachable, keeps the stage's target and fails its `debug_assert`.)*
 2. **The oracle's automated fader never fuses or defers** (the bank fuses when no event falls in
    the block). Both are exact; the oracle has no fused-with-operations form, and the parity gate
    below proves the bits equal.
@@ -645,6 +648,7 @@ The held-ramp obligation (D1.6, batch 13b amendment, gate 8).
 - No new `debug_assert`: a refused move uses the existing refusal closure and counter
   (`refused_events`). The stage's `fader_operations_stopped` stays summed per lane (constraint 6,
   #1647b). `finish` still advances a cell through a cut the stage did not reach (no move).
+  *(Superseded by the U2 fold, MINOR-7: the counters were deleted; the condition is unreachable, keeps the stage's target and fails its `debug_assert`.)*
 
 **Departures.**
 
@@ -715,9 +719,11 @@ These amend the batch 13b amendment and gate 8 above; the filed text stays as it
   the gain is free from `E`, so it sets the lane there exactly (D3), and it discharges the
   obligation. Constraint 5 ("a seek `Set` inside a held ramp lands by the move") is for a seek
   before `E`.
-- **Constraint 4 (R17-10).** A live write that frees the gain at a block entry discharges an owed
-  obligation and, in the same block, releases the cell's hold (D1.2's report, or the cell's own
-  ramp end), so the grid moves the lane from that block's first sample.
+- **Constraint 4 (R17-10).** A live write that frees, at a block entry, a gain the stage held
+  through the end of the previous block discharges an owed obligation and, in the same block,
+  releases the cell's hold, whether or not a move was owed (U2 fold 2), so the grid moves the lane
+  from that block's first sample. A hold that ends by itself needs no release: the cell's hold of
+  it ends at the same sample.
 - **Gate 8 (e).** "Samples `[E, E + J - 1]` equal the stage driven directly with one `RetargetGain`
   at `E` over `J`" reads: with one `RetargetGain` at `E` over `J` to the curve at `E + J - 1`, and
   the one grid retarget #1637 commits in that ramp's last 64 samples (the grid point at
@@ -726,6 +732,7 @@ These amend the batch 13b amendment and gate 8 above; the filed text stays as it
 - **Gate 8's test value.** "Red if D1.2 refreshes `hold_until` inside the hold" is withdrawn: under
   R17-9 the landing at `E` rewrites the whole cell state, and before `E` the stage only remembers,
   so neither a refresh nor a missing D1.2 report reaches the output (U2 fold, finding MAJOR-1).
+  D1.2 itself is removed (U2 fold 2).
 
 ## U2 fold (batch 17)
 
@@ -740,8 +747,10 @@ once against the mutation the review found green (or the stated revert), then th
   refreshed at every held block entry). Reason: before `E` the stage only remembers every gain
   operation, a refresh only moves the cell's state, and the R17-9 landing at `E` rewrites all of
   that state (cursor, target, held flag, ramp end). Without a move nothing was remembered, so the
-  hold changes nothing; after a live write R17-10 releases the hold. The test was deleted (it
-  defended nothing); D1.2 is kept per R17-10. Gate 8's test-value clause is withdrawn above.
+  hold changes nothing, except when a live write frees the lane early (U2 fold 2: R17-10 then
+  releases the hold at the entry of the block whose write freed a gain the stage held through the
+  previous block, owed or not). The test was deleted (it defended nothing); D1.2 was kept here and
+  is removed in U2 fold 2. Gate 8's test-value clause is withdrawn above.
 - **MAJOR-2 (constraint 7).** `the_move_at_the_unmute_ramps_end_replaces_the_cells_event_there`: a
   step exactly at `E` (to `-15` dB at 1,000 after a remembered fade), and a grid point at `E`
   (an unmute of 1,024 on a fade); 4 quanta and the oracle. Red (the test process aborts on the
@@ -759,7 +768,8 @@ once against the mutation the review found green (or the stated revert), then th
   latent insert, quanta 100 and 37 with the oracle: the seek's `Set` after `E` in `E`'s block);
   red with `hold_end` dropping a step after `E`.
 - **MAJOR-5 / R17-10 (render fix).** `HeldRampObligation::block` returns whether a free block
-  entry discharged an owed obligation; `FaderEventDriver::new` then reports a hold that ended
+  entry discharged an owed obligation (U2 fold 2: whether a write freed a gain held through the
+  previous block, owed or not); `FaderEventDriver::new` then reports a hold that ended
   before the block (`hold_until(node(0) - 1)`), which releases the cell's hold. One driver, so
   the bank, the fused bank and the scalar oracle all take it.
   `a_live_write_that_frees_a_held_lane_releases_its_hold` (a 4,000-sample unmute ended by a
@@ -832,3 +842,59 @@ regions in 33 files (unchanged). fmt; clippy `-D warnings` (builtins-compiler, h
 all targets, all features); no-feature `cargo check --all-targets` on the same: clean.
 `./target/release/audit capi`: `pcm_digest` `bffc21e857b5e134` (unchanged), 0 violations, 0
 allocations.
+
+## U2 fold 2 (batch 17)
+
+The U2 fold's review (MAJOR-A, MINOR-B, a NIT) and root's ruling on D1.2, folded on
+`codex/controls-batch-17k` over `6fcd46e01`. Uncommitted for the coordinator.
+
+- **MAJOR-A (render fix: the held-through release).** R17-10 released the cell's hold only when a
+  move was owed, so a live write that freed the lane with nothing owed left the cell holding (D1.2's
+  report of the ended ramp): later grid events became `RememberGain` on a free stage and the lane
+  stayed stale. `HeldRampObligation` now records `held_through` (the stage held the gain through the
+  last sample of the block just rendered); `block` returns a release at any free block entry after
+  such a block with no move due, owed or not, and the driver releases the cell's hold there
+  (`hold_until(node(0) - 1)`). A hold that ended by itself (inside the previous block, or on its last
+  sample: `due`) needs no release. The other places that copy the stage's hold into the cell (the
+  held branch of `offsets_jump`, the adoption reposition) take the same release: both copy a stage
+  ramp, which either ends inside the block (the cell's hold ends with it) or holds through the
+  block's end (and so is released at the next free entry). One driver: the bank, the fused bank and
+  the scalar oracle all take it. Gate
+  `a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold` (prepared muted; curve flat at
+  `-30` dB over `[0, 2_000]`, then a fade to `0` dB at 10,000; a live unmute of 4,000 at 0 and of
+  window 0 at 1,024: every completion sample from 1,087 is the curve's gain; quanta 128 and 64 and
+  the oracle). Red on `6fcd46e01` (completion sample 2,047 off the curve), checked once.
+- **D1.2 removed: unobservable after R17-9 and R17-10.** While the stage holds the lane it only
+  stores gain operations, and the cell emits the same events with or without the report, so `owed`
+  is set alike. If a move is owed, the R17-9 landing at `E` rewrites the cell's whole state; if a
+  live write frees the lane early, the held-through release ends the hold; if nothing is owed and
+  the hold ends by itself, it ends at `E - 1`, where the report's hold ended too. So
+  `LaneFaderAutomation::report_held_ramp`, `report_held_ramps`, the drain's held marks
+  (`drain_fader_controls_marking`, folded back into `drain_fader_controls`), the scalar oracle's
+  marks and the now unused `selector_channels` are deleted. Mutation check (once): with the fix in
+  and D1.2 removed every gate stays green (`stored_fader_automation` 27/27, and the full check set
+  below). This withdraws constraint 1's report (batch 13b amendment) and the "D1.2 is kept" of the
+  U2 fold above.
+- **MINOR-B.** Each unreachable `debug_assert` condition in the driver carries a one-line proof and
+  its release action (a hold or a skip; no panic; no NaN reaches the stage): `read_offsets`'s
+  offsets-jump refusal, `cut`'s span, the driver's missing program cell, its span / slot / `hold_end`
+  refusal, `apply`'s push and moving cut, and the three `process_with` stop sites.
+- **NIT.** D1's render counter, the #1647b driver bullet, #1647b departure 1 and the #1647c
+  "No new `debug_assert`" bullet now carry a superseded note (the counters were deleted by the U2
+  fold's MINOR-7).
+
+**Measured (x86-64, AVX2).** `lane_slot_bytes` 224 (unchanged: the new flag fits the padding). No
+fixture moved; `pcm_digest` `bffc21e857b5e134` unchanged.
+
+**Checks (x86-64 AVX2).** `cargo test --locked -p automation -p graph -p builtins -p
+builtins-compiler --features builtins-compiler/test-support,graph/test-support`: 388 pass.
+`-p host-core --all-features`: 556 pass (`stored_fader_automation` 27; 24 without features).
+`-p capi`: 206 pass. `-p host-web --features host-web/test-support --lib --test control_parity`:
+173 pass. `realtime-policy`: ok, 160 regions in 33 files (unchanged). fmt; clippy `-D warnings`
+(builtins-compiler, host-core; all targets, all features); no-feature `cargo check --all-targets`:
+clean. `./target/release/audit capi`: `pcm_digest` `bffc21e857b5e134`, 0 violations, 0
+allocations. No edit under `crates/engine/src/realtime/`, `crates/automation` or `crates/builtins`.
+
+**Attempt count (AGENTS.md five-attempt rule).** #1647 is at attempt 3 of 5: the implementation
+(#1647a-c), the U2 fold (59ca8e3b4) and U2 fold 2 (this section). A failed verification of fold 2
+goes to root before attempt 4.

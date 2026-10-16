@@ -1149,7 +1149,7 @@ fn parity_model() -> SessionModel {
 }
 
 /// Render `rig` for `blocks` blocks; with handles, a live mute ramp of 300 samples starts on track
-/// 1's left lane at block 10 and an unmute ramp at block 20, so a held ramp is reported (D1.2).
+/// 1's left lane at block 10 and an unmute ramp at block 20, so the lane holds its gain.
 /// With handles, the offsets cells take two writes too (#1649 D3): track 0's two lanes a new `S`
 /// at block 15 (a jump of 480 samples), and track 1's left lane one at block 20, in the block
 /// whose drain starts the unmute ramp, so its jump meets a held gain.
@@ -1933,6 +1933,43 @@ fn a_live_write_that_frees_a_held_lane_releases_its_hold() {
     });
     for plane in &out {
         for t in (3_200 + 63..FRAMES).step_by(64) {
+            assert_eq!(
+                plane[t as usize].to_bits(),
+                gain(curve(&entry, t as i64)).to_bits(),
+                "completion sample {t}"
+            );
+        }
+    }
+}
+
+/// R17-10 with nothing owed (MAJOR-A of the U2 fold review): a live write that frees a lane the
+/// stage held through the end of the previous block releases the cell's hold there, whether or not
+/// a move is owed. The track is prepared muted on a curve flat at `-30` dB over `[0, 2_000]` (the
+/// seeded value, so the cell gives no event inside the hold and owes nothing) and then fading to
+/// `0` dB at 10,000; a live unmute of 4,000 samples is drained at 0, and a live unmute of window 0
+/// at 1,024 ends it there. From 1,024 the lane follows the curve: at each completion sample
+/// `64k + 63` it equals the curve's gain exactly, at quantum 128 and 64 and on the oracle.
+///
+/// Test value: red if the release is made only when a move is owed (the cell keeps a hold of the
+/// ended ramp to 3,999, so the fade's grid events from 2,000 are only remembered on a free stage
+/// and the lane stays at `-30` dB while the curve moves).
+#[test]
+fn a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold() {
+    const FRAMES: u64 = 6_144;
+    let (model, entry) = muted_ride(
+        vec![
+            segment(AutomationShape::Linear, 0, 2_000, -30.0, -30.0),
+            segment(AutomationShape::Linear, 2_000, 10_000, -30.0, 0.0),
+        ],
+        10.0,
+    );
+    let out = scripted_across(&model, &[128, 64], FRAMES, &|rig| match rig.rendered {
+        0 => live_mute(rig, builtins::BuiltinLaneSelector::Both, false, 4_000),
+        1_024 => live_mute(rig, builtins::BuiltinLaneSelector::Both, false, 0),
+        _ => {}
+    });
+    for plane in &out {
+        for t in (1_024 + 63..FRAMES).step_by(64) {
             assert_eq!(
                 plane[t as usize].to_bits(),
                 gain(curve(&entry, t as i64)).to_bits(),
