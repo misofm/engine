@@ -11,9 +11,9 @@ use engine::SampleRateHz;
 use engine::realtime::PreparedRenderPlan;
 use session::SessionModel;
 use source::{
-    HostChunkError, HostChunkProvider, HostPlanarChunk, PublishedGeneration, SourceCommand,
-    SourceFrame, SourceGeneration, SourceSeekError, SourceSeekReport, SubmitReport,
-    TimelineProducer,
+    HostChunkError, HostChunkProvider, HostPlanarChunk, PublishedGeneration, SessionSeek,
+    SessionSeekError, SourceCommand, SourceFrame, SourceGeneration, SourceSeekError,
+    SourceSeekReport, SubmitReport, TimelineProducer,
 };
 
 use crate::PlanStateInventory;
@@ -29,6 +29,59 @@ pub(crate) struct ControlSource {
     /// `None` while vacant: the plan was prepared to carry this source's ring from its
     /// predecessor, and the producer arrives through [`SourceControlSet::adopt_persisting`].
     provider: Option<HostChunkProvider>,
+}
+
+impl ControlSource {
+    /// The frame a session seek to `timeline_sample` sends this source: the sample clamped to
+    /// the source's region (#1642 D1).
+    fn session_frame(&self, timeline_sample: u64) -> u64 {
+        timeline_sample.min(self.region_end).max(self.region_start)
+    }
+}
+
+/// Step 1 of [`SourceControlSet::seek_session`]: generation 0 is
+/// [`SourceControlError::GenerationZero`], as for a per-source seek; a stale generation is the
+/// word's [`SourceControlError::Seek`] refusal.
+fn session_refusal(error: SourceSeekError) -> SourceControlError {
+    match error {
+        SourceSeekError::GenerationZero => SourceControlError::GenerationZero,
+        error => SourceControlError::Seek(error),
+    }
+}
+
+/// Step 2 of [`SourceControlSet::seek_session`]: the timeline producer, then every source
+/// producer in ID order, checks its command with nothing pushed; the first refusal is returned. A
+/// vacant entry is [`SourceControlError::Vacated`]; a producer of another session's word is an
+/// engine invariant ([`HostChunkError::InternalInvariant`]): every producer of the set is prepared
+/// with the set's word.
+fn check_session_producers(
+    seek: &SessionSeek<'_>,
+    timeline: Option<&TimelineProducer>,
+    sources: &[ControlSource],
+    timeline_sample: u64,
+) -> Result<(), SourceControlError> {
+    let refused = |error| match error {
+        SessionSeekError::Seek(error) => SourceControlError::Seek(error),
+        SessionSeekError::ForeignSession => {
+            SourceControlError::Chunk(HostChunkError::InternalInvariant)
+        }
+    };
+    seek.check_timeline(
+        timeline.ok_or(SourceControlError::Vacated)?,
+        timeline_sample,
+    )
+    .map_err(refused)?;
+    for source in sources {
+        seek.check_source(
+            source
+                .provider
+                .as_ref()
+                .ok_or(SourceControlError::Vacated)?,
+            source.session_frame(timeline_sample),
+        )
+        .map_err(refused)?;
+    }
+    Ok(())
 }
 
 /// One borrowed planar chunk offered to a named source.
@@ -303,64 +356,56 @@ impl SourceControlSet {
         timeline_sample: u64,
         anchor_sample: Option<u64>,
     ) -> Result<(), SourceControlError> {
-        let generation =
-            SourceGeneration::new(generation).ok_or(SourceControlError::GenerationZero)?;
-        let published = self.published.generation();
-        if generation <= published {
-            return Err(SourceControlError::Seek(
-                SourceSeekError::GenerationNotStrictlyIncreasing {
-                    active: published,
-                    requested: generation,
-                },
-            ));
-        }
-        let command = |frame: u64| match anchor_sample {
-            None => SourceCommand::Seek {
-                generation,
-                frame: SourceFrame(frame),
-            },
-            Some(anchor_sample) => SourceCommand::SeekAt {
-                generation,
-                frame: SourceFrame(frame),
-                anchor_sample,
-            },
-        };
-        let source_frame = |source: &ControlSource| {
-            timeline_sample
-                .min(source.region_end)
-                .max(source.region_start)
-        };
-        self.timeline
-            .as_ref()
-            .ok_or(SourceControlError::Vacated)?
-            .check_seek(command(timeline_sample))
-            .map_err(SourceControlError::Seek)?;
-        for source in &self.sources {
-            source
-                .provider
-                .as_ref()
-                .ok_or(SourceControlError::Vacated)?
-                .check_seek(command(source_frame(source)))
-                .map_err(SourceControlError::Seek)?;
-        }
-        let mut pushed = self.timeline.as_mut().is_some_and(|timeline| {
-            timeline
-                .try_seek_unpublished(command(timeline_sample))
-                .is_ok()
-        });
+        let mut seek = self
+            .published
+            .session_seek(generation, anchor_sample)
+            .map_err(session_refusal)?;
+        check_session_producers(
+            &seek,
+            self.timeline.as_ref(),
+            &self.sources,
+            timeline_sample,
+        )?;
+        // The source crate pushes unpublished and publishes once, when `seek` drops, whatever
+        // the pushes return: a pushed command never stays held in its slot.
+        let mut pushed = self
+            .timeline
+            .as_mut()
+            .is_some_and(|timeline| seek.push_timeline(timeline, timeline_sample).is_ok());
         for source in &mut self.sources {
-            let frame = source_frame(source);
+            let frame = source.session_frame(timeline_sample);
             pushed &= source
                 .provider
                 .as_mut()
-                .is_some_and(|provider| provider.try_seek_unpublished(command(frame)).is_ok());
+                .is_some_and(|provider| seek.push_source(provider, frame).is_ok());
         }
-        self.published.publish(generation);
+        seek.publish();
         if !pushed {
             debug_assert!(false, "a checked session seek pushes to every slot");
             return Err(SourceControlError::Chunk(HostChunkError::InternalInvariant));
         }
         Ok(())
+    }
+
+    /// Every rule of [`Self::seek_session`] (steps 1 and 2) with nothing pushed and nothing
+    /// published: the check a caller runs before it commits to the seek (B16-R9 declares the
+    /// discontinuity between this check and [`Self::seek_session`], which checks again).
+    pub fn check_session_seek(
+        &self,
+        generation: u64,
+        timeline_sample: u64,
+        anchor_sample: Option<u64>,
+    ) -> Result<(), SourceControlError> {
+        let seek = self
+            .published
+            .session_seek(generation, anchor_sample)
+            .map_err(session_refusal)?;
+        check_session_producers(
+            &seek,
+            self.timeline.as_ref(),
+            &self.sources,
+            timeline_sample,
+        )
     }
 
     /// The session's published seek generation (#1642 B16-R2): the largest generation any seek of
@@ -949,9 +994,9 @@ mod tests {
             let mut builder = ControlSourceBuilder::with_capacity(9, 2).expect("builder");
             let mut consumers = Vec::new();
             for (id, frames) in [("long", 10_000), ("short", 4_000)] {
-                let (mut producer, consumer, _) =
-                    PcmSourceRing::prepare_host_region(ring, SourceFrame(0)).expect("ring");
-                producer.share_published_generation(word.clone());
+                let (producer, consumer, _) =
+                    PcmSourceRing::prepare_host_region(ring, SourceFrame(0), word.clone())
+                        .expect("ring");
                 builder.push(
                     id,
                     48_000,
@@ -963,9 +1008,9 @@ mod tests {
                 consumers.push(consumer);
             }
             let mut set = builder.finish(word.clone());
-            let (mut producer, timeline, _) =
-                SourceTimeline::prepare(QuantumFrames(Q), NonZeroUsize::MIN).expect("timeline");
-            producer.share_published_generation(word);
+            let (producer, timeline, _) =
+                SourceTimeline::prepare(QuantumFrames(Q), NonZeroUsize::MIN, word)
+                    .expect("timeline");
             set.set_timeline(producer);
             let short = consumers.pop().expect("short");
             let long = consumers.pop().expect("long");
@@ -1051,8 +1096,9 @@ mod tests {
         assert_eq!(rig.landed(sample), ((4, 10_000), (4, 4_000), 50_000));
     }
 
-    /// Test value: red if any slot is pushed before every check passes (a partial seek), or the
-    /// session seek takes a generation at or below the published one.
+    /// Test value: red if any slot is pushed before every check passes (a partial seek). Each
+    /// stale case here is also a live producer's own refusal, so the word's rule is
+    /// `a_generation_not_above_the_word_is_stale_when_every_producer_takes_it`'s.
     #[test]
     fn a_refusal_pushes_nothing_and_publishes_nothing() {
         let mut rig = Rig::new();
@@ -1114,6 +1160,35 @@ mod tests {
                 }
             ))
         );
+    }
+
+    /// Test value: red if the session seek is not refused against the session's word when every
+    /// live producer would take it (the case of a source removed at a higher generation), or the
+    /// check and the seek disagree on it.
+    #[test]
+    fn a_generation_not_above_the_word_is_stale_when_every_producer_takes_it() {
+        let mut rig = Rig::new();
+        rig.set.published.publish(SourceGeneration(10));
+        assert!(rig.every_slot_empty(5), "every live producer takes 5");
+        let stale = Err(SourceControlError::Seek(
+            SourceSeekError::GenerationNotStrictlyIncreasing {
+                active: SourceGeneration(10),
+                requested: SourceGeneration(5),
+            },
+        ));
+        assert_eq!(rig.set.check_session_seek(5, 0, None), stale);
+        assert_eq!(rig.set.seek_session(5, 0, None), stale);
+        assert!(rig.every_slot_empty(5), "nothing pushed");
+        assert_eq!(rig.set.published_generation(), 10, "nothing published");
+        assert_eq!(rig.set.check_session_seek(11, 0, None), Ok(()));
+        assert!(rig.every_slot_empty(11), "a check pushes nothing");
+        assert_eq!(
+            rig.set.published_generation(),
+            10,
+            "a check publishes nothing"
+        );
+        rig.set.seek_session(11, 0, None).expect("above the word");
+        assert_eq!(rig.set.published_generation(), 11);
     }
 
     /// Test value: red if a vacant entry is skipped instead of refusing the whole seek.

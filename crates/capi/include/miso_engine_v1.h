@@ -96,7 +96,9 @@ extern "C" {
  * Declared discontinuity (issue 1323). miso_engine_v1_declare_discontinuity(session) says that
  * the next block the host renders need not continue the previous output, because the host has
  * stopped or is about to seek every source. The host's duty: call it at a stop, and before a seek
- * of every source. If the newest plan (the waiting replacement, else the plan that renders) runs
+ * of every source made with per-source seeks. A plain session seek is a declared discontinuity:
+ * the engine declares it in the same call (see "Session seek"), so the host does not call this
+ * before it; an anchored session seek keeps continuity. If the newest plan (the waiting replacement, else the plan that renders) runs
  * behind its natural timing because a floor above raised some node's arrival, the call prepares
  * the committed session again with no floors and publishes it for the next block: from that
  * block latency_samples is the session's natural latency. That plan carries only the sources
@@ -308,14 +310,25 @@ extern "C" {
  * has used on the session, on any source or session seek; one above the largest it has used is
  * always valid. The refusals, all MISO_ENGINE_V1_INVALID_ARGUMENT unless named: g = 0
  * ("source.generation.zero"), g not above every generation the session has used
- * ("source.generation.stale"), T over the timeline limit ("source.seek.frame_out_of_range"), and
+ * ("source.generation.stale"), T over the timeline limit ("source.seek.frame_out_of_range"), a
+ * source whose producer the newest session does not hold yet ("source.ring.vacated"), and
  * MISO_ENGINE_V1_BACKPRESSURE with "source.seek.backpressure" while any source or the timeline
- * still holds an unpopped seek. miso_engine_v1_session_seek_at(session, g, T, A) is the anchored
- * form, with the anchor of miso_engine_v1_source_seek_at: every consumer changes at the block at
- * A, or, reached late, at its frame plus the lateness. A per-source seek leaves the timeline where
- * it is. A seek of every source is a declared discontinuity: the host calls
- * miso_engine_v1_declare_discontinuity first. A host checks MISO_ENGINE_V1_FEATURE_SESSION_SEEK
- * before calling either symbol.
+ * still holds an unpopped seek; MISO_ENGINE_V1_INTERNAL with "capi.source.epoch" when the
+ * session's plan epochs cannot be synchronized, or with "source.internal" for an engine invariant.
+ * miso_engine_v1_session_seek_at(session, g, T, A) is the anchored form, with the anchor of
+ * miso_engine_v1_source_seek_at: every consumer changes at the block at A, or, reached late, at
+ * its frame plus the lateness; an A that is not a multiple of the quantum is
+ * MISO_ENGINE_V1_INVALID_ARGUMENT with "source.seek.anchor_unaligned". A per-source seek leaves
+ * the timeline where it is. A plain session seek is a declared discontinuity; the engine declares
+ * it in the same call, and a refused seek declares nothing: every check runs first, then the
+ * declaration (miso_engine_v1_declare_discontinuity's, all or nothing), then the seek. A refused
+ * declaration changes nothing and returns its own result and diagnostic, as
+ * miso_engine_v1_declare_discontinuity returns them (MISO_ENGINE_V1_COMPILE_REJECTED,
+ * MISO_ENGINE_V1_BACKPRESSURE or MISO_ENGINE_V1_INTERNAL). An anchored session seek keeps
+ * continuity: it declares nothing, so its effect tails and latency floors stay (it is the loop
+ * and exact-start form); a host that wants the floors reset declares at a stop. A seek of every
+ * source made with per-source seeks is still the host's own call, and the host declares before
+ * it. A host checks MISO_ENGINE_V1_FEATURE_SESSION_SEEK before calling either symbol.
  *
  * Choosing the anchor. To start a stem that a transaction added, after the command returns OK:
  * pick A, a quantum multiple past the last rendered block by enough quanta to cover the time the

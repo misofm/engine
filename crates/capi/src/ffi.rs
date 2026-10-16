@@ -18,7 +18,7 @@ use lane::fpenv::CanonicalFpEnv;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::runtime::{
-    CommandError, EventError, EventLane, PlanQueries, PlanState, SourceFailure,
+    CommandError, EventError, EventLane, PlanQueries, PlanState, SessionSeekFailure, SourceFailure,
     SourceFailureReport, compile_children, limits_are_valid, plan_error, render_error_code,
 };
 
@@ -635,12 +635,21 @@ unsafe fn source_seek_entry(
 /// generation `generation` of each source from its frame. `generation` must be above every
 /// generation the host has used on this session (one above the largest is always valid).
 ///
+/// A plain session seek is a declared discontinuity (root ruling B16-R9): the engine declares it in
+/// the same call, after every check and before any push, through the core path of
+/// [`miso_engine_v1_declare_discontinuity`]; a refused seek declares nothing. So a host never
+/// declares before a session seek. The anchored form ([`miso_engine_v1_session_seek_at`]) keeps
+/// continuity and declares nothing.
+///
 /// Runs the service step first, as every session call does. Returns `RESULT_OK`;
 /// `RESULT_INVALID_ARGUMENT` for a zero (`source.generation.zero`) or stale
 /// (`source.generation.stale`) generation or a timeline sample over the limit
 /// (`source.seek.frame_out_of_range`); `RESULT_BACKPRESSURE` with `source.seek.backpressure` when
 /// any consumer still holds a seek (nothing changed; retry after a render); otherwise the source
-/// seek's mapping, with the diagnostic in `miso_engine_v1_last_error`.
+/// seek's mapping (`RESULT_INVALID_ARGUMENT` with `source.ring.vacated`, `RESULT_INTERNAL` with
+/// `capi.source.epoch` or `source.internal`); and a refused declaration's result and diagnostic,
+/// as [`miso_engine_v1_declare_discontinuity`] returns them, with nothing pushed. The diagnostic is
+/// in `miso_engine_v1_last_error`.
 ///
 /// # Safety
 ///
@@ -661,7 +670,9 @@ pub unsafe extern "C" fn miso_engine_v1_session_seek(
 /// [`miso_engine_v1_source_seek_at`]'s anchor: the timeline and every source change at the block
 /// that starts at `anchor_sample` (or, reached late, at the first block after it, each at its frame
 /// plus the lateness). An anchor that is not a multiple of the quantum is
-/// `RESULT_INVALID_ARGUMENT` with `source.seek.anchor_unaligned`.
+/// `RESULT_INVALID_ARGUMENT` with `source.seek.anchor_unaligned`. It declares no discontinuity
+/// (root ruling B16-R9): it is the loop and exact-start form, which keeps continuity, so the effect
+/// tails and the latency floors stay; a host that wants them reset declares at a stop.
 ///
 /// # Safety
 ///
@@ -707,11 +718,14 @@ unsafe fn session_seek_entry(
                 session.last_error.borrow_mut().clear();
                 RESULT_OK
             }
-            Err(error) => {
+            Err(SessionSeekFailure::Seek(error)) => {
                 let (code, diagnostic) = error.report();
                 session.last_error.borrow_mut().set(diagnostic);
                 code
             }
+            // B16-R9: the plain form's declaration refused; it reports as
+            // `miso_engine_v1_declare_discontinuity` does.
+            Err(SessionSeekFailure::Declaration(refused)) => declaration_refused(session, &refused),
         }
     })
 }
@@ -841,7 +855,9 @@ pub unsafe extern "C" fn miso_engine_v1_service(session: *mut Session) -> u32 {
 
 /// Declare a discontinuity (#1323): the next block the host renders need not continue the
 /// previous output, because the host has stopped or is about to seek every source. A host calls it
-/// at a stop, and before a seek of every source.
+/// at a stop, and before a seek of every source made with per-source seeks; a plain
+/// [`miso_engine_v1_session_seek`] declares it in the same call (root ruling B16-R9), so a host does
+/// not call it before one.
 ///
 /// It forwards to the control plane's `SessionState::declare_discontinuity`, the function the
 /// browser's `miso_engine_web_v1_declare_discontinuity` runs. If the newest plan runs behind its
@@ -874,17 +890,21 @@ pub unsafe extern "C" fn miso_engine_v1_declare_discontinuity(session: *mut Sess
                 session.last_error.borrow_mut().clear();
                 RESULT_OK
             }
-            Err(refused) => {
-                session.last_error.borrow_mut().set(&refused.diagnostic());
-                match refused {
-                    CommandError::BufferTooSmall { .. } | CommandError::Internal => RESULT_INTERNAL,
-                    CommandError::Invalid => RESULT_INVALID_ARGUMENT,
-                    CommandError::Backpressure => RESULT_BACKPRESSURE,
-                    CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
-                }
-            }
+            Err(refused) => declaration_refused(session, &refused),
         }
     })
+}
+
+/// The result of a refused declaration, its own or a plain session seek's (B16-R9): the core's
+/// diagnostic into the session's last error, and the code a rebuild's refusal has.
+fn declaration_refused(session: &Session, refused: &CommandError) -> u32 {
+    session.last_error.borrow_mut().set(&refused.diagnostic());
+    match refused {
+        CommandError::BufferTooSmall { .. } | CommandError::Internal => RESULT_INTERNAL,
+        CommandError::Invalid => RESULT_INVALID_ARGUMENT,
+        CommandError::Backpressure => RESULT_BACKPRESSURE,
+        CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
+    }
 }
 
 /// Process one bounded Issue-005 capability command with exact-byte replay.
@@ -1390,6 +1410,15 @@ pub(crate) fn test_session_state_summary(session: *mut Session) -> (u64, usize, 
     // SAFETY: Test callers retain the exclusively owned live session for this inspection.
     let state = unsafe { &(*session).state };
     state.test_state_summary()
+}
+
+/// The newest plan epoch, the running plan's or a waiting replacement's (B16-R9 gates): it
+/// advances exactly when the control plane publishes a plan.
+#[cfg(test)]
+pub(crate) fn test_newest_plan_epoch(session: *mut Session) -> u64 {
+    // SAFETY: Test callers retain the exclusively owned live session for this inspection.
+    let state = unsafe { &(*session).state };
+    state.newest_plan_epoch()
 }
 
 #[cfg(test)]

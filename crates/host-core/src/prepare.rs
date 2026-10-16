@@ -2293,10 +2293,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             graph_sources.push(SourceGraphSource::vacant(u32::from(source.channels)));
             carried_sources.push((index, predecessor_index));
         } else {
-            let (mut producer, consumer, resources) =
-                PcmSourceRing::prepare_host_region(ring, SourceFrame(0))
-                    .map_err(|_| resource("host.source.prepare"))?;
-            producer.share_published_generation(published_generation.clone());
+            let (producer, consumer, resources) = PcmSourceRing::prepare_host_region(
+                ring,
+                SourceFrame(0),
+                published_generation.clone(),
+            )
+            .map_err(|_| resource("host.source.prepare"))?;
             builder.push(
                 source.id.as_str(),
                 compiled.sample_rate().0,
@@ -2963,8 +2965,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let timeline = if timeline_carries {
         // D3, D7: a vacant timeline owns only its history; the command queue its carry brings is
         // counted with the carried source overhead, as a carried ring's is.
-        let (consumer, report) = SourceTimeline::prepare_vacant(quantum, history_blocks)
-            .map_err(|_| resource("host.source.prepare"))?;
+        let (consumer, report) =
+            SourceTimeline::prepare_vacant(quantum, history_blocks, published_generation.clone())
+                .map_err(|_| resource("host.source.prepare"))?;
         carried_total_bytes = carried_total_bytes
             .checked_add(report.command_queue_bytes)
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
@@ -2975,9 +2978,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             carried_largest_bytes.max(report.command_queue_largest_allocation_bytes);
         consumer
     } else {
-        let (mut producer, consumer, _) = SourceTimeline::prepare(quantum, history_blocks)
-            .map_err(|_| resource("host.source.prepare"))?;
-        producer.share_published_generation(published_generation.clone());
+        let (producer, consumer, _) =
+            SourceTimeline::prepare(quantum, history_blocks, published_generation.clone())
+                .map_err(|_| resource("host.source.prepare"))?;
         sources.set_timeline(producer);
         consumer
     };

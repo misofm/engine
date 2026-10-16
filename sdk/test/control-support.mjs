@@ -151,7 +151,7 @@ const STRUCTURAL_FIXTURE = JSON.parse(readFileSync(
 /**
  * The structural command frames the Rust codec wrote beside the parity session
  * (`hosts/host-web/tests/structural_frames_fixture.rs`): `replace_last_strip`, `add_first_strip`,
- * `swap_comp_for_soft_clip`, `remove_comp`, `remove_eq` and `swap_t3_multi_and_limiter`, each applied to the booted session. The returned
+ * `swap_comp_for_soft_clip`, `remove_comp`, `remove_eq`, `swap_t3_multi_and_limiter` and `remove_t3_limiter`, each applied to the booted session. The returned
  * function stamps the frame with the endpoint's next request ID and the committed revision, which
  * are the only header words that depend on the engine.
  */

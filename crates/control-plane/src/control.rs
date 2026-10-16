@@ -2153,6 +2153,12 @@ where
     /// for an accounting fault.
     pub fn declare_discontinuity(&mut self) -> Result<(), CommandError> {
         self.service()?;
+        self.declare_discontinuity_serviced()
+    }
+
+    /// [`Self::declare_discontinuity`] after its service step: the one core path of a declaration,
+    /// which a plain session seek also runs (B16-R9).
+    fn declare_discontinuity_serviced(&mut self) -> Result<(), CommandError> {
         if !self
             .newest_providers()
             .inventory
@@ -4089,19 +4095,65 @@ where
     /// (#1642 D1, D2): [`host_core::SourceControlSet::seek_session`] on the newest session's
     /// producers, which while a structural transaction's candidate waits for its swap are the
     /// candidate's (its carried producers feed the rings the running plan renders, and a source
-    /// it adds has its own new ring). With `anchor_sample`, every command is anchored there, as
-    /// [`Self::seek_at`]'s. The one core function behind both hosts' session seek.
+    /// it adds has its own new ring). The one core function behind both hosts' session seek.
+    ///
+    /// **A plain session seek is a declared discontinuity (root ruling B16-R9).** With no
+    /// `anchor_sample`, the engine declares the discontinuity in the same call, in this order:
+    /// every producer checks its command ([`host_core::SourceControlSet::check_session_seek`]),
+    /// then the declaration runs ([`Self::declare_discontinuity`]'s core path, all or nothing),
+    /// then the commands are pushed. A refused check declares nothing and pushes nothing; a
+    /// refused declaration pushes nothing and returns its own error,
+    /// [`SessionSeekFailure::Declaration`]. A host therefore never declares separately before a
+    /// session seek.
+    ///
+    /// **An anchored session seek keeps continuity.** With `anchor_sample`, every command is
+    /// anchored there, as [`Self::seek_at`]'s, and nothing is declared: it is the loop and
+    /// exact-start form (#1643), and a declaration publishes its successor at the next block,
+    /// before the anchor, so the effects would go to rest while the old pass still plays. A host
+    /// that wants the floors reset declares at a stop.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionSeekFailure::Seek`] with the facade's refusal, or `Internal` for an epoch fault;
+    /// [`SessionSeekFailure::Declaration`] with the declaration's refusal (plain form only).
     pub fn session_seek(
         &mut self,
         generation: u64,
         timeline_sample: u64,
         anchor_sample: Option<u64>,
-    ) -> Result<(), SourceFailure> {
-        self.service().map_err(|_| SourceFailure::Internal)?;
+    ) -> Result<(), SessionSeekFailure> {
+        self.service()
+            .map_err(|_| SessionSeekFailure::Seek(SourceFailure::Internal))?;
+        if anchor_sample.is_none() {
+            self.newest_providers()
+                .sources
+                .check_session_seek(generation, timeline_sample, None)
+                .map_err(|error| SessionSeekFailure::Seek(SourceFailure::Control(error)))?;
+            self.declare_discontinuity_serviced()
+                .map_err(SessionSeekFailure::Declaration)?;
+            // The declaration may have superseded a pending candidate, so the newest providers
+            // may now be a new epoch's. Its set holds the same producer objects the check ran
+            // on: a discontinuity successor carries every source of the committed model, the
+            // candidate's model, and its commit moves each producer it carries from the set it
+            // supersedes (the checked donation of the candidate's fresh rings, then
+            // `adopt_persisting` for the persisting producers and the timeline), so no command
+            // was pushed in between and the check's verdict still holds. `seek_session` checks
+            // again; a refusal there is that invariant broken.
+            return self
+                .newest_providers_mut()
+                .sources
+                .seek_session(generation, timeline_sample, None)
+                .map_err(|_| {
+                    debug_assert!(false, "a checked session seek holds across its declaration");
+                    SessionSeekFailure::Seek(SourceFailure::Control(SourceControlError::Chunk(
+                        source::HostChunkError::InternalInvariant,
+                    )))
+                });
+        }
         self.newest_providers_mut()
             .sources
             .seek_session(generation, timeline_sample, anchor_sample)
-            .map_err(SourceFailure::Control)
+            .map_err(|error| SessionSeekFailure::Seek(SourceFailure::Control(error)))
     }
 
     /// Where a source of the newest committed session landed, as render last published it, after
@@ -4128,6 +4180,18 @@ pub enum SourceFailure {
     Control(SourceControlError),
     /// The control plane could not synchronise its plan epochs.
     Internal,
+}
+
+/// Why a session seek was refused (root ruling B16-R9): the seek's own refusal, or, for the
+/// plain form, the refusal of the discontinuity it declares. Either way nothing was pushed. The
+/// adapter maps `Seek` as it maps a source seek's [`SourceFailure`] and `Declaration` as it maps
+/// its declaration's [`CommandError`].
+#[derive(Debug)]
+pub enum SessionSeekFailure {
+    /// A producer refused the seek, or the epochs could not synchronise; nothing was declared.
+    Seek(SourceFailure),
+    /// The plain form's declaration refused; nothing was pushed.
+    Declaration(CommandError),
 }
 
 #[cfg(test)]

@@ -9754,7 +9754,7 @@ mod session_seek {
     /// session's published generation.
     ///
     /// Test value: red if the export checks the generation per consumer after earlier pushes, or
-    /// only against the consumers' own generations and not the largest the session has used.
+    /// if a stale refusal pushes to any consumer (the short source and the timeline stay put).
     #[test]
     fn a_stale_generation_changes_nothing() {
         // The twin takes no stale call. The host holds one instance per thread, so it runs and is
@@ -9777,8 +9777,10 @@ mod session_seek {
         assert_eq!(refused.timeline(sample), twin_timeline);
         assert_eq!(refused.timeline(sample), (6_000 + Q) as i64);
 
-        // A per-source seek to generation 5 makes a session seek at 4 stale: the timeline is
-        // still at generation 2, so only the session's published generation refuses it.
+        // A per-source seek to generation 5 makes a session seek at 4 stale. The long source's
+        // own generation (5) and the session's published generation both refuse it, so this case
+        // does not tell the two rules apart; the C ABI's
+        // `a_removed_sources_generation_keeps_a_session_seek_stale` isolates the published one.
         refused.stage(LONG);
         assert_eq!(
             miso_engine_web_v1_source_seek(refused.handle, LONG.len() as u32, 5, 0),
@@ -9807,7 +9809,8 @@ mod session_seek {
     fn one_full_slot_refuses_every_consumer() {
         let mut rig = Rig::boot(&two_sources(), &[LONG, SHORT]);
         let anchor = rig.next() + 4 * Q;
-        // An anchored seek holds the long source's slot until its anchor block.
+        // The long source's slot holds this seek until the next block's pop; it is full here
+        // only because no block renders between the two calls.
         rig.stage(LONG);
         assert_eq!(
             miso_engine_web_v1_source_seek_at(rig.handle, LONG.len() as u32, 2, 640, anchor),
@@ -9834,12 +9837,12 @@ mod session_seek {
         );
     }
 
-    /// Gate 3a, the role: on an instance that holds no control half (a failed host) both exports
-    /// refuse with `RESULT_REFUSED_LIFECYCLE` and change nothing.
+    /// Gate 3a, the role: on a host that is not ready (a sticky-failed host) both exports refuse
+    /// with `RESULT_REFUSED_LIFECYCLE` and change nothing.
     ///
-    /// Test value: red if either export runs without checking the host is ready (it would reach
-    /// for control state the instance does not hold), or moves the report record or the timeline
-    /// on a refusal.
+    /// Test value: red if either export runs without checking the host is ready (the failed host
+    /// still holds its control state, so the seek would be queued in its slots, which no block
+    /// empties), or moves the report record or the timeline on a refusal.
     #[test]
     fn the_session_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
         let mut rig = Rig::boot(&one_source(), &[LONG]);
@@ -9883,6 +9886,12 @@ mod session_seek {
         );
         assert_eq!(crate::ffi::native_staging::seek_report(rig.handle), record);
         assert_eq!(rig.timeline(sample), timeline);
+        // A failed host renders no block, so a stray push would wait in its slot: none does.
+        assert_eq!(
+            crate::ffi::native_staging::session_seek_slots_empty(rig.handle),
+            Some(true),
+            "the refusals queued no seek"
+        );
     }
 
     /// Gate 3a, the pending candidate: a transaction that adds a source is committed through the

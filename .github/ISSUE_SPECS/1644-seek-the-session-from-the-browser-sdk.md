@@ -238,3 +238,16 @@ Checked against `12d4a4f9d`.
   refused declaration calls no seek export.
 - **Dependencies** gain #1323 (the export and its mirrors). Authorized paths do not change: the
   call is in D1's handler.
+
+## Amendment (batch 16b review fold, root ruling B16-R9, 2026-10-16)
+
+- **This slice is the caller of `miso_engine_web_v1_session_seek` and
+  `miso_engine_web_v1_session_seek_at`** (#1643 D1; MINOR d): D1's handler calls the plain export
+  for a seek and the anchored export for a seek with an anchor (the loop and exact-start form).
+  No other SDK file calls the anchored export today.
+- **"Discontinuity first (B15-R7 reach)" (batch 15a fold) is retired.** A plain session seek
+  declares the discontinuity in the same call, and a refused seek declares nothing; an anchored
+  session seek keeps continuity. D1's handler calls the session seek export alone, never
+  `miso_engine_web_v1_declare_discontinuity` before it. Gate 2's added rows become: the handler
+  calls no declaration export for a session seek message, once per message.
+- **Dependencies.** #1323 is no longer one for this slice.

@@ -1183,10 +1183,11 @@ export class WasmBoundary {
 
   /**
    * Seek the timeline and every source to `frame` under one new `generation`, all or nothing.
-   * It declares the discontinuity first, as a C ABI host does before its session seek, and stops
-   * at the declaration's refusal. The seek does not prepare the consumers: each applies it at the
-   * next block, and the caller then submits every source's PCM from its clamped frame under the
-   * same generation. Control work, never `process()`.
+   * A plain session seek is a declared discontinuity: the engine declares it in the same call, and
+   * a refused seek declares nothing, so this makes no separate declaration. The seek does not
+   * prepare the consumers: each applies it at the next block, and the caller then submits every
+   * source's PCM from its clamped frame under the same generation. Control work, never
+   * `process()`.
    */
   sessionSeek(request: {
     readonly generation: bigint;
@@ -1199,8 +1200,6 @@ export class WasmBoundary {
     if (typeof request.frame !== "bigint" || request.frame < 0n) {
       throw new MisoUsageError("session seek frame must be a non-negative bigint");
     }
-    const declared = this.declareDiscontinuity();
-    if (!declared.ok) return declared;
     const result = Number(this.#exports.miso_engine_web_v1_session_seek(
       handle,
       request.generation,

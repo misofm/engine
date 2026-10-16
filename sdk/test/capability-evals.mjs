@@ -1,6 +1,7 @@
 /** Issue #321: direct-Wasm source seek, status/session map, and meter capability parity. */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
@@ -8,7 +9,15 @@ import { MisoControlRefusal, MisoUsageError } from "../src/core/errors.ts";
 import { LiveControlWriter } from "../src/core/writer.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
+import { decodeControlReply } from "../src/core/control-frame.ts";
+import { structuralFrame } from "./control-support.mjs";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
+
+/** The parity session: three tracks, t3 behind a multiband compressor, a true-peak limiter and a delay. */
+const PARITY = JSON.parse(readFileSync(
+  new URL("../../hosts/host-web/tests/fixtures/control-list.json", import.meta.url),
+  "utf8",
+));
 
 let asset;
 
@@ -217,10 +226,12 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     }
   });
 
-  test("session seek declares the discontinuity first and moves the sources in the next block", async () => {
+  test("session seek calls the session seek export alone and moves the sources in the next block", async () => {
     // Issue #1643 gate 2. Red if `seek` does not call the session seek export (the generation-2
-    // PCM is then refused, the twin comparison below fails), if it calls it before the
-    // discontinuity declaration (B15-R7), or if it picks a stale generation.
+    // PCM is then refused, the twin comparison below fails), if it declares the discontinuity
+    // itself before the seek (root ruling B16-R9 retired B15-R7's order: the plain session seek
+    // declares in the same call, so a separate declaration first would reset the floors even
+    // when the seek is refused), or if it picks a stale generation.
     const calls = [];
     const instantiate = asset.instantiate.bind(asset);
     asset.instantiate = async () => {
@@ -254,7 +265,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
 
       const seek = engine.seek(4_096n);
       assert.deepEqual(seek, { generation: 2n, ok: true, result: 0, code: "ok" });
-      assert.deepEqual(calls, ["declare_discontinuity", "session_seek"]);
+      assert.deepEqual(calls, ["session_seek"], "no separate declaration before the seek");
       feed(engine, 2n, 4_096n, 17);
       const block = engine.render();
 
@@ -291,6 +302,77 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     } finally {
       engine?.dispose();
       twin?.dispose();
+    }
+  });
+
+  test("a plain session seek declares the discontinuity itself, and a refused one declares nothing", async () => {
+    // Root ruling B16-R9 gate 4, on the headless path (which has no anchored session seek). The
+    // parity session holds a true-peak limiter on t3; removing it rebuilds the plan, and #1285
+    // keeps the old latency as floors. Red if the core's plain seek does not
+    // declare (the latency stays floored after an accepted seek), if it declares before its check
+    // (the refused seek resets the floors), or if the SDK declares separately (the export calls).
+    const calls = [];
+    let exports;
+    let handle;
+    const instantiate = asset.instantiate.bind(asset);
+    asset.instantiate = async () => {
+      const instance = await instantiate();
+      exports = {};
+      for (const [name, value] of Object.entries(instance.exports)) {
+        exports[name] = typeof value === "function" && /declare_discontinuity$|session_seek$|_render$/.test(name)
+          ? (...args) => {
+            handle = args[0];
+            if (!name.endsWith("_render")) calls.push(name.replace("miso_engine_web_v1_", ""));
+            return value(...args);
+          }
+          : value;
+      }
+      return { exports };
+    };
+    let engine;
+    try {
+      engine = await createOfflineEngine(PARITY.session, {
+        asset,
+        liveControls: { meterBlocks: 1, observationTaps: 8 },
+      });
+    } finally {
+      delete asset.instantiate;
+    }
+    const quantum = BigInt(engine.shape().quantumFrames);
+    const latency = () => {
+      assert.equal(Number(exports.miso_engine_web_v1_plan_latency_read(handle)), 0);
+      const record = Number(exports.miso_engine_web_v1_plan_latency_ptr(handle));
+      return new DataView(exports.memory.buffer).getBigUint64(record + 8, true);
+    };
+    const play = (generation, from, blocks, start) => {
+      for (let block = 0n; block < blocks; block += 1n) {
+        feed(engine, generation, start + block * quantum, 3);
+        engine.render();
+      }
+      return from + blocks;
+    };
+    try {
+      let block = play(1n, 0n, 4n, 0n);
+      const boot = latency();
+      assert.ok(boot > 0n, "the limiter delays the plan");
+      const reply = decodeControlReply(engine.controlFrame(structuralFrame("remove_t3_limiter", engine)));
+      assert.equal(reply.status, "ok");
+      assert.equal(reply.applied.editPath, "rebuild", "removing the limiter rebuilds the plan");
+      block = play(1n, block, 2n, block * quantum);
+      assert.equal(latency(), boot, "the floors keep the old latency (#1285)");
+
+      const refused = engine.seek(0n, { generation: 1n });
+      assert.equal(refused.code, "invalidArgument", "generation 1 is stale");
+      block = play(1n, block, 2n, block * quantum);
+      assert.equal(latency(), boot, "a refused plain seek declares nothing");
+
+      const accepted = engine.seek(0n, { generation: 2n });
+      assert.equal(accepted.ok, true, accepted.code);
+      play(2n, block, 2n, 0n);
+      assert.ok(latency() < boot, "an accepted plain seek declares: the floors reset");
+      assert.deepEqual(calls, ["session_seek", "session_seek"], "the SDK makes no separate declaration");
+    } finally {
+      engine.dispose();
     }
   });
 

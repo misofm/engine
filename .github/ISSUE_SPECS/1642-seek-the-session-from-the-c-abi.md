@@ -516,3 +516,84 @@ Built on `51ec4fd67` (tranche 1).
 code. capi's dev-dependency on `engine` turns the feature on. The workspace debug-test and doctest
 steps of `qualification.yml` name `engine/test-support`, so `scripts/check-test-support-ci.py`
 passes (13 packages). The release `capi` build does not see the accessor.
+
+## Amendment (root ruling B16-R9, batch 16b review, 2026-10-16)
+
+- **D5 amended.** Its last two sentences ("A seek of every source is a declared discontinuity: the
+  host calls `miso_engine_v1_declare_discontinuity` (#1323 D1) first.") are replaced by: "A plain
+  session seek is a declared discontinuity; the engine declares it in the same call, and a refused
+  seek declares nothing. An anchored session seek keeps continuity." A seek of every source made
+  with per-source seeks is still the host's own call, so `miso_engine_v1_declare_discontinuity`
+  keeps its duty text for that case and for a stop.
+- **D1 amended (the core).** `SessionState::session_seek` without an anchor runs, in order: the
+  service step; `SourceControlSet::check_session_seek` on the newest providers' set (every rule of
+  `seek_session` except the pushes and the publication); the declaration, through the same core
+  path as `declare_discontinuity` (all or nothing); then `seek_session` on the newest providers. A
+  refused check declares nothing and pushes nothing; a refused declaration pushes nothing and
+  returns its own error. With an anchor nothing is declared: it is the loop and exact-start form
+  (#1643), and #1323 D2 publishes the successor `Next`, at the next block, before the anchor, so the
+  effects would go to rest and PDC drop while the old pass still plays.
+- **D6 amended.** `audit capi` makes no separate declaration: the session seek declares itself.
+- **Gates added.** A refused plain session seek publishes nothing; an accepted one publishes exactly
+  one discontinuity successor and its seek applies; an anchored one publishes no successor; each on
+  the C ABI and alike on the browser (the parity row), over #1285's floors (a latent insert removed,
+  so a declaration has a successor to publish).
+- **B15-R7's order is retired** (no host and no SDK calls the declaration before a session seek;
+  recorded in #1323's and #1643's specs too).
+
+## Fold (batch 16b review), part B / B16-R9
+
+**What shipped.**
+
+- **Core.** `crates/control-plane/src/control.rs`, inside the existing `impl SessionState` (no new
+  impl block): `session_seek` returns `Result<(), SessionSeekFailure>`, a new enum with `Seek(SourceFailure)`
+  and `Declaration(CommandError)`, exported from the crate root. `declare_discontinuity` is now its
+  service step plus `declare_discontinuity_serviced`, the one core path both calls run. The plain
+  form checks, declares, then calls `seek_session` on the newest providers; a refusal of that push
+  maps to `SourceFailure::Control(Chunk(InternalInvariant))` behind a `debug_assert`. The comment
+  says why the set is the one checked: the discontinuity successor carries every source of the
+  committed model, and its commit moves each producer from the set it supersedes (the checked
+  donation, then `adopt_persisting` for the persisting producers and the timeline), with no push in
+  between.
+- **C ABI.** `session_seek_entry` maps `Seek` by `SourceFailure::report` and `Declaration` by the new
+  `declaration_refused`, the mapping `miso_engine_v1_declare_discontinuity` already used (now shared),
+  so the result codes stay consistent. Header: the session seek paragraph states B16-R9 and gains
+  the full refusal list (MINOR a: `source.seek.anchor_unaligned` for `_at`, `source.ring.vacated`,
+  `INTERNAL` with `capi.source.epoch` or `source.internal`, and the declaration's refusals for the
+  plain form); the declared-discontinuity paragraph's duty is now "at a stop, and before a seek of
+  every source made with per-source seeks". `docs/C_ABI_V1_QUALIFICATION.md`: the same text, a new
+  B16-R9 paragraph, the #1323 duty line, and MINOR b ("at or below which").
+- **Browser.** `ReadyOwnership::session_seek` runs the plain form through `run_control` (made generic
+  over its result and error, with the refusal for a full table queue passed in), so a plan the
+  declaration publishes keeps its tables and counts as a blocking rebuild, as
+  `declare_discontinuity`'s does; the anchored form calls the core directly. A refused
+  declaration reports through `refuse_control`, as the browser's declaration does. The exports pass
+  the spectrum promotion analysis, as `declare_discontinuity`'s export does.
+- **Audit (D6).** `tools/audit/src/capi.rs` no longer calls `miso_engine_v1_declare_discontinuity`.
+  `pcm_digest` `bffc21e857b5e134`, unchanged: the audit session has no raised floor and no
+  source-read offset, so the declaration publishes nothing both before and after (the separate call
+  and the seek's own declaration are both no-ops there); 0 violations, `replacements == 1` holds.
+- **MAJOR 1 (host part).** `runtime::tests::session_seek::a_removed_sources_generation_keeps_a_session_seek_stale`:
+  a per-source seek of the short source to 10, a transaction that removes it, the swap, then a
+  session seek at 5 is `source.generation.stale` and pushes nothing; 11 is accepted. The false
+  comments in `a_stale_generation_changes_nothing` (capi and host-web: the long source's own
+  generation refuses that case too) are corrected.
+
+**Gates (each red with its rule removed).**
+
+1. A refused plain seek publishes nothing: `capi` `runtime::tests::session_seek_declares::a_refused_plain_session_seek_publishes_nothing`
+   (red when the declaration runs before the check).
+2. An accepted plain seek publishes one successor and applies: `...::an_accepted_plain_session_seek_publishes_one_successor_and_applies`
+   (after the swap and while the removal's candidate waits; red with the declaration removed).
+3. An anchored seek publishes none: `...::an_anchored_session_seek_publishes_no_successor` (red when
+   the anchored form declares).
+4. Both hosts alike: `control_parity::a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_hosts`
+   (48 and 96 kHz; red under each of the three mutations).
+5. The headless SDK: `sdk/test/capability-evals.mjs` (see #1643's record).
+
+The floors come from #1285's path: the limited session (a muted track behind a true-peak limiter,
+removed by a transaction) on the C ABI, and t3's limiter removed on the parity session.
+
+### Fold (batch 16b review), part A
+
+The unfenced mode is gone (finding M2). The session's published generation is now a required argument of `PcmSourceRing::prepare_host_region`, `SourceTimeline::prepare`/`prepare_vacant` and `prepare_session_graph_source_set`; `prepare_graph_source_set` and the `u64::MAX` sentinel are removed. Every producer publishes to its word. Every consumer and timeline holds the word and loads it at each block entry; the driver loads it once for the whole set. `PcmSourceRing::prepare(config)` stays: it gives the ring a word of its own, so the ring is fenced as a session of one. A set refuses a timeline or occupied consumer of another word (`SourceGraphSourceSetError::SessionWord`), and a carry or swap between sets of different words is refused. The only push without a publish is the source-crate `SessionSeek` (`PublishedGeneration::session_seek`), which owns the zero and stale rules and checks that each producer is of its word (`SessionSeekError::ForeignSession`). It publishes once, on `publish()` or drop, and only if something was pushed. host-core's `seek_session` uses it, and the new `check_session_seek` applies the same rules with nothing pushed or published; part B calls it before it declares the discontinuity. For M1, host-core `source::tests::a_generation_not_above_the_word_is_stale_when_every_producer_takes_it` (word at 10, seek at 5 is stale while every producer would take it) is red with the stale rule disabled, when every other host-core source test stays green. `published::a_session_seek_opens_above_its_word_and_pushes_only_its_own_producers` and `published::a_set_takes_only_consumers_of_its_session` are red under their mutations. Render stays allocation-, lock- and syscall-free: 153 policy regions; capi `pcm_digest` `bffc21e857b5e134`.
