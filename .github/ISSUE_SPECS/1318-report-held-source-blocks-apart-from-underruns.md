@@ -157,3 +157,43 @@ named command exists.
 
 **Realtime-path edits.** None under `crates/engine/src/realtime`. The change is on the source
 consumer's render path in `crates/source/src/lib.rs`.
+
+## Decision record: #1318 (batch 15b)
+
+**Shipped.** D1-D4 and D6 in `crates/source/src/lib.rs` and the one header clause.
+
+- `begin_block_play`'s missing-PCM branch reads `held_seek` after the acquire step (the batch 15
+  precision of D1). Held: the missing frames go to new `held_frames` / `held_blocks` counters and
+  `underrun_*` stays untouched. Otherwise it is an underrun as before. `next_frame` still advances by
+  one quantum in both cases, so no rendered bit moves (D2).
+- `SourceReadReport` gains `held_frames`, `held`, `cumulative_held_frames`, `cumulative_held_blocks`;
+  `SourceConsumerTelemetry` gains `held_frames`, `held_blocks` (D3). Held frames use the same
+  region-bounded count as underrun frames (a held block past the end is neither, unchanged).
+- The graph driver needed no change: it folds only `report.underrun_event` and the vacant entry, so a
+  held block sets nothing (D4). `GraphObservationValidity` and `copy_after_disarm_telemetry` are
+  untouched (D5). The browser spectrum record and the C ABI read nothing new, so both hosts behave the
+  same: a held block stops marking spectrum windows as starved on both. The held counters reach hosts
+  with #1316 (C ABI) and #1537 (browser status), which are the non-goals here.
+- Header: "and those blocks count as source underruns" deleted (`miso_engine_v1.h`, lines ~250-253,
+  rewrapped at 100 columns). #1317 owns the full replacement text.
+- D6 facade doc (`crates/host-core/src/source.rs` `seek_at`) left to #1316 as the spec says.
+
+**Departures.** None. The B15-R/B15-Q rulings the task text names are not in this spec file.
+
+**Gates -> tests** (all in `crates/source/src/lib.rs`):
+
+1. `a_wait_for_an_anchor_is_held_and_starvation_after_it_is_an_underrun` (both the delivered and the
+   undelivered case).
+2. `queued_pcm_of_the_playing_generation_plays_while_a_seek_is_held`.
+3. `graph_driver_does_not_flag_a_held_block_as_an_underrun` (held source plus a starved second source
+   in one block).
+4. Updated, not deleted: `a_primed_block_waits_for_its_anchor` and
+   `a_seek_whose_pcm_arrives_inside_the_block_window_keeps_its_pcm` now assert held, not underrun.
+
+**Red evidence** (temporary mutations, restored): classification forced to never-held turns five tests
+red (the three new ones plus the two updated); the driver also OR-ing `report.held` turns only gate 3
+red; deciding played-vs-missing by `held_seek` alone turns gate 2 and
+`prepare_seek_holds_an_anchored_seek` red.
+
+**Measured numbers.** None re-pinned. `TransferBlock` is unchanged; the consumer gains two `u64`
+fields, with no resource-report row that counts them.

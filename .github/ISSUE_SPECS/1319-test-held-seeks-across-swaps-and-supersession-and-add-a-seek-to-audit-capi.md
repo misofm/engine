@@ -207,3 +207,56 @@ audited render, so a defect on that path shows up as an audit violation, not as 
 - **Batch placement.** "#1310 ... is not in the batch-15/16 list" and "#1344, also open and not in
   the list" (Dependencies on GitHub) are void. #1344 and #1310 are in batch 15a (with #1398), which
   lands before this slice.
+
+## Decision record: #1319 (batch 15b)
+
+**Shipped.** D1-D4 whole, in the two authorized paths.
+
+- `crates/capi/src/runtime/tests.rs`: `a_held_anchored_seek_crosses_a_plan_swap` (D1),
+  `a_queued_seek_on_a_persisting_source_survives_supersession` (D2) and
+  `a_held_seek_carries_from_a_taken_candidate` (D3), with helpers `submit_block_c`, `transact_c`
+  (returns the response's `EditPath`), `add_source_and_track`, `put_compressor` and
+  `render_fresh_reference`.
+- `tools/audit/src/capi.rs`: right after the structural transaction (outside every render scope)
+  the audit calls `miso_engine_v1_source_seek_at(session, "fixture-source", 2, 512, 512)` and
+  submits one generation-2 quantum from frame 512; `submit_source_chunk` takes a generation. The
+  carried consumer pops the seek at the swap call (call 1), holds it for calls 2-3 and applies it at
+  call 4. The existing assertions are unchanged.
+
+**Measured.** `audit capi`: allocations 0, all violation counters 0, `replacements == 1`,
+`(carried, carry_mismatches) == (1, 0)`. `pcm_digest` moved `bf7dcedd1d92621f` -> `4f52089e4a8cf83c`
+(call 4 now plays the generation-2 quantum instead of an underrun's silence; CI checks the digest
+for format only). The JSON schema is unchanged; no resource row exists in this audit.
+
+**Gates.** `cargo test --locked -p capi`: 151 lib tests and every integration test pass, among them
+the three new tests. `cargo test --locked --release -p audit`: 33 pass. Clippy on `capi` and `audit`
+(`--all-targets --all-features -D warnings`), `cargo fmt --all -- --check`, `RUSTDOCFLAGS='-D
+warnings' cargo doc --locked --workspace --no-deps` and `scripts/check-workspace-policy.sh` pass.
+The C header is untouched.
+
+**Departures from the text.**
+
+- D1 adds a muted track on the fixture source (`add_muted_track`), not a new track and source:
+  the spec's "keeps the source" is what the test needs, and the reference then compares with exact
+  zeros from the extra strip.
+- D2 and D3 use inserts and a muted track that leave the reference comparable: D2 compares with
+  the twin, as the spec says (a fresh session's compressor state would differ from a swapped-in
+  one's); D3's T2 is a muted track, so its reference is a fresh session of T2's document.
+- Both D2/D3 assert `EditPath::Rebuild` in each transaction's response (batch 15 check).
+- The held counters (#1318) are consumer telemetry that the C ABI tests cannot reach (no
+  accessor from a plan or session), so the assertions are bit-identity and nonzero-reference, which
+  an unapplied or dropped seek breaks (the generation-2 blocks are discarded and the source is
+  silent from the anchor).
+- D2 never feeds fresh sources, so the batch 15a guard (`drops_acked_fresh_source`) does not
+  arise: the fixture source persists from P0 and is never fresh in A. D3 withdraws nothing.
+
+**Red evidence (argued, not run: sprint mode forbids mutation runs).** D1: a carry that resets or
+rebuilds `held_seek` leaves the successor with no seek at block 8, so the queued generation-2
+block is discarded as unobserved and blocks 8-15 are silent against a playing reference. D2: a
+supersession that rebuilds the persisting ring (or clears its command slot) loses the seek or the
+queued blocks the same way; the counters pin `(withdrawn, superseded, taken) == (1, 1, 0)`. D3:
+preparing B across a taken A makes `s2` fresh in B, so its held seek and queued generation 2 are
+lost and `s2` is silent from block 8; the counters pin `(withdrawn, taken) == (0, 0)`.
+
+**Successor work.** Expose the consumer's held counters through a test accessor (or the counter
+snapshot) so a C ABI test can assert `held_blocks` directly.

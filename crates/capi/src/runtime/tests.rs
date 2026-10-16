@@ -1522,6 +1522,392 @@ fn assert_bit_identical(label: &str, first: u64, actual: &[Vec<f32>], expected: 
     }
 }
 
+/// Submits block `block` of `signal` salt `salt` to `source` as generation `generation`, at the
+/// source frame `block * 128`.
+fn submit_block_c(
+    session: *mut crate::Session,
+    source: &[u8],
+    generation: u64,
+    block: u64,
+    salt: u64,
+    sample_rate_hz: u32,
+) {
+    let (left, right) = continuity_block(block, salt);
+    submit_c_to(
+        session,
+        source,
+        generation,
+        block * 128,
+        sample_rate_hz,
+        &left,
+        &right,
+        false,
+    );
+}
+
+/// Commits `edits` at `base` through the C entry point and returns the path the response reports.
+/// Panics unless the transaction commits.
+fn transact_c(
+    session: *mut crate::Session,
+    request_id: u64,
+    base: u64,
+    edits: &[protocol::SessionEdit],
+) -> protocol::EditPath {
+    let request = command_bytes_at_revision(
+        request_id,
+        ExpectedRevision::Exact(SessionRevision(base)),
+        protocol::CommandPayload::SessionTransactionApply(edits),
+    );
+    let (result, response) = command_c(session, &request);
+    assert_eq!(result, crate::RESULT_OK, "request {request_id}");
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("transaction response")
+    {
+        protocol::DecodedTypedResponseFrame::Success {
+            payload: protocol::DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+            header,
+        } => {
+            assert_eq!(header.revision, SessionRevision(base + 1));
+            applied.edit_path
+        }
+        protocol::DecodedTypedResponseFrame::Success { .. } => panic!("not a transaction response"),
+        protocol::DecodedTypedResponseFrame::NonOk { header, payload } => {
+            panic!(
+                "request {request_id}: {:?} {:?}",
+                header.status, payload.diagnostics
+            )
+        }
+    }
+}
+
+/// `UpsertSource` of `source_id` (a copy of the first source), `UpsertTrack` of `track_id` on it
+/// and `UpsertRoute` of its route.
+fn add_source_and_track(
+    model: &session::SessionModel,
+    source_id: &str,
+    track_id: &str,
+) -> [protocol::SessionEdit; 3] {
+    let mut source = model.sources[0].clone();
+    source.id = session::StableId::parse(source_id).expect("source ID");
+    let mut track = model.tracks[0].clone();
+    track.id = session::StableId::parse(track_id).expect("track ID");
+    track.source_id = source.id.clone();
+    let mut route = model.routes[0].clone();
+    route.id = session::StableId::parse(&format!("{track_id}-main")).expect("route ID");
+    let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+        panic!("track route")
+    };
+    *track_id = track.id.clone();
+    [
+        protocol::SessionEdit::UpsertSource { source },
+        protocol::SessionEdit::UpsertTrack { track },
+        protocol::SessionEdit::UpsertRoute { route },
+    ]
+}
+
+/// A structural insert edit that changes the audio only on `track`: a compressor at its default
+/// parameters, put at the head of the track's inserts.
+fn put_compressor(model: &session::SessionModel, track: usize) -> protocol::SessionEdit {
+    use session::{EffectIdentity, EffectQuality, LinkMode, SidechainDeclaration, StableId};
+    protocol::SessionEdit::PutTrackEffect {
+        track_id: model.tracks[track].id.clone(),
+        rack_name: session::RackName::Inserts,
+        final_position: 0,
+        effect: session::Effect {
+            id: StableId::parse("comp").expect("insert ID"),
+            identity: EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("effect ID"),
+            },
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            params: Vec::new(),
+            sidechain: SidechainDeclaration::None,
+        },
+    }
+}
+
+/// The reference of the held-seek tests: a fresh session of `committed`, fed by `feed(session,
+/// block)` one block ahead of each rendered block, rendering `blocks` blocks.
+fn render_fresh_reference(
+    committed: &str,
+    blocks: u64,
+    feed: &dyn Fn(*mut crate::Session, u64),
+) -> Vec<Vec<f32>> {
+    let (session, plan) = boxed_c_children(committed);
+    feed(session, 0);
+    let rendered = (0..blocks)
+        .map(|block| {
+            feed(session, block + 1);
+            render_c(plan, block)
+        })
+        .collect::<Vec<_>>();
+    crate::ffi::test_plan_destroy(plan);
+    crate::ffi::test_session_destroy(session);
+    rendered
+}
+
+/// Issue #1319 D1 (the #1275 verifier's probe P5): a seek the predecessor plan already popped, and
+/// holds, moves with its source's consumer across a plan swap and applies at its anchor.
+///
+/// At 48 kHz the fixture source plays generation 1 for blocks 0-7. After block 3 the host anchors
+/// generation 2 at render sample 1024 (block 8) and submits it from frame 0. Blocks 4 and 5 render
+/// on the predecessor, whose consumer pops the seek and holds it while the queued generation-1
+/// blocks play. A structural transaction (a muted track on the same source) commits after block 5,
+/// block 6 is the swap block, and block 8 applies the seek on the successor. All 16 blocks equal a
+/// fresh session of the committed document fed one stream that switches content at block 8, and
+/// the swap carried the consumer.
+///
+/// Test value: red if the swap resets, rebuilds or drops the carried consumer's held seek (block 8
+/// then finds no seek: the generation-2 blocks are discarded as unobserved and block 8 on is
+/// silent), or if the successor applies a held seek before its anchor or after it; no other
+/// committed test seeks before a swap (`successor_swap.rs` asserts `seek_before >= SWAP_BLOCK`).
+#[test]
+fn a_held_anchored_seek_crosses_a_plan_swap() {
+    const RATE: u32 = 48_000;
+    const FIXTURE_ID: &[u8] = b"fixture-source";
+    const ANCHOR_BLOCK: u64 = 8;
+    let model = stateless_session(RATE);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let (session, plan) = boxed_c_children(&document);
+    let mut swapped = Vec::new();
+    submit_block_c(session, FIXTURE_ID, 1, 0, 0, RATE);
+    swapped.extend(feed_and_render_c(session, plan, RATE, 0, 4));
+    // Generation 1 is queued through block 7 (block 4 is queued by the feed above).
+    for block in 5..8 {
+        submit_block_c(session, FIXTURE_ID, 1, block, 0, RATE);
+    }
+    assert_eq!(
+        crate::ffi::test_source_seek_at(session, FIXTURE_ID, 2, 0, ANCHOR_BLOCK * 128),
+        crate::RESULT_OK
+    );
+    for block in 0..4 {
+        submit_block_c(session, FIXTURE_ID, 2, block, 1, RATE);
+    }
+    swapped.push(render_c(plan, 4));
+    swapped.push(render_c(plan, 5));
+    let edits = add_muted_track(&model, "a-muted");
+    assert_eq!(
+        transact_c(session, 1, 42, &edits),
+        protocol::EditPath::Rebuild,
+        "a structural transaction rebuilds"
+    );
+    for block in 6..16 {
+        // The ring holds eight blocks: generation 2 block `m` fits once `m - 3` blocks played.
+        match block {
+            6 => {
+                submit_block_c(session, FIXTURE_ID, 2, 4, 1, RATE);
+                submit_block_c(session, FIXTURE_ID, 2, 5, 1, RATE);
+            }
+            7 => submit_block_c(session, FIXTURE_ID, 2, 6, 1, RATE),
+            8 => submit_block_c(session, FIXTURE_ID, 2, 7, 1, RATE),
+            _ => {}
+        }
+        swapped.push(render_c(plan, block));
+    }
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(plan),
+        (1, 0),
+        "one swap, and it carried the source"
+    );
+    let committed = snapshot_c(session);
+    crate::ffi::test_plan_destroy(plan);
+    crate::ffi::test_session_destroy(session);
+
+    let reference = render_fresh_reference(&committed, 16, &|session, block| {
+        let (salt, content_block) = if block < ANCHOR_BLOCK {
+            (0, block)
+        } else {
+            (1, block - ANCHOR_BLOCK)
+        };
+        let (left, right) = continuity_block(content_block, salt);
+        submit_c(session, 1, block * 128, RATE, &left, &right, false);
+    });
+    assert_bit_identical("held seek across a swap", 0, &swapped, &reference);
+}
+
+/// Issue #1319 D2: an anchored seek queued on a source that persists from the running plan through
+/// a withdrawn candidate into its replacement survives the supersession.
+///
+/// P0 plays the fixture source for blocks 0-3 and has generation 1 queued through block 7. With no
+/// render between them, T1 (a compressor on the second track) commits and candidate A is
+/// published; the seek to generation 2 at block 8 goes to A's producer set, so it is queued in the
+/// command slot of the ring P0 owns; T2 (a compressor on the third track) withdraws A and commits
+/// B against P0. Generation 2 is then submitted through the producer that is now B's, and blocks
+/// 4-11 render. The source switches at the anchor, and every block equals a twin that submits
+/// T1 and T2 as one transaction at the same point and seeks the same way. The supersession is one
+/// withdrawal (and one drop of A), and each transaction took the rebuild path.
+///
+/// Test value: red if the supersession rebuilds a persisting source's ring for B (its queued
+/// blocks are lost) or loses the seek in the ring's command slot while A is withdrawn (block 8 on
+/// then finds generation 2 unobserved and is silent); the #1310 tests seek only on a source the
+/// withdrawn candidate added, whose ring is donated.
+#[test]
+fn a_queued_seek_on_a_persisting_source_survives_supersession() {
+    const RATE: u32 = 48_000;
+    const FIXTURE_ID: &[u8] = b"fixture-source";
+    const ANCHOR_BLOCK: u64 = 8;
+    let model = stateless_session(RATE);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let first = [put_compressor(&model, 1)];
+    let second = [put_compressor(&model, 2)];
+    let combined = [put_compressor(&model, 1), put_compressor(&model, 2)];
+
+    let run = |superseding: bool| {
+        let (session, plan) = boxed_c_children(&document);
+        let before = crate::ffi::test_owner_counters(session);
+        submit_block_c(session, FIXTURE_ID, 1, 0, 0, RATE);
+        let mut blocks = feed_and_render_c(session, plan, RATE, 0, 4);
+        for block in 5..8 {
+            submit_block_c(session, FIXTURE_ID, 1, block, 0, RATE);
+        }
+        // The seek goes to the pending candidate's producer set, whichever transaction left it.
+        let seek = || {
+            assert_eq!(
+                crate::ffi::test_source_seek_at(session, FIXTURE_ID, 2, 0, ANCHOR_BLOCK * 128),
+                crate::RESULT_OK
+            );
+        };
+        if superseding {
+            assert_eq!(
+                transact_c(session, 1, 42, &first),
+                protocol::EditPath::Rebuild
+            );
+            seek();
+            assert_eq!(
+                transact_c(session, 2, 43, &second),
+                protocol::EditPath::Rebuild
+            );
+        } else {
+            assert_eq!(
+                transact_c(session, 1, 42, &combined),
+                protocol::EditPath::Rebuild
+            );
+            seek();
+        }
+        for block in 0..4 {
+            submit_block_c(session, FIXTURE_ID, 2, block, 1, RATE);
+        }
+        for block in 4..12 {
+            blocks.push(render_c(plan, block));
+        }
+        let counters = crate::ffi::test_owner_counters(session);
+        let delta = (
+            counters.candidate_withdrawn - before.candidate_withdrawn,
+            counters.candidate_superseded - before.candidate_superseded,
+            counters.candidate_taken - before.candidate_taken,
+        );
+        let carried = crate::ffi::test_plan_carry_counts(plan);
+        crate::ffi::test_plan_destroy(plan);
+        crate::ffi::test_session_destroy(session);
+        (blocks, delta, carried)
+    };
+    let (superseded, delta, carried) = run(true);
+    assert_eq!(
+        delta,
+        (1, 1, 0),
+        "one withdrawal, whose candidate A was dropped"
+    );
+    assert_eq!(carried, (1, 0), "one swap, B alone, and it carried");
+    let (twin, twin_delta, twin_carried) = run(false);
+    assert_eq!(twin_delta, (0, 0, 0));
+    assert_eq!(twin_carried, (1, 0));
+    assert_bit_identical("supersession across a queued seek", 0, &superseded, &twin);
+}
+
+/// Issue #1319 D3: a held seek on a source a candidate added carries on when a later structural
+/// transaction finds that candidate already taken by render.
+///
+/// T1 adds source `s2` with its track. The host anchors `s2`'s generation 2 at block 8 (frame 0)
+/// and submits it, and block 2 renders: render claims T1's candidate A, and A's consumer for `s2`
+/// pops the seek and holds it. T2 (a muted track on the fixture source, keeping `s2`) commits: its
+/// service step promotes A, so B is prepared against A as the running plan and carries A's `s2`
+/// consumer with its held seek, rather than preparing across a withdrawal. Blocks 3-11 render. `s2`
+/// is silent until block 8 and plays from there, and every block equals a fresh session of T2's
+/// document fed `s2` zeros below the anchor and the same PCM from it. Neither withdrawal outcome
+/// is counted: A was neither withdrawn nor found taken by the withdrawal.
+///
+/// Test value: red if the control plane treats a candidate render has taken as withdrawn and
+/// prepares B across it: `s2`, which A added, is then fresh in B, and A's held, acked seek and its
+/// queued generation 2 are lost (block 8 on lacks `s2`).
+#[test]
+fn a_held_seek_carries_from_a_taken_candidate() {
+    const RATE: u32 = 48_000;
+    const FIXTURE_ID: &[u8] = b"fixture-source";
+    const ADDED: &[u8] = b"s2-source";
+    const ANCHOR_BLOCK: u64 = 8;
+    let mut model = stateless_session(RATE);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let (session, plan) = boxed_c_children(&document);
+    let before = crate::ffi::test_owner_counters(session);
+    submit_block_c(session, FIXTURE_ID, 1, 0, 0, RATE);
+    let mut swapped = feed_and_render_c(session, plan, RATE, 0, 2);
+
+    let first = add_source_and_track(&model, "s2-source", "t2");
+    assert_eq!(
+        transact_c(session, 1, 42, &first),
+        protocol::EditPath::Rebuild
+    );
+    assert_eq!(
+        crate::ffi::test_source_seek_at(session, ADDED, 2, 0, ANCHOR_BLOCK * 128),
+        crate::RESULT_OK
+    );
+    for block in 0..4 {
+        submit_block_c(session, ADDED, 2, block, 1, RATE);
+    }
+    submit_block_c(session, FIXTURE_ID, 1, 3, 0, RATE);
+    swapped.push(render_c(plan, 2));
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(plan),
+        (1, 0),
+        "render took A"
+    );
+
+    let second = add_muted_track(&model, "a-muted");
+    assert_eq!(
+        transact_c(session, 2, 43, &second),
+        protocol::EditPath::Rebuild
+    );
+    let counters = crate::ffi::test_owner_counters(session);
+    assert_eq!(
+        (
+            counters.candidate_withdrawn - before.candidate_withdrawn,
+            counters.candidate_taken - before.candidate_taken,
+        ),
+        (0, 0),
+        "the service step promoted A before the withdrawal ran"
+    );
+    for block in 3..12 {
+        if block > 3 {
+            submit_block_c(session, FIXTURE_ID, 1, block, 0, RATE);
+        }
+        swapped.push(render_c(plan, block));
+    }
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(plan),
+        (2, 0),
+        "A, then B, carried"
+    );
+    let committed = snapshot_c(session);
+    crate::ffi::test_plan_destroy(plan);
+    crate::ffi::test_session_destroy(session);
+
+    let reference = render_fresh_reference(&committed, 12, &|session, block| {
+        submit_block_c(session, FIXTURE_ID, 1, block, 0, RATE);
+        let (left, right) = if block < ANCHOR_BLOCK {
+            (vec![0.0; 128], vec![0.0; 128])
+        } else {
+            continuity_block(block - ANCHOR_BLOCK, 1)
+        };
+        submit_c_to(session, ADDED, 1, block * 128, RATE, &left, &right, false);
+    });
+    assert_bit_identical("held seek from a taken candidate", 0, &swapped, &reference);
+}
+
 /// Issue #1273 gate 2: a transaction that removes a track and its source leaves the remaining
 /// source playing from its carried ring, bit-identical to the fresh post-edit session, and a
 /// submit for the removed source is refused as unknown.
