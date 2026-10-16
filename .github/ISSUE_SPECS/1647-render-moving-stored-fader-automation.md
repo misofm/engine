@@ -863,18 +863,20 @@ The U2 fold's review (MAJOR-A, MINOR-B, a NIT) and root's ruling on D1.2, folded
   `a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold` (prepared muted; curve flat at
   `-30` dB over `[0, 2_000]`, then a fade to `0` dB at 10,000; a live unmute of 4,000 at 0 and of
   window 0 at 1,024: every completion sample from 1,087 is the curve's gain; quanta 128 and 64 and
-  the oracle). Red on `6fcd46e01` (completion sample 2,047 off the curve), checked once.
-- **D1.2 removed: unobservable after R17-9 and R17-10.** While the stage holds the lane it only
-  stores gain operations, and the cell emits the same events with or without the report, so `owed`
-  is set alike. If a move is owed, the R17-9 landing at `E` rewrites the cell's whole state; if a
-  live write frees the lane early, the held-through release ends the hold; if nothing is owed and
-  the hold ends by itself, it ends at `E - 1`, where the report's hold ended too. So
+  the oracle). ~~Red on `6fcd46e01` (completion sample 2,047 off the curve), checked once.~~
+  Corrected in U2 fold 3: this claim does not hold for the gate as committed. With D1.2 removed
+  nothing gave the cell a hold of the ended ramp in that case, so the gate stayed green under the
+  mutation "release only when owed" (the fold-2 verifier's finding); it was replaced (U2 fold 3,
+  F2).
+- **D1.2: D1.2 was observable (P3) and produced a worse output; removed by root decision
+  B17-R11.** With D1.2 an unchanged jump inside the hold becomes an owed move at `E`, and the lane
+  departs from the never-muted reference; without it the lane equals the never-muted session from
+  `E` (gate `an_unchanged_jump_inside_the_hold_owes_no_move`, U2 fold 3, F3). The fold-2 argument
+  that D1.2 was unobservable is withdrawn. Removed with it:
   `LaneFaderAutomation::report_held_ramp`, `report_held_ramps`, the drain's held marks
   (`drain_fader_controls_marking`, folded back into `drain_fader_controls`), the scalar oracle's
-  marks and the now unused `selector_channels` are deleted. Mutation check (once): with the fix in
-  and D1.2 removed every gate stays green (`stored_fader_automation` 27/27, and the full check set
-  below). This withdraws constraint 1's report (batch 13b amendment) and the "D1.2 is kept" of the
-  U2 fold above.
+  marks and the then unused `selector_channels`. This withdraws constraint 1's report (batch 13b
+  amendment) and the "D1.2 is kept" of the U2 fold above.
 - **MINOR-B.** Each unreachable `debug_assert` condition in the driver carries a one-line proof and
   its release action (a hold or a skip; no panic; no NaN reaches the stage): `read_offsets`'s
   offsets-jump refusal, `cut`'s span, the driver's missing program cell, its span / slot / `hold_end`
@@ -898,3 +900,51 @@ allocations. No edit under `crates/engine/src/realtime/`, `crates/automation` or
 **Attempt count (AGENTS.md five-attempt rule).** #1647 is at attempt 3 of 5: the implementation
 (#1647a-c), the U2 fold (59ca8e3b4) and U2 fold 2 (this section). A failed verification of fold 2
 goes to root before attempt 4.
+
+## U2 fold 3 (batch 17): attempt 4 of 5
+
+The fold-2 verification's findings (F1-F3) and root decision B17-R11, folded on
+`codex/controls-batch-17k` over `2d08d9142`. Root-approved scope only. Uncommitted for the
+coordinator.
+
+- **F1 (render fix: a regression from fold 2).** The held-through release (R17-10) overwrote a
+  hold that `offsets_jump` set at the same block entry: a live unmute of window 0 and an `S`
+  write at one entry cut the offsets jump's ramp at the next grid point. The free branch of
+  `AutomatedFaderCell::offsets_jump` now clears `obligation.held_through` after the stage takes
+  the operation; the jump's hold is newer than the ramp the write ended. A successor's carried
+  record goes through the same `offsets_jump` call at its first block (`read_offsets`), with the
+  carried obligation, so it takes the same treatment. Gate
+  `an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp` (the verifier's P2):
+  prepared muted, flat `-30` dB to 1,100 then a fade; unmute of window 0 and `S = -6` dB with a
+  480-sample ramp at 1,024, with no unmute in progress and with a 4,000-sample unmute from 0;
+  from 1,024 the lane equals the never-muted twin that takes the same write; quanta 128, 64, 37;
+  bank at eight and four lanes, the fused path at both widths, and the scalar oracle. Red on
+  `86271e096`'s logic (the one line reverted), checked once.
+- **F2 (void gate replaced).** `a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold`
+  is now the verifier's P1b at quantum 37: an unmute of 4,000 at 0, an `S` write of `-6` dB (ramp
+  200) at 962 under it (the held branch: the cell holds to 3,999), and an unmute of window 0 at
+  999; no grid point lies between them, so nothing is owed. Every completion sample from 1,087 is
+  the composed curve; both lanes, and a left-only form whose right lane stays muted; all five
+  render forms. Red under the mutation "release only when owed", checked once.
+- **F3 (B17-R11).** Gate `an_unchanged_jump_inside_the_hold_owes_no_move` (the verifier's P3):
+  jump length 16; curve flat `-20` dB to 1,024, linear `-21` to `-13` dB over `[1_024, 1_144]`,
+  flat `-13` after; prepared muted; unmute of window 1,060 at 0. From `E = 1_060` both lanes equal
+  the never-muted twin; quanta 128, 64, 37; all five forms. Red with D1.2 restored (the hunks of
+  the verifier's `lib.rs.d12`, ported to this tree), checked once. The U2 fold 2 record above now
+  states the D1.2 decision and corrects the replaced gate's "Red on `6fcd46e01`" line.
+
+The verifier's other probes (P1, P4, P5) are not committed: P1b covers P1's case, and P4 and P5
+pass with no mutation named that they alone catch.
+
+**Checks (x86-64 AVX2).** `cargo test --locked -p builtins-compiler --features test-support`:
+86 pass. `-p host-core --all-features`: 561 pass (`stored_fader_automation` 30). `-p
+control-plane --all-features`: 25 pass. `-p capi`: 220 pass, 1 ignored. `-p host-web --features
+host-web/test-support --lib --test control_parity`: 175 pass. `realtime-policy`: ok, 160 regions
+in 33 files. fmt; clippy `-D warnings` (builtins-compiler, host-core, capi; all targets, all
+features); no-feature `cargo check --all-targets` of the same: clean. `./target/release/audit
+capi`: `pcm_digest` `bffc21e857b5e134`, 0 violations, 0 allocations, 0 syscalls. No fixture or
+byte moved. No edit under `crates/engine/src/realtime/`.
+
+**Attempt count (AGENTS.md five-attempt rule).** #1647 is at attempt 4 of 5: the implementation
+(#1647a-c), the U2 fold, U2 fold 2 and U2 fold 3 (this section). A failed verification of this
+attempt leaves one attempt.

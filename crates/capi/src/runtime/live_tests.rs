@@ -8921,6 +8921,87 @@ mod set_control {
             }
         }
 
+        /// A hand move (#1650b) of `document`'s first track's fader to `db` on both lanes over
+        /// `ramp`: on an automated fader it is stored as the ride's offset and moves `S`.
+        fn hand_move(document: &str, db: f32, ramp: Option<u32>) -> SessionEdit {
+            set(
+                builtin(&first_track(document), FADER_DB, Lane::Both),
+                db,
+                ramp,
+            )
+        }
+
+        /// U3 fold residue R2b (#1648, #1650b). A live hand move on the riding fader with its own
+        /// 4,000-sample ramp, still unread when a rebuild commits (no block between them), is
+        /// carried into the successor as the VCA move is: every block equals the uninterrupted
+        /// engine's, the move is heard, the successor is adopted, and `LIVE_VALUES_SUPERSEDED`
+        /// holds the same count. On the moving and the flat ride.
+        ///
+        /// Test value: red if a hand move's offsets write misses the carry drain (checked once)
+        /// or its record loses its ramp word across the swap: the successor then jumps over the
+        /// fader length from its prepared `S`. A hand move reaches the offsets cell through the
+        /// fader row's stored offset, not the VCA row, which the VCA forms do not exercise.
+        #[test]
+        fn a_hand_move_pending_at_a_swap_keeps_its_length() {
+            bench_support::alloc::assert_installed();
+            for (ride, document) in [("moving ride", riding()), ("flat ride", flat())] {
+                let label = &format!("{ride}, a hand move of 4,000 samples");
+                let model = parse_session_json(&document).expect("model");
+                let mut rigs = warm(&document);
+                let edit = hand_move(&document, -6.0, Some(4_000));
+                for rig in &mut rigs[..2] {
+                    send(
+                        rig,
+                        core::slice::from_ref(&edit),
+                        protocol::EditPath::Live,
+                        label,
+                    );
+                }
+                send(
+                    &mut rigs[0],
+                    &add_muted_track(&model, "added"),
+                    protocol::EditPath::Rebuild,
+                    label,
+                );
+                let (first, heard) = lockstep(&mut rigs, 44);
+                assert_eq!(rigs[0].summary().3, 0, "{label}: the successor is adopted");
+                assert_eq!(first, None, "{label}: first difference (block, sample)");
+                assert!(heard, "{label}: the move is heard");
+                let counts = [superseded(&mut rigs[0]), superseded(&mut rigs[1])];
+                assert_eq!(
+                    counts[0], counts[1],
+                    "{label}: LIVE_VALUES_SUPERSEDED [a, u]"
+                );
+            }
+        }
+
+        /// U3 fold residue, reviewer C's case as a hand move (#1648, #1650b). A hand move with an
+        /// explicit 4,096-sample ramp in the same transaction as a structural edit (the
+        /// transaction rebuilds) reaches the carried automated lane with its own length: every
+        /// block equals the same hand move sent alone (`live`). On the moving and the flat ride.
+        ///
+        /// Test value: red if the join writes no offsets record for a hand move's stored offset
+        /// (the successor's `S` then reaches the lane by the adoption rule, over the fader length
+        /// `J`, not over 4,096 samples).
+        #[test]
+        fn a_hand_move_inside_a_rebuild_keeps_its_own_length() {
+            bench_support::alloc::assert_installed();
+            for (ride, document) in [("moving ride", riding()), ("flat ride", flat())] {
+                let label = &format!("{ride}, a hand move of 4,096 samples");
+                let model = parse_session_json(&document).expect("model");
+                let mut rigs = warm(&document);
+                let edit = hand_move(&document, -6.0, Some(4_096));
+                let mut edits = vec![edit.clone()];
+                edits.extend(add_muted_track(&model, "added"));
+                send(&mut rigs[0], &edits, protocol::EditPath::Rebuild, label);
+                send(&mut rigs[1], &[edit], protocol::EditPath::Live, label);
+                let (first, heard) = lockstep(&mut rigs, 44);
+                assert_eq!(rigs[0].summary().3, 0, "{label}: the successor is adopted");
+                assert_eq!(first, None, "{label}: first difference (block, sample)");
+                assert!(heard, "{label}: the move is heard");
+            }
+        }
+
         /// U3 fold, MAJOR 2 (R1). A live VCA move heard (mid-jump after three blocks, settled
         /// after twelve), then a rebuild that keeps the ride: the carried lane continues with no
         /// adoption jump, and every block equals the uninterrupted engine's.

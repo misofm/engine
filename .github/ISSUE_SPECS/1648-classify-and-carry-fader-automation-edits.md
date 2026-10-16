@@ -601,6 +601,23 @@ takes its adoption jump over `J`, even when the same transaction also moves `S` 
 `Adoption` is now ordered, and `adopt` keeps the stronger of its own adoption and one the
 carried cell still owed (NIT 3).
 
+**Compare reachability (root ruling B17-R12): unreachable from every shipped host.** Proof: the
+join (`join_strips` -> `join_level_records`) writes an offsets record to the successor's cell
+whenever the transaction moves a carried automated lane's effective `S`, and it is `Live` (not
+`Same`) exactly when the successor attaches live controls (`live_strips = attach_live`). Every
+host preparation attaches them: the C ABI (`crates/capi/src/runtime/mod.rs`, both
+`prepare_host_runtime_with_live_lanes[_successor]`) and the browser (`prepare_web_host`, its
+three branches, `..._with_live_controls_and_spectrum[_collection]_successor` and
+`prepare_host_runtime_with_selected_meters_successor`) pass `Some(live_controls)`, whatever the
+`HostLiveLanes` selection, and `live_control_strips` lists every track and submix. So on a
+shipped plan the first block always reads the cell's own record and never raises `Compare` for
+an `S` change. Only host-core's plain entries (`prepare_host_runtime_successor` and the other
+`None` forms, which no shipped host calls) prepare a lane with no live cells, where `Compare` is
+the backstop and ramps over `J`. `read_offsets` now carries
+`debug_assert!(superseded.is_none(), ...)` at the raise with this proof (`superseded` is `Some`
+exactly on a lane with live cells); in release the action stays the `J` ramp. Every test of
+builtins-compiler, host-core, control-plane, capi and host-web passes with it.
+
 **MINOR 8.** The held-ramp re-report under `Reposition` is in `settle_adoption`, not D1.2, so it
 survives U2 fold 2. It changes no sample: a held stage only remembers either operation, and the
 obligation follows `free_from`. It is documented there as bookkeeping (M14 stays green). The
@@ -631,9 +648,28 @@ In `crates/host-core/tests/stored_fader_automation.rs`:
 **Not done here.** R2b and reviewer C's hand-move form need #1650b's hand offset, which is not on
 this branch. The VCA forms above exercise the same records. R4 is not a discriminating test on
 this branch, because the offset is not yet heard (#1650a). Its red check belongs to the merged
-tree.
+tree. (Done on the merged tree: see "U3 fold residue" below.)
 
 **Numbers.** `lane_slot_bytes` 224 -> 304 (the carried record and the adopted `S`, both
 channels), measured by `fader_automation_sizes()`. No byte gate moved. `realtime-policy`: ok, 160
 regions in 33 files. `audit capi`: `pcm_digest` `bffc21e857b5e134`, 0 violations, 0 allocations.
 No edit under `crates/engine/src/realtime/`.
+
+## U3 fold residue (batch 17, on the merged tree with #1650b)
+
+- **R2b.** `a_hand_move_pending_at_a_swap_keeps_its_length` (`set_control::automated_carry`): a
+  live hand move of the riding fader (`fader_db`, both lanes, `-6` dB over 4,000 samples), unread
+  when a rebuild commits; moving and flat ride. Every block equals the uninterrupted engine, the
+  move is heard, the successor is adopted, `LIVE_VALUES_SUPERSEDED` is equal. Red with the carry
+  drain (`carry_offsets`) reading nothing, checked once.
+- **Reviewer C's case as a hand move.** `a_hand_move_inside_a_rebuild_keeps_its_own_length`: the
+  same hand move with an explicit 4,096-sample ramp in the transaction that adds a track (rebuild)
+  equals the hand move sent alone (`live`), moving and flat ride. Red with the join's offsets
+  records dropped, checked once. No hand-move defect found.
+- **R4 red check (merged tree).** `an_offset_only_upsert_inside_a_rebuild_renders_as_it_does_alone`
+  is red when the join's offsets record takes ramp 0 (a jump over another length), and red when
+  the record is dropped and the `Compare` backstop removed. It stays green when only the record
+  is dropped: the upsert sent alone ramps over the session's length `J`, and the `Compare`
+  backstop also ramps over `J` to the same bits, so a lost record alone is not observable in that
+  case (the hand-move and VCA forms with their own lengths are red under it).
+- Part C (B17-R12) is recorded in the U3 fold section above.

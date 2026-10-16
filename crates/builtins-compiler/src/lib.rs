@@ -822,7 +822,8 @@ struct HeldRampObligation {
     /// The stage held the gain through the last sample of the block just rendered. A next block
     /// that finds the gain free with no move due had its hold cleared by a live write at its
     /// entry, so the cell's hold of the ramp that write ended is released there, owed or not
-    /// (R17-10).
+    /// (R17-10). An offsets jump applied on the free lane at that entry clears it: the jump's own
+    /// hold is newer than the ramp the write ended (U2 fold 3, F1).
     held_through: bool,
 }
 
@@ -1033,6 +1034,15 @@ impl LaneFaderAutomation {
                 && let Some(sum) = adopted_sum
                 && sum.to_bits() != cell.offsets_sum.to_bits()
             {
+                // Unreachable on a lane with live cells (B17-R12): the join writes an offsets
+                // record to the successor's cell whenever its `S` differs from the committed one
+                // (`join_level_records`), and every C ABI and browser plan attaches live cells to
+                // every strip, so only a plan prepared with no live controls (a host-core entry no
+                // shipped host calls) takes this backstop. In release it ramps over `J`.
+                debug_assert!(
+                    superseded.is_none(),
+                    "the adoption rule stands in for a live offsets record"
+                );
                 cell.offsets_sum = sum;
                 cell.adoption = cell.adoption.max(Adoption::Compare);
             }
@@ -1114,8 +1124,9 @@ impl AutomatedFaderCell {
     /// the gain (#1638 D2), so the target its ramp aims for is no longer one the cell knows: the
     /// cell forgets its target (a fresh state, whose next free grid event always retargets) and
     /// holds until the held ramp's last sample (released at the entry of a block whose live write
-    /// frees the gain early, R17-10). With no node time (a plan with no timeline) the cell's own
-    /// target is the jump's value.
+    /// frees the gain early, R17-10). On a free lane the jump's own hold is never released by
+    /// that rule: a live write that frees the gain at the same entry ended an older ramp. With no
+    /// node time (a plan with no timeline) the cell's own target is the jump's value.
     ///
     /// `false` when the composed value has no fader gain, the program has no such cell, or the
     /// stage refuses the operation (unreachable: the curve is in the fader domain,
@@ -1184,6 +1195,10 @@ impl AutomatedFaderCell {
         if !stage.apply(channel, operation) {
             return false;
         }
+        // This jump's hold is newer than the held ramp a live write ended at this entry, so the
+        // block's R17-10 release must not cut it (#1647 U2 fold 3, F1). A successor's carried
+        // record takes this same path at its first block, with the carried obligation.
+        self.obligation.held_through = false;
         self.state.seed_target(value);
         if let Some(start) = start {
             self.state
