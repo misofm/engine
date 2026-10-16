@@ -146,3 +146,61 @@ during its ramp-out.
 - *Swap and retire browser plans through the Worker's service loop* (#1381).
 - *Move browser source submission and seeks into the Worker* (#1387).
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332).
+
+## Amendment (controls coordinator, batch 16a review, 2026-10-16)
+
+Anchors checked against `35ac17545` plus the batch 16a tree. Earlier text is kept.
+
+**Finding (review M4).** D3 has `applySharedSeek` call `miso_engine_web_v1_source_seek_at`. That is
+wrong for the feed worklet's render path.
+- `applySharedSeek` is called from `drainSharedRing`, which runs in `process()`
+  (`sdk/src/browser-assets/miso-engine-v1-pcm-feed-worklet.js:366`; the helper is `:466`, its
+  comment at `:465` says "shared by render and the between-block control handler").
+- The feed worklet is a render-thread caller of the plain seek: `tools/realtime-policy/render-thread-exports.json:10`
+  lists `source_seek` with the callers `engine/receiveSeek` and `feed/applySharedSeek`. `source_seek_at`
+  is not on that table and must not be added.
+- `source_seek_at` (`hosts/host-web/src/ffi.rs:3311`) calls `SessionState::seek_at`
+  (`crates/control-plane/src/control.rs:4073-4081`). That runs `service()` first (`:4080`; `service` is
+  `:1930`). The service step drops retired plans, takes the shared report lock and may allocate. The
+  doc comment on the export says the same: control half only, never `process()` (`ffi.rs:3299-3303`).
+  The plain seek uses `seek_unserviced` (`hosts/host-web/src/lib.rs:3630`; `control.rs:4059`) for this
+  reason.
+
+**Rule, replacing D3's call.**
+- A render-thread caller keeps the plain `miso_engine_web_v1_source_seek`. `applySharedSeek` called from
+  `drainSharedRing` never calls `source_seek_at`.
+- An anchored seek (anchor not `-1`) is applied by the control half's message handler, between blocks:
+  the Worker in `worker` mode, the worklet's control handler in `single` mode. The handler may reach
+  `source_seek_at` through #1294 D2's path (`miso.seek-at.v1`, or the same handler code reading the
+  ring's published generation, frame and anchor). It does not run in `process()`.
+- The drain must not consume a ring whose newest seek epoch is anchored and not yet applied by the
+  handler. It leaves the epoch unseen and reads no slot of that ring (the same wait the drain does
+  today on `RESULT_BACKPRESSURE`, `:476-480`). Otherwise the drain would feed old-generation PCM to
+  a source that is about to seek.
+- "One seek channel" (D3) still holds: the ring publishes the seek once. The handler applying it is
+  not a second channel. #1294 D2's sentence that shared-ring feeds do not use `miso.seek-at.v1` is
+  amended in #1294 in the same batch.
+- A render-side anchored seek would need `seek_at_unserviced` in `crates/control-plane`. No slice builds
+  it (#1293 record, "Successors"). If this issue needs one, it names that successor first and waits
+  for it. Do not call `source_seek_at` from `process()` meanwhile.
+
+**Other text that carries the same assumption.**
+- Context, `applySharedSeek` bullet (`:23-25`): true for the plain seek only. Read it with the rule above.
+- D4 (`:80-81`, "then publishes the anchored seek once"): the publish is the writer's. Application is
+  the handler's, so `A` must still be ahead of the render clock when the handler runs. The prime
+  length in `A` (D4) covers the handler latency. It stays an engine-compensated lateness otherwise (gate 2).
+- D4 `alignTo` reads the seek report. `source_seek_report` (`ffi.rs:3339`) runs
+  `SessionState::seek_report`, which also runs the service step. So the report is read from the control
+  half, not from `process()`. It is not on a render path in this spec; keep it so.
+- Gate 1 (`:110-112`) says "the drain calls `source_seek_at` exactly once". Read it as "the control
+  handler calls `source_seek_at` exactly once, and the drain never calls it". Add a check that the
+  drain's recorded export calls contain no `source_seek_at`.
+- Gate 3 (`:118-119`, "an unanchored seek takes the plain path"): the plain path is the only seek the
+  drain may call. An anchored epoch seen by the drain is left unapplied, not sent to the plain seek.
+- Test value, gate 1 (`:130-131`): add the defect "an SDK that calls `source_seek_at` from the drain".
+  It runs the service step in `process()`.
+- Non-goals (`:106`, "No engine, Worker or engine-worklet change"): the handler path lives in the
+  SDK-side feed worklet and in #1294's control half. If it needs a change in
+  `hosts/host-web/web/miso-engine-v1-audio-worklet.js`, that file is outside this issue's authorized
+  paths. Name the owner before implementation.
+- Dependencies: #1294 (the message handler path, D2) is a dependency of D3 now. Add it.

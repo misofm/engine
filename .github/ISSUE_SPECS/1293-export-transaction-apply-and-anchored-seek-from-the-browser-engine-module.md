@@ -373,15 +373,16 @@ Root ruling R7 (2026-10-16): the record is 64 bytes, the C struct's layout, rese
 **Departures from the text.**
 - `scripts/check-session-map-shape.py` (not in the authorized paths) treated every
   `source_*(handle) -> u32` export as a source-map query, so it flagged `source_seek_report_ptr`.
-  Mechanical fix: it skips that one name, with a comment. No other behavior changed.
+  Mechanical fix: it skips record-pointer exports (a name ending in `_ptr`; the fold made the
+  one-name skip this rule). No other behavior changed.
 - The plain seek is unchanged. The amendment's hazard did not materialize: the parity row shows the
   browser's report after a plain seek equals the C ABI's at the call (the old generation) and at
   every later block (`first_sample` = the first block that begins after the call), at 48 and 96 kHz.
   `prepare_source_seek` at the call changes what the consumer reads, not the published report.
-- Gate 5 for the pointer export is partly unobservable natively: `pointer_u32` truncates a 64-bit
-  native address to 0, so a native test cannot tell "not ready" from "ready" for
-  `source_seek_report_ptr`. The not-ready refusal of both call exports is tested; the pointer's
-  not-ready 0 follows from the same `status().state` check.
+- Gate 5 for the pointer export: `pointer_u32` truncates a 64-bit native address to 0, so the
+  export's value cannot be read natively. The fold split out `seek_report_pointer`, which the
+  export casts, and the test reads its address before the cast (`test_seek_report_addresses`, the
+  `test_buffer_address` pattern): the record's address while ready, null once not ready.
 - Gate 3's "silence until the anchor" is set up with no PCM of the old generation queued.
 
 **Gates -> tests.**
@@ -401,7 +402,7 @@ Root ruling R7 (2026-10-16): the record is 64 bytes, the C struct's layout, rese
 
 **Commands run.** `cargo test --locked -p host-web --features host-web/test-support` (all pass);
 `cargo clippy --locked -p host-web -p parameter-metadata --all-targets --all-features -- -D
-warnings`; `cargo fmt --all`; `build-web-audioworklet.sh --named-twin target/ci/h1293/n
+warnings` (two packages only; the workspace-wide clippy runs at the batch gates); `cargo fmt --all`; `build-web-audioworklet.sh --named-twin target/ci/h1293/n
 target/ci/h1293/a`; `check-web-audioworklet.sh`; `check-sdk-generated.sh target/ci/h1293/a`;
 `test-web-audioworklet.sh`; `check-workspace-policy.sh`; `cargo run -p realtime-policy`.
 
@@ -411,4 +412,25 @@ target/ci/h1293/a`; `check-web-audioworklet.sh`; `check-sdk-generated.sh target/
 
 **Successors.** The SDK binding for the three exports and the message-handler-only rule for
 `source_seek_at` (the feed worklet's render-side seek must keep the plain seek) are #1294 and #1297.
+Correction (batch 16a fold): at `454d65688` neither spec said so. #1297 D3 had `applySharedSeek`, an
+audio-thread caller, call `source_seek_at`, and #1294 D1 still named the dropped `edit_ptr`/`apply`
+exports; the fold amends both (M4, outside this record).
 A `seek_at_unserviced` for a render-side caller stays unbuilt until a caller needs it.
+
+**Fold (batch 16a review).**
+
+- **MINOR 8.** `source_seek_report_ptr` has a behavioural test: in
+  `tests::the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing` the pointer
+  (before its `u32` cast) is the record's address while ready and null once the host is failed.
+  Red if the pointer names anything else while ready, or anything at all once not ready (both run).
+- **MINOR 9.** The ABI self-test swaps the `firstSample` and `sourceFrame` names of `seekReport`,
+  offsets kept, which only the record's name rule catches (red with that rule deleted, run). It
+  replaces the record-field drop (caught by the generic layout rules) and two of the three seek
+  export drops; the `source_seek_at` drop stays. 34 mutations caught.
+- **MINOR 10.** `check-session-map-shape.py` states the `_ptr` rule in its docstring and code (16
+  self-test mutations caught, unchanged). The gate 3/4 test no longer claims to catch another
+  source's ring (its session has one source). The staged-ID refusal now follows its operation's
+  bookkeeping: `source_seek_at` records it as `seek_source_at` records its results, and
+  `source_seek_report` records none, as `read_seek_report` records none (`with_staged_source_id`
+  returns the refusal to its caller). The gate 5 test checks both; red if the report export
+  records its refusal (run).

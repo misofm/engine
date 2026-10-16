@@ -3702,8 +3702,8 @@ pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
 /// Install the hand-over this graph plan runs when it displaces its predecessor.
 ///
 /// Call it before publication. Refused, leaving any earlier program in place, when the plan is
-/// not a graph plan, has no source set, or a successor index is out of range, not vacant or
-/// repeated, or a predecessor index is repeated. Predecessor indices are checked against the
+/// not a graph plan, has no source set for a program that moves a source or the timeline, or a
+/// successor index is out of range, not vacant or repeated, or a predecessor index is repeated. Predecessor indices are checked against the
 /// predecessor at the swap block, where an out-of-range index refuses the whole move.
 pub fn install_carry_program(
     plan: &mut PreparedRenderPlan,
@@ -3713,11 +3713,11 @@ pub fn install_carry_program(
         .executor_any_mut()
         .and_then(|any| any.downcast_mut::<GraphExecutor>())
         .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
-    // A program that moves no source needs no source set (issue #1276: a plan may carry only
-    // strip state).
+    // A program that moves no source and no timeline needs no source set (issue #1276: a plan
+    // may carry only strip state). The timeline lives in the source set (#1641 D1).
     let set = match executor.source_set.as_ref() {
         Some(set) => Some(set),
-        None if program.sources.is_empty() => None,
+        None if program.sources.is_empty() && !program.timeline => None,
         None => return Err(GraphCarryInstallError::NoSourceSet),
     };
     for (index, &(successor, predecessor)) in program.sources.iter().enumerate() {
@@ -9165,6 +9165,23 @@ mod tests {
             Ok(plan) => plan,
             Err(_) => panic!("bindings"),
         }
+    }
+
+    /// Batch 16a fold MINOR 11 (#1641 D1). Red if install accepts a timeline carry on a plan
+    /// with no source set, which holds the timeline: the swap block would report a mismatch.
+    #[test]
+    fn install_refuses_a_timeline_carry_on_a_plan_with_no_source_set() {
+        let mut plan = sidechain_pdc_plan(false);
+        let program = |timeline| GraphCarryProgram {
+            predecessor: 1,
+            sources: Box::new([]),
+            timeline,
+        };
+        assert_eq!(
+            install_carry_program(&mut plan, program(true)),
+            Err(GraphCarryInstallError::NoSourceSet)
+        );
+        assert_eq!(install_carry_program(&mut plan, program(false)), Ok(()));
     }
 
     #[test]

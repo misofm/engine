@@ -423,6 +423,140 @@ fn a_rebuild_carries_the_timeline_its_history_and_its_producer() {
     assert_eq!(timeline(&mut successor.plan, sample), (7 * Q) as i64);
 }
 
+/// The command queue a successor's carried timeline brings (#1641 D7): a successor that carries no
+/// ring carries exactly these source bytes.
+fn timeline_queue_bytes() -> u64 {
+    SourceTimeline::resource_report(QuantumFrames(QUANTUM as u32), NonZeroUsize::MIN)
+        .expect("timeline report")
+        .command_queue_bytes
+}
+
+/// Gate 2 with nothing else carried (batch 16a fold M2): the successor changes the source's
+/// declaration, so it prepares a ring of its own, and renames the track, so no strip state
+/// carries either: the timeline is the carry program's only move.
+///
+/// Test value: red if preparation builds a carry program only when a source or strip carries
+/// (the D3 `timeline_carries` condition dropped: the carry is not requested), or the graph calls
+/// the driver's adopt step only for a source move (`program.timeline` dropped: the successor's
+/// timeline restarts at 0 and a seek through the moved producer is lost).
+#[test]
+fn a_rebuild_that_carries_no_source_still_carries_the_timeline() {
+    let a = Session::compile(one_track());
+    let mut b_model = one_track();
+    b_model.sources[0].frames *= 2;
+    b_model.tracks[0].id = id(ADDED_TRACK);
+    let RouteSource::Track { track_id, .. } = &mut b_model.routes[0].source else {
+        panic!("a track route");
+    };
+    *track_id = id(ADDED_TRACK);
+    let b = Session::compile(b_model);
+    let mut predecessor = a.prepare(Backend::current());
+    let mut fed = 0;
+    submit(&mut predecessor.sources, 1, 0..Q);
+    fed += Q;
+    render_fed(&mut predecessor, &mut fed, 6);
+    const SOUGHT: u64 = 300 * Q;
+    producer(&mut predecessor.sources)
+        .try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(SOUGHT),
+        })
+        .expect("timeline seek");
+    render_fed(&mut predecessor, &mut fed, 2);
+    let now = predecessor.plan.next_absolute_sample();
+    assert_eq!(
+        timeline(&mut predecessor.plan, now - 1),
+        (SOUGHT + 2 * Q - 1) as i64
+    );
+    let mut successor = successor_of(&b, &a, &predecessor.inventory, false);
+    assert_eq!(
+        successor.report.carried_source_total_bytes,
+        timeline_queue_bytes(),
+        "not vacuous: the successor carries no ring, only the timeline's queue"
+    );
+    assert_eq!(
+        hand_over(&mut successor, &mut predecessor),
+        CarryOutcome::Carried
+    );
+    // No gap or repeat: the successor's blocks continue the predecessor's timeline.
+    for block in 0..3_u64 {
+        let sample = render(&mut successor.plan).sample;
+        assert_eq!(
+            timeline(&mut successor.plan, sample),
+            (SOUGHT + (2 + block) * Q) as i64,
+            "successor block {block}"
+        );
+    }
+    // A seek through the moved producer lands in the next block.
+    producer(&mut successor.sources)
+        .try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(3),
+            frame: SourceFrame(7 * Q),
+        })
+        .expect("a seek through the successor's set");
+    let sample = render(&mut successor.plan).sample;
+    assert_eq!(timeline(&mut successor.plan, sample), (7 * Q) as i64);
+}
+
+/// Gate 2, a seek accepted but not yet popped at the swap block (batch 16a fold MINOR 3): the
+/// predecessor renders no block after the push, so the command is still in the queue that the
+/// carry moves.
+///
+/// Test value: red if the carry moves the timeline without its command queue, or the successor
+/// drains it without applying it (an acked seek would be dropped).
+#[test]
+fn a_seek_queued_at_the_swap_block_lands_in_the_successors_first_block() {
+    let a = Session::compile(one_track());
+    let b = Session::compile(with_added_track(one_track()));
+    let mut predecessor = a.prepare(Backend::current());
+    let mut fed = 0;
+    submit(&mut predecessor.sources, 1, 0..Q);
+    fed += Q;
+    render_fed(&mut predecessor, &mut fed, 4);
+    let mut successor = successor_of(&b, &a, &predecessor.inventory, false);
+    producer(&mut predecessor.sources)
+        .try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(40 * Q),
+        })
+        .expect("timeline seek");
+    assert_eq!(
+        hand_over(&mut successor, &mut predecessor),
+        CarryOutcome::Carried
+    );
+    let sample = render(&mut successor.plan).sample;
+    assert_eq!(timeline(&mut successor.plan, sample), (40 * Q) as i64);
+    assert_eq!(
+        producer(&mut successor.sources).active_generation(),
+        SourceGeneration(2)
+    );
+}
+
+/// The D3 guard (batch 16a fold MINOR 3): a successor prepared by hand at another rate or quantum
+/// gets a fresh timeline with a producer of its own, not a vacant one whose carry the swap block
+/// would refuse.
+///
+/// Test value: red if the guard is dropped (every successor's timeline vacant): this successor
+/// would hold no timeline producer until a carry that cannot happen.
+#[test]
+fn a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline() {
+    let a = Session::compile(one_track());
+    let predecessor = a.prepare(Backend::current());
+    for (rate, quantum) in [(44_100, QUANTUM as u32), (48_000, 2 * QUANTUM as u32)] {
+        let mut model = one_track();
+        model.sample_rate_hz = rate;
+        model.quantum_frames = quantum;
+        let b = Session::compile(model);
+        let mut successor = successor_of(&b, &a, &predecessor.inventory, false);
+        let fresh = producer(&mut successor.sources);
+        assert_eq!(
+            fresh.active_generation(),
+            SourceGeneration(1),
+            "{rate} Hz, {quantum} frames"
+        );
+    }
+}
+
 /// Gate 2, a successor with a larger `A_max`: its history is its own, of its own `K`.
 ///
 /// Test value: red if the successor sizes its history from the predecessor's `K` (a seek its
@@ -495,7 +629,9 @@ fn a_latent_successor_keeps_the_newest_entries_in_a_history_of_its_own_size() {
 /// Gate 3, a declared discontinuity.
 ///
 /// Test value: red if a discontinuity successor moves the sources and not the timeline (it
-/// restarts it, or steps it back with the source-read clock), or reads the overlap's older entry.
+/// restarts it, or steps it back with the source-read clock). The plan has no latency, so its
+/// history holds one entry and no overlap: the reader's overlap rule is the `source` unit tests'
+/// (`a_node_block_reports_the_steps_of_a_source_read_step_back`).
 #[test]
 fn a_discontinuity_keeps_the_sources_and_the_timeline_in_step() {
     const OFFSET: u64 = 3 * Q;
@@ -518,8 +654,7 @@ fn a_discontinuity_keeps_the_sources_and_the_timeline_in_step() {
         hand_over(&mut successor, &mut predecessor),
         CarryOutcome::Carried
     );
-    // The source-read clock steps back by `OFFSET`; the timeline and the source continue, and
-    // the overlap's samples read the newest entry, the block render played last.
+    // The source-read clock steps back by `OFFSET`; the timeline and the source continue.
     for _ in 0..2 {
         submit(&mut successor.sources, 1, fed..fed + Q);
         fed += Q;
