@@ -107,6 +107,52 @@ fn session_schema_u64_pattern_executes_the_exact_unsigned_64_bit_domain() {
     }
 }
 
+/// The schema's automation segment sample domain is the validator's: `0..automation::TIME_LIMIT`.
+/// Both leaves are probed at the ceiling read from the constant, so a drift in either side turns
+/// this red.
+#[test]
+fn session_schema_automation_sample_domain_is_the_validators_ceiling() {
+    let source = fs::read_to_string(workspace("docs/session-v1.schema.json"))
+        .expect("read checked JSON Schema");
+    let schema: serde_json::Value = serde_json::from_str(&source).expect("valid JSON Schema JSON");
+    let validator = jsonschema::validator_for(&schema).expect("Draft 2020-12 schema compiles");
+    let fixture = fs::read_to_string(workspace("fixtures/session/v1/canonical.json"))
+        .expect("read canonical session artifact");
+    let base: serde_json::Value = serde_json::from_str(&fixture).expect("valid session JSON");
+    let segment = |leaf: &str, value: String| {
+        let mut candidate = base.clone();
+        candidate["automation"][0]["segments"][0][leaf] = serde_json::Value::String(value);
+        candidate
+    };
+
+    let ceiling = automation::TIME_LIMIT - 1;
+    for leaf in ["start_sample", "end_sample"] {
+        for valid in [0, 1, 999_999_999_999_999, ceiling - 1, ceiling] {
+            assert!(
+                validator.is_valid(&segment(leaf, valid.to_string())),
+                "schema refused {leaf} {valid}"
+            );
+        }
+        for invalid in [ceiling + 1, ceiling + 2, 9_999_999_999_999_999, u64::MAX] {
+            assert!(
+                !validator.is_valid(&segment(leaf, invalid.to_string())),
+                "schema admitted {leaf} {invalid}"
+            );
+        }
+        for invalid in ["", "01", "-1", "18446744073709551616"] {
+            assert!(
+                !validator.is_valid(&segment(leaf, invalid.to_owned())),
+                "schema admitted {leaf} {invalid:?}"
+            );
+        }
+    }
+    // The leaf the schema accepts at the ceiling is the leaf the validator accepts.
+    let mut model = session::parse_session_json(&fixture).expect("fixture parses");
+    model.automation[0].segments[0].start_sample = ceiling - 1;
+    model.automation[0].segments[0].end_sample = ceiling;
+    session::canonical_session_json(&model).expect("validator accepts the ceiling");
+}
+
 /// The schema's `revision` domain is the engine validator's (#1503): the ceiling is computed from
 /// `session::MAX_SESSION_REVISION`, so a drift in either side turns this red.
 #[test]
