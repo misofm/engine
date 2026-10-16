@@ -403,3 +403,14 @@ The coordinator added it, as recorded above.
   all covered; a source the donor carried from P0 is not. Unit test
   `withdrawn_successor::the_guard_refuses_exactly_a_fed_fresh_ring_the_donation_leaves_behind`;
   see #1310's fold 3.
+
+## Amendment (#1698, batch 15b, coordinator ruling of 2026-10-16 confirmed by root)
+
+D1 and D2 are amended. A replacement B across a withdrawn A is prepared from P0's own inventory
+(`PlanStateInventory::across_withdrawn(&A.inventory, A.plan)`), not from A's restricted base, so
+an owner B keeps unchanged from P0 carries from P0 even when A restarted or removed it. Source rows
+keep only the sources A carries from P0, so the source carry is what this issue shipped.
+`PreparedHost::carried_base`, `PlanStateInventory::restricted_to`, `carried_base_retained_bytes`,
+the test-support views and `graph::installed_carry_reads` are removed. Gate 2
+(`the_carried_base_holds_exactly_the_rows_the_hand_over_reads`) is deleted with them. D3 (the
+donation) is unchanged. See #1698's decision record.

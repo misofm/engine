@@ -56,10 +56,6 @@ pub struct ProviderEpoch {
     /// the epoch's life and moves only with the epoch, which holds no open stamp between
     /// commands.
     pub(crate) revision_gate: PlanRevisionGate,
-    /// What this epoch's plan carries from the plan it was prepared to displace (#1344 D1): the
-    /// base inventory of a replacement prepared across this plan should it be withdrawn before
-    /// render adopts it (#1310 D2). `None` for the boot plan.
-    pub(crate) carried_base: Option<PlanStateInventory>,
     /// The part of this epoch's plan's source rows it carries from the plan it was prepared to
     /// displace (#1273 D5), kept for the replacement admission while the epoch is a held
     /// candidate (#1398 D4, batch 15a review fold M2). Zero for the boot plan.
@@ -186,7 +182,6 @@ impl ProviderEpoch {
             effects,
             capi,
             revision_gate,
-            carried_base: None,
             carried: CarriedSourceBytes::default(),
             kept: None,
             parked: None,
@@ -200,7 +195,6 @@ impl ProviderEpoch {
     pub(crate) fn candidate(
         sources: SourceControlSet,
         inventory: PlanStateInventory,
-        carried_base: Option<PlanStateInventory>,
         carried: CarriedSourceBytes,
         strips: StripLanes,
         effects: Box<[host_core::EffectControlProducer]>,
@@ -215,7 +209,6 @@ impl ProviderEpoch {
             effects,
             capi,
             revision_gate,
-            carried_base,
             carried,
             kept: None,
             parked: None,
@@ -2160,16 +2153,29 @@ where
             .prospective_session()
             .compiled()
             .ok_or(CommandError::Internal)?;
-        let base = if superseding {
-            // #1310 D2: A's carried base (every row a P0 row) and P0's kept base.
+        // #1698 (amending #1310 D2 and #1344 D1): across a withdrawn candidate A, P0's own
+        // inventory, with only the source rows A carries from P0, and P0's kept base. An owner B
+        // keeps unchanged from P0 carries from P0 as a direct P0 -> B swap carries it; a source A
+        // added or redeclared restarted the host's feed against A, so B starts it fresh.
+        let withdrawn_base = match withdrawn.as_ref() {
+            Some(candidate) => {
+                let holder = self.kept_holder().ok_or(CommandError::Internal)?;
+                let donor = self
+                    .pending_providers
+                    .last()
+                    .ok_or(CommandError::Internal)?;
+                Some(
+                    holder
+                        .inventory
+                        .across_withdrawn(&donor.inventory, candidate.plan()),
+                )
+            }
+            None => None,
+        };
+        let base = if let Some(inventory) = withdrawn_base.as_ref() {
             let kept = self
                 .kept_holder()
                 .and_then(|holder| holder.kept.as_ref())
-                .ok_or(CommandError::Internal)?;
-            let inventory = self
-                .pending_providers
-                .last()
-                .and_then(|candidate| candidate.carried_base.as_ref())
                 .ok_or(CommandError::Internal)?;
             SuccessorBase {
                 inventory,
@@ -2222,7 +2228,6 @@ where
             resources,
             carried,
             inventory,
-            carried_base,
             control_catalog: candidate_catalog,
             capi: prospective_capi,
             revision_gate,
@@ -2231,7 +2236,6 @@ where
         let mut candidate_provider = ProviderEpoch::candidate(
             sources,
             inventory,
-            carried_base,
             carried,
             strips,
             effects,
@@ -2369,8 +2373,8 @@ where
         // #1310, root rulings of 2026-10-16 (no ack before a drop; M-A of fold 3): a ring A
         // created (A added or redeclared the source) that the host fed and the donation above does
         // not move to B would drop with A, and with it PCM the host was acked for. Until an issue
-        // lets B read it (#1698 for a source B reverts to its P0 form), such a supersession is
-        // refused here as backpressure. The guard reads the donation plan itself, so it sits after
+        // lets B read it, such a supersession is refused here as backpressure (#1698 keeps the
+        // reverted case refused: B starts a reverted source fresh, as the host contract says). The guard reads the donation plan itself, so it sits after
         // the check, still before the commit: the reservation it follows is cancelled by the
         // return (it returns its credit and consumes no epoch), nothing else has changed, the
         // caller republishes A, and once render adopts A the same edit commits on it.

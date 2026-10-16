@@ -2203,6 +2203,111 @@ fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
     assert_bit_identical("removal", 6, &swapped, &expected[6..]);
 }
 
+/// Issue #1285 gate 3: three tracks, the first muted behind a true-peak limiter insert. A
+/// `RemoveTrack` transaction after block 6 removes it. `miso_engine_v1_plan_resources` reports the
+/// same `latency_samples` after the swap, and every block equals the floored reference: the same
+/// transaction committed before the first block, so its successor is compiled with A's floors and
+/// adopts at frame 0 with every state at rest, which is B compiled with A's floors and rendered
+/// from frame 0. B compiled fresh has a lower latency and renders the remaining tracks earlier.
+///
+/// Test value: red if the plan's resource row keeps the natural latency while the plan renders
+/// the floored one, or if a successor is compiled without floors (the latency drops and the two
+/// remaining tracks jump forward at the swap).
+#[test]
+fn removing_a_limited_track_keeps_the_plan_latency() {
+    let source: [&[u8]; 1] = [b"fixture-source"];
+    let mut model = stateless_session(48_000);
+    let limited = &mut model.tracks[0];
+    limited.fader.left_mute = true;
+    limited.fader.right_mute = true;
+    limited.inserts.effects.push(session::Effect {
+        id: session::StableId::parse("lim").expect("insert ID"),
+        identity: session::EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.true-peak-limiter").expect("limiter id"),
+        },
+        quality: session::EffectQuality::Normal,
+        bypass: false,
+        link_mode: session::LinkMode::Maximum,
+        params: Vec::new(),
+        sidechain: session::SidechainDeclaration::None,
+    });
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let edits = [
+        protocol::SessionEdit::RemoveRoute {
+            route_id: model.routes[0].id.clone(),
+        },
+        protocol::SessionEdit::RemoveTrack {
+            track_id: model.tracks[0].id.clone(),
+        },
+    ];
+    let transaction = command_bytes_at_revision(
+        1,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::SessionTransactionApply(&edits),
+    );
+    let bits = |blocks: &[Vec<f32>]| -> Vec<Vec<u32>> {
+        blocks
+            .iter()
+            .map(|block| block.iter().map(|sample| sample.to_bits()).collect())
+            .collect()
+    };
+
+    let mut children = compile_children(&document, limits()).expect("children");
+    let latency = children.plan.resources().latency_samples;
+    assert!(latency > 0, "the limiter delays A");
+    submit_direct(&mut children, &source, 0);
+    let mut swapped = feed_and_render_direct(&mut children, &source, 0, 6);
+    children
+        .session
+        .command(&transaction, 4_096)
+        .expect("removal transaction");
+    swapped.extend(feed_and_render_direct(&mut children, &source, 6, 6));
+    assert_eq!(children.plan.owner().carried_count(), 1, "the swap carried");
+    assert_eq!(
+        children.plan.resources().latency_samples,
+        latency,
+        "the plan reports A's latency after the swap (D4)"
+    );
+
+    let mut reference = compile_children(&document, limits()).expect("reference");
+    submit_direct(&mut reference, &source, 0);
+    reference
+        .session
+        .command(&transaction, 4_096)
+        .expect("reference transaction");
+    let expected = feed_and_render_direct(&mut reference, &source, 0, 12);
+    assert_eq!(reference.plan.owner().carried_count(), 1);
+    assert_eq!(reference.plan.resources().latency_samples, latency);
+    assert!(
+        expected[7..].iter().flatten().all(|sample| *sample != 0.0),
+        "the reference plays after the swap"
+    );
+    assert_eq!(
+        bits(&swapped),
+        bits(&expected),
+        "every block equals B compiled with A's floors"
+    );
+
+    let committed = session::canonical_session_json(
+        children
+            .session
+            .test_controller()
+            .session()
+            .compiled()
+            .normalized_model(),
+    )
+    .expect("committed");
+    let mut fresh = compile_children(&committed, limits()).expect("fresh B");
+    assert!(fresh.plan.resources().latency_samples < latency);
+    submit_direct(&mut fresh, &source, 0);
+    let unfloored = feed_and_render_direct(&mut fresh, &source, 0, 12);
+    assert_ne!(
+        bits(&unfloored[6..]),
+        bits(&expected[6..]),
+        "without floors the remaining tracks move by the limiter's latency"
+    );
+}
+
 /// Issue #1273 gate 3: a structural transaction refused at any phase, including a protocol
 /// commit that returns `Err`, moves no producer. The source still accepts PCM and the running
 /// plan renders it, bit-identical to a session that never saw the transaction.

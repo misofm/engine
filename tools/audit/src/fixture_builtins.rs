@@ -709,6 +709,7 @@ fn graph_tap_artifact() -> graph_compiler::PreparedGraphBuiltinsArtifact {
     )
     .expect("prepare builtins");
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id: 7,
         effects,

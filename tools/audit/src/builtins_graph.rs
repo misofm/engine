@@ -683,6 +683,7 @@ fn prepare_graph_plan(
     )
     .expect("sealed builtins");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id,
         effects,

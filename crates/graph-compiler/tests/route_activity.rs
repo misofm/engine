@@ -84,6 +84,7 @@ fn bind(model: &SessionModel) -> Bound {
     )
     .expect("the builtins prepare");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id: 1_217,
         effects,

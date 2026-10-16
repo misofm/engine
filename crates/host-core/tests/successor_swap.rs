@@ -9033,6 +9033,221 @@ fn a_repointed_route_does_not_carry_its_line_at_every_rate_and_width() {
     }
 }
 
+// Issue #1285 (slice 15 of #1269): latency floors. A successor is compiled with every node's
+// input arrival in its predecessor as a floor, so removing a latent effect, or the track that
+// holds it, moves no surviving path in time: every compensation line keeps its length and carries.
+
+/// B prepared against an inventory that holds only `floors`' input floors, rendered from frame 0
+/// and fed `feed`: the fresh reference of B compiled with those floors (#1285 gate 1).
+fn floored_reference(
+    b: &Session,
+    floors: &host_core::PlanStateInventory,
+    feed: &Feed,
+    backend: Backend,
+) -> Vec<Vec<u32>> {
+    let quantum = b.model.quantum_frames as usize;
+    let floors = floors.test_only_floors_only();
+    let mut plan = LivePlan::successor(b, &floors, &b.model, backend);
+    plan.submit(feed, quantum, 0);
+    (0..BLOCKS)
+        .map(|block| {
+            if block + 1 < BLOCKS {
+                plan.submit(feed, quantum, block + 1);
+            }
+            plan.render(quantum)
+        })
+        .collect()
+}
+
+/// `model` with one more true-peak limiter insert, `insert`, on `track`, after its others.
+fn add_limiter(model: &mut SessionModel, track: &str, insert: &str) {
+    let (index, strip) = model
+        .tracks
+        .iter_mut()
+        .enumerate()
+        .find(|(_, strip)| strip.id.as_str() == track)
+        .expect("the track");
+    strip.inserts.effects.push(Effect {
+        id: id(insert),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.true-peak-limiter"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::Maximum,
+        params: console_params("limiter", index, false),
+        sidechain: SidechainDeclaration::None,
+    });
+}
+
+/// The checks gates 1 and 2 share: B removes the limited track `eq0` from `a_model`. The swapped
+/// run equals B compiled with A's floors from frame 0 in every block, its latency is A's, nothing
+/// restarts, and B without floors renders the remaining tracks earlier. `eq0` is muted in A, so it
+/// adds exact `+0.0` and A's blocks before the swap are B's too.
+fn a_removed_latency_moves_no_surviving_path(a_model: SessionModel, backend: Backend, what: &str) {
+    let a_model = with_mute(a_model, "eq0", true);
+    let mut b_model = a_model.clone();
+    remove_track(&mut b_model, "eq0");
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    let predecessor = LivePlan::fresh(&a, backend).prepared;
+    let latency = predecessor.report.latency_samples;
+    assert!(latency > 0, "{what}: the limiter delays A");
+    let successor = LivePlan::successor(&b, &predecessor.inventory, &a.model, backend).prepared;
+    assert_eq!(
+        successor.report.latency_samples, latency,
+        "{what}: the successor reports A's latency (D4)"
+    );
+    assert!(
+        b.prepare(backend).report.latency_samples < latency,
+        "{what}: B's natural latency is lower"
+    );
+    let feed = Feed::new(SOURCE, 1);
+    let (run, unfloored) = pdc_runs(&a, &b, &feed, backend, what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    let reference = floored_reference(&b, &predecessor.inventory, &feed, backend);
+    assert_eq!(
+        run.blocks
+            .iter()
+            .zip(&reference)
+            .position(|(swapped, fresh)| swapped != fresh),
+        None,
+        "{what}: every block equals B compiled with A's floors from frame 0"
+    );
+    assert!(
+        reference[SWAP_BLOCK + 2..]
+            .iter()
+            .flatten()
+            .any(|bits| *bits != 0),
+        "{what}: the reference plays after the swap block"
+    );
+    assert_ne!(
+        unfloored.blocks[SWAP_BLOCK + 1..],
+        reference[SWAP_BLOCK + 1..],
+        "{what}: without floors the remaining tracks move by the limiter's latency"
+    );
+}
+
+/// Gate 1: three tracks, the first behind a limiter; B removes the first track. Red if a
+/// successor is compiled without floors: the output's two compensation lines vanish and the
+/// remaining tracks jump forward by the limiter's latency at the swap.
+#[test]
+fn removing_a_limited_track_keeps_the_output_timing_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            let mut a_model = pdc_session(rate, &["eq0"]);
+            remove_track(&mut a_model, "eq3");
+            a_removed_latency_moves_no_surviving_path(
+                a_model,
+                backend,
+                &format!("{backend:?} at {rate} Hz"),
+            );
+        }
+    }
+}
+
+/// Gate 2: `eq0` (behind a limiter) and `eq1` feed the submix `bus1`; the output takes `bus1` and
+/// `eq2`. B removes `eq0`. Red if floors are applied only at the output: the bus input's natural
+/// arrival drops to 0, `eq1`'s line into the bus vanishes and the bus's own route into the output
+/// gets a new line that starts at rest.
+#[test]
+fn removing_a_limited_track_keeps_the_submix_timing_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            a_removed_latency_moves_no_surviving_path(
+                bus_session(rate),
+                backend,
+                &format!("{backend:?} at {rate} Hz, submix"),
+            );
+        }
+    }
+}
+
+/// Gate 5: after gate 1's swap, C removes `eq1` from B. C keeps A's output latency, because B's
+/// inventory records the floored arrivals. Red if the inventory records the natural `max`: B's
+/// output arrival is naturally 0, so C's latency drops to it.
+#[test]
+fn a_second_removal_keeps_the_first_floors() {
+    for backend in backends() {
+        let mut a_model = pdc_session(48_000, &["eq0"]);
+        remove_track(&mut a_model, "eq3");
+        let mut b_model = a_model.clone();
+        remove_track(&mut b_model, "eq0");
+        let mut c_model = b_model.clone();
+        remove_track(&mut c_model, "eq1");
+        let (a, b, c) = (
+            Session::compile(a_model),
+            Session::compile(b_model),
+            Session::compile(c_model),
+        );
+        let first = a.prepare(backend);
+        let latency = first.report.latency_samples;
+        assert!(latency > 0, "{backend:?}");
+        let second = b
+            .prepare_successor(&first.inventory, &a.model, &caps(), backend)
+            .expect("B");
+        let third = c
+            .prepare_successor(&second.inventory, &b.model, &caps(), backend)
+            .expect("C");
+        assert_eq!(second.report.latency_samples, latency, "{backend:?}: B");
+        assert_eq!(third.report.latency_samples, latency, "{backend:?}: C");
+        assert_eq!(
+            third.inventory.input_floors(),
+            second.inventory.input_floors(),
+            "{backend:?}: C renders at B's arrivals"
+        );
+    }
+}
+
+/// #1344 with floors: P0 has `eq0` behind a limiter. The candidate A adds a second limiter to
+/// `eq1`, so its own floors are higher than P0's, and is withdrawn. B removes `eq0` from P0 and is
+/// prepared against P0 across A. Render runs P0, so B keeps P0's timing: its latency is P0's and
+/// its floors are P0's arrivals. Red if the base across a withdrawn plan drops the floors (B's
+/// latency falls to its natural value) or takes A's (B's latency is A's).
+#[test]
+fn a_replacement_across_a_withdrawn_candidate_keeps_the_running_floors() {
+    for backend in backends() {
+        let mut p0_model = pdc_session(48_000, &["eq0"]);
+        remove_track(&mut p0_model, "eq3");
+        let mut a_model = p0_model.clone();
+        add_limiter(&mut a_model, "eq1", "lim");
+        add_limiter(&mut a_model, "eq1", "lim2");
+        let mut b_model = p0_model.clone();
+        remove_track(&mut b_model, "eq0");
+        let (p0, a, b) = (
+            Session::compile(p0_model),
+            Session::compile(a_model),
+            Session::compile(b_model),
+        );
+        let running = p0.prepare(backend);
+        let latency = running.report.latency_samples;
+        let withdrawn = a
+            .prepare_successor(&running.inventory, &p0.model, &caps(), backend)
+            .expect("A");
+        assert!(
+            withdrawn.report.latency_samples > latency,
+            "{backend:?}: A's two limiters delay it past P0"
+        );
+        let base = running
+            .inventory
+            .across_withdrawn(&withdrawn.inventory, &withdrawn.plan);
+        let replacement = b
+            .prepare_successor(&base, &p0.model, &caps(), backend)
+            .expect("B");
+        assert_eq!(
+            replacement.report.latency_samples, latency,
+            "{backend:?}: B keeps the running plan's latency"
+        );
+        let direct = b
+            .prepare_successor(&running.inventory, &p0.model, &caps(), backend)
+            .expect("P0 -> B");
+        assert_eq!(
+            replacement.inventory.input_floors(),
+            direct.inventory.input_floors(),
+            "{backend:?}: B renders at the arrivals of a direct P0 -> B swap"
+        );
+    }
+}
+
 // Issue #1284 (slice 14 of #1269): the strip input alignment lines (`delay_samples` of a track and
 // of a submix) and the live sends. A line is keyed by its strip and lane, a send by its route ID;
 // a lane whose delay changed starts at rest and its strip goes into the restart set, and a

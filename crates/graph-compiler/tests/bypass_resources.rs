@@ -247,6 +247,7 @@ fn bind(
     });
     let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("builtins");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         plan_id: 1100,
         effects,
         builtins,
