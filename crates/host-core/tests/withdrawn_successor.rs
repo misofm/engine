@@ -1,8 +1,9 @@
 //! Issue #1344: prepare a successor across a withdrawn candidate plan.
 //!
 //! P0 is the plan render runs. A was prepared against P0, committed and taken back before render
-//! adopted it. B replaces A: it is prepared against P0 with A's `carried_base` and P0's committed
-//! model (D2), and takes A's fresh rings by a checked donation (D3-D5).
+//! adopted it. B replaces A: it is prepared against P0 with P0's inventory less the sources A did
+//! not carry from P0 (`PlanStateInventory::across_withdrawn`, #1698) and P0's committed model
+//! (D2), and takes A's fresh rings by a checked donation (D3-D5).
 //!
 //! The twin of every case is the path render would have taken had A not been withdrawn: A'
 //! (prepared against a second copy P0' of P0, rendered identically) adopts P0' render-free, B' is
@@ -14,14 +15,10 @@
 //!   A replaces `t1`'s insert, removes `b`, adds `c`; B replaces `t2`'s (the spec's
 //!   insert-quality edit does not prepare: no launch effect has a second quality). B renders
 //!   bit-identically to B' over 16 blocks, with `a` and `t3` carried, `t1` and `t2` restarted and
-//!   `b` absent; B prepared with no base does not. (An owner A restarts and B reverts to its P0
-//!   form starts fresh here, as in the sequential twin; root ruled that a defect and its fix is a
-//!   successor issue, so no assertion pins it either way.)
-//! * **Gate 2, `carried_base` follows the installed hand-over.** Over a session with a row in
-//!   every inventory family, where A drops a strip and a source that sort first (so A's keys are
-//!   not P0's) and restarts what a session edit can restart, A's base holds exactly the P0 rows
-//!   whose keys A's hand-over reads (set equality of keys), and they belong to exactly the owners
-//!   both plans hold less those A restarted; a plan with no base has none.
+//!   `b` absent; B prepared with no base does not.
+//! * **#1698 gate 1, an owner B reverts carries from P0.** A restarts or removes an owner and B
+//!   reverts it: B renders as the combined twin P0 -> B. A source B reverts is fresh in B, and
+//!   one A carries still carries.
 //! * **Gate 3, a source absent from P0 is never carried from A.** A adds `d` with 4 seconds, B with
 //!   5: B's `d` is a fresh ring at generation 1, frame 0, and no donation applies.
 //! * **Gate 4, donation.** `c` fed through A's producers and seeked (anchored) moves to B whole:
@@ -38,18 +35,14 @@ use bench_support::alloc as bench_alloc;
 use engine::realtime::{CarryOutcome, PlanarBufferMut, PreparedRenderPlan, RenderIo};
 use graph_compiler::Backend;
 use host_core::{
-    DonationError, DonationSide, DonationSideMut, HostLiveControlRequest, HostLiveLanes,
-    LiveValuesSuperseded, PlanStateInventory, PreparedHost, SourceControlSet, SourceSubmission,
-    SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget, SuccessorBase, apply_donation,
-    check_donation, drops_acked_fresh_source, prepare_host_runtime_with_live_controls_and_spectrum,
-    prepare_host_runtime_with_live_controls_and_spectrum_successor, spectrum_capture_resources_for,
-    test_only_carry_read_keys, test_only_inventory_rows,
+    DonationError, DonationSide, DonationSideMut, HostLiveControlRequest, PlanStateInventory,
+    PreparedHost, SourceControlSet, SourceSubmission, SuccessorBase, apply_donation,
+    check_donation, drops_acked_fresh_source,
 };
 use session::{
-    DualMonoFader, Effect, EffectIdentity, EffectQuality, LinkMode, RouteDestination, RouteSource,
-    SendTap, SessionModel, SidechainDeclaration, Source, StableId, Submix, parse_session_json,
+    Effect, EffectIdentity, EffectQuality, LinkMode, RouteSource, SendTap, SessionModel,
+    SidechainDeclaration, Source, StableId, parse_session_json,
 };
-use std::collections::BTreeSet;
 use successor::{QUANTUM, SUCCESSOR_REVISION, Session, caps};
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -408,20 +401,17 @@ fn base_across_a_withdrawn_plan(backend: Backend) {
     let mut running = running_p0(p0, backend, &signal);
     // A: prepared against P0, committed and taken back; render never adopts it.
     let withdrawn = successor_of(a, &running.inventory, &p0.model, backend);
-    let base = withdrawn.carried_base.as_ref().expect("A has a base");
-    let mut replacement = successor_of(b, base, &p0.model, backend);
+    let base = base_across(&running, &withdrawn);
+    let mut replacement = successor_of(b, &base, &p0.model, backend);
     commit(&mut replacement);
     // `a` carries from P0: its producer moves, and its ring moves at adoption.
     assert_eq!(
         replacement.sources.adopt_persisting(&mut running.sources),
         1
     );
-    let a_index = running.inventory.source("a").expect("P0 has a").index;
-    assert_eq!(
-        graph::installed_carry_reads(&replacement.plan)
-            .expect("B has a hand-over")
-            .sources,
-        vec![a_index],
+    let a_index = replacement.inventory.source("a").expect("B has a").index;
+    assert!(
+        !replacement.plan.can_prepare_source_seek(a_index as usize),
         "B carries a's ring from P0"
     );
     assert!(replacement.inventory.source("b").is_none(), "b is absent");
@@ -460,248 +450,6 @@ fn a_successor_prepared_across_a_withdrawn_plan_renders_as_its_twin() {
     }
 }
 
-/// Gate 2's session: three sources (`a`, `b`, `c`), sends into a submix (live routes), a true-peak limiter on
-/// `t0001`, whose latency the other paths compensate (compensation lines), strip delays on `t` and
-/// `t0002`, a compressor on `t`, `t0000` and `t0001` (effect lanes and observation taps), a console
-/// slot on every strip, meters, and a spectrum capture on `t0000`. Track `t` and its source `a`
-/// sort first, so a plan without them has other keys for every row after them.
-fn rich_model() -> SessionModel {
-    let template = parse_session_json(FIXTURE).expect("fixture parses");
-    let mut model = template.clone();
-    model.tracks.clear();
-    model.routes.clear();
-    model.sources = vec![
-        source(&template.sources[0], "a", 48_000),
-        source(&template.sources[0], "b", 48_000),
-        source(&template.sources[0], "c", 48_000),
-    ];
-    for (track, source) in [
-        ("t", "a"),
-        ("t0000", "b"),
-        ("t0001", "b"),
-        ("t0002", "c"),
-        ("t0003", "b"),
-    ] {
-        add_track(&mut model, &template, track, source, true);
-    }
-    for track in &mut model.tracks {
-        if track.id.as_str() == "t0001" {
-            track.inserts.effects.push(Effect {
-                id: id("limiter"),
-                identity: EffectIdentity::Native {
-                    effect_id: id("miso.true-peak-limiter"),
-                },
-                ..compressor("limiter")
-            });
-        }
-        if matches!(track.id.as_str(), "t0002" | "t0003") {
-            track.inserts.effects.clear();
-        }
-        if matches!(track.id.as_str(), "t" | "t0002") {
-            track.builtins.left.delay_samples = 64;
-            track.builtins.right.delay_samples = 32;
-        }
-    }
-    let bus = id("bus");
-    model
-        .submixes
-        .push(Submix::unity(bus.clone(), &model.console));
-    for track in ["t", "t0000", "t0001", "t0003"] {
-        let mut send = model.routes[0].clone();
-        send.id = id(&format!("{track}-bus"));
-        send.source = RouteSource::Track {
-            track_id: id(track),
-            tap: SendTap::PreFader,
-        };
-        send.destination = RouteDestination::SubmixInput {
-            submix_id: bus.clone(),
-        };
-        model.routes.push(send);
-    }
-    let mut out = model.routes[0].clone();
-    out.id = id("bus-main");
-    out.source = RouteSource::Submix {
-        submix_id: bus,
-        tap: SendTap::PostPan,
-    };
-    model.routes.push(out);
-    // A fader of its own on `t0003`, so the strips' values are not all equal.
-    model.tracks[4].fader = DualMonoFader {
-        left_db: -6.0,
-        right_db: -6.0,
-        left_mute: false,
-        right_mute: false,
-    };
-    model
-}
-
-/// Gate 2's A: P0 without track `t` (and its routes) and source `a`, which sort first, so every
-/// family loses `t`'s (or `a`'s) row; and a restart where a session edit restarts an owner that
-/// stays: `c` redeclared (sources) and `t0000`'s insert replaced (its effect lane and observation
-/// taps). Under live input lanes an input-section or strip-stage value edit carries and
-/// retargets, so those families restart only by removal; the plan's one spectrum capture carries,
-/// since restarting it would leave the family unread.
-fn rich_a_model() -> SessionModel {
-    let mut model = rich_model();
-    remove_track(&mut model, "t");
-    model.routes.retain(|route| route.id.as_str() != "t-bus");
-    model.sources.retain(|source| source.id.as_str() != "a");
-    for source in &mut model.sources {
-        if source.id.as_str() == "c" {
-            source.frames = 2 * 48_000;
-        }
-    }
-    replace_insert(&mut model, "t0000");
-    model
-}
-
-fn live_request() -> HostLiveControlRequest {
-    HostLiveControlRequest {
-        meter_period_frames: core::num::NonZeroU32::new(QUANTUM as u32),
-        observation_taps: 1,
-        ..HostLiveControlRequest::default()
-    }
-}
-
-fn spectrum_request() -> SpectrumCaptureRequest {
-    let target = SpectrumTarget::TrackPostMatrix("t0000".into());
-    SpectrumCaptureRequest {
-        maximum_capture_bytes: spectrum_capture_resources_for(&target).retained_bytes,
-        target,
-        channels: SpectrumChannels::Stereo,
-    }
-}
-
-fn prepare_rich(session: &Session, base: Option<SuccessorBase<'_>>) -> PreparedHost {
-    let live = live_request();
-    let superseded = LiveValuesSuperseded::default();
-    let spectrum = spectrum_request();
-    match base {
-        None => prepare_host_runtime_with_live_controls_and_spectrum(
-            &session.compiled,
-            &caps(),
-            &live,
-            &spectrum,
-            HostLiveLanes::ALL,
-            &superseded,
-        ),
-        Some(base) => prepare_host_runtime_with_live_controls_and_spectrum_successor(
-            &session.compiled,
-            &caps(),
-            &live,
-            &spectrum,
-            HostLiveLanes::ALL,
-            &superseded,
-            base,
-        ),
-    }
-    .map(|(host, _, _)| host)
-    .unwrap_or_else(|failure| panic!("prepare: {failure:?}"))
-}
-
-/// `(family, owner)` of every row of `rows`.
-fn owners(rows: &BTreeSet<(&'static str, String, String)>) -> BTreeSet<(&'static str, String)> {
-    rows.iter()
-        .map(|(family, owner, _)| (*family, owner.clone()))
-        .collect()
-}
-
-/// `(family, key)` of every row of `rows`.
-fn keys(rows: &BTreeSet<(&'static str, String, String)>) -> BTreeSet<(&'static str, String)> {
-    rows.iter()
-        .map(|(family, _, key)| (*family, key.clone()))
-        .collect()
-}
-
-/// Gate 2, tightened by the batch 15a fold (M3). Red if the restriction keeps a row the hand-over
-/// does not read (an unfiltered `restricted_to`: the removed `t`, `a` and every restarted
-/// owner would stay), or if `installed_carry_reads` reports successor keys for predecessor keys
-/// (A lacks `t` and `a`, which sort first, so A's keys name other P0 rows: the owners differ).
-#[test]
-fn the_carried_base_holds_exactly_the_rows_the_hand_over_reads() {
-    let p0 = Session::compile(rich_model());
-    let a = Session::compile(rich_a_model());
-    let running = prepare_rich(&p0, None);
-    assert!(
-        running.carried_base.is_none(),
-        "a plan with no base has none"
-    );
-    assert_eq!(running.report.carried_base_retained_bytes, 0);
-    let withdrawn = prepare_rich(
-        &a,
-        Some(SuccessorBase {
-            inventory: &running.inventory,
-            committed: &p0.model,
-            revision: SUCCESSOR_REVISION,
-            edit_ramps: &session::EditRamps::new(),
-            monitor: host_core::MonitorBase::NONE,
-            observation: &host_core::NO_OBSERVATION,
-        }),
-    );
-    let base = withdrawn.carried_base.as_ref().expect("A has a base");
-    assert_eq!(base.plan_identity(), running.inventory.plan_identity());
-    assert_eq!(
-        withdrawn.report.carried_base_retained_bytes,
-        base.retained_bytes()
-    );
-    assert!(base.spectrum_pairing().is_empty());
-    let reads = graph::installed_carry_reads(&withdrawn.plan).expect("A has a hand-over");
-    assert_eq!(reads.predecessor, running.inventory.plan_identity());
-
-    let p0_rows = test_only_inventory_rows(&running.inventory);
-    let a_rows = test_only_inventory_rows(&withdrawn.inventory);
-    let base_rows = test_only_inventory_rows(base);
-    let read_keys = test_only_carry_read_keys(&reads);
-    // Every family is exercised by the hand-over.
-    for family in [
-        "sources",
-        "input sections",
-        "strip stages",
-        "effect lanes",
-        "meters",
-        "observations",
-        "spectrum",
-        "delay lines",
-        "strip delays",
-        "live routes",
-    ] {
-        assert!(
-            read_keys.iter().any(|(read, _)| *read == family),
-            "{family}: the session exercises the family"
-        );
-    }
-    // Every base row is P0's row, unchanged.
-    assert!(base_rows.is_subset(&p0_rows), "base rows are P0 rows");
-    // The base holds exactly the keys the hand-over reads: no more, no fewer.
-    assert_eq!(keys(&base_rows), read_keys, "base keys equal read keys");
-    // Not vacuous: A's own keys differ from P0's, so a successor-key read names other rows.
-    assert_ne!(keys(&a_rows), keys(&p0_rows), "A's keys are not P0's");
-    // The owners: those both plans hold, less those A restarted. Independent of keys.
-    let restarted = |(family, owner): &(&'static str, String)| match *family {
-        "sources" => owner == "c",
-        "effect lanes" | "observations" => owner.starts_with("t0000 ") && owner.ends_with(" comp"),
-        _ => false,
-    };
-    let expected: BTreeSet<_> = owners(&p0_rows)
-        .intersection(&owners(&a_rows))
-        .filter(|owner| !restarted(owner))
-        .cloned()
-        .collect();
-    assert_eq!(
-        owners(&base_rows),
-        expected,
-        "base owners are A's carried owners"
-    );
-    for owner in owners(&p0_rows) {
-        if restarted(&owner) || !owners(&a_rows).contains(&owner) {
-            assert!(
-                !owners(&base_rows).contains(&owner),
-                "{owner:?}: removed or restarted, so not in the base"
-            );
-        }
-    }
-}
-
 /// Gate 3: P0 lacks `d`; A adds it with 4 seconds of frames, B with 5.
 #[test]
 fn a_source_absent_from_the_running_plan_is_never_carried_from_the_withdrawn_one() {
@@ -725,19 +473,17 @@ fn a_source_absent_from_the_running_plan_is_never_carried_from_the_withdrawn_one
     for block in 0..2 {
         submit(&mut withdrawn.sources, "d", &signal[0], 1, block).expect("feed A's d");
     }
-    let base = withdrawn.carried_base.as_ref().expect("A has a base");
+    let base = base_across(&running, &withdrawn);
     assert!(
         base.source("d").is_none(),
-        "P0 has no d, so A's base has none"
+        "P0 has no d, so B's base has none"
     );
-    let mut replacement = successor_of(&b, base, &p0.model, backend);
+    let mut replacement = successor_of(&b, &base, &p0.model, backend);
     let d_index = replacement.inventory.source("d").expect("B has d").index;
-    assert_eq!(
-        graph::installed_carry_reads(&replacement.plan)
-            .expect("B carries a")
-            .sources,
-        vec![running.inventory.source("a").expect("P0 has a").index],
-        "B carries a from P0 and nothing for d"
+    let a_index = replacement.inventory.source("a").expect("B has a").index;
+    assert!(
+        !replacement.plan.can_prepare_source_seek(a_index as usize),
+        "B carries a from P0"
     );
     assert!(
         replacement.plan.can_prepare_source_seek(d_index as usize),
@@ -774,7 +520,7 @@ fn donation_plays_the_fed_ring(backend: Backend) {
         let mut running = running_p0(p0, backend, &signal);
         let mut withdrawn = successor_of(a, &running.inventory, &p0.model, backend);
         feed_c(&mut withdrawn.sources, &c_signal);
-        let base = withdrawn.carried_base.clone().expect("A has a base");
+        let base = base_across(&running, &withdrawn);
         let mut replacement = successor_of(b, &base, &p0.model, backend);
         commit(&mut replacement);
         if donate {
@@ -891,7 +637,7 @@ fn a_refused_or_mismatched_donation_moves_nothing() {
     let mut withdrawn = successor_of(a, &running.inventory, &p0.model, backend);
     feed_four(&mut withdrawn.sources);
     render(&mut withdrawn.plan);
-    let base = withdrawn.carried_base.clone().expect("A has a base");
+    let base = base_across(&running, &withdrawn);
     let mut replacement = successor_of(b, &base, &p0.model, backend);
     let (into, from) = sides(&replacement, &b.model, &withdrawn, &a.model);
     assert_eq!(check_donation(into, from), Err(DonationError::Consumed));
@@ -915,7 +661,7 @@ fn a_refused_or_mismatched_donation_moves_nothing() {
         let running = running_p0(p0, backend, &signal);
         let mut withdrawn = successor_of(a, &running.inventory, &p0.model, backend);
         feed_four(&mut withdrawn.sources);
-        let base = withdrawn.carried_base.clone().expect("A has a base");
+        let base = base_across(&running, &withdrawn);
         let mut replacement = session
             .prepare_successor(&base, &p0.model, &caps, backend)
             .unwrap_or_else(|failure| panic!("{what}: successor: {failure:?}"));
@@ -957,7 +703,7 @@ fn a_donation_never_separates_an_acked_ring_from_its_producer() {
         for block in 0..4 {
             submit(&mut withdrawn.sources, "c", &signal[0], 1, block).expect("feed A's c");
         }
-        let base = withdrawn.carried_base.clone().expect("A has a base");
+        let base = base_across(&running, &withdrawn);
         let replacement = successor_of(b, &base, &p0.model, backend);
         (withdrawn, replacement)
     };
@@ -1018,7 +764,7 @@ fn fed_withdrawn_and_replacement(
     for block in 0..4 {
         submit(&mut withdrawn.sources, "c", &signal[0], 1, block).expect("feed A's c");
     }
-    let base = withdrawn.carried_base.clone().expect("A has a base");
+    let base = base_across(&running, &withdrawn);
     let replacement = successor_of(b, &base, &p0.model, backend);
     (withdrawn, replacement)
 }
@@ -1174,7 +920,7 @@ fn guard_refuses(a: SessionModel, b: SessionModel, feed: &str, carry: bool) -> b
             submit(&mut withdrawn.sources, feed, &signal[0], 1, block).expect("feed A");
         }
     }
-    let base = withdrawn.carried_base.clone().expect("A has a base");
+    let base = base_across(&running, &withdrawn);
     let replacement = successor_of(&b, &base, &p0.model, backend);
     let (into, from) = sides(&replacement, &b.model, &withdrawn, &a.model);
     let plan = check_donation(into, from).expect("the donation checks");
@@ -1275,5 +1021,141 @@ fn the_guard_refuses_exactly_a_fed_fresh_ring_the_donation_leaves_behind() {
         ),
     ] {
         assert_eq!(guard_refuses(a, b, feed, carry), refused, "{label}");
+    }
+}
+
+/// The base inventory a replacement of the withdrawn A is prepared from, as the control plane
+/// builds it (#1698).
+fn base_across(running: &PreparedHost, withdrawn: &PreparedHost) -> PlanStateInventory {
+    running
+        .inventory
+        .across_withdrawn(&withdrawn.inventory, &withdrawn.plan)
+}
+
+/// The combined twin of #1698 gate 1: B prepared against P0 directly (one transaction P0 -> B)
+/// and adopted, then rendered [`AFTER`] blocks.
+fn direct_twin(
+    p0: &Session,
+    b: &Session,
+    backend: Backend,
+    signal: &[[Vec<f32>; 2]; 2],
+) -> Vec<Vec<u32>> {
+    let mut running = running_p0(p0, backend, signal);
+    let mut twin = successor_of(b, &running.inventory, &p0.model, backend);
+    commit(&mut twin);
+    twin.sources.adopt_persisting(&mut running.sources);
+    assert_eq!(
+        twin.plan.adopt_predecessor_plan(&mut running.plan),
+        CarryOutcome::Carried
+    );
+    play(&mut twin, signal)
+}
+
+/// #1698 gate 1 at one width, for one A: B is P0 with `t2`'s insert replaced, so it reverts to
+/// its P0 form the owner A changed. The producers move as the control plane moves them: A takes
+/// those of the sources it carries at its commit, B takes them from A, and P0 takes back what B
+/// left.
+fn reverted_owner_carries_from_p0(a_model: SessionModel, backend: Backend) {
+    let p0 = Session::compile(p0_model());
+    let a = Session::compile(a_model);
+    let mut b_model = p0_model();
+    replace_insert(&mut b_model, "t2");
+    let b = Session::compile(b_model);
+    let signal = signal();
+    let twin = direct_twin(&p0, &b, backend, &signal);
+
+    let mut running = running_p0(&p0, backend, &signal);
+    let mut withdrawn = successor_of(&a, &running.inventory, &p0.model, backend);
+    withdrawn.sources.adopt_persisting(&mut running.sources);
+    let base = base_across(&running, &withdrawn);
+    let mut replacement = successor_of(&b, &base, &p0.model, backend);
+    commit(&mut replacement);
+    replacement.sources.adopt_persisting(&mut withdrawn.sources);
+    running.sources.adopt_persisting(&mut withdrawn.sources);
+    assert_eq!(
+        replacement.restarted_strips(),
+        [Box::<str>::from("t2")],
+        "{backend:?}: only t2 restarts; the reverted owner carries from P0"
+    );
+    assert_eq!(
+        replacement.plan.adopt_predecessor_plan(&mut running.plan),
+        CarryOutcome::Carried
+    );
+    let blocks = play(&mut replacement, &signal);
+    for (block, (left, right)) in blocks.iter().zip(&twin).enumerate() {
+        assert_eq!(left, right, "{backend:?} block {block}: B equals P0 -> B");
+    }
+}
+
+/// #1698 gate 1 (owners): A restarts `t1` (its compressor insert replaced, so the strip restarts)
+/// or removes `t3` (strip, input section, transient shaper and route), and B reverts it to its P0
+/// form. The owner carries from P0, so B renders bit-identically to the combined twin P0 -> B at
+/// both lane widths, and only `t2`, which B itself edits, restarts.
+///
+/// Test value: red if an owner A restarted or removed starts fresh in B (the batch 15a base,
+/// P0's inventory restricted to the rows A's hand-over reads).
+#[test]
+fn an_owner_a_restarts_or_removes_and_b_reverts_carries_from_p0() {
+    let restarted = || {
+        let mut model = p0_model();
+        replace_insert(&mut model, "t1");
+        model
+    };
+    let removed = || {
+        let mut model = p0_model();
+        remove_track(&mut model, "t3");
+        model
+    };
+    for backend in backends() {
+        reverted_owner_carries_from_p0(restarted(), backend);
+        reverted_owner_carries_from_p0(removed(), backend);
+    }
+}
+
+/// #1698, sources stay under the host contract: a source declared differently in the newest
+/// committed session restarts at generation 1, frame 0 (`CONTROL_PROTOCOL_SEMANTICS.md`). A
+/// redeclares or removes P0's `b`, and B declares it as P0 does: `b` is fresh in B, a ring of its
+/// own that takes generation 1 from frame 0, while `a`, which A carries from P0, still carries.
+///
+/// Test value: red if B's base carries a source A did not carry from P0 (P0's full inventory
+/// without the source filter), which would refuse the host's restarted feed of `b`.
+#[test]
+fn a_source_b_reverts_is_fresh_and_a_source_a_carries_still_carries() {
+    let backend = Backend::current();
+    let p0 = Session::compile(p0_model());
+    let signal = signal();
+    for (label, a_model) in [
+        ("b redeclared", with_b_frames(40_000)),
+        ("b removed", without(p0_model(), "b", "tb")),
+    ] {
+        let a = Session::compile(a_model);
+        let mut running = running_p0(&p0, backend, &signal);
+        let mut withdrawn = successor_of(&a, &running.inventory, &p0.model, backend);
+        withdrawn.sources.adopt_persisting(&mut running.sources);
+        let base = base_across(&running, &withdrawn);
+        let mut replacement = successor_of(&p0, &base, &p0.model, backend);
+        let index = |source: &str| {
+            replacement
+                .inventory
+                .source(source)
+                .expect("B declares it")
+                .index as usize
+        };
+        assert!(
+            replacement.plan.can_prepare_source_seek(index("b")),
+            "{label}: B's b owns a fresh ring"
+        );
+        assert!(
+            !replacement.plan.can_prepare_source_seek(index("a")),
+            "{label}: B's a is vacant, carried from P0"
+        );
+        submit(&mut replacement.sources, "b", &signal[1], 1, 0).unwrap_or_else(|error| {
+            panic!("{label}: B's b takes generation 1 at frame 0: {error:?}")
+        });
+        assert_eq!(
+            replacement.sources.adopt_persisting(&mut withdrawn.sources),
+            1,
+            "{label}: a's producer moves from A"
+        );
     }
 }

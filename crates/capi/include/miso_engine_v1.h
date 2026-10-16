@@ -209,11 +209,13 @@ extern "C" {
  * publishes it; nothing of the earlier transaction is lost. A source the new plan keeps from the
  * waiting replacement or from the plan that renders keeps playing: the PCM accepted for it and a
  * seek or seek_at queued on it move into the new plan, so the host neither refeeds nor reseeks it.
- * One case is not covered yet: a source or owner that the earlier transaction restarted or removed
- * and the new one puts back in its form in the plan that renders starts fresh in the new plan (a
- * source at generation 1, frame 0, as an added one, and the host restarts its feed); that gap
- * closes with the successor issue "Carry an owner or source a superseding candidate keeps
- * unchanged from P0 from P0's state". No accepted chunk on a ring the waiting replacement created
+ * An owner (a strip, an effect, a meter) that the earlier transaction restarted or removed and
+ * the new one puts back in its form in the plan that renders carries from the plan that renders,
+ * as one transaction of both would carry it (issue 1698). A source does not: its declaration
+ * changed against the newest committed session, so the host restarted its feed, and a source the
+ * earlier transaction added, redeclared or removed and the new one does not keep as the waiting
+ * replacement declares it starts fresh in the new plan (generation 1, frame 0, as an added one),
+ * also when the new one puts it back in its form in the plan that renders. No accepted chunk on a ring the waiting replacement created
  * is dropped across a supersession: when the waiting replacement created a source's ring (the
  * earlier transaction added the source, or redeclared it) and the session has accepted PCM, a seek
  * or an end of region for that source since, a new transaction that does not keep the source as

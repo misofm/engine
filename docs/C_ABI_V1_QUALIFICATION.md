@@ -826,14 +826,14 @@ that window is admitted against the plan that renders.
   compiled models. The repository's reference limits (`tools/audit/src/capi.rs`,
   `crates/capi/tests/plan_swap_race.rs`, `crates/capi/tests/resource_lifecycle.rs`) admit three
   plans of the nine-track EQ reference session with room to spare (graph 316,350 bytes against
-  100,000,000; capi 168,810 against 10,000,000), so none was raised. The rule is measured from the
+  100,000,000; capi 167,514 against 10,000,000), so none was raised. The rule is measured from the
   row of a running successor plan, which carries its sources and owns their rings. The browser's caps are its
   one memory budget, which charges the same tables through the same control-plane code; its
   replacement-peak term must cover the three-plan peak when a warm candidate is admitted (#1403).
 - **Resource movement.** The larger tables add fixed bytes to every session's
   `capi_retained_bytes` (+1,904 bytes, #1398 D1's tables). On the nine-track EQ reference session
-  the row measures 165,842 bytes at the batch 15a head, 165,922 after its review fold and 168,810
-  after fold 2 (x86-64; the ceiling in `crates/capi/tests/resource_lifecycle.rs` is 175,296). A caller whose
+  the row measures 165,842 bytes at the batch 15a head, 165,922 after its review fold, 168,810
+  after fold 2 and 167,514 after #1698 (x86-64; the ceiling in `crates/capi/tests/resource_lifecycle.rs` is 175,296). A caller whose
   `maximum_capi_retained_bytes` was exact must raise it. No symbol, result code or event is added.
 
 ## Supersession of an unadopted candidate (#1310)
@@ -868,7 +868,9 @@ that window is admitted against the plan that renders.
   getting `RESULT_BACKPRESSURE` until it renders. A source the candidate carries unchanged from the
   running plan is not refused. Both hosts answer alike
   (`control_parity::a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_
-  hosts`, cases reverted, redeclared a third way and removed). #1698 lifts only the reverted case.
+  hosts`, cases reverted, redeclared a third way and removed). #1698 keeps the reverted case
+  refused too: the host restarted its feed of the source against the candidate, so the successor
+  starts it fresh and cannot play the candidate's chunks in the running plan's source.
 - **Displaced plans are charged until reclaimed (batch 15a fold 2).** When a transaction finds the
   candidate taken by render and builds on it, the plan render displaced may not yet be reclaimed
   (a render preempted between its claim and its retirement). The session keeps that plan's
@@ -880,10 +882,21 @@ that window is admitted against the plan that renders.
 - **Admission.** While a successor of the running plan is pending, the running plan's model is
   kept, so the replacement and the live admissions count it: three plans and three models when a
   candidate is superseded, three models when a live edit lands while one waits.
-- **Resource movement.** Each candidate epoch keeps its carried base (#1344), charged in its capi
-  epoch row (`carried_base_retained_bytes`); the boot plan has none. The provider epoch itself grew
+- **Resource movement.** Each candidate epoch kept its carried base (#1344), charged in its capi
+  epoch row (`carried_base_retained_bytes`), until #1698 removed it (below); the boot plan had none. The provider epoch itself grew
   (its kept base and carried base, and the batch 15a review fold's carried source bytes), and the
   pending and retired provider lists charge that size, so the reference session's boot
   `capi_retained_bytes` moves: 165,842 bytes at the batch 15a head, 165,922 after its review fold,
   168,810 after fold 2 (x86-64; a third retired slot and a 248-byte parked row in each of the
   five slots, +2,888), within the 175,296 ceiling. No symbol, result code or event is added.
+- **An owner the successor reverts carries from the running plan (#1698).** The successor is
+  prepared from the running plan's own inventory, with only the source rows the candidate carried
+  from it, so a strip, effect or other owner it keeps unchanged from the running plan carries as
+  a direct swap would carry it, also when the candidate restarted or removed it. A source the
+  candidate added, redeclared or removed, and the successor does not keep as the candidate
+  declares it (that one moves by the donation), starts fresh in the successor (generation 1,
+  frame 0, as the host contract for a declaration change against the newest committed session
+  says). The
+  candidate epoch no longer keeps a carried base, and `carried_base_retained_bytes` is gone: the
+  reference session's `capi_retained_bytes` moves 168,810 -> 167,514 (x86-64, -1,296: 216 bytes
+  in each of the six provider epochs).

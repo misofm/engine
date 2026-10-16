@@ -312,10 +312,6 @@ pub struct HostPrepareReport {
     pub carry_program_retained_bytes: u64,
     /// Bytes [`PreparedHost::inventory`] retains ([`PlanStateInventory::retained_bytes`]).
     pub inventory_retained_bytes: u64,
-    /// Bytes [`PreparedHost::carried_base`] retains ([`PlanStateInventory::retained_bytes`]);
-    /// zero for a plan prepared without a successor base (#1344 D1). A host that keeps the base
-    /// to prepare across this plan once it is withdrawn charges it; one that drops it does not.
-    pub carried_base_retained_bytes: u64,
     /// Summed effect state bytes.
     pub effect_scalar_state_bytes: u64,
     /// Summed effect scratch bytes.
@@ -677,16 +673,6 @@ pub struct PreparedHost {
     /// What this plan holds, for preparing its successor ([`SuccessorBase`]). Control-side plain
     /// data; never read on the render thread.
     pub inventory: PlanStateInventory,
-    /// What this plan carries from the plan it was prepared to displace (#1344 D1): that plan's
-    /// inventory restricted to the rows the installed hand-over reads, with its identity, so
-    /// every row is a predecessor row. `None` for a plan prepared without a [`SuccessorBase`].
-    ///
-    /// Derived once, at the end of preparation, from what is installed in the plan
-    /// (`graph::installed_carry_reads`), never recorded family by family. Should this plan be
-    /// committed and then withdrawn before render adopts it, a successor of the plan render runs
-    /// is prepared with this as its base inventory and the running plan's committed model
-    /// ([`SuccessorBase`], D2). Control-side plain data; never read on the render thread.
-    pub carried_base: Option<PlanStateInventory>,
     /// The control list of the compiled session (decision 17, C4), built before graph lowering
     /// consumes the prepared entries.
     #[cfg(feature = "control-provider")]
@@ -1078,267 +1064,37 @@ impl PlanStateInventory {
 }
 
 impl PlanStateInventory {
-    /// This inventory restricted to the rows `reads` names (#1344 D1): the rows of each family a
-    /// successor's installed hand-over reads, keyed as that section keys its predecessor. Keeps
-    /// this plan's identity, rate, quantum and capture kind; the pairing and the restart set
-    /// describe a successor against this plan, not this plan, so they are empty. Every row kept is
-    /// this plan's own row, unchanged and in its order.
-    fn restricted_to(&self, reads: &graph::GraphCarryReads) -> Self {
-        // Named without a rest pattern: a family added to the inventory does not compile until
-        // its restriction is written here.
-        let Self {
-            plan_identity,
-            sources,
-            input_sections,
-            strip_stages,
-            effect_lanes,
-            meters,
-            observations,
-            sample_rate_hz,
-            quantum_frames,
-            spectrum,
-            spectrum_collection,
-            spectrum_pairing: _,
-            delay_lines,
-            strip_delays,
-            live_routes,
-            restarted: _,
-        } = self;
-        fn keep<Row: Clone, Key: Ord>(
-            rows: &[Row],
-            keys: &BTreeSet<Key>,
-            key: impl Fn(&Row) -> Key,
-        ) -> Box<[Row]> {
-            rows.iter()
-                .filter(|row| keys.contains(&key(row)))
-                .cloned()
-                .collect()
-        }
-        let observers = |wanted: engine::realtime::ObserverKind| -> BTreeSet<_> {
-            reads
-                .observers
-                .iter()
-                .filter(|(kind, _)| *kind == wanted)
-                .map(|(_, location)| *location)
-                .collect()
-        };
-        let set = |keys: &[u32]| keys.iter().copied().collect::<BTreeSet<u32>>();
-        Self {
-            plan_identity: *plan_identity,
-            sources: keep(sources, &set(&reads.sources), |row| row.index),
-            input_sections: keep(
-                input_sections,
-                &reads.input_lanes.iter().copied().collect(),
-                |row| row.location,
-            ),
-            strip_stages: keep(
-                strip_stages,
-                &reads.strip_lanes.iter().copied().collect(),
-                |row| (row.owner, row.location),
-            ),
-            effect_lanes: keep(
-                effect_lanes,
-                &reads.effect_sites.iter().copied().collect(),
-                |row| row.location,
-            ),
-            meters: keep(
-                meters,
-                &observers(engine::realtime::ObserverKind::Meter),
-                |row| row.location,
-            ),
-            observations: keep(
-                observations,
-                &reads.observation_sites.iter().copied().collect(),
-                |row| row.location,
-            ),
-            sample_rate_hz: *sample_rate_hz,
-            quantum_frames: *quantum_frames,
-            spectrum: keep(
-                spectrum,
-                &observers(engine::realtime::ObserverKind::Spectrum),
-                |row| row.location,
-            ),
-            spectrum_collection: *spectrum_collection,
-            spectrum_pairing: Box::default(),
-            delay_lines: keep(delay_lines, &set(&reads.delay_lines), |row| row.line),
-            strip_delays: keep(strip_delays, &set(&reads.strip_delay_lines), |row| row.line),
-            live_routes: keep(live_routes, &set(&reads.live_routes), |row| row.unit),
-            restarted: Box::default(),
-        }
-    }
-}
-
-/// Test-support view of an inventory (#1344 fold M3): every row as `(family, owner, key)`, where
-/// `owner` names what the row belongs to by session identity (a strip, an effect, a route, a
-/// source) and `key` is the predecessor key a successor's hand-over names it by, formatted as
-/// [`test_only_carry_read_keys`] formats the same key. A gate compares the two to prove a
-/// restricted base holds exactly the rows the hand-over reads, and that those rows belong to the
-/// owners the test expects.
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-#[must_use]
-pub fn test_only_inventory_rows(
-    inventory: &PlanStateInventory,
-) -> BTreeSet<(&'static str, String, String)> {
-    let PlanStateInventory {
-        plan_identity: _,
-        sources,
-        input_sections,
-        strip_stages,
-        effect_lanes,
-        meters,
-        observations,
-        sample_rate_hz: _,
-        quantum_frames: _,
-        spectrum,
-        spectrum_collection: _,
-        spectrum_pairing: _,
-        delay_lines,
-        strip_delays,
-        live_routes,
-        restarted: _,
-    } = inventory;
-    let mut rows = BTreeSet::new();
-    let mut add = |family, owner: String, key: String| {
-        rows.insert((family, owner, key));
-    };
-    for row in sources.iter() {
-        add("sources", row.id.to_string(), format!("{:?}", row.index));
-    }
-    for row in input_sections.iter() {
-        add(
-            "input sections",
-            row.id.to_string(),
-            format!("{:?}", row.location),
-        );
-    }
-    for row in strip_stages.iter() {
-        add(
-            "strip stages",
-            format!("{} {:?}", row.id, row.owner),
-            format!("{:?}", (row.owner, row.location)),
-        );
-    }
-    let effect_owner = |location: &graph::GraphEffectSite| {
-        effect_lanes
+    /// The base inventory a replacement B of the withdrawn successor A is prepared from, this
+    /// inventory being P0's, the plan render runs and A was prepared to displace (#1698, amending
+    /// #1344 D1 and D2). Control-side plain data, built once per supersession.
+    ///
+    /// Every owner row is P0's own, so an owner B keeps unchanged from P0 carries from P0 as a
+    /// direct P0 -> B swap carries it, whatever A did to it. A source row is kept only when A
+    /// carries that source from P0 (A's plan holds it vacant, `can_prepare_source_seek` false on
+    /// its index): the host feeds the newest committed session, and a source A added or
+    /// redeclared restarted the host's feed at generation 1, frame 0 against A, so B, which
+    /// declares it differently from A, restarts it the same way (`CONTROL_PROTOCOL_SEMANTICS.md`,
+    /// "Sources across a structural transaction"). A source A created fresh and B keeps as A
+    /// declares it moves by the donation ([`crate::check_donation`]), never through this base.
+    #[must_use]
+    pub fn across_withdrawn(
+        &self,
+        withdrawn: &PlanStateInventory,
+        withdrawn_plan: &PreparedRenderPlan,
+    ) -> Self {
+        let mut base = self.clone();
+        base.sources = self
+            .sources
             .iter()
-            .find(|lane| lane.location == *location)
-            .map_or_else(
-                || "unknown effect".to_owned(),
-                |lane| format!("{} {:?} {}", lane.id, lane.rack, lane.effect_id),
-            )
-    };
-    for row in effect_lanes.iter() {
-        add(
-            "effect lanes",
-            effect_owner(&row.location),
-            format!("{:?}", row.location),
-        );
+            .filter(|row| {
+                withdrawn.source(&row.id).is_some_and(|carried| {
+                    !withdrawn_plan.can_prepare_source_seek(carried.index as usize)
+                })
+            })
+            .cloned()
+            .collect();
+        base
     }
-    for row in meters.iter() {
-        add(
-            "meters",
-            format!("{} {:?} {:?}", row.id, row.tap, row.metrics),
-            format!("{:?}", row.location),
-        );
-    }
-    for row in observations.iter() {
-        add(
-            "observations",
-            effect_owner(&row.location),
-            format!("{:?}", row.location),
-        );
-    }
-    for row in spectrum.iter() {
-        add(
-            "spectrum",
-            format!("{:?} {:?}", row.target, row.channels),
-            format!("{:?}", row.location),
-        );
-    }
-    for row in delay_lines.iter() {
-        add(
-            "delay lines",
-            format!("{:?}", row.edge),
-            format!("{:?}", row.line),
-        );
-    }
-    for row in strip_delays.iter() {
-        add(
-            "strip delays",
-            row.strip.to_string(),
-            format!("{:?}", row.line),
-        );
-    }
-    for row in live_routes.iter() {
-        add(
-            "live routes",
-            row.route_id.to_string(),
-            format!("{:?}", row.unit),
-        );
-    }
-    rows
-}
-
-/// Test-support view of a hand-over's reads (#1344 fold M3): every predecessor key as `(family,
-/// key)`, formatted as [`test_only_inventory_rows`] formats it.
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-#[must_use]
-pub fn test_only_carry_read_keys(
-    reads: &graph::GraphCarryReads,
-) -> BTreeSet<(&'static str, String)> {
-    let graph::GraphCarryReads {
-        predecessor: _,
-        sources,
-        input_lanes,
-        strip_lanes,
-        effect_sites,
-        observers,
-        observation_sites,
-        delay_lines,
-        strip_delay_lines,
-        live_routes,
-    } = reads;
-    let mut keys = BTreeSet::new();
-    let mut add = |family, key: String| {
-        keys.insert((family, key));
-    };
-    sources
-        .iter()
-        .for_each(|key| add("sources", format!("{key:?}")));
-    input_lanes
-        .iter()
-        .for_each(|key| add("input sections", format!("{key:?}")));
-    strip_lanes
-        .iter()
-        .for_each(|key| add("strip stages", format!("{key:?}")));
-    effect_sites
-        .iter()
-        .for_each(|key| add("effect lanes", format!("{key:?}")));
-    for (kind, location) in observers {
-        let family = match kind {
-            engine::realtime::ObserverKind::Meter => "meters",
-            engine::realtime::ObserverKind::Spectrum => "spectrum",
-            // The observation taps' readers move with their effect instance; the restriction
-            // keys observation rows by `observation_sites`, below.
-            engine::realtime::ObserverKind::Observation => continue,
-        };
-        add(family, format!("{location:?}"));
-    }
-    observation_sites
-        .iter()
-        .for_each(|key| add("observations", format!("{key:?}")));
-    delay_lines
-        .iter()
-        .for_each(|key| add("delay lines", format!("{key:?}")));
-    strip_delay_lines
-        .iter()
-        .for_each(|key| add("strip delays", format!("{key:?}")));
-    live_routes
-        .iter()
-        .for_each(|key| add("live routes", format!("{key:?}")));
-    keys
 }
 
 /// The plan a successor is prepared to displace (issue #1272 D2, umbrella #1269 P1).
@@ -1358,15 +1114,15 @@ pub fn test_only_carry_read_keys(
 /// the successor's cells as a retarget stamped with `revision`, as a strip's is. A strip whose
 /// effect chain changed restarts even if its remaining slots carry.
 ///
-/// **Across a withdrawn plan (#1344 D2).** When the plan render runs (P0) has a committed
-/// successor A that was taken back before render adopted it, A's replacement B is prepared
-/// against P0 with this same entry: `inventory` is A's [`PreparedHost::carried_base`] and
-/// `committed` is P0's committed model. Every row of that inventory is a P0 row, so the joins run
-/// unchanged and an owner carries from P0 only if A carried it and B leaves it unchanged against
-/// P0's model; everything A restarted, added or removed is fresh in B. A strip A restarted has no
-/// row there, so B restarts it too and lists it in [`PreparedHost::restarted_strips`]. The rings
-/// A created fresh move to B by a checked donation ([`crate::check_donation`]), never through this
-/// base.
+/// **Across a withdrawn plan (#1344 D2, amended by #1698).** When the plan render runs (P0) has a
+/// committed successor A that was taken back before render adopted it, A's replacement B is
+/// prepared against P0 with this same entry: `inventory` is
+/// [`PlanStateInventory::across_withdrawn`] of P0's inventory and A, and `committed` is P0's
+/// committed model. Every row of that inventory is a P0 row, so the joins run unchanged and B
+/// carries from P0 every owner it leaves unchanged against P0's model, as a direct P0 -> B swap
+/// does, including an owner A restarted or removed. Sources carry only as A carried them: a
+/// source A added, redeclared or removed is fresh in B. The rings A created fresh move to B by a
+/// checked donation ([`crate::check_donation`]), never through this base.
 #[derive(Clone, Copy, Debug)]
 pub struct SuccessorBase<'a> {
     /// The predecessor's [`PreparedHost::inventory`].
@@ -3479,32 +3235,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         live_routes: live_routes.into_boxed_slice(),
         restarted: restarted.into_boxed_slice(),
     };
-    // #1344 D1: what this plan carries, read back from the hand-over just installed. A successor
-    // with nothing installed carries nothing, so its base is the predecessor's identity alone.
-    let carried_base = successor.map(|base| {
-        let reads = graph::installed_carry_reads(&plan).unwrap_or_default();
-        debug_assert!(
-            reads == graph::GraphCarryReads::default()
-                || reads.predecessor == base.inventory.plan_identity,
-            "the hand-over names the base it was prepared against"
-        );
-        let restricted = base.inventory.restricted_to(&reads);
-        // #1395 D3: the observer section's spectrum moves are the pairs the control side applies.
-        debug_assert_eq!(
-            restricted
-                .spectrum
-                .iter()
-                .map(|row| row.entry)
-                .collect::<BTreeSet<_>>(),
-            inventory
-                .spectrum_pairing
-                .iter()
-                .map(|pair| pair.predecessor)
-                .collect::<BTreeSet<_>>(),
-            "the spectrum rows the hand-over reads are the ones the pairing names"
-        );
-        restricted
-    });
     let report = HostPrepareReport {
         sample_rate_hz: compiled.sample_rate().0,
         quantum_frames: compiled.quantum().0,
@@ -3532,9 +3262,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         carried_source_overhead_bytes: carried_overhead_bytes,
         carry_program_retained_bytes,
         inventory_retained_bytes: inventory.retained_bytes(),
-        carried_base_retained_bytes: carried_base
-            .as_ref()
-            .map_or(0, PlanStateInventory::retained_bytes),
         effect_scalar_state_bytes: effect_state_bytes,
         effect_scalar_scratch_bytes: effect_scratch_bytes,
         builtin_processor_payload_bytes: builtin_resources.engine_owned_processor_payload_bytes,
@@ -3651,7 +3378,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             sources,
             report,
             inventory,
-            carried_base,
             #[cfg(feature = "control-provider")]
             control_catalog,
         },

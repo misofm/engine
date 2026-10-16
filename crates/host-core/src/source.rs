@@ -590,9 +590,11 @@ pub fn check_donation(
 ///
 /// The caller refuses the replacement before its commit as retryable backpressure: once render
 /// adopts the donor, X's ring is the running plan's and the same edit commits on it. Read-only;
-/// it allocates nothing. Issue #1698 lifts the reverted case only (it carries X from the running
-/// plan); the others stay refused until an issue gives the replacement a way to read those chunks
-/// or the owner rules that a removed source's chunks may drop.
+/// it allocates nothing. Every case stays refused until an issue gives the replacement a way to
+/// read those chunks or the owner rules that a removed source's chunks may drop. #1698 keeps the
+/// reverted case too: the host restarted its feed of X against the donor, so the replacement
+/// starts X fresh ([`crate::PlanStateInventory::across_withdrawn`]) and cannot read the donor's
+/// chunks into the running plan's continuing X.
 #[must_use]
 pub fn drops_acked_fresh_source(donor: DonationSide<'_>, donation: &DonationPlan) -> bool {
     donor.inventory.sources().iter().any(|row| {
