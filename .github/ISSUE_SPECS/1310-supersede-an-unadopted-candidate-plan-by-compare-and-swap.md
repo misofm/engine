@@ -546,3 +546,12 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
   `hosts/host-web/tests/control_parity.rs` (the guard's parity row),
   `.github/ISSUE_SPECS/TBD42-*.md` (one line). No edit under
   `crates/engine/src/realtime/`.
+- *Parity row's silent adoption block (harness, not engine).* A plain run of this session (no
+  edit) first outputs a non-zero sample at frame 459 at 48 kHz and 939 at 96 kHz (the plan's
+  compensated latency, which grows with the rate), so its first playing block is 3 / 7 and block 2
+  was silent on both hosts for that reason alone (probe, not kept). The row now commits T1 at block `lead + 1` (`lead` = a plain run's first
+  playing block), asserts the adoption block plays, renders to block `adopt + lead` before the
+  retry, and asserts there that the output plays and differs from a control run whose host never
+  fed A's `src-t1` ring (blocks before it bit-identical), bits equal on both hosts at both rates.
+  Red: the control run also fed the acked chunk (`assert_ne`, block 7 at 48 kHz); adoption at
+  block 2 ("the adoption block plays").

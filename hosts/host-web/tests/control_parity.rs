@@ -3107,13 +3107,23 @@ fn paused_structural_edits_commit_alike_on_both_hosts() {
 /// `src-t1`, so A restarts it at frame 0 and the host's next chunk for it is acked into A's ring.
 /// T2 (B) puts `src-t1` back as the running plan declares it: B would prepare it fresh and A's
 /// acked chunk would drop with A, so both hosts refuse T2 with `BACKPRESSURE`, the same code and
-/// the same revision. The next block adopts A on both, and the retried T2 commits alike; from
-/// then on the two hosts render the same bits.
+/// the same revision. The next block adopts A on both, and the retried T2 commits alike; the two
+/// hosts render the same bits in every block.
+///
+/// This session's plan has a compensated latency of more than one block, and it grows with the
+/// rate (a plain run first plays at frame 459 at 48 kHz, 939 at 96 kHz): the first block a plain
+/// run plays is `lead`. So T1 commits only once the output plays, the adoption block must
+/// play, and the acked chunk reaches the output `lead` blocks after the adoption block. The retry
+/// waits for that block. A control run, whose host never feeds A's `src-t1` ring and so never
+/// attempts the early T2, renders the same blocks until then and a different block there, on both
+/// hosts: the acked chunk is heard, at A's restart position.
 ///
 /// Test value: red if either host lets such a supersession commit (the guard missing in the
-/// core), or if the two hosts refuse it differently or render differently after the retry.
+/// core), if the two hosts refuse it differently or render differently, or if A's acked chunk is
+/// not heard (dropped, or not played at A's restart position).
 #[test]
 fn a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_hosts() {
+    let plays = |pcm: &[u32]| pcm.iter().any(|word| f32::from_bits(*word) != 0.0);
     for rate in [48_000, 96_000] {
         let model = model_at(rate);
         let name = format!("src-{}", T1.id);
@@ -3129,112 +3139,89 @@ fn a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_hosts(
         let first = [SessionEdit::UpsertSource { source: redeclared }];
         let second = [SessionEdit::UpsertSource { source: original }];
 
-        let mut browser = Rig::new(&model);
-        let mut c_abi = CAbi::new(&model);
-        for block in 0..2 {
-            let b = browser.step(block);
-            assert_eq!(b, c_abi.step(block), "{rate} Hz: block {block}");
-        }
-        // Each host is fed `src-t1` from `t1_start` (its own frame, in blocks) and the other two
-        // sources at the render position, then renders `block`.
-        let feed_and_render =
-            |browser: &mut Rig, c_abi: &mut CAbi, block: u64, t1_start: u64| -> Vec<u32> {
-                for (feed, strip) in [T1, T2, T3].into_iter().enumerate() {
-                    let source = format!("src-{}", strip.id);
-                    let start = if strip.id == T1.id { t1_start } else { block };
-                    let [left, right] = planes(feed as u64, block);
-                    assert_eq!(
-                        browser.host.submit_source(
-                            source.as_bytes(),
-                            1,
-                            start * u64::from(QUANTUM),
-                            rate,
-                            &[&left, &right],
-                            QUANTUM,
-                            false,
-                        ),
-                        host_web::RESULT_OK,
-                        "{rate} Hz: browser {source}"
-                    );
-                    c_abi.submit_from(&source, feed as u64, block, start, 1);
-                }
-                assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
-                let b = bits(browser.host.output_pcm().expect("browser output"));
-                assert_eq!(b, c_abi.render(block), "{rate} Hz: block {block}");
-                b
-            };
-
-        let (b_first, _) = browser.transaction_reply(&first);
-        let (c_first, _) = c_abi.transaction(&first);
-        assert!(
-            matches!(
-                b_first,
-                Verdict::Applied {
-                    path: EditPath::Rebuild,
-                    ..
-                }
-            ),
-            "{rate} Hz: the redeclaration is a rebuild: {b_first:?}"
-        );
-        assert_eq!(b_first, c_first, "{rate} Hz: T1");
-        let revision = c_abi.revision;
-
-        // T2 before any block adopts A, once A's `src-t1` ring holds an acked chunk.
-        let acked = |browser: &mut Rig, c_abi: &mut CAbi| {
-            let [left, right] = planes(0, 2);
-            assert_eq!(
-                browser.host.submit_source(
-                    name.as_bytes(),
-                    1,
-                    0,
-                    rate,
-                    &[&left, &right],
-                    QUANTUM,
-                    false,
-                ),
-                host_web::RESULT_OK
-            );
-            c_abi.submit_from(&name, 0, 2, 0, 1);
+        // The plan's latency in whole blocks: the first block a plain run plays.
+        let lead = {
+            let mut browser = Rig::new(&model);
+            (0..BLOCKS)
+                .find(|&block| plays(&browser.step(block)))
+                .expect("the session plays")
         };
-        acked(&mut browser, &mut c_abi);
-        let b_frame = browser.encode(
-            CommandPayload::SessionTransactionApply(&second),
-            ExpectedRevision::Exact(SessionRevision(browser.revision)),
-        );
-        let (b_code, b_reply) = browser.send_frame(&b_frame);
-        let (c_code, c_reply) = c_abi.send_status(
-            CommandPayload::SessionTransactionApply(&second),
-            ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
-        );
-        assert_eq!(
-            (b_code, c_code),
-            (host_web::RESULT_BACKPRESSURE, capi::RESULT_BACKPRESSURE),
-            "{rate} Hz: the supersession would drop A's acked chunk: {} / {}",
-            String::from_utf8_lossy(&b_reply),
-            String::from_utf8_lossy(&c_reply)
-        );
-        assert_eq!(c_abi.revision, revision, "{rate} Hz: no commit");
-        assert_eq!(browser.revision, revision, "{rate} Hz: no commit");
-        assert_eq!(
-            drain_events(&mut browser.host),
-            0,
-            "{rate} Hz: the refusal queues no event"
-        );
+        let adopt = lead + 1;
+        let heard_at = adopt + lead;
+        let retry = heard_at + 1;
 
-        // The block that adopts A renders the acked chunk; the other two sources continue. (The
-        // capi test `a_supersession_that_would_drop_acked_pcm_on_a_redeclared_source_is_
-        // backpressure` shows the chunk is heard; this row pins that both hosts render alike.)
-        let mut heard = false;
-        for block in 2..3 {
-            // `src-t1`'s chunk for this block is the one acked above.
-            for (feed, strip) in [T2, T3].into_iter().enumerate() {
+        // Each host is fed `src-t1` (if `t1`) from `t1_start` (its own frame, in blocks) and the
+        // other two sources at the render position, then renders `block`.
+        let feed_and_render = |browser: &mut Rig,
+                               c_abi: &mut CAbi,
+                               block: u64,
+                               t1: bool,
+                               t1_start: u64|
+         -> Vec<u32> {
+            for (feed, strip) in [T1, T2, T3].into_iter().enumerate() {
+                if strip.id == T1.id && !t1 {
+                    continue;
+                }
                 let source = format!("src-{}", strip.id);
-                let [left, right] = planes(feed as u64 + 1, block);
+                let start = if strip.id == T1.id { t1_start } else { block };
+                let [left, right] = planes(feed as u64, block);
                 assert_eq!(
                     browser.host.submit_source(
                         source.as_bytes(),
                         1,
-                        block * u64::from(QUANTUM),
+                        start * u64::from(QUANTUM),
+                        rate,
+                        &[&left, &right],
+                        QUANTUM,
+                        false,
+                    ),
+                    host_web::RESULT_OK,
+                    "{rate} Hz: browser {source}"
+                );
+                c_abi.submit_from(&source, feed as u64, block, start, 1);
+            }
+            assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+            let b = bits(browser.host.output_pcm().expect("browser output"));
+            assert_eq!(b, c_abi.render(block), "{rate} Hz: block {block}");
+            b
+        };
+
+        // `feed_a`: the host feeds A's `src-t1` ring the acked chunk, and T2 is attempted before
+        // the adoption. Otherwise the host never feeds A's ring before the retry.
+        let run = |feed_a: bool| -> Vec<Vec<u32>> {
+            let mut browser = Rig::new(&model);
+            let mut c_abi = CAbi::new(&model);
+            let mut blocks = Vec::new();
+            for block in 0..adopt {
+                let b = browser.step(block);
+                assert_eq!(b, c_abi.step(block), "{rate} Hz: block {block}");
+                blocks.push(b);
+            }
+
+            let (b_first, _) = browser.transaction_reply(&first);
+            let (c_first, _) = c_abi.transaction(&first);
+            assert!(
+                matches!(
+                    b_first,
+                    Verdict::Applied {
+                        path: EditPath::Rebuild,
+                        ..
+                    }
+                ),
+                "{rate} Hz: the redeclaration is a rebuild: {b_first:?}"
+            );
+            assert_eq!(b_first, c_first, "{rate} Hz: T1");
+            let revision = c_abi.revision;
+
+            if feed_a {
+                // A's `src-t1` chunk at frame 0, acked before any block adopts A: the source's
+                // PCM of the adoption block, as the host would send it.
+                let [left, right] = planes(0, adopt);
+                assert_eq!(
+                    browser.host.submit_source(
+                        name.as_bytes(),
+                        1,
+                        0,
                         rate,
                         &[&left, &right],
                         QUANTUM,
@@ -3242,26 +3229,85 @@ fn a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_hosts(
                     ),
                     host_web::RESULT_OK
                 );
-                c_abi.submit_from(&source, feed as u64 + 1, block, block, 1);
-            }
-            assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
-            let b = bits(browser.host.output_pcm().expect("browser output"));
-            assert_eq!(b, c_abi.render(block), "{rate} Hz: block {block}");
-            heard |= b.iter().any(|word| f32::from_bits(*word) != 0.0);
-        }
+                c_abi.submit_from(&name, 0, adopt, 0, 1);
 
-        // The retry commits on A, alike; B restarts `src-t1` at frame 0 again.
-        let (b_second, _) = browser.transaction_reply(&second);
-        let (c_second, _) = c_abi.transaction(&second);
+                // T2 before any block adopts A.
+                let b_frame = browser.encode(
+                    CommandPayload::SessionTransactionApply(&second),
+                    ExpectedRevision::Exact(SessionRevision(browser.revision)),
+                );
+                let (b_code, b_reply) = browser.send_frame(&b_frame);
+                let (c_code, c_reply) = c_abi.send_status(
+                    CommandPayload::SessionTransactionApply(&second),
+                    ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
+                );
+                assert_eq!(
+                    (b_code, c_code),
+                    (host_web::RESULT_BACKPRESSURE, capi::RESULT_BACKPRESSURE),
+                    "{rate} Hz: the supersession would drop A's acked chunk: {} / {}",
+                    String::from_utf8_lossy(&b_reply),
+                    String::from_utf8_lossy(&c_reply)
+                );
+                assert_eq!(c_abi.revision, revision, "{rate} Hz: no commit");
+                assert_eq!(browser.revision, revision, "{rate} Hz: no commit");
+                assert_eq!(
+                    drain_events(&mut browser.host),
+                    0,
+                    "{rate} Hz: the refusal queues no event"
+                );
+            }
+
+            // The adoption block, and the blocks until the acked chunk reaches the output. Only
+            // the other two sources are fed: the one difference between the two runs is the
+            // acked chunk.
+            for block in adopt..retry {
+                blocks.push(feed_and_render(&mut browser, &mut c_abi, block, false, 0));
+            }
+
+            // The retry commits on A, alike; B restarts `src-t1` at frame 0 again.
+            let (b_second, _) = browser.transaction_reply(&second);
+            let (c_second, _) = c_abi.transaction(&second);
+            assert!(
+                matches!(b_second, Verdict::Applied { .. }),
+                "{rate} Hz: the retry commits: {b_second:?}"
+            );
+            assert_eq!(b_second, c_second, "{rate} Hz: T2 retried");
+            for block in retry..retry + 5 {
+                blocks.push(feed_and_render(
+                    &mut browser,
+                    &mut c_abi,
+                    block,
+                    true,
+                    block - retry,
+                ));
+            }
+            blocks
+        };
+
+        let fed = run(true);
+        let unfed = run(false);
+        let adopt = adopt as usize;
+        let heard_at = heard_at as usize;
         assert!(
-            matches!(b_second, Verdict::Applied { .. }),
-            "{rate} Hz: the retry commits: {b_second:?}"
+            plays(&fed[adopt]),
+            "{rate} Hz: the adoption block (block {adopt}) plays"
         );
-        assert_eq!(b_second, c_second, "{rate} Hz: T2 retried");
-        for block in 3..8 {
-            let b = feed_and_render(&mut browser, &mut c_abi, block, block - 3);
-            heard |= b.iter().any(|word| f32::from_bits(*word) != 0.0);
-        }
-        assert!(heard, "{rate} Hz: the compared blocks play");
+        assert!(
+            plays(&fed[heard_at]),
+            "{rate} Hz: the block that carries the acked chunk (block {heard_at}) plays"
+        );
+        assert_eq!(
+            fed[..heard_at],
+            unfed[..heard_at],
+            "{rate} Hz: the refusal changes nothing, and the acked chunk is not heard early"
+        );
+        assert_ne!(
+            fed[heard_at], unfed[heard_at],
+            "{rate} Hz: the acked chunk is heard (block {heard_at}, latency {lead} blocks)"
+        );
+        assert!(
+            fed[retry as usize..].iter().all(|block| plays(block)),
+            "{rate} Hz: the blocks after the retry play"
+        );
     }
 }
