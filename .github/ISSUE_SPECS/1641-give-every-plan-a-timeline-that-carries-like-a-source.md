@@ -439,9 +439,11 @@ was not run (worker rules).
   `carried_source_total_bytes > carried_source_overhead_bytes`: the timeline queue is overhead
   only, a carried ring adds its PCM payload. (Not `timeline_queue_bytes()` as in
   `successor_swap.rs`: host-web does not depend on `source`, and this needs no new dependency.)
-- **MINOR 3.** `timeline::a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline` (red when
-  the guard is `successor.is_some()`), `timeline::a_seek_queued_at_the_swap_block_lands_in_the_successors_first_block`
-  (red when the carry does not swap the command consumer), and the vacant-timeline unit test
+- **MINOR 3.** `timeline::a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline` (red
+  when the guard is `successor.is_some()`),
+  `timeline::a_seek_queued_at_the_swap_block_lands_in_the_successors_first_block` (its unique
+  catch: a carry that drains the queue, so the seek queued at the swap block is lost), and the
+  vacant-timeline unit test
   `source::tests::timeline::a_vacant_timeline_never_adopted_advances_from_zero`.
 - **MINOR 4.** The discontinuity gate's claim that it reads the overlap's older entry is removed:
   its plan has `K = 1`, so no overlap is held. The overlap rule is `source`'s
@@ -453,3 +455,7 @@ was not run (worker rules).
   `timeline.rs`'s gate 4 already counts the same carry and blocks.
 - No charged byte moved (#1640 fold MINOR 6 removed only unread rows); `realtime_policy` 153
   regions, unchanged.
+- **Fold 2.** M1 is completed in `source` (#1640 "Fold 2"): a node block now also steps where a
+  newer entry starts below every older entry after a step-back, so a carried timeline's step-back
+  reads right in every node block with at most one step. This record's MINOR 3 line now names the
+  queued-seek test's unique catch. No charged byte moved; `realtime_policy` regions unchanged.

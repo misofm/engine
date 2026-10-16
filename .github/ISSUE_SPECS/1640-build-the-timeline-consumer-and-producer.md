@@ -311,10 +311,11 @@ counts (the driver), so no row charges it (fold MINOR 6 removed `consumer_bytes`
   512). It now checks every entry's first sample and its end (`sr + q`) inside the node block and
   reports the first sample `s` where `timeline_at(s) != timeline_at(s - 1) + 1`. Where no held entry
   starts at or before `s - 1` (or `s` is 0), the entry at `s` is a step when it is a seek, read
-  against `oldest_expected_timeline` as before. Bound: at most `6K² + 6K` entry reads,
-  allocation-free. Test `a_node_block_reports_the_steps_of_a_source_read_step_back` (red on the
-  unfixed code: `{start: 216, step: None}`), which also checks every block's span against
-  `timeline_at` sample by sample.
+  against `oldest_expected_timeline` as before. Bound: at most `6K² + 6K` entry reads (fold 2:
+  `6K² + 10K + 1`), allocation-free. Test
+  `a_node_block_reports_the_steps_of_a_source_read_step_back` (red on the unfixed code:
+  `{start: 216, step: None}`), which also checks every block's span against `timeline_at` sample by
+  sample.
 - **MINOR 4.** `the_reader_reads_the_newest_overlap_and_reports_the_first_step` (`K` 4 and 3): red
   for a `resolve` searched oldest first, a later step reported instead of the first, and an
   eviction that does not update `oldest_expected_timeline` (each mutation run).
@@ -333,3 +334,17 @@ counts (the driver), so no row charges it (fold MINOR 6 removed `consumer_bytes`
   (#1641's, in this module).
 - Rustdoc: the public docs no longer link the private `SeekState`, `SeekClock::At` and
   `SeekState::prime_window_clear` (`cargo doc -D warnings`).
+- **Fold 2: M1 completed.** After a step-back the oldest held entry is not the lowest source-read
+  sample, so where no held entry starts at or before `s - 1` the value at `s - 1` is extrapolated
+  back from an entry that need not start at `s`, and the seek-only test missed a real step (`K` 3,
+  blocks at 0, 128, 256, 384, 384, 512: `timeline_block(260, 128)` gave no step, `timeline_at(384)`
+  is 512; `K` 2, blocks at 0, 128, 256, 384, 256: `timeline_block(200, 128)` gave no step,
+  `timeline_at(256)` is 512). `step_at` now reports a step wherever `s > 0` and
+  `timeline_at(s - 1) + 1 != timeline_at(s)`, and keeps the oldest-seek rule where no held entry
+  starts at or before `s - 1`, so the claim above (a node block with at most one step agrees with
+  `timeline_at` on every sample) holds. Bound: at most `6K² + 10K + 1` entry reads,
+  allocation-free, no new panic path, inside its `REALTIME_POLICY` region. Tests
+  `a_step_back_steps_where_no_held_entry_starts_before_it` (the two cases) and
+  `every_node_block_with_one_step_agrees_with_timeline_at_after_a_step_back` (`K` 1 to 5, step-backs
+  of 64, 128, 200, 256 and 384, a node block from every fourth sample): both red on the fold-1 code
+  (`{start: 260, step: None}`; the sweep reads 384 for 512), green with the fix.

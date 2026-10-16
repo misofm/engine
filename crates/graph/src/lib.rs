@@ -3703,8 +3703,9 @@ pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
 ///
 /// Call it before publication. Refused, leaving any earlier program in place, when the plan is
 /// not a graph plan, has no source set for a program that moves a source or the timeline, or a
-/// successor index is out of range, not vacant or repeated, or a predecessor index is repeated. Predecessor indices are checked against the
-/// predecessor at the swap block, where an out-of-range index refuses the whole move.
+/// successor index is out of range, not vacant or repeated, or a predecessor index is repeated.
+/// Predecessor indices are checked against the predecessor at the swap block, where an
+/// out-of-range index refuses the whole move.
 pub fn install_carry_program(
     plan: &mut PreparedRenderPlan,
     program: GraphCarryProgram,

@@ -2442,7 +2442,7 @@ impl TimelineConsumer {
     /// step is `(0, start)`. A node block with at most one step, every block
     /// a host renders without a step-back inside it, agrees with `timeline_at` on every sample;
     /// of several, the first is reported. Read-only and allocation-free, with at most
-    /// `6K² + 6K` entry reads.
+    /// `6K² + 10K + 1` entry reads.
     #[must_use]
     pub fn timeline_block(&self, first_source_read_sample: u64, frames: u32) -> TimelineSpan {
         let start = self.timeline_at(first_source_read_sample);
@@ -2476,15 +2476,18 @@ impl TimelineConsumer {
 
     /// The timeline value at `sample` when the timeline steps there: when it is not the value at
     /// `sample - 1` plus one. When no held entry starts at or before `sample - 1` (that value is
-    /// extrapolated back, or `sample` is 0), the entry that starts at `sample` is a step when it
-    /// is a seek, read against `oldest_expected_timeline` for the oldest entry.
+    /// extrapolated back from the oldest entry, or `sample` is 0), the entry that starts at
+    /// `sample` is also a step when it is a seek, read against `oldest_expected_timeline` for the
+    /// oldest entry: the history no longer holds the block it stepped from.
     fn step_at(&self, sample: u64) -> Option<i64> {
         let (resolving, timeline) = self.resolve(sample);
         let stepped = match sample.checked_sub(1) {
-            Some(previous) if self.starts_at_or_before(previous) => {
+            Some(previous) => {
                 self.resolve(previous).1.checked_add(1) != Some(timeline)
+                    || (!self.starts_at_or_before(previous)
+                        && resolving.is_some_and(|age| self.is_seek_entry(age)))
             }
-            _ => resolving.is_some_and(|age| self.is_seek_entry(age)),
+            None => resolving.is_some_and(|age| self.is_seek_entry(age)),
         };
         stepped.then_some(timeline)
     }
@@ -6482,6 +6485,86 @@ mod tests {
                         consumer.timeline_at(first + u64::from(i)),
                         "block from {first}, sample {i}"
                     );
+                }
+            }
+        }
+
+        /// Batch 16a fold 2, M1: after a step-back the oldest held entry is not the lowest
+        /// source-read sample, so a sample before every held entry is extrapolated back from an
+        /// entry that does not start next to it, and the timeline can step where a newer entry
+        /// starts although that entry is no seek.
+        ///
+        /// Test value: red if `timeline_block` tests only for a seek entry where no held entry
+        /// starts at or before `s - 1` (`K` 3: samples 124 to 127 read 128 off; `K` 2: samples 56
+        /// to 127 read 256 off).
+        #[test]
+        fn a_step_back_steps_where_no_held_entry_starts_before_it() {
+            let (_producer, mut consumer) = timeline(3);
+            blocks_at(&mut consumer, &[0, QU, 2 * QU, 3 * QU, 3 * QU, 4 * QU]);
+            assert_eq!(consumer.timeline_at(383), 383);
+            assert_eq!(consumer.timeline_at(384), 512);
+            assert_eq!(
+                consumer.timeline_block(260, Q),
+                TimelineSpan {
+                    start: 260,
+                    step: Some(TimelineStep {
+                        offset: 124,
+                        timeline: 512,
+                    }),
+                }
+            );
+
+            let (_producer, mut consumer) = timeline(2);
+            blocks_at(&mut consumer, &[0, QU, 2 * QU, 3 * QU, 2 * QU]);
+            assert_eq!(consumer.timeline_at(255), 255);
+            assert_eq!(consumer.timeline_at(256), 512);
+            assert_eq!(
+                consumer.timeline_block(200, Q),
+                TimelineSpan {
+                    start: 200,
+                    step: Some(TimelineStep {
+                        offset: 56,
+                        timeline: 512,
+                    }),
+                }
+            );
+        }
+
+        /// Batch 16a fold 2, M1 sweep: `K` 1 to 5, a step-back of 64, 128, 200, 256 or 384
+        /// samples after four plain blocks, and a node block from every fourth sample.
+        ///
+        /// Test value: red if any node block with at most one step disagrees with `timeline_at`
+        /// on any sample (a missed or a misplaced step, whatever entry is the oldest).
+        #[test]
+        fn every_node_block_with_one_step_agrees_with_timeline_at_after_a_step_back() {
+            for history in 1..=5 {
+                for back in [64, 128, 200, 256, 384] {
+                    let (_producer, mut consumer) = timeline(history);
+                    blocks_at(
+                        &mut consumer,
+                        &[0, QU, 2 * QU, 3 * QU, 4 * QU - back, 5 * QU - back],
+                    );
+                    for first in (0..6 * QU).step_by(4) {
+                        let steps = (0..Q)
+                            .filter(|&i| {
+                                let sample = first + u64::from(i);
+                                sample > 0
+                                    && consumer.timeline_at(sample)
+                                        != consumer.timeline_at(sample - 1) + 1
+                            })
+                            .count();
+                        if steps > 1 {
+                            continue;
+                        }
+                        let span = consumer.timeline_block(first, Q);
+                        for i in 0..Q {
+                            assert_eq!(
+                                span_value(span, i),
+                                consumer.timeline_at(first + u64::from(i)),
+                                "K {history}, back {back}, block from {first}, sample {i}"
+                            );
+                        }
+                    }
                 }
             }
         }
