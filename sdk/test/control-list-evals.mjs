@@ -68,6 +68,7 @@ function projected(entry) {
     defaultBits: bits(entry.default),
     valueBits: bits(entry.value),
     choices: entry.choices.length,
+    automated: entry.automated,
   };
 }
 
@@ -130,6 +131,13 @@ describe("#1564A gate 1 -- the list is the core's", () => {
     try {
       const list = await engine.controls();
       assert.equal(list.controls.length, FIXTURE.rows.length, "no row is dropped or added");
+      // #1650 D4: the fixture rides `b`'s right fader, so one row is automated and its left
+      // neighbour is not; the projection compares the flag on every row.
+      assert.deepEqual(
+        FIXTURE.rows.filter((row) => row.automated).map((row) => [row.owner.id, row.name, row.lane]),
+        [["b", "fader_db", "right"]],
+        "the fixture has one automated row",
+      );
       assert.deepEqual(list.controls.map(projected), FIXTURE.rows);
       const handles = list.controls.map((entry) => entry.handle);
       assert.ok(handles.every((handle, at) => handle > 0 && (at === 0 || handle > handles[at - 1])),

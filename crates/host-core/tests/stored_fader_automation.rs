@@ -196,10 +196,19 @@ fn a_fader_automation_is_charged_to_the_graph_plan_rows_and_the_cap() {
         );
     }
 
+    // The control catalog charges its own bytes: the automated lane's `fader_db` row carries
+    // `automated` (#1650 D4), a descriptor of its own, which the catalog's resources count. The
+    // catalog exists only with `control-provider`.
+    #[cfg(feature = "control-provider")]
+    let catalog = with.control_catalog.resources().retained_bytes
+        - base.control_catalog.resources().retained_bytes;
+    #[cfg(not(feature = "control-provider"))]
+    let catalog = 0;
     assert_eq!(
-        with_retained - base_retained,
+        with_retained - base_retained - catalog,
         charge,
-        "the heap the automation retains is its charge: {base_retained} -> {with_retained}"
+        "the heap the automation retains is its charge: {base_retained} -> {with_retained}, \
+         the catalog's own {catalog}"
     );
 
     let total = admitted(&with.report);

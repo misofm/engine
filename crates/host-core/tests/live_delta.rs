@@ -1711,6 +1711,193 @@ fn a_vca_move_writes_the_automated_lanes_offsets_cell() {
     }
 }
 
+/// #1650b D3, D5 and root's ruling R17-1, in the shared classifier. Track 0 rides its fader on
+/// both lanes under a VCA at -2 dB. A hand move (`SET_CONTROL fader_db`) on its left lane writes the
+/// ride's left offset, not the static fader, and is live with one offsets-cell write of
+/// `S = offset + VCA` on that lane, with the `Fader` row's length (the edit's own 256 samples, not
+/// the VCA row's), and no `FaderDb`. An offset-only `UpsertAutomation` is the same live write. A
+/// change of an automated lane's static fader (the fallback) is a rebuild. The fast path over the
+/// whole model, and over the in-place view whose owners hold the ride (`controls::OwnerEdits`),
+/// give the full classifier's delta.
+///
+/// Test value: red if the hand move lands on the static fader (`model_only` or a `FaderDb` the
+/// curve overrides), if `S` leaves out the hand offset or adds it after the VCAs (two VCAs and a
+/// hand offset below half an ulp of their sum's first term), if the move takes
+/// the VCA row's length, if a static fallback change commits live without being heard, or if the
+/// in-place view reads the lane's committed offset instead of the edited one.
+#[test]
+fn a_hand_move_on_an_automated_fader_writes_the_lanes_offsets_cell() {
+    let session_ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 300,
+        pan_samples: 200,
+        link_samples: 0,
+    };
+    let current = normalized(&edited(&with_vca(-2.0, -2.0, [false; 2]), |model| {
+        let ride = fader_ride(model);
+        model.automation.push(ride);
+    }));
+    let first = track_id(&current, 0);
+    let rate = current.sample_rate_hz;
+    let fader = |lane| ControlAddress {
+        owner: Owner::Strip(current.tracks[0].id.clone()),
+        section: Section::Builtins,
+        control: 5,
+        lane,
+    };
+    let mut ramp = EditRamps::new();
+    ramp.set(
+        &EditRampTarget::Strip(current.tracks[0].id.clone()),
+        EditRampRow::Fader,
+        Some(256),
+    );
+    let next = edited(&current, |next| {
+        controls::set(next, &fader(ParameterChannel::Left), 3.0, Some(256), rate)
+            .expect("a hand move");
+    });
+    assert_eq!(
+        next.automation[0].offset.left_db.to_bits(),
+        3.0_f32.to_bits()
+    );
+    assert_eq!(
+        next.tracks[0].fader, current.tracks[0].fader,
+        "the fallback stays"
+    );
+    let s = f64::from(3.0_f32) + f64::from(-2.0_f32);
+    let full = classify_live_delta(&current, &next, session_ramps, &ramp);
+    assert_eq!(
+        full.as_ref().map(level),
+        Ok(vec![(first.clone(), Vec::new(), [sum(s, 256), None])]),
+        "one offsets-cell write, the edit's length"
+    );
+    // An offset-only upsert of the ride is the same write, with the session's fader length.
+    assert_eq!(
+        classify_live_delta(
+            &current,
+            &edited(&current, |next| next.automation[0].offset.right_db = -1.5),
+            session_ramps,
+            &EditRamps::new(),
+        )
+        .map(|delta| level(&delta)),
+        Ok(vec![(
+            first.clone(),
+            Vec::new(),
+            [None, sum(f64::from(-1.5_f32) + f64::from(-2.0_f32), 100)]
+        )])
+    );
+    // The static fader of an automated lane is no control value: a change of it is structure.
+    assert_eq!(
+        classify_live_delta(
+            &current,
+            &edited(&current, |next| next.tracks[0].fader.left_db = -9.0),
+            session_ramps,
+            &EditRamps::new(),
+        )
+        .map(|delta| level(&delta)),
+        Err(LiveRebuild::Structure)
+    );
+    // D6 order (U3 fold, batch 17): two VCAs at +24 and -24 dB reach the track, and a hand move of
+    // 1e-10 dB is below half an ulp of 24 in `f64`. `S` adds the hand offset first, then the VCAs
+    // in ascending ID order: `(1e-10 + 24) + -24`, which keeps only the rounded part of 1e-10; the
+    // order that adds the hand offset last gives `1e-10` itself.
+    let two_vcas = normalized(&edited(&current, |model| {
+        let track = model.tracks[0].id.clone();
+        model.vcas = vec![
+            Vca {
+                id: id("vca-a"),
+                fader: DualMonoFader {
+                    left_db: 24.0,
+                    right_db: 24.0,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: vec![track.clone()],
+            },
+            Vca {
+                id: id("vca-b"),
+                fader: DualMonoFader {
+                    left_db: -24.0,
+                    right_db: -24.0,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: vec![track],
+            },
+        ];
+    }));
+    let tiny = 1e-10_f32;
+    let ordered = (f64::from(tiny) + 24.0) + -24.0;
+    assert_ne!(
+        ordered.to_bits(),
+        f64::from(tiny).to_bits(),
+        "the two orders differ"
+    );
+    assert_eq!(
+        classify_live_delta(
+            &two_vcas,
+            &edited(&two_vcas, |next| {
+                controls::set(next, &fader(ParameterChannel::Left), tiny, None, rate)
+                    .expect("a hand move");
+            }),
+            session_ramps,
+            &EditRamps::new(),
+        )
+        .map(|delta| level(&delta)),
+        Ok(vec![(first.clone(), Vec::new(), [sum(ordered, 100), None])]),
+        "the hand offset first, then the VCAs"
+    );
+
+    #[cfg(feature = "test-support")]
+    {
+        let rows = [fader(ParameterChannel::Left)];
+        let full = full.map(|delta| level(&delta));
+        let _ = host_core::take_fast_classification_count();
+        let fast = host_core::classify_live_edit(
+            &current,
+            &next,
+            session_ramps,
+            &ramp,
+            host_core::MonitorBase::NONE,
+            Some(&rows),
+        );
+        assert_eq!(
+            host_core::take_fast_classification_count(),
+            1,
+            "the fast path"
+        );
+        assert_eq!(
+            fast.map(|delta| level(&delta)),
+            full,
+            "the fast path, whole"
+        );
+        // R17-1: the in-place owners hold the ride the move wrote, and the view reads it.
+        let mut owners = controls::OwnerEdits::new(&current);
+        owners
+            .set(&fader(ParameterChannel::Left), 3.0, Some(256), rate)
+            .expect("an in-place hand move");
+        let (owners, slots) = owners.finish();
+        assert_eq!(
+            slots.automation.len(),
+            1,
+            "the ride is an owner of the edit"
+        );
+        let view = controls::ModelView::edited(&current, &owners);
+        let mut dense = view.to_model();
+        dense.revision = next.revision;
+        assert_eq!(dense, next, "the view is the edited model");
+        let staged = host_core::classify_live_staged(
+            &current,
+            view,
+            session_ramps,
+            &ramp,
+            host_core::MonitorBase::NONE,
+            &rows,
+        )
+        .expect("the fast path judges it");
+        assert_eq!(Ok(level(&staged)), full, "the fast path, in place");
+    }
+}
+
 /// #1260 gate 1. Red if a profile field that preparation reads is masked with its profile's ID.
 #[test]
 fn an_output_profile_channel_change_is_structural() {

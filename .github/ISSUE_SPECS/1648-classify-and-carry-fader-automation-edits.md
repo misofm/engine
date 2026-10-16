@@ -568,7 +568,7 @@ over `5e695ecb6` for the coordinator.
 ## U3 fold (batch 17)
 
 Fold of the U3 review, part U3a (render and carry), on `codex/controls-batch-17k` over
-`86271e096`, uncommitted for the coordinator. **Attempt count:** #1648 is at attempt 2 of 5 with
+`86271e096`, committed as `9dcf288de`. **Attempt count:** #1648 is at attempt 2 of 5 with
 this fold (the implementation #1648a/#1648b, then this fold).
 
 **MAJOR 1: a live level value pending at a swap lost its ramp, and a superseded write went

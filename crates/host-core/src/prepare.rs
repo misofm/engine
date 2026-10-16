@@ -4376,6 +4376,11 @@ pub(crate) fn strip_at(model: &SessionModel, index: usize) -> StripRef<'_> {
 pub(crate) struct StripChange<'s> {
     pub(crate) own_before: &'s session::DualMonoFader,
     pub(crate) own_after: &'s session::DualMonoFader,
+    /// The hand-move offset of each automated fader lane in each model
+    /// ([`controls::EffectiveStrip::fader_offset`], #1650): a hand move on an automated fader
+    /// writes it, so it is the strip's own fader edit there.
+    pub(crate) offset_before: [Option<f32>; 2],
+    pub(crate) offset_after: [Option<f32>; 2],
     pub(crate) id: &'s session::StableId,
     /// [`SessionModel::vca_reach`] of the strip in `current`, then in `next`.
     pub(crate) reach_before: &'s [usize],
@@ -4404,7 +4409,8 @@ impl LevelRules<'_> {
     /// The ramp length of each lane's `FaderDb` and `Mute` record of one strip (#1558 D7).
     ///
     /// A lane's fader length is that of the strip's own `fader_db` edit when the strip's own value
-    /// on the lane changed (row `Fader`, the edit's length); else that of the first reaching VCA,
+    /// on the lane changed, or its hand-move offset did on an automated lane (#1650 D5) (row
+    /// `Fader`, the edit's length); else that of the first reaching VCA,
     /// in ascending VCA-ID order, whose offset on the lane changed (row `VcaOffset`, the VCA's
     /// edit's length); else row `VcaOffset` with no edit length (a membership change, or a VCA
     /// added or removed). The mute is the same with rows `Mute` and `VcaMute`.
@@ -4434,7 +4440,11 @@ impl LevelRules<'_> {
         };
         let fader = [0, 1].map(|lane| {
             let db = |fader: &session::DualMonoFader| [fader.left_db, fader.right_db][lane];
-            if db(own_before).to_bits() != db(own_after).to_bits() {
+            // A hand move on an automated lane (#1650 D5) is the strip's own fader edit.
+            let offset = |offsets: [Option<f32>; 2]| offsets[lane].map(f32::to_bits);
+            if db(own_before).to_bits() != db(own_after).to_bits()
+                || offset(strip.offset_before) != offset(strip.offset_after)
+            {
                 self.ramps.resolve(LiveRampRow::Fader, edit.fader)
             } else {
                 self.ramps
@@ -4595,6 +4605,8 @@ impl<'a> EffectiveDiff<'a> {
         StripChange {
             own_before: strip_at(self.rules.current, before).fader,
             own_after: after_strip.fader,
+            offset_before: self.before.strips[before].fader_offset,
+            offset_after: self.after.strips[after].fader_offset,
             id: after_strip.id,
             reach_before: &self.reach_before[before],
             reach: &self.reach[after],

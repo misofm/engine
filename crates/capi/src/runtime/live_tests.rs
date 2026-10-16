@@ -8084,6 +8084,19 @@ mod set_control {
         const MEMBER_DB: f32 = -0.01384;
         const OFFSET_DB: f32 = 1.0 / 3.0;
 
+        /// The flat curve of the automated rows (#1649, #1650b): `3 * 2^-20` dB, exactly.
+        const CURVE_DB: f32 = 3.0 / 1_048_576.0;
+        /// The VCA offset of the automated rows.
+        const VCA_DB: f32 = 20.0;
+        /// The hand offset of the automated rows: below half an `f64` ulp of [`VCA_DB`], so the
+        /// lane's `S = (HAND_DB + VCA_DB) + 0` is `20` under round to nearest and the `f64` below
+        /// `20` under round toward zero. `CURVE_DB + 20` is a midpoint between two `f32` values
+        /// that rounds up (ties to even) and the composition with the lower `S` rounds down, so
+        /// the two `S` reach different fader dB and different gains (asserted below).
+        const HAND_DB: f32 = -1e-30;
+        /// The hand offset the hand-move row starts from, so that its move changes `S`.
+        const PRIOR_HAND_DB: f32 = 1.0;
+
         /// [`vca_document`] with `eq0`'s left fader at `member` and `inner`'s left offset at
         /// `offset` (`outer` stays at `0` dB, so the offsets' sum is `offset` exactly).
         fn document(member: f32, offset: f32) -> String {
@@ -8093,10 +8106,11 @@ mod set_control {
             })
         }
 
-        /// [`document`] with `eq0`'s left fader also automated, flat at `member` (#1649): its
-        /// gain is composed at render from the curve and the offsets cell's `S`.
-        fn automated_document(member: f32, offset: f32) -> String {
-            with_model(&document(member, offset), |model| {
+        /// [`document`] with `eq0`'s left fader at [`CURVE_DB`] and also automated, flat at
+        /// [`CURVE_DB`] with the stored hand offset `hand` (#1649, #1650): its gain is composed at
+        /// render from the curve and the offsets cell's `S = (hand + vca) + 0`.
+        fn automated_document(hand: f32, vca: f32) -> String {
+            with_model(&document(CURVE_DB, vca), |model| {
                 model.automation.push(session::Automation {
                     id: id("eq0-flat"),
                     target: session::ControlAddress {
@@ -8109,13 +8123,21 @@ mod set_control {
                         shape: session::AutomationShape::Step,
                         start_sample: 0,
                         end_sample: SOURCE_FRAMES,
-                        start_value: member,
-                        end_value: member,
+                        start_value: CURVE_DB,
+                        end_value: CURVE_DB,
                         unit: session::ParameterUnit::Db,
                     }],
-                    offset: session::AutomationOffset::default(),
+                    offset: session::AutomationOffset {
+                        left_db: hand,
+                        right_db: 0.0,
+                    },
                 });
             })
+        }
+
+        /// The gain bits of `db`.
+        fn gain(db: f32) -> Option<u32> {
+            builtins::checked_fader_gain(db).map(f32::to_bits).ok()
         }
 
         /// The fixture is not vacuous: the hostile word composes the pair to another `f32`, and
@@ -8137,17 +8159,50 @@ mod set_control {
                 "the gate is vacuous: the composition rounds alike under the hostile word"
             );
             assert_ne!(
-                builtins::checked_fader_gain(canonical).map(f32::to_bits),
-                builtins::checked_fader_gain(rounded).map(f32::to_bits),
+                gain(canonical),
+                gain(rounded),
                 "the gate is vacuous: the composition's rounding does not reach the gain"
+            );
+        }
+
+        /// The automated rows are not vacuous: the hostile word sums the lane's `S` to another
+        /// `f64`, and render's composition of the curve with it (canonical, on the render
+        /// thread) reaches another fader dB and another gain.
+        fn assert_the_hostile_word_rounds_the_offsets_sum() {
+            let sum = || session::vca_offsets_sum([HAND_DB, VCA_DB, 0.0]).expect("three offsets");
+            let canonical = sum();
+            let rounded = under_hostile_fp_env(sum);
+            assert_eq!(canonical.to_bits(), f64::from(VCA_DB).to_bits());
+            assert_ne!(
+                canonical.to_bits(),
+                rounded.to_bits(),
+                "the gate is vacuous: S sums alike under the hostile word"
+            );
+            let (canonical, rounded) = (
+                session::vca_compose_db(CURVE_DB, canonical),
+                session::vca_compose_db(CURVE_DB, rounded),
+            );
+            assert_ne!(
+                canonical.to_bits(),
+                rounded.to_bits(),
+                "the gate is vacuous: the two S compose to one fader dB"
+            );
+            assert_ne!(
+                gain(canonical),
+                gain(rounded),
+                "the gate is vacuous: the two fader dB give one gain"
             );
         }
 
         /// One case: a rig on `before` takes `edit` under the hostile word, live, and from the
         /// block its ramp leaves behind renders the bits of a canonical preparation of the
-        /// committed session; the catalog's derived `effective_fader_db` row holds the canonical
-        /// composition.
-        fn live_move_under_hostile_word(label: &str, before: &str, edit: SessionEdit) {
+        /// committed session. `committed` checks the committed model and the rig's catalog.
+        fn live_move_under_hostile_word(
+            label: &str,
+            before: &str,
+            edit: SessionEdit,
+            committed: impl FnOnce(&mut Rig, &SessionModel),
+        ) {
             let mut rig = Rig::new(before);
             for _ in 0..4 {
                 rig.step();
@@ -8166,32 +8221,14 @@ mod set_control {
                 (revision + 1, epoch, pending),
                 "{label}: one revision, the same plan, no candidate"
             );
-            let committed = rig.snapshot();
-            let model = parse_session_json(&committed).expect("model");
-            assert_eq!(
-                (
-                    model.tracks[0].fader.left_db.to_bits(),
-                    model.vcas[0].fader.left_db.to_bits()
-                ),
-                (MEMBER_DB.to_bits(), OFFSET_DB.to_bits()),
-                "{label}: the committed pair is the fixture's"
-            );
-            let (list, ..) = control_list_all_c(rig.session, &mut rig.request, 256);
-            let derived = listed(&list, |entry, row| {
-                entry.address.owner_id.as_deref() == Some("eq0")
-                    && row.name == "effective_fader_db"
-                    && entry.address.lane == Some(protocol::ParameterChannel::Left)
-            });
-            assert_eq!(
-                control_of(derived).map(|row| row.value.to_bits()),
-                Some(session::vca_effective_db(MEMBER_DB, [OFFSET_DB, 0.0]).to_bits()),
-                "{label}: the catalog's derived row holds the canonical composition"
-            );
+            let snapshot = rig.snapshot();
+            let model = parse_session_json(&snapshot).expect("model");
+            committed(&mut rig, &model);
             let ramps = model.control_smoothing_samples();
             let k = window(rig.latency(), ramps.fader.max(64), rig.quantum);
             let edit_block = rig.block;
             let live: Vec<Vec<f32>> = (0..k + 4).map(|_| rig.step()).collect();
-            let reference = Reference::run(&committed, rig.block);
+            let reference = Reference::run(&snapshot, rig.block);
             for (offset, pcm) in live.iter().enumerate().skip(k as usize) {
                 let block = edit_block as usize + offset;
                 assert!(pcm.iter().any(|sample| *sample != 0.0), "{label}: signal");
@@ -8203,35 +8240,130 @@ mod set_control {
             }
         }
 
+        /// The static rows' check: the committed pair is the fixture's, and the catalog's derived
+        /// `effective_fader_db` row holds the canonical composition.
+        fn static_pair(label: &'static str) -> impl FnOnce(&mut Rig, &SessionModel) {
+            move |rig, model| {
+                assert_eq!(
+                    (
+                        model.tracks[0].fader.left_db.to_bits(),
+                        model.vcas[0].fader.left_db.to_bits()
+                    ),
+                    (MEMBER_DB.to_bits(), OFFSET_DB.to_bits()),
+                    "{label}: the committed pair is the fixture's"
+                );
+                let (list, ..) = control_list_all_c(rig.session, &mut rig.request, 256);
+                let derived = listed(&list, |entry, row| {
+                    entry.address.owner_id.as_deref() == Some("eq0")
+                        && row.name == "effective_fader_db"
+                        && entry.address.lane == Some(protocol::ParameterChannel::Left)
+                });
+                assert_eq!(
+                    control_of(derived).map(|row| row.value.to_bits()),
+                    Some(session::vca_effective_db(MEMBER_DB, [OFFSET_DB, 0.0]).to_bits()),
+                    "{label}: the catalog's derived row holds the canonical composition"
+                );
+            }
+        }
+
+        /// The automated rows' check: the committed hand offset and VCA offset are the fixture's.
+        fn automated_pair(label: &'static str) -> impl FnOnce(&mut Rig, &SessionModel) {
+            move |_, model| {
+                let ride = model
+                    .automation
+                    .iter()
+                    .find(|entry| entry.id == id("eq0-flat"))
+                    .expect("the ride");
+                assert_eq!(
+                    (
+                        ride.offset.left_db.to_bits(),
+                        model.vcas[0].fader.left_db.to_bits()
+                    ),
+                    (HAND_DB.to_bits(), VCA_DB.to_bits()),
+                    "{label}: the committed pair is the fixture's"
+                );
+            }
+        }
+
         /// TBD48 D2 (C ABI): a live fader move on a VCA member, a live VCA offset move over it,
-        /// and (#1649) that VCA move over a member whose fader is automated, which writes its
-        /// offsets cell, each made while the caller's thread runs FTZ, DAZ and round toward zero, render
-        /// from the end of their ramp the bits of the same committed session prepared on a
-        /// canonical thread, and the catalog's derived fader row holds the canonical composition.
-        /// The pair's composition rounds to another `f32`, and another gain, under that word
-        /// (asserted), so the gate is not vacuous.
+        /// (#1649) a VCA move over a member whose fader is automated, which writes its offsets
+        /// cell, and (#1650b) a hand move on that automated fader, which writes it too, each made
+        /// while the caller's thread runs FTZ, DAZ and round toward zero, render from the end of
+        /// their ramp the bits of the same committed session prepared on a canonical thread, and
+        /// the catalog's derived fader row holds the canonical composition. The static pair's
+        /// composition rounds to another `f32`, and another gain, under that word, and the
+        /// automated rows' `S` sums to another `f64`, which render composes to another gain
+        /// (both asserted), so no row is vacuous.
         ///
         /// Test value: red if a live transaction composes a member's effective fader (the VCA
-        /// sum) in the caller's environment: remove the guard in `SessionState::command`.
+        /// sum) or an automated lane's offsets-cell `S` in the caller's environment: remove the
+        /// guard in `SessionState::command`.
         #[test]
         fn a_live_fader_and_vca_move_under_a_hostile_caller_word_render_the_canonical_bits() {
             assert_the_hostile_word_rounds_the_composition();
+            assert_the_hostile_word_rounds_the_offsets_sum();
             live_move_under_hostile_word(
                 "a live fader move",
                 &document(0.0, OFFSET_DB),
                 set(builtin("eq0", FADER_DB, Lane::Left), MEMBER_DB, None),
+                static_pair("a live fader move"),
             );
             live_move_under_hostile_word(
                 "a live VCA move",
                 &document(MEMBER_DB, 0.0),
                 set(vca_row("inner", VCA_OFFSET_DB, Lane::Left), OFFSET_DB, None),
+                static_pair("a live VCA move"),
             );
-            // #1649: the same VCA move over an automated member writes its offsets cell.
+            // #1649: a VCA move over an automated member writes its offsets cell.
             live_move_under_hostile_word(
                 "a live VCA move on an automated lane",
-                &automated_document(MEMBER_DB, 0.0),
-                set(vca_row("inner", VCA_OFFSET_DB, Lane::Left), OFFSET_DB, None),
+                &automated_document(HAND_DB, 0.0),
+                set(vca_row("inner", VCA_OFFSET_DB, Lane::Left), VCA_DB, None),
+                automated_pair("a live VCA move on an automated lane"),
             );
+            // #1650b: a hand move on the automated lane writes its offsets cell with `S` = the
+            // stored offset and the VCA's.
+            live_move_under_hostile_word(
+                "a hand move on an automated lane",
+                &automated_document(PRIOR_HAND_DB, VCA_DB),
+                set(builtin("eq0", FADER_DB, Lane::Left), HAND_DB, None),
+                automated_pair("a hand move on an automated lane"),
+            );
+        }
+
+        /// TBD48 D1 (C ABI): a session compiled and booted from its JSON while the caller's
+        /// thread runs FTZ, DAZ and round toward zero is the session a canonical boot gives: the
+        /// same committed snapshot and the same rendered bits. The session's JSON parse reads
+        /// `0.1` as another `f32` under that word (asserted), so the gate is not vacuous.
+        ///
+        /// Test value: red if `compile_children` parses or prepares the session in the caller's
+        /// environment: remove its `CanonicalFpEnv` guard.
+        #[test]
+        fn a_session_booted_under_a_hostile_caller_word_is_the_canonical_session() {
+            let parse = || "0.1".parse::<f32>().expect("a number");
+            assert_ne!(
+                parse().to_bits(),
+                under_hostile_fp_env(parse).to_bits(),
+                "the gate is vacuous: the parse rounds alike under the hostile word"
+            );
+            let document = with_model(&vca_document(), |model| {
+                model.tracks[0].fader.left_db = 0.1;
+                model.vcas[0].fader.left_db = 0.1;
+            });
+            let mut canonical = Rig::new(&document);
+            let mut hostile = under_hostile_fp_env(|| Rig::new(&document));
+            assert_eq!(
+                hostile.snapshot(),
+                canonical.snapshot(),
+                "the committed session is the canonical parse"
+            );
+            let mut signal = false;
+            for block in 0..16 {
+                let (pcm, reference) = (hostile.step(), canonical.step());
+                signal |= pcm.iter().any(|sample| *sample != 0.0);
+                assert_eq!(bits(&pcm), bits(&reference), "block {block}");
+            }
+            assert!(signal, "signal");
         }
     }
 
@@ -8241,7 +8373,7 @@ mod set_control {
 
         /// The fader ride of `eq0` (both lanes): linear from 0 dB at sample 0 to -12 dB at the
         /// source's end, so every grid point moves the lane.
-        fn ride() -> session::Automation {
+        pub(super) fn ride() -> session::Automation {
             session::Automation {
                 id: id("eq0-fader-ride"),
                 target: session::ControlAddress {
@@ -8264,7 +8396,7 @@ mod set_control {
 
         /// The ten-track session at 48 kHz with `eq0` riding its fader, VCA `v` holding `eq0` and
         /// `eq1` (which has no automation), and `change` applied.
-        fn document(change: impl FnOnce(&mut SessionModel)) -> String {
+        pub(super) fn document(change: impl FnOnce(&mut SessionModel)) -> String {
             with_model(&long_session(10, 48_000), |model| {
                 model.automation.push(ride());
                 model.vcas.push(vca_of("v", &["eq0", "eq1"]));
@@ -8282,7 +8414,7 @@ mod set_control {
 
         /// `(eq0's offsets-cell writes [left, right], eq1's fader/mute cell writes)` in the current
         /// epoch.
-        fn writes(rig: &Rig) -> ([Option<u64>; 2], [u64; 4]) {
+        pub(super) fn writes(rig: &Rig) -> ([Option<u64>; 2], [u64; 4]) {
             let snapshot = crate::ffi::test_transaction_snapshot(rig.session);
             let epoch = snapshot.provider_epoch;
             let offsets = snapshot
@@ -8373,7 +8505,7 @@ mod set_control {
 
         /// The session's fader length, in samples: the `VcaOffset` row's length of a VCA edit with
         /// no length of its own.
-        fn fader_length(document: &str) -> u32 {
+        pub(super) fn fader_length(document: &str) -> u32 {
             parse_session_json(document)
                 .expect("model")
                 .control_smoothing_samples()
@@ -9001,6 +9133,307 @@ mod set_control {
                 assert_eq!(first, None, "{label}: first difference (block, sample)");
                 assert!(heard, "{label}: the move is heard");
             }
+        }
+    }
+
+    /// #1650b: a hand move on a fader that stored automation drives, on the C ABI.
+    mod automated_hand_move {
+        use super::automated_vca::{document, fader_length, ride, writes};
+        use super::*;
+
+        /// The rows of `eq0`'s `fader_db` in the list: per lane, the bits of the value and
+        /// `automated`.
+        fn fader_rows(rig: &mut Rig) -> Vec<(Option<protocol::ParameterChannel>, u32, bool)> {
+            let (list, ..) = control_list_all_c(rig.session, &mut rig.request, 256);
+            list.iter()
+                .filter(|entry| entry.address.owner_id.as_deref() == Some("eq0"))
+                .filter_map(|entry| {
+                    control_of(entry)
+                        .filter(|row| row.name == "fader_db")
+                        .map(|row| (entry.address.lane, row.value.to_bits(), row.automated))
+                })
+                .collect()
+        }
+
+        /// What one leg of gate 2 gives: the reply, the committed document, the offsets-cell writes
+        /// the move made and every block from the edit on.
+        struct Leg {
+            reply: Vec<u8>,
+            committed: String,
+            offsets: [Option<u64>; 2],
+            blocks: Vec<Vec<f32>>,
+        }
+
+        /// `edits` on a rig on `before` after four blocks: `live`, one revision on the same plan
+        /// with no candidate; then `blocks` blocks, none of which allocates or frees.
+        fn leg(label: &str, before: &str, edits: &[SessionEdit], blocks: u64) -> Leg {
+            let mut rig = Rig::new(before);
+            for _ in 0..4 {
+                rig.step();
+            }
+            let (revision, _, epoch, pending) = rig.summary();
+            let (offsets_before, _) = writes(&rig);
+            let bytes = rig.transaction(edits);
+            let (result, reply) = rig.send(&bytes);
+            assert_eq!(result, crate::RESULT_OK, "{label}");
+            assert_eq!(edit_path_of(&reply), protocol::EditPath::Live, "{label}");
+            assert_eq!(
+                (rig.summary().0, rig.summary().2, rig.summary().3),
+                (revision + 1, epoch, pending),
+                "{label}: one revision, the same plan, no candidate"
+            );
+            let (offsets_after, _) = writes(&rig);
+            let offsets = [0, 1].map(|lane| {
+                offsets_after[lane]
+                    .zip(offsets_before[lane])
+                    .map(|(after, before)| after - before)
+            });
+            let committed = rig.snapshot();
+            let mut out = Vec::new();
+            for _ in 0..blocks {
+                let (pcm, used) = rig.step_counted();
+                assert_eq!(
+                    (used.allocations, used.deallocations),
+                    (0, 0),
+                    "{label}: a render block allocated or freed"
+                );
+                out.push(pcm);
+            }
+            Leg {
+                reply,
+                committed,
+                offsets,
+                blocks: out,
+            }
+        }
+
+        /// #1650b gate 2 (C ABI) and root's ruling R17-1. `eq0` rides its fader on both lanes
+        /// under VCA `v`. `SET_CONTROL fader_db = +3` on its left lane is `live`, one revision on
+        /// the same plan, and writes the left lane's offsets cell once and the right lane's not at
+        /// all; the committed document stores `+3` as the ride's left offset and keeps the static
+        /// fader; from the end of the jump and the first grid ramp after it every block equals a
+        /// fresh plan of that document, and none allocates. The list reads `+3` on the left row
+        /// and `0` on the right, both `automated`. The same transaction prepared by the full path
+        /// gives the same reply, document, cell writes and bits; the in-place leg commits in place.
+        ///
+        /// Test value: red if the move writes the static fallback (the curve overrides it, so the
+        /// window differs from the fresh plan), rebuilds, reaches the right lane, or if the
+        /// in-place path answers otherwise than the full path (an in-place owners model with no
+        /// automation entry reads the lane as not automated: `model_only`, checked once).
+        #[test]
+        fn a_hand_move_on_an_automated_fader_is_live_and_renders_the_stored_offset() {
+            bench_support::alloc::assert_installed();
+            let before = document(|_| {});
+            let edits = [set(builtin("eq0", FADER_DB, Lane::Left), 3.0, None)];
+            let probe = Rig::new(&before);
+            let k = window(probe.latency(), fader_length(&before) + 128, probe.quantum);
+            drop(probe);
+
+            control_plane::test_take_in_place_counts();
+            let in_place = leg("in place", &before, &edits, k + 4);
+            assert_eq!(
+                control_plane::test_take_in_place_counts(),
+                (1, 0),
+                "the hand move commits in place"
+            );
+            assert_eq!(
+                in_place.offsets,
+                [Some(1), Some(0)],
+                "the left lane's cell only"
+            );
+            let model = parse_session_json(&in_place.committed).expect("model");
+            let plain = parse_session_json(&before).expect("model");
+            let ride = model
+                .automation
+                .iter()
+                .find(|entry| entry.id == ride().id)
+                .expect("the ride");
+            assert_eq!(
+                (
+                    ride.offset.left_db.to_bits(),
+                    ride.offset.right_db.to_bits()
+                ),
+                (3.0_f32.to_bits(), 0.0_f32.to_bits()),
+                "the ride stores the move on its left lane"
+            );
+            assert_eq!(
+                model.tracks[0].fader, plain.tracks[0].fader,
+                "the static fader stays"
+            );
+            let reference = Reference::run(&in_place.committed, 4 + k + 4);
+            let unedited = Reference::run(&before, 4 + k + 4);
+            let mut moved = false;
+            for (offset, pcm) in in_place.blocks.iter().enumerate().skip(k as usize) {
+                let block = 4 + offset;
+                assert_eq!(
+                    bits(pcm),
+                    bits(&reference[block]),
+                    "block {block} renders the stored offset's plan"
+                );
+                moved |= bits(pcm) != bits(&unedited[block]);
+            }
+            assert!(moved, "the offset is heard");
+            let mut rig = Rig::new(&in_place.committed);
+            assert_eq!(
+                fader_rows(&mut rig),
+                vec![
+                    (
+                        Some(protocol::ParameterChannel::Left),
+                        3.0_f32.to_bits(),
+                        true
+                    ),
+                    (
+                        Some(protocol::ParameterChannel::Right),
+                        0.0_f32.to_bits(),
+                        true
+                    ),
+                ],
+                "the list reads the offset back"
+            );
+
+            control_plane::test_force_full_preparation(true);
+            let full = leg("full path", &before, &edits, k + 4);
+            control_plane::test_force_full_preparation(false);
+            assert_eq!(control_plane::test_take_in_place_counts().0, 0);
+            assert_eq!(full.reply, in_place.reply, "one reply on both paths");
+            assert_eq!(full.committed, in_place.committed, "one document");
+            assert_eq!(full.offsets, in_place.offsets, "one cell write");
+            assert_eq!(
+                full.blocks.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+                in_place
+                    .blocks
+                    .iter()
+                    .map(|pcm| bits(pcm))
+                    .collect::<Vec<_>>(),
+                "the same bits on both paths"
+            );
+        }
+
+        /// #1650b gate 3. A flat ride at -7.25 dB with offset `0` renders the bits of a static
+        /// -7.25 dB fader (#1646 gate 1's twin), with no VCA and under a reaching VCA at -2.5 dB;
+        /// so does an offset of `-0.0`.
+        ///
+        /// Test value: red if the offset term changes the gain bits of a zero offset (a `+0.0`
+        /// seed that moves `S` off the VCA sum, or a `-0.0` that does).
+        #[test]
+        fn a_zero_offset_renders_the_static_fader() {
+            let flat = |offset: f32, vca: Option<f32>| {
+                with_model(&long_session(10, 48_000), |model| {
+                    let mut entry = ride();
+                    entry.segments[0].shape = session::AutomationShape::Step;
+                    entry.segments[0].start_value = -7.25;
+                    entry.segments[0].end_value = -7.25;
+                    entry.offset = session::AutomationOffset {
+                        left_db: offset,
+                        right_db: offset,
+                    };
+                    model.automation.push(entry);
+                    if let Some(db) = vca {
+                        let mut v = vca_of("v", &["eq0"]);
+                        v.fader.left_db = db;
+                        v.fader.right_db = db;
+                        model.vcas.push(v);
+                    }
+                })
+            };
+            let fixed = |vca: Option<f32>| {
+                with_model(&long_session(10, 48_000), |model| {
+                    model.tracks[0].fader.left_db = -7.25;
+                    model.tracks[0].fader.right_db = -7.25;
+                    if let Some(db) = vca {
+                        let mut v = vca_of("v", &["eq0"]);
+                        v.fader.left_db = db;
+                        v.fader.right_db = db;
+                        model.vcas.push(v);
+                    }
+                })
+            };
+            for vca in [None, Some(-2.5)] {
+                let reference = Reference::run(&fixed(vca), 24);
+                for offset in [0.0, -0.0] {
+                    let rendered = Reference::run(&flat(offset, vca), 24);
+                    assert!(
+                        rendered.iter().flatten().any(|sample| *sample != 0.0),
+                        "signal"
+                    );
+                    for (block, (left, right)) in rendered.iter().zip(&reference).enumerate() {
+                        assert_eq!(
+                            bits(left),
+                            bits(right),
+                            "VCA {vca:?}, offset {offset:?}: block {block}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// #1650b gate 4 (C ABI). On a ride that stores a +3 dB left offset, `SetAutomationSegments`
+        /// rebuilds and keeps the offset (the list still reads +3, `automated`); `RemoveAutomation`
+        /// rebuilds and removes it, and the lanes list their static fader, not `automated`.
+        ///
+        /// Test value: red if a curve edit drops the hand offset, or a removal keeps it.
+        #[test]
+        fn re_authoring_keeps_the_hand_offset_and_removal_ends_it() {
+            let before = document(|model| model.automation[0].offset.left_db = 3.0);
+            let plain = parse_session_json(&before).expect("model");
+            let mut rig = Rig::new(&before);
+            rig.step();
+            let offset_rows = vec![
+                (
+                    Some(protocol::ParameterChannel::Left),
+                    3.0_f32.to_bits(),
+                    true,
+                ),
+                (
+                    Some(protocol::ParameterChannel::Right),
+                    0.0_f32.to_bits(),
+                    true,
+                ),
+            ];
+            assert_eq!(fader_rows(&mut rig), offset_rows);
+            let mut segments = ride().segments;
+            segments[0].start_value = -9.0;
+            let bytes = rig.transaction(&[SessionEdit::SetAutomationSegments {
+                automation_id: ride().id,
+                segments,
+            }]);
+            let (result, reply) = rig.send(&bytes);
+            assert_eq!(result, crate::RESULT_OK);
+            assert_eq!(edit_path_of(&reply), protocol::EditPath::Rebuild);
+            rig.step();
+            rig.step();
+            assert_eq!(fader_rows(&mut rig), offset_rows, "the curve edit keeps it");
+            let bytes = rig.transaction(&[SessionEdit::RemoveAutomation {
+                automation_id: ride().id,
+            }]);
+            let (result, reply) = rig.send(&bytes);
+            assert_eq!(result, crate::RESULT_OK);
+            assert_eq!(edit_path_of(&reply), protocol::EditPath::Rebuild);
+            rig.step();
+            rig.step();
+            let fader = &plain.tracks[0].fader;
+            assert_eq!(
+                fader_rows(&mut rig),
+                vec![
+                    (
+                        Some(protocol::ParameterChannel::Left),
+                        fader.left_db.to_bits(),
+                        false
+                    ),
+                    (
+                        Some(protocol::ParameterChannel::Right),
+                        fader.right_db.to_bits(),
+                        false
+                    ),
+                ],
+                "the removal returns the lanes to their static fader"
+            );
+            assert!(
+                parse_session_json(&rig.snapshot())
+                    .expect("model")
+                    .automation
+                    .is_empty()
+            );
         }
     }
 }

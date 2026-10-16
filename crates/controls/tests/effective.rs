@@ -239,6 +239,7 @@ fn effective_into_allocates_nothing_and_refuses_a_wrong_shape() {
             mute: BOTH_ON,
             vca_mute: BOTH_ON,
             offsets_sum: [9.0; 2],
+            fader_offset: [None; 2],
         });
         let before = wrong.clone();
         assert_eq!(

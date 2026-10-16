@@ -69,8 +69,10 @@ Root ruling R17-7: inside batch 17, closes in this PR.
   - `SessionState::declare_discontinuity_serviced`: the one core path of
     `declare_discontinuity` and of a plain `session_seek` on both hosts; its successor's carried
     level values are composed under it.
-  - `compile_children` (`crates/control-plane/src/compile.rs`): the boot of both hosts (catalog
-    build and boot preparation).
+  - `compile_children` (`crates/control-plane/src/compile.rs`): the boot of both hosts (session
+    JSON parse, catalog build and boot preparation). The parse is environment-dependent on its
+    own: `str::parse::<f32>`'s fast path divides in `f32`, so `"0.1"` reads as `0x3dcccccd`
+    canonically and `0x3dcccccc` under round toward zero.
   - host-core `ControlCatalog::build` and `ControlCatalog::stage_live`
     (`crates/host-core/src/control_provider.rs`): the catalog's derived rows are composed in the
     canonical environment whatever the caller (`prepare_host_runtime*` builds the catalog outside
@@ -133,3 +135,34 @@ Root ruling R17-7: inside batch 17, closes in this PR.
   panics included. The three gate tests call it with no `unsafe` of their own; capi, host-core and
   host-web name `lane` with `test-support` as a dev-dependency. The policy's allowlist is
   unchanged and passes. All three red checks were run again with the helper.
+
+## U3 fold (batch 17)
+
+- **Automated rows are not vacuous (U3 MINOR 2).** The #1649 and #1650b rows used the static
+  pair, whose `f64` `S` of two `f32` offsets is exact under any rounding mode, so they passed with
+  the guard removed. They now use their own constants: flat curve `3 * 2^-20` dB, VCA offset
+  `20` dB, hand offset `-1e-30` dB (below half an `f64` ulp of 20), prior hand offset `1` dB.
+  `S = (hand + 20) + 0` is `20` canonically and the `f64` below 20 under round toward zero;
+  `curve + 20` is an `f32` midpoint that rounds up (ties to even) while the lower `S` rounds down,
+  so the two `S` give different fader dB and gains (asserted: `assert_the_hostile_word_rounds_the_offsets_sum`
+  on the C ABI, the second vacuity assertion on the browser). The rows assert the rendered bits,
+  not the cell's `S` bits: no test accessor reads the offsets cell's value, and adding one is a
+  `builtins-compiler` edit outside this lane. Red, checked once per row with only the
+  `SessionState::command` guard removed (the static rows skipped): C ABI and browser, both
+  automated rows fail at the render-bits assertion.
+- **Boot gate (U3 MINOR 3).** `runtime::live_tests::set_control::canonical_live::a_session_booted_under_a_hostile_caller_word_is_the_canonical_session`
+  (C ABI): a session with a fader and a VCA offset at `0.1` dB compiled and booted under the
+  hostile word has the canonical boot's snapshot and rendered bits; the parse of `"0.1"` differs
+  under that word (asserted). Red, checked once, with the `compile_children` guard removed (the
+  snapshot differs).
+- **Helper restore (U3 NIT 5).** `lane` `tests/fp_env.rs`
+  `x86::under_hostile_fp_env_restores_the_callers_word` (and the AArch64 twin, compiled with
+  `cargo check --target aarch64-unknown-linux-gnu`): the helper installs
+  `hostile_fp_control_word(caller)` inside, and writes a non-canonical caller word back on return
+  and while unwinding. Red, checked once, with the helper's restore forgotten.
+- **Nested guards (U3 NIT 5).** `declare_discontinuity_serviced`, `ControlCatalog::build` and
+  `stage_live` keep their own guards without a separate test each: every one runs inside, or
+  nests under, a guard the gates above prove (`SessionState::command`, `compile_children`, the
+  preparation entry), and a nested guard only saves and restores the canonical word. The browser
+  `canonical_live` rows cover the same core path as the C ABI rows; they stay as the browser's
+  entry check (`control_command` -> `run_command` -> `command`).

@@ -94,6 +94,55 @@ fn the_mask_copies_and_the_diff_sees_every_rows_field() {
     }
 }
 
+/// #1650 D5 (U3 fold, batch 17). A hand move on an automated fader writes the ride's offset, the
+/// value of the lane's `fader_db` row; the mask copies it back from the other model, and keeps the
+/// lane's static fader (its fallback) as the masked model holds it.
+///
+/// Test value: red if the mask leaves a ride's hand-move offset out (the masked model keeps the
+/// moved offset), or if it copies the static fader of an automated lane.
+#[test]
+fn the_mask_copies_a_rides_hand_move_offset() {
+    let mut base = effects_fixture();
+    let strip = base.tracks[0].id.clone();
+    base.automation.push(session::Automation {
+        id: id("fader-ride"),
+        target: common::address(
+            Owner::Strip(strip.clone()),
+            Section::Builtins,
+            5,
+            Lane::Both,
+        ),
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Step,
+            start_sample: 0,
+            end_sample: 480,
+            start_value: -6.0,
+            end_value: -6.0,
+            unit: session::ParameterUnit::Db,
+        }],
+        offset: session::AutomationOffset::default(),
+    });
+    let ride = base.automation.len() - 1;
+    for lane in [Lane::Left, Lane::Right] {
+        let fader = common::address(Owner::Strip(strip.clone()), Section::Builtins, 5, lane);
+        let mut edited = base.clone();
+        set(&mut edited, &fader, -3.5, None, RATE).expect("a hand move");
+        assert_ne!(
+            edited.automation[ride].offset, base.automation[ride].offset,
+            "{lane:?}: the move writes the offset"
+        );
+        let mut masked = edited.clone();
+        mask_values(&mut masked, &base);
+        assert_eq!(masked, base, "{lane:?}: the mask copies the offset");
+    }
+    // The static fader of an automated lane is not a control value: the mask keeps it.
+    let mut fallback = base.clone();
+    fallback.tracks[0].fader.left_db = -9.0;
+    let mut masked = fallback.clone();
+    mask_values(&mut masked, &base);
+    assert_eq!(masked, fallback, "the fallback stays different");
+}
+
 /// Red if the mask copies a field that is not a control value, or hides an owner it does not
 /// share: a removed strip, a renamed strip and a reordered insert stay different after the mask,
 /// and the diff of two models with different owners has no answer.

@@ -3,13 +3,14 @@
 //! (parameter entries only, #1620), and how many bytes they take in the canonical text.
 //!
 //! A host that changes the value of a control writes it into a **clone of the owner** (a track, a
-//! submix, a route or a VCA), checks the clone with [`owners_values_valid`] and
+//! submix, a route, a VCA, or the automation entry whose offset a hand move on an automated fader
+//! writes, #1650), checks the clone with [`owners_values_valid`] and
 //! [`owners_growth`], measures the change of the canonical text with
 //! [`canonical_owner_bytes`], and installs the clones with [`CompiledSession::swap_owners`]. The
 //! rest of the compiled session is the same value, so nothing else is cloned, validated or written.
 
 use crate::canonical::owner_bytes;
-use crate::{CompiledSession, Route, SessionModel, Submix, Track, Vca};
+use crate::{Automation, CompiledSession, Route, SessionModel, Submix, Track, Vca};
 
 /// One owner of a session, borrowed.
 #[derive(Clone, Copy, Debug)]
@@ -22,6 +23,9 @@ pub enum OwnerRef<'a> {
     Vca(&'a Vca),
     /// A route.
     Route(&'a Route),
+    /// A stored automation entry: a hand move on an automated fader writes its offset (#1650,
+    /// R17-1 = A).
+    Automation(&'a Automation),
 }
 
 /// Where the edited owners sit: for each, its index in the **owners** model (a small model that
@@ -36,10 +40,14 @@ pub struct OwnerSlots {
     pub vcas: Vec<(usize, usize)>,
     /// The same for routes.
     pub routes: Vec<(usize, usize)>,
+    /// The same for automation entries (#1650, R17-1 = A): the entries whose offset a hand move
+    /// on an automated fader wrote.
+    pub automation: Vec<(usize, usize)>,
 }
 
 impl OwnerSlots {
-    /// The edited owners as held by `owners`, tracks, submixes, VCAs, then routes.
+    /// The edited owners as held by `owners`, tracks, submixes, VCAs, routes, then automation
+    /// entries.
     ///
     /// # Panics
     ///
@@ -83,6 +91,11 @@ impl OwnerSlots {
                     .iter()
                     .map(move |slot| OwnerRef::Route(&model.routes[at(slot)])),
             )
+            .chain(
+                self.automation
+                    .iter()
+                    .map(move |slot| OwnerRef::Automation(&model.automation[at(slot)])),
+            )
     }
 
     /// Whether no owner is edited.
@@ -92,6 +105,7 @@ impl OwnerSlots {
             && self.submixes.is_empty()
             && self.vcas.is_empty()
             && self.routes.is_empty()
+            && self.automation.is_empty()
     }
 }
 
@@ -105,6 +119,7 @@ pub fn canonical_owner_bytes<'a>(owners: impl IntoIterator<Item = OwnerRef<'a>>)
             OwnerRef::Submix(submix) => owner_bytes(submix),
             OwnerRef::Vca(vca) => owner_bytes(vca),
             OwnerRef::Route(route) => owner_bytes(route),
+            OwnerRef::Automation(automation) => owner_bytes(automation),
         })
         .sum()
 }
@@ -210,6 +225,10 @@ fn grow(growth: &mut OwnersGrowth, old: OwnerRef<'_>, new: OwnerRef<'_>) -> Opti
             (old.members.len() == new.members.len()).then_some(())
         }
         (OwnerRef::Route(_), OwnerRef::Route(_)) => Some(()),
+        // A hand move writes an entry's offset and no count (#1650).
+        (OwnerRef::Automation(old), OwnerRef::Automation(new)) => {
+            (old.segments.len() == new.segments.len()).then_some(())
+        }
         _ => None,
     }
 }
@@ -245,6 +264,10 @@ impl CompiledSession {
         for &(at, committed) in &slots.routes {
             debug_assert_eq!(model.routes[committed].id, owners.routes[at].id);
             core::mem::swap(&mut model.routes[committed], &mut owners.routes[at]);
+        }
+        for &(at, committed) in &slots.automation {
+            debug_assert_eq!(model.automation[committed].id, owners.automation[at].id);
+            core::mem::swap(&mut model.automation[committed], &mut owners.automation[at]);
         }
     }
 

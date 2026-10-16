@@ -416,8 +416,7 @@ change (the `Fader` row length via `LevelRules::lengths`).
 
 ## U3 fold (batch 17)
 
-Fold of the U3 review, part U3a, on `codex/controls-batch-17k` over `86271e096`, uncommitted for
-the coordinator. **Attempt count:** #1649 is at attempt 2 of 5 with this fold.
+Fold of the U3 review, part U3a, on `codex/controls-batch-17k` over `86271e096`, committed as `9dcf288de`. **Attempt count:** #1649 is at attempt 2 of 5 with this fold.
 
 - **MAJOR 1** (the offsets cell across a swap): see #1648's "U3 fold (batch 17)". The carry drain
   reads the offsets cells (`read_counted`, `ALL`). An `S` change in a structural transaction
@@ -445,3 +444,7 @@ the coordinator. **Attempt count:** #1649 is at attempt 2 of 5 with this fold.
   `control-plane --all-features`, `capi`, `host-web --lib --test control_parity` all pass.
   `realtime-policy` 160 regions. `audit capi` `bffc21e857b5e134`, 0 violations. `lane_slot_bytes`
   224 -> 304.
+- U3 MINOR 2: the #1649 row of both `canonical_live` modules (C ABI and browser) was vacuous (an
+  exact `f64` `S`). It now moves the VCA to `20` dB over a lane whose stored hand offset is
+  `-1e-30` dB, so `S` rounds differently under the hostile word and reaches another gain; red with
+  the `SessionState::command` guard removed. Details in the TBD48 spec's "U3 fold (batch 17)".

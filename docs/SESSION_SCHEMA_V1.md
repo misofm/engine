@@ -340,13 +340,17 @@ each lane at `$.automation[id=<id>].offset.left_db` or `.right_db`, after the se
 The offset of a lane belongs to the entry that drives the lane, so a lane-granular hand move on a
 `both` entry needs no entry split. `RemoveAutomation` removes the offset with the entry;
 `SetAutomationSegments` and `SetAutomationTarget` keep it, and the row rule judges it against the
-new target. The offset is stored, checked and round-tripped (canonical JSON, wire, SDK). It is not
-yet heard: render composes a fader event with the sum `S` of the reaching VCA offsets, and the
-slice that adds the lane's own offset to `S` and routes a `SET_CONTROL fader_db` on an automated
-lane to it (#1650b) lands in the same push as the fader automation render (#1646 to #1649). After
-that slice the static fader value of an automated lane is not a control value: `SET_CONTROL`
-writes the offset, and the static fallback changes only through a rebuild (remove the automation,
-set the fader, upsert the automation, in one transaction) or a document replacement.
+new target. The offset is stored, checked, round-tripped (canonical JSON, wire, SDK) and heard
+(#1650b): render composes each fader event of the lane as `vca_compose_db(curve, S)`, where `S`
+is the `f64` sum of the lane's own offset first and then the reaching VCA offsets in ascending VCA
+ID. On a lane a rendered `fader_db` entry drives, the `fader_db` row reads and writes the offset:
+`SET_CONTROL fader_db` sets it (live, one offsets-cell write; a `both` write sets both lanes),
+`CONTROL_STATE_GET` and the control list report it as the row's value, and the list marks the row
+`automated` (`ControlEntry` field 35). The static fader value of an automated lane is its fallback,
+not a control value: the static fallback changes only through a rebuild (remove the automation,
+set the fader, upsert the automation, in one transaction) or a document replacement, and any edit
+that changes it on an automated lane is a change of structure. An `UpsertAutomation` that changes
+only an entry's offset is live, as a hand move is.
 
 **The input filter order, on curves (#1645).** On each strip lane where HPF (3) or LPF (4) is
 automated (a `both` entry drives both lanes), each side is its entry under the hold rule, or the
