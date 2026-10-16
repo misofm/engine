@@ -78,10 +78,10 @@ extern "C" {
  * and a supersession are not in the response; the watermark's outcome flags report them. After
  * a live edit or a replacement the host goes on submitting every source the transaction left
  * unchanged, with no seek; after a replacement it acts only on a source the transaction added,
- * changed or removed (see "Sources across a structural transaction" and "Starting an added stem
- * in time" below). (miso_engine_v1_plan_resources describes whichever plan is active, so a
- * replacement may change it, but an unchanged report does not mean that no replacement
- * happened; the edit path is the signal.)
+ * changed or removed (see "Sources across a structural transaction" and the seek paragraphs from
+ * "The source-read clock" to "Where a seek landed" below). (miso_engine_v1_plan_resources
+ * describes whichever plan is active, so a replacement may change it, but an unchanged report
+ * does not mean that no replacement happened; the edit path is the signal.)
  *
  * Latency across a replacement (issue 1285). No node's latency, the output's included, drops
  * across a structural transaction: the successor plan is compiled with every surviving node's
@@ -226,20 +226,21 @@ extern "C" {
  * changed against the newest committed session, so the host restarted its feed, and a source the
  * earlier transaction added, redeclared or removed and the new one does not keep as the waiting
  * replacement declares it starts fresh in the new plan (generation 1, frame 0, as an added one),
- * also when the new one puts it back in its form in the plan that renders. No accepted chunk on a ring the waiting replacement created
- * is dropped across a supersession: when the waiting replacement created a source's ring (the
- * earlier transaction added the source, or redeclared it) and the session has accepted PCM, a seek
- * or an end of region for that source since, a new transaction that does not keep the source as
- * the waiting replacement declares it (it declares it as the plan that renders does, redeclares it
- * another way, or removes it) is refused with MISO_ENGINE_V1_BACKPRESSURE before it commits:
+ * also when the new one puts it back in its form in the plan that renders. No accepted chunk on a
+ * ring the waiting replacement created is dropped across a supersession: when the waiting
+ * replacement created a source's ring (the earlier transaction added the source, or redeclared
+ * it) and the session has accepted PCM, a seek or an end of region for that source since, a new
+ * transaction that does not keep the source as the waiting replacement declares it (it declares
+ * it as the plan that renders does, redeclares it another way, or removes it) is refused with
+ * MISO_ENGINE_V1_BACKPRESSURE before it commits:
  * nothing changes, the waiting replacement stays published, no event is queued and the revision
  * does not move. Once render adopts the waiting replacement, a retry commits. A host that does not
  * render keeps getting MISO_ENGINE_V1_BACKPRESSURE for such a transaction until it renders. A
  * source the waiting replacement carries unchanged from the plan that renders is not refused this
  * way. A source the caller's own transaction removes discards its queued audio, whether the plan
  * that renders or the waiting replacement (carrying it unchanged) holds it: the caller asked for
- * the removal, so this is not an unintended drop. No counter reports the discarded frames yet; a
- * counter for the discarded frames is a successor issue (placeholder #1699). A resource cap counts
+ * the removal, so this is not an unintended drop. No counter reports the discarded frames yet;
+ * issue 1699 is the successor issue for one. A resource cap counts
  * every plan the session still holds and the new one: the running plan, the waiting replacement,
  * and a plan render has displaced until a later call reclaims it. A refusal is
  * MISO_ENGINE_V1_BACKPRESSURE when the new plan fit against the newest held plan alone, so a retry
@@ -250,23 +251,125 @@ extern "C" {
  * watermark advances to its revision with MISO_ENGINE_V1_OUTCOME_SUPERSEDED set, and
  * superseded_count grows by the revisions the earlier replacements carried.
  *
- * Starting an added stem in time (issue 1275). miso_engine_v1_source_seek_at is
- * miso_engine_v1_source_seek with an anchor: source_frame enters the graph in the block that starts
- * at absolute render sample anchor_sample, the clock miso_engine_v1_render_f32_planar takes and
- * every plan swap continues; the output hears it the plan's latency later. The anchor must be a
- * multiple of the plan's quantum, or the call returns MISO_ENGINE_V1_INVALID_ARGUMENT with
- * "source.seek.anchor_unaligned". A host checks MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT before
- * calling it. To start a stem a transaction added, after the command returns OK: pick A, a
- * quantum multiple a few quanta past the last rendered block; call
- * miso_engine_v1_source_seek_at(id, g, F, A), where g is above the source's generation (2 for a
- * just-added source) and F is the source frame the playing stems read at A; then submit generation
- * g from F before the block at A renders. Until A the stem renders silence; from A it plays F on.
- * Should the render reach the seek only after A, the stem starts at F plus the lateness, so it
- * stays in time.
+ * The source-read clock (issues 1275, 1316). A seek that names a block names it on the plan's
+ * source-read clock: the absolute sample of source time the block reads. In this version it is
+ * equal to the render clock. A plan's clock is 0 at compile. Each miso_engine_v1_render_f32_planar
+ * call must pass the clock's value as absolute_sample, renders one quantum and advances the clock
+ * by one quantum; a call at another sample renders nothing, moves nothing and returns
+ * MISO_ENGINE_V1_RENDER_REJECTED with "render.time.discontinuity". A plan that a structural
+ * transaction swaps in continues the clock of the plan it replaces, so an anchor stays valid
+ * across a swap.
  *
- * Where a seek landed (issue 1316). miso_engine_v1_source_seek_report copies the source's
- * (generation, first_sample, source_frame) and its cumulative underrun and held frames; a host
- * checks MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT before calling it.
+ * Seek. miso_engine_v1_source_seek(id, g, F) makes generation g play from source frame F. It
+ * takes effect no later than the first block that begins after the call returns; the PCM of the
+ * earlier generations that is still queued is discarded, not played. The call switches the source
+ * to g at once: from then on the host submits generation g in order from F, and a chunk of any
+ * other generation is refused as "source.generation.stale". Submit it before the block renders;
+ * a block of g with no PCM queued renders silence and counts as underrun frames. The refusals,
+ * all MISO_ENGINE_V1_INVALID_ARGUMENT: g not above the source's generation
+ * ("source.generation.stale"), g = 0 ("source.generation.zero"), F outside the source's region
+ * ("source.region.outside"), an unknown source ("source.id.unknown"). Where the seek landed is
+ * the seek report (below). Like every session call, a seek runs the service step first (see
+ * "Control service").
+ *
+ * Anchored seek. miso_engine_v1_source_seek_at(id, g, F, A) is the seek with an anchor: F enters
+ * the graph in the block that starts at sample A of the source-read clock, and the output hears
+ * it the plan's latency later. A must be a multiple of the plan's quantum, or the call returns
+ * MISO_ENGINE_V1_INVALID_ARGUMENT with "source.seek.anchor_unaligned". Its other checks and
+ * results are the seek's, and it too switches the source to g at once, so the host submits g from
+ * F before the block at A renders. A host checks MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT before
+ * calling it.
+ *
+ * Choosing the anchor. To start a stem that a transaction added, after the command returns OK:
+ * pick A, a quantum multiple past the last rendered block by enough quanta to cover the time the
+ * host needs to decode generation g from F and submit it (a few quanta); call
+ * miso_engine_v1_source_seek_at(id, g, F, A), where g is above the source's generation (2 for a
+ * just-added source) and F is the source frame the playing stems read at A; then submit g from F.
+ * Until A the stem renders silence; from A it plays F on. If g's PCM is not queued when the block
+ * at A renders, the seek applies there anyway: the blocks without PCM count as underrun frames,
+ * and PCM that falls behind the read position is discarded. A playing stem's seek report gives
+ * that frame: a stem whose report reads (generation, s, f) reads source frame f + (A - s) at A,
+ * until its next seek and inside its region.
+ *
+ * Held. From the block that pops an anchored seek until the block that applies it, the seek is
+ * held. Queued PCM of the playing generation plays meanwhile (the host cannot add to it, because
+ * the call switched the producer to g); when that runs out the source renders silence, and the
+ * frames count in the report's cumulative_held_frames, not in cumulative_underrun_frames. A
+ * planned wait is not starvation. A block without PCM while no seek is held is an underrun.
+ *
+ * Replacement. A newer seek, plain or anchored, replaces a held one: the held seek never applies,
+ * and the PCM already submitted for its generation is discarded. A plain seek applies as above;
+ * an anchored one holds in its place with its own anchor.
+ *
+ * One seek in flight. A source's command queue holds one seek. A seek call that arrives before
+ * render has popped the previous one, which happens when render begins a block, returns
+ * MISO_ENGINE_V1_BACKPRESSURE with "source.seek.backpressure" and changes nothing; the host
+ * retries after a block has begun, and a host that renders nothing keeps getting it. A held seek
+ * has been popped, so it does not block the next one.
+ *
+ * Seeks across a structural transaction (issues 1273, 1310). A source that a replacement plan
+ * keeps unchanged keeps its seek state with its ring: a seek queued and not yet popped, and a
+ * held seek, move to the new plan, and a held anchor stays on the continuing clock, so it applies
+ * in the anchor block of the new plan or, if that block has passed, as a late seek (below). The
+ * host does not repeat the seek. The same holds when a transaction supersedes an unadopted
+ * replacement. A source that the transaction added or changed restarts in a new ring at
+ * generation 1, frame 0, with its seek report at generation 0: a seek held or queued on the old
+ * ring is discarded with it, and the host seeks the new one after the command returns OK. A seek
+ * on a source that the transaction removed is refused as "source.id.unknown".
+ *
+ * Far past anchors. An anchor that render has already passed is not refused. The seek applies no
+ * later than the first block that begins after the call returns, at source frame F plus the
+ * lateness, the number of samples from A to that block's first sample, so the stem stays in time;
+ * a replacement plan adopted only after A does the same in its first block. If F plus the
+ * lateness lies past the end of a region that the host closed with end_of_region, the block
+ * renders silence as end of region: neither an underrun nor held.
+ *
+ * Rate. The lateness is added to F in source frames, one for one with samples of the source-read
+ * clock. That is exact because every chunk must be at the session's sample rate (refused as
+ * "source.rate.mismatch" otherwise); the engine converts no rates, so a host that decodes at
+ * another rate resamples before it submits.
+ *
+ * Where a seek landed (issue 1316). miso_engine_v1_source_seek_report(session, id, out) copies
+ * what render last published for the source of the newest committed session into out, a
+ * miso_engine_v1_seek_report (MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE bytes; the caller sets
+ * struct_size and zeroes reserved0 and reserved[]). generation is the generation in effect, 0
+ * until the source's ring has rendered its first block; first_sample is the source-read sample of
+ * the first block in which that generation was in effect, and source_frame the source frame that
+ * block started at, for an anchored seek that render reached late F plus the lateness; so the
+ * source plays frame source_frame + (t - first_sample) in the block at t, until its next seek and
+ * inside its region.
+ * cumulative_underrun_frames and cumulative_held_frames count the source frames that blocks
+ * without PCM covered since the ring was made, split as under "Held"; a seek does not reset them.
+ * A plain seek lands in the block that applies it, and the report is how a host learns which: it
+ * keeps the previous generation until that block has rendered. The report is a level that render
+ * overwrites, not a queue. The ring owns it, so a swap that carries the source keeps it, and a
+ * source that a transaction added or changed starts at generation 0. The call returns
+ * MISO_ENGINE_V1_OK; MISO_ENGINE_V1_INVALID_ARGUMENT for a wrong struct_size, a nonzero reserved
+ * word, a malformed source ID, or an undeclared source ("source.id.unknown"); and
+ * MISO_ENGINE_V1_BACKPRESSURE with "source.report.busy", out untouched, when every bounded read
+ * (64) landed inside render's publication, so the host reads again. A host checks
+ * MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT before calling it.
+ */
+
+/*
+ * ABI growth. MISO_ENGINE_V1_ABI_VERSION changes only on a break. Everything else grows in place:
+ *
+ *   - Each added exported symbol, and each former reserved struct word that gets a name, gets its
+ *     own MISO_ENGINE_V1_FEATURE_* bit in miso_engine_v1_capabilities.feature_mask: the next free
+ *     one when it merges, never a reused one.
+ *   - A new value of an existing enum or result code, and a field added in place to a V1 protocol
+ *     message, takes no bit. So a host tolerates an enum value it does not know, and treats a
+ *     result code it does not know as a failure.
+ *   - A feature added as a protocol message is announced by its protocol capability flag in the
+ *     CAPABILITIES reply, not by a feature bit. The control protocol registry, not this rule,
+ *     governs protocol flags.
+ *
+ * A host tests each bit it needs with &, tolerates bits it does not know (a newer library reports
+ * more bits than the header the host was built with), and never compares feature_mask with ==.
+ * MISO_ENGINE_V1_FEATURE_MASK is every bit this header defines; it is not a value to compare the
+ * report with. A feature bit protects only a host that resolves the symbol at run time: a host
+ * that links a symbol directly fails to load against a library that lacks it, before it can test
+ * any bit.
  */
 
 #define MISO_ENGINE_V1_ABI_VERSION UINT32_C(0x00010000)

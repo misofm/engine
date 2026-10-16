@@ -233,3 +233,10 @@ widths.
 - *Carry meter and effect observation state across a plan swap* (#1327).
 - *Carry spectrum capture state across a plan swap* (#1395).
 - *Reset latency floors at a host-declared discontinuity* (#1323), D2: the rule D6 cites.
+
+**Note (controls coordinator, batch 15c, 2026-10-16).** #1317 documents the seek contract in the
+C header with "equal to the render clock in this version" for the source-read clock. When a warm
+successor makes the source-read offset nonzero, this slice amends that sentence in the header's
+first seek paragraph, in `docs/C_ABI_V1_QUALIFICATION.md` and in the `SourceControlSet::seek_at`
+doc. It also calls #1320's `prime_ready` with the source-read sample (S + O), not the render
+sample, and wires the prime on both hosts.

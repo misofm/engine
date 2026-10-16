@@ -245,6 +245,23 @@ static int check_plan_watermark(miso_engine_v1_engine *engine) {
     return failed;
 }
 
+/* A host tests each feature bit it needs with `&` and tolerates bits it does not know; it never
+ * compares the mask with `==` (header, "ABI growth"). This requires every bit the header defines,
+ * one test per symbol and never a bit number, so a library that stops reporting one fails and a
+ * library that reports an extra unknown bit passes. The exact mask is asserted by the Rust tests
+ * (`version_and_capabilities_are_exact`). */
+static int reports_every_defined_feature(uint64_t mask) {
+    return (mask & MISO_ENGINE_V1_FEATURE_IMMUTABLE_SESSION) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_HOST_PLANAR_SOURCE) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_PLANAR_STEREO_RENDER) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_CAPABILITY_COMMAND) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_SERVICE) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT) != 0;
+}
+
 int main(void) {
     miso_engine_v1_capabilities capabilities = {0};
     miso_engine_v1_engine_config config = {0};
@@ -255,7 +272,7 @@ int main(void) {
         query_capabilities_signature(&capabilities) != MISO_ENGINE_V1_OK ||
         capabilities.abi_version != MISO_ENGINE_V1_ABI_VERSION ||
         capabilities.exact_launch_rate_mask != MISO_ENGINE_V1_EXACT_LAUNCH_RATE_MASK ||
-        capabilities.feature_mask != MISO_ENGINE_V1_FEATURE_MASK) {
+        !reports_every_defined_feature(capabilities.feature_mask)) {
         return 1;
     }
 

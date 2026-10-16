@@ -107,10 +107,13 @@ A host starts a stem a structural transaction added in exact time through
 exported symbol, announced by `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (32) in the capability
 report, whose feature mask becomes 63; no struct, size or `ABI_VERSION` changes. It is
 `miso_engine_v1_source_seek` with an anchor: the seek's source frame enters the graph in the
-block that starts at absolute render sample `anchor_sample`, which must be a multiple of the
-quantum or the call returns `RESULT_INVALID_ARGUMENT` with `source.seek.anchor_unaligned`; its
-thread rule, argument checks and every other result are the plain seek's. The host checks the bit
-before calling the symbol, since a library older than #1275 does not export it. After the
+block that starts at sample `anchor_sample` of the plan's source-read clock (equal to the render
+clock in this version, #1316 D1), which must be a multiple of the quantum or the call returns
+`RESULT_INVALID_ARGUMENT` with `source.seek.anchor_unaligned`; its
+thread rule, argument checks and every other result are the plain seek's. A host that resolves
+the symbol at run time checks the bit before calling it; a host that links the symbol directly
+fails to load against a library older than #1275 before it can check anything (see "ABI growth"
+below). After the
 transaction returns, the host picks `A` a few quanta past the last rendered block, calls
 `seek_at(id, g, F, A)` with `F` the frame the playing stems read at `A`, then submits generation
 `g` from `F`; the stem renders silence until `A` and plays `F` from `A` on, bit-identical to the
@@ -215,6 +218,32 @@ against the queried mask and reads a compiled session's source (generation 0), a
 and a wrong size, `header_smoke.cpp` pins the size, every field offset and the signature, and the
 capi runtime tests cover a plain seek, a late anchored seek, a scrub-then-align across a
 transaction, a carried and an added ring, and the two counters.
+
+The seek contract in the header (#1317, decision 15 D15-12) states, from the code, the source-read
+clock and its origin (0 at compile, one quantum per render call, continued by a swapped-in plan),
+the plain and the anchored seek, how to choose the anchor, held behaviour (queued PCM of the
+playing generation plays, then silence counted as held frames, never as underrun frames),
+replacement of a held seek, the one-slot refusal (`BACKPRESSURE`, `source.seek.backpressure`),
+displacement by a structural transaction, far-past anchors and the region end, the source-rate
+assumption (`source.rate.mismatch`), and how `miso_engine_v1_source_seek_report` reports a seek's
+landing. It promises nothing the code does not do; a source-read clock that leads the render clock
+is a later change and amends the "equal to the render clock in this version" sentence.
+
+ABI growth (#1317, decision 15 D15-3). `MISO_ENGINE_V1_ABI_VERSION` changes only on a break. Each
+added exported symbol, and each former reserved struct word given a name, gets its own
+`MISO_ENGINE_V1_FEATURE_*` bit, the next free one when it merges. A new value of an existing enum
+or result code, and a field added in place to a V1 protocol message, takes no bit, so a host
+tolerates an enum value it does not know and treats a result code it does not know as a failure. A
+feature added as a protocol message is announced by its protocol capability flag in the
+`CAPABILITIES` reply, not by a feature bit; the control protocol registry, not this rule, governs
+protocol flags. A host tests each bit it needs with `&`, tolerates bits it does not know and never
+compares `feature_mask` with `==`. A feature bit protects only a host that resolves the symbol at
+run time: a host that links a symbol directly fails to load against a library that lacks it, before
+it can test anything. The exact mask is asserted by the library's own Rust tests
+(`version_and_capabilities_are_exact` and the constant pins in `abi.rs`), not by the C smoke test:
+`abi_smoke.c` tests one `&` per `MISO_ENGINE_V1_FEATURE_*` symbol (it fails when the library stops
+reporting a defined bit and passes when it reports an extra unknown one) and keeps its compile-time
+pins of the header's constants.
 
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was
