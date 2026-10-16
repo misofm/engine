@@ -282,12 +282,8 @@ fn base<'a>(
     edit_ramps: &'a EditRamps,
 ) -> SuccessorBase<'a> {
     SuccessorBase {
-        inventory,
-        committed,
-        revision: SUCCESSOR_REVISION,
         edit_ramps,
-        monitor: host_core::MonitorBase::NONE,
-        observation: &host_core::NO_OBSERVATION,
+        ..SuccessorBase::new(inventory, committed, SUCCESSOR_REVISION)
     }
 }
 

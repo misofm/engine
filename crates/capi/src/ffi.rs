@@ -750,6 +750,54 @@ pub unsafe extern "C" fn miso_engine_v1_service(session: *mut Session) -> u32 {
     })
 }
 
+/// Declare a discontinuity (#1323): the next block the host renders need not continue the
+/// previous output, because the host has stopped or is about to seek every source. A host calls it
+/// at a stop, and before a seek of every source.
+///
+/// It forwards to the control plane's `SessionState::declare_discontinuity`, the function the
+/// browser's `miso_engine_web_v1_declare_discontinuity` runs. If the newest plan runs behind its
+/// natural timing (a latency floor of a structural transaction raised it, #1285), the committed
+/// session is prepared again with no floors, only its sources carried, and published for the next
+/// block, superseding a waiting replacement; otherwise nothing is published. The model and the
+/// revision do not change.
+///
+/// Returns `RESULT_OK`; a null or wrong handle as every session call; `RESULT_COMPILE_REJECTED`
+/// with the preparation's or the cap's diagnostic, `RESULT_BACKPRESSURE` and `RESULT_INTERNAL` as
+/// `miso_engine_v1_submit_command` returns them for a rebuild. A refusal changes nothing.
+///
+/// # Safety
+///
+/// `session` must be a live session handle.
+///
+/// Thread: control, serialized with the other session calls.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_declare_discontinuity(session: *mut Session) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { session_kind(session) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
+        let session = unsafe { &mut *session };
+        match session.state.declare_discontinuity() {
+            Ok(()) => {
+                session.last_error.borrow_mut().clear();
+                RESULT_OK
+            }
+            Err(refused) => {
+                session.last_error.borrow_mut().set(&refused.diagnostic());
+                match refused {
+                    CommandError::BufferTooSmall { .. } | CommandError::Internal => RESULT_INTERNAL,
+                    CommandError::Invalid => RESULT_INVALID_ARGUMENT,
+                    CommandError::Backpressure => RESULT_BACKPRESSURE,
+                    CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
+                }
+            }
+        }
+    })
+}
+
 /// Process one bounded Issue-005 capability command with exact-byte replay.
 ///
 /// # Safety
@@ -1225,6 +1273,24 @@ pub(crate) fn test_service(session: *mut Session) -> u32 {
 }
 
 #[cfg(test)]
+pub(crate) fn test_declare_discontinuity(session: *mut Session) -> u32 {
+    // SAFETY: Test callers pass a live session handle, or a null or wrong one to test refusal.
+    unsafe { miso_engine_v1_declare_discontinuity(session) }
+}
+
+/// The plan's `latency_samples` through the exported resource query (#1323 gate 2).
+#[cfg(test)]
+pub(crate) fn test_plan_latency(plan: *const Plan) -> u64 {
+    // SAFETY: Every field of the report is an integer, for which zero is a valid value.
+    let mut out: PlanResourceReport = unsafe { core::mem::zeroed() };
+    out.struct_size = crate::PLAN_RESOURCE_REPORT_SIZE;
+    // SAFETY: Test callers pass a live plan; `out` is one complete local report.
+    let result = unsafe { miso_engine_v1_plan_resources(plan, &mut out) };
+    assert_eq!(result, RESULT_OK);
+    out.latency_samples
+}
+
+#[cfg(test)]
 pub(crate) fn test_dequeue_event(session: *mut Session, lane: u32, output: &mut BytesOut) -> u32 {
     // SAFETY: Test callers retain the live session and ABI output for this call.
     unsafe { miso_engine_v1_dequeue_event(session, lane, output) }
@@ -1676,10 +1742,15 @@ mod tests {
         assert_eq!(query(&mut capabilities), RESULT_OK);
         assert_eq!(capabilities.abi_version, ABI_VERSION);
         assert_eq!(capabilities.exact_launch_rate_mask, 0x0f);
-        assert_eq!(capabilities.feature_mask, 0x1ff);
+        assert_eq!(capabilities.feature_mask, 0x3ff);
+        assert_eq!(capabilities.feature_mask, crate::FEATURE_MASK);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_SOURCE_SEEK_AT, 0);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_PLAN_WATERMARK, 0);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_SERVICE, 0);
+        assert_ne!(
+            capabilities.feature_mask & crate::FEATURE_DECLARE_DISCONTINUITY,
+            0
+        );
         assert_ne!(
             capabilities.feature_mask & crate::FEATURE_SOURCE_SEEK_REPORT,
             0

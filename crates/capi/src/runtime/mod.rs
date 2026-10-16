@@ -21,7 +21,7 @@ pub(crate) use engine::realtime::RenderError;
 
 pub(crate) use crate::{
     ABI_VERSION, CompileLimits, PlanResourceReport, RESULT_BACKPRESSURE, RESULT_INTERNAL,
-    RESULT_INVALID_ARGUMENT, TAIL_FINITE, TAIL_INFINITE,
+    RESULT_INVALID_ARGUMENT, TAIL_FINITE,
 };
 
 pub(crate) mod error;
@@ -218,10 +218,7 @@ impl From<CompileLimits> for ControlLimits {
 /// The ABI report row the control plane stores, built once when a row is inserted (#1309 D4).
 impl From<PlanResources> for PlanResourceReport {
     fn from(resources: PlanResources) -> Self {
-        let (tail_kind, tail_samples) = match resources.output_tail {
-            TailSamples::Finite(samples) => (TAIL_FINITE, samples),
-            TailSamples::Infinite => (TAIL_INFINITE, 0),
-        };
+        let (tail_kind, tail_samples) = control_plane::tail_words(resources.output_tail);
         Self {
             struct_size: crate::PLAN_RESOURCE_REPORT_SIZE,
             abi_version: ABI_VERSION,

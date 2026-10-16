@@ -19,8 +19,8 @@ extern "C" {
  *                miso_engine_v1_source_submit_planar_f32, miso_engine_v1_source_seek,
  *                miso_engine_v1_source_seek_at, miso_engine_v1_source_seek_report,
  *                miso_engine_v1_submit_command, miso_engine_v1_dequeue_event,
- *                miso_engine_v1_service, or miso_engine_v1_last_error on the session; they are
- *                serialized with each other.
+ *                miso_engine_v1_service, miso_engine_v1_declare_discontinuity, or
+ *                miso_engine_v1_last_error on the session; they are serialized with each other.
  *   plan         Split ownership.
  *                miso_engine_v1_render_f32_planar: render thread only, never concurrently with
  *                itself, and the exclusive owner of the plan's render state.
@@ -90,7 +90,27 @@ extern "C" {
  * latency_samples does not fall. A path whose own upstream latency dropped gets a new
  * compensation line, which starts at rest. An added latency still raises latency_samples. The
  * lower latency returns only with a fresh miso_engine_v1_compile_session, or at a host-declared
- * discontinuity once issue 1323 provides one; there is no permanent latency reserve.
+ * discontinuity (below); there is no permanent latency reserve.
+ *
+ * Declared discontinuity (issue 1323). miso_engine_v1_declare_discontinuity(session) says that
+ * the next block the host renders need not continue the previous output, because the host has
+ * stopped or is about to seek every source. The host's duty: call it at a stop, and before a seek
+ * of every source. If the newest plan (the waiting replacement, else the plan that renders) runs
+ * behind its natural timing because a floor above raised some node's arrival, the call prepares
+ * the committed session again with no floors and publishes it for the next block: from that
+ * block latency_samples is the session's natural latency. That plan carries only the sources
+ * (each source's ring, generation and read position), so no frame is repeated or skipped; every
+ * effect, line and meter starts at rest. A waiting replacement is superseded, as a structural
+ * transaction supersedes it, and its revisions complete when the new plan is adopted with
+ * MISO_ENGINE_V1_OUTCOME_EXACT (MISO_ENGINE_V1_OUTCOME_SUPERSEDED for the revisions it had folded
+ * in), never MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK. A structural transaction that supersedes
+ * the new plan before render adopts it is prepared the same way. With nothing to reset, or at
+ * revision 0, the call returns MISO_ENGINE_V1_OK and publishes nothing. The model and the
+ * revision never change. It returns MISO_ENGINE_V1_OK; a null session or another handle as every
+ * session call; and MISO_ENGINE_V1_COMPILE_REJECTED, MISO_ENGINE_V1_BACKPRESSURE or
+ * MISO_ENGINE_V1_INTERNAL with the session diagnostic as miso_engine_v1_submit_command returns
+ * them for a rebuild; a refusal changes nothing. A host checks
+ * MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY before calling the symbol.
  *
  * Solo (issue 1559). Solo is a SET_CONTROL like every other value: the address is the strip's
  * own section, control 2 (named "solo", a toggle, value exactly 0 or 1, lane both), on a track.
@@ -405,8 +425,9 @@ extern "C" {
 #define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT UINT64_C(32)
 #define MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK UINT64_C(64)
 #define MISO_ENGINE_V1_FEATURE_SERVICE UINT64_C(128)
-#define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT UINT64_C(256)
-#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(511)
+#define MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY UINT64_C(256)
+#define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT UINT64_C(512)
+#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(1023)
 
 #define MISO_ENGINE_V1_OUTCOME_EXACT UINT64_C(1)
 #define MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK UINT64_C(2)
@@ -630,6 +651,7 @@ uint32_t miso_engine_v1_dequeue_event(miso_engine_v1_session *session,
                                       uint32_t lane,
                                       miso_engine_v1_bytes_out *event);
 uint32_t miso_engine_v1_service(miso_engine_v1_session *session);
+uint32_t miso_engine_v1_declare_discontinuity(miso_engine_v1_session *session);
 uint32_t miso_engine_v1_render_f32_planar(miso_engine_v1_plan *plan,
                                           uint64_t absolute_sample,
                                           const miso_engine_v1_planar_output *output);

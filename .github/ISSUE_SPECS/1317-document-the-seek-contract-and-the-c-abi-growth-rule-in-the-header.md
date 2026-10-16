@@ -207,7 +207,7 @@ exact-mask tests.
   a directly linked host and names the source-read clock; a paragraph records the seek contract and
   one "ABI growth" paragraph states D2 once.
 - `crates/capi/tests/c/abi_smoke.c` (D4): `reports_every_defined_feature` requires one `&` per
-  `MISO_ENGINE_V1_FEATURE_*` symbol (nine); the `!= MISO_ENGINE_V1_FEATURE_MASK` comparison is gone.
+  `MISO_ENGINE_V1_FEATURE_*` symbol (ten); the `!= MISO_ENGINE_V1_FEATURE_MASK` comparison is gone.
   The compile-time pins are kept.
 
 **Statements checked against the code** (file, function): clock origin 0 and `render.time.discontinuity`
@@ -230,7 +230,7 @@ including `held_seek` (`adopt_sources`); report words and 64-attempt bound (`pub
   popped"), as `observe_seek_at_block_boundary` pops and applies in one block.
 - The end-of-region sentence is conditional on a region the host closed with `end_of_region`; with
   no end known the block is an underrun.
-- Feature mask is 511 (bit 8 landed with #1316), not the amendment's 255.
+- Feature mask is 1023 (bit 8 landed with #1323, bit 9 with #1316), not the amendment's 255.
 - #1320's prime has no host-visible API, so the header says nothing about it. #1396 has not landed,
   so "equal to the render clock in this version" stands and #1396 is not named in the header.
 

@@ -41,5 +41,9 @@ static_assert((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_
 static_assert(std::is_same<decltype(&miso_engine_v1_source_seek_report),
                            uint32_t (*)(miso_engine_v1_session *, const uint8_t *, uint64_t,
                                         miso_engine_v1_seek_report *)>::value);
+static_assert((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY) ==
+              MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY);
+static_assert(std::is_same<decltype(&miso_engine_v1_declare_discontinuity),
+                           uint32_t (*)(miso_engine_v1_session *)>::value);
 static_assert(std::is_same<decltype(&miso_engine_v1_service),
                            uint32_t (*)(miso_engine_v1_session *)>::value);

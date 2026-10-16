@@ -1785,14 +1785,11 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             effects: true,
             routes: true,
         },
-        host_core::SuccessorBase {
-            inventory: &current_host.prepared.inventory,
-            committed: current_host.store.compiled().normalized_model(),
-            revision: 1,
-            edit_ramps: &session::EditRamps::new(),
-            monitor: host_core::MonitorBase::NONE,
-            observation: &host_core::NO_OBSERVATION,
-        },
+        host_core::SuccessorBase::new(
+            &current_host.prepared.inventory,
+            current_host.store.compiled().normalized_model(),
+            1,
+        ),
         &host_core::LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|_| panic!("the prospective session prepares as a successor"))

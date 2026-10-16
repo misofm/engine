@@ -248,6 +248,7 @@ fi
 printf '%s\n' \
     miso_engine_v1_abi_version \
     miso_engine_v1_compile_session \
+    miso_engine_v1_declare_discontinuity \
     miso_engine_v1_dequeue_event \
     miso_engine_v1_engine_create \
     miso_engine_v1_engine_destroy \

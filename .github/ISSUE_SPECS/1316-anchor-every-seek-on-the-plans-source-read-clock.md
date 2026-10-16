@@ -261,8 +261,8 @@ one attempt.
 - control-plane: `SessionState::seek_report` runs `service()` first (amendment), reads the newest
   providers; `pub use source::SourceSeekReport`.
 - capi: `miso_engine_v1_source_seek_report`, `SOURCE_SEEK_REPORT_SIZE` 64,
-  `FEATURE_SOURCE_SEEK_REPORT` = `1 << 8` (next free bit; mask 511), header thread table, service
-  paragraph and a two-sentence note, both smoke programs, the frozen list (18 symbols) and
+  `FEATURE_SOURCE_SEEK_REPORT` = `1 << 9` (mask 1023), header thread table, service
+  paragraph and a two-sentence note, both smoke programs, the frozen list (19 symbols) and
   `docs/C_ABI_V1_QUALIFICATION.md`.
 
 **Departures.**
@@ -315,3 +315,5 @@ counters plus six `u64` words). host-web's `retained_ceilings` stays inside its 
 (batch 16) alone, with a parity row against the C ABI struct, independent of #1332 (which waits
 on the owner's iOS test). Until #1293 lands, the browser cannot seek through the core, so it has
 no seek to report; the C ABI reads the report today. #1293's amendment of 2026-10-16 records it.
+
+Bit move: bit 9, because #1323 took bit 8 first; merge of 15b into 15c.

@@ -195,29 +195,28 @@ A host learns where a seek landed through `miso_engine_v1_source_seek_report` (#
 D15-12), an in-place V1 amendment: one new exported symbol and one new 64-byte struct,
 `miso_engine_v1_seek_report` (`MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE`; not D6's
 `miso_engine_v1_source_seek_report`, which is the function's name, and C gives a typedef and a
-function one name space), announced by
-`MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT` (the next free bit, 256) in the capability report,
-whose feature mask grows to include it; no other struct, size or `ABI_VERSION` changes. It is a
-session call, serialized with the others, and runs the service step first. It copies the source
-ring's `(generation, first_sample, source_frame)` and its cumulative underrun and held frames:
-the generation in effect, the source-read sample (the render clock in this version) of the first
-block it played in, and the source frame that block started at, a late anchored seek's frame
-including its lateness. Render publishes the record from the source consumer at the end of a
-block's acquire step, only when a new generation took effect or a cumulative counter moved,
-through the engine's one single-writer seqlock (`crates/engine/src/realtime/seqlock.rs`), so it is
-a level, not a queue: no ack can precede a drop. Before the ring's first block it reads generation
-0. The record belongs to the ring (one shared record charged as `seek_report_bytes` in the
-source's overhead), so a plan swap that carries the source keeps it and an added or redeclared
-source starts at 0. A host that plain-seeks one stem and reads `(g, s, f)` then starts another
-with `seek_at(Y, g', f + (A - s), A)` and the two align exactly. Results: `OK`;
-`INVALID_ARGUMENT` for a wrong `struct_size`, a nonzero reserved word or a malformed source ID,
-and with `source.id.unknown` for an undeclared source; `BACKPRESSURE` with `source.report.busy`
-when every bounded read (64 attempts) landed inside render's publication, `out` untouched. The
-frozen exported set is now 18 `miso_engine_v1_*` definitions; `abi_smoke.c` checks the bit
-against the queried mask and reads a compiled session's source (generation 0), an unknown source
-and a wrong size, `header_smoke.cpp` pins the size, every field offset and the signature, and the
-capi runtime tests cover a plain seek, a late anchored seek, a scrub-then-align across a
-transaction, a carried and an added ring, and the two counters.
+function one name space), announced by `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT` (bit 9, 512;
+#1323 took bit 8 first) in the capability report, whose feature mask grows to include it; no other
+struct, size or `ABI_VERSION` changes. It is a session call, serialized with the others, and runs
+the service step first. It copies the source ring's `(generation, first_sample, source_frame)` and
+its cumulative underrun and held frames: the generation in effect, the source-read sample (the
+render clock in this version) of the first block it played in, and the source frame that block
+started at, a late anchored seek's frame including its lateness. Render publishes the record from
+the source consumer at the end of a block's acquire step, only when a new generation took effect or
+a cumulative counter moved, through the engine's one single-writer seqlock
+(`crates/engine/src/realtime/seqlock.rs`), so it is a level, not a queue: no ack can precede a drop.
+Before the ring's first block it reads generation 0. The record belongs to the ring (one shared
+record charged as `seek_report_bytes` in the source's overhead), so a plan swap that carries the
+source keeps it and an added or redeclared source starts at 0. A host that plain-seeks one stem and
+reads `(g, s, f)` then starts another with `seek_at(Y, g', f + (A - s), A)` and the two align
+exactly. Results: `OK`; `INVALID_ARGUMENT` for a wrong `struct_size`, a nonzero reserved word or a
+malformed source ID, and with `source.id.unknown` for an undeclared source; `BACKPRESSURE` with
+`source.report.busy` when every bounded read (64 attempts) landed inside render's publication, `out`
+untouched. The frozen exported set is now 19 `miso_engine_v1_*` definitions (with #1323's);
+`abi_smoke.c` checks the bit against the queried mask and reads a compiled session's source
+(generation 0), an unknown source and a wrong size, `header_smoke.cpp` pins the size, every field
+offset and the signature, and the capi runtime tests cover a plain seek, a late anchored seek, a
+scrub-then-align across a transaction, a carried and an added ring, and the two counters.
 
 The seek contract in the header (#1317, decision 15 D15-12) states, from the code, the source-read
 clock and its origin (0 at compile, one quantum per render call, continued by a swapped-in plan),
@@ -974,9 +973,51 @@ that window is admitted against the plan that renders.
   first plan's timing. A successor prepared across a withdrawn candidate takes the running plan's
   floors (#1698's base is the running plan's inventory). A fresh `miso_engine_v1_compile_session`
   and a browser boot compile with no floors; the lower latency returns there, or at a
-  host-declared discontinuity once #1323 provides one. There is no permanent latency reserve.
+  host-declared discontinuity (#1323, below). There is no permanent latency reserve.
 - **Evidence.** `capi` `runtime::tests::removing_a_limited_track_keeps_the_plan_latency`
   (`RemoveTrack` of a limited track: an unchanged `latency_samples` after the swap, and every
   block equal to the floored reference). With no floors neither the program nor its canonical bytes
   change: the graph fixture corpus, `scripts/check-graph-determinism.sh` and `console-workload`
   keep their digests.
+
+## A host-declared discontinuity resets the floors (#1323)
+
+- **Surface.** `miso_engine_v1_declare_discontinuity(session)`, an in-place V1 amendment: one new
+  exported symbol, announced by `MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY` (the next free bit,
+  256) in the capability report, whose feature mask grows to include it; no struct, size or
+  `ABI_VERSION` changes. The mask is the OR of every feature symbol and is never compared with a
+  literal (`capi` `abi::tests::masks_and_result_codes_are_frozen` folds the symbols; `abi_smoke.c`
+  and `header_smoke.cpp` pin the bit inside the mask and the signature, and `abi_smoke.c` calls
+  the symbol with a null session for `INVALID_ARGUMENT`). The frozen exported set is now 18
+  `miso_engine_v1_*` definitions. It is a session call, serialized with the others; it runs the
+  service step first. The browser's `miso_engine_web_v1_declare_discontinuity(handle)` forwards to
+  the same control-plane function, `control_plane::SessionState::declare_discontinuity` (root
+  ruling B15-R7); the browser SDK surface is #1296's.
+- **Duty.** A host calls it at a stop, and before a seek of every source: the next block it renders
+  need not continue the previous output.
+- **Behavior.** If the newest plan (the waiting replacement, else the running plan) runs behind its
+  natural timing (a floor raised some node's input arrival above its natural one; the inventory
+  records each raised node's natural arrival beside its floored one), the committed model is
+  prepared again as a successor at a discontinuity (`SuccessorBase::discontinuity`): no floors, and
+  only the source consumers (ring, generation, read position) carry, so no frame is repeated or
+  skipped and every other owner starts at rest. It is published `Next` with the committed
+  revision and its retirement credit reserved. A waiting replacement, a `Primed` warm successor
+  included (it always runs behind its natural timing), is superseded through #1310: withdrawn, the
+  donor of the rings it created, its persisting producers returned to the running epoch, then
+  dropped. Its revisions complete when the successor is adopted: `EXACT`, with `SUPERSEDED` for
+  the revisions it had folded in, never `TRANSITION_FALLBACK`. With nothing to reset, or at
+  revision 0 (root ruling B15-R6), the call returns `OK` and publishes nothing. The model and the
+  revision never change; a refusal (a preparation or cap rejection, backpressure) changes nothing,
+  and a withdrawn replacement is published again whole.
+- **Supersession of the successor.** A structural transaction that supersedes the discontinuity
+  successor before render adopts it is prepared at the same discontinuity: render never played the
+  successor, so the pair is one transaction "declare, then edit" against the running plan, whose
+  combined twin has no floors.
+- **Evidence.** `capi` `runtime::tests::` gates
+  `a_declared_discontinuity_reports_the_natural_latency_on_the_c_abi`,
+  `a_declaration_with_nothing_to_reset_publishes_nothing`, `a_refused_declaration_changes_nothing`,
+  `a_declared_stop_supersedes_a_pending_warm_successor_alone_and_folded` and
+  `an_edit_that_supersedes_a_discontinuity_successor_is_prepared_at_it`; `host-core`
+  `successor_swap::a_declared_discontinuity_resets_the_floors_at_every_rate_and_width`; `host-web`
+  `tests::structural_apply::a_declared_discontinuity_resets_the_floors_on_the_browser` and the
+  parity row `control_parity::a_declared_discontinuity_resets_the_floors_alike_on_both_hosts`.

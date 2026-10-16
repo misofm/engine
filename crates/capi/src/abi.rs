@@ -34,9 +34,9 @@ pub const EVENT_LANE_RELIABLE: u32 = 0;
 pub const EVENT_LANE_LOSSY: u32 = 1;
 
 /// A plan tail terminates after `tail_samples`.
-pub const TAIL_FINITE: u64 = 0;
+pub const TAIL_FINITE: u64 = control_plane::TAIL_FINITE;
 /// A plan tail is unbounded and reports zero `tail_samples`.
-pub const TAIL_INFINITE: u64 = 1;
+pub const TAIL_INFINITE: u64 = control_plane::TAIL_INFINITE;
 
 /// Launch support for 44,100 Hz.
 pub const RATE_44_100: u64 = 1 << 0;
@@ -68,9 +68,12 @@ pub const FEATURE_PLAN_WATERMARK: u64 = 1 << 6;
 /// Control-service capability: `miso_engine_v1_service` (#1348), an in-place V1 amendment. A host
 /// checks this bit before calling the symbol.
 pub const FEATURE_SERVICE: u64 = 1 << 7;
+/// Declared-discontinuity capability: `miso_engine_v1_declare_discontinuity` (#1323), an in-place
+/// V1 amendment. A host checks this bit before calling the symbol.
+pub const FEATURE_DECLARE_DISCONTINUITY: u64 = 1 << 8;
 /// Source seek-report capability: `miso_engine_v1_source_seek_report` (#1316), an in-place V1
 /// amendment. A host checks this bit before calling the symbol.
-pub const FEATURE_SOURCE_SEEK_REPORT: u64 = 1 << 8;
+pub const FEATURE_SOURCE_SEEK_REPORT: u64 = 1 << 9;
 /// All ABI V1 feature capability bits.
 pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_HOST_PLANAR_SOURCE
@@ -80,6 +83,7 @@ pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_SOURCE_SEEK_AT
     | FEATURE_PLAN_WATERMARK
     | FEATURE_SERVICE
+    | FEATURE_DECLARE_DISCONTINUITY
     | FEATURE_SOURCE_SEEK_REPORT;
 
 /// Watermark outcome flag: the covered revisions completed exactly as committed.
@@ -591,11 +595,38 @@ mod tests {
             FEATURE_PLAN_WATERMARK
         );
         assert_eq!(FEATURE_MASK & FEATURE_SERVICE, FEATURE_SERVICE);
+        // #1323 gate 6 (#1317's growth rule): the mask is the OR of every feature symbol, each one
+        // bit of its own, never a literal.
+        let features = [
+            FEATURE_IMMUTABLE_SESSION,
+            FEATURE_HOST_PLANAR_SOURCE,
+            FEATURE_SOURCE_SEEK,
+            FEATURE_PLANAR_STEREO_RENDER,
+            FEATURE_CAPABILITY_COMMAND,
+            FEATURE_SOURCE_SEEK_AT,
+            FEATURE_PLAN_WATERMARK,
+            FEATURE_SERVICE,
+            FEATURE_DECLARE_DISCONTINUITY,
+            FEATURE_SOURCE_SEEK_REPORT,
+        ];
+        assert!(features.iter().all(|feature| feature.count_ones() == 1));
+        assert_eq!(
+            features.iter().fold(0, |mask, feature| {
+                assert_eq!(mask & feature, 0, "every feature has its own bit");
+                mask | feature
+            }),
+            FEATURE_MASK
+        );
+        assert_eq!(
+            FEATURE_MASK & FEATURE_DECLARE_DISCONTINUITY,
+            FEATURE_DECLARE_DISCONTINUITY
+        );
         assert_eq!(
             FEATURE_MASK & FEATURE_SOURCE_SEEK_REPORT,
             FEATURE_SOURCE_SEEK_REPORT
         );
-        assert_eq!(FEATURE_MASK, 0x1ff);
+        assert_eq!(FEATURE_DECLARE_DISCONTINUITY, 1 << 8);
+        assert_eq!(FEATURE_SOURCE_SEEK_REPORT, 1 << 9);
         assert_eq!(
             [
                 OUTCOME_EXACT,

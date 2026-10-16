@@ -42,9 +42,9 @@ use core::ptr;
 
 use capi::{
     ABI_VERSION as C_ABI_VERSION, BYTES_OUT_SIZE, BytesOut, COMPILE_LIMITS_SIZE, CompileLimits,
-    ENGINE_CONFIG_SIZE, EVENT_LANE_RELIABLE, EngineConfig, PLANAR_OUTPUT_SIZE, Plan, PlanarOutput,
-    RESULT_OK as C_RESULT_OK, SOURCE_CHUNK_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk,
-    SubmitReport,
+    ENGINE_CONFIG_SIZE, EVENT_LANE_RELIABLE, EngineConfig, PLAN_RESOURCE_REPORT_SIZE,
+    PLANAR_OUTPUT_SIZE, Plan, PlanResourceReport, PlanarOutput, RESULT_OK as C_RESULT_OK,
+    SOURCE_CHUNK_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk, SubmitReport,
 };
 use controls::{ControlAddress, Lane, Owner, Section};
 use protocol::{
@@ -1368,6 +1368,18 @@ impl CAbi {
         (out.revision, out.first_sample, out.outcome_flags)
     }
 
+    /// The active plan's `(latency_samples, tail_kind, tail_samples)` through
+    /// `miso_engine_v1_plan_resources`.
+    fn plan_latency(&self) -> (u64, u64, u64) {
+        // SAFETY: `PlanResourceReport` is plain integers, for which all-zero bytes are a value.
+        let mut out: PlanResourceReport = unsafe { core::mem::zeroed() };
+        out.struct_size = PLAN_RESOURCE_REPORT_SIZE;
+        // SAFETY: The plan is live; the query is pure and `out` is owned storage of the exact size.
+        let code = unsafe { capi::miso_engine_v1_plan_resources(self.plan, &mut out) };
+        assert_eq!(code, C_RESULT_OK, "C ABI plan resources");
+        (out.latency_samples, out.tail_kind, out.tail_samples)
+    }
+
     fn superseded(&mut self) -> u64 {
         let response = self.send(
             CommandPayload::CountersGet(&CountersRequest {
@@ -1654,7 +1666,20 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
                 }
             }
         }
+        // #1688 D4: the browser's latency and tail words are the C ABI report's, after every
+        // scripted edit (the plan that renders has not changed yet) and after every block.
+        let latency = c_abi.plan_latency();
+        assert_eq!(
+            browser_plan_latency(&mut browser),
+            latency,
+            "{rate} Hz: before block {block}: the browser plan latency is the C ABI's"
+        );
         let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(
+            browser_plan_latency(&mut browser),
+            c_abi.plan_latency(),
+            "{rate} Hz: after block {block}: the browser plan latency is the C ABI's"
+        );
         // #1349 gate 1: the status words are the C ABI's watermark after every block.
         assert_eq!(
             status_watermark(&browser),
@@ -1720,6 +1745,21 @@ fn both_hosts_give_the_same_result_for_the_same_control_edits() {
             "{rate} Hz: only {moved} blocks differ from the unedited run"
         );
     }
+}
+
+/// The browser record's `(latency_samples, tail_kind, tail_samples)` after a fresh read (#1688).
+fn browser_plan_latency(browser: &mut Rig) -> (u64, u64, u64) {
+    assert_eq!(
+        browser.host.read_plan_latency(),
+        host_web::RESULT_OK,
+        "the browser plan latency read"
+    );
+    let record = browser.host.plan_latency();
+    (
+        record.latency_samples,
+        record.tail_kind,
+        record.tail_samples,
+    )
 }
 
 /// The three watermark words of the browser's status: `(revision, first sample, outcome flags)`.
@@ -3357,5 +3397,251 @@ fn a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_hosts(
                 "{rate} Hz: the blocks after the retry play"
             );
         }
+    }
+}
+
+/// The C ABI plan's `latency_samples`, through the exported resource query.
+fn c_latency(c_abi: &CAbi) -> u64 {
+    // SAFETY: Every field of the report is an integer, for which zero is a valid value.
+    let mut report: capi::PlanResourceReport = unsafe { core::mem::zeroed() };
+    report.struct_size = capi::PLAN_RESOURCE_REPORT_SIZE;
+    // SAFETY: The plan is live; `report` is one complete local report.
+    let code = unsafe { capi::miso_engine_v1_plan_resources(c_abi.plan, &mut report) };
+    assert_eq!(code, C_RESULT_OK);
+    report.latency_samples
+}
+
+/// #1323 on both hosts: removing the true-peak limiter insert keeps every node's latency (#1285),
+/// and a declared discontinuity, `miso_engine_v1_declare_discontinuity` on the C ABI and the
+/// browser host's `declare_discontinuity`, publishes the committed session with no floors on both.
+/// From the block after it the two hosts render the same bits, and the C ABI reports a lower
+/// latency than before the declaration.
+///
+/// Test value: red if one host's entry does not reach the control plane's declaration, or
+/// reaches another rule (that host keeps the floors, and its remaining tracks play later than the
+/// other host's), or if the declaration is a no-op on both (the C ABI latency stays floored).
+#[test]
+fn a_declared_discontinuity_resets_the_floors_alike_on_both_hosts() {
+    for rate in [48_000, 96_000] {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..4, &format!("{rate} Hz before"));
+        let edits = [SessionEdit::RemoveTrackEffect {
+            track_id: id(LIMITER.track.id),
+            rack_name: session::RackName::Inserts,
+            effect_id: id(LIMITER.id),
+        }];
+        let (b_verdict, _) = browser.transaction_reply(&edits);
+        let (c_verdict, _) = c_abi.transaction(&edits);
+        c_abi.drain_reliable();
+        assert!(
+            matches!(
+                b_verdict,
+                Verdict::Applied {
+                    path: EditPath::Rebuild,
+                    ..
+                }
+            ),
+            "{rate} Hz: {b_verdict:?}"
+        );
+        assert_eq!(b_verdict, c_verdict, "{rate} Hz");
+        same_blocks(
+            &mut browser,
+            &mut c_abi,
+            4..8,
+            &format!("{rate} Hz floored"),
+        );
+        let floored = c_latency(&c_abi);
+        assert_eq!(
+            browser.host.declare_discontinuity(None),
+            host_web::RESULT_OK,
+            "{rate} Hz"
+        );
+        // SAFETY: The session is live and used by this thread alone.
+        let code = unsafe { capi::miso_engine_v1_declare_discontinuity(c_abi.session) };
+        assert_eq!(code, C_RESULT_OK, "{rate} Hz");
+        same_blocks(
+            &mut browser,
+            &mut c_abi,
+            8..16,
+            &format!("{rate} Hz declared"),
+        );
+        assert!(
+            c_latency(&c_abi) < floored,
+            "{rate} Hz: the declaration resets the floors ({floored})"
+        );
+    }
+}
+
+/// #1688 gate 1 with #1285's floors: a muted track behind a true-peak limiter (and the delay and
+/// multiband beside it) sets the plan's latency. A transaction that removes the track and its
+/// routes rebuilds the plan, and a fresh compile of the committed session would report a lower
+/// latency. The successor is compiled with the predecessor's floors, so both hosts report the same,
+/// unchanged latency (and tail) after the swap, and the browser record equals the C ABI's before
+/// the swap, at it and after it.
+///
+/// Test value: red if the browser reports the unfloored latency of a fresh compile, reads a stale
+/// plan's row, or encodes the tail differently from the C ABI; and red if the row is vacuous (the
+/// latency must be positive and the rebuild must be adopted).
+#[test]
+fn removing_a_limited_track_keeps_the_plan_latency_alike_on_both_hosts() {
+    for rate in RATES {
+        let model = model_at(rate);
+        let limited = id(LIMITER.track.id);
+        let mut removal: Vec<SessionEdit> = model
+            .routes
+            .iter()
+            .filter(|route| {
+                matches!(
+                    &route.source,
+                    session::RouteSource::Track { track_id, .. } if *track_id == limited
+                )
+            })
+            .map(|route| SessionEdit::RemoveRoute {
+                route_id: route.id.clone(),
+            })
+            .collect();
+        removal.push(SessionEdit::RemoveTrack { track_id: limited });
+
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let boot = c_abi.plan_latency();
+        assert!(boot.0 > 0, "{rate} Hz: the limiter delays the plan");
+        assert_eq!(browser_plan_latency(&mut browser), boot, "{rate} Hz: boot");
+        for block in 0..4 {
+            browser.step(block);
+            c_abi.step(block);
+        }
+        let (b, c) = (browser.transaction(&removal), c_abi.transaction(&removal).0);
+        assert_eq!(b, c, "{rate} Hz: one verdict");
+        assert!(
+            matches!(
+                c,
+                Verdict::Applied {
+                    path: EditPath::Rebuild,
+                    ..
+                }
+            ),
+            "{rate} Hz: the removal rebuilds, got {c:?}"
+        );
+        // Committed, not adopted: both still report the running plan's words.
+        assert_eq!(
+            browser_plan_latency(&mut browser),
+            boot,
+            "{rate} Hz: pending"
+        );
+        assert_eq!(c_abi.plan_latency(), boot, "{rate} Hz: pending");
+        for block in 4..8 {
+            browser.step(block);
+            c_abi.step(block);
+        }
+        let (watermark, _, _) = c_abi.watermark();
+        assert_eq!(
+            watermark, c_abi.revision,
+            "{rate} Hz: the rebuild is adopted"
+        );
+        assert_eq!(
+            c_abi.plan_latency(),
+            boot,
+            "{rate} Hz: the floored successor keeps the latency"
+        );
+        assert_eq!(
+            browser_plan_latency(&mut browser),
+            boot,
+            "{rate} Hz: the browser reports the same, unchanged latency after the swap"
+        );
+
+        // Without floors the committed session would report less: the row is not vacuous.
+        let mut committed = model.clone();
+        committed
+            .routes
+            .retain(|route| !matches!(
+                &route.source,
+                session::RouteSource::Track { track_id, .. } if track_id.as_str() == LIMITER.track.id
+            ));
+        committed
+            .tracks
+            .retain(|track| track.id.as_str() != LIMITER.track.id);
+        let mut fresh = Rig::new(&committed);
+        assert!(
+            browser_plan_latency(&mut fresh).0 < boot.0,
+            "{rate} Hz: a fresh compile of the committed session reports a lower latency"
+        );
+    }
+}
+
+/// #1688 gate 1, the moving row: inserts that add latency to `t1` until its path is the longest
+/// make a rebuild that raises the plan's latency. (A strip's `delay_samples` does not: a track
+/// delay shifts the output and leaves the PDC report alone, `graph-compiler`'s `track_delay.rs`
+/// P2-3.) Both hosts report the boot latency until the adopting block, then the same raised one;
+/// the value moved, so the comparison is not vacuous.
+///
+/// Test value: red if the browser keeps the boot value after a rebuild (a boot-time copy) or
+/// reports the candidate's before the adoption block.
+#[test]
+fn a_rebuild_that_adds_latency_moves_the_plan_latency_alike_on_both_hosts() {
+    const LIMITERS: usize = 4;
+    for rate in RATES {
+        let model = model_at(rate);
+        let template = model
+            .tracks
+            .iter()
+            .flat_map(|track| &track.inserts.effects)
+            .find(|effect| effect.id.as_str() == LIMITER.id)
+            .expect("the session's limiter insert")
+            .clone();
+        let edits: Vec<SessionEdit> = (0..LIMITERS)
+            .map(|index| {
+                let mut effect = template.clone();
+                effect.id = id(&format!("added-limiter-{index}"));
+                SessionEdit::PutTrackEffect {
+                    track_id: id(T1.id),
+                    rack_name: session::RackName::Inserts,
+                    final_position: 2 + index as u32,
+                    effect,
+                }
+            })
+            .collect();
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let boot = c_abi.plan_latency();
+        assert_eq!(browser_plan_latency(&mut browser), boot, "{rate} Hz: boot");
+        for block in 0..4 {
+            browser.step(block);
+            c_abi.step(block);
+        }
+        let (b, c) = (browser.transaction(&edits), c_abi.transaction(&edits).0);
+        assert_eq!(b, c, "{rate} Hz: one verdict");
+        assert!(
+            matches!(
+                c,
+                Verdict::Applied {
+                    path: EditPath::Rebuild,
+                    ..
+                }
+            ),
+            "{rate} Hz: the inserts rebuild, got {c:?}"
+        );
+        assert_eq!(
+            browser_plan_latency(&mut browser),
+            boot,
+            "{rate} Hz: pending"
+        );
+        assert_eq!(c_abi.plan_latency(), boot, "{rate} Hz: pending");
+        browser.step(4);
+        c_abi.step(4);
+        let moved = c_abi.plan_latency();
+        assert!(
+            moved.0 > boot.0,
+            "{rate} Hz: the added inserts raise the plan latency ({} -> {})",
+            boot.0,
+            moved.0
+        );
+        assert_eq!(
+            browser_plan_latency(&mut browser),
+            moved,
+            "{rate} Hz: the browser reports the adopted plan's latency"
+        );
     }
 }

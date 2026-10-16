@@ -192,6 +192,11 @@ pub struct GraphCompileReport {
     /// by node ID (#1285 D2). A node absent here has input arrival 0. A successor's preparation
     /// passes this back as [`GraphBuiltinsCompileRequest::input_floors`].
     pub input_arrivals: Box<[(GraphNodeId, LatencySamples)]>,
+    /// The natural input arrival (the latest incoming arrival, before the floor) of every node
+    /// whose [`GraphBuiltinsCompileRequest::input_floors`] floor raised it, sorted by node ID
+    /// (#1323 D3). Its floored arrival is the node's row in [`Self::input_arrivals`]. Empty when no
+    /// floor raised any node: the plan then runs at its natural timing.
+    pub raised_arrivals: Box<[(GraphNodeId, LatencySamples)]>,
     /// The retained estimate, including the bank overlay and capped against the session limits.
     pub estimate: GraphResourceEstimate,
     /// The pre-bank estimate that participates in the semantic hash. Dispatch-independent by
@@ -15380,14 +15385,26 @@ mod tests {
                 .iter()
                 .map(|route| route.compensation_delay.0)
                 .collect();
-            (timing.output_latency.0, delays, timing.input_arrivals)
+            (
+                timing.output_latency.0,
+                delays,
+                timing.input_arrivals,
+                timing.raised_arrivals,
+            )
         };
         let natural = run(&[]);
         assert_eq!((natural.0, &natural.1[..]), (7, &[4, 0][..]));
         assert_eq!(natural.2.as_slice(), [(output.clone(), LatencySamples(7))]);
+        assert!(natural.3.is_empty(), "no floor raised a node");
         let floored = run(&[(output.clone(), 10)]);
         assert_eq!((floored.0, &floored.1[..]), (10, &[7, 3][..]));
         assert_eq!(floored.2.as_slice(), [(output.clone(), LatencySamples(10))]);
+        // #1323 D3: the raised node's natural arrival, beside its floored one.
+        assert_eq!(floored.3.as_slice(), [(output.clone(), LatencySamples(7))]);
+        assert!(
+            run(&[(output.clone(), 7)]).3.is_empty(),
+            "a floor equal to the natural arrival raises nothing"
+        );
         assert_eq!(
             run(&[(output.clone(), 5)]),
             natural,
