@@ -1785,10 +1785,17 @@ mod canonical_preparation {
             decibels
                 .iter()
                 .filter(|&&db| {
-                    let gain = builtins::checked_fader_gain(db).expect("in domain");
+                    // `black_box` on the input and both outputs: under `--release` LLVM
+                    // otherwise folds the two conversions across the guard.
+                    let gain = core::hint::black_box(
+                        builtins::checked_fader_gain(core::hint::black_box(db)).expect("in domain"),
+                    );
                     let pinned = {
                         let _pin = lane::CanonicalFpEnv::enter();
-                        builtins::checked_fader_gain(db).expect("in domain")
+                        core::hint::black_box(
+                            builtins::checked_fader_gain(core::hint::black_box(db))
+                                .expect("in domain"),
+                        )
                     };
                     gain.to_bits() != pinned.to_bits()
                 })
@@ -1804,10 +1811,11 @@ mod canonical_preparation {
             route_decibels
                 .iter()
                 .filter(|&&db| {
-                    let gain = math::db_to_gain_f32(core::hint::black_box(db));
+                    let gain =
+                        core::hint::black_box(math::db_to_gain_f32(core::hint::black_box(db)));
                     let pinned = {
                         let _pin = lane::CanonicalFpEnv::enter();
-                        math::db_to_gain_f32(core::hint::black_box(db))
+                        core::hint::black_box(math::db_to_gain_f32(core::hint::black_box(db)))
                     };
                     gain.to_bits() != pinned.to_bits()
                 })
@@ -1817,9 +1825,12 @@ mod canonical_preparation {
             routes_moved > 0,
             "the gate is vacuous: no fixture route gain converts differently under the hostile word"
         );
-        let offset = f64::from(VCA_DB);
-        let composed = session::vca_compose_db(VCA_MEMBER_DB, offset);
-        let rounded = under_hostile_fp_env(|| session::vca_compose_db(VCA_MEMBER_DB, offset));
+        let offset = core::hint::black_box(f64::from(VCA_DB));
+        let member = core::hint::black_box(VCA_MEMBER_DB);
+        let composed = core::hint::black_box(session::vca_compose_db(member, offset));
+        let rounded = core::hint::black_box(under_hostile_fp_env(|| {
+            session::vca_compose_db(core::hint::black_box(member), core::hint::black_box(offset))
+        }));
         assert_ne!(
             builtins::checked_fader_gain(composed).map(f32::to_bits),
             builtins::checked_fader_gain(rounded).map(f32::to_bits),

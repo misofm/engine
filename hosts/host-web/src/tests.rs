@@ -10386,7 +10386,14 @@ mod canonical_live {
     /// the caller's environment: remove the guard in the core's `SessionState::command`.
     #[test]
     fn a_live_fader_and_vca_move_under_a_hostile_caller_word_render_the_canonical_bits() {
-        let compose = || session::vca_effective_db(MEMBER_DB, [OFFSET_DB]);
+        // `black_box` on the inputs and outputs: under `--release` LLVM otherwise folds the
+        // composition at compile time, whatever the thread's word.
+        let compose = || {
+            core::hint::black_box(session::vca_effective_db(
+                core::hint::black_box(MEMBER_DB),
+                [core::hint::black_box(OFFSET_DB)],
+            ))
+        };
         let rounded = under_hostile_fp_env(compose);
         assert_ne!(
             builtins::checked_fader_gain(compose()).map(f32::to_bits),

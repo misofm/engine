@@ -5163,6 +5163,7 @@ impl PreparedBuiltinsSession {
         report: R,
     ) -> PreparedBuiltinsGraphArtifact<R> {
         // #1646 D2: the scalar oracle rebuilds the ramped fader from the prepared parameters here.
+        // Defensive for direct oracle callers; `into_graph_artifact_with_banks` already holds it.
         let _canonical = lane::CanonicalFpEnv::enter();
         let mut processors = core::mem::take(&mut self.processors);
         processors.append(&mut self.strip_bindings());
@@ -6366,10 +6367,14 @@ pub fn prepare_session_builtins(
     requests: &[MeterRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
-    let effective = controls::effective(
-        session.normalized_model(),
-        &controls::MonitorOverlay::default(),
-    );
+    // #1646 D2: the effective values are composed in the canonical floating-point environment.
+    let effective = {
+        let _canonical = lane::CanonicalFpEnv::enter();
+        controls::effective(
+            session.normalized_model(),
+            &controls::MonitorOverlay::default(),
+        )
+    };
     prepare_session_builtins_with_live_controls(session, &effective, requests, &[], caps)
 }
 

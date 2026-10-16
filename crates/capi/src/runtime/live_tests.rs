@@ -8121,7 +8121,14 @@ mod set_control {
         /// The fixture is not vacuous: the hostile word composes the pair to another `f32`, and
         /// that `f32` converts to another gain.
         fn assert_the_hostile_word_rounds_the_composition() {
-            let compose = || session::vca_effective_db(MEMBER_DB, [OFFSET_DB, 0.0]);
+            // `black_box` on the inputs and outputs: under `--release` LLVM otherwise folds the
+            // composition at compile time, whatever the thread's word.
+            let compose = || {
+                core::hint::black_box(session::vca_effective_db(
+                    core::hint::black_box(MEMBER_DB),
+                    [core::hint::black_box(OFFSET_DB), 0.0],
+                ))
+            };
             let canonical = compose();
             let rounded = under_hostile_fp_env(compose);
             assert_ne!(
