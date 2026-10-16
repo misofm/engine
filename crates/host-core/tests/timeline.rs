@@ -213,21 +213,21 @@ fn producer(sources: &mut SourceControlSet) -> &mut TimelineProducer {
         .expect("the set holds the timeline producer")
 }
 
-/// Push `command` to the source (through its control set) and to the timeline (through its
-/// producer directly).
+/// Seek the source and the timeline with one session seek (#1642 D1): `command`'s generation,
+/// its frame as the timeline sample (inside the source's region, so the source takes it too) and
+/// its anchor, if any.
 fn seek_both(sources: &mut SourceControlSet, command: SourceCommand) {
-    match command {
-        SourceCommand::Seek { generation, frame } => {
-            sources.seek(SOURCE.as_bytes(), generation.0, frame.0)
-        }
+    let (generation, frame, anchor) = match command {
+        SourceCommand::Seek { generation, frame } => (generation, frame, None),
         SourceCommand::SeekAt {
             generation,
             frame,
             anchor_sample,
-        } => sources.seek_at(SOURCE.as_bytes(), generation.0, frame.0, anchor_sample),
-    }
-    .expect("source seek");
-    producer(sources).try_seek(command).expect("timeline seek");
+        } => (generation, frame, Some(anchor_sample)),
+    };
+    sources
+        .seek_session(generation.0, frame.0, anchor)
+        .expect("session seek");
 }
 
 /// Render `blocks` blocks of `plan` (whose source-read clock leads its render clock by `offset`)
@@ -704,12 +704,18 @@ fn a_discontinuity_keeps_the_sources_and_the_timeline_in_step() {
 #[test]
 fn a_prime_advances_the_timeline_as_it_advances_a_source() {
     let quantum = QuantumFrames(QUANTUM as u32);
-    let (producer, mut source, _) = PcmSourceRing::prepare(PcmSourceRingConfig {
-        channel_count: 1,
-        quantum_frames: quantum,
-        frame_capacity: 8 * Q,
-        initial_generation: SourceGeneration(1),
-    })
+    // One session: the ring and the timeline share its published generation (#1642 B16-R2).
+    let word = source::PublishedGeneration::new(SourceGeneration(1));
+    let (producer, mut source, _) = PcmSourceRing::prepare_host_region(
+        PcmSourceRingConfig {
+            channel_count: 1,
+            quantum_frames: quantum,
+            frame_capacity: 8 * Q,
+            initial_generation: SourceGeneration(1),
+        },
+        SourceFrame(0),
+        word.clone(),
+    )
     .expect("ring");
     let mut host = producer.into_host_chunk_provider(engine::SampleRateHz(48_000));
     for start in (0..6 * Q).step_by(QUANTUM) {
@@ -725,7 +731,8 @@ fn a_prime_advances_the_timeline_as_it_advances_a_source() {
         .expect("source PCM");
     }
     let (mut timeline_producer, mut timeline, _) =
-        SourceTimeline::prepare(quantum, NonZeroUsize::new(4).expect("four")).expect("timeline");
+        SourceTimeline::prepare(quantum, NonZeroUsize::new(4).expect("four"), word)
+            .expect("timeline");
     // Two ordinary blocks.
     for sample in [0, Q] {
         source.begin_block_at(sample);

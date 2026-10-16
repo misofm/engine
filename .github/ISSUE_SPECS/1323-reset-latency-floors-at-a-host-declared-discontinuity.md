@@ -417,3 +417,14 @@ adoption, `EXACT`, with `SUPERSEDED` for those A folded in.
 **Measured.** `audit capi`: allocations 0, deallocations 0, syscalls 0, pcm_digest
 `4f52089e4a8cf83c` (unchanged; `tools/audit` not touched). C ABI gate 2: latency 486 -> 0 at
 48 kHz. No resource ceiling was re-pinned.
+
+## Amendment (root ruling B16-R9, batch 16b review, 2026-10-16)
+
+B15-R7's order ("#1643 calls it before its seek") is retired. A plain session seek (#1642,
+`SessionState::session_seek`) is a declared discontinuity: it runs this slice's declaration in the
+same call, through the same core path (`declare_discontinuity_serviced`), after every check and
+before any push; a refused seek declares nothing, and a refused declaration pushes nothing and
+returns its own error. An anchored session seek declares nothing (it keeps continuity: D2 publishes
+`Next`, before the anchor). No host and no SDK calls `declare_discontinuity` before a session seek.
+D1's duty is now: a host calls it at a stop, and before a seek of every source made with
+per-source seeks. B15-R7's browser export stays as it is.

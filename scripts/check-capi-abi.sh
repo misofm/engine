@@ -260,6 +260,8 @@ printf '%s\n' \
     miso_engine_v1_render_f32_planar \
     miso_engine_v1_service \
     miso_engine_v1_session_destroy \
+    miso_engine_v1_session_seek \
+    miso_engine_v1_session_seek_at \
     miso_engine_v1_source_seek \
     miso_engine_v1_source_seek_at \
     miso_engine_v1_source_seek_report \

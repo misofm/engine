@@ -5781,3 +5781,523 @@ fn the_c_abi_bounds_revisions_at_the_plan_gate_ceiling() {
         crate::ffi::test_session_destroy(session);
     }
 }
+
+/// #1642: the session seek through the C entry points. A two-source session at 48 kHz, quantum
+/// 128: track `eq0` on `fixture-source` (10,000 frames) and track `t2` on `short-source` (4,000
+/// frames), stateless, played on generation 1.
+mod session_seek {
+    use super::*;
+
+    const LONG: &[u8] = b"fixture-source";
+    const SHORT: &[u8] = b"short-source";
+    const Q: u64 = 128;
+
+    fn two_sources() -> session::SessionModel {
+        let mut model = stateless_session(48_000);
+        model.tracks.truncate(1);
+        model.routes.truncate(1);
+        model.sources[0].frames = 10_000;
+        let [
+            protocol::SessionEdit::UpsertSource { mut source },
+            protocol::SessionEdit::UpsertTrack { track },
+            protocol::SessionEdit::UpsertRoute { route },
+        ] = add_source_and_track(&model, "short-source", "t2")
+        else {
+            panic!("three upserts")
+        };
+        source.frames = 4_000;
+        model.sources.push(source);
+        model.tracks.push(track);
+        model.routes.push(route);
+        model
+    }
+
+    /// The C children of `model`, with `fixture-source` fed and rendered for four blocks.
+    struct Rig {
+        session: *mut crate::Session,
+        plan: *mut crate::Plan,
+        block: u64,
+    }
+
+    impl Rig {
+        fn new(model: &session::SessionModel) -> Self {
+            let document = session::canonical_session_json(model).expect("canonical");
+            let (session, plan) = boxed_c_children(&document);
+            let mut rig = Self {
+                session,
+                plan,
+                block: 0,
+            };
+            submit_block_c(session, LONG, 1, 0, 0, 48_000);
+            for _ in 0..4 {
+                submit_block_c(session, LONG, 1, rig.block + 1, 0, 48_000);
+                rig.render();
+            }
+            rig
+        }
+
+        /// Renders the next block; returns its output.
+        fn render(&mut self) -> Vec<f32> {
+            let output = render_c(self.plan, self.block);
+            self.block += 1;
+            output
+        }
+
+        /// The sample of the next block.
+        fn next(&self) -> u64 {
+            self.block * Q
+        }
+
+        fn timeline(&self, sample: u64) -> i64 {
+            crate::ffi::test_plan_timeline_at(self.plan, sample)
+        }
+
+        /// `(generation, first_sample, source_frame)` of `id`'s seek report.
+        fn landed(&self, id: &[u8]) -> (u64, u64, u64) {
+            let (generation, first, frame, _, _) = seek_report_c(self.session, id);
+            (generation, first, frame)
+        }
+
+        fn seek(&self, generation: u64, timeline_sample: u64) -> u32 {
+            crate::ffi::test_session_seek(self.session, generation, timeline_sample, None)
+        }
+
+        fn seek_at(&self, generation: u64, timeline_sample: u64, anchor: u64) -> u32 {
+            crate::ffi::test_session_seek(self.session, generation, timeline_sample, Some(anchor))
+        }
+
+        fn last_error(&self) -> Vec<u8> {
+            crate::ffi::test_last_error(self.session)
+        }
+
+        /// One quantum of `LONG`'s generation `generation` from source frame `frame`.
+        fn feed_long(&self, generation: u64, frame: u64) {
+            let (left, right) = continuity_block(frame / Q, 0);
+            submit_c_to(
+                self.session,
+                LONG,
+                generation,
+                frame,
+                48_000,
+                &left,
+                &right,
+                false,
+            );
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            crate::ffi::test_plan_destroy(self.plan);
+            crate::ffi::test_session_destroy(self.session);
+        }
+    }
+
+    /// Gate 1 up to its anchored seek: the rig after `session_seek(2, 6_000)` and the block that
+    /// applied it.
+    fn after_gate_one_plain() -> Rig {
+        let mut rig = Rig::new(&two_sources());
+        assert_eq!(rig.seek(2, 6_000), crate::RESULT_OK);
+        rig.feed_long(2, 6_000);
+        let sample = rig.next();
+        rig.render();
+        assert_eq!(rig.landed(LONG), (2, sample, 6_000));
+        assert_eq!(rig.landed(SHORT), (2, sample, 4_000), "clamped to its end");
+        assert_eq!(rig.timeline(sample), 6_000);
+        rig
+    }
+
+    /// Gate 1, both forms move everything at one block.
+    ///
+    /// Test value: red if the timeline and the sources apply the seek in different blocks, a
+    /// source is not clamped to its region, or the anchored form ignores its anchor.
+    #[test]
+    fn both_forms_move_the_timeline_and_every_source_at_one_block() {
+        let mut rig = after_gate_one_plain();
+        let anchor = rig.next() + 2 * Q;
+        assert_eq!(rig.seek_at(3, 1_000, anchor), crate::RESULT_OK);
+        // The plain seek applied at the block before these, at timeline 6,000.
+        for block in 1..=2 {
+            let sample = rig.next();
+            rig.render();
+            assert_eq!(rig.landed(LONG).0, 2, "held before the anchor");
+            assert_eq!(rig.landed(SHORT).0, 2, "held before the anchor");
+            assert_eq!(rig.timeline(sample), (6_000 + block * Q) as i64);
+        }
+        rig.feed_long(3, 1_000);
+        let sample = rig.next();
+        assert_eq!(sample, anchor);
+        rig.render();
+        assert_eq!(rig.landed(LONG), (3, anchor, 1_000));
+        assert_eq!(rig.landed(SHORT), (3, anchor, 1_000));
+        assert_eq!(rig.timeline(anchor), 1_000);
+    }
+
+    /// Gate 2, a stale generation changes nothing, under the source's rule and the session's
+    /// published generation alike.
+    ///
+    /// Test value: red if the generation check runs per consumer after earlier pushes, or if a
+    /// stale refusal pushes to any consumer (the short source and the timeline stay put).
+    #[test]
+    fn a_stale_generation_changes_nothing() {
+        let mut refused = after_gate_one_plain();
+        let mut twin = after_gate_one_plain();
+        assert_eq!(refused.seek(2, 0), crate::RESULT_INVALID_ARGUMENT);
+        assert_eq!(refused.last_error(), b"source.generation.stale");
+        let sample = refused.next();
+        refused.feed_long(2, 6_000 + Q);
+        twin.feed_long(2, 6_000 + Q);
+        let bits = |block: Vec<f32>| {
+            block
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(refused.render()), bits(twin.render()));
+        assert_eq!(refused.timeline(sample), twin.timeline(sample));
+        assert_eq!(refused.timeline(sample), (6_000 + Q) as i64);
+
+        // A per-source seek to 5 makes a session seek at 4 stale. Both the long source's own
+        // generation (5) and the session's published generation refuse it here, so this case
+        // does not tell the two rules apart; `a_removed_sources_generation_keeps_a_session_seek_stale`
+        // isolates the published generation.
+        assert_eq!(
+            crate::ffi::test_source_seek(refused.session, LONG, 5, 0),
+            crate::RESULT_OK
+        );
+        refused.render();
+        assert_eq!(refused.seek(4, 0), crate::RESULT_INVALID_ARGUMENT);
+        assert_eq!(refused.last_error(), b"source.generation.stale");
+        let sample = refused.next();
+        refused.render();
+        assert_eq!(refused.landed(SHORT).0, 2, "the refusal pushed nothing");
+        assert_eq!(refused.timeline(sample), (6_000 + 3 * Q) as i64);
+        assert_eq!(refused.seek(6, 0), crate::RESULT_OK);
+    }
+
+    /// Gate 2, the published generation alone (batch 16b review, MAJOR 1): a per-source seek of
+    /// the short source to 10, then a transaction that removes it, swapped in. No live producer
+    /// holds a generation above 1 now, so only the session's published generation (10) refuses a
+    /// session seek at 5; one at 11 is accepted.
+    ///
+    /// Test value: red if a session seek is checked only against the live producers' own
+    /// generations and not against the largest the session has published: a source removed at a
+    /// higher generation would let a lower one through.
+    #[test]
+    fn a_removed_sources_generation_keeps_a_session_seek_stale() {
+        let model = two_sources();
+        let mut rig = Rig::new(&model);
+        assert_eq!(
+            crate::ffi::test_source_seek(rig.session, SHORT, 10, 0),
+            crate::RESULT_OK
+        );
+        submit_block_c(rig.session, LONG, 1, rig.block + 1, 0, 48_000);
+        rig.render();
+        assert_eq!(rig.landed(SHORT).0, 10);
+        transact_c(
+            rig.session,
+            1,
+            model.revision,
+            &[
+                protocol::SessionEdit::RemoveRoute {
+                    route_id: model.routes[1].id.clone(),
+                },
+                protocol::SessionEdit::RemoveTrack {
+                    track_id: model.tracks[1].id.clone(),
+                },
+                protocol::SessionEdit::RemoveSource {
+                    source_id: model.sources[1].id.clone(),
+                },
+            ],
+        );
+        submit_block_c(rig.session, LONG, 1, rig.block + 1, 0, 48_000);
+        rig.render();
+        assert_eq!(
+            rig.landed(LONG).0,
+            1,
+            "the long source is still at generation 1"
+        );
+        assert_eq!(rig.seek(5, 0), crate::RESULT_INVALID_ARGUMENT);
+        assert_eq!(rig.last_error(), b"source.generation.stale");
+        let sample = rig.next();
+        rig.render();
+        assert_eq!(rig.landed(LONG).0, 1, "the refusal pushed nothing");
+        assert_eq!(
+            rig.timeline(sample),
+            sample as i64,
+            "the timeline did not move"
+        );
+        assert_eq!(rig.seek(11, 0), crate::RESULT_OK);
+    }
+
+    /// Gate 3, one full slot refuses all.
+    ///
+    /// Test value: red if any slot is pushed before every slot is checked: the partial seek the
+    /// acked-batch rule forbids.
+    #[test]
+    fn one_full_slot_refuses_every_consumer() {
+        let mut rig = Rig::new(&two_sources());
+        assert_eq!(
+            crate::ffi::test_source_seek(rig.session, LONG, 2, 640),
+            crate::RESULT_OK
+        );
+        assert_eq!(rig.seek(3, 2_000), crate::RESULT_BACKPRESSURE);
+        assert_eq!(rig.last_error(), b"source.seek.backpressure");
+        // The short source's slot (and the timeline's) stayed empty.
+        assert_eq!(
+            crate::ffi::test_source_seek(rig.session, SHORT, 3, 100),
+            crate::RESULT_OK
+        );
+        let sample = rig.next();
+        rig.render();
+        assert_eq!(rig.landed(LONG), (2, sample, 640));
+        assert_eq!(rig.landed(SHORT), (3, sample, 100));
+        assert_eq!(
+            rig.timeline(sample),
+            sample as i64,
+            "the timeline did not move"
+        );
+    }
+
+    /// Gate 4, a session seek while a structural candidate waits for its swap.
+    ///
+    /// Test value: red if the call seeks the running plan's producers instead of the newest
+    /// committed session's: the added source would not be sought, and the carried source's seek
+    /// would land in a ring the candidate does not hold.
+    #[test]
+    fn a_seek_before_the_swap_reaches_the_carried_and_the_added_source_and_the_timeline() {
+        let mut model = stateless_session(48_000);
+        model.tracks.truncate(1);
+        model.routes.truncate(1);
+        let mut rig = Rig::new(&model);
+        transact_c(
+            rig.session,
+            1,
+            42,
+            &add_source_and_track(&model, "added", "t2"),
+        );
+        assert_eq!(rig.seek(2, 3_000), crate::RESULT_OK);
+        rig.feed_long(2, 3_000);
+        let swap = rig.next();
+        rig.render();
+        assert_eq!(
+            crate::ffi::test_plan_carry_counts(rig.plan),
+            (1, 0),
+            "the swap block carried the source"
+        );
+        assert_eq!(rig.landed(LONG), (2, swap, 3_000));
+        assert_eq!(rig.landed(b"added"), (2, swap, 3_000));
+        assert_eq!(rig.timeline(swap), 3_000);
+    }
+
+    /// Gate 5, a per-source seek leaves the timeline where it is.
+    ///
+    /// Test value: red if a per-source seek moves the playhead.
+    #[test]
+    fn a_source_seek_leaves_the_timeline() {
+        let mut rig = Rig::new(&two_sources());
+        assert_eq!(
+            crate::ffi::test_source_seek(rig.session, LONG, 2, 2_048),
+            crate::RESULT_OK
+        );
+        let sample = rig.next();
+        rig.render();
+        assert_eq!(rig.landed(LONG), (2, sample, 2_048));
+        assert_eq!(rig.landed(SHORT).0, 1);
+        assert_eq!(rig.timeline(sample), sample as i64);
+    }
+}
+
+/// Root ruling B16-R9 on the C ABI: a plain session seek declares the discontinuity in the same
+/// call, after its check; an anchored one declares nothing. Each case starts from #1285's floors:
+/// the limited session, its removal transaction committed and swapped, so the running plan runs
+/// behind its natural timing and a declaration has a successor to publish.
+mod session_seek_declares {
+    use super::*;
+
+    const SOURCE: &[u8] = b"fixture-source";
+    const Q: u64 = 128;
+
+    /// The floored C children: the session, the plan, the next block and the floored latency.
+    struct Floored {
+        session: *mut crate::Session,
+        plan: *mut crate::Plan,
+        block: u64,
+        floored: u64,
+    }
+
+    impl Floored {
+        /// With `swap` false the removal's candidate still waits for its block.
+        fn new(swap: bool) -> Self {
+            let (model, edits) = limited_session();
+            let document = session::canonical_session_json(&model).expect("canonical");
+            let (session, plan) = boxed_c_children(&document);
+            let floored = crate::ffi::test_plan_latency(plan);
+            assert!(floored > 0, "the limiter delays the plan");
+            let (left, right) = continuity_block(0, 0);
+            submit_c(session, 1, 0, 48_000, &left, &right, false);
+            feed_and_render_c(session, plan, 48_000, 0, 6);
+            assert_eq!(
+                command_c(session, &transaction_at(1, 42, &edits)).0,
+                crate::RESULT_OK
+            );
+            let mut block = 6;
+            if swap {
+                feed_and_render_c(session, plan, 48_000, 6, 4);
+                block = 10;
+                assert_eq!(crate::ffi::test_plan_latency(plan), floored, "#1285 floors");
+            }
+            Self {
+                session,
+                plan,
+                block,
+                floored,
+            }
+        }
+
+        fn epoch(&self) -> u64 {
+            crate::ffi::test_newest_plan_epoch(self.session)
+        }
+
+        fn latency(&self) -> u64 {
+            crate::ffi::test_plan_latency(self.plan)
+        }
+
+        /// Feeds generation `generation` from `frame` and renders `blocks` blocks.
+        fn play(&mut self, generation: u64, frame: u64, blocks: u64) {
+            for step in 0..blocks {
+                let (left, right) = continuity_block(self.block + 1, 0);
+                submit_c(
+                    self.session,
+                    generation,
+                    frame + step * Q,
+                    48_000,
+                    &left,
+                    &right,
+                    false,
+                );
+                render_c(self.plan, self.block);
+                self.block += 1;
+            }
+        }
+    }
+
+    impl Drop for Floored {
+        fn drop(&mut self) {
+            crate::ffi::test_plan_destroy(self.plan);
+            crate::ffi::test_session_destroy(self.session);
+        }
+    }
+
+    /// Gate 1: a refused plain session seek publishes nothing.
+    ///
+    /// Test value: red if the seek declares before (or without) its check: the stale seek would
+    /// publish the floorless successor, and the epoch and the latency would move.
+    #[test]
+    fn a_refused_plain_session_seek_publishes_nothing() {
+        let mut rig = Floored::new(true);
+        let epoch = rig.epoch();
+        assert_eq!(
+            crate::ffi::test_session_seek(rig.session, 1, 0, None),
+            crate::RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            crate::ffi::test_last_error(rig.session),
+            b"source.generation.stale"
+        );
+        assert_eq!(rig.epoch(), epoch, "nothing is published");
+        rig.play(1, (rig.block + 1) * Q, 2);
+        assert_eq!(rig.latency(), rig.floored, "the floors stay");
+        assert_eq!(seek_report_c(rig.session, SOURCE).0, 1, "nothing is pushed");
+    }
+
+    /// Gate 2: an accepted plain session seek publishes exactly one discontinuity successor and its
+    /// seek applies, at the next block; also while the removal's candidate still waits, which the
+    /// declaration supersedes before the seek is pushed to the same producers.
+    ///
+    /// Test value: red if the plain seek does not declare (the latency stays floored), publishes
+    /// more than one plan, or pushes to a set other than the one the successor carries (the seek
+    /// would not land, or the debug assertion of the re-check fires).
+    #[test]
+    fn an_accepted_plain_session_seek_publishes_one_successor_and_applies() {
+        for swap in [true, false] {
+            let mut rig = Floored::new(swap);
+            let epoch = rig.epoch();
+            assert_eq!(
+                crate::ffi::test_session_seek(rig.session, 2, 1_280, None),
+                crate::RESULT_OK,
+                "swap {swap}"
+            );
+            assert_eq!(rig.epoch(), epoch + 1, "swap {swap}: one successor");
+            let sample = rig.block * Q;
+            rig.play(2, 1_280, 3);
+            let (generation, first, frame, _, _) = seek_report_c(rig.session, SOURCE);
+            assert_eq!(
+                (generation, first, frame),
+                (2, sample, 1_280),
+                "swap {swap}"
+            );
+            assert!(rig.latency() < rig.floored, "swap {swap}: the floors reset");
+            assert_eq!(
+                rig.epoch(),
+                epoch + 1,
+                "swap {swap}: nothing else published"
+            );
+        }
+    }
+
+    /// Gate 1b: a plain session seek whose declaration is refused pushes nothing and returns the
+    /// declaration's own error; the same generation is accepted once the fault clears.
+    ///
+    /// Test value: red if the seek ignores its declaration's error (`let _ =`): the refused
+    /// declaration would be followed by a push, the report would carry generation 2 and the seek
+    /// would return OK.
+    #[test]
+    fn a_refused_declaration_pushes_nothing_and_leaves_the_generation_free() {
+        use crate::runtime::TestStructuralFaultPhase::BeforeProtocolCommit;
+        let mut rig = Floored::new(true);
+        let epoch = rig.epoch();
+        crate::ffi::test_set_structural_faults(rig.session, [Some(BeforeProtocolCommit), None]);
+        assert_eq!(
+            crate::ffi::test_session_seek(rig.session, 2, 1_280, None),
+            crate::RESULT_BACKPRESSURE,
+            "the declaration's refusal is returned"
+        );
+        assert_eq!(rig.epoch(), epoch, "nothing is published");
+        rig.play(1, (rig.block + 1) * Q, 2);
+        assert_eq!(rig.latency(), rig.floored, "the floors stay");
+        assert_eq!(seek_report_c(rig.session, SOURCE).0, 1, "nothing is pushed");
+        // The fault is spent: the same generation is not burned by the refused attempt.
+        assert_eq!(
+            crate::ffi::test_session_seek(rig.session, 2, 1_280, None),
+            crate::RESULT_OK
+        );
+        assert_eq!(rig.epoch(), epoch + 1, "one successor");
+        let sample = rig.block * Q;
+        rig.play(2, 1_280, 3);
+        let (generation, first, frame, _, _) = seek_report_c(rig.session, SOURCE);
+        assert_eq!((generation, first, frame), (2, sample, 1_280));
+    }
+
+    /// Gate 3: an anchored session seek publishes no successor; it applies at its anchor and the
+    /// floors stay.
+    ///
+    /// Test value: red if the anchored form declares (the successor would publish, the epoch
+    /// would move and the latency drop before the anchor).
+    #[test]
+    fn an_anchored_session_seek_publishes_no_successor() {
+        let mut rig = Floored::new(true);
+        let epoch = rig.epoch();
+        let anchor = (rig.block + 2) * Q;
+        assert_eq!(
+            crate::ffi::test_session_seek(rig.session, 2, 1_280, Some(anchor)),
+            crate::RESULT_OK
+        );
+        assert_eq!(rig.epoch(), epoch, "nothing is published");
+        rig.play(2, 1_280, 4);
+        let (generation, first, frame, _, _) = seek_report_c(rig.session, SOURCE);
+        assert_eq!((generation, first, frame), (2, anchor, 1_280));
+        assert_eq!(rig.latency(), rig.floored, "the floors stay");
+        assert_eq!(rig.epoch(), epoch);
+    }
+}

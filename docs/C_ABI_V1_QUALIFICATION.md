@@ -166,7 +166,8 @@ reclaims the plans render has retired and brings the provider epochs up to rende
 provider's counters (the controller's telemetry counters today), stages the render observation,
 and refreshes the counters again so a record that staging coalesced or dropped is counted in the
 same call. Every other session control call (`source_submit_planar_f32`, `source_seek`,
-`source_seek_at`, `submit_command`, `dequeue_event`) that passes its argument checks runs the same
+`source_seek_at`, `session_seek` and `session_seek_at` (#1642), `submit_command`, `dequeue_event`)
+that passes its argument checks runs the same
 step first, in place of the parts each ran before; a call refused for its arguments (a null
 `source_id`, a bad struct size, an invalid lane, an empty request) returns before the step. Before
 #1348 only `submit_command` refreshed the counters and the source
@@ -217,6 +218,53 @@ untouched. The frozen exported set is now 19 `miso_engine_v1_*` definitions (wit
 (generation 0), an unknown source and a wrong size, `header_smoke.cpp` pins the size, every field
 offset and the signature, and the capi runtime tests cover a plain seek, a late anchored seek, a
 scrub-then-align across a transaction, a carried and an added ring, and the two counters.
+
+A host moves the playhead with one call, `miso_engine_v1_session_seek(session, g, T)` and its
+anchored form `miso_engine_v1_session_seek_at(session, g, T, A)` (#1642), an in-place V1
+amendment: two new exported symbols, announced by `MISO_ENGINE_V1_FEATURE_SESSION_SEEK` (bit 10,
+1024) in the capability report, whose feature mask grows to 2047; no struct, size or `ABI_VERSION`
+changes. The timeline is the session's playhead: it starts at 0, advances one quantum per render
+and stored automation follows it (#1058). The call moves it and every source of the newest
+committed session (a pending candidate's set while a swap waits, so a source the candidate adds is
+sought too) in one step, all or nothing: the timeline to `T`, each source to `min(T, its frames)`;
+the host then submits generation `g` from each source's frame. `g` must be above every generation
+the session has used (one above the largest the host has used is always valid). It checks every
+consumer's slot before it pushes to any, pushes every command unpublished and then publishes `g`
+once to the session's published-generation word, which render loads once per block entry and
+at or below which alone a consumer takes a command; so every consumer takes the seek at the same block
+entry or none does, and a held-back command keeps its slot, so no ack precedes a drop. Results:
+`OK`; `INVALID_ARGUMENT` for `g = 0` (`source.generation.zero`), a `g` not above the session's
+published generation or a consumer's (`source.generation.stale`), an unaligned anchor
+(`source.seek.anchor_unaligned`) or a `T` over the timeline limit
+(`source.seek.frame_out_of_range`); `BACKPRESSURE` with `source.seek.backpressure` while any slot
+holds a seek; the source seek's mapping otherwise (`INVALID_ARGUMENT` with `source.ring.vacated`,
+`INTERNAL` with `capi.source.epoch` or `source.internal`). The anchored form takes the anchor of
+`miso_engine_v1_source_seek_at`. A per-source seek leaves the timeline where it is.
+
+A plain session seek is a declared discontinuity; the engine declares it in the same call, and a
+refused seek declares nothing (root ruling B16-R9). `control_plane::SessionState::session_seek`,
+the one function behind both hosts, runs the service step, checks every consumer
+(`SourceControlSet::check_session_seek`), declares the discontinuity through the core path of
+`miso_engine_v1_declare_discontinuity` (#1323, all or nothing), then pushes and publishes. A refused
+check declares nothing and pushes nothing; a refused declaration pushes nothing and returns its own
+result and diagnostic, as `miso_engine_v1_declare_discontinuity` returns them (`COMPILE_REJECTED`,
+`BACKPRESSURE` or `INTERNAL`). A declaration that supersedes a waiting replacement moves every
+producer the check ran on into the successor, so the push reaches the producers it checked; a
+refusal of that push is an engine invariant (`INTERNAL`, `source.internal`). An anchored session
+seek keeps continuity: it declares nothing, because it is the loop and exact-start form, and a
+declaration publishes its successor at the next block, before the anchor, which would put the
+effects at rest and drop the compensation lines while the old pass still plays. A host that wants
+the floors reset declares at a stop. A seek of every source made with per-source seeks is still the
+host's own call, so `miso_engine_v1_declare_discontinuity` keeps its duty for that case and for a
+stop. No host or SDK calls it before a session seek (this retires B15-R7's order). The frozen
+exported set is now 21 `miso_engine_v1_*` definitions; `abi_smoke.c` checks the bit against the
+queried mask and calls both symbols with a null session for `INVALID_ARGUMENT`, `header_smoke.cpp`
+pins the bit inside the mask and both signatures, and `audit capi` runs a session seek (which
+declares the discontinuity itself; on the audit session it publishes nothing) outside its render
+scope with 0 violations. The gates: `capi` `runtime::tests::session_seek_declares` (a refused plain
+seek publishes nothing; an accepted one publishes exactly one successor and applies, also across a
+waiting replacement; an anchored one publishes none) and the parity row
+`control_parity::a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_hosts`.
 
 The seek contract in the header (#1317, decision 15 D15-12) states, from the code, the source-read
 clock and its origin (0 at compile, one quantum per render call, continued by a swapped-in plan),
@@ -996,8 +1044,10 @@ that window is admitted against the plan that renders.
   service step first. The browser's `miso_engine_web_v1_declare_discontinuity(handle)` forwards to
   the same control-plane function, `control_plane::SessionState::declare_discontinuity` (root ruling
   B15-R7); the browser SDK surface is #1296's.
-- **Duty.** A host calls it at a stop, and before a seek of every source: the next block it renders
-  need not continue the previous output.
+- **Duty.** A host calls it at a stop, and before a seek of every source made with per-source
+  seeks: the next block it renders need not continue the previous output. A plain session seek
+  (#1642) declares it in the same call, so a host does not call it before one; an anchored session
+  seek keeps continuity (root ruling B16-R9).
 - **Behavior.** If the newest plan (the waiting replacement, else the running plan) runs behind its
   natural timing (a floor raised some node's input arrival above its natural one; the inventory
   records each raised node's natural arrival beside its floored one), the committed model is

@@ -134,6 +134,12 @@ export class OfflineEngine {
   #controlQueue: ControlTransactionQueue | undefined;
   readonly #responseLimits: TrackResponseSubscriptionLimits | undefined;
   readonly #spectrumLimits: SpectrumSubscriptionLimits | undefined;
+  /**
+   * The largest generation a successful `seek`, `seekSource` or `submitSource` of this object has
+   * passed to the engine. Every source and the timeline start at generation 1. It is the only
+   * state `seek` adds: the core refuses a stale generation, so this only picks the next one.
+   */
+  #highestGeneration = 1n;
 
   private constructor(
     asset: MisoEngineAsset,
@@ -423,7 +429,9 @@ export class OfflineEngine {
     readonly planes: readonly Float32Array[];
     readonly endOfRegion: boolean;
   }): EngineCallResult {
-    return this.#boundary.submitSource(request);
+    const result = this.#boundary.submitSource(request);
+    if (result.ok) this.#noteGeneration(request.generation);
+    return result;
   }
 
   seekSource(request: {
@@ -431,7 +439,33 @@ export class OfflineEngine {
     readonly generation: bigint;
     readonly sourceFrame: bigint;
   }): EngineCallResult {
-    return this.#boundary.seekSource(request);
+    const result = this.#boundary.seekSource(request);
+    if (result.ok) this.#noteGeneration(request.generation);
+    return result;
+  }
+
+  /**
+   * Seek the timeline and every source to `frame` under one new generation, all or nothing, and
+   * resolve with the generation used. Every consumer applies the seek at the next block; the
+   * caller then submits each source's PCM from `min(frame, source frames)` under that generation.
+   * Until it does, a source underruns. The generation is `options.generation`, else one above the
+   * largest this object has passed through `seek`, `seekSource` or `submitSource`. A stale
+   * generation is refused (`source.generation.stale`, result `invalidArgument`) and nothing
+   * changes. The engine declares the discontinuity in the same call (the floors a rebuild kept
+   * reset), and a refused seek declares nothing, as on the C ABI.
+   */
+  seek(
+    frame: bigint,
+    options?: { readonly generation?: bigint },
+  ): { readonly generation: bigint } & EngineCallResult {
+    const generation = options?.generation ?? this.#highestGeneration + 1n;
+    const result = this.#boundary.sessionSeek({ generation, frame });
+    if (result.ok) this.#noteGeneration(generation);
+    return Object.freeze({ generation, ...result });
+  }
+
+  #noteGeneration(generation: bigint): void {
+    if (generation > this.#highestGeneration) this.#highestGeneration = generation;
   }
 
   /** Take or release the decimated meter lease. */

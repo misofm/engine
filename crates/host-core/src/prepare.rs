@@ -48,8 +48,8 @@ use session::{
     parse_session_json,
 };
 use source::{
-    PcmSourceRing, PcmSourceRingConfig, SourceFrame, SourceGeneration, SourceGraphSource,
-    SourceGraphTrackMapping, SourceTimeline, prepare_graph_source_set,
+    PcmSourceRing, PcmSourceRingConfig, PublishedGeneration, SourceFrame, SourceGeneration,
+    SourceGraphSource, SourceGraphTrackMapping, SourceTimeline, prepare_session_graph_source_set,
 };
 use std::collections::BTreeMap;
 
@@ -779,6 +779,11 @@ pub struct PlanStateInventory {
     /// predecessor's for an ordinary successor, 0 for a first plan and at a declared
     /// discontinuity.
     source_read_offset: u64,
+    /// The session's published seek generation (#1642 B16-R2): the one word every source
+    /// producer, the timeline producer and every plan's source-set driver of the session share. A
+    /// first plan allocates it; a successor takes its predecessor's from this row, so every plan of
+    /// one session, and every consumer it carries or creates, is fenced by the same object.
+    published_generation: PublishedGeneration,
 }
 
 /// One strip stage of a prepared plan, owner key `(strip ID, PostFader)` or `(strip ID,
@@ -1051,6 +1056,8 @@ impl PlanStateInventory {
             raised_arrivals: Box::default(),
             // #1396 D2: no read-ahead.
             source_read_offset: 0,
+            // #1642 B16-R2: the same session.
+            published_generation: self.published_generation.clone(),
         }
     }
 
@@ -1080,6 +1087,8 @@ impl PlanStateInventory {
             input_floors: self.input_floors.clone(),
             raised_arrivals: self.raised_arrivals.clone(),
             source_read_offset: 0,
+            // A fresh reference: a session of its own.
+            published_generation: PublishedGeneration::new(SourceGeneration(1)),
         }
     }
 
@@ -1116,7 +1125,8 @@ impl PlanStateInventory {
         strip_stage_row(&self.strip_stages, id, owner)
     }
 
-    /// Heap bytes this inventory retains: its row tables and their ID text.
+    /// Heap bytes this inventory retains: its row tables, their ID text and the session's
+    /// published seek generation (#1642 B16-R2).
     #[must_use]
     pub fn retained_bytes(&self) -> u64 {
         let ids: usize = self.sources.iter().map(|row| row.id.len()).sum::<usize>()
@@ -1178,6 +1188,9 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
                 + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.input_floors)
                 + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.raised_arrivals)
+                // #1642 B16-R2: the session's published generation, charged where it is held
+                // across plans (every inventory of the session holds the one word).
+                + PublishedGeneration::retained_bytes()
                 + ids,
         )
         .unwrap_or(u64::MAX)
@@ -2219,6 +2232,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     graph_sources
         .try_reserve_exact(compiled.source_count())
         .map_err(|_| resource("host.resource.allocation"))?;
+    // #1642 B16-R2: the session's published seek generation. A first plan allocates it here, on
+    // the control thread; a successor shares its predecessor's, so every plan of the session and
+    // every producer feeding it publishes to, and every driver loads, the same word.
+    let published_generation = successor.map_or_else(
+        || PublishedGeneration::new(SourceGeneration(1)),
+        |base| base.inventory.published_generation.clone(),
+    );
     let mut builder = ControlSourceBuilder::with_capacity(source_id_bytes, compiled.source_count())
         .map_err(|()| resource("host.resource.allocation"))?;
     // Issue #1272 D3: the predecessor's committed source declarations, by ID.
@@ -2273,9 +2293,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             graph_sources.push(SourceGraphSource::vacant(u32::from(source.channels)));
             carried_sources.push((index, predecessor_index));
         } else {
-            let (producer, consumer, resources) =
-                PcmSourceRing::prepare_host_region(ring, SourceFrame(0))
-                    .map_err(|_| resource("host.source.prepare"))?;
+            let (producer, consumer, resources) = PcmSourceRing::prepare_host_region(
+                ring,
+                SourceFrame(0),
+                published_generation.clone(),
+            )
+            .map_err(|_| resource("host.source.prepare"))?;
             builder.push(
                 source.id.as_str(),
                 compiled.sample_rate().0,
@@ -2474,7 +2497,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(|_| resource("host.resource.arithmetic"))?,
         )
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    let mut sources = builder.finish();
+    let mut sources = builder.finish(published_generation.clone());
 
     // Source semantics: tracks only.
     let mappings = model
@@ -2942,8 +2965,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let timeline = if timeline_carries {
         // D3, D7: a vacant timeline owns only its history; the command queue its carry brings is
         // counted with the carried source overhead, as a carried ring's is.
-        let (consumer, report) = SourceTimeline::prepare_vacant(quantum, history_blocks)
-            .map_err(|_| resource("host.source.prepare"))?;
+        let (consumer, report) =
+            SourceTimeline::prepare_vacant(quantum, history_blocks, published_generation.clone())
+                .map_err(|_| resource("host.source.prepare"))?;
         carried_total_bytes = carried_total_bytes
             .checked_add(report.command_queue_bytes)
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
@@ -2954,14 +2978,20 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             carried_largest_bytes.max(report.command_queue_largest_allocation_bytes);
         consumer
     } else {
-        let (producer, consumer, _) = SourceTimeline::prepare(quantum, history_blocks)
-            .map_err(|_| resource("host.source.prepare"))?;
+        let (producer, consumer, _) =
+            SourceTimeline::prepare(quantum, history_blocks, published_generation.clone())
+                .map_err(|_| resource("host.source.prepare"))?;
         sources.set_timeline(producer);
         consumer
     };
-    let source_set =
-        prepare_graph_source_set(artifact.envelope(), graph_sources, timeline, mappings)
-            .map_err(|_| graph_failure("host.source.graph.prepare"))?;
+    let source_set = prepare_session_graph_source_set(
+        artifact.envelope(),
+        graph_sources,
+        timeline,
+        published_generation.clone(),
+        mappings,
+    )
+    .map_err(|_| graph_failure("host.source.graph.prepare"))?;
     let source_resources = source_set.resource_report();
     // Issue #1272 D4: a plan's source caps count the rings it allocated plus the rings it will
     // carry, so the active plan never exceeds them after the swap.
@@ -3507,6 +3537,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         input_floors,
         raised_arrivals,
         source_read_offset,
+        published_generation: published_generation.clone(),
     };
     let report = HostPrepareReport {
         sample_rate_hz: compiled.sample_rate().0,
@@ -6163,6 +6194,7 @@ mod tests {
             raised_arrivals: Box::default(),
             // #1396 D2: no read-ahead.
             source_read_offset: 0,
+            published_generation: source::PublishedGeneration::new(source::SourceGeneration(1)),
         }
     }
 

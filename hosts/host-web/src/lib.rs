@@ -35,8 +35,8 @@ use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
 use builtins_compiler::MeterConsumer;
 use control_plane::{
     CompileFailure, ControlAdapter, ControlLimits, ObservationChange, ObservationKeyError,
-    ObservationKeyRef, ObservationRefusal, PlanQueries, PlanResources, PlanState, SessionState,
-    SourceFailure,
+    ObservationKeyRef, ObservationRefusal, PlanQueries, PlanResources, PlanState,
+    SessionSeekFailure, SessionState, SourceFailure,
 };
 use effect_contract::{ObservationCost, ObservationDescriptor};
 use engine::realtime::{
@@ -1681,9 +1681,12 @@ impl ReadyOwnership {
         analysis: Option<&mut SpectrumAnalysis>,
         applied_at_sample: u64,
     ) -> Result<usize, control_plane::CommandError> {
-        self.run_control(analysis, applied_at_sample, |control| {
-            control.command(request, output_capacity)
-        })
+        self.run_control(
+            analysis,
+            applied_at_sample,
+            control_plane::CommandError::Backpressure,
+            |control| control.command(request, output_capacity),
+        )
     }
 
     /// Declare a discontinuity through the control plane (#1323), the function the C ABI's
@@ -1694,24 +1697,53 @@ impl ReadyOwnership {
         analysis: Option<&mut SpectrumAnalysis>,
         applied_at_sample: u64,
     ) -> Result<(), control_plane::CommandError> {
-        self.run_control(analysis, applied_at_sample, |control| {
-            control.declare_discontinuity().map(|()| 0)
-        })
-        .map(|_| ())
+        self.run_control(
+            analysis,
+            applied_at_sample,
+            control_plane::CommandError::Backpressure,
+            WebSession::declare_discontinuity,
+        )
     }
 
-    /// Run one control-plane call that may publish a replacement plan (#1290a, #1323): reclaim
-    /// first, check the room for the plan's tables, run `call`, and keep the tables of a plan it
-    /// published for its adoption block.
-    fn run_control(
+    /// Seek the session through the control plane (#1643 D1): `SessionState::session_seek`, the
+    /// call the C ABI's `miso_engine_v1_session_seek` and `_session_seek_at` run. The plain form
+    /// declares the discontinuity in the same call (root ruling B16-R9), so a plan it publishes
+    /// is kept and counted as [`Self::declare_discontinuity`] keeps one; the anchored form
+    /// declares nothing and so publishes nothing.
+    fn session_seek(
         &mut self,
         analysis: Option<&mut SpectrumAnalysis>,
         applied_at_sample: u64,
-        call: impl FnOnce(&mut WebSession) -> Result<usize, control_plane::CommandError>,
-    ) -> Result<usize, control_plane::CommandError> {
+        generation: u64,
+        timeline_frame: u64,
+        anchor_sample: Option<u64>,
+    ) -> Result<(), SessionSeekFailure> {
+        if anchor_sample.is_some() {
+            return self
+                .control
+                .session_seek(generation, timeline_frame, anchor_sample);
+        }
+        self.run_control(
+            analysis,
+            applied_at_sample,
+            SessionSeekFailure::Declaration(control_plane::CommandError::Backpressure),
+            |control| control.session_seek(generation, timeline_frame, None),
+        )
+    }
+
+    /// Run one control-plane call that may publish a replacement plan (#1290a, #1323): reclaim
+    /// first, check the room for the plan's tables (refusing with `full` when there is none, with
+    /// nothing run), run `call`, and keep the tables of a plan it published for its adoption block.
+    fn run_control<T, E>(
+        &mut self,
+        analysis: Option<&mut SpectrumAnalysis>,
+        applied_at_sample: u64,
+        full: E,
+        call: impl FnOnce(&mut WebSession) -> Result<T, E>,
+    ) -> Result<T, E> {
         self.reclaim_shapes(analysis);
         if self.pending_shapes.len() == self.pending_shapes.capacity() {
-            return Err(control_plane::CommandError::Backpressure);
+            return Err(full);
         }
         let before = self.control.newest_plan_epoch();
         let result = call(&mut self.control);
@@ -2462,6 +2494,35 @@ impl AudioWorkletEngineHost {
         self.plan.as_ref().map(|plan| plan.owner().active_epoch().0)
     }
 
+    /// Whether no seek waits in a command slot of the newest committed session's timeline and
+    /// sources (batch 16b review, MINOR f): a session seek one above the published generation
+    /// passes its check, which a full slot refuses. `None` for a host with no control half. It
+    /// shows a stray push on a host that cannot render the block that would empty the slot.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn session_seek_slots_empty_for_test(&self) -> Option<bool> {
+        let control = &self.ready.as_ref()?.control;
+        let providers = control
+            .test_pending_providers()
+            .last()
+            .unwrap_or_else(|| control.test_providers());
+        let sources = providers.test_sources();
+        let next = sources.published_generation().checked_add(1)?;
+        Some(sources.check_session_seek(next, 0, None).is_ok())
+    }
+
+    /// The session timeline's sample at `source_read_sample` in the plan that renders (#1641's
+    /// test reader, #1643 gates); `None` for a host with no plan, a plan with no timeline, or a
+    /// sample the reader has no record for. Between render calls only.
+    #[cfg(feature = "test-support")]
+    pub fn timeline_at_for_test(&mut self, source_read_sample: u64) -> Option<i64> {
+        let plan = self.plan.as_mut()?;
+        host_core::test_only_timeline_at(
+            plan.test_owner_mut().active_plan_mut(),
+            source_read_sample,
+        )
+    }
+
     /// Render one block through the plan owner at `absolute_sample` rather than the host's clock,
     /// and nothing else (#1398 gate 1b); `false` when the owner refused it or the host is not
     /// ready. A mistimed block adopts a published successor before the owner checks its time, and
@@ -2546,7 +2607,9 @@ impl AudioWorkletEngineHost {
 
     /// Declare a discontinuity (#1323): the next block this host renders need not continue the
     /// previous output, because the page has stopped or is about to seek every source. The page
-    /// calls it at a stop and before a seek of every source. It runs the control plane's
+    /// calls it at a stop and before a seek of every source made with per-source seeks (a plain
+    /// [`Self::session_seek`] declares it in the same call, root ruling B16-R9). It runs the
+    /// control plane's
     /// `SessionState::declare_discontinuity`, the function the C ABI's
     /// `miso_engine_v1_declare_discontinuity` runs: if the newest plan runs behind its natural
     /// timing (a latency floor of a structural transaction raised it, #1285), the committed
@@ -3673,6 +3736,54 @@ impl AudioWorkletEngineHost {
             Err(failure) => source_failure_result(failure),
         };
         self.record(code)
+    }
+
+    /// Seek the timeline and every source of the newest committed session to timeline sample
+    /// `timeline_frame` under one new `generation`, all or nothing (#1643 D1).
+    ///
+    /// It runs the control plane's `SessionState::session_seek`, the call the C ABI's
+    /// `miso_engine_v1_session_seek` and `_session_seek_at` run, after its service step, so it is
+    /// a control-side call (the message handler, never `process()`). With `anchor_sample`, every
+    /// consumer applies the seek in the block that starts there. This adapter holds no seek
+    /// logic, and it never prepares the plan's consumer: every consumer observes the seek through
+    /// its command queue at the next block, the timeline included. A host that is not ready
+    /// refuses with [`RESULT_REFUSED_LIFECYCLE`] and changes nothing; the core's refusals map
+    /// through `source_failure_result` (a stale generation or an anchor that is not a quantum
+    /// multiple is [`RESULT_INVALID_ARGUMENT`], one full slot [`RESULT_BACKPRESSURE`]). The plain
+    /// form declares the discontinuity in the same call (root ruling B16-R9): a plan it publishes
+    /// is kept and counted as [`Self::declare_discontinuity`]'s, and a refused declaration
+    /// reports as that call's does, with nothing pushed. The anchored form declares nothing.
+    pub fn session_seek(
+        &mut self,
+        analysis: Option<&mut SpectrumAnalysis>,
+        generation: u64,
+        timeline_frame: u64,
+        anchor_sample: Option<u64>,
+    ) -> u32 {
+        self.control_response = ControlResponse::None;
+        if self.status.state != STATE_READY {
+            return self.record(RESULT_REFUSED_LIFECYCLE);
+        }
+        let applied_at_sample = self.status.next_absolute_sample;
+        let Some(ready) = self.ready.as_mut() else {
+            return self.record(RESULT_REFUSED_LIFECYCLE);
+        };
+        match ready.session_seek(
+            analysis,
+            applied_at_sample,
+            generation,
+            timeline_frame,
+            anchor_sample,
+        ) {
+            Ok(()) => self.record(RESULT_OK),
+            Err(SessionSeekFailure::Seek(failure)) => {
+                let code = source_failure_result(failure);
+                self.record(code)
+            }
+            // B16-R9: the plain form's declaration refused, reported as
+            // [`Self::declare_discontinuity`] reports its own.
+            Err(SessionSeekFailure::Declaration(error)) => self.refuse_control(&error),
+        }
     }
 
     // REALTIME_POLICY_BEGIN

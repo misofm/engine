@@ -56,7 +56,14 @@ serde_json = "=1.0.151"
 
 [features]
 default = []
-test-support = ["builtins-compiler/test-support", "host-core/test-support"]
+# `control-plane/test-support` and `engine/test-support` let the timeline test reader reach the
+# active plan (`PlanState::test_owner_mut`, `RealtimePlanOwner::active_plan_mut`, #1643).
+test-support = [
+    "builtins-compiler/test-support",
+    "control-plane/test-support",
+    "engine/test-support",
+    "host-core/test-support",
+]
 
 [lints]
 workspace = true

@@ -358,3 +358,245 @@ the existing `impl SessionState`.
   none of them does: no seek is split across blocks. Run at both bank widths the native build
   covers. The render thread's allocation and free counts stay 0 (`bench_support::alloc` thread
   counters after warming).
+
+## Decision record: tranche 1, core (batch 16)
+
+Built on `454d65688` (worktree `codex/controls-batch-16b`). Tranche 2 (D4-D6: C exports, bit,
+header, docs, audit, capi gates 1-7) follows.
+
+**What shipped:**
+
+- **B16-R2, the publish fence** (`crates/source/src/lib.rs`). `PublishedGeneration`, one
+  `Arc<AtomicU64>` per session: `new(initial)` (control thread), `publish(g)` (`fetch_max`,
+  `Release`: the word is `max(word, g)` and never falls), `generation()`, `retained_bytes()`, and
+  a crate-private block-entry load (`Acquire`). Equality is identity (`Arc::ptr_eq`).
+  `SeekProducer` holds `Option<PublishedGeneration>`; its `push` is the old `try_seek` without a
+  publication, and `try_seek` is `push` then publish. `PcmSourceProducer`, `HostChunkProvider` and
+  `TimelineProducer` gain `try_seek_unpublished` and `share_published_generation`; their
+  `try_seek` publishes after its one push. The shared observe step's pop is
+  `SeekState::take_published(queue, published)`: `peek(0)` (#1320), and pop only a command whose
+  generation is at most the loaded value; otherwise the command keeps its slot. The PCM consumer
+  and the timeline call it at every observe. The driver holds `Option<PublishedGeneration>`,
+  loads it once at `begin_block` entry, before the timeline and the sources, and passes the value
+  to both (and to `prepare_source_seek`). `prepare_session_graph_source_set` seals a session's
+  set with the word; `prepare_graph_source_set` (standalone, no word, no fence) is unchanged.
+  Superseded by 'Fold (batch 16b review), part A' below.
+- **No acked PCM is dropped by the fence.** The PCM consumer's acquire now peeks each block before
+  it pops it: a block of an unobserved generation gets the one re-observe, and if its seek is
+  still unobserved (fenced) the acquire stops and leaves the block queued behind its command.
+  Before, the acquire popped the block first and, had the re-observe found nothing, would have
+  discarded it. For an unfenced consumer the outcome is the old one in every case the old
+  reasoning allowed.
+- **One word per session** (`crates/host-core/src/prepare.rs`). `PlanStateInventory` holds it: a
+  first plan allocates it, a successor takes `base.inventory`'s, `at_discontinuity` keeps it and
+  `across_withdrawn` clones it, so every plan of a session, its fresh rings (a source a candidate
+  adds or redeclares), its carried consumers, its timeline and a donation's two sides share one
+  object. `test_only_floors_only` (a fresh reference) gets a word of its own. Every fresh producer
+  and the fresh timeline producer share it before their first seek; the driver gets it through
+  `prepare_session_graph_source_set`; `SourceControlSet` holds it (`ControlSourceBuilder::finish`).
+  `adopt_persisting` debug-asserts both sets hold the same word.
+- **D1** (`crates/host-core/src/source.rs`). `SourceControlSet::seek_session(generation,
+  timeline_sample, anchor_sample)`: zero is `GenerationZero`; a generation not above the word is
+  `Seek(GenerationNotStrictlyIncreasing)` (`source.generation.stale`); then `check_seek` on the
+  timeline and every source in ID order (vacant is `Vacated`), each source at
+  `min(timeline_sample, region_end)` (then `max(region_start)`, a no-op while host-core sets 0);
+  then every `try_seek_unpublished` (timeline first), then one `publish(g)`. A failed push after
+  the checks is `Chunk(HostChunkError::InternalInvariant)` with a `debug_assert`; the pushed
+  commands are published so none stays held. `published_generation()` reads the word.
+- **SessionState::session_seek** (`crates/control-plane/src/control.rs`, inside the existing
+  `impl SessionState`): the service step, then `seek_session` on `newest_providers_mut().sources`.
+
+**Departures:**
+
+- **The word is charged in the inventory, not the source rows.** `PlanStateInventory::retained_bytes`
+  gains `PublishedGeneration::retained_bytes()` (24 bytes on x86-64), because the inventory is
+  the owner that holds the word across plans and the capi drop oracle frees it there
+  (`capi_retained_bytes_charge_every_byte_the_compile_retains` passes unchanged). No source row,
+  pin or ceiling moved. Each kept inventory charges it once, an overcharge in the safe direction.
+- **Four test literals** of `SourceGraphSourceSetDriver` in `crates/source/src/lib.rs` and one of
+  `PlanStateInventory` in `prepare.rs` gain the new field (`published: None`, a fresh word):
+  field additions only, no assertion changed.
+- **`crates/host-core/tests/timeline.rs`**: `seek_both` (gates 1 and 3 of #1641) now issues one
+  `seek_session` instead of a source seek plus `test_only_timeline_producer().try_seek`. The other
+  `test_only_timeline_producer` uses stay: they seek the timeline alone.
+- **A per-source seek pushed during a block** with a generation above the word now applies at the
+  next block, not in the block the push raced (B16-R2's rule for every command). Only a
+  concurrent host sees it; no existing test does.
+
+**Gates (tranche 1):**
+
+- D1 unit tests, `crates/host-core/src/source.rs` `source::tests`:
+  `both_forms_move_the_timeline_and_every_source_clamped_to_its_region`,
+  `a_refusal_pushes_nothing_and_publishes_nothing`, `a_vacant_entry_refuses_the_whole_seek`. PASS.
+- Fence unit tests, `crates/source/src/lib.rs` `tests::published`:
+  `an_unpublished_seek_and_its_pcm_wait_in_their_slots_until_published` (red with the fence
+  removed), `a_seek_on_its_own_publishes_its_generation_and_the_word_never_falls`. PASS.
+- **Gate 1b**, `crates/host-core/tests/session_seek.rs`
+  `concurrent_session_seeks_reach_the_timeline_and_every_source_in_one_block`: a session thread
+  pushes 10,000 session seeks (about half anchored, some late; generation `k + 2`; each pushed at a
+  random instant up to 40 µs after a block starts) while a render thread renders; every timeline
+  step is in the block both sources' seek reports name, at the seek's frames (the short source
+  clamped), at Simd8 and Simd4; render-thread allocations, reallocations and frees 0 over every
+  measured block. About 12 s for both widths (debug). With the fence removed (`take_published`
+  ignoring the value) it fails in each of two runs, at seeks 297 and 1,368 (`short` one block
+  ahead of the timeline and `long`).
+- Commands: `cargo test --locked -p source`, `-p host-core --features host-core/test-support`,
+  `-p control-plane`, `-p capi`: PASS. `./target/release/audit capi`: `pcm_digest`
+  `4f52089e4a8cf83c` (unchanged), 0 violations. `realtime_policy`: ok, 153 regions (unchanged).
+  Clippy `-p source -p host-core -p control-plane --all-targets --all-features -D warnings`,
+  `cargo check --workspace --all-targets --all-features`, `cargo fmt --all`: clean.
+
+## Decision record: tranche 2, the C ABI (batch 16)
+
+Built on `51ec4fd67` (tranche 1).
+
+**What shipped:**
+
+- **D4.** `miso_engine_v1_session_seek(session, generation, timeline_sample)` and
+  `miso_engine_v1_session_seek_at(session, generation, timeline_sample, anchor_sample)` in
+  `crates/capi/src/ffi.rs`: one shared body (`session_seek_entry`) with the handle check and the
+  `SourceFailure::report` mapping around `SessionState::session_seek`. `FEATURE_SESSION_SEEK = 1 <<
+  10` (1024); the mask is 2047. `masks_and_result_codes_are_frozen` gains the bit in its `features`
+  array (the mask is the OR of every bit) and pins it; `version_and_capabilities_are_exact` checks
+  it is reported. No C export of the published generation (not approved).
+- **Header.** The two prototypes after `miso_engine_v1_source_seek_report`; the constant and
+  mask; D5's paragraph, "Session seek (issue 1642)", right after "Anchored seek.", which also
+  says a host may pick the next generation as one above the largest it has used; the two symbols
+  in the thread table and in "Control service" (that paragraph rewrapped, no word changed but the
+  two names).
+- **Smoke programs.** `abi_smoke.c` pins the bit and the mask, adds it to
+  `reports_every_defined_feature`, checks it against the queried mask and calls both symbols
+  with a null session for `INVALID_ARGUMENT`; `header_smoke.cpp` pins the bit inside the mask and
+  both signatures. `scripts/check-capi-abi.sh`: the frozen list 19 -> 21 (the self-test is
+  generic and needs no change).
+- **Docs.** `docs/C_ABI_V1_QUALIFICATION.md`: the D5 paragraph (with the fence and the frozen count
+  21), and the two calls in the service paragraph's list of session calls.
+- **D6.** `tools/audit/src/capi.rs`: before call 5 (`SESSION_SEEK_CALL`, right after call 4's
+  render applied the anchored seek), outside every render scope, `declare_discontinuity`, then
+  `session_seek(session, 3, 8 * QUANTUM_FRAMES)`, then one generation-3 quantum of
+  `fixture-source` from that frame, each asserted `RESULT_OK`.
+
+**Departures:**
+
+- **One `engine/realtime` edit (accepted on its one attempt).**
+  `RealtimePlanOwner::active_plan_mut` in `crates/engine/src/realtime/plan_exchange.rs`, inside
+  the existing `impl RealtimePlanOwner` (no new impl block), so a capi test can read the active
+  plan's timeline (`crate::ffi::test_plan_timeline_at`, over `graph::test_only_timeline_at`
+  through control-plane's test-support `test_owner_mut`). No other reader of the active plan
+  existed; gate 1 names #1641's reader. It is a borrow for the plan's exclusive owner only.
+- **The D5 paragraph sits after "Anchored seek." in the header** as the batch-16 check says; in
+  the qualification doc it follows the seek-report paragraph (#1316), not the #1275 one, so the
+  frozen counts there stay in order (15, 17, 19, 21).
+- **Test helper.** `crate::ffi::test_session_seek` (the runtime test module forbids `unsafe`).
+
+**Gates** (`crates/capi/src/runtime/tests.rs`, `runtime::tests::session_seek`):
+
+1. `both_forms_move_the_timeline_and_every_source_at_one_block`: `session_seek(2, 6_000)` lands
+   long at 6,000, short at 4,000 and the timeline at 6,000 in one block; `session_seek_at(3, 1_000,
+   A)` holds all three two blocks and lands them at `A`.
+2. `a_stale_generation_changes_nothing`: `session_seek(2, 0)` refuses `source.generation.stale`
+   and the next block's bits and timeline equal a twin's; a per-source seek to 5 makes a session
+   seek at 4 stale through the published generation alone (the timeline is at 2), and pushes
+   nothing.
+3. `one_full_slot_refuses_every_consumer`: `BACKPRESSURE` with `source.seek.backpressure`; the
+   short source's slot and the timeline's stay empty.
+4. `a_seek_before_the_swap_reaches_the_carried_and_the_added_source_and_the_timeline`.
+5. `a_source_seek_leaves_the_timeline`.
+6. `masks_and_result_codes_are_frozen`, `version_and_capabilities_are_exact`,
+   `check-capi-abi.sh` and its `--self-test`.
+7. `audit capi`: 0 violations, `replacements == 1` and the carry assertion hold. `pcm_digest`
+   moved `4f52089e4a8cf83c` -> `bffc21e857b5e134`: call 5 now plays the generation-3 quantum where
+   it rendered underrun silence before (the anchored seek's one quantum ran out at call 4).
+- **`cargo doc -D warnings` repairs (mechanical, outside the paths).** Four pre-existing
+  public-doc links to private items: three in `crates/source/src/lib.rs` (`TimelineConsumer`,
+  `begin_block_at` and `prime_ready`, from #1640/#1641) and one in
+  `crates/control-plane/src/compile.rs:734`, each turned into a code span.
+
+**Root ruling B16-R8 (2026-10-16).** `RealtimePlanOwner::active_plan_mut` is gated behind a new
+`engine/test-support` feature (`#[cfg(feature = "test-support")]`), because its only caller is test
+code. capi's dev-dependency on `engine` turns the feature on. The workspace debug-test and doctest
+steps of `qualification.yml` name `engine/test-support`, so `scripts/check-test-support-ci.py`
+passes (13 packages). The release `capi` build does not see the accessor.
+
+## Amendment (root ruling B16-R9, batch 16b review, 2026-10-16)
+
+- **D5 amended.** Its last two sentences ("A seek of every source is a declared discontinuity: the
+  host calls `miso_engine_v1_declare_discontinuity` (#1323 D1) first.") are replaced by: "A plain
+  session seek is a declared discontinuity; the engine declares it in the same call, and a refused
+  seek declares nothing. An anchored session seek keeps continuity." A seek of every source made
+  with per-source seeks is still the host's own call, so `miso_engine_v1_declare_discontinuity`
+  keeps its duty text for that case and for a stop.
+- **D1 amended (the core).** `SessionState::session_seek` without an anchor runs, in order: the
+  service step; `SourceControlSet::check_session_seek` on the newest providers' set (every rule of
+  `seek_session` except the pushes and the publication); the declaration, through the same core
+  path as `declare_discontinuity` (all or nothing); then `seek_session` on the newest providers. A
+  refused check declares nothing and pushes nothing; a refused declaration pushes nothing and
+  returns its own error. With an anchor nothing is declared: it is the loop and exact-start form
+  (#1643), and #1323 D2 publishes the successor `Next`, at the next block, before the anchor, so the
+  effects would go to rest and PDC drop while the old pass still plays.
+- **D6 amended.** `audit capi` makes no separate declaration: the session seek declares itself.
+- **Gates added.** A refused plain session seek publishes nothing; an accepted one publishes exactly
+  one discontinuity successor and its seek applies; an anchored one publishes no successor; each on
+  the C ABI and alike on the browser (the parity row), over #1285's floors (a latent insert removed,
+  so a declaration has a successor to publish).
+- **B15-R7's order is retired** (no host and no SDK calls the declaration before a session seek;
+  recorded in #1323's and #1643's specs too).
+
+## Fold (batch 16b review), part B / B16-R9
+
+**What shipped.**
+
+- **Core.** `crates/control-plane/src/control.rs`, inside the existing `impl SessionState` (no new
+  impl block): `session_seek` returns `Result<(), SessionSeekFailure>`, a new enum with `Seek(SourceFailure)`
+  and `Declaration(CommandError)`, exported from the crate root. `declare_discontinuity` is now its
+  service step plus `declare_discontinuity_serviced`, the one core path both calls run. The plain
+  form checks, declares, then calls `seek_session` on the newest providers; a refusal of that push
+  maps to `SourceFailure::Control(Chunk(InternalInvariant))` behind a `debug_assert`. The comment
+  says why the set is the one checked: the discontinuity successor carries every source of the
+  committed model, and its commit moves each producer from the set it supersedes (the checked
+  donation, then `adopt_persisting` for the persisting producers and the timeline), with no push in
+  between.
+- **C ABI.** `session_seek_entry` maps `Seek` by `SourceFailure::report` and `Declaration` by the new
+  `declaration_refused`, the mapping `miso_engine_v1_declare_discontinuity` already used (now shared),
+  so the result codes stay consistent. Header: the session seek paragraph states B16-R9 and gains
+  the full refusal list (MINOR a: `source.seek.anchor_unaligned` for `_at`, `source.ring.vacated`,
+  `INTERNAL` with `capi.source.epoch` or `source.internal`, and the declaration's refusals for the
+  plain form); the declared-discontinuity paragraph's duty is now "at a stop, and before a seek of
+  every source made with per-source seeks". `docs/C_ABI_V1_QUALIFICATION.md`: the same text, a new
+  B16-R9 paragraph, the #1323 duty line, and MINOR b ("at or below which").
+- **Browser.** `ReadyOwnership::session_seek` runs the plain form through `run_control` (made generic
+  over its result and error, with the refusal for a full table queue passed in), so a plan the
+  declaration publishes keeps its tables and counts as a blocking rebuild, as
+  `declare_discontinuity`'s does; the anchored form calls the core directly. A refused
+  declaration reports through `refuse_control`, as the browser's declaration does. The exports pass
+  the spectrum promotion analysis, as `declare_discontinuity`'s export does.
+- **Audit (D6).** `tools/audit/src/capi.rs` no longer calls `miso_engine_v1_declare_discontinuity`.
+  `pcm_digest` `bffc21e857b5e134`, unchanged: the audit session has no raised floor and no
+  source-read offset, so the declaration publishes nothing both before and after (the separate call
+  and the seek's own declaration are both no-ops there); 0 violations, `replacements == 1` holds.
+- **MAJOR 1 (host part).** `runtime::tests::session_seek::a_removed_sources_generation_keeps_a_session_seek_stale`:
+  a per-source seek of the short source to 10, a transaction that removes it, the swap, then a
+  session seek at 5 is `source.generation.stale` and pushes nothing; 11 is accepted. The false
+  comments in `a_stale_generation_changes_nothing` (capi and host-web: the long source's own
+  generation refuses that case too) are corrected.
+
+**Gates (each red with its rule removed).**
+
+1. A refused plain seek publishes nothing: `capi` `runtime::tests::session_seek_declares::a_refused_plain_session_seek_publishes_nothing`
+   (red when the declaration runs before the check).
+2. An accepted plain seek publishes one successor and applies: `...::an_accepted_plain_session_seek_publishes_one_successor_and_applies`
+   (after the swap and while the removal's candidate waits; red with the declaration removed).
+3. An anchored seek publishes none: `...::an_anchored_session_seek_publishes_no_successor` (red when
+   the anchored form declares).
+4. Both hosts alike: `control_parity::a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_hosts`
+   (48 and 96 kHz; red under each of the three mutations).
+5. The headless SDK: `sdk/test/capability-evals.mjs` (see #1643's record).
+
+The floors come from #1285's path: the limited session (a muted track behind a true-peak limiter,
+removed by a transaction) on the C ABI, and t3's limiter removed on the parity session.
+
+### Fold (batch 16b review), part A
+
+The unfenced mode is gone (finding M2). The session's published generation is now a required argument of `PcmSourceRing::prepare_host_region`, `SourceTimeline::prepare`/`prepare_vacant` and `prepare_session_graph_source_set`; `prepare_graph_source_set` and the `u64::MAX` sentinel are removed. Every producer publishes to its word. Every consumer and timeline holds the word and loads it at each block entry; the driver loads it once for the whole set. `PcmSourceRing::prepare(config)` stays: it gives the ring a word of its own, so the ring is fenced as a session of one. A set refuses a timeline or occupied consumer of another word (`SourceGraphSourceSetError::SessionWord`), and a carry or swap between sets of different words is refused. The only push without a publish is the source-crate `SessionSeek` (`PublishedGeneration::session_seek`), which owns the zero and stale rules and checks that each producer is of its word (`SessionSeekError::ForeignSession`). It publishes once, on `publish()` or drop, and only if something was pushed. host-core's `seek_session` uses it, and the new `check_session_seek` applies the same rules with nothing pushed or published; part B calls it before it declares the discontinuity. For M1, host-core `source::tests::a_generation_not_above_the_word_is_stale_when_every_producer_takes_it` (word at 10, seek at 5 is stale while every producer would take it) is red with the stale rule disabled, when every other host-core source test stays green. `published::a_session_seek_opens_above_its_word_and_pushes_only_its_own_producers` and `published::a_set_takes_only_consumers_of_its_session` are red under their mutations. Render stays allocation-, lock- and syscall-free: 153 policy regions; capi `pcm_digest` `bffc21e857b5e134`.
+
+Fold 3 (batch 16b fold verification): `session_seek_declares::a_refused_declaration_pushes_nothing_and_leaves_the_generation_free` gates the refused-declaration rule; PcmSourceRing::prepare(config) stays ungated because no host path reaches it (only crates/source integration tests: prime.rs, randomized.rs, seek_schedule_model.rs), root ruling B16-R10's condition.

@@ -195,6 +195,19 @@ fn frames() -> Vec<(&'static str, Vec<u8>)> {
             "swap_t3_multi_and_limiter",
             frame(&[t3_with_multi_and_limiter_swapped(&model)], revision),
         ),
+        // t3's true-peak limiter removed: the natural latency falls, and #1285 keeps the old one
+        // as floors, so a declared discontinuity has a successor to publish (B16-R9's SDK eval).
+        (
+            "remove_t3_limiter",
+            frame(
+                &[SessionEdit::RemoveTrackEffect {
+                    track_id: id("t3"),
+                    rack_name: session::RackName::Inserts,
+                    effect_id: id("limiter"),
+                }],
+                revision,
+            ),
+        ),
     ]
 }
 

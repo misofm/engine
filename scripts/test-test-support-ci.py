@@ -20,7 +20,7 @@ WORKFLOW = ".github/workflows/qualification.yml"
 DEBUG_A_FEATURES = (
     "--features builtins-compiler/test-support,graph/test-support,"
     "host-web/test-support,host-core/test-support,effect-compiler/test-support,"
-    "protocol/test-support,control-plane/test-support,engine/realtime-audit\n"
+    "protocol/test-support,control-plane/test-support,engine/test-support,engine/realtime-audit\n"
 )
 DEBUG_B_FEATURES = (
     "--features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support\n"
@@ -157,8 +157,8 @@ def main() -> int:
         fails(f"{package}/test-support removed from test-debug-b", {package},
               feature_b(f"{package}/test-support"))
     fails("every test-support feature removed from test-debug-a",
-          {"builtins-compiler", "control-plane", "effect-compiler", "effect-contract", "graph",
-           "host-core", "host-web", "protocol", "rack"},
+          {"builtins-compiler", "control-plane", "effect-compiler", "effect-contract", "engine",
+           "graph", "host-core", "host-web", "protocol", "rack"},
           in_a(DEBUG_A_FEATURES, "--features engine/realtime-audit\n"))
     fails("every test-support feature removed from test-debug-b",
           {"builtins", "lane", "parametric-eq"},
@@ -166,10 +166,12 @@ def main() -> int:
 
     # The doctest steps (#1422) run no `--all-targets`, so only the doctest-parity rule sees them:
     # a feature or package set that drifts from the sibling test step is refused.
-    refused("control-plane/test-support removed from the test-debug-a doctest step only",
+    # protocol/test-support: no other feature forwards it (host-web's test-support forwards
+    # control-plane's since #1643), so dropping it from the doctest step alone is a real drift.
+    refused("protocol/test-support removed from the test-debug-a doctest step only",
             DOCTEST_REFUSAL,
             in_a_doc(DEBUG_A_FEATURES,
-                     DEBUG_A_FEATURES.replace("control-plane/test-support,", "", 1)))
+                     DEBUG_A_FEATURES.replace("protocol/test-support,", "", 1)))
     refused("builtins/test-support removed from the test-debug-b doctest step only",
             DOCTEST_REFUSAL,
             in_b_doc(DEBUG_B_FEATURES, DEBUG_B_FEATURES.replace(",builtins/test-support", "", 1)))
@@ -187,8 +189,8 @@ def main() -> int:
                  redundant[2].replace("effect-compiler/test-support,", "", 1))
     host_web_forward = (
         "hosts/host-web/Cargo.toml",
-        'test-support = ["builtins-compiler/test-support", "host-core/test-support"]',
-        'test-support = ["builtins-compiler/test-support"]')
+        '    "engine/test-support",\n    "host-core/test-support",\n]',
+        '    "engine/test-support",\n]')
     control_plane_forward = (
         "crates/control-plane/Cargo.toml",
         'test-support = ["host-core/test-support"]',

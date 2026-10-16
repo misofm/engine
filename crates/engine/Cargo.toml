@@ -12,6 +12,9 @@ name = "engine"
 [features]
 default = []
 realtime-audit = []
+# Root ruling B16-R8: `RealtimePlanOwner::active_plan_mut`, for other crates' tests only (capi's
+# #1642 gates read the active plan's timeline through it). Never a production feature.
+test-support = []
 
 [dev-dependencies]
 # MIT licensed; test/model-checking only. It is not reachable from production, Wasm, or render.

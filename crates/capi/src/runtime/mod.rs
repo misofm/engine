@@ -13,7 +13,7 @@
 
 pub(crate) use control_plane::{
     CommandError, CompileFailure, ControlAdapter, ControlLimits, EventError, EventLane,
-    PlanResources, ResourceFault, SourceFailure, SourceSubmission,
+    PlanResources, ResourceFault, SessionSeekFailure, SourceFailure, SourceSubmission,
 };
 pub(crate) use core::mem::size_of;
 pub(crate) use effect_contract::TailSamples;

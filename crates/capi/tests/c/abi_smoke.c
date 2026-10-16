@@ -22,7 +22,10 @@ ABI_ASSERT(MISO_ENGINE_V1_EXACT_LAUNCH_RATE_MASK == 15);
 ABI_ASSERT(MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT == 32);
 ABI_ASSERT(MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY == 256);
 ABI_ASSERT(MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT == 512);
-ABI_ASSERT(MISO_ENGINE_V1_FEATURE_MASK == 1023);
+ABI_ASSERT(MISO_ENGINE_V1_FEATURE_SESSION_SEEK == 1024);
+ABI_ASSERT(MISO_ENGINE_V1_FEATURE_MASK == 2047);
+ABI_ASSERT((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SESSION_SEEK) ==
+           MISO_ENGINE_V1_FEATURE_SESSION_SEEK);
 ABI_ASSERT((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT) ==
            MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT);
 ABI_ASSERT((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY) ==
@@ -141,6 +144,10 @@ static uint32_t (*const watermark_signature)(const miso_engine_v1_plan *,
 static uint32_t (*const service_signature)(miso_engine_v1_session *) = miso_engine_v1_service;
 static uint32_t (*const declare_discontinuity_signature)(miso_engine_v1_session *) =
     miso_engine_v1_declare_discontinuity;
+static uint32_t (*const session_seek_signature)(miso_engine_v1_session *, uint64_t, uint64_t) =
+    miso_engine_v1_session_seek;
+static uint32_t (*const session_seek_at_signature)(miso_engine_v1_session *, uint64_t, uint64_t,
+                                                   uint64_t) = miso_engine_v1_session_seek_at;
 static uint32_t (*const last_error_signature)(const void *, miso_engine_v1_bytes_out *) =
     miso_engine_v1_last_error;
 static void (*const session_destroy_signature)(miso_engine_v1_session *) =
@@ -266,7 +273,8 @@ static int reports_every_defined_feature(uint64_t mask) {
            (mask & MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK) != 0 &&
            (mask & MISO_ENGINE_V1_FEATURE_SERVICE) != 0 &&
            (mask & MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY) != 0 &&
-           (mask & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT) != 0;
+           (mask & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_SESSION_SEEK) != 0;
 }
 
 int main(void) {
@@ -320,13 +328,22 @@ int main(void) {
         return 7;
     }
 
+    /* A host checks the session-seek bit before calling either symbol (issue 1642); a null session
+     * is refused. */
+    if ((capabilities.feature_mask & MISO_ENGINE_V1_FEATURE_SESSION_SEEK) == 0 ||
+        session_seek_signature(NULL, 2, 0) != MISO_ENGINE_V1_INVALID_ARGUMENT ||
+        session_seek_at_signature(NULL, 2, 0, 0) != MISO_ENGINE_V1_INVALID_ARGUMENT) {
+        return 8;
+    }
+
     return compile_session_signature == NULL || source_submit_signature == NULL ||
                    source_seek_signature == NULL || source_seek_report_signature == NULL ||
                    submit_command_signature == NULL ||
                    dequeue_event_signature == NULL ||
                    render_signature == NULL || resources_signature == NULL ||
                    watermark_signature == NULL || service_signature == NULL ||
-                   declare_discontinuity_signature == NULL ||
+                   declare_discontinuity_signature == NULL || session_seek_signature == NULL ||
+                   session_seek_at_signature == NULL ||
                    last_error_signature == NULL || session_destroy_signature == NULL ||
                    plan_destroy_signature == NULL
                ? 3
