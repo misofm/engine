@@ -4084,6 +4084,26 @@ where
             .map_err(SourceFailure::Control)
     }
 
+    /// Seeks the timeline and every source of the newest committed session to timeline sample
+    /// `timeline_sample` under one new `generation`, all or nothing, after the service step
+    /// (#1642 D1, D2): [`host_core::SourceControlSet::seek_session`] on the newest session's
+    /// producers, which while a structural transaction's candidate waits for its swap are the
+    /// candidate's (its carried producers feed the rings the running plan renders, and a source
+    /// it adds has its own new ring). With `anchor_sample`, every command is anchored there, as
+    /// [`Self::seek_at`]'s. The one core function behind both hosts' session seek.
+    pub fn session_seek(
+        &mut self,
+        generation: u64,
+        timeline_sample: u64,
+        anchor_sample: Option<u64>,
+    ) -> Result<(), SourceFailure> {
+        self.service().map_err(|_| SourceFailure::Internal)?;
+        self.newest_providers_mut()
+            .sources
+            .seek_session(generation, timeline_sample, anchor_sample)
+            .map_err(SourceFailure::Control)
+    }
+
     /// Where a source of the newest committed session landed, as render last published it, after
     /// the service step (#1316 D6, D7): [`host_core::SourceControlSet::seek_report`] of the ring
     /// the newest session's producer feeds, which is the one `seek` queues on.

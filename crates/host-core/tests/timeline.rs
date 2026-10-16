@@ -213,21 +213,21 @@ fn producer(sources: &mut SourceControlSet) -> &mut TimelineProducer {
         .expect("the set holds the timeline producer")
 }
 
-/// Push `command` to the source (through its control set) and to the timeline (through its
-/// producer directly).
+/// Seek the source and the timeline with one session seek (#1642 D1): `command`'s generation,
+/// its frame as the timeline sample (inside the source's region, so the source takes it too) and
+/// its anchor, if any.
 fn seek_both(sources: &mut SourceControlSet, command: SourceCommand) {
-    match command {
-        SourceCommand::Seek { generation, frame } => {
-            sources.seek(SOURCE.as_bytes(), generation.0, frame.0)
-        }
+    let (generation, frame, anchor) = match command {
+        SourceCommand::Seek { generation, frame } => (generation, frame, None),
         SourceCommand::SeekAt {
             generation,
             frame,
             anchor_sample,
-        } => sources.seek_at(SOURCE.as_bytes(), generation.0, frame.0, anchor_sample),
-    }
-    .expect("source seek");
-    producer(sources).try_seek(command).expect("timeline seek");
+        } => (generation, frame, Some(anchor_sample)),
+    };
+    sources
+        .seek_session(generation.0, frame.0, anchor)
+        .expect("session seek");
 }
 
 /// Render `blocks` blocks of `plan` (whose source-read clock leads its render clock by `offset`)

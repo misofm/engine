@@ -12,7 +12,7 @@ use core::{
     cmp,
     mem::size_of,
     num::NonZeroUsize,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::{fmt, sync::Arc};
 
@@ -720,6 +720,7 @@ impl PcmSourceRing {
             published_seek_report: SourceSeekReport::default(),
             next_source_read_sample: 0,
             prime_required: Arc::clone(&prime_required),
+            observed_published: u64::MAX,
         };
         // The producer starts with exactly the configured blocks; the retained block above never
         // enters the recycle queue until the consumer has a played block to hold instead.
@@ -739,6 +740,7 @@ impl PcmSourceRing {
                     active_generation: config.initial_generation,
                     quantum_frames: config.quantum_frames.0,
                     frame_limit: None,
+                    published: None,
                 },
                 shape: consumer.shape,
                 channel_count: config.channel_count,
@@ -868,6 +870,91 @@ fn prime_flag_retained_bytes() -> usize {
     Layout::new::<SharedAllocation>().size()
 }
 
+/// One session's published seek generation (#1642 B16-R2): the fence that makes every command of
+/// one session seek visible to render at the same block entry.
+///
+/// One word per session, allocated on the control thread when the session's first plan is
+/// prepared, and shared by every source producer, the timeline producer and the source-set driver
+/// of every plan of that session: a successor's preparation takes its predecessor's word, so a
+/// fresh and a carried consumer of one plan are fenced by the same object.
+///
+/// * Every seek push is followed by [`Self::publish`] of its generation, a `Release`
+///   read-modify-write to `max(word, g)`: a per-source seek right after its one push, a session
+///   seek only after its last push.
+/// * Render loads the word once per block entry with `Acquire`, before the timeline and the
+///   sources, and each consumer leaves in its queue (by `peek`, never `pop`) a command whose
+///   generation is above the loaded value. The command keeps its slot, so nothing is dropped and a
+///   later push to that slot is still backpressure; it is observed at the first block whose load
+///   covers it.
+///
+/// A load that returns at least `g` read the publication of `g` or a later one of the same
+/// control thread, so every push sequenced before it is visible: either every consumer of a
+/// session seek takes it at a block entry or none does. A word never decreases.
+#[derive(Clone)]
+pub struct PublishedGeneration(Arc<AtomicU64>);
+
+impl PublishedGeneration {
+    /// A new session's word at `initial`, the generation every prepared ring starts at. Control
+    /// thread only: it allocates.
+    #[must_use]
+    pub fn new(initial: SourceGeneration) -> Self {
+        Self(Arc::new(AtomicU64::new(initial.0)))
+    }
+
+    /// Exact bytes of the word's shared allocation: `Arc`'s `{ strong, weak, data }`.
+    #[must_use]
+    pub fn retained_bytes() -> usize {
+        #[repr(C)]
+        struct SharedAllocation {
+            strong: AtomicUsize,
+            weak: AtomicUsize,
+            word: AtomicU64,
+        }
+        Layout::new::<SharedAllocation>().size()
+    }
+
+    /// The newest generation published on this session. Control thread: its only writer.
+    #[must_use]
+    pub fn generation(&self) -> SourceGeneration {
+        SourceGeneration(self.0.load(Ordering::Relaxed))
+    }
+
+    /// Publish `generation` after the last push it covers: the word becomes `max(word,
+    /// generation)` with `Release`, so a block entry whose load covers it sees every such push.
+    pub fn publish(&self, generation: SourceGeneration) {
+        self.0.fetch_max(generation.0, Ordering::Release);
+    }
+
+    /// Whether `self` and `other` are the same session's word.
+    #[must_use]
+    pub fn is_shared_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// The block entry's load (render): one `Acquire` load, wait-free.
+    fn load_at_block_entry(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// Identity: two words are equal when they are one session's.
+impl PartialEq for PublishedGeneration {
+    fn eq(&self, other: &Self) -> bool {
+        self.is_shared_with(other)
+    }
+}
+
+impl Eq for PublishedGeneration {}
+
+impl fmt::Debug for PublishedGeneration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("PublishedGeneration")
+            .field(&self.0.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
 /// Name for the prepared producer when it is used solely to control source seeks.
 pub type SourceController = PcmSourceProducer;
 
@@ -893,11 +980,32 @@ impl PcmSourceProducer {
     /// Either command switches this producer to the new generation at once, so the host submits
     /// that generation's PCM from `frame` straight away.
     pub fn try_seek(&mut self, command: SourceCommand) -> Result<(), SourceSeekError> {
-        self.seek.try_seek(command)?;
+        let generation = self.push_seek(command)?;
+        self.seek.publish(generation);
+        Ok(())
+    }
+
+    /// [`Self::try_seek`] without publishing the generation to the session's word (#1642
+    /// B16-R2): one push of a session seek, whose caller publishes the generation with
+    /// [`PublishedGeneration::publish`] after its last push. Until then render observes the
+    /// command at no block, so a seek of many producers becomes visible at one block entry.
+    pub fn try_seek_unpublished(&mut self, command: SourceCommand) -> Result<(), SourceSeekError> {
+        self.push_seek(command).map(|_| ())
+    }
+
+    /// Share the session's published generation with this producer (#1642 B16-R2): every later
+    /// [`Self::try_seek`] publishes to it. Control thread, at preparation, before the producer's
+    /// first seek; it allocates nothing.
+    pub fn share_published_generation(&mut self, published: PublishedGeneration) {
+        self.seek.published = Some(published);
+    }
+
+    fn push_seek(&mut self, command: SourceCommand) -> Result<SourceGeneration, SourceSeekError> {
+        let generation = self.seek.push(command)?;
         let (SourceCommand::Seek { frame, .. } | SourceCommand::SeekAt { frame, .. }) = command;
         self.next_write_frame = frame;
         self.end_of_region_submitted = false;
-        Ok(())
+        Ok(generation)
     }
 
     /// Whether [`Self::try_seek`] would accept `command` now, pushing nothing and changing
@@ -1033,6 +1141,17 @@ impl HostChunkProvider {
     /// Check a seek request without pushing it; see [`PcmSourceProducer::check_seek`].
     pub fn check_seek(&self, command: SourceCommand) -> Result<(), SourceSeekError> {
         self.producer.check_seek(command)
+    }
+
+    /// Push a seek request without publishing it; see [`PcmSourceProducer::try_seek_unpublished`].
+    pub fn try_seek_unpublished(&mut self, command: SourceCommand) -> Result<(), SourceSeekError> {
+        self.producer.try_seek_unpublished(command)
+    }
+
+    /// Share the session's published generation; see
+    /// [`PcmSourceProducer::share_published_generation`].
+    pub fn share_published_generation(&mut self, published: PublishedGeneration) {
+        self.producer.share_published_generation(published);
     }
 
     /// Copy producer telemetry outside render.
@@ -1187,6 +1306,10 @@ pub struct PcmSourceConsumer {
     next_source_read_sample: u64,
     /// The ring's `prime_required` flag, which control sets (#1320 D4).
     prime_required: Arc<AtomicBool>,
+    /// The session's published generation this block observes commands under (#1642 B16-R2): the
+    /// source-set driver's block-entry load, set by its entry points; `u64::MAX` (no fence) on
+    /// every standalone entry point. Render-owned.
+    observed_published: u64,
 }
 
 /// A [`SourceCommand::SeekAt`] the consumer has popped and holds until its anchor block.
@@ -1367,6 +1490,29 @@ impl SeekState {
                 .held_seek
                 .is_none_or(|held| generation > held.generation)
     }
+
+    /// The pop of the observe step every source-transport consumer shares (#1642 B16-R2): the
+    /// command at the head of `queue`, popped, when its generation is at most `published`, the
+    /// block entry's load of the session's published generation; otherwise `None`, and the
+    /// command stays in its slot for the first block whose load covers it. It peeks first and
+    /// pops only what it peeked (only this consumer pops), so a command pushed after the peek is
+    /// never taken here. Nothing is dropped. Wait-free: at most two loads and one pop.
+    fn take_published(
+        queue: &mut Consumer<SourceCommand>,
+        published: u64,
+    ) -> Option<SourceCommand> {
+        let generation = match queue.peek(0) {
+            Some(
+                &(SourceCommand::Seek { generation, .. }
+                | SourceCommand::SeekAt { generation, .. }),
+            ) => generation,
+            None => return None,
+        };
+        if generation.0 > published {
+            return None;
+        }
+        queue.try_pop().ok()
+    }
     // REALTIME_POLICY_END
 }
 
@@ -1382,6 +1528,9 @@ struct SeekProducer {
     /// The largest frame a seek may name, if any: [`TIMELINE_SAMPLE_LIMIT`] for a timeline,
     /// `None` for a PCM source.
     frame_limit: Option<u64>,
+    /// The session's published generation (#1642 B16-R2), which every push publishes to; `None`
+    /// for a standalone ring or timeline, whose consumer is not fenced.
+    published: Option<PublishedGeneration>,
 }
 
 impl SeekProducer {
@@ -1429,17 +1578,32 @@ impl SeekProducer {
         Ok(())
     }
 
-    /// The rules of [`Self::check_seek`], then the push; the generation switches only when the
-    /// push lands. A full slot changes nothing but the queue's full count.
-    fn try_seek(&mut self, command: SourceCommand) -> Result<(), SourceSeekError> {
+    /// The rules of [`Self::check_seek`], then the push, with nothing published; the generation
+    /// switches only when the push lands. A full slot changes nothing but the queue's full count.
+    /// Returns the pushed command's generation, which the caller publishes after its last push.
+    fn push(&mut self, command: SourceCommand) -> Result<SourceGeneration, SourceSeekError> {
         let generation = self.check_rules(command)?;
         match self.command_producer.try_push(command) {
             Ok(()) => {
                 self.active_generation = generation;
-                Ok(())
+                Ok(generation)
             }
             Err(QueueFull { full_count, .. }) => Err(SourceSeekError::Backpressure { full_count }),
         }
+    }
+
+    /// Publish `generation` to the session's word, if this producer has one (#1642 B16-R2).
+    fn publish(&self, generation: SourceGeneration) {
+        if let Some(published) = &self.published {
+            published.publish(generation);
+        }
+    }
+
+    /// [`Self::push`], then publish the pushed generation: one seek on its own.
+    fn try_seek(&mut self, command: SourceCommand) -> Result<(), SourceSeekError> {
+        let generation = self.push(command)?;
+        self.publish(generation);
+        Ok(())
     }
 }
 
@@ -1463,6 +1627,18 @@ impl PcmSourceConsumer {
     /// holds for a seek a producer pushes while this runs, too: if the acquire's re-observe
     /// (#1274 MINOR-3) takes a newer seek, plain or anchored, this returns `false`.
     pub fn prepare_seek(&mut self, generation: SourceGeneration, frame: SourceFrame) -> bool {
+        self.prepare_seek_published(generation, frame, u64::MAX)
+    }
+
+    /// [`Self::prepare_seek`] under the session's published generation `published` (#1642
+    /// B16-R2): the source-set driver's form, which observes no command above it.
+    fn prepare_seek_published(
+        &mut self,
+        generation: SourceGeneration,
+        frame: SourceFrame,
+        published: u64,
+    ) -> bool {
+        self.observed_published = published;
         self.end_block();
         self.flush_deferred_recycle();
         // The prepared source command queue has one slot. Observe exactly that admitted
@@ -1517,6 +1693,7 @@ impl PcmSourceConsumer {
     /// Without a block time an anchored seek applies at once, as a plain seek to its frame; the
     /// graph calls [`Self::begin_block_at`] instead.
     pub fn begin_block(&mut self) -> SourceReadReport {
+        self.observed_published = u64::MAX;
         self.begin_block_with(SeekClock::Now)
     }
 
@@ -1536,6 +1713,18 @@ impl PcmSourceConsumer {
     /// The block publishes the ring's seek report when a seek applies at it, at the ring's first
     /// block and when a cumulative counter moves ([`SourceSeekReport`], #1316 D3).
     pub fn begin_block_at(&mut self, source_read_sample: u64) -> SourceReadReport {
+        self.begin_block_at_published(source_read_sample, u64::MAX)
+    }
+
+    /// [`Self::begin_block_at`] under the session's published generation `published` (#1642
+    /// B16-R2): the source-set driver's form. A command whose generation is above `published`
+    /// stays in its slot, and a block of its generation stays queued behind it, for a later block.
+    fn begin_block_at_published(
+        &mut self,
+        source_read_sample: u64,
+        published: u64,
+    ) -> SourceReadReport {
+        self.observed_published = published;
         self.begin_block_with(SeekClock::At { source_read_sample })
     }
 
@@ -1811,13 +2000,15 @@ impl PcmSourceConsumer {
         }
     }
 
-    /// Pop the admitted command, if any, then apply a held anchored seek whose block has come.
+    /// Pop the admitted command, if any, then apply a held anchored seek whose block has come. A
+    /// command above the block's published generation stays in its slot ([`SeekState::take_published`]).
     ///
     /// The seek rules are the shared [`SeekState::observe`]; the source's own work runs on its
     /// result: a newly held anchored seek makes the pending block of a replaced generation stale,
     /// and a seek to apply repositions the PCM.
     fn observe_seek_at_block_boundary(&mut self, clock: SeekClock) {
-        let command = self.command_consumer.try_pop().ok();
+        let command =
+            SeekState::take_published(&mut self.command_consumer, self.observed_published);
         let observation = self.seek.observe(command, clock);
         if let Some(held) = observation.newly_held {
             // A newer command replaces a held one; the replaced seek's pending block is stale.
@@ -1953,11 +2144,15 @@ impl PcmSourceConsumer {
     ///
     /// The call pops at most the blocks queued when it begins (`available`), never the blocks the
     /// host publishes while it runs: a count taken at entry, not the ring's capacity, bounds it, so
-    /// a host that keeps the ring fed cannot hold the render here. Two counted phases, with the
-    /// one seek re-observe between them and in neither loop.
+    /// a host that keeps the ring fed cannot hold the render here. Each block is peeked before it
+    /// is popped, with at most one seek re-observe in the call.
     ///
-    /// With [`CommandObservation::Withheld`] (a prime) it stops before a block of an unobserved
-    /// generation, which stays queued with its command, so it never observes a command.
+    /// A block of a generation this consumer has not observed is never popped: with
+    /// [`CommandObservation::Withheld`] (a prime) the call stops before it, so it never observes a
+    /// command; otherwise it re-observes the command queue once, and if the block's seek is still
+    /// unobserved (its command is above the block's published generation, #1642 B16-R2) it stops
+    /// before it too. Either way the block stays queued with its command, and plays at the block
+    /// that observes the seek: no acked PCM is discarded for a seek render has not observed yet.
     fn acquire_current_block(&mut self, clock: SeekClock, observation: CommandObservation) {
         if self.current.is_some() {
             return;
@@ -1966,58 +2161,36 @@ impl PcmSourceConsumer {
             .data_consumer
             .available_at_entry()
             .min(self.transfer_block_count);
-        let mut popped = 0_usize;
-        let mut unobserved = None;
+        let mut reobserved = false;
         for _ in 0..available {
-            if observation == CommandObservation::Withheld
-                && self
-                    .data_consumer
-                    .peek(0)
-                    .is_some_and(|block| self.is_unobserved_generation(block.generation))
-            {
-                return;
+            let Some(generation) = self.data_consumer.peek(0).map(|block| block.generation) else {
+                break;
+            };
+            if self.is_unobserved_generation(generation) {
+                if observation == CommandObservation::Withheld || reobserved {
+                    return;
+                }
+                // This block's seek was pushed after this block's command pop. The host pushes a
+                // seek's command before any of its PCM, on one thread, through release/acquire
+                // queues, so the command is in the one-slot command queue now: observe it before
+                // judging the block rather than discard accepted PCM (#1274 MINOR-3). A counted
+                // block was published after its seek's command was pushed, so that command was
+                // pushed before the count too. Only `observe_seek_at_block_boundary` pops the
+                // one-slot queue (its callers are this acquire, `prepare_seek` and
+                // `begin_block_observe`, all on this consumer's thread), so at the count at most
+                // one command is pushed and not yet popped, and at most one generation among the
+                // counted blocks is unobserved. This one re-observe takes it, unless the session
+                // has not published its generation at this block's entry: then the block waits.
+                reobserved = true;
+                self.observe_seek_at_block_boundary(clock);
+                if self.is_unobserved_generation(generation) {
+                    return;
+                }
             }
             let Ok(block) = self.data_consumer.try_pop() else {
                 break;
             };
-            popped += 1;
             self.note_sanitized_samples(&block);
-            if self.is_unobserved_generation(block.generation) {
-                unobserved = Some(block);
-                break;
-            }
-            if self.settle_block(block) {
-                return;
-            }
-        }
-        let Some(block) = unobserved else {
-            return;
-        };
-        // This block's seek was pushed after this block's command pop. The host pushes a seek's
-        // command before any of its PCM, on one thread, through release/acquire queues, so the
-        // command is in the one-slot command queue now: observe it before judging the block
-        // rather than discard accepted PCM (#1274 MINOR-3). Bounded: at most one command pop per
-        // call. A counted block was published after its seek's command was pushed, so that
-        // command was pushed before the count too. Only `observe_seek_at_block_boundary` pops the
-        // one-slot queue (its callers are this acquire, `prepare_seek` and `begin_block_observe`,
-        // all on this consumer's thread), so at the count at most one command is pushed and not
-        // yet popped, and at most one generation among the counted blocks is unobserved. This one
-        // pop observes it, and a later command's blocks were published after the count.
-        self.observe_seek_at_block_boundary(clock);
-        if self.settle_block(block) {
-            return;
-        }
-        let unpopped = available.saturating_sub(popped);
-        let rest = self.data_consumer.available_at_entry().min(unpopped);
-        for _ in 0..rest {
-            let Ok(block) = self.data_consumer.try_pop() else {
-                break;
-            };
-            self.note_sanitized_samples(&block);
-            debug_assert!(
-                !self.is_unobserved_generation(block.generation),
-                "a block counted at entry has an observed seek after one re-observe"
-            );
             if self.settle_block(block) {
                 return;
             }
@@ -2210,6 +2383,7 @@ impl SourceTimeline {
                     active_generation: initial_generation,
                     quantum_frames: quantum_frames.0,
                     frame_limit: Some(TIMELINE_SAMPLE_LIMIT),
+                    published: None,
                 },
             },
             consumer,
@@ -2251,6 +2425,17 @@ impl TimelineProducer {
     /// (#1640 D1), so an all-or-nothing caller checks every producer before it pushes to any.
     pub fn check_seek(&self, command: SourceCommand) -> Result<(), SourceSeekError> {
         self.seek.check_seek(command)
+    }
+
+    /// [`Self::try_seek`] without publishing; see [`PcmSourceProducer::try_seek_unpublished`].
+    pub fn try_seek_unpublished(&mut self, command: SourceCommand) -> Result<(), SourceSeekError> {
+        self.seek.push(command).map(|_| ())
+    }
+
+    /// Share the session's published generation (#1642 B16-R2); see
+    /// [`PcmSourceProducer::share_published_generation`].
+    pub fn share_published_generation(&mut self, published: PublishedGeneration) {
+        self.seek.published = Some(published);
     }
 
     /// The newest generation this producer accepted.
@@ -2373,9 +2558,15 @@ impl TimelineConsumer {
     /// quantum. It runs on every block, so the timeline never stops. Allocation-free, lock-free
     /// and bounded.
     pub fn begin_block_at(&mut self, source_read_sample: u64) {
+        self.begin_block_at_published(source_read_sample, u64::MAX);
+    }
+
+    /// [`Self::begin_block_at`] under the session's published generation `published` (#1642
+    /// B16-R2), the source-set driver's form: a command above it stays in its slot.
+    fn begin_block_at_published(&mut self, source_read_sample: u64, published: u64) {
         // A vacant timeline has no queue and observes nothing.
         let command = match self.command_consumer.as_mut() {
-            Some(consumer) => consumer.try_pop().ok(),
+            Some(consumer) => SeekState::take_published(consumer, published),
             None => None,
         };
         let observation = self
@@ -2688,6 +2879,9 @@ struct GraphSourceEntry {
 struct SourceGraphSourceSetDriver {
     /// The session's playhead (#1641 D1), inline: the driver's own allocation counts its value.
     timeline: TimelineConsumer,
+    /// The session's published generation (#1642 B16-R2), loaded once per block entry; `None`
+    /// for a standalone set, whose consumers are not fenced.
+    published: Option<PublishedGeneration>,
     sources: Box<[GraphSourceEntry]>,
     mappings: Box<[SourceGraphTrackMapping]>,
     quantum_frames: u32,
@@ -2762,11 +2956,14 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         let Some(generation) = SourceGeneration::new(generation) else {
             return false;
         };
+        let published = self.published_at_entry();
         let prepared = self
             .sources
             .get_mut(source_index)
             .and_then(|source| source.consumer.as_mut())
-            .is_some_and(|consumer| consumer.prepare_seek(generation, SourceFrame(frame)));
+            .is_some_and(|consumer| {
+                consumer.prepare_seek_published(generation, SourceFrame(frame), published)
+            });
         if prepared {
             self.pending_generation_change = true;
         }
@@ -2790,9 +2987,13 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             source_generation_changed: self.pending_generation_change,
         };
         self.pending_generation_change = false;
+        // #1642 B16-R2: one load of the session's published generation, before the timeline and
+        // the sources, so every consumer observes the same session seeks in this block.
+        let published = self.published_at_entry();
         // #1641 D1: the timeline first, at the sample the sources read, so it observes a seek in
         // the same block as a source given the same seek. It applies no state to the sources.
-        self.timeline.begin_block_at(first_sample);
+        self.timeline
+            .begin_block_at_published(first_sample, published);
         for source in &mut self.sources {
             // A vacant entry has nothing to play: its block is an underrun.
             let Some(consumer) = source.consumer.as_mut() else {
@@ -2801,7 +3002,7 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             };
             // The graph passes the plan's source-read sample, which an anchored seek waits on: the
             // render clock plus the plan's source-read offset (#1316 D1, #1396 D1).
-            let report = consumer.begin_block_at(first_sample);
+            let report = consumer.begin_block_at_published(first_sample, published);
             self.block_validity.source_underrun |= report.underrun_event;
             self.block_validity.source_generation_changed |= report.generation_changed;
         }
@@ -3048,6 +3249,14 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
 }
 
 impl SourceGraphSourceSetDriver {
+    /// The block entry's load of the session's published generation (#1642 B16-R2); `u64::MAX`
+    /// for a standalone set. One `Acquire` load, wait-free.
+    fn published_at_entry(&self) -> u64 {
+        self.published
+            .as_ref()
+            .map_or(u64::MAX, PublishedGeneration::load_at_block_entry)
+    }
+
     /// [`GraphPreparedSourceSetDriver::can_swap_sources`] against a set of this type.
     fn swappable(&self, other: &Self, pairs: &[(u32, u32)]) -> bool {
         other.quantum_frames == self.quantum_frames
@@ -3086,6 +3295,31 @@ pub fn prepare_graph_source_set(
     envelope: engine::realtime::RenderEnvelope,
     sources: Vec<SourceGraphSource>,
     timeline: TimelineConsumer,
+    mappings: Vec<SourceGraphTrackMapping>,
+) -> Result<GraphPreparedSourceSet, SourceGraphSourceSetError> {
+    seal_graph_source_set(envelope, sources, timeline, None, mappings)
+}
+
+/// [`prepare_graph_source_set`] for one plan of a session (#1642 B16-R2): the driver loads
+/// `published`, the session's published generation, once per block entry and passes it to the
+/// timeline's and every source's observe step, so a session seek reaches every consumer at one
+/// block. `published` is the word every producer of the session publishes to, the same object for
+/// every plan of the session. It is the session's, not this set's: no row of the report counts it.
+pub fn prepare_session_graph_source_set(
+    envelope: engine::realtime::RenderEnvelope,
+    sources: Vec<SourceGraphSource>,
+    timeline: TimelineConsumer,
+    published: PublishedGeneration,
+    mappings: Vec<SourceGraphTrackMapping>,
+) -> Result<GraphPreparedSourceSet, SourceGraphSourceSetError> {
+    seal_graph_source_set(envelope, sources, timeline, Some(published), mappings)
+}
+
+fn seal_graph_source_set(
+    envelope: engine::realtime::RenderEnvelope,
+    sources: Vec<SourceGraphSource>,
+    timeline: TimelineConsumer,
+    published: Option<PublishedGeneration>,
     mappings: Vec<SourceGraphTrackMapping>,
 ) -> Result<GraphPreparedSourceSet, SourceGraphSourceSetError> {
     if timeline.quantum_frames != envelope.quantum.0 {
@@ -3162,6 +3396,7 @@ pub fn prepare_graph_source_set(
         },
         Box::new(SourceGraphSourceSetDriver {
             timeline,
+            published,
             sources: entries.into_boxed_slice(),
             mappings: mappings.into_boxed_slice(),
             quantum_frames: envelope.quantum.0,
@@ -3929,6 +4164,7 @@ mod tests {
     ) -> SourceGraphSourceSetDriver {
         SourceGraphSourceSetDriver {
             timeline: test_timeline(4),
+            published: None,
             sources: vec![GraphSourceEntry {
                 channel_count: consumer.channel_count(),
                 consumer: Some(consumer),
@@ -5612,6 +5848,7 @@ mod tests {
             let [a, _] = inputs();
             let mut driver = SourceGraphSourceSetDriver {
                 timeline: test_timeline(FRAMES),
+                published: None,
                 sources: vec![GraphSourceEntry {
                     consumer: None,
                     channel_count: 2,
@@ -5733,6 +5970,7 @@ mod tests {
             let driver =
                 |sources: Vec<GraphSourceEntry>, quantum_frames| SourceGraphSourceSetDriver {
                     timeline: test_timeline(quantum_frames),
+                    published: None,
                     sources: sources.into_boxed_slice(),
                     mappings: Vec::new().into_boxed_slice(),
                     quantum_frames,
@@ -5766,6 +6004,7 @@ mod tests {
         ) -> SourceGraphSourceSetDriver {
             SourceGraphSourceSetDriver {
                 timeline: test_timeline(quantum_frames),
+                published: None,
                 sources: entries.into_boxed_slice(),
                 mappings: Vec::new().into_boxed_slice(),
                 quantum_frames,
@@ -6659,6 +6898,120 @@ mod tests {
             // A source seek has no frame limit.
             consumer.begin_block();
             assert_eq!(host.check_seek(seek(3, u64::MAX)), Ok(()));
+        }
+    }
+
+    /// #1642 B16-R2: the publish fence a session seek is made visible to render through.
+    mod published {
+        use super::*;
+
+        fn seek(generation: u64, frame: u64) -> SourceCommand {
+            SourceCommand::Seek {
+                generation: SourceGeneration(generation),
+                frame: SourceFrame(frame),
+            }
+        }
+
+        /// A set of one mono source and an occupied timeline at quantum 4, fenced by `word`, with
+        /// both producers sharing it.
+        fn fenced(
+            word: &PublishedGeneration,
+        ) -> (
+            HostChunkProvider,
+            TimelineProducer,
+            SourceGraphSourceSetDriver,
+        ) {
+            let (mut producer, consumer, _) =
+                PcmSourceRing::prepare(config(1, 4, 16)).expect("ring");
+            producer.share_published_generation(word.clone());
+            let (mut timeline_producer, timeline, _) =
+                SourceTimeline::prepare(QuantumFrames(4), NonZeroUsize::MIN).expect("timeline");
+            timeline_producer.share_published_generation(word.clone());
+            let driver = SourceGraphSourceSetDriver {
+                timeline,
+                published: Some(word.clone()),
+                sources: vec![GraphSourceEntry {
+                    channel_count: consumer.channel_count(),
+                    consumer: Some(consumer),
+                }]
+                .into_boxed_slice(),
+                mappings: vec![test_mapping(0)].into_boxed_slice(),
+                quantum_frames: 4,
+                block_validity: GraphObservationValidity::CLEAR,
+                pending_generation_change: false,
+            };
+            (
+                producer.into_host_chunk_provider(RATE),
+                timeline_producer,
+                driver,
+            )
+        }
+
+        fn telemetry(driver: &SourceGraphSourceSetDriver) -> SourceConsumerTelemetry {
+            driver.sources[0]
+                .consumer
+                .as_ref()
+                .expect("occupied")
+                .telemetry()
+        }
+
+        /// Test value: red if a consumer pops a command above the block's published generation (a
+        /// session seek could split across two blocks), drops it or its PCM instead of leaving
+        /// them queued, or does not take both at the first block after the publication.
+        #[test]
+        fn an_unpublished_seek_and_its_pcm_wait_in_their_slots_until_published() {
+            let word = PublishedGeneration::new(SourceGeneration(1));
+            let (mut host, mut timeline, mut driver) = fenced(&word);
+            driver.begin_block(0, 4).expect("block 0");
+            host.try_seek_unpublished(seek(2, 100))
+                .expect("source push");
+            timeline
+                .try_seek_unpublished(seek(2, 1_000))
+                .expect("timeline push");
+            let plane = [100.0_f32, 101.0, 102.0, 103.0];
+            host.submit(chunk(2, 100, &[&plane], 4, false))
+                .expect("generation 2 PCM");
+            assert_eq!(word.generation(), SourceGeneration(1), "nothing published");
+
+            driver.begin_block(4, 4).expect("block 1");
+            let held = telemetry(&driver);
+            assert_eq!(held.active_generation, SourceGeneration(1));
+            assert_eq!(held.cumulative_read_frames, 0);
+            assert_eq!(held.stale_generation_discard_count, 0, "the PCM waits");
+            assert_eq!(driver.timeline_at(4), Some(4), "the timeline runs on");
+            // Both commands still hold their slots.
+            assert!(matches!(
+                host.check_seek(seek(3, 0)),
+                Err(SourceSeekError::Backpressure { .. })
+            ));
+            assert!(matches!(
+                timeline.check_seek(seek(3, 0)),
+                Err(SourceSeekError::Backpressure { .. })
+            ));
+
+            word.publish(SourceGeneration(2));
+            driver.begin_block(8, 4).expect("block 2");
+            let applied = telemetry(&driver);
+            assert_eq!(applied.active_generation, SourceGeneration(2));
+            assert_eq!(applied.cumulative_read_frames, 4, "the waiting PCM plays");
+            assert_eq!(applied.stale_generation_discard_count, 0);
+            assert_eq!(driver.timeline_at(8), Some(1_000));
+            assert!(driver.observation_validity().source_generation_changed);
+        }
+
+        /// Test value: red if a seek on its own does not publish its generation (render would
+        /// hold it forever) or publishing lowers the word.
+        #[test]
+        fn a_seek_on_its_own_publishes_its_generation_and_the_word_never_falls() {
+            let word = PublishedGeneration::new(SourceGeneration(1));
+            let (mut host, mut timeline, mut driver) = fenced(&word);
+            host.try_seek(seek(5, 40)).expect("source seek");
+            assert_eq!(word.generation(), SourceGeneration(5));
+            timeline.try_seek(seek(3, 700)).expect("timeline seek");
+            assert_eq!(word.generation(), SourceGeneration(5), "max, not last");
+            driver.begin_block(0, 4).expect("block 0");
+            assert_eq!(telemetry(&driver).active_generation, SourceGeneration(5));
+            assert_eq!(driver.timeline_at(0), Some(700));
         }
     }
 }

@@ -358,3 +358,89 @@ the existing `impl SessionState`.
   none of them does: no seek is split across blocks. Run at both bank widths the native build
   covers. The render thread's allocation and free counts stay 0 (`bench_support::alloc` thread
   counters after warming).
+
+## Decision record: tranche 1, core (batch 16)
+
+Built on `454d65688` (worktree `codex/controls-batch-16b`). Tranche 2 (D4-D6: C exports, bit,
+header, docs, audit, capi gates 1-7) follows.
+
+**What shipped:**
+
+- **B16-R2, the publish fence** (`crates/source/src/lib.rs`). `PublishedGeneration`, one
+  `Arc<AtomicU64>` per session: `new(initial)` (control thread), `publish(g)` (`fetch_max`,
+  `Release`: the word is `max(word, g)` and never falls), `generation()`, `retained_bytes()`, and
+  a crate-private block-entry load (`Acquire`). Equality is identity (`Arc::ptr_eq`).
+  `SeekProducer` holds `Option<PublishedGeneration>`; its `push` is the old `try_seek` without a
+  publication, and `try_seek` is `push` then publish. `PcmSourceProducer`, `HostChunkProvider` and
+  `TimelineProducer` gain `try_seek_unpublished` and `share_published_generation`; their
+  `try_seek` publishes after its one push. The shared observe step's pop is
+  `SeekState::take_published(queue, published)`: `peek(0)` (#1320), and pop only a command whose
+  generation is at most the loaded value; otherwise the command keeps its slot. The PCM consumer
+  and the timeline call it at every observe. The driver holds `Option<PublishedGeneration>`,
+  loads it once at `begin_block` entry, before the timeline and the sources, and passes the value
+  to both (and to `prepare_source_seek`). `prepare_session_graph_source_set` seals a session's
+  set with the word; `prepare_graph_source_set` (standalone, no word, no fence) is unchanged.
+- **No acked PCM is dropped by the fence.** The PCM consumer's acquire now peeks each block before
+  it pops it: a block of an unobserved generation gets the one re-observe, and if its seek is
+  still unobserved (fenced) the acquire stops and leaves the block queued behind its command.
+  Before, the acquire popped the block first and, had the re-observe found nothing, would have
+  discarded it. For an unfenced consumer the outcome is the old one in every case the old
+  reasoning allowed.
+- **One word per session** (`crates/host-core/src/prepare.rs`). `PlanStateInventory` holds it: a
+  first plan allocates it, a successor takes `base.inventory`'s, `at_discontinuity` keeps it and
+  `across_withdrawn` clones it, so every plan of a session, its fresh rings (a source a candidate
+  adds or redeclares), its carried consumers, its timeline and a donation's two sides share one
+  object. `test_only_floors_only` (a fresh reference) gets a word of its own. Every fresh producer
+  and the fresh timeline producer share it before their first seek; the driver gets it through
+  `prepare_session_graph_source_set`; `SourceControlSet` holds it (`ControlSourceBuilder::finish`).
+  `adopt_persisting` debug-asserts both sets hold the same word.
+- **D1** (`crates/host-core/src/source.rs`). `SourceControlSet::seek_session(generation,
+  timeline_sample, anchor_sample)`: zero is `GenerationZero`; a generation not above the word is
+  `Seek(GenerationNotStrictlyIncreasing)` (`source.generation.stale`); then `check_seek` on the
+  timeline and every source in ID order (vacant is `Vacated`), each source at
+  `min(timeline_sample, region_end)` (then `max(region_start)`, a no-op while host-core sets 0);
+  then every `try_seek_unpublished` (timeline first), then one `publish(g)`. A failed push after
+  the checks is `Chunk(HostChunkError::InternalInvariant)` with a `debug_assert`; the pushed
+  commands are published so none stays held. `published_generation()` reads the word.
+- **SessionState::session_seek** (`crates/control-plane/src/control.rs`, inside the existing
+  `impl SessionState`): the service step, then `seek_session` on `newest_providers_mut().sources`.
+
+**Departures:**
+
+- **The word is charged in the inventory, not the source rows.** `PlanStateInventory::retained_bytes`
+  gains `PublishedGeneration::retained_bytes()` (24 bytes on x86-64), because the inventory is
+  the owner that holds the word across plans and the capi drop oracle frees it there
+  (`capi_retained_bytes_charge_every_byte_the_compile_retains` passes unchanged). No source row,
+  pin or ceiling moved. Each kept inventory charges it once, an overcharge in the safe direction.
+- **Four test literals** of `SourceGraphSourceSetDriver` in `crates/source/src/lib.rs` and one of
+  `PlanStateInventory` in `prepare.rs` gain the new field (`published: None`, a fresh word):
+  field additions only, no assertion changed.
+- **`crates/host-core/tests/timeline.rs`**: `seek_both` (gates 1 and 3 of #1641) now issues one
+  `seek_session` instead of a source seek plus `test_only_timeline_producer().try_seek`. The other
+  `test_only_timeline_producer` uses stay: they seek the timeline alone.
+- **A per-source seek pushed during a block** with a generation above the word now applies at the
+  next block, not in the block the push raced (B16-R2's rule for every command). Only a
+  concurrent host sees it; no existing test does.
+
+**Gates (tranche 1):**
+
+- D1 unit tests, `crates/host-core/src/source.rs` `source::tests`:
+  `both_forms_move_the_timeline_and_every_source_clamped_to_its_region`,
+  `a_refusal_pushes_nothing_and_publishes_nothing`, `a_vacant_entry_refuses_the_whole_seek`. PASS.
+- Fence unit tests, `crates/source/src/lib.rs` `tests::published`:
+  `an_unpublished_seek_and_its_pcm_wait_in_their_slots_until_published` (red with the fence
+  removed), `a_seek_on_its_own_publishes_its_generation_and_the_word_never_falls`. PASS.
+- **Gate 1b**, `crates/host-core/tests/session_seek.rs`
+  `concurrent_session_seeks_reach_the_timeline_and_every_source_in_one_block`: a session thread
+  pushes 10,000 session seeks (about half anchored, some late; generation `k + 2`; each pushed at a
+  random instant up to 40 µs after a block starts) while a render thread renders; every timeline
+  step is in the block both sources' seek reports name, at the seek's frames (the short source
+  clamped), at Simd8 and Simd4; render-thread allocations, reallocations and frees 0 over every
+  measured block. About 12 s for both widths (debug). With the fence removed (`take_published`
+  ignoring the value) it fails in each of two runs, at seeks 297 and 1,368 (`short` one block
+  ahead of the timeline and `long`).
+- Commands: `cargo test --locked -p source`, `-p host-core --features host-core/test-support`,
+  `-p control-plane`, `-p capi`: PASS. `./target/release/audit capi`: `pcm_digest`
+  `4f52089e4a8cf83c` (unchanged), 0 violations. `realtime_policy`: ok, 153 regions (unchanged).
+  Clippy `-p source -p host-core -p control-plane --all-targets --all-features -D warnings`,
+  `cargo check --workspace --all-targets --all-features`, `cargo fmt --all`: clean.

@@ -11,8 +11,9 @@ use engine::SampleRateHz;
 use engine::realtime::PreparedRenderPlan;
 use session::SessionModel;
 use source::{
-    HostChunkError, HostChunkProvider, HostPlanarChunk, SourceCommand, SourceFrame,
-    SourceGeneration, SourceSeekError, SourceSeekReport, SubmitReport, TimelineProducer,
+    HostChunkError, HostChunkProvider, HostPlanarChunk, PublishedGeneration, SourceCommand,
+    SourceFrame, SourceGeneration, SourceSeekError, SourceSeekReport, SubmitReport,
+    TimelineProducer,
 };
 
 use crate::PlanStateInventory;
@@ -141,14 +142,23 @@ pub struct SourceControlSet {
     /// The session timeline's producer (#1641 D2). `None` while vacant: a successor's, until
     /// [`Self::adopt_persisting`] moves its predecessor's in, or a predecessor's once moved.
     timeline: Option<TimelineProducer>,
+    /// The session's published seek generation (#1642 B16-R2), which every producer here
+    /// publishes to and every plan of the session loads at block entry: the same word in every
+    /// set of the session.
+    published: PublishedGeneration,
 }
 
 impl SourceControlSet {
-    pub(crate) fn new(ids: Box<[u8]>, sources: Box<[ControlSource]>) -> Self {
+    pub(crate) fn new(
+        ids: Box<[u8]>,
+        sources: Box<[ControlSource]>,
+        published: PublishedGeneration,
+    ) -> Self {
         Self {
             ids,
             sources,
             timeline: None,
+            published,
         }
     }
 
@@ -158,7 +168,7 @@ impl SourceControlSet {
     }
 
     /// The session timeline's producer, for a test that seeks the timeline directly (#1641
-    /// gates). `None` while vacant. Host-core has no public timeline seek; #1642 adds it.
+    /// gates). `None` while vacant. A host seeks the timeline with [`Self::seek_session`].
     #[cfg(feature = "test-support")]
     pub fn test_only_timeline_producer(&mut self) -> Option<&mut TimelineProducer> {
         self.timeline.as_mut()
@@ -262,6 +272,105 @@ impl SourceControlSet {
         self.queue_seek(id, generation, frame, Some(anchor_sample))
     }
 
+    /// Seek the session's timeline and every source to timeline sample `timeline_sample`, under
+    /// one new `generation`, all or nothing (#1642 D1): the session seek both hosts call.
+    ///
+    /// The timeline goes to `timeline_sample` as given (up to [`source::TIMELINE_SAMPLE_LIMIT`]);
+    /// each source to `min(timeline_sample, its region end)`. With `anchor_sample` every command is
+    /// the anchored form of [`Self::seek_at`], with that anchor. The host then submits generation
+    /// `generation` from each source's frame.
+    ///
+    /// 1. Generation 0 is [`SourceControlError::GenerationZero`]; a generation not above the
+    ///    session's published generation ([`Self::published_generation`]) is stale
+    ///    (`source.generation.stale`), so a source removed at a higher generation cannot let a
+    ///    command through early.
+    /// 2. The timeline producer and every source producer, in ID order, check their command with
+    ///    no push: the first refusal is returned and nothing is pushed. A vacant entry is
+    ///    [`SourceControlError::Vacated`]; a generation not above a producer's, a full slot, an
+    ///    unaligned anchor and a timeline frame over the limit are that producer's
+    ///    [`SourceControlError::Seek`] refusal.
+    /// 3. Every command is pushed, the timeline first, then the sources in ID order, none of them
+    ///    published; then the generation is published once (B16-R2), so render observes all of
+    ///    them at one block entry or none. Only this thread pushes to those slots and render only
+    ///    empties them, so after step 2 no push can fail; one that fails anyway is an engine
+    ///    invariant, [`HostChunkError::InternalInvariant`] (the pushed commands are published, so
+    ///    none stays held in its slot).
+    ///
+    /// Acknowledged only when every consumer holds the seek in its slot: no ack precedes a drop.
+    pub fn seek_session(
+        &mut self,
+        generation: u64,
+        timeline_sample: u64,
+        anchor_sample: Option<u64>,
+    ) -> Result<(), SourceControlError> {
+        let generation =
+            SourceGeneration::new(generation).ok_or(SourceControlError::GenerationZero)?;
+        let published = self.published.generation();
+        if generation <= published {
+            return Err(SourceControlError::Seek(
+                SourceSeekError::GenerationNotStrictlyIncreasing {
+                    active: published,
+                    requested: generation,
+                },
+            ));
+        }
+        let command = |frame: u64| match anchor_sample {
+            None => SourceCommand::Seek {
+                generation,
+                frame: SourceFrame(frame),
+            },
+            Some(anchor_sample) => SourceCommand::SeekAt {
+                generation,
+                frame: SourceFrame(frame),
+                anchor_sample,
+            },
+        };
+        let source_frame = |source: &ControlSource| {
+            timeline_sample
+                .min(source.region_end)
+                .max(source.region_start)
+        };
+        self.timeline
+            .as_ref()
+            .ok_or(SourceControlError::Vacated)?
+            .check_seek(command(timeline_sample))
+            .map_err(SourceControlError::Seek)?;
+        for source in &self.sources {
+            source
+                .provider
+                .as_ref()
+                .ok_or(SourceControlError::Vacated)?
+                .check_seek(command(source_frame(source)))
+                .map_err(SourceControlError::Seek)?;
+        }
+        let mut pushed = self.timeline.as_mut().is_some_and(|timeline| {
+            timeline
+                .try_seek_unpublished(command(timeline_sample))
+                .is_ok()
+        });
+        for source in &mut self.sources {
+            let frame = source_frame(source);
+            pushed &= source
+                .provider
+                .as_mut()
+                .is_some_and(|provider| provider.try_seek_unpublished(command(frame)).is_ok());
+        }
+        self.published.publish(generation);
+        if !pushed {
+            debug_assert!(false, "a checked session seek pushes to every slot");
+            return Err(SourceControlError::Chunk(HostChunkError::InternalInvariant));
+        }
+        Ok(())
+    }
+
+    /// The session's published seek generation (#1642 B16-R2): the largest generation any seek of
+    /// this session has published, 1 before the first. A session seek must be above it; a host
+    /// that chooses one above the largest generation it has used on the session always is.
+    #[must_use]
+    pub fn published_generation(&self) -> u64 {
+        self.published.generation().0
+    }
+
     /// Where the named source's newest generation landed, as render last published it (#1316 D7):
     /// the generation in effect, the source-read sample of the first block it played in and the
     /// source frame that block started at, plus the ring's cumulative underrun and held frames.
@@ -357,6 +466,10 @@ impl SourceControlSet {
         if self.timeline.is_none() {
             self.timeline = predecessor.timeline.take();
         }
+        debug_assert!(
+            self.published.is_shared_with(&predecessor.published),
+            "a successor's set shares its predecessor's published generation (#1642 B16-R2)"
+        );
         moved
     }
 
@@ -459,13 +572,17 @@ impl ControlSourceBuilder {
         });
     }
 
-    pub(crate) fn finish(mut self) -> SourceControlSet {
+    pub(crate) fn finish(mut self, published: PublishedGeneration) -> SourceControlSet {
         let ids = self.ids;
         self.sources.sort_unstable_by(|left, right| {
             ids[left.id_offset..left.id_offset + left.id_bytes]
                 .cmp(&ids[right.id_offset..right.id_offset + right.id_bytes])
         });
-        SourceControlSet::new(ids.into_boxed_slice(), self.sources.into_boxed_slice())
+        SourceControlSet::new(
+            ids.into_boxed_slice(),
+            self.sources.into_boxed_slice(),
+            published,
+        )
     }
 }
 
@@ -786,4 +903,235 @@ pub fn apply_donation(
     let producers = donate_producers(successor.sources, donor.sources, producers);
     debug_assert_eq!(producers, consumers, "both halves move every pair");
     consumers
+}
+
+#[cfg(test)]
+mod tests {
+    //! #1642 D1: the session seek, on a hand-built set of two sources and the timeline.
+
+    use core::num::NonZeroUsize;
+
+    use engine::QuantumFrames;
+    use source::{
+        PcmSourceConsumer, PcmSourceRing, PcmSourceRingConfig, SourceTimeline,
+        TIMELINE_SAMPLE_LIMIT, TimelineConsumer,
+    };
+
+    use super::*;
+
+    const Q: u32 = 4;
+    const LONG: &[u8] = b"long";
+    const SHORT: &[u8] = b"short";
+
+    /// A set of `long` (10,000 frames) and `short` (4,000 frames) and the timeline, all sharing
+    /// one published generation, and their consumers, rendered here by hand.
+    struct Rig {
+        set: SourceControlSet,
+        long: PcmSourceConsumer,
+        short: PcmSourceConsumer,
+        timeline: TimelineConsumer,
+        next: u64,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            let word = PublishedGeneration::new(SourceGeneration(1));
+            let ring = PcmSourceRingConfig {
+                channel_count: 1,
+                quantum_frames: QuantumFrames(Q),
+                frame_capacity: 16,
+                initial_generation: SourceGeneration(1),
+            };
+            let mut builder = ControlSourceBuilder::with_capacity(9, 2).expect("builder");
+            let mut consumers = Vec::new();
+            for (id, frames) in [("long", 10_000), ("short", 4_000)] {
+                let (mut producer, consumer, _) =
+                    PcmSourceRing::prepare_host_region(ring, SourceFrame(0)).expect("ring");
+                producer.share_published_generation(word.clone());
+                builder.push(
+                    id,
+                    48_000,
+                    1,
+                    0,
+                    frames,
+                    Some(producer.into_host_chunk_provider(SampleRateHz(48_000))),
+                );
+                consumers.push(consumer);
+            }
+            let mut set = builder.finish(word.clone());
+            let (mut producer, timeline, _) =
+                SourceTimeline::prepare(QuantumFrames(Q), NonZeroUsize::MIN).expect("timeline");
+            producer.share_published_generation(word);
+            set.set_timeline(producer);
+            let short = consumers.pop().expect("short");
+            let long = consumers.pop().expect("long");
+            Self {
+                set,
+                long,
+                short,
+                timeline,
+                next: 0,
+            }
+        }
+
+        /// Render one block of every consumer; returns its source-read sample.
+        fn block(&mut self) -> u64 {
+            let sample = self.next;
+            self.timeline.begin_block_at(sample);
+            self.long.begin_block_at(sample);
+            self.short.begin_block_at(sample);
+            self.next += u64::from(Q);
+            sample
+        }
+
+        /// `(generation, source frame)` each source's report names, then the timeline at `sample`.
+        fn landed(&self, sample: u64) -> ((u64, u64), (u64, u64), i64) {
+            let report = |id| {
+                let report = self.set.seek_report(id).expect("report");
+                (report.generation, report.source_frame)
+            };
+            (
+                report(LONG),
+                report(SHORT),
+                self.timeline.timeline_at(sample),
+            )
+        }
+
+        /// Whether every producer still takes a seek of `generation`: no slot is full.
+        fn every_slot_empty(&self, generation: u64) -> bool {
+            let command = SourceCommand::Seek {
+                generation: SourceGeneration(generation),
+                frame: SourceFrame(0),
+            };
+            self.set
+                .timeline
+                .as_ref()
+                .is_some_and(|timeline| timeline.check_seek(command).is_ok())
+                && self.set.sources.iter().all(|source| {
+                    source
+                        .provider
+                        .as_ref()
+                        .is_some_and(|provider| provider.check_seek(command).is_ok())
+                })
+        }
+    }
+
+    /// Test value: red if a source is not clamped to its region, the timeline is, a consumer
+    /// takes the seek in another block, or the anchored form applies before its anchor.
+    #[test]
+    fn both_forms_move_the_timeline_and_every_source_clamped_to_its_region() {
+        let mut rig = Rig::new();
+        rig.block();
+        rig.set.seek_session(2, 6_000, None).expect("session seek");
+        assert_eq!(rig.set.published_generation(), 2);
+        let sample = rig.block();
+        assert_eq!(rig.landed(sample), ((2, 6_000), (2, 4_000), 6_000));
+
+        let anchor = rig.next + 2 * u64::from(Q);
+        rig.set
+            .seek_session(3, 1_000, Some(anchor))
+            .expect("anchored session seek");
+        for _ in 0..2 {
+            let sample = rig.block();
+            let ((long, _), (short, _), _) = rig.landed(sample);
+            assert_eq!((long, short), (2, 2), "held before the anchor");
+        }
+        let sample = rig.block();
+        assert_eq!(sample, anchor);
+        assert_eq!(rig.landed(sample), ((3, 1_000), (3, 1_000), 1_000));
+        // The timeline is not clamped to any region.
+        rig.set
+            .seek_session(4, 50_000, None)
+            .expect("past every region");
+        let sample = rig.block();
+        assert_eq!(rig.landed(sample), ((4, 10_000), (4, 4_000), 50_000));
+    }
+
+    /// Test value: red if any slot is pushed before every check passes (a partial seek), or the
+    /// session seek takes a generation at or below the published one.
+    #[test]
+    fn a_refusal_pushes_nothing_and_publishes_nothing() {
+        let mut rig = Rig::new();
+        let stale = SourceControlError::Seek(SourceSeekError::GenerationNotStrictlyIncreasing {
+            active: SourceGeneration(1),
+            requested: SourceGeneration(1),
+        });
+        assert_eq!(
+            rig.set.seek_session(0, 0, None),
+            Err(SourceControlError::GenerationZero)
+        );
+        assert_eq!(rig.set.seek_session(1, 0, None), Err(stale));
+        assert_eq!(stale.diagnostic(), "source.generation.stale");
+        assert_eq!(
+            rig.set.seek_session(2, 0, Some(1)),
+            Err(SourceControlError::Seek(SourceSeekError::AnchorUnaligned))
+        );
+        assert_eq!(
+            rig.set.seek_session(2, TIMELINE_SAMPLE_LIMIT + 1, None),
+            Err(SourceControlError::Seek(SourceSeekError::FrameOutOfRange))
+        );
+        assert_eq!(rig.set.published_generation(), 1);
+        assert!(rig.every_slot_empty(2));
+
+        // One full slot refuses all: the short source holds a per-source seek.
+        rig.set.seek(SHORT, 2, 10).expect("per-source seek");
+        assert_eq!(
+            rig.set.published_generation(),
+            2,
+            "a per-source seek publishes"
+        );
+        let refused = rig.set.seek_session(3, 0, None);
+        assert!(
+            matches!(
+                refused,
+                Err(SourceControlError::Seek(
+                    SourceSeekError::Backpressure { .. }
+                ))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(rig.set.published_generation(), 2);
+        // The timeline's and the long source's slots stayed empty.
+        rig.set
+            .seek(LONG, 3, 20)
+            .expect("the long source's slot is empty");
+        let sample = rig.block();
+        let (long, short, timeline) = rig.landed(sample);
+        assert_eq!((long, short, timeline), ((3, 20), (2, 10), 0));
+
+        // A per-source seek at 5 makes a session seek at 4 stale.
+        rig.set.seek(LONG, 5, 0).expect("per-source seek");
+        assert_eq!(
+            rig.set.seek_session(4, 0, None),
+            Err(SourceControlError::Seek(
+                SourceSeekError::GenerationNotStrictlyIncreasing {
+                    active: SourceGeneration(5),
+                    requested: SourceGeneration(4),
+                }
+            ))
+        );
+    }
+
+    /// Test value: red if a vacant entry is skipped instead of refusing the whole seek.
+    #[test]
+    fn a_vacant_entry_refuses_the_whole_seek() {
+        let mut rig = Rig::new();
+        let timeline = rig.set.timeline.take();
+        assert_eq!(
+            rig.set.seek_session(2, 0, None),
+            Err(SourceControlError::Vacated)
+        );
+        rig.set.timeline = timeline;
+        let provider = rig.set.sources[1].provider.take();
+        assert_eq!(
+            rig.set.seek_session(2, 0, None),
+            Err(SourceControlError::Vacated)
+        );
+        rig.set.sources[1].provider = provider;
+        assert!(rig.every_slot_empty(2));
+        assert_eq!(rig.set.published_generation(), 1);
+        rig.set
+            .seek_session(2, 0, None)
+            .expect("every entry occupied");
+    }
 }
