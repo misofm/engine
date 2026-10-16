@@ -1145,16 +1145,11 @@ impl AutomatedFaderCell {
         let completion = controls::FADER_CELL_RULE.completion;
         let start = span.and_then(|span| node_time_at(span, 0));
         let value = match (start, program.cell(self.cell as usize)) {
-            (Some(start), Some(cell)) => {
-                let mut at = automation::completion_of(completion, start, ramp);
-                let ahead = cell.discontinuities();
-                if let Some(&next) = ahead.get(ahead.partition_point(|&time| time <= start))
-                    && next <= at
-                {
-                    at = next - 1;
-                }
-                automation::value_at(cell.segments(), at)
-            }
+            (Some(start), Some(cell)) => curve_toward(
+                &cell,
+                start,
+                automation::completion_of(completion, start, ramp),
+            ),
             (Some(_), None) => return false,
             (None, _) => match self.state.target() {
                 Some(value) => value,
@@ -1210,6 +1205,18 @@ impl AutomatedFaderCell {
 // REALTIME_POLICY_END
 
 // REALTIME_POLICY_BEGIN
+/// The value a ramp started at node time `start` and completing at `at` aims for: the curve at
+/// `at`, but never past the next discontinuity after `start`, which jumps of its own (the rule of
+/// the cell's own `target_at`).
+fn curve_toward(cell: &automation::CellProgram<'_>, start: i64, at: i64) -> f32 {
+    let ahead = cell.discontinuities();
+    let at = match ahead.get(ahead.partition_point(|&time| time <= start)) {
+        Some(&next) if next <= at => next - 1,
+        _ => at,
+    };
+    automation::value_at(cell.segments(), at)
+}
+
 /// The node time of sample `offset` of a node block mapped by `span` (`offset` may lie past the
 /// block: the mapping extends forward), or `None` past the `i64` range. Checked: a span saturated
 /// at the `i64` edges (R17-5) never wraps here.
@@ -1474,13 +1481,18 @@ impl<'a> FaderEventDriver<'a> {
                     });
                 let hold_now = hold(lane, channel);
                 let mut mode = controls::FADER_CELL_RULE.seek;
-                if settle_adoption(
+                // A landing longer than `J`: the remainder of the free stage's own ramp (U3 fold
+                // 2), landed alone at the block's first sample so the block's discontinuities
+                // still jump over `J`.
+                let mut long_landing = None;
+                if let Some(length) = settle_adoption(
                     core::mem::replace(adoption, Adoption::None),
                     AdoptionBlock {
                         program: &cell_program,
                         span,
                         offsets_sum: *offsets_sum,
                         hold: hold_now,
+                        jump,
                     },
                     state,
                 ) && step.is_none()
@@ -1489,6 +1501,7 @@ impl<'a> FaderEventDriver<'a> {
                     // over the block's jump length, to the curve at the jump's completion.
                     step = Some((0, span.start));
                     mode = automation::SeekMode::Ramp;
+                    long_landing = (length > jump).then_some(length);
                 }
                 let (free_from, at, release) = obligation.block(hold_now, frames);
                 if release && let Some(first) = span_time(span.start, step, 0) {
@@ -1520,26 +1533,73 @@ impl<'a> FaderEventDriver<'a> {
                     refused();
                     continue;
                 };
+                let end = end.flatten();
+                let (events, landing, base) = match long_landing {
+                    // U3 fold 2: the landing alone, a one-sample piece over its own length (it
+                    // commits the target and holds the grid until its end, as the cell's own
+                    // `Jump` does), then the rest of the block from its second sample. A free
+                    // stage has no cut (`end` is `None`); a cut at the first sample (a move due
+                    // there) takes the landing over `J` below instead.
+                    Some(length) if end.is_none() => {
+                        let one = automation::NodeSpan::new(span.start, Some((0, span.start)), 1);
+                        let rest = automation::NodeSpan::new(span.start + 1, None, frames - 1);
+                        // Unreachable: a step at 0 lies inside one sample, and the block's node
+                        // times were checked against the `i64` edge above. In release the channel
+                        // is skipped: it emits nothing and the lane holds its gain.
+                        let (Ok(one), Ok(rest)) = (one, rest) else {
+                            refused();
+                            continue;
+                        };
+                        let mut landing_events = automation::CellEvents::new(
+                            cell_program,
+                            state,
+                            one,
+                            automation::SeekMode::Ramp,
+                            length,
+                        );
+                        let landing = landing_events.next();
+                        let state = landing_events.into_state();
+                        let events = (frames > 1).then(|| {
+                            automation::CellEvents::new(
+                                cell_program,
+                                state,
+                                rest,
+                                controls::FADER_CELL_RULE.seek,
+                                jump,
+                            )
+                        });
+                        (events, landing, 1)
+                    }
+                    _ => (
+                        Some(automation::CellEvents::new(
+                            cell_program,
+                            state,
+                            node,
+                            mode,
+                            jump,
+                        )),
+                        None,
+                        0,
+                    ),
+                };
                 let mut cursor = FaderCellCursor {
                     lane,
                     channel,
                     offsets_sum: *offsets_sum,
                     program: cell_program,
                     jump,
-                    events: Some(automation::CellEvents::new(
-                        cell_program,
-                        state,
-                        node,
-                        mode,
-                        jump,
-                    )),
-                    base: 0,
+                    events,
+                    base,
                     next: None,
                     obligation,
                     free_from,
-                    end: end.flatten(),
+                    end,
                 };
-                cursor.pull();
+                if landing.is_some() {
+                    cursor.next = landing;
+                } else {
+                    cursor.pull();
+                }
                 *slot = Some(cursor);
                 used += 1;
             }
@@ -1640,10 +1700,12 @@ struct AdoptionBlock<'p, 'a> {
     span: TimelineSpan,
     offsets_sum: f64,
     hold: Option<ChannelHold>,
+    /// The block's jump length `J`.
+    jump: u32,
 }
 
 /// #1648 D2, at an adopted channel's first block: settle what [`LaneFaderAutomation::adopt`] left
-/// owed, and whether the block must open with the adoption jump.
+/// owed, and whether the block must open with the adoption jump, and over how many samples.
 ///
 /// A [`Adoption::Reposition`] places the cursor at the block's node time in the cell's own table
 /// (#1637 D4) and reports the stage's held ramp again (batch 13b: `reposition` drops the one the
@@ -1651,11 +1713,18 @@ struct AdoptionBlock<'p, 'a> {
 /// operation of either kind, and the obligation is decided by where the gain is free, not by the
 /// event's flag. It keeps the repositioned cell's events what the cell gives under a hold (held
 /// events as `RememberGain`, as the test-only event probe reports them); batch 17 U3 fold,
-/// MINOR 8: kept as bookkeeping, with no audible gate.
+/// MINOR 8: kept as bookkeeping, with no audible gate. On a free stage still in a ramp (a live
+/// level edit over its own length, applied at this block's entry or heard before the swap, or a
+/// jump) the repositioned cell holds that ramp again, and the adoption rule compares the curve
+/// where the ramp ends, where the stage's target was taken (U3 fold 2, D15-7): an unmoved target
+/// keeps the edit's own length, and only a moved one lands over the jump length.
 /// Then, for a reposition or [`Adoption::Compare`], the adoption rule: when
-/// the curve at the block's first sample, composed with this plan's `S`
+/// the curve at the block's first sample (or that ramp's end), composed with this plan's `S`
 /// (`checked_fader_gain(vca_compose_db(curve, S))`, #1648 departure 4), differs in bits from the
-/// gain the stage aims for, the block opens with a jump (returns `true`). Otherwise a repositioned
+/// gain the stage aims for, the block opens with a jump (returns its length: `J`, or the frames
+/// the free stage's own ramp has left when that is longer, so a running edit still ends when it
+/// was due, on this table's curve; never shorter than `J`, so a moved target never lands faster
+/// than a table change does). Otherwise a repositioned
 /// cell takes the curve's value as its current target (`seed_target`: the stage already holds its
 /// gain), and a continued one keeps its carried state. A block with a seek step lands the seek
 /// instead (the caller's step wins): the seek sets the lane exactly where it applies.
@@ -1663,37 +1732,50 @@ fn settle_adoption(
     adoption: Adoption,
     block: AdoptionBlock<'_, '_>,
     state: &mut automation::CellState,
-) -> bool {
+) -> Option<u32> {
     let AdoptionBlock {
         program,
         span,
         offsets_sum,
         hold,
+        jump,
     } = block;
     if adoption == Adoption::None {
-        return false;
+        return None;
     }
+    // The landing's length: `J`, or the frames the free stage's own ramp has left when longer.
+    let mut length = jump;
+    // The node time at which the curve is compared: the block's first sample, or the end of a
+    // ramp the free stage still runs (U3 fold 2).
+    let mut at = span.start;
     if adoption == Adoption::Reposition {
         state.reposition(program, span.start);
         if let Some(ChannelHold {
-            held: true,
-            remaining,
-            ..
+            held, remaining, ..
         }) = hold
             && let Some(last) = remaining.checked_sub(1)
             && let Some(end) = node_time_at(span, u64::from(last))
         {
+            // A held stage: the held ramp again (batch 13b). A free stage: the ramp it runs is the
+            // cell's own (a live level edit over its own length, or a jump) and `reposition`
+            // dropped its hold, so the cell holds it again and compares the curve where it ends
+            // (U3 fold 2, D15-7): the edit keeps its own length unless the new table moved its
+            // target.
             state.hold_until(end);
+            if !held {
+                at = end;
+                length = length.max(remaining);
+            }
         }
     }
-    let value = automation::value_at(program.segments(), span.start);
+    let value = curve_toward(program, span.start, at);
     let differs = FaderEventDriver::gain(value, offsets_sum)
         .zip(hold.and_then(|hold| hold.fader_gain))
         .is_some_and(|(gain, stage)| gain.to_bits() != stage.to_bits());
     if !differs && adoption == Adoption::Reposition {
         state.seed_target(value);
     }
-    differs
+    differs.then_some(length)
 }
 
 /// The cut of a block of `frames` samples whose offset 0 is node time `start`, with seek step

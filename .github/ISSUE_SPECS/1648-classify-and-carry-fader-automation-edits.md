@@ -673,3 +673,47 @@ No edit under `crates/engine/src/realtime/`.
   backstop also ramps over `J` to the same bits, so a lost record alone is not observable in that
   case (the hand-move and VCA forms with their own lengths are red under it).
 - Part C (B17-R12) is recorded in the U3 fold section above.
+
+## U3 fold 2 (batch 17): attempt 3 of 5
+
+Defect (verifier, at 93146057e): at a `Reposition` adoption (a table-only rebuild of the ride), a
+live level edit's own ramp was cut to the fader length `J` on a moving curve, while the watermark
+reported EXACT. `reposition` dropped the hold of the edit's ramp, and the adoption rule compared
+the curve at the block's first sample with a stage target taken at the ramp's end, so they
+differed and the block opened with a landing over `J` (0.047 from the uninterrupted engine).
+
+Fix (`crates/builtins-compiler/src/lib.rs`, `settle_adoption` and the driver's first block; no
+edit under `crates/automation` or `crates/engine/src/realtime/`):
+- On a free stage still in a ramp (`remaining > 0`), the repositioned cell holds that ramp again
+  until its last sample, and the adoption rule compares the curve where the ramp ends (with the
+  cell's discontinuity clamp, `curve_toward`, now shared with `offsets_jump`) with the stage's
+  target. An unmoved target keeps the edit's own ramp with no landing (an edit applied at the
+  first block, pending or in the rebuild's transaction).
+- When that target moved (a heard edit whose target the new table gives in other bits, even by
+  `f32` rounding), the landing length is `max(J, remaining)`: the edit still ends when it was due,
+  on the new table's curve, and a moved target never lands faster than `J`. A landing longer than
+  `J` is landed alone as a one-sample piece (`SeekMode::Ramp` over that length), and the rest of
+  the block runs from its second sample with `J`, so the block's own discontinuities still jump
+  over `J`. A landing of `J` keeps the old path.
+- A held stage is unchanged (the batch 13b report of the held ramp).
+
+Gates (`crates/capi/src/runtime/live_tests.rs`, `automated_carry`, C ABI plans):
+- `a_level_move_across_a_table_change_keeps_its_length`: a VCA move and a hand move, each with its
+  own 4,000 samples; the ride split at 10,000 (equal values up to rounding) and a change only in
+  its last 2,000 samples; the move pending at the swap, in the rebuild's transaction, and heard 1
+  and 12 blocks before it. 44 blocks, allocation-free, adopted, max `|a - u| < 1e-3`. All 16 cases
+  red at 93146057e (0.047, 0.046 heard 1, 0.024 heard 12). With the fix: 0 in 12 cases, 4.6e-6
+  heard 12 (the new table's rounding). The hand-move split keeps the offset the move stored.
+- `a_carried_move_replaced_unheard_counts_as_superseded` (MINOR): "a rebuild that moves again" and
+  "a move, a rebuild, a move", moving and flat ride: every block and `LIVE_VALUES_SUPERSEDED` equal
+  the uninterrupted engine's. Both cases red with `superseded.add_carried(1)` removed from
+  `read_offsets`, checked once each.
+- NIT: the two hand-move residue gates run on C ABI plans (the shipped preparer). Under the
+  carry-drain and join-write mutations a debug build stops first at the B17-R12 `debug_assert`
+  (the panic in render aborts the test process, red); a release build reaches the bit assert (red),
+  checked once each. Recorded in their test value.
+
+Also in this attempt (coordinator): `crates/host-core/tests/stored_fader_automation.rs` selected
+`Backend::Simd8` in `form_rig` on every target; the forms are now a `FORMS` list whose eight-lane
+entries carry `cfg(target_feature = "avx2")`, so `acted` compares five forms on x86-64 and three
+elsewhere. `scripts/check-cross-targets.sh` passes.

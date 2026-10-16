@@ -2033,12 +2033,28 @@ fn a_live_write_that_frees_a_held_lane_releases_its_hold() {
     }
 }
 
-/// A rig of `model` at `quantum` with live controls and its plan's gate, on one of the five
-/// render forms [`acted`] compares: the live bank at eight and four lanes, the same between
-/// render calls (the fused path), and the scalar oracle (R17-4).
+/// The render forms [`acted`] compares, as `(backend, between render calls)`: the live bank at
+/// eight lanes (on an AVX2 target only, the one that has them) and four, the same between render
+/// calls (the fused path), and the scalar oracle (R17-4).
 #[cfg(feature = "test-support")]
-fn form_rig(model: &SessionModel, quantum: u32, form: usize) -> Rig {
-    use graph_compiler::Backend;
+const FORMS: &[(graph_compiler::Backend, bool)] = &[
+    #[cfg(target_feature = "avx2")]
+    (graph_compiler::Backend::Simd8, false),
+    (graph_compiler::Backend::Simd4, false),
+    #[cfg(target_feature = "avx2")]
+    (graph_compiler::Backend::Simd8, true),
+    (graph_compiler::Backend::Simd4, true),
+    (graph_compiler::Backend::Scalar, false),
+];
+
+/// A rig of `model` at `quantum` with live controls and its plan's gate, on one of the
+/// [`FORMS`].
+#[cfg(feature = "test-support")]
+fn form_rig(
+    model: &SessionModel,
+    quantum: u32,
+    (backend, between): (graph_compiler::Backend, bool),
+) -> Rig {
     let mut model = model.clone();
     model.quantum_frames = quantum;
     let document = canonical_session_json(&model).expect("canonical");
@@ -2046,13 +2062,6 @@ fn form_rig(model: &SessionModel, quantum: u32, form: usize) -> Rig {
     let compiled = host_core::compile_host_session(&document, &caps)
         .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
     let request = host_core::HostLiveControlRequest::default();
-    let (backend, between) = match form {
-        0 => (Backend::Simd8, false),
-        1 => (Backend::Simd4, false),
-        2 => (Backend::Simd8, true),
-        3 => (Backend::Simd4, true),
-        _ => (Backend::Scalar, false),
-    };
     let (mut prepared, handles) = if between {
         host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
             &compiled, &caps, &request, backend,
@@ -2094,7 +2103,7 @@ const fn act(at: u64) -> Act {
 }
 
 /// The output of `model` at `quantum` over `frames` with `acts`, the same bits on each of the
-/// five forms of [`form_rig`]; and the block entry each act landed on.
+/// [`FORMS`] the target provides (five on AVX2); and the block entry each act landed on.
 #[cfg(feature = "test-support")]
 fn acted(
     model: &SessionModel,
@@ -2105,7 +2114,7 @@ fn acted(
     use builtins_compiler::TestOnlyWriteGate;
     let mut outs = Vec::new();
     let mut entries = Vec::new();
-    for form in 0..5 {
+    for &form in FORMS {
         let mut rig = form_rig(model, quantum, form);
         entries.clear();
         while rig.rendered < frames {

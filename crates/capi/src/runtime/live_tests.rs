@@ -8940,7 +8940,12 @@ mod set_control {
         /// Test value: red if a hand move's offsets write misses the carry drain (checked once)
         /// or its record loses its ramp word across the swap: the successor then jumps over the
         /// fader length from its prepared `S`. A hand move reaches the offsets cell through the
-        /// fader row's stored offset, not the VCA row, which the VCA forms do not exercise.
+        /// fader row's stored offset, not the VCA row, which the VCA forms do not exercise. The
+        /// rigs are C ABI plans (the shipped preparer, live cells on every strip): with the carry
+        /// drain's read removed, a debug build stops first at the B17-R12 `debug_assert` (the
+        /// adoption backstop becomes reachable; a panic in render aborts the test process, red),
+        /// and a release build reaches this test's bit assert (red at the moving ride's first
+        /// block after the swap).
         #[test]
         fn a_hand_move_pending_at_a_swap_keeps_its_length() {
             bench_support::alloc::assert_installed();
@@ -8982,7 +8987,10 @@ mod set_control {
         ///
         /// Test value: red if the join writes no offsets record for a hand move's stored offset
         /// (the successor's `S` then reaches the lane by the adoption rule, over the fader length
-        /// `J`, not over 4,096 samples).
+        /// `J`, not over 4,096 samples). The rigs are C ABI plans (the shipped preparer): with the
+        /// join's offsets write removed, a debug build stops first at the B17-R12 `debug_assert`
+        /// (a panic in render aborts the test process, red), and a release build reaches this
+        /// test's bit assert.
         #[test]
         fn a_hand_move_inside_a_rebuild_keeps_its_own_length() {
             bench_support::alloc::assert_installed();
@@ -8999,6 +9007,201 @@ mod set_control {
                 assert_eq!(rigs[0].summary().3, 0, "{label}: the successor is adopted");
                 assert_eq!(first, None, "{label}: first difference (block, sample)");
                 assert!(heard, "{label}: the move is heard");
+            }
+        }
+
+        /// When a live level move reaches a swap whose rebuild changes the ride's table: still
+        /// unread, in the rebuild's own transaction, or heard some blocks before it.
+        #[derive(Clone, Copy, Debug)]
+        enum MoveTiming {
+            /// The move is committed live and the rebuild follows with no block between them.
+            Pending,
+            /// The move is in the rebuild's transaction.
+            SameTransaction,
+            /// The move is heard for this many blocks before the rebuild.
+            Heard(usize),
+        }
+
+        /// The ride of [`riding`] split into two linear segments at `at` that join where the
+        /// single segment passes (equal values up to `f32` rounding), the second ending at
+        /// `end_db` (-12 dB keeps the ride; another value changes only the second segment), with
+        /// the stored `offset` (a hand move's, which the upsert must keep).
+        fn split_ride(
+            track: &str,
+            (at, end_db): (u64, f32),
+            offset: session::AutomationOffset,
+        ) -> SessionEdit {
+            let lin = session::AutomationShape::Linear;
+            let k = -12.0 * at as f32 / SOURCE_FRAMES as f32;
+            let mut automation = entry(
+                track,
+                vec![
+                    segment(lin, (0, at), (0.0, k)),
+                    segment(lin, (at, SOURCE_FRAMES), (k, end_db)),
+                ],
+            );
+            automation.offset = offset;
+            SessionEdit::UpsertAutomation { automation }
+        }
+
+        /// U3 fold 2 (#1648 D2, D15-7). A live level move with its own 4,000 samples on the
+        /// riding fader (a VCA move and a hand move), and a rebuild whose only change is the
+        /// ride's table: the same ride split in two at sample 10,000, or a change only in its
+        /// last 2,000 samples. The move is pending at the swap, in the rebuild's transaction, or
+        /// heard 1 and 12 blocks before it. Every block of the rebuilt rig stays within 1e-3 of
+        /// the uninterrupted engine's (the split alone moves the output by at most 1.7e-4) over
+        /// 44 blocks, allocation-free, and the successor is adopted.
+        ///
+        /// Test value: red if the repositioned cell drops the hold of the ramp the free stage
+        /// still runs, or compares the curve at the block's first sample rather than at that
+        /// ramp's end with the stage's target: on a moving ride they differ, and the adoption
+        /// jump replaces the edit's 4,000 samples with the fader length (960; 0.047 at HEAD).
+        #[test]
+        fn a_level_move_across_a_table_change_keeps_its_length() {
+            bench_support::alloc::assert_installed();
+            let document = riding();
+            let track = first_track(&document);
+            let moves = [
+                ("a VCA move", vca_move(-6.0, Some(4_000))),
+                ("a hand move", hand_move(&document, -6.0, Some(4_000))),
+            ];
+            let changes = [
+                ("the ride split at 10,000", (10_000, -12.0)),
+                (
+                    "a change in the last 2,000 samples",
+                    (SOURCE_FRAMES - 2_000, -6.0),
+                ),
+            ];
+            let timings = [
+                MoveTiming::Pending,
+                MoveTiming::SameTransaction,
+                MoveTiming::Heard(1),
+                MoveTiming::Heard(12),
+            ];
+            for (what, edit) in &moves {
+                for &(change, table) in &changes {
+                    for timing in timings {
+                        let label = &format!("{what}, {change}, {timing:?}");
+                        let mut rigs = warm(&document);
+                        send(
+                            &mut rigs[1],
+                            core::slice::from_ref(edit),
+                            protocol::EditPath::Live,
+                            label,
+                        );
+                        // The offset the move stored (a hand move's; zero for a VCA move).
+                        let offset = rigs[1].model().automation[0].offset;
+                        let rebuild = &split_ride(&track, table, offset);
+                        if let MoveTiming::SameTransaction = timing {
+                            send(
+                                &mut rigs[0],
+                                &[edit.clone(), rebuild.clone()],
+                                protocol::EditPath::Rebuild,
+                                label,
+                            );
+                        } else {
+                            send(
+                                &mut rigs[0],
+                                core::slice::from_ref(edit),
+                                protocol::EditPath::Live,
+                                label,
+                            );
+                            if let MoveTiming::Heard(blocks) = timing {
+                                let (first, _) = lockstep(&mut rigs, blocks);
+                                assert_eq!(first, None, "{label}: before the rebuild");
+                            }
+                            send(
+                                &mut rigs[0],
+                                core::slice::from_ref(rebuild),
+                                protocol::EditPath::Rebuild,
+                                label,
+                            );
+                        }
+                        let [a, u, _] = &mut rigs;
+                        let mut worst = (0.0_f32, 0_u64);
+                        for _ in 0..44 {
+                            let block = a.block;
+                            let (x, used) = a.step_counted();
+                            assert_eq!(
+                                (used.allocations, used.deallocations),
+                                (0, 0),
+                                "{label}: block {block} allocated or freed"
+                            );
+                            for (p, q) in x.iter().zip(&u.step()) {
+                                if (p - q).abs() > worst.0 {
+                                    worst = ((p - q).abs(), block);
+                                }
+                            }
+                        }
+                        assert_eq!(a.summary().3, 0, "{label}: the successor is adopted");
+                        assert!(
+                            worst.0 < 1e-3,
+                            "{label}: max |a - u| {} at block {}",
+                            worst.0,
+                            worst.1
+                        );
+                    }
+                }
+            }
+        }
+
+        /// U3 fold 2, MINOR (#1648 D2, D15-2). Two live VCA moves around a rebuild, with no block
+        /// between any of them: a move pending at a rebuild whose own transaction moves `v`
+        /// again, and a move, a rebuild, then a second live move. The first move is replaced
+        /// unheard in both, as two writes before one uninterrupted block are, so
+        /// `LIVE_VALUES_SUPERSEDED` equals the uninterrupted engine's, and every block does too.
+        ///
+        /// Test value: red if the successor's first block, applying a record of its own over the
+        /// carried one, does not count the carried record it replaces unheard.
+        #[test]
+        fn a_carried_move_replaced_unheard_counts_as_superseded() {
+            bench_support::alloc::assert_installed();
+            for document in [riding(), flat()] {
+                let model = parse_session_json(&document).expect("model");
+                let rebuild = add_muted_track(&model, "added");
+                for (label, inside) in [
+                    ("a rebuild that moves again", true),
+                    ("a move, a rebuild, a move", false),
+                ] {
+                    let mut rigs = warm(&document);
+                    let (first_move, second) = (vca_move(-6.0, None), vca_move(-3.0, Some(4_000)));
+                    for rig in &mut rigs[..2] {
+                        send(
+                            rig,
+                            core::slice::from_ref(&first_move),
+                            protocol::EditPath::Live,
+                            label,
+                        );
+                    }
+                    if inside {
+                        let mut edits = vec![second.clone()];
+                        edits.extend(rebuild.iter().cloned());
+                        send(&mut rigs[0], &edits, protocol::EditPath::Rebuild, label);
+                    } else {
+                        send(&mut rigs[0], &rebuild, protocol::EditPath::Rebuild, label);
+                        send(
+                            &mut rigs[0],
+                            core::slice::from_ref(&second),
+                            protocol::EditPath::Live,
+                            label,
+                        );
+                    }
+                    send(
+                        &mut rigs[1],
+                        core::slice::from_ref(&second),
+                        protocol::EditPath::Live,
+                        label,
+                    );
+                    let (first, heard) = lockstep(&mut rigs, 44);
+                    assert_eq!(rigs[0].summary().3, 0, "{label}: the successor is adopted");
+                    assert_eq!(first, None, "{label}: first difference (block, sample)");
+                    assert!(heard, "{label}: the moves are heard");
+                    let counts = [superseded(&mut rigs[0]), superseded(&mut rigs[1])];
+                    assert_eq!(
+                        counts[0], counts[1],
+                        "{label}: LIVE_VALUES_SUPERSEDED [a, u]"
+                    );
+                }
             }
         }
 
