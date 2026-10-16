@@ -182,22 +182,39 @@ fn every_u64_leaf_accepts_the_full_unsigned_domain() {
     let canonical = canonical_session_json(&model).expect("full-domain u64 leaf writes");
     assert!(canonical.contains(replacement));
 
-    // The semantic interval rule requires start < end, so exercise both leaves at their highest
-    // jointly valid values rather than weakening validation merely to test lexical width.
+    // The semantic interval rule requires start < end, and an automation sample is bounded below
+    // `automation::TIME_LIMIT` (2^53), so exercise both leaves at their highest jointly valid
+    // values rather than weakening validation merely to test lexical width.
+    let high = automation::TIME_LIMIT - 1;
     let source = CANONICAL
         .replacen(
             "\"start_sample\": \"0\"",
-            "\"start_sample\": \"18446744073709551614\"",
+            &format!("\"start_sample\": \"{}\"", high - 1),
             1,
         )
         .replacen(
             "\"end_sample\": \"480\"",
-            "\"end_sample\": \"18446744073709551615\"",
+            &format!("\"end_sample\": \"{high}\""),
             1,
         );
-    let model = parse_session_json(&source).expect("full-domain automation interval parses");
-    assert_eq!(model.automation[0].segments[0].start_sample, u64::MAX - 1);
-    assert_eq!(model.automation[0].segments[0].end_sample, u64::MAX);
+    let model = parse_session_json(&source).expect("highest automation interval parses");
+    assert_eq!(model.automation[0].segments[0].start_sample, high - 1);
+    assert_eq!(model.automation[0].segments[0].end_sample, high);
+
+    // The lexical width is still the full u64; the semantic bound refuses the rest.
+    let source = CANONICAL.replacen(
+        "\"end_sample\": \"480\"",
+        "\"end_sample\": \"18446744073709551615\"",
+        1,
+    );
+    let errors = parse_session_json(&source).expect_err("an end sample past 2^53 is refused");
+    assert!(
+        errors.diagnostics().iter().any(|item| {
+            item.code == session::DiagnosticCode::NumericOutOfSchemaRange
+                && item.path.to_string() == "$.automation[0].segments[0].end_sample"
+        }),
+        "{errors}"
+    );
 }
 
 #[test]

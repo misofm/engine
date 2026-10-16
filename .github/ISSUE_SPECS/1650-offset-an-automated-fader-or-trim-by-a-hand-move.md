@@ -412,7 +412,7 @@ moves to #1654 (render stored send gain, mute and matrix automation). No inert f
 
 ## Decision record: #1650a (batch 17)
 
-Implemented on `codex/controls-batch-17w` over `ba240b6e1` (uncommitted for the coordinator).
+Implemented on `codex/controls-batch-17w` over `ba240b6e1`, committed as `5c8781b7e`.
 
 **What shipped.**
 

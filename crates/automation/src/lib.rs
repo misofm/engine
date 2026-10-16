@@ -52,6 +52,7 @@ pub use events::{
 };
 pub use program::{
     BuildError, CellDescription, CellProgram, DISCONTINUITY_SPACING, Program, ProgramBuilder,
+    TIME_LIMIT,
 };
 
 /// The shape of one segment.

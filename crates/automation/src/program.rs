@@ -5,8 +5,11 @@ use alloc::vec::Vec;
 
 use crate::{Completion, JumpLength, Segment, Shape, value_at};
 
-/// Times are exact in `f64` below this bound, which the evaluator relies on.
-const TIME_LIMIT: u64 = 1 << 53;
+/// Times are exact in `f64` below this bound, which the evaluator relies on: a segment's start and
+/// end sample are both below it, so the largest accepted sample is `TIME_LIMIT - 1`. The session
+/// validator refuses a segment at or past it with the same constant (`numeric.out_of_schema_range`
+/// at the sample's path), so a validated session never reaches [`BuildError::Segment`] on it.
+pub const TIME_LIMIT: u64 = 1 << 53;
 
 /// The least distance, in node-time samples, between two discontinuities of one cell: the session
 /// refuses closer ones (`automation.discontinuity_spacing`, #1626 D3), and the builder refuses

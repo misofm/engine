@@ -26,7 +26,11 @@ Solidus and all other Unicode scalars, including U+2028, U+2029 and non-BMP scal
 Booleans and `u8`/`u32` fields are JSON booleans/numbers. Integer-number fields reject fractions,
 exponents and any leading minus, including `-0`. Every typed `u64` leaf (source `frames`, and
 automation `start_sample`/`end_sample`) is a canonical unsigned decimal JSON string matching
-`^(0|[1-9][0-9]*)$`, bounded through `18446744073709551615`. `revision` is the same canonical
+`^(0|[1-9][0-9]*)$`, bounded through `18446744073709551615`; an automation segment's
+`start_sample` and `end_sample` are further bounded below `2^53` (`9007199254740992`,
+`automation::TIME_LIMIT`: node times are exact in `f64` below it, and the stored-automation program
+builder refuses a segment at or past it), so the validator refuses a larger one with
+`numeric.out_of_schema_range` at that sample's path. `revision` is the same canonical
 decimal string, bounded through `9223372036854775807` (2^63 - 1, `session::MAX_SESSION_REVISION`):
 a plan's revision gate cannot hold a larger revision, so the validator refuses one with
 `numeric.out_of_schema_range` at `$.revision`. Finite `f32` fields accept

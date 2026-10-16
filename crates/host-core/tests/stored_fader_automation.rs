@@ -6,6 +6,11 @@
 //! render allocation. The events on the fader (#1647b): completion samples, jumps, latency, the
 //! session seek, quantum invariance, allocation and the scalar oracle's parity (#1647 gates 1-6,
 //! R17-4).
+//! Preparation bakes every fader in the canonical floating-point environment, whatever the
+//! caller's thread has set (D2).
+
+// The D2 environment test writes the thread's floating-point control word, which is `unsafe`.
+#![allow(unsafe_code)]
 
 #[cfg(feature = "test-support")]
 #[path = "support/successor.rs"]
@@ -96,6 +101,19 @@ fn flat_fader(
     }
 }
 
+/// [`prepare`], and the heap bytes the preparation left live on this thread (the audited
+/// allocator's thread-scoped counters: requested minus released), which the prepared host holds:
+/// the compiled model is dropped inside the window.
+fn prepare_retained(model: &SessionModel) -> (PreparedHost, u64) {
+    let document = canonical_session_json(model).expect("canonical");
+    let mark = bench_support::alloc::current_thread_counters();
+    let prepared = prepare_host_session(&document, &caps(u64::MAX))
+        .map(|(_, prepared)| prepared)
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+    let moved = bench_support::alloc::current_thread_delta_since(mark);
+    (prepared, moved.requested_bytes - moved.released_bytes)
+}
+
 fn prepare(model: &SessionModel, maximum: u64) -> Result<PreparedHost, String> {
     let document = canonical_session_json(model).expect("canonical");
     prepare_host_session(&document, &caps(maximum))
@@ -126,13 +144,16 @@ fn width(units: &[PlanUnitEligibility]) -> u64 {
 /// Gate 2: the same session with and without one automated fader lane. `builtin_bank_bytes`,
 /// `graph_incremental_plan_bytes` and `graph_session_plus_plan_bytes` each differ by exactly the
 /// lane's charge: the builder's byte report for its program and the program's shared allocation,
-/// one automation slot per lane of its fader bank, and its offsets cell (D4). A cap one byte below
-/// the admitted total refuses the session with `host.graph.resource.limit`, and the cap at the
-/// total prepares it.
+/// one automation slot per lane of its fader bank, and its offsets cell (D4). The charge is also
+/// checked against the heap itself: the bytes the automated prepared host holds live, less the
+/// plain one's, are exactly the charge, measured with the audited allocator's thread-scoped
+/// counters (the compiled model is dropped inside the window). A cap one byte below the admitted total
+/// refuses the session with `host.graph.resource.limit`, and the cap at the total prepares it.
 ///
 /// Test value: red if any term of the charge (the program, the bank slots or the offsets cell)
 /// escapes the graph rows, the caller's cap or (through `graph_session_plus_plan_bytes`) the C
-/// ABI's replacement peak, or if a session without automation pays for it.
+/// ABI's replacement peak, if the charged sizes disagree with what lowering actually retains, or
+/// if a session without automation pays for it.
 #[test]
 fn a_fader_automation_is_charged_to_the_graph_plan_rows_and_the_cap() {
     let plain = bank_model();
@@ -141,8 +162,11 @@ fn a_fader_automation_is_charged_to_the_graph_plan_rows_and_the_cap() {
     let segments = controls::stored_segments(&entry);
     automated.automation = vec![entry];
 
-    let base = prepare(&plain, u64::MAX).expect("the plain session prepares");
-    let with = prepare(&automated, u64::MAX).expect("the automated session prepares");
+    bench_support::alloc::assert_installed();
+    // Warm the process statics first, so neither measured preparation pays for them.
+    drop(prepare_retained(&plain));
+    let (base, base_retained) = prepare_retained(&plain);
+    let (with, with_retained) = prepare_retained(&automated);
     let sizes = fader_automation_sizes();
     let lanes = width(&with.plan.unit_eligibility());
     let program = ProgramBuilder::bytes(&[controls::FADER_CELL_RULE.describe(&segments)]);
@@ -175,6 +199,12 @@ fn a_fader_automation_is_charged_to_the_graph_plan_rows_and_the_cap() {
         );
     }
 
+    assert_eq!(
+        with_retained - base_retained,
+        charge,
+        "the heap the automation retains is its charge: {base_retained} -> {with_retained}"
+    );
+
     let total = admitted(&with.report);
     assert!(
         admitted(&base.report) < total - 1,
@@ -203,7 +233,11 @@ fn signal(index: usize) -> f32 {
 /// `[left, right]` output bits over [`BLOCKS`] blocks, the source's two planes carrying the same
 /// PCM, and the plan's `[blocks rendered collapsed, chains armed with a prefix]`.
 fn render(model: &SessionModel) -> ([Vec<u32>; 2], [u64; 2]) {
-    let mut prepared = prepare(model, 100_000_000).expect("prepares");
+    render_prepared(prepare(model, 100_000_000).expect("prepares"))
+}
+
+/// [`render`] of an already prepared host.
+fn render_prepared(mut prepared: PreparedHost) -> ([Vec<u32>; 2], [u64; 2]) {
     let mut planes = [Vec::new(), Vec::new()];
     for block in 0..BLOCKS {
         let base = block * QUANTUM;
@@ -1260,5 +1294,167 @@ fn a_lane_a_successor_adds_starts_at_its_curve() {
             reference[SWAP_BLOCK].bits, without[SWAP_BLOCK].bits,
             "the ride is heard"
         );
+    }
+}
+
+/// The caller words of the D2 environment test: MXCSR on `x86_64`, FPCR on AArch64.
+#[cfg(target_arch = "x86_64")]
+mod word {
+    use lane::softfma::{MXCSR_DAZ, MXCSR_FTZ};
+
+    /// Flush-to-zero, denormals-are-zero and round-toward-zero (RC `11`, bits 13-14).
+    pub(super) fn hostile(saved: u32) -> u32 {
+        saved | MXCSR_FTZ | MXCSR_DAZ | 0x6000
+    }
+}
+
+/// FPCR `FZ` and `RMode` `11` (round toward zero); AArch64 has no separate DAZ bit.
+#[cfg(target_arch = "aarch64")]
+mod word {
+    use lane::fpenv::FPCR_FZ;
+
+    pub(super) fn hostile(saved: u64) -> u64 {
+        saved | FPCR_FZ | (0b11 << 22)
+    }
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod canonical_preparation {
+    use super::*;
+    use lane::fpenv::{
+        FpControlWord, canonical_fp_control_word, read_fp_control_word, write_fp_control_word,
+    };
+
+    /// Writes the saved word back on drop, so a failed assertion leaves the thread as it was.
+    struct Restore(FpControlWord);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: `self.0` is the word this test read from this thread before it changed it,
+            // so it sets no reserved or `RES0` bit.
+            unsafe { write_fp_control_word(self.0) };
+        }
+    }
+
+    /// Runs `body` with the thread's control word set to `word`, then restores the saved word.
+    fn under<T>(word: FpControlWord, body: impl FnOnce() -> T) -> T {
+        let _restore = Restore(read_fp_control_word());
+        // SAFETY: `word` is the canonical word or `word::hostile` of a word read from this thread,
+        // which sets only FTZ, DAZ and RC (MXCSR) or FZ and RMode (FPCR): no reserved bit.
+        unsafe { write_fp_control_word(word) };
+        body()
+    }
+
+    /// A member dB whose composition with [`VCA_DB`] rounds differently under round-toward-zero,
+    /// and whose two compositions convert to different gains (asserted).
+    const VCA_MEMBER_DB: f32 = -0.01384;
+    /// The left offset of the fixture's VCA.
+    const VCA_DB: f32 = 1.0 / 3.0;
+
+    /// Static faders of distinct dB on every lane, input trims and filters, no effect (an effect's
+    /// own preparation is outside this gate), a flat automated lane on track 2 and a moving
+    /// automated pair on track 5. One VCA reaches tracks 1, 2 and 5; track 1's left lane is
+    /// [`VCA_MEMBER_DB`].
+    fn fixture() -> (SessionModel, Vec<f32>) {
+        let mut model = bank_model();
+        model.console.pre_insert.clear();
+        model.console.post_insert.clear();
+        let mut decibels = Vec::new();
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            let k = index as f32;
+            track.console.clear();
+            track.fader.left_db = -0.37 - 1.13 * k;
+            track.fader.right_db = 0.71 - 0.89 * k;
+            track.builtins.left.trim_db = -1.3 + 0.21 * k;
+            track.builtins.left.hpf_hz = 37.3 + 3.1 * k;
+            track.builtins.right.lpf_hz = 15_013.0 - 271.0 * k;
+            decibels.extend([track.fader.left_db, track.fader.right_db]);
+        }
+        let flat = flat_fader(&model, 2, ParameterChannel::Left, -7.31);
+        let mut moving = flat_fader(&model, 5, ParameterChannel::Both, -3.17);
+        moving.segments[0].end_value = 2.5;
+        decibels.extend([-7.31, -3.17]);
+        model.automation = vec![flat, moving];
+        model.tracks[1].fader.left_db = VCA_MEMBER_DB;
+        let members = [1, 2, 5]
+            .map(|track| model.tracks[track].id.clone())
+            .to_vec();
+        model.vcas = vec![session::Vca {
+            id: id("vca-a"),
+            fader: session::DualMonoFader {
+                left_db: VCA_DB,
+                right_db: -0.1,
+                left_mute: false,
+                right_mute: false,
+            },
+            members,
+        }];
+        (model, decibels)
+    }
+
+    /// D2: a caller thread with FTZ, DAZ and round-toward-zero set prepares the plan a canonical
+    /// thread prepares. Each arm prepares under its word; both render under the canonical word, so
+    /// any difference is a prepared value. The fixture's dB-to-gain conversions and one VCA
+    /// composition round differently under round-toward-zero, by a step that reaches the gain
+    /// (both asserted), so the gate is not vacuous.
+    ///
+    /// Test value: red if preparation composes a strip's effective fader, or bakes a fader gain or
+    /// an input coefficient, outside `CanonicalFpEnv` (remove the guard around host-core's
+    /// `controls::effective`, in the builtins preparation body or in
+    /// `into_graph_artifact_with_banks`), so a flat automated lane and a static fader would take
+    /// the caller's rounding.
+    #[test]
+    fn a_hostile_caller_environment_prepares_the_canonical_faders() {
+        let canonical = canonical_fp_control_word();
+        let hostile = word::hostile(canonical);
+        let (model, decibels) = fixture();
+
+        let moved = under(hostile, || {
+            decibels
+                .iter()
+                .filter(|&&db| {
+                    let gain = builtins::checked_fader_gain(db).expect("in domain");
+                    let pinned = {
+                        let _pin = lane::CanonicalFpEnv::enter();
+                        builtins::checked_fader_gain(db).expect("in domain")
+                    };
+                    gain.to_bits() != pinned.to_bits()
+                })
+                .count()
+        });
+        assert!(
+            moved > 0,
+            "the gate is vacuous: no fixture fader converts differently under the hostile word"
+        );
+        let offset = f64::from(VCA_DB);
+        let composed = session::vca_compose_db(VCA_MEMBER_DB, offset);
+        let rounded = under(hostile, || session::vca_compose_db(VCA_MEMBER_DB, offset));
+        assert_ne!(
+            builtins::checked_fader_gain(composed).map(f32::to_bits),
+            builtins::checked_fader_gain(rounded).map(f32::to_bits),
+            "the gate is vacuous: the VCA composition's rounding does not reach the gain"
+        );
+
+        let prepared_canonical = under(canonical, || prepare(&model, 100_000_000));
+        let prepared_hostile = under(hostile, || prepare(&model, 100_000_000));
+        let render_arm = |prepared: Result<PreparedHost, String>| {
+            under(canonical, || render_prepared(prepared.expect("prepares")).0)
+        };
+        let reference = render_arm(prepared_canonical);
+        let candidate = render_arm(prepared_hostile);
+        assert!(
+            reference[0].iter().any(|&bits| bits != 0),
+            "the fixture renders sound"
+        );
+        for plane in 0..2 {
+            let first = reference[plane]
+                .iter()
+                .zip(&candidate[plane])
+                .position(|(a, b)| a != b);
+            assert_eq!(
+                first, None,
+                "plane {plane}: the hostile caller's preparation renders the canonical bits"
+            );
+        }
     }
 }

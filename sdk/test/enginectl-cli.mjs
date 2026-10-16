@@ -190,13 +190,13 @@ describe("enginectl session build", () => {
     maximum.session.revision = "9223372036854775807";
     maximum.sources[0].spec.frames = "18446744073709551615";
     maximum.sources[1].spec.frames = "18446744073709551615";
-    maximum.automation[0].segments[0].endSample = "18446744073709551615";
+    maximum.automation[0].segments[0].endSample = "9007199254740991";
     const accepted = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(maximum));
     assert.equal(accepted.status, 0, accepted.stderr.toString("utf8"));
     const document = JSON.parse(accepted.stdout.toString("utf8"));
     assert.equal(document.revision, "9223372036854775807");
     assert.equal(document.sources[0].frames, "18446744073709551615");
-    assert.equal(document.automation[0].segments[0].end_sample, "18446744073709551615");
+    assert.equal(document.automation[0].segments[0].end_sample, "9007199254740991");
   });
 
   test("retired --stems is unknown and publishes no output", async () => {

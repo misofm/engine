@@ -157,6 +157,9 @@ const LAUNCH_RATES: readonly number[] = [44_100, 48_000, 88_200, 96_000];
 const U64_MAX = 18_446_744_073_709_551_615n;
 /** The session schema's `revision` ceiling, 2^63 - 1: the largest revision a plan's gate holds. */
 const REVISION_MAX = 9_223_372_036_854_775_807n;
+/** A stored-automation segment's start and end sample stay below 2^53, the engine's
+ * `automation::TIME_LIMIT`: times are exact in `f64` below it. */
+const AUTOMATION_TIME_LIMIT = 9_007_199_254_740_992n;
 const SEND_TAPS: ReadonlySet<string> = new Set([
   "input",
   "post_input",
@@ -1571,6 +1574,15 @@ function normalizeAutomation(spec: AutomationSpec, state: BuilderState): ModelRe
     const start = u64(segment.startSample, `${where}.startSample`);
     const end = u64(segment.endSample, `${where}.endSample`);
     if (end <= start) fail(`${where}.endSample`, "endSample must be greater than startSample");
+    for (const [field, sample] of [["startSample", start], ["endSample", end]] as const) {
+      if (sample >= AUTOMATION_TIME_LIMIT) {
+        fail(
+          `${where}.${field}`,
+          "a segment sample must be below 2^53 (9007199254740992)",
+          CODE.outOfRange,
+        );
+      }
+    }
     if (previousStart !== undefined && start < previousStart) {
       fail(`${where}.startSample`, "segments must be declared in nondecreasing start order");
     }
