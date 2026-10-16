@@ -19,13 +19,22 @@
 //! loads, retries, at most [`MAXIMUM_READ_ATTEMPTS`] times. There is no `unsafe` here: this module
 //! is inside the realtime root that `tools/realtime-policy` holds to its approved-unsafe list.
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
-use std::sync::Arc;
+use core::sync::atomic::AtomicUsize;
+
+// The ring's shim: core's atomics and `std`'s `Arc` in every shipped build, loom's under
+// `--cfg loom`, so `seqlock_loom` explores this protocol itself (TBD44).
+use super::spsc::sync::{Arc, AtomicU64, Ordering, fence};
 
 /// The bound on one read's attempts. It keeps a read provably finite while a writer publishing in
 /// a tight loop still lets the reader through. A production writer publishes at most once per
 /// render block, so a read retries only when it lands inside one record store.
 pub const MAXIMUM_READ_ATTEMPTS: usize = 64;
+
+/// The attempts one read takes. Under `--cfg loom` it is two, so `seqlock_loom` can explore every
+/// interleaving of a read that retries once: each attempt's no-tear argument is independent of the
+/// bound, and 64 spinning attempts are beyond loom's reach (TBD44). Every shipped build takes
+/// [`MAXIMUM_READ_ATTEMPTS`].
+const READ_ATTEMPTS: usize = if cfg!(loom) { 2 } else { MAXIMUM_READ_ATTEMPTS };
 
 /// A read gave up after [`MAXIMUM_READ_ATTEMPTS`] torn attempts; the caller retries later.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,7 +115,7 @@ impl<const N: usize> PublishedWordsReader<N> {
     /// even counter reads, so what comes back is exactly one publication.
     pub fn read(&self) -> Result<[u64; N], PublishedWordsBusy> {
         let record = &*self.record;
-        for _ in 0..MAXIMUM_READ_ATTEMPTS {
+        for _ in 0..READ_ATTEMPTS {
             let before = record.sequence_lock.load(Ordering::Acquire);
             if !before.is_multiple_of(2) {
                 continue;
@@ -198,5 +207,37 @@ mod tests {
             record(PUBLICATIONS)
         );
         assert!(newest <= PUBLICATIONS);
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::published_words;
+
+    /// Words that are all equal within one publication and distinct across publications, so any
+    /// mixture of two records is detectable.
+    const RECORDS: [[u64; 2]; 3] = [[0, 0], [1, 1], [2, 2]];
+
+    /// TBD44: the real seqlock on loom's atomics and fences. One writer publishes two records
+    /// while one reader reads; under every interleaving loom explores (including the stale loads
+    /// its weak memory model allows), an `Ok` is one whole record -- the initial one or a
+    /// published one. `Busy` is allowed. After the writer is joined, a read is the last record.
+    #[test]
+    fn seqlock_loom_a_read_is_one_whole_record_or_busy() {
+        loom::model(|| {
+            let (mut writer, reader) = published_words(RECORDS[0]);
+            let publisher = loom::thread::spawn(move || {
+                writer.publish(&RECORDS[1]);
+                writer.publish(&RECORDS[2]);
+            });
+            if let Ok(observed) = reader.read() {
+                assert!(
+                    RECORDS.contains(&observed),
+                    "a read returned a torn record {observed:?}"
+                );
+            }
+            publisher.join().expect("writer");
+            assert_eq!(reader.read(), Ok(RECORDS[2]));
+        });
     }
 }

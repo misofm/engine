@@ -14,13 +14,16 @@ use sync::{Arc, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering, UnsafeCel
 ///
 /// Under `--cfg loom` the real ring and the real plan mailbox are instantiated on loom's `Arc`,
 /// `AtomicUsize`, `AtomicU64` and `UnsafeCell`, so `spsc_loom` explores *this* code rather than a hand-written model of it
-/// (#84 phase B). `cfg(loom)` is only a supported configuration for `cargo test`; a non-test
-/// loom build is not a shape this crate promises to link.
+/// (#84 phase B). The engine's seqlock (`seqlock.rs`) takes its `Arc`, `AtomicU64`, `Ordering`
+/// and `fence` from here too, so `seqlock_loom` explores the real seqlock (TBD44).
+/// `cfg(loom)` is only a supported configuration for `cargo test`; a non-test loom build is not a
+/// shape this crate promises to link.
 #[cfg(not(loom))]
-mod sync {
+pub(super) mod sync {
     pub(super) use core::cell::UnsafeCell;
-    pub(super) use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-    pub(super) use std::sync::Arc;
+    pub(super) use core::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize};
+    pub(in crate::realtime) use core::sync::atomic::{AtomicU64, Ordering, fence};
+    pub(in crate::realtime) use std::sync::Arc;
 
     /// Exclusive access to a slot's storage, spelled the way loom's `UnsafeCell` spells it.
     #[inline(always)]
@@ -41,10 +44,11 @@ mod sync {
     }
 }
 #[cfg(loom)]
-mod sync {
+pub(super) mod sync {
     pub(super) use loom::cell::UnsafeCell;
-    pub(super) use loom::sync::Arc;
-    pub(super) use loom::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+    pub(in crate::realtime) use loom::sync::Arc;
+    pub(super) use loom::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize};
+    pub(in crate::realtime) use loom::sync::atomic::{AtomicU64, Ordering, fence};
 
     pub(super) fn with_mut<T, R>(cell: &UnsafeCell<T>, body: impl FnOnce(*mut T) -> R) -> R {
         cell.with_mut(body)
