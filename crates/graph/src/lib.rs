@@ -2666,6 +2666,12 @@ pub trait GraphPreparedSourceSetDriver: Send {
     ) -> bool {
         false
     }
+    /// The session timeline's sample at `source_read_sample` (#1641 D8), from the driver's
+    /// timeline history, or `None` (the default) for a driver with no timeline. Read-only and
+    /// bounded.
+    fn timeline_at(&self, _source_read_sample: u64) -> Option<i64> {
+        None
+    }
 }
 
 /// The source set as a bank's gather sees it during the unit loop (issue #918): a shared view of
@@ -3312,6 +3318,9 @@ pub struct GraphCarryProgram {
     pub predecessor: u64,
     /// `(successor source index, predecessor source index)` pairs.
     pub sources: Box<[(u32, u32)]>,
+    /// Whether the source set's timeline carries (#1641 D3): set on every host successor, so the
+    /// driver's [`GraphPreparedSourceSetDriver::adopt_sources`] runs even when no source moves.
+    pub timeline: bool,
 }
 
 impl GraphCarryProgram {
@@ -4344,6 +4353,17 @@ pub fn route_carry_retained_bytes(moves: usize) -> Option<u64> {
     u64::try_from(moves.checked_mul(core::mem::size_of::<GraphRouteMove>())?).ok()
 }
 
+/// The session timeline's sample at `source_read_sample` in a graph plan's source set (#1641 D8):
+/// [`GraphPreparedSourceSetDriver::timeline_at`], downcast as [`carry_program_retained_bytes`]
+/// does. `None` for another plan, a plan with no source set or a driver with no timeline.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_only_timeline_at(
+    plan: &mut PreparedRenderPlan,
+    source_read_sample: u64,
+) -> Option<i64> {
+    graph_source_driver_mut(plan)?.timeline_at(source_read_sample)
+}
+
 /// Bytes the plan's installed [`GraphCarryProgram`] retains; zero for a plan without one or for
 /// any other plan.
 pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
@@ -4787,7 +4807,7 @@ impl PreparedPlanExecutor for GraphExecutor {
         {
             return CarryOutcome::PredecessorMismatch;
         }
-        if !program.sources.is_empty() {
+        if !program.sources.is_empty() || program.timeline {
             let (Some(successor_set), Some(predecessor_set)) =
                 (self.source_set.as_mut(), predecessor.source_set.as_mut())
             else {

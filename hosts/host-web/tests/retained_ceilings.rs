@@ -115,6 +115,13 @@ const CAPTURE: u64 = LIVE_RESPONSE_CAPTURE_BYTES as u64;
 /// the retained row fell from 1,764,878 to 1,631,294 bytes (x86-64; -133,584 and 113 for the ID
 /// staging, so +113 over the row before B1), and the metadata row to 1,594,186. The new
 /// beyond-capture figure is 582,718; plus 10 % is 640,989.8, rounded up to 64: 641,024.
+///
+/// **Re-pinned: `source_total_bytes` and `source_overhead_bytes` (#1641, batch 16).** Every plan
+/// holds the session timeline: the timeline consumer's fixed bytes (#1641 D7), its one-slot command
+/// queue, its one-entry history (the fixture has no latency, so `K = 1`) and the consumer inline in
+/// the source driver. Both rows rose by 480 bytes (x86-64): overhead 2,658 to 3,138 and total 3,682
+/// to 4,162. The ceilings are the new values plus 10 %, rounded up to 64: 3,451.8 -> 3,456 (was
+/// 2,688) and 4,578.2 -> 4,608 (was 3,840). The four-lane values are inferred, as before.
 const BUDGETS: [Budget; 12] = [
     Budget {
         row: "bridge_metadata_bytes",
@@ -131,14 +138,14 @@ const BUDGETS: [Budget; 12] = [
     Budget {
         row: "source_total_bytes",
         value: |report| report.source_total_bytes,
-        eight_lanes: 3_840,
-        four_lanes: 3_840,
+        eight_lanes: 4_608,
+        four_lanes: 4_608,
     },
     Budget {
         row: "source_overhead_bytes",
         value: |report| report.source_overhead_bytes,
-        eight_lanes: 2_688,
-        four_lanes: 2_688,
+        eight_lanes: 3_456,
+        four_lanes: 3_456,
     },
     Budget {
         row: "builtin_retained_bytes",

@@ -51,6 +51,18 @@ fn strip_moves(moves: u64) -> u64 {
     moves * core::mem::size_of::<graph::GraphStripMove>() as u64
 }
 
+/// The command queue a successor's carried timeline brings (#1641 D7): every successor's carried
+/// source bytes hold it, as they hold a carried ring's overhead, so a successor that carries no
+/// ring still carries these bytes.
+fn timeline_queue_bytes() -> u64 {
+    source::SourceTimeline::resource_report(
+        engine::QuantumFrames(QUANTUM as u32),
+        core::num::NonZeroUsize::MIN,
+    )
+    .expect("timeline report")
+    .command_queue_bytes
+}
+
 fn id(value: &str) -> StableId {
     StableId::parse(value).expect("stable ID")
 }
@@ -188,7 +200,7 @@ fn added_muted_track_keeps_playing(backend: Backend) {
     // source bytes are exactly a fresh plan's.
     let fresh = b.prepare(backend).report;
     let report = run.successor;
-    assert!(report.carried_source_total_bytes > 0);
+    assert!(report.carried_source_total_bytes > timeline_queue_bytes());
     assert_eq!(
         report.source_total_bytes + report.carried_source_total_bytes,
         fresh.source_total_bytes,
@@ -293,15 +305,22 @@ fn a_changed_source_gets_its_own_ring() {
             .prepare_successor(&predecessor.inventory, &a.model, &caps(), backend)
             .expect("successor");
         let fresh = b.prepare(backend).report;
-        assert_eq!(prepared.report.carried_source_total_bytes, 0);
+        // The timeline's carried command queue only (#1641 D7).
+        assert_eq!(
+            prepared.report.carried_source_total_bytes,
+            timeline_queue_bytes()
+        );
         assert_eq!(
             prepared.report.carry_program_retained_bytes,
             2 * core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(4),
             "no source move; the two unchanged input sections (#1276) and the fader and matrix \
              stage of both strips (#1277)"
         );
+        // Allocated plus carried is a fresh plan's: the ring is new, and only the timeline's
+        // command queue is carried (#1641 D7).
         assert_eq!(
-            prepared.report.source_total_bytes, fresh.source_total_bytes,
+            prepared.report.source_total_bytes + prepared.report.carried_source_total_bytes,
+            fresh.source_total_bytes,
             "{backend:?}: the successor allocates and charges a new ring"
         );
         let mut predecessor_sources = predecessor.sources;
@@ -329,7 +348,9 @@ fn a_successor_charges_allocated_and_carried_rings_to_the_source_cap() {
         .prepare_successor(&predecessor.inventory, &a.model, &caps(), backend)
         .expect("successor")
         .report;
-    assert!(roomy.source_total_bytes > 0 && roomy.carried_source_total_bytes > 0);
+    assert!(
+        roomy.source_total_bytes > 0 && roomy.carried_source_total_bytes > timeline_queue_bytes()
+    );
     let required = roomy.source_total_bytes + roomy.carried_source_total_bytes;
     let mut exact = caps();
     exact.maximum_source_total_bytes = required;
@@ -344,7 +365,7 @@ fn a_successor_charges_allocated_and_carried_rings_to_the_source_cap() {
     assert_eq!(refused.as_bytes(), b"host.source.resource.limit\t$\n");
 
     // The overhead cap counts carried overhead too.
-    assert!(roomy.carried_source_overhead_bytes > 0);
+    assert!(roomy.carried_source_overhead_bytes > timeline_queue_bytes());
     let mut below = caps();
     below.maximum_source_overhead_bytes =
         roomy.source_overhead_bytes + roomy.carried_source_overhead_bytes - 1;
@@ -369,7 +390,7 @@ fn another_ring_size_or_changed_content_carries_no_ring() {
         .prepare_successor(&predecessor.inventory, &a.model, &caps(), backend)
         .expect("successor");
     assert!(
-        same.report.carried_source_total_bytes > 0,
+        same.report.carried_source_total_bytes > timeline_queue_bytes(),
         "the control case carries"
     );
     let mut smaller = caps();
@@ -377,7 +398,11 @@ fn another_ring_size_or_changed_content_carries_no_ring() {
     let resized = b
         .prepare_successor(&predecessor.inventory, &a.model, &smaller, backend)
         .expect("successor with smaller rings");
-    assert_eq!(resized.report.carried_source_total_bytes, 0);
+    // The timeline's carried command queue only (#1641 D7).
+    assert_eq!(
+        resized.report.carried_source_total_bytes,
+        timeline_queue_bytes()
+    );
 
     let mut c_model = session_a();
     let template = c_model.sources[0].clone();
@@ -390,7 +415,10 @@ fn another_ring_size_or_changed_content_carries_no_ring() {
     let changed = c
         .prepare_successor(&predecessor.inventory, &a.model, &caps(), backend)
         .expect("successor with changed content");
-    assert_eq!(changed.report.carried_source_total_bytes, 0);
+    assert_eq!(
+        changed.report.carried_source_total_bytes,
+        timeline_queue_bytes()
+    );
 }
 
 /// #1272 follow-up MINOR 4. Red if the largest-allocation fold leaves out a carried ring: with
@@ -415,7 +443,7 @@ fn the_largest_allocation_counts_a_carried_ring() {
         .prepare_successor(&predecessor.inventory, &a.model, &long_rings, backend)
         .expect("successor")
         .report;
-    assert!(successor.carried_source_total_bytes > 0);
+    assert!(successor.carried_source_total_bytes > timeline_queue_bytes());
     assert_eq!(
         successor.largest_engine_allocation_bytes,
         fresh.largest_engine_allocation_bytes
@@ -508,6 +536,80 @@ fn the_swap_block_allocates_and_frees_nothing() {
     for (index, block) in run.blocks.iter().enumerate().skip(1) {
         assert_eq!(block.allocator, (0, 0, 0), "block {index}: allocator calls");
         assert_eq!(block.audit, (0, 0), "block {index}: render audit");
+    }
+}
+
+/// #1641 gate 4, through the plan exchange. The successor adds a latent track, so its timeline's
+/// history is longer than the predecessor's, and the predecessor's timeline holds an anchored seek
+/// across the swap. The swap block, which swaps the timeline's seek state, queue and position and
+/// copies its history, and the ten blocks after it, make no allocator call.
+///
+/// Test value: red if the timeline carry or its history write allocates or frees on the render
+/// thread of the real plan exchange.
+#[test]
+fn the_timeline_carry_allocates_and_frees_nothing_through_the_exchange() {
+    use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+    struct RestoreMode(Mode);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    assert_installed();
+    let _restore = RestoreMode(mode());
+    set_mode(Mode::Count);
+    engine::realtime::audit::warm_up();
+    let a = Session::compile(session_a());
+    let mut b_model = session_a();
+    add_track(&mut b_model, "eq0", MUTED_TRACK, SOURCE, true);
+    add_limiter(&mut b_model, MUTED_TRACK, "timeline-limiter");
+    let b = Session::compile(b_model);
+    const EXTRA: usize = 5;
+    let feed = Feed::with_blocks(SOURCE, 1, BLOCKS + EXTRA + 1);
+    let backend = Backend::current();
+    let mut predecessor = a.prepare(backend);
+    predecessor
+        .sources
+        .test_only_timeline_producer()
+        .expect("a fresh plan's timeline producer")
+        .try_seek(source::SourceCommand::SeekAt {
+            generation: source::SourceGeneration(2),
+            frame: source::SourceFrame(4_096),
+            anchor_sample: ((SWAP_BLOCK + 2) * QUANTUM) as u64,
+        })
+        .expect("an anchored timeline seek");
+    let mut run = successor::swapped_run_with(
+        predecessor,
+        |inventory| {
+            b.prepare_successor(inventory, &a.model, &caps(), backend)
+                .unwrap_or_else(|failure| panic!("successor: {failure:?}"))
+        },
+        &[&feed],
+        &[&feed],
+        Successor::Carry,
+    );
+    assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
+    assert!(
+        run.successor_sources
+            .test_only_timeline_producer()
+            .is_some(),
+        "the producer moved"
+    );
+    let mut allocators: Vec<(u64, u64, u64)> = run.blocks[SWAP_BLOCK..]
+        .iter()
+        .map(|block| block.allocator)
+        .collect();
+    for block in BLOCKS..BLOCKS + EXTRA {
+        feed.submit(&mut run.successor_sources, 48_000, block);
+        allocators.push(successor::render(&mut run.owner).allocator);
+    }
+    assert_eq!(allocators.len(), 11, "the swap block and ten after it");
+    for (index, allocator) in allocators.into_iter().enumerate() {
+        assert_eq!(
+            allocator,
+            (0, 0, 0),
+            "block {index} from the swap: allocator calls"
+        );
     }
 }
 
@@ -2377,6 +2479,7 @@ fn a_bad_input_move_is_refused_whole() {
         GraphCarryProgram {
             predecessor: predecessor.inventory.plan_identity(),
             sources: Box::default(),
+            timeline: false,
         },
     )
     .expect("a program that moves no source");

@@ -1328,6 +1328,32 @@ impl SeekState {
             .is_some_and(|held| held.anchor_sample < sample)
     }
 
+    /// The seek half of a prime's readiness, which every source-transport consumer shares
+    /// (#1320 D3, #1641 D5): no command is queued (`queued` is the command queue's count at entry)
+    /// and no held anchored seek is anchored before the end of the window of `lead_blocks + 1`
+    /// blocks of `quantum_frames` from `first_sample`. An overflowing window is not clear.
+    fn prime_window_clear(
+        &self,
+        queued: usize,
+        quantum_frames: u32,
+        first_sample: u64,
+        lead_blocks: u32,
+    ) -> bool {
+        if queued != 0 {
+            return false;
+        }
+        let Some(window_end) = u64::from(lead_blocks)
+            .checked_add(1)
+            .and_then(|blocks| blocks.checked_mul(u64::from(quantum_frames)))
+            .and_then(|window| first_sample.checked_add(window))
+        else {
+            return false;
+        };
+        // A held anchor is always past the last block's sample, so this is every held seek that
+        // would apply at one of the blocks, a late one at `first_sample` included.
+        !self.holds_anchor_before(window_end)
+    }
+
     /// Whether the held anchored seek, if any, is of `generation`.
     fn holds_generation(&self, generation: SourceGeneration) -> bool {
         self.held_seek
@@ -1848,20 +1874,12 @@ impl PcmSourceConsumer {
     /// observes no command.
     #[must_use]
     pub fn prime_ready(&self, first_sample: u64, lead_blocks: u32) -> bool {
-        if self.command_consumer.available_at_entry() != 0 {
-            return false;
-        }
-        let quantum = u64::from(self.quantum_frames);
-        let Some(window_end) = u64::from(lead_blocks)
-            .checked_add(1)
-            .and_then(|blocks| blocks.checked_mul(quantum))
-            .and_then(|window| first_sample.checked_add(window))
-        else {
-            return false;
-        };
-        // A held anchor is always past the last block's sample, so this is every held seek that
-        // would apply at one of the blocks, a late one at `first_sample` included.
-        if self.seek.holds_anchor_before(window_end) {
+        if !self.seek.prime_window_clear(
+            self.command_consumer.available_at_entry(),
+            self.quantum_frames,
+            first_sample,
+            lead_blocks,
+        ) {
             return false;
         }
         let mut frame = self.next_frame.0;
@@ -2122,6 +2140,8 @@ pub struct TimelineResourceReport {
     pub history_blocks: u64,
     /// One-slot seek-command SPSC header plus slot: a ring's `command_queue_bytes` formula.
     pub command_queue_bytes: u64,
+    /// The largest single allocation of the command queue (#1641 D7: a carried queue's row).
+    pub command_queue_largest_allocation_bytes: u64,
     /// The history allocation: `16 * K` bytes.
     pub history_bytes: u64,
     /// The [`TimelineConsumer`] value itself, wherever its owner stores it.
@@ -2155,13 +2175,13 @@ impl SourceTimeline {
         let consumer = u64::try_from(size_of::<TimelineConsumer>())
             .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?;
         let overhead = checked_u64_add(checked_u64_add(command_queue, history)?, consumer)?;
-        let largest = largest_queue_allocation::<SourceCommand>(NonZeroUsize::MIN)?
-            .max(history)
-            .max(consumer);
+        let queue_largest = largest_queue_allocation::<SourceCommand>(NonZeroUsize::MIN)?;
+        let largest = queue_largest.max(history).max(consumer);
         Ok(TimelineResourceReport {
             history_blocks: u64::try_from(history_blocks.get())
                 .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?,
             command_queue_bytes: command_queue,
+            command_queue_largest_allocation_bytes: queue_largest,
             history_bytes: history,
             consumer_bytes: consumer,
             overhead_bytes: overhead,
@@ -2181,11 +2201,8 @@ impl SourceTimeline {
         let (command_producer, command_consumer) =
             bounded_spsc(NonZeroUsize::MIN, QueueGeneration(initial_generation.0))
                 .map_err(map_spsc_error)?;
-        let mut history = Vec::new();
-        history
-            .try_reserve_exact(history_blocks.get())
-            .map_err(|_| PcmSourceRingError::AllocationFailure)?;
-        history.resize(history_blocks.get(), TimelineEntry::default());
+        let consumer =
+            TimelineConsumer::with_history(quantum_frames, history_blocks, Some(command_consumer))?;
         Ok((
             TimelineProducer {
                 seek: SeekProducer {
@@ -2195,19 +2212,23 @@ impl SourceTimeline {
                     frame_limit: Some(TIMELINE_SAMPLE_LIMIT),
                 },
             },
-            TimelineConsumer {
-                seek: SeekState::new(initial_generation),
-                command_consumer,
-                quantum_frames: quantum_frames.0,
-                position: 0,
-                history: history.into_boxed_slice(),
-                capacity: history_blocks,
-                oldest: 0,
-                len: 0,
-                oldest_expected_timeline: 0,
-            },
+            consumer,
             report,
         ))
+    }
+
+    /// Allocate a vacant timeline (#1641 D3): its own history of `history_blocks` entries and no
+    /// command queue, for a successor plan that carries its predecessor's timeline at the swap
+    /// block. Until a carry fills it, it advances from timeline sample 0 and observes no seek, so
+    /// render stays defined. Its report's command-queue rows name the queue the carry brings,
+    /// which the successor does not allocate. Control thread only.
+    pub fn prepare_vacant(
+        quantum_frames: QuantumFrames,
+        history_blocks: NonZeroUsize,
+    ) -> Result<(TimelineConsumer, TimelineResourceReport), PcmSourceRingError> {
+        let report = Self::resource_report(quantum_frames, history_blocks)?;
+        let consumer = TimelineConsumer::with_history(quantum_frames, history_blocks, None)?;
+        Ok((consumer, report))
     }
 }
 
@@ -2273,7 +2294,8 @@ pub struct TimelineStep {
 /// plan can still be processing to its timeline sample. Every value is an exact integer.
 pub struct TimelineConsumer {
     seek: SeekState,
-    command_consumer: Consumer<SourceCommand>,
+    /// `None` while vacant (#1641 D3): a successor's timeline before its carry.
+    command_consumer: Option<Consumer<SourceCommand>>,
     quantum_frames: u32,
     /// The timeline sample of the next block.
     position: u64,
@@ -2289,6 +2311,38 @@ pub struct TimelineConsumer {
 }
 
 impl TimelineConsumer {
+    /// A timeline at generation 1, timeline sample 0, with an empty history of `history_blocks`
+    /// entries. Control thread only.
+    fn with_history(
+        quantum_frames: QuantumFrames,
+        history_blocks: NonZeroUsize,
+        command_consumer: Option<Consumer<SourceCommand>>,
+    ) -> Result<Self, PcmSourceRingError> {
+        let mut history = Vec::new();
+        history
+            .try_reserve_exact(history_blocks.get())
+            .map_err(|_| PcmSourceRingError::AllocationFailure)?;
+        history.resize(history_blocks.get(), TimelineEntry::default());
+        Ok(Self {
+            seek: SeekState::new(SourceGeneration(1)),
+            command_consumer,
+            quantum_frames: quantum_frames.0,
+            position: 0,
+            history: history.into_boxed_slice(),
+            capacity: history_blocks,
+            oldest: 0,
+            len: 0,
+            oldest_expected_timeline: 0,
+        })
+    }
+
+    /// Whether this timeline is vacant: it has no command queue, because it waits for a carry
+    /// (#1641 D3) or a carry has moved its queue to a successor.
+    #[must_use]
+    pub const fn is_vacant(&self) -> bool {
+        self.command_consumer.is_none()
+    }
+
     /// The quantum every block advances the timeline by.
     #[must_use]
     pub const fn quantum_frames(&self) -> u32 {
@@ -2319,13 +2373,59 @@ impl TimelineConsumer {
     /// quantum. It runs on every block, so the timeline never stops. Allocation-free, lock-free
     /// and bounded.
     pub fn begin_block_at(&mut self, source_read_sample: u64) {
-        let command = self.command_consumer.try_pop().ok();
+        // A vacant timeline has no queue and observes nothing.
+        let command = match self.command_consumer.as_mut() {
+            Some(consumer) => consumer.try_pop().ok(),
+            None => None,
+        };
         let observation = self
             .seek
             .observe(command, SeekClock::At { source_read_sample });
         if let Some(seek) = observation.apply {
             self.position = seek.frame.0;
         }
+        self.advance(source_read_sample);
+    }
+
+    /// Whether a prime of `lead_blocks + 1` blocks from `first_sample` can run (#1641 D5,
+    /// B16-R3): the source consumer's non-PCM test, written once in [`SeekState::prime_window_clear`]. The
+    /// command queue is empty and no held anchored seek falls before the prime window's end, so a
+    /// prime never skips a seek. A timeline has no PCM to run out of, so that is the whole test.
+    #[must_use]
+    pub fn prime_ready(&self, first_sample: u64, lead_blocks: u32) -> bool {
+        let queued = self
+            .command_consumer
+            .as_ref()
+            .map_or(0, Consumer::available_at_entry);
+        self.seek
+            .prime_window_clear(queued, self.quantum_frames, first_sample, lead_blocks)
+    }
+
+    /// Advance one block from `source_read_sample` as [`Self::begin_block_at`] would, without
+    /// observing any command (#1641 D5): a warm successor's prime. It neither pops the command
+    /// queue nor applies a held seek; it records the history entry and advances one quantum.
+    /// Precondition, as for [`PcmSourceConsumer::prime_block_at`]: [`Self::prime_ready`] was
+    /// `true` for the window in this render callback. Allocation-free and wait-free.
+    pub fn prime_block_at(&mut self, source_read_sample: u64) {
+        self.advance(source_read_sample);
+    }
+
+    /// Take `predecessor`'s timeline at a carry (#1641 D3): swap the seek state, the command
+    /// consumer and the position, and copy the predecessor's newest history entries into this
+    /// timeline's own history. Nothing is allocated or freed; the predecessor is left vacant.
+    /// Both timelines have the same quantum.
+    fn adopt_from(&mut self, predecessor: &mut Self) {
+        core::mem::swap(&mut self.seek, &mut predecessor.seek);
+        core::mem::swap(
+            &mut self.command_consumer,
+            &mut predecessor.command_consumer,
+        );
+        core::mem::swap(&mut self.position, &mut predecessor.position);
+        self.copy_history_from(predecessor);
+    }
+
+    /// Record `(source_read_sample, position)` and advance one quantum.
+    fn advance(&mut self, source_read_sample: u64) {
         self.record(TimelineEntry {
             source_read_sample,
             timeline: self.position,
@@ -2574,6 +2674,8 @@ pub enum SourceGraphSourceSetError {
     SourceIndex,
     ChannelIndex,
     ArithmeticOverflow,
+    /// The timeline's quantum is not the envelope's (#1641 D1).
+    TimelineQuantum,
 }
 
 struct GraphSourceEntry {
@@ -2584,6 +2686,8 @@ struct GraphSourceEntry {
 }
 
 struct SourceGraphSourceSetDriver {
+    /// The session's playhead (#1641 D1), inline: the driver's own allocation counts its value.
+    timeline: TimelineConsumer,
     sources: Box<[GraphSourceEntry]>,
     mappings: Box<[SourceGraphTrackMapping]>,
     quantum_frames: u32,
@@ -2686,6 +2790,9 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             source_generation_changed: self.pending_generation_change,
         };
         self.pending_generation_change = false;
+        // #1641 D1: the timeline first, at the sample the sources read, so it observes a seek in
+        // the same block as a source given the same seek. It applies no state to the sources.
+        self.timeline.begin_block_at(first_sample);
         for source in &mut self.sources {
             // A vacant entry has nothing to play: its block is an underrun.
             let Some(consumer) = source.consumer.as_mut() else {
@@ -2824,6 +2931,10 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
     /// is checked first -- both indices in range, this entry vacant, the predecessor's occupied,
     /// the channel counts and quanta equal -- and any failure moves nothing. The predecessor's
     /// pending generation change (a seek prepared since its last block) is carried too.
+    ///
+    /// A vacant timeline takes the predecessor's (#1641 D3): its seek state, command consumer and
+    /// position by swap and its newest history entries by copy, into this timeline's own
+    /// history. The predecessor's timeline must be occupied, or nothing moves.
     fn adopt_sources(
         &mut self,
         predecessor: &mut dyn GraphPreparedSourceSetDriver,
@@ -2836,6 +2947,7 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             return false;
         };
         let movable = predecessor.quantum_frames == self.quantum_frames
+            && (!self.timeline.is_vacant() || !predecessor.timeline.is_vacant())
             && moves.iter().all(|&(successor, source)| {
                 match (
                     self.sources.get(successor as usize),
@@ -2858,8 +2970,16 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
                 &mut predecessor.sources[source as usize].consumer,
             );
         }
+        if self.timeline.is_vacant() {
+            self.timeline.adopt_from(&mut predecessor.timeline);
+        }
         self.pending_generation_change |= predecessor.pending_generation_change;
         true
+    }
+
+    /// The timeline sample at `source_read_sample` (#1641 D8), from the timeline's history.
+    fn timeline_at(&self, source_read_sample: u64) -> Option<i64> {
+        Some(self.timeline.timeline_at(source_read_sample))
     }
     // REALTIME_POLICY_END
 
@@ -2953,18 +3073,36 @@ impl SourceGraphSourceSetDriver {
 
 /// Seal one or more prepared source consumers into a graph-owned fan-out source set.
 ///
-/// The wrapper owns exactly one consumer per source. The graph calls `begin_block` once, then each
-/// mapping copies directly from the retained played block, which stays the consumer's until the
-/// next `begin_block` or seek preparation (#917).
+/// The wrapper owns exactly one consumer per source and the session's timeline (#1641 D1). The
+/// graph calls `begin_block` once, which begins the timeline's block and then each source's, then
+/// each mapping copies directly from the retained played block, which stays the consumer's until
+/// the next `begin_block` or seek preparation (#917).
+///
+/// The timeline's fixed bytes join the set's overhead and largest allocation (#1641 D7): its
+/// history, and for an occupied timeline its command queue. A vacant timeline's queue arrives
+/// with its carry, so its host counts it with the carried source overhead. The consumer value is
+/// inline in the driver, whose own allocation already counts it.
 pub fn prepare_graph_source_set(
     envelope: engine::realtime::RenderEnvelope,
     sources: Vec<SourceGraphSource>,
+    timeline: TimelineConsumer,
     mappings: Vec<SourceGraphTrackMapping>,
 ) -> Result<GraphPreparedSourceSet, SourceGraphSourceSetError> {
+    if timeline.quantum_frames != envelope.quantum.0 {
+        return Err(SourceGraphSourceSetError::TimelineQuantum);
+    }
     let retained = source_set_retained_resources(&sources, &mappings)?;
+    let timeline_report = SourceTimeline::resource_report(envelope.quantum, timeline.capacity)
+        .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
     let mut pcm_payload = 0_u64;
-    let mut overhead = 0_u64;
-    let mut largest = 0_u64;
+    let mut overhead = timeline_report.history_bytes;
+    let mut largest = timeline_report.history_bytes;
+    if !timeline.is_vacant() {
+        overhead = overhead
+            .checked_add(timeline_report.command_queue_bytes)
+            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        largest = largest.max(timeline_report.command_queue_largest_allocation_bytes);
+    }
     let mut entries = Vec::with_capacity(sources.len());
     for source in sources {
         // A vacant source owns no ring: it charges no PCM payload and no ring overhead.
@@ -3023,6 +3161,7 @@ pub fn prepare_graph_source_set(
             largest_allocation_bytes: largest,
         },
         Box::new(SourceGraphSourceSetDriver {
+            timeline,
             sources: entries.into_boxed_slice(),
             mappings: mappings.into_boxed_slice(),
             quantum_frames: envelope.quantum.0,
@@ -3037,6 +3176,13 @@ mod tests {
     use super::*;
 
     const RATE: SampleRateHz = SampleRateHz(48_000);
+
+    /// An occupied timeline of one history entry at `quantum` frames, for a hand-built source set.
+    fn test_timeline(quantum: u32) -> TimelineConsumer {
+        SourceTimeline::prepare(QuantumFrames(quantum), NonZeroUsize::MIN)
+            .expect("timeline")
+            .1
+    }
 
     fn config(channels: u32, quantum: u32, capacity: u64) -> PcmSourceRingConfig {
         PcmSourceRingConfig {
@@ -3782,6 +3928,7 @@ mod tests {
         mappings: Vec<SourceGraphTrackMapping>,
     ) -> SourceGraphSourceSetDriver {
         SourceGraphSourceSetDriver {
+            timeline: test_timeline(4),
             sources: vec![GraphSourceEntry {
                 channel_count: consumer.channel_count(),
                 consumer: Some(consumer),
@@ -4457,6 +4604,7 @@ mod tests {
             prepare_graph_source_set(
                 envelope,
                 vec![SourceGraphSource::new(consumer, resources, 0, 0)],
+                test_timeline(2),
                 mappings,
             )
             .expect("source set")
@@ -5008,7 +5156,9 @@ mod tests {
             mappings: Vec<SourceGraphTrackMapping>,
             validity: &Arc<AtomicU8>,
         ) -> PreparedRenderPlan {
-            let set = prepare_graph_source_set(envelope(), sources, mappings).expect("source set");
+            let set =
+                prepare_graph_source_set(envelope(), sources, test_timeline(FRAMES), mappings)
+                    .expect("source set");
             let bindings = GraphRuntimeBindings {
                 envelope: envelope(),
                 nodes: vec![graph::GraphNodeBinding::new(output(), Box::new(Noop))],
@@ -5153,6 +5303,7 @@ mod tests {
             GraphCarryProgram {
                 predecessor,
                 sources: vec![(0, 0)].into_boxed_slice(),
+                timeline: false,
             }
         }
 
@@ -5215,6 +5366,7 @@ mod tests {
                 Some(GraphCarryProgram {
                     predecessor: identity,
                     sources: vec![(0, 1)].into_boxed_slice(),
+                    timeline: false,
                 })
             });
             assert_eq!(carry, CarryOutcome::PredecessorMismatch);
@@ -5290,6 +5442,7 @@ mod tests {
             let program = |sources: &[(u32, u32)]| GraphCarryProgram {
                 predecessor: 1,
                 sources: sources.into(),
+                timeline: false,
             };
             assert_eq!(
                 graph::install_carry_program(&mut vacant, program(&[(1, 0)])),
@@ -5332,11 +5485,17 @@ mod tests {
         fn a_vacant_source_charges_no_ring_and_is_counted_apart() {
             let (_host, occupied_source) = filled_source();
             let ring = occupied_source.resources.expect("ring report");
-            let occupied = prepare_graph_source_set(envelope(), vec![occupied_source], mappings())
-                .expect("occupied set");
+            let occupied = prepare_graph_source_set(
+                envelope(),
+                vec![occupied_source],
+                test_timeline(FRAMES),
+                mappings(),
+            )
+            .expect("occupied set");
             let vacant = prepare_graph_source_set(
                 envelope(),
                 vec![SourceGraphSource::vacant(2)],
+                test_timeline(FRAMES),
                 mappings(),
             )
             .expect("vacant set");
@@ -5360,6 +5519,7 @@ mod tests {
                 prepare_graph_source_set(
                     envelope(),
                     vec![SourceGraphSource::vacant(1)],
+                    test_timeline(FRAMES),
                     mappings()
                 ),
                 Err(SourceGraphSourceSetError::ChannelIndex)
@@ -5409,6 +5569,7 @@ mod tests {
                 GraphCarryProgram {
                     predecessor: identity,
                     sources: vec![(0, 0), (1, 5)].into_boxed_slice(),
+                    timeline: false,
                 },
             )
             .expect("install");
@@ -5437,6 +5598,7 @@ mod tests {
                     GraphCarryProgram {
                         predecessor: 1,
                         sources: vec![(0, 0), (1, 0)].into_boxed_slice(),
+                        timeline: false,
                     },
                 ),
                 Err(GraphCarryInstallError::DuplicateSourceIndex)
@@ -5449,6 +5611,7 @@ mod tests {
         fn a_vacant_claim_writes_positive_zero_over_dirty_buffers_and_refuses_seek() {
             let [a, _] = inputs();
             let mut driver = SourceGraphSourceSetDriver {
+                timeline: test_timeline(FRAMES),
                 sources: vec![GraphSourceEntry {
                     consumer: None,
                     channel_count: 2,
@@ -5569,6 +5732,7 @@ mod tests {
             let (_host, source) = filled_source();
             let driver =
                 |sources: Vec<GraphSourceEntry>, quantum_frames| SourceGraphSourceSetDriver {
+                    timeline: test_timeline(quantum_frames),
                     sources: sources.into_boxed_slice(),
                     mappings: Vec::new().into_boxed_slice(),
                     quantum_frames,
@@ -5601,6 +5765,7 @@ mod tests {
             quantum_frames: u32,
         ) -> SourceGraphSourceSetDriver {
             SourceGraphSourceSetDriver {
+                timeline: test_timeline(quantum_frames),
                 sources: entries.into_boxed_slice(),
                 mappings: Vec::new().into_boxed_slice(),
                 quantum_frames,
@@ -6453,6 +6618,11 @@ mod tests {
             assert_eq!(report.history_blocks, 5);
             assert_eq!(report.history_bytes, 80);
             assert_eq!(report.command_queue_bytes, ring.command_queue_bytes);
+            assert_eq!(
+                report.command_queue_largest_allocation_bytes,
+                largest_queue_allocation::<SourceCommand>(NonZeroUsize::MIN).unwrap()
+            );
+            assert!(report.command_queue_largest_allocation_bytes <= report.command_queue_bytes);
             assert_eq!(
                 report.consumer_bytes,
                 u64::try_from(size_of::<TimelineConsumer>()).unwrap()

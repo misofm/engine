@@ -49,7 +49,7 @@ use session::{
 };
 use source::{
     PcmSourceRing, PcmSourceRingConfig, SourceFrame, SourceGeneration, SourceGraphSource,
-    SourceGraphTrackMapping, prepare_graph_source_set,
+    SourceGraphTrackMapping, SourceTimeline, prepare_graph_source_set,
 };
 use std::collections::BTreeMap;
 
@@ -2433,9 +2433,18 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         }
         _ => false,
     };
+    // #1641 D3: every successor carries the session timeline, so every successor has a program.
+    // Its history is the successor's own, of its own `K`; the move is a swap and a bounded copy.
+    // Both hosts refuse a rate or quantum change (#1290a), so the guard only keeps the carry
+    // defined for a caller that prepares one by hand: such a successor starts a fresh timeline.
+    let timeline_carries = successor.is_some_and(|base| {
+        base.inventory.sample_rate_hz == compiled.sample_rate().0
+            && base.inventory.quantum_frames == compiled.quantum().0
+    });
     let carry_program = match successor {
         Some(base)
-            if !carried_sources.is_empty()
+            if timeline_carries
+                || !carried_sources.is_empty()
                 || !carried_inputs.is_empty()
                 || meters_may_carry
                 || spectrum_may_carry
@@ -2445,6 +2454,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             Some(graph::GraphCarryProgram {
                 predecessor: base.inventory.plan_identity(),
                 sources: carried_sources.into_boxed_slice(),
+                timeline: timeline_carries,
             })
         }
         _ => None,
@@ -2464,7 +2474,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(|_| resource("host.resource.arithmetic"))?,
         )
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    let sources = builder.finish();
+    let mut sources = builder.finish();
 
     // Source semantics: tracks only.
     let mappings = model
@@ -2913,8 +2923,45 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     {
         return Err(resource("host.resource.limit"));
     }
-    let source_set = prepare_graph_source_set(artifact.envelope(), graph_sources, mappings)
-        .map_err(|_| graph_failure("host.source.graph.prepare"))?;
+    // #1641 D1: the timeline's history covers the largest floored input arrival, `K = ⌈A_max /
+    // q⌉ + 1` blocks (one block for a plan with no latency).
+    let quantum = artifact.envelope().quantum;
+    let largest_arrival = artifact
+        .report()
+        .input_arrivals
+        .iter()
+        .map(|(_, arrival)| arrival.0)
+        .max()
+        .unwrap_or(0);
+    let history_blocks = largest_arrival
+        .div_ceil(u64::from(quantum.0.max(1)))
+        .checked_add(1)
+        .and_then(|blocks| usize::try_from(blocks).ok())
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    let timeline = if timeline_carries {
+        // D3, D7: a vacant timeline owns only its history; the command queue its carry brings is
+        // counted with the carried source overhead, as a carried ring's is.
+        let (consumer, report) = SourceTimeline::prepare_vacant(quantum, history_blocks)
+            .map_err(|_| resource("host.source.prepare"))?;
+        carried_total_bytes = carried_total_bytes
+            .checked_add(report.command_queue_bytes)
+            .ok_or_else(|| resource("host.resource.arithmetic"))?;
+        carried_overhead_bytes = carried_overhead_bytes
+            .checked_add(report.command_queue_bytes)
+            .ok_or_else(|| resource("host.resource.arithmetic"))?;
+        carried_largest_bytes =
+            carried_largest_bytes.max(report.command_queue_largest_allocation_bytes);
+        consumer
+    } else {
+        let (producer, consumer, _) = SourceTimeline::prepare(quantum, history_blocks)
+            .map_err(|_| resource("host.source.prepare"))?;
+        sources.set_timeline(producer);
+        consumer
+    };
+    let source_set =
+        prepare_graph_source_set(artifact.envelope(), graph_sources, timeline, mappings)
+            .map_err(|_| graph_failure("host.source.graph.prepare"))?;
     let source_resources = source_set.resource_report();
     // Issue #1272 D4: a plan's source caps count the rings it allocated plus the rings it will
     // carry, so the active plan never exceeds them after the swap.
@@ -3398,6 +3445,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 graph::GraphCarryProgram {
                     predecessor: base.inventory.plan_identity(),
                     sources: Box::default(),
+                    timeline: false,
                 },
             )
             .map_err(|_| graph_failure("host.carry.install"))?;
