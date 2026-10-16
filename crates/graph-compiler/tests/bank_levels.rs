@@ -277,6 +277,7 @@ pub fn compile_bind_render(
     let builtins =
         prepare_session_builtins(&session, &[], builtin_caps()).expect("the session's builtins");
     let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         plan_id: 966,
         effects,
         builtins,

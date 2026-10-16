@@ -755,6 +755,12 @@ pub struct PlanStateInventory {
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
     restarted: Box<[Box<str>]>,
+    /// The input arrival this plan renders at every node where it is nonzero (#1285 D2): the
+    /// floored `max` of PDC, in samples, sorted by node ID. A successor is compiled with these as
+    /// its input floors, so no surviving node's latency drops across a structural transaction.
+    /// They are the floored values, not the natural ones, so a chain of successors keeps the
+    /// first plan's timing until a declared discontinuity (#1323).
+    input_floors: Box<[(graph::GraphNodeId, u64)]>,
 }
 
 /// One strip stage of a prepared plan, owner key `(strip ID, PostFader)` or `(strip ID,
@@ -970,6 +976,40 @@ impl PlanStateInventory {
         self.live_routes.len()
     }
 
+    /// The input floors a successor of this plan is compiled with (#1285 D2): every node whose
+    /// input arrival in this plan is nonzero, with that arrival in samples, sorted by node ID.
+    #[must_use]
+    pub fn input_floors(&self) -> &[(graph::GraphNodeId, u64)] {
+        &self.input_floors
+    }
+
+    /// An inventory that holds only this inventory's input floors (#1285, deliverable 2): a
+    /// successor prepared against it carries no state, so a test renders it from frame 0 as the
+    /// fresh reference of a plan compiled with the same floors.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_floors_only(&self) -> Self {
+        Self {
+            plan_identity: self.plan_identity,
+            sources: Box::default(),
+            input_sections: Box::default(),
+            strip_stages: Box::default(),
+            effect_lanes: Box::default(),
+            meters: Box::default(),
+            observations: Box::default(),
+            sample_rate_hz: self.sample_rate_hz,
+            quantum_frames: self.quantum_frames,
+            spectrum: Box::default(),
+            spectrum_collection: false,
+            spectrum_pairing: Box::default(),
+            delay_lines: Box::default(),
+            strip_delays: Box::default(),
+            live_routes: Box::default(),
+            restarted: Box::default(),
+            input_floors: self.input_floors.clone(),
+        }
+    }
+
     /// Strip stage rows, one per banked fader or matrix lane (issue #1277).
     #[must_use]
     pub fn strip_stage_count(&self) -> usize {
@@ -1043,7 +1083,12 @@ impl PlanStateInventory {
                 .iter()
                 .map(graph::GraphLiveRoute::heap_bytes)
                 .sum::<usize>()
-            + self.restarted.iter().map(|id| id.len()).sum::<usize>();
+            + self.restarted.iter().map(|id| id.len()).sum::<usize>()
+            + self
+                .input_floors
+                .iter()
+                .map(|(node, _)| graph_node_heap_bytes(node))
+                .sum::<usize>();
         u64::try_from(
             core::mem::size_of_val::<[SourceInventoryRow]>(&self.sources)
                 + core::mem::size_of_val::<[InputSectionInventoryRow]>(&self.input_sections)
@@ -1057,9 +1102,36 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[graph::GraphStripDelayLine]>(&self.strip_delays)
                 + core::mem::size_of_val::<[graph::GraphLiveRoute]>(&self.live_routes)
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
+                + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.input_floors)
                 + ids,
         )
         .unwrap_or(u64::MAX)
+    }
+}
+
+/// Bytes of ID text a graph node ID owns on the heap.
+fn graph_node_heap_bytes(node: &graph::GraphNodeId) -> usize {
+    fn edge(id: &graph::GraphEdgeId) -> usize {
+        match id {
+            graph::GraphEdgeId::TrackMain { target } => graph_node_heap_bytes(target),
+            graph::GraphEdgeId::RouteSource { route_id }
+            | graph::GraphEdgeId::RouteDestination { route_id } => route_id.as_str().len(),
+            graph::GraphEdgeId::EffectSidechain { effect, port } => {
+                effect.track_id.as_str().len() + effect.effect_id.as_str().len() + port.len()
+            }
+        }
+    }
+    match node {
+        graph::GraphNodeId::TrackStage { track_id, .. } => track_id.as_str().len(),
+        graph::GraphNodeId::Effect(effect) => {
+            effect.track_id.as_str().len() + effect.effect_id.as_str().len()
+        }
+        graph::GraphNodeId::Route { route_id } => route_id.as_str().len(),
+        graph::GraphNodeId::Submix { submix_id } => submix_id.as_str().len(),
+        graph::GraphNodeId::Output { output_id } => output_id.as_str().len(),
+        graph::GraphNodeId::CompensationDelay { edge_id } => {
+            core::mem::size_of::<graph::GraphEdgeId>() + edge(edge_id)
+        }
     }
 }
 
@@ -2589,6 +2661,17 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         plan_id: 1,
         effects,
         builtins,
+        // #1285 D2: a successor keeps every surviving node's input arrival; a first plan has no
+        // floors. Across a withdrawn candidate the base is P0's inventory, so these are P0's.
+        input_floors: successor
+            .map(|base| {
+                base.inventory
+                    .input_floors
+                    .iter()
+                    .map(|(node, floor)| (node.clone(), effect_contract::LatencySamples(*floor)))
+                    .collect()
+            })
+            .unwrap_or_default(),
         caps: GraphCompileCaps {
             maximum_nodes: u64::MAX,
             maximum_edges: u64::MAX,
@@ -2637,8 +2720,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .into_iter()
         .map(RouteControlProducer::new)
         .collect();
+    // #1285 D4: the floored output arrival, the one the plan renders.
     let output_latency = artifact.report().output_latency;
     let output_tail = artifact.report().output_tail;
+    let input_floors: Box<[(graph::GraphNodeId, u64)]> = artifact
+        .report()
+        .input_arrivals
+        .iter()
+        .map(|(node, arrival)| (node.clone(), arrival.0))
+        .collect();
     let mut graph_resources = artifact.graph_resource_estimate().clone();
     // The plan's own allocations that the graph row does not count: its revision gate (#1502 D1),
     // its jump-length cell (#1639 D1, attached after bind below) and, when this preparation made
@@ -3234,6 +3324,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         strip_delays: strip_delays.into_boxed_slice(),
         live_routes: live_routes.into_boxed_slice(),
         restarted: restarted.into_boxed_slice(),
+        input_floors,
     };
     let report = HostPrepareReport {
         sample_rate_hz: compiled.sample_rate().0,
@@ -5886,6 +5977,7 @@ mod tests {
             strip_delays: Box::default(),
             live_routes: Box::default(),
             restarted: Box::default(),
+            input_floors: Box::default(),
         }
     }
 

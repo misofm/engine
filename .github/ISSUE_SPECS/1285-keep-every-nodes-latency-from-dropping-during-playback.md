@@ -196,3 +196,62 @@ Checked against `228fca26c`.
   browser's parity row on the floored latency. D4 and gate 3 still cover the C ABI only here.
 - **Anchor.** The `restarted` field of `PlanStateInventory` is `prepare.rs:750` at `228fca26c`
   (the batch-15 amendment says `:744`). On `main` at `c5b5c88b2` it is `:757`.
+
+## Decision record: #1285 (batch 15b)
+
+**What shipped.**
+- D1: `GraphBuiltinsCompileRequest::input_floors` (`BTreeMap<GraphNodeId, LatencySamples>`,
+  empty by default). `pdc::timings` takes `max = max(latest incoming arrival, floor)` and
+  compensates every incoming edge to it. A floor that names no node of the graph is ignored, so the
+  successor's map can be the predecessor's arrivals as they are ("every node present in both
+  plans"). `GraphCompileReport::input_arrivals` reports each node's floored `max` where it is
+  nonzero, sorted by node ID (a missing node has arrival 0, and a 0 floor bounds nothing).
+- D2: `PlanStateInventory` holds `input_floors` (from `input_arrivals`, so floored values) and
+  shows them through `input_floors()`. `retained_bytes` counts them. A preparation with a
+  `SuccessorBase` passes them as the request's floors. A first plan has none. Across a withdrawn
+  candidate, `across_withdrawn` clones P0's inventory, so B gets P0's floors (render runs P0).
+  The discontinuity case (#1323) is not built yet, so every successor floors for now.
+- D3: no duck. A restarted strip starts at rest with no duck until #1324 lands, as the batch 15
+  amendment says.
+- D4: `latency_samples` is the floored output arrival, because PDC's output arrival includes the
+  floor. No extra code was needed.
+- D6: a header paragraph "Latency across a replacement (issue 1285)" and
+  `docs/C_ABI_V1_QUALIFICATION.md` § "Latency floors across a structural transaction (#1285)".
+  Both say the lower latency comes back with a fresh compile, or at #1323's discontinuity once it
+  exists. They do not claim a mechanism that is not built.
+- Test support: `PlanStateInventory::test_only_floors_only` (feature `test-support`).
+- Both hosts run this one core path (control-plane -> host-core). No host adapter changed.
+
+**Departures.**
+- Gates 1 and 2 mute `eq0` in A. A's blocks before the swap then equal B's, so the test can
+  compare "every block". An audible `eq0` in A differs from B before the swap by design.
+- Gate 3's reference is the same `RemoveTrack` transaction committed before the first block. Its
+  successor is compiled with A's floors and adopts at frame 0 with all state at rest, so it is B
+  compiled with A's floors and rendered from frame 0. A test-support inventory reference needs
+  `host-core/test-support` in capi's dev-dependencies, and `crates/capi/Cargo.toml` is not an
+  authorized path.
+- Mechanical neutral field (`input_floors: Default::default()`) in the 8 B15-R9 files and in the
+  authorized graph-compiler tests. `crates/builtins-compiler` is not touched.
+- Fixtures: none regenerated. With no floors the compiled output does not change.
+
+**Gates.**
+- Gate 1: `host-core` `successor_swap::removing_a_limited_track_keeps_the_output_timing_at_every_rate_and_width`
+  (4 rates, both widths where built). Red when successors get no floors: latency 0 against 447 at
+  44.1 kHz.
+- Gate 2: `...::removing_a_limited_track_keeps_the_submix_timing_at_every_rate_and_width`. Red
+  when floors go only to the output: it first differs at the swap block (6).
+- Gate 3: `capi` `runtime::tests::removing_a_limited_track_keeps_the_plan_latency`. Red when
+  successors get no floors: latency 0 against 486.
+- Gate 4: `cargo test -p graph-compiler` (fixture corpus) ok; `check-graph-determinism.sh` PASS
+  100/100; `cargo test -p console-workload` ok; `check-builtins-fixtures.sh` ok (50 files).
+- Gate 5: `...::a_second_removal_keeps_the_first_floors`. Red when the inventory records the
+  natural `max`: C's latency is 0 against 486.
+- Supersession (added): `...::a_replacement_across_a_withdrawn_candidate_keeps_the_running_floors`.
+  A adds two limiters (latency 972). B across withdrawn A must keep P0's latency (486). Red when
+  the base takes A's floors (972) or drops them (0).
+- Unit: `graph-compiler` `tests::timing_compensates_every_incoming_edge_to_a_floor`.
+- Gate 6 command: all suites ok. `check-capi-abi.sh` ok, `check-workspace-policy.sh` ok,
+  clippy (touched crates) ok, rustdoc ok, `realtime-policy` ok.
+
+**Measured.** `audit capi`: allocations 0, deallocations 0, pcm_digest `4f52089e4a8cf83c`
+(unchanged). No resource ceiling was re-pinned.

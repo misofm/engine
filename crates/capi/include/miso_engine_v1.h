@@ -82,6 +82,15 @@ extern "C" {
  * replacement may change it, but an unchanged report does not mean that no replacement
  * happened; the edit path is the signal.)
  *
+ * Latency across a replacement (issue 1285). No node's latency, the output's included, drops
+ * across a structural transaction: the successor plan is compiled with every surviving node's
+ * input arrival in the plan it displaces as a lower bound, so removing a latent effect, or the
+ * track that holds it, moves no other path in time, every compensation line keeps its length, and
+ * latency_samples does not fall. A path whose own upstream latency dropped gets a new
+ * compensation line, which starts at rest. An added latency still raises latency_samples. The
+ * lower latency returns only with a fresh miso_engine_v1_compile_session, or at a host-declared
+ * discontinuity once issue 1323 provides one; there is no permanent latency reserve.
+ *
  * Solo (issue 1559). Solo is a SET_CONTROL like every other value: the address is the strip's
  * own section, control 2 (named "solo", a toggle, value exactly 0 or 1, lane both), on a track.
  * A submix has no solo row (a submix is solo-safe), so a solo on a submix is the typed refusal

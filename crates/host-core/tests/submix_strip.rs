@@ -972,6 +972,7 @@ fn graph_artifact(document: &str, plan_id: u64) -> PreparedGraphBuiltinsArtifact
     )
     .expect("builtins");
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id,
         effects,

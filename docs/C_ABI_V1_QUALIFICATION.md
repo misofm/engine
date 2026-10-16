@@ -900,3 +900,26 @@ that window is admitted against the plan that renders.
   candidate epoch no longer keeps a carried base, and `carried_base_retained_bytes` is gone: the
   reference session's `capi_retained_bytes` moves 168,810 -> 167,514 (x86-64, -1,296: 216 bytes
   in each of the six provider epochs).
+
+## Latency floors across a structural transaction (#1285)
+
+- **Behavior.** No node's latency, the output's included, drops across a structural transaction.
+  The core (`host_core`, for the C ABI and the browser alike) compiles a successor with every node's
+  input arrival in the plan it displaces as a lower bound (an input floor), and PDC compensates
+  every incoming edge of the node to it. Removing a latent effect, or the track that holds it,
+  therefore moves no other path in time: every surviving compensation line keeps its length and
+  carries (#1283), at the output and inside a submix. `latency_samples` reports the floored output
+  arrival, the one the plan renders. A path whose own upstream latency dropped gets a new
+  compensation line, which starts at rest; its strip lost a latent effect, so it is in the restart
+  set, and it starts at rest with no duck until #1324 adds the duck-swap. An added latency still
+  grows the node (#1287 owns growth).
+- **How long.** The inventory records the floored arrivals, so a chain of successors keeps the
+  first plan's timing. A successor prepared across a withdrawn candidate takes the running plan's
+  floors (#1698's base is the running plan's inventory). A fresh `miso_engine_v1_compile_session`
+  and a browser boot compile with no floors; the lower latency returns there, or at a
+  host-declared discontinuity once #1323 provides one. There is no permanent latency reserve.
+- **Evidence.** `capi` `runtime::tests::removing_a_limited_track_keeps_the_plan_latency`
+  (`RemoveTrack` of a limited track: an unchanged `latency_samples` after the swap, and every
+  block equal to the floored reference). With no floors neither the program nor its canonical bytes
+  change: the graph fixture corpus, `scripts/check-graph-determinism.sh` and `console-workload`
+  keep their digests.
