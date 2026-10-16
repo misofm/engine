@@ -982,6 +982,22 @@ pub struct Automation {
     pub target: ControlAddress,
     /// Ordered segments, preserved canonically.
     pub segments: Vec<AutomationSegment>,
+    /// The stored hand-move offset of each lane, in dB (#1650 D1). Required in every entry: the
+    /// V1 grammar has no optional key. Each lane's offset belongs to the entry that drives that
+    /// lane, so a lane this entry does not drive holds `+0.0`, and only a row that takes an offset
+    /// may hold a non-zero value (`controls::takes_offset`). The session crate cannot see rows and
+    /// checks nothing here; `controls::automation_diagnostics` judges it.
+    pub offset: AutomationOffset,
+}
+
+/// The per-lane dB offset a hand move adds to an automated fader (#1650 D1). The default is no
+/// offset: `+0.0` on both lanes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AutomationOffset {
+    /// The left lane's offset in dB.
+    pub left_db: f32,
+    /// The right lane's offset in dB.
+    pub right_db: f32,
 }
 
 closed_tokens! {

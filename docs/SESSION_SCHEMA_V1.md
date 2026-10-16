@@ -279,7 +279,7 @@ beside the effect diagnostics: `control.address.unknown` (no row), `control.auto
 (the row is rebuild-only, derived, a monitor row, a setting, or one of the two live rows that a ruling keeps out of automation: a send's `follows_mute`, a routing setting, and a strip's `matrix_mode`, a mode; #1632), `control.inactive` (the owner's shape
 does not use the row), `control.lane` (`left` or `right` on a shared row), `control.domain` (a
 segment whose unit is not the row's, or a value the row refuses), `control.automation.shape` and
-`control.automation.order` (#1645, below). A console target on a submix
+`control.automation.order` (#1645, below), and `control.automation.offset` (#1650, below). A console target on a submix
 addresses that submix's entry for the slot (#1202). A session does not have to state a parameter
 value for the row it automates: the row exists whether or not the session states it.
 
@@ -305,6 +305,34 @@ The shape rule is one rule for every row: a toggle row (polarity, mute) or an en
 (of the builtins, only HPF and LPF; never a fader, trim, pan or matrix row); and on a row with a
 disabled value (a filter's `0`, "off") a `linear` or `exponential` segment has neither value equal
 to it, so "off" is entered and left only by a `step`.
+
+**The hand-move offset (#1650).** Every automation entry carries a required `offset` record, key
+4 after `segments` (`id` 1, `target` 2, `segments` 3), with two required finite `f32` keys,
+`left_db` 1 and `right_db` 2: the dB offset a hand move adds to the curve of each lane. On the wire
+it is field 4 of `Automation`, a required nested `AutomationOffset` message with two required `F32`
+fields 1 and 2. A missing record or lane is `schema.missing_field` and a third key
+`schema.unknown_field`, at their paths. The row rule (`controls::automation_diagnostics`) judges
+each lane at `$.automation[id=<id>].offset.left_db` or `.right_db`, after the segments:
+
+- Only `fader_db` (builtins control 5 of a strip) takes an offset (`takes_offset`). The input trim
+  and the send gain do not yet: the slices that render them (#1658, #1654) add them.
+- A lane that takes no offset holds exactly `+0.0`, else `control.automation.offset`. That is a
+  lane the entry does not drive (`right_db` of a `left` entry, `left_db` of a `right` entry) and
+  every lane of an entry whose row takes no offset. `-0.0` is refused there too, so "no offset"
+  has one spelling.
+- A lane a `fader_db` entry drives holds an offset in the fader's own domain, `[-144, 24]` dB (the
+  VCA offset domain), else `control.domain`. `-0.0` is a valid zero there.
+
+The offset of a lane belongs to the entry that drives the lane, so a lane-granular hand move on a
+`both` entry needs no entry split. `RemoveAutomation` removes the offset with the entry;
+`SetAutomationSegments` and `SetAutomationTarget` keep it, and the row rule judges it against the
+new target. The offset is stored, checked and round-tripped (canonical JSON, wire, SDK). It is not
+yet heard: render composes a fader event with the sum `S` of the reaching VCA offsets, and the
+slice that adds the lane's own offset to `S` and routes a `SET_CONTROL fader_db` on an automated
+lane to it (#1650b) lands in the same push as the fader automation render (#1646 to #1649). After
+that slice the static fader value of an automated lane is not a control value: `SET_CONTROL`
+writes the offset, and the static fallback changes only through a rebuild (remove the automation,
+set the fader, upsert the automation, in one transaction) or a document replacement.
 
 **The input filter order, on curves (#1645).** On each strip lane where HPF (3) or LPF (4) is
 automated (a `both` entry drives both lanes), each side is its entry under the hold rule, or the

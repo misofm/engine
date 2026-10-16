@@ -925,7 +925,10 @@ pub enum ConformanceDecoder {
 /// refused and never reallocated, so `command.transport_set` carries the state alone and the
 /// snapshot and event frames carry the state and the effective sample. The frame count stays 46.
 /// Batch 13b carries #1678 and #1635 together and re-pins it once from `cc9a7bcc502c4936`.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x0c71_96f8_6abe_6d57;
+/// #1650 adds the automation offset: the `Automation` message gains a required field 4, the
+/// nested `AutomationOffset` (`left_db` 1, `right_db` 2), so the transaction's `UpsertAutomation`
+/// carries it. Re-pinned from `0c7196f86abe6d57`; the frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x5eb9_ad2e_d137_f3be;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

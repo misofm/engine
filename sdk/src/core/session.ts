@@ -925,6 +925,7 @@ export class SessionBuilder {
       automation: [...this.#state.automation, freeze({
         ...spec,
         segments: spec.segments.map((segment) => ({ ...segment })),
+        ...(spec.offset === undefined ? {} : { offset: { ...spec.offset } }),
       })],
     });
   }
@@ -1002,6 +1003,7 @@ export class SessionBuilder {
     if (spec.segments.length === 0) {
       fail(`${path}.segments`, "automation must declare at least one segment");
     }
+    normalizeAutomationOffset(spec.offset, `${path}.offset`);
   }
 
   #next(update: Partial<BuilderState>): SessionBuilder {
@@ -1605,6 +1607,18 @@ function normalizeAutomation(spec: AutomationSpec, state: BuilderState): ModelRe
       lane: resolved.lane,
     }),
     segments,
+    offset: normalizeAutomationOffset(spec.offset, `${path}.offset`),
+  });
+}
+
+/**
+ * The stored hand-move offset (#1650): two `f32` dB lanes, `0` when omitted. Which row and lane
+ * may hold a non-zero offset, and its domain, are the engine's rule (`validate()`).
+ */
+function normalizeAutomationOffset(raw: AutomationSpec["offset"], path: string): ModelRecord {
+  return freeze({
+    left_db: raw?.leftDb === undefined ? 0 : f32(raw.leftDb, `${path}.leftDb`),
+    right_db: raw?.rightDb === undefined ? 0 : f32(raw.rightDb, `${path}.rightDb`),
   });
 }
 

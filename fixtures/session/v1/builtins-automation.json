@@ -188,7 +188,11 @@
           "end_value": -3.0,
           "unit": "db"
         }
-      ]
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": 0.0
+      }
     },
     {
       "id": "pan-ride",
@@ -208,7 +212,11 @@
           "end_value": 0.5,
           "unit": "linear"
         }
-      ]
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": 0.0
+      }
     },
     {
       "id": "polarity-flip",
@@ -228,7 +236,11 @@
           "end_value": 1.0,
           "unit": "linear"
         }
-      ]
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": 0.0
+      }
     },
     {
       "id": "route-ride",
@@ -248,7 +260,11 @@
           "end_value": -6.0,
           "unit": "db"
         }
-      ]
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": 0.0
+      }
     },
     {
       "id": "trim-ride-left",
@@ -268,7 +284,11 @@
           "end_value": -6.0,
           "unit": "db"
         }
-      ]
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": 0.0
+      }
     },
     {
       "id": "vca-ride",
@@ -288,7 +308,11 @@
           "end_value": -3.0,
           "unit": "db"
         }
-      ]
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": 0.0
+      }
     }
   ]
 }

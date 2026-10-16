@@ -9,7 +9,7 @@ use session::{
 };
 
 use crate::ControlKind;
-use crate::builtin_rows::{HPF_HZ, LPF_HZ};
+use crate::builtin_rows::{FADER_DB, HPF_HZ, LPF_HZ};
 use crate::descriptor::{ControlDescriptor, Lanes, check};
 use crate::effect_rows::{has_rows, session_unit};
 use crate::error::ControlError;
@@ -45,12 +45,52 @@ fn effect_has_no_rows(model: &SessionModel, target: &ControlAddress) -> bool {
     identity.is_some_and(|identity| !has_rows(identity))
 }
 
+/// Whether the row at `target` takes a stored hand-move offset (#1650 D2, root's ruling R17-6):
+/// only a strip's builtin `fader_db`. The slices that render the input trim (#1658) and the send
+/// gain (#1654) add their rows here.
+pub(crate) fn takes_offset(target: &ControlAddress) -> bool {
+    matches!(target.owner, Owner::Strip(_))
+        && target.section == Section::Builtins
+        && target.control == FADER_DB
+}
+
+/// The offset rule of one entry whose target is accepted (#1650 D2), per lane, left then right:
+/// on a lane that takes no offset (the entry does not drive it, or its row takes none) the
+/// offset is exactly `+0.0`, else `control.automation.offset`; on a driven lane of a row that
+/// takes one, the offset lies in the row's own domain (`fader_db`: `[-144, 24]` dB, the VCA
+/// offset domain), else `control.domain`. `-0.0` is a valid zero only on a lane that takes an
+/// offset, so a lane without one has one spelling.
+fn offset_faults(
+    automation: &Automation,
+    descriptor: &ControlDescriptor,
+) -> impl Iterator<Item = (ControlError, &'static str)> {
+    let target = &automation.target;
+    let takes = takes_offset(target);
+    [
+        (Lane::Left, automation.offset.left_db, ".offset.left_db"),
+        (Lane::Right, automation.offset.right_db, ".offset.right_db"),
+    ]
+    .into_iter()
+    .filter_map(move |(lane, value, suffix)| {
+        let driven = target.lane == lane || target.lane == Lane::Both;
+        let fault = if !(takes && driven) {
+            (value.to_bits() != 0.0_f32.to_bits()).then_some(ControlError::AutomationOffset)
+        } else {
+            check(descriptor, lane, value, None)
+                .err()
+                .map(|_| ControlError::Domain)
+        };
+        fault.map(|error| (error, suffix))
+    })
+}
+
 /// One refusal of a stored automation: a stable code and the session path it belongs to.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlDiagnostic {
     /// The stable machine code (a [`ControlError`] code).
     pub code: &'static str,
-    /// `$.automation[id=<id>].target`, or `$.automation[id=<id>].segments[<i>]`.
+    /// `$.automation[id=<id>].target`, `$.automation[id=<id>].segments[<i>]`, or
+    /// `$.automation[id=<id>].offset.left_db` / `.right_db`.
     pub path: String,
 }
 
@@ -74,7 +114,11 @@ pub struct ControlDiagnostic {
 /// - `control.automation.order`: on a strip lane where the HPF or the LPF is automated, the two
 ///   curves can come to an HPF at or above an enabled LPF (#1645 D2; see
 ///   `input_filter_order`). It is reported once per lane, at the LPF entry's segment when the LPF
-///   is automated, else at the HPF entry's.
+///   is automated, else at the HPF entry's;
+/// - `control.automation.offset`: a hand-move offset (#1650 D2) that is not `+0.0` on a lane the
+///   entry does not drive, or on any lane of a row that takes no offset (only `fader_db` takes
+///   one); `control.domain` for an offset outside the fader row's domain. Each is reported at
+///   `.offset.left_db` or `.offset.right_db`, after the entry's segments.
 ///
 /// A target is reported once, at `.target`; its segments are judged only when the target is
 /// accepted. A segment is reported once, at `.segments[<i>]`: a domain fault first, else a shape
@@ -143,6 +187,9 @@ pub fn automation_diagnostics(model: &SessionModel, sample_rate: u32) -> Vec<Con
             if let Some(error) = fault {
                 diagnostics.push(refuse(error, at(&format!(".segments[{position}]"))));
             }
+        }
+        for (error, suffix) in offset_faults(automation, &descriptor) {
+            diagnostics.push(refuse(error, at(suffix)));
         }
         faulted[index] = diagnostics.len() > before;
     }

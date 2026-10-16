@@ -470,7 +470,7 @@ function requestU64(value: unknown, path: string): bigint {
 
 function automation(value: unknown, path: string): AutomationSpec {
   const raw = record(value, path);
-  keys(raw, ["id", "target", "segments"], ["id", "target", "segments"], path);
+  keys(raw, ["id", "target", "segments", "offset"], ["id", "target", "segments"], path);
   const target = record(raw.target, `${path}.target`);
   keys(target, ["owner", "section", "control", "lane"], ["owner", "section", "control", "lane"], `${path}.target`);
   // The control address `edit.set` takes (#1566): the builder checks the owner, the slot and the row.
@@ -490,6 +490,16 @@ function automation(value: unknown, path: string): AutomationSpec {
       endValue: number(segment.endValue, `${where}.endValue`),
     };
   });
+  // The stored hand-move offset (#1650): optional in a request, `0` per lane when omitted.
+  let offset: AutomationSpec["offset"];
+  if (raw.offset !== undefined) {
+    const supplied = record(raw.offset, `${path}.offset`);
+    keys(supplied, ["leftDb", "rightDb"], [], `${path}.offset`);
+    offset = {
+      ...(supplied.leftDb === undefined ? {} : { leftDb: number(supplied.leftDb, `${path}.offset.leftDb`) }),
+      ...(supplied.rightDb === undefined ? {} : { rightDb: number(supplied.rightDb, `${path}.offset.rightDb`) }),
+    };
+  }
   return {
     id: string(raw.id, `${path}.id`),
     // The kinds are checked by the builder, which refuses what the engine's grammar refuses.
@@ -509,6 +519,7 @@ function automation(value: unknown, path: string): AutomationSpec {
       lane: string(target.lane, `${path}.target.lane`),
     } as unknown as AutomationSpec["target"],
     segments,
+    ...(offset === undefined ? {} : { offset }),
   };
 }
 

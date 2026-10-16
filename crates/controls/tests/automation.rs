@@ -5,9 +5,13 @@ mod common;
 
 use common::{RATE, address, effects_fixture, id, insert_id, route_own, strip_builtin, strip_own};
 use controls::{ControlAddress, ControlDiagnostic, Lane, Owner, Section, automation_diagnostics};
-use session::{Automation, AutomationSegment, AutomationShape, ParameterUnit, SessionModel};
+use session::{
+    Automation, AutomationOffset, AutomationSegment, AutomationShape, ParameterUnit, SessionModel,
+};
 
+const TRIM_DB: u32 = 2;
 const FADER_DB: u32 = 5;
+const PAN: u32 = 12;
 const DELAY_SAMPLES: u32 = 11;
 const MATRIX_LL: u32 = 7;
 const SOLO: u32 = 2;
@@ -37,6 +41,7 @@ fn automation(name: &str, target: ControlAddress, segments: Vec<AutomationSegmen
         id: id(name),
         target,
         segments,
+        offset: AutomationOffset::default(),
     }
 }
 
@@ -666,5 +671,153 @@ fn input_filter_curves_keep_their_order_within_renders_reach() {
     assert_eq!(
         judged_with(with_static_lpf(1_000.0), pair(1_200)),
         Vec::new()
+    );
+}
+
+/// An entry of `automation` with `offset` stored.
+fn with_offset(automation: Automation, left_db: f32, right_db: f32) -> Automation {
+    Automation {
+        offset: AutomationOffset { left_db, right_db },
+        ..automation
+    }
+}
+
+/// #1650a gate 1 (D2, root's ruling R17-6): the hand-move offset belongs to a lane the entry
+/// drives on the one row that takes it, `fader_db`, inside that row's `[-144, 24]` dB. A lane the
+/// entry does not drive, and every lane of any other row (the input trim and the send gain until
+/// #1658 and #1654 add them, a pan), hold exactly `+0.0`, else `control.automation.offset`; an
+/// offset outside the domain is `control.domain`. Each is reported at its lane's path, after the
+/// entry's segments.
+///
+/// Red if `takes_offset` admits another row (the stored value would be accepted and never heard),
+/// if the lane rule is missing (a `left` entry could carry a right offset that no lane reads), if
+/// the domain check is missing, or if `-0.0` passes on a lane that takes no offset (two spellings
+/// of "none").
+#[test]
+fn the_offset_belongs_to_a_driven_fader_lane() {
+    let fader = |name: &str, lane: Lane| {
+        one(
+            name,
+            strip_builtin("vocal", FADER_DB, lane),
+            ParameterUnit::Db,
+            -6.0,
+        )
+    };
+    // Accepted: a both entry with one offset per lane, a left entry with a left offset, the domain
+    // ends, and a `-0.0` zero on a driven lane.
+    for accepted in [
+        with_offset(fader("both", Lane::Both), 3.0, -6.0),
+        with_offset(fader("left", Lane::Left), 24.0, 0.0),
+        with_offset(fader("right", Lane::Right), 0.0, -144.0),
+        with_offset(fader("negative-zero", Lane::Both), -0.0, -0.0),
+    ] {
+        let name = accepted.id.as_str().to_owned();
+        assert_eq!(judged(vec![accepted]), [], "{name}");
+    }
+
+    let refused = [
+        // The lane rule: a lane the entry does not drive holds `+0.0`, and only `+0.0`.
+        (
+            with_offset(fader("left-right", Lane::Left), 0.0, 1.0),
+            "control.automation.offset",
+            ".offset.right_db",
+        ),
+        (
+            with_offset(fader("right-left", Lane::Right), -0.0, 0.0),
+            "control.automation.offset",
+            ".offset.left_db",
+        ),
+        // The fader row's domain.
+        (
+            with_offset(fader("above", Lane::Both), 24.5, 0.0),
+            "control.domain",
+            ".offset.left_db",
+        ),
+        (
+            with_offset(fader("below", Lane::Left), -144.5, 0.0),
+            "control.domain",
+            ".offset.left_db",
+        ),
+        // Rows that take no offset (R17-6): the trim, a send's gain, a pan.
+        (
+            with_offset(
+                one(
+                    "trim",
+                    strip_builtin("vocal", TRIM_DB, Lane::Left),
+                    ParameterUnit::Db,
+                    0.0,
+                ),
+                2.0,
+                0.0,
+            ),
+            "control.automation.offset",
+            ".offset.left_db",
+        ),
+        (
+            with_offset(
+                one(
+                    "send-gain",
+                    route_own("send", GAIN_DB),
+                    ParameterUnit::Db,
+                    0.0,
+                ),
+                0.0,
+                -3.0,
+            ),
+            "control.automation.offset",
+            ".offset.right_db",
+        ),
+        (
+            with_offset(
+                one(
+                    "pan",
+                    strip_builtin("vocal", PAN, Lane::Both),
+                    ParameterUnit::Linear,
+                    0.0,
+                ),
+                0.0,
+                -0.0,
+            ),
+            "control.automation.offset",
+            ".offset.right_db",
+        ),
+    ];
+    for (entry, code, suffix) in refused {
+        let name = entry.id.as_str().to_owned();
+        assert_eq!(
+            judged(vec![entry]),
+            [(code, format!("$.automation[id={name}]{suffix}"))],
+            "{name}"
+        );
+    }
+
+    // Both lanes report, after a segment fault of the same entry.
+    let mut both = with_offset(
+        one(
+            "trim-both",
+            strip_builtin("vocal", TRIM_DB, Lane::Both),
+            ParameterUnit::Db,
+            0.0,
+        ),
+        1.0,
+        1.0,
+    );
+    both.segments[0].unit = ParameterUnit::Hz;
+    assert_eq!(
+        judged(vec![both]),
+        [
+            (
+                "control.domain",
+                "$.automation[id=trim-both].segments[0]".to_owned()
+            ),
+            (
+                "control.automation.offset",
+                "$.automation[id=trim-both].offset.left_db".to_owned()
+            ),
+            (
+                "control.automation.offset",
+                "$.automation[id=trim-both].offset.right_db".to_owned()
+            ),
+        ]
     );
 }

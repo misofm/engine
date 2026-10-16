@@ -58,6 +58,7 @@ fn with_eq_automation(control: u32, unit: ParameterUnit) -> SessionModel {
             end_value: 1.0,
             unit,
         }],
+        offset: session::AutomationOffset::default(),
     }];
     model
 }

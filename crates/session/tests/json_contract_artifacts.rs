@@ -392,6 +392,7 @@ const SCHEMA_RECORDS: &[(&str, &[(&str, Option<&str>)])] = &[
         ],
     ),
     ("automation_segment", &[("segment", None)]),
+    ("automation_offset", &[("automation_offset", None)]),
     ("automation", &[("automation", None)]),
 ];
 

@@ -205,9 +205,13 @@
       "type": "object", "additionalProperties": false, "required": ["shape", "start_sample", "end_sample", "start_value", "end_value", "unit"],
       "properties": { "shape": { "enum": ["step", "linear", "exponential"] }, "start_sample": { "$ref": "#/$defs/u64" }, "end_sample": { "$ref": "#/$defs/u64" }, "start_value": { "$ref": "#/$defs/f32" }, "end_value": { "$ref": "#/$defs/f32" }, "unit": { "$ref": "#/$defs/unit" } }
     },
+    "automation_offset": {
+      "type": "object", "additionalProperties": false, "required": ["left_db", "right_db"],
+      "properties": { "left_db": { "$ref": "#/$defs/f32" }, "right_db": { "$ref": "#/$defs/f32" } }
+    },
     "automation": {
-      "type": "object", "additionalProperties": false, "required": ["id", "target", "segments"],
-      "properties": { "id": { "$ref": "#/$defs/id" }, "target": { "$ref": "#/$defs/automation_target" }, "segments": { "type": "array", "items": { "$ref": "#/$defs/automation_segment" }, "minItems": 1 } }
+      "type": "object", "additionalProperties": false, "required": ["id", "target", "segments", "offset"],
+      "properties": { "id": { "$ref": "#/$defs/id" }, "target": { "$ref": "#/$defs/automation_target" }, "segments": { "type": "array", "items": { "$ref": "#/$defs/automation_segment" }, "minItems": 1 }, "offset": { "$ref": "#/$defs/automation_offset" } }
     }
   }
 }

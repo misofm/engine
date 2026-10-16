@@ -1113,6 +1113,78 @@ fn automation_category_has_20_distinct_cases() {
     assert_eq!(count, 20);
 }
 
+/// Issue #1650 D1: every automation entry carries a required `offset` record of two required
+/// `f32` dB lanes, written after `segments`. The grammar refuses a missing record, a missing lane
+/// and an unknown key at their paths; the row rule (domain, lane, `takes_offset`) is
+/// `controls::automation_diagnostics`'s and is tested there.
+///
+/// Red if the key becomes optional, if the record accepts a third key, or if the canonical writer
+/// drops an offset or the sign of a `-0.0` lane.
+#[test]
+fn automation_offset_is_a_required_two_lane_record() {
+    const ZERO: &str = r#","offset":{"left_db":0.0,"right_db":0.0}"#;
+    let compact = compact_json(EXAMPLE);
+    assert_eq!(
+        compact.matches(ZERO).count(),
+        1,
+        "the fixture carries one zero offset"
+    );
+    let mut count = 0;
+    parse_case(
+        &mut count,
+        &compact.replacen(ZERO, "", 1),
+        DiagnosticCode::MissingField,
+        "$.automation[0].offset",
+    );
+    parse_case(
+        &mut count,
+        &compact.replacen(ZERO, r#","offset":{"left_db":0.0}"#, 1),
+        DiagnosticCode::MissingField,
+        "$.automation[0].offset.right_db",
+    );
+    parse_case(
+        &mut count,
+        &compact.replacen(
+            ZERO,
+            r#","offset":{"left_db":0.0,"right_db":0.0,"center_db":0.0}"#,
+            1,
+        ),
+        DiagnosticCode::UnknownField,
+        "$.automation[0].offset.center_db",
+    );
+    parse_case(
+        &mut count,
+        &compact.replacen(ZERO, r#","offset":{"left_db":"3","right_db":0.0}"#, 1),
+        DiagnosticCode::WrongType,
+        "$.automation[0].offset.left_db",
+    );
+    assert_eq!(count, 4);
+
+    let moved = parse_session_json(&compact.replacen(
+        ZERO,
+        r#","offset":{"left_db":3.5,"right_db":-0.0}"#,
+        1,
+    ))
+    .expect("a stored offset parses");
+    assert_eq!(moved.automation[0].offset.left_db, 3.5);
+    assert_eq!(
+        moved.automation[0].offset.right_db.to_bits(),
+        (-0.0f32).to_bits()
+    );
+    let canonical = canonical_session_json(&moved).expect("a stored offset canonicalizes");
+    assert!(
+        canonical.contains(
+            "\"offset\": {\n        \"left_db\": 3.5,\n        \"right_db\": -0.0\n      }"
+        )
+    );
+    let reparsed = parse_session_json(&canonical).expect("canonical reparses");
+    assert_eq!(reparsed, moved);
+    assert_eq!(
+        reparsed.automation[0].offset.right_db.to_bits(),
+        (-0.0f32).to_bits()
+    );
+}
+
 #[test]
 fn configured_resource_category_has_4_distinct_cases() {
     let mut count = 0;
