@@ -2382,8 +2382,8 @@ fn model_only_edits(model: &SessionModel) -> [(&'static str, SessionEdit); 5] {
         ),
         (
             "control smoothing",
-            // Before the automation upsert: on a session with a fader entry the edit writes the
-            // plan's jump-length cell and is `live` (#1639 D3).
+            // On a session with a fader entry the edit writes the plan's jump-length cell and is
+            // `live` (#1639 D3); the EQ entry below reads no length, so the session has none.
             // The first write turns the `default` arm into the explicit lengths (#1561 D4a).
             smoothing_edits(ControlSmoothing {
                 mute_ms: 1.0,
@@ -2393,15 +2393,18 @@ fn model_only_edits(model: &SessionModel) -> [(&'static str, SessionEdit); 5] {
             .remove(0),
         ),
         (
+            // An entry on the console EQ's band-1 gain: a valid block-rate target whose row does
+            // not render until #1667, the last row to leave the mask. A fader entry is a rebuild
+            // (#1648 D1).
             "automation upsert",
             SessionEdit::UpsertAutomation {
                 automation: session::Automation {
-                    id: id("fader-ride"),
+                    id: id("eq-ride"),
                     target: session::ControlAddress {
                         owner: session::Owner::Strip(model.tracks[0].id.clone()),
-                        section: session::Section::Builtins,
-                        control: 5,
-                        lane: session::ParameterChannel::Both,
+                        section: session::Section::Console(id("eq")),
+                        control: 4,
+                        lane: session::ParameterChannel::Left,
                     },
                     segments: vec![session::AutomationSegment {
                         shape: session::AutomationShape::Linear,
@@ -8669,6 +8672,78 @@ fn a_control_smoothing_edit_on_an_automated_session_writes_the_jump_lengths_live
         rig.step();
         assert_eq!(graph::test_only_block_jump_lengths(), Some(held));
     }
+}
+
+/// #1648a, the #1639 gap (batch 13b amendment, root ruling 2026-10-15). A playing session with no
+/// stored automation takes a `control_smoothing` change: no entry reads the lengths, so the commit
+/// is `model_only` and the plan keeps the prepared lengths. A later transaction adds a fader entry:
+/// a fader automation edit is a rebuild (#1648 D1), and from the block that adopts the successor
+/// the plan holds the committed lengths, which the successor seeds from its own model (#1639 D4).
+///
+/// Test value: red if the fader entry commits without a rebuild (the cell would keep the prepared
+/// lengths, which the earlier edit never wrote, so the new entry's jumps would ramp over stale
+/// lengths), or if the successor seeds its cell from anything but its committed model.
+#[test]
+fn a_fader_entry_added_after_an_unwritten_smoothing_change_reads_the_new_lengths() {
+    let fast = ControlSmoothing {
+        mute_ms: 1.0,
+        fader_ms: 2.0,
+        pan_ms: 3.0,
+    };
+    // The default table at 48 kHz: fader 20 ms, mute 10 ms, pan 20 ms.
+    let prepared = graph::GraphJumpLengths {
+        fader_samples: 960,
+        mute_samples: 480,
+        pan_samples: 960,
+    };
+    let written = graph::GraphJumpLengths {
+        fader_samples: 96,
+        mute_samples: 48,
+        pan_samples: 144,
+    };
+    let document = long_session(10, 48_000);
+    let mut rig = Rig::new(&document);
+    for _ in 0..2 {
+        rig.step();
+    }
+    let bytes = rig.transaction(&smoothing_edits(fast));
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::ModelOnly);
+    rig.step();
+    assert_eq!(
+        graph::test_only_block_jump_lengths(),
+        Some(prepared),
+        "no entry reads the lengths: the cell is not written"
+    );
+    let (revision, _, epoch, _) = rig.summary();
+    let entry = parse_session_json(&with_fader_automation(&document))
+        .expect("model")
+        .automation
+        .remove(0);
+    let bytes = rig.transaction(&[SessionEdit::UpsertAutomation { automation: entry }]);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        edit_path_of(&response),
+        protocol::EditPath::Rebuild,
+        "a fader entry is a rebuild"
+    );
+    let mut guard = 0;
+    while rig.summary().3 != 0 {
+        rig.step();
+        guard += 1;
+        assert!(guard < 16, "the candidate is adopted");
+    }
+    let (after, _, after_epoch, _) = rig.summary();
+    assert_eq!(after, revision + 1, "one revision");
+    assert_ne!(after_epoch, epoch, "the successor renders");
+    rig.step();
+    assert_eq!(
+        graph::test_only_block_jump_lengths(),
+        Some(written),
+        "the successor's cell holds the committed lengths"
+    );
 }
 
 /// #1639 D4. One transaction adds a track (a structural edit, so a successor plan) and changes the

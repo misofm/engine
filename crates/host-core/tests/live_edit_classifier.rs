@@ -215,6 +215,7 @@ fn a_random_transaction_classifies_as_the_full_classifier_does() {
             Err(LiveRebuild::Structure) => "structure",
             Err(LiveRebuild::Domain) => "domain",
             Err(LiveRebuild::AutomationTarget) => "automation",
+            Err(LiveRebuild::Automation) => "automation curve",
         });
     }
     for row in [

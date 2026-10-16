@@ -182,7 +182,8 @@ pub struct LiveDelta<'a> {
 
 impl LiveDelta<'_> {
     /// Whether the delta holds no record of any kind (#1313 D2): a transaction that changed only
-    /// model-only fields (the session ID, a profile ID, the stored automation) or rewrote
+    /// model-only fields (the session ID, a profile ID, the stored automation of a row that does
+    /// not render yet) or rewrote
     /// identical values. The host reports such a commit as `model_only` and a delta with at least
     /// one record as `live`.
     ///
@@ -262,16 +263,22 @@ pub use crate::prepare::LiveRebuild;
 ///    automates either filter ([`controls::filter_statics_changed_under_automation`]: the order
 ///    rule reads the static side, #1645) and [`controls::automation_diagnostics`] refuses one of
 ///    `next`'s automations (decision 15 E1, #1335 D4, #1566 D6). An unchanged automation table
-///    over unchanged activity and unchanged filter statics is never re-checked: it was prepared. An accepted
-///    change stays live with no records, as #1260 D2 made it.
-/// 3. With the structure equal, the two models list the same controls in the same order. For each
+///    over unchanged activity and unchanged filter statics is never re-checked: it was prepared.
+/// 3. [`LiveRebuild::Automation`] if the entries of the rows that render differ
+///    ([`controls::rendered_automation_changed`], #1648 D1): an entry on such a row (today a
+///    strip's fader, builtin row 5, [`controls::automation_row_renders`]) is added, removed,
+///    retargeted or given other segments. A plan compiles its cells from these entries, so only a
+///    rebuild can carry the change; the successor also seeds its jump-length cell from its own
+///    model (#1639 D4). An entry's hand offset (#1650) is not compared. An accepted change on a
+///    row that does not render yet stays live with no records, as #1260 D2 made it.
+/// 4. With the structure equal, the two models list the same controls in the same order. For each
 ///    control whose value bits differ ([`controls::changed_controls`]): a row that is
 ///    rebuild-only is [`LiveRebuild::RebuildOnly`] with the row's reason; a row of family
 ///    `Setting` gives no record; a live row marks its owner changed for its family.
-/// 4. [`LiveRebuild::Domain`] if a changed effect's `params` do not resolve through
+/// 5. [`LiveRebuild::Domain`] if a changed effect's `params` do not resolve through
 ///    [`resolve_initial_values`] (the one function preparation uses), whether or not a row's value
 ///    moved: an unknown parameter or a unit mismatch has no row.
-/// 5. Each changed owner is lowered once per family (`lower`): a strip's input trim, polarity and
+/// 6. Each changed owner is lowered once per family (`lower`): a strip's input trim, polarity and
 ///    filters (#1556), a strip's fader and mute, a strip's pan or matrix, an effect instance's
 ///    bypass and parameters, a send's gain, mute and matrix (#1557). An unchanged owner is
 ///    never lowered. A lowering's domain refusal is [`LiveRebuild::Domain`].
@@ -284,9 +291,11 @@ pub use crate::prepare::LiveRebuild;
 /// record. The records come from the effective values only, never from a raw fader, mute or VCA
 /// field.
 ///
-/// The session ID, the two profile IDs, the stored automation and `control_smoothing` are
-/// model-only: no prepared plan reads them (#1260, #1365), so a delta that changes only them is
-/// live with no records, once step 3 has accepted the automation's targets. The one exception is
+/// The session ID, the two profile IDs, the stored automation of rows that do not render yet and
+/// `control_smoothing` are model-only: no prepared plan reads them (#1260, #1365), so a delta that
+/// changes only them is live with no records, once step 2 has accepted the automation's targets
+/// and step 3 has found no rendered entry changed. Each rendering slice adds its row to
+/// [`controls::automation_row_renders`], which moves that row's edits to step 3. The one exception is
 /// the plan's jump-length cell (#1639 D3): when the lengths in samples differ and `next` holds a
 /// stored automation whose jumps ramp over one of them ([`automation_jump_row`]), the delta
 /// carries [`LiveDelta::jump_lengths`] and is not empty. `control_smoothing`'s
@@ -296,10 +305,13 @@ pub use crate::prepare::LiveRebuild;
 /// the key at that preparation only, so a later edit still governs only later transitions. The
 /// first such slice is a successor's carry retarget (#1277 D5): its fader, mute and matrix records
 /// are written to the successor's cells at preparation, with the lengths of the successor's own
-/// model (and the transaction's per-edit lengths, #1394 D6). Masking
-/// `automation` is correct only while no host renders stored automation: the first issue that
-/// renders it (#1058) must remove it from the mask, or an automation edit would commit without
-/// reaching the running plan.
+/// model (and the transaction's per-edit lengths, #1394 D6). Step 1 masks the whole automation
+/// table because steps 2 and 3 judge it, by row and by rendered curve.
+///
+/// A static fader value of a lane that `next` automates ([`controls::automated_cell`]) gives no
+/// `FaderDb` record (#1648 D3): the lane's cell renders the curve, and the static value is its
+/// fallback. Since the record comes from the effective value, the rule covers a VCA move that
+/// reaches the lane too. The lane's `Mute` records are unchanged.
 ///
 /// A record is emitted only when the value the render plane holds changes (`solo.rs`: never a
 /// redundant record): a `FaderDb` per lane whose effective gain bits change (one `Both` when both change to
@@ -348,7 +360,7 @@ pub fn classify_live_delta<'a>(
 }
 
 /// [`classify_live_delta`] for a host that holds a monitor overlay (decision 17, C8, #1559 D6,
-/// D7): the effective values of step 5 are those of `current` under `monitor.committed` and of
+/// D7): the effective values of step 6 are those of `current` under `monitor.committed` and of
 /// `next` under `monitor.next`, so a solo's mutes and the closing of the sends that follow them
 /// are records like any other. A change of the overlay alone makes the effective values differ
 /// (the model is the same), and its records take the ramp of `monitor.ramp` unless a model edit
@@ -373,8 +385,8 @@ pub fn classify_live_delta_with_monitor<'a>(
     masked.session_id = current.session_id.clone();
     masked.render_profile.id = current.render_profile.id.clone();
     masked.output_profile.id = current.output_profile.id.clone();
-    // #1260 D2: correct only while no host renders stored automation (#1058). The first issue
-    // that renders it must drop this line.
+    // The stored automation is judged by steps 2 and 3, not by bytes here: its targets by their
+    // rows (step 2), the entries of the rows that render by their curves (step 3, #1648 D1).
     masked.automation = current.automation.clone();
     match (
         canonical_session_json(current),
@@ -394,7 +406,12 @@ pub fn classify_live_delta_with_monitor<'a>(
         return Err(LiveRebuild::AutomationTarget);
     }
 
-    // Step 3. A VCA added or removed has no row in the diff, so the lists decide whether the
+    // Step 3 (#1648 D1). After step 2, so a refusable entry keeps its refusal's route.
+    if controls::rendered_automation_changed(current, next) {
+        return Err(LiveRebuild::Automation);
+    }
+
+    // Step 4. A VCA added or removed has no row in the diff, so the lists decide whether the
     // effective values can differ, and a change of the overlay moves the effective mutes without
     // moving a row.
     let changes = controls::changed_controls(current, next, next.sample_rate_hz)
@@ -420,10 +437,10 @@ pub fn classify_live_delta_with_monitor<'a>(
         }
     }
 
-    // Step 4.
+    // Step 5.
     refuse_unresolvable_params(current, next)?;
 
-    // Step 5. The effective values of both models, once (decision 17, C7).
+    // Step 6. The effective values of both models, once (decision 17, C7).
     let diff = accumulated
         .derived
         .then(|| EffectiveDiff::new(current, next, ramps, edit_ramps, monitor));
@@ -658,7 +675,7 @@ fn classify_rows<'a>(
         }
     }
 
-    // Step 4 of the full classifier, for the strips whose rows changed.
+    // Step 5 of the full classifier, for the strips whose rows changed.
     for item in &accumulated.work {
         let index = controls::strip_index(next, &item.strip)?;
         let (before, after) = (strip_at(current, index), view.strip(index));
@@ -795,7 +812,7 @@ impl RowOrder {
     }
 }
 
-/// What the changed controls say, gathered by one body for both classifiers (step 3).
+/// What the changed controls say, gathered by one body for both classifiers (step 4).
 #[derive(Default)]
 struct Changes {
     /// The changed controls of each strip, in the control list's order.
@@ -879,7 +896,7 @@ impl Changes {
     }
 }
 
-/// Step 5 for strips: the records of each `(index, changed controls)` item, in the order given
+/// Step 6 for strips: the records of each `(index, changed controls)` item, in the order given
 /// (strip order), into `delta`. `index` counts [`SessionModel::strips`] in both models.
 fn lower_strips<'a>(
     current: &SessionModel,
@@ -948,7 +965,7 @@ fn lower_strips<'a>(
     Ok(())
 }
 
-/// Step 5 for sends: the record of each route in `indices` (ascending positions in
+/// Step 6 for sends: the record of each route in `indices` (ascending positions in
 /// `model.routes`) into a submix whose own rows changed (`routes`) or whose effective gate changed.
 #[expect(
     clippy::too_many_arguments,
@@ -1245,10 +1262,12 @@ impl LevelDiff for LocalDiff<'_> {
 
     fn level_records(&self, strip: usize) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
         let strip = self.strip(strip).ok_or(OutOfDomain)?;
+        let change = self.change(strip);
         fader_records(
             &effective_fader(&strip.before),
             &effective_fader(&strip.after),
-            self.rules.lengths(&self.change(strip)),
+            self.rules.lengths(&change),
+            || controls::automated_fader_lanes(self.rules.next.structure(), change.id),
         )
     }
 
@@ -1447,7 +1466,7 @@ fn route_records<'a>(
     }))
 }
 
-/// Step 4: a changed effect's `params` must resolve, as preparation resolves them. An unknown
+/// Step 5: a changed effect's `params` must resolve, as preparation resolves them. An unknown
 /// parameter ID, a unit mismatch or a duplicate lane has no control row to move, yet a rebuild
 /// refuses it, so a live commit must not ack it.
 fn refuse_unresolvable_params(

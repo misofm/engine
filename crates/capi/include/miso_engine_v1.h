@@ -43,8 +43,12 @@ extern "C" {
  * whose automation rate is Block, on a console-slot entry or an insert, the parametric EQ's live
  * parameters included (applied through prepared targets); and a track effect's bypass, except the
  * delay's and the multiband compressor's, which rebuild. A transaction that changes only the
- * session ID, a profile's id or the stored automation table commits with no replacement and no
- * live value. Any other change takes the replacement path exactly as before: every submix strip
+ * session ID, a profile's id or a stored automation entry on a row that does not render yet
+ * commits with no replacement and no live value. A stored fader automation edit (an entry on a
+ * strip's fader_db added, removed, retargeted or given other segments) rebuilds the plan, and
+ * the successor carries every owner; a static fader value of a lane the session automates is that
+ * lane's fallback and gives no live value; the other rows stay model-only until they render.
+ * Any other change takes the replacement path exactly as before: every submix strip
  * value (its fader, its effects), any edit while the session declares a VCA, the mute of a track
  * that a follows_mute send reads, a fader outside its domain or effect parameters that
  * preparation refuses (refused as MISO_ENGINE_V1_COMPILE_REJECTED with the same diagnostic as
