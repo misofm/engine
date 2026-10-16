@@ -815,6 +815,49 @@ fn assert_same_blocks(label: &str, actual: &[Vec<f32>], expected: &[Vec<f32>]) {
     }
 }
 
+/// #1698 gate 1 (owners): T1 restarts `t2`'s insert (`restart`: replaced) or removes it, and T2,
+/// which supersedes T1, puts `t2`'s compressor back as P0 has it and replaces `t3`'s. `t2`
+/// carries from P0, its compressor state included, so the replacement renders bit-identically to
+/// the combined transaction P0 -> B (`t3`'s replacement alone).
+fn a_reverted_owner_carries_from_p0(restart: bool) {
+    let mut model = stateless_session(48_000);
+    model.tracks[1].inserts.effects.push(compressor());
+    model.tracks[2].inserts.effects.push(compressor());
+    let first = if restart {
+        put(&model, 1, gate())
+    } else {
+        remove(&model, 1)
+    };
+    let revert = vec![put(&model, 1, compressor()), put(&model, 2, gate())];
+    let (superseded, twin) = superseding_and_combined(
+        &model,
+        &[(vec![first], true), (revert, true)],
+        &[put(&model, 2, gate())],
+    );
+    assert_same_blocks(
+        if restart { "restarted" } else { "removed" },
+        &superseded,
+        &twin,
+    );
+}
+
+/// [`a_reverted_owner_carries_from_p0`], T1 replacing `t2`'s insert.
+///
+/// Test value: red if an owner the withdrawn candidate restarted starts fresh in the replacement
+/// (the batch 15a base, P0's inventory restricted to what the candidate carried).
+#[test]
+fn an_owner_the_candidate_restarts_and_the_replacement_reverts_carries_from_p0() {
+    a_reverted_owner_carries_from_p0(true);
+}
+
+/// [`a_reverted_owner_carries_from_p0`], T1 removing `t2`'s insert.
+///
+/// Test value: red if an owner the withdrawn candidate removed starts fresh in the replacement.
+#[test]
+fn an_owner_the_candidate_removes_and_the_replacement_restores_carries_from_p0() {
+    a_reverted_owner_carries_from_p0(false);
+}
+
 /// #1310 (D3 with root ruling B15-Q3, "B wins on a shared row"): T1 moves `t4`'s fader with its own
 /// ramp length; T2, which supersedes T1, moves it again with no length. The replacement ramps
 /// `t4` with the session default, as a transaction holding T1's structural edit and T2 does: B

@@ -131,6 +131,7 @@ fn compile(
     let builtins =
         prepare_session_builtins(&effects.session, requests, builtin_caps()).expect("builtins");
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch,
         plan_id: 1026,
         effects,
@@ -735,6 +736,7 @@ fn a_loop_through_a_bus_tap_is_a_graph_cycle() {
     let builtins =
         prepare_session_builtins(&effects.session, &[], builtin_caps()).expect("builtins");
     let failure = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id: 1203,
         effects,
@@ -817,6 +819,7 @@ fn a_bus_insert_keyed_from_its_own_fader_names_its_sidechain() {
     let builtins =
         prepare_session_builtins(&effects.session, &[], builtin_caps()).expect("builtins");
     let failure = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id: 1205,
         effects,

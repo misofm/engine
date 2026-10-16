@@ -54,6 +54,12 @@ pub struct GraphBuiltinsCompileRequest {
     /// schedule, levels, PDC, reductions, canonical bytes -- is deliberately independent of this
     /// value; only the bank overlay and the bank half of the estimate depend on it.
     pub dispatch: Backend,
+    /// A lower bound on the input arrival of a node, in samples (#1285 D1). PDC takes a node's
+    /// `max` as the larger of its latest incoming arrival and its floor, and compensates every
+    /// incoming edge to it, so a successor keeps every surviving node's input timing. A floor that
+    /// names no node of this graph is ignored. Empty for a plan with no predecessor: with no
+    /// floors, neither the program nor its canonical bytes change.
+    pub input_floors: BTreeMap<GraphNodeId, LatencySamples>,
 }
 /// The one-way, sealed builtin attachment result.
 ///
@@ -182,6 +188,15 @@ pub struct GraphCompileReport {
     pub output_latency: LatencySamples,
     /// Propagated extent of the sole session output after latency and declared tails.
     pub output_tail: TailSamples,
+    /// The input arrival (the floored `max` of PDC) of every node at which it is nonzero, sorted
+    /// by node ID (#1285 D2). A node absent here has input arrival 0. A successor's preparation
+    /// passes this back as [`GraphBuiltinsCompileRequest::input_floors`].
+    pub input_arrivals: Box<[(GraphNodeId, LatencySamples)]>,
+    /// The natural input arrival (the latest incoming arrival, before the floor) of every node
+    /// whose [`GraphBuiltinsCompileRequest::input_floors`] floor raised it, sorted by node ID
+    /// (#1323 D3). Its floored arrival is the node's row in [`Self::input_arrivals`]. Empty when no
+    /// floor raised any node: the plan then runs at its natural timing.
+    pub raised_arrivals: Box<[(GraphNodeId, LatencySamples)]>,
     /// The retained estimate, including the bank overlay and capped against the session limits.
     pub estimate: GraphResourceEstimate,
     /// The pre-bank estimate that participates in the semantic hash. Dispatch-independent by
@@ -2148,6 +2163,7 @@ mod tests {
         let builtins = prepare_session_builtins(&effects.session, &[], unbounded_builtin_caps())
             .expect("the session's builtins prepare");
         GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             plan_id,
             effects,
             builtins,
@@ -2971,6 +2987,7 @@ mod tests {
             }
             .expect("prepared scalar builtins");
             GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                input_floors: Default::default(),
                 dispatch: Backend::Scalar,
                 plan_id: if controlled { 443_001 } else { 443_000 },
                 effects: EffectPreparedSession {
@@ -3648,6 +3665,7 @@ mod tests {
         // scalar dispatch is the one production compile that has no slot owner to charge, so the
         // host compile below must publish exactly its estimate plus the literal reservation.
         let semantic_baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch: Backend::Scalar,
             plan_id: 5_115,
             effects: EffectPreparedSession {
@@ -3703,6 +3721,7 @@ mod tests {
         expected.session_plus_plan_bytes += slot_total;
         expected.largest_allocation_bytes = expected.largest_allocation_bytes.max(slot_largest);
         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch: host_dispatch(),
             plan_id: 5_112,
             effects: EffectPreparedSession {
@@ -3731,6 +3750,7 @@ mod tests {
         // reservation and the attached builtin payload. Until #964 an effect-only, builtins-less
         // compile at the host dispatch supplied the prior owners and the effect-bank term together.
         let scalar_mixed = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch: Backend::Scalar,
             plan_id: 5_117,
             effects: {
@@ -3802,6 +3822,7 @@ mod tests {
             .max(combined_largest);
 
         let mixed = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch: host_dispatch(),
             plan_id: 5_116,
             effects: {
@@ -3868,6 +3889,7 @@ mod tests {
             let prepared = prepare_session_builtins(&effects.session, &[], builtin_caps)
                 .expect("prepared for cap");
             let exact_result = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                input_floors: Default::default(),
                 dispatch: host_dispatch(),
                 plan_id: 5_113,
                 effects,
@@ -3886,6 +3908,7 @@ mod tests {
             let prepared = prepare_session_builtins(&effects.session, &[], builtin_caps)
                 .expect("returned prepared");
             let failure = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                input_floors: Default::default(),
                 dispatch: host_dispatch(),
                 plan_id: 5_114,
                 effects,
@@ -4156,6 +4179,7 @@ mod tests {
         };
         let (baseline_effects, baseline_builtins) = prepare();
         let baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             plan_id: 162,
             effects: baseline_effects,
             builtins: baseline_builtins,
@@ -4178,6 +4202,7 @@ mod tests {
             let mut constrained = integration_caps();
             constrained.maximum_nodes = maximum_nodes;
             let failure = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                input_floors: Default::default(),
                 plan_id: 162,
                 effects,
                 builtins,
@@ -4228,6 +4253,7 @@ mod tests {
             builtins = failure.builtins;
         }
         let recovered = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             plan_id: 162,
             effects,
             builtins,
@@ -11469,6 +11495,7 @@ mod tests {
         .expect("prepared console builtins");
         let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch,
             plan_id,
             effects: prepare_native_session_effects(
@@ -11681,6 +11708,7 @@ mod tests {
         )
         .expect("prepared console builtins");
         GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch,
             plan_id,
             effects: prepare_native_session_effects(
@@ -11772,6 +11800,7 @@ mod tests {
         }
         .expect("prepared selected console builtins");
         GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch,
             plan_id,
             effects: prepare_native_session_effects(
@@ -11930,6 +11959,7 @@ mod tests {
         .expect("prepared between-render-call console builtins");
         let registry = scalar_console_registry();
         GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch: Backend::Scalar,
             plan_id,
             effects: prepare_native_session_effects(
@@ -14250,6 +14280,7 @@ mod tests {
             .expect("vocal tail");
         assert!(matches!(prepared_tail, TailSamples::Finite(samples) if samples > 0));
         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch: host_dispatch(),
             plan_id: 77,
             effects: EffectPreparedSession {
@@ -14368,6 +14399,7 @@ mod tests {
             )
             .expect("builtins");
             GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                input_floors: Default::default(),
                 dispatch: host_dispatch(),
                 plan_id,
                 effects: EffectPreparedSession {
@@ -14585,6 +14617,7 @@ mod tests {
         )
         .expect("baseline builtins");
         let baseline = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch: host_dispatch(),
             plan_id: 80,
             effects: EffectPreparedSession {
@@ -14621,6 +14654,7 @@ mod tests {
         )
         .expect("returned builtins");
         let failure = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch: host_dispatch(),
             plan_id: 81,
             effects: EffectPreparedSession {
@@ -14731,6 +14765,7 @@ mod tests {
             )
             .expect("prepared seeded builtins");
             let artifact = match GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                input_floors: Default::default(),
                 dispatch: host_dispatch(),
                 plan_id: u64::from(layout) + 50_000,
                 effects: EffectPreparedSession {
@@ -14761,6 +14796,7 @@ mod tests {
             .expect("independently prepared native seeded builtins");
             let repeat_artifact =
                 GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                    input_floors: Default::default(),
                     dispatch: host_dispatch(),
                     plan_id: u64::from(layout) + 60_000,
                     effects: EffectPreparedSession {
@@ -15077,6 +15113,7 @@ mod tests {
             .expect("builtins");
             builtins.test_only_corrupt_for_compiler_test(corruption);
             let Err(failure) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                input_floors: Default::default(),
                 dispatch: host_dispatch(),
                 plan_id: 78,
                 effects: EffectPreparedSession {
@@ -15180,9 +15217,16 @@ mod tests {
             .iter()
             .map(|node| (node.id.clone(), node.tail))
             .collect();
-        let error = timings(&schedule, &edges, &latencies, &tails, &caps(7))
-            .err()
-            .expect("latency plus tail exceeds cap");
+        let error = timings(
+            &schedule,
+            &edges,
+            &latencies,
+            &tails,
+            &BTreeMap::new(),
+            &caps(7),
+        )
+        .err()
+        .expect("latency plus tail exceeds cap");
         assert_eq!(error.code, "graph.tail.limit");
     }
 
@@ -15241,18 +15285,136 @@ mod tests {
             .iter()
             .map(|node| (node.id.clone(), node.tail))
             .collect();
-        let timing = timings(&schedule, &edges, &latencies, &tails, &caps(100))
-            .expect("checked output timing");
+        let timing = timings(
+            &schedule,
+            &edges,
+            &latencies,
+            &tails,
+            &BTreeMap::new(),
+            &caps(100),
+        )
+        .expect("checked output timing");
         assert_eq!(timing.output_latency, LatencySamples(7));
         assert_eq!(timing.output_tail, TailSamples::Finite(12));
         assert_eq!(timing.delays.len(), 1);
 
         let mut infinite_tails = tails;
         infinite_tails.insert(node("late"), TailSamples::Infinite);
-        let infinite = timings(&schedule, &edges, &latencies, &infinite_tails, &caps(100))
-            .expect("infinite output tail");
+        let infinite = timings(
+            &schedule,
+            &edges,
+            &latencies,
+            &infinite_tails,
+            &BTreeMap::new(),
+            &caps(100),
+        )
+        .expect("infinite output tail");
         assert_eq!(infinite.output_latency, LatencySamples(7));
         assert_eq!(infinite.output_tail, TailSamples::Infinite);
+    }
+
+    /// #1285 D1: a floor above a node's latest incoming arrival raises its `max`, and every
+    /// incoming edge is compensated to it; a floor at or below the natural arrival, or one that
+    /// names no node of the graph, changes nothing. Red if the floor moves only the reported
+    /// arrival and not the edges (the early and late routes keep the natural delays), or if it is
+    /// added to the natural arrival instead of bounding it.
+    #[test]
+    fn timing_compensates_every_incoming_edge_to_a_floor() {
+        let early = node("early");
+        let late = node("late");
+        let output = GraphNodeId::Output {
+            output_id: gid("main"),
+        };
+        let nodes = [
+            GraphNode {
+                id: early.clone(),
+                latency: LatencySamples(3),
+                tail: TailSamples::Finite(0),
+            },
+            GraphNode {
+                id: late.clone(),
+                latency: LatencySamples(7),
+                tail: TailSamples::Finite(0),
+            },
+            GraphNode {
+                id: output.clone(),
+                latency: LatencySamples(0),
+                tail: TailSamples::Finite(0),
+            },
+        ];
+        let edges = [
+            GraphEdge {
+                id: GraphEdgeId::RouteDestination {
+                    route_id: gid("early-main"),
+                },
+                source: port(early, GraphPortKind::MainOutput),
+                destination: port(output.clone(), GraphPortKind::MainInput),
+                path: "$.routes[id=early-main]".to_owned(),
+            },
+            GraphEdge {
+                id: GraphEdgeId::RouteDestination {
+                    route_id: gid("late-main"),
+                },
+                source: port(late, GraphPortKind::MainOutput),
+                destination: port(output.clone(), GraphPortKind::MainInput),
+                path: "$.routes[id=late-main]".to_owned(),
+            },
+        ];
+        let levels = topo(&nodes, &edges).expect("acyclic output graph");
+        let schedule: Vec<_> = levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
+        let latencies = nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.latency))
+            .collect();
+        let tails = nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.tail))
+            .collect();
+        let run = |floors: &[(GraphNodeId, u64)]| {
+            let floors = floors
+                .iter()
+                .map(|(node, floor)| (node.clone(), LatencySamples(*floor)))
+                .collect();
+            let timing = timings(&schedule, &edges, &latencies, &tails, &floors, &caps(100))
+                .expect("checked timing");
+            let delays: Vec<u64> = timing
+                .routes
+                .iter()
+                .map(|route| route.compensation_delay.0)
+                .collect();
+            (
+                timing.output_latency.0,
+                delays,
+                timing.input_arrivals,
+                timing.raised_arrivals,
+            )
+        };
+        let natural = run(&[]);
+        assert_eq!((natural.0, &natural.1[..]), (7, &[4, 0][..]));
+        assert_eq!(natural.2.as_slice(), [(output.clone(), LatencySamples(7))]);
+        assert!(natural.3.is_empty(), "no floor raised a node");
+        let floored = run(&[(output.clone(), 10)]);
+        assert_eq!((floored.0, &floored.1[..]), (10, &[7, 3][..]));
+        assert_eq!(floored.2.as_slice(), [(output.clone(), LatencySamples(10))]);
+        // #1323 D3: the raised node's natural arrival, beside its floored one.
+        assert_eq!(floored.3.as_slice(), [(output.clone(), LatencySamples(7))]);
+        assert!(
+            run(&[(output.clone(), 7)]).3.is_empty(),
+            "a floor equal to the natural arrival raises nothing"
+        );
+        assert_eq!(
+            run(&[(output.clone(), 5)]),
+            natural,
+            "a lower floor is no bound"
+        );
+        assert_eq!(
+            run(&[(node("absent"), 50)]),
+            natural,
+            "an absent node's floor"
+        );
     }
 
     #[test]
@@ -15707,6 +15869,7 @@ mod tests {
                     &edges,
                     &latencies,
                     &tails,
+                    &BTreeMap::new(),
                     &caps(1_000_000),
                 );
                 let second = timings(
@@ -15714,6 +15877,7 @@ mod tests {
                     &edges,
                     &latencies,
                     &tails,
+                    &BTreeMap::new(),
                     &caps(1_000_000),
                 );
                 assert_eq!(

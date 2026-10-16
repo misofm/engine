@@ -290,6 +290,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_control_response_bytes \
   miso_engine_web_v1_control_response_ptr \
   miso_engine_web_v1_control_revision \
+  miso_engine_web_v1_declare_discontinuity \
   miso_engine_web_v1_document_ptr \
   miso_engine_web_v1_dispose \
   miso_engine_web_v1_meter_header_ptr \
@@ -311,6 +312,8 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_observation_tap_count \
   miso_engine_web_v1_observation_tap_id \
   miso_engine_web_v1_observation_track_index \
+  miso_engine_web_v1_plan_latency_ptr \
+  miso_engine_web_v1_plan_latency_read \
   miso_engine_web_v1_render \
   miso_engine_web_v1_render_allocation_count \
   miso_engine_web_v1_response_frame_close \

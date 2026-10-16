@@ -84,6 +84,7 @@ impl GraphCompiler {
             builtins,
             caps,
             dispatch,
+            input_floors,
         } = request;
         let builtin_diagnostics = builtins.validate_for_session(&effects.session);
         if !builtin_diagnostics.0.is_empty() {
@@ -99,16 +100,17 @@ impl GraphCompiler {
                 ),
             });
         }
-        let compiled = match Self::compile_graph(plan_id, effects, caps, dispatch, &builtins) {
-            Ok(value) => value,
-            Err(failure) => {
-                return Err(GraphBuiltinsCompileFailure {
-                    effects: failure.effects,
-                    builtins,
-                    diagnostics: failure.diagnostics,
-                });
-            }
-        };
+        let compiled =
+            match Self::compile_graph(plan_id, effects, caps, dispatch, &builtins, &input_floors) {
+                Ok(value) => value,
+                Err(failure) => {
+                    return Err(GraphBuiltinsCompileFailure {
+                        effects: failure.effects,
+                        builtins,
+                        diagnostics: failure.diagnostics,
+                    });
+                }
+            };
         let levels = compiled.graph.dependency_levels.clone();
         Ok(builtins.into_graph_artifact_with_banks(
             compiled.graph,
@@ -134,6 +136,7 @@ impl GraphCompiler {
         caps: GraphCompileCaps,
         dispatch: Backend,
         builtins: &PreparedBuiltinsSession,
+        input_floors: &BTreeMap<GraphNodeId, LatencySamples>,
     ) -> Result<CompiledGraph, GraphFailure> {
         // `validate_for_session` has checked the tail set against the session's tracks, so every
         // track has exactly one entry here.
@@ -419,7 +422,14 @@ impl GraphCompiler {
                 vec![diag("graph.resource.limit", "$.graph_compile_caps")],
             ));
         }
-        let timing = match timings(&schedule, &edges, &node_latency, &node_tail, &caps) {
+        let timing = match timings(
+            &schedule,
+            &edges,
+            &node_latency,
+            &node_tail,
+            input_floors,
+            &caps,
+        ) {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
         };
@@ -863,6 +873,8 @@ impl GraphCompiler {
             report: GraphCompileReport {
                 output_latency: timing.output_latency,
                 output_tail: timing.output_tail,
+                input_arrivals: timing.input_arrivals.into_boxed_slice(),
+                raised_arrivals: timing.raised_arrivals.into_boxed_slice(),
                 semantic_estimate,
                 estimate,
                 rack_cohorts,

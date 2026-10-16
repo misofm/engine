@@ -56,10 +56,6 @@ pub struct ProviderEpoch {
     /// the epoch's life and moves only with the epoch, which holds no open stamp between
     /// commands.
     pub(crate) revision_gate: PlanRevisionGate,
-    /// What this epoch's plan carries from the plan it was prepared to displace (#1344 D1): the
-    /// base inventory of a replacement prepared across this plan should it be withdrawn before
-    /// render adopts it (#1310 D2). `None` for the boot plan.
-    pub(crate) carried_base: Option<PlanStateInventory>,
     /// The part of this epoch's plan's source rows it carries from the plan it was prepared to
     /// displace (#1273 D5), kept for the replacement admission while the epoch is a held
     /// candidate (#1398 D4, batch 15a review fold M2). Zero for the boot plan.
@@ -78,6 +74,10 @@ pub struct ProviderEpoch {
     /// reclaims it, so both admissions charge it from here until then. `None` while the epoch is
     /// running or pending.
     pub(crate) parked: Option<LiveEpochResources>,
+    /// This epoch's plan was prepared at a host-declared discontinuity (#1323 D2): no floors, only
+    /// its source consumers carried. A successor that supersedes it unadopted is prepared at the
+    /// same discontinuity, since render never played this plan.
+    pub(crate) discontinuity: bool,
 }
 
 /// The committed base an epoch keeps while a successor prepared from it is pending (#1310 D3,
@@ -100,6 +100,20 @@ pub(crate) struct KeptBase {
     pub(crate) monitor_ramp: Option<Option<u32>>,
 }
 
+/// What a rebuild publishes a successor for (#1323).
+enum Rebuild {
+    /// A structural transaction: the successor is compiled from the token's prospective model and
+    /// the protocol commit acknowledges it.
+    Transaction(ObservedPreparedToken),
+    /// A host-declared discontinuity (#1323 D2): the successor is the committed model, of which
+    /// this is the control plane's own copy, prepared with no floors and only its source
+    /// consumers carried. Nothing is committed.
+    Discontinuity(Box<CompiledSession>),
+}
+
+/// The edit ramps of a discontinuity successor: no edit gave a row a length (#1323).
+static NO_EDIT_RAMPS: session::EditRamps = session::EditRamps::new();
+
 /// `earlier`'s ramp lengths with `later`'s laid over them: `later` wins on every row it wrote, with
 /// or without a length (`EditRamps::overlay`). The
 /// merge of the kept base's lengths with a newer transaction's (#1310, root ruling B15-Q3).
@@ -121,6 +135,12 @@ impl ProviderEpoch {
     #[cfg(feature = "test-support")]
     pub fn test_carried(&self) -> (u64, u64) {
         (self.carried.total, self.carried.overhead)
+    }
+
+    /// What this epoch's plan holds, for preparing its successor (#1323's gates read its floors).
+    #[cfg(feature = "test-support")]
+    pub fn test_inventory(&self) -> &PlanStateInventory {
+        &self.inventory
     }
 
     /// This epoch's source producers.
@@ -186,10 +206,10 @@ impl ProviderEpoch {
             effects,
             capi,
             revision_gate,
-            carried_base: None,
             carried: CarriedSourceBytes::default(),
             kept: None,
             parked: None,
+            discontinuity: false,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_provider_constructed += 1);
@@ -200,7 +220,6 @@ impl ProviderEpoch {
     pub(crate) fn candidate(
         sources: SourceControlSet,
         inventory: PlanStateInventory,
-        carried_base: Option<PlanStateInventory>,
         carried: CarriedSourceBytes,
         strips: StripLanes,
         effects: Box<[host_core::EffectControlProducer]>,
@@ -215,10 +234,10 @@ impl ProviderEpoch {
             effects,
             capi,
             revision_gate,
-            carried_base,
             carried,
             kept: None,
             parked: None,
+            discontinuity: false,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.candidate_provider_constructed += 1);
@@ -2045,7 +2064,7 @@ where
                 // move while the control thread owns them.
                 let mut withdrawn = self.withdraw_pending_candidate()?;
                 let result = self.rebuild(
-                    prepared,
+                    Rebuild::Transaction(prepared),
                     revision,
                     monitor_change,
                     observation_change,
@@ -2062,6 +2081,84 @@ where
                 result
             }
         }
+    }
+
+    /// Declares a discontinuity (#1323 D1, D2): the next block the host renders need not continue
+    /// the previous output, because the host has stopped or is about to seek every source. Both
+    /// hosts call this one function: `miso_engine_v1_declare_discontinuity` and
+    /// `miso_engine_web_v1_declare_discontinuity` only forward to it.
+    ///
+    /// After the service step, it rebuilds only if the newest plan (the pending candidate, else
+    /// the running plan) runs behind its natural timing
+    /// ([`PlanStateInventory::runs_behind_natural_timing`]). It then prepares the committed model
+    /// as a successor at a discontinuity (`SuccessorBase::discontinuity`): no floors, only the
+    /// source consumers carried, every other owner at rest. It is published
+    /// [`PlanAdoption::Next`] with the committed revision and its retirement credit reserved, as a
+    /// structural transaction's plan is. A pending candidate is superseded first (#1310): withdrawn,
+    /// the donor of the rings it created, its persisting producers returned to the running epoch,
+    /// then dropped; its revisions complete when the successor is adopted, `EXACT`, with
+    /// `SUPERSEDED` for the revisions it had itself folded in (D4), never as a fallback. A `Primed`
+    /// warm candidate always runs behind its natural timing, so a declaration always supersedes
+    /// one. Otherwise it publishes nothing and returns `Ok`; so does a session at revision 0,
+    /// which has no successor and so no floor (root ruling B15-R6).
+    ///
+    /// **Acked-batch question (D4): can an ack ever precede a drop? No.** The declaration
+    /// acknowledges no edit and changes neither the committed model nor the revision. A refusal
+    /// (a preparation or admission error, backpressure) changes nothing: a withdrawn candidate is
+    /// published again whole, and the running plan keeps its floors. A superseded candidate's
+    /// edits are in the committed model the successor is compiled from, and its fed rings move
+    /// by the checked donation or the supersession is refused (`drops_acked_fresh_source`).
+    ///
+    /// # Errors
+    ///
+    /// [`CommandError::CompileRejected`] when the preparation or the replacement admission
+    /// refuses; [`CommandError::Backpressure`] when the plan is gone, when a retry can fit, or
+    /// when a superseded candidate's fed fresh ring could not move; [`CommandError::Internal`]
+    /// for an accounting fault.
+    pub fn declare_discontinuity(&mut self) -> Result<(), CommandError> {
+        self.service()?;
+        if !self
+            .newest_providers()
+            .inventory
+            .runs_behind_natural_timing()
+        {
+            return Ok(());
+        }
+        if !self.shared.plan_alive.load(Ordering::Acquire) {
+            return Err(CommandError::Backpressure);
+        }
+        // D4: the successor carries the committed revision. A plan behind its natural timing is a
+        // successor, so the committed revision is at least 1 (B15-R6).
+        let revision = self.controller.session().revision().0;
+        if !(1..=engine::realtime::GATE_REVISION_MAX).contains(&revision) {
+            return Err(CommandError::Internal);
+        }
+        let model = Box::new(self.controller.session().compiled().clone());
+        // Nothing changes the overlay or the subscriptions: the successor renders under the ones
+        // the newest plan holds, and every binding keeps its target.
+        let monitor_change = self.monitor.after(&[], model.normalized_model());
+        let observation_change = self
+            .observation
+            .after(model.normalized_model())
+            .map_err(|_| CommandError::CompileRejected(failure(ResourceFault::Allocation)))?;
+        if !observation_change.ended.is_empty() {
+            return Err(CommandError::Internal);
+        }
+        let mut withdrawn = self.withdraw_pending_candidate()?;
+        let result = self.rebuild(
+            Rebuild::Discontinuity(model),
+            revision,
+            monitor_change,
+            observation_change,
+            &mut withdrawn,
+        );
+        // #1310 D4: as for a transaction, a refusal republishes the withdrawn candidate whole.
+        if let Some(candidate) = withdrawn.take() {
+            self.publisher.republish(candidate);
+            #[cfg(feature = "test-support")]
+            update_test_owners(|owners| owners.candidate_republished += 1);
+        }
+        result.map(|_| ())
     }
 
     /// Takes back the newest pending candidate if render has not adopted it (#1310 D1). `None`
@@ -2125,10 +2222,18 @@ where
     /// back to P0 before A drops, and every observation record queued on A is queued on B before
     /// B is published. B is acked only after every fallible step; A's revisions complete as
     /// `superseded` when B is adopted (D6).
+    ///
+    /// **A declared discontinuity (#1323).** With [`Rebuild::Discontinuity`] the successor is the
+    /// committed model prepared at a discontinuity: no floors, only its source consumers carried,
+    /// published [`PlanAdoption::Next`]. Nothing is committed: the model and the revision do not
+    /// change, and the successor carries the committed revision. A successor that supersedes a
+    /// discontinuity successor unadopted is prepared at the same discontinuity: render never
+    /// played the withdrawn plan, so the pair is the one transaction "declare, then edit" against
+    /// the running plan.
     #[allow(clippy::too_many_lines)]
     fn rebuild(
         &mut self,
-        prepared: ObservedPreparedToken,
+        kind: Rebuild,
         revision: u64,
         monitor_change: controls::MonitorChange,
         observation_change: controls::ObservationChange,
@@ -2141,9 +2246,23 @@ where
             // The mailbox's last publication is the newest pending candidate by construction.
             return Err(CommandError::Internal);
         }
-        let own_ramps = prepared.get().prospective_session().edit_ramps();
+        let declared = matches!(kind, Rebuild::Discontinuity(_));
+        // #1323: a successor of a withdrawn discontinuity successor is prepared at it too.
+        let discontinuity = declared
+            || (superseding
+                && self
+                    .pending_providers
+                    .last()
+                    .is_some_and(|newest| newest.discontinuity));
+        let own_ramps = match &kind {
+            Rebuild::Transaction(prepared) => prepared.get().prospective_session().edit_ramps(),
+            Rebuild::Discontinuity(_) => &NO_EDIT_RAMPS,
+        };
         // Whether B writes a monitor row: then its overlay change's ramp is the latest.
-        let writes_monitor = !prepared.get().monitor_edits().is_empty();
+        let writes_monitor = match &kind {
+            Rebuild::Transaction(prepared) => !prepared.get().monitor_edits().is_empty(),
+            Rebuild::Discontinuity(_) => false,
+        };
         // The ramp lengths the epoch B succeeds keeps from now on: B's own, or, across a
         // withdrawn candidate, the kept base's with B's laid over them (B wins on a shared row).
         let kept_ramps = if superseding {
@@ -2155,26 +2274,39 @@ where
         } else {
             own_ramps.clone()
         };
-        let prospective = prepared
-            .get()
-            .prospective_session()
-            .compiled()
-            .ok_or(CommandError::Internal)?;
-        let base = if superseding {
-            // #1310 D2: A's carried base (every row a P0 row) and P0's kept base.
+        let prospective = match &kind {
+            Rebuild::Transaction(prepared) => prepared
+                .get()
+                .prospective_session()
+                .compiled()
+                .ok_or(CommandError::Internal)?,
+            Rebuild::Discontinuity(model) => &**model,
+        };
+        // #1698 (amending #1310 D2 and #1344 D1): across a withdrawn candidate A, P0's own
+        // inventory, with only the source rows A carries from P0, and P0's kept base. An owner B
+        // keeps unchanged from P0 carries from P0 as a direct P0 -> B swap carries it; a source A
+        // added or redeclared restarted the host's feed against A, so B starts it fresh.
+        let withdrawn_base = match withdrawn.as_ref() {
+            Some(candidate) => {
+                let holder = self.kept_holder().ok_or(CommandError::Internal)?;
+                let donor = self
+                    .pending_providers
+                    .last()
+                    .ok_or(CommandError::Internal)?;
+                Some(
+                    holder
+                        .inventory
+                        .across_withdrawn(&donor.inventory, candidate.plan()),
+                )
+            }
+            None => None,
+        };
+        let base = if let Some(inventory) = withdrawn_base.as_ref() {
             let kept = self
                 .kept_holder()
                 .and_then(|holder| holder.kept.as_ref())
                 .ok_or(CommandError::Internal)?;
-            let inventory = self
-                .pending_providers
-                .last()
-                .and_then(|candidate| candidate.carried_base.as_ref())
-                .ok_or(CommandError::Internal)?;
             SuccessorBase {
-                inventory,
-                committed: kept.model.normalized_model(),
-                revision,
                 edit_ramps: &kept_ramps,
                 monitor: host_core::MonitorBase {
                     committed: &kept.monitor,
@@ -2186,14 +2318,13 @@ where
                     },
                 },
                 observation: &observation_change.bindings,
+                discontinuity,
+                ..SuccessorBase::new(inventory, kept.model.normalized_model(), revision)
             }
         } else {
             // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
             // transaction leaves unchanged is prepared to carry that plan's ring.
             SuccessorBase {
-                inventory: &self.newest_providers().inventory,
-                committed: self.controller.session().compiled().normalized_model(),
-                revision,
                 // #1394 D6: a carry retarget is the record of the transaction's own edit, so it
                 // takes that edit's ramp length.
                 edit_ramps: own_ramps,
@@ -2203,6 +2334,12 @@ where
                     ramp: monitor_change.ramp,
                 },
                 observation: &observation_change.bindings,
+                discontinuity,
+                ..SuccessorBase::new(
+                    &self.newest_providers().inventory,
+                    self.controller.session().compiled().normalized_model(),
+                    revision,
+                )
             }
         };
         let prepared_runtime = prepare_runtime::<A>(
@@ -2222,7 +2359,6 @@ where
             resources,
             carried,
             inventory,
-            carried_base,
             control_catalog: candidate_catalog,
             capi: prospective_capi,
             revision_gate,
@@ -2231,20 +2367,20 @@ where
         let mut candidate_provider = ProviderEpoch::candidate(
             sources,
             inventory,
-            carried_base,
             carried,
             strips,
             effects,
             prospective_capi,
             revision_gate,
         );
+        candidate_provider.discontinuity = discontinuity;
         let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
         #[cfg(feature = "test-support")]
         {
             if self.take_test_fault(TestStructuralFaultPhase::AfterRuntimePrepare) {
                 drop(candidate_plan);
                 drop(candidate_provider);
-                drop(prepared);
+                drop(kind);
                 return Err(CommandError::Backpressure);
             }
         }
@@ -2292,14 +2428,20 @@ where
         if self.take_test_fault(TestStructuralFaultPhase::AfterAdmission) {
             drop(candidate_plan);
             drop(candidate_provider);
-            drop(prepared);
+            drop(kind);
             return Err(CommandError::Backpressure);
         }
-        // #1310 D1: B is published with the adoption of its own classification, never A's.
+        // #1310 D1: B is published with the adoption of its own classification, never A's. A
+        // discontinuity successor is always `Next` (#1323 D2): no lead, readiness, deadline or
+        // transition.
         #[cfg(feature = "test-support")]
-        let adoption = TEST_NEXT_ADOPTION
-            .with(core::cell::Cell::take)
-            .unwrap_or(PlanAdoption::Next);
+        let adoption = if declared {
+            PlanAdoption::Next
+        } else {
+            TEST_NEXT_ADOPTION
+                .with(core::cell::Cell::take)
+                .unwrap_or(PlanAdoption::Next)
+        };
         #[cfg(not(feature = "test-support"))]
         let adoption = PlanAdoption::Next;
         let reservation = match self
@@ -2333,7 +2475,7 @@ where
             if take_test_fault_state(TestStructuralFaultPhase::AfterPlanReservation) {
                 drop(reservation);
                 drop(candidate_provider);
-                drop(prepared);
+                drop(kind);
                 return Err(CommandError::Backpressure);
             }
         }
@@ -2369,11 +2511,12 @@ where
         // #1310, root rulings of 2026-10-16 (no ack before a drop; M-A of fold 3): a ring A
         // created (A added or redeclared the source) that the host fed and the donation above does
         // not move to B would drop with A, and with it PCM the host was acked for. Until an issue
-        // lets B read it (#1698 for a source B reverts to its P0 form), such a supersession is
-        // refused here as backpressure. The guard reads the donation plan itself, so it sits after
-        // the check, still before the commit: the reservation it follows is cancelled by the
-        // return (it returns its credit and consumes no epoch), nothing else has changed, the
-        // caller republishes A, and once render adopts A the same edit commits on it.
+        // lets B read it, such a supersession is refused here as backpressure (#1698 keeps the
+        // reverted case refused: B starts a reverted source fresh, as the host contract says). The
+        // guard reads the donation plan itself, so it sits after the check, still before the
+        // commit: the reservation it follows is cancelled by the return (it returns its credit and
+        // consumes no epoch), nothing else has changed, the caller republishes A, and once render
+        // adopts A the same edit commits on it.
         if let (Some(plan), Some(candidate)) = (donation.as_ref(), withdrawn.as_ref()) {
             let donor = self
                 .pending_providers
@@ -2431,7 +2574,7 @@ where
             drop(reports);
             drop(reservation);
             drop(candidate_provider);
-            drop(prepared);
+            drop(kind);
             return Err(CommandError::Backpressure);
         }
 
@@ -2446,7 +2589,7 @@ where
             drop(reports);
             drop(reservation);
             drop(candidate_provider);
-            drop(prepared);
+            drop(kind);
             return Err(CommandError::Internal);
         }
         // #1584 D6a: the newest plan's pending-subscription storage is built here, with the other
@@ -2460,26 +2603,36 @@ where
             drop(reports);
             drop(reservation);
             drop(candidate_provider);
-            drop(prepared);
+            drop(kind);
             return Err(CommandError::CompileRejected(failure(
                 ResourceFault::Allocation,
             )));
         };
         // #1310 D4: the protocol's own commit predicate, the last check.
-        if self
-            .controller
-            .check_prepared_structural(prepared.get())
-            .is_err()
+        if let Rebuild::Transaction(prepared) = &kind
+            && self
+                .controller
+                .check_prepared_structural(prepared.get())
+                .is_err()
         {
             return Err(CommandError::Internal);
         }
-        // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
-        let mut committed = prepared
-            .commit(&mut self.controller, protocol::EditPath::Rebuild)
-            .map_err(|_| CommandError::Internal)?;
-        // #1310 D3: the model the commit displaced, never one committed in place (#1613).
-        let displaced = committed.take_displaced();
-        debug_assert!(displaced.is_some(), "a rebuild displaces a compiled model");
+        let (committed, displaced) = match kind {
+            Rebuild::Transaction(prepared) => {
+                // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
+                let mut committed = prepared
+                    .commit(&mut self.controller, protocol::EditPath::Rebuild)
+                    .map_err(|_| CommandError::Internal)?;
+                // #1310 D3: the model the commit displaced, never one committed in place (#1613).
+                let displaced = committed.take_displaced();
+                debug_assert!(displaced.is_some(), "a rebuild displaces a compiled model");
+                (Some(committed), displaced)
+            }
+            // #1323 D4: nothing is committed. The copy of the committed model is the base the
+            // epoch this successor displaces keeps (the model that epoch renders), or, across a
+            // withdrawn candidate, drops below as a commit's displaced model does.
+            Rebuild::Discontinuity(model) => (None, Some(*model)),
+        };
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
         let monitor_ramp = writes_monitor.then_some(monitor_change.ramp);
         let previous_monitor = core::mem::replace(&mut self.monitor, monitor_change.overlay);
@@ -2632,9 +2785,11 @@ where
             #[cfg(feature = "test-support")]
             update_test_owners(|owners| owners.candidate_superseded += 1);
         }
-        Ok(committed
-            .write_into(&mut self.response_scratch)
-            .expect("prepared response capacity was admitted before protocol commit"))
+        Ok(committed.map_or(0, |committed| {
+            committed
+                .write_into(&mut self.response_scratch)
+                .expect("prepared response capacity was admitted before protocol commit")
+        }))
     }
 
     /// The live arm of a structural command (#1257 D2, #1053 D6).

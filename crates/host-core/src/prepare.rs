@@ -312,10 +312,6 @@ pub struct HostPrepareReport {
     pub carry_program_retained_bytes: u64,
     /// Bytes [`PreparedHost::inventory`] retains ([`PlanStateInventory::retained_bytes`]).
     pub inventory_retained_bytes: u64,
-    /// Bytes [`PreparedHost::carried_base`] retains ([`PlanStateInventory::retained_bytes`]);
-    /// zero for a plan prepared without a successor base (#1344 D1). A host that keeps the base
-    /// to prepare across this plan once it is withdrawn charges it; one that drops it does not.
-    pub carried_base_retained_bytes: u64,
     /// Summed effect state bytes.
     pub effect_scalar_state_bytes: u64,
     /// Summed effect scratch bytes.
@@ -677,16 +673,6 @@ pub struct PreparedHost {
     /// What this plan holds, for preparing its successor ([`SuccessorBase`]). Control-side plain
     /// data; never read on the render thread.
     pub inventory: PlanStateInventory,
-    /// What this plan carries from the plan it was prepared to displace (#1344 D1): that plan's
-    /// inventory restricted to the rows the installed hand-over reads, with its identity, so
-    /// every row is a predecessor row. `None` for a plan prepared without a [`SuccessorBase`].
-    ///
-    /// Derived once, at the end of preparation, from what is installed in the plan
-    /// (`graph::installed_carry_reads`), never recorded family by family. Should this plan be
-    /// committed and then withdrawn before render adopts it, a successor of the plan render runs
-    /// is prepared with this as its base inventory and the running plan's committed model
-    /// ([`SuccessorBase`], D2). Control-side plain data; never read on the render thread.
-    pub carried_base: Option<PlanStateInventory>,
     /// The control list of the compiled session (decision 17, C4), built before graph lowering
     /// consumes the prepared entries.
     #[cfg(feature = "control-provider")]
@@ -769,6 +755,16 @@ pub struct PlanStateInventory {
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
     restarted: Box<[Box<str>]>,
+    /// The input arrival this plan renders at every node where it is nonzero (#1285 D2): the
+    /// floored `max` of PDC, in samples, sorted by node ID. A successor is compiled with these as
+    /// its input floors, so no surviving node's latency drops across a structural transaction.
+    /// They are the floored values, not the natural ones, so a chain of successors keeps the
+    /// first plan's timing until a declared discontinuity (#1323).
+    input_floors: Box<[(graph::GraphNodeId, u64)]>,
+    /// The natural input arrival of every node whose floor raised it (#1323 D3), sorted by node
+    /// ID: its latest incoming arrival, below its floored arrival in `input_floors`. Empty when the
+    /// plan runs at its natural timing.
+    raised_arrivals: Box<[(graph::GraphNodeId, u64)]>,
 }
 
 /// One strip stage of a prepared plan, owner key `(strip ID, PostFader)` or `(strip ID,
@@ -984,6 +980,84 @@ impl PlanStateInventory {
         self.live_routes.len()
     }
 
+    /// The input floors a successor of this plan is compiled with (#1285 D2): every node whose
+    /// input arrival in this plan is nonzero, with that arrival in samples, sorted by node ID.
+    #[must_use]
+    pub fn input_floors(&self) -> &[(graph::GraphNodeId, u64)] {
+        &self.input_floors
+    }
+
+    /// The natural input arrival of every node a floor raised in this plan (#1323 D3), sorted by
+    /// node ID; each node's floored arrival is its row in [`Self::input_floors`].
+    #[must_use]
+    pub fn raised_arrivals(&self) -> &[(graph::GraphNodeId, u64)] {
+        &self.raised_arrivals
+    }
+
+    /// Whether this plan runs behind its natural timing (#1323 D2): a floor raised some node's
+    /// input arrival above its natural one. A host-declared discontinuity rebuilds only such a
+    /// plan. (*Give a plan a source-read clock that leads its render clock*, #1396 D2, adds a
+    /// source-read offset above 0 to this test.)
+    #[must_use]
+    pub fn runs_behind_natural_timing(&self) -> bool {
+        !self.raised_arrivals.is_empty()
+    }
+
+    /// The base inventory of a successor at a host-declared discontinuity (#1323 D3): this
+    /// inventory's identity, rate, quantum and source rows, and nothing else. A successor prepared
+    /// against it has no floors and carries only its source consumers (ring, generation and read
+    /// position); every other owner starts at rest.
+    fn at_discontinuity(&self) -> Self {
+        Self {
+            plan_identity: self.plan_identity,
+            sources: self.sources.clone(),
+            input_sections: Box::default(),
+            strip_stages: Box::default(),
+            effect_lanes: Box::default(),
+            meters: Box::default(),
+            observations: Box::default(),
+            sample_rate_hz: self.sample_rate_hz,
+            quantum_frames: self.quantum_frames,
+            spectrum: Box::default(),
+            spectrum_collection: false,
+            spectrum_pairing: Box::default(),
+            delay_lines: Box::default(),
+            strip_delays: Box::default(),
+            live_routes: Box::default(),
+            restarted: Box::default(),
+            input_floors: Box::default(),
+            raised_arrivals: Box::default(),
+        }
+    }
+
+    /// An inventory that holds only this inventory's input floors (#1285, deliverable 2): a
+    /// successor prepared against it carries no state, so a test renders it from frame 0 as the
+    /// fresh reference of a plan compiled with the same floors.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_floors_only(&self) -> Self {
+        Self {
+            plan_identity: self.plan_identity,
+            sources: Box::default(),
+            input_sections: Box::default(),
+            strip_stages: Box::default(),
+            effect_lanes: Box::default(),
+            meters: Box::default(),
+            observations: Box::default(),
+            sample_rate_hz: self.sample_rate_hz,
+            quantum_frames: self.quantum_frames,
+            spectrum: Box::default(),
+            spectrum_collection: false,
+            spectrum_pairing: Box::default(),
+            delay_lines: Box::default(),
+            strip_delays: Box::default(),
+            live_routes: Box::default(),
+            restarted: Box::default(),
+            input_floors: self.input_floors.clone(),
+            raised_arrivals: self.raised_arrivals.clone(),
+        }
+    }
+
     /// Strip stage rows, one per banked fader or matrix lane (issue #1277).
     #[must_use]
     pub fn strip_stage_count(&self) -> usize {
@@ -1057,7 +1131,13 @@ impl PlanStateInventory {
                 .iter()
                 .map(graph::GraphLiveRoute::heap_bytes)
                 .sum::<usize>()
-            + self.restarted.iter().map(|id| id.len()).sum::<usize>();
+            + self.restarted.iter().map(|id| id.len()).sum::<usize>()
+            + self
+                .input_floors
+                .iter()
+                .chain(self.raised_arrivals.iter())
+                .map(|(node, _)| graph_node_heap_bytes(node))
+                .sum::<usize>();
         u64::try_from(
             core::mem::size_of_val::<[SourceInventoryRow]>(&self.sources)
                 + core::mem::size_of_val::<[InputSectionInventoryRow]>(&self.input_sections)
@@ -1071,274 +1151,72 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[graph::GraphStripDelayLine]>(&self.strip_delays)
                 + core::mem::size_of_val::<[graph::GraphLiveRoute]>(&self.live_routes)
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
+                + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.input_floors)
+                + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.raised_arrivals)
                 + ids,
         )
         .unwrap_or(u64::MAX)
     }
 }
 
+/// Bytes of ID text a graph node ID owns on the heap.
+fn graph_node_heap_bytes(node: &graph::GraphNodeId) -> usize {
+    fn edge(id: &graph::GraphEdgeId) -> usize {
+        match id {
+            graph::GraphEdgeId::TrackMain { target } => graph_node_heap_bytes(target),
+            graph::GraphEdgeId::RouteSource { route_id }
+            | graph::GraphEdgeId::RouteDestination { route_id } => route_id.as_str().len(),
+            graph::GraphEdgeId::EffectSidechain { effect, port } => {
+                effect.track_id.as_str().len() + effect.effect_id.as_str().len() + port.len()
+            }
+        }
+    }
+    match node {
+        graph::GraphNodeId::TrackStage { track_id, .. } => track_id.as_str().len(),
+        graph::GraphNodeId::Effect(effect) => {
+            effect.track_id.as_str().len() + effect.effect_id.as_str().len()
+        }
+        graph::GraphNodeId::Route { route_id } => route_id.as_str().len(),
+        graph::GraphNodeId::Submix { submix_id } => submix_id.as_str().len(),
+        graph::GraphNodeId::Output { output_id } => output_id.as_str().len(),
+        graph::GraphNodeId::CompensationDelay { edge_id } => {
+            core::mem::size_of::<graph::GraphEdgeId>() + edge(edge_id)
+        }
+    }
+}
+
 impl PlanStateInventory {
-    /// This inventory restricted to the rows `reads` names (#1344 D1): the rows of each family a
-    /// successor's installed hand-over reads, keyed as that section keys its predecessor. Keeps
-    /// this plan's identity, rate, quantum and capture kind; the pairing and the restart set
-    /// describe a successor against this plan, not this plan, so they are empty. Every row kept is
-    /// this plan's own row, unchanged and in its order.
-    fn restricted_to(&self, reads: &graph::GraphCarryReads) -> Self {
-        // Named without a rest pattern: a family added to the inventory does not compile until
-        // its restriction is written here.
-        let Self {
-            plan_identity,
-            sources,
-            input_sections,
-            strip_stages,
-            effect_lanes,
-            meters,
-            observations,
-            sample_rate_hz,
-            quantum_frames,
-            spectrum,
-            spectrum_collection,
-            spectrum_pairing: _,
-            delay_lines,
-            strip_delays,
-            live_routes,
-            restarted: _,
-        } = self;
-        fn keep<Row: Clone, Key: Ord>(
-            rows: &[Row],
-            keys: &BTreeSet<Key>,
-            key: impl Fn(&Row) -> Key,
-        ) -> Box<[Row]> {
-            rows.iter()
-                .filter(|row| keys.contains(&key(row)))
-                .cloned()
-                .collect()
-        }
-        let observers = |wanted: engine::realtime::ObserverKind| -> BTreeSet<_> {
-            reads
-                .observers
-                .iter()
-                .filter(|(kind, _)| *kind == wanted)
-                .map(|(_, location)| *location)
-                .collect()
-        };
-        let set = |keys: &[u32]| keys.iter().copied().collect::<BTreeSet<u32>>();
-        Self {
-            plan_identity: *plan_identity,
-            sources: keep(sources, &set(&reads.sources), |row| row.index),
-            input_sections: keep(
-                input_sections,
-                &reads.input_lanes.iter().copied().collect(),
-                |row| row.location,
-            ),
-            strip_stages: keep(
-                strip_stages,
-                &reads.strip_lanes.iter().copied().collect(),
-                |row| (row.owner, row.location),
-            ),
-            effect_lanes: keep(
-                effect_lanes,
-                &reads.effect_sites.iter().copied().collect(),
-                |row| row.location,
-            ),
-            meters: keep(
-                meters,
-                &observers(engine::realtime::ObserverKind::Meter),
-                |row| row.location,
-            ),
-            observations: keep(
-                observations,
-                &reads.observation_sites.iter().copied().collect(),
-                |row| row.location,
-            ),
-            sample_rate_hz: *sample_rate_hz,
-            quantum_frames: *quantum_frames,
-            spectrum: keep(
-                spectrum,
-                &observers(engine::realtime::ObserverKind::Spectrum),
-                |row| row.location,
-            ),
-            spectrum_collection: *spectrum_collection,
-            spectrum_pairing: Box::default(),
-            delay_lines: keep(delay_lines, &set(&reads.delay_lines), |row| row.line),
-            strip_delays: keep(strip_delays, &set(&reads.strip_delay_lines), |row| row.line),
-            live_routes: keep(live_routes, &set(&reads.live_routes), |row| row.unit),
-            restarted: Box::default(),
-        }
-    }
-}
-
-/// Test-support view of an inventory (#1344 fold M3): every row as `(family, owner, key)`, where
-/// `owner` names what the row belongs to by session identity (a strip, an effect, a route, a
-/// source) and `key` is the predecessor key a successor's hand-over names it by, formatted as
-/// [`test_only_carry_read_keys`] formats the same key. A gate compares the two to prove a
-/// restricted base holds exactly the rows the hand-over reads, and that those rows belong to the
-/// owners the test expects.
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-#[must_use]
-pub fn test_only_inventory_rows(
-    inventory: &PlanStateInventory,
-) -> BTreeSet<(&'static str, String, String)> {
-    let PlanStateInventory {
-        plan_identity: _,
-        sources,
-        input_sections,
-        strip_stages,
-        effect_lanes,
-        meters,
-        observations,
-        sample_rate_hz: _,
-        quantum_frames: _,
-        spectrum,
-        spectrum_collection: _,
-        spectrum_pairing: _,
-        delay_lines,
-        strip_delays,
-        live_routes,
-        restarted: _,
-    } = inventory;
-    let mut rows = BTreeSet::new();
-    let mut add = |family, owner: String, key: String| {
-        rows.insert((family, owner, key));
-    };
-    for row in sources.iter() {
-        add("sources", row.id.to_string(), format!("{:?}", row.index));
-    }
-    for row in input_sections.iter() {
-        add(
-            "input sections",
-            row.id.to_string(),
-            format!("{:?}", row.location),
-        );
-    }
-    for row in strip_stages.iter() {
-        add(
-            "strip stages",
-            format!("{} {:?}", row.id, row.owner),
-            format!("{:?}", (row.owner, row.location)),
-        );
-    }
-    let effect_owner = |location: &graph::GraphEffectSite| {
-        effect_lanes
+    /// The base inventory a replacement B of the withdrawn successor A is prepared from, this
+    /// inventory being P0's, the plan render runs and A was prepared to displace (#1698, amending
+    /// #1344 D1 and D2). Control-side plain data, built once per supersession.
+    ///
+    /// Every owner row is P0's own, so an owner B keeps unchanged from P0 carries from P0 as a
+    /// direct P0 -> B swap carries it, whatever A did to it. A source row is kept only when A
+    /// carries that source from P0 (A's plan holds it vacant, `can_prepare_source_seek` false on
+    /// its index): the host feeds the newest committed session, and a source A added or
+    /// redeclared restarted the host's feed at generation 1, frame 0 against A, so B, which
+    /// declares it differently from A, restarts it the same way (`CONTROL_PROTOCOL_SEMANTICS.md`,
+    /// "Sources across a structural transaction"). A source A created fresh and B keeps as A
+    /// declares it moves by the donation ([`crate::check_donation`]), never through this base.
+    #[must_use]
+    pub fn across_withdrawn(
+        &self,
+        withdrawn: &PlanStateInventory,
+        withdrawn_plan: &PreparedRenderPlan,
+    ) -> Self {
+        let mut base = self.clone();
+        base.sources = self
+            .sources
             .iter()
-            .find(|lane| lane.location == *location)
-            .map_or_else(
-                || "unknown effect".to_owned(),
-                |lane| format!("{} {:?} {}", lane.id, lane.rack, lane.effect_id),
-            )
-    };
-    for row in effect_lanes.iter() {
-        add(
-            "effect lanes",
-            effect_owner(&row.location),
-            format!("{:?}", row.location),
-        );
+            .filter(|row| {
+                withdrawn.source(&row.id).is_some_and(|carried| {
+                    !withdrawn_plan.can_prepare_source_seek(carried.index as usize)
+                })
+            })
+            .cloned()
+            .collect();
+        base
     }
-    for row in meters.iter() {
-        add(
-            "meters",
-            format!("{} {:?} {:?}", row.id, row.tap, row.metrics),
-            format!("{:?}", row.location),
-        );
-    }
-    for row in observations.iter() {
-        add(
-            "observations",
-            effect_owner(&row.location),
-            format!("{:?}", row.location),
-        );
-    }
-    for row in spectrum.iter() {
-        add(
-            "spectrum",
-            format!("{:?} {:?}", row.target, row.channels),
-            format!("{:?}", row.location),
-        );
-    }
-    for row in delay_lines.iter() {
-        add(
-            "delay lines",
-            format!("{:?}", row.edge),
-            format!("{:?}", row.line),
-        );
-    }
-    for row in strip_delays.iter() {
-        add(
-            "strip delays",
-            row.strip.to_string(),
-            format!("{:?}", row.line),
-        );
-    }
-    for row in live_routes.iter() {
-        add(
-            "live routes",
-            row.route_id.to_string(),
-            format!("{:?}", row.unit),
-        );
-    }
-    rows
-}
-
-/// Test-support view of a hand-over's reads (#1344 fold M3): every predecessor key as `(family,
-/// key)`, formatted as [`test_only_inventory_rows`] formats it.
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-#[must_use]
-pub fn test_only_carry_read_keys(
-    reads: &graph::GraphCarryReads,
-) -> BTreeSet<(&'static str, String)> {
-    let graph::GraphCarryReads {
-        predecessor: _,
-        sources,
-        input_lanes,
-        strip_lanes,
-        effect_sites,
-        observers,
-        observation_sites,
-        delay_lines,
-        strip_delay_lines,
-        live_routes,
-    } = reads;
-    let mut keys = BTreeSet::new();
-    let mut add = |family, key: String| {
-        keys.insert((family, key));
-    };
-    sources
-        .iter()
-        .for_each(|key| add("sources", format!("{key:?}")));
-    input_lanes
-        .iter()
-        .for_each(|key| add("input sections", format!("{key:?}")));
-    strip_lanes
-        .iter()
-        .for_each(|key| add("strip stages", format!("{key:?}")));
-    effect_sites
-        .iter()
-        .for_each(|key| add("effect lanes", format!("{key:?}")));
-    for (kind, location) in observers {
-        let family = match kind {
-            engine::realtime::ObserverKind::Meter => "meters",
-            engine::realtime::ObserverKind::Spectrum => "spectrum",
-            // The observation taps' readers move with their effect instance; the restriction
-            // keys observation rows by `observation_sites`, below.
-            engine::realtime::ObserverKind::Observation => continue,
-        };
-        add(family, format!("{location:?}"));
-    }
-    observation_sites
-        .iter()
-        .for_each(|key| add("observations", format!("{key:?}")));
-    delay_lines
-        .iter()
-        .for_each(|key| add("delay lines", format!("{key:?}")));
-    strip_delay_lines
-        .iter()
-        .for_each(|key| add("strip delays", format!("{key:?}")));
-    live_routes
-        .iter()
-        .for_each(|key| add("live routes", format!("{key:?}")));
-    keys
 }
 
 /// The plan a successor is prepared to displace (issue #1272 D2, umbrella #1269 P1).
@@ -1358,15 +1236,15 @@ pub fn test_only_carry_read_keys(
 /// the successor's cells as a retarget stamped with `revision`, as a strip's is. A strip whose
 /// effect chain changed restarts even if its remaining slots carry.
 ///
-/// **Across a withdrawn plan (#1344 D2).** When the plan render runs (P0) has a committed
-/// successor A that was taken back before render adopted it, A's replacement B is prepared
-/// against P0 with this same entry: `inventory` is A's [`PreparedHost::carried_base`] and
-/// `committed` is P0's committed model. Every row of that inventory is a P0 row, so the joins run
-/// unchanged and an owner carries from P0 only if A carried it and B leaves it unchanged against
-/// P0's model; everything A restarted, added or removed is fresh in B. A strip A restarted has no
-/// row there, so B restarts it too and lists it in [`PreparedHost::restarted_strips`]. The rings
-/// A created fresh move to B by a checked donation ([`crate::check_donation`]), never through this
-/// base.
+/// **Across a withdrawn plan (#1344 D2, amended by #1698).** When the plan render runs (P0) has a
+/// committed successor A that was taken back before render adopted it, A's replacement B is
+/// prepared against P0 with this same entry: `inventory` is
+/// [`PlanStateInventory::across_withdrawn`] of P0's inventory and A, and `committed` is P0's
+/// committed model. Every row of that inventory is a P0 row, so the joins run unchanged and B
+/// carries from P0 every owner it leaves unchanged against P0's model, as a direct P0 -> B swap
+/// does, including an owner A restarted or removed. Sources carry only as A carried them: a
+/// source A added, redeclared or removed is fresh in B. The rings A created fresh move to B by a
+/// checked donation ([`crate::check_donation`]), never through this base.
 #[derive(Clone, Copy, Debug)]
 pub struct SuccessorBase<'a> {
     /// The predecessor's [`PreparedHost::inventory`].
@@ -1395,10 +1273,44 @@ pub struct SuccessorBase<'a> {
     /// takes the predecessor's own state instead, and is never restarted by this.
     /// [`NO_OBSERVATION`] for a host without subscriptions.
     pub observation: &'a controls::ObservationBindings,
+    /// The host declared a discontinuity (#1323 D3): the successor need not continue the
+    /// predecessor's output. It is compiled with no input floors, so it runs at its natural
+    /// timing, and its join carries only the source consumers (ring, generation and read
+    /// position), so no frame is repeated or skipped; every other owner starts at rest, with no
+    /// continuity constraint. `false` is the neutral value: a successor continues its
+    /// predecessor.
+    pub discontinuity: bool,
+}
+
+impl<'a> SuccessorBase<'a> {
+    /// The base of a successor of the plan whose inventory is `inventory`, prepared from
+    /// `committed` and committing as `revision` (#1323 D3, #1277 D10). Every other field takes
+    /// its neutral value: no edit ramps, no monitor overlay ([`MonitorBase::NONE`]), no armed
+    /// tap ([`NO_OBSERVATION`]) and no discontinuity. A field added later extends this with its
+    /// own neutral value; a base that needs another value sets it with struct update syntax.
+    #[must_use]
+    pub fn new(
+        inventory: &'a PlanStateInventory,
+        committed: &'a SessionModel,
+        revision: u64,
+    ) -> Self {
+        Self {
+            inventory,
+            committed,
+            revision,
+            edit_ramps: &NO_EDIT_RAMPS,
+            monitor: MonitorBase::NONE,
+            observation: &NO_OBSERVATION,
+            discontinuity: false,
+        }
+    }
 }
 
 /// The bindings that arm nothing, for a [`SuccessorBase`] of a host without subscriptions.
 pub static NO_OBSERVATION: controls::ObservationBindings = controls::ObservationBindings::new();
+
+/// The edit ramps of a successor whose transaction gave no row a length ([`SuccessorBase::new`]).
+static NO_EDIT_RAMPS: EditRamps = EditRamps::new();
 
 /// The host-local monitor values (solo) a successor is prepared under (decision 17, C8, #1559).
 ///
@@ -2215,6 +2127,17 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     if successor.is_some_and(|base| !(1..=GATE_REVISION_MAX).contains(&base.revision)) {
         return Err(successor_revision_refusal());
     }
+    // #1323 D3: at a host-declared discontinuity the successor joins against its predecessor's
+    // sources only, so it has no input floors and every owner but a source consumer starts at
+    // rest. Every join below reads the base's inventory, so this one substitution is the whole
+    // rule.
+    let discontinuity_inventory = successor
+        .filter(|base| base.discontinuity)
+        .map(|base| base.inventory.at_discontinuity());
+    let successor = successor.map(|base| match discontinuity_inventory.as_ref() {
+        Some(inventory) => SuccessorBase { inventory, ..base },
+        None => base,
+    });
     // #1312 D2: the session's count when the host passed one, else this preparation's own, which
     // the handles hand back. Made before any observed allocation of the preparation.
     let live_superseded = superseded.cloned().unwrap_or_default();
@@ -2833,6 +2756,17 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         plan_id: 1,
         effects,
         builtins,
+        // #1285 D2: a successor keeps every surviving node's input arrival; a first plan has no
+        // floors. Across a withdrawn candidate the base is P0's inventory, so these are P0's.
+        input_floors: successor
+            .map(|base| {
+                base.inventory
+                    .input_floors
+                    .iter()
+                    .map(|(node, floor)| (node.clone(), effect_contract::LatencySamples(*floor)))
+                    .collect()
+            })
+            .unwrap_or_default(),
         caps: GraphCompileCaps {
             maximum_nodes: u64::MAX,
             maximum_edges: u64::MAX,
@@ -2881,8 +2815,21 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .into_iter()
         .map(RouteControlProducer::new)
         .collect();
+    // #1285 D4: the floored output arrival, the one the plan renders.
     let output_latency = artifact.report().output_latency;
     let output_tail = artifact.report().output_tail;
+    let input_floors: Box<[(graph::GraphNodeId, u64)]> = artifact
+        .report()
+        .input_arrivals
+        .iter()
+        .map(|(node, arrival)| (node.clone(), arrival.0))
+        .collect();
+    let raised_arrivals: Box<[(graph::GraphNodeId, u64)]> = artifact
+        .report()
+        .raised_arrivals
+        .iter()
+        .map(|(node, arrival)| (node.clone(), arrival.0))
+        .collect();
     let mut graph_resources = artifact.graph_resource_estimate().clone();
     // The plan's own allocations that the graph row does not count: its revision gate (#1502 D1),
     // its jump-length cell (#1639 D1, attached after bind below) and, when this preparation made
@@ -3478,33 +3425,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         strip_delays: strip_delays.into_boxed_slice(),
         live_routes: live_routes.into_boxed_slice(),
         restarted: restarted.into_boxed_slice(),
+        input_floors,
+        raised_arrivals,
     };
-    // #1344 D1: what this plan carries, read back from the hand-over just installed. A successor
-    // with nothing installed carries nothing, so its base is the predecessor's identity alone.
-    let carried_base = successor.map(|base| {
-        let reads = graph::installed_carry_reads(&plan).unwrap_or_default();
-        debug_assert!(
-            reads == graph::GraphCarryReads::default()
-                || reads.predecessor == base.inventory.plan_identity,
-            "the hand-over names the base it was prepared against"
-        );
-        let restricted = base.inventory.restricted_to(&reads);
-        // #1395 D3: the observer section's spectrum moves are the pairs the control side applies.
-        debug_assert_eq!(
-            restricted
-                .spectrum
-                .iter()
-                .map(|row| row.entry)
-                .collect::<BTreeSet<_>>(),
-            inventory
-                .spectrum_pairing
-                .iter()
-                .map(|pair| pair.predecessor)
-                .collect::<BTreeSet<_>>(),
-            "the spectrum rows the hand-over reads are the ones the pairing names"
-        );
-        restricted
-    });
     let report = HostPrepareReport {
         sample_rate_hz: compiled.sample_rate().0,
         quantum_frames: compiled.quantum().0,
@@ -3532,9 +3455,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         carried_source_overhead_bytes: carried_overhead_bytes,
         carry_program_retained_bytes,
         inventory_retained_bytes: inventory.retained_bytes(),
-        carried_base_retained_bytes: carried_base
-            .as_ref()
-            .map_or(0, PlanStateInventory::retained_bytes),
         effect_scalar_state_bytes: effect_state_bytes,
         effect_scalar_scratch_bytes: effect_scratch_bytes,
         builtin_processor_payload_bytes: builtin_resources.engine_owned_processor_payload_bytes,
@@ -3651,7 +3571,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             sources,
             report,
             inventory,
-            carried_base,
             #[cfg(feature = "control-provider")]
             control_catalog,
         },
@@ -6160,6 +6079,8 @@ mod tests {
             strip_delays: Box::default(),
             live_routes: Box::default(),
             restarted: Box::default(),
+            input_floors: Box::default(),
+            raised_arrivals: Box::default(),
         }
     }
 

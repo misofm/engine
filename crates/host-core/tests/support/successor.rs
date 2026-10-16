@@ -95,14 +95,7 @@ impl Session {
         test_only_prepare_host_runtime_successor_on(
             &self.compiled,
             caps,
-            SuccessorBase {
-                inventory,
-                committed,
-                revision: SUCCESSOR_REVISION,
-                edit_ramps: &session::EditRamps::new(),
-                monitor: host_core::MonitorBase::NONE,
-                observation: &host_core::NO_OBSERVATION,
-            },
+            SuccessorBase::new(inventory, committed, SUCCESSOR_REVISION),
             backend,
         )
     }

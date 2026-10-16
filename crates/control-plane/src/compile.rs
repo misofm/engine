@@ -23,10 +23,6 @@ pub(crate) struct PreparedRuntime {
     pub(crate) carried: CarriedSourceBytes,
     /// What the plan holds, for preparing its successor (issue #1273 D1).
     pub(crate) inventory: PlanStateInventory,
-    /// What the plan carries from the plan it was prepared to displace (#1344 D1), the base its
-    /// replacement is prepared from should it be withdrawn before render adopts it (#1310 D2).
-    /// `None` for a plan prepared without a successor base.
-    pub(crate) carried_base: Option<PlanStateInventory>,
     pub(crate) control_catalog: ControlCatalog,
     pub(crate) capi: CapiResources,
     /// The designated master strip the plan was prepared with, as a strip index (#1683): a first
@@ -254,7 +250,6 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     strip_table_bytes: u64,
     provider: host_core::SessionControlProviderResources,
     inventory_bytes: u64,
-    carried_base_bytes: u64,
     effect_controls: host_core::EffectControlResources,
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
@@ -323,9 +318,6 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         source_id_row,
         // Issue #1273 D5: each epoch keeps its plan's state inventory for the successor.
         inventory_bytes,
-        // #1310 D2 (#1344 D1): and the base a successor is prepared from should this epoch's plan
-        // be withdrawn before render adopts it; zero for a plan prepared without a base.
-        carried_base_bytes,
         strip_table_bytes,
         effect_row,
         route_row,
@@ -454,7 +446,6 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     compiled: &CompiledSession,
     catalog: &ControlCatalog,
     inventory: &PlanStateInventory,
-    carried_base_bytes: u64,
     effect_controls: host_core::EffectControlResources,
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
@@ -494,7 +485,6 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
             .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
         provider,
         inventory.retained_bytes(),
-        carried_base_bytes,
         effect_controls,
         route_controls,
         observation,
@@ -1209,7 +1199,6 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         compiled,
         &prepared.control_catalog,
         &prepared.inventory,
-        prepared.report.carried_base_retained_bytes,
         prepared.report.effect_control_resources,
         prepared.report.route_control_resources,
         observation_resources(&effects, observation_slots_high_water)?,
@@ -1283,7 +1272,6 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         },
         carried,
         inventory: prepared.inventory,
-        carried_base: prepared.carried_base,
         control_catalog: prepared.control_catalog,
         capi,
         master_track,
@@ -1374,8 +1362,6 @@ where
         resources,
         carried: _,
         inventory,
-        // A boot plan is prepared without a successor base, so it has none.
-        carried_base: _,
         control_catalog,
         capi,
         master_track: _,

@@ -332,3 +332,88 @@ through `submit_command` and `control_command`, C13's form with no new export. B
 
 - **Batch placement.** "#1310 is open and not in batch 15/16" (Dependencies) is void. #1310, #1344
   and #1398 are batch 15a, which lands before this slice (B15-R5).
+
+## Decision record: #1323 (batch 15b)
+
+**What shipped.**
+- D1: `miso_engine_v1_declare_discontinuity(session)` in `crates/capi/src/ffi.rs`, a forwarder to
+  `control_plane::SessionState::declare_discontinuity`. `FEATURE_DECLARE_DISCONTINUITY = 1 << 8`
+  (the next free bit), and the mask ORs it. Header: the define, the prototype, the session thread
+  list, and a paragraph "Declared discontinuity (issue 1323)" with the host's duty. The #1285
+  paragraph now points to it. `scripts/check-capi-abi.sh` lists the symbol (18 frozen).
+- B15-R7: `miso_engine_web_v1_declare_discontinuity(handle) -> u32` in `hosts/host-web/src/ffi.rs`,
+  through `AudioWorkletEngineHost::declare_discontinuity`, which runs the same control-plane
+  function. The host's `run_command` became `run_control`, so the plan a declaration publishes
+  keeps its tables as a rebuild's do. The #1293 D7 mirrors are updated and the SDK is regenerated.
+- D2/D4 in `crates/control-plane/src/control.rs`. `rebuild` takes `Rebuild::Transaction(token)`
+  or `Rebuild::Discontinuity(Box<CompiledSession>)`. The discontinuity arm has no protocol commit
+  and returns no response. Its copy of the committed model is the kept base of the epoch it
+  displaces (the direct case), or it is dropped when the arm supersedes a candidate, as a commit's
+  displaced model is. It is always published `Next`, and the test adoption hook is not taken.
+  Supersession, the donation, the acked-PCM guard, observation forwarding, the `superseded` word
+  (`r - 1 - last_running`) and republish-on-refusal are the transaction path's own code.
+- D3 in `crates/host-core/src/prepare.rs`. `SuccessorBase::discontinuity`, `SuccessorBase::new`
+  (with a private static neutral `EditRamps`), and every literal site moved to `new`. At
+  preparation, a discontinuity base swaps its inventory for `at_discontinuity()`: identity, rate,
+  quantum and source rows only, with no floors. Every join reads the base's inventory, so that one
+  substitution is the whole rule. The inventory records `raised_arrivals` (each raised node's
+  natural arrival, beside its floored one in `input_floors`), and
+  `runs_behind_natural_timing()` is D2's test.
+
+**Rule for the supersession case (the spec is silent).** A transaction E that supersedes a
+discontinuity successor D before render adopts it is prepared at the same discontinuity (sticky
+`ProviderEpoch::discontinuity`). The combined twin P0 -> E is "declare, then edit" as one
+transaction against the running plan, and render never played D. So E has no floors and carries
+only sources. A declaration while D waits finds nothing to reset (D has no raised floor) and
+publishes nothing. D over a withdrawn A carries A's revision. A's revisions complete at D's
+adoption, `EXACT`, with `SUPERSEDED` for those A folded in.
+
+**Departures.**
+- `crates/graph-compiler/src/{pdc.rs,compile.rs,lib.rs}` (not authorized): D3 needs natural
+  arrivals in the inventory, and only PDC knows them. `GraphCompileReport::raised_arrivals` is a
+  report field only. Program, canonical bytes and fixtures are unchanged, and the unit test is
+  extended.
+- Gate 5 and the supersession gate are in `crates/capi/src/runtime/tests.rs`, not in control-plane
+  unit tests. Those tests drive `control_plane::SessionState` directly. The control-plane crate has
+  no render or session-fixture harness, and its `tests/` directory is not authorized.
+- Gate 4's error is the replacement-peak cap's `CompileRejected` (set with
+  `set_replacement_peak_limit`). The C ABI's limits give no per-preparation cap that fails only
+  the floorless successor.
+- Mechanical edits outside the paths: `crates/capi/tests/c/{abi_smoke.c,header_smoke.cpp}` (the
+  bit inside the mask and the signature, replacing `MASK == 255`), `crates/host-core/tests/strip_meters.rs`
+  (a `SuccessorBase` site added after the batch check), `ProviderEpoch::test_inventory`, and the capi
+  test wrappers `test_declare_discontinuity` and `test_plan_latency`.
+- `hosts/host-web/tests/control_parity.rs`: a parity row, at the coordinator's request.
+- Header: the #1310 paragraph is re-wrapped to 100 columns (one line was 135).
+- No browser latency report exists yet (#1688). So the browser gate reads the plan latency through
+  the host's `queries`, and the parity row compares bits and the C ABI latency.
+
+**Gates.**
+- Gate 1: `host-core` `successor_swap::a_declared_discontinuity_resets_the_floors_at_every_rate_and_width`.
+  Red when the floors are kept (447 against 0 at 44.1 kHz) and when all state is carried (block 0
+  differs).
+- Gate 2: `capi` `runtime::tests::a_declared_discontinuity_reports_the_natural_latency_on_the_c_abi`.
+  Red when nothing is published. Browser:
+  `host-web` `tests::structural_apply::a_declared_discontinuity_resets_the_floors_on_the_browser`,
+  red when the host does not forward. Parity:
+  `control_parity::a_declared_discontinuity_resets_the_floors_alike_on_both_hosts` (48 and
+  96 kHz), red at block 8 when the browser does not forward.
+- Gate 3: `...::a_declaration_with_nothing_to_reset_publishes_nothing` (revision 0 and after an
+  added track). Red when the declaration always rebuilds.
+- Gate 4: `...::a_refused_declaration_changes_nothing`. Red when the error is swallowed. The retry
+  under the lifted cap resets the floors.
+- Gate 5: `...::a_declared_stop_supersedes_a_pending_warm_successor_alone_and_folded`. Red when
+  the successor is published `Primed`, and when the pending candidate is left alone.
+- Supersession: `...::an_edit_that_supersedes_a_discontinuity_successor_is_prepared_at_it`. Red
+  without the sticky rule.
+- Gate 6: `abi::tests::masks_and_result_codes_are_frozen` (the OR of the symbols) and
+  `ffi::tests::version_and_capabilities_are_exact`.
+- Gate 7 command: all suites pass. `host-web` (test-support) and `graph-compiler` suites pass.
+  `check-capi-abi.sh` and `--self-test` pass. `check-workspace-policy.sh` passes. `fmt` passes.
+  Clippy passes on the touched crates. Rustdoc passes. `realtime-policy` passes.
+  `check-sdk-generated.sh` passes. `check-abi-layout-v1.py` and `--self-test` pass.
+  `check-web-audioworklet.sh` passes.
+
+**Measured.** `audit capi`: allocations 0, deallocations 0, syscalls 0, pcm_digest
+`4f52089e4a8cf83c` (unchanged; `tools/audit` not touched). C ABI gate 2: latency 486 -> 0 at
+48 kHz. No resource ceiling was re-pinned.

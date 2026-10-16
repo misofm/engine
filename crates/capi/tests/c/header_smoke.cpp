@@ -25,5 +25,9 @@ static_assert((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_PLAN_WATERMA
               MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK);
 static_assert((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SERVICE) ==
               MISO_ENGINE_V1_FEATURE_SERVICE);
+static_assert((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY) ==
+              MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY);
+static_assert(std::is_same<decltype(&miso_engine_v1_declare_discontinuity),
+                           uint32_t (*)(miso_engine_v1_session *)>::value);
 static_assert(std::is_same<decltype(&miso_engine_v1_service),
                            uint32_t (*)(miso_engine_v1_session *)>::value);

@@ -1055,12 +1055,13 @@ impl LivePlan {
                 &caps(),
                 request,
                 host_core::SuccessorBase {
-                    inventory: predecessor,
-                    committed,
-                    revision: successor::SUCCESSOR_REVISION,
                     edit_ramps,
-                    monitor: host_core::MonitorBase::NONE,
                     observation,
+                    ..host_core::SuccessorBase::new(
+                        predecessor,
+                        committed,
+                        successor::SUCCESSOR_REVISION,
+                    )
                 },
                 backend,
             )
@@ -3000,12 +3001,12 @@ impl CellPlan {
         Self::successor_at(
             session,
             host_core::SuccessorBase {
-                inventory: predecessor,
-                committed,
-                revision: successor::SUCCESSOR_REVISION,
                 edit_ramps,
-                monitor: host_core::MonitorBase::NONE,
-                observation: &host_core::NO_OBSERVATION,
+                ..host_core::SuccessorBase::new(
+                    predecessor,
+                    committed,
+                    successor::SUCCESSOR_REVISION,
+                )
             },
             backend,
             form,
@@ -4378,14 +4379,7 @@ fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
     for revision in [0, engine::realtime::GATE_REVISION_MAX + 1, u64::MAX] {
         let refused = CellPlan::successor_at(
             &b,
-            host_core::SuccessorBase {
-                inventory: &predecessor.inventory,
-                committed: &a.model,
-                revision,
-                edit_ramps: &EditRamps::new(),
-                monitor: host_core::MonitorBase::NONE,
-                observation: &host_core::NO_OBSERVATION,
-            },
+            host_core::SuccessorBase::new(&predecessor.inventory, &a.model, revision),
             backend,
             Form::Split,
         )
@@ -4402,14 +4396,7 @@ fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
     assert!(
         CellPlan::successor_at(
             &b,
-            host_core::SuccessorBase {
-                inventory: &predecessor.inventory,
-                committed: &a.model,
-                revision: accepted,
-                edit_ramps: &EditRamps::new(),
-                monitor: host_core::MonitorBase::NONE,
-                observation: &host_core::NO_OBSERVATION,
-            },
+            host_core::SuccessorBase::new(&predecessor.inventory, &a.model, accepted),
             backend,
             Form::Split,
         )
@@ -4432,14 +4419,11 @@ fn successor_handle(
             &b.compiled,
             &caps(),
             &LivePlan::request(),
-            host_core::SuccessorBase {
-                inventory: &predecessor.live.prepared.inventory,
+            host_core::SuccessorBase::new(
+                &predecessor.live.prepared.inventory,
                 committed,
-                revision: successor::SUCCESSOR_REVISION,
-                edit_ramps: &EditRamps::new(),
-                monitor: host_core::MonitorBase::NONE,
-                observation: &host_core::NO_OBSERVATION,
-            },
+                successor::SUCCESSOR_REVISION,
+            ),
             backend,
         )
         .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
@@ -7427,8 +7411,8 @@ mod meter_carry {
     use builtins_compiler::MeterConsumer;
     use engine::realtime::{HostAttachment, ObserverCarry, ObserverKind, PlanAdoption};
     use host_core::{
-        HostLiveControlRequest, HostMeterRequest, MonitorBase, PreparedHost, SuccessorBase,
-        pair_carried_meters, test_only_prepare_host_runtime_with_selected_meters_on,
+        HostLiveControlRequest, HostMeterRequest, PreparedHost, SuccessorBase, pair_carried_meters,
+        test_only_prepare_host_runtime_with_selected_meters_on,
     };
 
     use super::successor::{self, SUCCESSOR_REVISION};
@@ -7611,14 +7595,7 @@ mod meter_carry {
             b,
             b_live,
             b_meters,
-            Some(SuccessorBase {
-                inventory: &inventory,
-                committed: &a.model,
-                revision: SUCCESSOR_REVISION,
-                edit_ramps: &session::EditRamps::new(),
-                monitor: MonitorBase::NONE,
-                observation: &host_core::NO_OBSERVATION,
-            }),
+            Some(SuccessorBase::new(&inventory, &a.model, SUCCESSOR_REVISION)),
             backend,
         );
         b_prepared.sources.adopt_persisting(&mut a_sources);
@@ -9033,6 +9010,411 @@ fn a_repointed_route_does_not_carry_its_line_at_every_rate_and_width() {
     }
 }
 
+// Issue #1285 (slice 15 of #1269): latency floors. A successor is compiled with every node's
+// input arrival in its predecessor as a floor, so removing a latent effect, or the track that
+// holds it, moves no surviving path in time: every compensation line keeps its length and carries.
+
+/// B prepared against an inventory that holds only `floors`' input floors, rendered from frame 0
+/// and fed `feed`: the fresh reference of B compiled with those floors (#1285 gate 1).
+fn floored_reference(
+    b: &Session,
+    floors: &host_core::PlanStateInventory,
+    feed: &Feed,
+    backend: Backend,
+) -> Vec<Vec<u32>> {
+    let quantum = b.model.quantum_frames as usize;
+    let floors = floors.test_only_floors_only();
+    let mut plan = LivePlan::successor(b, &floors, &b.model, backend);
+    plan.submit(feed, quantum, 0);
+    (0..BLOCKS)
+        .map(|block| {
+            if block + 1 < BLOCKS {
+                plan.submit(feed, quantum, block + 1);
+            }
+            plan.render(quantum)
+        })
+        .collect()
+}
+
+/// `model` with one more true-peak limiter insert, `insert`, on `track`, after its others.
+fn add_limiter(model: &mut SessionModel, track: &str, insert: &str) {
+    let (index, strip) = model
+        .tracks
+        .iter_mut()
+        .enumerate()
+        .find(|(_, strip)| strip.id.as_str() == track)
+        .expect("the track");
+    strip.inserts.effects.push(Effect {
+        id: id(insert),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.true-peak-limiter"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::Maximum,
+        params: console_params("limiter", index, false),
+        sidechain: SidechainDeclaration::None,
+    });
+}
+
+/// The checks gates 1 and 2 share: B removes the limited track `eq0` from `a_model`. The swapped
+/// run equals B compiled with A's floors from frame 0 in every block, its latency is A's, nothing
+/// restarts, and B without floors renders the remaining tracks earlier. `eq0` is muted in A, so it
+/// adds exact `+0.0` and A's blocks before the swap are B's too.
+fn a_removed_latency_moves_no_surviving_path(a_model: SessionModel, backend: Backend, what: &str) {
+    let a_model = with_mute(a_model, "eq0", true);
+    let mut b_model = a_model.clone();
+    remove_track(&mut b_model, "eq0");
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    let predecessor = LivePlan::fresh(&a, backend).prepared;
+    let latency = predecessor.report.latency_samples;
+    assert!(latency > 0, "{what}: the limiter delays A");
+    let successor = LivePlan::successor(&b, &predecessor.inventory, &a.model, backend).prepared;
+    assert_eq!(
+        successor.report.latency_samples, latency,
+        "{what}: the successor reports A's latency (D4)"
+    );
+    assert!(
+        b.prepare(backend).report.latency_samples < latency,
+        "{what}: B's natural latency is lower"
+    );
+    let feed = Feed::new(SOURCE, 1);
+    let (run, unfloored) = pdc_runs(&a, &b, &feed, backend, what);
+    assert_eq!(run.restarted, Vec::<Box<str>>::new(), "{what}");
+    let reference = floored_reference(&b, &predecessor.inventory, &feed, backend);
+    assert_eq!(
+        run.blocks
+            .iter()
+            .zip(&reference)
+            .position(|(swapped, fresh)| swapped != fresh),
+        None,
+        "{what}: every block equals B compiled with A's floors from frame 0"
+    );
+    assert!(
+        reference[SWAP_BLOCK + 2..]
+            .iter()
+            .flatten()
+            .any(|bits| *bits != 0),
+        "{what}: the reference plays after the swap block"
+    );
+    assert_ne!(
+        unfloored.blocks[SWAP_BLOCK + 1..],
+        reference[SWAP_BLOCK + 1..],
+        "{what}: without floors the remaining tracks move by the limiter's latency"
+    );
+}
+
+/// Gate 1: three tracks, the first behind a limiter; B removes the first track. Red if a
+/// successor is compiled without floors: the output's two compensation lines vanish and the
+/// remaining tracks jump forward by the limiter's latency at the swap.
+#[test]
+fn removing_a_limited_track_keeps_the_output_timing_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            let mut a_model = pdc_session(rate, &["eq0"]);
+            remove_track(&mut a_model, "eq3");
+            a_removed_latency_moves_no_surviving_path(
+                a_model,
+                backend,
+                &format!("{backend:?} at {rate} Hz"),
+            );
+        }
+    }
+}
+
+/// Gate 2: `eq0` (behind a limiter) and `eq1` feed the submix `bus1`; the output takes `bus1` and
+/// `eq2`. B removes `eq0`. Red if floors are applied only at the output: the bus input's natural
+/// arrival drops to 0, `eq1`'s line into the bus vanishes and the bus's own route into the output
+/// gets a new line that starts at rest.
+#[test]
+fn removing_a_limited_track_keeps_the_submix_timing_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            a_removed_latency_moves_no_surviving_path(
+                bus_session(rate),
+                backend,
+                &format!("{backend:?} at {rate} Hz, submix"),
+            );
+        }
+    }
+}
+
+/// Gate 5: after gate 1's swap, C removes `eq1` from B. C keeps A's output latency, because B's
+/// inventory records the floored arrivals. Red if the inventory records the natural `max`: B's
+/// output arrival is naturally 0, so C's latency drops to it.
+#[test]
+fn a_second_removal_keeps_the_first_floors() {
+    for backend in backends() {
+        let mut a_model = pdc_session(48_000, &["eq0"]);
+        remove_track(&mut a_model, "eq3");
+        let mut b_model = a_model.clone();
+        remove_track(&mut b_model, "eq0");
+        let mut c_model = b_model.clone();
+        remove_track(&mut c_model, "eq1");
+        let (a, b, c) = (
+            Session::compile(a_model),
+            Session::compile(b_model),
+            Session::compile(c_model),
+        );
+        let first = a.prepare(backend);
+        let latency = first.report.latency_samples;
+        assert!(latency > 0, "{backend:?}");
+        let second = b
+            .prepare_successor(&first.inventory, &a.model, &caps(), backend)
+            .expect("B");
+        let third = c
+            .prepare_successor(&second.inventory, &b.model, &caps(), backend)
+            .expect("C");
+        assert_eq!(second.report.latency_samples, latency, "{backend:?}: B");
+        assert_eq!(third.report.latency_samples, latency, "{backend:?}: C");
+        assert_eq!(
+            third.inventory.input_floors(),
+            second.inventory.input_floors(),
+            "{backend:?}: C renders at B's arrivals"
+        );
+    }
+}
+
+/// #1344 with floors: P0 has `eq0` behind a limiter. The candidate A adds a second limiter to
+/// `eq1`, so its own floors are higher than P0's, and is withdrawn. B removes `eq0` from P0 and is
+/// prepared against P0 across A. Render runs P0, so B keeps P0's timing: its latency is P0's and
+/// its floors are P0's arrivals. Red if the base across a withdrawn plan drops the floors (B's
+/// latency falls to its natural value) or takes A's (B's latency is A's).
+#[test]
+fn a_replacement_across_a_withdrawn_candidate_keeps_the_running_floors() {
+    for backend in backends() {
+        let mut p0_model = pdc_session(48_000, &["eq0"]);
+        remove_track(&mut p0_model, "eq3");
+        let mut a_model = p0_model.clone();
+        add_limiter(&mut a_model, "eq1", "lim");
+        add_limiter(&mut a_model, "eq1", "lim2");
+        let mut b_model = p0_model.clone();
+        remove_track(&mut b_model, "eq0");
+        let (p0, a, b) = (
+            Session::compile(p0_model),
+            Session::compile(a_model),
+            Session::compile(b_model),
+        );
+        let running = p0.prepare(backend);
+        let latency = running.report.latency_samples;
+        let withdrawn = a
+            .prepare_successor(&running.inventory, &p0.model, &caps(), backend)
+            .expect("A");
+        assert!(
+            withdrawn.report.latency_samples > latency,
+            "{backend:?}: A's two limiters delay it past P0"
+        );
+        let base = running
+            .inventory
+            .across_withdrawn(&withdrawn.inventory, &withdrawn.plan);
+        let replacement = b
+            .prepare_successor(&base, &p0.model, &caps(), backend)
+            .expect("B");
+        assert_eq!(
+            replacement.report.latency_samples, latency,
+            "{backend:?}: B keeps the running plan's latency"
+        );
+        let direct = b
+            .prepare_successor(&running.inventory, &p0.model, &caps(), backend)
+            .expect("P0 -> B");
+        assert_eq!(
+            replacement.inventory.input_floors(),
+            direct.inventory.input_floors(),
+            "{backend:?}: B renders at the arrivals of a direct P0 -> B swap"
+        );
+    }
+}
+
+// Issue #1323: a host-declared discontinuity. Its successor is compiled with no floors and
+// carries only its source consumers, so it renders as the session compiled fresh, fed from the
+// frames the carried consumers stood at.
+
+/// The block the discontinuity successor renders first.
+const DISCONTINUITY_BLOCK: usize = 10;
+/// Blocks in a discontinuity run.
+const DISCONTINUITY_BLOCKS: usize = 16;
+
+/// `session` prepared with live controls as the successor of `predecessor` at a declared
+/// discontinuity, its gate stamped and published with the committed revision, as the control
+/// plane's publication does.
+fn discontinuity_successor(
+    session: &Session,
+    predecessor: &host_core::PlanStateInventory,
+    committed: &SessionModel,
+    backend: Backend,
+) -> LivePlan {
+    let (prepared, handles) =
+        host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+            &session.compiled,
+            &caps(),
+            &LivePlan::request(),
+            host_core::SuccessorBase {
+                discontinuity: true,
+                ..host_core::SuccessorBase::new(
+                    predecessor,
+                    committed,
+                    successor::SUCCESSOR_REVISION,
+                )
+            },
+            backend,
+        )
+        .unwrap_or_else(|failure| panic!("discontinuity successor: {failure:?}"));
+    let mut successor = LivePlan::new(prepared, handles);
+    let _ = successor
+        .gate
+        .stamp(successor::SUCCESSOR_REVISION)
+        .expect("a fresh gate stamps the committed revision");
+    successor.gate.publish(successor::SUCCESSOR_REVISION);
+    successor
+}
+
+/// `successor` adopts `plan` and renders one block; the run goes on with it.
+fn adopt_and_render(
+    plan: &mut LivePlan,
+    mut successor: LivePlan,
+    feed: &Feed,
+    quantum: usize,
+    block: usize,
+) -> (Vec<u32>, CarryOutcome) {
+    assert_eq!(
+        successor
+            .prepared
+            .sources
+            .adopt_persisting(&mut plan.prepared.sources),
+        1,
+        "the source's producer moves"
+    );
+    successor.submit(feed, quantum, block + 1);
+    let carry = successor
+        .prepared
+        .plan
+        .adopt_predecessor_plan(&mut plan.prepared.plan);
+    let bits = successor.render(quantum);
+    *plan = successor;
+    (bits, carry)
+}
+
+/// Gate 1: A has three tracks, the first behind a limiter; B removes it and is swapped in at
+/// [`SWAP_BLOCK`] with A's floors (#1285). B is then prepared again against itself with
+/// `discontinuity: true` and swapped in at [`DISCONTINUITY_BLOCK`]. From that block on, every
+/// block equals B compiled fresh, with no floors, fed the PCM from the frame its carried source
+/// consumer stood at; its latency is B's natural latency, and its inventory has no raised floor.
+///
+/// Test value: red if the discontinuity successor keeps the floors (its latency stays A's and the
+/// remaining tracks stay late), or if it carries any DSP state but the source consumer (the EQs'
+/// filter state and the compensation lines differ from a fresh plan's at rest), or if it carries
+/// no source (it reads its ring from frame 0, a repeat).
+fn a_declared_discontinuity_resets_the_floors(backend: Backend, rate: u32) {
+    let what = format!("{backend:?} at {rate} Hz");
+    let mut a_model = pdc_session(rate, &["eq0"]);
+    remove_track(&mut a_model, "eq3");
+    let a_model = with_mute(a_model, "eq0", true);
+    let mut b_model = a_model.clone();
+    remove_track(&mut b_model, "eq0");
+    let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+    let quantum = a.model.quantum_frames as usize;
+    let feed = Feed::with_blocks(SOURCE, 1, DISCONTINUITY_BLOCKS + DISCONTINUITY_BLOCK + 1);
+
+    let mut plan = LivePlan::fresh(&a, backend);
+    let latency = plan.prepared.report.latency_samples;
+    let natural = LivePlan::fresh(&b, backend);
+    let natural_latency = natural.prepared.report.latency_samples;
+    assert!(
+        natural_latency < latency,
+        "{what}: B's natural latency is lower"
+    );
+    assert!(
+        !plan.prepared.inventory.runs_behind_natural_timing(),
+        "{what}: a first plan has no floor"
+    );
+    let mut blocks = Vec::with_capacity(DISCONTINUITY_BLOCKS);
+    plan.submit(&feed, quantum, 0);
+    for block in 0..DISCONTINUITY_BLOCKS {
+        let bits = match block {
+            SWAP_BLOCK => {
+                let floored = LivePlan::successor(&b, &plan.prepared.inventory, &a.model, backend);
+                assert_eq!(floored.prepared.report.latency_samples, latency, "{what}");
+                assert!(
+                    floored.prepared.inventory.runs_behind_natural_timing(),
+                    "{what}: B with A's floors runs behind its natural timing"
+                );
+                adopt_and_render(&mut plan, floored, &feed, quantum, block).0
+            }
+            DISCONTINUITY_BLOCK => {
+                let reset =
+                    discontinuity_successor(&b, &plan.prepared.inventory, &b.model, backend);
+                assert_eq!(
+                    reset.prepared.report.latency_samples, natural_latency,
+                    "{what}: the discontinuity successor runs at B's natural latency"
+                );
+                assert!(
+                    !reset.prepared.inventory.runs_behind_natural_timing(),
+                    "{what}: and has no raised floor"
+                );
+                assert_eq!(
+                    reset.prepared.inventory.input_floors(),
+                    natural.prepared.inventory.input_floors(),
+                    "{what}: its arrivals are a fresh B's"
+                );
+                let (bits, carry) = adopt_and_render(&mut plan, reset, &feed, quantum, block);
+                assert!(
+                    carry == CarryOutcome::Carried,
+                    "{what}: the source consumer carries: {carry:?}"
+                );
+                bits
+            }
+            _ => {
+                if block + 1 < DISCONTINUITY_BLOCKS {
+                    plan.submit(&feed, quantum, block + 1);
+                }
+                plan.render(quantum)
+            }
+        };
+        blocks.push(bits);
+    }
+
+    // The fresh reference: B with no floors, rendered from frame 0, fed the PCM from the frame the
+    // carried consumer stood at when the discontinuity successor adopted.
+    let offset = DISCONTINUITY_BLOCK * quantum;
+    let shifted = Feed {
+        id: SOURCE,
+        planes: [
+            feed.planes[0][offset..].to_vec(),
+            feed.planes[1][offset..].to_vec(),
+        ],
+    };
+    let mut reference = natural;
+    let tail = DISCONTINUITY_BLOCKS - DISCONTINUITY_BLOCK;
+    reference.submit(&shifted, quantum, 0);
+    let expected: Vec<Vec<u32>> = (0..tail)
+        .map(|block| {
+            reference.submit(&shifted, quantum, block + 1);
+            reference.render(quantum)
+        })
+        .collect();
+    assert!(
+        expected.iter().flatten().any(|bits| *bits != 0),
+        "{what}: the reference plays"
+    );
+    assert_eq!(
+        blocks[DISCONTINUITY_BLOCK..]
+            .iter()
+            .zip(&expected)
+            .position(|(reset, fresh)| reset != fresh),
+        None,
+        "{what}: every block from the discontinuity equals a fresh B"
+    );
+}
+
+#[test]
+fn a_declared_discontinuity_resets_the_floors_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            a_declared_discontinuity_resets_the_floors(backend, rate);
+        }
+    }
+}
+
 // Issue #1284 (slice 14 of #1269): the strip input alignment lines (`delay_samples` of a track and
 // of a submix) and the live sends. A line is keyed by its strip and lane, a send by its route ID;
 // a lane whose delay changed starts at rest and its strip goes into the restart set, and a
@@ -9438,7 +9820,7 @@ fn a_carried_send_is_retargeted_to_the_successors_gain_at_four_lanes() {
 mod spectrum_carry {
     use engine::realtime::{HostAttachment, ObserverCarry, ObserverKind, PlanAdoption};
     use host_core::{
-        HostLiveControlRequest, HostLiveLanes, LiveValuesSuperseded, MonitorBase, PreparedHost,
+        HostLiveControlRequest, HostLiveLanes, LiveValuesSuperseded, PreparedHost,
         PreparedSpectrumCaptures, SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionRequest,
         SpectrumCaptureRequest, SpectrumChannels, SpectrumContinuousWindow, SpectrumHop,
         SpectrumPair, SpectrumService, SpectrumServiceError, SpectrumSmoothingConfig,
@@ -9784,14 +10166,7 @@ mod spectrum_carry {
         }
         let (mut b_prepared, b_capture) = b_request.prepare(
             b,
-            Some(SuccessorBase {
-                inventory: &inventory,
-                committed: &a.model,
-                revision: SUCCESSOR_REVISION,
-                edit_ramps: &session::EditRamps::new(),
-                monitor: MonitorBase::NONE,
-                observation: &host_core::NO_OBSERVATION,
-            }),
+            Some(SuccessorBase::new(&inventory, &a.model, SUCCESSOR_REVISION)),
         );
         b_prepared.sources.adopt_persisting(&mut a_sources);
         let pairing = b_prepared.inventory.spectrum_pairing().to_vec();

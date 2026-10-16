@@ -308,6 +308,7 @@ fn prepared_graph(
     .expect("sealed builtins");
     let dispatch = Backend::current();
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch,
         plan_id,
         effects: EffectPreparedSession {

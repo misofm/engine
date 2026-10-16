@@ -715,16 +715,12 @@ fn a_successor_takes_its_master_from_the_overlay_by_strip_id() {
             &caps(),
             live,
             host_core::SuccessorBase {
-                inventory: &prepared.inventory,
-                committed: compiled.normalized_model(),
-                revision: 2,
-                edit_ramps: &session::EditRamps::new(),
                 monitor: host_core::MonitorBase {
                     committed: overlay,
                     next: overlay,
                     ramp: None,
                 },
-                observation: &host_core::NO_OBSERVATION,
+                ..host_core::SuccessorBase::new(&prepared.inventory, compiled.normalized_model(), 2)
             },
         )
     };

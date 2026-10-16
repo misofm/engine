@@ -132,6 +132,7 @@ fn compile_fixture() -> PreparedGraphBuiltinsArtifact {
     )
     .unwrap_or_else(|diagnostics| panic!("builtin diagnostics: {diagnostics:?}"));
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: FIXTURE_DISPATCH.expect(NO_FIXTURE_WIDTH),
         plan_id: 0,
         effects: EffectPreparedSession {

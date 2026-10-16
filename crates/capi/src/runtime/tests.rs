@@ -1522,6 +1522,392 @@ fn assert_bit_identical(label: &str, first: u64, actual: &[Vec<f32>], expected: 
     }
 }
 
+/// Submits block `block` of `signal` salt `salt` to `source` as generation `generation`, at the
+/// source frame `block * 128`.
+fn submit_block_c(
+    session: *mut crate::Session,
+    source: &[u8],
+    generation: u64,
+    block: u64,
+    salt: u64,
+    sample_rate_hz: u32,
+) {
+    let (left, right) = continuity_block(block, salt);
+    submit_c_to(
+        session,
+        source,
+        generation,
+        block * 128,
+        sample_rate_hz,
+        &left,
+        &right,
+        false,
+    );
+}
+
+/// Commits `edits` at `base` through the C entry point and returns the path the response reports.
+/// Panics unless the transaction commits.
+fn transact_c(
+    session: *mut crate::Session,
+    request_id: u64,
+    base: u64,
+    edits: &[protocol::SessionEdit],
+) -> protocol::EditPath {
+    let request = command_bytes_at_revision(
+        request_id,
+        ExpectedRevision::Exact(SessionRevision(base)),
+        protocol::CommandPayload::SessionTransactionApply(edits),
+    );
+    let (result, response) = command_c(session, &request);
+    assert_eq!(result, crate::RESULT_OK, "request {request_id}");
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("transaction response")
+    {
+        protocol::DecodedTypedResponseFrame::Success {
+            payload: protocol::DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+            header,
+        } => {
+            assert_eq!(header.revision, SessionRevision(base + 1));
+            applied.edit_path
+        }
+        protocol::DecodedTypedResponseFrame::Success { .. } => panic!("not a transaction response"),
+        protocol::DecodedTypedResponseFrame::NonOk { header, payload } => {
+            panic!(
+                "request {request_id}: {:?} {:?}",
+                header.status, payload.diagnostics
+            )
+        }
+    }
+}
+
+/// `UpsertSource` of `source_id` (a copy of the first source), `UpsertTrack` of `track_id` on it
+/// and `UpsertRoute` of its route.
+fn add_source_and_track(
+    model: &session::SessionModel,
+    source_id: &str,
+    track_id: &str,
+) -> [protocol::SessionEdit; 3] {
+    let mut source = model.sources[0].clone();
+    source.id = session::StableId::parse(source_id).expect("source ID");
+    let mut track = model.tracks[0].clone();
+    track.id = session::StableId::parse(track_id).expect("track ID");
+    track.source_id = source.id.clone();
+    let mut route = model.routes[0].clone();
+    route.id = session::StableId::parse(&format!("{track_id}-main")).expect("route ID");
+    let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+        panic!("track route")
+    };
+    *track_id = track.id.clone();
+    [
+        protocol::SessionEdit::UpsertSource { source },
+        protocol::SessionEdit::UpsertTrack { track },
+        protocol::SessionEdit::UpsertRoute { route },
+    ]
+}
+
+/// A structural insert edit that changes the audio only on `track`: a compressor at its default
+/// parameters, put at the head of the track's inserts.
+fn put_compressor(model: &session::SessionModel, track: usize) -> protocol::SessionEdit {
+    use session::{EffectIdentity, EffectQuality, LinkMode, SidechainDeclaration, StableId};
+    protocol::SessionEdit::PutTrackEffect {
+        track_id: model.tracks[track].id.clone(),
+        rack_name: session::RackName::Inserts,
+        final_position: 0,
+        effect: session::Effect {
+            id: StableId::parse("comp").expect("insert ID"),
+            identity: EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("effect ID"),
+            },
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::DualMono,
+            params: Vec::new(),
+            sidechain: SidechainDeclaration::None,
+        },
+    }
+}
+
+/// The reference of the held-seek tests: a fresh session of `committed`, fed by `feed(session,
+/// block)` one block ahead of each rendered block, rendering `blocks` blocks.
+fn render_fresh_reference(
+    committed: &str,
+    blocks: u64,
+    feed: &dyn Fn(*mut crate::Session, u64),
+) -> Vec<Vec<f32>> {
+    let (session, plan) = boxed_c_children(committed);
+    feed(session, 0);
+    let rendered = (0..blocks)
+        .map(|block| {
+            feed(session, block + 1);
+            render_c(plan, block)
+        })
+        .collect::<Vec<_>>();
+    crate::ffi::test_plan_destroy(plan);
+    crate::ffi::test_session_destroy(session);
+    rendered
+}
+
+/// Issue #1319 D1 (the #1275 verifier's probe P5): a seek the predecessor plan already popped, and
+/// holds, moves with its source's consumer across a plan swap and applies at its anchor.
+///
+/// At 48 kHz the fixture source plays generation 1 for blocks 0-7. After block 3 the host anchors
+/// generation 2 at render sample 1024 (block 8) and submits it from frame 0. Blocks 4 and 5 render
+/// on the predecessor, whose consumer pops the seek and holds it while the queued generation-1
+/// blocks play. A structural transaction (a muted track on the same source) commits after block 5,
+/// block 6 is the swap block, and block 8 applies the seek on the successor. All 16 blocks equal a
+/// fresh session of the committed document fed one stream that switches content at block 8, and
+/// the swap carried the consumer.
+///
+/// Test value: red if the swap resets, rebuilds or drops the carried consumer's held seek (block 8
+/// then finds no seek: the generation-2 blocks are discarded as unobserved and block 8 on is
+/// silent), or if the successor applies a held seek before its anchor or after it; no other
+/// committed test seeks before a swap (`successor_swap.rs` asserts `seek_before >= SWAP_BLOCK`).
+#[test]
+fn a_held_anchored_seek_crosses_a_plan_swap() {
+    const RATE: u32 = 48_000;
+    const FIXTURE_ID: &[u8] = b"fixture-source";
+    const ANCHOR_BLOCK: u64 = 8;
+    let model = stateless_session(RATE);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let (session, plan) = boxed_c_children(&document);
+    let mut swapped = Vec::new();
+    submit_block_c(session, FIXTURE_ID, 1, 0, 0, RATE);
+    swapped.extend(feed_and_render_c(session, plan, RATE, 0, 4));
+    // Generation 1 is queued through block 7 (block 4 is queued by the feed above).
+    for block in 5..8 {
+        submit_block_c(session, FIXTURE_ID, 1, block, 0, RATE);
+    }
+    assert_eq!(
+        crate::ffi::test_source_seek_at(session, FIXTURE_ID, 2, 0, ANCHOR_BLOCK * 128),
+        crate::RESULT_OK
+    );
+    for block in 0..4 {
+        submit_block_c(session, FIXTURE_ID, 2, block, 1, RATE);
+    }
+    swapped.push(render_c(plan, 4));
+    swapped.push(render_c(plan, 5));
+    let edits = add_muted_track(&model, "a-muted");
+    assert_eq!(
+        transact_c(session, 1, 42, &edits),
+        protocol::EditPath::Rebuild,
+        "a structural transaction rebuilds"
+    );
+    for block in 6..16 {
+        // The ring holds eight blocks: generation 2 block `m` fits once `m - 3` blocks played.
+        match block {
+            6 => {
+                submit_block_c(session, FIXTURE_ID, 2, 4, 1, RATE);
+                submit_block_c(session, FIXTURE_ID, 2, 5, 1, RATE);
+            }
+            7 => submit_block_c(session, FIXTURE_ID, 2, 6, 1, RATE),
+            8 => submit_block_c(session, FIXTURE_ID, 2, 7, 1, RATE),
+            _ => {}
+        }
+        swapped.push(render_c(plan, block));
+    }
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(plan),
+        (1, 0),
+        "one swap, and it carried the source"
+    );
+    let committed = snapshot_c(session);
+    crate::ffi::test_plan_destroy(plan);
+    crate::ffi::test_session_destroy(session);
+
+    let reference = render_fresh_reference(&committed, 16, &|session, block| {
+        let (salt, content_block) = if block < ANCHOR_BLOCK {
+            (0, block)
+        } else {
+            (1, block - ANCHOR_BLOCK)
+        };
+        let (left, right) = continuity_block(content_block, salt);
+        submit_c(session, 1, block * 128, RATE, &left, &right, false);
+    });
+    assert_bit_identical("held seek across a swap", 0, &swapped, &reference);
+}
+
+/// Issue #1319 D2: an anchored seek queued on a source that persists from the running plan through
+/// a withdrawn candidate into its replacement survives the supersession.
+///
+/// P0 plays the fixture source for blocks 0-3 and has generation 1 queued through block 7. With no
+/// render between them, T1 (a compressor on the second track) commits and candidate A is
+/// published; the seek to generation 2 at block 8 goes to A's producer set, so it is queued in the
+/// command slot of the ring P0 owns; T2 (a compressor on the third track) withdraws A and commits
+/// B against P0. Generation 2 is then submitted through the producer that is now B's, and blocks
+/// 4-11 render. The source switches at the anchor, and every block equals a twin that submits
+/// T1 and T2 as one transaction at the same point and seeks the same way. The supersession is one
+/// withdrawal (and one drop of A), and each transaction took the rebuild path.
+///
+/// Test value: red if the supersession rebuilds a persisting source's ring for B (its queued
+/// blocks are lost) or loses the seek in the ring's command slot while A is withdrawn (block 8 on
+/// then finds generation 2 unobserved and is silent); the #1310 tests seek only on a source the
+/// withdrawn candidate added, whose ring is donated.
+#[test]
+fn a_queued_seek_on_a_persisting_source_survives_supersession() {
+    const RATE: u32 = 48_000;
+    const FIXTURE_ID: &[u8] = b"fixture-source";
+    const ANCHOR_BLOCK: u64 = 8;
+    let model = stateless_session(RATE);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let first = [put_compressor(&model, 1)];
+    let second = [put_compressor(&model, 2)];
+    let combined = [put_compressor(&model, 1), put_compressor(&model, 2)];
+
+    let run = |superseding: bool| {
+        let (session, plan) = boxed_c_children(&document);
+        let before = crate::ffi::test_owner_counters(session);
+        submit_block_c(session, FIXTURE_ID, 1, 0, 0, RATE);
+        let mut blocks = feed_and_render_c(session, plan, RATE, 0, 4);
+        for block in 5..8 {
+            submit_block_c(session, FIXTURE_ID, 1, block, 0, RATE);
+        }
+        // The seek goes to the pending candidate's producer set, whichever transaction left it.
+        let seek = || {
+            assert_eq!(
+                crate::ffi::test_source_seek_at(session, FIXTURE_ID, 2, 0, ANCHOR_BLOCK * 128),
+                crate::RESULT_OK
+            );
+        };
+        if superseding {
+            assert_eq!(
+                transact_c(session, 1, 42, &first),
+                protocol::EditPath::Rebuild
+            );
+            seek();
+            assert_eq!(
+                transact_c(session, 2, 43, &second),
+                protocol::EditPath::Rebuild
+            );
+        } else {
+            assert_eq!(
+                transact_c(session, 1, 42, &combined),
+                protocol::EditPath::Rebuild
+            );
+            seek();
+        }
+        for block in 0..4 {
+            submit_block_c(session, FIXTURE_ID, 2, block, 1, RATE);
+        }
+        for block in 4..12 {
+            blocks.push(render_c(plan, block));
+        }
+        let counters = crate::ffi::test_owner_counters(session);
+        let delta = (
+            counters.candidate_withdrawn - before.candidate_withdrawn,
+            counters.candidate_superseded - before.candidate_superseded,
+            counters.candidate_taken - before.candidate_taken,
+        );
+        let carried = crate::ffi::test_plan_carry_counts(plan);
+        crate::ffi::test_plan_destroy(plan);
+        crate::ffi::test_session_destroy(session);
+        (blocks, delta, carried)
+    };
+    let (superseded, delta, carried) = run(true);
+    assert_eq!(
+        delta,
+        (1, 1, 0),
+        "one withdrawal, whose candidate A was dropped"
+    );
+    assert_eq!(carried, (1, 0), "one swap, B alone, and it carried");
+    let (twin, twin_delta, twin_carried) = run(false);
+    assert_eq!(twin_delta, (0, 0, 0));
+    assert_eq!(twin_carried, (1, 0));
+    assert_bit_identical("supersession across a queued seek", 0, &superseded, &twin);
+}
+
+/// Issue #1319 D3: a held seek on a source a candidate added carries on when a later structural
+/// transaction finds that candidate already taken by render.
+///
+/// T1 adds source `s2` with its track. The host anchors `s2`'s generation 2 at block 8 (frame 0)
+/// and submits it, and block 2 renders: render claims T1's candidate A, and A's consumer for `s2`
+/// pops the seek and holds it. T2 (a muted track on the fixture source, keeping `s2`) commits: its
+/// service step promotes A, so B is prepared against A as the running plan and carries A's `s2`
+/// consumer with its held seek, rather than preparing across a withdrawal. Blocks 3-11 render. `s2`
+/// is silent until block 8 and plays from there, and every block equals a fresh session of T2's
+/// document fed `s2` zeros below the anchor and the same PCM from it. Neither withdrawal outcome
+/// is counted: A was neither withdrawn nor found taken by the withdrawal.
+///
+/// Test value: red if the control plane treats a candidate render has taken as withdrawn and
+/// prepares B across it: `s2`, which A added, is then fresh in B, and A's held, acked seek and its
+/// queued generation 2 are lost (block 8 on lacks `s2`).
+#[test]
+fn a_held_seek_carries_from_a_taken_candidate() {
+    const RATE: u32 = 48_000;
+    const FIXTURE_ID: &[u8] = b"fixture-source";
+    const ADDED: &[u8] = b"s2-source";
+    const ANCHOR_BLOCK: u64 = 8;
+    let mut model = stateless_session(RATE);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let (session, plan) = boxed_c_children(&document);
+    let before = crate::ffi::test_owner_counters(session);
+    submit_block_c(session, FIXTURE_ID, 1, 0, 0, RATE);
+    let mut swapped = feed_and_render_c(session, plan, RATE, 0, 2);
+
+    let first = add_source_and_track(&model, "s2-source", "t2");
+    assert_eq!(
+        transact_c(session, 1, 42, &first),
+        protocol::EditPath::Rebuild
+    );
+    assert_eq!(
+        crate::ffi::test_source_seek_at(session, ADDED, 2, 0, ANCHOR_BLOCK * 128),
+        crate::RESULT_OK
+    );
+    for block in 0..4 {
+        submit_block_c(session, ADDED, 2, block, 1, RATE);
+    }
+    submit_block_c(session, FIXTURE_ID, 1, 3, 0, RATE);
+    swapped.push(render_c(plan, 2));
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(plan),
+        (1, 0),
+        "render took A"
+    );
+
+    let second = add_muted_track(&model, "a-muted");
+    assert_eq!(
+        transact_c(session, 2, 43, &second),
+        protocol::EditPath::Rebuild
+    );
+    let counters = crate::ffi::test_owner_counters(session);
+    assert_eq!(
+        (
+            counters.candidate_withdrawn - before.candidate_withdrawn,
+            counters.candidate_taken - before.candidate_taken,
+        ),
+        (0, 0),
+        "the service step promoted A before the withdrawal ran"
+    );
+    for block in 3..12 {
+        if block > 3 {
+            submit_block_c(session, FIXTURE_ID, 1, block, 0, RATE);
+        }
+        swapped.push(render_c(plan, block));
+    }
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(plan),
+        (2, 0),
+        "A, then B, carried"
+    );
+    let committed = snapshot_c(session);
+    crate::ffi::test_plan_destroy(plan);
+    crate::ffi::test_session_destroy(session);
+
+    let reference = render_fresh_reference(&committed, 12, &|session, block| {
+        submit_block_c(session, FIXTURE_ID, 1, block, 0, RATE);
+        let (left, right) = if block < ANCHOR_BLOCK {
+            (vec![0.0; 128], vec![0.0; 128])
+        } else {
+            continuity_block(block - ANCHOR_BLOCK, 1)
+        };
+        submit_c_to(session, ADDED, 1, block * 128, RATE, &left, &right, false);
+    });
+    assert_bit_identical("held seek from a taken candidate", 0, &swapped, &reference);
+}
+
 /// Issue #1273 gate 2: a transaction that removes a track and its source leaves the remaining
 /// source playing from its carried ring, bit-identical to the fresh post-edit session, and a
 /// submit for the removed source is refused as unknown.
@@ -1610,6 +1996,654 @@ fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
     submit_direct(&mut reference, &both[..1], 0);
     let expected = feed_and_render_direct(&mut reference, &both[..1], 0, 12);
     assert_bit_identical("removal", 6, &swapped, &expected[6..]);
+}
+
+/// Issue #1285 gate 3: three tracks, the first muted behind a true-peak limiter insert. A
+/// `RemoveTrack` transaction after block 6 removes it. `miso_engine_v1_plan_resources` reports the
+/// same `latency_samples` after the swap, and every block equals the floored reference: the same
+/// transaction committed before the first block, so its successor is compiled with A's floors and
+/// adopts at frame 0 with every state at rest, which is B compiled with A's floors and rendered
+/// from frame 0. B compiled fresh has a lower latency and renders the remaining tracks earlier.
+///
+/// Test value: red if the plan's resource row keeps the natural latency while the plan renders
+/// the floored one, or if a successor is compiled without floors (the latency drops and the two
+/// remaining tracks jump forward at the swap).
+#[test]
+fn removing_a_limited_track_keeps_the_plan_latency() {
+    let source: [&[u8]; 1] = [b"fixture-source"];
+    let mut model = stateless_session(48_000);
+    let limited = &mut model.tracks[0];
+    limited.fader.left_mute = true;
+    limited.fader.right_mute = true;
+    limited.inserts.effects.push(session::Effect {
+        id: session::StableId::parse("lim").expect("insert ID"),
+        identity: session::EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.true-peak-limiter").expect("limiter id"),
+        },
+        quality: session::EffectQuality::Normal,
+        bypass: false,
+        link_mode: session::LinkMode::Maximum,
+        params: Vec::new(),
+        sidechain: session::SidechainDeclaration::None,
+    });
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let edits = [
+        protocol::SessionEdit::RemoveRoute {
+            route_id: model.routes[0].id.clone(),
+        },
+        protocol::SessionEdit::RemoveTrack {
+            track_id: model.tracks[0].id.clone(),
+        },
+    ];
+    let transaction = command_bytes_at_revision(
+        1,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::SessionTransactionApply(&edits),
+    );
+    let bits = |blocks: &[Vec<f32>]| -> Vec<Vec<u32>> {
+        blocks
+            .iter()
+            .map(|block| block.iter().map(|sample| sample.to_bits()).collect())
+            .collect()
+    };
+
+    let mut children = compile_children(&document, limits()).expect("children");
+    let latency = children.plan.resources().latency_samples;
+    assert!(latency > 0, "the limiter delays A");
+    submit_direct(&mut children, &source, 0);
+    let mut swapped = feed_and_render_direct(&mut children, &source, 0, 6);
+    children
+        .session
+        .command(&transaction, 4_096)
+        .expect("removal transaction");
+    swapped.extend(feed_and_render_direct(&mut children, &source, 6, 6));
+    assert_eq!(children.plan.owner().carried_count(), 1, "the swap carried");
+    assert_eq!(
+        children.plan.resources().latency_samples,
+        latency,
+        "the plan reports A's latency after the swap (D4)"
+    );
+
+    let mut reference = compile_children(&document, limits()).expect("reference");
+    submit_direct(&mut reference, &source, 0);
+    reference
+        .session
+        .command(&transaction, 4_096)
+        .expect("reference transaction");
+    let expected = feed_and_render_direct(&mut reference, &source, 0, 12);
+    assert_eq!(reference.plan.owner().carried_count(), 1);
+    assert_eq!(reference.plan.resources().latency_samples, latency);
+    assert!(
+        expected[7..].iter().flatten().all(|sample| *sample != 0.0),
+        "the reference plays after the swap"
+    );
+    assert_eq!(
+        bits(&swapped),
+        bits(&expected),
+        "every block equals B compiled with A's floors"
+    );
+
+    let committed = session::canonical_session_json(
+        children
+            .session
+            .test_controller()
+            .session()
+            .compiled()
+            .normalized_model(),
+    )
+    .expect("committed");
+    let mut fresh = compile_children(&committed, limits()).expect("fresh B");
+    assert!(fresh.plan.resources().latency_samples < latency);
+    submit_direct(&mut fresh, &source, 0);
+    let unfloored = feed_and_render_direct(&mut fresh, &source, 0, 12);
+    assert_ne!(
+        bits(&unfloored[6..]),
+        bits(&expected[6..]),
+        "without floors the remaining tracks move by the limiter's latency"
+    );
+}
+
+// Issue #1323: a host-declared discontinuity resets the latency floors of #1285.
+
+/// The #1285 gate 3 session: three tracks on the fixture source, the first muted behind a
+/// true-peak limiter insert, and the `RemoveRoute`/`RemoveTrack` transaction that removes it.
+fn limited_session() -> (session::SessionModel, [protocol::SessionEdit; 2]) {
+    let mut model = stateless_session(48_000);
+    let limited = &mut model.tracks[0];
+    limited.fader.left_mute = true;
+    limited.fader.right_mute = true;
+    limited.inserts.effects.push(session::Effect {
+        id: session::StableId::parse("lim").expect("insert ID"),
+        identity: session::EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.true-peak-limiter").expect("limiter id"),
+        },
+        quality: session::EffectQuality::Normal,
+        bypass: false,
+        link_mode: session::LinkMode::Maximum,
+        params: Vec::new(),
+        sidechain: session::SidechainDeclaration::None,
+    });
+    let edits = [
+        protocol::SessionEdit::RemoveRoute {
+            route_id: model.routes[0].id.clone(),
+        },
+        protocol::SessionEdit::RemoveTrack {
+            track_id: model.tracks[0].id.clone(),
+        },
+    ];
+    (model, edits)
+}
+
+/// `edits` as one transaction expected at `revision`.
+fn transaction_at(request_id: u64, revision: u64, edits: &[protocol::SessionEdit]) -> Vec<u8> {
+    command_bytes_at_revision(
+        request_id,
+        ExpectedRevision::Exact(SessionRevision(revision)),
+        protocol::CommandPayload::SessionTransactionApply(edits),
+    )
+}
+
+/// Runs `request` on the session state, which must accept it, and drains the reliable events.
+fn command_direct(children: &mut CompiledChildren, request: &[u8]) {
+    children
+        .session
+        .command(request, 4_096)
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    while children
+        .session
+        .dequeue_event(EventLane::Reliable, 4_096)
+        .expect("a reliable event")
+        .is_some()
+    {}
+}
+
+/// The committed model's canonical JSON.
+fn committed_document(children: &CompiledChildren) -> String {
+    session::canonical_session_json(
+        children
+            .session
+            .test_controller()
+            .session()
+            .compiled()
+            .normalized_model(),
+    )
+    .expect("canonical")
+}
+
+/// `document` compiled fresh, so with no floors, fed the fixture source's signal from source
+/// block `from` on, rendered for `blocks` blocks: the reference of a plan that adopts at block
+/// `from` with its carried source consumer standing at frame `from * 128`. Returns its latency
+/// and its blocks.
+fn natural_reference(document: &str, from: u64, blocks: u64) -> (u64, Vec<Vec<f32>>) {
+    let mut fresh = compile_children(document, limits()).expect("fresh");
+    let latency = fresh.plan.resources().latency_samples;
+    let submit = |fresh: &mut CompiledChildren, block: u64| {
+        let (left, right) = continuity_block(from + block, 0);
+        fresh
+            .session
+            .submit(
+                b"fixture-source",
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: block * 128,
+                    sample_rate_hz: 48_000,
+                    planes: &[&left, &right],
+                    frames: 128,
+                    end_of_region: false,
+                },
+            )
+            .unwrap_or_else(|error| panic!("block {block}: {:?}", error.report()));
+    };
+    submit(&mut fresh, 0);
+    let rendered = (0..blocks)
+        .map(|block| {
+            submit(&mut fresh, block + 1);
+            render_direct(&mut fresh, block)
+        })
+        .collect();
+    (latency, rendered)
+}
+
+fn sample_bits(blocks: &[Vec<f32>]) -> Vec<Vec<u32>> {
+    blocks
+        .iter()
+        .map(|block| block.iter().map(|sample| sample.to_bits()).collect())
+        .collect()
+}
+
+/// Issue #1323 gate 2: the #1285 removal through the C ABI, then
+/// `miso_engine_v1_declare_discontinuity`. Before the declaration
+/// `miso_engine_v1_plan_resources` reports A's latency (the floors), and after one render it
+/// reports the committed session's natural latency; from that block the output is the committed
+/// session compiled fresh, fed from the frame the carried source stood at. The revision and the
+/// watermark do not move.
+///
+/// Test value: red if the declaration clears the floors in an inventory but publishes no plan (the
+/// report keeps A's latency), if the C entry does not reach the control plane, or if the
+/// successor carries any state but the source (the compensation lines differ from a fresh plan's).
+#[test]
+fn a_declared_discontinuity_reports_the_natural_latency_on_the_c_abi() {
+    let (model, edits) = limited_session();
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let (c_session, c_plan) = boxed_c_children(&document);
+    let latency = crate::ffi::test_plan_latency(c_plan);
+    assert!(latency > 0, "the limiter delays A");
+    let (left, right) = continuity_block(0, 0);
+    submit_c(c_session, 1, 0, 48_000, &left, &right, false);
+    feed_and_render_c(c_session, c_plan, 48_000, 0, 6);
+    assert_eq!(
+        command_c(c_session, &transaction_at(1, 42, &edits)).0,
+        crate::RESULT_OK
+    );
+    feed_and_render_c(c_session, c_plan, 48_000, 6, 4);
+    assert_eq!(
+        crate::ffi::test_plan_latency(c_plan),
+        latency,
+        "the removal keeps A's latency (#1285)"
+    );
+    let summary = crate::ffi::test_session_state_summary(c_session);
+    let (_, watermark) = crate::ffi::test_plan_watermark(c_plan);
+    assert_eq!(watermark.revision, 43);
+
+    assert_eq!(
+        crate::ffi::test_declare_discontinuity(c_session),
+        crate::RESULT_OK
+    );
+    assert_eq!(
+        crate::ffi::test_plan_latency(c_plan),
+        latency,
+        "the running plan reports until render adopts the successor"
+    );
+    let reset = feed_and_render_c(c_session, c_plan, 48_000, 10, 6);
+    let (natural, expected) = natural_reference(&snapshot_c(c_session), 10, 6);
+    assert!(natural < latency, "B's natural latency is lower");
+    assert_eq!(crate::ffi::test_plan_latency(c_plan), natural);
+    assert!(
+        expected.iter().flatten().any(|sample| *sample != 0.0),
+        "the reference plays"
+    );
+    assert_eq!(sample_bits(&reset), sample_bits(&expected));
+    let after = crate::ffi::test_session_state_summary(c_session);
+    assert_eq!(after.0, summary.0, "the revision does not move");
+    let (_, adopted) = crate::ffi::test_plan_watermark(c_plan);
+    assert_eq!(adopted, watermark, "the watermark does not move");
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// Issue #1323 gate 3: a declaration with nothing to reset returns `OK`, publishes no plan and
+/// leaves the output bit-identical to a run without it: on a session at revision 0 (B15-R6: no
+/// successor, so no floor), and after a structural transaction that adds a muted track, whose
+/// successor's floors raise no node.
+///
+/// Test value: red if the declaration always rebuilds (every effect tail and line would restart
+/// at each stop: here the compensation lines of the added track's path and the limiter restart,
+/// and the output differs from the twin), or if it refuses or moves the revision at revision 0.
+#[test]
+fn a_declaration_with_nothing_to_reset_publishes_nothing() {
+    for (label, revision, structural) in [("revision 0", 0, false), ("added track", 42, true)] {
+        let (mut model, _) = limited_session();
+        model.revision = revision;
+        let document = session::canonical_session_json(&model).expect("canonical");
+        let run = |declare: bool| {
+            let mut children = compile_children(&document, limits()).expect("children");
+            let latency = children.plan.resources().latency_samples;
+            submit_direct(&mut children, &[b"fixture-source"], 0);
+            if declare {
+                let epoch = children.session.newest_plan_epoch();
+                children
+                    .session
+                    .declare_discontinuity()
+                    .expect("nothing to reset");
+                assert_eq!(children.session.newest_plan_epoch(), epoch, "{label}");
+            }
+            let mut blocks = feed_and_render_direct(&mut children, &[b"fixture-source"], 0, 4);
+            if structural {
+                command_direct(
+                    &mut children,
+                    &transaction_at(
+                        1,
+                        revision,
+                        &add_muted_track(&stateless_session(48_000), "a-muted"),
+                    ),
+                );
+            }
+            blocks.extend(feed_and_render_direct(
+                &mut children,
+                &[b"fixture-source"],
+                4,
+                2,
+            ));
+            assert!(
+                !children
+                    .session
+                    .test_providers()
+                    .test_inventory()
+                    .runs_behind_natural_timing(),
+                "{label}: no floor is raised"
+            );
+            if declare {
+                let epoch = children.session.newest_plan_epoch();
+                let summary = children.session.test_state_summary();
+                children
+                    .session
+                    .declare_discontinuity()
+                    .expect("nothing to reset");
+                assert_eq!(children.session.newest_plan_epoch(), epoch, "{label}");
+                assert_eq!(children.session.test_state_summary(), summary, "{label}");
+            }
+            blocks.extend(feed_and_render_direct(
+                &mut children,
+                &[b"fixture-source"],
+                6,
+                6,
+            ));
+            assert_eq!(
+                children.plan.resources().latency_samples,
+                latency,
+                "{label}"
+            );
+            blocks
+        };
+        let declared = run(true);
+        let twin = run(false);
+        assert!(
+            twin[8..].iter().flatten().any(|sample| *sample != 0.0),
+            "{label}: the twin plays"
+        );
+        assert_eq!(sample_bits(&declared), sample_bits(&twin), "{label}");
+    }
+}
+
+/// Issue #1323 gate 4: with the replacement peak cap below any successor, the declaration after
+/// the #1285 removal returns the cap's compile rejection, and the plan render runs, its floors,
+/// the committed model and the revision are unchanged: the next blocks equal a run without the
+/// call. With the cap lifted, the same declaration then resets the floors.
+///
+/// Test value: red if the declaration drops the floors before its preparation succeeds (the
+/// running epoch's inventory loses them and the retry finds nothing to reset, so the latency
+/// never comes down), or if a refusal publishes or moves anything.
+#[test]
+fn a_refused_declaration_changes_nothing() {
+    let (model, edits) = limited_session();
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let run = |declare: bool| {
+        let mut children = compile_children(&document, limits()).expect("children");
+        let latency = children.plan.resources().latency_samples;
+        submit_direct(&mut children, &[b"fixture-source"], 0);
+        let mut blocks = feed_and_render_direct(&mut children, &[b"fixture-source"], 0, 6);
+        command_direct(&mut children, &transaction_at(1, 42, &edits));
+        blocks.extend(feed_and_render_direct(
+            &mut children,
+            &[b"fixture-source"],
+            6,
+            4,
+        ));
+        if declare {
+            let floors = children.session.test_providers().test_inventory().clone();
+            assert!(floors.runs_behind_natural_timing());
+            let epoch = children.session.newest_plan_epoch();
+            let summary = children.session.test_state_summary();
+            let committed = committed_document(&children);
+            children.session.set_replacement_peak_limit(1);
+            let refused = children.session.declare_discontinuity();
+            assert!(
+                matches!(refused, Err(CommandError::CompileRejected(_))),
+                "{refused:?}"
+            );
+            assert_eq!(children.session.newest_plan_epoch(), epoch);
+            assert_eq!(children.session.test_state_summary(), summary);
+            assert_eq!(committed_document(&children), committed);
+            assert_eq!(
+                children
+                    .session
+                    .test_providers()
+                    .test_inventory()
+                    .input_floors(),
+                floors.input_floors(),
+                "the running plan keeps its floors"
+            );
+            children.session.set_replacement_peak_limit(u64::MAX);
+        }
+        blocks.extend(feed_and_render_direct(
+            &mut children,
+            &[b"fixture-source"],
+            10,
+            2,
+        ));
+        assert_eq!(children.plan.resources().latency_samples, latency);
+        (children, blocks, latency)
+    };
+    let (mut refused, blocks, latency) = run(true);
+    let (_, twin, _) = run(false);
+    assert_eq!(sample_bits(&blocks), sample_bits(&twin));
+
+    refused
+        .session
+        .declare_discontinuity()
+        .expect("the retry under the lifted cap");
+    feed_and_render_direct(&mut refused, &[b"fixture-source"], 12, 1);
+    let (natural, _) = natural_reference(&committed_document(&refused), 12, 1);
+    assert!(natural < latency);
+    assert_eq!(refused.plan.resources().latency_samples, natural);
+}
+
+/// The lifecycle counters of every owner and reservation, balanced once both handles are gone.
+fn assert_owners_balanced(counters: TestOwnerCounters) {
+    assert_eq!(
+        counters.current_provider_constructed + counters.candidate_provider_constructed,
+        counters.current_provider_disposed + counters.candidate_provider_disposed,
+        "providers"
+    );
+    assert_eq!(
+        counters.current_plan_constructed + counters.candidate_plan_constructed,
+        counters.current_plan_disposed + counters.candidate_plan_disposed,
+        "plans"
+    );
+    assert_eq!(
+        counters.token_constructed, counters.token_disposed,
+        "tokens"
+    );
+    assert_eq!(
+        counters.reservation_constructed,
+        counters.reservation_canceled + counters.reservation_committed,
+        "reservations"
+    );
+}
+
+/// Issue #1323 gate 5: a declared stop supersedes a pending warm successor. The #1285 removal B
+/// is committed and published `Primed` 64 blocks ahead (floored at A's arrivals, so above its
+/// natural ones). After 4 blocks B is still pending; the declaration withdraws it, and the block
+/// after the declaration is the discontinuity successor's: from it the output is the committed
+/// session compiled fresh, fed from the frame the carried source stood at, at the natural
+/// latency. B is never adopted. The watermark advances to the committed revision at that block
+/// with `EXACT` and never `TRANSITION_FALLBACK`; with an earlier structural edit B folded in, with
+/// `EXACT | SUPERSEDED`, and `superseded` grows by 1. The source's producer moves into the
+/// successor, and every owner and reservation balances.
+///
+/// Test value: red if the successor is published with B's `Primed` kind (it waits for
+/// `not_before` and readiness, and the floored B plays past the stop), if B is left to its own
+/// adoption, or if the revision is reported as a fallback or loses B's folded revision.
+fn a_declared_stop_supersedes_a_pending_warm_successor(fold: bool) {
+    const DECLARED_AT: u64 = 8;
+    test_reset_lifecycle_observer();
+    {
+        let (model, edits) = limited_session();
+        let document = session::canonical_session_json(&model).expect("canonical");
+        let mut children = compile_children(&document, limits()).expect("children");
+        let latency = children.plan.resources().latency_samples;
+        submit_direct(&mut children, &[b"fixture-source"], 0);
+        feed_and_render_direct(&mut children, &[b"fixture-source"], 0, 4);
+        let mut revision = 42;
+        if fold {
+            // An edit committed and left pending: B supersedes it, so B folds in one revision.
+            command_direct(
+                &mut children,
+                &transaction_at(
+                    1,
+                    revision,
+                    &add_muted_track(&stateless_session(48_000), "a-muted"),
+                ),
+            );
+            revision += 1;
+        }
+        children
+            .session
+            .test_set_next_adoption(engine::realtime::PlanAdoption::Primed {
+                not_before: (4 + 64) * 128,
+                lead_blocks: 1,
+            });
+        command_direct(&mut children, &transaction_at(2, revision, &edits));
+        revision += 1;
+        assert!(
+            children.session.test_pending_providers()[0]
+                .test_inventory()
+                .runs_behind_natural_timing(),
+            "B is floored above its natural arrivals"
+        );
+        feed_and_render_direct(&mut children, &[b"fixture-source"], 4, 4);
+        let before = children.plan.queries().watermark().expect("watermark");
+        assert_eq!(before.revision, 42, "B waits, unadopted");
+        assert_eq!(children.session.test_pending_providers().len(), 1);
+        let counters = children.session.test_owner_counters();
+
+        children
+            .session
+            .declare_discontinuity()
+            .expect("the declaration");
+        let after = children.session.test_owner_counters();
+        assert_eq!(after.candidate_withdrawn, counters.candidate_withdrawn + 1);
+        assert_eq!(
+            after.candidate_superseded,
+            counters.candidate_superseded + 1
+        );
+        assert_eq!(after.candidate_republished, counters.candidate_republished);
+        assert_eq!(
+            after.candidate_provider_published,
+            counters.candidate_provider_published + 1
+        );
+        let newest = children.session.newest_plan_epoch();
+        let successor = children
+            .session
+            .test_epoch_mut(newest)
+            .expect("the successor's epoch");
+        assert_eq!(
+            successor.test_source_vacant(b"fixture-source"),
+            Some(false),
+            "the source's producer moved into the successor"
+        );
+
+        let reset = feed_and_render_direct(&mut children, &[b"fixture-source"], DECLARED_AT, 8);
+        let watermark = children.plan.queries().watermark().expect("watermark");
+        assert_eq!(
+            (watermark.revision, watermark.first_sample),
+            (revision, DECLARED_AT * 128),
+            "the successor is adopted at the block after the declaration"
+        );
+        let superseded = u64::from(fold);
+        assert_eq!(
+            watermark.outcome_flags,
+            engine::realtime::OUTCOME_EXACT
+                | if fold {
+                    engine::realtime::OUTCOME_SUPERSEDED
+                } else {
+                    0
+                }
+        );
+        assert_eq!(watermark.superseded, before.superseded + superseded);
+        assert_eq!(watermark.exact, before.exact + 1);
+        assert_eq!(watermark.transition_fallback, before.transition_fallback);
+        let (natural, expected) = natural_reference(&committed_document(&children), DECLARED_AT, 8);
+        assert!(natural < latency);
+        assert_eq!(children.plan.resources().latency_samples, natural);
+        assert!(expected.iter().flatten().any(|sample| *sample != 0.0));
+        assert_eq!(sample_bits(&reset), sample_bits(&expected));
+    }
+    assert_owners_balanced(test_lifecycle_counters());
+}
+
+#[test]
+fn a_declared_stop_supersedes_a_pending_warm_successor_alone_and_folded() {
+    a_declared_stop_supersedes_a_pending_warm_successor(false);
+    a_declared_stop_supersedes_a_pending_warm_successor(true);
+}
+
+/// Issue #1323, the supersession the spec leaves open: a structural edit E committed while the
+/// discontinuity successor D waits unadopted supersedes it, and E is prepared at the same
+/// discontinuity. Render never played D, so the pair is the one transaction "declare, then edit"
+/// against the running plan, whose combined twin (P0 -> E) has no floors: E runs at its natural
+/// latency, carries only its source, and renders as its model compiled fresh from the block that
+/// adopts it. A second declaration while D waits finds nothing to reset (D has no raised floor)
+/// and publishes nothing.
+///
+/// Test value: red if E is prepared as an ordinary successor across the withdrawn D: its base is
+/// the running plan's inventory, so E takes the running plan's floors (A's latency) and the
+/// declared stop is lost.
+#[test]
+fn an_edit_that_supersedes_a_discontinuity_successor_is_prepared_at_it() {
+    const ADOPTED_AT: u64 = 10;
+    let (model, edits) = limited_session();
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let mut children = compile_children(&document, limits()).expect("children");
+    let latency = children.plan.resources().latency_samples;
+    submit_direct(&mut children, &[b"fixture-source"], 0);
+    feed_and_render_direct(&mut children, &[b"fixture-source"], 0, 6);
+    command_direct(&mut children, &transaction_at(1, 42, &edits));
+    feed_and_render_direct(&mut children, &[b"fixture-source"], 6, 4);
+    assert_eq!(children.plan.resources().latency_samples, latency);
+    let before = children.plan.queries().watermark().expect("watermark");
+
+    children
+        .session
+        .declare_discontinuity()
+        .expect("the declaration");
+    let declared = children.session.newest_plan_epoch();
+    children
+        .session
+        .declare_discontinuity()
+        .expect("a second declaration");
+    assert_eq!(
+        children.session.newest_plan_epoch(),
+        declared,
+        "the waiting discontinuity successor has nothing to reset"
+    );
+    let counters = children.session.test_owner_counters();
+    let edit = add_muted_track(
+        children
+            .session
+            .test_controller()
+            .session()
+            .compiled()
+            .normalized_model(),
+        "a-muted",
+    );
+    command_direct(&mut children, &transaction_at(2, 43, &edit));
+    let after = children.session.test_owner_counters();
+    assert_eq!(after.candidate_withdrawn, counters.candidate_withdrawn + 1);
+    assert_eq!(
+        after.candidate_superseded,
+        counters.candidate_superseded + 1
+    );
+    assert!(
+        !children.session.test_pending_providers()[0]
+            .test_inventory()
+            .runs_behind_natural_timing(),
+        "E has no raised floor"
+    );
+
+    let rendered = feed_and_render_direct(&mut children, &[b"fixture-source"], ADOPTED_AT, 6);
+    let watermark = children.plan.queries().watermark().expect("watermark");
+    assert_eq!(
+        (watermark.revision, watermark.first_sample),
+        (44, ADOPTED_AT * 128)
+    );
+    assert_eq!(watermark.outcome_flags, engine::realtime::OUTCOME_EXACT);
+    assert_eq!(watermark.superseded, before.superseded);
+    let (natural, expected) = natural_reference(&committed_document(&children), ADOPTED_AT, 6);
+    assert!(natural < latency);
+    assert_eq!(children.plan.resources().latency_samples, natural);
+    assert!(expected.iter().flatten().any(|sample| *sample != 0.0));
+    assert_eq!(sample_bits(&rendered), sample_bits(&expected));
 }
 
 /// Issue #1273 gate 3: a structural transaction refused at any phase, including a protocol
@@ -3061,10 +4095,7 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
 
     // Same latency and tail as the lanes-free plan.
     let resources = c.plan.resources();
-    let (tail_kind, tail_samples) = match host.output_tail {
-        TailSamples::Finite(samples) => (TAIL_FINITE, samples),
-        TailSamples::Infinite => (TAIL_INFINITE, 0),
-    };
+    let (tail_kind, tail_samples) = control_plane::tail_words(host.output_tail);
     if expect_finite {
         assert_eq!(
             tail_kind, TAIL_FINITE,
@@ -3087,7 +4118,8 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
         );
     } else {
         assert_eq!(
-            resources.tail_kind, TAIL_INFINITE,
+            resources.tail_kind,
+            crate::TAIL_INFINITE,
             "{label}: an infinite-tail effect keeps the plan's tail infinite"
         );
     }
@@ -3110,10 +4142,7 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
     );
     assert_eq!(
         (resources.tail_kind, resources.tail_samples),
-        match without_effects.output_tail {
-            TailSamples::Finite(samples) => (TAIL_FINITE, samples),
-            TailSamples::Infinite => (TAIL_INFINITE, 0),
-        },
+        control_plane::tail_words(without_effects.output_tail),
         "{label}: tail without effect lanes"
     );
 

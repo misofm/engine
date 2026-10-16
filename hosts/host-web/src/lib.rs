@@ -1217,6 +1217,34 @@ pub struct WebPlanWatermark {
 /// Exact byte size of [`WebPlanWatermark`], equal to the C ABI watermark's.
 pub const WATERMARK_BYTES: u32 = size_of::<WebPlanWatermark>() as u32;
 
+/// The active plan's output latency and tail (#1688 D2), in the order and sizes of the C ABI
+/// report's `latency_samples`, `tail_kind` and `tail_samples` words.
+///
+/// The host keeps one at a stable address, written by
+/// [`AudioWorkletEngineHost::read_plan_latency`] and found through
+/// `miso_engine_web_v1_plan_latency_ptr`. The words are the control plane's row for the active
+/// plan epoch, copied: the browser computes nothing.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebPlanLatency {
+    /// Exact structure byte size ([`PLAN_LATENCY_BYTES`]); zero until the first successful read.
+    pub struct_size: u32,
+    /// Required zero.
+    pub reserved0: u32,
+    /// The plan's output latency in samples.
+    pub latency_samples: u64,
+    /// `0` for a tail that ends after `tail_samples`, `1` for an unbounded one: the C ABI's
+    /// `TAIL_FINITE` and `TAIL_INFINITE`.
+    pub tail_kind: u64,
+    /// The finite tail in samples; zero for an unbounded tail.
+    pub tail_samples: u64,
+    /// Required-zero expansion words.
+    pub reserved: [u64; 4],
+}
+
+/// Exact byte size of [`WebPlanLatency`].
+pub const PLAN_LATENCY_BYTES: u32 = size_of::<WebPlanLatency>() as u32;
+
 /// Exact retained-resource projection for the browser bridge and production artifacts.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1462,7 +1490,7 @@ struct PlanShape {
 /// host drops a superseded candidate's tables as soon as the core no longer holds its epoch
 /// ([`ReadyOwnership::drop_superseded_shapes`]); the tables of plans adopted since the last
 /// service step wait for it. So a command meets at most one entry after the reclaim and adds one:
-/// four leaves room to spare, and the room check in [`ReadyOwnership::run_command`] never refuses
+/// four leaves room to spare, and the room check in [`ReadyOwnership::run_control`] never refuses
 /// a structural edit, paused or not.
 const PENDING_SHAPES: usize = 4;
 
@@ -1620,12 +1648,40 @@ impl ReadyOwnership {
         analysis: Option<&mut SpectrumAnalysis>,
         applied_at_sample: u64,
     ) -> Result<usize, control_plane::CommandError> {
+        self.run_control(analysis, applied_at_sample, |control| {
+            control.command(request, output_capacity)
+        })
+    }
+
+    /// Declare a discontinuity through the control plane (#1323), the function the C ABI's
+    /// `miso_engine_v1_declare_discontinuity` runs. A plan it publishes is kept and counted as
+    /// [`Self::run_command`] keeps a rebuild's.
+    fn declare_discontinuity(
+        &mut self,
+        analysis: Option<&mut SpectrumAnalysis>,
+        applied_at_sample: u64,
+    ) -> Result<(), control_plane::CommandError> {
+        self.run_control(analysis, applied_at_sample, |control| {
+            control.declare_discontinuity().map(|()| 0)
+        })
+        .map(|_| ())
+    }
+
+    /// Run one control-plane call that may publish a replacement plan (#1290a, #1323): reclaim
+    /// first, check the room for the plan's tables, run `call`, and keep the tables of a plan it
+    /// published for its adoption block.
+    fn run_control(
+        &mut self,
+        analysis: Option<&mut SpectrumAnalysis>,
+        applied_at_sample: u64,
+        call: impl FnOnce(&mut WebSession) -> Result<usize, control_plane::CommandError>,
+    ) -> Result<usize, control_plane::CommandError> {
         self.reclaim_shapes(analysis);
         if self.pending_shapes.len() == self.pending_shapes.capacity() {
             return Err(control_plane::CommandError::Backpressure);
         }
         let before = self.control.newest_plan_epoch();
-        let result = self.control.command(request, output_capacity);
+        let result = call(&mut self.control);
         // Whatever the preparer left is taken: a command refused after its preparation leaves
         // tables nothing will read.
         let (prepared, handover) = self.record.lock().map_or((None, None), |mut record| {
@@ -2091,6 +2147,9 @@ pub struct AudioWorkletEngineHost {
     /// The watermark `read_watermark` last copied (#1381a D5), at a stable address in the
     /// control half: all zero until the first successful read.
     watermark: WebPlanWatermark,
+    /// The plan latency `read_plan_latency` last copied (#1688 D2), at a stable address in the
+    /// control half: all zero until the first successful read.
+    plan_latency: WebPlanLatency,
     /// First sample eligible for the current lease. A snapshot that opens before this boundary
     /// is an old/partial interval and is dropped rather than presented as a clean measurement.
     meter_activation_sample: u64,
@@ -2290,6 +2349,7 @@ impl AudioWorkletEngineHost {
                 struct_size: WATERMARK_BYTES,
                 ..WebPlanWatermark::default()
             },
+            plan_latency: WebPlanLatency::default(),
             meter_lease: false,
             meter_activation_sample: 0,
             buffers: Some(buffers),
@@ -2443,28 +2503,63 @@ impl AudioWorkletEngineHost {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
             }
-            Err(error) => {
-                let diagnostic = error.diagnostic();
-                let kept = diagnostic.len().min(buffers.diagnostic.len());
-                buffers.diagnostic[..kept].copy_from_slice(&diagnostic[..kept]);
-                self.diagnostic_len = kept;
-                self.control_response = ControlResponse::Diagnostic;
-                self.record(match error {
-                    control_plane::CommandError::Invalid => RESULT_INVALID_ARGUMENT,
-                    control_plane::CommandError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
-                    control_plane::CommandError::Backpressure => RESULT_BACKPRESSURE,
-                    // #1290a: a transaction that changes the rate or the quantum cannot be applied
-                    // to a running plan; the page re-prepares the session from its document.
-                    control_plane::CommandError::CompileRejected(_)
-                        if diagnostic.starts_with(control_plane::REPREPARE_REQUIRED.as_bytes()) =>
-                    {
-                        RESULT_REPREPARE_REQUIRED
-                    }
-                    control_plane::CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
-                    control_plane::CommandError::Internal => RESULT_INTERNAL,
-                })
-            }
+            Err(error) => self.refuse_control(&error),
         }
+    }
+
+    /// Declare a discontinuity (#1323): the next block this host renders need not continue the
+    /// previous output, because the page has stopped or is about to seek every source. The page
+    /// calls it at a stop and before a seek of every source. It runs the control plane's
+    /// `SessionState::declare_discontinuity`, the function the C ABI's
+    /// `miso_engine_v1_declare_discontinuity` runs: if the newest plan runs behind its natural
+    /// timing (a latency floor of a structural transaction raised it, #1285), the committed
+    /// session is prepared again with no floors and only its sources carried, and published for
+    /// the next block; otherwise nothing is published. The model and the revision do not change.
+    /// Control work, as [`Self::control_command`]: never `process()`.
+    ///
+    /// Results: [`RESULT_OK`]; [`RESULT_WRONG_STATE`] for a host that is not ready; and the
+    /// refusals of [`Self::control_command`] for a rebuild, with the core's diagnostic at
+    /// [`Self::control_response`]. A refusal changes nothing.
+    pub fn declare_discontinuity(&mut self, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
+        self.control_response = ControlResponse::None;
+        if self.status.state != STATE_READY {
+            return self.record(RESULT_WRONG_STATE);
+        }
+        let applied_at_sample = self.status.next_absolute_sample;
+        let Some(ready) = self.ready.as_mut() else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        };
+        match ready.declare_discontinuity(analysis, applied_at_sample) {
+            Ok(()) => self.record(RESULT_OK),
+            Err(error) => self.refuse_control(&error),
+        }
+    }
+
+    /// A refused control call (#1562a D1, #1323): the core's diagnostic into the session
+    /// diagnostic and the response, and the result code for `error`.
+    fn refuse_control(&mut self, error: &control_plane::CommandError) -> u32 {
+        let Some(buffers) = self.buffers.as_mut() else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        };
+        let diagnostic = error.diagnostic();
+        let kept = diagnostic.len().min(buffers.diagnostic.len());
+        buffers.diagnostic[..kept].copy_from_slice(&diagnostic[..kept]);
+        self.diagnostic_len = kept;
+        self.control_response = ControlResponse::Diagnostic;
+        self.record(match error {
+            control_plane::CommandError::Invalid => RESULT_INVALID_ARGUMENT,
+            control_plane::CommandError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
+            control_plane::CommandError::Backpressure => RESULT_BACKPRESSURE,
+            // #1290a: a transaction that changes the rate or the quantum cannot be applied
+            // to a running plan; the page re-prepares the session from its document.
+            control_plane::CommandError::CompileRejected(_)
+                if diagnostic.starts_with(control_plane::REPREPARE_REQUIRED.as_bytes()) =>
+            {
+                RESULT_REPREPARE_REQUIRED
+            }
+            control_plane::CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
+            control_plane::CommandError::Internal => RESULT_INTERNAL,
+        })
     }
 
     /// Dequeue the next event of `lane` (issue #1570b D1): `0` is the reliable lane, `1` the lossy
@@ -2625,6 +2720,38 @@ impl AudioWorkletEngineHost {
             reserved: [0; 5],
         };
         RESULT_OK
+    }
+
+    /// Copy the active plan's output latency and tail into the host's record (#1688 D2).
+    ///
+    /// The words are the control plane's resource row for the active plan epoch, the same
+    /// `PlanQueries::resources()` row the C ABI reports, with the tail in the control plane's
+    /// two-word encoding: a successor's values appear from the first read after the block that
+    /// adopts it. Like [`Self::service`] it leaves the status's last result alone.
+    pub fn read_plan_latency(&mut self) -> u32 {
+        if self.status.state != STATE_READY {
+            return RESULT_WRONG_STATE;
+        }
+        let Some(ready) = self.ready.as_ref() else {
+            return RESULT_WRONG_STATE;
+        };
+        let resources = ready.queries.resources();
+        let (tail_kind, tail_samples) = control_plane::tail_words(resources.output_tail);
+        self.plan_latency = WebPlanLatency {
+            struct_size: PLAN_LATENCY_BYTES,
+            reserved0: 0,
+            latency_samples: resources.latency_samples,
+            tail_kind,
+            tail_samples,
+            reserved: [0; 4],
+        };
+        RESULT_OK
+    }
+
+    /// The record [`Self::read_plan_latency`] fills.
+    #[must_use]
+    pub const fn plan_latency(&self) -> &WebPlanLatency {
+        &self.plan_latency
     }
 
     /// The record [`Self::read_watermark`] fills.

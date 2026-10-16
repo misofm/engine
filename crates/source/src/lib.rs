@@ -408,6 +408,11 @@ pub struct SourceReadReport {
     pub underrun_frames: u32,
     /// Whether this call contained one maximal missing in-region run.
     pub underrun_event: bool,
+    /// In-region frames emitted as positive zero because an anchored seek is held: the host asked
+    /// the source to wait, so the frames are not an underrun.
+    pub held_frames: u32,
+    /// Whether this call was a held block (`held_frames != 0`).
+    pub held: bool,
     /// Whether the source is at a declared end-of-region after this call.
     pub end_of_region: bool,
     /// Active generation used for this render quantum.
@@ -420,6 +425,10 @@ pub struct SourceReadReport {
     pub cumulative_underrun_frames: u64,
     /// Saturating cumulative missing-run count.
     pub cumulative_underrun_events: u64,
+    /// Saturating cumulative held in-region frame count.
+    pub cumulative_held_frames: u64,
+    /// Saturating cumulative held block count.
+    pub cumulative_held_blocks: u64,
 }
 
 /// Owner-local producer telemetry copied only outside render.
@@ -442,6 +451,10 @@ pub struct SourceConsumerTelemetry {
     pub stale_generation_discard_count: u64,
     pub underrun_frames: u64,
     pub underrun_events: u64,
+    /// Frames rendered as silence while an anchored seek was held (not underruns).
+    pub held_frames: u64,
+    /// Blocks rendered as silence while an anchored seek was held (not underruns).
+    pub held_blocks: u64,
     pub end_of_region: bool,
     /// Native-decoder replacements, or zero for a host-supplied consumer.
     pub native_decoder_sanitized_samples: u64,
@@ -612,6 +625,8 @@ impl PcmSourceRing {
             stale_generation_discard_count: 0,
             underrun_frames: 0,
             underrun_events: 0,
+            held_frames: 0,
+            held_blocks: 0,
             native_decoder_sanitized_samples: 0,
             generation_changed: false,
             held_seek: None,
@@ -1013,6 +1028,8 @@ pub struct PcmSourceConsumer {
     stale_generation_discard_count: u64,
     underrun_frames: u64,
     underrun_events: u64,
+    held_frames: u64,
+    held_blocks: u64,
     native_decoder_sanitized_samples: u64,
     generation_changed: bool,
     /// An observed [`SourceCommand::SeekAt`] whose anchor block has not begun yet (issue #1274).
@@ -1114,8 +1131,9 @@ impl PcmSourceConsumer {
     /// anchor; the block that starts at or past it applies the seek at `frame + (first_sample -
     /// anchor_sample)` (saturating). While it is held, queued PCM of the playing generation still
     /// plays, the new generation's first block is kept as the pending block, and with nothing
-    /// playable the block underruns. A newer command replaces a held one. This render-path
-    /// operation allocates nothing and never blocks.
+    /// playable the block is **held**, not an underrun (the host asked the source to wait; underrun
+    /// means the host owed PCM and did not deliver it). A newer command replaces a held one. This
+    /// render-path operation allocates nothing and never blocks.
     pub fn begin_block_at(&mut self, first_sample: u64) -> SourceReadReport {
         self.begin_block_with(SeekClock::At(first_sample))
     }
@@ -1141,6 +1159,7 @@ impl PcmSourceConsumer {
         self.acquire_current_block(clock);
         let mut copied_frames = 0_u32;
         let mut underrun_frames = 0_u32;
+        let mut held_frames = 0_u32;
         if self.end_reached() {
             self.end_of_region = true;
         } else if self.current_matches_next_frame() {
@@ -1161,7 +1180,7 @@ impl PcmSourceConsumer {
                 .end_frame
                 .map(|end| end.0.saturating_sub(self.next_frame.0))
                 .unwrap_or(u64::from(self.quantum_frames));
-            underrun_frames = u32::try_from(cmp::min(
+            let missing_frames = u32::try_from(cmp::min(
                 u64::from(self.quantum_frames),
                 available_until_end,
             ))
@@ -1171,11 +1190,22 @@ impl PcmSourceConsumer {
                     .0
                     .saturating_add(u64::from(self.quantum_frames)),
             );
-            if underrun_frames != 0 {
-                self.underrun_frames = self
-                    .underrun_frames
-                    .saturating_add(u64::from(underrun_frames));
-                self.underrun_events = self.underrun_events.saturating_add(1);
+            // After the acquire step, which can set or apply a held seek (`acquire_current_block`):
+            // missing PCM while an anchored seek is still held is a planned wait, not starvation.
+            if self.held_seek.is_some() {
+                held_frames = missing_frames;
+                if held_frames != 0 {
+                    self.held_frames = self.held_frames.saturating_add(u64::from(held_frames));
+                    self.held_blocks = self.held_blocks.saturating_add(1);
+                }
+            } else {
+                underrun_frames = missing_frames;
+                if underrun_frames != 0 {
+                    self.underrun_frames = self
+                        .underrun_frames
+                        .saturating_add(u64::from(underrun_frames));
+                    self.underrun_events = self.underrun_events.saturating_add(1);
+                }
             }
             if self.end_reached() {
                 self.end_of_region = true;
@@ -1185,12 +1215,16 @@ impl PcmSourceConsumer {
             copied_frames,
             underrun_frames,
             underrun_event: underrun_frames != 0,
+            held_frames,
+            held: held_frames != 0,
             end_of_region: self.end_of_region,
             active_generation: self.active_generation,
             generation_changed: self.generation_changed,
             cumulative_read_frames: self.cumulative_read_frames,
             cumulative_underrun_frames: self.underrun_frames,
             cumulative_underrun_events: self.underrun_events,
+            cumulative_held_frames: self.held_frames,
+            cumulative_held_blocks: self.held_blocks,
         }
     }
 
@@ -1308,6 +1342,8 @@ impl PcmSourceConsumer {
             stale_generation_discard_count: self.stale_generation_discard_count,
             underrun_frames: self.underrun_frames,
             underrun_events: self.underrun_events,
+            held_frames: self.held_frames,
+            held_blocks: self.held_blocks,
             end_of_region: self.end_of_region,
             native_decoder_sanitized_samples: self.native_decoder_sanitized_samples,
         }
@@ -2330,10 +2366,16 @@ mod tests {
         host.try_seek(seek_at(2, 4, 8)).unwrap();
         host.submit(chunk(2, 4, &[&[2.0; 4]], 4, false)).unwrap();
         let (output, report) = render_at(&mut consumer, 0);
-        assert_eq!((output, report.underrun_frames), ([0.0; 4], 4));
-        // The old generation's underrun has reached frame 4, the primed block's start.
+        assert_eq!(
+            (output, report.held_frames, report.underrun_frames),
+            ([0.0; 4], 4, 0)
+        );
+        // The old generation's held wait has reached frame 4, the primed block's start.
         let (output, report) = render_at(&mut consumer, 4);
-        assert_eq!((output, report.underrun_frames), ([0.0; 4], 4));
+        assert_eq!(
+            (output, report.held_frames, report.underrun_frames),
+            ([0.0; 4], 4, 0)
+        );
         assert_eq!(report.active_generation, SourceGeneration(1));
         let (output, report) = render_at(&mut consumer, 8);
         assert_eq!((output, report.copied_frames), ([2.0; 4], 4));
@@ -2462,7 +2504,9 @@ mod tests {
             }
             assert_eq!(consumer.active_generation, SourceGeneration(2));
             assert_eq!(consumer.stale_generation_discard_count, 0);
-            assert_eq!(consumer.underrun_events, u64::from(anchored));
+            // The anchored run waited one block for its anchor: held, never an underrun.
+            assert_eq!(consumer.underrun_events, 0);
+            assert_eq!(consumer.held_blocks, u64::from(anchored));
         }
 
         // An anchored seek whose anchor has already passed when the window's re-observe takes
@@ -2876,6 +2920,134 @@ mod tests {
                 source_generation_changed: true,
             }
         );
+    }
+
+    /// #1318 gate 3. Red if the graph source driver still folds a held block into the graph-wide
+    /// `source_underrun` flag (a planned wait would mark every spectrum window as starved), or if
+    /// the fix swallows a true underrun on another source in the same block.
+    #[test]
+    fn graph_driver_does_not_flag_a_held_block_as_an_underrun() {
+        let (producer, held, _) = PcmSourceRing::prepare(config(1, 4, 8)).expect("held ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        let (_other_producer, starved, _) =
+            PcmSourceRing::prepare(config(1, 4, 8)).expect("starved ring");
+        host.try_seek(seek_at(2, 100, 16)).expect("anchored seek");
+        let mut driver = test_driver(held, vec![test_mapping(0)]);
+        driver.begin_block(0, 4).expect("held block");
+        assert!(
+            !driver.observation_validity().source_underrun,
+            "a held block is a planned wait"
+        );
+        assert!(
+            !driver.sources[0]
+                .consumer
+                .as_ref()
+                .unwrap()
+                .held_seek
+                .is_none()
+        );
+        let telemetry = driver.sources[0].consumer.as_ref().unwrap().telemetry();
+        assert_eq!((telemetry.held_blocks, telemetry.underrun_events), (1, 0));
+
+        // A second source with nothing queued and no held seek is a true underrun in the same
+        // block, and sets the flag.
+        driver.sources = vec![
+            GraphSourceEntry {
+                channel_count: 1,
+                consumer: driver.sources[0].consumer.take(),
+            },
+            GraphSourceEntry {
+                channel_count: 1,
+                consumer: Some(starved),
+            },
+        ]
+        .into_boxed_slice();
+        driver.mappings = vec![
+            test_mapping(0),
+            SourceGraphTrackMapping {
+                source_index: 1,
+                ..test_mapping(1)
+            },
+        ]
+        .into_boxed_slice();
+        driver.begin_block(4, 4).expect("held and underrun block");
+        assert!(driver.observation_validity().source_underrun);
+        let telemetry = driver.sources[0].consumer.as_ref().unwrap().telemetry();
+        assert_eq!((telemetry.held_blocks, telemetry.underrun_events), (2, 0));
+        let telemetry = driver.sources[1].consumer.as_ref().unwrap().telemetry();
+        assert_eq!((telemetry.held_blocks, telemetry.underrun_events), (0, 1));
+    }
+
+    /// #1318 gate 1. Red if a block waiting for its anchor still counts as an underrun, or if
+    /// "held" outlives the anchor (the block at the anchor applied the seek: a host that owes PCM
+    /// then and delivers none is starved, not waiting).
+    #[test]
+    fn a_wait_for_an_anchor_is_held_and_starvation_after_it_is_an_underrun() {
+        for delivered in [true, false] {
+            let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+            let mut host = producer.into_host_chunk_provider(RATE);
+            host.try_seek(seek_at(2, 100, 16)).unwrap();
+            if delivered {
+                host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false)).unwrap();
+            }
+            for block in 0..4_u64 {
+                let (output, report) = render_at(&mut consumer, 4 * block);
+                assert_eq!(output, [0.0; 4]);
+                assert!(report.held, "block {block}");
+                assert_eq!(report.held_frames, 4);
+                assert!(!report.underrun_event, "block {block}");
+                assert_eq!(report.underrun_frames, 0);
+                assert_eq!(report.cumulative_held_blocks, block + 1);
+                assert_eq!(report.cumulative_held_frames, 4 * (block + 1));
+                assert_eq!(report.cumulative_underrun_events, 0);
+                assert_eq!(report.cumulative_underrun_frames, 0);
+            }
+            let (output, report) = render_at(&mut consumer, 16);
+            assert_eq!(report.active_generation, SourceGeneration(2));
+            assert!(report.generation_changed);
+            assert!(!report.held, "the seek applied at its anchor");
+            assert_eq!(report.held_frames, 0);
+            assert_eq!(report.cumulative_held_blocks, 4);
+            if delivered {
+                assert_eq!(output, [2.0; 4]);
+                assert_eq!(report.copied_frames, 4);
+                assert!(!report.underrun_event);
+                assert_eq!(report.cumulative_underrun_events, 0);
+            } else {
+                assert_eq!(output, [0.0; 4]);
+                assert!(report.underrun_event, "the host owed PCM at the anchor");
+                assert_eq!(report.underrun_frames, 4);
+                assert_eq!(report.cumulative_underrun_events, 1);
+            }
+            let telemetry = consumer.telemetry();
+            assert_eq!((telemetry.held_blocks, telemetry.held_frames), (4, 16));
+        }
+    }
+
+    /// #1318 gate 2. Red if held is decided by `held_seek` alone: the playing generation's
+    /// queued PCM still plays while a seek is held, and those blocks are neither held nor
+    /// underruns.
+    #[test]
+    fn queued_pcm_of_the_playing_generation_plays_while_a_seek_is_held() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&[1.0; 4]], 4, false)).unwrap();
+        host.submit(chunk(1, 4, &[&[1.5; 4]], 4, false)).unwrap();
+        host.try_seek(seek_at(2, 100, 16)).unwrap();
+        for (block, expected) in [(0_u64, 1.0), (1, 1.5)] {
+            let (output, report) = render_at(&mut consumer, 4 * block);
+            assert_eq!(output, [expected; 4]);
+            assert_eq!(report.copied_frames, 4);
+            assert!(!report.held && !report.underrun_event, "block {block}");
+            assert_eq!(report.cumulative_held_blocks, 0);
+        }
+        for block in 2..4_u64 {
+            let (output, report) = render_at(&mut consumer, 4 * block);
+            assert_eq!(output, [0.0; 4]);
+            assert!(report.held && !report.underrun_event, "block {block}");
+            assert_eq!(report.cumulative_held_blocks, block - 1);
+        }
+        assert_eq!(consumer.telemetry().underrun_events, 0);
     }
 
     /// #917 restates the pre-change `..._last_claim_recycles_in_call_...` test for the hold rule:

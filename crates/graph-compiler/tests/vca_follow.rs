@@ -61,6 +61,7 @@ fn text(model: &SessionModel) -> Vec<String> {
     )
     .expect("the native effects prepare");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id: 1,
         effects,

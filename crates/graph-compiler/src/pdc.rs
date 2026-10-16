@@ -32,14 +32,26 @@ pub(crate) struct TimingResult {
     pub(crate) delay_count: u64,
     pub(crate) output_latency: LatencySamples,
     pub(crate) output_tail: TailSamples,
+    /// Every node whose input arrival (its floored `max`) is nonzero, sorted by node ID (#1285 D2).
+    pub(crate) input_arrivals: Vec<(GraphNodeId, LatencySamples)>,
+    /// Every node whose floor raised its input arrival, with its latest incoming arrival, sorted
+    /// by node ID (#1323 D3).
+    pub(crate) raised_arrivals: Vec<(GraphNodeId, LatencySamples)>,
 }
 
+/// Arrivals, compensation and tails for `schedule`.
+///
+/// `floors` holds a lower bound on a node's input arrival (#1285 D1): a node's `max` is the larger
+/// of its latest incoming arrival and its floor, and every incoming edge is compensated to that
+/// `max`. A floor that names no node of `schedule` is ignored. With no floors the result is the
+/// natural one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn timings(
     schedule: &[GraphNodeId],
     edges: &[GraphEdge],
     latencies: &BTreeMap<GraphNodeId, LatencySamples>,
     tails: &BTreeMap<GraphNodeId, TailSamples>,
+    floors: &BTreeMap<GraphNodeId, LatencySamples>,
     caps: &GraphCompileCaps,
 ) -> Result<TimingResult, GraphDiagnostic> {
     let mut incoming_by_node: BTreeMap<&GraphNodeId, Vec<&GraphEdge>> =
@@ -56,13 +68,22 @@ pub(crate) fn timings(
     let mut delay_count: u64 = 0;
     let mut routes = Vec::new();
     let mut delays = Vec::new();
+    let mut input_arrivals = Vec::new();
+    let mut raised_arrivals = Vec::new();
     for node in schedule {
         let incoming = &incoming_by_node[node];
-        let max = incoming
+        let latest = incoming
             .iter()
             .filter_map(|edge| arrivals.get(&edge.source.node).copied())
             .max()
             .unwrap_or(0);
+        let max = latest.max(floors.get(node).map_or(0, |floor| floor.0));
+        if max > latest {
+            raised_arrivals.push((node.clone(), LatencySamples(latest)));
+        }
+        if max > 0 {
+            input_arrivals.push((node.clone(), LatencySamples(max)));
+        }
         for edge in incoming {
             let source = arrivals.get(&edge.source.node).copied().unwrap_or(0);
             let delay = max
@@ -138,6 +159,8 @@ pub(crate) fn timings(
     }
     routes.sort_by(|a, b| a.route_id.cmp(&b.route_id));
     delays.sort_by(|left, right| left.edge_id.cmp(&right.edge_id));
+    input_arrivals.sort_by(|left, right| left.0.cmp(&right.0));
+    raised_arrivals.sort_by(|left, right| left.0.cmp(&right.0));
     let output = schedule
         .iter()
         .find(|node| matches!(node, GraphNodeId::Output { .. }))
@@ -157,6 +180,8 @@ pub(crate) fn timings(
         delay_count,
         output_latency,
         output_tail,
+        input_arrivals,
+        raised_arrivals,
     })
 }
 pub(crate) fn shifted_tail(value: TailSamples, add: u64) -> Result<TailSamples, GraphDiagnostic> {

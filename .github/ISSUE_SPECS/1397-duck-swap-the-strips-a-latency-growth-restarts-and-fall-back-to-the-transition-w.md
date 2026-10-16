@@ -323,3 +323,11 @@ warm edit would be `LeadBound`.
 - `AdmissionPeak::WithReprepare` named above did not ship with #1398 (root ruling: code with no
   production caller is a placeholder). #1403 adds the reprepare admission peak together with its
   first caller; see its batch 15a amendment.
+
+## Amendment (controls coordinator, batch 15b fold, 2026-10-16)
+
+- #1698 (batch 15b) removed `PreparedHost::carried_base` (the donor's `carried_base`, #1344 D1,
+  named in the donor base bullet above). With a donor, `inventory` is now P0's own inventory
+  through `PlanStateInventory::across_withdrawn`, with its source rows filtered to those the
+  donor carried vacant. `committed` (the running epoch's kept model with #1325 D6's duck overlay)
+  and the rest of that bullet are unchanged.

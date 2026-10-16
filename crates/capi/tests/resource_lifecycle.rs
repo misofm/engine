@@ -797,10 +797,8 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         sources,
         report: host_report,
         inventory,
-        carried_base,
         control_catalog,
     } = prepared;
-    assert!(carried_base.is_none(), "a boot plan has no carried base");
     let owners = HostOwners {
         routes: freed_by_drop(routes),
         effects: freed_by_drop(effects),
@@ -1232,6 +1230,17 @@ impl Budget {
 /// parked (`ProviderEpoch::parked`, 248 bytes). `capi_retained_bytes` measured 165,922 before and
 /// 168,810 after (x86-64, +2,888: one more 1,648-byte provider-epoch slot and 248 bytes in each of
 /// the five slots; the row does not depend on the lane width), within the 175,296 ceiling, so the
+/// ceiling stays.
+///
+/// #1698 (batch 15b) removes `ProviderEpoch::carried_base` (a replacement across a withdrawn
+/// candidate is now prepared from the running plan's own inventory). `capi_retained_bytes`
+/// measured 168,810 before and 167,514 after (x86-64, -1,296: one 216-byte
+/// `Option<PlanStateInventory>` in each of the six provider epochs, the current one, two pending
+/// and three retired), within the 175,296 ceiling, so the ceiling stays.
+///
+/// #1285 (batch 15b) adds the plan state inventory's `input_floors` and `raised_arrivals`
+/// tables. `capi_retained_bytes` measured 167,514 before and 167,754 after (x86-64, +240: the
+/// two tables in the inventory the provider epochs keep), within the 175,296 ceiling, so the
 /// ceiling stays.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
@@ -1781,14 +1790,11 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             effects: true,
             routes: true,
         },
-        host_core::SuccessorBase {
-            inventory: &current_host.prepared.inventory,
-            committed: current_host.store.compiled().normalized_model(),
-            revision: 1,
-            edit_ramps: &session::EditRamps::new(),
-            monitor: host_core::MonitorBase::NONE,
-            observation: &host_core::NO_OBSERVATION,
-        },
+        host_core::SuccessorBase::new(
+            &current_host.prepared.inventory,
+            current_host.store.compiled().normalized_model(),
+            1,
+        ),
         &host_core::LiveValuesSuperseded::default(),
     )
     .unwrap_or_else(|_| panic!("the prospective session prepares as a successor"))
@@ -1826,12 +1832,9 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     // strips the swap restarts (#1277 D6, #1279 D1). This session's console slots have live
     // effect lanes, which the effect carry does not move (#1280), so every strip restarts and the
     // inventory is that much larger than `capi_epoch_terms` read off the fresh preparation.
-    // It also keeps the base a replacement would be prepared from were it withdrawn unadopted
-    // (#1310 D2, #1344 D1), which a fresh preparation has none of.
     let prospective_epoch = prospective_epoch
         - prospective_host.prepared.report.inventory_retained_bytes
-        + successor.inventory_retained_bytes
-        + successor.carried_base_retained_bytes;
+        + successor.inventory_retained_bytes;
     let rows: [(&str, u64); 8] = [
         (
             "graph",

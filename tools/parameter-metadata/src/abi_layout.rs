@@ -68,25 +68,26 @@ use host_web::{
     MAXIMUM_COMMAND_RECORDS, MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_TAPS, METER_HEADER_BYTES,
     OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT,
     OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING,
-    OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED, RACK_CONSOLE, RACK_INSERTS,
-    RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESPONSE_CHANNEL_BOTH, RESPONSE_CHANNEL_LEFT,
-    RESPONSE_CHANNEL_RIGHT, RESPONSE_GRID_LINEAR, RESPONSE_GRID_LOGARITHMIC, RESULT_ABI_MISMATCH,
-    RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL,
-    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
-    RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED,
-    RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE, SOURCE_STALL_TOLERANCE_MS,
-    SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT,
-    SPECTRUM_CHANNEL_RIGHT, SPECTRUM_COLLECTION_ENTRY_BYTES, SPECTRUM_COLLECTION_ENTRY_CAPACITY,
-    SPECTRUM_COLLECTION_REQUEST_BYTES, SPECTRUM_COLLECTION_TARGET_IDS_BYTES,
-    SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_MAXIMUM_PREPARED_TARGETS, SPECTRUM_REQUEST_BYTES,
-    SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_STREAM_METADATA_BYTES, SPECTRUM_STREAM_STATUS_FAILED,
-    SPECTRUM_STREAM_STATUS_GAP, SPECTRUM_STREAM_STATUS_INACTIVE, SPECTRUM_STREAM_STATUS_PENDING,
-    SPECTRUM_STREAM_STATUS_READY, SPECTRUM_STREAM_STATUS_STOPPED, SPECTRUM_STREAM_STATUS_WARMING,
-    SPECTRUM_TARGET_OUTPUT, SPECTRUM_TARGET_TRACK_POST_INPUT, SPECTRUM_TARGET_TRACK_POST_PAN,
-    SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_DISPOSED, STATE_FAILED,
-    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebCommandReport,
-    WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection,
-    WebMeterHeader, WebObservationResult, WebObservationSelection, WebPlanWatermark,
+    OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED, PLAN_LATENCY_BYTES, RACK_CONSOLE,
+    RACK_INSERTS, RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESPONSE_CHANNEL_BOTH,
+    RESPONSE_CHANNEL_LEFT, RESPONSE_CHANNEL_RIGHT, RESPONSE_GRID_LINEAR, RESPONSE_GRID_LOGARITHMIC,
+    RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED,
+    RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
+    RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS,
+    RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE,
+    SOURCE_STALL_TOLERANCE_MS, SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH,
+    SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT, SPECTRUM_COLLECTION_ENTRY_BYTES,
+    SPECTRUM_COLLECTION_ENTRY_CAPACITY, SPECTRUM_COLLECTION_REQUEST_BYTES,
+    SPECTRUM_COLLECTION_TARGET_IDS_BYTES, SPECTRUM_MAXIMUM_ID_BYTES,
+    SPECTRUM_MAXIMUM_PREPARED_TARGETS, SPECTRUM_REQUEST_BYTES, SPECTRUM_RESULT_HEADER_BYTES,
+    SPECTRUM_STREAM_METADATA_BYTES, SPECTRUM_STREAM_STATUS_FAILED, SPECTRUM_STREAM_STATUS_GAP,
+    SPECTRUM_STREAM_STATUS_INACTIVE, SPECTRUM_STREAM_STATUS_PENDING, SPECTRUM_STREAM_STATUS_READY,
+    SPECTRUM_STREAM_STATUS_STOPPED, SPECTRUM_STREAM_STATUS_WARMING, SPECTRUM_TARGET_OUTPUT,
+    SPECTRUM_TARGET_TRACK_POST_INPUT, SPECTRUM_TARGET_TRACK_POST_PAN, SPECTRUM_WINDOW_FRAMES,
+    SPECTRUM_WINDOW_HEADER_BYTES, STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES,
+    WATERMARK_BYTES, WebBootOptions, WebCommandReport, WebLiveResponseOwner,
+    WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection, WebMeterHeader,
+    WebObservationResult, WebObservationSelection, WebPlanLatency, WebPlanWatermark,
     WebResourceReport, WebSpectrumCollectionEntry, WebSpectrumCollectionRequest,
     WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
 };
@@ -122,7 +123,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 102] = [
+pub const EXPORTS: [&str; 105] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -140,6 +141,7 @@ pub const EXPORTS: [&str; 102] = [
     "miso_engine_web_v1_control_response_bytes",
     "miso_engine_web_v1_control_response_ptr",
     "miso_engine_web_v1_control_revision",
+    "miso_engine_web_v1_declare_discontinuity",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_meter_header_ptr",
@@ -161,6 +163,8 @@ pub const EXPORTS: [&str; 102] = [
     "miso_engine_web_v1_observation_tap_count",
     "miso_engine_web_v1_observation_tap_id",
     "miso_engine_web_v1_observation_track_index",
+    "miso_engine_web_v1_plan_latency_ptr",
+    "miso_engine_web_v1_plan_latency_read",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_resource_ptr",
@@ -553,6 +557,26 @@ fn plan_watermark_fields() -> [Field; 9] {
             "u64",
         ),
         ("reserved", offset_of!(WebPlanWatermark, reserved), "u64[5]"),
+    ]
+}
+
+/// The plan latency record (issue #1688 D2): the C ABI report's latency and tail words.
+fn plan_latency_fields() -> [Field; 6] {
+    [
+        ("structSize", offset_of!(WebPlanLatency, struct_size), "u32"),
+        ("reserved0", offset_of!(WebPlanLatency, reserved0), "u32"),
+        (
+            "latencySamples",
+            offset_of!(WebPlanLatency, latency_samples),
+            "u64",
+        ),
+        ("tailKind", offset_of!(WebPlanLatency, tail_kind), "u64"),
+        (
+            "tailSamples",
+            offset_of!(WebPlanLatency, tail_samples),
+            "u64",
+        ),
+        ("reserved", offset_of!(WebPlanLatency, reserved), "u64[4]"),
     ]
 }
 
@@ -1421,6 +1445,13 @@ pub fn render() -> String {
         "planWatermark",
         WATERMARK_BYTES,
         &plan_watermark_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "planLatency",
+        PLAN_LATENCY_BYTES,
+        &plan_latency_fields(),
         true,
     );
     render_structure(

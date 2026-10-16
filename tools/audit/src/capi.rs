@@ -11,6 +11,12 @@
 //! After the first call, one structural transaction (#1273 deliverable 3) adds a muted track, so
 //! the next audited call is a swap block that carries the unchanged source's ring into the
 //! successor plan, and the live edits after it ride the successor's lanes.
+//!
+//! Right after that transaction, one anchored seek (#1319 D4) moves the source to generation 2 at
+//! render sample [`SEEK_ANCHOR_SAMPLE`], and the generation-2 quantum for that frame is submitted.
+//! The swap block's carried consumer pops the seek and holds it for the two calls before the
+//! anchor, and the call at the anchor applies it and plays the generation-2 quantum, so the
+//! held-seek paths of the render run inside the audited scope.
 
 #![allow(unsafe_code)]
 
@@ -24,8 +30,8 @@ use capi::{
     SubmitReport, miso_engine_v1_compile_session, miso_engine_v1_dequeue_event,
     miso_engine_v1_engine_create, miso_engine_v1_engine_destroy, miso_engine_v1_plan_destroy,
     miso_engine_v1_render_f32_planar, miso_engine_v1_session_destroy,
-    miso_engine_v1_source_submit_planar_f32, miso_engine_v1_submit_command, plan_carry_counts,
-    plan_replacement_count,
+    miso_engine_v1_source_seek_at, miso_engine_v1_source_submit_planar_f32,
+    miso_engine_v1_submit_command, plan_carry_counts, plan_replacement_count,
 };
 use engine::realtime::audit::{self, AuditSnapshot};
 use protocol::{
@@ -50,6 +56,11 @@ const COMPRESSOR: &str = "comp";
 /// Render calls before the structural transaction (issue #1273 deliverable 3): the next call is
 /// the carrying swap block.
 const CALLS_BEFORE_TRANSACTION: u64 = 1;
+/// The render sample at which the audit's anchored seek applies (#1319 D4): the call index
+/// `SEEK_ANCHOR_SAMPLE / QUANTUM_FRAMES`, three calls after the swap block.
+const SEEK_ANCHOR_SAMPLE: u64 = 4 * QUANTUM_FRAMES as u64;
+/// The generation the anchored seek starts.
+const SEEK_GENERATION: u64 = 2;
 
 /// The nine-track EQ fixture with an enabled compressor insert (`comp`) on `eq2`, so the live
 /// editor also reaches a non-EQ effect lane. Every track keeps its console EQ slot, whose band 1
@@ -161,7 +172,7 @@ impl AuditHandles {
             return Err(compiled);
         }
 
-        let (submitted, accepted_frames) = submit_source_chunk(handles.session, 0);
+        let (submitted, accepted_frames) = submit_source_chunk(handles.session, 1, 0);
         if submitted != RESULT_OK || accepted_frames != QUANTUM_FRAMES as u64 {
             return Err(if submitted != RESULT_OK {
                 submitted
@@ -174,7 +185,11 @@ impl AuditHandles {
 
     /// Commits [`structural_transaction`] through `editor`'s request and revision sequence, and
     /// feeds the source's next block through the producer it moved, so the swap block renders PCM
-    /// from the carried ring. Control work, run outside every render scope.
+    /// from the carried ring. Then it anchors a seek of the source to generation 2 at
+    /// [`SEEK_ANCHOR_SAMPLE`] and submits the generation-2 quantum for that frame (#1319 D4): the
+    /// seek and the chunk go to the moved producer, in the order the host owes them, and the
+    /// carried consumer holds the seek until its anchor. Control work, run outside every render
+    /// scope.
     fn apply_structural_transaction(&mut self, editor: &mut LiveEditor) -> Result<(), u32> {
         editor.request_id += 1;
         let request = structural_transaction(editor.request_id, editor.revision);
@@ -200,7 +215,27 @@ impl AuditHandles {
             return Err(committed);
         }
         editor.revision += 1;
-        match submit_source_chunk(self.session, QUANTUM_FRAMES as u64) {
+        match submit_source_chunk(self.session, 1, QUANTUM_FRAMES as u64) {
+            (RESULT_OK, accepted) if accepted == QUANTUM_FRAMES as u64 => {}
+            (RESULT_OK, _) => return Err(RESULT_INTERNAL),
+            (refused, _) => return Err(refused),
+        }
+        // SAFETY: The session is live and used by this thread alone; the source ID bytes outlive
+        // the synchronous call.
+        let seeked = unsafe {
+            miso_engine_v1_source_seek_at(
+                self.session,
+                SOURCE_ID.as_ptr(),
+                SOURCE_ID.len() as u64,
+                SEEK_GENERATION,
+                SEEK_ANCHOR_SAMPLE,
+                SEEK_ANCHOR_SAMPLE,
+            )
+        };
+        if seeked != RESULT_OK {
+            return Err(seeked);
+        }
+        match submit_source_chunk(self.session, SEEK_GENERATION, SEEK_ANCHOR_SAMPLE) {
             (RESULT_OK, accepted) if accepted == QUANTUM_FRAMES as u64 => Ok(()),
             (RESULT_OK, _) => Err(RESULT_INTERNAL),
             (refused, _) => Err(refused),
@@ -208,16 +243,19 @@ impl AuditHandles {
     }
 }
 
-/// Submits one generation-1 quantum of constant source at `start_frame`, returning the result
+/// The fixture's one source.
+const SOURCE_ID: &[u8] = b"fixture-source";
+
+/// Submits one quantum of constant source of `generation` at `start_frame`, returning the result
 /// and the accepted frame count.
-fn submit_source_chunk(session: *mut Session, start_frame: u64) -> (u32, u64) {
+fn submit_source_chunk(session: *mut Session, generation: u64, start_frame: u64) -> (u32, u64) {
     let left = [0.25_f32; QUANTUM_FRAMES];
     let right = [-0.5_f32; QUANTUM_FRAMES];
     let planes = [left.as_ptr(), right.as_ptr()];
     let chunk = SourceChunk {
         struct_size: SOURCE_CHUNK_SIZE,
         sample_rate_hz: SAMPLE_RATE_HZ,
-        generation: 1,
+        generation,
         start_frame,
         planes: planes.as_ptr(),
         plane_count: 2,
@@ -237,8 +275,8 @@ fn submit_source_chunk(session: *mut Session, start_frame: u64) -> (u32, u64) {
     let submitted = unsafe {
         miso_engine_v1_source_submit_planar_f32(
             session,
-            b"fixture-source".as_ptr(),
-            14,
+            SOURCE_ID.as_ptr(),
+            SOURCE_ID.len() as u64,
             &chunk,
             &mut report,
         )

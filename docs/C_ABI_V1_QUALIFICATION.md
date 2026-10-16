@@ -826,15 +826,16 @@ that window is admitted against the plan that renders.
   compiled models. The repository's reference limits (`tools/audit/src/capi.rs`,
   `crates/capi/tests/plan_swap_race.rs`, `crates/capi/tests/resource_lifecycle.rs`) admit three
   plans of the nine-track EQ reference session with room to spare (graph 316,350 bytes against
-  100,000,000; capi 168,810 against 10,000,000), so none was raised. The rule is measured from the
-  row of a running successor plan, which carries its sources and owns their rings. The browser's caps are its
-  one memory budget, which charges the same tables through the same control-plane code; its
+  100,000,000; capi 167,754 against 10,000,000), so none was raised. The rule is measured from the
+  row of a running successor plan, which carries its sources and owns their rings. The browser's
+  caps are its one memory budget, which charges the same tables through the same control-plane code; its
   replacement-peak term must cover the three-plan peak when a warm candidate is admitted (#1403).
 - **Resource movement.** The larger tables add fixed bytes to every session's
   `capi_retained_bytes` (+1,904 bytes, #1398 D1's tables). On the nine-track EQ reference session
-  the row measures 165,842 bytes at the batch 15a head, 165,922 after its review fold and 168,810
-  after fold 2 (x86-64; the ceiling in `crates/capi/tests/resource_lifecycle.rs` is 175,296). A caller whose
-  `maximum_capi_retained_bytes` was exact must raise it. No symbol, result code or event is added.
+  the row measures 165,842 bytes at the batch 15a head, 165,922 after its review fold, 168,810
+  after fold 2, 167,514 after #1698 and 167,754 after #1285's floors (+240: the `input_floors` and
+  `raised_arrivals` tables; x86-64; the ceiling in `crates/capi/tests/resource_lifecycle.rs` is
+  175,296). A caller whose `maximum_capi_retained_bytes` was exact must raise it. No symbol, result code or event is added.
 
 ## Supersession of an unadopted candidate (#1310)
 
@@ -868,7 +869,9 @@ that window is admitted against the plan that renders.
   getting `RESULT_BACKPRESSURE` until it renders. A source the candidate carries unchanged from the
   running plan is not refused. Both hosts answer alike
   (`control_parity::a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_
-  hosts`, cases reverted, redeclared a third way and removed). #1698 lifts only the reverted case.
+  hosts`, cases reverted, redeclared a third way and removed). #1698 keeps the reverted case
+  refused too: the host restarted its feed of the source against the candidate, so the successor
+  starts it fresh and cannot play the candidate's chunks in the running plan's source.
 - **Displaced plans are charged until reclaimed (batch 15a fold 2).** When a transaction finds the
   candidate taken by render and builds on it, the plan render displaced may not yet be reclaimed
   (a render preempted between its claim and its retirement). The session keeps that plan's
@@ -880,10 +883,87 @@ that window is admitted against the plan that renders.
 - **Admission.** While a successor of the running plan is pending, the running plan's model is
   kept, so the replacement and the live admissions count it: three plans and three models when a
   candidate is superseded, three models when a live edit lands while one waits.
-- **Resource movement.** Each candidate epoch keeps its carried base (#1344), charged in its capi
-  epoch row (`carried_base_retained_bytes`); the boot plan has none. The provider epoch itself grew
+- **Resource movement.** Each candidate epoch kept its carried base (#1344), charged in its capi
+  epoch row (`carried_base_retained_bytes`), until #1698 removed it (below); the boot plan had
+  none. The provider epoch itself grew
   (its kept base and carried base, and the batch 15a review fold's carried source bytes), and the
   pending and retired provider lists charge that size, so the reference session's boot
   `capi_retained_bytes` moves: 165,842 bytes at the batch 15a head, 165,922 after its review fold,
   168,810 after fold 2 (x86-64; a third retired slot and a 248-byte parked row in each of the
   five slots, +2,888), within the 175,296 ceiling. No symbol, result code or event is added.
+- **An owner the successor reverts carries from the running plan (#1698).** The successor is
+  prepared from the running plan's own inventory, with only the source rows the candidate carried
+  from it, so a strip, effect or other owner it keeps unchanged from the running plan carries as
+  a direct swap would carry it, also when the candidate restarted or removed it. A source the
+  candidate added, redeclared or removed, and the successor does not keep as the candidate
+  declares it (that one moves by the donation), starts fresh in the successor (generation 1,
+  frame 0, as the host contract for a declaration change against the newest committed session
+  says). The candidate epoch no longer keeps a carried base, and `carried_base_retained_bytes` is gone: the
+  reference session's `capi_retained_bytes` moves 168,810 -> 167,514 (x86-64, -1,296: 216 bytes
+  in each of the six provider epochs). #1285's floors (`input_floors`, `raised_arrivals`) then add
+  240 bytes: 167,754 (ceiling unchanged).
+
+## Latency floors across a structural transaction (#1285)
+
+- **Behavior.** No node's latency, the output's included, drops across a structural transaction.
+  The core (`host_core`, for the C ABI and the browser alike) compiles a successor with every node's
+  input arrival in the plan it displaces as a lower bound (an input floor), and PDC compensates
+  every incoming edge of the node to it. Removing a latent effect, or the track that holds it,
+  therefore moves no other path in time: every surviving compensation line keeps its length and
+  carries (#1283), at the output and inside a submix. `latency_samples` reports the floored output
+  arrival, the one the plan renders. A path whose own upstream latency dropped gets a new
+  compensation line, which starts at rest; its strip lost a latent effect, so it is in the restart
+  set, and it starts at rest with no duck until #1324 adds the duck-swap. An added latency still
+  grows the node (#1287 owns growth).
+- **How long.** The inventory records the floored arrivals, so a chain of successors keeps the
+  first plan's timing. A successor prepared across a withdrawn candidate takes the running plan's
+  floors (#1698's base is the running plan's inventory). A fresh `miso_engine_v1_compile_session`
+  and a browser boot compile with no floors; the lower latency returns there, or at a
+  host-declared discontinuity (#1323, below). There is no permanent latency reserve.
+- **Evidence.** `capi` `runtime::tests::removing_a_limited_track_keeps_the_plan_latency`
+  (`RemoveTrack` of a limited track: an unchanged `latency_samples` after the swap, and every
+  block equal to the floored reference). With no floors neither the program nor its canonical bytes
+  change: the graph fixture corpus, `scripts/check-graph-determinism.sh` and `console-workload`
+  keep their digests.
+
+## A host-declared discontinuity resets the floors (#1323)
+
+- **Surface.** `miso_engine_v1_declare_discontinuity(session)`, an in-place V1 amendment: one new
+  exported symbol, announced by `MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY` (the next free bit,
+  256) in the capability report, whose feature mask grows to include it; no struct, size or
+  `ABI_VERSION` changes. The mask is the OR of every feature symbol and is never compared with a
+  literal (`capi` `abi::tests::masks_and_result_codes_are_frozen` folds the symbols; `abi_smoke.c`
+  and `header_smoke.cpp` pin the bit inside the mask and the signature, and `abi_smoke.c` calls
+  the symbol with a null session for `INVALID_ARGUMENT`). The frozen exported set is now 18
+  `miso_engine_v1_*` definitions. It is a session call, serialized with the others; it runs the
+  service step first. The browser's `miso_engine_web_v1_declare_discontinuity(handle)` forwards to
+  the same control-plane function, `control_plane::SessionState::declare_discontinuity` (root
+  ruling B15-R7); the browser SDK surface is #1296's.
+- **Duty.** A host calls it at a stop, and before a seek of every source: the next block it renders
+  need not continue the previous output.
+- **Behavior.** If the newest plan (the waiting replacement, else the running plan) runs behind its
+  natural timing (a floor raised some node's input arrival above its natural one; the inventory
+  records each raised node's natural arrival beside its floored one), the committed model is
+  prepared again as a successor at a discontinuity (`SuccessorBase::discontinuity`): no floors, and
+  only the source consumers (ring, generation, read position) carry, so no frame is repeated or
+  skipped and every other owner starts at rest. It is published `Next` with the committed
+  revision and its retirement credit reserved. A waiting replacement, a `Primed` warm successor
+  included (it always runs behind its natural timing), is superseded through #1310: withdrawn, the
+  donor of the rings it created, its persisting producers returned to the running epoch, then
+  dropped. Its revisions complete when the successor is adopted: `EXACT`, with `SUPERSEDED` for
+  the revisions it had folded in, never `TRANSITION_FALLBACK`. With nothing to reset, or at
+  revision 0 (root ruling B15-R6), the call returns `OK` and publishes nothing. The model and the
+  revision never change; a refusal (a preparation or cap rejection, backpressure) changes nothing,
+  and a withdrawn replacement is published again whole.
+- **Supersession of the successor.** A structural transaction that supersedes the discontinuity
+  successor before render adopts it is prepared at the same discontinuity: render never played the
+  successor, so the pair is one transaction "declare, then edit" against the running plan, whose
+  combined twin has no floors.
+- **Evidence.** `capi` `runtime::tests::` gates
+  `a_declared_discontinuity_reports_the_natural_latency_on_the_c_abi`,
+  `a_declaration_with_nothing_to_reset_publishes_nothing`, `a_refused_declaration_changes_nothing`,
+  `a_declared_stop_supersedes_a_pending_warm_successor_alone_and_folded` and
+  `an_edit_that_supersedes_a_discontinuity_successor_is_prepared_at_it`; `host-core`
+  `successor_swap::a_declared_discontinuity_resets_the_floors_at_every_rate_and_width`; `host-web`
+  `tests::structural_apply::a_declared_discontinuity_resets_the_floors_on_the_browser` and the
+  parity row `control_parity::a_declared_discontinuity_resets_the_floors_alike_on_both_hosts`.

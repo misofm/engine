@@ -545,7 +545,7 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
 - *Edits outside the original authorized paths.* `hosts/host-web/src/lib.rs` (`promote_spectrum`
   only), `hosts/host-web/tests/structural_apply_realtime.rs` (the m-5 cost test),
   `hosts/host-web/tests/control_parity.rs` (the guard's parity row),
-  `.github/ISSUE_SPECS/1698-carry-an-owner-or-source-a-superseding-candidate-keeps-unchanged-from-p0.md` (one line). No edit under
+  `.github/ISSUE_SPECS/1698-carry-an-owner-a-superseding-candidate-keeps-unchanged-from-p0.md` (one line). No edit under
   `crates/engine/src/realtime/`.
 - *Parity row's silent adoption block (harness, not engine).* A plain run of this session (no
   edit) first outputs a non-zero sample at frame 459 at 48 kHz and 939 at 96 kHz (the plan's
@@ -607,3 +607,14 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
 - *Task B-A (doc job).* Five private intra-doc links in `crates/host-core/src/source.rs`
   (`donate_producers`, `donate_consumers`, `unfed`) are plain code spans;
   `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` passes.
+
+## Amendment (#1698, batch 15b, coordinator ruling of 2026-10-16 confirmed by root)
+
+D2's base across a withdrawn candidate is now P0's own inventory less the sources A did not carry
+from P0 (`PlanStateInventory::across_withdrawn`), so B carries from P0 an owner it keeps unchanged
+from P0, as a direct P0 -> B swap does. `ProviderEpoch::carried_base` and its capi epoch term are
+gone (reference `capi_retained_bytes` 168,810 -> 167,514). The fold-3 guard
+`drops_acked_fresh_source` stays for all four cases, (a) included: a source A added or redeclared
+restarted the host's feed against A (`docs/CONTROL_PROTOCOL_SEMANTICS.md:23`), so B starts it
+fresh and cannot read A's chunks into P0's continuing source. The guard's capi and parity rows stay.
+See #1698's decision record.
