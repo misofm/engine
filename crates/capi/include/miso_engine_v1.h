@@ -202,39 +202,38 @@ extern "C" {
  * the host restarts its feed.
  *
  * A transaction behind an unadopted replacement (issue 1310). A SESSION_TRANSACTION_APPLY that
- * needs a new plan while an earlier transaction's replacement plan has not been adopted by
- * render (a paused host never adopts one) commits as any other: it is not refused as
- * backpressure because a replacement waits, with the one exception below. The engine takes the waiting replacement back,
- * prepares one plan that carries both transactions against the plan that renders, and publishes
- * it; nothing of the earlier transaction is lost. A source the new plan keeps from the waiting
- * replacement or from the plan that renders keeps playing: the PCM accepted for it and a seek or
- * seek_at queued on it move into the new plan, so the host neither refeeds nor reseeks it. One
- * case is not covered yet: a source or owner that the earlier transaction restarted or removed
+ * needs a new plan while an earlier transaction's replacement plan has not been adopted by render
+ * (a paused host never adopts one) commits as any other: it is not refused as backpressure because
+ * a replacement waits, with the one exception below. The engine takes the waiting replacement
+ * back, prepares one plan that carries both transactions against the plan that renders, and
+ * publishes it; nothing of the earlier transaction is lost. A source the new plan keeps from the
+ * waiting replacement or from the plan that renders keeps playing: the PCM accepted for it and a
+ * seek or seek_at queued on it move into the new plan, so the host neither refeeds nor reseeks it.
+ * One case is not covered yet: a source or owner that the earlier transaction restarted or removed
  * and the new one puts back in its form in the plan that renders starts fresh in the new plan (a
  * source at generation 1, frame 0, as an added one, and the host restarts its feed); that gap
  * closes with the successor issue "Carry an owner or source a superseding candidate keeps
- * unchanged from P0 from P0's state". No accepted chunk is dropped across a supersession: when
- * the waiting replacement created a source's ring (the earlier transaction added the source, or
- * redeclared it) and the session has accepted PCM, a seek or an end of region for that source
- * since, a new transaction that does not keep the source as the waiting replacement declares it
- * (it declares it as the plan that renders does, redeclares it another way, or removes it) is
- * refused with MISO_ENGINE_V1_BACKPRESSURE before it commits: nothing changes, the waiting
- * replacement stays published, no event is queued and the revision does not move. Once render
- * adopts the waiting replacement, a retry commits. A host that does not render keeps getting
- * MISO_ENGINE_V1_BACKPRESSURE for such a transaction until it renders. A source the waiting
- * replacement carries unchanged from the plan that renders is not refused this way. A source the
- * caller's own transaction removes discards its queued audio, whether the plan that renders or
- * the waiting replacement (carrying it unchanged) holds it: the caller asked for the removal, so
- * this is not an unintended drop. No counter reports the discarded frames yet; a counter for the
- * discarded frames is a successor issue (placeholder TBD43). Should the new transaction be
- * refused, the waiting replacement stays published unchanged. A resource cap counts every plan the session still holds
- * and the new one: the running plan, the waiting replacement, and a plan render has displaced
- * until a later call reclaims it. A refusal is MISO_ENGINE_V1_BACKPRESSURE when the new plan fit
- * against the newest held plan alone, so a retry after a render normally commits; the split is
- * approximate, and such a retry may still be refused within a small band (a plan prepared on the
- * adopted replacement differs by a few hundred bytes from one prepared across it). A refusal
- * that does not fit even then is MISO_ENGINE_V1_COMPILE_REJECTED with the cap's diagnostic.
- * When render adopts the new plan, the
+ * unchanged from P0 from P0's state". No accepted chunk on a ring the waiting replacement created
+ * is dropped across a supersession: when the waiting replacement created a source's ring (the
+ * earlier transaction added the source, or redeclared it) and the session has accepted PCM, a seek
+ * or an end of region for that source since, a new transaction that does not keep the source as
+ * the waiting replacement declares it (it declares it as the plan that renders does, redeclares it
+ * another way, or removes it) is refused with MISO_ENGINE_V1_BACKPRESSURE before it commits:
+ * nothing changes, the waiting replacement stays published, no event is queued and the revision
+ * does not move. Once render adopts the waiting replacement, a retry commits. A host that does not
+ * render keeps getting MISO_ENGINE_V1_BACKPRESSURE for such a transaction until it renders. A
+ * source the waiting replacement carries unchanged from the plan that renders is not refused this
+ * way. A source the caller's own transaction removes discards its queued audio, whether the plan
+ * that renders or the waiting replacement (carrying it unchanged) holds it: the caller asked for
+ * the removal, so this is not an unintended drop. No counter reports the discarded frames yet; a
+ * counter for the discarded frames is a successor issue (placeholder TBD43). A resource cap counts
+ * every plan the session still holds and the new one: the running plan, the waiting replacement,
+ * and a plan render has displaced until a later call reclaims it. A refusal is
+ * MISO_ENGINE_V1_BACKPRESSURE when the new plan fit against the newest held plan alone, so a retry
+ * after a render normally commits; the split is approximate, and such a retry may still be refused
+ * within a small band (a plan prepared on the adopted replacement differs by a few hundred bytes
+ * from one prepared across it). A refusal that does not fit even then is
+ * MISO_ENGINE_V1_COMPILE_REJECTED with the cap's diagnostic. When render adopts the new plan, the
  * watermark advances to its revision with MISO_ENGINE_V1_OUTCOME_SUPERSEDED set, and
  * superseded_count grows by the revisions the earlier replacements carried.
  *
@@ -327,7 +326,8 @@ typedef struct miso_engine_v1_compile_limits {
        structural transaction is admitted against every plan the session still holds plus its
        own: the running plan, and at most a withdrawn candidate and its successor, so up to three
        plans live at once (a plan render has just displaced also counts until a later call
-       reclaims it; a refusal only it causes is MISO_ENGINE_V1_BACKPRESSURE). Set each of these caps to at least three times one plan's row (the
+       reclaims it; a refusal only it causes is MISO_ENGINE_V1_BACKPRESSURE). Set each of these
+       caps to at least three times one plan's row (the
        matching field of miso_engine_v1_plan_resource_report, for the largest session the host
        will compile, read while a successor plan of it runs: such a plan carries its sources and
        owns their rings), and maximum_graph_session_plus_plan_bytes to that plus three compiled
