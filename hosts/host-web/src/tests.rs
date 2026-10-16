@@ -10092,6 +10092,7 @@ fn flat_fader_sessions() -> Vec<(&'static str, session::SessionModel, session::S
                     end_value: value,
                     unit: session::ParameterUnit::Db,
                 }],
+                offset: session::AutomationOffset::default(),
             }];
             (label, automated, reference)
         })

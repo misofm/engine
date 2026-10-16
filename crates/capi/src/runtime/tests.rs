@@ -6333,6 +6333,7 @@ fn flat_fader_entry(
             end_value: value,
             unit: session::ParameterUnit::Db,
         }],
+        offset: session::AutomationOffset::default(),
     }
 }
 

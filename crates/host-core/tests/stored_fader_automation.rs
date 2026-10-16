@@ -82,6 +82,7 @@ fn flat_fader(
             end_value: value,
             unit: ParameterUnit::Db,
         }],
+        offset: session::AutomationOffset::default(),
     }
 }
 
