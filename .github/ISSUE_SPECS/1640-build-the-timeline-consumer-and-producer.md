@@ -179,3 +179,43 @@ Checked against `12d4a4f9d`.
 - **Dependencies.** #1316, #1318 and #1320 are still open; the ordering rule stands. The source
   crate's seek anchors have moved; re-read them at filing.
 - No decision 17 change: the timeline is source transport, not a control.
+
+## Amendment (controls coordinator, batch 16 check, 2026-10-16)
+
+Checked against `35ac17545`.
+
+- **Landed deps.** #1316, #1318 and #1320 are closed and on `main`. The ordering rule is met.
+- **Moved anchors (`crates/source/src/lib.rs`).** `SourceCommand` `:56-87`. `SourceSeekError`
+  `:394-405` (still not `#[non_exhaustive]`). `PcmSourceProducer` `:819-835`; `try_seek`
+  `:888-919` (anchor check `:905-910`, push `:911-918`). `HostChunkProvider::try_seek` `:1039-1041`
+  forwards to it. `PcmSourceConsumer` `:1154-1194`; `held_seek` `:1181`; `HeldSeek` `:1199-1205`;
+  `SeekClock` `:1208-1222`. `observe_seek_at_block_boundary` `:1591-1633`; `apply_seek`
+  `:1638-1654`. Underrun advance: `begin_block_play` `:1372-1404`. `prepare_graph_source_set`
+  `:2421-2497`. Gate 2's four tests are at `:2654-2770`.
+- **`SeekClock` has three cases now:** `Now`, `At { source_read_sample }` and `Hold` (#1320
+  preparation and prime). D1's shared function takes all three.
+- **The source observes a command at two points.** `begin_block_observe` and the acquire's one
+  re-observe (`acquire_current_block`, `:1772-1838`, #1274 MINOR-3). Both call the D1 function. The
+  timeline has no acquire, so it observes once per block.
+- **The seek state is read outside the observe step too:** `settle_block`,
+  `is_unobserved_generation`, `prime_ready` and the held/underrun split in `begin_block_play`. The
+  D1 type gives read access to the held seek; no rule moves out of it.
+- **Producer factoring.** `try_seek`'s post-push work (`next_write_frame`, `end_of_region_submitted`)
+  is PCM-only and stays in `PcmSourceProducer`. The shared seek producer needs the quantum for the
+  anchor check.
+- **`check_seek` on the PCM side (for #1642 D1 step 2).** `PcmSourceProducer` and
+  `HostChunkProvider` (the type `SourceControlSet` holds) both expose `check_seek(command)`,
+  forwarding to the shared seek producer, as `try_seek` already does.
+- **The seek report (#1316) is per ring, not a table.** One seqlock record
+  (`PublishedWordsWriter<SEEK_REPORT_WORDS>`, 5 words, `crates/engine/src/realtime/seqlock.rs`)
+  per ring. The consumer publishes it (`publish_seek_report`, `:1575-1589`) and the producer reads
+  it (`seek_report`, `:924-929`). If #1641 D6 stands, the timeline gets the same record through
+  the same writer and reader, unchanged. D5 then also needs a seek-report row
+  (`published_words_retained_bytes::<5>()`, as `SourceResourceReport::seek_report_bytes`).
+- **Diagnostic name.** The Non-goals say "the diagnostic name (#1641)". #1641 D2 overrides that:
+  this slice adds the arm as `source.seek.frame_out_of_range`. Host-core anchors moved:
+  `SourceControlError::diagnostic` `crates/host-core/src/source.rs:86-118`;
+  `crates/host-core/tests/source_diagnostics.rs` `TABLE` `:27`, `variant_index` `:182-205`
+  (the new row is index 20). No other crate matches on `SourceSeekError`.
+- **No `crates/engine/src/realtime/` edit.** The SPSC and seqlock types are used as they are.
+- **Decision 17.** No change. C13 (ruling 2026-10-15) calls seeks and the seek report transport.

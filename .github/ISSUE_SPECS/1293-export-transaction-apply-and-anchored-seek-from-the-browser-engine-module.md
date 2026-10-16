@@ -282,3 +282,64 @@ Done under B15-R8: #1386 and #1643 each carry an amendment of 2026-10-15.
   `seek_at` on both hosts at 48 and 96 kHz; after each block, the browser record and the C ABI
   struct are equal field by field, from the seek call to the block that applies it and after.
   Red if either host reports at the call, names a different block, or drops the lateness.
+
+## Amendment (controls coordinator, batch 16 check, 2026-10-16)
+
+Checked against `35ac17545`.
+
+**Landed dependencies.** #1309, #1316, #1319, #1323, #1562 and #1688 are closed and on main.
+#1332 and #1387 stay open and ordering-only (B15-R8). The scope is D5, D6 and D7 (three exports).
+
+**Moved anchors.**
+- `hosts/host-web/src/ffi.rs`: `miso_engine_web_v1_source_seek` `:3251-3276`; `service`
+  `:3336`; `declare_discontinuity` `:3354`; `control_request_ptr` `:3365`; `control_command`
+  `:3384`; `control_response_ptr` `:3417`; `control_response_bytes` `:3430`;
+  `plan_latency_read` `:3474`; `plan_latency_ptr` `:3482`.
+- `hosts/host-web/src/lib.rs`: `seek_source` `:3533-3565`. It still checks
+  `plan.can_prepare_source_seek` (`:3548`), calls `ready.control.seek_unserviced` (`:3551-3553`),
+  then `plan.prepare_source_seek` (`:3556`). `source_result` `:5181`, `source_failure_result`
+  `:5197`. `RESULT_REFUSED_LIFECYCLE` equals `RESULT_WRONG_STATE` (`:146`, `:117`).
+- `PcmSourceConsumer::prepare_seek` is `crates/source/src/lib.rs:1241` (doc `:1233-1240`). The D4
+  trap still holds: it returns `false` while an anchored seek is held.
+- `SessionState` (`crates/control-plane/src/control.rs`): `seek_at` `:4073` and `seek_report`
+  `:4090` both run the service step first, so both are message-handler calls, never `process()`.
+  `SourceControlSet::seek_report` is `crates/host-core/src/source.rs:258`.
+- Mirrors: `expected_exports` `scripts/check-web-audioworklet.sh:274` (its call of
+  `check-abi-layout-v1.py` `:638`); `EXPORTS` `tools/parameter-metadata/src/abi_layout.rs:126`
+  (105 names; 108 after this slice) and `scripts/check-abi-layout-v1.py:120`; the self-test
+  fixture `scripts/fixtures/abi-layout-v1-self-test.json`; `sdk/assets/miso-engine-v1-abi-layout.json`;
+  `sdk/src/generated/abi.ts`. `scripts/check-sdk-generated.sh` holds no list; it needs no edit.
+- The hermetic mock in `scripts/test-web-audioworklet.mjs` (`:2741`) lists only the exports the
+  worklet script calls (68). No worklet script calls the new exports, so it needs no edit.
+- #1688 is the model for D6: `WebPlanLatency` (`lib.rs:1229-1246`), its read and pointer exports,
+  `plan_latency_fields` (`abi_layout.rs:564`) and its parity rows (commit `6c1f8c2c1`).
+
+**Stale text and the code's truth.**
+- D5 "with the plain seek's argument checks": the plain seek's `can_prepare_source_seek` check
+  and its own source lookup (`lib.rs:3540-3550`) belong to the `prepare_source_seek` path. D5
+  takes the staged-ID checks only and lets the core report an unknown source
+  (`source.id.unknown`, `RESULT_INVALID_ARGUMENT`).
+- D6's record is 48 bytes (`struct_size`, `reserved0`, five `u64`). The C struct
+  `miso_engine_v1_seek_report` is 64 bytes, with `reserved[2]` after the five words
+  (`crates/capi/include/miso_engine_v1.h:601-610`; `crates/capi/src/abi.rs:585`). The field names
+  there are `cumulative_underrun_frames` and `cumulative_held_frames`. #1688's browser record
+  copied the C size and reserved tail. Root decides whether D6 does too (see the coordinator's
+  report).
+- Gate 3 "renders silence until the anchor": while a seek is held, queued PCM of the playing
+  generation plays first (header "Held", `:312-316`). The gate holds only with no PCM of the old
+  generation queued. Set the gate up that way.
+- D6's error mapping is already the core's: `ReportBusy` is backpressure and `UnknownSource` is
+  invalid in `source_result`. No new mapping is needed.
+
+**Paths.** The parity row (root ruling, batch 15c) is in `hosts/host-web/tests/control_parity.rs`,
+which is not in the authorized paths. That ruling authorizes it.
+
+**Hazard.** The browser's plain seek prepares the consumer at the call (`prepare_source_seek`);
+the C ABI's applies at the next block's start. The parity row's plain-seek case compares the
+reports. If the browser publishes a different `first_sample` there, the gate is red and the fix is
+in the plain seek, outside this slice. Stop and report it; do not change the plain seek here.
+
+**Decision 17.** D5 and D6 call the same core functions as the C ABI (`SessionState::seek_at`,
+`SessionState::seek_report`); host-web keeps staging, pointer checks and the record copy. The
+widened C13 list names the C seek report only; B15-R8 and the batch 15c ruling approved D5 and D6.
+Root may add the three browser names to the list.
