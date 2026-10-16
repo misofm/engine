@@ -721,3 +721,38 @@ Also in this attempt (coordinator): `crates/host-core/tests/stored_fader_automat
 `Backend::Simd8` in `form_rig` on every target; the forms are now a `FORMS` list whose eight-lane
 entries carry `cfg(target_feature = "avx2")`, so `acted` compares five forms on x86-64 and three
 elsewhere. `scripts/check-cross-targets.sh` passes.
+
+## Split (root ruling B17-R13, batch 17)
+
+- #1648 closes on its passing gates. The in-flight Reposition length case moves to
+  `TBD50-keep-a-live-level-moves-own-length-across-a-reposition-swap.md`, following the "split a
+  blocking gate early" practice (a gate that holds a passed batch goes to a successor after one
+  fix round).
+- Current difference (verifier, at 0fac00ee9): a live level move still ramping with
+  `remaining < J` at a Reposition swap is stretched to `J` by the landing `max(J, remaining)`.
+  Gate setup: heard 24, 26 and 30 blocks (928, 672 and 160 samples left; `J` = 960). The rebuilt
+  rig differs from the uninterrupted engine by 4.8e-4, 3.1e-3 and 2.1e-3. The watermark marks it
+  as a fallback under root ruling B17-R14 (control-time, conservative), which is not landed yet in
+  this record: see its decision record when it lands. TBD50 replaces that flag with the exact
+  behaviour.
+- The step guard (regression fix, `settle_adoption` in `crates/builtins-compiler/src/lib.rs`):
+  when the cell's program has a discontinuity exactly at the block's first sample
+  (`program.discontinuities().binary_search(&span.start)` finds it), the curve is compared there
+  and the landing is `J`. `curve_toward` looks only past `start`, so before the guard the landing
+  ran over `remaining` and missed the step's `J` jump (8.6e-2 from a fresh plan).
+- Gate `a_step_at_a_reposition_swap_jumps_over_the_fader_length`
+  (`crates/capi/src/runtime/live_tests.rs`, `automated_carry`): VCA and hand moves of 4,000
+  samples, heard 1 and 12 blocks, then a rebuild whose ride steps to -20 dB at the swap's first
+  sample or one sample after it. The reference is a fresh plan prepared with the stepped ride and
+  given the same move. From the step plus `J`, max |a - r| < 1e-3 (measured: 7.8e-5 heard 1,
+  5.2e-4 heard 12), allocation-free, adopted. Red without the guard (8.6e-2, step at the swap).
+  Red when the long landing runs over the whole block (verifier's mutation m5: 8.6e-2, step one
+  sample after the swap; this is MINOR 3). Each was checked once.
+- MINOR 4 (`at = end` has no gate) moves to TBD50. Probe finding: for every heard move on the
+  moving ride, the stage's `fader_gain` at the swap is not the composed curve at the ramp's end
+  (0.398 at 12 blocks heard, 0.335 at 24, against 0.3018). The comparison therefore differs at
+  either point, and `at` cannot be seen by the current tables.
+- NIT 5: the doc of `a_level_move_across_a_table_change_keeps_its_length` now gives the measured
+  numbers (0, and 4.6e-6 at 12 blocks heard, where the landing recomputes the stage's ramp step).
+  NIT 6: D2 has a note that points to the fold's longer landing and the step rule.
+- Attempt count: attempt 3 of 5 plus this ruling's landing. There is no attempt 4.
