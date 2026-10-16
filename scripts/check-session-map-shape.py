@@ -38,9 +38,10 @@ Extending it: the introspection family is derived from the Rust FFI by *signatur
 at most an index -- but the name pattern is `source_`, because that is the only family the map
 carries today. One name rule excludes the record-pointer exports, whose names end in `_ptr`
 (`source_seek_report_ptr`, #1293 D6): they take only the handle, like a count query, but answer
-the address of a control-half record, not a source-map field. When the output-bus and route lists arrive on this same mechanism (#210 phase 4),
-the family regexes below take a second prefix and the field/type derivation applies unchanged; the
-rules do not need rewriting, only pointing at one more list.
+the address of a control-half record, not a source-map field. When the output-bus and route
+lists arrive on this same mechanism (#210 phase 4), the family regexes below take a second prefix
+and the field/type derivation applies unchanged; the rules do not need rewriting, only pointing at
+one more list.
 
 Run with no arguments to check the tree, or `--artifacts DIR` to additionally hold a built artifact
 directory's shipped JS/`.d.ts` to the same rules.

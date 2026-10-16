@@ -199,7 +199,7 @@ worklet only renders and swaps.
 
 ## Amendment (controls coordinator, batch 16a review, 2026-10-16)
 
-Anchors checked against `35ac17545` plus the batch 16a tree. Earlier text is kept.
+Anchors checked against `90b76cfdf` (batch 16a with its first fold). Earlier text is kept.
 
 **Finding (review M4).** D1 names exports that #1293 dropped.
 - `miso_engine_web_v1_edit_ptr` and `miso_engine_web_v1_apply`, and the "outcome record", do not exist.
@@ -210,13 +210,13 @@ Anchors checked against `35ac17545` plus the batch 16a tree. Earlier text is kep
   through the same generic entry. Its browser transport is #1697. See #1386's amendments.
 
 **Rule, replacing D1's call path.**
-- A transaction is staged in `miso_engine_web_v1_control_request_ptr` (`hosts/host-web/src/ffi.rs:3450`)
-  and applied with `miso_engine_web_v1_control_command` (`:3469`), on the control half only. The worklet
+- A transaction is staged in `miso_engine_web_v1_control_request_ptr` (`hosts/host-web/src/ffi.rs:3464`)
+  and applied with `miso_engine_web_v1_control_command` (`:3483`), on the control half only. The worklet
   already has the staging helper: `readControlCommand`
   (`hosts/host-web/web/miso-engine-v1-audio-worklet.js:1727`) and the message `miso.control.v1`
   (`CONTROL_FIELDS = ["tag", "requestId", "frame"]`, `:93`; dispatched at `:1116`).
-- The outcome is the response frame, read with `miso_engine_web_v1_control_response_ptr` (`ffi.rs:3502`)
-  and `_control_response_bytes` (`:3515`): `revision`, `edit_path` and the diagnostics. `miso.edit.v1`
+- The outcome is the response frame, read with `miso_engine_web_v1_control_response_ptr` (`ffi.rs:3516`)
+  and `_control_response_bytes` (`:3529`): `revision`, `edit_path` and the diagnostics. `miso.edit.v1`
   `{ result, revision, path, diagnostic }` is built from that frame and from the call's result code.
   `path` is the frame's `edit_path`; `diagnostic` is the frame's diagnostic text, empty on success.
 - `miso.apply.v1` and `miso.replace.v1` stay as the SDK's internal messages only if the root re-brief
@@ -227,10 +227,12 @@ Anchors checked against `35ac17545` plus the batch 16a tree. Earlier text is kep
 - Context, the exports bullet (`:47-53`): "the exports come from #1293" is now only `source_seek_at` and
   `source_seek_report`. Apply and replace come from #1562's generic entry and #1386/#1697. The service and
   watermark exports stay with #1381.
-- D2 (`:71-75`): `source_seek_at` is real (`ffi.rs:3311`) and is control half only: it runs the service
+- D2 (`:71-75`): `source_seek_at` is real (`ffi.rs:3313`) and is control half only: it runs the service
   step (`crates/control-plane/src/control.rs:4073-4081`) and must never run in `process()`. Its sentence
   "Feeds that use the shared PCM ring do not use it" is amended: a ring's anchored seek is applied by this
-  handler between blocks (#1297 amendment of 2026-10-16). The feed worklet's render path keeps the plain
+  handler between blocks (#1297 amendment of 2026-10-16). The writer that publishes an anchored seek on
+  the ring also posts the same seek (generation, frame, anchor) to the control half as
+  `miso.seek-at.v1`; that message is what wakes this handler. The feed worklet's render path keeps the plain
   seek. No render-side caller is added.
 - D6 (`:118-120`): `apply(transaction)` and `replace(document)` call the generic entry; they need no
   `edit_ptr`.
