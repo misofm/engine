@@ -15,7 +15,7 @@ make_fixture() {
         "$fixture/crates/rack"
     printf '[workspace]\nmembers = []\n' >"$fixture/Cargo.toml"
     printf '[package]\nname = "builtins"\n[lib]\nname = "builtins"\n[dependencies]\nengine.workspace = true\neffect-contract.workspace = true\nlane.workspace = true\nmath.workspace = true\n' >"$fixture/crates/builtins/Cargo.toml"
-    printf '[package]\nname = "builtins-compiler"\n[lib]\nname = "builtins_compiler"\n[dependencies]\nbuiltins.workspace = true\ncontrols.workspace = true\nengine.workspace = true\neffect-contract.workspace = true\ngraph.workspace = true\nlane.workspace = true\nrack.workspace = true\nrack-compiler.workspace = true\nsession.workspace = true\nsha2.workspace = true\n' >"$fixture/crates/builtins-compiler/Cargo.toml"
+    printf '[package]\nname = "builtins-compiler"\n[lib]\nname = "builtins_compiler"\n[dependencies]\nautomation.workspace = true\nbuiltins.workspace = true\ncontrols.workspace = true\nengine.workspace = true\neffect-contract.workspace = true\ngraph.workspace = true\nlane.workspace = true\nrack.workspace = true\nrack-compiler.workspace = true\nsession.workspace = true\nsha2.workspace = true\n' >"$fixture/crates/builtins-compiler/Cargo.toml"
     printf '[package]\nname = "engine"\n' >"$fixture/crates/engine/Cargo.toml"
     printf '[package]\nname = "effect-contract"\n' >"$fixture/crates/effect-contract/Cargo.toml"
     printf '[package]\nname = "session"\n' >"$fixture/crates/session/Cargo.toml"
