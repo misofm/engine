@@ -1762,7 +1762,16 @@ fn settle_adoption(
             // (U3 fold 2, D15-7): the edit keeps its own length unless the new table moved its
             // target.
             state.hold_until(end);
-            if !held {
+            // A step of the cell's own at the block's first sample jumps over `J` there, as the
+            // cell does at any discontinuity (and as a plan prepared with this table does), so
+            // the curve is compared at the block's first sample and the landing is `J`
+            // (B17-R13): `curve_toward` looks only past `start` and would skip it.
+            if !held
+                && program
+                    .discontinuities()
+                    .binary_search(&span.start)
+                    .is_err()
+            {
                 at = end;
                 length = length.max(remaining);
             }

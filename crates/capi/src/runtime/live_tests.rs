@@ -9145,6 +9145,134 @@ mod set_control {
             }
         }
 
+        /// [`riding`]'s ride kept up to `at`, then a step to `db` from `at` to the source's end,
+        /// with the stored `offset`.
+        fn stepped_ride(
+            track: &str,
+            at: u64,
+            db: f32,
+            offset: session::AutomationOffset,
+        ) -> session::Automation {
+            let k = -12.0 * at as f32 / SOURCE_FRAMES as f32;
+            let mut automation = entry(
+                track,
+                vec![
+                    segment(session::AutomationShape::Linear, (0, at), (0.0, k)),
+                    segment(
+                        session::AutomationShape::Step,
+                        (at, SOURCE_FRAMES),
+                        (db, db),
+                    ),
+                ],
+            );
+            automation.offset = offset;
+            automation
+        }
+
+        /// B17-R13 (#1648 D2). A live level move with its own 4,000 samples (a VCA move and a
+        /// hand move) heard 1 and 12 blocks, then a rebuild whose ride steps to -20 dB exactly
+        /// at the swap block's first sample, or one sample after it (inside the landing block).
+        /// The rebuilt rig is compared with a fresh plan prepared with the stepped ride from the
+        /// start and given the same move at the same block: at the step the lane jumps over the
+        /// fader length `J` in both, so from the step plus `J` on every sample stays within 1e-3
+        /// of the fresh plan's (measured: 7.8e-5 heard 1, 5.2e-4 heard 12) over 44 blocks, every
+        /// block is allocation-free, and the successor is adopted.
+        ///
+        /// Test value: red if the adoption skips a step at the block's first sample (it compares
+        /// the curve where the move's ramp ends and lands over the ramp's remaining length, not
+        /// over `J` at the step; 8.6e-2, checked once), or if a long landing runs over the whole
+        /// block, step included (the step one sample after the swap; 8.6e-2, checked once).
+        #[test]
+        fn a_step_at_a_reposition_swap_jumps_over_the_fader_length() {
+            /// The session's fader jump length `J`.
+            const FADER_JUMP: u64 = 960;
+            bench_support::alloc::assert_installed();
+            let document = riding();
+            let track = first_track(&document);
+            for (what, hand) in [("a VCA move", false), ("a hand move", true)] {
+                for heard in [1_usize, 12] {
+                    for delta in [0_u64, 1] {
+                        let label = &format!("{what}, heard {heard}, a step at the swap + {delta}");
+                        let edit_of = |document: &str| {
+                            if hand {
+                                hand_move(document, -6.0, Some(4_000))
+                            } else {
+                                vca_move(-6.0, Some(4_000))
+                            }
+                        };
+                        let mut a = Rig::new(&document);
+                        for _ in 0..4 {
+                            a.step();
+                        }
+                        send(
+                            &mut a,
+                            core::slice::from_ref(&edit_of(&document)),
+                            protocol::EditPath::Live,
+                            label,
+                        );
+                        let swap_block = a.block + heard as u64;
+                        let at = swap_block * a.quantum as u64 + delta;
+                        let offset = a.model().automation[0].offset;
+                        let stepped = stepped_ride(&track, at, -20.0, offset);
+                        // The fresh plan: the stepped ride from the start, the same move.
+                        let mut model = parse_session_json(&document).expect("model");
+                        model.automation[0] =
+                            stepped_ride(&track, at, -20.0, session::AutomationOffset::default());
+                        let fresh = session::canonical_session_json(&model).expect("canonical");
+                        let mut r = Rig::new(&fresh);
+                        for _ in 0..4 {
+                            r.step();
+                        }
+                        send(
+                            &mut r,
+                            core::slice::from_ref(&edit_of(&fresh)),
+                            protocol::EditPath::Live,
+                            label,
+                        );
+                        // Before the swap the fresh plan differs already (its move aims short of
+                        // the step, the rule of the cell's own target), so only the samples from
+                        // the step's jump completion on are compared.
+                        for _ in 0..heard {
+                            a.step();
+                            r.step();
+                        }
+                        send(
+                            &mut a,
+                            &[SessionEdit::UpsertAutomation {
+                                automation: stepped,
+                            }],
+                            protocol::EditPath::Rebuild,
+                            label,
+                        );
+                        let mut worst = (0.0_f32, 0_u64);
+                        for _ in 0..44 {
+                            let block = a.block;
+                            let (x, used) = a.step_counted();
+                            assert_eq!(
+                                (used.allocations, used.deallocations),
+                                (0, 0),
+                                "{label}: block {block} allocated or freed"
+                            );
+                            let start = block * a.quantum as u64;
+                            for (i, (p, q)) in x.iter().zip(&r.step()).enumerate() {
+                                let d = (p - q).abs();
+                                if start + i as u64 >= at + FADER_JUMP && d > worst.0 {
+                                    worst = (d, block);
+                                }
+                            }
+                        }
+                        assert_eq!(a.summary().3, 0, "{label}: the successor is adopted");
+                        assert!(
+                            worst.0 < 1e-3,
+                            "{label}: max |a - r| from the step plus J {} at block {}",
+                            worst.0,
+                            worst.1
+                        );
+                    }
+                }
+            }
+        }
+
         /// U3 fold 2, MINOR (#1648 D2, D15-2). Two live VCA moves around a rebuild, with no block
         /// between any of them: a move pending at a rebuild whose own transaction moves `v`
         /// again, and a move, a rebuild, then a second live move. The first move is replaced
