@@ -9837,14 +9837,15 @@ mod session_seek {
         );
     }
 
-    /// Gate 3a, the role: on a host that is not ready (a sticky-failed host) both exports refuse
-    /// with `RESULT_REFUSED_LIFECYCLE` and change nothing.
+    /// Gate 3a, the role: on a host that is not ready (a sticky-failed host, which still holds its
+    /// control state) both exports refuse with `RESULT_REFUSED_LIFECYCLE` and change nothing; a
+    /// null handle is `RESULT_INVALID_ARGUMENT`.
     ///
     /// Test value: red if either export runs without checking the host is ready (the failed host
     /// still holds its control state, so the seek would be queued in its slots, which no block
     /// empties), or moves the report record or the timeline on a refusal.
     #[test]
-    fn the_session_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
+    fn the_session_seek_exports_refuse_a_sticky_failed_host_and_change_nothing() {
         let mut rig = Rig::boot(&one_source(), &[LONG]);
         assert_eq!(
             miso_engine_web_v1_session_seek(0, 2, 0),

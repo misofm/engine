@@ -98,8 +98,9 @@ extern "C" {
  * stopped or is about to seek every source. The host's duty: call it at a stop, and before a seek
  * of every source made with per-source seeks. A plain session seek is a declared discontinuity:
  * the engine declares it in the same call (see "Session seek"), so the host does not call this
- * before it; an anchored session seek keeps continuity. If the newest plan (the waiting replacement, else the plan that renders) runs
- * behind its natural timing because a floor above raised some node's arrival, the call prepares
+ * before it; an anchored session seek keeps continuity. If the newest plan (the waiting
+ * replacement, else the plan that renders) runs behind its natural timing because a floor above
+ * raised some node's arrival, the call prepares
  * the committed session again with no floors and publishes it for the next block: from that
  * block latency_samples is the session's natural latency. That plan carries only the sources
  * (each source's ring, generation and read position), so no frame is repeated or skipped; every

@@ -6246,6 +6246,39 @@ mod session_seek_declares {
         }
     }
 
+    /// Gate 1b: a plain session seek whose declaration is refused pushes nothing and returns the
+    /// declaration's own error; the same generation is accepted once the fault clears.
+    ///
+    /// Test value: red if the seek ignores its declaration's error (`let _ =`): the refused
+    /// declaration would be followed by a push, the report would carry generation 2 and the seek
+    /// would return OK.
+    #[test]
+    fn a_refused_declaration_pushes_nothing_and_leaves_the_generation_free() {
+        use crate::runtime::TestStructuralFaultPhase::BeforeProtocolCommit;
+        let mut rig = Floored::new(true);
+        let epoch = rig.epoch();
+        crate::ffi::test_set_structural_faults(rig.session, [Some(BeforeProtocolCommit), None]);
+        assert_eq!(
+            crate::ffi::test_session_seek(rig.session, 2, 1_280, None),
+            crate::RESULT_BACKPRESSURE,
+            "the declaration's refusal is returned"
+        );
+        assert_eq!(rig.epoch(), epoch, "nothing is published");
+        rig.play(1, (rig.block + 1) * Q, 2);
+        assert_eq!(rig.latency(), rig.floored, "the floors stay");
+        assert_eq!(seek_report_c(rig.session, SOURCE).0, 1, "nothing is pushed");
+        // The fault is spent: the same generation is not burned by the refused attempt.
+        assert_eq!(
+            crate::ffi::test_session_seek(rig.session, 2, 1_280, None),
+            crate::RESULT_OK
+        );
+        assert_eq!(rig.epoch(), epoch + 1, "one successor");
+        let sample = rig.block * Q;
+        rig.play(2, 1_280, 3);
+        let (generation, first, frame, _, _) = seek_report_c(rig.session, SOURCE);
+        assert_eq!((generation, first, frame), (2, sample, 1_280));
+    }
+
     /// Gate 3: an anchored session seek publishes no successor; it applies at its anchor and the
     /// floors stay.
     ///
