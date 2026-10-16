@@ -320,7 +320,7 @@ Checked against `35ac17545`.
   and a source consumer directly until #1355 wires the prime above the consumer.
 - **B16-R4, D6 deferred.** No host reads a timeline seek report after this batch. D6 (the
   timeline's seek-report record), its bytes in D7 and its move in D3 are taken out of this slice.
-  Placeholder TBD45 *Report the timeline seek position to hosts* keeps them, for the first slice
+  #1704 *Report the timeline seek position to hosts* keeps them, for the first slice
   that needs a host reader. Gate 1 compares `test_only_timeline_at` with the frame each block's
   source read starts at; its seek-report clause is dropped.
 
