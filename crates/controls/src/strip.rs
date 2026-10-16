@@ -16,7 +16,7 @@ use crate::effective::{EffectiveStrip, MonitorOverlay, MonitorRow};
 use crate::error::ControlError;
 use crate::lane::Side;
 use crate::lane::{is_on, toggle};
-use crate::registry::{ControlRow, Resolved, Source, push_control};
+use crate::registry::{ControlRow, Resolved, Source, push_control, push_control_automated};
 use crate::{ControlClass, ControlKind, ControlScope, Family, LiveRampRow, Taper};
 use session::{Owner, Section};
 
@@ -286,10 +286,14 @@ pub(crate) fn strip_mut<'a>(model: &'a mut SessionModel, id: &StableId) -> Optio
 /// Append every control row of one strip, in listing order: own, then builtins, then the effect
 /// rows in chain order (decision 17, C4): the pre-insert console slots, the inserts, then the
 /// post-insert console slots.
+///
+/// `offsets` are the strip's [`builtin_rows::FaderOffsets`]: an automated fader lane lists its
+/// entry's hand-move offset as the `fader_db` value and is marked `automated` (#1650 D3, D4).
 pub(crate) fn push_rows(
     out: &mut Vec<ControlRow>,
     console: &Console,
     strip: &StripRef<'_>,
+    offsets: builtin_rows::FaderOffsets,
     effective: &EffectiveStrip,
     overlay: &MonitorOverlay,
     sample_rate: u32,
@@ -298,13 +302,14 @@ pub(crate) fn push_rows(
     push_own_rows(out, strip, effective, overlay, false);
     for row in builtin_rows::rows() {
         let descriptor = builtin_rows::descriptor(row, sample_rate, strip.matrix_or_pan);
-        push_control(
+        push_control_automated(
             out,
             &owner,
             &Section::Builtins,
             row.id,
             &descriptor,
-            |side| builtin_rows::read(strip, row, side),
+            |side| builtin_rows::read(strip, row, side, offsets),
+            |side| row.id == builtin_rows::FADER_DB && side.pick(offsets[0], offsets[1]).is_some(),
         );
     }
     // Chain order: the pre-insert slots, the inserts, then the post-insert slots, each in declared
@@ -410,8 +415,14 @@ pub(crate) fn resolve(
         Section::Builtins => {
             let row = builtin_rows::row(control).ok_or(unknown)?;
             let descriptor = builtin_rows::descriptor(row, sample_rate, strip.matrix_or_pan);
+            // Only the fader row has model scope (#1650 D3): the entries are read for it alone.
+            let offsets = if control == builtin_rows::FADER_DB {
+                builtin_rows::model_fader_offsets(model, id)
+            } else {
+                [None; 2]
+            };
             Ok(Resolved::stored(descriptor, |side| {
-                builtin_rows::read(&strip, row, side)
+                builtin_rows::read(&strip, row, side, offsets)
             }))
         }
         Section::Console(slot) => {

@@ -5,12 +5,18 @@
 //! on it: the same lookups, checks, value normalization and write as on a whole model, which reads
 //! only the owner and the session header. The result is the owners as the transaction leaves them,
 //! and where each sits in the committed model, with no clone of the session.
+//!
+//! A hand move on an automated fader writes the hand-move offset of the stored automation entry
+//! that drives the lane (#1650 D3), so that entry is an owner of the edit too (root's ruling
+//! R17-1 = A): a `fader_db` write clones the rendered entries that drive the strip's fader lanes
+//! with the strip, and [`crate::set`] on the owners model reads and writes them as it would on the
+//! whole model.
 
 use session::{OwnerSlots, SessionModel};
 
 use crate::error::ControlError;
 use crate::view::position;
-use session::{ControlAddress, Owner};
+use session::{ControlAddress, Owner, Section};
 
 /// Why an edit is not one the owners model can hold.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,8 +89,29 @@ impl<'m> OwnerEdits<'m> {
         sample_rate: u32,
     ) -> Result<(), OwnerEditError> {
         self.take(&address.owner)?;
+        if let Owner::Strip(strip) = &address.owner
+            && address.section == Section::Builtins
+            && address.control == crate::builtin_rows::FADER_DB
+        {
+            self.take_fader_automation(strip);
+        }
         crate::registry::set(&mut self.owners, address, value, ramp, sample_rate)
             .map_err(OwnerEditError::Control)
+    }
+
+    /// Clone the rendered entries that drive strip `strip`'s fader lanes into the owners model, in
+    /// ID order, unless they are there already (#1650, R17-1 = A). A scan of the committed table,
+    /// with an early out when it is empty.
+    fn take_fader_automation(&mut self, strip: &session::StableId) {
+        if self.committed.automation.is_empty() {
+            return;
+        }
+        for entry in crate::automation::fader_automation(self.committed, strip)
+            .into_iter()
+            .flatten()
+        {
+            insert_sorted(&mut self.owners.automation, entry, |entry| &entry.id);
+        }
     }
 
     /// Clone the owner into the owners model, in ID order, unless it is there already.
@@ -150,6 +177,11 @@ impl<'m> OwnerEdits<'m> {
             let home = position(&committed.routes, &route.id, |route| &route.id)
                 .expect("an edited route came from the committed model");
             slots.routes.push((at, home));
+        }
+        for (at, entry) in self.owners.automation.iter().enumerate() {
+            let home = position(&committed.automation, &entry.id, |entry| &entry.id)
+                .expect("an edited automation entry came from the committed model");
+            slots.automation.push((at, home));
         }
         (self.owners, slots)
     }

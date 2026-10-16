@@ -8,6 +8,9 @@
 //! inside one block. Every render call after the warm-up allocates and frees nothing, measured
 //! with the audited allocator's thread-scoped counters: the block that reads the offsets cell and
 //! jumps, and every block of the jump and the grid after it.
+//!
+//! #1650b gate 6 runs the same rig with hand moves of `eq0`'s automated fader (`SET_CONTROL
+//! fader_db`, which writes the ride's offset and the lane's offsets cell) in place of the VCA moves.
 
 use control_plane::{
     CompiledChildren, ControlAdapter, ControlLimits, EventLane, PlanResources, PlanState,
@@ -175,15 +178,24 @@ impl Rig {
 
     /// Commit `v`'s offset at `db` on both lanes, over `ramp` samples or the session's length.
     fn move_vca(&mut self, db: f32, ramp: Option<u32>) {
-        self.request += 1;
-        let edits = [SessionEdit::SetControl {
-            expected_effect: None,
-            address: ControlAddress {
+        self.move_row(
+            ControlAddress {
                 owner: Owner::Vca(id("v")),
                 section: Section::Own,
                 control: 1,
                 lane: ParameterChannel::Both,
             },
+            db,
+            ramp,
+        );
+    }
+
+    /// Commit `value` at `address` live, over `ramp` samples or the session's length.
+    fn move_row(&mut self, address: ControlAddress, db: f32, ramp: Option<u32>) {
+        self.request += 1;
+        let edits = [SessionEdit::SetControl {
+            expected_effect: None,
+            address,
             value: db,
             ramp_samples: ramp,
         }];
@@ -203,7 +215,7 @@ impl Rig {
         let length = self
             .session
             .command(&bytes, 65_536)
-            .expect("the VCA move commits");
+            .expect("the move commits");
         let mut fields = [0_u16; 64];
         let path = match codec
             .decode_typed_response(
@@ -217,11 +229,11 @@ impl Rig {
                 ..
             } => applied.edit_path,
             DecodedTypedResponseFrame::NonOk { payload, .. } => {
-                panic!("the VCA move is refused: {payload:?}")
+                panic!("the move is refused: {payload:?}")
             }
             DecodedTypedResponseFrame::Success { .. } => panic!("another success payload"),
         };
-        assert_eq!(path, EditPath::Live, "the VCA move is live");
+        assert_eq!(path, EditPath::Live, "the move is live");
         self.revision += 1;
         // The commit's reliable events, read as a host reads them.
         while self
@@ -233,11 +245,8 @@ impl Rig {
     }
 }
 
-/// Gate 6. Test value: red if the offsets cell's read, the jump or the composition with the new
-/// `S` allocates or frees on render.
-#[test]
-fn a_vca_move_over_an_automated_member_renders_allocation_free() {
-    bench_support::alloc::assert_installed();
+/// The rig on [`document`], warmed: the process statics and the first blocks' one-time work.
+fn rig() -> Rig {
     let (document, revision) = document();
     let CompiledChildren { session, plan } =
         compile_children::<Adapter>(&document, limits(), Box::new(Preparer)).expect("boot compile");
@@ -248,10 +257,18 @@ fn a_vca_move_over_an_automated_member_renders_allocation_free() {
         request: 1,
         block: 0,
     };
-    // Warm-up: the process statics and the first blocks' one-time work.
     for _ in 0..4 {
         rig.block();
     }
+    rig
+}
+
+/// Gate 6. Test value: red if the offsets cell's read, the jump or the composition with the new
+/// `S` allocates or frees on render.
+#[test]
+fn a_vca_move_over_an_automated_member_renders_allocation_free() {
+    bench_support::alloc::assert_installed();
+    let mut rig = rig();
     let script: [&[(f32, Option<u32>)]; 4] = [
         &[(-6.0, None)],
         &[(-3.0, Some(256))],
@@ -262,6 +279,49 @@ fn a_vca_move_over_an_automated_member_renders_allocation_free() {
     for moves in script {
         for &(db, ramp) in moves {
             rig.move_vca(db, ramp);
+        }
+        for _ in 0..12 {
+            let block = rig.block;
+            let used = rig.block();
+            assert_eq!(
+                (used.allocations, used.deallocations),
+                (0, 0),
+                "block {block} allocated or freed"
+            );
+        }
+    }
+}
+
+/// #1650b gate 6. Hand moves of `eq0`'s automated fader commit live (each writes the ride's offset
+/// and the lane's offsets cell): on the left lane with the session's length, on both lanes with an
+/// edit length of 256 samples, twice before one block, and back to `0`. Every render call after
+/// the warm-up allocates and frees nothing.
+///
+/// Test value: red if the offsets-cell read, the jump or the composition with a hand offset's `S`
+/// allocates or frees on render.
+#[test]
+fn a_hand_move_on_an_automated_fader_renders_allocation_free() {
+    bench_support::alloc::assert_installed();
+    let mut rig = rig();
+    let fader = |lane| ControlAddress {
+        owner: Owner::Strip(id("eq0")),
+        section: Section::Builtins,
+        control: 5,
+        lane,
+    };
+    let script: [&[(ParameterChannel, f32, Option<u32>)]; 4] = [
+        &[(ParameterChannel::Left, 3.0, None)],
+        &[(ParameterChannel::Both, -4.5, Some(256))],
+        // Two moves before one block: render reads the newest slot only.
+        &[
+            (ParameterChannel::Right, 6.0, None),
+            (ParameterChannel::Left, -1.5, Some(256)),
+        ],
+        &[(ParameterChannel::Both, 0.0, None)],
+    ];
+    for moves in script {
+        for &(lane, db, ramp) in moves {
+            rig.move_row(fader(lane), db, ramp);
         }
         for _ in 0..12 {
             let block = rig.block;

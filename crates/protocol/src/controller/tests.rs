@@ -453,6 +453,7 @@ fn mock_controls() -> Vec<crate::ControlEntry> {
                 family: crate::ControlFamily::Effect,
                 active: true,
                 value: 0.25,
+                automated: false,
             }),
         },
     ]

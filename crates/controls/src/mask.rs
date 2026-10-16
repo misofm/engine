@@ -47,15 +47,31 @@ struct Target<'a> {
 /// single supported link mode's `link_mode`), so that a change to it stays a difference of
 /// structure and a rebuild reports it.
 ///
+/// A fader lane that a rendered stored automation of `into` drives (#1650 D3, departure 2) has
+/// the driving entry's hand-move offset as its `fader_db` value: the offset is copied (from the
+/// entry of `from` with the same ID and target), and the strip's static fader dB of that lane is
+/// left as `into` holds it. It is the lane's fallback, not a control value, so a change of it stays
+/// a difference of structure.
+///
 /// After this call, `into` and `from` differ only in what is not a control value, and in the
 /// owners they do not share.
 pub fn mask_values(into: &mut SessionModel, from: &SessionModel) {
     into.control_smoothing = from.control_smoothing;
+    mask_fader_offsets(into, from);
+    // One pass over the table: the lanes each strip's rendered entries drive, by strip index.
+    let driven = crate::effective::model_fader_offsets(into);
+    let automated = |index: usize| {
+        driven
+            .get(index)
+            .map_or([false; 2], |lanes| lanes.map(|offset| offset.is_some()))
+    };
+    let tracks = into.tracks.len();
     let console = &into.console;
     for (index, track) in into.tracks.iter_mut().enumerate() {
         if let Some(source) = pair(&from.tracks, index, |candidate| candidate.id == track.id) {
             mask_strip(
                 console,
+                automated(index),
                 Target {
                     builtins: &mut track.builtins,
                     fader: &mut track.fader,
@@ -77,6 +93,7 @@ pub fn mask_values(into: &mut SessionModel, from: &SessionModel) {
         if let Some(source) = pair(&from.submixes, index, |candidate| candidate.id == submix.id) {
             mask_strip(
                 console,
+                automated(tracks + index),
                 Target {
                     builtins: &mut submix.builtins,
                     fader: &mut submix.fader,
@@ -114,10 +131,35 @@ fn pair<T>(items: &[T], index: usize, matches: impl Fn(&T) -> bool) -> Option<&T
         .or_else(|| items.iter().find(|item| matches(item)))
 }
 
+/// Copy the hand-move offset of every rendered entry of `into` from the entry of `from` with the
+/// same ID and target (#1650 D5): an offset is a control value, the value of the `fader_db` row of
+/// the lanes the entry drives.
+fn mask_fader_offsets(into: &mut SessionModel, from: &SessionModel) {
+    for (index, entry) in into.automation.iter_mut().enumerate() {
+        if !crate::automation_row_renders(&entry.target) {
+            continue;
+        }
+        if let Some(prior) = pair(&from.automation, index, |candidate| {
+            candidate.id == entry.id && candidate.target == entry.target
+        }) {
+            entry.offset = prior.offset;
+        }
+    }
+}
+
 /// Mask one strip. `console` is the session's slot declaration, which gives each entry's identity.
-fn mask_strip(console: &Console, into: Target<'_>, from: &Source<'_>) {
+/// `automated` says which fader lanes a rendered entry of the model being masked drives: their
+/// static dB is kept (#1650 departure 2).
+fn mask_strip(console: &Console, automated: [bool; 2], into: Target<'_>, from: &Source<'_>) {
     into.builtins.clone_from(from.builtins);
+    let kept = [into.fader.left_db, into.fader.right_db];
     into.fader.clone_from(from.fader);
+    if automated[0] {
+        into.fader.left_db = kept[0];
+    }
+    if automated[1] {
+        into.fader.right_db = kept[1];
+    }
     into.matrix_or_pan.clone_from(from.matrix_or_pan);
     for (index, entry) in into.console.iter_mut().enumerate() {
         let Some(slot) = console.slots().find(|slot| slot.slot == entry.slot) else {

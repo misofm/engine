@@ -636,6 +636,12 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   lane the session automates is that lane's fallback: it gives no `FaderDb` record, whether an own
   edit or a VCA move reaches it, and its mute records are unchanged. Every other row stays
   model-only until its rendering slice adds it.
+- **A hand move on an automated fader (#1650b).** On a lane a rendered `fader_db` entry drives,
+  `SET_CONTROL fader_db` writes the entry's hand offset, not the static fader: it is live (in place
+  when it is the transaction's only kind of edit), writes the lane's offsets cell with
+  `S = offset + the reaching VCA offsets` over the `Fader` row's length, and the list reports the
+  offset as the row's value with `automated` (field 35). An offset-only `UpsertAutomation` is the
+  same live write. A change of an automated lane's static fader is structure (a rebuild).
 - **Live effect parameters (#1264, #1265).** A track's console-slot entry or insert whose
   `params` change only in live parameters, parametric EQ values included, is live too; see
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a

@@ -7,7 +7,7 @@ schemas. Optional/boundary values are represented by the transaction's nested fi
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`5eb9ad2ed137f3be`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`5cab2cf3b4e4767f`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings

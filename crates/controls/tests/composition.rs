@@ -192,6 +192,7 @@ fn vca_reach_counts_a_diamond_once_and_includes_nested_parents_in_id_order() {
             mute: [true, vocal.right_mute],
             vca_mute: [true, false],
             offsets_sum: [-1.0, -1.0],
+            fader_offset: [None; 2],
         },
         EffectiveStrip {
             fader_db: [1.0 - 2.0 - 3.0 - 4.0, -2.5 + 0.125 + 0.25 + 0.5],
@@ -199,6 +200,7 @@ fn vca_reach_counts_a_diamond_once_and_includes_nested_parents_in_id_order() {
             vca_mute: [false, true],
             // The reach in ascending VCA ID: `a-mid`, `b-mid`, `z-top`.
             offsets_sum: [-2.0 - 3.0 - 4.0, 0.125 + 0.25 + 0.5],
+            fader_offset: [None; 2],
         },
         EffectiveStrip {
             fader_db: [
@@ -212,12 +214,14 @@ fn vca_reach_counts_a_diamond_once_and_includes_nested_parents_in_id_order() {
             vca_mute: [false, false],
             // No VCA reaches `t1`: `S` is `+0.0`.
             offsets_sum: [0.0, 0.0],
+            fader_offset: [None; 2],
         },
         EffectiveStrip {
             fader_db: [bus.left_db - 3.0 - 4.0, bus.right_db + 0.25 + 0.5],
             mute: [bus.left_mute, true],
             vca_mute: [false, true],
             offsets_sum: [-3.0 - 4.0, 0.25 + 0.5],
+            fader_offset: [None; 2],
         },
     ];
     let actual = effective(&model, &MonitorOverlay::default());

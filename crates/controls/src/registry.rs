@@ -23,6 +23,9 @@ pub struct ControlRow {
     /// The committed value. A derived row reports its computed value, a monitor row (solo) the
     /// overlay's, and a row that the owner's shape does not use the descriptor's default.
     pub value: f32,
+    /// Whether a rendered stored automation drives the row's lane (#1650 D4). On such a lane the
+    /// `fader_db` row's value is the driving entry's hand-move offset, not the static fader.
+    pub automated: bool,
 }
 
 /// Append the rows of one control: one per lane the descriptor lists. `value` gives the committed
@@ -34,6 +37,20 @@ pub(crate) fn push_control(
     control: u32,
     descriptor: &ControlDescriptor,
     value: impl Fn(Side) -> f32,
+) {
+    push_control_automated(out, owner, section, control, descriptor, value, |_| false);
+}
+
+/// [`push_control`] for a row that a rendered stored automation can drive: `automated` says, per
+/// side, whether one does (#1650 D4).
+pub(crate) fn push_control_automated(
+    out: &mut Vec<ControlRow>,
+    owner: &Owner,
+    section: &Section,
+    control: u32,
+    descriptor: &ControlDescriptor,
+    value: impl Fn(Side) -> f32,
+    automated: impl Fn(Side) -> bool,
 ) {
     for &lane in descriptor.lanes.listed() {
         out.push(ControlRow {
@@ -49,6 +66,7 @@ pub(crate) fn push_control(
             } else {
                 descriptor.default
             },
+            automated: automated(Side::of(lane)),
         });
     }
 }
@@ -200,10 +218,12 @@ pub fn owner_rows_in(
     match owner_slot(model, owner) {
         OwnerSlot::Strip(index) => {
             let strip = view.strip(index);
+            let offsets = builtin_rows::fader_offsets(view.fader_automation(strip.id));
             strip::push_rows(
                 out,
                 &model.console,
                 &strip,
+                offsets,
                 &effective.strip(index),
                 overlay,
                 sample_rate,
@@ -533,9 +553,16 @@ fn write(
                 .try_for_each(|&side| strip::write_own(&mut target, control, side, value))
         }
         (Owner::Strip(id), Section::Builtins) => {
+            // An automated fader lane's value is its entry's hand-move offset (#1650 D3).
+            let static_sides = if control == builtin_rows::FADER_DB {
+                builtin_rows::write_fader_offset(model, id, sides, value)
+            } else {
+                [true; 2]
+            };
             let mut target = strip::strip_mut(model, id).ok_or(ControlError::AddressUnknown)?;
             sides
                 .iter()
+                .filter(|&&side| static_sides[side.pick(0, 1)])
                 .try_for_each(|&side| builtin_rows::write(&mut target, control, side, value))
         }
         (Owner::Strip(_), Section::Console(_) | Section::Inserts(_)) => {
