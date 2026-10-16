@@ -204,6 +204,8 @@ after publication).
 **Measured.** Reference session `capi_retained_bytes` 168,810 -> 167,514 (x86-64, -1,296 = one
 216-byte `Option<PlanStateInventory>` in each of six provider epochs); the 175,296 ceiling stays.
 No ABI change: the row was a control-plane epoch term, not a header field.
+Amendment (batch 15b fold): after #1285's `input_floors` and `raised_arrivals` merged the row
+measures 167,754 (+240); the ceiling stays.
 
 **Edits outside the listed paths (authorized by the ruling or mechanical).**
 `crates/graph/src/lib.rs` (deletion), `crates/host-core/src/{lib.rs,render_session.rs}`,

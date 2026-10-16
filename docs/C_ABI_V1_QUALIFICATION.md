@@ -882,15 +882,16 @@ that window is admitted against the plan that renders.
   compiled models. The repository's reference limits (`tools/audit/src/capi.rs`,
   `crates/capi/tests/plan_swap_race.rs`, `crates/capi/tests/resource_lifecycle.rs`) admit three
   plans of the nine-track EQ reference session with room to spare (graph 316,350 bytes against
-  100,000,000; capi 167,514 against 10,000,000), so none was raised. The rule is measured from the
-  row of a running successor plan, which carries its sources and owns their rings. The browser's caps are its
-  one memory budget, which charges the same tables through the same control-plane code; its
+  100,000,000; capi 167,754 against 10,000,000), so none was raised. The rule is measured from the
+  row of a running successor plan, which carries its sources and owns their rings. The browser's
+  caps are its one memory budget, which charges the same tables through the same control-plane code; its
   replacement-peak term must cover the three-plan peak when a warm candidate is admitted (#1403).
 - **Resource movement.** The larger tables add fixed bytes to every session's
   `capi_retained_bytes` (+1,904 bytes, #1398 D1's tables). On the nine-track EQ reference session
   the row measures 165,842 bytes at the batch 15a head, 165,922 after its review fold, 168,810
-  after fold 2 and 167,514 after #1698 (x86-64; the ceiling in `crates/capi/tests/resource_lifecycle.rs` is 175,296). A caller whose
-  `maximum_capi_retained_bytes` was exact must raise it. No symbol, result code or event is added.
+  after fold 2, 167,514 after #1698 and 167,754 after #1285's floors (+240: the `input_floors` and
+  `raised_arrivals` tables; x86-64; the ceiling in `crates/capi/tests/resource_lifecycle.rs` is
+  175,296). A caller whose `maximum_capi_retained_bytes` was exact must raise it. No symbol, result code or event is added.
 
 ## Supersession of an unadopted candidate (#1310)
 
@@ -939,7 +940,8 @@ that window is admitted against the plan that renders.
   kept, so the replacement and the live admissions count it: three plans and three models when a
   candidate is superseded, three models when a live edit lands while one waits.
 - **Resource movement.** Each candidate epoch kept its carried base (#1344), charged in its capi
-  epoch row (`carried_base_retained_bytes`), until #1698 removed it (below); the boot plan had none. The provider epoch itself grew
+  epoch row (`carried_base_retained_bytes`), until #1698 removed it (below); the boot plan had
+  none. The provider epoch itself grew
   (its kept base and carried base, and the batch 15a review fold's carried source bytes), and the
   pending and retired provider lists charge that size, so the reference session's boot
   `capi_retained_bytes` moves: 165,842 bytes at the batch 15a head, 165,922 after its review fold,
@@ -952,10 +954,10 @@ that window is admitted against the plan that renders.
   candidate added, redeclared or removed, and the successor does not keep as the candidate
   declares it (that one moves by the donation), starts fresh in the successor (generation 1,
   frame 0, as the host contract for a declaration change against the newest committed session
-  says). The
-  candidate epoch no longer keeps a carried base, and `carried_base_retained_bytes` is gone: the
+  says). The candidate epoch no longer keeps a carried base, and `carried_base_retained_bytes` is gone: the
   reference session's `capi_retained_bytes` moves 168,810 -> 167,514 (x86-64, -1,296: 216 bytes
-  in each of the six provider epochs).
+  in each of the six provider epochs). #1285's floors (`input_floors`, `raised_arrivals`) then add
+  240 bytes: 167,754 (ceiling unchanged).
 
 ## Latency floors across a structural transaction (#1285)
 

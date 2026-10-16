@@ -1490,7 +1490,7 @@ struct PlanShape {
 /// host drops a superseded candidate's tables as soon as the core no longer holds its epoch
 /// ([`ReadyOwnership::drop_superseded_shapes`]); the tables of plans adopted since the last
 /// service step wait for it. So a command meets at most one entry after the reclaim and adds one:
-/// four leaves room to spare, and the room check in [`ReadyOwnership::run_command`] never refuses
+/// four leaves room to spare, and the room check in [`ReadyOwnership::run_control`] never refuses
 /// a structural edit, paused or not.
 const PENDING_SHAPES: usize = 4;
 

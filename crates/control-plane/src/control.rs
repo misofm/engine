@@ -2548,10 +2548,11 @@ where
         // created (A added or redeclared the source) that the host fed and the donation above does
         // not move to B would drop with A, and with it PCM the host was acked for. Until an issue
         // lets B read it, such a supersession is refused here as backpressure (#1698 keeps the
-        // reverted case refused: B starts a reverted source fresh, as the host contract says). The guard reads the donation plan itself, so it sits after
-        // the check, still before the commit: the reservation it follows is cancelled by the
-        // return (it returns its credit and consumes no epoch), nothing else has changed, the
-        // caller republishes A, and once render adopts A the same edit commits on it.
+        // reverted case refused: B starts a reverted source fresh, as the host contract says). The
+        // guard reads the donation plan itself, so it sits after the check, still before the
+        // commit: the reservation it follows is cancelled by the return (it returns its credit and
+        // consumes no epoch), nothing else has changed, the caller republishes A, and once render
+        // adopts A the same edit commits on it.
         if let (Some(plan), Some(candidate)) = (donation.as_ref(), withdrawn.as_ref()) {
             let donor = self
                 .pending_providers

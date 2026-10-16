@@ -251,3 +251,9 @@ three #1638 reviews measured; the mechanism is this slice's design, reviewed wit
   with `control_smoothing` 0), if D1.2 refreshes `hold_until` inside the hold, or if a grid event
   cuts the move's ramp in `[E, E + J - 1]`.
 - **#1648** carries the obligation across a swap (see its amendment).
+
+## Amendment (controls coordinator, batch 15b fold, 2026-10-16)
+
+- #1285 landed first (batch 15b). `a(n)` above must therefore be the floored input arrival
+  (`GraphCompileReport::input_arrivals`, kept in `PlanStateInventory::input_floors()`), not the
+  arrival the graph compiler computes without floors.

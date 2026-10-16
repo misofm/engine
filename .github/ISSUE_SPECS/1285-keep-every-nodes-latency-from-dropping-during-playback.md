@@ -255,3 +255,8 @@ Checked against `228fca26c`.
 
 **Measured.** `audit capi`: allocations 0, deallocations 0, pcm_digest `4f52089e4a8cf83c`
 (unchanged). No resource ceiling was re-pinned.
+
+## Amendment (controls coordinator, batch 15b fold, 2026-10-16)
+
+- The note above that the discontinuity case (#1323) is not built yet is superseded: #1323 shipped
+  it in the same batch (`SessionState::declare_discontinuity`, both hosts).
