@@ -8068,6 +8068,133 @@ mod set_control {
         );
         assert_eq!(rig.summary().3, 0, "still live");
     }
+
+    // TBD48: live level values are composed in the canonical floating-point environment.
+
+    /// TBD48 D2 on the C ABI: a live move made while the host's control thread runs FTZ, DAZ and
+    /// round toward zero.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    mod canonical_live {
+        use super::*;
+        use lane::fpenv::under_hostile_fp_env;
+
+        /// The member dB and the VCA offset of #1646's environment gate: their composition rounds
+        /// differently under round toward zero, and the two compositions convert to different
+        /// gains (both asserted below).
+        const MEMBER_DB: f32 = -0.01384;
+        const OFFSET_DB: f32 = 1.0 / 3.0;
+
+        /// [`vca_document`] with `eq0`'s left fader at `member` and `inner`'s left offset at
+        /// `offset` (`outer` stays at `0` dB, so the offsets' sum is `offset` exactly).
+        fn document(member: f32, offset: f32) -> String {
+            with_model(&vca_document(), |model| {
+                model.tracks[0].fader.left_db = member;
+                model.vcas[0].fader.left_db = offset;
+            })
+        }
+
+        /// The fixture is not vacuous: the hostile word composes the pair to another `f32`, and
+        /// that `f32` converts to another gain.
+        fn assert_the_hostile_word_rounds_the_composition() {
+            let compose = || session::vca_effective_db(MEMBER_DB, [OFFSET_DB, 0.0]);
+            let canonical = compose();
+            let rounded = under_hostile_fp_env(compose);
+            assert_ne!(
+                canonical.to_bits(),
+                rounded.to_bits(),
+                "the gate is vacuous: the composition rounds alike under the hostile word"
+            );
+            assert_ne!(
+                builtins::checked_fader_gain(canonical).map(f32::to_bits),
+                builtins::checked_fader_gain(rounded).map(f32::to_bits),
+                "the gate is vacuous: the composition's rounding does not reach the gain"
+            );
+        }
+
+        /// One case: a rig on `before` takes `edit` under the hostile word, live, and from the
+        /// block its ramp leaves behind renders the bits of a canonical preparation of the
+        /// committed session; the catalog's derived `effective_fader_db` row holds the canonical
+        /// composition.
+        fn live_move_under_hostile_word(label: &str, before: &str, edit: SessionEdit) {
+            let mut rig = Rig::new(before);
+            for _ in 0..4 {
+                rig.step();
+            }
+            let (revision, _, epoch, pending) = rig.summary();
+            let bytes = rig.transaction(&[edit]);
+            let (result, response) = under_hostile_fp_env(|| rig.send(&bytes));
+            assert_eq!(result, crate::RESULT_OK, "{label}");
+            assert_eq!(
+                edit_path_of(&response),
+                protocol::EditPath::Live,
+                "{label}: the move is live"
+            );
+            assert_eq!(
+                (rig.summary().0, rig.summary().2, rig.summary().3),
+                (revision + 1, epoch, pending),
+                "{label}: one revision, the same plan, no candidate"
+            );
+            let committed = rig.snapshot();
+            let model = parse_session_json(&committed).expect("model");
+            assert_eq!(
+                (
+                    model.tracks[0].fader.left_db.to_bits(),
+                    model.vcas[0].fader.left_db.to_bits()
+                ),
+                (MEMBER_DB.to_bits(), OFFSET_DB.to_bits()),
+                "{label}: the committed pair is the fixture's"
+            );
+            let (list, ..) = control_list_all_c(rig.session, &mut rig.request, 256);
+            let derived = listed(&list, |entry, row| {
+                entry.address.owner_id.as_deref() == Some("eq0")
+                    && row.name == "effective_fader_db"
+                    && entry.address.lane == Some(protocol::ParameterChannel::Left)
+            });
+            assert_eq!(
+                control_of(derived).map(|row| row.value.to_bits()),
+                Some(session::vca_effective_db(MEMBER_DB, [OFFSET_DB, 0.0]).to_bits()),
+                "{label}: the catalog's derived row holds the canonical composition"
+            );
+            let ramps = model.control_smoothing_samples();
+            let k = window(rig.latency(), ramps.fader.max(64), rig.quantum);
+            let edit_block = rig.block;
+            let live: Vec<Vec<f32>> = (0..k + 4).map(|_| rig.step()).collect();
+            let reference = Reference::run(&committed, rig.block);
+            for (offset, pcm) in live.iter().enumerate().skip(k as usize) {
+                let block = edit_block as usize + offset;
+                assert!(pcm.iter().any(|sample| *sample != 0.0), "{label}: signal");
+                assert_eq!(
+                    bits(pcm),
+                    bits(&reference[block]),
+                    "{label}: block {block} renders the canonical preparation's bits"
+                );
+            }
+        }
+
+        /// TBD48 D2 (C ABI): a live fader move on a VCA member, and a live VCA offset move over
+        /// it, each made while the caller's thread runs FTZ, DAZ and round toward zero, render
+        /// from the end of their ramp the bits of the same committed session prepared on a
+        /// canonical thread, and the catalog's derived fader row holds the canonical composition.
+        /// The pair's composition rounds to another `f32`, and another gain, under that word
+        /// (asserted), so the gate is not vacuous.
+        ///
+        /// Test value: red if a live transaction composes a member's effective fader (the VCA
+        /// sum) in the caller's environment: remove the guard in `SessionState::command`.
+        #[test]
+        fn a_live_fader_and_vca_move_under_a_hostile_caller_word_render_the_canonical_bits() {
+            assert_the_hostile_word_rounds_the_composition();
+            live_move_under_hostile_word(
+                "a live fader move",
+                &document(0.0, OFFSET_DB),
+                set(builtin("eq0", FADER_DB, Lane::Left), MEMBER_DB, None),
+            );
+            live_move_under_hostile_word(
+                "a live VCA move",
+                &document(MEMBER_DB, 0.0),
+                set(vca_row("inner", VCA_OFFSET_DB, Lane::Left), OFFSET_DB, None),
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

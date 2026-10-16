@@ -4,9 +4,6 @@
 //! `hosts/host-web/src/tests.rs`. Preparation bakes every fader in the canonical floating-point
 //! environment, whatever the caller's thread has set (D2).
 
-// The D2 environment test writes the thread's floating-point control word, which is `unsafe`.
-#![allow(unsafe_code)]
-
 use automation::ProgramBuilder;
 use builtins_compiler::fader_automation_sizes;
 use engine::realtime::{PlanUnitEligibility, PlanarBufferMut, RenderIo, RenderTime};
@@ -311,51 +308,14 @@ fn a_left_only_fader_automation_keeps_a_mono_tracks_collapse() {
     }
 }
 
-/// The caller words of the D2 environment test: MXCSR on `x86_64`, FPCR on AArch64.
-#[cfg(target_arch = "x86_64")]
-mod word {
-    use lane::softfma::{MXCSR_DAZ, MXCSR_FTZ};
-
-    /// Flush-to-zero, denormals-are-zero and round-toward-zero (RC `11`, bits 13-14).
-    pub(super) fn hostile(saved: u32) -> u32 {
-        saved | MXCSR_FTZ | MXCSR_DAZ | 0x6000
-    }
-}
-
-/// FPCR `FZ` and `RMode` `11` (round toward zero); AArch64 has no separate DAZ bit.
-#[cfg(target_arch = "aarch64")]
-mod word {
-    use lane::fpenv::FPCR_FZ;
-
-    pub(super) fn hostile(saved: u64) -> u64 {
-        saved | FPCR_FZ | (0b11 << 22)
-    }
-}
-
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod canonical_preparation {
     use super::*;
-    use lane::fpenv::{
-        FpControlWord, canonical_fp_control_word, read_fp_control_word, write_fp_control_word,
-    };
+    use lane::fpenv::under_hostile_fp_env;
 
-    /// Writes the saved word back on drop, so a failed assertion leaves the thread as it was.
-    struct Restore(FpControlWord);
-
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            // SAFETY: `self.0` is the word this test read from this thread before it changed it,
-            // so it sets no reserved or `RES0` bit.
-            unsafe { write_fp_control_word(self.0) };
-        }
-    }
-
-    /// Runs `body` with the thread's control word set to `word`, then restores the saved word.
-    fn under<T>(word: FpControlWord, body: impl FnOnce() -> T) -> T {
-        let _restore = Restore(read_fp_control_word());
-        // SAFETY: `word` is the canonical word or `word::hostile` of a word read from this thread,
-        // which sets only FTZ, DAZ and RC (MXCSR) or FZ and RMode (FPCR): no reserved bit.
-        unsafe { write_fp_control_word(word) };
+    /// Runs `body` in the canonical environment (the guard restores the thread's word).
+    fn canonical<T>(body: impl FnOnce() -> T) -> T {
+        let _canonical = lane::CanonicalFpEnv::enter();
         body()
     }
 
@@ -368,8 +328,9 @@ mod canonical_preparation {
     /// Static faders of distinct dB on every lane, input trims and filters, no effect (an effect's
     /// own preparation is outside this gate), a flat automated lane on track 2 and a moving
     /// automated pair on track 5. One VCA reaches tracks 1, 2 and 5; track 1's left lane is
-    /// [`VCA_MEMBER_DB`].
-    fn fixture() -> (SessionModel, Vec<f32>) {
+    /// [`VCA_MEMBER_DB`]. Every route carries its own non-0 dB gain (TBD48: `compile_graph`
+    /// converts it), returned third.
+    fn fixture() -> (SessionModel, Vec<f32>, Vec<f32>) {
         let mut model = bank_model();
         model.console.pre_insert.clear();
         model.console.post_insert.clear();
@@ -403,7 +364,12 @@ mod canonical_preparation {
             },
             members,
         }];
-        (model, decibels)
+        let mut route_decibels = Vec::new();
+        for (index, route) in model.routes.iter_mut().enumerate() {
+            route.gain_db = -0.77 - 0.53 * index as f32;
+            route_decibels.push(route.gain_db);
+        }
+        (model, decibels, route_decibels)
     }
 
     /// D2: a caller thread with FTZ, DAZ and round-toward-zero set prepares the plan a canonical
@@ -416,14 +382,13 @@ mod canonical_preparation {
     /// an input coefficient, outside `CanonicalFpEnv` (remove the guard around host-core's
     /// `controls::effective`, in the builtins preparation body or in
     /// `into_graph_artifact_with_banks`), so a flat automated lane and a static fader would take
-    /// the caller's rounding.
+    /// the caller's rounding; or if a route gain is converted outside it (remove the guard at the
+    /// entry of host-core's `prepare_host_runtime_with_live_controls_policy_and_spectrum`, TBD48).
     #[test]
     fn a_hostile_caller_environment_prepares_the_canonical_faders() {
-        let canonical = canonical_fp_control_word();
-        let hostile = word::hostile(canonical);
-        let (model, decibels) = fixture();
+        let (model, decibels, route_decibels) = fixture();
 
-        let moved = under(hostile, || {
+        let moved = under_hostile_fp_env(|| {
             decibels
                 .iter()
                 .filter(|&&db| {
@@ -440,19 +405,38 @@ mod canonical_preparation {
             moved > 0,
             "the gate is vacuous: no fixture fader converts differently under the hostile word"
         );
+        // TBD48: a route gain the hostile word converts differently, so the guard at the entry
+        // of host-core's preparation (around `compile_graph`) is discriminated too.
+        let routes_moved = under_hostile_fp_env(|| {
+            route_decibels
+                .iter()
+                .filter(|&&db| {
+                    let gain = math::db_to_gain_f32(core::hint::black_box(db));
+                    let pinned = {
+                        let _pin = lane::CanonicalFpEnv::enter();
+                        math::db_to_gain_f32(core::hint::black_box(db))
+                    };
+                    gain.to_bits() != pinned.to_bits()
+                })
+                .count()
+        });
+        assert!(
+            routes_moved > 0,
+            "the gate is vacuous: no fixture route gain converts differently under the hostile word"
+        );
         let offset = f64::from(VCA_DB);
         let composed = session::vca_compose_db(VCA_MEMBER_DB, offset);
-        let rounded = under(hostile, || session::vca_compose_db(VCA_MEMBER_DB, offset));
+        let rounded = under_hostile_fp_env(|| session::vca_compose_db(VCA_MEMBER_DB, offset));
         assert_ne!(
             builtins::checked_fader_gain(composed).map(f32::to_bits),
             builtins::checked_fader_gain(rounded).map(f32::to_bits),
             "the gate is vacuous: the VCA composition's rounding does not reach the gain"
         );
 
-        let prepared_canonical = under(canonical, || prepare(&model, 100_000_000));
-        let prepared_hostile = under(hostile, || prepare(&model, 100_000_000));
+        let prepared_canonical = canonical(|| prepare(&model, 100_000_000));
+        let prepared_hostile = under_hostile_fp_env(|| prepare(&model, 100_000_000));
         let render_arm = |prepared: Result<PreparedHost, String>| {
-            under(canonical, || render_prepared(prepared.expect("prepares")).0)
+            canonical(|| render_prepared(prepared.expect("prepares")).0)
         };
         let reference = render_arm(prepared_canonical);
         let candidate = render_arm(prepared_hostile);

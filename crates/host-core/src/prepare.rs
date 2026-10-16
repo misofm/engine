@@ -2155,6 +2155,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     ),
     PrepareDiagnostics,
 > {
+    // TBD48 D1: the whole preparation runs in the canonical floating-point environment, so a
+    // route or send gain (`compile_graph`'s `db_to_gain_f32`), a native effect's coefficients and
+    // every value composed below are what a canonical thread prepares, whatever the caller has
+    // set. The inner guards (builtins body, lowerings, `controls::effective`, the catalog) nest:
+    // each restores the canonical word this one installed, and this one restores the caller's.
+    let _canonical = lane::CanonicalFpEnv::enter();
     // `None` is the plain entry: no live controls, and a request of defaults for the meter and
     // observation fields below. Every `Some` attaches live controls.
     let default_request = HostLiveControlRequest::default();

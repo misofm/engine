@@ -1951,7 +1951,17 @@ where
     /// Runs one control command frame. A success returns the response's length in the response
     /// scratch ([`Self::command_response`]); a structural command either rides the newest plan's
     /// live lanes or prepares, admits and publishes a replacement plan.
+    ///
+    /// **Floating-point environment (TBD48 D1).** The whole command runs in
+    /// `lane::CanonicalFpEnv`: the live classification composes each strip's effective fader
+    /// (`controls::effective`, the VCA sum), the catalog stages its derived rows, and a rebuild
+    /// prepares, all as a fresh preparation of the committed value does, whatever the host's
+    /// control thread has set. Both hosts reach a transaction through here and nowhere else. The
+    /// guard restores the caller's word on every return, an error included; a nested guard (the
+    /// preparation's) saves and restores the canonical word. Render never calls this: it pins its
+    /// own environment.
     pub fn command(&mut self, request: &[u8], output_capacity: u64) -> Result<usize, CommandError> {
+        let _canonical = lane::CanonicalFpEnv::enter();
         self.service()?;
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
         // #1613: a transaction of values is prepared in place (no clone, no compile); every other
@@ -2159,6 +2169,8 @@ where
     /// [`Self::declare_discontinuity`] after its service step: the one core path of a declaration,
     /// which a plain session seek also runs (B16-R9).
     fn declare_discontinuity_serviced(&mut self) -> Result<(), CommandError> {
+        // TBD48 D1: the successor's carried level values are composed as `Self::command`'s are.
+        let _canonical = lane::CanonicalFpEnv::enter();
         if !self
             .newest_providers()
             .inventory

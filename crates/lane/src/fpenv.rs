@@ -399,6 +399,54 @@ pub fn canonical_fp_control_word() -> FpControlWord {
     {}
 }
 
+/// The hostile caller word of the environment gates (#1646 D2, TBD48 D2): `saved` with
+/// flush-to-zero, denormals-are-zero and round toward zero set (MXCSR `FTZ`, `DAZ`, `RC = 11`), or
+/// on AArch64 `FPCR.FZ` and `RMode = 11` (AArch64 has no separate DAZ bit).
+#[cfg(all(feature = "test-support", target_arch = "x86_64"))]
+#[must_use]
+pub fn hostile_fp_control_word(saved: FpControlWord) -> FpControlWord {
+    saved | crate::softfma::MXCSR_FTZ | crate::softfma::MXCSR_DAZ | 0x6000
+}
+
+/// The hostile caller word of the environment gates: see the `x86_64` item.
+#[cfg(all(feature = "test-support", target_arch = "aarch64"))]
+#[must_use]
+pub fn hostile_fp_control_word(saved: FpControlWord) -> FpControlWord {
+    saved | FPCR_FZ | (0b11 << 22)
+}
+
+/// Runs `body` with this thread's control word set to [`hostile_fp_control_word`] of the current
+/// word, then writes the current word back, also when `body` panics. Test-only: it lets a test
+/// stand in for a host whose control thread runs a hostile environment, without `unsafe` of its
+/// own (the one write is here, in this audited file).
+#[cfg(all(
+    feature = "test-support",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub fn under_hostile_fp_env<T>(body: impl FnOnce() -> T) -> T {
+    /// Writes the saved word back on drop.
+    struct Restore(FpControlWord);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            scheduling_barrier();
+            // SAFETY: `self.0` was read from this thread (the value never leaves this function's
+            // frame), so it sets no reserved bit.
+            unsafe { write_fp_control_word(self.0) };
+        }
+    }
+
+    let saved = read_fp_control_word();
+    let restore = Restore(saved);
+    // SAFETY: the hostile word adds only FTZ, DAZ and RC (MXCSR) or FZ and RMode (FPCR), all
+    // control bits, to a word read from this thread: no reserved or `RES0` bit.
+    unsafe { write_fp_control_word(hostile_fp_control_word(saved)) };
+    scheduling_barrier();
+    let value = body();
+    drop(restore);
+    value
+}
+
 /// The pinned floating-point environment of one render call.
 ///
 /// Construct one at the top of a render entry and let it live for the whole call. On construction
