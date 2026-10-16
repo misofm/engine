@@ -222,11 +222,12 @@ impl Policy {
             // (`crates/builtins`: the fader operation sink, and the bank's and the scalar track's
             // `process_with`) and #1639's two (`crates/graph`: the jump-length cell's word decode
             // and its block-entry read) and #1630's one (`crates/builtins-compiler`: the cell
-            // readers' carry marks, D15-2). The floors had fallen behind the tree before #1637; they
-            // are set to its counts again. A change that adds a marker raises them in the same
-            // change.
-            marked_files_floor: 32,
-            marked_regions_floor: 150,
+            // readers' carry marks, D15-2) and #1316's (`seqlock.rs`, the engine's one seqlock
+            // writer, B15-R1, and `crates/source`'s seek-report publication). The floors had fallen
+            // behind the tree before #1637; they are set to its counts again. A change that adds a
+            // marker raises them in the same change.
+            marked_files_floor: 33,
+            marked_regions_floor: 151,
             render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
                 .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
             unwrapped_exports: UNWRAPPED_EXPORTS

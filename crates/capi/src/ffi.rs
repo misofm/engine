@@ -7,8 +7,9 @@ use crate::{
     EXACT_LAUNCH_RATE_MASK, Engine, EngineConfig, FEATURE_MASK, HandleHeader, Plan,
     PlanResourceReport, PlanarOutput, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
     RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
-    RESULT_OK, RESULT_RENDER_REJECTED, RESULT_UNSUPPORTED, RESULT_WRONG_HANDLE, Session,
-    SourceChunk, SubmitReport, WATERMARK_SIZE, Watermark,
+    RESULT_OK, RESULT_RENDER_REJECTED, RESULT_UNSUPPORTED, RESULT_WRONG_HANDLE,
+    SOURCE_SEEK_REPORT_SIZE, Session, SourceChunk, SourceSeekReport, SubmitReport, WATERMARK_SIZE,
+    Watermark,
 };
 use core::ffi::c_void;
 use core::ptr;
@@ -626,6 +627,85 @@ unsafe fn source_seek_entry(
     })
 }
 
+/// Copy where a source of the newest committed session landed, as render last published it
+/// (#1316): the generation in effect, the source-read sample (the render clock in this version) of
+/// the first block it played in, the source frame that block started at, and the source's
+/// cumulative underrun and held frames. A plain seek lands at the first block that begins after the
+/// call; an anchored seek at its anchor block, at its frame plus the lateness if render reached it
+/// late. Generation `0` means the source has not rendered a block yet. The report belongs to the
+/// source's ring, so a plan swap that carries the source keeps it; a source a transaction adds
+/// starts at generation `0`.
+///
+/// Runs the service step first, as every session call does. Returns `RESULT_OK` and fills `out`;
+/// `RESULT_INVALID_ARGUMENT` for a wrong `struct_size`, a nonzero reserved word, or a null, empty,
+/// non-UTF-8 or over-long source ID, and, with `source.id.unknown`, for a source the session does
+/// not declare; `RESULT_BACKPRESSURE` with `source.report.busy` when every bounded read landed
+/// inside render's publication (`out` untouched; read again).
+///
+/// # Safety
+///
+/// `session` must be live, `source_id` must reference the declared borrowed byte count and `out`
+/// must satisfy the writable ABI V1 seek-report contract.
+///
+/// Thread: control.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_source_seek_report(
+    session: *mut Session,
+    source_id: *const u8,
+    source_id_bytes: u64,
+    out: *mut SourceSeekReport,
+) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { session_kind(session) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        if source_id.is_null() || out.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is nonnull and the caller promises readable seek-report storage for these
+        // input-validation fields before the complete fixed-size write.
+        let (struct_size, reserved0, reserved) =
+            unsafe { ((*out).struct_size, (*out).reserved0, (*out).reserved) };
+        if struct_size != SOURCE_SEEK_REPORT_SIZE || reserved0 != 0 || reserved != [0; 2] {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: The caller promises the source-ID storage is readable for this call.
+        let source_id =
+            match unsafe { borrowed_bytes(source_id, source_id_bytes, MAX_SOURCE_ID_BYTES) } {
+                Ok(value) if !value.is_empty() && core::str::from_utf8(value).is_ok() => value,
+                _ => return RESULT_INVALID_ARGUMENT,
+            };
+        // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
+        let session = unsafe { &mut *session };
+        match session.state.seek_report(source_id) {
+            Ok(report) => {
+                // SAFETY: Exact struct size establishes writable ABI V1 seek-report storage.
+                unsafe {
+                    out.write(SourceSeekReport {
+                        struct_size: SOURCE_SEEK_REPORT_SIZE,
+                        reserved0: 0,
+                        generation: report.generation,
+                        first_sample: report.first_sample,
+                        source_frame: report.source_frame,
+                        cumulative_underrun_frames: report.cumulative_underrun_frames,
+                        cumulative_held_frames: report.cumulative_held_frames,
+                        reserved: [0; 2],
+                    });
+                }
+                session.last_error.borrow_mut().clear();
+                RESULT_OK
+            }
+            Err(error) => {
+                let (code, diagnostic) = error.report();
+                session.last_error.borrow_mut().set(diagnostic);
+                code
+            }
+        }
+    })
+}
+
 /// Run one bounded step of control work between edits (#1348): reclaim retired plans, bring the
 /// provider epochs up to render, refresh the session counters and stage render telemetry. Every
 /// other session control call runs the same step first; this entry point runs only the step.
@@ -1181,6 +1261,35 @@ pub(crate) fn test_plan_snapshot(plan: *mut Plan) -> (u64, PlanResourceReport) {
     (plan.owner().next_absolute_sample(), plan.resources())
 }
 
+/// A source's seek report through the exported entry point, with a valid zeroed struct.
+#[cfg(test)]
+pub(crate) fn test_source_seek_report(
+    session: *mut Session,
+    source_id: &[u8],
+) -> (u32, SourceSeekReport) {
+    let mut out = SourceSeekReport {
+        struct_size: SOURCE_SEEK_REPORT_SIZE,
+        reserved0: 0,
+        generation: 0,
+        first_sample: 0,
+        source_frame: 0,
+        cumulative_underrun_frames: 0,
+        cumulative_held_frames: 0,
+        reserved: [0; 2],
+    };
+    // SAFETY: Test callers pass a live session and a borrowed source ID; `out` is one complete
+    // local report.
+    let result = unsafe {
+        miso_engine_v1_source_seek_report(
+            session,
+            source_id.as_ptr(),
+            source_id.len() as u64,
+            &mut out,
+        )
+    };
+    (result, out)
+}
+
 /// The plan's watermark through the exported entry point, with a valid zeroed struct.
 #[cfg(test)]
 pub(crate) fn test_plan_watermark(plan: *const Plan) -> (u32, Watermark) {
@@ -1567,10 +1676,14 @@ mod tests {
         assert_eq!(query(&mut capabilities), RESULT_OK);
         assert_eq!(capabilities.abi_version, ABI_VERSION);
         assert_eq!(capabilities.exact_launch_rate_mask, 0x0f);
-        assert_eq!(capabilities.feature_mask, 0xff);
+        assert_eq!(capabilities.feature_mask, 0x1ff);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_SOURCE_SEEK_AT, 0);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_PLAN_WATERMARK, 0);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_SERVICE, 0);
+        assert_ne!(
+            capabilities.feature_mask & crate::FEATURE_SOURCE_SEEK_REPORT,
+            0
+        );
         assert_eq!(capabilities.reserved, [0; 4]);
     }
 
@@ -2457,6 +2570,111 @@ mod tests {
             RESULT_INVALID_ARGUMENT
         );
         assert_eq!(read_last_error(session.cast()), b"source.generation.stale");
+        destroy_fixture(engine, session, plan);
+    }
+
+    /// #1316 D6: `miso_engine_v1_source_seek_report` refuses a bad handle, a bad struct and an
+    /// unknown or malformed source ID without touching `out`, and a valid call fills it.
+    ///
+    /// Test value: red if the export skips the struct checks (a wrong size or a nonzero reserved
+    /// word is then written through), if an unknown source is not `source.id.unknown`, or if the
+    /// fresh ring does not read generation 0, "not yet rendered".
+    #[test]
+    fn seek_report_refusals_leave_out_untouched_and_name_their_rule() {
+        let (engine, session, plan) = compiled_fixture();
+        let report = |session: *mut Session, id: &[u8], out: &mut SourceSeekReport| {
+            // SAFETY: Test callers pass a borrowed ID and one complete local report.
+            unsafe { miso_engine_v1_source_seek_report(session, id.as_ptr(), id.len() as u64, out) }
+        };
+        let valid = SourceSeekReport {
+            struct_size: SOURCE_SEEK_REPORT_SIZE,
+            reserved0: 0,
+            generation: 77,
+            first_sample: 77,
+            source_frame: 77,
+            cumulative_underrun_frames: 77,
+            cumulative_held_frames: 77,
+            reserved: [0; 2],
+        };
+        let refusals: [(&str, *mut Session, &[u8], SourceSeekReport, u32); 7] = [
+            (
+                "null session",
+                ptr::null_mut(),
+                b"fixture-source",
+                valid,
+                RESULT_INVALID_ARGUMENT,
+            ),
+            (
+                "engine handle",
+                engine.cast(),
+                b"fixture-source",
+                valid,
+                RESULT_WRONG_HANDLE,
+            ),
+            (
+                "short struct",
+                session,
+                b"fixture-source",
+                SourceSeekReport {
+                    struct_size: SOURCE_SEEK_REPORT_SIZE - 8,
+                    ..valid
+                },
+                RESULT_INVALID_ARGUMENT,
+            ),
+            (
+                "nonzero reserved0",
+                session,
+                b"fixture-source",
+                SourceSeekReport {
+                    reserved0: 1,
+                    ..valid
+                },
+                RESULT_INVALID_ARGUMENT,
+            ),
+            (
+                "nonzero reserved",
+                session,
+                b"fixture-source",
+                SourceSeekReport {
+                    reserved: [0, 1],
+                    ..valid
+                },
+                RESULT_INVALID_ARGUMENT,
+            ),
+            ("empty ID", session, b"", valid, RESULT_INVALID_ARGUMENT),
+            (
+                "non-UTF-8 ID",
+                session,
+                b"\xff",
+                valid,
+                RESULT_INVALID_ARGUMENT,
+            ),
+        ];
+        for (why, handle, id, input, code) in refusals {
+            let mut out = input;
+            assert_eq!(report(handle, id, &mut out), code, "{why}");
+            assert_eq!(out, input, "{why}: out untouched");
+        }
+        let mut out = valid;
+        assert_eq!(
+            report(session, b"absent-source", &mut out),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(out, valid);
+        assert_eq!(read_last_error(session.cast()), b"source.id.unknown");
+        assert_eq!(report(session, b"fixture-source", &mut out), RESULT_OK);
+        assert_eq!(read_last_error(session.cast()), b"");
+        assert_eq!(
+            out,
+            SourceSeekReport {
+                generation: 0,
+                first_sample: 0,
+                source_frame: 0,
+                cumulative_underrun_frames: 0,
+                cumulative_held_frames: 0,
+                ..valid
+            }
+        );
         destroy_fixture(engine, session, plan);
     }
 

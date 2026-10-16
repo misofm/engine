@@ -25,5 +25,21 @@ static_assert((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_PLAN_WATERMA
               MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK);
 static_assert((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SERVICE) ==
               MISO_ENGINE_V1_FEATURE_SERVICE);
+static_assert(sizeof(miso_engine_v1_seek_report) == MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE);
+static_assert(MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE == 64);
+static_assert(std::is_standard_layout<miso_engine_v1_seek_report>::value);
+static_assert(offsetof(miso_engine_v1_seek_report, struct_size) == 0);
+static_assert(offsetof(miso_engine_v1_seek_report, reserved0) == 4);
+static_assert(offsetof(miso_engine_v1_seek_report, generation) == 8);
+static_assert(offsetof(miso_engine_v1_seek_report, first_sample) == 16);
+static_assert(offsetof(miso_engine_v1_seek_report, source_frame) == 24);
+static_assert(offsetof(miso_engine_v1_seek_report, cumulative_underrun_frames) == 32);
+static_assert(offsetof(miso_engine_v1_seek_report, cumulative_held_frames) == 40);
+static_assert(offsetof(miso_engine_v1_seek_report, reserved) == 48);
+static_assert((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT) ==
+              MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT);
+static_assert(std::is_same<decltype(&miso_engine_v1_source_seek_report),
+                           uint32_t (*)(miso_engine_v1_session *, const uint8_t *, uint64_t,
+                                        miso_engine_v1_seek_report *)>::value);
 static_assert(std::is_same<decltype(&miso_engine_v1_service),
                            uint32_t (*)(miso_engine_v1_session *)>::value);

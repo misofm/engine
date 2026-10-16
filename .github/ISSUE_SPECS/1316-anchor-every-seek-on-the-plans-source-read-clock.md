@@ -238,3 +238,75 @@ Re-pin from the measurement, with the reason.
 **Realtime-path edits.** D2 edits `crates/engine/src/realtime/watermark.rs` and `mod.rs` and adds
 the new `seqlock.rs` (B15-R1). D3 adds a render-side publication in the source consumer. That slice gets
 one attempt.
+
+## Decision record: #1316 (batch 15c)
+
+**Shipped.** D1-D8 and B15-R1/R2 on `460fca68b`.
+
+- `crates/engine/src/realtime/seqlock.rs` (new, B15-R1): `PublishedWords<const N: usize>`, a
+  non-`Clone` `PublishedWordsWriter::publish(&mut self, &[u64; N])` (marked realtime region,
+  wait-free) and a `Clone` `PublishedWordsReader::read` bounded at `MAXIMUM_READ_ATTEMPTS` (64),
+  then `PublishedWordsBusy`. No `unsafe`. `watermark.rs` now stores its six words through it; its
+  record size is unchanged (72 bytes). #1314's torn-read test moved to `seqlock.rs` with the
+  protocol and the watermark copy was deleted.
+- `crates/source`: `begin_block_at(source_read_sample)` and `SeekClock::At { source_read_sample }`
+  with D1's text; `SourceCommand::SeekAt` and `HeldSeek` anchors documented on the source-read
+  clock. `SourceSeekReport` (five words) and `SourceSeekReportBusy`; one record per ring made in
+  `prepare_at_source_frame`, writer in the consumer, reader in the producer
+  (`PcmSourceProducer::seek_report`, `HostChunkProvider::seek_report`). D3's publication is
+  `publish_seek_report` at the end of `begin_block_play`, inside the existing marked region.
+  `SourceResourceReport::seek_report_bytes` is in overhead, total and the largest-allocation list.
+- host-core: `SourceControlSet::seek_report`, the `seek_at` doc (D7), and a new
+  `SourceControlError::ReportBusy` (`source.report.busy`, backpressure).
+- control-plane: `SessionState::seek_report` runs `service()` first (amendment), reads the newest
+  providers; `pub use source::SourceSeekReport`.
+- capi: `miso_engine_v1_source_seek_report`, `SOURCE_SEEK_REPORT_SIZE` 64,
+  `FEATURE_SOURCE_SEEK_REPORT` = `1 << 8` (next free bit; mask 511), header thread table, service
+  paragraph and a two-sentence note, both smoke programs, the frozen list (18 symbols) and
+  `docs/C_ABI_V1_QUALIFICATION.md`.
+
+**Departures.**
+
+- The C struct is `miso_engine_v1_seek_report`, not D6's `miso_engine_v1_source_seek_report`: C
+  and C++ give a typedef and a function one name space, so D6's two names do not compile
+  (`redeclared as different kind of entity`). The size macro and feature bit keep D6's names.
+- D3 read: a block that changes only a counter rewrites the two counters and keeps the
+  generation's `first_sample` and `source_frame`, so `(g, s, f)` always names the generation's
+  first block (the host workflow of gate 3).
+- A clockless `begin_block` (tests and `read_block` only) continues its own clock: the block after
+  a block at `t` is at `t + quantum`, from 0.
+- No re-export in `crates/capi/src/runtime/mod.rs`: the export reads the report's fields without
+  naming the type.
+- Mechanical edits outside Authorized paths: `crates/host-core/tests/source_diagnostics.rs` gains
+  the `ReportBusy` row (its exhaustive table does not compile without it), and
+  `tools/realtime-policy/src/policy.rs` raises the floors to the tree's counts (33 files, 151
+  regions), as its comment requires.
+
+**Gates.**
+
+1. `capi` `runtime::tests::a_plain_seek_is_reported_at_the_block_that_applied_it`: `(2, 768,
+   4096, 0, 0)` after block 6, and `(1, 0, 0, 0, 0)` between the seek call and block 6.
+2. `a_late_anchored_seek_reports_its_frame_plus_the_lateness`: `(2, 1280, 768, 0, 0)`, and block
+   10 is bit-identical to block 6 (frames 768 on).
+3. and 4. `a_scrubbed_stem_and_a_stem_started_from_its_report_stay_aligned`: Y anchored at
+   `f + (A - s)`; blocks 10-15 bit-identical to a fresh session of the committed document fed both
+   stems from the aligned frames; X unchanged across the carrying swap and its underrun counter
+   moves after it; Y `(0, ..)` before the swap block, `(1, 896, 0, 0, held)` while held, then
+   `(2, 1280, 4608, 0, 384)`. Source-level: `a_carried_consumer_continues_the_predecessor_audio_gap_free`
+   now also checks the report across the swap.
+5. `source` `the_seek_report_carries_the_cumulative_held_and_underrun_frames`; also
+   `the_seek_report_names_the_block_and_frame_each_generation_started_at` and
+   `a_clockless_consumer_reports_consecutive_quanta`.
+6. `report_separates_session_pcm_from_source_overhead` adds the row. `./target/release/audit capi`:
+   0 allocations, 0 deallocations, 0 syscalls, `"total_violations":0`, `pcm_digest`
+   `4f52089e4a8cf83c` (unchanged).
+7. `ffi::tests::seek_report_refusals_leave_out_untouched_and_name_their_rule`; `cargo test -p
+   source`, `-p engine --features engine/realtime-audit`, `-p host-core --features
+   host-core/test-support`, `-p capi`; `check-capi-abi.sh` and `--self-test`; `realtime-policy`;
+   `check-cross-targets.sh`; `check-workspace-policy.sh`; clippy of the touched crates; fmt; doc.
+
+**Measured.** `seek_report_bytes` is 64 per ring on 64-bit targets, 56 on wasm32 (`Arc`'s two
+counters plus six `u64` words). host-web's `retained_ceilings` stays inside its budgets.
+
+**Successors.** The browser export is #1332 and #1293 (Non-goals). `observe.rs` onto
+`seqlock.rs` is #1482 D3. `source.id.invalid` on this entry point is #1350.

@@ -3892,6 +3892,17 @@ where
             .seek_at(id, generation, source_frame, anchor_sample)
             .map_err(SourceFailure::Control)
     }
+
+    /// Where a source of the newest committed session landed, as render last published it, after
+    /// the service step (#1316 D6, D7): [`host_core::SourceControlSet::seek_report`] of the ring
+    /// the newest session's producer feeds, which is the one `seek` queues on.
+    pub fn seek_report(&mut self, id: &[u8]) -> Result<source::SourceSeekReport, SourceFailure> {
+        self.service().map_err(|_| SourceFailure::Internal)?;
+        self.newest_providers()
+            .sources
+            .seek_report(id)
+            .map_err(SourceFailure::Control)
+    }
 }
 
 /// A source submission or seek that the adapter's boundary must report.

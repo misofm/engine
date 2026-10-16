@@ -12,7 +12,7 @@ use engine::realtime::PreparedRenderPlan;
 use session::SessionModel;
 use source::{
     HostChunkError, HostChunkProvider, HostPlanarChunk, SourceCommand, SourceFrame,
-    SourceGeneration, SourceSeekError, SubmitReport,
+    SourceGeneration, SourceSeekError, SourceSeekReport, SubmitReport,
 };
 
 use crate::PlanStateInventory;
@@ -75,6 +75,9 @@ pub enum SourceControlError {
     /// or to a predecessor whose producer has already moved to its successor. Neither
     /// backpressure nor an engine invariant: the caller feeds the newest set.
     Vacated,
+    /// Every bounded attempt to read the source's seek report landed inside render's publication
+    /// of it (#1316 D6): backpressure, the caller reads again.
+    ReportBusy,
 }
 
 impl SourceControlError {
@@ -104,6 +107,7 @@ impl SourceControlError {
             Self::Seek(SourceSeekError::Backpressure { .. }) => "source.seek.backpressure",
             Self::Vacated => "source.ring.vacated",
             Self::Seek(SourceSeekError::AnchorUnaligned) => "source.seek.anchor_unaligned",
+            Self::ReportBusy => "source.report.busy",
         }
     }
 
@@ -114,6 +118,7 @@ impl SourceControlError {
             self,
             Self::Chunk(HostChunkError::Full { .. })
                 | Self::Seek(SourceSeekError::Backpressure { .. })
+                | Self::ReportBusy
         )
     }
 
@@ -212,11 +217,11 @@ impl SourceControlSet {
     }
 
     /// Queue one strictly increasing, generation-tagged seek whose source `frame` enters the graph
-    /// in the block that starts at absolute render sample `anchor_sample` (issue #1274).
+    /// in the block that reads source time from `anchor_sample` (issue #1274).
     ///
-    /// `anchor_sample` is on the plan's absolute render clock, the one a host renders with and
-    /// every plan swap continues; it names when `frame` enters the graph, and the output hears it
-    /// the plan's latency later. It must be a multiple of the quantum, or the seek is refused with
+    /// `anchor_sample` is on the plan's source-read clock, which every plan swap continues and
+    /// which equals the absolute render clock a host renders with in this version (#1316 D1); it
+    /// names when `frame` enters the graph, and the output hears it the plan's latency later. It must be a multiple of the quantum, or the seek is refused with
     /// `source.seek.anchor_unaligned`. The region and generation rules are [`Self::seek`]'s.
     ///
     /// On success the source accepts the new generation's PCM from `frame` at once; submit it
@@ -224,7 +229,8 @@ impl SourceControlSet {
     /// the render pops that PCM before it pops the seek. Should the render reach the seek only
     /// after the anchor block has passed, it starts at `frame` plus the lateness, so it stays in
     /// time. Until the anchor block, PCM already queued for the playing generation keeps playing;
-    /// when that runs out, the source renders silence and reports an underrun.
+    /// when that runs out, the source renders silence and holds: the blocks count as held, not as
+    /// underruns (#1318). [`Self::seek_report`] tells where the seek landed.
     pub fn seek_at(
         &mut self,
         id: &[u8],
@@ -233,6 +239,29 @@ impl SourceControlSet {
         anchor_sample: u64,
     ) -> Result<(), SourceControlError> {
         self.queue_seek(id, generation, frame, Some(anchor_sample))
+    }
+
+    /// Where the named source's newest generation landed, as render last published it (#1316 D7):
+    /// the generation in effect, the source-read sample of the first block it played in and the
+    /// source frame that block started at, plus the ring's cumulative underrun and held frames.
+    /// Generation `0` means the ring has not rendered a block yet.
+    ///
+    /// A plain seek lands at the first block that begins after it is queued; an anchored one at
+    /// its anchor block, at `frame` plus the lateness if render reached it late. So a host that
+    /// reads `(g, s, f)` here knows the source plays frame `f + (t - s)` at source-read sample `t`.
+    ///
+    /// Bounded: a read that keeps landing inside render's publication is
+    /// [`SourceControlError::ReportBusy`]. The record belongs to the ring, so it survives a plan
+    /// swap that carries the source; a vacant entry is [`SourceControlError::Vacated`], as for
+    /// [`Self::seek`].
+    pub fn seek_report(&self, id: &[u8]) -> Result<SourceSeekReport, SourceControlError> {
+        let index = self.index_of(id).ok_or(SourceControlError::UnknownSource)?;
+        self.sources[index]
+            .provider
+            .as_ref()
+            .ok_or(SourceControlError::Vacated)?
+            .seek_report()
+            .map_err(|_| SourceControlError::ReportBusy)
     }
 
     fn queue_seek(

@@ -68,6 +68,9 @@ pub const FEATURE_PLAN_WATERMARK: u64 = 1 << 6;
 /// Control-service capability: `miso_engine_v1_service` (#1348), an in-place V1 amendment. A host
 /// checks this bit before calling the symbol.
 pub const FEATURE_SERVICE: u64 = 1 << 7;
+/// Source seek-report capability: `miso_engine_v1_source_seek_report` (#1316), an in-place V1
+/// amendment. A host checks this bit before calling the symbol.
+pub const FEATURE_SOURCE_SEEK_REPORT: u64 = 1 << 8;
 /// All ABI V1 feature capability bits.
 pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_HOST_PLANAR_SOURCE
@@ -76,7 +79,8 @@ pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_CAPABILITY_COMMAND
     | FEATURE_SOURCE_SEEK_AT
     | FEATURE_PLAN_WATERMARK
-    | FEATURE_SERVICE;
+    | FEATURE_SERVICE
+    | FEATURE_SOURCE_SEEK_REPORT;
 
 /// Watermark outcome flag: the covered revisions completed exactly as committed.
 pub const OUTCOME_EXACT: u64 = 1;
@@ -355,6 +359,29 @@ pub struct Watermark {
     pub reserved: [u64; 5],
 }
 
+/// Where a source's newest generation landed, as render last published it (#1316 D6).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct SourceSeekReport {
+    /// Must equal [`SOURCE_SEEK_REPORT_SIZE`].
+    pub struct_size: u32,
+    /// Must be zero in ABI V1.
+    pub reserved0: u32,
+    /// The generation in effect; `0` until the source's ring has rendered a block.
+    pub generation: u64,
+    /// The source-read sample (the render clock in this version) of the first block `generation`
+    /// played in: the clock `miso_engine_v1_source_seek_at`'s anchor is on.
+    pub first_sample: u64,
+    /// The source frame that block started at; a late anchored seek's includes its lateness.
+    pub source_frame: u64,
+    /// Saturating cumulative missing in-region frames (true underruns).
+    pub cumulative_underrun_frames: u64,
+    /// Saturating cumulative in-region frames held while an anchored seek waited.
+    pub cumulative_held_frames: u64,
+    /// Must be zero in ABI V1.
+    pub reserved: [u64; 2],
+}
+
 /// Frozen size of [`EngineConfig`] on the pinned 64-bit ABI.
 pub const ENGINE_CONFIG_SIZE: u32 = 40;
 /// Frozen size of [`CompileLimits`] on the pinned 64-bit ABI.
@@ -373,6 +400,8 @@ pub const CAPABILITIES_SIZE: u32 = 56;
 pub const PLAN_RESOURCE_REPORT_SIZE: u32 = 240;
 /// Frozen size of [`Watermark`] on the pinned 64-bit ABI.
 pub const WATERMARK_SIZE: u32 = 96;
+/// Frozen size of [`SourceSeekReport`] on the pinned 64-bit ABI.
+pub const SOURCE_SEEK_REPORT_SIZE: u32 = 64;
 
 const HANDLE_COOKIE: u64 = 0x4d49_534f_5632_4142;
 const HANDLE_KIND_ENGINE: u32 = 1;
@@ -507,6 +536,10 @@ mod tests {
             PLAN_RESOURCE_REPORT_SIZE as usize
         );
         assert_eq!(size_of::<Watermark>(), WATERMARK_SIZE as usize);
+        assert_eq!(
+            size_of::<SourceSeekReport>(),
+            SOURCE_SEEK_REPORT_SIZE as usize
+        );
 
         assert_eq!(align_of::<EngineConfig>(), 8);
         assert_eq!(align_of::<CompileLimits>(), 8);
@@ -517,6 +550,7 @@ mod tests {
         assert_eq!(align_of::<Capabilities>(), 8);
         assert_eq!(align_of::<PlanResourceReport>(), 8);
         assert_eq!(align_of::<Watermark>(), 8);
+        assert_eq!(align_of::<SourceSeekReport>(), 8);
 
         assert_eq!(offset_of!(CompileLimits, maximum_document_bytes), 16);
         assert_eq!(offset_of!(CompileLimits, maximum_replay_entries), 168);
@@ -539,6 +573,12 @@ mod tests {
         assert_eq!(offset_of!(Watermark, transition_fallback_count), 40);
         assert_eq!(offset_of!(Watermark, superseded_count), 48);
         assert_eq!(offset_of!(Watermark, reserved), 56);
+        assert_eq!(offset_of!(SourceSeekReport, generation), 8);
+        assert_eq!(offset_of!(SourceSeekReport, first_sample), 16);
+        assert_eq!(offset_of!(SourceSeekReport, source_frame), 24);
+        assert_eq!(offset_of!(SourceSeekReport, cumulative_underrun_frames), 32);
+        assert_eq!(offset_of!(SourceSeekReport, cumulative_held_frames), 40);
+        assert_eq!(offset_of!(SourceSeekReport, reserved), 48);
     }
 
     #[test]
@@ -551,7 +591,11 @@ mod tests {
             FEATURE_PLAN_WATERMARK
         );
         assert_eq!(FEATURE_MASK & FEATURE_SERVICE, FEATURE_SERVICE);
-        assert_eq!(FEATURE_MASK, 0xff);
+        assert_eq!(
+            FEATURE_MASK & FEATURE_SOURCE_SEEK_REPORT,
+            FEATURE_SOURCE_SEEK_REPORT
+        );
+        assert_eq!(FEATURE_MASK, 0x1ff);
         assert_eq!(
             [
                 OUTCOME_EXACT,

@@ -17,9 +17,10 @@ extern "C" {
  *                miso_engine_v1_last_error on the engine).
  *   session      Control thread. At most one thread at a time calls
  *                miso_engine_v1_source_submit_planar_f32, miso_engine_v1_source_seek,
- *                miso_engine_v1_source_seek_at, miso_engine_v1_submit_command,
- *                miso_engine_v1_dequeue_event, miso_engine_v1_service, or
- *                miso_engine_v1_last_error on the session; they are serialized with each other.
+ *                miso_engine_v1_source_seek_at, miso_engine_v1_source_seek_report,
+ *                miso_engine_v1_submit_command, miso_engine_v1_dequeue_event,
+ *                miso_engine_v1_service, or miso_engine_v1_last_error on the session; they are
+ *                serialized with each other.
  *   plan         Split ownership.
  *                miso_engine_v1_render_f32_planar: render thread only, never concurrently with
  *                itself, and the exclusive owner of the plan's render state.
@@ -149,7 +150,8 @@ extern "C" {
  * between edits. miso_engine_v1_service(session) runs one bounded step of it: it reclaims plans
  * render has retired, brings the session's view of the running plan up to render, refreshes the
  * session counters, and stages render telemetry. Every other session call (source submit, seek,
- * seek_at, submit_command, dequeue_event) that passes its argument checks runs the same step
+ * seek_at, seek_report, submit_command, dequeue_event) that passes its argument checks runs the
+ * same step
  * first; a call refused for its arguments returns before the step. So a host that makes those
  * calls anyway need not also call service. The step never waits for render, never commits or
  * acknowledges anything, and never takes or drops a pending edit; its cost does not grow with the
@@ -250,6 +252,10 @@ extern "C" {
  * g from F before the block at A renders. Until A the stem renders silence; from A it plays F on.
  * Should the render reach the seek only after A, the stem starts at F plus the lateness, so it
  * stays in time.
+ *
+ * Where a seek landed (issue 1316). miso_engine_v1_source_seek_report copies the source's
+ * (generation, first_sample, source_frame) and its cumulative underrun and held frames; a host
+ * checks MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT before calling it.
  */
 
 #define MISO_ENGINE_V1_ABI_VERSION UINT32_C(0x00010000)
@@ -285,7 +291,8 @@ extern "C" {
 #define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT UINT64_C(32)
 #define MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK UINT64_C(64)
 #define MISO_ENGINE_V1_FEATURE_SERVICE UINT64_C(128)
-#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(255)
+#define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT UINT64_C(256)
+#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(511)
 
 #define MISO_ENGINE_V1_OUTCOME_EXACT UINT64_C(1)
 #define MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK UINT64_C(2)
@@ -300,6 +307,7 @@ extern "C" {
 #define MISO_ENGINE_V1_CAPABILITIES_SIZE UINT32_C(56)
 #define MISO_ENGINE_V1_PLAN_RESOURCE_REPORT_SIZE UINT32_C(240)
 #define MISO_ENGINE_V1_WATERMARK_SIZE UINT32_C(96)
+#define MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE UINT32_C(64)
 
 typedef struct miso_engine_v1_engine miso_engine_v1_engine;
 typedef struct miso_engine_v1_session miso_engine_v1_session;
@@ -457,6 +465,17 @@ typedef struct miso_engine_v1_watermark {
     uint64_t reserved[5]; /* Must be zero in ABI V1. */
 } miso_engine_v1_watermark;
 
+typedef struct miso_engine_v1_seek_report {
+    uint32_t struct_size;
+    uint32_t reserved0; /* Must be zero in ABI V1. */
+    uint64_t generation;
+    uint64_t first_sample;
+    uint64_t source_frame;
+    uint64_t cumulative_underrun_frames;
+    uint64_t cumulative_held_frames;
+    uint64_t reserved[2]; /* Must be zero in ABI V1. */
+} miso_engine_v1_seek_report;
+
 uint32_t miso_engine_v1_abi_version(void);
 uint32_t miso_engine_v1_query_capabilities(miso_engine_v1_capabilities *out);
 uint32_t miso_engine_v1_engine_create(const miso_engine_v1_engine_config *config,
@@ -485,6 +504,10 @@ uint32_t miso_engine_v1_source_seek_at(miso_engine_v1_session *session,
                                        uint64_t generation,
                                        uint64_t source_frame,
                                        uint64_t anchor_sample);
+uint32_t miso_engine_v1_source_seek_report(miso_engine_v1_session *session,
+                                           const uint8_t *source_id,
+                                           uint64_t source_id_bytes,
+                                           miso_engine_v1_seek_report *out);
 uint32_t miso_engine_v1_submit_command(miso_engine_v1_session *session,
                                        const uint8_t *request,
                                        uint64_t request_bytes,

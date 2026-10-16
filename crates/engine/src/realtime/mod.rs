@@ -11,6 +11,7 @@ mod latest_cell;
 mod observe;
 mod plan;
 mod plan_exchange;
+mod seqlock;
 mod spsc;
 mod watermark;
 
@@ -41,6 +42,10 @@ pub use plan_exchange::{
     RealtimePlanOwner, RealtimeRenderReport, RealtimeResponseSnapshot, SwapOutcome,
     UnadoptedCandidate, Withdrawal, plan_exchange, plan_exchange_at_revision,
     plan_exchange_resource_report,
+};
+pub use seqlock::{
+    MAXIMUM_READ_ATTEMPTS, PublishedWords, PublishedWordsBusy, PublishedWordsReader,
+    PublishedWordsWriter, published_words, published_words_retained_bytes,
 };
 pub use spsc::{
     Consumer, PlanAdoption, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError,

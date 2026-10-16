@@ -188,6 +188,34 @@ mask and the signature, and the capi runtime tests cover reclaim by `service` al
 inside a source submit, the counter refresh, a scheduled candidate kept across 1,000 calls, and
 idle calls that change nothing.
 
+A host learns where a seek landed through `miso_engine_v1_source_seek_report` (#1316, decision 15
+D15-12), an in-place V1 amendment: one new exported symbol and one new 64-byte struct,
+`miso_engine_v1_seek_report` (`MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE`; not D6's
+`miso_engine_v1_source_seek_report`, which is the function's name, and C gives a typedef and a
+function one name space), announced by
+`MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT` (the next free bit, 256) in the capability report,
+whose feature mask grows to include it; no other struct, size or `ABI_VERSION` changes. It is a
+session call, serialized with the others, and runs the service step first. It copies the source
+ring's `(generation, first_sample, source_frame)` and its cumulative underrun and held frames:
+the generation in effect, the source-read sample (the render clock in this version) of the first
+block it played in, and the source frame that block started at, a late anchored seek's frame
+including its lateness. Render publishes the record from the source consumer at the end of a
+block's acquire step, only when a new generation took effect or a cumulative counter moved,
+through the engine's one single-writer seqlock (`crates/engine/src/realtime/seqlock.rs`), so it is
+a level, not a queue: no ack can precede a drop. Before the ring's first block it reads generation
+0. The record belongs to the ring (one shared record charged as `seek_report_bytes` in the
+source's overhead), so a plan swap that carries the source keeps it and an added or redeclared
+source starts at 0. A host that plain-seeks one stem and reads `(g, s, f)` then starts another
+with `seek_at(Y, g', f + (A - s), A)` and the two align exactly. Results: `OK`;
+`INVALID_ARGUMENT` for a wrong `struct_size`, a nonzero reserved word or a malformed source ID,
+and with `source.id.unknown` for an undeclared source; `BACKPRESSURE` with `source.report.busy`
+when every bounded read (64 attempts) landed inside render's publication, `out` untouched. The
+frozen exported set is now 18 `miso_engine_v1_*` definitions; `abi_smoke.c` checks the bit
+against the queried mask and reads a compiled session's source (generation 0), an unknown source
+and a wrong size, `header_smoke.cpp` pins the size, every field offset and the signature, and the
+capi runtime tests cover a plain seek, a late anchored seek, a scrub-then-align across a
+transaction, a carried and an added ring, and the two counters.
+
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was
 changed or rebuilt. The new consumer was corrected to submit generation 1 first, then seek and
