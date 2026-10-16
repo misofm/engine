@@ -698,3 +698,137 @@ carried held ramp with `hold_until` at adoption (`CellState::reposition` drops i
 `fresh` on a carried lane. The successor's first block reads the stage state itself, so `E` needs
 no carry; `due_at_entry` must carry with `owed` (a ramp ending on the predecessor's last block). A
 release cell takes the same obligation and the same move.
+
+## Amendment (U2 fold, batch 17, from root's rulings R17-8, R17-9 and R17-10)
+
+These amend the batch 13b amendment and gate 8 above; the filed text stays as it was filed.
+
+- **The move (R17-9).** Where the batch 13b amendment says "the lane moves to the automation value
+  the cell then holds" and gate 8 (a)/(b) say "the gain composed from the cell's `target()`", read:
+  at `E` the cell lands as a seek in `SeekMode::Ramp` does, one `Jump` over the block's fader jump
+  length `J` aimed at the curve at the ramp's completion `E + J - 1` (never past the next
+  discontinuity, which jumps of its own), composed as D1.4, so the lane arrives on the curve at
+  `E + J - 1`. On a curve flat after `E` this is the cell's target, so (a)-(d) keep their bits.
+  The landing commits that target and holds the grid for its own ramp (constraint 3).
+- **Constraint 7 (R17-8).** "The move at `E` replaces any gain operation the cell gives at `E`"
+  holds for a `Jump` and a grid event. A seek `Set` that lands exactly at `E` is pushed instead:
+  the gain is free from `E`, so it sets the lane there exactly (D3), and it discharges the
+  obligation. Constraint 5 ("a seek `Set` inside a held ramp lands by the move") is for a seek
+  before `E`.
+- **Constraint 4 (R17-10).** A live write that frees the gain at a block entry discharges an owed
+  obligation and, in the same block, releases the cell's hold (D1.2's report, or the cell's own
+  ramp end), so the grid moves the lane from that block's first sample.
+- **Gate 8 (e).** "Samples `[E, E + J - 1]` equal the stage driven directly with one `RetargetGain`
+  at `E` over `J`" reads: with one `RetargetGain` at `E` over `J` to the curve at `E + J - 1`, and
+  the one grid retarget #1637 commits in that ramp's last 64 samples (the grid point at
+  `⌊(E + J - 1)/64⌋·64`, over 64 samples, to the curve at its completion); every other grid point
+  in the ramp is held (#1647c departure 1, confirmed by the U2 review).
+- **Gate 8's test value.** "Red if D1.2 refreshes `hold_until` inside the hold" is withdrawn: under
+  R17-9 the landing at `E` rewrites the whole cell state, and before `E` the stage only remembers,
+  so neither a refresh nor a missing D1.2 report reaches the output (U2 fold, finding MAJOR-1).
+
+## U2 fold (batch 17)
+
+The U2 review of #1647 (at `5e695ecb6`) and root's rulings R17-8, R17-9 and R17-10, folded on
+`codex/controls-batch-17k` over `275ff76e8`. Uncommitted for the coordinator. All tests in
+`crates/host-core/tests/stored_fader_automation.rs` unless named otherwise. Each "red" was checked
+once against the mutation the review found green (or the stated revert), then the code restored.
+
+- **MAJOR-1 (constraint 1, D1.2): not gateable after R17-9; no test added.** A case with a `Jump`
+  at 950 inside the unmute ramp, a fade after it and a quantum-64 block entry on grid point 960
+  (4 quanta and the oracle) stayed green under both mutations (D1.2 removed; `hold_until`
+  refreshed at every held block entry). Reason: before `E` the stage only remembers every gain
+  operation, a refresh only moves the cell's state, and the R17-9 landing at `E` rewrites all of
+  that state (cursor, target, held flag, ramp end). Without a move nothing was remembered, so the
+  hold changes nothing; after a live write R17-10 releases the hold. The test was deleted (it
+  defended nothing); D1.2 is kept per R17-10. Gate 8's test-value clause is withdrawn above.
+- **MAJOR-2 (constraint 7).** `the_move_at_the_unmute_ramps_end_replaces_the_cells_event_there`: a
+  step exactly at `E` (to `-15` dB at 1,000 after a remembered fade), and a grid point at `E`
+  (an unmute of 1,024 on a fade); 4 quanta and the oracle. Red (the test process aborts on the
+  sink refusal's `debug_assert` inside render) with the cell's event pushed beside the move.
+- **MAJOR-3 (D1.4, `S`).** `a_vca_offset_composes_with_every_fader_event`: gate 1's fade on a
+  member of a VCA at `-6` dB, every completion sample `checked_fader_gain(vca_compose_db(curve,
+  S))` and every sample the stage driven directly with the composed retargets. Red with the event
+  gain composed without `S`. A live `S` change stays covered by
+  `the_scalar_oracle_renders_the_banks_fader_events` (#1649's writes), not added here.
+- **MAJOR-4 (seeks inside a node block).**
+  `a_session_seek_sets_a_latent_fader_lane_exactly_where_it_reaches_the_node` (gate 4 behind a
+  true-peak limiter, quanta 128 and 100: one `Set` per channel at `3,200 + a(n)`, the unseeked
+  bits before it, the static plan's bits from it); red with the seek step moved to the block's
+  offset 0. `a_seek_step_after_the_unmute_ramps_end_in_its_block_still_lands` (gate 8 with a
+  latent insert, quanta 100 and 37 with the oracle: the seek's `Set` after `E` in `E`'s block);
+  red with `hold_end` dropping a step after `E`.
+- **MAJOR-5 / R17-10 (render fix).** `HeldRampObligation::block` returns whether a free block
+  entry discharged an owed obligation; `FaderEventDriver::new` then reports a hold that ended
+  before the block (`hold_until(node(0) - 1)`), which releases the cell's hold. One driver, so
+  the bank, the fused bank and the scalar oracle all take it.
+  `a_live_write_that_frees_a_held_lane_releases_its_hold` (a 4,000-sample unmute ended by a
+  window-0 unmute at 3,200 on a `-30 -> 0` dB fade: every completion sample from 3,263 is the
+  curve's gain; quanta 128, 100, 64 and the oracle). Red on the code before the fix.
+- **#1648b MAJOR (required gate).** Already fixed by #1648b's comparison with the stage's gain.
+  `a_ride_gained_on_a_carried_static_fader_jumps_from_the_stages_gain` (predecessor static at
+  `-20` dB; the carried successor adds a ride flat at `0` dB; Simd8 and Simd4: the swap block
+  ramps, and every block after the jump equals the successor rendered fresh). Red with the
+  adoption compared with the cell's seed.
+- **R17-8 (render fix).** `apply` pushes a seek `Set` that lands exactly at `E` and discharges the
+  obligation; the cut then makes no move. `a_seek_set_exactly_at_the_unmute_ramps_end_sets_the_lane`
+  (behind a latent insert, the seek and the unmute's end both at `3,200 + a(n)`, mid-block at
+  quanta 128, 100 and 64, and the oracle: one `Set` per channel at `E` in the probe, the static
+  plan's bits from `E`). Red without the rule.
+- **R17-9 (render change).** `FaderCellCursor::cut` lands the cell at `E` through `CellEvents` on
+  a one-sample span whose seek step is at its offset 0, in `SeekMode::Ramp`: #1637's own landing
+  (`target_at(E, J)`, the curve at `E + J - 1`, capped before the next discontinuity; commit and
+  ramp end). Allocation-free and bounded: one event, one binary search of the discontinuities and
+  one curve read. Its reach is the fader jump `J`, the reach a `Jump` already has; the fader has
+  no filter order rule, so `ORDER_REACH` (the input filters' 128 samples) is not touched.
+  Moving curves: `grid_events_after_the_unmute_ramps_end_do_not_cut_the_move` (updated: the
+  target is now `curve(E + J - 1)`; red on the pre-R17-9 move, which aimed at `curve(1,023)`), and
+  the moving cases of the MAJOR-2, MINOR-11 and MAJOR-4 tests. Flat curves keep their bits: gate
+  8 (a)-(d) pass unchanged.
+- **MINOR-7 (counters): deleted.** `LaneFaderAutomation::{refused_events, operations_stopped}`,
+  the driver's per-lane `refused` array (and its lane >= 8 drop) and `settle_fader_events` are
+  gone. Each counted condition is unreachable and fails a `debug_assert` first (in a debug test
+  build the process aborts before a count could be read), so no test can drive a count above 0;
+  nothing read them. A refused event keeps the stage's target and fails its `debug_assert`; a
+  stage that stops pulling fails its own. This withdraws D1's "adds one to a render counter",
+  departure 6 of the batch 17 amendment, constraint 6 of the batch 13b amendment and #1647b's
+  departure 1.
+- **MINOR-9.** `a_written_jump_length_reaches_the_next_jump_not_the_one_in_flight` also writes at
+  2,944, the entry of the block holding the second step. Red with the length read one block
+  late.
+- **MINOR-10.** `the_scalar_oracle_renders_the_banks_fader_events`: track 0 sits behind a
+  true-peak limiter and every ride ends by 6,000, and the bank prepared between render calls
+  must both fuse (the fused path with operations) and fall back. Red with the oracle's
+  `set_input_arrival` ignored.
+- **MINOR-11.** `a_ramp_that_ends_muted_keeps_the_obligation_and_a_hold_with_nothing_remembered_does_not_move`
+  (constraint 4: a 300-sample mute at 0, the later unmute's end lands; departure 3: a hold with
+  nothing remembered renders the free lane from `E`); red with a muted entry discharging, and red
+  with a move at every hold end. `a_left_only_unmute_moves_the_left_lane_alone` (dual mono); red
+  with the left channel's hold read for both.
+- **MINOR-12.** `docs/SESSION_SCHEMA_V1.md` names the held-ramp exception to "set exactly where a
+  seek reaches the fader". Gate 8 (c) and (d) no longer claim "red if a grid event cuts the move"
+  (their curves are flat after `E`; (e) gates it). The C ABI gate 4 doc says the raised-floor leg
+  lands the seek through the successor's step (#1647b departure 3).
+- **NITs.** `block` cuts at a due entry only when a move is owed (`due && owed`), so an entry
+  with nothing owed may fuse. The probe records the move (a `Jump` at `E`). A const assert holds
+  every `BankWidth::ALL` width within `MAXIMUM_BANK_LANES` (and so `MAXIMUM_FADER_CELLS`). #1646's
+  "Measured" paragraph is re-measured in a note under it. Gate 8 (e)'s text is amended above.
+
+**Measured (x86-64, AVX2).** `lane_slot_bytes` 240 -> 224 (the two counters), by
+`fader_automation_sizes()`; the one-lane charge is `68 + 64 + 8 × 224 + 120 = 2,044` bytes. No
+fixture moved.
+
+**Departures.** MAJOR-1 has no gate (above). MINOR-7 deletes the counters rather than reading
+them. Out-of-path edits: `.github/ISSUE_SPECS/1646-prepare-stored-fader-automation.md` (the
+re-measured note). No edit under `crates/engine/src/realtime/`, `crates/automation` or
+`crates/builtins`.
+
+**Checks (x86-64 AVX2).** `cargo test --locked -p automation -p graph -p builtins -p
+builtins-compiler --features builtins-compiler/test-support,graph/test-support`: 388 pass.
+`-p host-core --all-features`: 555 pass (`stored_fader_automation` 26; 23 without features).
+`-p capi`: 206 pass. `-p host-web --features host-web/test-support --lib --test
+control_parity`: 173 pass. `-p control-plane --all-features`: 24 pass. `realtime-policy`: ok, 160
+regions in 33 files (unchanged). fmt; clippy `-D warnings` (builtins-compiler, host-core, capi;
+all targets, all features); no-feature `cargo check --all-targets` on the same: clean.
+`./target/release/audit capi`: `pcm_digest` `bffc21e857b5e134` (unchanged), 0 violations, 0
+allocations.

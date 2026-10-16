@@ -790,16 +790,17 @@ enum Adoption {
     Reposition,
 }
 
-/// One automated channel's obligation to move to its cell's target where a held ramp ends with
-/// the gain free (#1647 D1.6, batch 13b amendment): while the stage holds the lane's gain (muted,
+/// One automated channel's obligation to move to its curve where a held ramp ends with the gain
+/// free (#1647 D1.6, batch 13b amendment, R17-9): while the stage holds the lane's gain (muted,
 /// or in a mute or unmute ramp, #1638 D2) a gain event is only remembered, and on a curve flat
 /// afterwards the cell emits nothing more, so without the move the lane would stay at the gain
 /// the unmute ramp aimed for.
 #[derive(Clone, Copy, Debug, Default)]
 struct HeldRampObligation {
     /// A gain event the stage only remembered is outstanding. Kept through a ramp that ends
-    /// muted (constraint 4); cleared by the move, or when a live write freed the gain at a block
-    /// entry (it discharges the obligation there).
+    /// muted (constraint 4); cleared by the move, by a seek `Set` exactly at the hold's end
+    /// (R17-8), or when a live write freed the gain at a block entry (it discharges the
+    /// obligation there and the cell's hold is released, R17-10).
     owed: bool,
     /// The held ramp ends on the last sample of the block just rendered: the move is due at the
     /// next block's first sample, which is the first sample the stage reports the gain free.
@@ -827,14 +828,6 @@ struct LaneFaderAutomation {
     /// The lane has rendered no block yet (#1647 D2): its first block takes a `Set` when the
     /// curve at that block's node time differs from the value it was seeded with.
     fresh: bool,
-    /// Events render refused (#1647 D1, unreachable): a gain the conversion refuses, a sink
-    /// refusal, a cell the program does not hold, a span the cell refuses or a cell past the
-    /// driver's capacity. Each also fails a `debug_assert`. Read off render.
-    refused_events: u64,
-    /// Blocks in which the stage stopped pulling this lane's owner's operations
-    /// (`BuiltinProcessReport::fader_operations_stopped`, #1638): a bank's stop is counted on each
-    /// of its automated lanes. Read off render.
-    operations_stopped: u64,
 }
 
 impl LaneFaderAutomation {
@@ -864,8 +857,6 @@ impl LaneFaderAutomation {
             span: None,
             fader_jump: None,
             fresh: true,
-            refused_events: 0,
-            operations_stopped: 0,
         }
     }
 
@@ -954,7 +945,6 @@ impl LaneFaderAutomation {
             program,
             channels,
             span,
-            refused_events,
             ..
         } = self;
         for (channel, cell) in channels.iter_mut().enumerate() {
@@ -974,10 +964,8 @@ impl LaneFaderAutomation {
                 continue;
             };
             let record = FaderOffsetsRecord::from_words(words);
-            if !cell.offsets_jump(program, *span, channel, record, stage) {
-                debug_assert!(false, "an offsets jump is refused at render");
-                *refused_events = refused_events.saturating_add(1);
-            }
+            let jumped = cell.offsets_jump(program, *span, channel, record, stage);
+            debug_assert!(jumped, "an offsets jump is refused at render");
         }
     }
     // REALTIME_POLICY_END
@@ -1259,19 +1247,31 @@ impl FaderCellCursor<'_> {
             .or_else(|| self.end.map(|end| end.at))
     }
 
-    /// End the first piece at the cut and start the second, after the move at `E` (if any) has
-    /// reported its ramp to the cell. Returns the cell's target, for the move.
-    fn cut(&mut self, end: HoldEnd, moving: bool) -> Option<f32> {
+    /// End the first piece at the cut and start the second. With `moving`, the cell first lands
+    /// at `E` as a seek in [`automation::SeekMode::Ramp`] does (R17-9): one `Jump` over the
+    /// block's jump length `J`, aimed at the curve at the ramp's completion `E + J - 1` (never
+    /// past the next discontinuity), which commits that target and holds the grid for the move's
+    /// own ramp (constraint 3), as after the cell's own `Jump`. Returns that landing. Bounded: one
+    /// event of a one-sample span, a binary search of the discontinuities and one curve read.
+    fn cut(&mut self, end: HoldEnd, moving: bool) -> Option<automation::Event> {
         self.end = None;
-        let state = self.events.take()?.into_state();
-        let target = state.target();
+        let mut state = self.events.take()?.into_state();
+        let mut landing = None;
         if moving {
-            // Constraint 3: the move holds the grid for its own ramp, as after the cell's Jump.
-            state.hold_until(automation::completion_of(
-                automation::Completion::End,
-                end.node,
-                self.jump,
-            ));
+            match automation::NodeSpan::new(end.node, Some((0, end.node)), 1) {
+                Ok(span) => {
+                    let mut events = automation::CellEvents::new(
+                        self.program,
+                        state,
+                        span,
+                        automation::SeekMode::Ramp,
+                        self.jump,
+                    );
+                    landing = events.next();
+                    state = events.into_state();
+                }
+                Err(_) => debug_assert!(false, "a one-sample span with its step at 0 is valid"),
+            }
         }
         if let Some(rest) = end.rest {
             self.base = end.at.saturating_add(1);
@@ -1284,7 +1284,7 @@ impl FaderCellCursor<'_> {
             ));
             self.pull();
         }
-        target
+        landing
     }
 }
 
@@ -1301,14 +1301,16 @@ impl FaderCellCursor<'_> {
 ///
 /// D1.6 (batch 13b amendment): a gain event pushed while the stage holds the channel's gain is
 /// only remembered, so the channel owes a move. At the first sample `E` at which the stage
-/// reports the gain free, the driver moves the channel to its cell's target over the block's jump
-/// length, in place of any event the cell gives at `E`, and reports that ramp to the cell; the
-/// channel's span is cut there, so no event past `E` is pulled before the move. Fixed size, on the
-/// render stack; allocation-, lock- and syscall-free.
+/// reports the gain free, the driver moves the channel with a ramped landing of its cell at `E`
+/// (R17-9: aimed at the curve at `E + J - 1`, over the block's jump length `J`), in place of any
+/// event the cell gives at `E`; a seek `Set` exactly at `E` is pushed instead and discharges the
+/// obligation (R17-8). The channel's span is cut there, so no event past `E` is pulled before the
+/// move. A live write that frees the gain at a block entry discharges the obligation and releases
+/// the cell's hold there (R17-10). An event render refuses (unreachable: the curve is in the fader
+/// domain, `vca_compose_db` clamps and the lane is a member) keeps the stage's target and fails a
+/// `debug_assert`. Fixed size, on the render stack; allocation-, lock- and syscall-free.
 struct FaderEventDriver<'a> {
     cursors: [Option<FaderCellCursor<'a>>; MAXIMUM_FADER_CELLS],
-    /// Refused events per owner lane, returned by [`Self::finish`].
-    refused: [u64; MAXIMUM_BANK_LANES],
     #[cfg(any(test, feature = "test-support"))]
     first_sample: u64,
 }
@@ -1333,7 +1335,6 @@ impl<'a> FaderEventDriver<'a> {
         let _ = first_sample;
         let mut driver = Self {
             cursors: core::array::from_fn(|_| None),
-            refused: [0; MAXIMUM_BANK_LANES],
             #[cfg(any(test, feature = "test-support"))]
             first_sample,
         };
@@ -1375,14 +1376,10 @@ impl<'a> FaderEventDriver<'a> {
                 else {
                     continue;
                 };
-                let refused = |driver: &mut Self| {
-                    debug_assert!(false, "an automated fader cell is refused at render");
-                    if let Some(count) = driver.refused.get_mut(lane) {
-                        *count = count.saturating_add(1);
-                    }
-                };
+                let refused =
+                    || debug_assert!(false, "an automated fader cell is refused at render");
                 let Some(cell_program) = program.cell(*cell as usize) else {
-                    refused(&mut driver);
+                    refused();
                     continue;
                 };
                 let mut step = span
@@ -1411,7 +1408,13 @@ impl<'a> FaderEventDriver<'a> {
                     step = Some((0, span.start));
                     mode = automation::SeekMode::Ramp;
                 }
-                let (free_from, at) = obligation.block(hold_now, frames);
+                let (free_from, at, discharged) = obligation.block(hold_now, frames);
+                if discharged && let Some(first) = span_time(span.start, step, 0) {
+                    // R17-10: the live write that freed the gain discharged the obligation, so
+                    // the cell's hold of the ramp it ended is released here: its grid moves the
+                    // lane from this block's first sample on.
+                    state.hold_until(first.saturating_sub(1));
+                }
                 let end = at.map(|at| hold_end(span.start, step, at, frames));
                 let first = match end {
                     Some(Some(end)) => automation::NodeSpan::new(
@@ -1426,7 +1429,7 @@ impl<'a> FaderEventDriver<'a> {
                     driver.cursors.get_mut(used),
                     matches!(end, Some(None)),
                 ) else {
-                    refused(&mut driver);
+                    refused();
                     continue;
                 };
                 let mut cursor = FaderCellCursor {
@@ -1482,10 +1485,10 @@ impl<'a> FaderEventDriver<'a> {
         })
     }
 
-    /// Consume every event the stage did not pull (none, unless a stage stopped pulling: the
-    /// cell's state must still advance through its block) and return the refused events per
-    /// owner lane. A cut the stage did not reach starts its second piece with no move.
-    fn finish(mut self) -> [u64; MAXIMUM_BANK_LANES] {
+    /// Consume every event the stage did not pull (none, unless a stage stopped pulling, which
+    /// fails its own `debug_assert`: the cell's state must still advance through its block). A
+    /// cut the stage did not reach starts its second piece with no move.
+    fn finish(mut self) {
         for cursor in self.cursors.iter_mut().flatten() {
             while cursor.next.is_some() {
                 cursor.pull();
@@ -1497,17 +1500,18 @@ impl<'a> FaderEventDriver<'a> {
                 }
             }
         }
-        self.refused
     }
 }
 
 impl HeldRampObligation {
     /// The block's hold of one channel from its stage state `hold` after the live drain: the
-    /// first offset at which the gain is free, and `E` when the hold ends with the gain free in
-    /// this block (a ramp that ends exactly at the block's end makes `E` the next block's first
-    /// sample). A channel free at a block entry with no move due had its hold cleared by a live
-    /// write there, which discharges the obligation (constraint 4).
-    fn block(&mut self, hold: Option<ChannelHold>, frames: u32) -> (u32, Option<u32>) {
+    /// first offset at which the gain is free, `E` when the hold ends with the gain free in this
+    /// block (a ramp that ends exactly at the block's end makes `E` the next block's first sample,
+    /// when a move is owed), and whether a live write discharged the obligation here. A channel
+    /// free at a block entry with no move due had its hold cleared by a live write there, which
+    /// discharges an owed obligation (constraint 4); the caller then releases the cell's hold
+    /// (R17-10).
+    fn block(&mut self, hold: Option<ChannelHold>, frames: u32) -> (u32, Option<u32>, bool) {
         let due = core::mem::take(&mut self.due_at_entry);
         match hold {
             Some(ChannelHold {
@@ -1517,19 +1521,16 @@ impl HeldRampObligation {
                 ..
             }) if remaining > 0 => {
                 if remaining < frames {
-                    (remaining, Some(remaining))
+                    (remaining, Some(remaining), false)
                 } else {
                     self.due_at_entry = remaining == frames;
-                    (frames, None)
+                    (frames, None, false)
                 }
             }
-            Some(ChannelHold { held: true, .. }) => (frames, None),
-            Some(_) if due => (0, Some(0)),
-            Some(_) => {
-                self.owed = false;
-                (0, None)
-            }
-            None => (0, None),
+            Some(ChannelHold { held: true, .. }) => (frames, None, false),
+            Some(_) if due && self.owed => (0, Some(0), false),
+            Some(_) => (0, None, core::mem::take(&mut self.owed)),
+            None => (0, None, false),
         }
     }
 }
@@ -1621,77 +1622,57 @@ impl builtins::FaderOperationSource for FaderEventDriver<'_> {
     fn apply(&mut self, offset: u32, sink: &mut builtins::FaderOperationSink) {
         #[cfg(any(test, feature = "test-support"))]
         let first_sample = self.first_sample;
-        let Self {
-            cursors, refused, ..
-        } = self;
-        for cursor in cursors.iter_mut().flatten() {
+        for cursor in self.cursors.iter_mut().flatten() {
             let event = cursor.next.filter(|event| event.offset == offset);
             let end = cursor.end.filter(|end| end.at == offset);
             if event.is_none() && end.is_none() {
                 continue;
             }
-            let selector = if cursor.channel == 0 {
-                BuiltinLaneSelector::Left
-            } else {
-                BuiltinLaneSelector::Right
+            let selector = channel_selector(cursor.channel);
+            // R17-8: a seek `Set` that lands exactly at `E` sets the lane there (the gain is
+            // free from `E`) and discharges the obligation (D3 wins over constraint 7).
+            let set_at_end = end.is_some()
+                && event.is_some_and(|event| event.kind == automation::EventKind::Set);
+            // Constraint 7: otherwise the move at `E` replaces any gain operation the cell gives
+            // at `E`.
+            let moving = end.is_some() && cursor.obligation.owed && !set_at_end;
+            let mut push = |cursor: &FaderCellCursor<'_>, event: automation::Event| {
+                let pushed = Self::operation(event, cursor.offsets_sum)
+                    .is_some_and(|operation| sink.push(cursor.lane, selector, operation).is_ok());
+                debug_assert!(pushed, "a stored fader event is refused at render");
+                #[cfg(any(test, feature = "test-support"))]
+                test_only_record_fader_event(TestOnlyFaderEvent {
+                    lane: cursor.lane,
+                    channel: cursor.channel,
+                    sample: first_sample.saturating_add(u64::from(offset)),
+                    kind: event.kind,
+                    held: event.held,
+                    value: event.value,
+                    ramp: event.ramp,
+                });
             };
-            let lane = cursor.lane;
-            let mut refuse = || {
-                debug_assert!(false, "a stored fader event is refused at render");
-                if let Some(count) = refused.get_mut(lane) {
-                    *count = count.saturating_add(1);
-                }
-            };
-            // Constraint 7: the move at `E` replaces any gain operation the cell gives at `E`.
-            let moving = end.is_some() && cursor.obligation.owed;
             if let Some(event) = event {
                 if !moving {
-                    let pushed =
-                        Self::operation(event, cursor.offsets_sum).is_some_and(|operation| {
-                            sink.push(cursor.lane, selector, operation).is_ok()
-                        });
-                    if !pushed {
-                        refuse();
-                    }
+                    push(cursor, event);
                     // The stage only remembers a gain while it holds the lane.
                     if offset < cursor.free_from {
                         cursor.obligation.owed = true;
                     }
-                    #[cfg(any(test, feature = "test-support"))]
-                    test_only_record_fader_event(TestOnlyFaderEvent {
-                        lane: cursor.lane,
-                        channel: cursor.channel,
-                        sample: first_sample.saturating_add(u64::from(offset)),
-                        kind: event.kind,
-                        held: event.held,
-                        value: event.value,
-                        ramp: event.ramp,
-                    });
                 }
                 cursor.pull();
             }
             let Some(end) = end else {
                 continue;
             };
-            let target = cursor.cut(end, moving);
+            if set_at_end {
+                cursor.obligation.owed = false;
+            }
+            let landing = cursor.cut(end, moving);
             if moving {
                 cursor.obligation.owed = false;
-                let jump = cursor.jump;
-                let pushed = target
-                    .and_then(|target| Self::gain(target, cursor.offsets_sum))
-                    .is_some_and(|gain| {
-                        sink.push(
-                            cursor.lane,
-                            selector,
-                            builtins::FaderOperation::RetargetGain {
-                                gain,
-                                samples: jump,
-                            },
-                        )
-                        .is_ok()
-                    });
-                if !pushed {
-                    refuse();
+                match landing {
+                    Some(landing) => push(cursor, landing),
+                    None => debug_assert!(false, "a moving cut lands its cell"),
                 }
             }
         }
@@ -2572,6 +2553,16 @@ struct BuiltinBankProcessor {
 /// Widest bank any backend selects (`BankWidth::Eight`), as a plain array bound.
 const MAXIMUM_BANK_LANES: usize = 8;
 
+// Every bank width this build has fits the arrays bound by `MAXIMUM_BANK_LANES` (the live
+// witnesses, the lane masks and `MAXIMUM_FADER_CELLS`' cursors): a wider width fails the build.
+const _: () = {
+    let mut index = 0;
+    while index < BankWidth::ALL.len() {
+        assert!(BankWidth::ALL[index].lanes() as usize <= MAXIMUM_BANK_LANES);
+        index += 1;
+    }
+};
+
 /// The lane mask of a drain that visits every lane of a bank: the block drain's.
 const EVERY_LANE: u8 = u8::MAX;
 
@@ -3196,9 +3187,9 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
                 first_sample,
                 bank_hold(bank),
             );
-            let report = bank.process_with(left, right, frames, &mut driver);
-            let refused = driver.finish();
-            settle_fader_events(automation, refused, report);
+            // A stop is a broken source contract: the stage fails its own `debug_assert`.
+            let _ = bank.process_with(left, right, frames, &mut driver);
+            driver.finish();
         }
         self.process_calls = self.process_calls.saturating_add(1);
         self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
@@ -3246,22 +3237,6 @@ fn bank_hold(bank: &BuiltinFaderBank) -> impl Fn(usize, usize) -> Option<Channel
             remaining: bank.ramp_remaining(lane, channel)?,
             fader_gain: bank.fader_gain(lane, channel),
         })
-    }
-}
-
-/// Add a block's refused events and the stage's stop to the automated lanes' counters.
-fn settle_fader_events(
-    automation: &mut [Option<LaneFaderAutomation>],
-    refused: [u64; MAXIMUM_BANK_LANES],
-    report: builtins::BuiltinProcessReport,
-) {
-    for (slot, refused) in automation.iter_mut().zip(refused) {
-        if let Some(slot) = slot {
-            slot.refused_events = slot.refused_events.saturating_add(refused);
-            slot.operations_stopped = slot
-                .operations_stopped
-                .saturating_add(report.fader_operations_stopped);
-        }
     }
 }
 
@@ -4046,17 +4021,17 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
                 counters[2] = counters[2].saturating_add(1);
                 value.set(counters);
             });
-            let report = match driver.as_mut() {
+            match driver.as_mut() {
                 None => {
                     bank.process(left, right, frames);
-                    builtins::BuiltinProcessReport::default()
                 }
-                Some(driver) => bank.process_with(left, right, frames, driver),
-            };
+                Some(driver) => {
+                    let _ = bank.process_with(left, right, frames, driver);
+                }
+            }
             matrix.bank.process(left, right, frames);
             if let Some(driver) = driver.take() {
-                let refused = driver.finish();
-                settle_fader_events(automation, refused, report);
+                driver.finish();
             }
         } else {
             #[cfg(any(test, feature = "test-support"))]
@@ -4068,12 +4043,7 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
                 value.set(counters);
             });
             if let Some(driver) = driver.take() {
-                let refused = driver.finish();
-                settle_fader_events(
-                    automation,
-                    refused,
-                    builtins::BuiltinProcessReport::default(),
-                );
+                driver.finish();
             }
         }
         fader.process_calls = fader.process_calls.saturating_add(1);
@@ -7404,12 +7374,8 @@ fn render_oracle_fader(
                     })
                 },
             );
-            let report = fader.process_with(block, &mut driver);
-            let [refused, ..] = driver.finish();
-            automation.refused_events = automation.refused_events.saturating_add(refused);
-            automation.operations_stopped = automation
-                .operations_stopped
-                .saturating_add(report.fader_operations_stopped);
+            let _ = fader.process_with(block, &mut driver);
+            driver.finish();
         }
     }
     Ok(())

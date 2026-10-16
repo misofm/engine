@@ -293,7 +293,11 @@ the browser alike (#1647): the lane follows its curve in node time, reaching the
 the end of each 64-sample retarget on a fixed grid, taking each discontinuity at its exact sample
 over the session's fader ramp length (`control_smoothing.fader_ms`), lined up with the audio it
 acts on through every latent insert, and set exactly, with no ramp, where a session seek reaches
-the fader. The output does not depend on the render quantum or on where a seek landed. Stored
+the fader. One exception: while a mute or unmute ramp holds the lane's gain, the lane only
+remembers each value it is given, a seek's included, and where the hold ends with the gain free it
+ramps over the fader ramp length to the curve at that ramp's end (a seek that reaches the fader
+exactly where the hold ends still sets it exactly). The output does not depend on the render
+quantum or on where a seek landed. Stored
 automation has no queue: render generates its events from the plan. An entry on any other row,
 for the strip, a console slot or an insert, is valid and inert: it authors and round-trips and
 renders nothing until its row's slice lands. Rendering the whole table identically on every

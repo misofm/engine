@@ -529,6 +529,12 @@ fixture). Each further automated channel in the same bank adds 120 plus its cell
 A session without fader automation carries the empty slot array: `size_of::<FaderBankProcessor>()`
 grows by 16 bytes per fader bank, a fixed structural change inside every ceiling (no re-pin).
 
+*Re-measured at the #1647 U2 fold (batch 17), same host:* #1647a-c, #1648b and #1649 grew the slot
+(240 bytes at `275ff76e8`) and the U2 fold removed #1647b's two unread render counters: lane slot
+224, program overhead 64, offsets cell 120. The one left-only lane's charge is
+`68 + 64 + 8 × 224 + 120 = 2,044` bytes (`builtin_bank_bytes` 8,472 -> 10,516 on the bank
+fixture); each further automated channel in the same bank adds 120 plus its cells' program bytes.
+
 **Departures.**
 
 1. **The program is built in the builtins preparation, not in host-core** (departure 6 said
