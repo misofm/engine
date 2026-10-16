@@ -192,7 +192,6 @@ impl PreparedHost {
             sources,
             report,
             inventory,
-            carried_base,
             #[cfg(feature = "control-provider")]
             control_catalog,
         } = self;
@@ -204,7 +203,6 @@ impl PreparedHost {
                     sources,
                     report,
                     inventory,
-                    carried_base,
                     #[cfg(feature = "control-provider")]
                     control_catalog,
                 },

@@ -148,6 +148,7 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
     let mut constrained = graph_caps();
     constrained.maximum_nodes = NODES - 1;
     let failure = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id: 1,
         effects: EffectPreparedSession {
@@ -615,6 +616,7 @@ fn compiles_and_binds_65_537_tracks_with_builtins() {
     let builtins = prepare_session_builtins(&session, &[], builtin_caps()).expect("scale builtins");
     let dispatch = Backend::current();
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch,
         plan_id: 3,
         effects: EffectPreparedSession {

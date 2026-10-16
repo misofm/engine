@@ -172,6 +172,7 @@ fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled,
     )
     .expect("the fixture's native effects prepare");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id: 1,
         effects,

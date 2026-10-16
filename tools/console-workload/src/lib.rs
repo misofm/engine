@@ -1399,6 +1399,7 @@ impl SessionRuntime {
         }
         .expect("prepared console builtins");
         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch,
             plan_id: PLAN_ID,
             effects,
@@ -2605,6 +2606,7 @@ mod tests {
         let builtins = builtins_compiler::prepare_session_builtins(&session, &[], builtin_caps())
             .expect("prepared console builtins");
         let Ok(artifact) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch: Backend::current(),
             plan_id: PLAN_ID,
             effects,
@@ -3227,6 +3229,7 @@ mod tests {
         let builtins = builtins_compiler::prepare_session_builtins(&session, &[], builtin_caps())
             .expect("prepared console builtins");
         let Ok(artifact) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
             dispatch: Backend::current(),
             plan_id: PLAN_ID,
             effects,

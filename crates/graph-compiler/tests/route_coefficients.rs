@@ -67,6 +67,7 @@ fn compile(model: &SessionModel) -> Result<PreparedGraphBuiltinsArtifact, Vec<(S
     )
     .expect("the native effects prepare");
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id: 1,
         effects,

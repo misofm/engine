@@ -7392,6 +7392,84 @@ mod structural_apply {
         );
     }
 
+    /// #1698 on the browser: a subscription acked against a candidate that restarted "track"'s
+    /// compressor (its link mode changed), which a later structural edit supersedes by putting the
+    /// compressor back as the plan that renders has it. The replacement now carries the
+    /// compressor from the plan that renders, whose tap never saw the record, so the core queues
+    /// the record again on the replacement and the host copies it onto the replacement's tables,
+    /// as for a compressor the candidate itself carried.
+    ///
+    /// Test value: red if the record forwarding or the host's table hand-over serves only a tap
+    /// the candidate carried, and not one the replacement carries from the plan that renders
+    /// across a candidate that restarted it: the carried tap keeps the running plan's unarmed
+    /// state, the tables report it unarmed and no window publishes.
+    #[test]
+    fn a_subscription_on_a_candidate_that_restarted_the_tap_publishes_on_a_replacement_that_reverts_it()
+     {
+        let mut model =
+            parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+                .expect("accepted command fixture");
+        model.tracks[0].inserts.effects[0] = observed_compressor_insert();
+        let original = model.tracks[0].inserts.effects[0].clone();
+        let mut restarted = original.clone();
+        restarted.link_mode = session::LinkMode::Maximum;
+        let put = |effect: session::Effect| {
+            [SessionEdit::PutTrackEffect {
+                track_id: model.tracks[0].id.clone(),
+                rack_name: session::RackName::Inserts,
+                final_position: 0,
+                effect,
+            }]
+        };
+        let mut rig = Rig::boot(&model, options(), None);
+        rig.step();
+        assert!(matches!(
+            rig.apply(&put(restarted), 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(
+            observe_key(&mut rig.host, "track", RACK_INSERTS, "comp", 1, 2, true),
+            RESULT_OK,
+            "the subscription is acked against the pending candidate"
+        );
+        assert!(matches!(
+            rig.apply(&put(original), 2),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        rig.step();
+        assert_eq!(rig.epoch(), 2, "the replacement is adopted");
+        assert_eq!(
+            armed_mask(&rig.host, "track", "comp"),
+            Some(1),
+            "the replacement's tables hold the subscription"
+        );
+        for _ in 0..6 {
+            rig.step();
+        }
+        let binding = (0..rig.host.observation_binding_count() as u32)
+            .filter_map(|index| rig.host.observation_binding(index))
+            .next()
+            .expect("the compressor is bound");
+        let mut address = binding.address;
+        address.tap_id = 1;
+        let read = rig
+            .host
+            .read_observation_addresses(&[address])
+            .expect("a read");
+        assert_eq!(&*read[0].track_id, "track");
+        assert!(
+            read[0].window.is_some(),
+            "the subscription publishes windows on the replacement: {:?}",
+            read[0].status
+        );
+    }
+
     /// Drive `blocks` more blocks with the lease on, polling after each; the windows folded.
     fn poll_blocks(rig: &mut Rig, blocks: u64) -> u32 {
         let mut windows = 0;

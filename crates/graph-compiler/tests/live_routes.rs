@@ -346,6 +346,7 @@ fn compile(model: &SessionModel) -> PreparedGraphBuiltinsArtifact {
     )
     .expect("the builtins prepare");
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id: 1_220,
         effects,

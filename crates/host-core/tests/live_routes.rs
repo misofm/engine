@@ -959,6 +959,7 @@ fn graph_route_resources(document: &str) -> RouteControlResources {
     )
     .expect("builtins");
     let mut artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        input_floors: Default::default(),
         dispatch: Backend::current(),
         plan_id: 1_221,
         effects,
