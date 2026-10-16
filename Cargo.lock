@@ -338,6 +338,7 @@ dependencies = [
  "effect-contract",
  "engine",
  "host-core",
+ "lane",
  "protocol",
  "session",
  "source",

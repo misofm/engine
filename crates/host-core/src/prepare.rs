@@ -2155,6 +2155,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     ),
     PrepareDiagnostics,
 > {
+    // TBD48 D1: the whole preparation runs in the canonical floating-point environment, so a
+    // route or send gain (`compile_graph`'s `db_to_gain_f32`), a native effect's coefficients and
+    // every value composed below are what a canonical thread prepares, whatever the caller has
+    // set. The inner guards (builtins body, lowerings, `controls::effective`, the catalog) nest:
+    // each restores the canonical word this one installed, and this one restores the caller's.
+    let _canonical = lane::CanonicalFpEnv::enter();
     // `None` is the plain entry: no live controls, and a request of defaults for the meter and
     // observation fields below. Every `Some` attaches live controls.
     let default_request = HostLiveControlRequest::default();
@@ -4202,6 +4208,12 @@ pub(crate) struct LevelLengths {
 /// the same value and the same length). A fader move on a lane that stays muted still gets its
 /// record, so the stage remembers the gain for a later unmute.
 ///
+/// A lane that `automated` names (the lanes the post-change model automates,
+/// [`controls::automated_fader_lanes`]) gets no `FaderDb` (#1648 D3): its cell renders the curve
+/// and the static value is only its fallback. That is no error, so a successor's join reads the
+/// strip as unchanged when nothing else moved, and its stage carries. Its `Mute` records are
+/// unchanged. `automated` is called only when a lane's gain bits change.
+///
 /// # Errors
 ///
 /// [`OutOfDomain`] when either fader is outside the domain [`checked_fader_gain`] accepts.
@@ -4209,6 +4221,7 @@ pub(crate) fn fader_records(
     before: &session::DualMonoFader,
     after: &session::DualMonoFader,
     lengths: LevelLengths,
+    automated: impl FnOnce() -> [bool; 2],
 ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
     let gain = |db| {
         checked_fader_gain(db)
@@ -4226,7 +4239,15 @@ pub(crate) fn fader_records(
         used += 1;
     };
     let db_after = [after.left_db, after.right_db];
-    let gain_changed = [0, 1].map(|lane| gains_before[lane] != gains_after[lane]);
+    let mut gain_changed = [0, 1].map(|lane| gains_before[lane] != gains_after[lane]);
+    // #1648 D3: an automated lane renders its curve; its static value is the fallback, so a change
+    // of it is no record. Asked only when a gain changed.
+    if gain_changed.contains(&true) {
+        let automated = automated();
+        for lane in 0..2 {
+            gain_changed[lane] &= !automated[lane];
+        }
+    }
     for (lanes, lane) in lane_records(
         gain_changed,
         db_after[0].to_bits() == db_after[1].to_bits() && lengths.fader[0] == lengths.fader[1],
@@ -4534,10 +4555,12 @@ impl<'a> EffectiveDiff<'a> {
         before: usize,
         after: usize,
     ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
+        let change = self.change(before, after);
         fader_records(
             &effective_fader(&self.before.strips[before]),
             &effective_fader(&self.after.strips[after]),
-            self.rules.lengths(&self.change(before, after)),
+            self.rules.lengths(&change),
+            || controls::automated_fader_lanes(self.rules.next.structure(), change.id),
         )
     }
 
@@ -4841,6 +4864,12 @@ pub enum LiveRebuild {
     /// rebuild's preparation refuses it with the row's code; the classifier only routes, so the
     /// refusal has one author and no live commit can ack it first.
     AutomationTarget,
+    /// The stored automation of a row that renders ([`controls::automation_row_renders`]) changes:
+    /// an entry is added, removed, retargeted or given other segments (#1648 D1,
+    /// [`controls::rendered_automation_changed`]). A plan compiles its cells from the entries at
+    /// preparation, so only a successor plan holds the new curve. An entry's hand offset (#1650) is
+    /// not part of this comparison.
+    Automation,
 }
 
 /// The one per-instance function that decides whether a difference between two lowered instances

@@ -10229,3 +10229,184 @@ fn a_flat_fader_automation_renders_the_static_fader_bits_in_the_browser() {
         }
     }
 }
+
+/// TBD48 D2 (browser): a live level move made while the control thread runs FTZ, DAZ and round
+/// toward zero. The browser host's own tests run natively, so the caller's word can be set.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod canonical_live {
+    use super::*;
+    use lane::fpenv::under_hostile_fp_env;
+    use protocol::control_core::{ControlAddress, Lane, Owner, Section};
+    use protocol::{
+        CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
+        EditPath, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionRevision,
+        TypedCommandFrame,
+    };
+    use session::StableId;
+
+    /// The member dB and VCA offset of #1646's environment gate (asserted below to round apart).
+    const MEMBER_DB: f32 = -0.01384;
+    const OFFSET_DB: f32 = 1.0 / 3.0;
+    /// The track the VCA holds.
+    const MEMBER: usize = 1;
+
+    /// [`flat_fader_base`] with VCA `v` over track 1: the track's left fader at `member`, the
+    /// VCA's left offset at `offset`.
+    fn model(member: f32, offset: f32) -> session::SessionModel {
+        let mut model = flat_fader_base();
+        model.vcas = vec![flat_fader_vca(&model, "v", 0.0, &[MEMBER])];
+        model.vcas[0].fader.left_db = offset;
+        model.tracks[MEMBER].fader.left_db = member;
+        model
+    }
+
+    fn set(owner: Owner, section: Section, control: u32, value: f32) -> SessionEdit {
+        SessionEdit::SetControl {
+            expected_effect: None,
+            address: ControlAddress {
+                owner,
+                section,
+                control,
+                lane: Lane::Left,
+            },
+            value,
+            ramp_samples: None,
+        }
+    }
+
+    /// The transaction frame of `edit` at `revision`.
+    fn frame(edit: &SessionEdit, revision: u64) -> Vec<u8> {
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(7).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                    payload: CommandPayload::SessionTransactionApply(std::slice::from_ref(edit)),
+                },
+                &mut bytes,
+            )
+            .expect("a transaction frame");
+        bytes.truncate(length);
+        bytes
+    }
+
+    /// The path and revision of an applied transaction's response.
+    fn applied(response: &[u8]) -> (EditPath, u64) {
+        let mut fields = [0_u16; 64];
+        match ProtocolCodec::default()
+            .decode_typed_response(response, &mut DecodeScratch::new(&mut fields))
+            .expect("a transaction response")
+        {
+            DecodedTypedResponseFrame::Success {
+                header,
+                payload: DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+            } => (applied.edit_path, header.revision.0),
+            _ => panic!("the transaction applies"),
+        }
+    }
+
+    /// A browser host booted on `before` takes `edit` under the hostile word, live, and from the
+    /// block its ramp leaves behind renders the bits of a canonical boot of the committed model.
+    fn live_move_under_hostile_word(
+        label: &str,
+        before: &session::SessionModel,
+        edit: &SessionEdit,
+    ) {
+        const BLOCKS: u64 = 4;
+        let document = canonical_session_json(before).expect("canonical");
+        let mut host = strip_boot(
+            &document,
+            WebBootOptions {
+                require_sample_rate_hz: 48_000,
+                require_quantum_frames: STRIP_QUANTUM,
+                source_ring_frames: STRIP_QUANTUM * 4,
+                ..WebBootOptions::live_control_defaults()
+            },
+        );
+        let mut rendered = Vec::new();
+        let mut render = |host: &mut AudioWorkletEngineHost, block: u64| {
+            submit_strip_source(host, "fixture-source", block, &strip_planes(0, block));
+            assert_eq!(host.render_next(), RESULT_OK, "{label}: block {block}");
+            rendered.push(
+                host.output_pcm()
+                    .expect("output")
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<u32>>(),
+            );
+        };
+        for block in 0..BLOCKS {
+            render(&mut host, block);
+        }
+        let bytes = frame(edit, before.revision);
+        let staging = host
+            .control_request_mut(bytes.len() as u32)
+            .expect("the control staging");
+        staging[..bytes.len()].copy_from_slice(&bytes);
+        let result = under_hostile_fp_env(|| host.control_command(bytes.len() as u32, None));
+        assert_eq!(result, RESULT_OK, "{label}");
+        assert_eq!(
+            applied(host.control_response()),
+            (EditPath::Live, before.revision + 1),
+            "{label}: the move is live"
+        );
+        let mut committed = model(MEMBER_DB, OFFSET_DB);
+        committed.revision = before.revision + 1;
+        let ramp = u64::from(committed.control_smoothing_samples().fader);
+        let settled = BLOCKS + ramp.div_ceil(u64::from(STRIP_QUANTUM)) + 1;
+        for block in BLOCKS..settled + 4 {
+            render(&mut host, block);
+        }
+        let reference = render_flat_fader_web(&committed, settled + 4);
+        for block in settled..settled + 4 {
+            let block = block as usize;
+            assert!(
+                reference[block]
+                    .iter()
+                    .any(|bits| f32::from_bits(*bits) != 0.0),
+                "{label}: the reference plays"
+            );
+            assert_eq!(
+                rendered[block], reference[block],
+                "{label}: block {block} renders the canonical boot's bits"
+            );
+        }
+    }
+
+    /// TBD48 D2 (browser): a live fader move on a VCA member, and a live VCA offset move over it,
+    /// each made through the browser's control entry while the caller's thread runs FTZ, DAZ and
+    /// round toward zero, render from the end of their ramp the bits of the committed model booted
+    /// on a canonical thread. The pair's composition rounds to another `f32`, and another gain,
+    /// under that word (asserted), so the gate is not vacuous.
+    ///
+    /// Test value: red if the browser's live transaction composes a member's effective fader in
+    /// the caller's environment: remove the guard in the core's `SessionState::command`.
+    #[test]
+    fn a_live_fader_and_vca_move_under_a_hostile_caller_word_render_the_canonical_bits() {
+        let compose = || session::vca_effective_db(MEMBER_DB, [OFFSET_DB]);
+        let rounded = under_hostile_fp_env(compose);
+        assert_ne!(
+            builtins::checked_fader_gain(compose()).map(f32::to_bits),
+            builtins::checked_fader_gain(rounded).map(f32::to_bits),
+            "the gate is vacuous: the hostile word's composition converts to the same gain"
+        );
+        let member = model(0.0, OFFSET_DB).tracks[MEMBER].id.clone();
+        live_move_under_hostile_word(
+            "a live fader move",
+            &model(0.0, OFFSET_DB),
+            &set(Owner::Strip(member), Section::Builtins, 5, MEMBER_DB),
+        );
+        live_move_under_hostile_word(
+            "a live VCA move",
+            &model(MEMBER_DB, 0.0),
+            &set(
+                Owner::Vca(StableId::parse("v").expect("VCA ID")),
+                Section::Own,
+                1,
+                OFFSET_DB,
+            ),
+        );
+    }
+}

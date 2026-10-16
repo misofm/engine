@@ -388,3 +388,82 @@ other options.
   rows and the send mute only. The send gain (#1654) and the trim (#1658) take a hand offset, not
   `model_only`, from their own slices, and their rule is #1650's. Polarity stays "automation wins".
   No step here changes.
+
+## Decision record: #1648a (batch 17)
+
+Classification only (D1, D3's hook and predicate, D4, gate 1, the #1639 gap gate). Uncommitted on
+`codex/controls-batch-17w` over `b84450183` for the coordinator.
+
+**What shipped.**
+
+- **`controls` (thick core).** `automation_row_renders` was already added by #1646b and is reused.
+  New: `automated_cell(model, &ControlAddress) -> bool` (a rendered entry on the same owner,
+  section and row whose lane drives the address's lane; a `both` address is automated when either
+  lane is), `automated_fader_lanes(model, strip) -> [bool; 2]` (the fader row through
+  `automated_cell`, early out on an empty table), and `rendered_automation_changed(current, next)`
+  (the rendered entries in table order, compared by `id`, `target` and `segments`, every `f32` by
+  bits; the offset is not compared, departure 3). `fader_automation` shares the private lane rule
+  `drives`. Exported from `crates/controls/src/lib.rs`.
+- **D1.** `LiveRebuild::Automation` (`crates/host-core/src/prepare.rs`). In
+  `classify_live_delta_with_monitor` the new check is step 3, after step 2 (`AutomationTarget`)
+  and before the changed controls (now step 4); the later steps renumber to 5 and 6. Step 1 keeps
+  masking the whole table; its comment and the rustdoc steps and model-only paragraph now say that
+  steps 2 and 3 judge it. No control-plane edit: any classifier `Err` is `LiveCommit::Rebuild`.
+  The fast path (`classify_rows`) needs no edit: it only runs on transactions of `SetControl`s,
+  which leave the table as committed (R17-1 keeps that true under #1650b).
+- **D3 hook.** `fader_records` gains `automated: impl FnOnce() -> [bool; 2]`, called only when a
+  lane's gain bits change; an automated lane's `gain_changed` is cleared, so it gives no `FaderDb`
+  and no error, and the mute records are unchanged. Both `LevelDiff` forms pass
+  `controls::automated_fader_lanes(self.rules.next.structure(), strip id)`:
+  `EffectiveDiff::level_records` (full path and `join_strips`, which then reads the strip as
+  `Same` and carries) and `LocalDiff::level_records` (fast path).
+- **D4.** `crates/capi/include/miso_engine_v1.h` (live-edits paragraph),
+  `docs/CONTROL_PROTOCOL_SEMANTICS.md` (the "#1260" sentence), `docs/C_ABI_V1_QUALIFICATION.md`
+  (the model-only item narrowed, a new "Stored fader automation (#1648)" item). The text states
+  the carry ("the successor carries every owner"), which #1648b delivers in the same push.
+
+**Departures and readings.**
+
+- *Superseded cases moved, per the hazard.* `model_only_edits` in
+  `crates/host-core/tests/live_delta.rs` now upserts and removes an EQ band-1 gain entry
+  (`eq_automation(.., 4, Db)`), and `model_only_edits_are_live_with_no_records` runs on
+  `with_effects()` (it has the EQ insert; `two_tracks` has none). The C ABI twin upserts an entry
+  on the console EQ slot's band-1 gain (`Section::Console("eq")`, control 4, left, dB).
+- *No static `left_db` case* (departure 5): a test superseded by #1650 is not written. D3's hook
+  is gated through the VCA move, the one edit in this slice that reaches an automated lane and
+  stays a no-`FaderDb` case after #1649 and #1650.
+- *Mechanical, outside the path list:* `crates/host-core/tests/live_edit_classifier.rs` gains the
+  `LiveRebuild::Automation` arm of its exhaustive verdict match.
+
+**Gates and tests (all pass).**
+
+- Gate 1: `a_fader_automation_edit_is_a_rebuild` (`crates/host-core/tests/live_delta.rs`): add
+  (both lanes, one lane), remove, other segments, a zero's sign, retarget to the other track,
+  rename are `Automation`; an offset-only change is `Ok`; a mute entry added, changed and removed
+  is `Ok` with no records; a static change with an automation change is a rebuild; a `linear` fader
+  entry is `AutomationTarget`.
+- D3: `an_automated_fader_lane_takes_no_fader_record` (same file): a VCA move under a left-lane
+  fader entry gives only the right lane's `FaderDb`; the left lane alone gives no record; the left
+  mute keeps its record; with `test-support`, `classify_live_edit` takes the fast path and returns
+  the same delta.
+- Both hosts: `a_fader_automation_edit_rebuilds_alike_on_both_hosts`
+  (`hosts/host-web/tests/control_parity.rs`, four rates): a fader entry replies `rebuild` with the
+  same bytes on both hosts and the same bits across the swap; a mute entry replies `model_only`.
+- #1639 gap: `a_fader_entry_added_after_an_unwritten_smoothing_change_reads_the_new_lengths`
+  (`crates/capi/src/runtime/live_tests.rs`): the smoothing change is `model_only` and leaves the
+  prepared lengths; the fader entry is `rebuild`, and after adoption the block holds the new lengths.
+- Gate 8: `./target/release/audit capi` `pcm_digest` `bffc21e857b5e134` (unchanged), 0
+  violations, 0 allocations.
+
+**Checks run.** `cargo test --locked -p controls`; `-p host-core --all-features` (all binaries);
+`-p control-plane`; `-p capi` (175 + integration binaries); `-p host-web --features
+host-web/test-support --test control_parity` (22) and `--lib -- automation`;
+`bash scripts/check-capi-abi.sh`; `cargo fmt --all`; `cargo clippy --locked -p controls -p
+host-core -p capi -p host-web -p control-plane --all-targets --all-features -- -D warnings`; the
+same crates with `cargo check --locked --all-targets` and no features.
+
+**For #1648b.** Until the carry lands, a fader automation edit rebuilds with today's join: the
+fader stage carries its ramp as `Same` when no static level moved, but the cell event state does
+not carry (`adopt_lane`), so the successor's cell starts at its prepared value. The D3 hook already
+makes the join read a static change on an automated lane as `Same`, so #1648b's carry sees no
+retarget record for it.

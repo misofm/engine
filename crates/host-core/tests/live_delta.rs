@@ -1279,7 +1279,10 @@ fn a_static_filter_edit_that_crosses_an_automated_curve_needs_a_rebuild() {
     );
 }
 
-/// The model-only edits: #1260 D1's four and #1365 D4's `control_smoothing`.
+/// The model-only edits: #1260 D1's four and #1365 D4's `control_smoothing`. The automation upsert
+/// is an entry on `with_effects`' EQ band-1 gain, a valid block-rate target whose row does not
+/// render until #1667, the last row to leave the mask (#1648 hazard): a fader entry is a rebuild
+/// (#1648 D1).
 fn model_only_edits() -> [(&'static str, Edit); 5] {
     [
         ("session id", |next| next.session_id = id("another-session")),
@@ -1290,7 +1293,7 @@ fn model_only_edits() -> [(&'static str, Edit); 5] {
             next.output_profile.id = id("another-output-profile");
         }),
         ("automation upsert", |next| {
-            let ride = fader_ride(next);
+            let ride = eq_automation(next, 4, ParameterUnit::Db);
             next.automation.push(ride);
         }),
         ("control smoothing", |next| {
@@ -1307,7 +1310,7 @@ fn model_only_edits() -> [(&'static str, Edit); 5] {
 #[test]
 fn model_only_edits_are_live_with_no_records() {
     use BuiltinLaneSelector::Left;
-    let current = two_tracks();
+    let current = with_effects();
     assert!(current.automation.is_empty());
     for (name, edit) in model_only_edits() {
         assert_eq!(classify(&current, edit), Ok(Vec::new()), "{name}");
@@ -1338,13 +1341,204 @@ fn model_only_edits_are_live_with_no_records() {
             None
         )])
     );
-    // Removing stored automation is model-only too.
+    // Removing stored automation of a row that does not render is model-only too.
     let mut automated = current.clone();
-    automated.automation.push(fader_ride(&current));
+    automated
+        .automation
+        .push(eq_automation(&current, 4, ParameterUnit::Db));
     assert_eq!(
         classify(&automated, |next| next.automation.clear()),
         Ok(Vec::new())
     );
+}
+
+/// `fader_ride` on the first track's left lane only.
+fn left_fader_ride(model: &SessionModel) -> Automation {
+    let mut ride = fader_ride(model);
+    ride.target.lane = ParameterChannel::Left;
+    ride
+}
+
+/// #1648 gate 1 (as amended by the batch 17 spec check, departure 5). A fader entry (builtin row
+/// 5, a row that renders) added, removed, given other segments, retargeted or renamed is
+/// `Automation`; a change of its hand offset alone is not (departure 3). A mute entry (row 6, not
+/// rendered yet) is live with no records. A static change together with an automation change is a
+/// rebuild. A fader entry in unit `linear` keeps `AutomationTarget` (#1645 D5), so the row rule
+/// runs before D1's check.
+///
+/// Test value: red if the mask still hides fader entries (an edit is acked and never heard), if it
+/// hides nothing (a mute entry rebuilds), if the comparison reads the offset (a hand move would
+/// rebuild), or if D1's check runs before the refusal route.
+#[test]
+fn a_fader_automation_edit_is_a_rebuild() {
+    let current = two_tracks();
+    let automated = normalized(&edited(&current, |model| {
+        let ride = fader_ride(model);
+        model.automation.push(ride);
+    }));
+    let cases: [(&str, &SessionModel, Edit); 7] = [
+        ("added", &current, |next| {
+            let ride = fader_ride(next);
+            next.automation.push(ride);
+        }),
+        ("added on one lane", &current, |next| {
+            let ride = left_fader_ride(next);
+            next.automation.push(ride);
+        }),
+        ("removed", &automated, |next| next.automation.clear()),
+        ("other segments", &automated, |next| {
+            next.automation[0].segments[0].end_value = -6.0;
+        }),
+        ("a zero's sign", &automated, |next| {
+            next.automation[0].segments[0].start_value = -0.0;
+        }),
+        ("retargeted to the other track", &automated, |next| {
+            next.automation[0].target.owner = Owner::Strip(next.tracks[1].id.clone());
+        }),
+        ("renamed", &automated, |next| {
+            next.automation[0].id = id("another-ride");
+        }),
+    ];
+    for (name, base, edit) in cases {
+        assert_eq!(classify(base, edit), Err(LiveRebuild::Automation), "{name}");
+    }
+    // The hand offset is not part of the curve (#1650 D5 makes it a live write of its own).
+    assert!(
+        classify(&automated, |next| {
+            next.automation[0].offset.left_db = 2.0;
+        })
+        .is_ok(),
+        "an offset-only change is not a rebuild"
+    );
+    // A mute entry's row does not render yet: added, changed and removed, it is live with no
+    // records.
+    let mute_ride = |model: &SessionModel| {
+        let mut ride = fader_ride(model);
+        ride.id = id("mute-ride");
+        ride.target.control = 6;
+        ride.segments[0] = AutomationSegment {
+            shape: AutomationShape::Step,
+            start_sample: 0,
+            end_sample: 960,
+            start_value: 1.0,
+            end_value: 1.0,
+            unit: ParameterUnit::Linear,
+        };
+        ride
+    };
+    let muted = normalized(&edited(&current, |model| {
+        let ride = mute_ride(model);
+        model.automation.push(ride);
+    }));
+    assert_eq!(
+        classify(&current, |next| {
+            let ride = mute_ride(next);
+            next.automation.push(ride);
+        }),
+        Ok(Vec::new()),
+        "a mute entry added"
+    );
+    assert_eq!(
+        classify(&muted, |next| next.automation[0].segments[0].end_sample =
+            1_920),
+        Ok(Vec::new()),
+        "a mute entry changed"
+    );
+    assert_eq!(
+        classify(&muted, |next| next.automation.clear()),
+        Ok(Vec::new()),
+        "a mute entry removed"
+    );
+    // A static change in the same transaction as an automation change is a rebuild.
+    assert!(
+        classify(&current, |next| {
+            next.tracks[0].fader.left_db = -6.0;
+            let ride = fader_ride(next);
+            next.automation.push(ride);
+        })
+        .is_err(),
+        "a static change with an automation change"
+    );
+    // A fader entry the row refuses keeps the refusal's route (#1645 D5).
+    assert_eq!(
+        classify(&current, |next| {
+            let mut ride = fader_ride(next);
+            ride.segments[0].unit = ParameterUnit::Linear;
+            next.automation.push(ride);
+        }),
+        Err(LiveRebuild::AutomationTarget),
+        "a fader entry in unit linear"
+    );
+}
+
+/// #1648 D3, the hook in the shared level lowering: a lane that `next` automates gets no
+/// `FaderDb`, by the full classifier and by the fast path alike; the other lane and the mute keep
+/// their records. A VCA move is the case that reaches an automated lane in this slice (the own
+/// fader's hand move is #1650's offset write).
+///
+/// Test value: red if either classifier path still writes a static `FaderDb` onto an automated
+/// lane (a record that fights the curve), if the suppression drops the other lane's record or a
+/// mute record, or if a suppressed lane turns into a refusal.
+#[test]
+fn an_automated_fader_lane_takes_no_fader_record() {
+    use BuiltinLaneSelector::{Left, Right};
+    let current = normalized(&edited(&with_vca(0.0, 0.0, [false; 2]), |model| {
+        let ride = left_fader_ride(model);
+        model.automation.push(ride);
+    }));
+    let first = track_id(&current, 0);
+    let both = |next: &mut SessionModel| {
+        next.vcas[0].fader.left_db = -6.0;
+        next.vcas[0].fader.right_db = -6.0;
+    };
+    assert_eq!(
+        classify(&current, both),
+        Ok(vec![(first.clone(), vec![fader_db(Right, -6.0, 0)], None)]),
+        "the automated left lane takes no record"
+    );
+    assert_eq!(
+        classify(&current, |next| next.vcas[0].fader.left_db = -6.0),
+        Ok(Vec::new()),
+        "a move of the automated lane alone is no record"
+    );
+    assert_eq!(
+        classify(&current, |next| {
+            next.vcas[0].fader.left_db = -6.0;
+            next.vcas[0].fader.left_mute = true;
+        }),
+        Ok(vec![(first, vec![mute(Left, true, 0)], None)]),
+        "the automated lane's mute keeps its record"
+    );
+    #[cfg(feature = "test-support")]
+    {
+        let next = edited(&current, both);
+        let rows = [ControlAddress {
+            owner: Owner::Vca(id("vca")),
+            section: Section::Own,
+            control: 1,
+            lane: ParameterChannel::Both,
+        }];
+        let full = classify_live_delta(&current, &next, STEP, &EditRamps::new());
+        let _ = host_core::take_fast_classification_count();
+        let fast = host_core::classify_live_edit(
+            &current,
+            &next,
+            STEP,
+            &EditRamps::new(),
+            host_core::MonitorBase::NONE,
+            Some(&rows),
+        );
+        assert_eq!(
+            host_core::take_fast_classification_count(),
+            1,
+            "the VCA move takes the fast path"
+        );
+        let fast = fast.map(|mut delta| {
+            delta.derived_owners = None;
+            delta
+        });
+        assert_eq!(fast, full, "the fast path suppresses the same lane");
+    }
 }
 
 /// #1260 gate 1. Red if a profile field that preparation reads is masked with its profile's ID.

@@ -402,13 +402,107 @@ pub fn fader_automation<'a>(
         {
             continue;
         }
-        for (index, lane) in [Lane::Left, Lane::Right].iter().enumerate() {
-            if (target.lane == *lane || target.lane == Lane::Both) && lanes[index].is_none() {
+        for (index, lane) in [Lane::Left, Lane::Right].into_iter().enumerate() {
+            if drives(target.lane, lane) && lanes[index].is_none() {
                 lanes[index] = Some(automation);
             }
         }
     }
     lanes
+}
+
+/// Whether an entry on lane `entry` drives lane `lane` (`Left` or `Right`): a `both` entry drives
+/// both lanes, a `left` or `right` entry its own.
+fn drives(entry: Lane, lane: Lane) -> bool {
+    entry == lane || entry == Lane::Both
+}
+
+/// Whether `model` holds a stored automation that renders ([`automation_row_renders`]) and drives
+/// the cell at `address` (#1648 D3): an entry on the same owner, section and row whose lane drives
+/// the address's lane. A `left` or `right` address names one cell; a `both` address names two,
+/// and is automated when either lane is. This is the enumeration preparation compiles cells from
+/// ([`fader_automation`] for the fader row): a cell exists exactly where this holds.
+///
+/// A static value of an automated cell is the lane's fallback, not what the stage renders, so a
+/// static edit of it gives no live record (#1648 D3).
+#[must_use]
+pub fn automated_cell(model: &SessionModel, address: &ControlAddress) -> bool {
+    model.automation.iter().any(|automation| {
+        let target = &automation.target;
+        automation_row_renders(target)
+            && target.owner == address.owner
+            && target.section == address.section
+            && target.control == address.control
+            && match address.lane {
+                Lane::Both => true,
+                lane => drives(target.lane, lane),
+            }
+    })
+}
+
+/// Whether `model` automates strip `strip`'s fader, per lane (`[left, right]`): [`automated_cell`]
+/// at the strip's builtin `fader_db` row (#1648 D3). The live classifier and a successor's strip
+/// join read it to give no `FaderDb` record to an automated lane.
+#[must_use]
+pub fn automated_fader_lanes(model: &SessionModel, strip: &StableId) -> [bool; 2] {
+    if model.automation.is_empty() {
+        return [false; 2];
+    }
+    let mut address = ControlAddress {
+        owner: Owner::Strip(strip.clone()),
+        section: Section::Builtins,
+        control: FADER_DB,
+        lane: Lane::Left,
+    };
+    let left = automated_cell(model, &address);
+    address.lane = Lane::Right;
+    [left, automated_cell(model, &address)]
+}
+
+/// Whether the stored automation of the rows that render ([`automation_row_renders`]) differs
+/// between `current` and `next` (#1648 D1): the rendered entries of each model, in table order,
+/// compared by `id`, `target` and `segments`, every `f32` by bits (the canonical spelling keeps a
+/// zero's sign, so this is the canonical-bytes comparison of those fields). An entry's hand offset
+/// (#1650) is not compared: an offset-only change is a live write of its own (#1650 D5). An entry
+/// whose target leaves or joins a rendered row is a difference.
+///
+/// A difference needs a plan rebuild: a plan's cells are compiled from these entries at
+/// preparation, so no live record can carry a changed curve.
+#[must_use]
+pub fn rendered_automation_changed(current: &SessionModel, next: &SessionModel) -> bool {
+    fn rendered(model: &SessionModel) -> impl Iterator<Item = &Automation> {
+        model
+            .automation
+            .iter()
+            .filter(|automation| automation_row_renders(&automation.target))
+    }
+    let (mut before, mut after) = (rendered(current), rendered(next));
+    loop {
+        match (before.next(), after.next()) {
+            (None, None) => return false,
+            (Some(before), Some(after)) if same_curve(before, after) => {}
+            _ => return true,
+        }
+    }
+}
+
+/// Whether two entries have the same `id`, `target` and `segments`, `f32` values by bits.
+fn same_curve(before: &Automation, after: &Automation) -> bool {
+    before.id == after.id
+        && before.target == after.target
+        && before.segments.len() == after.segments.len()
+        && before
+            .segments
+            .iter()
+            .zip(&after.segments)
+            .all(|(before, after)| {
+                before.shape == after.shape
+                    && before.start_sample == after.start_sample
+                    && before.end_sample == after.end_sample
+                    && before.start_value.to_bits() == after.start_value.to_bits()
+                    && before.end_value.to_bits() == after.end_value.to_bits()
+                    && before.unit == after.unit
+            })
 }
 
 /// An entry's segments in the evaluator's type, in table order: the one conversion of a stored

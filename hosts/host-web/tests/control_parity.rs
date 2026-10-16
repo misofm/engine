@@ -2760,6 +2760,89 @@ fn both_hosts_refuse_a_source_of_more_than_two_channels_alike() {
     }
 }
 
+/// #1648a (D1): adding stored fader automation (builtin row 5, a row that renders) is a rebuild
+/// on both hosts, with the same reply bytes, and both hosts render the same bits across the swap;
+/// an entry on a row that does not render yet (the mute, row 6) commits `model_only` on both.
+/// Both hosts call the one shared classifier, so neither has its own rule for automation edits.
+///
+/// Test value: red if either host acks a fader automation edit as `model_only` (an edit that is
+/// never heard), if the two hosts answer it differently, or if the browser's rebuild renders other
+/// bits than the C ABI's.
+#[test]
+fn a_fader_automation_edit_rebuilds_alike_on_both_hosts() {
+    let entry = |name: &str, control: u32, segment: session::AutomationSegment| {
+        SessionEdit::UpsertAutomation {
+            automation: session::Automation {
+                id: id(name),
+                target: address(
+                    Owner::Strip(id(T1.id)),
+                    Section::Builtins,
+                    control,
+                    ParameterChannel::Both,
+                ),
+                segments: vec![segment],
+                offset: session::AutomationOffset::default(),
+            },
+        }
+    };
+    let fader = entry(
+        "t1-fader-ride",
+        5,
+        session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: 960,
+            start_value: 0.0,
+            end_value: -6.0,
+            unit: session::ParameterUnit::Db,
+        },
+    );
+    let mute = entry(
+        "t1-mute-ride",
+        6,
+        session::AutomationSegment {
+            shape: session::AutomationShape::Step,
+            start_sample: 0,
+            end_sample: 960,
+            start_value: 0.0,
+            end_value: 0.0,
+            unit: session::ParameterUnit::Linear,
+        },
+    );
+    for rate in RATES {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..3, "before the edit");
+        let (b, b_reply) = browser.transaction_reply(std::slice::from_ref(&fader));
+        let (c, c_reply) = c_abi.transaction(std::slice::from_ref(&fader));
+        assert_eq!(b, c, "{rate} Hz: one verdict for the fader entry");
+        assert_eq!(b_reply, c_reply, "{rate} Hz: one reply");
+        assert_eq!(
+            b,
+            Verdict::Applied {
+                path: EditPath::Rebuild,
+                revision: model.revision + 1
+            },
+            "{rate} Hz: a fader entry rebuilds"
+        );
+        same_blocks(&mut browser, &mut c_abi, 3..8, "across the swap");
+        let (b, b_reply) = browser.transaction_reply(std::slice::from_ref(&mute));
+        let (c, c_reply) = c_abi.transaction(std::slice::from_ref(&mute));
+        assert_eq!(b, c, "{rate} Hz: one verdict for the mute entry");
+        assert_eq!(b_reply, c_reply, "{rate} Hz: one reply");
+        assert_eq!(
+            b,
+            Verdict::Applied {
+                path: EditPath::ModelOnly,
+                revision: model.revision + 2
+            },
+            "{rate} Hz: a mute entry is model-only"
+        );
+        same_blocks(&mut browser, &mut c_abi, 8..10, "after the mute entry");
+    }
+}
+
 /// #1631. A `matrix_mode` switch under a stored pan entry is refused alike by both hosts: the same
 /// refusal and the same diagnostic (`control.inactive` at the entry's path, the row rule's
 /// own, through the rebuild route), and nothing commits -- the same expected revision still
