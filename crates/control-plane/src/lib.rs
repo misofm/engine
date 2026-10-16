@@ -58,7 +58,9 @@ mod control;
 mod error;
 mod plan;
 
-pub use adapter::{ControlAdapter, ControlLimits, PlanResources};
+pub use adapter::{
+    ControlAdapter, ControlLimits, PlanResources, TAIL_FINITE, TAIL_INFINITE, tail_words,
+};
 pub use compile::{CompiledChildren, RuntimePreparer, compile_children};
 pub use control::{
     CommandError, EventError, EventLane, ObservationChange, ObservationForward,

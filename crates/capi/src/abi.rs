@@ -34,9 +34,9 @@ pub const EVENT_LANE_RELIABLE: u32 = 0;
 pub const EVENT_LANE_LOSSY: u32 = 1;
 
 /// A plan tail terminates after `tail_samples`.
-pub const TAIL_FINITE: u64 = 0;
+pub const TAIL_FINITE: u64 = control_plane::TAIL_FINITE;
 /// A plan tail is unbounded and reports zero `tail_samples`.
-pub const TAIL_INFINITE: u64 = 1;
+pub const TAIL_INFINITE: u64 = control_plane::TAIL_INFINITE;
 
 /// Launch support for 44,100 Hz.
 pub const RATE_44_100: u64 = 1 << 0;

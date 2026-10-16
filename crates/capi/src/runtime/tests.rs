@@ -4095,10 +4095,7 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
 
     // Same latency and tail as the lanes-free plan.
     let resources = c.plan.resources();
-    let (tail_kind, tail_samples) = match host.output_tail {
-        TailSamples::Finite(samples) => (TAIL_FINITE, samples),
-        TailSamples::Infinite => (TAIL_INFINITE, 0),
-    };
+    let (tail_kind, tail_samples) = control_plane::tail_words(host.output_tail);
     if expect_finite {
         assert_eq!(
             tail_kind, TAIL_FINITE,
@@ -4121,7 +4118,8 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
         );
     } else {
         assert_eq!(
-            resources.tail_kind, TAIL_INFINITE,
+            resources.tail_kind,
+            crate::TAIL_INFINITE,
             "{label}: an infinite-tail effect keeps the plan's tail infinite"
         );
     }
@@ -4144,10 +4142,7 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
     );
     assert_eq!(
         (resources.tail_kind, resources.tail_samples),
-        match without_effects.output_tail {
-            TailSamples::Finite(samples) => (TAIL_FINITE, samples),
-            TailSamples::Infinite => (TAIL_INFINITE, 0),
-        },
+        control_plane::tail_words(without_effects.output_tail),
         "{label}: tail without effect lanes"
     );
 

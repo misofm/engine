@@ -70,6 +70,8 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_observation_tap_count",
     "miso_engine_web_v1_observation_tap_id",
     "miso_engine_web_v1_observation_track_index",
+    "miso_engine_web_v1_plan_latency_ptr",
+    "miso_engine_web_v1_plan_latency_read",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_resource_ptr",
@@ -588,6 +590,41 @@ export const ABI_LAYOUT = deepFreeze(
           "name": "reserved",
           "offset": 56,
           "type": "u64[5]"
+        }
+      ]
+    },
+    "planLatency": {
+      "bytes": 64,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "latencySamples",
+          "offset": 8,
+          "type": "u64"
+        },
+        {
+          "name": "tailKind",
+          "offset": 16,
+          "type": "u64"
+        },
+        {
+          "name": "tailSamples",
+          "offset": 24,
+          "type": "u64"
+        },
+        {
+          "name": "reserved",
+          "offset": 32,
+          "type": "u64[4]"
         }
       ]
     },
