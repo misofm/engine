@@ -93,7 +93,8 @@ struct SharedCounterAllocation {
 /// render sample, and that sample plus the plan's source-read offset. Each is one word, stored
 /// `Release` by render and loaded `Acquire` by the control thread, so neither read can tear.
 /// The two loads are not a snapshot: render stores the source-read clock and then the render
-/// clock, so a reader that needs both together must take them through `seqlock.rs`.
+/// clock, so a reader that needs both together would need them published as one record through
+/// `seqlock.rs`; no reader needs that today.
 struct PlanClocks {
     render: AtomicU64,
     source_read: AtomicU64,

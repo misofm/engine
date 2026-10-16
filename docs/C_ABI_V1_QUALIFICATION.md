@@ -230,15 +230,15 @@ is a later change and amends the "equal to the render clock in this version" sen
 
 ABI growth (#1317, decision 15 D15-3). `MISO_ENGINE_V1_ABI_VERSION` changes only on a break. Each
 added exported symbol, and each former reserved struct word given a name, gets its own
-`MISO_ENGINE_V1_FEATURE_*` bit, the next free one when it merges. A new value of an existing enum
-or result code, and a field added in place to a V1 protocol message, takes no bit, so a host
-tolerates an enum value it does not know and treats a result code it does not know as a failure. A
-feature added as a protocol message is announced by its protocol capability flag in the
-`CAPABILITIES` reply, not by a feature bit; the control protocol registry, not this rule, governs
-protocol flags. A host tests each bit it needs with `&`, tolerates bits it does not know and never
-compares `feature_mask` with `==`. A feature bit protects only a host that resolves the symbol at
-run time: a host that links a symbol directly fails to load against a library that lacks it, before
-it can test anything. The library's own Rust tests compare the reported mask with the library's `FEATURE_MASK`
+`MISO_ENGINE_V1_FEATURE_*` bit, the next free one when it merges. A new value of an existing enum or
+result code, and a field added in place to a V1 protocol message, takes no bit, so a host tolerates
+an enum value it does not know and treats a result code it does not know as a failure. A feature
+added as a protocol message is announced by its protocol capability flag in the `CAPABILITIES`
+reply, not by a feature bit; the control protocol registry, not this rule, governs protocol flags. A
+host tests each bit it needs with `&`, tolerates bits it does not know and never compares
+`feature_mask` with `==`. A feature bit protects only a host that resolves the symbol at run time: a
+host that links a symbol directly fails to load against a library that lacks it, before it can test
+anything. The library's own Rust tests compare the reported mask with the library's `FEATURE_MASK`
 (`version_and_capabilities_are_exact` and the constant pins in `abi.rs`); the C smoke test does not
 compare the reported mask. `abi_smoke.c` tests one `&` per `MISO_ENGINE_V1_FEATURE_*` symbol (it
 fails when the library stops reporting a defined bit and passes when it reports an extra unknown
@@ -988,13 +988,14 @@ that window is admitted against the plan that renders.
   exported symbol, announced by `MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY` (the next free bit,
   256) in the capability report, whose feature mask grows to include it; no struct, size or
   `ABI_VERSION` changes. The mask is the OR of every feature symbol and is never compared with a
-  literal, except the C smoke test's header-constant pins (`capi` `abi::tests::masks_and_result_codes_are_frozen` folds the symbols; `abi_smoke.c`
-  and `header_smoke.cpp` pin the bit inside the mask and the signature, and `abi_smoke.c` calls
-  the symbol with a null session for `INVALID_ARGUMENT`). The frozen exported set is now 18
+  literal, except the C smoke test's header-constant pins (`capi`
+  `abi::tests::masks_and_result_codes_are_frozen` folds the symbols; `abi_smoke.c` and
+  `header_smoke.cpp` pin the bit inside the mask and the signature, and `abi_smoke.c` calls the
+  symbol with a null session for `INVALID_ARGUMENT`). The frozen exported set is now 18
   `miso_engine_v1_*` definitions. It is a session call, serialized with the others; it runs the
   service step first. The browser's `miso_engine_web_v1_declare_discontinuity(handle)` forwards to
-  the same control-plane function, `control_plane::SessionState::declare_discontinuity` (root
-  ruling B15-R7); the browser SDK surface is #1296's.
+  the same control-plane function, `control_plane::SessionState::declare_discontinuity` (root ruling
+  B15-R7); the browser SDK surface is #1296's.
 - **Duty.** A host calls it at a stop, and before a seek of every source: the next block it renders
   need not continue the previous output.
 - **Behavior.** If the newest plan (the waiting replacement, else the running plan) runs behind its
