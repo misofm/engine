@@ -1,8 +1,8 @@
 # Report source refusal diagnostics on the browser as on the C ABI
 
-Placeholder from the batch 16 #1293 review (MINOR 5), for root to file. It is the "source submit
+Filed by root from the batch 16 #1293 review (MINOR 5). It is the "source submit
 diagnostics" one-host difference that decision 17 C13 lists
-(`docs/rulings/one-control-abstraction-2026-10-13.md`, C13). A draft for root to file.
+(`docs/rulings/one-control-abstraction-2026-10-13.md`, C13).
 
 ## Product outcome
 

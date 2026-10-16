@@ -1,7 +1,6 @@
 # Ask for a control queue slot only when a declared discontinuity publishes
 
-Placeholder from root ruling B16-R10 (batch 16b, 2026-10-16), for root to file. A draft for root to
-file.
+Filed by root from ruling B16-R10 (batch 16b, 2026-10-16).
 
 ## Product outcome
 
