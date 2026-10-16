@@ -610,3 +610,91 @@ needs the first iterator dropped; give `FaderCellCursor` a pending second span a
 `CellEvents` when the first ends (or return the state from `CellEvents`). D1.2's report is
 `report_held_ramp` at the drain; the adoption re-report belongs with #1648's carry, which must also
 clear `fresh`.
+
+## Decision record: #1647c (batch 17)
+
+The held-ramp obligation (D1.6, batch 13b amendment, gate 8).
+
+**Shipped.**
+
+- **The obligation.** `AutomatedFaderCell::obligation` (`HeldRampObligation { owed, due_at_entry }`,
+  one per automated channel). `owed` is set when the driver pushes a gain event at an offset where
+  the stage holds the gain (any kind: `Jump`, seek `Set`, a committed or held grid event).
+- **`E` (constraint 7).** `FaderEventDriver::new` takes the stage's state of each channel after the
+  block's drain (`ChannelHold { held, muted, remaining }`, `bank_hold` on the bank, the ramped
+  fader's accessors on the oracle). Held, not muted, `remaining < frames`: `E = remaining`. A ramp
+  that ends on the block's last sample sets `due_at_entry`, so `E` is the next block's offset 0.
+  Muted (settled or ramping to `0.0`): held all block, the obligation kept (constraint 4). Free at
+  a block entry with no move due: a live write cleared the hold there, so `owed` is discharged
+  (constraint 4).
+- **The cut (constraint 2).** A channel with `E` in the block gets the span `[0, E]` (the seek
+  step kept in the piece that holds it) and a pending `HoldEnd` with the span `[E + 1, frames)`.
+  The cursor reports `E` as its next offset once the first piece is spent, so no event past `E` is
+  pulled before the move. At `E`, any event the cell gives at `E` is consumed; with `owed` it is
+  replaced (constraint 7) by `RetargetGain` to `checked_fader_gain(vca_compose_db(target(), S))`
+  over the block's fader jump length `J`, the cell gets `hold_until(completion_of(End, node(E),
+  J))` (constraint 3), and the second piece's `CellEvents` is built on the same state. Without
+  `owed` the span is still cut (the events are the same; #1637 events do not depend on span
+  boundaries) and the event at `E` is pushed as usual.
+- **`CellEvents::into_state`** (`crates/automation/src/events.rs`): returns the borrowed state, so
+  the cursor can report the move's ramp and rebuild its events (the #1647b note's second option).
+- **`BuiltinFaderBank::is_muted(lane, channel)`** (`crates/builtins/src/lib.rs`): the bank had
+  `gain_held` and `ramp_remaining` but nothing to tell a ramp toward unmuted from one toward muted.
+  Mirrors `FaderMuteRampBuiltins::is_muted`.
+- **Scalar oracle.** `render_oracle_fader` passes its ramped fader's state; it runs the same driver.
+- No new `debug_assert`: a refused move uses the existing refusal closure and counter
+  (`refused_events`). The stage's `fader_operations_stopped` stays summed per lane (constraint 6,
+  #1647b). `finish` still advances a cell through a cut the stage did not reach (no move).
+
+**Departures.**
+
+1. **Gate 8 (e) includes one grid retarget.** On a curve that moves after `E`, #1637 commits the
+   one grid point in the last 64 samples of any ramp it holds the grid for (its own completion
+   reaches the ramp's end), as after the cell's own `Jump`; constraint 3 asks for exactly that
+   hold. So `[E, E + J - 1]` cannot equal one `RetargetGain` alone on a moving curve. The test
+   compares `[E, E + J - 1]` with the stage driven directly with the move at `E` over `J` and that
+   one grid retarget (`64` samples, curve at its completion); every other grid point in the ramp
+   is held. On a flat curve ((c)) the comparison is one `RetargetGain`, as written.
+2. **Out-of-path edits**, both one accessor: `crates/automation/src/events.rs`
+   (`CellEvents::into_state`) and `crates/builtins/src/lib.rs` (`BuiltinFaderBank::is_muted`).
+3. **The move is made only for an owed channel.** A hold with nothing remembered ends with no
+   move: the unmute ramp already aimed at the remembered gain, and the fused fader-matrix path
+   stays available.
+
+**Gates** (x86-64 AVX2 host). Each gate 8 case runs at quantum 128, 100, 64 and 37 (same bits)
+and on the scalar oracle at 128 (same bits). The track is prepared muted; a live unmute of 1,000
+samples is drained at render sample 0, so `E = 1,000` (a block entry at quantum 100 only: the
+due-at-entry path).
+
+- (a), (b): `a_remembered_jump_or_seek_set_moves_the_lane_at_the_unmute_ramps_end` (a step at
+  timeline 400; a session seek to 6,000 drained with the unmute; `J` = 480 and explicit 0). Exact
+  composed target from `E + J - 1` (from `E` at 0), the move bit-identical to the stage driven
+  directly.
+- (c): `a_jump_ramping_past_the_unmute_ramps_end_is_moved_to_at_its_end` (a step at 990, ramp to
+  1,469; a block entry between the step and `E` at quantum 37 only).
+- (d): `a_curve_flat_inside_the_unmute_ramps_last_grid_point_moves_the_lane` (a fade to `-12` dB
+  ending at timeline 960).
+- (e): `grid_events_after_the_unmute_ramps_end_do_not_cut_the_move` (a step at 300 whose ramp ends
+  at 779, then a fade; a seek to 2,000 on a fade).
+- Red on revert, checked once each: no move (all four tests red), no `hold_until` for the move
+  ((e) red), no `due_at_entry` (all four red, quantum 100), no stage state on the oracle (all four
+  red at the oracle leg).
+- Commands: `cargo test --locked -p automation -p graph -p builtins -p builtins-compiler --features
+  builtins-compiler/test-support,graph/test-support`; `-p host-core --all-features --test
+  stored_fader_automation` (17 pass); `-p capi`; `-p host-web --features host-web/test-support`:
+  pass. fmt; clippy `-D warnings` (automation, builtins, builtins-compiler, host-core; all targets,
+  all features); no-feature `cargo check --all-targets`: clean.
+- `realtime-policy`: 159 regions in 33 files (unchanged). The run fails on the known `unsafe` FP
+  control-word writes in `crates/host-core/tests/stored_fader_automation.rs` (the U1 fold's test;
+  fixed in the W lane), the same on the base; with those two lines removed in a local probe it is
+  `ok`.
+- `./target/release/audit capi`: `pcm_digest` `bffc21e857b5e134` (unchanged), 0 violations, 0
+  allocations.
+- Bytes: `lane_slot_bytes` 192 -> 208 (x86-64: the two obligation flags per channel), measured by
+  `fader_automation_sizes()` and charged by #1646's sum; no fixture moved.
+
+**Notes for #1648b.** Carry `HeldRampObligation` with the cell state across a swap, re-report a
+carried held ramp with `hold_until` at adoption (`CellState::reposition` drops it) and clear
+`fresh` on a carried lane. The successor's first block reads the stage state itself, so `E` needs
+no carry; `due_at_entry` must carry with `owed` (a ramp ending on the predecessor's last block). A
+release cell takes the same obligation and the same move.

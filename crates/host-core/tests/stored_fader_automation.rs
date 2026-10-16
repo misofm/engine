@@ -5,7 +5,7 @@
 //! its `a(n)` and, per block, its node-time mapping and the fader row's jump length, with no
 //! render allocation. The events on the fader (#1647b): completion samples, jumps, latency, the
 //! session seek, quantum invariance, allocation and the scalar oracle's parity (#1647 gates 1-6,
-//! R17-4).
+//! R17-4). The held-ramp obligation (#1647c, gate 8).
 //! Preparation bakes every fader in the canonical floating-point environment, whatever the
 //! caller's thread has set (D2).
 
@@ -1295,6 +1295,358 @@ fn a_lane_a_successor_adds_starts_at_its_curve() {
             "the ride is heard"
         );
     }
+}
+
+// #1647c: the held-ramp obligation (D1.6, batch 13b amendment, gate 8).
+
+/// The render sample at which gate 8's unmute ramp ends: `E`, the first sample the stage reports
+/// the gain free. A live unmute of `UNMUTE` samples is drained at render sample 0, a block entry at
+/// every quantum, and `E` is a block entry at quantum 100 only (the move is then due at a block's
+/// first sample).
+const UNMUTE: u32 = 1_000;
+
+/// Gate 8's quanta.
+const QUANTA: [u32; 4] = [128, 100, 64, 37];
+
+/// One track prepared muted on both lanes, with `segments` on its fader and fader length
+/// `fader_ms`.
+fn muted_ride(segments: Vec<AutomationSegment>, fader_ms: f32) -> (SessionModel, Automation) {
+    let mut model = plain(1, 128);
+    model.control_smoothing = smoothing(fader_ms);
+    (
+        model.tracks[0].fader.left_mute,
+        model.tracks[0].fader.right_mute,
+    ) = (true, true);
+    let entry = fader_entry(&model, 0, ParameterChannel::Both, segments);
+    model.automation = vec![entry.clone()];
+    (model, entry)
+}
+
+/// The output of `model` at `quantum` over `frames`: a live unmute ramp of [`UNMUTE`] samples on
+/// track 0 is drained at render sample 0, after an optional session seek to timeline `seek`.
+fn unmuted_at(model: &SessionModel, quantum: u32, frames: u64, seek: Option<u64>) -> [Vec<f32>; 2] {
+    let mut model = model.clone();
+    model.quantum_frames = quantum;
+    unmuted(Rig::live(&model), frames, seek)
+}
+
+/// [`unmuted_at`] on the test-only scalar oracle (R17-4) at the model's quantum.
+#[cfg(feature = "test-support")]
+fn unmuted_on_the_oracle(model: &SessionModel, frames: u64, seek: Option<u64>) -> [Vec<f32>; 2] {
+    let document = canonical_session_json(model).expect("canonical");
+    let caps = rig_caps(model);
+    let compiled = host_core::compile_host_session(&document, &caps)
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+    let (mut prepared, handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
+        &compiled,
+        &caps,
+        &host_core::HostLiveControlRequest::default(),
+        graph_compiler::Backend::Scalar,
+    )
+    .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+    let gate = prepared.plan.take_revision_gate();
+    let mut rig = Rig::from(prepared, model);
+    rig.handles = Some(handles);
+    rig.gate = gate;
+    unmuted(rig, frames, seek)
+}
+
+/// Run `rig` (with live controls and its plan's gate) as [`unmuted_at`] describes.
+fn unmuted(mut rig: Rig, frames: u64, seek: Option<u64>) -> [Vec<f32>; 2] {
+    use builtins_compiler::TestOnlyWriteGate;
+    if let Some(timeline) = seek {
+        rig.seek(timeline);
+    }
+    let handles = rig.handles.as_mut().expect("live controls");
+    rig.gate
+        .as_mut()
+        .expect("the plan's gate")
+        .write_published(|stamp| {
+            handles.strip_controls[0].fader.write(
+                stamp,
+                builtins_compiler::TrackFaderRecord::Mute {
+                    lanes: builtins::BuiltinLaneSelector::Both,
+                    muted: false,
+                    smoothing_samples: UNMUTE,
+                },
+            );
+        });
+    rig.until(frames);
+    rig.out.map(|mut plane| {
+        plane.truncate(frames as usize);
+        plane
+    })
+}
+
+/// Gate 8's run of `model`: the same bits at every quantum of [`QUANTA`] and on the scalar oracle
+/// (returned at the first quantum), and the unmute ramp's end `E` at the gain it aimed for, the
+/// prepared value (`entry`'s curve at node time 0: no latency here).
+fn gate_eight(
+    model: &SessionModel,
+    entry: &Automation,
+    frames: u64,
+    seek: Option<u64>,
+) -> [Vec<f32>; 2] {
+    let first = unmuted_at(model, QUANTA[0], frames, seek);
+    for &quantum in &QUANTA[1..] {
+        let other = unmuted_at(model, quantum, frames, seek);
+        for plane in 0..2 {
+            assert_eq!(
+                first_difference(&first[plane], &other[plane]),
+                None,
+                "quantum {quantum} against {}: plane {plane}",
+                QUANTA[0]
+            );
+        }
+    }
+    #[cfg(feature = "test-support")]
+    {
+        let oracle = unmuted_on_the_oracle(model, frames, seek);
+        for plane in 0..2 {
+            assert_eq!(
+                first_difference(&first[plane], &oracle[plane]),
+                None,
+                "the scalar oracle: plane {plane}"
+            );
+        }
+    }
+    for plane in &first {
+        assert!(plane[0] < 0.01, "the unmute ramp starts at sample 0");
+        assert_eq!(
+            plane[UNMUTE as usize - 1].to_bits(),
+            gain(curve(entry, 0)).to_bits(),
+            "the unmute ramp ends at the pre-unmute gain"
+        );
+    }
+    first
+}
+
+/// The stage driven directly from gain `start` (its gain at `E - 1`), given `operations` at
+/// offsets from `E`, over `frames` samples of DC `1.0`.
+fn reference_from(
+    start: f32,
+    operations: &[(u64, builtins::FaderOperation)],
+    frames: u64,
+) -> Vec<f32> {
+    let mut stage = builtins::FaderMuteRampBuiltins::new(builtins::BuiltinParameters::default())
+        .expect("default parameters");
+    stage
+        .apply_fader_operation(
+            builtins::BuiltinLaneSelector::Both,
+            builtins::FaderOperation::SetGain { gain: start },
+        )
+        .expect("start gain");
+    let mut out = Vec::with_capacity(frames as usize);
+    let mut next = operations.iter().peekable();
+    let mut at = 0_u64;
+    while at < frames {
+        while let Some(&&(sample, operation)) = next.peek()
+            && sample == at
+        {
+            stage
+                .apply_fader_operation(builtins::BuiltinLaneSelector::Both, operation)
+                .expect("operation");
+            next.next();
+        }
+        let end = next
+            .peek()
+            .map_or(frames, |&&(sample, _)| sample.min(frames));
+        let mut left = vec![1.0_f32; (end - at) as usize];
+        let mut right = left.clone();
+        stage.process(builtins::DualMonoBlock::new(&mut left, &mut right, at).expect("block"));
+        out.extend_from_slice(&left);
+        at = end;
+    }
+    out
+}
+
+/// Assert that `out[E..E + J]` equals the stage driven directly from `out[E - 1]` with
+/// `operations` (offsets from `E`).
+fn assert_move(
+    out: &[Vec<f32>; 2],
+    jump: u32,
+    operations: &[(u64, builtins::FaderOperation)],
+    label: &str,
+) {
+    let e = UNMUTE as usize;
+    let span = u64::from(jump.max(1));
+    for plane in out {
+        let expected = reference_from(plane[e - 1], operations, span);
+        assert_eq!(
+            first_difference(&plane[e..e + span as usize], &expected),
+            None,
+            "{label}: samples [E, E + J - 1]"
+        );
+    }
+}
+
+/// The move at `E`: one `RetargetGain` to `db` over `jump`.
+fn retarget(db: f32, jump: u32) -> (u64, builtins::FaderOperation) {
+    (
+        0,
+        builtins::FaderOperation::RetargetGain {
+            gain: gain(db),
+            samples: jump,
+        },
+    )
+}
+
+/// Assert that the lane equals `gain(db)` exactly from `E + J - 1` (from `E` with `J = 0`) to
+/// the end of `out`, and not before: it settles at the cell's target one fader jump length after
+/// `E`, never at the pre-unmute gain.
+fn assert_settles(out: &[Vec<f32>; 2], jump: u32, db: f32, label: &str) {
+    let settled = UNMUTE as usize + jump.max(1) as usize - 1;
+    for plane in out {
+        assert!(
+            plane[settled..]
+                .iter()
+                .all(|value| value.to_bits() == gain(db).to_bits()),
+            "{label}: the lane equals the composed target from E + J - 1"
+        );
+        if jump > 1 {
+            assert_ne!(plane[settled - 1].to_bits(), gain(db).to_bits(), "{label}");
+        }
+    }
+}
+
+/// #1647 gate 8 (a) and (b): a `Jump` (a step at timeline 400) and a seek `Set` (a session seek
+/// to timeline 6,000 drained with the unmute) inside an unmute ramp on a curve flat after it.
+/// The stage only remembers each; at `E` the lane moves to the gain composed from the cell's
+/// target, so it equals that gain exactly from `E + J - 1` (from `E` with `control_smoothing`
+/// explicit 0), the same bits at quantum 128, 100, 64 and 37.
+///
+/// Test value: red if a remembered `Jump` or seek `Set` is never moved to at `E` (the lane
+/// settles at the pre-unmute gain), if the move follows a block entry instead of `E`, or if the
+/// move's length is not the fader jump length.
+#[test]
+fn a_remembered_jump_or_seek_set_moves_the_lane_at_the_unmute_ramps_end() {
+    const FRAMES: u64 = 2_048;
+    for fader_ms in [10.0, 0.0] {
+        let (model, entry) = muted_ride(steps(&[(400, -6.0)]), fader_ms);
+        let jump = controls::LiveRamps::for_session(&model).fader_samples;
+        let out = gate_eight(&model, &entry, FRAMES, None);
+        let label = format!("(a) {fader_ms} ms");
+        assert_move(&out, jump, &[retarget(-6.0, jump)], &label);
+        assert_settles(&out, jump, -6.0, &label);
+
+        let (model, entry) = muted_ride(steps(&[(5_000, -9.0)]), fader_ms);
+        assert_eq!(curve(&entry, 6_000).to_bits(), (-9.0_f32).to_bits());
+        let out = gate_eight(&model, &entry, FRAMES, Some(6_000));
+        let label = format!("(b) {fader_ms} ms");
+        assert_move(&out, jump, &[retarget(-9.0, jump)], &label);
+        assert_settles(&out, jump, -9.0, &label);
+    }
+}
+
+/// #1647 gate 8 (c): a `Jump` at timeline 990 whose own 480-sample ramp ends after `E`, with a
+/// block entry between the `Jump` and `E` at quantum 37 only. Samples `[E, E + J - 1]` equal the
+/// stage driven directly with one `RetargetGain` at `E` over `J`: no grid event cuts the move's
+/// ramp, and the bits are the same at every quantum.
+///
+/// Test value: red if the move does not take the cell's target, if it is built at a block entry,
+/// or if a grid event cuts its ramp.
+#[test]
+fn a_jump_ramping_past_the_unmute_ramps_end_is_moved_to_at_its_end() {
+    const FRAMES: u64 = 2_048;
+    let (model, entry) = muted_ride(steps(&[(990, -6.0)]), 10.0);
+    let jump = controls::LiveRamps::for_session(&model).fader_samples;
+    assert_eq!(jump, 480);
+    let out = gate_eight(&model, &entry, FRAMES, None);
+    assert_move(&out, jump, &[retarget(-6.0, jump)], "(c)");
+    assert_settles(&out, jump, -6.0, "(c)");
+}
+
+/// #1647 gate 8 (d): a curve that goes flat inside the last 64 samples of the unmute ramp (a
+/// linear fade from `0` to `-12` dB that ends at timeline 960), with no `Jump` or `Set`: only grid
+/// events. The last grid point in the ramp commits `-12` dB, which the stage only remembers; at
+/// `E` the lane moves there and settles from `E + J - 1`.
+///
+/// Test value: red if a remembered grid event is never moved to at `E` (the lane stays at the
+/// pre-unmute gain on the flat curve), or if the move is cut by a grid event.
+#[test]
+fn a_curve_flat_inside_the_unmute_ramps_last_grid_point_moves_the_lane() {
+    const FRAMES: u64 = 2_048;
+    for fader_ms in [10.0, 0.0] {
+        let (model, entry) = muted_ride(
+            vec![segment(AutomationShape::Linear, 0, 960, 0.0, -12.0)],
+            fader_ms,
+        );
+        let jump = controls::LiveRamps::for_session(&model).fader_samples;
+        let out = gate_eight(&model, &entry, FRAMES, None);
+        let label = format!("(d) {fader_ms} ms");
+        assert_move(&out, jump, &[retarget(-12.0, jump)], &label);
+        assert_settles(&out, jump, -12.0, &label);
+    }
+}
+
+/// The grid operations of the move's ramp at `E` (node time `node`) over `jump` on a curve with no
+/// discontinuity after it: the move to the cell's target `target` dB, then the one grid point in
+/// the ramp's last 64 samples, which #1637 commits as after the cell's own `Jump` (every earlier
+/// grid point is held by the move's report, batch 13b constraint 3).
+fn move_operations(
+    entry: &Automation,
+    node: i64,
+    target: f32,
+    jump: u32,
+) -> Vec<(u64, builtins::FaderOperation)> {
+    let last = (node + i64::from(jump) - 1).div_euclid(64) * 64;
+    vec![
+        retarget(target, jump),
+        (
+            (last - node) as u64,
+            builtins::FaderOperation::RetargetGain {
+                gain: gain(curve(entry, last + 63)),
+                samples: 64,
+            },
+        ),
+    ]
+}
+
+/// #1647 gate 8 (e): grid events that are not held lie between `E` and the next block entry: a
+/// `Jump` whose ramp ends before `E` on a curve that moves after it (the grid point at timeline
+/// 1,024 lies before the next entry at quantum 100 and 37 only), and a seek `Set` (a session seek
+/// to timeline 2,000 drained with the unmute) on a moving curve. Samples `[E, E + J - 1]` equal the
+/// stage driven directly with one `RetargetGain` at `E` over `J` and the one grid point #1637
+/// commits in that ramp's last 64 samples (departure 1 of #1647c): no other grid event cuts the
+/// move's ramp, at any quantum.
+///
+/// Test value: red if the move does not hold the grid for its own ramp (the grid events after
+/// `E` cut it into 64-sample retargets), or if it follows a block entry instead of `E`.
+#[test]
+fn grid_events_after_the_unmute_ramps_end_do_not_cut_the_move() {
+    const FRAMES: u64 = 2_048;
+    let jump = 480;
+    // A step to -6 dB at timeline 300 (its ramp ends at 779), then a fade to -30 dB.
+    let (model, entry) = muted_ride(
+        vec![
+            segment(AutomationShape::Step, 0, 300, 0.0, -6.0),
+            segment(AutomationShape::Linear, 300, 5_000, -6.0, -30.0),
+        ],
+        10.0,
+    );
+    let out = gate_eight(&model, &entry, FRAMES, None);
+    // The cell's target at `E`: the last grid point before it (960) committed the curve at 1,023.
+    let target = curve(&entry, 960 + 63);
+    assert_move(
+        &out,
+        jump,
+        &move_operations(&entry, i64::from(UNMUTE), target, jump),
+        "(e) jump",
+    );
+
+    let (model, entry) = muted_ride(
+        vec![segment(AutomationShape::Linear, 0, 10_000, -30.0, 0.0)],
+        10.0,
+    );
+    let out = gate_eight(&model, &entry, FRAMES, Some(2_000));
+    let node = 2_000 + i64::from(UNMUTE);
+    let target = curve(&entry, (node - 1).div_euclid(64) * 64 + 63);
+    assert_move(
+        &out,
+        jump,
+        &move_operations(&entry, node, target, jump),
+        "(e) seek",
+    );
 }
 
 /// The caller words of the D2 environment test: MXCSR on `x86_64`, FPCR on AArch64.

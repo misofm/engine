@@ -257,6 +257,15 @@ impl<'a, 's> CellEvents<'a, 's> {
         }
     }
 
+    /// Ends the block's events early and returns the cell's state, so the caller can report a ramp
+    /// with [`CellState::hold_until`] and continue the block with a second span (#1647 D1.6: a
+    /// span cut at a held ramp's end). Consume the events up to the cut first: the state has
+    /// advanced only through the events already pulled.
+    #[must_use]
+    pub fn into_state(self) -> &'s mut CellState {
+        self.state
+    }
+
     fn jump_length(&self) -> u32 {
         match self.program.jump {
             JumpLength::Block => self.jump,
