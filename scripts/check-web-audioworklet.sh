@@ -328,6 +328,9 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_source_frames \
   miso_engine_web_v1_source_id \
   miso_engine_web_v1_source_seek \
+  miso_engine_web_v1_source_seek_at \
+  miso_engine_web_v1_source_seek_report \
+  miso_engine_web_v1_source_seek_report_ptr \
   miso_engine_web_v1_source_submit \
   miso_engine_web_v1_status_ptr \
   miso_engine_web_v1_spectrum_analysis \

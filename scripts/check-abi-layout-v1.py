@@ -173,6 +173,9 @@ EXPORTS = [
     "miso_engine_web_v1_source_frames",
     "miso_engine_web_v1_source_id",
     "miso_engine_web_v1_source_seek",
+    "miso_engine_web_v1_source_seek_at",
+    "miso_engine_web_v1_source_seek_report",
+    "miso_engine_web_v1_source_seek_report_ptr",
     "miso_engine_web_v1_source_submit",
     "miso_engine_web_v1_spectrum_analysis",
     "miso_engine_web_v1_spectrum_arm",
@@ -237,6 +240,7 @@ STRUCTURES = {
     "commandReport": 48,
     "planWatermark": 96,
     "planLatency": 64,
+    "seekReport": 64,
     "observationSelection": 32,
     "observationResult": 96,
     "spectrumRequest": 40,
@@ -277,6 +281,11 @@ PLAN_WATERMARK_FIELDS = [
 # The plan latency record (#1688 D2): the C ABI report's latency and tail words.
 PLAN_LATENCY_FIELDS = [
     "structSize", "reserved0", "latencySamples", "tailKind", "tailSamples", "reserved",
+]
+# The source seek report record (#1293 D6): the C ABI seek report's layout.
+SEEK_REPORT_FIELDS = [
+    "structSize", "reserved0", "generation", "firstSample", "sourceFrame",
+    "cumulativeUnderrunFrames", "cumulativeHeldFrames", "reserved",
 ]
 # The status block (#1349 D2): offset 48 `liveValuesSuperseded` (#1399), then the applied-revision
 # watermark words at 56, 64 and 72, and no reserved word.
@@ -474,6 +483,7 @@ def validate(document: object) -> None:
     for name, expected_fields in (
         ("planWatermark", PLAN_WATERMARK_FIELDS),
         ("planLatency", PLAN_LATENCY_FIELDS),
+        ("seekReport", SEEK_REPORT_FIELDS),
         ("observationSelection", OBSERVATION_SELECTION_FIELDS),
         ("observationResult", OBSERVATION_RESULT_FIELDS),
     ):
@@ -632,6 +642,17 @@ def self_test() -> int:
     def drop_plan_latency_field(document: dict) -> None:
         document["structures"]["planLatency"]["fields"].pop(2)
 
+    def drop_seek_export(export: str):
+        def drop(document: dict) -> None:
+            try:
+                document["exports"].remove(export)
+            except ValueError as error:
+                raise AssertionError(f"{export} exists in the valid fixture") from error
+        return drop
+
+    def drop_seek_report_field(document: dict) -> None:
+        document["structures"]["seekReport"]["fields"].pop(3)
+
     def drop_status_watermark_word(document: dict) -> None:
         document["structures"]["status"]["fields"].pop()
 
@@ -716,6 +737,13 @@ def self_test() -> int:
         ("the watermark record omits a field", drop_watermark_field),
         ("the plan latency record omits a field", drop_plan_latency_field),
         ("the plan latency read export is dropped", drop_plan_latency_export),
+        ("the seek report record omits a field", drop_seek_report_field),
+        ("the anchored seek export is dropped",
+         drop_seek_export("miso_engine_web_v1_source_seek_at")),
+        ("the seek report export is dropped",
+         drop_seek_export("miso_engine_web_v1_source_seek_report")),
+        ("the seek report pointer export is dropped",
+         drop_seek_export("miso_engine_web_v1_source_seek_report_ptr")),
         ("the status omits a watermark word", drop_status_watermark_word),
         ("the spectrum-hop capability export is dropped", drop_spectrum_hop_capability_export),
         ("the export set is unsorted", unsorted_exports),

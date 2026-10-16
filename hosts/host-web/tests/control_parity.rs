@@ -44,7 +44,8 @@ use capi::{
     ABI_VERSION as C_ABI_VERSION, BYTES_OUT_SIZE, BytesOut, COMPILE_LIMITS_SIZE, CompileLimits,
     ENGINE_CONFIG_SIZE, EVENT_LANE_RELIABLE, EngineConfig, PLAN_RESOURCE_REPORT_SIZE,
     PLANAR_OUTPUT_SIZE, Plan, PlanResourceReport, PlanarOutput, RESULT_OK as C_RESULT_OK,
-    SOURCE_CHUNK_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk, SubmitReport,
+    SOURCE_CHUNK_SIZE, SOURCE_SEEK_REPORT_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk,
+    SourceSeekReport, SubmitReport,
 };
 use controls::{ControlAddress, Lane, Owner, Section};
 use protocol::{
@@ -3653,5 +3654,295 @@ fn a_rebuild_that_adds_latency_moves_the_plan_latency_alike_on_both_hosts() {
             moved,
             "{rate} Hz: the browser reports the adopted plan's latency"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Source seek reports (#1293 D5, D6; batch 15c root ruling)
+// ---------------------------------------------------------------------------------------------
+
+impl CAbi {
+    fn seek(&self, name: &str, generation: u64, source_frame: u64) {
+        // SAFETY: The session is live and used by this thread alone; the name outlives the call.
+        let code = unsafe {
+            capi::miso_engine_v1_source_seek(
+                self.session,
+                name.as_ptr(),
+                name.len() as u64,
+                generation,
+                source_frame,
+            )
+        };
+        assert_eq!(code, C_RESULT_OK, "C ABI seek");
+    }
+
+    fn seek_at(&self, name: &str, generation: u64, source_frame: u64, anchor: u64) {
+        // SAFETY: As `seek`.
+        let code = unsafe {
+            capi::miso_engine_v1_source_seek_at(
+                self.session,
+                name.as_ptr(),
+                name.len() as u64,
+                generation,
+                source_frame,
+                anchor,
+            )
+        };
+        assert_eq!(code, C_RESULT_OK, "C ABI seek_at");
+    }
+
+    /// The source's seek report through `miso_engine_v1_source_seek_report`.
+    fn seek_report(&self, name: &str) -> SourceSeekReport {
+        let mut out = SourceSeekReport {
+            struct_size: SOURCE_SEEK_REPORT_SIZE,
+            reserved0: 0,
+            generation: 0,
+            first_sample: 0,
+            source_frame: 0,
+            cumulative_underrun_frames: 0,
+            cumulative_held_frames: 0,
+            reserved: [0; 2],
+        };
+        // SAFETY: As `seek`; `out` is owned storage of the exact size.
+        let code = unsafe {
+            capi::miso_engine_v1_source_seek_report(
+                self.session,
+                name.as_ptr(),
+                name.len() as u64,
+                &mut out,
+            )
+        };
+        assert_eq!(code, C_RESULT_OK, "C ABI seek report");
+        out
+    }
+}
+
+/// Both hosts' seek report for `name`, equal field by field. Returns
+/// `(generation, first_sample, source_frame, underrun, held)`.
+fn same_seek_report(
+    browser: &mut Rig,
+    c_abi: &CAbi,
+    name: &str,
+    label: &str,
+) -> (u64, u64, u64, u64, u64) {
+    assert_eq!(
+        browser.host.read_seek_report(name.as_bytes()),
+        host_web::RESULT_OK,
+        "{label}: the browser seek report read"
+    );
+    let b = *browser.host.seek_report();
+    let c = c_abi.seek_report(name);
+    assert_eq!(b.struct_size, c.struct_size, "{label}: struct_size");
+    assert_eq!(b.reserved0, c.reserved0, "{label}: reserved0");
+    assert_eq!(b.generation, c.generation, "{label}: generation");
+    assert_eq!(b.first_sample, c.first_sample, "{label}: first_sample");
+    assert_eq!(b.source_frame, c.source_frame, "{label}: source_frame");
+    assert_eq!(
+        b.cumulative_underrun_frames, c.cumulative_underrun_frames,
+        "{label}: cumulative underrun frames"
+    );
+    assert_eq!(
+        b.cumulative_held_frames, c.cumulative_held_frames,
+        "{label}: cumulative held frames"
+    );
+    assert_eq!(b.reserved, c.reserved, "{label}: reserved");
+    (
+        b.generation,
+        b.first_sample,
+        b.source_frame,
+        b.cumulative_underrun_frames,
+        b.cumulative_held_frames,
+    )
+}
+
+/// Block `block` on both hosts with `src-t1` fed generation `generation` from source block
+/// `t1_start` (and the other two sources fed at the render position); `None` feeds no `src-t1`
+/// chunk this block. The output bits equal.
+fn seek_block(
+    browser: &mut Rig,
+    c_abi: &mut CAbi,
+    block: u64,
+    generation: u64,
+    t1_start: Option<u64>,
+    label: &str,
+) {
+    let rate = browser.rate;
+    for (feed, strip) in [T1, T2, T3].into_iter().enumerate() {
+        let source = format!("src-{}", strip.id);
+        let (chunk_generation, start) = if strip.id == T1.id {
+            let Some(t1_start) = t1_start else {
+                continue;
+            };
+            (generation, t1_start)
+        } else {
+            (1, block)
+        };
+        let [left, right] = planes(feed as u64, block);
+        assert_eq!(
+            browser.host.submit_source(
+                source.as_bytes(),
+                chunk_generation,
+                start * u64::from(QUANTUM),
+                rate,
+                &[&left, &right],
+                QUANTUM,
+                false,
+            ),
+            host_web::RESULT_OK,
+            "{label}: browser {source}"
+        );
+        c_abi.submit_from(&source, feed as u64, block, start, chunk_generation);
+    }
+    assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+    let b = bits(browser.host.output_pcm().expect("browser output"));
+    assert_eq!(b, c_abi.render(block), "{label}: block {block} bits");
+}
+
+/// #1293 D6 with the batch 15c ruling: after a plain seek, a late anchored seek and an anchored
+/// seek ahead, the browser's 64-byte seek report record equals the C ABI's struct field by field,
+/// at the call, at every block through the one that applies it, and after, at 48 and 96 kHz.
+///
+/// Test value: red if either host reports the new generation at the call (before a block has
+/// played it), names a different `first_sample` or `source_frame` for the applying block, drops a
+/// late anchored seek's lateness from `source_frame` (the C ABI's `first_sample` is the block that
+/// played, not the anchor), counts held or underrun frames differently, or leaves a reserved word
+/// nonzero. The seeks' own result codes are asserted, and the rows are not vacuous (the new
+/// generation is reported with a nonzero source frame, and the late seek lands after its anchor).
+#[test]
+fn the_seek_report_is_alike_on_both_hosts_for_plain_late_and_future_seeks() {
+    const NAME: &str = "src-t1";
+    for rate in [48_000, 96_000] {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let label = format!("{rate} Hz");
+        for block in 0..4 {
+            seek_block(&mut browser, &mut c_abi, block, 1, Some(block), &label);
+        }
+        let boot = same_seek_report(&mut browser, &c_abi, NAME, &label);
+        assert_eq!(boot.0, 1, "{label}: generation 1 has rendered");
+
+        // 1. A plain seek: reported at the call as before, then as the block that starts after it.
+        let plain_frame = 40_u64;
+        let call_block = 4_u64;
+        assert_eq!(
+            browser
+                .host
+                .seek_source(NAME.as_bytes(), 2, plain_frame * u64::from(QUANTUM)),
+            host_web::RESULT_OK
+        );
+        c_abi.seek(NAME, 2, plain_frame * u64::from(QUANTUM));
+        let at_call = same_seek_report(&mut browser, &c_abi, NAME, &format!("{label} plain: call"));
+        assert_eq!(
+            at_call.0, 1,
+            "{label} plain: the call alone reports generation 1"
+        );
+        for block in call_block..call_block + 4 {
+            seek_block(
+                &mut browser,
+                &mut c_abi,
+                block,
+                2,
+                Some(plain_frame + (block - call_block)),
+                &format!("{label} plain"),
+            );
+            let report = same_seek_report(
+                &mut browser,
+                &c_abi,
+                NAME,
+                &format!("{label} plain: after block {block}"),
+            );
+            assert_eq!(report.0, 2, "{label} plain: generation 2 in effect");
+        }
+        let plain = same_seek_report(&mut browser, &c_abi, NAME, &format!("{label} plain: end"));
+        assert_eq!(
+            plain.1,
+            call_block * u64::from(QUANTUM),
+            "{label} plain: first block that began after the call"
+        );
+        assert_eq!(plain.2, plain_frame * u64::from(QUANTUM));
+
+        // 2. A late anchored seek: the anchor (block 3) is behind the render clock (block 8).
+        let late_call = call_block + 4;
+        let late_frame = 50_u64;
+        let anchor = 3 * u64::from(QUANTUM);
+        assert_eq!(
+            browser.host.seek_source_at(
+                NAME.as_bytes(),
+                3,
+                late_frame * u64::from(QUANTUM),
+                anchor
+            ),
+            host_web::RESULT_OK
+        );
+        c_abi.seek_at(NAME, 3, late_frame * u64::from(QUANTUM), anchor);
+        same_seek_report(&mut browser, &c_abi, NAME, &format!("{label} late: call"));
+        for block in late_call..late_call + 4 {
+            seek_block(
+                &mut browser,
+                &mut c_abi,
+                block,
+                3,
+                Some(late_frame + (block - late_call)),
+                &format!("{label} late"),
+            );
+            same_seek_report(
+                &mut browser,
+                &c_abi,
+                NAME,
+                &format!("{label} late: after block {block}"),
+            );
+        }
+        let late = same_seek_report(&mut browser, &c_abi, NAME, &format!("{label} late: end"));
+        assert_eq!(late.0, 3, "{label} late: generation 3 in effect");
+        assert!(
+            late.1 > anchor,
+            "{label} late: it played after its anchor ({} vs {anchor})",
+            late.1
+        );
+
+        // 3. An anchored seek two quanta ahead: held until the anchor block.
+        let ahead_call = late_call + 4;
+        let ahead_frame = 60_u64;
+        let ahead_anchor = (ahead_call + 2) * u64::from(QUANTUM);
+        assert_eq!(
+            browser.host.seek_source_at(
+                NAME.as_bytes(),
+                4,
+                ahead_frame * u64::from(QUANTUM),
+                ahead_anchor
+            ),
+            host_web::RESULT_OK
+        );
+        c_abi.seek_at(NAME, 4, ahead_frame * u64::from(QUANTUM), ahead_anchor);
+        same_seek_report(&mut browser, &c_abi, NAME, &format!("{label} ahead: call"));
+        for block in ahead_call..ahead_call + 5 {
+            seek_block(
+                &mut browser,
+                &mut c_abi,
+                block,
+                4,
+                // The ring holds two quanta: feed two, wait for the anchor block to take one.
+                match block - ahead_call {
+                    0 | 1 => Some(ahead_frame + (block - ahead_call)),
+                    2 => None,
+                    later => Some(ahead_frame + later - 1),
+                },
+                &format!("{label} ahead"),
+            );
+            same_seek_report(
+                &mut browser,
+                &c_abi,
+                NAME,
+                &format!("{label} ahead: after block {block}"),
+            );
+        }
+        let ahead = same_seek_report(&mut browser, &c_abi, NAME, &format!("{label} ahead: end"));
+        assert_eq!(
+            (ahead.0, ahead.1),
+            (4, ahead_anchor),
+            "{label} ahead: lands at its anchor"
+        );
+        assert!(ahead.4 > 0, "{label} ahead: the wait held frames");
     }
 }

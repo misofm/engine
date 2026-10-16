@@ -1277,6 +1277,208 @@ fn paused_seek_recycles_full_internal_queue_before_first_target_quantum() {
     assert_eq!(host.status().next_absolute_sample, 128);
 }
 
+/// The exports of an identity session at one quantum, driven as the page's message handler does:
+/// the source ID staged, then `seek_at`, `source_submit`, `render` and `seek_report` as raw calls.
+struct SeekExports {
+    handle: u32,
+    quantum: u32,
+}
+
+impl SeekExports {
+    const SOURCE: &'static [u8] = b"fixture-source";
+
+    fn boot() -> Self {
+        let quantum = 128;
+        let document = identity_session(quantum, 480_000);
+        let options = WebBootOptions {
+            source_ring_frames: 512,
+            ..boot_options(quantum)
+        };
+        let handle = crate::ffi::test_boot(document.as_bytes(), options);
+        assert_ne!(handle, 0);
+        let rig = Self { handle, quantum };
+        rig.stage(Self::SOURCE);
+        assert_eq!(crate::ffi::test_fill_source_pcm(handle, 0.25), RESULT_OK);
+        rig
+    }
+
+    fn stage(&self, id: &[u8]) {
+        assert_eq!(
+            crate::ffi::test_copy_staging(self.handle, BUFFER_SOURCE_ID, id),
+            RESULT_OK
+        );
+    }
+
+    fn seek_at(&self, generation: u64, frame: u64, anchor: u64) -> u32 {
+        miso_engine_web_v1_source_seek_at(
+            self.handle,
+            Self::SOURCE.len() as u32,
+            generation,
+            frame,
+            anchor,
+        )
+    }
+
+    fn submit(&self, generation: u64, start_frame: u64) {
+        assert_eq!(
+            miso_engine_web_v1_source_submit(
+                self.handle,
+                Self::SOURCE.len() as u32,
+                generation,
+                start_frame,
+                2,
+                self.quantum,
+                0,
+            ),
+            RESULT_OK
+        );
+    }
+
+    fn render(&self) -> Vec<f32> {
+        assert_eq!(
+            miso_engine_web_v1_render(self.handle, self.quantum),
+            RESULT_OK
+        );
+        crate::ffi::native_staging::output_pcm(self.handle).expect("output")
+    }
+
+    fn report(&self) -> (u32, WebSeekReport) {
+        let code = miso_engine_web_v1_source_seek_report(self.handle, Self::SOURCE.len() as u32);
+        (
+            code,
+            crate::ffi::native_staging::seek_report(self.handle).expect("record"),
+        )
+    }
+}
+
+/// Issue #1293 gates 3 and 4 through the raw exports: an anchored seek two quanta ahead is
+/// accepted (`RESULT_OK`, not the `prepare_source_seek` path's `RESULT_INTERNAL` for a held seek),
+/// the source plays silence until the anchor block and the sought frame from it on, an unaligned
+/// anchor is invalid, and the 64-byte record reads the generation, the anchor as `first_sample`,
+/// and the sought frame.
+///
+/// Test value: red if `source_seek_at` is wired through `plan.prepare_source_seek` (the D4 trap:
+/// the future anchor would be `RESULT_INTERNAL`), if it queues a plain seek (sound from the next
+/// block), or if the report export reads another source's ring, another word order or a stale
+/// record.
+#[test]
+fn the_anchored_seek_exports_play_at_the_anchor_and_report_where_it_landed() {
+    let rig = SeekExports::boot();
+    assert_eq!(SEEK_REPORT_BYTES, 64);
+    // Before any seek: a zero-filled record, then generation 1's.
+    assert_eq!(
+        crate::ffi::native_staging::seek_report(rig.handle),
+        Some(WebSeekReport::default())
+    );
+
+    // An anchor that is not a quantum multiple, and an unknown source, are invalid.
+    assert_eq!(rig.seek_at(2, 10_000, 130), RESULT_INVALID_ARGUMENT);
+    rig.stage(b"no-such-source");
+    assert_eq!(
+        miso_engine_web_v1_source_seek_at(rig.handle, 14, 2, 10_000, 256),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        miso_engine_web_v1_source_seek_report(rig.handle, 14),
+        RESULT_INVALID_ARGUMENT
+    );
+    rig.stage(SeekExports::SOURCE);
+
+    // Two quanta ahead: accepted, with the new generation's PCM queued behind the anchor.
+    assert_eq!(rig.seek_at(2, 10_000, 256), RESULT_OK);
+    rig.submit(2, 10_000);
+    rig.submit(2, 10_128);
+    for block in 0..2 {
+        let output = rig.render();
+        assert!(
+            output.iter().all(|sample| *sample == 0.0),
+            "block {block}: silence until the anchor"
+        );
+    }
+    let output = rig.render();
+    assert!(
+        output.iter().all(|sample| *sample == 0.25),
+        "the anchor block plays the sought frame"
+    );
+    let (code, record) = rig.report();
+    assert_eq!(code, RESULT_OK);
+    assert_eq!(
+        (
+            record.struct_size,
+            record.reserved0,
+            record.generation,
+            record.first_sample,
+            record.source_frame,
+            record.reserved
+        ),
+        (SEEK_REPORT_BYTES, 0, 2, 256, 10_000, [0; 2])
+    );
+    assert_eq!(
+        record.cumulative_underrun_frames, 0,
+        "no frame was missing in-region"
+    );
+    assert_eq!(
+        record.cumulative_held_frames, 256,
+        "two quanta were held until the anchor"
+    );
+}
+
+/// Issue #1293 gate 5: on a host that is not ready (no control half), `source_seek_at` and
+/// `source_seek_report` refuse with `RESULT_REFUSED_LIFECYCLE`, the report record keeps its last
+/// words, and a wrong handle or an ID count past the staging is `RESULT_INVALID_ARGUMENT`.
+///
+/// Test value: red if either export runs on a host with no control half (it would reach for
+/// control state the instance does not hold) or overwrites the record on a refusal.
+#[test]
+fn the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
+    let rig = SeekExports::boot();
+    assert_eq!(rig.seek_at(2, 10_000, 256), RESULT_OK);
+    rig.submit(2, 10_000);
+    let _ = rig.render();
+    let (code, before) = rig.report();
+    assert_eq!(code, RESULT_OK);
+
+    // Argument checks on a live host.
+    assert_eq!(
+        miso_engine_web_v1_source_seek_at(0, 14, 3, 0, 512),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        miso_engine_web_v1_source_seek_report(0, 14),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        miso_engine_web_v1_source_seek_at(rig.handle, u32::MAX, 3, 0, 512),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        miso_engine_web_v1_source_seek_report(rig.handle, u32::MAX),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        crate::ffi::native_staging::seek_report(rig.handle),
+        Some(before)
+    );
+
+    // An output-shape mismatch makes the host sticky-failed: no control half to run on.
+    assert_eq!(
+        miso_engine_web_v1_render(rig.handle, 0),
+        RESULT_REPREPARE_REQUIRED
+    );
+    assert_eq!(
+        crate::ffi::test_status(rig.handle).expect("status").state,
+        STATE_FAILED
+    );
+    assert_eq!(rig.seek_at(3, 0, 1024), RESULT_REFUSED_LIFECYCLE);
+    assert_eq!(rig.report().0, RESULT_REFUSED_LIFECYCLE);
+    assert_eq!(
+        crate::ffi::native_staging::seek_report(rig.handle),
+        Some(before),
+        "a refusal leaves the record alone"
+    );
+    assert_eq!(miso_engine_web_v1_source_seek_report_ptr(0), 0);
+}
+
 #[test]
 fn output_mismatch_and_disposal_are_sticky_and_idempotent() {
     let mut host = prepared_host(64);

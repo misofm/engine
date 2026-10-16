@@ -75,21 +75,22 @@ use host_web::{
     RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
     RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS,
     RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE,
-    SOURCE_STALL_TOLERANCE_MS, SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH,
-    SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT, SPECTRUM_COLLECTION_ENTRY_BYTES,
-    SPECTRUM_COLLECTION_ENTRY_CAPACITY, SPECTRUM_COLLECTION_REQUEST_BYTES,
-    SPECTRUM_COLLECTION_TARGET_IDS_BYTES, SPECTRUM_MAXIMUM_ID_BYTES,
-    SPECTRUM_MAXIMUM_PREPARED_TARGETS, SPECTRUM_REQUEST_BYTES, SPECTRUM_RESULT_HEADER_BYTES,
-    SPECTRUM_STREAM_METADATA_BYTES, SPECTRUM_STREAM_STATUS_FAILED, SPECTRUM_STREAM_STATUS_GAP,
-    SPECTRUM_STREAM_STATUS_INACTIVE, SPECTRUM_STREAM_STATUS_PENDING, SPECTRUM_STREAM_STATUS_READY,
-    SPECTRUM_STREAM_STATUS_STOPPED, SPECTRUM_STREAM_STATUS_WARMING, SPECTRUM_TARGET_OUTPUT,
-    SPECTRUM_TARGET_TRACK_POST_INPUT, SPECTRUM_TARGET_TRACK_POST_PAN, SPECTRUM_WINDOW_FRAMES,
-    SPECTRUM_WINDOW_HEADER_BYTES, STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES,
-    WATERMARK_BYTES, WebBootOptions, WebCommandReport, WebLiveResponseOwner,
-    WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection, WebMeterHeader,
-    WebObservationResult, WebObservationSelection, WebPlanLatency, WebPlanWatermark,
-    WebResourceReport, WebSpectrumCollectionEntry, WebSpectrumCollectionRequest,
-    WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata, WebSpectrumWindow, WebStatus,
+    SEEK_REPORT_BYTES, SOURCE_STALL_TOLERANCE_MS, SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES,
+    SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
+    SPECTRUM_COLLECTION_ENTRY_BYTES, SPECTRUM_COLLECTION_ENTRY_CAPACITY,
+    SPECTRUM_COLLECTION_REQUEST_BYTES, SPECTRUM_COLLECTION_TARGET_IDS_BYTES,
+    SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_MAXIMUM_PREPARED_TARGETS, SPECTRUM_REQUEST_BYTES,
+    SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_STREAM_METADATA_BYTES, SPECTRUM_STREAM_STATUS_FAILED,
+    SPECTRUM_STREAM_STATUS_GAP, SPECTRUM_STREAM_STATUS_INACTIVE, SPECTRUM_STREAM_STATUS_PENDING,
+    SPECTRUM_STREAM_STATUS_READY, SPECTRUM_STREAM_STATUS_STOPPED, SPECTRUM_STREAM_STATUS_WARMING,
+    SPECTRUM_TARGET_OUTPUT, SPECTRUM_TARGET_TRACK_POST_INPUT, SPECTRUM_TARGET_TRACK_POST_PAN,
+    SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_DISPOSED, STATE_FAILED,
+    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebCommandReport,
+    WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection,
+    WebMeterHeader, WebObservationResult, WebObservationSelection, WebPlanLatency,
+    WebPlanWatermark, WebResourceReport, WebSeekReport, WebSpectrumCollectionEntry,
+    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
+    WebSpectrumWindow, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -123,7 +124,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 105] = [
+pub const EXPORTS: [&str; 108] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -179,6 +180,9 @@ pub const EXPORTS: [&str; 105] = [
     "miso_engine_web_v1_source_frames",
     "miso_engine_web_v1_source_id",
     "miso_engine_web_v1_source_seek",
+    "miso_engine_web_v1_source_seek_at",
+    "miso_engine_web_v1_source_seek_report",
+    "miso_engine_web_v1_source_seek_report_ptr",
     "miso_engine_web_v1_source_submit",
     "miso_engine_web_v1_spectrum_analysis",
     "miso_engine_web_v1_spectrum_arm",
@@ -577,6 +581,36 @@ fn plan_latency_fields() -> [Field; 6] {
             "u64",
         ),
         ("reserved", offset_of!(WebPlanLatency, reserved), "u64[4]"),
+    ]
+}
+
+/// The source seek report record (issue #1293 D6): the C ABI seek report's layout.
+fn seek_report_fields() -> [Field; 8] {
+    [
+        ("structSize", offset_of!(WebSeekReport, struct_size), "u32"),
+        ("reserved0", offset_of!(WebSeekReport, reserved0), "u32"),
+        ("generation", offset_of!(WebSeekReport, generation), "u64"),
+        (
+            "firstSample",
+            offset_of!(WebSeekReport, first_sample),
+            "u64",
+        ),
+        (
+            "sourceFrame",
+            offset_of!(WebSeekReport, source_frame),
+            "u64",
+        ),
+        (
+            "cumulativeUnderrunFrames",
+            offset_of!(WebSeekReport, cumulative_underrun_frames),
+            "u64",
+        ),
+        (
+            "cumulativeHeldFrames",
+            offset_of!(WebSeekReport, cumulative_held_frames),
+            "u64",
+        ),
+        ("reserved", offset_of!(WebSeekReport, reserved), "u64[2]"),
     ]
 }
 
@@ -1452,6 +1486,13 @@ pub fn render() -> String {
         "planLatency",
         PLAN_LATENCY_BYTES,
         &plan_latency_fields(),
+        true,
+    );
+    render_structure(
+        &mut out,
+        "seekReport",
+        SEEK_REPORT_BYTES,
+        &seek_report_fields(),
         true,
     );
     render_structure(
