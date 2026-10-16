@@ -704,12 +704,18 @@ fn a_discontinuity_keeps_the_sources_and_the_timeline_in_step() {
 #[test]
 fn a_prime_advances_the_timeline_as_it_advances_a_source() {
     let quantum = QuantumFrames(QUANTUM as u32);
-    let (producer, mut source, _) = PcmSourceRing::prepare(PcmSourceRingConfig {
-        channel_count: 1,
-        quantum_frames: quantum,
-        frame_capacity: 8 * Q,
-        initial_generation: SourceGeneration(1),
-    })
+    // One session: the ring and the timeline share its published generation (#1642 B16-R2).
+    let word = source::PublishedGeneration::new(SourceGeneration(1));
+    let (producer, mut source, _) = PcmSourceRing::prepare_host_region(
+        PcmSourceRingConfig {
+            channel_count: 1,
+            quantum_frames: quantum,
+            frame_capacity: 8 * Q,
+            initial_generation: SourceGeneration(1),
+        },
+        SourceFrame(0),
+        word.clone(),
+    )
     .expect("ring");
     let mut host = producer.into_host_chunk_provider(engine::SampleRateHz(48_000));
     for start in (0..6 * Q).step_by(QUANTUM) {
@@ -725,7 +731,8 @@ fn a_prime_advances_the_timeline_as_it_advances_a_source() {
         .expect("source PCM");
     }
     let (mut timeline_producer, mut timeline, _) =
-        SourceTimeline::prepare(quantum, NonZeroUsize::new(4).expect("four")).expect("timeline");
+        SourceTimeline::prepare(quantum, NonZeroUsize::new(4).expect("four"), word)
+            .expect("timeline");
     // Two ordinary blocks.
     for sample in [0, Q] {
         source.begin_block_at(sample);

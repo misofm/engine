@@ -3335,24 +3335,32 @@ pub extern "C" fn miso_engine_web_v1_source_seek_at(
 /// nothing (issue #1643 D1). It runs the control plane's `SessionState::session_seek`, the call the
 /// C ABI's `miso_engine_v1_session_seek` runs, so the control Worker (or in `single` mode the
 /// worklet's message handler) calls it, never `process()`: it runs the service step. It never
-/// prepares the plan's consumer; every consumer observes the seek at the next block.
+/// prepares the plan's consumer; every consumer observes the seek at the next block. It is a
+/// declared discontinuity (root ruling B16-R9): after every check and before any push it declares
+/// it as [`miso_engine_web_v1_declare_discontinuity`] does, and a plan that publishes is counted as
+/// a blocking rebuild; a refused seek declares nothing, so the page never declares before it.
 ///
 /// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle, a generation that is
 /// zero or not above every generation the session has published (`source.generation.stale`) or any
 /// other malformed seek; [`RESULT_BACKPRESSURE`] when one consumer's slot is full (nothing
 /// changes); [`RESULT_REFUSED_LIFECYCLE`] for a host that is not ready (nothing changes);
-/// [`RESULT_INTERNAL`].
+/// [`RESULT_INTERNAL`]; and the refusals of [`miso_engine_web_v1_declare_discontinuity`] for its
+/// declaration, with the core's diagnostic at [`miso_engine_web_v1_control_response_ptr`] and
+/// nothing pushed.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_session_seek(handle: u32, generation: u64, frame: u64) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.session_seek(generation, frame, None)
+        with_promotion_analysis(host, |host, analysis| {
+            host.session_seek(analysis, generation, frame, None)
+        })
     })
 }
 
 /// The anchored form of [`miso_engine_web_v1_session_seek`] (issue #1643 D1): every consumer
 /// applies the seek in the block that starts at absolute render sample `anchor`, which must be a
 /// quantum multiple. Same function, same results and same thread rule as the C ABI's
-/// `miso_engine_v1_session_seek_at`.
+/// `miso_engine_v1_session_seek_at`. It declares no discontinuity: the loop and exact-start form
+/// keeps continuity (root ruling B16-R9).
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_session_seek_at(
     handle: u32,
@@ -3361,7 +3369,9 @@ pub extern "C" fn miso_engine_web_v1_session_seek_at(
     anchor: u64,
 ) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.session_seek(generation, frame, Some(anchor))
+        with_promotion_analysis(host, |host, analysis| {
+            host.session_seek(analysis, generation, frame, Some(anchor))
+        })
     })
 }
 
@@ -3474,7 +3484,8 @@ pub extern "C" fn miso_engine_web_v1_service(handle: u32) -> u32 {
 
 /// Declare a discontinuity (issue #1323): the next block need not continue the previous output,
 /// because the page has stopped or is about to seek every source. The page calls it at a stop and
-/// before a seek of every source. It runs the control plane's `SessionState::declare_discontinuity`,
+/// before a seek of every source made with per-source seeks; a plain
+/// [`miso_engine_web_v1_session_seek`] declares it in the same call (root ruling B16-R9). It runs the control plane's `SessionState::declare_discontinuity`,
 /// the function the C ABI's `miso_engine_v1_declare_discontinuity` runs, so both hosts reset the
 /// latency floors alike. Control side only: the control Worker, or in `single` mode the worklet's
 /// message handler, never `process()`; a plan it publishes is counted as a blocking rebuild.
@@ -4273,6 +4284,15 @@ pub mod native_staging {
     #[cfg(feature = "test-support")]
     pub fn active_plan_epoch(handle: u32) -> Option<u64> {
         super::with_host(handle, None, |host| host.active_plan_epoch_for_test())
+    }
+
+    /// Whether no seek waits in a session seek's command slots, for the host `handle` names
+    /// (batch 16b review, MINOR f); `None` for an unknown handle or one with no control half.
+    #[cfg(feature = "test-support")]
+    pub fn session_seek_slots_empty(handle: u32) -> Option<bool> {
+        super::with_host(handle, None, |host| {
+            host.session_seek_slots_empty_for_test()
+        })
     }
 
     /// The session timeline's sample at `source_read_sample` in the plan that renders, for the

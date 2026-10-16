@@ -18,10 +18,11 @@
 //! anchor, and the call at the anchor applies it and plays the generation-2 quantum, so the
 //! held-seek paths of the render run inside the audited scope.
 //!
-//! After the call at the anchor (#1642 D6), the audit declares a discontinuity and session-seeks
-//! the timeline and the source to generation 3 at [`SESSION_SEEK_SAMPLE`], then submits the
-//! generation-3 quantum for that frame, all outside the render scope; the next audited call
-//! applies the seek at the timeline and the source in one block.
+//! After the call at the anchor (#1642 D6), the audit session-seeks the timeline and the source
+//! to generation 3 at [`SESSION_SEEK_SAMPLE`], which declares the discontinuity in the same call
+//! (root ruling B16-R9), then submits the generation-3 quantum for that frame, all outside the
+//! render scope; the next audited call applies the seek at the timeline and the source in one
+//! block.
 
 #![allow(unsafe_code)]
 
@@ -32,12 +33,11 @@ use capi::{
     ABI_VERSION, BYTES_OUT_SIZE, BytesOut, COMPILE_LIMITS_SIZE, CompileLimits, ENGINE_CONFIG_SIZE,
     EVENT_LANE_RELIABLE, Engine, EngineConfig, PLANAR_OUTPUT_SIZE, Plan, PlanarOutput,
     RESULT_INTERNAL, RESULT_OK, SOURCE_CHUNK_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk,
-    SubmitReport, miso_engine_v1_compile_session, miso_engine_v1_declare_discontinuity,
-    miso_engine_v1_dequeue_event, miso_engine_v1_engine_create, miso_engine_v1_engine_destroy,
-    miso_engine_v1_plan_destroy, miso_engine_v1_render_f32_planar, miso_engine_v1_session_destroy,
-    miso_engine_v1_session_seek, miso_engine_v1_source_seek_at,
-    miso_engine_v1_source_submit_planar_f32, miso_engine_v1_submit_command, plan_carry_counts,
-    plan_replacement_count,
+    SubmitReport, miso_engine_v1_compile_session, miso_engine_v1_dequeue_event,
+    miso_engine_v1_engine_create, miso_engine_v1_engine_destroy, miso_engine_v1_plan_destroy,
+    miso_engine_v1_render_f32_planar, miso_engine_v1_session_destroy, miso_engine_v1_session_seek,
+    miso_engine_v1_source_seek_at, miso_engine_v1_source_submit_planar_f32,
+    miso_engine_v1_submit_command, plan_carry_counts, plan_replacement_count,
 };
 use engine::realtime::audit::{self, AuditSnapshot};
 use protocol::{
@@ -257,18 +257,14 @@ impl AuditHandles {
 }
 
 impl AuditHandles {
-    /// Declares a discontinuity, session-seeks the timeline and the source to generation
-    /// [`SESSION_SEEK_GENERATION`] at [`SESSION_SEEK_SAMPLE`], and submits that generation's
-    /// quantum from the frame (#1642 D6), each asserted `RESULT_OK`. The declaration publishes
-    /// nothing here: no audit plan has a raised floor or a source-read offset. Control work, run
-    /// outside every render scope.
+    /// Session-seeks the timeline and the source to generation [`SESSION_SEEK_GENERATION`] at
+    /// [`SESSION_SEEK_SAMPLE`], and submits that generation's quantum from the frame (#1642 D6),
+    /// each asserted `RESULT_OK`. The plain session seek declares the discontinuity itself
+    /// (B16-R9), so the audit makes no separate declaration; the declaration publishes nothing
+    /// here: no audit plan has a raised floor or a source-read offset. Control work, run outside
+    /// every render scope.
     fn apply_session_seek(&mut self) -> Result<(), u32> {
         // SAFETY: The session is live and used by this thread alone.
-        let declared = unsafe { miso_engine_v1_declare_discontinuity(self.session) };
-        if declared != RESULT_OK {
-            return Err(declared);
-        }
-        // SAFETY: As above.
         let seeked = unsafe {
             miso_engine_v1_session_seek(self.session, SESSION_SEEK_GENERATION, SESSION_SEEK_SAMPLE)
         };

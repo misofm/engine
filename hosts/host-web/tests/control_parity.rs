@@ -3953,8 +3953,14 @@ fn the_seek_report_is_alike_on_both_hosts_for_plain_late_and_future_seeks() {
 
 impl CAbi {
     fn session_seek(&self, generation: u64, timeline_frame: u64, anchor: Option<u64>) {
+        let code = self.session_seek_code(generation, timeline_frame, anchor);
+        assert_eq!(code, C_RESULT_OK, "C ABI session seek");
+    }
+
+    /// [`Self::session_seek`]'s result code, unchecked.
+    fn session_seek_code(&self, generation: u64, timeline_frame: u64, anchor: Option<u64>) -> u32 {
         // SAFETY: The session is live and used by this thread alone.
-        let code = unsafe {
+        unsafe {
             match anchor {
                 None => capi::miso_engine_v1_session_seek(self.session, generation, timeline_frame),
                 Some(anchor) => capi::miso_engine_v1_session_seek_at(
@@ -3964,8 +3970,7 @@ impl CAbi {
                     anchor,
                 ),
             }
-        };
-        assert_eq!(code, C_RESULT_OK, "C ABI session seek");
+        }
     }
 }
 
@@ -4060,7 +4065,7 @@ fn the_session_seek_is_alike_on_both_hosts_for_plain_and_late_seeks() {
         let call_block = 4_u64;
         let frame = 40 * quantum;
         assert_eq!(
-            browser.host.session_seek(2, frame, None),
+            browser.host.session_seek(None, 2, frame, None),
             host_web::RESULT_OK
         );
         c_abi.session_seek(2, frame, None);
@@ -4111,7 +4116,7 @@ fn the_session_seek_is_alike_on_both_hosts_for_plain_and_late_seeks() {
         let late_frame = 30 * quantum;
         let anchor = 3 * quantum;
         assert_eq!(
-            browser.host.session_seek(3, late_frame, Some(anchor)),
+            browser.host.session_seek(None, 3, late_frame, Some(anchor)),
             host_web::RESULT_OK
         );
         c_abi.session_seek(3, late_frame, Some(anchor));
@@ -4157,6 +4162,127 @@ fn the_session_seek_is_alike_on_both_hosts_for_plain_and_late_seeks() {
         assert_ne!(
             late[1].2, late[0].2,
             "{label} late: the short source clamped, so it lands on another frame"
+        );
+    }
+}
+
+/// Root ruling B16-R9 on both hosts, over #1285's floors (the true-peak limiter insert removed, so
+/// every node keeps its latency): an anchored session seek declares nothing, and the floors stay;
+/// a refused plain session seek declares nothing, and the floors stay; an accepted plain session
+/// seek declares the discontinuity in the same call, so the floors reset, and its seek applies at
+/// the next block. At each step both hosts render the same bits and report the same latency and
+/// the same seek reports.
+///
+/// Test value: red if either host's plain seek does not declare (its latency stays floored), if
+/// either declares on the anchored form (the latency drops at the anchored call) or before its
+/// check (the refused seek resets the floors), or if the two hosts reach different rules (their
+/// bits or latencies differ).
+#[cfg(feature = "test-support")]
+#[test]
+fn a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_hosts() {
+    let quantum = u64::from(QUANTUM);
+    for rate in [48_000, 96_000] {
+        let label = format!("{rate} Hz");
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..4, &format!("{label} before"));
+        let edits = [SessionEdit::RemoveTrackEffect {
+            track_id: id(LIMITER.track.id),
+            rack_name: session::RackName::Inserts,
+            effect_id: id(LIMITER.id),
+        }];
+        let (b_verdict, _) = browser.transaction_reply(&edits);
+        let (c_verdict, _) = c_abi.transaction(&edits);
+        c_abi.drain_reliable();
+        assert_eq!(b_verdict, c_verdict, "{label}");
+        same_blocks(&mut browser, &mut c_abi, 4..8, &format!("{label} floored"));
+        let floored = c_latency(&c_abi);
+        assert_eq!(browser_plan_latency(&mut browser).0, floored, "{label}");
+        let latencies = |browser: &mut Rig, c_abi: &CAbi, step: &str| {
+            let latency = c_latency(c_abi);
+            assert_eq!(
+                browser_plan_latency(browser).0,
+                latency,
+                "{label} {step}: both hosts report one latency"
+            );
+            latency
+        };
+
+        // 3. An anchored seek at block 10: nothing is declared, the floors stay.
+        let anchor = 10 * quantum;
+        assert_eq!(
+            browser.host.session_seek(None, 2, 0, Some(anchor)),
+            host_web::RESULT_OK
+        );
+        c_abi.session_seek(2, 0, Some(anchor));
+        for block in 8..12 {
+            let feed = (block >= 10).then(|| (2, block - 10));
+            session_block(&mut browser, &mut c_abi, block, [feed; 3], &label);
+        }
+        let reports = same_session_reports(&mut browser, &c_abi, &format!("{label} anchored"));
+        assert!(
+            reports
+                .iter()
+                .all(|report| (report.0, report.1) == (2, anchor))
+        );
+        assert_eq!(
+            latencies(&mut browser, &c_abi, "anchored"),
+            floored,
+            "{label}: an anchored session seek keeps the floors"
+        );
+
+        // 1. A refused plain seek (generation 2 is stale): nothing is declared.
+        assert_eq!(
+            browser.host.session_seek(None, 2, 0, None),
+            host_web::RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            c_abi.session_seek_code(2, 0, None),
+            capi::RESULT_INVALID_ARGUMENT
+        );
+        for block in 12..14 {
+            session_block(
+                &mut browser,
+                &mut c_abi,
+                block,
+                [Some((2, block - 10)); 3],
+                &label,
+            );
+        }
+        assert_eq!(
+            latencies(&mut browser, &c_abi, "refused"),
+            floored,
+            "{label}: a refused plain session seek keeps the floors"
+        );
+
+        // 2. An accepted plain seek: it declares, the floors reset and the seek applies at the
+        // next block.
+        let call = 14_u64;
+        assert_eq!(
+            browser.host.session_seek(None, 3, 0, None),
+            host_web::RESULT_OK
+        );
+        c_abi.session_seek(3, 0, None);
+        for block in call..call + 4 {
+            session_block(
+                &mut browser,
+                &mut c_abi,
+                block,
+                [Some((3, block - call)); 3],
+                &label,
+            );
+        }
+        let reports = same_session_reports(&mut browser, &c_abi, &format!("{label} plain"));
+        assert!(
+            reports
+                .iter()
+                .all(|report| (report.0, report.1, report.2) == (3, call * quantum, 0)),
+            "{label}: the plain seek applied at the next block: {reports:?}"
+        );
+        assert!(
+            latencies(&mut browser, &c_abi, "plain") < floored,
+            "{label}: a plain session seek resets the floors ({floored})"
         );
     }
 }

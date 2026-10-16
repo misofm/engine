@@ -353,3 +353,39 @@ re-pinned.
 **Successors.** (1) A capi test hook that reads the active plan's timeline would let the parity row
 compare both timelines directly. (2) #1644 (browser SDK `seek` and the PCM feed's ring rule) is the
 next caller of the exports.
+
+## Amendment (root ruling B16-R9, batch 16b review, 2026-10-16)
+
+- **B15-R7's order is retired.** The headless `seek` (D2) and `WasmBoundary.sessionSeek` no longer
+  call `miso_engine_web_v1_declare_discontinuity`: a plain session seek is a declared discontinuity,
+  and the engine declares it in the same call, after every check, so a refused seek declares
+  nothing. An anchored session seek keeps continuity and declares nothing (the loop and exact-start
+  form; README A1.2). `WasmBoundary.declareDiscontinuity()` stays for a stop.
+- **Gate 2 amended.** It asserts the SDK does not call the declaration before a session seek (the
+  call log is `["session_seek"]`), and a new eval holds the B16-R9 rules on the headless path.
+
+## Fold (batch 16b review), part B / B16-R9
+
+- **SDK.** `sdk/src/core/boundary.ts` `sessionSeek` and `sdk/src/headless/engine.ts` `seek`: no
+  declaration call; the doc comments say the engine declares in the same call. The browser export
+  (`miso_engine_web_v1_session_seek`) runs the plain form through the host's `run_control`, so a
+  plan the declaration publishes keeps its tables and counts as a blocking rebuild; the anchored
+  export declares nothing.
+- **Evals (`sdk/test/capability-evals.mjs`).** `session seek calls the session seek export alone and
+  moves the sources in the next block` (gate 2, the call log is `["session_seek"]`; red with the
+  SDK's declaration restored) and `a plain session seek declares the discontinuity itself, and a
+  refused one declares nothing` (B16-R9 gate 4 on the parity session: t3's limiter removed through
+  the new `remove_t3_limiter` structural frame, so #1285 floors hold the latency; a stale plain seek
+  keeps the floors, an accepted one resets them, and no separate declaration is called; red with
+  the SDK's declaration restored, and red against an artifact built with the core's declaration
+  removed). The headless SDK has no anchored session seek, so rule 3 is held on the C ABI and the
+  parity row only.
+- **Fixture.** `hosts/host-web/tests/structural_frames_fixture.rs` writes one more frame,
+  `remove_t3_limiter` (`RemoveTrackEffect` of t3's limiter), into
+  `hosts/host-web/tests/fixtures/structural-frames.json` (blessed; the byte gate passes).
+- **Browser tests.** `tests::session_seek::the_session_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing`
+  now asserts no seek waits in a slot after the refusals (`native_staging::session_seek_slots_empty`,
+  test-support; MINOR f; red when the export pushes before its lifecycle refusal); its doc says the
+  failed host keeps its control state. The `one_full_slot_refuses_every_consumer` comment is
+  corrected (MINOR e: the slot frees at the next block's pop; it is full only because no block
+  renders between the calls).

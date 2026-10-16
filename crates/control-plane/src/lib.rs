@@ -11,7 +11,7 @@
 //! control plane in a Worker. An adapter describes itself through [`ControlAdapter`]: the row type
 //! of its plan resource table and the fixed allocations it keeps per session. It passes plain
 //! [`ControlLimits`], and reads plain [`PlanResources`] and typed failures
-//! ([`CompileFailure`], [`SourceFailure`], [`CommandError`], [`EventError`]) that it maps to its
+//! ([`CompileFailure`], [`SourceFailure`], [`SessionSeekFailure`], [`CommandError`], [`EventError`]) that it maps to its
 //! own codes. The crate owns every command and event refusal text (decision 17 C1), through
 //! [`CommandError::diagnostic`], [`CompileFailure::diagnostic`] and [`EventError::diagnostic`]; an
 //! adapter owns only its result-code numbering.
@@ -65,7 +65,7 @@ pub use compile::{CompiledChildren, RuntimePreparer, compile_children};
 pub use control::{
     CommandError, EventError, EventLane, ObservationChange, ObservationForward,
     ObservationKeyError, ObservationKeyRef, ObservationLimit, ObservationRefusal,
-    REPREPARE_REQUIRED, ResolvedObservationTap, SessionState, SourceFailure,
+    REPREPARE_REQUIRED, ResolvedObservationTap, SessionSeekFailure, SessionState, SourceFailure,
     resolve_observation_tap,
 };
 pub use error::{CompileFailure, ResourceFault};

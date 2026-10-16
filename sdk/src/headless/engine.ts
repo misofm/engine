@@ -451,7 +451,8 @@ export class OfflineEngine {
    * Until it does, a source underruns. The generation is `options.generation`, else one above the
    * largest this object has passed through `seek`, `seekSource` or `submitSource`. A stale
    * generation is refused (`source.generation.stale`, result `invalidArgument`) and nothing
-   * changes. A discontinuity is declared first, as on the C ABI.
+   * changes. The engine declares the discontinuity in the same call (the floors a rebuild kept
+   * reset), and a refused seek declares nothing, as on the C ABI.
    */
   seek(
     frame: bigint,
