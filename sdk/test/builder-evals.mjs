@@ -852,6 +852,26 @@ describe("validation refusals name the offending path", () => {
 
     // What the session document checks, the builder checks at the verb, by path.
     const refused = (target) => code(() => base.automation(ride("x", target, 0, 1)));
+    // A segment sample is below 2^53, the program builder's bound (the session validator refuses
+    // the same set): 2^53 - 1 builds, 2^53 is refused when the document is built, under the
+    // engine's range code, and the engine refuses it the same way.
+    const limit = 2n ** 53n;
+    const rideAt = (startSample, endSample) => base.automation({
+      id: "far",
+      target: builtinRow("fader_db", "both"),
+      segments: [{ shape: "linear", startSample, endSample, startValue: -2, endValue: 0 }],
+    });
+    assert.equal(rideAt(limit - 2n, limit - 1n).toJSON().automation[0].segments[0].end_sample, String(limit - 1n));
+    assert.equal(code(() => rideAt(0n, limit).toJSON()).code, "numeric.out_of_schema_range");
+    assert.equal(code(() => rideAt(limit, limit + 1n).toJSON()).code, "numeric.out_of_schema_range");
+    if (asset !== undefined) {
+      const model = mutableModel(rideAt(limit - 2n, limit - 1n).toJSON());
+      assert.equal((await validate(JSON.stringify(model), { asset })).ok, true);
+      model.automation[0].segments[0].end_sample = limit.toString();
+      const outcome = await validate(JSON.stringify(model), { asset });
+      assert.equal(outcome.ok, false, "the engine must refuse a segment end at 2^53");
+      assert.equal(outcome.diagnostics[0]?.code, "numeric.out_of_schema_range");
+    }
     assert.equal(refused({ ...builtinRow("fader_db", "both"), owner: { kind: "strip", id: "ghost" } }).code, "reference.missing_entity");
     assert.equal(refused({ ...builtinRow("fader_db", "both"), owner: { kind: "route", id: "ghost" } }).code, "reference.missing_entity");
     assert.equal(refused({ ...builtinRow("fader_db", "both"), owner: { kind: "vca", id: "ghost" } }).code, "reference.missing_entity");
@@ -1129,13 +1149,14 @@ describe("canonical float spellings", () => {
           control: "fader_db",
           lane: "both",
         },
-        segments: [{ shape: "step", startSample: 0, endSample: maximum, startValue: 0, endValue: 0 }],
+        // A segment sample is below 2^53, not u64::MAX: the program builder's bound.
+        segments: [{ shape: "step", startSample: 0, endSample: 2n ** 53n - 1n, startValue: 0, endValue: 0 }],
       });
     const model = built.toJSON();
     assert.equal(model.revision, REVISION_MAX.toString());
     assert.equal(model.sources[0].frames, maximum.toString());
     assert.equal(model.automation[0].segments[0].start_sample, "0");
-    assert.equal(model.automation[0].segments[0].end_sample, maximum.toString());
+    assert.equal(model.automation[0].segments[0].end_sample, String(2n ** 53n - 1n));
     assert.match(built.toJson(), /"revision": "9223372036854775807"/);
     assert.throws(() => session({ id: "overflow", sampleRateHz: 48_000, revision: maximum + 1n }), /u64::MAX/);
     assert.throws(() => session({ id: "unsafe", sampleRateHz: 48_000, revision: Number.MAX_SAFE_INTEGER + 1 }), /safe integer/);

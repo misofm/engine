@@ -542,6 +542,11 @@ grows by 16 bytes per fader bank, a fixed structural change inside every ceiling
    segment end at or past `2^53` samples, which the session validator accepts and
    `ProgramBuilder` refuses (`BuildError::Segment`), so that refusal is reachable, not only the
    unreachable conversion of D2.
+   *Batch 17 follow-up:* the session validator now refuses a segment `start_sample` or
+   `end_sample` at or past `automation::TIME_LIMIT` (`2^53`) with `numeric.out_of_schema_range`, so a
+   validated session no longer reaches this builder refusal; it stays as a defensive check.
+   Gate: `the_validator_and_the_program_builder_agree_on_the_segment_time_bound`
+   (`crates/session/tests/diagnostic_parity.rs`).
 3. **No offsets-cell writer here.** #1649 departure 4 adds the writer to `FaderCells`; the cell is
    created unwritten and its holder keeps the prepared words.
 4. **Parts with no reader until the same push** carry `#[expect(dead_code, reason = ...)]`, which

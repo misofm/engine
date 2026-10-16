@@ -1932,6 +1932,7 @@ dependencies = [
 name = "session"
 version = "0.1.0"
 dependencies = [
+ "automation",
  "engine",
  "json-syntax",
  "jsonschema",
