@@ -75,7 +75,11 @@ Today every automation edit is "live with no records": it commits with no plan c
     them by address. No second carry program exists for cell state.
   - **At adoption.** The successor repositions each carried cursor in its own table (#1637 D4).
     If the new curve's value at the adoption block's first sample differs in bits from the carried
-    current target, the cell takes a jump there, over the fader jump length.
+    current target, the cell takes a jump there, over the fader jump length. (Amended by U3 fold
+    2 and B17-R13: on a free stage still in a ramp, the curve is compared where that ramp ends and
+    the landing is over `max(J, remaining)`; a step of the cell's own at the first sample keeps
+    the comparison there and the landing over `J`. See "U3 fold 2" and "Split (root ruling
+    B17-R13)".)
   - **A cell gained.** A lane that gains automation on a carried stage starts its cell with the
     carried stage target as its current target, then applies the adoption rule above. It is not set
     exactly: the strip is not added (A1.4 "New lanes").

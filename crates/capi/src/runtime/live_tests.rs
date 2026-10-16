@@ -9049,8 +9049,10 @@ mod set_control {
         /// ride's table: the same ride split in two at sample 10,000, or a change only in its
         /// last 2,000 samples. The move is pending at the swap, in the rebuild's transaction, or
         /// heard 1 and 12 blocks before it. Every block of the rebuilt rig stays within 1e-3 of
-        /// the uninterrupted engine's (the split alone moves the output by at most 1.7e-4) over
-        /// 44 blocks, allocation-free, and the successor is adopted.
+        /// the uninterrupted engine's over 44 blocks, allocation-free, and the successor is
+        /// adopted. Measured: 0 pending, in the transaction and heard 1; 4.6e-6 heard 12, where
+        /// the landing over the rest of the move's ramp recomputes the stage's ramp step at the
+        /// swap (B17-R13, NIT 5).
         ///
         /// Test value: red if the repositioned cell drops the hold of the ramp the free stage
         /// still runs, or compares the curve at the block's first sample rather than at that
