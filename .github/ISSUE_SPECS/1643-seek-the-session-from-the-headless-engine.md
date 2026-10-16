@@ -240,3 +240,19 @@ and `submitSource` too, so a headless caller that mixes them stays ahead.
 pointer checks and the result map. Open points are in the coordinator's report: the two new
 exports and the C13 list, the SDK-chosen generation (D2), and a parity row in
 `hosts/host-web/tests/control_parity.rs` (browser session seek against the C ABI session seek).
+
+## Amendment (root rulings, batch 16, 2026-10-16)
+
+- **B16-R1.** The two exports `miso_engine_web_v1_session_seek` and `_session_seek_at` are in
+  decision 17 C13's list of approved direct exports (seek transport behind
+  `SessionState::session_seek`).
+- **B16-R5, D2 stands.** The SDK chooses the generation, one above the largest it has used. It is a
+  host transport token, as on the C ABI (#1642 D3). The core refuses a stale one (and, under
+  #1642's B16-R2 fence, a generation not above every generation published on the session).
+- **B16-R6, new gate 6 (parity row).** In `hosts/host-web/tests/control_parity.rs` (now an
+  authorized path): a plain session seek and a late anchored session seek on both hosts at 48 and
+  96 kHz, two sources of different lengths. After each block, from the call through the applying
+  block and after, the browser and C ABI seek reports of both sources are equal field by field,
+  and the timeline (#1641's host-core test reader) reads the same value on both hosts. Red if
+  either host splits the seek across blocks, clamps differently or drops the lateness. It needs
+  #1642's C export.

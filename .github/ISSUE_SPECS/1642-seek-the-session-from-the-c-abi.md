@@ -322,3 +322,39 @@ the result mapping.
 **Hazard.** A new `impl` block in a render-path crate can move the impl index that
 `scripts/check-web-audioworklet-callgraph.py` pins (see `c48cc3875`). Add `session_seek` inside
 the existing `impl SessionState`.
+
+## Amendment (root rulings, batch 16, 2026-10-16)
+
+- **B16-R1.** `miso_engine_v1_session_seek` and `_session_seek_at` are in decision 17 C13's list
+  of approved direct exports (seek transport behind `SessionState::session_seek`).
+- **B16-R2, the publish fence.** A session seek is one committed act, so every consumer sees it in
+  the same render block, on both hosts. D1 as filed does not give that for a plain seek: render
+  pops the timeline's queue and each source's queue at different instants while the session
+  thread pushes, so a plain seek pushed during a block can split across two blocks. The fix:
+  - One atomic published-generation word per session, shared by every source producer, the
+    timeline producer and the source-set driver of every plan of that session. It is carried to a
+    successor with the producers, so a fresh and a carried consumer of one plan read the same
+    word. It is allocated on the control thread, never on render.
+  - The driver loads it once per block entry (acquire), before the timeline and the sources, and
+    passes the value to each consumer's observe step (#1640 D1's shared function).
+  - A consumer whose next command (read with the queue's `peek`, which #1320 added) has a
+    generation above the loaded value leaves it in the queue for a later block. Nothing is
+    dropped; the slot stays full, so a new push is still backpressure.
+  - Every seek push ends with a release store of `max(word, g)`: the per-source seek after its
+    one push, the session seek after its last push (D1 step 3). So all of a session seek's
+    commands become visible to render at one block entry.
+  - The session seek also refuses a generation not above the word (`source.generation.stale`),
+    so a source removed with a higher generation cannot let a command through early. This matches
+    D3's rule for the host (one above the largest generation it has used on the session).
+  - One atomic load per block. No allocation, lock or syscall on render; no `engine/realtime`
+    edit is expected. If one is needed, one attempt; on a refusal stop and report.
+- **Paths added for B16-R2.** `crates/source/src/lib.rs` (the word in the driver, the observe
+  step and the producers' push), `crates/host-core/src/prepare.rs` and
+  `crates/host-core/src/source.rs` (the word shared into each plan's source set and carried with
+  the producers), and `crates/control-plane/src/control.rs` only if the carry needs it.
+- **New gate 1b (concurrency).** A native test runs a session thread that pushes plain and anchored
+  session seeks (each one strictly newer) while a render thread renders, for many iterations
+  (at least 10,000 seeks). In every block, either the timeline and every source apply the seek or
+  none of them does: no seek is split across blocks. Run at both bank widths the native build
+  covers. The render thread's allocation and free counts stay 0 (`bench_support::alloc` thread
+  counters after warming).

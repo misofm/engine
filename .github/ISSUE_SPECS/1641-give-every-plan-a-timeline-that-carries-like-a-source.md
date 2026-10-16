@@ -308,3 +308,18 @@ Checked against `35ac17545`.
 - **Decision 17.** No change. C13 (rulings 2026-10-15 and 2026-10-16) calls seeks and the seek
   report transport. Exposing a timeline report to a host would need a new direct export or a
   protocol message, and a new direct export needs its own root ruling.
+
+## Amendment (root rulings, batch 16, 2026-10-16)
+
+- **B16-R3, D5 readiness.** The timeline is not "always ready". Its readiness is the source
+  consumer's non-PCM test, written once (#1640 D1's shared seek state): its command queue is empty
+  and it holds no anchored seek whose anchor falls before the end of the prime window. So a prime
+  never skips a held anchored seek. Its prime still advances it by `k` blocks, as `k` calls of
+  `begin_block_at` that observe no command. #1355 calls the readiness check and the prime on the
+  timeline as on each carried consumer (amended there). Gate 3's prime half compares the timeline
+  and a source consumer directly until #1355 wires the prime above the consumer.
+- **B16-R4, D6 deferred.** No host reads a timeline seek report after this batch. D6 (the
+  timeline's seek-report record), its bytes in D7 and its move in D3 are taken out of this slice.
+  Placeholder TBD45 *Report the timeline seek position to hosts* keeps them, for the first slice
+  that needs a host reader. Gate 1 compares `test_only_timeline_at` with the frame each block's
+  source read starts at; its seek-report clause is dropped.

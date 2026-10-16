@@ -306,6 +306,15 @@ discontinuity declaration; the two #1386 document exports, `miso_engine_web_v1_r
 plan latency read, `miso_engine_web_v1_plan_latency_read` with its record pointer
 `miso_engine_web_v1_plan_latency_ptr`, a copy of the core's `PlanQueries::resources()` row. A new
 direct export that is not in this list needs its own root ruling.
+Widened again (root, B16-R1, 2026-10-16): seven seek exports are transport behind one core
+function each, so none is a C13 exception. They are the session seek of #1642 and #1643,
+`miso_engine_v1_session_seek` and `miso_engine_v1_session_seek_at` (C ABI) and
+`miso_engine_web_v1_session_seek` and `miso_engine_web_v1_session_seek_at` (browser), all behind
+`SessionState::session_seek`; and #1293's browser forms of the anchored source seek and the seek
+report, `miso_engine_web_v1_source_seek_at` (behind `SessionState::seek_at`) and
+`miso_engine_web_v1_source_seek_report` with its record pointer
+`miso_engine_web_v1_source_seek_report_ptr` (behind `SessionState::seek_report`, the same call as
+`miso_engine_v1_source_seek_report`).
 
 ### How to add a control
 
