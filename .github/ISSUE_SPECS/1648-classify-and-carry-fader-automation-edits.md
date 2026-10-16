@@ -564,3 +564,76 @@ over `5e695ecb6` for the coordinator.
   all pass.
 - Bytes: `Adoption` (one byte) sits in `AutomatedFaderCell`'s padding and
   `GraphStripMove::continued_cells` in the move's padding. No existing byte gate moved.
+
+## U3 fold (batch 17)
+
+Fold of the U3 review, part U3a (render and carry), on `codex/controls-batch-17k` over
+`86271e096`, uncommitted for the coordinator. **Attempt count:** #1648 is at attempt 2 of 5 with
+this fold (the implementation #1648a/#1648b, then this fold).
+
+**MAJOR 1: a live level value pending at a swap lost its ramp, and a superseded write went
+uncounted.** The plan-swap carry drain (`FaderBankProcessor::apply_pending`, which the fused bank
+calls too) did not read the offsets cells, and adoption compared the successor's prepared `S`
+with the predecessor's heard one, jumping over the fader length `J`. Now:
+
+- The carry drain reads each carried automated lane's offsets cells with `LiveSnapshot::ALL`
+  through `read_counted` (`LaneFaderAutomation::carry_offsets`) and keeps the newest record in
+  the cell (`AutomatedFaderCell::carried_record`), without moving the stage.
+- `adopt` carries that record, the heard `S` and its ramp word, and remembers the successor's
+  prepared `S` (`adopted_sum`) until the first block.
+- At the successor's first block the drain applies the record through `offsets_jump` from the
+  carried `S`, as the uninterrupted block does. A record in the successor's own cell (the join's
+  retarget, or a live write committed after the rebuild) replaces it unheard and counts one
+  superseded value.
+- The join now delivers an `S` change as an offsets record. `join_level_records` returns
+  `LevelRecords`, and the carry retarget writes the offsets records to the successor's cells,
+  with the edit's length (`LevelRules::lengths`, the live path's rule). So a VCA move in the same
+  transaction as a structural edit ramps over its own length, not `J`.
+
+**Departure (Compare).** `Adoption::Compare` is no longer decided at `adopt`. With no record of
+its own, the first block raises it when the `S` left after the carried record still differs
+from the prepared one. Live plans always deliver a record, so this happens only on a plan with
+no live cells: the join keeps an offsets-only change `Same` there, and the lane takes the
+adoption rule over `J`. There a VCA edit's own length is not honoured. That is the one case
+found, and no production host runs it (both hosts attach live cells). No watermark flag reports
+it, because a plan with no live cells has no live values. A table change (`Reposition`) still
+takes its adoption jump over `J`, even when the same transaction also moves `S` (D2).
+`Adoption` is now ordered, and `adopt` keeps the stronger of its own adoption and one the
+carried cell still owed (NIT 3).
+
+**MINOR 8.** The held-ramp re-report under `Reposition` is in `settle_adoption`, not D1.2, so it
+survives U2 fold 2. It changes no sample: a held stage only remembers either operation, and the
+obligation follows `free_from`. It is documented there as bookkeeping (M14 stays green). The
+reposition's `seed_target` is gated.
+
+**Gates (all pass; each red under its mutation, checked once).** In
+`crates/capi/src/runtime/live_tests.rs` (`set_control::automated_carry`, not `canonical_live`):
+
+- `vca_moves_pending_at_a_swap_keep_their_length_and_their_count` (R1c, R9, R10; a moving ride
+  and a flat ride; own 4,000 samples, the session's length, two moves, the rebuild committed
+  first): bits equal to the uninterrupted engine and `LIVE_VALUES_SUPERSEDED` equal. It is red
+  with no carry read, with the carry read uncounted, and with the heard `S` not carried.
+- `a_vca_move_inside_a_rebuild_keeps_its_own_length` (reviewer C's case with a VCA move, 4,096
+  samples and the session's length, both rides): red with no join offsets write, and red with no
+  heard `S`.
+- `a_heard_vca_move_then_a_rebuild_continues_the_ride` (R1, mid-jump and settled).
+- `an_offset_only_upsert_inside_a_rebuild_renders_as_it_does_alone` (R4).
+- `a_held_ramp_obligation_owed_at_a_swap_is_carried` (R6, R7): red with the obligation not
+  carried (M15).
+- `a_gained_ride_on_a_moving_fader_lets_the_fader_finish_its_ramp` (MINOR 8): red with no
+  `seed_target` (M13).
+
+In `crates/host-core/tests/stored_fader_automation.rs`:
+
+- `a_carried_lane_whose_s_moves_with_no_record_takes_the_adoption_rule` (the `Compare` path on
+  plans with no live cells): red with the raise removed (M1).
+
+**Not done here.** R2b and reviewer C's hand-move form need #1650b's hand offset, which is not on
+this branch. The VCA forms above exercise the same records. R4 is not a discriminating test on
+this branch, because the offset is not yet heard (#1650a). Its red check belongs to the merged
+tree.
+
+**Numbers.** `lane_slot_bytes` 224 -> 304 (the carried record and the adopted `S`, both
+channels), measured by `fader_automation_sizes()`. No byte gate moved. `realtime-policy`: ok, 160
+regions in 33 files. `audit capi`: `pcm_digest` `bffc21e857b5e134`, 0 violations, 0 allocations.
+No edit under `crates/engine/src/realtime/`.

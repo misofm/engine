@@ -1152,9 +1152,10 @@ fn parity_model() -> SessionModel {
 /// 1's left lane at block 10 and an unmute ramp at block 20, so the lane holds its gain.
 /// With handles, the offsets cells take two writes too (#1649 D3): track 0's two lanes a new `S`
 /// at block 15 (a jump of 480 samples), and track 1's left lane one at block 20, in the block
-/// whose drain starts the unmute ramp, so its jump meets a held gain.
+/// whose drain starts the unmute ramp, so its jump meets a held gain. With `offsets` false the
+/// offsets cells take no write and the mute ramps run as they do with it.
 #[cfg(feature = "test-support")]
-fn render_parity(mut rig: Rig, blocks: usize) -> [Vec<f32>; 2] {
+fn render_parity(mut rig: Rig, blocks: usize, offsets: bool) -> [Vec<f32>; 2] {
     use builtins_compiler::TestOnlyWriteGate;
     let mut gate = rig.handles.is_some().then(|| {
         rig.prepared
@@ -1175,7 +1176,7 @@ fn render_parity(mut rig: Rig, blocks: usize) -> [Vec<f32>; 2] {
                         smoothing_samples: 300,
                     },
                 );
-                if block == 20 {
+                if block == 20 && offsets {
                     handles.strip_controls[1].fader.write_offsets(
                         stamp,
                         0,
@@ -1189,6 +1190,7 @@ fn render_parity(mut rig: Rig, blocks: usize) -> [Vec<f32>; 2] {
         }
         if let (Some(gate), Some(handles)) = (gate.as_mut(), rig.handles.as_mut())
             && block == 15
+            && offsets
         {
             gate.write_published(|stamp| {
                 for channel in 0..2 {
@@ -1241,9 +1243,9 @@ fn the_scalar_oracle_renders_the_banks_fader_events() {
     let plain_on = |backend| {
         let prepared = host_core::test_only_prepare_host_runtime_on(&compiled, &caps, backend)
             .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
-        render_parity(Rig::from(prepared, &model), BLOCKS)
+        render_parity(Rig::from(prepared, &model), BLOCKS, true)
     };
-    let live_on = |backend, between: bool| {
+    let live_with = |backend, between: bool, offsets: bool| {
         let (prepared, handles) = if between {
             host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
                 &compiled, &caps, &request, backend,
@@ -1256,11 +1258,12 @@ fn the_scalar_oracle_renders_the_banks_fader_events() {
         .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
         let mut rig = Rig::from(prepared, &model);
         rig.handles = Some(handles);
-        render_parity(rig, BLOCKS)
+        render_parity(rig, BLOCKS, offsets)
     };
+    let live_on = |backend, between| live_with(backend, between, true);
     let mut unautomated = model.clone();
     unautomated.automation.clear();
-    let without = render_parity(Rig::new(&unautomated), BLOCKS);
+    let without = render_parity(Rig::new(&unautomated), BLOCKS, true);
     // Delivery between render calls forms the fused fader-matrix bank.
     builtins_compiler::test_only_reset_fader_matrix_witness();
     let fused_bank = live_on(Backend::Simd4, true);
@@ -1289,9 +1292,11 @@ fn the_scalar_oracle_renders_the_banks_fader_events() {
     ] {
         assert_ne!(bank, without, "{label}: the automation is heard");
         if label != "no live control" {
+            // U3 fold, MINOR 7: against the same live rig with no offsets write, so only the
+            // writes can make the difference.
             assert_ne!(
                 bank,
-                plain_on(Backend::Simd4),
+                live_with(Backend::Simd4, label == "between render calls", false),
                 "{label}: the offsets writes are heard"
             );
         }
@@ -1359,6 +1364,83 @@ fn a_lane_a_successor_adds_jumps_to_its_curve() {
         assert_ne!(
             swapped.blocks[SWAP_BLOCK].bits, without[SWAP_BLOCK].bits,
             "{backend:?}: the swap block moves toward the curve"
+        );
+        for (block, (swapped, reference)) in swapped
+            .blocks
+            .iter()
+            .zip(&reference)
+            .enumerate()
+            .skip(settled)
+        {
+            assert_eq!(swapped.bits, reference.bits, "{backend:?}: block {block}");
+        }
+    }
+}
+
+/// #1648 D2, departure 4 (batch 17 U3 fold): on plans with no live cells a VCA edit cannot reach a
+/// carried automated lane as an offsets record, so the lane's first block takes the adoption rule
+/// (`Adoption::Compare` in the builtins compiler): track 1 rides its fader linearly under VCA
+/// `v`, and a successor with `v` at -6 dB (the same ride, so the table continues) is swapped in
+/// at block 6 with a 240-sample fader jump. The swap block differs from both sessions rendered
+/// fresh (the lane ramps), and from the block after the jump and its first grid ramp every block
+/// equals the successor's session rendered fresh.
+///
+/// Test value: red if the carried lane keeps the `S` its stage heard when no record moves it
+/// (it would stay 6 dB high), or sets it at once.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_carried_lane_whose_s_moves_with_no_record_takes_the_adoption_rule() {
+    use successor::{Feed, QUANTUM, SWAP_BLOCK, Session, Successor, reference_run, swapped_run};
+    let mut base = plain(2, 128);
+    base.control_smoothing = smoothing(5.0);
+    base.automation = vec![fader_entry(
+        &base,
+        1,
+        ParameterChannel::Both,
+        vec![segment(AutomationShape::Linear, 0, 1 << 20, 0.0, -12.0)],
+    )];
+    base.vcas = vec![session::Vca {
+        id: id("v"),
+        fader: session::DualMonoFader {
+            left_db: 0.0,
+            right_db: 0.0,
+            left_mute: false,
+            right_mute: false,
+        },
+        members: vec![base.tracks[1].id.clone()],
+    }];
+    let mut moved = base.clone();
+    moved.vcas[0].fader.left_db = -6.0;
+    moved.vcas[0].fader.right_db = -6.0;
+    let a = Session::compile(base);
+    let b = Session::compile(moved);
+    let feed = Feed::new("fixture-source", 7);
+    let settled = SWAP_BLOCK + (240_usize + 64).div_ceil(QUANTUM);
+    assert!(settled < successor::BLOCKS);
+    for backend in [
+        #[cfg(target_feature = "avx2")]
+        graph_compiler::Backend::Simd8,
+        graph_compiler::Backend::Simd4,
+    ] {
+        let swapped = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
+        assert!(
+            swapped.restarted.is_empty(),
+            "{backend:?}: the stage carries"
+        );
+        let reference = reference_run(&b, &[&feed], backend);
+        let without = reference_run(&a, &[&feed], backend);
+        assert_eq!(
+            swapped.blocks[SWAP_BLOCK - 1].bits,
+            without[SWAP_BLOCK - 1].bits,
+            "{backend:?}: the predecessor"
+        );
+        assert_ne!(
+            swapped.blocks[SWAP_BLOCK].bits, reference[SWAP_BLOCK].bits,
+            "{backend:?}: the swap block ramps, it is not set"
+        );
+        assert_ne!(
+            swapped.blocks[SWAP_BLOCK].bits, without[SWAP_BLOCK].bits,
+            "{backend:?}: the swap block moves toward the new S"
         );
         for (block, (swapped, reference)) in swapped
             .blocks

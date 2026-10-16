@@ -771,18 +771,32 @@ struct AutomatedFaderCell {
     obligation: HeldRampObligation,
     /// What the cell's first block after a plan swap that carried its lane owes (#1648 D2).
     adoption: Adoption,
+    /// The newest offsets record the plan-swap carry drain read from this cell and no block has
+    /// applied yet (#1648 D2, U3 fold): the successor's adopting cell takes it, and its first
+    /// block applies it through [`Self::offsets_jump`] as the uninterrupted block would.
+    carried_record: Option<FaderOffsetsRecord>,
+    /// At an adopted cell until its first block's offsets reads: the `S` this plan was prepared
+    /// with. The adopted cell holds the carried `S` (the one its stage heard), and the carried and
+    /// the successor's own records move it. With no record of the cell's own (which is newer than
+    /// the preparation), an `S` left unequal to this one takes the adoption rule
+    /// ([`Adoption::Compare`]).
+    adopted_sum: Option<f64>,
 }
 
 /// What an automated channel's first block after a plan swap owes (#1648 D2). Set by
-/// [`LaneFaderAutomation::adopt`] at the swap block, taken by the lane's next block, which knows
-/// the node time.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// [`LaneFaderAutomation::adopt`] at the swap block (and raised to `Compare` by the first block's
+/// offsets reads), taken by the lane's next block, which knows the node time. Ordered by strength:
+/// two adoptions owed at once keep the stronger one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 enum Adoption {
     /// Nothing: the cell has rendered a block since it was prepared or adopted, or it continues
     /// its carried state verbatim (the same table, `a(n)` and `S`: the uninterrupted events).
     None,
-    /// The cell continues its carried table and cursor, but its `S` changed: the adoption rule
-    /// alone (the jump when the composed gain differs from the stage's).
+    /// The cell continues its carried table and cursor, but after the first block's offsets
+    /// records (the carried one and the successor's own) its `S` still differs from the one this
+    /// plan was prepared with: the adoption rule alone (the jump when the composed gain differs
+    /// from the stage's). Reached when no record could bring the change: a plan with no live
+    /// cells, whose join cannot write one.
     Compare,
     /// The cell's table is not the one its state was built on (a changed or gained curve, or a
     /// moved `a(n)`): it repositions its cursor in its own table, takes the stage's held ramp
@@ -855,6 +869,8 @@ impl LaneFaderAutomation {
                         offsets_ramp: cell.offsets_ramp,
                         obligation: HeldRampObligation::default(),
                         adoption: Adoption::None,
+                        carried_record: None,
+                        adopted_sum: None,
                     }
                 })
             }),
@@ -868,15 +884,19 @@ impl LaneFaderAutomation {
     // REALTIME_POLICY_BEGIN
     /// #1648 D2: this lane's stage was carried from `predecessor`'s lane at the swap block (the
     /// predecessor lane's automation, `None` when it had none). Each automated channel takes the
-    /// carried cell's event state and held-ramp obligation by its stable address (the strip, row 5
-    /// and the channel; the strip move paired the strip) and owes its first block an adoption:
-    /// none when its table continues bit for bit (`continued_cells`, from the join) at the same
-    /// `a(n)` and `S`, the adoption rule alone when only `S` moved, and a reposition otherwise. A
-    /// channel the predecessor did not automate (a gained cell) keeps its prepared state and
-    /// repositions. The lane is not fresh: its stage holds the carried gain, so no `Set` lands
-    /// (#1647 D2 is for a lane that starts at its prepared value). A channel the successor does
-    /// not automate is released by the join's retarget record, not here. Allocation-free: plain
-    /// copies.
+    /// carried cell's event state, held-ramp obligation, heard `S` with its ramp word, and the
+    /// offsets record the carry drain read and no block applied, by its stable address (the
+    /// strip, row 5 and the channel; the strip move paired the strip). Its first block applies
+    /// that record and the successor's own (the join's retarget, a later live write) from the
+    /// heard `S`, as the uninterrupted block would, and then compares the `S` it holds with this
+    /// plan's ([`AutomatedFaderCell::adopted_sum`]). It owes that block a reposition when its
+    /// table does not continue bit for bit (`continued_cells`, from the join) or `a(n)` moved,
+    /// else nothing; an adoption the carried cell still owed (two swaps with no block between)
+    /// is kept when it is the stronger. A channel the predecessor did not automate (a gained
+    /// cell) keeps its prepared state and `S` and repositions. The lane is not fresh: its stage
+    /// holds the carried gain, so no `Set` lands (#1647 D2 is for a lane that starts at its
+    /// prepared value). A channel the successor does not automate is released by the join's
+    /// retarget record, not here. Allocation-free: plain copies.
     fn adopt(&mut self, predecessor: Option<&Self>, continued_cells: u8) {
         self.fresh = false;
         let arrival = self.arrival;
@@ -895,16 +915,48 @@ impl LaneFaderAutomation {
                 Some((carried, carried_arrival)) => {
                     cell.state = carried.state;
                     cell.obligation = carried.obligation;
-                    if continued_cells & (1 << channel) == 0 || carried_arrival != arrival {
+                    cell.adopted_sum = Some(cell.offsets_sum);
+                    cell.offsets_sum = carried.offsets_sum;
+                    cell.offsets_ramp = carried.offsets_ramp;
+                    cell.carried_record = carried.carried_record;
+                    let own = if continued_cells & (1 << channel) == 0 || carried_arrival != arrival
+                    {
                         Adoption::Reposition
-                    } else if carried.offsets_sum.to_bits() == cell.offsets_sum.to_bits() {
-                        Adoption::None
                     } else {
-                        Adoption::Compare
-                    }
+                        Adoption::None
+                    };
+                    own.max(carried.adoption)
                 }
                 None => Adoption::Reposition,
             };
+        }
+    }
+
+    /// #1648 D2 (U3 fold), the plan-swap carry drain: each automated channel whose offsets cell
+    /// holds a write takes the newest with every revision ([`LiveSnapshot::ALL`]), as the block
+    /// drain would at the next block, and keeps it for the successor's first block
+    /// ([`AutomatedFaderCell::carried_record`]); the stage is not moved here, because the jump's
+    /// target is the curve at the node time of that block. The read adds the writes it replaced
+    /// to `superseded`, and a kept record it replaces unheard (two carries with no block between)
+    /// adds one. Allocation-, lock- and syscall-free; one read per automated channel.
+    fn carry_offsets(&mut self, superseded: &LiveValuesSuperseded) {
+        for cell in self.channels.iter_mut().flatten() {
+            if cell.offsets_dirty.pending(&cell.offsets.dirty) == 0 {
+                continue;
+            }
+            if let CellRead::Applied { words, .. } = cell.offsets_reader.read_counted(
+                &cell.offsets.cell,
+                LiveSnapshot::ALL,
+                &mut cell.offsets_dirty,
+                0,
+                superseded,
+            ) && cell
+                .carried_record
+                .replace(FaderOffsetsRecord::from_words(words))
+                .is_some()
+            {
+                superseded.add_carried(1);
+            }
         }
     }
 
@@ -919,12 +971,20 @@ impl LaneFaderAutomation {
     /// offsets cell holds a newer write takes its `S` and ramp word, and the lane jumps to the
     /// composed gain at the jump's completion when that gain differs in bits from the lane's
     /// current gain target ([`AutomatedFaderCell::offsets_jump`]). An applied read adds the
-    /// writes it replaced to `superseded`. Allocation-, lock- and syscall-free; one read per
-    /// automated channel.
+    /// writes it replaced to `superseded`; `superseded` is `None` on a lane with no control lane,
+    /// whose cells have no writer and are not read.
+    ///
+    /// #1648 D2 (U3 fold), at an adopted cell's first block: the record the carry drain kept is
+    /// applied the same way, from the carried `S` the stage heard, unless the cell's own read
+    /// applied a newer one, which replaces it unheard (one superseded value, as two writes before
+    /// one uninterrupted block). With no record of its own, an `S` still unequal to the one this
+    /// plan was prepared with takes it and owes the adoption rule ([`Adoption::Compare`]); a
+    /// record of its own is newer than the preparation and is the committed `S`. Allocation-, lock- and
+    /// syscall-free; at most one read per automated channel.
     fn read_offsets(
         &mut self,
         snapshot: LiveSnapshot,
-        superseded: &LiveValuesSuperseded,
+        superseded: Option<&LiveValuesSuperseded>,
         stage: &mut impl FaderJumpStage,
     ) {
         let Self {
@@ -937,26 +997,45 @@ impl LaneFaderAutomation {
             let Some(cell) = cell.as_mut() else {
                 continue;
             };
-            if cell.offsets_dirty.pending(&cell.offsets.dirty) == 0 {
-                continue;
+            let carried = cell.carried_record.take();
+            let own = superseded.and_then(|superseded| {
+                if cell.offsets_dirty.pending(&cell.offsets.dirty) == 0 {
+                    return None;
+                }
+                let CellRead::Applied { words, .. } = cell.offsets_reader.read_counted(
+                    &cell.offsets.cell,
+                    snapshot,
+                    &mut cell.offsets_dirty,
+                    0,
+                    superseded,
+                ) else {
+                    return None;
+                };
+                if carried.is_some() {
+                    superseded.add_carried(1);
+                }
+                Some(FaderOffsetsRecord::from_words(words))
+            });
+            let adopted_sum = cell.adopted_sum.take();
+            if let Some(record) = own.or(carried) {
+                let jumped = cell.offsets_jump(program, *span, channel, record, stage);
+                // Unreachable refusal: the cell index is the program's own (prepared from it),
+                // the curve is in the fader domain and `vca_compose_db` clamps (a NaN `S`, which
+                // a validated record never carries, fails `checked_fader_gain`, so no NaN reaches
+                // the stage), and the lane is a populated member. In release a refusal leaves the
+                // stage's gain as it was: a hold, no panic.
+                debug_assert!(jumped, "an offsets jump is refused at render");
             }
-            let CellRead::Applied { words, .. } = cell.offsets_reader.read_counted(
-                &cell.offsets.cell,
-                snapshot,
-                &mut cell.offsets_dirty,
-                0,
-                superseded,
-            ) else {
-                continue;
-            };
-            let record = FaderOffsetsRecord::from_words(words);
-            let jumped = cell.offsets_jump(program, *span, channel, record, stage);
-            // Unreachable refusal: the cell index is the program's own (prepared from it), the
-            // curve is in the fader domain and `vca_compose_db` clamps (a NaN `S`, which a
-            // validated record never carries, fails `checked_fader_gain`, so no NaN reaches the
-            // stage), and the lane is a populated member. In release a refusal leaves the stage's
-            // gain as it was: a hold, no panic.
-            debug_assert!(jumped, "an offsets jump is refused at render");
+            // A record of the cell's own is newer than this plan's preparation (the join's
+            // retarget, or a live write committed after it), so its `S` is the committed one; a
+            // carried record is older than the preparation, whose `S` it must then match.
+            if own.is_none()
+                && let Some(sum) = adopted_sum
+                && sum.to_bits() != cell.offsets_sum.to_bits()
+            {
+                cell.offsets_sum = sum;
+                cell.adoption = cell.adoption.max(Adoption::Compare);
+            }
         }
     }
     // REALTIME_POLICY_END
@@ -1553,7 +1632,12 @@ struct AdoptionBlock<'p, 'a> {
 ///
 /// A [`Adoption::Reposition`] places the cursor at the block's node time in the cell's own table
 /// (#1637 D4) and reports the stage's held ramp again (batch 13b: `reposition` drops the one the
-/// carried state held). Then, for a reposition or [`Adoption::Compare`], the adoption rule: when
+/// carried state held). That report changes no sample: a held stage only remembers a gain
+/// operation of either kind, and the obligation is decided by where the gain is free, not by the
+/// event's flag. It keeps the repositioned cell's events what the cell gives under a hold (held
+/// events as `RememberGain`, as the test-only event probe reports them); batch 17 U3 fold,
+/// MINOR 8: kept as bookkeeping, with no audible gate.
+/// Then, for a reposition or [`Adoption::Compare`], the adoption rule: when
 /// the curve at the block's first sample, composed with this plan's `S`
 /// (`checked_fader_gain(vca_compose_db(curve, S))`, #1648 departure 4), differs in bits from the
 /// gain the stage aims for, the block opens with a jump (returns `true`). Otherwise a repositioned
@@ -3024,9 +3108,27 @@ impl FaderBankProcessor {
     /// it on a quiescent predecessor, for the lanes it exports (#1277); no production render path
     /// takes `ALL`.
     // REALTIME_POLICY_BEGIN
+    ///
+    /// Each carried automated lane's offsets cells are read the same way (#1648 D2, U3 fold):
+    /// the newest record is kept for the successor's first block, which applies it
+    /// ([`LaneFaderAutomation::carry_offsets`]).
     fn apply_pending(&mut self, lanes: u8) -> Result<(), RenderError> {
-        let Self { bank, controls, .. } = self;
-        drain_fader_controls(bank, controls, LiveSnapshot::ALL, lanes)
+        let Self {
+            bank,
+            controls,
+            automation,
+            ..
+        } = self;
+        let result = drain_fader_controls(bank, controls, LiveSnapshot::ALL, lanes);
+        for (lane, slot) in automated_lanes(automation) {
+            if !lane_selected(lanes, lane) {
+                continue;
+            }
+            if let Some(Some(reader)) = controls.get(lane) {
+                slot.carry_offsets(&reader.superseded);
+            }
+        }
+        result
     }
 
     /// Whether `predecessor` is a fader bank of this bank's width with lane `predecessor_lane`
@@ -3251,9 +3353,9 @@ fn bank_hold(bank: &BuiltinFaderBank) -> impl Fn(usize, usize) -> Option<Channel
     }
 }
 
-/// #1649 D3: each automated lane with a live control lane reads its offsets cells under the
-/// block's `snapshot` and jumps ([`LaneFaderAutomation::read_offsets`]). A lane with no control
-/// lane has no writer, so its cells stay as prepared.
+/// #1649 D3: each automated lane reads its offsets cells under the block's `snapshot` and jumps
+/// ([`LaneFaderAutomation::read_offsets`]). A lane with no control lane has no writer, so its
+/// cells stay as prepared; an adopted lane still settles its carried `S` (#1648 D2).
 fn read_fader_offsets(
     bank: &mut BuiltinFaderBank,
     controls: &[Option<FaderReader>],
@@ -3261,12 +3363,13 @@ fn read_fader_offsets(
     snapshot: LiveSnapshot,
 ) {
     for (lane, slot) in automated_lanes(automation) {
-        let Some(Some(reader)) = controls.get(lane) else {
-            continue;
-        };
+        let superseded = controls
+            .get(lane)
+            .and_then(Option::as_ref)
+            .map(|reader| &reader.superseded);
         slot.read_offsets(
             snapshot,
-            &reader.superseded,
+            superseded,
             &mut BankLaneStage {
                 bank: &mut *bank,
                 lane,
@@ -7607,7 +7710,7 @@ impl LiveControlFaderProcessor {
             .map_err(render_error);
         if let Some(automation) = self.automation.as_deref_mut() {
             // #1649 D3: the offsets cells, after the drain, as the fader bank reads them.
-            automation.read_offsets(snapshot, &self.control.superseded, &mut self.fader);
+            automation.read_offsets(snapshot, Some(&self.control.superseded), &mut self.fader);
         }
         result
     }

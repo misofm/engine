@@ -8490,6 +8490,518 @@ mod set_control {
                 assert_eq!(offsets, [Some(1), Some(1)], "{label}: eq0's offsets cells");
             }
         }
+
+        /// #1649 (U3 fold, MAJOR 4). Two moves of `v` in turn on a playing engine: -6 dB, then,
+        /// after the first has settled, -2 dB. Each is `live`, and from the end of its jump and
+        /// the first grid ramp after it the output equals a plan prepared from the committed
+        /// session, so the automated member hears the second write as it heard the first.
+        ///
+        /// Test value: red if render applies only the first write of an offsets cell (a writer
+        /// whose sequence restarts at each write is acked and never heard), which a single move
+        /// cannot show.
+        #[test]
+        fn a_second_vca_move_over_an_automated_member_is_heard() {
+            let before = document(|_| {});
+            let fader = fader_length(&before);
+            let mut rig = Rig::new(&before);
+            for _ in 0..4 {
+                rig.step();
+            }
+            let k = window(rig.latency(), fader + 128, rig.quantum);
+            for db in [-6.0, -2.0] {
+                let bytes =
+                    rig.transaction(&[set(vca_row("v", VCA_OFFSET_DB, Lane::Both), db, None)]);
+                let (result, response) = rig.send(&bytes);
+                assert_eq!(result, crate::RESULT_OK, "v at {db} dB");
+                assert_eq!(edit_path_of(&response), protocol::EditPath::Live);
+                let committed = rig.snapshot();
+                let edit_block = rig.block;
+                let live: Vec<Vec<f32>> = (0..k + 4).map(|_| rig.step()).collect();
+                let reference = Reference::run(&committed, rig.block);
+                for (offset, pcm) in live.iter().enumerate().skip(k as usize) {
+                    let block = edit_block as usize + offset;
+                    assert_eq!(
+                        bits(pcm),
+                        bits(&reference[block]),
+                        "v at {db} dB: block {block} renders the committed session's plan"
+                    );
+                }
+            }
+        }
+    }
+
+    /// #1648 D2 and #1649 across a plan swap (batch 17 U3 fold): a level value that reaches an
+    /// automated fader lane around a rebuild is heard as the uninterrupted engine hears it. Each
+    /// test renders rigs of one document in lockstep: `a` takes a rebuild (a muted track added,
+    /// whose strip renders exact zeros), `u` the same live edits with no rebuild, and `plain`
+    /// none of the edits, to show that they are heard.
+    mod automated_carry {
+        use super::*;
+
+        /// A fader entry of track `track` (both lanes) with `segments`.
+        fn entry(track: &str, segments: Vec<session::AutomationSegment>) -> session::Automation {
+            session::Automation {
+                id: id("ride"),
+                target: session::ControlAddress {
+                    owner: session::Owner::Strip(id(track)),
+                    section: session::Section::Builtins,
+                    control: FADER_DB,
+                    lane: session::ParameterChannel::Both,
+                },
+                segments,
+                offset: session::AutomationOffset::default(),
+            }
+        }
+
+        /// One segment of `shape` over `[start, end)`, from `from` to `to` dB.
+        fn segment(
+            shape: session::AutomationShape,
+            (start, end): (u64, u64),
+            (from, to): (f32, f32),
+        ) -> session::AutomationSegment {
+            session::AutomationSegment {
+                shape,
+                start_sample: start,
+                end_sample: end,
+                start_value: from,
+                end_value: to,
+                unit: session::ParameterUnit::Db,
+            }
+        }
+
+        /// The stateless session (no effect, no input filter) with a long source and `change`
+        /// applied, given the first two track IDs.
+        fn session_with(change: impl FnOnce(&mut SessionModel, &str, &str)) -> String {
+            let mut model = stateless_session(48_000);
+            model.sources[0].frames = SOURCE_FRAMES;
+            let first = model.tracks[0].id.as_str().to_owned();
+            let second = model.tracks[1].id.as_str().to_owned();
+            change(&mut model, &first, &second);
+            session::canonical_session_json(&model).expect("canonical session")
+        }
+
+        /// The first track rides its fader linearly from 0 dB to -12 dB over the source, so every
+        /// grid point moves the lane, and VCA `v` holds the first two tracks (the second has no
+        /// automation).
+        fn riding() -> String {
+            session_with(|model, first, second| {
+                model.automation.push(entry(
+                    first,
+                    vec![segment(
+                        session::AutomationShape::Linear,
+                        (0, SOURCE_FRAMES),
+                        (0.0, -12.0),
+                    )],
+                ));
+                model.vcas.push(vca_of("v", &[first, second]));
+            })
+        }
+
+        /// [`riding`] with a flat ride at -3 dB: an offsets jump then moves the lane only because
+        /// `S` moved, so the `S` it jumps from decides whether it jumps at all.
+        fn flat() -> String {
+            session_with(|model, first, second| {
+                model.automation.push(entry(
+                    first,
+                    vec![segment(
+                        session::AutomationShape::Step,
+                        (0, SOURCE_FRAMES),
+                        (-3.0, -3.0),
+                    )],
+                ));
+                model.vcas.push(vca_of("v", &[first, second]));
+            })
+        }
+
+        /// The first track of `document`.
+        fn first_track(document: &str) -> String {
+            parse_session_json(document).expect("model").tracks[0]
+                .id
+                .as_str()
+                .to_owned()
+        }
+
+        /// A move of `v` to `db` over `ramp`.
+        fn vca_move(db: f32, ramp: Option<u32>) -> SessionEdit {
+            set(vca_row("v", VCA_OFFSET_DB, Lane::Both), db, ramp)
+        }
+
+        /// Send `edits` on `rig`; the reply's path must be `path`.
+        fn send(rig: &mut Rig, edits: &[SessionEdit], path: protocol::EditPath, label: &str) {
+            let bytes = rig.transaction(edits);
+            let (result, response) = rig.send(&bytes);
+            assert_eq!(result, crate::RESULT_OK, "{label}");
+            assert_eq!(edit_path_of(&response), path, "{label}: path");
+        }
+
+        /// Three rigs of `document`, four blocks rendered on each.
+        fn warm(document: &str) -> [Rig; 3] {
+            let mut rigs = [0, 1, 2].map(|_| Rig::new(document));
+            for _ in 0..4 {
+                let [a, u, plain] = &mut rigs;
+                let x = bits(&a.step());
+                assert_eq!(x, bits(&u.step()), "warm-up");
+                assert_eq!(x, bits(&plain.step()), "warm-up");
+            }
+            rigs
+        }
+
+        /// Render `blocks` blocks on the three rigs. Returns the first block of `a` whose bits
+        /// differ from `u`'s, with its first differing sample, and whether `u` differs from
+        /// `plain` in any block. Every block of `a` is allocation-free.
+        fn lockstep(rigs: &mut [Rig; 3], blocks: usize) -> (Option<(u64, usize)>, bool) {
+            let [a, u, plain] = rigs;
+            let (mut first, mut heard) = (None, false);
+            for _ in 0..blocks {
+                let block = a.block;
+                let (x, used) = a.step_counted();
+                assert_eq!(
+                    (used.allocations, used.deallocations),
+                    (0, 0),
+                    "block {block} allocated or freed"
+                );
+                let (x, y) = (bits(&x), bits(&u.step()));
+                heard |= y != bits(&plain.step());
+                if x != y && first.is_none() {
+                    first = Some((block, x.iter().zip(&y).position(|(x, y)| x != y).unwrap()));
+                }
+            }
+            (first, heard)
+        }
+
+        /// The superseded-value counter of `rig`.
+        fn superseded(rig: &mut Rig) -> u64 {
+            rig.counter(protocol::CounterId::LiveValuesSuperseded)
+        }
+
+        /// U3 fold, MAJOR 1 (R1c, R9, R10). Live VCA moves whose offsets writes are still unread
+        /// when a rebuild commits (no block between them) are carried into the successor: the
+        /// carry drain reads them, and the successor's first block jumps from the `S` the stage
+        /// heard over the edit's own length, as the uninterrupted engine does. Cases: one move
+        /// with its own 4,000 samples, one with the session's length, two moves (the first is
+        /// superseded unheard), and a rebuild committed first with the move written to the
+        /// pending successor. Every block equals the uninterrupted engine's, the moves are
+        /// heard, the successor is adopted, and `LIVE_VALUES_SUPERSEDED` holds the same count.
+        ///
+        /// Test value: red if the carry drain does not read the offsets cells (the successor
+        /// starts from the committed `S` and jumps over the fader length, and a superseded write
+        /// goes uncounted), or if the carried record or the heard `S` does not reach the
+        /// successor's cell.
+        #[test]
+        fn vca_moves_pending_at_a_swap_keep_their_length_and_their_count() {
+            bench_support::alloc::assert_installed();
+            for (ride, document) in [("moving ride", riding()), ("flat ride", flat())] {
+                pending_case(ride, &document);
+            }
+        }
+
+        /// One document of [`vca_moves_pending_at_a_swap_keep_their_length_and_their_count`].
+        fn pending_case(ride: &str, document: &str) {
+            let model = parse_session_json(document).expect("model");
+            let rebuild = add_muted_track(&model, "added");
+            let cases: [(&str, Vec<SessionEdit>, bool); 4] = [
+                (
+                    "its own 4,000 samples",
+                    vec![vca_move(-6.0, Some(4_000))],
+                    false,
+                ),
+                ("the session's length", vec![vca_move(-6.0, None)], false),
+                (
+                    "two moves",
+                    vec![vca_move(-6.0, None), vca_move(-3.0, Some(4_000))],
+                    false,
+                ),
+                (
+                    "the rebuild committed first",
+                    vec![vca_move(-6.0, Some(4_000))],
+                    true,
+                ),
+            ];
+            for (label, moves, rebuild_first) in cases {
+                let label = &format!("{ride}, {label}");
+                let mut rigs = warm(document);
+                if rebuild_first {
+                    send(&mut rigs[0], &rebuild, protocol::EditPath::Rebuild, label);
+                }
+                for edit in &moves {
+                    for rig in &mut rigs[..2] {
+                        send(
+                            rig,
+                            core::slice::from_ref(edit),
+                            protocol::EditPath::Live,
+                            label,
+                        );
+                    }
+                }
+                if !rebuild_first {
+                    send(&mut rigs[0], &rebuild, protocol::EditPath::Rebuild, label);
+                }
+                let (first, heard) = lockstep(&mut rigs, 44);
+                assert_eq!(rigs[0].summary().3, 0, "{label}: the successor is adopted");
+                assert_eq!(first, None, "{label}: first difference (block, sample)");
+                assert!(heard, "{label}: the moves are heard");
+                let counts = [superseded(&mut rigs[0]), superseded(&mut rigs[1])];
+                assert_eq!(
+                    counts[0], counts[1],
+                    "{label}: LIVE_VALUES_SUPERSEDED [a, u]"
+                );
+            }
+        }
+
+        /// U3 fold, MAJOR 1 (reviewer C's case). A VCA move in the same transaction as a
+        /// structural edit (the transaction rebuilds) reaches the carried automated lane as the
+        /// join's offsets record, with the edit's own length: every block equals the same move
+        /// sent alone (`live`), with its own 4,096 samples and with the session's length.
+        ///
+        /// Test value: red if the join writes no offsets record (the successor's `S` reaches the
+        /// lane by the adoption rule, over the fader length, from the block's curve), or the
+        /// carried lane composes its first block with the new `S` as if it had heard it.
+        #[test]
+        fn a_vca_move_inside_a_rebuild_keeps_its_own_length() {
+            bench_support::alloc::assert_installed();
+            for ((ride, document), (length, ramp)) in
+                [("moving ride", riding()), ("flat ride", flat())]
+                    .into_iter()
+                    .flat_map(|document| {
+                        [
+                            ("its own 4,096 samples", Some(4_096)),
+                            ("the session's length", None),
+                        ]
+                        .map(|length| (document.clone(), length))
+                    })
+            {
+                let label = &format!("{ride}, {length}");
+                let model = parse_session_json(&document).expect("model");
+                let mut rigs = warm(&document);
+                let mut edits = vec![vca_move(-6.0, ramp)];
+                edits.extend(add_muted_track(&model, "added"));
+                send(&mut rigs[0], &edits, protocol::EditPath::Rebuild, label);
+                send(
+                    &mut rigs[1],
+                    &[vca_move(-6.0, ramp)],
+                    protocol::EditPath::Live,
+                    label,
+                );
+                let (first, heard) = lockstep(&mut rigs, 44);
+                assert_eq!(rigs[0].summary().3, 0, "{label}: the successor is adopted");
+                assert_eq!(first, None, "{label}: first difference (block, sample)");
+                assert!(heard, "{label}: the move is heard");
+            }
+        }
+
+        /// U3 fold, MAJOR 2 (R1). A live VCA move heard (mid-jump after three blocks, settled
+        /// after twelve), then a rebuild that keeps the ride: the carried lane continues with no
+        /// adoption jump, and every block equals the uninterrupted engine's.
+        ///
+        /// Test value: red if adoption compares the successor's `S` with anything but the `S`
+        /// the stage heard (a stale `S` makes a jump the uninterrupted engine never makes), or
+        /// the carried state does not continue.
+        #[test]
+        fn a_heard_vca_move_then_a_rebuild_continues_the_ride() {
+            bench_support::alloc::assert_installed();
+            let document = riding();
+            let model = parse_session_json(&document).expect("model");
+            for heard_blocks in [3, 12] {
+                let label = format!("rebuilt after {heard_blocks} blocks");
+                let mut rigs = warm(&document);
+                for rig in &mut rigs[..2] {
+                    send(
+                        rig,
+                        &[vca_move(-6.0, None)],
+                        protocol::EditPath::Live,
+                        &label,
+                    );
+                }
+                let (first, _) = lockstep(&mut rigs, heard_blocks);
+                assert_eq!(first, None, "{label}: before the rebuild");
+                send(
+                    &mut rigs[0],
+                    &add_muted_track(&model, "added"),
+                    protocol::EditPath::Rebuild,
+                    &label,
+                );
+                let (first, heard) = lockstep(&mut rigs, 30);
+                assert_eq!(rigs[0].summary().3, 0, "{label}: the successor is adopted");
+                assert_eq!(first, None, "{label}: first difference (block, sample)");
+                assert!(heard, "{label}: the move is heard");
+            }
+        }
+
+        /// U3 fold, MAJOR 2 (R4). An offset-only `UpsertAutomation` of the ride (a hand move's
+        /// stored offset, #1650) inside a structural transaction renders as the same upsert sent
+        /// alone. On this branch the offset is stored and not yet heard (#1650a); with #1650b it
+        /// moves `S` and reaches the carried lane as the join's offsets record.
+        ///
+        /// Test value: red if an offset carried across a swap is heard differently from the same
+        /// offset committed without one (with #1650b: a lost record, or a jump over another
+        /// length).
+        #[test]
+        fn an_offset_only_upsert_inside_a_rebuild_renders_as_it_does_alone() {
+            let document = riding();
+            let model = parse_session_json(&document).expect("model");
+            let mut ride = model.automation[0].clone();
+            ride.offset = session::AutomationOffset {
+                left_db: -4.5,
+                right_db: -4.5,
+            };
+            let upsert = SessionEdit::UpsertAutomation { automation: ride };
+            let mut rigs = warm(&document);
+            let mut edits = vec![upsert.clone()];
+            edits.extend(add_muted_track(&model, "added"));
+            send(&mut rigs[0], &edits, protocol::EditPath::Rebuild, "R4");
+            let bytes = rigs[1].transaction(&[upsert]);
+            assert_eq!(rigs[1].send(&bytes).0, crate::RESULT_OK, "R4: alone");
+            let (first, _) = lockstep(&mut rigs, 40);
+            assert_eq!(rigs[0].summary().3, 0, "R4: the successor is adopted");
+            assert_eq!(first, None, "R4: first difference (block, sample)");
+        }
+
+        /// U3 fold, MAJOR 2 (R6, R7). The batch 13b held-ramp obligation owed at a swap: the
+        /// muted first track steps from 0 dB to -9 dB at sample 3,000 inside an unmute ramp, so
+        /// the step is only remembered and the lane owes a move where the ramp ends. A rebuild
+        /// lands while the obligation is owed: inside an 8,000-sample ramp, and when a
+        /// 3,072-sample ramp ends on the last sample before the swap (the move is due at the
+        /// swap block's first sample). Every block equals the uninterrupted engine's.
+        ///
+        /// Test value: red if the obligation (owed, due at entry) is not carried across the swap:
+        /// the successor's lane then stays at the gain the unmute aimed for.
+        #[test]
+        fn a_held_ramp_obligation_owed_at_a_swap_is_carried() {
+            bench_support::alloc::assert_installed();
+            let document = session_with(|model, first, _| {
+                model.tracks[0].fader.left_mute = true;
+                model.tracks[0].fader.right_mute = true;
+                let step = |(start, end), db| {
+                    segment(session::AutomationShape::Step, (start, end), (db, db))
+                };
+                model.automation.push(entry(
+                    first,
+                    vec![step((0, 3_000), 0.0), step((3_000, SOURCE_FRAMES), -9.0)],
+                ));
+            });
+            let model = parse_session_json(&document).expect("model");
+            let track = first_track(&document);
+            let quantum = Rig::new(&document).quantum;
+            // The unmute starts at block 4's first sample.
+            for (label, ramp, swap) in [
+                ("owed inside the ramp", 8_000, 26_u64),
+                (
+                    "due at the swap's first sample",
+                    (28 - 4) * quantum as u32,
+                    28,
+                ),
+            ] {
+                let mut rigs = warm(&document);
+                let unmute = [set(builtin(&track, MUTE, Lane::Both), 0.0, Some(ramp))];
+                for rig in &mut rigs[..2] {
+                    send(rig, &unmute, protocol::EditPath::Live, label);
+                }
+                let (first, _) = lockstep(&mut rigs, (swap - 4) as usize);
+                assert_eq!(first, None, "{label}: before the swap");
+                send(
+                    &mut rigs[0],
+                    &add_muted_track(&model, "added"),
+                    protocol::EditPath::Rebuild,
+                    label,
+                );
+                let (first, heard) = lockstep(&mut rigs, 60);
+                assert_eq!(rigs[0].summary().3, 0, "{label}: the successor is adopted");
+                assert_eq!(first, None, "{label}: first difference (block, sample)");
+                assert!(heard, "{label}: the unmute is heard");
+            }
+        }
+
+        /// U3 fold, MINOR 8 (#1648 D2, the reposition's seeding). A live fader move to -6 dB
+        /// (the session's 960 samples) and a rebuild that adds a ride on the same track commit in
+        /// one gap between blocks. The ride holds 0 dB until sample 100 and -6 dB after, so the
+        /// gained cell is seeded with 0 dB while its curve at the swap equals the gain the stage
+        /// is ramping to: the cell takes that value as its target and the stage finishes its own
+        /// ramp, as the plain fader does with no ride. Every block equals the rig that only moved
+        /// the fader.
+        ///
+        /// Test value: red if a repositioned cell whose curve equals the stage's target keeps its
+        /// seeded target (its first grid event would retarget the stage over 64 samples and cut
+        /// the fader's ramp short).
+        #[test]
+        fn a_gained_ride_on_a_moving_fader_lets_the_fader_finish_its_ramp() {
+            bench_support::alloc::assert_installed();
+            let document = session_with(|_, _, _| {});
+            let mut model = parse_session_json(&document).expect("model");
+            let track = first_track(&document);
+            let step =
+                |(start, end), db| segment(session::AutomationShape::Step, (start, end), (db, db));
+            model.automation.push(entry(
+                &track,
+                vec![step((0, 100), 0.0), step((100, SOURCE_FRAMES), -6.0)],
+            ));
+            let ride = SessionEdit::UpsertAutomation {
+                automation: model.automation[0].clone(),
+            };
+            let mut rigs = warm(&document);
+            let fader = [
+                set(builtin(&track, FADER_DB, Lane::Left), -6.0, None),
+                set(builtin(&track, FADER_DB, Lane::Right), -6.0, None),
+            ];
+            for rig in &mut rigs[..2] {
+                send(rig, &fader, protocol::EditPath::Live, "the fader move");
+            }
+            send(
+                &mut rigs[0],
+                &[ride],
+                protocol::EditPath::Rebuild,
+                "the ride",
+            );
+            let (first, heard) = lockstep(&mut rigs, 20);
+            assert_eq!(rigs[0].summary().3, 0, "the successor is adopted");
+            assert_eq!(first, None, "first difference (block, sample)");
+            assert!(heard, "the fader move is heard");
+        }
+
+        /// U3 fold, MAJOR 3 (#1649 D3's ramp word). Twin A holds a flat step ride at -7.25 dB
+        /// under VCA `v`; twin B holds a static -7.25 dB fader under `v`. They render the same
+        /// bits, and a move of `v` on both (with the session's length and with its own 256
+        /// samples) ramps the automated lane exactly as the plain one: equal bits on every block
+        /// from the move on, with no settle window.
+        ///
+        /// Test value: red if the offsets cell's ramp word is lost or replaced (a `0` word sets
+        /// the gain at once, a click; another length ramps differently), which a comparison
+        /// after the jump cannot see.
+        #[test]
+        fn a_flat_ride_under_a_vca_move_ramps_as_a_static_fader() {
+            bench_support::alloc::assert_installed();
+            let ride = session_with(|model, first, _| {
+                model.automation.push(entry(
+                    first,
+                    vec![segment(
+                        session::AutomationShape::Step,
+                        (0, SOURCE_FRAMES),
+                        (-7.25, -7.25),
+                    )],
+                ));
+                model.vcas.push(vca_of("v", &[first]));
+            });
+            let fixed = session_with(|model, first, _| {
+                model.tracks[0].fader.left_db = -7.25;
+                model.tracks[0].fader.right_db = -7.25;
+                model.vcas.push(vca_of("v", &[first]));
+            });
+            for (label, ramp) in [("the session's length", None), ("its own 256", Some(256))] {
+                let mut rigs = [Rig::new(&ride), Rig::new(&fixed), Rig::new(&fixed)];
+                let (first, _) = lockstep(&mut rigs, 4);
+                assert_eq!(first, None, "{label}: before the move");
+                for rig in &mut rigs[..2] {
+                    send(
+                        rig,
+                        &[vca_move(-6.0, ramp)],
+                        protocol::EditPath::Live,
+                        label,
+                    );
+                }
+                let (first, heard) = lockstep(&mut rigs, 20);
+                assert_eq!(first, None, "{label}: first difference (block, sample)");
+                assert!(heard, "{label}: the move is heard");
+            }
+        }
     }
 }
 
