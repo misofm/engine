@@ -365,3 +365,54 @@ Departure 3: a unit test beside the reader in `crates/source/src/lib.rs`. Gate 7
 `NodeSpan`, `a(n)` and jump length per block; no audible change; about 4 h); **#1647b** events on
 the fader (D1.1-D1.5, D2, D3, D4; gates 1-6; about 7 h); **#1647c** the held-ramp obligation of
 the batch 13b amendment (gate 8; about 5 h).
+
+## Rulings (root, batch 17, 2026-10-16)
+
+These rulings override the filed text and every amendment above where they differ. They answer the
+ruling questions Q1 and Q2 of the batch 17 amendment and add one requirement for the reader.
+
+### R17-2 (Q1): option A
+
+At the end of `compile_with_builtins` the graph compiler gives each builtin bank its members'
+floored input arrivals `a(n)` through a new defaulted method on the prepared builtin bank processor
+trait (`GraphPreparedBuiltinBankProcessor`).
+
+- No downcast in host-core. Host-core installs nothing after the compile.
+- `a(n)` is the floored arrival (`GraphCompileReport::input_arrivals`, #1285, batch 15b fold).
+- `crates/graph-compiler/src/compile.rs` is an authorized path of this issue now, not "Q1 = A
+  only". Gate 7 runs `cargo test --locked -p graph-compiler` always.
+- This work is #1647's (#1647a, the plumbing). #1646's departure 1 already moves `a(n)` here. Its
+  slice list must name it as #1647's too. The coordinator makes that edit in #1646, not this
+  ruling.
+
+### R17-3 (Q2): option B
+
+The graph sets the per-block node-time context on each builtin slot through `builtin_processor_mut`
+(`crates/graph/src/runtime.rs`), with a new defaulted method on the same trait, before
+`chain.run`. `process` reads it. `rack` is not edited.
+
+- The set must be allocation-free and O(slots) per block.
+- It is covered by the realtime-policy gate and the allocation gate (gate 6). The brief for
+  #1647a runs gate 6's counter on the context-set path, because #1647b is not yet in when #1647a
+  lands.
+- `crates/rack/src/lib.rs` is not an authorized path.
+
+### R17-4: the test-only scalar oracle
+
+This issue mentions the oracle (departure 5). #1646's Q2 is ruled option B. The scalar oracle gets
+the same event driver as the bank processors, and its render path installs the program through the
+one shared event driver. The scalar backend is not refused. So the oracle line of the authorized
+paths ("the oracle per #1646 Q2") reads: the oracle gets the event driver. The coordinator records
+the matching ruling in #1646.
+
+### R17-5: the signed timeline reader is accepted
+
+The signed form of `TimelineConsumer::timeline_block` and of the driver's `timeline_block`
+(departure 3) is accepted. It must not overflow.
+
+- Every conversion between the unsigned source-read sample and the signed first sample is checked
+  or saturating. The same holds for `r + ΣP - a(n)` and for the extrapolation back from sample 0.
+- A unit test beside the reader in `crates/source/src/lib.rs` runs at the `u64` and `i64` limits:
+  a first sample above `i64::MAX`, at `i64::MAX`, at `0` and at `i64::MIN`, and a block that crosses
+  each of them. It checks that nothing panics and nothing wraps.
+- This is part of #1647a.

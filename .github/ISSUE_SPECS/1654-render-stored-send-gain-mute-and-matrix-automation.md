@@ -192,3 +192,48 @@ hand offset; a hand send mute ORs (D5 confirmed); on the send matrix automation 
 - **Non-goals.** "VCA automation (README F20)" is #1655.
 - **Dependencies** gain #1650's amended field and rule (batch R1) and #1632 (ordering only: its
   row rule refuses the `follows_mute` entry this slice no longer renders).
+
+## Rulings (root, batch 17, 2026-10-16)
+
+These rulings override the filed text and every amendment above where they differ.
+
+### R17-6: this issue owns the hand offset for the send gain
+
+Under OQ1 = C, a hand move of an automated send `gain_db` adds a stored dB offset. The send offset
+(its field use, its write and its gates) moved here from #1650. #1650 now delivers the fader offset
+only. This issue depends on #1650, which ships the shared mechanism for the fader: the offset
+field and grammar (#1650a), and the offset write, the in-place owner rule and the list flag
+(#1650b). The batch 10 amendment above still gives the render half (the seven-word cell and
+`g = clamp(f64(curve) + f64(offset), -144, 24)`). Where it says "#1650's offset field, amended for
+the send gain", read: the field of #1650 D1, with the rule below.
+
+The rule is the one of #1650, for route row 1 `gain_db` on a route into a submix:
+
+- **The offset field.** The field is the one of #1650 D1. The row is shared (`lane: both`), so its
+  entry holds one offset: `left_db` and `right_db` are equal. This issue adds route `gain_db` on a
+  route into a submix to `takes_offset`, in the same slice that adds route rows 1 to 6 to
+  `automation_row_renders`. `control.automation.offset` also refuses an entry on this shared row
+  whose two fields differ. The domain is `[-144, 24]` dB (`ROUTE_GAIN_DB_MINIMUM`,
+  `ROUTE_GAIN_DB_MAXIMUM`). Before this issue a non-zero offset on a send entry is refused. The
+  matrix rows, `mute` and `follows_mute` take no offset: a non-zero offset on a send matrix row is
+  refused.
+- **The write.** On a send whose `gain_db` automation renders, `SET_CONTROL` on route row 1 writes
+  the entry's offset (both fields, one value), not the static gain. The path is `live`. The control
+  list reports the offset as the row's `value` and `automated = true`. The seven-word cell's `gain`
+  word and its ramp are written as in the batch 10 amendment.
+- **The in-place owner rule (R17-1).** The automation entries that drive the route row are an owner
+  of the in-place edit for route row 1: `OwnerEdits`, `OwnerSlots`, `ModelView`, and the row's read
+  and write with model scope. A hand move reaches the offset on every path. The reply and the sound
+  agree. An ack of a value that does not sound is a defect. The matrix rows keep D4: automation
+  wins, the edit is stored and commits `model_only`.
+- **Equivalence gate.** The same `SET_CONTROL` on an automated send gain through the in-place path
+  and through the full path gives the same reply and the same bits. It runs on both hosts: the C
+  ABI (`crates/capi/src/runtime/live_tests.rs`) and the browser
+  (`hosts/host-web/tests/control_parity.rs`).
+- **Gates moved here from #1650.** An entry on a send `gain_db` whose two offset fields differ is
+  refused `control.automation.offset`. A non-zero offset on a send matrix row is refused. Gate 3 of
+  the batch 10 amendment (the `+3` hand move) is the render check of this rule.
+- **Paths added to this issue's list:** `crates/controls/src/{builtin_rows.rs,owner_edits.rs}` (the
+  route row 1 binding and its owner), `crates/controls/tests/**`, and the fields #1650 introduces.
+  `docs/SESSION_SCHEMA_V1.md` names the send gain as taking the offset. The batch R2 order stands:
+  this issue follows #1650 and #1651 to #1653.

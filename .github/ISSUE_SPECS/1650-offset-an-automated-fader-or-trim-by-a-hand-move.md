@@ -334,3 +334,78 @@ where they differ.
 - **Recommendation: A.** It is the correct long-term shape (no path-dependent cost, no D1 change)
   and keeps decision 17 C3's one binding place in `controls`. B would be a shortcut that a later
   issue must remove.
+
+## Rulings (root, batch 17, 2026-10-16)
+
+These rulings override the filed text and every amendment above where they differ.
+
+**New title: "Store a hand move on an automated fader as a dB offset".** The file name does not
+change. Reason: ruling R17-6 below.
+
+### R17-1: option A
+
+The automation entries that drive a lane become an owner of the in-place edit. `OwnerEdits`,
+`OwnerSlots` and `ModelView` carry the rendered entries that drive the written lane. The builtin
+row's read and write take the entry, with model scope.
+
+- A hand move on an automated fader writes the offset (OQ1). The reply and the sound agree.
+- An ack of a value that does not sound is a defect.
+- `crates/session/src/in_place.rs` and `crates/protocol/src/model.rs` (`prepare_in_place`) are
+  authorized paths now, not "if R17-1 = A". The #1650b size of 10-14 hours (R17-1 = A) stands.
+- The fast classifier path (`classify_rows`) then reads the lane's entries through the same
+  `ModelView`. The assumption of #1648's departure 1 holds on that path. The brief for #1650b must
+  say this and test it.
+- **Gate kept and widened.** The same `SET_CONTROL` through the in-place path (a transaction of only
+  that edit) and through the full path gives the same reply and the same bits. It runs on both
+  hosts: the C ABI (`crates/capi/src/runtime/live_tests.rs`) and the browser
+  (`hosts/host-web/tests/control_parity.rs`). It is part of gate 2.
+
+### R17-6: this issue delivers the fader offset only
+
+The trim offset moves to #1658 (render stored input trim and polarity automation). The send offset
+moves to #1654 (render stored send gain, mute and matrix automation). No inert field stays here.
+
+**What leaves this issue.**
+
+- Product outcome: the sentence "The same rule holds for the input trim ... from the slice that
+  renders trim automation (#1658)" leaves. The trim rule is #1658's.
+- Deliverables and decisions:
+  - D2: `takes_offset` is true for `fader_db` only. `trim_db` leaves (to #1658). Route `gain_db`
+    leaves (to #1654).
+  - D3: the words "(or, from #1658, trim)" and the last bullet (trim before #1658) leave. After
+    this ruling `SET_CONTROL trim_db` is untouched by this issue. A trim entry is not rendered
+    (A10), so it stays inert as every unrendered row is, and its offset must be `+0.0`.
+  - Batch 10 amendment: the shared-row rule (one offset, `left_db` equals `right_db`), the route
+    `gain_db` accessor, the route lowering of D5 and the domain note for the route gain leave
+    (to #1654). Its remark on a VCA `offset_db` (#1655) is not changed by this ruling.
+  - Batch 17 amendment: the "Trim" bullet (a trim entry carries a checked, stored, inert offset)
+    is void. The binding switch of R17-1 covers row 5 only, not rows 2 and 5.
+- Authorized paths: no path leaves, because the fader needs every one of them. This issue adds no
+  trim or route file (`crates/controls/src/route.rs` is #1654's). The work in each path is smaller.
+- Gates:
+  - Gate 1 loses the batch 10 additions: a send `gain_db` entry whose two fields differ, and a
+    non-zero offset on a send matrix row, move to #1654.
+  - Gate 1 keeps: a non-zero offset on any row that does not take one is refused
+    `control.automation.offset`. A trim entry and a send entry are such rows until #1658 and #1654
+    add them to `takes_offset`. This keeps the field from being an inert, accepted value.
+  - Gates 2 to 6 are about the fader only, as they read already. No trim gate and no send gate stay.
+- The field is one struct for all entries (the V1 grammar has no optional key; D1). It holds `+0.0`
+  on every entry that is not a fader entry, until the slice that renders that row adds the row to
+  `takes_offset`. The field is heard for the fader in this issue, so it is not inert.
+- Non-goals now also name: an offset on `trim_db` (#1658) and on a send `gain_db` (#1654).
+- Dependencies: the line "#1658 (amended) gives the trim its render half and flips D3 for trim"
+  now reads: #1658 and #1654 depend on this issue. This issue ships the shared mechanism, tested
+  with the fader: the field and grammar (#1650a), the offset write, the owner rule of R17-1 and the
+  list flag (#1650b).
+
+**How the split reads now.**
+
+- **#1650a** (the field, the grammar, the wire, the SDK, the fixtures, the docs): D1; D2 with
+  `takes_offset` = `fader_db` only, the domain check and the lane rule; gate 1 as kept above. It
+  is inert for every row until #1650b, so it can land before #1646. The batch 17 path list for
+  #1650a does not change.
+- **#1650b** (the fader write, the in-place owner, the list flag, the classifier): D3 to D5 for
+  `fader_db`, R17-1 = A, the `automated` list field, and gates 2 to 6 with the widened gate 2. The
+  batch 17 path list for #1650b does not change. It lands in the R1 push with #1646 to #1649, with
+  the "no middle state" hazard.
+- Neither part has a trim or send step. #1658 and #1654 add their rows after this issue lands.

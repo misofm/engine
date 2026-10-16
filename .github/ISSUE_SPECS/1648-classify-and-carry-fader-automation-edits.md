@@ -372,3 +372,19 @@ where they differ.
   obligation, `across_withdrawn`) 8-10 h, tests 5 h. Split into two attempt-bounded slices in the
   same push: **#1648a** classification (D1, D3's hook and predicate, D4, gate 1, the #1639 gap
   gate) and **#1648b** carry (D2 and the batch 13b items, gates 2-4 and 6).
+
+## Rulings (root, batch 17, 2026-10-16)
+
+No change to the decisions, paths or gates of this issue. Two notes, so a brief does not assume the
+other options.
+
+- **R17-1 = A closes departure 1.** The automation entries that drive a lane are an owner of the
+  in-place edit (`OwnerEdits`, `OwnerSlots`, `ModelView`). The fast classifier path (`classify_rows`)
+  therefore sees the automation table, and its assumption "the edits leave the automation table as
+  committed" holds with the offset write of #1650. D1's comparison still excludes the offset
+  (departure 3).
+- **R17-6 narrows #1650 to the fader.** The 2026-10-14 amendment lists #1654 and #1658 among the
+  rows that use `automated_cell` for the "automation wins" rule. For #1654 that is the send matrix
+  rows and the send mute only. The send gain (#1654) and the trim (#1658) take a hand offset, not
+  `model_only`, from their own slices, and their rule is #1650's. Polarity stays "automation wins".
+  No step here changes.

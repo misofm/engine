@@ -216,3 +216,47 @@ Checked against `12d4a4f9d`.
   length of D2.
 - **Browser commands** `COMMAND_TRIM_DB` and `COMMAND_POLARITY_INVERT` are deleted (#1565).
   #1261 and #1346 have landed. Realtime policy as in #1637's amendment.
+
+## Rulings (root, batch 17, 2026-10-16)
+
+These rulings override the filed text and every amendment above where they differ.
+
+### R17-6: this issue owns the hand offset for the input trim
+
+Under OQ1 = C, a hand move of an automated trim dB adds a stored dB offset. The trim offset
+(its field use, its write and its gates) moved here from #1650. #1650 now delivers the fader offset
+only. This issue depends on #1650, which ships the shared mechanism for the fader: the offset
+field and grammar (#1650a), and the offset write, the in-place owner rule and the list flag
+(#1650b).
+
+The rule is the one of #1650, for trim (row 2, `trim_db`, builtins control 2):
+
+- **The offset field.** The field is the one of #1650 D1: `offset { left_db, right_db }` on the
+  entry that drives the lane. This issue adds `trim_db` to `takes_offset` in
+  `controls::automation_diagnostics`, in the same slice that adds row 2 to
+  `automation_row_renders`. The domain is `[-144, 24]` dB. Before this issue a non-zero offset on a
+  trim entry is refused `control.automation.offset`. A polarity entry (row 1) takes no offset.
+- **The write.** On a lane whose trim automation renders, `SET_CONTROL trim_db` writes that lane's
+  offset in the entry that drives the lane, not the static field. The path is `live`. The control
+  list reports the offset as the row's `value` and `automated = true`. A `both` write sets both
+  lanes' offsets.
+- **The in-place owner rule (R17-1).** The automation entries that drive the lane are an owner of
+  the in-place edit for row 2: `OwnerEdits`, `OwnerSlots`, `ModelView`, and the row's read and write
+  with model scope. A hand move reaches the offset on every path. The reply and the sound agree. An
+  ack of a value that does not sound is a defect.
+- **Classifier.** For an automated trim lane the lowering writes the trim offsets cell (the 2026-10-14
+  amendment above) with `LiveRamps::resolve(InputTrim, the edit's ramp)`. It writes no `TrimDb`
+  record. An offset-only `UpsertAutomation` is classified the same way.
+- **Equivalence gate.** The same `SET_CONTROL trim_db` through the in-place path and through the full
+  path gives the same reply and the same bits. It runs on both hosts: the C ABI
+  (`crates/capi/src/runtime/live_tests.rs`) and the browser (`hosts/host-web/tests/control_parity.rs`).
+- **Gates moved here from #1650.** A hand move of `+3` on a trim ride is heard as the ride plus
+  `+3` after the ramp, bit for bit equal to a fresh plan whose entry carries that offset, and the
+  other lane is unchanged. Offset `0` and `-0.0` give the bits of no offset. Re-authoring the
+  segments keeps the offset. A non-zero `right_db` on a `left` trim entry is refused. The 2026-10-14
+  amendment's bit rule for a flat trim stands.
+- **Polarity stays "automation wins"** (D5 for row 1). No offset reaches it.
+- **Paths added to this issue's list:** `crates/controls/src/{automation.rs,builtin_rows.rs,owner_edits.rs}`
+  and `crates/controls/tests/**` (the `takes_offset` entry, the row 2 binding and its owner),
+  `hosts/host-web/tests/control_parity.rs`, `docs/SESSION_SCHEMA_V1.md` (the automation section
+  names trim as taking the offset). The batch R2 order stands: this issue follows #1650.

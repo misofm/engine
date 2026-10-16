@@ -287,3 +287,15 @@ where they differ.
   and the control-plane write 2 h, the cell writer, the dirty read and the jump on both bank kinds
   3-4 h, tests (both hosts, the nested-order case, realtime binary) 5 h. One attempt; no split
   (the classifier and the render halves are not useful apart).
+
+## Rulings (root, batch 17, 2026-10-16)
+
+No change to the decisions, paths or gates of this issue. Two notes, so a brief does not assume the
+other options.
+
+- **R17-1 = A and departure 2.** The automation entries that drive a lane are an owner of the
+  in-place edit. `LocalDiff` (the fast path) reads the lane's entries through the same `ModelView`
+  as the full path, so the automated-lane branch of `level_records` decides the same on both paths.
+- **R17-6.** `S = offset + Σ reaching VCA offsets` is the fader's hand offset only. The trim and
+  send offsets live in #1658 and #1654, which keep their own cells. This issue's `S` does not change
+  and its offsets cell is the fader's.
