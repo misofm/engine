@@ -1457,8 +1457,13 @@ struct PlanShape {
     observation_present: Box<[bool]>,
 }
 
-/// How many replacement plans' tables the host holds at once: the plan exchange admits one
-/// unadopted candidate at a time, and one more waits for the service step after its adoption.
+/// How many replacement plans' tables the host holds at once. After every commit the core holds
+/// at most one unadopted candidate (a structural edit supersedes a waiting one, #1310), and the
+/// host drops a superseded candidate's tables as soon as the core no longer holds its epoch
+/// ([`ReadyOwnership::drop_superseded_shapes`]); the tables of plans adopted since the last
+/// service step wait for it. So a command meets at most one entry after the reclaim and adds one:
+/// four leaves room to spare, and the room check in [`ReadyOwnership::run_command`] never refuses
+/// a structural edit, paused or not.
 const PENDING_SHAPES: usize = 4;
 
 /// One replacement plan's tables, committed with the plan (#1290a).
@@ -1661,6 +1666,9 @@ impl ReadyOwnership {
                     .name_successor(core::ptr::from_ref(&entry.shape.meter_header));
             }
             self.blocking_rebuilds = self.blocking_rebuilds.saturating_add(1);
+            // #1310: the commit may have superseded the candidate that waited; its tables and
+            // spectrum captures go now, on the control side, as the core says.
+            self.drop_superseded_shapes();
         }
         if result.is_ok() {
             self.stamp_structure_epoch();
@@ -1723,6 +1731,18 @@ impl ReadyOwnership {
     fn reclaim_shapes(&mut self, analysis: Option<&mut SpectrumAnalysis>) {
         self.promote_spectrum(analysis);
         self.pending_shapes.retain(|entry| !entry.adopted);
+        self.drop_superseded_shapes();
+    }
+
+    /// Drop the tables, and the spectrum captures, of every candidate the core no longer holds
+    /// (#1310, batch 15a review fold B1): a structural edit that superseded a waiting candidate
+    /// dropped its plan with the commit, and no block will adopt it. The core decides
+    /// ([`control_plane::SessionState::holds_plan_epoch`]); an adopted entry waits for
+    /// [`Self::reclaim_shapes`], which promotes its spectrum first. Control side only: it frees.
+    fn drop_superseded_shapes(&mut self) {
+        let control = &self.control;
+        self.pending_shapes
+            .retain(|entry| entry.adopted || control.holds_plan_epoch(entry.epoch));
     }
 
     /// Promote the plans the render half has adopted (#1290d2; #1395 D3, D5): install each

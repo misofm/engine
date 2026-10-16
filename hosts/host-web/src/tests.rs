@@ -7125,6 +7125,113 @@ mod structural_apply {
         rig.step();
     }
 
+    /// #1310 on a paused page (batch 15a review fold B1): eight structural edits with no render
+    /// between them each commit, each superseding the candidate before it, as on the C ABI. The
+    /// host keeps one table entry per candidate the core holds, so the fifth edit finds room;
+    /// then the next block adopts the newest plan, which holds all eight edits, and from that
+    /// block on the output equals a fresh boot of the committed model.
+    ///
+    /// Test value: red if the host keeps a superseded candidate's tables until a later adoption
+    /// (the fifth paused edit is refused with `BACKPRESSURE`, as before the fold), or if the
+    /// adopted plan misses an edit.
+    #[test]
+    fn paused_structural_edits_all_commit_and_the_newest_renders_as_a_fresh_boot() {
+        const EDITS: u64 = 8;
+        let model = gate_model();
+        let mut rig = Rig::boot(&model, options(), None);
+        for _ in 0..APPLY_BEFORE {
+            rig.step();
+        }
+        let base = rig.host.committed_revision();
+        let mut results = Vec::new();
+        for edit in 0..EDITS {
+            let committed = rig
+                .host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .control
+                .committed_session()
+                .normalized_model()
+                .clone();
+            let edits = add_muted_track(&committed, &format!("a-muted-{edit}"));
+            let (result, response) =
+                rig.entry(&frame(&edits, edit + 1, rig.host.committed_revision()));
+            results.push(result);
+            // A client drains the committed events as it goes, so the event lane never refuses.
+            while rig.host.control_event(EVENT_LANE_RELIABLE) == RESULT_OK
+                && !rig.host.control_response().is_empty()
+            {}
+            if result == RESULT_OK {
+                assert_eq!(
+                    outcome(&response),
+                    Outcome::Applied {
+                        path: EditPath::Rebuild,
+                        revision: base + edit + 1
+                    },
+                    "edit {edit}"
+                );
+            }
+        }
+        assert_eq!(
+            results,
+            vec![RESULT_OK; EDITS as usize],
+            "every paused structural edit commits"
+        );
+        assert_eq!(rig.epoch(), 0, "nothing rendered: the boot plan still runs");
+        assert!(
+            rig.host.ready.as_ref().expect("ready").pending_shapes.len() <= 1,
+            "the host keeps the tables of the one candidate the core holds"
+        );
+        let document = canonical_session_json(
+            rig.host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .control
+                .committed_session()
+                .normalized_model(),
+        )
+        .expect("canonical session");
+        let committed = parse_session_json(&document).expect("the committed model parses");
+        let mut fresh = Rig::boot(&committed, options(), None);
+        for _ in 0..BLOCKS {
+            fresh.step();
+        }
+        let before = rig.watermark();
+        while rig.block < BLOCKS {
+            rig.step();
+        }
+        assert!(!rig.pending(), "render adopted the newest plan");
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(
+            rig.host.live_control_tracks().len(),
+            model.tracks.len() + EDITS as usize,
+            "the adopted plan holds every edit's track"
+        );
+        let watermark = rig.watermark();
+        assert_eq!(watermark.revision, base + EDITS);
+        assert_eq!(
+            watermark.superseded_count,
+            before.superseded_count + EDITS - 1,
+            "the first seven complete as superseded"
+        );
+        assert_eq!(
+            first_difference(
+                &rig.bits[APPLY_BEFORE as usize..],
+                &fresh.bits[APPLY_BEFORE as usize..]
+            ),
+            None,
+            "from the adoption block on, every block equals a fresh boot of the committed model"
+        );
+        assert!(
+            fresh.bits[APPLY_BEFORE as usize..]
+                .iter()
+                .any(|block| block.iter().any(|word| f32::from_bits(*word) != 0.0)),
+            "the compared blocks are not silent"
+        );
+    }
+
     /// #1310 (root ruling Q4) on the browser, the host that admits observation records: a
     /// subscription acked against a candidate that a later structural edit supersedes arms the
     /// replacement and publishes windows there. The replacement carries "track"'s compressor from

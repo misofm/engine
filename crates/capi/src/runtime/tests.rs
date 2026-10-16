@@ -1898,11 +1898,13 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
 /// eight-EQ plan is still pending, and inside the window after the swap. While the eight-EQ plan
 /// is pending the edit would supersede it (#1310), so the running nine-EQ plan, the withdrawn
 /// eight-EQ plan and the new nine-EQ plan are held at once: the three-plan peak is over the limit
-/// and the edit is refused with `effect.resource.limit` (#1310 gate 4). Inside the window the
-/// nine-EQ plan is reclaimed, so the edit sits beside the eight-EQ plan alone and is admitted; its
-/// plan is adopted at the next block, and the report table holds three rows meanwhile. Red if the
-/// lag refusal is kept (`Backpressure`), or if the admission pairs the candidate with the atomic's
-/// retired row (`effect.resource.limit`).
+/// (#1310 gate 4). The edit fits beside the eight-EQ plan alone, which is all a retry meets once
+/// render adopts it, so the refusal is retryable `Backpressure`, not a permanent compile rejection
+/// (batch 15a review fold, item 2). Inside the window the nine-EQ plan is reclaimed, so the edit
+/// sits beside the eight-EQ plan alone and is admitted; its plan is adopted at the next block,
+/// and the report table holds three rows meanwhile. Red if the lag refusal is kept (the window
+/// answers `Backpressure`), if the admission pairs the candidate with the atomic's retired row
+/// (`effect.resource.limit`), or if the three-plan refusal is permanent.
 #[test]
 fn a_valid_edit_inside_the_swap_window_is_admitted_against_the_running_plan() {
     // The fixture's EQ is a console slot on all nine tracks, which a track cannot drop (decision
@@ -1969,7 +1971,8 @@ fn a_valid_edit_inside_the_swap_window_is_admitted_against_the_running_plan() {
     );
     let request = edit(2, 43, &put_back);
     // Before the swap the eight-EQ plan is still pending: superseding it would hold three plans,
-    // which the limit refuses; the eight-EQ plan is republished and adopted below.
+    // which the limit refuses until a render adopts it, so the refusal is retryable; the
+    // eight-EQ plan is republished and adopted below.
     let pending = children.session.command(&request, 4_096);
 
     // First half of `PlanState::render`: swap to the eight-EQ plan.
@@ -2010,9 +2013,7 @@ fn a_valid_edit_inside_the_swap_window_is_admitted_against_the_running_plan() {
             children.session.test_controller().session().revision().0,
         ),
         (
-            control_outcome::<(), _>(&Err(CommandError::CompileRejected(
-                crate::runtime::CompileFailure::Diagnostics(b"effect.resource.limit\t$\n".to_vec())
-            ))),
+            control_outcome::<(), _>(&Err(CommandError::Backpressure)),
             "ok".to_owned(),
             44,
             vec![0, 1, 2],

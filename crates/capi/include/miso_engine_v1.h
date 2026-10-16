@@ -206,11 +206,19 @@ extern "C" {
  * render (a paused host never adopts one) commits as any other: it is never refused as
  * backpressure because a replacement waits. The engine takes the waiting replacement back,
  * prepares one plan that carries both transactions against the plan that renders, and publishes
- * it; nothing of the earlier transaction is lost. A source the earlier transaction added keeps
- * playing: the PCM accepted for it and a seek or seek_at queued on it move into the new plan, so
- * the host neither refeeds nor reseeks it. Should the new transaction be refused (for example
- * for a resource cap, which now counts the running plan, the waiting replacement and the new
- * one), the waiting replacement stays published unchanged. When render adopts the new plan, the
+ * it; nothing of the earlier transaction is lost. A source the new plan keeps from the waiting
+ * replacement or from the plan that renders keeps playing: the PCM accepted for it and a seek or
+ * seek_at queued on it move into the new plan, so the host neither refeeds nor reseeks it. One
+ * case is not covered yet: a source or owner that the earlier transaction restarted or removed
+ * and the new one puts back in its form in the plan that renders starts fresh in the new plan (a
+ * source at generation 1, frame 0, as an added one, and the host restarts its feed). That gap
+ * closes with the successor issue "Carry an owner or source a superseding candidate keeps
+ * unchanged from P0 from P0's state". Should the new transaction be refused, the waiting
+ * replacement stays published unchanged. A resource cap counts the running plan, the waiting
+ * replacement and the new one; a refusal that a render clears (the new plan fits beside the
+ * waiting replacement's plan alone, which is all a retry meets once render adopts it) is
+ * MISO_ENGINE_V1_BACKPRESSURE, and one that cannot fit even then is
+ * MISO_ENGINE_V1_COMPILE_REJECTED with the cap's diagnostic. When render adopts the new plan, the
  * watermark advances to its revision with MISO_ENGINE_V1_OUTCOME_SUPERSEDED set, and
  * superseded_count grows by the revisions the earlier replacements carried.
  *
@@ -304,9 +312,12 @@ typedef struct miso_engine_v1_compile_limits {
        own: the running plan, and at most a withdrawn candidate and its successor, so up to three
        plans live at once. Set each of these caps to at least three times one plan's row (the
        matching field of miso_engine_v1_plan_resource_report, for the largest session the host
-       will compile), and maximum_graph_session_plus_plan_bytes to that plus three compiled
-       models. A cap below that refuses a transaction with a resource diagnostic before it
-       commits; it is never backpressure, and nothing is acknowledged. */
+       will compile, read while a successor plan of it runs: such a plan carries its sources and
+       owns their rings), and maximum_graph_session_plus_plan_bytes to that plus three compiled
+       models. A cap below that refuses a transaction before it commits, and nothing is
+       acknowledged: with MISO_ENGINE_V1_BACKPRESSURE while only the three-plan peak is over the
+       cap (the transaction fits beside the newest plan alone, so a retry after a render can
+       commit), else with MISO_ENGINE_V1_COMPILE_REJECTED and a resource diagnostic. */
     uint64_t maximum_graph_session_plus_plan_bytes;
     uint64_t maximum_source_total_bytes;
     uint64_t maximum_source_overhead_bytes;

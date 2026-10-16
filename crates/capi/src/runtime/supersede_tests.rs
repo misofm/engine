@@ -335,11 +335,14 @@ fn assert_balanced(label: &str, counters: TestOwnerCounters) {
 /// (`BeforeProtocolCommit`) and the commit's own included: the refusal changes no committed or
 /// published state, the candidate is republished each time it was withdrawn, a retried T2
 /// supersedes it and renders as a supersession nothing refused, and every owner and reservation
-/// balances once both handles are gone.
+/// balances once both handles are gone. Last, the withdrawn candidate is itself a replacement
+/// with a nonzero `superseded` word (batch 15a review fold m4): the refusal republishes it with
+/// that word, and a retry's word counts every revision both candidates folded in.
 ///
 /// Test value: red if a refusal after the withdrawal drops or leaks the candidate (the next block
-/// is P0's, or an owner stays undisposed), or if a donation runs before the commit (the fault
-/// between the check and the commit would leave the candidate without its rings).
+/// is P0's, or an owner stays undisposed), if a donation runs before the commit (the fault
+/// between the check and the commit would leave the candidate without its rings), or if a
+/// republished replacement loses its `superseded` word (T1 then never completes).
 #[test]
 fn a_refused_replacement_restores_the_withdrawn_candidate() {
     use TestStructuralFaultPhase::{
@@ -467,15 +470,68 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
             control_plane::test_lifecycle_counters(),
         );
     }
+
+    // Batch 15a review fold m4: the withdrawn candidate is itself a replacement, B, whose
+    // `superseded` word counts T1. T3 is refused after B was withdrawn; B is republished with its
+    // word, so the block that adopts it completes T1 as superseded and T2 as exact. Then a retried
+    // T3 supersedes B, and its word counts T1 and T2.
+    let third = [put(&model, 0, compressor())];
+    for retry in [false, true] {
+        control_plane::test_reset_lifecycle_observer();
+        let mut children = pending(limits());
+        let before = children.plan.queries().watermark().expect("watermark");
+        commit(&mut children, 2, 43, &second);
+        children
+            .session
+            .test_set_structural_faults([Some(BeforeProtocolCommit), None]);
+        let refused = children.session.command(&transaction(3, 44, &third), 4_096);
+        assert!(
+            matches!(refused, Err(CommandError::Backpressure)),
+            "retry {retry}: {refused:?}"
+        );
+        let counters = children.session.test_owner_counters();
+        assert_eq!(
+            (counters.candidate_withdrawn, counters.candidate_republished),
+            (2, 1),
+            "retry {retry}: B was withdrawn and republished"
+        );
+        if retry {
+            commit(&mut children, 4, 44, &third);
+        }
+        render_direct(&mut children, 1);
+        let adopted = children.plan.queries().watermark().expect("watermark");
+        let folded = if retry { 2 } else { 1 };
+        assert_eq!(adopted.revision, 44 + u64::from(retry), "retry {retry}");
+        assert_eq!(
+            adopted.outcome_flags,
+            engine::realtime::OUTCOME_EXACT | engine::realtime::OUTCOME_SUPERSEDED,
+            "retry {retry}"
+        );
+        assert_eq!(
+            (adopted.superseded, adopted.exact),
+            (before.superseded + folded, before.exact + 1),
+            "retry {retry}: the republished word completes every revision it folded in"
+        );
+        children.session.service().expect("service");
+        drop(children);
+        assert_balanced(
+            &format!("m4 retry {retry}"),
+            control_plane::test_lifecycle_counters(),
+        );
+    }
 }
 
 /// Gate 4: the replacement admission holds the running plan, the withdrawn candidate and the
 /// replacement at once (#1310 D3, #1398 D4). With a graph cap above every two-plan peak and below
-/// that three-plan peak, T2 behind a pending T1 is refused with `graph.resource.limit`, the
-/// revision stays T1's and T1's candidate renders; once it is adopted the same T2 commits.
+/// that three-plan peak, T2 behind a pending T1 is refused, the revision stays T1's and T1's
+/// candidate renders; once it is adopted the same T2 commits. T2 fits beside T1's plan alone, so
+/// the refusal is retryable `BACKPRESSURE` (batch 15a review fold, item 2). With a cap that admits
+/// T1 beside the running plan but not T2 beside T1's plan, the refusal is the permanent
+/// `graph.resource.limit`, before and after T1's plan is adopted.
 ///
-/// Test value: red if a three-plan peak is admitted beyond the cap, or if the refusal loses the
-/// withdrawn candidate.
+/// Test value: red if a three-plan peak is admitted beyond the cap, if the refusal loses the
+/// withdrawn candidate, if a refusal a render clears is permanent, or if one no render clears is
+/// retryable.
 #[test]
 fn a_replacement_over_the_three_plan_ceiling_is_refused_and_the_candidate_kept() {
     let model = stateless_session(48_000);
@@ -530,16 +586,45 @@ fn a_replacement_over_the_three_plan_ceiling_is_refused_and_the_candidate_kept()
     let refused = children
         .session
         .command(&transaction(2, 43, &second), 4_096);
-    let Err(CommandError::CompileRejected(failure)) = &refused else {
-        panic!("a compile rejection, not {refused:?}")
-    };
-    assert_eq!(&*failure.diagnostic(), b"graph.resource.limit\t$\n");
+    assert!(
+        matches!(refused, Err(CommandError::Backpressure)),
+        "a refusal a render clears is retryable, not {refused:?}"
+    );
     assert_eq!(revision(&children), 43);
     submit_direct(&mut children, &[ADDED], 0);
     submit_direct(&mut children, &[FIXTURE, ADDED], 1);
     let rendered = render_direct(&mut children, 1);
     assert_eq!(bits(&rendered), bits(&twin), "A was republished");
     commit(&mut children, 3, 43, &second);
+
+    // A cap that admits A beside P0 but not B beside A: no render clears it.
+    let a_beside_p0 = p0.0 + a.0 + p0.1 + a.1;
+    let b_beside_a = a.0 + b.0 + a.1 + b.1;
+    assert!(
+        a_beside_p0 < b_beside_a,
+        "{a_beside_p0} against {b_beside_a}"
+    );
+    let mut limits = crate::runtime::tests::limits();
+    limits.maximum_graph_session_plus_plan_bytes = a_beside_p0;
+    let mut children = compile(&model, limits);
+    submit_direct(&mut children, &[FIXTURE], 0);
+    render_direct(&mut children, 0);
+    commit(&mut children, 1, 42, &first);
+    for (request, label) in [(2, "while A waits"), (3, "once A runs")] {
+        let refused = children
+            .session
+            .command(&transaction(request, 43, &second), 4_096);
+        let Err(CommandError::CompileRejected(failure)) = &refused else {
+            panic!("{label}: a compile rejection, not {refused:?}")
+        };
+        assert_eq!(
+            &*failure.diagnostic(),
+            b"graph.resource.limit\t$\n",
+            "{label}"
+        );
+        assert_eq!(revision(&children), 43, "{label}");
+        render_direct(&mut children, request - 1);
+    }
 }
 
 /// Gate 6: P0 has sources `s` and `u`. T1 changes `u`'s track's insert, so its candidate A
@@ -782,4 +867,143 @@ fn a_solo_committed_while_a_candidate_waits_holds_on_its_replacement() {
         &combined,
     );
     assert_same_blocks("solo", &superseded, &twin);
+}
+
+/// #1310 (D3 with root ruling Q3, the live path's merge): T1 is pending, a live edit moves `t4`'s
+/// fader with its own ramp length on T1's lanes, and T2 supersedes T1. The replacement carries
+/// `t4` from the running plan and retargets its fader at the live edit's ramp length: exactly
+/// what one transaction holding T1, the fader edit and T2 renders.
+///
+/// Test value: red if a live edit committed while a candidate waits does not join the kept base's
+/// ramp lengths (the live path's merge deleted): the replacement then ramps `t4`'s fader with the
+/// session default where the combined transaction ramps it over one sample.
+#[test]
+fn a_live_ramp_committed_while_a_candidate_waits_holds_on_its_replacement() {
+    let mut model = with_t4(stateless_session(48_000));
+    model.tracks[1].inserts.effects.push(compressor());
+    let first = vec![put(&model, 0, compressor())];
+    let live = t4_fader(-6.0, -9.0, Some(1));
+    let second = vec![put(&model, 1, gate())];
+    let combined: Vec<SessionEdit> = first.iter().chain(&live).chain(&second).cloned().collect();
+    let run = |superseding: bool| {
+        let mut children = compile(&model, limits());
+        submit_direct(&mut children, &[FIXTURE], 0);
+        let mut blocks = vec![render_direct(&mut children, 0)];
+        if superseding {
+            commit(&mut children, 1, 42, &first);
+            let pending = children.session.test_pending_providers()[0].test_epoch();
+            commit(&mut children, 2, 43, &live);
+            assert_eq!(
+                children.session.test_pending_providers()[0].test_epoch(),
+                pending,
+                "the fader edit rode the candidate's live lanes"
+            );
+            commit(&mut children, 3, 44, &second);
+            assert_eq!(
+                children.session.test_owner_counters().candidate_superseded,
+                1,
+                "T2 superseded T1"
+            );
+        } else {
+            commit(&mut children, 1, 42, &combined);
+        }
+        for block in 1..9 {
+            submit_direct(&mut children, &[FIXTURE], block);
+            blocks.push(render_direct(&mut children, block));
+        }
+        blocks
+    };
+    assert_same_blocks("live ramp", &run(true), &run(false));
+}
+
+/// Renders block `block` as the first half of `PlanState::render` does: the owner swaps to a
+/// published candidate and retires the plan it displaced, but the atomic the control plane reads
+/// is not published (a render call preempted before it returns).
+fn render_unpublished(children: &mut CompiledChildren, block: u64) -> Vec<f32> {
+    let mut pcm = vec![f32::NAN; 256];
+    children
+        .plan
+        .test_owner_mut()
+        .render_contiguous(
+            RenderIo {
+                output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
+            },
+            block * 128,
+        )
+        .expect("block");
+    pcm
+}
+
+/// Batch 15a review fold M1: render claims candidate A and is preempted before A's predecessor
+/// reaches the control side, so a structural edit C finds A taken but cannot promote it; C
+/// publishes B on A. Render then adopts B as well, and edit D finds B taken with A still pending.
+/// Each edit that finds the newest candidate taken promotes every pending candidate up to it, so
+/// D commits, the blocks equal a run whose renders each published their epoch, and once the
+/// retirements reach the control side every plan and owner is accounted for.
+///
+/// Test value: red if a taken candidate stays pending until its predecessor's retirement is
+/// reclaimed: D then meets two pending candidates and a full pending list, the accounting fault
+/// of #1398 D3 (`debug_assert!`, `INTERNAL`).
+#[test]
+fn edits_after_render_took_two_candidates_unretired_each_commit() {
+    let model = stateless_session(48_000);
+    let edits = [
+        add_source_track(&model).to_vec(),
+        vec![put(&model, 1, compressor())],
+        vec![put(&model, 2, compressor())],
+    ];
+    let run = |race: bool| {
+        control_plane::test_reset_lifecycle_observer();
+        let mut children = compile(&model, limits());
+        let mut blocks = Vec::new();
+        submit_direct(&mut children, &[FIXTURE], 0);
+        blocks.push(render_direct(&mut children, 0));
+        control_plane::test_hold_reclamation(race);
+        for (index, edits) in edits.iter().enumerate() {
+            let block = index as u64 + 1;
+            commit(&mut children, block, 41 + block, edits);
+            if index == 0 {
+                submit_direct(&mut children, &[ADDED], 0);
+            } else {
+                submit_direct(&mut children, &[ADDED], block - 1);
+            }
+            submit_direct(&mut children, &[FIXTURE], block);
+            blocks.push(if race {
+                render_unpublished(&mut children, block)
+            } else {
+                render_direct(&mut children, block)
+            });
+        }
+        if race {
+            let counters = children.session.test_owner_counters();
+            assert_eq!(
+                (counters.candidate_taken, counters.candidate_withdrawn),
+                (2, 0),
+                "both later edits found the newest candidate taken"
+            );
+        }
+        control_plane::test_hold_reclamation(false);
+        submit_direct(&mut children, &[FIXTURE], 4);
+        submit_direct(&mut children, &[ADDED], 3);
+        blocks.push(render_direct(&mut children, 4));
+        children.session.service().expect("service");
+        assert_eq!(revision(&children), 45);
+        assert!(children.session.test_pending_providers().is_empty());
+        assert!(children.session.test_retired_providers().is_empty());
+        drop(children);
+        assert_balanced(
+            if race { "race" } else { "paced" },
+            control_plane::test_lifecycle_counters(),
+        );
+        blocks
+    };
+    let paced = run(false);
+    let raced = run(true);
+    assert!(
+        paced[3].iter().any(|sample| *sample != 0.0),
+        "the compared blocks play"
+    );
+    for (block, (actual, expected)) in raced.iter().zip(&paced).enumerate() {
+        assert_eq!(bits(actual), bits(expected), "block {block}");
+    }
 }

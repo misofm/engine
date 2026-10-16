@@ -295,3 +295,31 @@ configuration (`PlanExchangeConfig`), read at boot.
 #1398 D1's tables). No test pinned that row; no browser pin moved.
 
 Root ruling (2026-10-15): gate 3 and `AdmissionPeak::WithReprepare` are dropped from this slice: code with no production caller is a placeholder. #1403 adds the reprepare peak together with its first caller.
+
+**Review fold (batch 15a).**
+- *M2 (D4 "a carried ring counted once").* `validate_replacement_peak` subtracted only the new
+  candidate's carried bytes, while a held candidate's row also holds rings it carried from the
+  running plan. Each provider epoch now keeps its `CarriedSourceBytes`, `LiveEpochResources`
+  carries it, and the source-total and source-overhead sums (and so the replacement-peak term)
+  subtract it for every held epoch after the running one. Gate 2 adds a middle row carrying 13
+  source bytes (5 overhead) and a running row carrying 2 (1): each cap passes at the peak and
+  refuses one byte below; red when every held row's carried bytes are left in. Measured on the
+  nine-track EQ reference session (T1 adds a source track, T2 a compressor; P0 12,198, A 23,282
+  of which 10,640 carried): the smallest admitting `maximum_source_total_bytes` moves 48,122 ->
+  37,482, the three-plan sum with each carried ring once (12,198 + 12,642 + 12,642).
+- *M1 (with #1310).* The D3 accounting fault could fire after two `Taken` outcomes in a race; a
+  structural edit now promotes every pending candidate up to a taken newest one before it rebuilds,
+  so the report table and the pending list never meet more than D1 sizes (see #1310's fold).
+- *Item 2.* A refusal at the three-plan peak is `BACKPRESSURE` when the edit fits beside the newest
+  held plan alone; `COMPILE_REJECTED` only otherwise (see #1310's fold). The header's sizing
+  paragraph says so, and says the rule is measured from a running successor plan's row.
+- *m5.* The `held_epochs` doc no longer claims a displaced plan is reclaimed before any admission:
+  it is not charged, and between render's swap and the next service step it lives beside the held
+  plans uncharged.
+- *m6.* `capi_retained_bytes` on the reference session is 165,842 at the batch 15a head and 165,922
+  after this fold (x86-64; +80, which matches the 16-byte carried field in five provider-epoch
+  slots; measured with part B's uncommitted host-core and source edits in the tree), within
+  the 175,296 ceiling of `resource_lifecycle.rs`; the 161,258 above was not the head figure.
+  `C_ABI_V1_QUALIFICATION.md` states both and no longer says #1310's boot row "does not move" or
+  that a full plan queue is backpressure (it is `INTERNAL` since D3). The four-lane
+  `builtin_bank_bytes` comment cites AArch64 CI job 116713280504 (`12969 of 21056`).

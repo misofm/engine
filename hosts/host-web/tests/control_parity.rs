@@ -3029,3 +3029,76 @@ fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
         );
     }
 }
+
+/// #1310 on a paused host (batch 15a review fold B1): eight structural edits with no render
+/// between them each commit on both hosts, each superseding the candidate before it, and from the
+/// block that adopts the newest plan the two hosts render the same bits.
+///
+/// Test value: red if one host refuses a paused structural edit the other commits (the browser
+/// kept a superseded candidate's tables until a later adoption and refused the fifth edit with
+/// `BACKPRESSURE`), or if the two hosts adopt different plans.
+#[test]
+fn paused_structural_edits_commit_alike_on_both_hosts() {
+    const EDITS: u64 = 8;
+    const PAUSE_AT: u64 = 2;
+    for rate in [48_000, 96_000] {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        for block in 0..PAUSE_AT {
+            let b = browser.step(block);
+            assert_eq!(b, c_abi.step(block), "{rate} Hz: block {block}");
+        }
+        let routes: Vec<session::Route> = model
+            .routes
+            .iter()
+            .filter(|route| {
+                matches!(
+                    &route.source,
+                    session::RouteSource::Track { track_id, .. } if track_id.as_str() == T1.id
+                )
+            })
+            .cloned()
+            .collect();
+        assert!(!routes.is_empty(), "t1 routes somewhere");
+        for edit in 0..EDITS {
+            // A copy of `t1` with no insert, on `t1`'s source, routed as `t1` is.
+            let mut track = model.tracks[T1.index as usize].clone();
+            track.id = id(&format!("p{edit}"));
+            track.inserts.effects.clear();
+            let mut edits = vec![SessionEdit::UpsertTrack {
+                track: track.clone(),
+            }];
+            for (index, route) in routes.iter().enumerate() {
+                let mut route = route.clone();
+                route.id = id(&format!("p{edit}-r{index}"));
+                let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+                    unreachable!("filtered on a track source")
+                };
+                *track_id = track.id.clone();
+                edits.push(SessionEdit::UpsertRoute { route });
+            }
+            let (b_verdict, _) = browser.transaction_reply(&edits);
+            let (c_verdict, _) = c_abi.transaction(&edits);
+            c_abi.drain_reliable();
+            assert_eq!(
+                b_verdict,
+                Verdict::Applied {
+                    path: EditPath::Rebuild,
+                    revision: model.revision + edit + 1
+                },
+                "{rate} Hz: paused edit {edit} commits on the browser"
+            );
+            assert_eq!(b_verdict, c_verdict, "{rate} Hz: paused edit {edit}");
+        }
+        for block in PAUSE_AT..PAUSE_AT + 8 {
+            let b = browser.step(block);
+            assert_eq!(b, c_abi.step(block), "{rate} Hz: block {block}");
+        }
+        assert_eq!(
+            browser.host.live_control_tracks().len(),
+            model.tracks.len() + EDITS as usize,
+            "{rate} Hz: the browser adopted the plan of every edit"
+        );
+    }
+}

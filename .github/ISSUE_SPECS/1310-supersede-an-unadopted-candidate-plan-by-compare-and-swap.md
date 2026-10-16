@@ -418,3 +418,57 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
    the change between the kept overlay and its own with it. Test `a_solo_committed_while_a_
    candidate_waits_holds_on_its_replacement` (capi): equal to one transaction of T1, the solo and
    T2; red with the current overlay as the base and red without the kept ramp.
+
+**Review fold (batch 15a).**
+- *B1 (host difference).* A paused browser page refused the fifth structural edit with
+  `BACKPRESSURE` (probe: eight add-track transactions without render gave `[OK,OK,OK,OK,6]`)
+  where the C ABI commits: a superseded candidate's `PendingShape` stayed until a later adoption.
+  The core now says which plans it holds (`SessionState::holds_plan_epoch`), and the browser drops
+  the tables and spectrum captures of every unadopted entry whose epoch the core no longer holds,
+  after each publishing command and in `reclaim_shapes` (`drop_superseded_shapes`); it decides
+  nothing itself. The `PENDING_SHAPES` comment is corrected. Tests: host-web
+  `structural_apply::paused_structural_edits_all_commit_and_the_newest_renders_as_a_fresh_boot`
+  (eight paused edits all OK, the adopted plan holds all eight tracks, superseded count +7, equal
+  to a fresh boot of the committed model from the adoption block) and parity row
+  `control_parity::paused_structural_edits_commit_alike_on_both_hosts` (48 and 96 kHz); both red
+  with the drop disabled (`[0,0,0,0,6,6,6,6]`; parity: `control.plan.backpressure`).
+- *M1 (with #1398 D3).* Render claims A and is preempted before P0's retirement reaches control;
+  C finds A `Taken` and publishes B on it; render adopts B; D finds B `Taken` with `[A, B]`
+  pending and hit the D3 accounting fault. `withdraw_pending_candidate` now promotes every pending
+  epoch up to the newest on `Taken`, or on an empty mailbox while one is pending (render adopts in
+  publication order), so a rebuild meets at most the one candidate it may supersede; the dead
+  older-epoch loop in the non-superseding branch is a `debug_assert`. New control-plane seam
+  `test_hold_reclamation` (test-support) keeps displaced plans in the retirement queue. Test capi
+  `supersede_tests::edits_after_render_took_two_candidates_unretired_each_commit`: two `Taken`,
+  blocks bit-equal to a paced run, every owner balanced; red without the promotion (the D3
+  `debug_assert`).
+- *Item 2 (coordinator default, root approved).* A three-plan refusal is `BACKPRESSURE` when the
+  successor fits beside the newest held plan alone and the committed model (what a retry meets
+  after render adopts the candidate), and `COMPILE_REJECTED` only when it cannot fit even then.
+  The second check charges the candidate's rows as prepared, so a ring it takes by donation is
+  counted twice there: it errs toward the permanent refusal by at most those rings' bytes, never
+  toward an admission. Tests: gate 4 now expects `Backpressure` at a cap between the two- and
+  three-plan peaks and adds a cap between P0+A and A+B that gives `graph.resource.limit` before
+  and after A is adopted; `runtime::tests::a_valid_edit_inside_the_swap_window_is_admitted_
+  against_the_running_plan` expects `Backpressure` for the pending case (each red against the
+  other behavior). Header, `C_ABI_V1_QUALIFICATION.md` and `CONTROL_PROTOCOL_SEMANTICS.md` say so.
+- *m3.* Test capi `a_live_ramp_committed_while_a_candidate_waits_holds_on_its_replacement`: T1
+  pending, a live `t4` fader edit with a one-sample ramp on A's lanes, T2 supersedes; equal to one
+  transaction of all three; red with the live path's kept-ramps merge deleted.
+- *m4.* Gate 3 adds a case whose withdrawn candidate is B (superseded word 1): a fault before the
+  protocol commit republishes B, whose adoption completes T1 as superseded and T2 as exact; a
+  retried T3 completes two as superseded. Red with `PlanPublisher::republish` writing a zero word
+  (checked in a scratch copy outside the worktree; no edit under `crates/engine/src/realtime/`).
+- *m5.* The `newest_providers` doc moved off `kept_holder`; `held_models` refuses a kept model with
+  no row (`debug_assert!` and `INTERNAL`) instead of skipping it; the `synchronize_plan_epochs` and
+  `promote_pending_provider` comments name every pending candidate.
+- *Header gap.* The header's "neither refeeds nor reseeks" holds for every source the new plan
+  keeps from the waiting replacement or from the running plan, except one case: a source or owner
+  that A restarted or removed and B reverts to its P0 form starts fresh in B. That gap closes with
+  the successor issue "Carry an owner or source a superseding candidate keeps unchanged from P0
+  from P0's state".
+- *Edits outside the original authorized paths, and who accepted them.*
+  `crates/session/src/edit_ramp.rs` (coordinator, under Q3); `hosts/host-web/src/lib.rs`
+  (coordinator, under Q4); `crates/engine/src/realtime/plan_exchange.rs`, the reservation
+  accessors (one attempt, accepted by root on 2026-10-16); `crates/capi/src/runtime/mod.rs`
+  (mechanical).

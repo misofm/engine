@@ -74,11 +74,18 @@ pub struct CapiResources {
 ///
 /// The successor's [`PlanResources`] count them in its source rows, because it owns those
 /// rings once active; until the swap the running plan owns them, so the double-live admission
-/// subtracts them from the successor's rows and counts each carried ring once.
+/// subtracts them from the successor's rows and counts each carried ring once. A pending
+/// candidate keeps its own (`LiveEpochResources::carried`), so a ring two held plans and the
+/// candidate share is counted once across all three (#1398 D4, batch 15a review fold M2).
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct CarriedSourceBytes {
-    pub(crate) total: u64,
-    pub(crate) overhead: u64,
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub struct CarriedSourceBytes {
+    /// The carried rings' share of `source_total_bytes`.
+    pub total: u64,
+    /// The carried rings' share of `source_overhead_bytes`.
+    pub overhead: u64,
 }
 
 /// Every compiled model's charge while a prospective session lives beside the ones the control
@@ -814,7 +821,8 @@ pub(crate) fn controller_retained_capacity(
 pub(crate) struct ProspectivePlan {
     /// The candidate's plan row: what it owns once active, carried rings included.
     pub(crate) resources: PlanResources,
-    /// The part of its source rows it carries from the newest held plan (#1273 D5).
+    /// The part of its source rows it carries from the plan it was prepared to displace (#1273
+    /// D5): the newest held plan, or across a withdrawn candidate the running one (#1310 D2).
     pub(crate) carried: CarriedSourceBytes,
     /// The capi resources it was prepared with.
     pub(crate) capi: CapiResources,
@@ -827,7 +835,8 @@ pub(crate) struct ProspectivePlan {
 /// plan, then every pending or withdrawn candidate. It is never empty. `compiled_models` charges
 /// every model the control plane holds plus the prospective one. Each term is the sum over the
 /// held plans plus the candidate, against its own cap: graph plus models, the source totals and
-/// overheads (a ring the candidate carries from the newest plan counted once, there), the
+/// overheads (a carried ring counted once, in the plan it was carried from: the candidate's and
+/// every held epoch's but the running one's carried bytes leave their rows), the
 /// replacement peak (graph, models and allocated source bytes, #1290a D3), effect state and
 /// scratch, builtins, and the control plane's retained bytes (the newest plan's row, which holds
 /// the session's fixed rows once, every older held epoch's own rows, and the candidate's epoch and
@@ -851,9 +860,28 @@ pub(crate) fn validate_replacement_peak(
             .and_then(|total| total.checked_add(candidate))
             .ok_or_else(arithmetic)
     };
-    // Issue #1273 D5: a carried ring is the newest held plan's until the swap, so the peak counts
-    // it once, there.
+    // Issue #1273 D5: a carried ring is the plan's it was carried from until the swap, so the peak
+    // counts it once, there: the candidate's carried bytes leave its row, and every held epoch
+    // after the running one leaves its own (#1398 D4: a ring a pending candidate carried from the
+    // running plan is the running plan's).
     let allocated = |row: u64, carried: u64| row.checked_sub(carried).ok_or_else(arithmetic);
+    let source_peak = |field: fn(&PlanResources) -> u64,
+                       carried: fn(&CarriedSourceBytes) -> u64,
+                       candidate: u64| {
+        held.iter()
+            .enumerate()
+            .try_fold(0_u64, |total, (index, epoch)| {
+                let row = field(&epoch.report);
+                let own = if index == 0 {
+                    Some(row)
+                } else {
+                    row.checked_sub(carried(&epoch.carried))
+                };
+                own.and_then(|own| total.checked_add(own))
+            })
+            .and_then(|total| total.checked_add(candidate))
+            .ok_or_else(arithmetic)
+    };
     let candidate = prospective.resources;
     let graph_peak = peak(
         |row| row.graph_session_plus_plan_bytes,
@@ -864,13 +892,15 @@ pub(crate) fn validate_replacement_peak(
     if graph_peak > limits.maximum_graph_session_plus_plan_bytes {
         return Err(diagnostic("graph.resource.limit"));
     }
-    let source_total = peak(
+    let source_total = source_peak(
         |row| row.source_total_bytes,
+        |carried| carried.total,
         allocated(candidate.source_total_bytes, prospective.carried.total)?,
     )?;
     if source_total > limits.maximum_source_total_bytes
-        || peak(
+        || source_peak(
             |row| row.source_overhead_bytes,
+            |carried| carried.overhead,
             allocated(
                 candidate.source_overhead_bytes,
                 prospective.carried.overhead,
@@ -949,6 +979,11 @@ pub struct LiveEpochResources {
     pub report: PlanResources,
     /// The capi resources the epoch's plan was prepared with.
     pub capi: CapiResources,
+    /// The part of the report's source rows the epoch's plan carries from the plan it was
+    /// prepared to displace (#1273 D5): zero for the boot plan. The replacement admission
+    /// subtracts it for every held epoch after the running one, whose carried rings belong to the
+    /// plan before it while both are held (#1398 D4, batch 15a review fold M2).
+    pub carried: CarriedSourceBytes,
 }
 
 /// The live arm's admission (#1053 D8, #1257 D5, #1398 D4): may the prospective compiled model
@@ -1512,6 +1547,15 @@ mod admission_tests {
                 prepared_protocol_retained: 9 * base,
                 largest: base,
             },
+            carried: CarriedSourceBytes::default(),
+        }
+    }
+
+    /// [`epoch`] carrying `total` source bytes, `overhead` of them overhead, from the plan before.
+    fn carrying(base: u64, total: u64, overhead: u64) -> LiveEpochResources {
+        LiveEpochResources {
+            carried: CarriedSourceBytes { total, overhead },
+            ..epoch(base)
         }
     }
 
@@ -1608,8 +1652,9 @@ mod admission_tests {
 
     /// The peak of each cap in [`CAPS`] for `held` (in base units, running plan first) beside a
     /// candidate of base `candidate`, with `models` retained model bytes, spelled out term by
-    /// term.
-    fn peaks(held: &[u64], candidate: u64, models: u64) -> [u64; 9] {
+    /// term. `carried` is the source total and overhead bytes every held epoch but the running
+    /// one carries from the plan before it, summed: each carried ring is counted once.
+    fn peaks(held: &[u64], candidate: u64, models: u64, carried: (u64, u64)) -> [u64; 9] {
         let sum =
             |factor: u64| held.iter().map(|base| factor * base).sum::<u64>() + factor * candidate;
         let graph = sum(1) + models;
@@ -1618,9 +1663,9 @@ mod admission_tests {
             7 * newest + older.iter().map(|base| 8 * base).sum::<u64>() + (8 + 9) * candidate;
         [
             graph,
-            sum(3),
-            sum(2),
-            graph + sum(3),
+            sum(3) - carried.0,
+            sum(2) - carried.1,
+            graph + sum(3) - carried.0,
             sum(4),
             sum(5),
             sum(6),
@@ -1658,9 +1703,13 @@ mod admission_tests {
 
     /// Gate 2. Three held plans and three models (two held, one prospective): each cap one byte
     /// below the sum refuses with its diagnostic, and at the sum passes; the largest allocation
-    /// folds every held row. With one held plan the peaks are today's: the running plan beside
-    /// the candidate. Test value: an admission that forgets a held plan or model (a missing third
-    /// term) passes one byte over the cap.
+    /// folds every held row. A held candidate's carried rings are counted once, in the plan they
+    /// were carried from: the middle row's carried bytes leave the source sums, the running plan's
+    /// do not (it owns its rings). With one held plan the peaks are today's: the running plan
+    /// beside the candidate. Test value: an admission that forgets a held plan or model (a missing
+    /// third term) passes one byte over the cap; one that subtracts only the candidate's carried
+    /// bytes (batch 15a review fold M2) refuses the source caps at the peak, and one that also
+    /// subtracts the running plan's admits one byte below it.
     #[test]
     fn the_replacement_admission_sums_every_held_plan_and_model() {
         let models = compiled_model_admission_over(
@@ -1677,7 +1726,17 @@ mod admission_tests {
             &held,
             prospective,
             models,
-            peaks(&[1, 10, 100], 1_000, models.retained_bytes),
+            peaks(&[1, 10, 100], 1_000, models.retained_bytes, (0, 0)),
+        );
+        // The middle row carries 13 source bytes (5 of them overhead) and the running row 2 (1):
+        // only the middle row's leave the sums.
+        let carrying_held = [carrying(1, 2, 1), carrying(10, 13, 5), epoch(100)];
+        assert_each_cap(
+            "three held, a carrying candidate",
+            &carrying_held,
+            prospective,
+            models,
+            peaks(&[1, 10, 100], 1_000, models.retained_bytes, (13, 5)),
         );
         // Today's check, for the same candidate beside the running plan alone.
         let today =
@@ -1687,7 +1746,7 @@ mod admission_tests {
             &held[..1],
             prospective,
             today,
-            peaks(&[1], 1_000, today.retained_bytes),
+            peaks(&[1], 1_000, today.retained_bytes, (0, 0)),
         );
         // The largest allocation: a middle held plan's is the strict maximum.
         let mut middle = epoch(10);

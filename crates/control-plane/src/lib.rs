@@ -73,14 +73,16 @@ pub use plan::{PlanQueries, PlanState};
 
 #[cfg(feature = "test-support")]
 pub use compile::{
-    CapiResources, CompiledModelAdmission, LiveCatalogAdmission, LiveEpochResources,
-    observation_binding_table_bytes, observation_reserve_bytes, prepare_caps, validate_live_peak,
+    CapiResources, CarriedSourceBytes, CompiledModelAdmission, LiveCatalogAdmission,
+    LiveEpochResources, observation_binding_table_bytes, observation_reserve_bytes, prepare_caps,
+    validate_live_peak,
 };
 #[cfg(feature = "test-support")]
 pub use control::{
     EffectCellRow, ProviderEpoch, TestOwnerCounters, TestOwnerState, TestStructuralFaultPhase,
-    TestTransactionSnapshot, test_force_full_preparation, test_lifecycle_counters,
-    test_reset_lifecycle_observer, test_take_in_place_counts, test_verify_catalog_stages,
+    TestTransactionSnapshot, test_force_full_preparation, test_hold_reclamation,
+    test_lifecycle_counters, test_reset_lifecycle_observer, test_take_in_place_counts,
+    test_verify_catalog_stages,
 };
 
 pub(crate) use compile::*;
