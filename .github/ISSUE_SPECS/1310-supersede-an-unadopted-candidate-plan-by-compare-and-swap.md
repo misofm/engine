@@ -246,7 +246,7 @@ Checked against `e2f6cfb24`.
 **Batch order (root, 2026-10-15).** Batch 15a is the controls lane: #1344, #1398, #1310, in
 that order. #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288,
 #1391, #1363 and #1325, in that order. The rest of batch 15 follows. #1319 and #1323 need this
-slice (root rulings R4 and R5 of 2026-10-15).
+slice (root rulings B15-R4 and B15-R5 of 2026-10-15).
 
 **Moved anchors.** Each fact in Context still holds; only the lines moved.
 - The one-candidate refusal is `crates/control-plane/src/control.rs:1742-1744`. The #1042 lag
@@ -348,7 +348,7 @@ control-plane `test-support`).
   (`r_B - 1 - last_published(P0's gate)`) and revision, publication, `adopt_persisting` of A's
   remaining producers back into P0's epoch, then A's plan and epoch drop. The one-candidate
   `Backpressure` check is deleted. `Taken`/`Nothing` take the old path with A as base.
-- D2/D3 (root ruling Q3): `ProviderEpoch::carried_base` (from `PreparedHost::carried_base`, charged
+- D2/D3 (root ruling B15-Q3): `ProviderEpoch::carried_base` (from `PreparedHost::carried_base`, charged
   as a capi epoch row with `carried_base_retained_bytes`) and `ProviderEpoch::kept: KeptBase
   { model, monitor, edit_ramps }`, set on the epoch a rebuild succeeds, extended by every later
   live or superseding commit (`merged_ramps`, the later edit winning), dropped when that epoch is
@@ -357,7 +357,7 @@ control-plane `test-support`).
   admissions (`compiled_model_admission_over`); the two-model helpers are deleted.
 - D3 protocol: `SessionStore::commit_prepared_displacing` and
   `CommittedCommandFrame::take_displaced` (`crates/protocol`).
-- Q4 (root ruling): an `ObservationSlot::queued` flag marks a tap whose record waits on an
+- B15-Q4 (root ruling): an `ObservationSlot::queued` flag marks a tap whose record waits on an
   unadopted plan; `observation_forwards` re-queues the tap's bound state on B's matching instance
   before publication, room checked before the commit. The observation queue holds only `Observe`
   records, which the bindings express; but a tap B carries from P0 takes P0's state at the swap
@@ -383,7 +383,7 @@ control-plane `test-support`).
 - Gate 7: `paused_bursts` now expects the second paused edit to commit; the swap-window, epoch,
   lifecycle, double-live oracle and pressure tests were updated (`resource_lifecycle.rs`,
   `runtime/tests.rs`). The live peak with a pending candidate gains the kept model.
-- Browser gap (Q4), closed in the follow-up below.
+- Browser gap (B15-Q4), closed in the follow-up below.
 
 **Gates** (all pass): `supersede_tests::{a_superseding_replacement_renders_as_one_combined_
 transaction, a_donated_source_keeps_its_pcm_and_its_held_seek, a_refused_replacement_restores_the_
@@ -395,7 +395,7 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
 `host-web structural_apply::a_structural_edit_behind_an_unadopted_candidate_supersedes_it`.
 
 **Follow-up (coordinator, same batch).**
-1. *Browser copy of forwarded records (Q4).* The core keeps the records the last rebuild queued
+1. *Browser copy of forwarded records (B15-Q4).* The core keeps the records the last rebuild queued
    again (`SessionState::observation_forwarded() -> &[ObservationForward]`, set by the
    superseding commit, empty otherwise). The browser's `run_command` copies each onto the new
    plan's `PlanShape` through `note_observe`, the same note `record_observe` makes for an
@@ -404,7 +404,7 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
    `a_subscription_queued_on_a_superseded_candidate_publishes_on_its_replacement` (host-web):
    red without the browser copy (mask 0) and red without the core's re-queue (no window). No
    parity row: the C ABI admits no observation record, so it cannot reach the case.
-2. *B wins on every row it writes (Q3).* `session::EditRamps` now also records rows written with
+2. *B wins on every row it writes (B15-Q3).* `session::EditRamps` now also records rows written with
    no length and targets rewritten whole (`clear_target`); `EditRamps::overlay` lays a later
    transaction over an earlier one with the later winning on every row it wrote; `get` and
    `entries` are unchanged. `merged_ramps` uses it, and the live path's merge runs for any edit
@@ -468,7 +468,7 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
   the successor issue "Carry an owner or source a superseding candidate keeps unchanged from P0
   from P0's state".
 - *Edits outside the original authorized paths, and who accepted them.*
-  `crates/session/src/edit_ramp.rs` (coordinator, under Q3); `hosts/host-web/src/lib.rs`
-  (coordinator, under Q4); `crates/engine/src/realtime/plan_exchange.rs`, the reservation
+  `crates/session/src/edit_ramp.rs` (coordinator, under B15-Q3); `hosts/host-web/src/lib.rs`
+  (coordinator, under B15-Q4); `crates/engine/src/realtime/plan_exchange.rs`, the reservation
   accessors (one attempt, accepted by root on 2026-10-16); `crates/capi/src/runtime/mod.rs`
   (mechanical).

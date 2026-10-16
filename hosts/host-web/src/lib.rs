@@ -1639,7 +1639,7 @@ impl ReadyOwnership {
             // always has its tables, and no refusal can follow a commit.
             let mut shape =
                 prepared.expect("a committed rebuild's preparer left the plan's tables");
-            // #1310 (root ruling Q4): the records the core queued again on this plan from the
+            // #1310 (root ruling B15-Q4): the records the core queued again on this plan from the
             // candidate it superseded are noted as admitted records are, so the hand-over keeps
             // them; the core says which they are and in what state.
             for forward in self.control.observation_forwarded() {

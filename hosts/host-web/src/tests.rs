@@ -7232,7 +7232,7 @@ mod structural_apply {
         );
     }
 
-    /// #1310 (root ruling Q4) on the browser, the host that admits observation records: a
+    /// #1310 (root ruling B15-Q4) on the browser, the host that admits observation records: a
     /// subscription acked against a candidate that a later structural edit supersedes arms the
     /// replacement and publishes windows there. The replacement carries "track"'s compressor from
     /// the plan that renders, which never saw the record, so the core queues the record again on

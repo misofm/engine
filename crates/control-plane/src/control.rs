@@ -95,7 +95,7 @@ pub(crate) struct KeptBase {
 
 /// `earlier`'s ramp lengths with `later`'s laid over them: `later` wins on every row it wrote, with
 /// or without a length (`EditRamps::overlay`). The
-/// merge of the kept base's lengths with a newer transaction's (#1310, root ruling Q3).
+/// merge of the kept base's lengths with a newer transaction's (#1310, root ruling B15-Q3).
 fn merged_ramps(earlier: &session::EditRamps, later: &session::EditRamps) -> session::EditRamps {
     let mut merged = earlier.clone();
     merged.overlay(later);
@@ -583,7 +583,7 @@ pub struct SessionState<A: ControlAdapter> {
     /// binding table are charged for it (#1676 D2).
     pub(crate) observation_slots_high_water: usize,
     /// The observation records the last rebuild queued again on the plan it published, taken
-    /// from the candidate it superseded (#1310, root ruling Q4); empty after a rebuild that
+    /// from the candidate it superseded (#1310, root ruling B15-Q4); empty after a rebuild that
     /// superseded nothing.
     pub(crate) observation_forwarded: Vec<ObservationForward>,
 }
@@ -815,7 +815,7 @@ pub(crate) struct ObservationSlot {
     /// it adds to the event that would end every armed tap. Set when the plan's slots are built.
     pub(crate) key_bytes: u16,
     /// A record for this tap waits in the queue of a plan render has not adopted (#1310, root
-    /// ruling Q4): pushed while the newest plan was a pending candidate, or forwarded to it from
+    /// ruling B15-Q4): pushed while the newest plan was a pending candidate, or forwarded to it from
     /// a candidate it superseded. A replacement of that candidate re-queues the tap's bound state
     /// on its own instance, because a tap it carries from the running plan takes that plan's
     /// state and would lose the record.
@@ -854,7 +854,7 @@ fn tap_key_of(
 }
 
 /// One observation record a superseded candidate's queue held, as it is queued again on its
-/// replacement's matching instance (#1310, root ruling Q4).
+/// replacement's matching instance (#1310, root ruling B15-Q4).
 ///
 /// A host that keeps its own copy of each plan's armed taps reads them through
 /// [`SessionState::observation_forwarded`] and copies them onto the replacement's copy, as it does
@@ -872,7 +872,7 @@ pub struct ObservationForward {
 }
 
 /// The records a withdrawn candidate's observation queues hold, as the replacement queues them
-/// (#1310, root ruling Q4): one per tap whose slot in `slots` (the candidate's, `offsets` its
+/// (#1310, root ruling B15-Q4): one per tap whose slot in `slots` (the candidate's, `offsets` its
 /// producers' first slots) is `queued`, on the `successor` instance with the same strip, rack,
 /// effect ID and tap ID, carrying the tap's state in `bindings`, which every admitted record has
 /// been folded into. An observation queue holds only `Observe` records (arm, with a window, or
@@ -2041,10 +2041,10 @@ where
     ///
     /// **Supersession (#1310).** With `withdrawn` holding a candidate A taken back unadopted, the
     /// successor B is prepared against the plan A succeeds, P0 (D2): A's carried base, and P0's
-    /// kept model, monitor overlay and edit ramps merged with B's own (D3, root ruling Q3). Every
+    /// kept model, monitor overlay and edit ramps merged with B's own (D3, root ruling B15-Q3). Every
     /// check runs while A is withdrawn, before the commit (D4): preparation, admission,
     /// reservation, the source donation from A and the room for A's queued observation records
-    /// on B (root ruling Q4), then the protocol's commit predicate. A refusal returns with
+    /// on B (root ruling B15-Q4), then the protocol's commit predicate. A refusal returns with
     /// `withdrawn` untouched, and the caller republishes A. After the commit, infallibly and in
     /// order (D5): the donation and the producer moves, B's `superseded` word and revision, B's
     /// publication, the return to P0's epoch of every producer A still holds that P0 holds
@@ -2297,7 +2297,7 @@ where
             }
             None => None,
         };
-        // #1310 (root ruling Q4): the observation records queued on A, re-queued on B's matching
+        // #1310 (root ruling B15-Q4): the observation records queued on A, re-queued on B's matching
         // instances, with their room checked here. A tap B carries from P0 takes P0's state at
         // the swap, which never saw them; arming from the bindings covers only a tap B starts.
         let forwards = match self.pending_providers.last() {
@@ -2482,7 +2482,7 @@ where
         candidate_provider.revision_gate.publish(revision);
         // #1310 D5 step 3, D6: B's `superseded` word, written before B is published.
         reservation.set_superseded(superseded_revisions);
-        // #1310 (root ruling Q4): A's queued observation records, on B's queues before B is
+        // #1310 (root ruling B15-Q4): A's queued observation records, on B's queues before B is
         // published. Their room was checked before the commit.
         for forward in &forwards {
             candidate_provider.effects[forward.position]
@@ -2679,7 +2679,7 @@ where
         // with no record is a revision render has nothing to do for), and a transaction of
         // monitor writes does when the overlay change produced a record (#1559 D4, #1603 D7).
         let publishes = !monitor_only || !delta.is_empty();
-        // #1310 (root ruling Q3): while a successor is pending, the ramp lengths this edit gives
+        // #1310 (root ruling B15-Q3): while a successor is pending, the ramp lengths this edit gives
         // its rows join the kept base of the epoch it succeeds, so a replacement prepared across a
         // withdrawn candidate ramps them as this edit does. Built before any check, so the commit
         // below only moves it; `None` when nothing is pending or the edit wrote no live row.
@@ -3617,7 +3617,7 @@ where
             .effects
             .get_mut(position)?;
         let pushed = producer.try_push_observe(tap_index, armed, window_blocks);
-        // #1310 (root ruling Q4): a record on a plan render has not adopted.
+        // #1310 (root ruling B15-Q4): a record on a plan render has not adopted.
         let on_candidate = !self.pending_providers.is_empty();
         if pushed.is_ok() {
             // #1584 D6a: the push is the acknowledgement, so the state every later successor is
@@ -3708,7 +3708,7 @@ where
     }
 
     /// The observation records the last rebuild queued again on the plan it published, from the
-    /// unadopted candidate it superseded (#1310, root ruling Q4), each with the tap's bound state.
+    /// unadopted candidate it superseded (#1310, root ruling B15-Q4), each with the tap's bound state.
     /// Read right after a structural command publishes a plan; empty when it superseded nothing.
     /// A host that mirrors each plan's armed taps copies these onto the new plan's mirror, as for a
     /// record it admitted: the plan arms them at its first block, whatever its carry brings.

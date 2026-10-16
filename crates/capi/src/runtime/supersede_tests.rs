@@ -176,7 +176,7 @@ fn a_superseding_replacement_renders_as_one_combined_transaction() {
         right_mute: false,
     };
     // The fader edits carry their own ramp length (#1394), which the replacement's base keeps
-    // across the withdrawn candidate (root ruling Q3).
+    // across the withdrawn candidate (root ruling B15-Q3).
     let mut fader_edits = protocol::control_core::fader_edits(&id("t4"), &fader);
     for edit in &mut fader_edits[..2] {
         let SessionEdit::SetControl { ramp_samples, .. } = edit else {
@@ -805,7 +805,7 @@ fn assert_same_blocks(label: &str, actual: &[Vec<f32>], expected: &[Vec<f32>]) {
     }
 }
 
-/// #1310 (D3 with root ruling Q3, "B wins on a shared row"): T1 moves `t4`'s fader with its own
+/// #1310 (D3 with root ruling B15-Q3, "B wins on a shared row"): T1 moves `t4`'s fader with its own
 /// ramp length; T2, which supersedes T1, moves it again with no length. The replacement ramps
 /// `t4` with the session default, as a transaction holding T1's structural edit and T2 does: B
 /// wrote the row last, so T1's length no longer applies to it.
@@ -835,7 +835,7 @@ fn a_superseding_edit_without_a_ramp_length_takes_the_default_on_its_row() {
     assert_same_blocks("ramp", &superseded, &twin);
 }
 
-/// #1310 (D3 with root ruling Q3, the kept monitor overlay): T1 is pending, a solo of `t1` with its
+/// #1310 (D3 with root ruling B15-Q3, the kept monitor overlay): T1 is pending, a solo of `t1` with its
 /// own ramp length commits on it, and T2 supersedes T1. The replacement renders the solo from the
 /// overlay the running plan's cells hold, with the solo's ramp: exactly what one transaction
 /// holding T1, the solo and T2 renders.
@@ -869,7 +869,7 @@ fn a_solo_committed_while_a_candidate_waits_holds_on_its_replacement() {
     assert_same_blocks("solo", &superseded, &twin);
 }
 
-/// #1310 (D3 with root ruling Q3, the live path's merge): T1 is pending, a live edit moves `t4`'s
+/// #1310 (D3 with root ruling B15-Q3, the live path's merge): T1 is pending, a live edit moves `t4`'s
 /// fader with its own ramp length on T1's lanes, and T2 supersedes T1. The replacement carries
 /// `t4` from the running plan and retargets its fader at the live edit's ramp length: exactly
 /// what one transaction holding T1, the fader edit and T2 renders.
