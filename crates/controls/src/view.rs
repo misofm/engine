@@ -6,12 +6,14 @@
 //! The classifier, the catalog stage and the effective values read the "next" model through it, so a
 //! commit of values clones, compiles and lists no more than the owners it changed.
 
-use session::{Route, SessionModel, StableId, StripRef, Vca};
+use session::{Automation, Route, SessionModel, StableId, StripRef, Vca};
 
 use crate::registry::strip_at;
 
-/// The committed model (`structure`: counts, order, IDs, header, console slots) and the edited
-/// owners (`owners`: a small model with the header and the edited clones in ID order), read as one.
+/// The committed model (`structure`: counts, order, IDs, header, console slots, the automation
+/// table's entries and targets) and the edited owners (`owners`: a small model with the header and
+/// the edited clones in ID order, among them the automation entries whose offset a hand move wrote,
+/// #1650), read as one.
 /// For a model that is whole, both are the same model.
 #[derive(Clone, Copy, Debug)]
 pub struct ModelView<'a> {
@@ -97,6 +99,27 @@ impl<'a> ModelView<'a> {
         find(&self.owners.vcas, &base.id, |vca| &vca.id).unwrap_or(base)
     }
 
+    /// The rendered stored automation entries that drive strip `strip`'s fader, per lane
+    /// (`[left, right]`, [`crate::fader_automation`]), each the edited entry when the view holds
+    /// one (#1650, R17-1 = A): a hand move on an automated fader writes the driving entry's offset,
+    /// so the binding of the strip's `fader_db` row and the lane's `S` read the entry here.
+    ///
+    /// A transaction of values leaves the automation table's entries and targets as committed, so
+    /// which entry drives a lane is read from the committed table, and only its offset from the
+    /// edit. Linear in the committed table's length, with an early out when it is empty.
+    #[must_use]
+    pub fn fader_automation(&self, strip: &StableId) -> [Option<&'a Automation>; 2] {
+        let lanes = crate::automation::fader_automation(self.structure, strip);
+        if self.is_whole() {
+            return lanes;
+        }
+        lanes.map(|entry| {
+            entry.map(|entry| {
+                find(&self.owners.automation, &entry.id, |held| &held.id).unwrap_or(entry)
+            })
+        })
+    }
+
     /// The dense model the view stands for: a clone of the committed model with the edited owners
     /// in place. Linear in the session; for tests and for a caller that has no view-shaped code.
     #[must_use]
@@ -123,6 +146,11 @@ impl<'a> ModelView<'a> {
         for route in &self.owners.routes {
             if let Some(at) = position(&model.routes, &route.id, |route| &route.id) {
                 model.routes[at] = route.clone();
+            }
+        }
+        for automation in &self.owners.automation {
+            if let Some(at) = position(&model.automation, &automation.id, |entry| &entry.id) {
+                model.automation[at] = automation.clone();
             }
         }
         model

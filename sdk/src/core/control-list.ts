@@ -276,8 +276,14 @@ export interface ControlListEntry {
   readonly family: ControlFamilyName;
   /** `false` for a row the owner's present shape does not use. */
   readonly active: boolean;
-  /** The committed value when its page was read. */
+  /**
+   * The committed value when its page was read. On an automated lane (`automated`) of a strip's
+   * `fader_db` row it is the lane's stored hand-move offset in dB: a `SET_CONTROL` of the row
+   * writes the offset, and the stored curve renders under it (#1650).
+   */
   readonly value: number;
+  /** Whether a rendered stored automation drives the row's lane (#1650 D4). */
+  readonly automated: boolean;
 }
 
 /** The control list of the running session, in the core's order. */
@@ -587,6 +593,7 @@ function decodeEntry(row: RawField): ControlHeader | ControlListEntry {
     family: named(FAMILIES, requiredU8(fields, 32, "a family"), "the family"),
     active: boolOf(fields, 33, "active"),
     value: requiredF32(fields, 34, "a value"),
+    automated: boolOf(fields, 35, "automated"),
   });
 }
 

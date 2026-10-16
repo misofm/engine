@@ -1315,6 +1315,11 @@ pub(crate) fn owner_values_valid(owner: crate::OwnerRef<'_>) -> bool {
         ),
         crate::OwnerRef::Vca(vca) => validate_vca_values(&mut diagnostics, &root, vca),
         crate::OwnerRef::Route(route) => validate_route_values(&mut diagnostics, &root, route),
+        // A hand move writes an entry's offset (#1650); the row's domain (`controls`) has checked
+        // it, and the session holds every number finite.
+        crate::OwnerRef::Automation(automation) => {
+            return automation.offset.left_db.is_finite() && automation.offset.right_db.is_finite();
+        }
     }
     diagnostics.is_empty()
 }

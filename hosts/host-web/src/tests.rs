@@ -10377,7 +10377,8 @@ mod canonical_live {
     }
 
     /// TBD48 D2 (browser): a live fader move on a VCA member, a live VCA offset move over it,
-    /// and (#1649) that VCA move over a member whose fader is automated, each made through the browser's control entry while the caller's thread runs FTZ, DAZ and
+    /// (#1649) that VCA move over a member whose fader is automated, and (#1650b) a hand move on
+    /// that automated fader, each made through the browser's control entry while the caller's thread runs FTZ, DAZ and
     /// round toward zero, render from the end of their ramp the bits of the committed model booted
     /// on a canonical thread. The pair's composition rounds to another `f32`, and another gain,
     /// under that word (asserted), so the gate is not vacuous.
@@ -10426,6 +10427,21 @@ mod canonical_live {
             &automated(model(MEMBER_DB, 0.0)),
             &vca_move,
             &automated(model(MEMBER_DB, OFFSET_DB)),
+        );
+        // #1650b: a hand move on that automated fader writes the ride's left offset, and the
+        // lane's offsets cell with `S` = the offset and the VCA's; the static fader stays.
+        let mut moved = automated(model(MEMBER_DB, OFFSET_DB));
+        moved.automation[0].offset.left_db = MEMBER_DB;
+        live_move_under_hostile_word(
+            "a hand move on an automated lane",
+            &automated(model(MEMBER_DB, OFFSET_DB)),
+            &set(
+                Owner::Strip(model(0.0, 0.0).tracks[MEMBER].id.clone()),
+                Section::Builtins,
+                5,
+                MEMBER_DB,
+            ),
+            &moved,
         );
     }
 

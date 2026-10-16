@@ -928,7 +928,10 @@ pub enum ConformanceDecoder {
 /// #1650 adds the automation offset: the `Automation` message gains a required field 4, the
 /// nested `AutomationOffset` (`left_db` 1, `right_db` 2), so the transaction's `UpsertAutomation`
 /// carries it. Re-pinned from `0c7196f86abe6d57`; the frame count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x5eb9_ad2e_d137_f3be;
+/// #1650b adds the control row's `automated` flag (#1650 D4): `ControlEntry` field 35, written on
+/// every control row, and the list page's live `ratio` row is automated. Re-pinned from
+/// `5eb9ad2ed137f3be`; the frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x5cab_2cf3_b4e4_767f;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1370,11 +1373,14 @@ fn control_corpus_pages() -> (ControlListPage, ControlStatePage) {
         family: ControlFamily::Effect,
         active: true,
         value: 4.0,
+        automated: false,
     };
     let mut live = row("ratio", ControlKind::Continuous, ControlClass::Live);
     live.disabled_value = Some(0.0);
     live.ramp_row = Some(ControlRampRow::Fader);
     live.default_ramp_samples = 480;
+    // #1650 D4: the corpus carries an automated row.
+    live.automated = true;
     let mut toggle = row("bypass", ControlKind::Toggle, ControlClass::Live);
     toggle.minimum = 0.0;
     toggle.maximum = 1.0;

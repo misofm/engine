@@ -443,6 +443,8 @@ pub(crate) mod control_entry {
     pub(crate) const FAMILY: FieldSpec = FieldSpec::opt(32, Wire::U8);
     pub(crate) const ACTIVE: FieldSpec = FieldSpec::opt(33, Wire::Bool);
     pub(crate) const VALUE: FieldSpec = FieldSpec::opt(34, Wire::F32);
+    // #1650 D4: a rendered stored automation drives the row's lane.
+    pub(crate) const AUTOMATED: FieldSpec = FieldSpec::opt(35, Wire::Bool);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "ControlEntry",
         fields: &[
@@ -480,6 +482,7 @@ pub(crate) mod control_entry {
             FAMILY,
             ACTIVE,
             VALUE,
+            AUTOMATED,
         ],
     };
 }

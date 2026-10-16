@@ -47,7 +47,9 @@ extern "C" {
  * commits with no replacement and no live value. A stored fader automation edit (an entry on a
  * strip's fader_db added, removed, retargeted or given other segments) rebuilds the plan, and
  * the successor carries every owner; a static fader value of a lane the session automates is that
- * lane's fallback and gives no live value; the other rows stay model-only until they render.
+ * lane's fallback and gives no live value, and a SET_CONTROL of that lane's fader_db writes the
+ * entry's hand offset instead, a live value heard on top of the curve (#1650); the other rows stay
+ * model-only until they render.
  * Any other change takes the replacement path exactly as before: every submix strip
  * value (its fader, its effects), any edit while the session declares a VCA, the mute of a track
  * that a follows_mute send reads, a fader outside its domain or effect parameters that

@@ -796,8 +796,13 @@ pub struct ControlRow {
     pub family: ControlFamily,
     /// `false` for a row the owner's present shape does not use.
     pub active: bool,
-    /// The committed value.
+    /// The committed value. On an automated lane (`automated`) of the `fader_db` row it is the
+    /// lane's stored hand-move offset in dB, which the curve renders under (#1650 D3).
     pub value: f32,
+    /// Whether a rendered stored automation drives the row's lane (#1650 D4). A descriptor field:
+    /// an automation edit that changes it advances the structure epoch. Only an automatable row is
+    /// automated.
+    pub automated: bool,
 }
 
 /// One page of the control list, in strictly ascending handle order.
@@ -2945,7 +2950,7 @@ fn control_entry_is_valid(limits: crate::ProtocolLimits, entry: &ControlEntry) -
 /// A control row's own rules, shared by both directions: finite numbers, an ordered range,
 /// choices exactly for an enumeration and holding its default and value, and the class, reason,
 /// issue and reopen condition present exactly together. A control is automatable only if it is a
-/// live model value.
+/// live model value, and automated only if it is automatable.
 fn control_row_is_valid(limits: crate::ProtocolLimits, row: &ControlRow) -> bool {
     let finite = row.minimum.is_finite()
         && row.maximum.is_finite()
@@ -2996,6 +3001,7 @@ fn control_row_is_valid(limits: crate::ProtocolLimits, row: &ControlRow) -> bool
             || (row.class == ControlClass::Live
                 && row.scope == ControlScope::Model
                 && row.family != ControlFamily::Setting))
+        && (!row.automated || row.automatable)
 }
 
 fn control_list_page_is_valid(limits: crate::ProtocolLimits, page: &ControlListPage) -> bool {
@@ -3348,6 +3354,7 @@ fn write_control_entry(sink: &mut dyn Sink, entry: &ControlEntry) -> Result<(), 
         (e::FAMILY, one(control)),
         (e::ACTIVE, one(control)),
         (e::VALUE, one(control)),
+        (e::AUTOMATED, one(control)),
     ])?;
     sink.nested_spec(control_list_page::ENTRY, &mut |sink| {
         sink.message_header(fields)?;
@@ -3429,7 +3436,8 @@ fn write_control_row(sink: &mut dyn Sink, row: &ControlRow) -> Result<(), Encode
     write_spec!(sink, e::AUTOMATABLE, &[u8::from(row.automatable)])?;
     write_spec!(sink, e::FAMILY, &[row.family.code()])?;
     write_spec!(sink, e::ACTIVE, &[u8::from(row.active)])?;
-    write_spec!(sink, e::VALUE, &row.value.to_le_bytes())
+    write_spec!(sink, e::VALUE, &row.value.to_le_bytes())?;
+    write_spec!(sink, e::AUTOMATED, &[u8::from(row.automated)])
 }
 
 fn write_enum_choice(sink: &mut dyn Sink, choice: &EnumChoice) -> Result<(), EncodeError> {
@@ -3565,6 +3573,7 @@ fn decode_control_entry(
         e::FAMILY,
         e::ACTIVE,
         e::VALUE,
+        e::AUTOMATED,
     ];
     let body = match row_kind {
         ControlRowKind::OwnerHeader => {
@@ -3654,6 +3663,7 @@ fn decode_control_entry(
                 family: ControlFamily::from_code(read_u8(required(e::FAMILY)?)?)?,
                 active: read_bool(required(e::ACTIVE)?)?,
                 value: float(e::VALUE)?,
+                automated: read_bool(required(e::AUTOMATED)?)?,
             })
         }
     };

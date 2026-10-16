@@ -735,6 +735,7 @@ fn control_row(name: &str) -> ControlRow {
         family: ControlFamily::Effect,
         active: true,
         value: 4.0,
+        automated: false,
     }
 }
 
@@ -1367,6 +1368,11 @@ fn control_entry_rules_refuse_on_encode_and_decode_alike() {
             "automatable row that is not live",
             Some(|p| row(p, 6).automatable = true),
             |f| set(entry(f, 6), 31, &[1]),
+        ),
+        (
+            "automated row that is not automatable",
+            Some(|p| row(p, 6).automated = true),
+            |f| set(entry(f, 6), 35, &[1]),
         ),
         (
             "automatable row in the monitor scope",

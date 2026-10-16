@@ -1235,6 +1235,8 @@ impl<'a> LocalDiff<'a> {
         StripChange {
             own_before: strip_at(self.rules.current, strip.index).fader,
             own_after: after.fader,
+            offset_before: strip.before.fader_offset,
+            offset_after: strip.after.fader_offset,
             id: after.id,
             reach_before: &strip.reach_before,
             reach: &strip.reach,
