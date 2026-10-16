@@ -299,3 +299,117 @@ other options.
 - **R17-6.** `S = offset + Σ reaching VCA offsets` is the fader's hand offset only. The trim and
   send offsets live in #1658 and #1654, which keep their own cells. This issue's `S` does not change
   and its offsets cell is the fader's.
+
+## Decision record: #1649 (batch 17)
+
+Shipped on `codex/controls-batch-17w` over `39fbb8997`, uncommitted, for the coordinator.
+
+**Classifier (D4, departures 1-3).** `S` is read from `controls::EffectiveStrip::offsets_sum`
+(#1646b, the one author); `controls` has no edit. `host-core/src/prepare.rs` gains
+`LevelRecords { fader, offsets }` and `level_records_between`, the one rule both `LevelDiff` forms
+call (`EffectiveDiff::strip_level_records`, full path; `LocalDiff::level_records`, fast path): the
+`fader_records` of #1648 D3, plus, per lane that the post-change model automates
+(`controls::automated_fader_lanes`, asked at most once) whose `S` differs in bits, one
+`FaderOffsetsRecord { offsets_sum: next S, smoothing_samples: LevelRules::lengths(..).fader[lane] }`
+(departure 1: one length rule, so automated and plain members of one edit ramp alike).
+`level_differs` also compares `S` bits, so a VCA edit that leaves the effective fader's bits (a
+clamp, a zero's sign) still reaches an automated lane. `EffectiveDiff::level_records` (the
+successor join's form) keeps returning the fader records only: no carry change (departure 5).
+`LiveStripRecords` gains `offsets: [Option<FaderOffsetsRecord>; 2]` (departure 4, the strip-level
+family); a strip with only offsets writes is pushed, so the path is `live`.
+
+**Commit (D4, D7).** `commit_live_once` step 2b refuses, before the stamp and any write, a strip
+whose offsets write names a channel with no offsets cell in the newest epoch (`INTERNAL`, never
+acked then dropped); after the stamp each record is written whole (`FaderCells::write_offsets`, one
+`LatestCell<3>` slot: `S` low word, high word, ramp word). A cell write cannot fail.
+
+**Cell plumbing.** The offsets cell (`Arc<OffsetsLane>`) is now created at preparation in
+`prepare_fader_automation` and held by `PreparedFaderCell` (no longer `Copy`), so the strip's
+`FaderCells` (writer, `attach_offsets`, a box of `[Option<OffsetsWriter>; 2]` only for strips with
+fader automation and a control lane) and the fader owner (`LaneFaderAutomation::new`, both bank
+lowering and the scalar oracle) share the same cell. `resource_plan` charges the writer box per
+automated controlled strip (`Layout::new::<[Option<OffsetsWriter>; 2]>()`, 80 bytes on x86-64);
+the cell itself stays #1646's bank charge.
+
+**Render (D3).** `AutomatedFaderCell` gains the cell's `CellReader` and `DirtyReader`.
+`LaneFaderAutomation::read_offsets` runs at block entry, after the fader/mute drain and the held
+ramp report, in `FaderBankProcessor::drain` (so the fused fader-matrix bank, which drains through
+it, too) and in the oracle's `LiveControlFaderProcessor::drain_controls`, through one
+`FaderJumpStage` trait (bank lane / `FaderMuteRampBuiltins`). A dirty cell is read with
+`read_counted` (replaced writes count as `live_values_superseded`). `AutomatedFaderCell::offsets_jump`:
+target value `v` = the curve at the jump's completion (`completion_of(End, node time of sample 0,
+ramp)`, never past the next discontinuity, as `CellEvents` aims a ramp); gain
+`checked_fader_gain(vca_compose_db(v, S_new))`; compared in bits with the lane's current target
+`checked_fader_gain(vca_compose_db(cell target, S_old))`; equal: nothing. Otherwise the stage takes
+`RetargetGain` over the ramp word (`SetGain` for 0) at the block's first sample, the cell commits
+`v` (`seed_target`) and holds until the completion, so grid events inside the jump are held.
+
+**Departures.**
+
+1. **A held lane forgets its target.** When the stage's gain is held (muted, or in a mute/unmute
+   ramp) a gain operation only remembers the gain (#1638 D2), so after an unmute ramp the stage
+   would not retarget to it unless the cell emits again. The jump still sends the operation (the
+   stage remembers it) and the cell is reset to a fresh `CellState` (no target, whose next free
+   grid event always retargets), re-reporting the stage's remaining held ramp. No new
+   `automation` API.
+2. **No timeline** (a plan without one, not reachable from host-core): the jump's value is the
+   cell's own target.
+3. **A lane's first block** (#1647 D2 `fresh`): if a jump lands in a lane's very first block on a
+   moving curve, the restart `Set` of that block overrides it (an exact set with the new `S`).
+4. **Paths outside the list (mechanical / test):** `crates/host-core/src/lib.rs` (re-export
+   `FaderOffsetsRecord`); `crates/host-core/tests/stored_fader_automation.rs` (the R17-4 oracle
+   parity test now also writes offsets cells, one under a held unmute ramp); `hosts/host-web/src/tests.rs`
+   (TBD48 `canonical_live`, as TBD48's record asks); `control.rs` test snapshot gains
+   `strip_offsets_cells` and `FaderCells::test_only_offsets_write_counts` (test-support).
+5. **Superseded test.** #1648a's `an_automated_fader_lane_takes_no_fader_record` is replaced by
+   gate 5's test, which keeps its D3 assertions (no `FaderDb` on an automated lane, the other
+   lane's record, the mute record, fast path equals full path).
+6. **Gate 2's nested case** renders no differently (`1e-30` against `2e-30` composes to the same
+   gain bits), so its `S`-bit claim is asserted in the classifier gate against
+   `controls::effective` of the edited session; the browser leg asserts `live`, parity and the
+   fresh boot's bits.
+
+**Gates (all pass, x86-64 AVX2).**
+
+- Gates 1, 3 (C ABI): `set_control::automated_vca::a_vca_move_over_an_automated_member_is_live_and_renders_the_prepared_plan`
+  (session length and 256 samples; eq0 one offsets write per lane, eq1 `[1, 1, 0, 0]` fader cell
+  writes = one `Both` `FaderDb`; unchanged value `model_only`, no write, no bit; a VCA not reaching
+  eq0 writes no eq0 cell; every render block 0 allocations). **Red on revert** (the bank's
+  `read_fader_offsets` call removed): fails at block 18 against the prepared plan, checked once.
+- Gate 4 (C ABI): `set_control::automated_vca::vca_reach_and_count_changes_over_an_automated_member_are_live`
+  (member added to a second VCA, nested parent, new VCA, first VCA, VCA removed).
+- Gates 1, 3 (browser): `a_vca_move_over_an_automated_member_is_live_alike_on_both_hosts`; gate 2:
+  `many_vca_moves_before_one_render_are_the_last_alike_on_both_hosts`; gate 4:
+  `vca_reach_and_count_changes_over_an_automated_member_are_live_alike_on_both_hosts`
+  (`hosts/host-web/tests/control_parity.rs`, four rates, parity with the C ABI and a fresh boot of
+  the committed session).
+- Gate 5: `a_vca_move_writes_the_automated_lanes_offsets_cell` (`crates/host-core/tests/live_delta.rs`;
+  also the nested three-VCA `S` bits: `1e-30`, not `0.0`).
+- Gate 6: `a_vca_move_over_an_automated_member_renders_allocation_free`
+  (`crates/control-plane/tests/vca_automation_realtime.rs`, four scripted moves incl. two in one
+  block, each asserted `live`; 0 allocations and frees per render call after warm-up).
+- Oracle (R17-4): `the_scalar_oracle_renders_the_banks_fader_events` with offsets writes; red with
+  the oracle's `read_offsets` removed (plane 0 at sample 1920), checked once.
+- TBD48: both `canonical_live` modules gain "a live VCA move on an automated lane".
+- Commands: `cargo test --locked -p controls -p control-plane` (and `--features test-support`),
+  `-p host-core --all-features`, `-p builtins-compiler --features test-support`, `-p capi`,
+  `-p host-web --features host-web/test-support --lib --test control_parity`: pass.
+  `realtime-policy`: ok, 160 regions in 33 files (159 + the jump region). fmt; clippy `-D warnings`
+  (touched crates, all targets, all features); no-feature `cargo check --all-targets`: clean.
+- `./target/release/audit capi`: `pcm_digest` `bffc21e857b5e134` (unchanged), 0 violations, 0
+  allocations.
+
+**Bytes (x86-64).** `lane_slot_bytes` 192 -> 224 (the offsets reader and dirty reader), measured by
+`fader_automation_sizes()`; `size_of::<FaderCells>()` 136 -> 144 (the writer box pointer), so every
+live-controlled strip's `TrackControlProducer` grows by 8 bytes, charged by its vector layout; an
+automated controlled strip adds the 80-byte writer box. No fixture moved.
+
+**`expect(dead_code)`.** None left on `OffsetsLane` or `AutomatedFaderCell::{offsets, offsets_ramp}`.
+
+**For #1648b.** The carry must move `AutomatedFaderCell`'s whole offsets state with the lane (the
+successor's cell is its own, seeded with its `S`; do not carry the predecessor's reader). The
+adoption comparison is the same composed-gain rule as `offsets_jump` (current target composed with
+the predecessor's heard `S`, against the successor's curve composed with its seeded `S`); reuse
+`offsets_jump`'s shape. **For #1650b.** A hand move on an automated fader changes `S` through
+`EffectiveStrip::offsets_sum`; `level_records_between` then writes the offsets cell with no other
+change (the `Fader` row length via `LevelRules::lengths`).

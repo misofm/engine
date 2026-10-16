@@ -1141,6 +1141,9 @@ fn parity_model() -> SessionModel {
 
 /// Render `rig` for `blocks` blocks; with handles, a live mute ramp of 300 samples starts on track
 /// 1's left lane at block 10 and an unmute ramp at block 20, so a held ramp is reported (D1.2).
+/// With handles, the offsets cells take two writes too (#1649 D3): track 0's two lanes a new `S`
+/// at block 15 (a jump of 480 samples), and track 1's left lane one at block 20, in the block
+/// whose drain starts the unmute ramp, so its jump meets a held gain.
 #[cfg(feature = "test-support")]
 fn render_parity(mut rig: Rig, blocks: usize) -> [Vec<f32>; 2] {
     use builtins_compiler::TestOnlyWriteGate;
@@ -1163,6 +1166,32 @@ fn render_parity(mut rig: Rig, blocks: usize) -> [Vec<f32>; 2] {
                         smoothing_samples: 300,
                     },
                 );
+                if block == 20 {
+                    handles.strip_controls[1].fader.write_offsets(
+                        stamp,
+                        0,
+                        builtins_compiler::FaderOffsetsRecord {
+                            offsets_sum: -3.0,
+                            smoothing_samples: 200,
+                        },
+                    );
+                }
+            });
+        }
+        if let (Some(gate), Some(handles)) = (gate.as_mut(), rig.handles.as_mut())
+            && block == 15
+        {
+            gate.write_published(|stamp| {
+                for channel in 0..2 {
+                    handles.strip_controls[0].fader.write_offsets(
+                        stamp,
+                        channel,
+                        builtins_compiler::FaderOffsetsRecord {
+                            offsets_sum: -6.0,
+                            smoothing_samples: 480,
+                        },
+                    );
+                }
             });
         }
         rig.block();
@@ -1176,9 +1205,14 @@ fn render_parity(mut rig: Rig, blocks: usize) -> [Vec<f32>; 2] {
 /// with the matrix), and prepared between render calls (the split pair), each with a live mute
 /// and unmute ramp on an automated lane.
 ///
+/// The live variants also write the offsets cells (#1649): a jump on a free lane and one under a
+/// held unmute ramp, read by the fader bank and by the oracle's live fader owner alike.
+///
 /// Test value: red if the oracle's fader owners ignore the program, take no node time or `a(n)`,
 /// defer or fuse an automated fader past its events, or convert an event differently from the
-/// bank: "a placement change moves no bit" would fail for automated sessions.
+/// bank: "a placement change moves no bit" would fail for automated sessions. Red too if the
+/// oracle does not read the offsets cells, or jumps (or forgets a held lane's target) otherwise
+/// than the bank.
 #[cfg(feature = "test-support")]
 #[test]
 fn the_scalar_oracle_renders_the_banks_fader_events() {
@@ -1231,6 +1265,13 @@ fn the_scalar_oracle_renders_the_banks_fader_events() {
         ),
     ] {
         assert_ne!(bank, without, "{label}: the automation is heard");
+        if label != "no live control" {
+            assert_ne!(
+                bank,
+                plain_on(Backend::Simd4),
+                "{label}: the offsets writes are heard"
+            );
+        }
         for plane in 0..2 {
             assert_eq!(
                 first_difference(&bank[plane], &oracle[plane]),

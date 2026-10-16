@@ -4373,3 +4373,277 @@ fn a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_host
         );
     }
 }
+
+/// #1649: [`model_at`] with `t2` riding its fader on both lanes (linear from -3 dB at sample 0 to
+/// -15 dB at the run's end, so every grid point moves the lane), VCA `v` holding `t2` and `t3`
+/// (`t3` has no automation), and `change` applied.
+fn automated_vca_model(rate: u32, change: impl FnOnce(&mut SessionModel)) -> SessionModel {
+    let mut model = model_at(rate);
+    model.automation.push(session::Automation {
+        id: id("t2-fader-ride"),
+        target: address(
+            Owner::Strip(id(T2.id)),
+            Section::Builtins,
+            FADER_DB,
+            ParameterChannel::Both,
+        ),
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: u64::from(QUANTUM) * BLOCKS,
+            start_value: -3.0,
+            end_value: -15.0,
+            unit: session::ParameterUnit::Db,
+        }],
+        offset: session::AutomationOffset::default(),
+    });
+    model.vcas[0].members = vec![id(T2.id), id(T3.id)];
+    change(&mut model);
+    model
+}
+
+/// A VCA `name` at `db` on both lanes holding `members`.
+fn vca_at(name: &str, db: f32, members: &[&str]) -> Vca {
+    Vca {
+        id: id(name),
+        fader: DualMonoFader {
+            left_db: db,
+            right_db: db,
+            left_mute: false,
+            right_mute: false,
+        },
+        members: members.iter().map(|member| id(member)).collect(),
+    }
+}
+
+/// `SET_CONTROL` of VCA `vca`'s offset on both lanes.
+fn vca_offset(vca: &str, db: f32, ramp: Option<u32>) -> SessionEdit {
+    SessionEdit::SetControl {
+        expected_effect: None,
+        address: address(
+            Owner::Vca(id(vca)),
+            Section::Own,
+            VCA_OFFSET_DB,
+            ParameterChannel::Both,
+        ),
+        value: db,
+        ramp_samples: ramp,
+    }
+}
+
+/// The blocks a jump of `jump` samples, the first grid ramp after it (two grid periods of 64) and
+/// the plan's latency may still be settling after the edit's block.
+fn settle_blocks(browser: &mut Rig, jump: u32) -> u64 {
+    let latency = browser_plan_latency(browser).0;
+    (latency + u64::from(jump) + 128).div_ceil(u64::from(QUANTUM)) + 1
+}
+
+/// One #1649 case on both hosts: `model` plays four blocks, then `edits` commit as one transaction
+/// on each host with the same verdict (`path`, one revision) and the same reply bytes. Every block
+/// is equal on the two hosts, and from `settle_blocks` after the edit the browser renders the bits
+/// of a browser booted on the committed session and fed the same PCM from block 0; when `heard`,
+/// that session renders otherwise than `model` there.
+fn automated_vca_alike(
+    label: &str,
+    model: &SessionModel,
+    edits: &[SessionEdit],
+    path: EditPath,
+    jump: u32,
+    heard: bool,
+) {
+    const EDIT: u64 = 4;
+    let mut browser = Rig::new(model);
+    let mut c_abi = CAbi::new(model);
+    same_blocks(&mut browser, &mut c_abi, 0..EDIT, label);
+    let (b, b_reply) = browser.transaction_reply(edits);
+    let (c, c_reply) = c_abi.transaction(edits);
+    assert_eq!(b, c, "{label}: one verdict");
+    assert_eq!(b_reply, c_reply, "{label}: one reply");
+    assert_eq!(
+        b,
+        Verdict::Applied {
+            path,
+            revision: model.revision + 1
+        },
+        "{label}: the path"
+    );
+    let committed = snapshot_bytes(|payload, expected| browser.command(payload, expected));
+    let mut twin = Rig::boot(&committed, model.sample_rate_hz);
+    let mut unedited = Rig::new(model);
+    let settle = EDIT + settle_blocks(&mut browser, jump);
+    let end = settle + 4;
+    assert!(end <= BLOCKS, "{label}: the run fits the sources");
+    let mut moved = false;
+    for block in 0..end {
+        let (t, u) = (twin.step(block), unedited.step(block));
+        if block < EDIT {
+            continue;
+        }
+        let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(b, c, "{label}: block {block} alike on both hosts");
+        if block >= settle {
+            assert_eq!(
+                b, t,
+                "{label}: block {block} renders the committed session's boot"
+            );
+            moved |= t != u;
+        }
+    }
+    assert_eq!(moved, heard, "{label}: heard exactly when a value moves");
+}
+
+/// #1649 gates 1 and 3 (both hosts). A -6 dB move of `v` over the automated member `t2` (and the
+/// plain member `t3`) is `live` on both hosts with the same reply, renders the same bits on both,
+/// and from the end of the jump and the first grid ramp after it renders the committed session's
+/// boot: with the session's length, and with the edit's own 256 samples (a longer ramp on either
+/// member would still differ in that shorter window). A move of `v` to its current value is
+/// `model_only` and moves no bit.
+///
+/// Test value: red if the browser's VCA move does not reach the automated lane's offsets cell
+/// (the ride keeps the old composition), if the two hosts differ, or if an unchanged offset
+/// retargets the lane.
+#[test]
+fn a_vca_move_over_an_automated_member_is_live_alike_on_both_hosts() {
+    for rate in RATES {
+        let model = automated_vca_model(rate, |_| {});
+        let fader = model.control_smoothing_samples().fader;
+        automated_vca_alike(
+            &format!("{rate} Hz, the session's length"),
+            &model,
+            &[vca_offset(VCA.id, -6.0, None)],
+            EditPath::Live,
+            fader,
+            true,
+        );
+        automated_vca_alike(
+            &format!("{rate} Hz, 256 samples"),
+            &model,
+            &[vca_offset(VCA.id, -6.0, Some(256))],
+            EditPath::Live,
+            256,
+            true,
+        );
+        automated_vca_alike(
+            &format!("{rate} Hz, the current value"),
+            &model,
+            &[vca_offset(VCA.id, 0.0, None)],
+            EditPath::ModelOnly,
+            fader,
+            false,
+        );
+    }
+}
+
+/// #1649 gate 2 (both hosts). Ten live moves of `v` before one render give the bits of a twin that
+/// made only the last, on both hosts (render reads the newest slot of the offsets cell, whole).
+/// Three nested VCAs reach `t2`, declared and nested out of ID order, at 24, -24 and 2e-30 dB in
+/// ascending ID order: a move of the third to 1e-30 is `live` and renders the committed session's
+/// boot (the `S` bits it writes are the classifier gate's,
+/// `a_vca_move_writes_the_automated_lanes_offsets_cell`).
+///
+/// Test value: red if render applies an older slot than the newest committed one, if a slot mixes
+/// two writes, or if a nested reach is composed otherwise than preparation.
+#[test]
+fn many_vca_moves_before_one_render_are_the_last_alike_on_both_hosts() {
+    const EDIT: u64 = 4;
+    for rate in RATES {
+        let model = automated_vca_model(rate, |_| {});
+        let mut many = Rig::new(&model);
+        let mut one = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut many, &mut c_abi, 0..EDIT, "before the moves");
+        for block in 0..EDIT {
+            one.step(block);
+        }
+        for step in 1..=10 {
+            let db = if step == 10 { -6.0 } else { -(step as f32) };
+            let edit = [vca_offset(VCA.id, db, None)];
+            assert_eq!(many.transaction(&edit), c_abi.transaction(&edit).0);
+        }
+        one.transaction(&[vca_offset(VCA.id, -6.0, None)]);
+        for block in EDIT..EDIT + 24 {
+            let (m, c, o) = (many.step(block), c_abi.step(block), one.step(block));
+            assert_eq!(m, c, "{rate} Hz: block {block} alike on both hosts");
+            assert_eq!(m, o, "{rate} Hz: block {block} is the last move's");
+        }
+
+        let nested = automated_vca_model(rate, |model| {
+            model.vcas = vec![
+                vca_at("vca-c", 2e-30, &[T2.id]),
+                vca_at("vca-b", -24.0, &["vca-a"]),
+                vca_at("vca-a", 24.0, &["vca-c"]),
+            ];
+        });
+        automated_vca_alike(
+            &format!("{rate} Hz, nested"),
+            &nested,
+            &[vca_offset("vca-c", 1e-30, None)],
+            EditPath::Live,
+            nested.control_smoothing_samples().fader,
+            false,
+        );
+    }
+}
+
+/// #1649 gate 4 (both hosts). Each edit that changes which VCAs reach the automated member `t2`, or
+/// how many VCAs the session has, is `live` alike on both hosts and from the end of the jump
+/// renders the committed session's boot: `t2` added to a second VCA; that VCA (holding `t2`) made
+/// a member of `v`; a new VCA that reaches `t2`; the first VCA of a session that had none; a VCA
+/// that reaches `t2` removed.
+///
+/// Test value: red if any of these rebuilds or differs between the hosts, if a lane no VCA reached
+/// had no cell to write when a VCA is added, or if a removed VCA leaves its offset in `S`.
+#[test]
+fn vca_reach_and_count_changes_over_an_automated_member_are_live_alike_on_both_hosts() {
+    let upsert = |vca: Vca| SessionEdit::UpsertVca { vca };
+    for rate in RATES {
+        let base = automated_vca_model(rate, |model| {
+            model.vcas = vec![
+                vca_at(VCA.id, -3.0, &[T2.id, T3.id]),
+                vca_at("w", -4.0, &[T1.id]),
+            ];
+        });
+        let nested = automated_vca_model(rate, |model| {
+            model.vcas = vec![vca_at(VCA.id, -3.0, &[T3.id]), vca_at("w", -4.0, &[T2.id])];
+        });
+        let bare = automated_vca_model(rate, |model| model.vcas.clear());
+        let fader = base.control_smoothing_samples().fader;
+        let cases: [(&str, &SessionModel, SessionEdit); 5] = [
+            (
+                "t2 added to a second VCA",
+                &base,
+                upsert(vca_at("w", -4.0, &[T1.id, T2.id])),
+            ),
+            (
+                "the VCA holding t2 nested in v",
+                &nested,
+                upsert(vca_at(VCA.id, -3.0, &[T3.id, "w"])),
+            ),
+            (
+                "a new VCA that reaches t2",
+                &base,
+                upsert(vca_at("x", -2.0, &[T2.id])),
+            ),
+            (
+                "the first VCA of the session",
+                &bare,
+                upsert(vca_at(VCA.id, -6.0, &[T2.id, T3.id])),
+            ),
+            (
+                "a VCA that reaches t2 removed",
+                &base,
+                SessionEdit::RemoveVca { vca_id: id(VCA.id) },
+            ),
+        ];
+        for (label, model, edit) in cases {
+            automated_vca_alike(
+                &format!("{rate} Hz, {label}"),
+                model,
+                &[edit],
+                EditPath::Live,
+                fader,
+                true,
+            );
+        }
+    }
+}

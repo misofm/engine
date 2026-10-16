@@ -271,7 +271,7 @@ pub use builtins::BuiltinLaneSelector;
 /// host that keeps them, as the C ABI does per provider epoch (#1256 D3), names the type without
 /// depending on `builtins-compiler`.
 pub use builtins_compiler::{FaderCells, LiveValuesSuperseded, MatrixCells, TrackControlProducer};
-pub use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
+pub use builtins_compiler::{FaderOffsetsRecord, TrackControlRecord, TrackFaderRecord};
 pub use effect_contract::{ChannelSymmetryWitness, LiveControlRecord, SeamSide, SymmetryEvent};
 
 #[doc(hidden)]
