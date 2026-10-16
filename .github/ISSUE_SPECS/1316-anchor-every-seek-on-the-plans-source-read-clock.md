@@ -310,3 +310,8 @@ counters plus six `u64` words). host-web's `retained_ceilings` stays inside its 
 
 **Successors.** The browser export is #1332 and #1293 (Non-goals). `observe.rs` onto
 `seqlock.rs` is #1482 D3. `source.id.invalid` on this entry point is #1350.
+
+**Successor owner (root ruling, 2026-10-16).** The browser export of the seek report is #1293 D6
+(batch 16) alone, with a parity row against the C ABI struct, independent of #1332 (which waits
+on the owner's iOS test). Until #1293 lands, the browser cannot seek through the core, so it has
+no seek to report; the C ABI reads the report today. #1293's amendment of 2026-10-16 records it.
