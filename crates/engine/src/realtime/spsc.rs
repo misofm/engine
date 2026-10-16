@@ -28,6 +28,12 @@ mod sync {
         body(cell.get())
     }
 
+    /// Shared access to a slot's storage, spelled the way loom's `UnsafeCell` spells it.
+    #[inline(always)]
+    pub(super) fn with<T, R>(cell: &UnsafeCell<T>, body: impl FnOnce(*const T) -> R) -> R {
+        body(cell.get())
+    }
+
     /// Read a cursor with exclusive access, without an atomic operation.
     #[inline(always)]
     pub(super) fn load_exclusive(cursor: &mut AtomicUsize) -> usize {
@@ -42,6 +48,10 @@ mod sync {
 
     pub(super) fn with_mut<T, R>(cell: &UnsafeCell<T>, body: impl FnOnce(*mut T) -> R) -> R {
         cell.with_mut(body)
+    }
+
+    pub(super) fn with<T, R>(cell: &UnsafeCell<T>, body: impl FnOnce(*const T) -> R) -> R {
+        cell.with(body)
     }
 
     /// Loom's `AtomicUsize` has no `get_mut`; `unsync_load` is its exclusive-access read.
@@ -426,6 +436,36 @@ impl<T: Send + 'static> Consumer<T> {
         } else {
             self.ring().slots_len - consumer + producer
         }
+    }
+    /// Borrow the `index`-th queued item, counted from this consumer's cursor, without popping it
+    /// (#1320 D1). `None` when `index` is not below [`Self::available_at_entry`].
+    ///
+    /// The producer cursor is loaded once with `Acquire`, as [`Self::available_at_entry`] loads
+    /// it; no cursor, cache or counter changes. The read is sound because the producer writes only
+    /// the slots from its own cursor up to (excluding) this consumer's: every slot in
+    /// `[local, producer)` was initialized by a `Release`-published push and nothing rewrites it
+    /// until this consumer pops it. The borrow is tied to `&self`, so no pop can happen while it
+    /// is held. Wait-free: one atomic load.
+    #[must_use]
+    pub fn peek(&self, index: usize) -> Option<&T> {
+        if index >= self.available_at_entry() {
+            return None;
+        }
+        let ring = self.ring();
+        // `index < available <= logical_capacity < slots_len`, so one subtraction wraps it, and
+        // the comparison form cannot overflow.
+        let to_end = ring.slots_len - self.local;
+        let slot = if index >= to_end {
+            index - to_end
+        } else {
+            self.local + index
+        };
+        // SAFETY: `slot` is in `[local, producer)` of the producer cursor loaded with `Acquire`
+        // above, so its push's `Release` publication happened-before this read and the producer
+        // cannot write it again until this consumer pops it, which needs `&mut self`.
+        Some(sync::with(&ring.slots[slot], |slot| unsafe {
+            (*slot).assume_init_ref()
+        }))
     }
     /// Whether the queue is empty, reloading the shared line only if it looks so.
     ///
@@ -995,6 +1035,46 @@ mod loom_tests {
                             }
                             Err(_) => loom::thread::yield_now(),
                         }
+                    }
+                }
+            });
+            writer.join().expect("producer");
+            reader.join().expect("consumer");
+        });
+    }
+
+    /// #1320 gate 1: the consumer peeks while the producer pushes three items through a two-slot
+    /// queue. Under every interleaving each peeked item is the one the consumer pops next (or,
+    /// at index 1, the one after it), and loom's cells fail the model if a peek reads a slot the
+    /// producer is writing.
+    #[test]
+    fn spsc_loom_peek_returns_the_item_later_popped() {
+        loom::model(|| {
+            let (mut producer, mut consumer) =
+                bounded_spsc::<usize>(NonZeroUsize::new(2).expect("two"), QueueGeneration(1))
+                    .expect("ring");
+            let writer = loom::thread::spawn(move || {
+                for value in 0..3 {
+                    while producer.try_push(value).is_err() {
+                        loom::thread::yield_now();
+                    }
+                }
+            });
+            let reader = loom::thread::spawn(move || {
+                for expected in 0..3 {
+                    loop {
+                        let Some(&peeked) = consumer.peek(0) else {
+                            loom::thread::yield_now();
+                            continue;
+                        };
+                        let behind = consumer.peek(1).copied();
+                        assert_eq!(peeked, expected);
+                        assert_eq!(consumer.try_pop(), Ok(peeked));
+                        if let Some(behind) = behind {
+                            assert_eq!(consumer.peek(0).copied(), Some(behind));
+                            assert_eq!(behind, expected + 1);
+                        }
+                        break;
                     }
                 }
             });
@@ -1615,6 +1695,60 @@ mod tests {
         assert_eq!(consumer.try_pop(), Ok(2));
         assert_eq!(consumer.try_pop(), Ok(3));
         assert_eq!(consumer.available_at_entry(), 1);
+    }
+
+    /// #1320 gate 1: `peek(i)` is the `i`-th queued item for every `i` below the queued count and
+    /// `None` at it, across several wraps of the cursor space, and no number of peeks moves a
+    /// cursor, the producer cache or a counter.
+    #[test]
+    fn peek_returns_each_queued_item_in_order_across_wraps_and_changes_nothing() {
+        let (mut producer, mut consumer) =
+            bounded_spsc(NonZeroUsize::new(3).expect("capacity"), QueueGeneration(17))
+                .expect("queue");
+        assert_eq!(consumer.peek(0), None);
+        let mut next_push = 0_u64;
+        let mut next_pop = 0_u64;
+        // Push 1, 2, 3, 1, 2, 3 ... items and pop them again, cycling the four-slot ring more than
+        // ten times so every cursor position is peeked from, with the queue full at some.
+        for round in 0..24_u64 {
+            let pushes = 1 + round % 3;
+            for _ in 0..pushes {
+                if producer.try_push(next_push).is_ok() {
+                    next_push += 1;
+                }
+            }
+            let queued = consumer.available_at_entry();
+            let before = (
+                consumer.local,
+                consumer.cached_producer,
+                consumer.success_count(),
+                consumer.empty_count(),
+            );
+            for _ in 0..2 {
+                for index in 0..queued {
+                    let expected = next_pop + u64::try_from(index).expect("index");
+                    assert_eq!(consumer.peek(index), Some(&expected), "round {round}");
+                }
+                assert_eq!(consumer.peek(queued), None, "round {round}");
+                assert_eq!(consumer.peek(usize::MAX), None, "round {round}");
+            }
+            assert_eq!(
+                (
+                    consumer.local,
+                    consumer.cached_producer,
+                    consumer.success_count(),
+                    consumer.empty_count(),
+                ),
+                before,
+                "round {round}"
+            );
+            assert_eq!(consumer.available_at_entry(), queued);
+            for _ in 0..pushes.min(u64::try_from(queued).expect("queued")) {
+                assert_eq!(consumer.try_pop(), Ok(next_pop));
+                next_pop += 1;
+            }
+        }
+        assert!(next_pop > 8, "the cursors wrapped the four-slot ring");
     }
 
     #[test]
