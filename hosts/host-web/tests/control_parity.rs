@@ -3951,6 +3951,7 @@ fn the_seek_report_is_alike_on_both_hosts_for_plain_late_and_future_seeks() {
 // Session seek (#1642, #1643 gate 6)
 // ---------------------------------------------------------------------------------------------
 
+#[cfg(feature = "test-support")]
 impl CAbi {
     fn session_seek(&self, generation: u64, timeline_frame: u64, anchor: Option<u64>) {
         let code = self.session_seek_code(generation, timeline_frame, anchor);
@@ -3974,6 +3975,7 @@ impl CAbi {
     }
 }
 
+#[cfg(feature = "test-support")]
 /// Block `block` on both hosts: `feeds[i]` is the generation and the first source block of the
 /// chunk fed to `src-t(i + 1)`, or `None` for no chunk. The output bits equal.
 fn session_block(
@@ -4010,6 +4012,7 @@ fn session_block(
     assert_eq!(b, c_abi.render(block), "{label}: block {block} bits");
 }
 
+#[cfg(feature = "test-support")]
 /// All three sources' seek reports, equal field by field on both hosts.
 fn same_session_reports(
     browser: &mut Rig,

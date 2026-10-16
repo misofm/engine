@@ -4108,7 +4108,9 @@ fn observe(
 }
 
 /// [`observe`] naming the tap by its stable key: the strip's ID, the console slot's or insert's ID
-/// and the tap's ID (#1677), whatever the plan that renders calls its position.
+/// and the tap's ID (#1677), whatever the plan that renders calls its position. Test support only:
+/// every caller is in a `test-support` module.
+#[cfg(feature = "test-support")]
 fn observe_key(
     host: &mut AudioWorkletEngineHost,
     strip_id: &str,
@@ -4137,7 +4139,9 @@ fn observe_key(
 }
 
 /// The armed-tap mask of the insert `insert_id` of strip `strip_id` on the plan that renders, or
-/// `None` when the plan has no such insert.
+/// `None` when the plan has no such insert. Test support only: every caller is in a `test-support`
+/// module.
+#[cfg(feature = "test-support")]
 fn armed_mask(host: &AudioWorkletEngineHost, strip_id: &str, insert_id: &str) -> Option<u32> {
     let ready = host.ready.as_ref().expect("ready");
     let strip = strip_index(
@@ -9536,6 +9540,9 @@ fn a_subscription_past_the_frame_is_refused_and_an_unsubscribe_makes_room() {
 }
 
 /// Issue #1643: the session seek exports, driven as the page's message handler drives them.
+/// Test support only: it reads the timeline and the slots through `native_staging`'s
+/// `test-support` helpers.
+#[cfg(feature = "test-support")]
 mod session_seek {
     use super::*;
     use protocol::{
