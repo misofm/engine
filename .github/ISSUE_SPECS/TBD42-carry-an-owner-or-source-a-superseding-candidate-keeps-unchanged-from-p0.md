@@ -113,13 +113,17 @@ fresh in B whenever A restarted or removed it.
 - Gate 2 turns red if a chunk acked into A's ring drops with A.
 - Gate 3 turns red if the producer pass or the D1 mechanism allocates at the swap.
 
-- **Lifts the batch 15a guard.** Batch 15a fold 2 (root ruling 2026-10-16) refuses with
-  `BACKPRESSURE` a supersession B that declares a source X as P0 does while A redeclared X and A's
-  X producer has acked anything (`host_core::drops_acked_reverted_source`, called in
-  `SessionState::rebuild` before the admission). TBD42 removes that guard and its tests
-  (`supersede_tests::a_supersession_that_would_drop_acked_pcm_on_a_redeclared_source_is_
-  backpressure`, `control_parity::a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_
-  on_both_hosts`), replacing them with gate 2, once D1's mechanism lets B read A's acked chunks.
+- **Lifts the batch 15a guard, reverted case only.** Batch 15a (fold 2, widened in fold 3 by root
+  ruling M-A of 2026-10-16) refuses with `BACKPRESSURE` a supersession B that leaves behind a ring
+  A created (A added or redeclared the source) whose producer has acked anything
+  (`host_core::drops_acked_fresh_source`, called in `SessionState::rebuild` right after
+  `check_donation`). TBD42 lifts only case (a), where B declares X as P0 does, once D1's mechanism
+  lets B read A's acked chunks: that case leaves the guard and its rows in
+  `supersede_tests::a_supersession_that_would_drop_acked_pcm_on_a_fresh_source_is_backpressure`
+  and `control_parity::a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_hosts`
+  are replaced by gate 2. Cases (b) B redeclares X a third way, (c) B removes X, and (d) A added X
+  and B removes or redeclares it stay refused until an issue gives B a way to read those chunks or
+  the owner rules that a removed source's chunks may drop.
 
 ## Dependencies
 

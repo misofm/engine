@@ -482,9 +482,10 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
   reclaimable plan before it promotes from the atomic. Test capi
   `supersede_tests::two_taken_candidates_and_a_published_adoption_never_wedge_the_session`
   (hold-reclamation and unpublished-render seams; asserts the reported state, then four blocks of
-  service and a fourth edit commit, owners balanced). Red: with both halves reverted the first call
-  after the hold clears fails (`capi.source.epoch`, the submit's service step answering
-  `INTERNAL`); with only the capacity reverted, the test's step that reclaims nothing cannot park
+  service and a fourth edit commit, owners balanced). Red: with both halves reverted the test
+  fails at the held service step, before the hold clears (the step that reclaims nothing answers
+  `Internal`; fold 3, m-A, corrected the earlier text, which placed it at the first call after the
+  hold clears); with only the capacity reverted, the test's step that reclaims nothing cannot park
   a third epoch (`Internal`).
 - *M-1 (a displaced plan uncharged after a `Taken` promotion).* `ProviderEpoch::parked:
   Option<LiveEpochResources>` captures an epoch's report row, capi resources and carried bytes
@@ -555,3 +556,54 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
   fed A's `src-t1` ring (blocks before it bit-identical), bits equal on both hosts at both rates.
   Red: the control run also fed the acked chunk (`assert_ne`, block 7 at 48 kHz); adoption at
   block 2 ("the adoption block plays").
+
+**Review fold 3 (batch 15a).**
+- *M-A (fold 3; root ruling M-A of 2026-10-16).* The fold-2 guard covered one of the ways A's fed
+  ring drops with A. Widened: B is refused with `BACKPRESSURE` before its commit when some source
+  of A has a fed producer (a chunk, a seek or an end of region) on a ring A created and the
+  donation `check_donation` returns for A -> B does not move it. Cases: (a) A redeclares X, B
+  declares X as P0 does (the fold-2 case); (b) A redeclares X, B redeclares it a third way; (c) A
+  redeclares X, B removes it; (d) A adds X, B removes or redeclares it. Not in scope: a source A
+  carries unchanged from P0 (its chunks are in P0's ring, and B treats it as a direct P0 -> B swap
+  would). "A created the ring" is `donor.plan.can_prepare_source_seek(index)` on X's index in A's
+  inventory: a carried source is prepared vacant (its ring arrives at the swap), so this is false
+  for it, the same freshness test `check_donation` applies. "Not donated": no pair in the
+  donation's consumer half has X's donor index. The function is renamed
+  `host_core::drops_acked_fresh_source(A's donation side, &DonationPlan)` (read-only,
+  allocation-free: a linear scan of the plan's pairs per source of A). It reads the donation plan,
+  so its call moved in `rebuild` from before the admission to right after `check_donation`, which
+  runs after the plan reservation; the reservation is cancelled by the return (it returns its
+  credit and consumes no epoch, as the `AfterPlanReservation` fault path already relies on), so
+  the refusal still commits nothing, queues no event, and the caller republishes A. A host that
+  does not render keeps getting `BACKPRESSURE` for such an edit until it renders. m-C is moot: the
+  guard no longer reads `self.providers.kept`. Tests: capi `supersede_tests::a_supersession_that_
+  would_drop_acked_pcm_on_a_fresh_source_is_backpressure` (renamed from `..._on_a_redeclared_
+  source_...`; five cases (a), (b), (c), (d) removed, (d) redeclared, each: `BACKPRESSURE`,
+  revision unchanged, A still the candidate, no event, every block bit-identical to the sequential
+  run, the adoption block differs from a run that never fed A's ring); host-core
+  `withdrawn_successor::the_guard_refuses_exactly_a_fed_fresh_ring_the_donation_leaves_behind`
+  (refused: (a)-(d); not refused: a fed `c` B keeps (donated), A's fresh `c` unfed, a source A
+  carries from P0 fed through A's producer, a reverted source unfed); parity row
+  `control_parity::a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_hosts`
+  extended to (a), (b) and (c) (B removes `src-t1`, `t1` and its routes) at 48 and 96 kHz. Red
+  with the fold-2 guard restored (this fold's tests unchanged): capi (a) passes and (b), (c), (d)
+  removed and (d) redeclared each commit (`Ok(80)`); parity `(0, 0)` against `(6, 6)` at 48 kHz
+  case (b). Docs: the header supersession paragraph, `CONTROL_PROTOCOL_SEMANTICS.md` and
+  `C_ABI_V1_QUALIFICATION.md` state the widened rule, the paused-host cost, and that a source the
+  caller's own edit removes discards its queued audio. TBD42 now lifts only case (a).
+- *Removal contract (root ruling, fold 3).* A source the caller's own edit removes discards its
+  queued audio: a direct P0 -> B removal, and B removing a source A carried unchanged from P0. The
+  caller asked for it, so it is not an unintended drop; the header and
+  `CONTROL_PROTOCOL_SEMANTICS.md` say so. No counter or telemetry field reports those frames
+  (source telemetry is per live source and leaves with it; the watermark outcome flags and the
+  counters name none): TBD43 (placeholder, no spec yet) is the successor issue for a counter of
+  the frames such a removal discards.
+- *m-A.* B-1's red text corrected above: with both halves reverted, the wedge test fails at the
+  held service step.
+- *m-B.* The drain-before-promotion order in `synchronize_plan_epochs` (B-1's second half) is
+  defence in depth, not a tested gate: at capacity 3 each parked plan holds a retirement credit,
+  so the parked list has room whichever order runs, and no test is red without the order. Code
+  kept; its comment says so. The B-1 test defends the capacity half only.
+- *Task B-A (doc job).* Five private intra-doc links in `crates/host-core/src/source.rs`
+  (`donate_producers`, `donate_consumers`, `unfed`) are plain code spans;
+  `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` passes.

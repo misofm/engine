@@ -41,7 +41,7 @@ use host_core::{
     DonationError, DonationSide, DonationSideMut, HostLiveControlRequest, HostLiveLanes,
     LiveValuesSuperseded, PlanStateInventory, PreparedHost, SourceControlSet, SourceSubmission,
     SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget, SuccessorBase, apply_donation,
-    check_donation, prepare_host_runtime_with_live_controls_and_spectrum,
+    check_donation, drops_acked_fresh_source, prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_successor, spectrum_capture_resources_for,
     test_only_carry_read_keys, test_only_inventory_rows,
 };
@@ -1128,4 +1128,152 @@ fn a_successor_fed_between_the_check_and_the_apply_moves_nothing() {
         .expect("B's producer continues after its acked chunk");
     submit(&mut withdrawn.sources, "c", &signal[0], 1, 4)
         .expect("A's producer continues after its acked chunks");
+}
+
+/// P0 with source `b` declared with `frames`: another declaration of `b`, so a plan prepared
+/// against P0 restarts `b` in a fresh ring.
+fn with_b_frames(frames: u64) -> SessionModel {
+    let mut model = p0_model();
+    model
+        .sources
+        .iter_mut()
+        .find(|source| source.id.as_str() == "b")
+        .expect("b")
+        .frames = frames;
+    model
+}
+
+/// `model` without source `source` and its track `track`.
+fn without(mut model: SessionModel, source: &str, track: &str) -> SessionModel {
+    remove_track(&mut model, track);
+    model
+        .sources
+        .retain(|existing| existing.id.as_str() != source);
+    model
+}
+
+/// Whether the acked-fresh-source guard refuses B (`b`) across the withdrawn A (`a`), A prepared
+/// against the running P0. `feed` names the source the host feeds two blocks of through A's
+/// producers (none when empty); `carry` hands P0's producers of the sources A carries over to A
+/// first, as the control plane's commit does.
+fn guard_refuses(a: SessionModel, b: SessionModel, feed: &str, carry: bool) -> bool {
+    let backend = Backend::current();
+    let p0 = Session::compile(p0_model());
+    let a = Session::compile(a);
+    let b = Session::compile(b);
+    let signal = signal();
+    let mut running = running_p0(&p0, backend, &signal);
+    let mut withdrawn = successor_of(&a, &running.inventory, &p0.model, backend);
+    if carry {
+        assert!(withdrawn.sources.adopt_persisting(&mut running.sources) > 0);
+    }
+    if !feed.is_empty() {
+        // A fresh ring starts at frame 0; a carried one continues P0's, fed through block BEFORE.
+        let first = if carry && feed == "a" { BEFORE + 1 } else { 0 };
+        for block in first..first + 2 {
+            submit(&mut withdrawn.sources, feed, &signal[0], 1, block).expect("feed A");
+        }
+    }
+    let base = withdrawn.carried_base.clone().expect("A has a base");
+    let replacement = successor_of(&b, &base, &p0.model, backend);
+    let (into, from) = sides(&replacement, &b.model, &withdrawn, &a.model);
+    let plan = check_donation(into, from).expect("the donation checks");
+    // Read-only: a second call finds the same.
+    let refused = drops_acked_fresh_source(from, &plan);
+    assert_eq!(refused, drops_acked_fresh_source(from, &plan));
+    refused
+}
+
+/// Batch 15a fold 3 (#1310, root ruling M-A of 2026-10-16): the guard refuses exactly when a ring
+/// A created (A added or redeclared the source) was fed and the donation does not move it to B.
+/// (a)-(c): A redeclares P0's `b` and the host feeds it; B reverts `b` to P0's declaration,
+/// redeclares it a third way, or removes it. (d): A adds `c` and the host feeds it; B removes or
+/// redeclares it. Not refused: B keeps `c` as A declares it (donated); A's fresh `c` unfed; a
+/// source A carries from P0 (`a`), fed through A's producer.
+///
+/// Test value: red if the guard reads only the reverted case (b-d pass), ignores the donation
+/// plan (the donated `c` is refused), ignores the producer's fed state (the unfed `c` is refused)
+/// or ignores freshness (the carried, fed `a` is refused).
+#[test]
+fn the_guard_refuses_exactly_a_fed_fresh_ring_the_donation_leaves_behind() {
+    let redeclared_b = || with_b_frames(40_000);
+    let c_as = |frames: u64| {
+        let mut model = a_model();
+        model
+            .sources
+            .iter_mut()
+            .find(|source| source.id.as_str() == "c")
+            .expect("c")
+            .frames = frames;
+        model
+    };
+    for (label, a, b, feed, carry, refused) in [
+        (
+            "(a) b reverted",
+            redeclared_b(),
+            p0_model(),
+            "b",
+            false,
+            true,
+        ),
+        (
+            "(b) b redeclared a third way",
+            redeclared_b(),
+            with_b_frames(44_000),
+            "b",
+            false,
+            true,
+        ),
+        (
+            "(c) b removed",
+            redeclared_b(),
+            without(p0_model(), "b", "tb"),
+            "b",
+            false,
+            true,
+        ),
+        (
+            "(d) c added, removed",
+            a_model(),
+            without(a_model(), "c", "tc"),
+            "c",
+            false,
+            true,
+        ),
+        (
+            "(d) c added, redeclared",
+            a_model(),
+            c_as(40_000),
+            "c",
+            false,
+            true,
+        ),
+        ("c donated", a_model(), b_model(), "c", false, false),
+        (
+            "c fresh and unfed",
+            a_model(),
+            without(a_model(), "c", "tc"),
+            "",
+            false,
+            false,
+        ),
+        (
+            "a carried and fed",
+            a_model(),
+            without(a_model(), "c", "tc"),
+            "a",
+            true,
+            false,
+        ),
+        (
+            "b reverted, unfed",
+            redeclared_b(),
+            p0_model(),
+            "",
+            false,
+            false,
+        ),
+    ] {
+        assert_eq!(guard_refuses(a, b, feed, carry), refused, "{label}");
+    }
 }

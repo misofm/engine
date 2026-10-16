@@ -1745,7 +1745,10 @@ where
     /// its parked epoch released, before the atomic promotes: a promotion parks epochs, and the
     /// parked list holds only as many as the retirement queue has credits, so promoting before
     /// the drain could find it full of epochs whose plans are already reclaimable and refuse
-    /// forever.
+    /// forever. This order is defence in depth, not a tested gate: at the parked list's capacity
+    /// of three each parked plan still holds a retirement credit, so the list has room for every
+    /// epoch a promotion parks whichever order runs, and no test is red without the order (batch
+    /// 15a fold 3, m-B).
     fn synchronize_plan_epochs(&mut self) -> Result<(), CommandError> {
         #[cfg(feature = "test-support")]
         let hold = TEST_HOLD_RECLAMATION.with(core::cell::Cell::get);
@@ -2245,30 +2248,6 @@ where
                 return Err(CommandError::Backpressure);
             }
         }
-        // #1310, root ruling of 2026-10-16 (no ack before a drop): a source A redeclared and B
-        // reverts to its P0 form is prepared fresh in B and not donated, so the PCM the host was
-        // acked for on A's ring would drop with A. Until TBD42 carries it, such a supersession is
-        // refused here, before the commit, as backpressure: nothing changed, A is republished, and
-        // once render adopts A the same edit commits on it.
-        if superseding {
-            let donor = self
-                .pending_providers
-                .last()
-                .ok_or(CommandError::Internal)?;
-            let running = self.providers.kept.as_ref().ok_or(CommandError::Internal)?;
-            if host_core::drops_acked_reverted_source(
-                prospective.normalized_model(),
-                host_core::DonationSide {
-                    plan: withdrawn.as_ref().ok_or(CommandError::Internal)?.plan(),
-                    sources: &donor.sources,
-                    inventory: &donor.inventory,
-                    model: self.controller.session().compiled().normalized_model(),
-                },
-                running.model.normalized_model(),
-            ) {
-                return Err(CommandError::Backpressure);
-            }
-        }
         // #1398 D4: the candidate beside every plan the control plane holds unreclaimed, a
         // withdrawn candidate included, and every model it holds, the kept ones included (#1310
         // D3), checked before anything is reserved or committed.
@@ -2387,6 +2366,31 @@ where
             }
             None => None,
         };
+        // #1310, root rulings of 2026-10-16 (no ack before a drop; M-A of fold 3): a ring A
+        // created (A added or redeclared the source) that the host fed and the donation above does
+        // not move to B would drop with A, and with it PCM the host was acked for. Until an issue
+        // lets B read it (TBD42 for a source B reverts to its P0 form), such a supersession is
+        // refused here as backpressure. The guard reads the donation plan itself, so it sits after
+        // the check, still before the commit: the reservation it follows is cancelled by the
+        // return (it returns its credit and consumes no epoch), nothing else has changed, the
+        // caller republishes A, and once render adopts A the same edit commits on it.
+        if let (Some(plan), Some(candidate)) = (donation.as_ref(), withdrawn.as_ref()) {
+            let donor = self
+                .pending_providers
+                .last()
+                .ok_or(CommandError::Internal)?;
+            if host_core::drops_acked_fresh_source(
+                host_core::DonationSide {
+                    plan: candidate.plan(),
+                    sources: &donor.sources,
+                    inventory: &donor.inventory,
+                    model: self.controller.session().compiled().normalized_model(),
+                },
+                plan,
+            ) {
+                return Err(CommandError::Backpressure);
+            }
+        }
         // #1310 (root ruling B15-Q4): the observation records queued on A, re-queued on B's matching
         // instances, with their room checked here. A tap B carries from P0 takes P0's state at
         // the swap, which never saw them; arming from the bindings covers only a tap B starts.

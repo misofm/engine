@@ -1221,9 +1221,10 @@ fn a_displaced_plan_not_yet_reclaimed_is_charged_after_a_taken_promotion() {
     }
 }
 
-/// `UpsertSource` of `s-source` as `model` declares it, with its content identity replaced when
-/// `redeclared`: a declaration change that restarts the source in a fresh ring.
-fn upsert_added_source(model: &SessionModel, redeclared: bool) -> SessionEdit {
+/// `UpsertSource` of `s-source` as `model` declares it, with its content identity's `7e94`
+/// replaced by `content` when given: a declaration change that restarts the source in a fresh
+/// ring.
+fn upsert_added_source(model: &SessionModel, content: Option<&str>) -> SessionEdit {
     let mut source = add_source_track(model)
         .into_iter()
         .find_map(|edit| match edit {
@@ -1231,8 +1232,8 @@ fn upsert_added_source(model: &SessionModel, redeclared: bool) -> SessionEdit {
             _ => None,
         })
         .expect("the added source");
-    if redeclared {
-        source.content = source.content.replace("7e94", "0e0e");
+    if let Some(content) = content {
+        source.content = source.content.replace("7e94", content);
         assert!(
             source.content != model.sources[0].content,
             "the content identity changed"
@@ -1241,86 +1242,172 @@ fn upsert_added_source(model: &SessionModel, redeclared: bool) -> SessionEdit {
     SessionEdit::UpsertSource { source }
 }
 
-/// #1310, root ruling of 2026-10-16 (no ack before a drop). P0 plays `s-source`. T1 (A)
-/// redeclares it, so A restarts it in a fresh ring, and the host's chunk for it is acked into
-/// A's ring. T2 (B) puts the source back as P0 declares it: B would prepare it fresh, not donated
-/// from A, and A's acked chunk would drop with A. So T2 is refused with `BACKPRESSURE` before its
-/// commit: the revision stays T1's, A stays the candidate, no event is queued. The next block
-/// adopts A and plays the acked chunk; the same T2 then commits on A. Every block equals the
-/// sequential run (T2 submitted only after A's adoption), and the acked chunk is heard (the
-/// block differs from a run whose host never fed A's ring).
+/// `RemoveRoute`, `RemoveTrack` and `RemoveSource` of what [`add_source_track`] adds.
+fn remove_source_track() -> Vec<SessionEdit> {
+    vec![
+        SessionEdit::RemoveRoute {
+            route_id: id("ts-main"),
+        },
+        SessionEdit::RemoveTrack { track_id: id("ts") },
+        SessionEdit::RemoveSource {
+            source_id: id("s-source"),
+        },
+    ]
+}
+
+/// One case of the acked-fresh-source guard (#1310, root ruling M-A of 2026-10-16): what P0, A
+/// and B do to `s-source`.
+struct FreshSourceCase {
+    label: &'static str,
+    /// Whether P0 declares `s-source` (with its track): committed and adopted before A.
+    in_p0: bool,
+    /// T(A): creates `s-source`'s ring fresh in A (adds or redeclares it).
+    first: Vec<SessionEdit>,
+    /// T(B): does not keep `s-source` as A declares it.
+    second: Vec<SessionEdit>,
+    /// Whether B declares `s-source`, restarting it fresh: the host refeeds it from frame 0.
+    in_b: bool,
+}
+
+fn fresh_source_cases(model: &SessionModel) -> Vec<FreshSourceCase> {
+    let redeclared = |content| vec![upsert_added_source(model, Some(content))];
+    vec![
+        FreshSourceCase {
+            label: "(a) A redeclares, B reverts to P0",
+            in_p0: true,
+            first: redeclared("0e0e"),
+            second: vec![upsert_added_source(model, None)],
+            in_b: true,
+        },
+        FreshSourceCase {
+            label: "(b) A redeclares, B redeclares a third way",
+            in_p0: true,
+            first: redeclared("0e0e"),
+            second: redeclared("1e1e"),
+            in_b: true,
+        },
+        FreshSourceCase {
+            label: "(c) A redeclares, B removes",
+            in_p0: true,
+            first: redeclared("0e0e"),
+            second: remove_source_track(),
+            in_b: false,
+        },
+        FreshSourceCase {
+            label: "(d) A adds, B removes",
+            in_p0: false,
+            first: add_source_track(model).to_vec(),
+            second: remove_source_track(),
+            in_b: false,
+        },
+        FreshSourceCase {
+            label: "(d) A adds, B redeclares",
+            in_p0: false,
+            first: add_source_track(model).to_vec(),
+            second: redeclared("1e1e"),
+            in_b: true,
+        },
+    ]
+}
+
+/// #1310, root rulings of 2026-10-16 (no ack before a drop; M-A of fold 3). P0 plays the fixture
+/// source and, in cases (a)-(c), `s-source`. T(A) creates `s-source`'s ring fresh in A (it
+/// redeclares it, or in case (d) adds it), and the host's chunk for it is acked into A's ring.
+/// T(B) does not keep `s-source` as A declares it: it reverts it to P0's declaration (a),
+/// redeclares it a third way (b, d), or removes it (c, d). B does not take A's ring by donation,
+/// so A's acked chunk would drop with A. So T(B) is refused with `BACKPRESSURE` before its commit:
+/// the revision stays T(A)'s, A stays the candidate, no event is queued. The next block adopts A
+/// and plays the acked chunk; the same T(B) then commits on A. Every block equals the sequential
+/// run (T(B) submitted only after A's adoption), and the acked chunk is heard (the block differs
+/// from a run whose host never fed A's ring).
 ///
-/// Test value: red if the guard is missing (T2 commits at once and supersedes A), or if the
-/// refusal changes anything (a block, the revision, the candidate or an event differs).
+/// Test value: red if the guard is missing or narrower than the ruling (the fold-2 guard let
+/// (b)-(d) commit at once and supersede A), or if the refusal changes anything (a block, the
+/// revision, the candidate or an event differs).
 #[test]
-fn a_supersession_that_would_drop_acked_pcm_on_a_redeclared_source_is_backpressure() {
+fn a_supersession_that_would_drop_acked_pcm_on_a_fresh_source_is_backpressure() {
     let model = stateless_session(48_000);
-    let p0_edits = add_source_track(&model).to_vec();
-    let first = vec![upsert_added_source(&model, true)];
-    let second = vec![upsert_added_source(&model, false)];
-    let run = |attempt_early: bool, feed_a: bool| {
-        let mut children = compile(&model, limits());
-        let mut blocks = Vec::new();
-        submit_direct(&mut children, &[FIXTURE], 0);
-        blocks.push(render_direct(&mut children, 0));
-        commit(&mut children, 1, 42, &p0_edits);
-        submit_direct(&mut children, &[ADDED], 0);
-        submit_direct(&mut children, &[FIXTURE], 1);
-        blocks.push(render_direct(&mut children, 1));
-        children.session.service().expect("service");
-        commit(&mut children, 2, 43, &first);
-        let candidate = children.session.test_pending_providers()[0].test_epoch();
-        if feed_a {
-            // A restarted `s-source` at generation 1, frame 0: this chunk is acked into A's ring.
-            submit_direct(&mut children, &[ADDED], 0);
-        }
-        submit_direct(&mut children, &[FIXTURE], 2);
-        if attempt_early {
-            let refused = children
-                .session
-                .command(&transaction(3, 44, &second), 4_096);
-            assert!(
-                matches!(refused, Err(CommandError::Backpressure)),
-                "the supersession would drop A's acked chunk: {refused:?}"
-            );
-            assert_eq!(revision(&children), 44, "the revision does not move");
-            let pending: Vec<u64> = children
-                .session
-                .test_pending_providers()
-                .iter()
-                .map(|provider| provider.test_epoch())
-                .collect();
-            assert_eq!(pending, vec![candidate], "A stays the candidate");
-            assert!(
-                children
+    for case in fresh_source_cases(&model) {
+        let label = case.label;
+        let run = |attempt_early: bool, feed_a: bool| {
+            let mut children = compile(&model, limits());
+            let mut blocks = Vec::new();
+            let mut base = 42;
+            submit_direct(&mut children, &[FIXTURE], 0);
+            blocks.push(render_direct(&mut children, 0));
+            if case.in_p0 {
+                commit(&mut children, 1, base, &add_source_track(&model));
+                base += 1;
+                submit_direct(&mut children, &[ADDED], 0);
+            }
+            submit_direct(&mut children, &[FIXTURE], 1);
+            blocks.push(render_direct(&mut children, 1));
+            children.session.service().expect("service");
+            commit(&mut children, 2, base, &case.first);
+            base += 1;
+            let candidate = children.session.test_pending_providers()[0].test_epoch();
+            if feed_a {
+                // A created `s-source` at generation 1, frame 0: this chunk is acked into A's ring.
+                submit_direct(&mut children, &[ADDED], 0);
+            }
+            submit_direct(&mut children, &[FIXTURE], 2);
+            if attempt_early {
+                let refused = children
                     .session
-                    .dequeue_event(EventLane::Reliable, 4_096)
-                    .expect("the event lane")
-                    .is_none(),
-                "the refusal queues no event"
+                    .command(&transaction(3, base, &case.second), 4_096);
+                assert!(
+                    matches!(refused, Err(CommandError::Backpressure)),
+                    "{label}: the supersession would drop A's acked chunk: {refused:?}"
+                );
+                assert_eq!(
+                    revision(&children),
+                    base,
+                    "{label}: the revision does not move"
+                );
+                let pending: Vec<u64> = children
+                    .session
+                    .test_pending_providers()
+                    .iter()
+                    .map(|provider| provider.test_epoch())
+                    .collect();
+                assert_eq!(pending, vec![candidate], "{label}: A stays the candidate");
+                assert!(
+                    children
+                        .session
+                        .dequeue_event(EventLane::Reliable, 4_096)
+                        .expect("the event lane")
+                        .is_none(),
+                    "{label}: the refusal queues no event"
+                );
+            }
+            blocks.push(render_direct(&mut children, 2));
+            children.session.service().expect("service");
+            assert_eq!(
+                children.session.test_providers().test_epoch(),
+                candidate,
+                "{label}: A is adopted"
             );
+            commit(&mut children, 4, base, &case.second);
+            for block in 3..6 {
+                if case.in_b {
+                    // B restarts `s-source` again: the host refeeds it from frame 0.
+                    submit_direct(&mut children, &[ADDED], block - 3);
+                }
+                submit_direct(&mut children, &[FIXTURE], block);
+                blocks.push(render_direct(&mut children, block));
+            }
+            blocks
+        };
+        let sequential = run(false, true);
+        let refused = run(true, true);
+        for (block, (actual, expected)) in refused.iter().zip(&sequential).enumerate() {
+            assert_eq!(bits(actual), bits(expected), "{label}: block {block}");
         }
-        blocks.push(render_direct(&mut children, 2));
-        children.session.service().expect("service");
-        assert_eq!(children.session.test_providers().test_epoch(), candidate);
-        commit(&mut children, 4, 44, &second);
-        // B restarts `s-source` again: the host refeeds it from frame 0.
-        for block in 3..6 {
-            submit_direct(&mut children, &[ADDED], block - 3);
-            submit_direct(&mut children, &[FIXTURE], block);
-            blocks.push(render_direct(&mut children, block));
-        }
-        blocks
-    };
-    let sequential = run(false, true);
-    let refused = run(true, true);
-    for (block, (actual, expected)) in refused.iter().zip(&sequential).enumerate() {
-        assert_eq!(bits(actual), bits(expected), "block {block}");
+        let unfed = run(false, false);
+        assert_ne!(
+            bits(&sequential[2]),
+            bits(&unfed[2]),
+            "{label}: A's adoption block plays the acked chunk"
+        );
     }
-    let unfed = run(false, false);
-    assert_ne!(
-        bits(&sequential[2]),
-        bits(&unfed[2]),
-        "A's adoption block plays the acked chunk"
-    );
 }

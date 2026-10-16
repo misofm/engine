@@ -856,15 +856,19 @@ that window is admitted against the plan that renders.
   on gate 4's session), and the second check counts a donated ring twice, so a retry may still be
   refused within that small band. A host that is not rendering keeps getting
   `RESULT_BACKPRESSURE` until it renders.
-- **A reverted, fed source is backpressure (batch 15a fold 2, root ruling of 2026-10-16).** When
-  the candidate redeclared a source, its restarted ring holds an accepted chunk, seek or end of
-  region, and the new transaction declares the source again as the running plan does, the
-  successor would start it fresh and the accepted PCM would drop with the candidate. The core
-  (`host_core::drops_acked_reverted_source`, checked before the admission) refuses the
-  transaction with `RESULT_BACKPRESSURE`: nothing is committed, the candidate is republished, no
-  event is queued. After render adopts the candidate, the retry commits on it. Both hosts answer
-  alike (`control_parity::a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_
-  hosts`). TBD42 lifts the refusal by carrying the source from the running plan.
+- **A fed ring the candidate created is backpressure (batch 15a folds 2 and 3, root rulings of
+  2026-10-16).** When the candidate created a source's ring (it added the source or redeclared
+  it), the host has fed that ring (an accepted chunk, seek or end of region), and the new
+  transaction does not keep the source as the candidate declares it (it declares it as the running
+  plan does, redeclares it another way, or removes it), the successor would not take that ring and
+  the accepted PCM would drop with the candidate. The core (`host_core::drops_acked_fresh_source`,
+  checked right after the donation check, before the commit) refuses the transaction with
+  `RESULT_BACKPRESSURE`: nothing is committed, the candidate is republished, no event is queued.
+  After render adopts the candidate, the retry commits on it; a host that does not render keeps
+  getting `RESULT_BACKPRESSURE` until it renders. A source the candidate carries unchanged from the
+  running plan is not refused. Both hosts answer alike
+  (`control_parity::a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_
+  hosts`, cases reverted, redeclared a third way and removed). TBD42 lifts only the reverted case.
 - **Displaced plans are charged until reclaimed (batch 15a fold 2).** When a transaction finds the
   candidate taken by render and builds on it, the plan render displaced may not yet be reclaimed
   (a render preempted between its claim and its retirement). The session keeps that plan's

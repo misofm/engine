@@ -475,9 +475,9 @@ pub struct ConsumerDonation(Box<[(u32, u32)]>);
 /// It borrows neither side.
 #[derive(Debug, Eq, PartialEq)]
 pub struct DonationPlan {
-    /// The producers [`donate_producers`] swaps.
+    /// The producers `donate_producers` swaps.
     pub producers: ProducerDonation,
-    /// The consumers [`donate_consumers`] swaps.
+    /// The consumers `donate_consumers` swaps.
     pub consumers: ConsumerDonation,
 }
 
@@ -570,35 +570,41 @@ pub fn check_donation(
     })
 }
 
-/// Whether a replacement would drop PCM the host was acked for on a withdrawn plan's redeclared
-/// source (#1310, root ruling of 2026-10-16 on the acked-batch rule): some source X that the
-/// withdrawn plan `donor` redeclared from the running plan's declaration in `running` (same ID,
-/// another declaration), whose producer on `donor` has acked anything since its commit (a chunk,
-/// a seek or an end of region: it is no longer [`unfed`]), and that `successor` declares exactly
-/// as `running` does. Such an X is not donated (its declaration differs between the two
-/// candidates), and the successor prepares it fresh, so the donor's ring and its acked chunks
-/// would drop with the donor. The caller refuses the replacement before its commit as retryable
-/// backpressure: once render adopts the donor, the same edit commits on it. Read-only; it
-/// allocates nothing. Issue TBD42 lifts this guard by carrying X from the running plan.
+/// Whether a replacement would drop PCM the host was acked for on a ring the withdrawn plan
+/// `donor` created (#1310, root rulings of 2026-10-16 on the acked-batch rule, M-A of fold 3).
+///
+/// True when some source X of `donor` meets all three:
+///
+/// * **Fresh in the donor.** The donor's plan owns X's ring (`can_prepare_source_seek` on X's
+///   inventory index): the donor added X, or redeclared it against the plan it was prepared to
+///   displace. A source the donor carries unchanged is prepared vacant (its ring is the running
+///   plan's, carried at the swap), so it is never fresh here: its chunks are in the ring the
+///   running plan renders, and the replacement treats it as a direct swap from the running plan
+///   would. This is the same freshness test `check_donation` applies to the donor.
+/// * **Fed.** The donor's producer for X has acked anything since preparation: a chunk, a seek or
+///   an end of region (it is no longer `unfed`).
+/// * **Not donated.** `donation`, the plan `check_donation` returned for this donor and the
+///   replacement, has no pair whose donor index is X's. So the replacement does not keep X as the
+///   donor declares it: it reverts X to the running plan's declaration, redeclares it another way,
+///   or removes it. The donor's ring and its acked chunks would drop with the donor.
+///
+/// The caller refuses the replacement before its commit as retryable backpressure: once render
+/// adopts the donor, X's ring is the running plan's and the same edit commits on it. Read-only;
+/// it allocates nothing. Issue TBD42 lifts the reverted case only (it carries X from the running
+/// plan); the others stay refused until an issue gives the replacement a way to read those chunks
+/// or the owner rules that a removed source's chunks may drop.
 #[must_use]
-pub fn drops_acked_reverted_source(
-    successor: &SessionModel,
-    donor: DonationSide<'_>,
-    running: &SessionModel,
-) -> bool {
-    fn declaration<'m>(model: &'m SessionModel, id: &str) -> Option<&'m session::Source> {
-        model.sources.iter().find(|source| source.id.as_str() == id)
-    }
-    donor.model.sources.iter().any(|source| {
-        let id = source.id.as_str();
-        let Some(original) = declaration(running, id) else {
-            return false;
-        };
-        original != source
-            && declaration(successor, id) == Some(original)
+pub fn drops_acked_fresh_source(donor: DonationSide<'_>, donation: &DonationPlan) -> bool {
+    donor.inventory.sources().iter().any(|row| {
+        donor.plan.can_prepare_source_seek(row.index as usize)
+            && !donation
+                .consumers
+                .0
+                .iter()
+                .any(|&(_, from)| from == row.index)
             && donor
                 .sources
-                .index_of(id.as_bytes())
+                .index_of(row.id.as_bytes())
                 .and_then(|index| donor.sources.sources[index].provider.as_ref())
                 .is_some_and(|provider| !unfed(provider))
     })
@@ -699,7 +705,7 @@ pub(crate) fn donate_consumers(
 /// and the consumer pairs pass [`graph::can_donate_sources`]. If any fails, nothing moves and it
 /// returns `0`: the donor keeps its fed rings and their producers, together, and the successor
 /// keeps its own. Then
-/// [`donate_consumers`], which is all or nothing; only if it moved does [`donate_producers`] run.
+/// `donate_consumers`, which is all or nothing; only if it moved does `donate_producers` run.
 /// So a donated ring and its producer are never separated.
 pub fn apply_donation(
     successor: DonationSideMut<'_>,

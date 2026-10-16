@@ -211,15 +211,23 @@ extern "C" {
  * seek_at queued on it move into the new plan, so the host neither refeeds nor reseeks it. One
  * case is not covered yet: a source or owner that the earlier transaction restarted or removed
  * and the new one puts back in its form in the plan that renders starts fresh in the new plan (a
- * source at generation 1, frame 0, as an added one, and the host restarts its feed). If the
- * earlier transaction redeclared such a source and the session has accepted PCM, a seek or an end
- * of region for it since (into the waiting replacement's fresh ring), the new transaction is
- * refused with MISO_ENGINE_V1_BACKPRESSURE before it commits, so no accepted chunk is dropped:
- * nothing changes, the waiting replacement stays published, no event is queued and the revision
- * does not move; once render adopts the waiting replacement, a retry commits. That gap, and this
- * refusal, close with the successor issue "Carry an owner or source a superseding candidate keeps
- * unchanged from P0 from P0's state". Should the new transaction be refused, the waiting
- * replacement stays published unchanged. A resource cap counts every plan the session still holds
+ * source at generation 1, frame 0, as an added one, and the host restarts its feed); that gap
+ * closes with the successor issue "Carry an owner or source a superseding candidate keeps
+ * unchanged from P0 from P0's state". No accepted chunk is dropped across a supersession: when
+ * the waiting replacement created a source's ring (the earlier transaction added the source, or
+ * redeclared it) and the session has accepted PCM, a seek or an end of region for that source
+ * since, a new transaction that does not keep the source as the waiting replacement declares it
+ * (it declares it as the plan that renders does, redeclares it another way, or removes it) is
+ * refused with MISO_ENGINE_V1_BACKPRESSURE before it commits: nothing changes, the waiting
+ * replacement stays published, no event is queued and the revision does not move. Once render
+ * adopts the waiting replacement, a retry commits. A host that does not render keeps getting
+ * MISO_ENGINE_V1_BACKPRESSURE for such a transaction until it renders. A source the waiting
+ * replacement carries unchanged from the plan that renders is not refused this way. A source the
+ * caller's own transaction removes discards its queued audio, whether the plan that renders or
+ * the waiting replacement (carrying it unchanged) holds it: the caller asked for the removal, so
+ * this is not an unintended drop. No counter reports the discarded frames yet; a counter for the
+ * discarded frames is a successor issue (placeholder TBD43). Should the new transaction be
+ * refused, the waiting replacement stays published unchanged. A resource cap counts every plan the session still holds
  * and the new one: the running plan, the waiting replacement, and a plan render has displaced
  * until a later call reclaims it. A refusal is MISO_ENGINE_V1_BACKPRESSURE when the new plan fit
  * against the newest held plan alone, so a retry after a render normally commits; the split is
