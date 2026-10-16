@@ -1613,6 +1613,7 @@ impl ReadyOwnership {
         request: &[u8],
         output_capacity: u64,
         analysis: Option<&mut SpectrumAnalysis>,
+        applied_at_sample: u64,
     ) -> Result<usize, control_plane::CommandError> {
         self.reclaim_shapes(analysis);
         if self.pending_shapes.len() == self.pending_shapes.capacity() {
@@ -1631,7 +1632,21 @@ impl ReadyOwnership {
             // `Ok` only once it has left the plan's tables in the record (it refuses the
             // preparation, before anything is committed, when it cannot). So a committed rebuild
             // always has its tables, and no refusal can follow a commit.
-            let shape = prepared.expect("a committed rebuild's preparer left the plan's tables");
+            let mut shape =
+                prepared.expect("a committed rebuild's preparer left the plan's tables");
+            // #1310 (root ruling Q4): the records the core queued again on this plan from the
+            // candidate it superseded are noted as admitted records are, so the hand-over keeps
+            // them; the core says which they are and in what state.
+            for forward in self.control.observation_forwarded() {
+                if let Some(&effect) = shape.producer_slots.get(forward.position) {
+                    shape.note_observe(
+                        effect as usize,
+                        forward.tap_index,
+                        forward.armed,
+                        applied_at_sample,
+                    );
+                }
+            }
             self.pending_shapes.push(PendingShape {
                 epoch,
                 shape: Box::new(shape),
@@ -2001,27 +2016,14 @@ impl ReadyOwnership {
     /// (#1676 attempt 2: the queue push itself is the core's
     /// [`SessionState::admit_and_push_observation_batch`], which admits the whole batch first).
     fn record_observe(&mut self, staged: StagedObserve, applied_at_sample: u64) {
-        let effect = staged.effect as usize;
         // Issue #143: the armed set is control-plane state and is updated here, where the record
         // is admitted, so it can never disagree with what the render side was told.
-        if let Some(mask) = self.shape.observation_armed.get_mut(effect)
-            && staged.tap_index < u32::BITS
-        {
-            let bit = 1_u32 << staged.tap_index;
-            *mask = if staged.armed {
-                *mask | bit
-            } else {
-                *mask & !bit
-            };
-            if let Some(samples) = self.shape.observation_arm_samples.get_mut(effect)
-                && let Some(sample) = samples.get_mut(staged.tap_index as usize)
-            {
-                *sample = applied_at_sample;
-            }
-            if let Some(commanded) = self.shape.observation_commanded.get_mut(effect) {
-                *commanded |= bit;
-            }
-        }
+        self.shape.note_observe(
+            staged.effect as usize,
+            staged.tap_index,
+            staged.armed,
+            applied_at_sample,
+        );
     }
 }
 
@@ -2337,6 +2339,22 @@ impl AudioWorkletEngineHost {
         self.plan.as_ref().map(|plan| plan.owner().active_epoch().0)
     }
 
+    /// Render one block through the plan owner at `absolute_sample` rather than the host's clock,
+    /// and nothing else (#1398 gate 1b); `false` when the owner refused it or the host is not
+    /// ready. A mistimed block adopts a published successor before the owner checks its time, and
+    /// is refused without publishing the epoch atomic: the window in which render has swapped
+    /// plans and the control plane has not seen the epoch. The host's own records (clock, shape,
+    /// status) do not move.
+    #[cfg(feature = "test-support")]
+    pub fn render_plan_at_for_test(&mut self, absolute_sample: u64) -> bool {
+        let quantum = self.status.quantum_frames as usize;
+        let (Some(plan), Some(buffers)) = (self.plan.as_mut(), self.buffers.as_mut()) else {
+            return false;
+        };
+        PlanarBufferMut::try_new(&mut buffers.output_pcm, 2, quantum, quantum)
+            .is_ok_and(|output| plan.render(absolute_sample, output).is_ok())
+    }
+
     /// The staging buffer for one control command frame of `len` bytes (issue #1562a D1), or
     /// `None` when `len` is zero or exceeds the boot's `maximum_control_frame_bytes`
     /// (16 KiB) or the host is not ready. The page writes the frame here and
@@ -2389,11 +2407,12 @@ impl AudioWorkletEngineHost {
         if len == 0 || u64::from(len) > CONTROL_FRAME_BYTES {
             return self.record(RESULT_INVALID_ARGUMENT);
         }
+        let applied_at_sample = self.status.next_absolute_sample;
         let Some((buffers, ready)) = self.buffers.as_mut().zip(self.ready.as_mut()) else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let request = &buffers.control_request[..len as usize];
-        match ready.run_command(request, CONTROL_FRAME_BYTES, analysis) {
+        match ready.run_command(request, CONTROL_FRAME_BYTES, analysis, applied_at_sample) {
             Ok(length) => {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
@@ -5927,6 +5946,26 @@ fn build_plan_shape(
 }
 
 impl PlanShape {
+    /// Note one observation record queued on this plan's effect slot `effect` for `tap_index`
+    /// (#143, #1381b): the armed bit, the sample its window is fresh from, and the commanded bit
+    /// that keeps the swap's hand-over from overwriting it with the predecessor's state.
+    fn note_observe(&mut self, effect: usize, tap_index: u32, armed: bool, applied_at_sample: u64) {
+        if let Some(mask) = self.observation_armed.get_mut(effect)
+            && tap_index < u32::BITS
+        {
+            let bit = 1_u32 << tap_index;
+            *mask = if armed { *mask | bit } else { *mask & !bit };
+            if let Some(samples) = self.observation_arm_samples.get_mut(effect)
+                && let Some(sample) = samples.get_mut(tap_index as usize)
+            {
+                *sample = applied_at_sample;
+            }
+            if let Some(commanded) = self.observation_commanded.get_mut(effect) {
+                *commanded |= bit;
+            }
+        }
+    }
+
     /// Name `successor` as the header that replaces this plan's (null for none): the `u32` word
     /// the page reads, and beside it the full-width pointer a gate compares.
     #[inline]

@@ -615,6 +615,7 @@ impl PcmSourceRing {
             native_decoder_sanitized_samples: 0,
             generation_changed: false,
             held_seek: None,
+            begun_block: false,
         };
         // The producer starts with exactly the configured blocks; the retained block above never
         // enters the recycle queue until the consumer has a played block to hold instead.
@@ -1016,6 +1017,9 @@ pub struct PcmSourceConsumer {
     generation_changed: bool,
     /// An observed [`SourceCommand::SeekAt`] whose anchor block has not begun yet (issue #1274).
     held_seek: Option<HeldSeek>,
+    /// Whether any block has begun on this consumer (#1344 D5): render-owned, set at block entry
+    /// and never cleared.
+    begun_block: bool,
 }
 
 /// A [`SourceCommand::SeekAt`] the consumer has popped and holds until its anchor block.
@@ -1117,6 +1121,7 @@ impl PcmSourceConsumer {
     }
 
     fn begin_block_with(&mut self, clock: SeekClock) -> SourceReadReport {
+        self.begun_block = true;
         self.begin_block_observe(clock);
         self.begin_block_play(clock)
     }
@@ -1277,6 +1282,15 @@ impl PcmSourceConsumer {
     #[must_use]
     pub const fn channel_count(&self) -> u32 {
         self.channel_count
+    }
+
+    /// Whether a block has ever begun on this consumer (#1344 D5). Until the first block it has
+    /// popped no PCM and played nothing, so every acked chunk, the generation and any seek are
+    /// still in its ring or held by it: the consumer can move to another plan whole with nothing
+    /// lost. A seek prepared between blocks ([`Self::prepare_seek`]) is not a block.
+    #[must_use]
+    pub const fn has_begun_block(&self) -> bool {
+        self.begun_block
     }
 
     /// Exact configured source ring capacity in transfer blocks.
@@ -1937,6 +1951,84 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         true
     }
     // REALTIME_POLICY_END
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
+    fn source_has_begun_block(&self, source_index: usize) -> Option<bool> {
+        self.sources
+            .get(source_index)?
+            .consumer
+            .as_ref()
+            .map(PcmSourceConsumer::has_begun_block)
+    }
+
+    /// Every pair names an occupied entry on both sides, of equal channel count, no index twice on
+    /// either side, and the two sets share one quantum.
+    fn can_swap_sources(
+        &self,
+        other: &dyn GraphPreparedSourceSetDriver,
+        pairs: &[(u32, u32)],
+    ) -> bool {
+        other
+            .as_any()
+            .and_then(|any| any.downcast_ref::<Self>())
+            .is_some_and(|other| self.swappable(other, pairs))
+    }
+
+    /// Exchange each pair's entries whole after [`Self::can_swap_sources`]'s check. The other
+    /// set's pending generation change (a seek prepared on a donated consumer) comes with its
+    /// consumers, as in [`Self::adopt_sources`].
+    fn swap_sources(
+        &mut self,
+        other: &mut dyn GraphPreparedSourceSetDriver,
+        pairs: &[(u32, u32)],
+    ) -> bool {
+        let Some(other) = other
+            .as_any_mut()
+            .and_then(|any| any.downcast_mut::<Self>())
+        else {
+            return false;
+        };
+        if !self.swappable(other, pairs) {
+            return false;
+        }
+        for &(own, theirs) in pairs {
+            core::mem::swap(
+                &mut self.sources[own as usize],
+                &mut other.sources[theirs as usize],
+            );
+        }
+        if !pairs.is_empty() {
+            self.pending_generation_change |= other.pending_generation_change;
+        }
+        true
+    }
+}
+
+impl SourceGraphSourceSetDriver {
+    /// [`GraphPreparedSourceSetDriver::can_swap_sources`] against a set of this type.
+    fn swappable(&self, other: &Self, pairs: &[(u32, u32)]) -> bool {
+        other.quantum_frames == self.quantum_frames
+            && pairs.iter().enumerate().all(|(index, &(own, theirs))| {
+                let fresh = pairs[..index].iter().all(|&(earlier_own, earlier_theirs)| {
+                    earlier_own != own && earlier_theirs != theirs
+                });
+                match (
+                    self.sources.get(own as usize),
+                    other.sources.get(theirs as usize),
+                ) {
+                    (Some(own), Some(theirs)) => {
+                        fresh
+                            && own.consumer.is_some()
+                            && theirs.consumer.is_some()
+                            && own.channel_count == theirs.channel_count
+                    }
+                    _ => false,
+                }
+            })
+    }
 }
 
 /// Seal one or more prepared source consumers into a graph-owned fan-out source set.

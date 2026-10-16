@@ -7065,6 +7065,153 @@ mod structural_apply {
         assert_eq!(rig.host.service(None), RESULT_OK);
     }
 
+    /// #1310 on the browser path, which runs the same control plane: a structural edit while a
+    /// candidate waits unadopted commits and supersedes it. The first candidate never renders; the
+    /// replacement carries both transactions and is adopted at the next block.
+    ///
+    /// Test value: red if the second structural edit is refused while the first waits (the
+    /// one-candidate backpressure the C ABI dropped), or if the replacement leaves out the first
+    /// transaction's source.
+    #[test]
+    fn a_structural_edit_behind_an_unadopted_candidate_supersedes_it() {
+        let model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+            .expect("accepted command fixture");
+        let mut source = model.sources[0].clone();
+        source.id = StableId::parse("a-source").expect("source ID");
+        let mut track = model.tracks[0].clone();
+        track.id = StableId::parse("a-track").expect("track ID");
+        track.source_id = source.id.clone();
+        let mut route = model.routes[0].clone();
+        route.id = StableId::parse("a-track-main").expect("route ID");
+        let RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("a track route")
+        };
+        *track_id = track.id.clone();
+        let mut later = source.clone();
+        later.id = StableId::parse("b-source").expect("source ID");
+        let first = [
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ];
+        let second = [SessionEdit::UpsertSource { source: later }];
+        let mut rig = Rig::boot(&model, options(), None);
+        rig.step();
+        assert!(matches!(
+            rig.apply(&first, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert!(
+            matches!(
+                rig.apply(&second, 2),
+                Outcome::Applied {
+                    path: EditPath::Rebuild,
+                    ..
+                }
+            ),
+            "a structural edit behind an unadopted candidate supersedes it"
+        );
+        rig.step();
+        assert_eq!(
+            rig.epoch(),
+            2,
+            "the replacement is adopted; the first never rendered"
+        );
+        assert_eq!(rig.host.session_source_count(), 3);
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        rig.step();
+    }
+
+    /// #1310 (root ruling Q4) on the browser, the host that admits observation records: a
+    /// subscription acked against a candidate that a later structural edit supersedes arms the
+    /// replacement and publishes windows there. The replacement carries "track"'s compressor from
+    /// the plan that renders, which never saw the record, so the core queues the record again on
+    /// the replacement and the host copies it onto the replacement's tables.
+    ///
+    /// Test value: red if the record is lost with the superseded candidate, in the engine (the
+    /// carried tap keeps the running plan's unarmed state and no window publishes) or in the
+    /// host's tables (the hand-over copies the running plan's unarmed bit and the read reports
+    /// the tap unarmed).
+    #[test]
+    fn a_subscription_queued_on_a_superseded_candidate_publishes_on_its_replacement() {
+        let mut model =
+            parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+                .expect("accepted command fixture");
+        model.tracks[0].inserts.effects[0] = observed_compressor_insert();
+        let mut source = model.sources[0].clone();
+        source.id = StableId::parse("a-source").expect("source ID");
+        let mut track = model.tracks[0].clone();
+        track.id = StableId::parse("a-track").expect("track ID");
+        track.source_id = source.id.clone();
+        let mut route = model.routes[0].clone();
+        route.id = StableId::parse("a-track-main").expect("route ID");
+        let RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("a track route")
+        };
+        *track_id = track.id.clone();
+        let mut later = source.clone();
+        later.id = StableId::parse("b-source").expect("source ID");
+        let first = [
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ];
+        let second = [SessionEdit::UpsertSource { source: later }];
+        let mut rig = Rig::boot(&model, options(), None);
+        rig.step();
+        assert!(matches!(
+            rig.apply(&first, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(
+            observe_key(&mut rig.host, "track", RACK_INSERTS, "comp", 1, 2, true),
+            RESULT_OK,
+            "the subscription is acked against the pending candidate"
+        );
+        assert!(matches!(
+            rig.apply(&second, 2),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        rig.step();
+        assert_eq!(rig.epoch(), 2, "the replacement is adopted");
+        assert_eq!(
+            (
+                armed_mask(&rig.host, "track", "comp"),
+                armed_mask(&rig.host, "a-track", "comp")
+            ),
+            (Some(1), Some(0)),
+            "the replacement's tables hold the subscription"
+        );
+        for _ in 0..6 {
+            rig.step();
+        }
+        let binding = (0..rig.host.observation_binding_count() as u32)
+            .filter_map(|index| rig.host.observation_binding(index))
+            .find(|binding| binding.address.track_index == 1)
+            .expect("the old track's compressor is bound");
+        let mut address = binding.address;
+        address.tap_id = 1;
+        let read = rig
+            .host
+            .read_observation_addresses(&[address])
+            .expect("a read");
+        assert_eq!(&*read[0].track_id, "track");
+        assert!(
+            read[0].window.is_some(),
+            "the subscription publishes windows on the replacement: {:?}",
+            read[0].status
+        );
+    }
+
     /// Drive `blocks` more blocks with the lease on, polling after each; the windows folded.
     fn poll_blocks(rig: &mut Rig, blocks: u64) -> u32 {
         let mut windows = 0;

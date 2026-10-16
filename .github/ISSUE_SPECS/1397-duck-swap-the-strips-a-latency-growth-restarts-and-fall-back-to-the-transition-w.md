@@ -317,3 +317,9 @@ warm edit would be `LeadBound`.
 - *Prepare a successor across a withdrawn candidate plan* (#1344), D1-D3 and D5.
 - *Size the C ABI's plan capacities and resource admission for a superseding candidate* (#1398),
   D4.
+
+## Amendment (controls coordinator, batch 15a, 2026-10-15)
+
+- `AdmissionPeak::WithReprepare` named above did not ship with #1398 (root ruling: code with no
+  production caller is a placeholder). #1403 adds the reprepare admission peak together with its
+  first caller; see its batch 15a amendment.

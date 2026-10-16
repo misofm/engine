@@ -800,3 +800,49 @@ and #1602 removed them with their ceilings (4,300,720 bytes of cache and 947,248
 journal outside every compile limit) and their epoch row. The engine's memory outside the compile
 limits is its handle alone; the C header states it in its "Engine memory" paragraph. A host that
 needs fast bounded designs again re-earns a cache in a new issue.
+
+## Plan capacities for a superseding candidate (#1398)
+
+A structural transaction is never refused because render has swapped plans but not yet published
+the new epoch: the refusal that waited for the epoch atomic is gone, and a transaction submitted in
+that window is admitted against the plan that renders.
+
+- **Capacities.** The plan-resource report table holds 4 rows (a lagging epoch's, the running
+  plan's, a withdrawn candidate's and its successor's), the pending and retired provider lists 2
+  each, and the plan exchange 3 retirement credits (a displaced plan not yet reclaimed, a withdrawn
+  candidate's credit and its successor's reservation). A full exchange, report table or pending
+  list while a candidate is reserved is now `INTERNAL`, never `BACKPRESSURE`; an incompatible
+  envelope, an exhausted epoch and a destroyed plan stay `BACKPRESSURE`.
+- **Admission.** A structural candidate is admitted against every plan the session holds
+  unreclaimed (the running plan and every pending or withdrawn candidate) plus itself, and every
+  compiled model it holds plus its own, in every cap the replacement peak checks; the live
+  admission sums the same held plans. Since supersession (#1310) a transaction submitted while a
+  candidate is pending commits, and that admission holds three plans.
+- **Sizing rule.** The header states it beside `maximum_graph_session_plus_plan_bytes`: each
+  resource cap must be at least three times one plan's row, and the graph cap must also cover three
+  compiled models. The repository's reference limits (`tools/audit/src/capi.rs`,
+  `crates/capi/tests/plan_swap_race.rs`, `crates/capi/tests/resource_lifecycle.rs`) admit three
+  plans of the nine-track EQ reference session with room to spare (graph 316,350 bytes against
+  100,000,000; capi 161,258 against 10,000,000), so none was raised. The browser's caps are its
+  one memory budget, which charges the same tables through the same control-plane code; its
+  replacement-peak term must cover the three-plan peak when a warm candidate is admitted (#1403).
+- **Resource movement.** The larger tables add fixed bytes to every session's
+  `capi_retained_bytes`: on the nine-track EQ reference session the row moves 159,354 -> 161,258
+  bytes (+1,904). A caller whose `maximum_capi_retained_bytes` was exact must raise it. No symbol,
+  result code or event is added.
+
+## Supersession of an unadopted candidate (#1310)
+
+- **Behavior.** A structural transaction submitted while an earlier replacement is unadopted
+  commits (`RESULT_OK`); `RESULT_BACKPRESSURE` for a pending candidate is gone. The session takes
+  the candidate back, prepares one successor of the running plan that carries both transactions
+  (from the candidate's carried base and the running plan's kept model, monitor overlay and edit
+  ramps), moves the rings of the sources the candidate added into it, and publishes it. A refusal
+  after the withdrawal republishes the candidate unchanged. The watermark completes the displaced
+  revisions with `MISO_ENGINE_V1_OUTCOME_SUPERSEDED` when the successor is adopted.
+- **Admission.** While a successor of the running plan is pending, the running plan's model is
+  kept, so the replacement and the live admissions count it: three plans and three models when a
+  candidate is superseded, three models when a live edit lands while one waits.
+- **Resource movement.** Each candidate epoch keeps its carried base (#1344), charged in its capi
+  epoch row (`carried_base_retained_bytes`); the boot plan has none, so the reference session's
+  boot `capi_retained_bytes` does not move. No symbol, result code or event is added.

@@ -1390,6 +1390,18 @@ impl SessionStore {
         &mut self,
         prepared: PreparedSessionTransaction,
     ) -> SessionCommit {
+        self.commit_prepared_displacing(prepared).0
+    }
+
+    /// [`Self::commit_prepared`], returning the compiled session the commit displaced (#1310 D3):
+    /// `Some` for a transaction installed as a whole compilation (every rebuild), so a host can
+    /// keep the predecessor's model while a successor prepared from it is pending; `None` for one
+    /// committed in place (#1613), which displaces no compilation. Moving it out is
+    /// allocation-free; dropping it is the caller's.
+    pub(crate) fn commit_prepared_displacing(
+        &mut self,
+        prepared: PreparedSessionTransaction,
+    ) -> (SessionCommit, Option<CompiledSession>) {
         debug_assert_eq!(self.revision(), prepared.base_revision);
         debug_assert!(
             !prepared.monitor_only,
@@ -1397,20 +1409,26 @@ impl SessionStore {
         );
         let revision = prepared.revision();
         let applied_operations = prepared.applied_operations;
-        match prepared.form {
-            TransactionForm::Compiled(compiled) => self.compiled = compiled,
+        let displaced = match prepared.form {
+            TransactionForm::Compiled(compiled) => {
+                Some(core::mem::replace(&mut self.compiled, compiled))
+            }
             TransactionForm::InPlace(mut edit) => {
                 self.compiled.swap_owners(&mut edit.owners, &edit.slots);
                 self.compiled.finish_in_place(edit.revision, edit.estimate);
+                None
             }
             TransactionForm::Monitor(_) => {
                 unreachable!("a monitor-only transaction commits no model")
             }
-        }
-        SessionCommit {
-            revision,
-            applied_operations,
-        }
+        };
+        (
+            SessionCommit {
+                revision,
+                applied_operations,
+            },
+            displaced,
+        )
     }
 
     /// The in-place preparation of [`Self::prepare_transaction_in_place`]: `None` unless it can
@@ -1728,6 +1746,37 @@ mod tests {
             value,
             None,
         )
+    }
+
+    /// #1310 D3. A commit installed as a whole compilation returns the compiled session it
+    /// displaced, the model the plan that renders was prepared from; a commit made in place
+    /// displaces none.
+    ///
+    /// Red if the displaced compilation is the committed one (a host would keep the successor's
+    /// model as the running plan's), or if an in-place commit claims to displace one.
+    #[test]
+    fn a_compiled_commit_returns_the_compilation_it_displaced() {
+        let mut store = store();
+        let before = store.compiled().normalized_model().clone();
+        let revision = ExpectedRevision::Exact(store.revision());
+        let gain = route_row("to-main", "gain_db", -3.123_456);
+        let prepared = store
+            .prepare_transaction_with_monitor(revision, std::slice::from_ref(&gain))
+            .expect("prepares");
+        assert!(!prepared.is_in_place());
+        let (commit, displaced) = store.commit_prepared_displacing(prepared);
+        assert_eq!(commit.revision, store.revision());
+        let displaced = displaced.expect("a compiled commit displaces the compilation");
+        assert_eq!(displaced.normalized_model(), &before);
+        assert_ne!(store.compiled().normalized_model(), &before);
+
+        let revision = ExpectedRevision::Exact(store.revision());
+        let again = route_row("to-main", "gain_db", -6.5);
+        let prepared = store
+            .prepare_transaction_in_place(revision, std::slice::from_ref(&again))
+            .expect("prepares");
+        assert!(prepared.is_in_place());
+        assert!(store.commit_prepared_displacing(prepared).1.is_none());
     }
 
     /// #1613. A transaction of values is prepared in place, holds the edited owners and no

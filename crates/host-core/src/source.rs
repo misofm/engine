@@ -5,12 +5,17 @@
 //! module is the single definition; the rules are capi's, which were the stricter pair.
 
 use core::alloc::Layout;
+use std::collections::BTreeMap;
 
 use engine::SampleRateHz;
+use engine::realtime::PreparedRenderPlan;
+use session::SessionModel;
 use source::{
     HostChunkError, HostChunkProvider, HostPlanarChunk, SourceCommand, SourceFrame,
     SourceGeneration, SourceSeekError, SubmitReport,
 };
+
+use crate::PlanStateInventory;
 
 /// One host-owned producer endpoint plus the immutable facts a submission is checked against.
 pub(crate) struct ControlSource {
@@ -407,4 +412,212 @@ impl ControlSourceBuilder {
         });
         SourceControlSet::new(ids.into_boxed_slice(), self.sources.into_boxed_slice())
     }
+}
+
+/// One side of a source donation (#1344 D3): a prepared plan the control thread holds, its source
+/// producers, what it holds ([`crate::PreparedHost::inventory`]) and the session model it was
+/// compiled from.
+///
+/// The successor side is a prepared plan not yet published; the donor side is a plan committed and
+/// then withdrawn before render adopted it (an `UnadoptedCandidate`'s `plan()`). Neither is owned
+/// by render, so nothing either side holds can change between [`check_donation`] and
+/// [`apply_donation`]: holding the plan by reference is what makes it unpublished.
+#[derive(Clone, Copy)]
+pub struct DonationSide<'a> {
+    /// The plan, which owns the source consumers.
+    pub plan: &'a PreparedRenderPlan,
+    /// The plan's source producers.
+    pub sources: &'a SourceControlSet,
+    /// The plan's own inventory: each source's ring configuration and index.
+    pub inventory: &'a PlanStateInventory,
+    /// The normalized model the plan was compiled from: each source's declaration.
+    pub model: &'a SessionModel,
+}
+
+/// The mutable halves [`apply_donation`] moves between: a plan and its source producers.
+pub struct DonationSideMut<'a> {
+    /// The plan, which owns the source consumers.
+    pub plan: &'a mut PreparedRenderPlan,
+    /// The plan's source producers.
+    pub sources: &'a mut SourceControlSet,
+}
+
+/// Why [`check_donation`] refuses (#1344 D5, D6). A refusal moves nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DonationError {
+    /// A donor ring the donation would move has been consumed: its consumer has begun a block, so
+    /// PCM the host was acked for may already be gone. A withdrawn candidate is never rendered
+    /// (#1311), so only a plan rendered on the control thread (a synchronous host, a test) is
+    /// refused this way.
+    Consumed,
+    /// The apply step could not perform a selected move: a producer is missing on one side, or
+    /// the two plans' source entries cannot exchange (another quantum or channel count, or not
+    /// graph plans).
+    Unswappable,
+}
+
+/// The producer half of a [`DonationPlan`]: `(successor entry, donor entry)` positions in the two
+/// [`SourceControlSet`]s.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ProducerDonation(Box<[(usize, usize)]>);
+
+/// The consumer half of a [`DonationPlan`]: `(successor source index, donor source index)` pairs
+/// in the two plans' source sets.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ConsumerDonation(Box<[(u32, u32)]>);
+
+/// What [`check_donation`] found movable, one pair per donated source, in successor source order.
+/// It borrows neither side.
+#[derive(Debug, Eq, PartialEq)]
+pub struct DonationPlan {
+    /// The producers [`donate_producers`] swaps.
+    pub producers: ProducerDonation,
+    /// The consumers [`donate_consumers`] swaps.
+    pub consumers: ConsumerDonation,
+}
+
+impl DonationPlan {
+    /// Sources the plan donates.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.consumers.0.len()
+    }
+
+    /// Whether the plan donates nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.consumers.0.is_empty()
+    }
+}
+
+/// Check a donation of fresh source rings from a withdrawn plan to its replacement (#1344 D3,
+/// D5). Read-only: it moves nothing and has no side effect.
+///
+/// It selects every source that both plans created fresh (each holds the source's ring: neither
+/// prepared it vacant to carry from the plan render runs) with the same ID, the same declaration
+/// (content, channels, bit depth, frames) and the same ring configuration. A source whose ID
+/// matches but whose declaration or ring differs is a source the transaction redeclared, as the
+/// carry rule treats it ([`crate::SuccessorBase`]): it is not selected and keeps its own fresh
+/// ring. It then checks everything the apply needs, so the apply cannot fail: both producers
+/// present, both consumers exchangeable, and every donated consumer unconsumed since its
+/// generation start (it has never begun a block), so every acked chunk, the generation and any
+/// held seek are still in its ring.
+///
+/// A caller runs it before the protocol commit, and [`apply_donation`] after.
+pub fn check_donation(
+    successor: DonationSide<'_>,
+    donor: DonationSide<'_>,
+) -> Result<DonationPlan, DonationError> {
+    fn declarations(model: &SessionModel) -> BTreeMap<&str, &session::Source> {
+        model
+            .sources
+            .iter()
+            .map(|source| (source.id.as_str(), source))
+            .collect()
+    }
+    let successor_declarations = declarations(successor.model);
+    let donor_declarations = declarations(donor.model);
+    let mut producers = Vec::new();
+    let mut consumers = Vec::new();
+    for row in successor.inventory.sources() {
+        let Some(given) = donor.inventory.source(&row.id) else {
+            continue;
+        };
+        let fresh =
+            |side: &DonationSide<'_>, index: u32| side.plan.can_prepare_source_seek(index as usize);
+        if !fresh(&successor, row.index)
+            || !fresh(&donor, given.index)
+            || row.ring != given.ring
+            || successor_declarations.get(&*row.id) != donor_declarations.get(&*row.id)
+            || !successor_declarations.contains_key(&*row.id)
+        {
+            continue;
+        }
+        let (Some(into), Some(from)) = (
+            successor.sources.index_of(row.id.as_bytes()),
+            donor.sources.index_of(given.id.as_bytes()),
+        ) else {
+            return Err(DonationError::Unswappable);
+        };
+        if successor.sources.sources[into].provider.is_none()
+            || donor.sources.sources[from].provider.is_none()
+        {
+            return Err(DonationError::Unswappable);
+        }
+        producers.push((into, from));
+        consumers.push((row.index, given.index));
+    }
+    graph::can_donate_sources(successor.plan, donor.plan, &consumers).map_err(|refusal| {
+        match refusal {
+            graph::GraphDonationRefusal::Consumed => DonationError::Consumed,
+            graph::GraphDonationRefusal::NotAGraphPlan | graph::GraphDonationRefusal::Mismatch => {
+                DonationError::Unswappable
+            }
+        }
+    })?;
+    Ok(DonationPlan {
+        producers: ProducerDonation(producers.into_boxed_slice()),
+        consumers: ConsumerDonation(consumers.into_boxed_slice()),
+    })
+}
+
+/// The producer half of [`apply_donation`] (#1344 D3): swap each checked pair's producers between
+/// the two control sets, so the successor feeds the donated ring and the donor holds the
+/// successor's fresh one. Infallible on a plan [`check_donation`] returned for these sets;
+/// allocation-free. Returns how many moved.
+pub fn donate_producers(
+    successor: &mut SourceControlSet,
+    donor: &mut SourceControlSet,
+    producers: ProducerDonation,
+) -> usize {
+    let mut moved = 0;
+    for &(into, from) in &producers.0 {
+        if let (Some(into), Some(from)) =
+            (successor.sources.get_mut(into), donor.sources.get_mut(from))
+        {
+            core::mem::swap(&mut into.provider, &mut from.provider);
+            moved += 1;
+        }
+    }
+    debug_assert_eq!(moved, producers.0.len(), "a checked producer pair resolves");
+    moved
+}
+
+/// The consumer half of [`apply_donation`] (#1344 D3, D4): swap each checked pair's whole source
+/// entries between the two plans (`graph::donate_sources`), ring, queued blocks, generation, read
+/// position and held seek. Infallible on a plan [`check_donation`] returned for these plans; on
+/// the control thread, on two plans neither of which render owns. Returns how many moved.
+pub fn donate_consumers(
+    successor: &mut PreparedRenderPlan,
+    donor: &mut PreparedRenderPlan,
+    consumers: ConsumerDonation,
+) -> usize {
+    if consumers.0.is_empty() {
+        return 0;
+    }
+    let moved = graph::donate_sources(successor, donor, &consumers.0);
+    debug_assert!(moved, "a checked consumer donation swaps");
+    if moved { consumers.0.len() } else { 0 }
+}
+
+/// Apply a donation [`check_donation`] returned (#1344 D3): [`donate_producers`], then
+/// [`donate_consumers`]. Infallible; returns how many sources moved. The donor ends with the
+/// successor's fresh rings and drops them with itself.
+///
+/// Neither side can have changed since the check: the successor is unpublished and the donor
+/// withdrawn, both held by the control thread. Call it after the protocol commit, when the
+/// donor is never republished.
+pub fn apply_donation(
+    successor: DonationSideMut<'_>,
+    donor: DonationSideMut<'_>,
+    plan: DonationPlan,
+) -> usize {
+    let DonationPlan {
+        producers,
+        consumers,
+    } = plan;
+    let producers = donate_producers(successor.sources, donor.sources, producers);
+    let consumers = donate_consumers(successor.plan, donor.plan, consumers);
+    debug_assert_eq!(producers, consumers, "both halves move every pair");
+    consumers
 }

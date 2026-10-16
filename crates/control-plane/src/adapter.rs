@@ -43,7 +43,8 @@ pub struct ControlLimits {
     pub maximum_routes: u64,
     /// Effect instances of one session.
     pub maximum_effects: u64,
-    /// Graph, session and plan bytes, both plans and both compiled models included at a swap.
+    /// Graph, session and plan bytes, every held plan and compiled model included at a swap
+    /// (#1398 D4).
     pub maximum_graph_session_plus_plan_bytes: u64,
     /// Source ring bytes, payload and overhead.
     pub maximum_source_total_bytes: u64,
@@ -78,9 +79,10 @@ pub struct ControlLimits {
     /// (Strip, VCA) reach pairs of one session (ruling V-Q3): the bound on one VCA move's work.
     /// Every adapter sets [`host_core::MAXIMUM_VCA_REACH_PAIRS`].
     pub maximum_vca_reach_pairs: u64,
-    /// The most a replacement may hold at its peak, summed over the categories: the running plan's
-    /// and the replacement's graph, session and plan bytes, both compiled models, and the source
-    /// bytes of both plans, a carried ring counted once (#1290a D3). Each category also has its own
+    /// The most a replacement may hold at its peak, summed over the categories: the graph, session
+    /// and plan bytes of every plan the control plane holds and of the replacement, every compiled
+    /// model, and the source bytes of all those plans, a carried ring counted once (#1290a D3,
+    /// #1398 D4). Each category also has its own
     /// ceiling above; an adapter that owns one aggregate budget (the browser's) sets this to what
     /// that budget leaves for them after its own fixed bytes, and one that has none sets
     /// `u64::MAX`.

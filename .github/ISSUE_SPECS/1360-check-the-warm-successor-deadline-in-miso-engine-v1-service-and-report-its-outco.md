@@ -209,3 +209,9 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
 - *Report each configured counter's own value in the C ABI counter snapshot* (#1351): the
   `TRANSITION_REPREPARE_REFUSALS` ID.
+
+## Amendment (controls coordinator, batch 15a, 2026-10-15)
+
+- `AdmissionPeak::WithReprepare` named above did not ship with #1398 (root ruling: code with no
+  production caller is a placeholder). #1403 adds the reprepare admission peak together with its
+  first caller; see its batch 15a amendment.

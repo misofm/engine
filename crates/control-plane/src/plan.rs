@@ -178,6 +178,24 @@ impl<'a> ObservedReservation<'a> {
         self.inner.as_ref().expect("reservation is live").epoch().0
     }
 
+    /// The bound candidate, unpublished (#1310 D4).
+    pub(crate) fn plan(&self) -> &PreparedRenderPlan {
+        self.inner.as_ref().expect("reservation is live").plan()
+    }
+
+    /// The bound candidate, unpublished, for the donation after the commit (#1310 D5).
+    pub(crate) fn plan_mut(&mut self) -> &mut PreparedRenderPlan {
+        self.inner.as_mut().expect("reservation is live").plan_mut()
+    }
+
+    /// The revisions the candidate completes as `superseded` when render adopts it (#1310 D6).
+    pub(crate) fn set_superseded(&mut self, superseded: u64) {
+        self.inner
+            .as_mut()
+            .expect("reservation is live")
+            .set_superseded(superseded);
+    }
+
     pub(crate) fn commit(mut self) {
         self.inner
             .take()
