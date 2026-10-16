@@ -1,7 +1,7 @@
 //! The row rule of a stored automation (decision 17, C10; #1566 D6): one function that holds every
 //! stored automation of a session to the control it names.
 
-use automation::{Segment, Shape, value_at};
+use automation::{CellDescription, Completion, JumpLength, SeekMode, Segment, Shape, value_at};
 use effect_contract::ParameterUnit;
 use session::{
     Automation, AutomationSegment, AutomationShape, ControlAddress, Owner, Section, SessionModel,
@@ -9,7 +9,7 @@ use session::{
 };
 
 use crate::ControlKind;
-use crate::builtin_rows::{HPF_HZ, LPF_HZ};
+use crate::builtin_rows::{FADER_DB, HPF_HZ, LPF_HZ};
 use crate::descriptor::{ControlDescriptor, Lanes, check};
 use crate::effect_rows::{has_rows, session_unit};
 use crate::error::ControlError;
@@ -279,6 +279,98 @@ impl Piece {
     }
 }
 
+/// How the cells of one row's stored automation move in render (#1637): the parameters of every
+/// cell compiled from an entry on the row. Each rendering row has one, written here and nowhere
+/// else, so a stage never spells a row's grid or ramp rule (#1646 departure 6).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CellRule {
+    /// `L`, the grid ramp in samples; the grid period is the larger of 64 and `L`.
+    pub grid_ramp: u32,
+    /// Where a jump's ramp length comes from.
+    pub jump: JumpLength,
+    /// Where a ramp started at `τ` completes.
+    pub completion: Completion,
+    /// A target whose ramp cannot restart while one runs.
+    pub no_restart: bool,
+    /// How a seek lands on the cell.
+    pub seek: SeekMode,
+}
+
+impl CellRule {
+    /// The cell description of `segments` under this rule, the input of
+    /// [`automation::ProgramBuilder`].
+    #[must_use]
+    pub const fn describe(self, segments: &[Segment]) -> CellDescription<'_> {
+        CellDescription {
+            segments,
+            grid_ramp: self.grid_ramp,
+            grid: if self.grid_ramp > 64 {
+                self.grid_ramp
+            } else {
+                64
+            },
+            jump: self.jump,
+            completion: self.completion,
+            no_restart: self.no_restart,
+        }
+    }
+}
+
+/// The fader row's cell rule (#1646 D1): grid period and grid ramp 64, completion `End` (the
+/// fader ramp assigns its target on its last frame), the jump length of the block
+/// (`controls::LiveRamps::for_row(LiveRampRow::Fader)`, resolved by the caller), restartable, and
+/// an exact seek landing (a builtin cell).
+pub const FADER_CELL_RULE: CellRule = CellRule {
+    grid_ramp: 64,
+    jump: JumpLength::Block,
+    completion: Completion::End,
+    no_restart: false,
+    seek: SeekMode::Exact,
+};
+
+/// Whether a stored automation of `target` renders (#1646, #1647): today the fader row of a strip
+/// (builtin row 5). An entry on any other row is validated and kept in the session but compiles
+/// to no cell. Every rendering slice adds its row here, so preparation and the live classifier
+/// (#1648) read one list.
+#[must_use]
+pub fn automation_row_renders(target: &ControlAddress) -> bool {
+    matches!(target.owner, Owner::Strip(_))
+        && target.section == Section::Builtins
+        && target.control == FADER_DB
+}
+
+/// The stored automation entries that drive strip `strip`'s fader, per lane (`[left, right]`): a
+/// `both` entry drives both lanes, a `left` or `right` entry its own. The session validator allows
+/// at most one entry per lane (#1626), so each lane has at most one.
+#[must_use]
+pub fn fader_automation<'a>(
+    model: &'a SessionModel,
+    strip: &StableId,
+) -> [Option<&'a Automation>; 2] {
+    let mut lanes = [None, None];
+    for automation in &model.automation {
+        let target = &automation.target;
+        if !automation_row_renders(target)
+            || !matches!(&target.owner, Owner::Strip(owner) if owner == strip)
+        {
+            continue;
+        }
+        for (index, lane) in [Lane::Left, Lane::Right].iter().enumerate() {
+            if (target.lane == *lane || target.lane == Lane::Both) && lanes[index].is_none() {
+                lanes[index] = Some(automation);
+            }
+        }
+    }
+    lanes
+}
+
+/// An entry's segments in the evaluator's type, in table order: the one conversion of a stored
+/// segment, which preparation and the order rule read.
+#[must_use]
+pub fn stored_segments(entry: &Automation) -> Vec<Segment> {
+    entry.segments.iter().map(stored_segment).collect()
+}
+
 fn stored_segment(segment: &AutomationSegment) -> Segment {
     Segment {
         start: segment.start_sample,
@@ -303,7 +395,7 @@ impl<'a> Curve<'a> {
         match entry {
             Some(entry) => Self::Automated {
                 entry,
-                segments: entry.segments.iter().map(stored_segment).collect(),
+                segments: stored_segments(entry),
             },
             None => Self::Static(value),
         }

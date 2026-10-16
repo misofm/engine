@@ -10,6 +10,8 @@ publish.workspace = true
 name = "builtins_compiler"
 
 [dependencies]
+# #1646: stored fader automation is compiled into a cell program at preparation.
+automation.workspace = true
 controls.workspace = true
 lane.workspace = true
 engine.workspace = true

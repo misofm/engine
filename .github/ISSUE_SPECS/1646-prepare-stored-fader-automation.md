@@ -481,3 +481,99 @@ D6 only. Shipped:
   processor method. No downcast in host-core. This slice needs no `a(n)` (departure 1).
 - **Q2 (R17-4): B.** The program is installed on the test-only scalar oracle too, through the one
   shared event driver. The scalar backend is not refused.
+
+## Decision record: #1646b (batch 17)
+
+The preparation (D1-D5). Shipped:
+
+- **Thick core (`controls`).** `EffectiveStrip::offsets_sum` is `S` per lane
+  (`vca_offsets_sum` of the reach, `+0.0` with none), written by `effective_strip` beside
+  `fader_db`; #1649 departure 3 only reads it. `crates/controls/src/automation.rs` gains
+  `CellRule` and `FADER_CELL_RULE` (grid 64, grid ramp 64, `End`, `JumpLength::Block`, restartable,
+  `SeekMode::Exact`), `stored_segments` (the one segment conversion, now also read by the order
+  rule), `automation_row_renders` (today the fader row; #1648's classifier reuses it) and
+  `fader_automation(model, strip) -> [Option<&Automation>; 2]`.
+- **Seed (`automation`).** `CellState::seed_target(value)` sets the target as a completed retarget
+  (clears `held`, keeps the cursor and the ramp); #1648 reuses it. Test
+  `events::tests::a_seeded_target_suppresses_the_first_retarget_to_the_same_bits`.
+- **Preparation (`builtins-compiler`).** The shared private body of every preparation form calls
+  `prepare_fader_automation` after the preflight and before phase two: one cell per automated
+  fader lane of every strip (tracks and submixes; `both` gives two), in strip then channel order,
+  built once into one `Arc<Program>`. Each lane's prepared value is its first `start_value` (D2,
+  the hold rule) composed as `vca_compose_db(value, S)`; the composition and its
+  `checked_fader_gain` run inside `CanonicalFpEnv`. That dB is the lane's prepared fader parameter
+  (departure 10), so the existing `checked_fader_gain` path bakes the static bits.
+- **Install.** At lowering each fader bank with an automated member gets one
+  `Option<LaneFaderAutomation>` slot per bank lane (`FaderBankProcessor::automation`, empty and
+  unallocated otherwise); a slot holds the program handle and per channel an `AutomatedFaderCell`:
+  cell index, `CellState` seeded with the prepared value, its own offsets cell (`Arc` of a
+  `LatestCell<3>` and its dirty word, created unwritten) and the held `S` and ramp word (the
+  session's fader length, `LiveRampRow::VcaOffset`). The test-only scalar oracle (R17-4) holds the
+  same `LaneFaderAutomation`, boxed, on both its fader owners (`FaderProcessor`,
+  `LiveControlFaderProcessor`); the scalar backend is not refused. The fused fader-matrix bank
+  holds the fader bank, so it carries the slots.
+- **Bytes (D4).** `strip_bank_resource` (the one sum the preflight `graph_builtin_bank_resource`
+  and the lowering both take) adds `fader_automation_bank_resource`: the program once
+  (`size_of::<SharedAllocation<Program>>()` plus `ProgramBuilder::bytes`), `width` slots per bank
+  with an automated member and one offsets cell (`size_of::<SharedAllocation<OffsetsLane>>()`)
+  per automated channel, as builtin bank payload, so they reach `builtin_bank_bytes`,
+  `graph_incremental_plan_bytes`, `graph_session_plus_plan_bytes`, the host's cap and the C ABI's
+  replacement peak. The oracle's are charged in `graph_scalar_owner_resource`. The sizes are
+  `builtins_compiler::fader_automation_sizes()`, measured, never literals.
+
+**Measured (x86-64, AVX2, eight lanes):** program overhead 64 bytes, offsets cell 120, lane slot
+120 (`Option<LaneFaderAutomation>`: program handle and two channels with their 32-byte
+`CellState`). One left-only lane with one segment: program report 68, charge
+`68 + 64 + 8 × 120 + 120 = 1,212` bytes (`builtin_bank_bytes` 8,472 -> 9,684 on the bank
+fixture). Each further automated channel in the same bank adds 120 plus its cells' program bytes.
+A session without fader automation carries the empty slot array: `size_of::<FaderBankProcessor>()`
+grows by 16 bytes per fader bank, a fixed structural change inside every ceiling (no re-pin).
+
+**Departures.**
+
+1. **The program is built in the builtins preparation, not in host-core** (departure 6 said
+   host-core builds it and passes it). The shared body of all five public forms builds it from
+   the session and the `Effective` it already takes, so every form installs it with no new
+   argument, no caller can omit it (departure 7's aim), the oracle and the graph compiler's
+   preflight read the same plan, and no public signature changes. The row rule, the segment
+   conversion and `S` stay written once in `controls`; host-core has no edit.
+2. **`host.automation.fader` is raised by that body**, so it reaches a host as a builtin
+   rejection, at `$.automation[id=<id>]`. It also covers a builder refusal: a session may hold a
+   segment end at or past `2^53` samples, which the session validator accepts and
+   `ProgramBuilder` refuses (`BuildError::Segment`), so that refusal is reachable, not only the
+   unreachable conversion of D2.
+3. **No offsets-cell writer here.** #1649 departure 4 adds the writer to `FaderCells`; the cell is
+   created unwritten and its holder keeps the prepared words.
+4. **Parts with no reader until the same push** carry `#[expect(dead_code, reason = ...)]`, which
+   turns into a warning (and so must go) as soon as the successor reads them: the program, the
+   seeded `CellState`, the held `S` and ramp word (render: #1647), the offsets cell (write and
+   dirty read: #1649), the slot carry in `adopt_lane` (#1648). Today the prepared value alone
+   renders: a flat curve exactly, a moving curve held at its first value.
+5. **The oracle's plain `FaderProcessor`** (a strip with no live-control request) holds the
+   automation but wraps the unramped fader, which takes no timed operation; #1647 binds an
+   automated oracle strip on the ramped fader.
+6. `a(n)` is #1647's (R17-2); nothing here reads it.
+
+**Gates.**
+
+- Gate 1: `a_flat_fader_automation_renders_the_static_fader_bits_on_the_c_abi`
+  (`crates/capi/src/runtime/tests.rs`) and
+  `a_flat_fader_automation_renders_the_static_fader_bits_in_the_browser`
+  (`hosts/host-web/src/tests.rs`, live-controlled boot): no VCA, one `+3` dB VCA, the crafted three
+  VCAs (asserting the two orders give dB bits `0x40ad_8ad3` and `0x40ad_8ad2` and different gain
+  bits) and `-0.0` dB on a lane neither of two VCAs reaches, 64 blocks each, and each automated
+  session differs from itself without the automation.
+- Gate 2: `a_fader_automation_is_charged_to_the_graph_plan_rows_and_the_cap`
+  (`crates/host-core/tests/stored_fader_automation.rs`): the three rows differ by exactly the
+  charge above; the admitted total prepares and one byte below refuses with
+  `host.graph.resource.limit`.
+- Gate 3: `a_left_only_fader_automation_keeps_a_mono_tracks_collapse` (same file): the collapse
+  counters equal the session without automation, and the output equals the twin's dual render.
+- Gate 4: `./target/release/audit capi` `pcm_digest` `bffc21e857b5e134` (unchanged), 0
+  violations, 0 allocations; every existing render test of `-p session`, `-p controls`,
+  `-p automation`, `-p host-core`, `-p builtins-compiler`, `-p capi`, `-p host-web` passes with
+  no digest moved. One layout test moved mechanically:
+  `scalar_owner_resource_is_independent_two_boxes_plus_two_pointer_outer` now counts the oracle
+  fader owner's new `automation` field. Gate 6 landed with #1646a. `S` in
+  `vca_reach_counts_a_diamond_once_and_includes_nested_parents_in_id_order`
+  (`crates/controls/tests/composition.rs`) now also pins `offsets_sum`, `+0.0` by bits.

@@ -6301,3 +6301,193 @@ mod session_seek_declares {
         assert_eq!(rig.epoch(), epoch);
     }
 }
+
+/// #1646 gate 1: the sessions of one case, all on [`stateless_session`] at 48 kHz.
+struct FlatFaderCase {
+    label: &'static str,
+    /// A flat fader automation on one track, whose static fader is another value.
+    automated: session::SessionModel,
+    /// The same session with the track's static fader at the flat value and no automation.
+    reference: session::SessionModel,
+}
+
+/// A `linear` segment from `value` to `value` on `lanes` of track `track`'s fader (builtin row 5).
+fn flat_fader_entry(
+    model: &session::SessionModel,
+    track: usize,
+    value: f32,
+) -> session::Automation {
+    session::Automation {
+        id: session::StableId::parse(&format!("fader-{track}")).expect("automation ID"),
+        target: session::ControlAddress {
+            owner: session::Owner::Strip(model.tracks[track].id.clone()),
+            section: session::Section::Builtins,
+            control: 5,
+            lane: session::ParameterChannel::Both,
+        },
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: 1 << 20,
+            start_value: value,
+            end_value: value,
+            unit: session::ParameterUnit::Db,
+        }],
+    }
+}
+
+/// A VCA `id` with offset `offset` dB on both lanes, holding `members`.
+fn flat_case_vca(id: &str, offset: f32, members: &[&session::StableId]) -> session::Vca {
+    session::Vca {
+        id: session::StableId::parse(id).expect("VCA ID"),
+        fader: session::DualMonoFader {
+            left_db: offset,
+            right_db: offset,
+            left_mute: false,
+            right_mute: false,
+        },
+        members: members.iter().map(|member| (*member).clone()).collect(),
+    }
+}
+
+/// Gate 1's crafted three-VCA value and offsets (in ascending VCA-ID order), for which the two
+/// composition orders of README F16 round to different gain bits.
+const CRAFTED_VALUE: u32 = 0x405a_f905;
+const CRAFTED_OFFSETS: [u32; 3] = [0xc1af_fc6c, 24.0_f32.to_bits(), 0x2624_8cd2];
+
+/// The four cases of #1646 gate 1: a flat value on a track no VCA reaches; a `both` entry on a
+/// track one `+3` dB VCA reaches; the crafted value on a track three VCAs reach; and `-0.0` dB on
+/// a track neither of two VCAs reaches (the cell's `S = +0.0`). Each automated track's own static
+/// fader is another value, so the flat value is heard only if the automation prepares it.
+fn flat_fader_cases() -> Vec<FlatFaderCase> {
+    let base = stateless_session(48_000);
+    let case = |label: &'static str,
+                track: usize,
+                value: f32,
+                static_db: f32,
+                vcas: &dyn Fn(&session::SessionModel) -> Vec<session::Vca>| {
+        let mut reference = base.clone();
+        reference.vcas = vcas(&reference);
+        let fader = &mut reference.tracks[track].fader;
+        (fader.left_db, fader.right_db) = (value, value);
+        let mut automated = reference.clone();
+        let fader = &mut automated.tracks[track].fader;
+        (fader.left_db, fader.right_db) = (static_db, static_db);
+        automated.automation = vec![flat_fader_entry(&automated, track, value)];
+        FlatFaderCase {
+            label,
+            automated,
+            reference,
+        }
+    };
+    vec![
+        case("no VCA", 0, -7.25, 0.0, &|_| Vec::new()),
+        case("one +3 dB VCA", 1, -7.25, 0.0, &|model| {
+            vec![flat_case_vca("v-plus", 3.0, &[&model.tracks[1].id])]
+        }),
+        case(
+            "three VCAs, crafted",
+            1,
+            f32::from_bits(CRAFTED_VALUE),
+            0.0,
+            &|model| {
+                ["va", "vb", "vc"]
+                    .into_iter()
+                    .zip(CRAFTED_OFFSETS)
+                    .map(|(id, offset)| {
+                        flat_case_vca(id, f32::from_bits(offset), &[&model.tracks[1].id])
+                    })
+                    .collect()
+            },
+        ),
+        case("-0.0 dB, two VCAs elsewhere", 2, -0.0, -3.0, &|model| {
+            vec![
+                flat_case_vca("va", -1.0, &[&model.tracks[0].id]),
+                flat_case_vca("vb", 2.0, &[&model.tracks[0].id, &model.tracks[1].id]),
+            ]
+        }),
+    ]
+}
+
+/// The crafted case composes to different gain bits in the two orders, so a render that keeps
+/// the member-first order cannot equal the static path, which sums the offsets first (#1646 D6).
+fn assert_the_crafted_orders_differ() {
+    let value = f64::from(f32::from_bits(CRAFTED_VALUE));
+    let offsets = CRAFTED_OFFSETS.map(|bits| f64::from(f32::from_bits(bits)));
+    let member_first = offsets.iter().fold(value, |sum, offset| sum + offset) as f32;
+    let offsets_first = session::vca_compose_db(
+        f32::from_bits(CRAFTED_VALUE),
+        session::vca_offsets_sum(CRAFTED_OFFSETS.map(f32::from_bits)).expect("three offsets"),
+    );
+    assert_eq!(member_first.to_bits(), 0x40ad_8ad3);
+    assert_eq!(offsets_first.to_bits(), 0x40ad_8ad2);
+    let gain = |db: f32| {
+        builtins::checked_fader_gain(db)
+            .expect("in domain")
+            .to_bits()
+    };
+    assert_ne!(
+        gain(member_first),
+        gain(offsets_first),
+        "the two orders give different gain bits"
+    );
+}
+
+/// Renders `model` on the C ABI for `blocks` blocks of the continuity signal.
+fn render_flat_case_c(model: &session::SessionModel, blocks: u64) -> Vec<Vec<u32>> {
+    let document = session::canonical_session_json(model).expect("canonical");
+    let (c_session, c_plan) = boxed_c_children_with_limits(
+        &document,
+        CompileLimits {
+            maximum_vcas: 8,
+            ..limits()
+        },
+    );
+    let (left, right) = continuity_block(0, 0);
+    submit_c(c_session, 1, 0, 48_000, &left, &right, false);
+    let blocks = feed_and_render_c(c_session, c_plan, 48_000, 0, blocks);
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+    sample_bits(&blocks)
+}
+
+/// #1646 gate 1 (C ABI): a flat stored fader automation renders, bit for bit, the static fader at
+/// its value, for 64 blocks, with no VCA, under one `+3` dB VCA, under the crafted three-VCA
+/// offsets, and at `-0.0` dB on a lane no VCA reaches. Each automated session also renders
+/// differently from itself without the automation, so the value is the automation's.
+///
+/// Test value: red if preparation composes the offsets in another order than the static path, if
+/// the `+0.0` of a lane no VCA reaches changes the gain bits, if the prepared value is not the
+/// curve's, or if the C ABI converts dB differently from the static fader.
+#[test]
+fn a_flat_fader_automation_renders_the_static_fader_bits_on_the_c_abi() {
+    const BLOCKS: u64 = 64;
+    assert_the_crafted_orders_differ();
+    for case in flat_fader_cases() {
+        let automated = render_flat_case_c(&case.automated, BLOCKS);
+        let reference = render_flat_case_c(&case.reference, BLOCKS);
+        let mut unautomated = case.automated.clone();
+        unautomated.automation.clear();
+        let without = render_flat_case_c(&unautomated, BLOCKS);
+        assert!(
+            reference
+                .iter()
+                .flatten()
+                .any(|bits| f32::from_bits(*bits) != 0.0),
+            "{}: the reference plays",
+            case.label
+        );
+        assert_ne!(
+            without, reference,
+            "{}: the automation is heard",
+            case.label
+        );
+        for (block, (automated, reference)) in automated.iter().zip(&reference).enumerate() {
+            assert_eq!(
+                automated, reference,
+                "{}: block {block} renders the static fader's bits",
+                case.label
+            );
+        }
+    }
+}

@@ -610,6 +610,271 @@ fn matrix_lane(superseded: &LiveValuesSuperseded) -> (MatrixCells, MatrixReader)
     )
 }
 
+/// Words of an automated fader lane's offsets cell (#1646 D1, written by #1649): the lane's offset
+/// sum `S` as the low and high words of its `f64` bits, then the ramp word (the jump length a VCA
+/// edit asks for).
+const OFFSETS_CELL_WORDS: usize = 3;
+
+/// What one automated fader channel's offsets cell shares between its writer (control, #1649) and
+/// its reader (render, #1647): one #1312 latest-target cell and its dirty word.
+///
+/// The cell is created unwritten; its reader holds the prepared words until its first applied
+/// write (#1646 departure 5, as #1639's jump-length cell does).
+#[expect(
+    dead_code,
+    reason = "#1649 writes the cell and #1647 reads it in render, in the same push (batch R1)"
+)]
+struct OffsetsLane {
+    cell: LatestCell<OFFSETS_CELL_WORDS>,
+    dirty: DirtyWord,
+}
+
+/// One automated fader channel as a fader owner holds it (#1646 D1): its cell in the plan's
+/// program, its event state and its offsets cell with the words render holds until the first
+/// write.
+///
+/// The event state lives here, beside the lane's ramp state, so the stage's carry moves it with
+/// the lane (#1648 extends [`FaderBankProcessor::adopt_lane`]).
+#[expect(
+    dead_code,
+    reason = "#1647 drives the events and composes the gain from these in render, in the same push \
+              (batch R1)"
+)]
+struct AutomatedFaderCell {
+    /// The cell's index in the plan's [`automation::Program`].
+    cell: u32,
+    /// Seeded with the prepared curve value, so the first grid event on a flat curve emits nothing.
+    state: automation::CellState,
+    offsets: Arc<OffsetsLane>,
+    /// `S`, held until the offsets cell's first applied write.
+    offsets_sum: f64,
+    /// The ramp word, held until the offsets cell's first applied write: the session's fader
+    /// length (`LiveRampRow::VcaOffset`, #1054).
+    offsets_ramp: u32,
+}
+
+/// One strip lane's stored fader automation (#1646 D1): the plan's program and the lane's
+/// automated channels. The one event driver both fader owners hold, the fader bank per lane and
+/// the test-only scalar oracle per strip (R17-4), so neither has a second copy of the rule.
+#[expect(
+    dead_code,
+    reason = "#1647 drives the events from the program in render, in the same push (batch R1)"
+)]
+struct LaneFaderAutomation {
+    program: Arc<automation::Program>,
+    /// `[left, right]`; `None` for a channel no entry drives.
+    channels: [Option<AutomatedFaderCell>; 2],
+}
+
+impl LaneFaderAutomation {
+    /// The lane's automation, from its prepared cells. Control side: it allocates one offsets
+    /// cell per automated channel.
+    fn new(program: &Arc<automation::Program>, cells: &[Option<PreparedFaderCell>; 2]) -> Self {
+        Self {
+            program: Arc::clone(program),
+            channels: cells.map(|cell| {
+                cell.map(|cell| {
+                    let mut state = automation::CellState::new();
+                    state.seed_target(cell.value);
+                    AutomatedFaderCell {
+                        cell: cell.cell,
+                        state,
+                        offsets: Arc::new(OffsetsLane {
+                            cell: LatestCell::new(),
+                            dirty: DirtyWord::new(),
+                        }),
+                        offsets_sum: cell.offsets_sum,
+                        offsets_ramp: cell.offsets_ramp,
+                    }
+                })
+            }),
+        }
+    }
+}
+
+/// One automated fader channel as preparation computed it (#1646 D1, D2): plain data, no
+/// allocation.
+#[derive(Clone, Copy, Debug)]
+struct PreparedFaderCell {
+    /// The cell's index in the program.
+    cell: u32,
+    /// The prepared curve value: the entry's first `start_value`, the curve at node time `-a(n)`
+    /// for every `a(n)` (D2, the hold rule).
+    value: f32,
+    /// `S` (`controls::EffectiveStrip::offsets_sum`).
+    offsets_sum: f64,
+    /// The offsets cell's ramp word.
+    offsets_ramp: u32,
+}
+
+/// The stored fader automation of one preparation (#1646): the program every automated lane
+/// reads, its byte report, and each automated strip's channels.
+struct FaderAutomationPlan {
+    program: Arc<automation::Program>,
+    /// [`automation::ProgramBuilder::bytes`] of the program.
+    program_bytes: u64,
+    /// Each strip that has an automated fader lane, by track ID.
+    strips: BTreeMap<Box<str>, [Option<PreparedFaderCell>; 2]>,
+}
+
+impl FaderAutomationPlan {
+    /// The prepared cells of strip `track`, if any channel is automated.
+    fn strip(&self, track: &str) -> Option<&[Option<PreparedFaderCell>; 2]> {
+        self.strips.get(track)
+    }
+
+    /// The prepared dB of each lane of strip `track`: `vca_compose_db(value, S)` on an automated
+    /// lane (D2), `effective` elsewhere.
+    fn fader_db(&self, track: &str, effective: [f32; 2]) -> [f32; 2] {
+        let Some(cells) = self.strip(track) else {
+            return effective;
+        };
+        [0, 1].map(|lane| {
+            cells[lane].map_or(effective[lane], |cell| {
+                session::vca_compose_db(cell.value, cell.offsets_sum)
+            })
+        })
+    }
+
+    /// The bytes the program retains: its shared allocation and the builder's report.
+    fn retained_program_bytes(&self) -> Option<u64> {
+        fader_automation_sizes()
+            .program_overhead_bytes
+            .checked_add(self.program_bytes)
+    }
+
+    /// The automated channels among `members`.
+    fn automated_channels<'a>(&self, members: impl Iterator<Item = &'a str>) -> Option<u64> {
+        members
+            .filter_map(|track| self.strip(track))
+            .map(|cells| cells.iter().filter(|cell| cell.is_some()).count())
+            .try_fold(0_u64, |total, count| {
+                total.checked_add(u64::try_from(count).ok()?)
+            })
+    }
+}
+
+/// The fixed retained sizes of stored fader automation (#1646 D4), measured on the build that
+/// runs, never written as literals.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FaderAutomationSizes {
+    /// The shared allocation that holds a plan's program, beyond the builder's byte report
+    /// ([`automation::ProgramBuilder::bytes`]), which is charged with it once per plan.
+    pub program_overhead_bytes: u64,
+    /// One automated channel's offsets cell: its shared allocation (the three-word
+    /// `LatestCell<3>` and its dirty word).
+    pub offsets_cell_bytes: u64,
+    /// One lane's automation slot on a fader owner (the event state, `S`, the ramp word and the
+    /// program handle of both channels). A fader bank with an automated member holds one per bank
+    /// lane.
+    pub lane_slot_bytes: u64,
+}
+
+/// The retained sizes stored fader automation charges (#1646 D4): a plan with automation charges
+/// its program once, each fader bank with an automated member one slot per bank lane, and each
+/// automated channel one offsets cell, as builtin bank payload.
+#[must_use]
+pub fn fader_automation_sizes() -> FaderAutomationSizes {
+    let bytes = |size: usize| u64::try_from(size).unwrap_or(u64::MAX);
+    FaderAutomationSizes {
+        program_overhead_bytes: bytes(core::mem::size_of::<SharedAllocation<automation::Program>>()),
+        offsets_cell_bytes: bytes(core::mem::size_of::<SharedAllocation<OffsetsLane>>()),
+        lane_slot_bytes: bytes(core::mem::size_of::<Option<LaneFaderAutomation>>()),
+    }
+}
+
+/// Compile the session's stored fader automation (#1646 D1, D2): one cell per automated fader
+/// lane (a `both` entry gives two), in strip order and then channel order, built once with the
+/// fader row's cell rule (`controls::FADER_CELL_RULE`). `None` when no fader lane is automated, so
+/// a session without fader automation prepares exactly as before.
+///
+/// Each lane's prepared value is its entry's first `start_value` and its `S` the strip's
+/// [`controls::EffectiveStrip::offsets_sum`]; the composition `vca_compose_db(value, S)` and its
+/// gain conversion run inside [`lane::fpenv::CanonicalFpEnv`], as render's do (D2).
+///
+/// # Errors
+///
+/// `host.automation.fader` at the entry when a lane's composed value has no fader gain or the
+/// program builder refuses its cell (a segment end at or past `2^53` samples), and at
+/// `$.automation` when the program does not fit.
+fn prepare_fader_automation(
+    session: &CompiledSession,
+    effective: &controls::Effective,
+) -> Result<Option<FaderAutomationPlan>, BuiltinDiagnostic> {
+    let model = session.normalized_model();
+    if !model
+        .automation
+        .iter()
+        .any(|entry| controls::automation_row_renders(&entry.target))
+    {
+        return Ok(None);
+    }
+    let ramp = controls::LiveRamps::for_session(model).for_row(controls::LiveRampRow::VcaOffset);
+    let refuse = |entry: &session::Automation| {
+        diag(
+            "host.automation.fader",
+            &format!("$.automation[id={}]", entry.id.as_str()),
+        )
+    };
+    // One segment table per cell, in program order, with its entry; transient.
+    let mut tables: Vec<(&session::Automation, Vec<automation::Segment>)> = Vec::new();
+    let mut strips = BTreeMap::new();
+    for (strip, values) in model.strips().zip(effective.strips.iter()) {
+        let entries = controls::fader_automation(model, strip.id);
+        if entries.iter().all(Option::is_none) {
+            continue;
+        }
+        let mut cells = [None, None];
+        for (lane, entry) in entries.into_iter().enumerate() {
+            let Some(entry) = entry else { continue };
+            let segments = controls::stored_segments(entry);
+            let value = segments.first().ok_or_else(|| refuse(entry))?.start_value;
+            let offsets_sum = values.offsets_sum[lane];
+            {
+                let _canonical = lane::fpenv::CanonicalFpEnv::enter();
+                let composed = session::vca_compose_db(core::hint::black_box(value), offsets_sum);
+                core::hint::black_box(builtins::checked_fader_gain(composed))
+                    .map_err(|_| refuse(entry))?;
+            }
+            let cell = u32::try_from(tables.len())
+                .map_err(|_| diag("host.automation.fader", "$.automation"))?;
+            cells[lane] = Some(PreparedFaderCell {
+                cell,
+                value,
+                offsets_sum,
+                offsets_ramp: ramp,
+            });
+            tables.push((entry, segments));
+        }
+        strips.insert(Box::<str>::from(strip.id.as_str()), cells);
+    }
+    let descriptions: Vec<automation::CellDescription<'_>> = tables
+        .iter()
+        .map(|(_, segments)| controls::FADER_CELL_RULE.describe(segments))
+        .collect();
+    let program_bytes = automation::ProgramBuilder::bytes(&descriptions);
+    let program = automation::ProgramBuilder::build(&descriptions).map_err(|error| {
+        let cell = match error {
+            automation::BuildError::NoSegments { cell }
+            | automation::BuildError::Segment { cell, .. }
+            | automation::BuildError::Order { cell, .. }
+            | automation::BuildError::NonPositiveExponential { cell, .. }
+            | automation::BuildError::Grid { cell }
+            | automation::BuildError::Spacing { cell, .. } => Some(cell),
+            automation::BuildError::TooLarge | automation::BuildError::Allocation => None,
+        };
+        cell.and_then(|cell| tables.get(cell)).map_or_else(
+            || diag("host.automation.fader", "$.automation"),
+            |(entry, _)| refuse(entry),
+        )
+    })?;
+    Ok(Some(FaderAutomationPlan {
+        program: Arc::new(program),
+        program_bytes,
+        strips,
+    }))
+}
+
 /// Words of one input trim cell: the `trim_db` bits and the ramp window.
 const TRIM_CELL_WORDS: usize = 2;
 /// Words of one input polarity cell: `0` or `1` and the ramp window.
@@ -1124,6 +1389,10 @@ pub struct PreparedBuiltinsSession {
     tails: Vec<(Box<str>, NodeTailBound)>,
     requests: Vec<MeterRequestSeal>,
     resources: BuiltinResourceEstimate,
+    /// The session's stored fader automation (#1646), installed on each automated lane's fader
+    /// owner at lowering; `None` when no fader lane is automated. Its program and every slot and
+    /// cell lowering builds for it are charged as builtin bank payload (D4).
+    fader_automation: Option<FaderAutomationPlan>,
     /// Every route's effective follow gate per source lane, in `model.routes` order, as the
     /// preparation was given it (decision 17, C7; `controls::Effective::routes`). Control-side data
     /// like `tails`: graph lowering reads it for the routes' follow gates, so the gate is composed
@@ -1521,6 +1790,15 @@ struct FaderBankProcessor {
     /// One channel per bank lane; `None` for a lane no live control addresses. Always `lanes` long,
     /// so the lane index is the array index and no lane map is stored.
     controls: Box<[Option<FaderReader>]>,
+    /// The stored fader automation of the bank's lanes (#1646 D1): one slot per bank lane when a
+    /// member's fader is automated, `None` on a lane that is not; empty (no allocation) when no
+    /// member is.
+    #[expect(
+        dead_code,
+        reason = "#1647 drives it in render and #1648 carries it in `adopt_lane`, in the same push \
+                  (batch R1)"
+    )]
+    automation: Box<[Option<LaneFaderAutomation>]>,
     process_calls: u64,
     frames_processed: u64,
     control_delivery: BuiltinControlDelivery,
@@ -2420,6 +2698,7 @@ impl TestOnlyFaderMatrixPair {
         let mut fader = FaderBankProcessor {
             bank: BuiltinFaderBank::new(Backend::Simd4, width, parameters).expect("fixture"),
             controls: (0..4).map(|_| None).collect(),
+            automation: Box::default(),
             process_calls: 0,
             frames_processed: 0,
             control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
@@ -3488,7 +3767,13 @@ impl PreparedBuiltinsSession {
     fn strip_bindings(&mut self) -> Vec<graph::GraphNodeBinding> {
         let mut bindings = Vec::with_capacity(self.strips.len() * 3);
         let control_delivery = self.control_delivery;
+        let fader_automation = self.fader_automation.take();
         for strip in core::mem::take(&mut self.strips) {
+            // #1646 R17-4: the oracle installs the same lane automation as a fader bank lane.
+            let automation = fader_automation.as_ref().and_then(|plan| {
+                plan.strip(&strip.track_id)
+                    .map(|cells| Box::new(LaneFaderAutomation::new(&plan.program, cells)))
+            });
             let StripPreparation {
                 graph_id,
                 parameters,
@@ -3511,7 +3796,7 @@ impl PreparedBuiltinsSession {
             ) = match control {
                 None => (
                     Box::new(InputProcessor(input)),
-                    Box::new(FaderProcessor(fader)),
+                    Box::new(FaderProcessor(fader, automation)),
                     Box::new(MatrixProcessor(matrix)),
                 ),
                 Some(control) => {
@@ -3537,6 +3822,7 @@ impl PreparedBuiltinsSession {
                                 .fader
                                 .expect("a strip is banked on all three stages or on none"),
                             control_delivery,
+                            automation,
                             #[cfg(any(test, feature = "test-support"))]
                             test_only_owner,
                         }),
@@ -3599,13 +3885,81 @@ impl PreparedBuiltinsSession {
         let Some(width) = BankWidth::for_backend(dispatch) else {
             return Some(GraphBuiltinBankResourceEstimate::default());
         };
+        let plan = planned_strip_banks(&self.seal.tracks, dispatch, levels, classes);
+        self.strip_bank_resource(&plan, width)
+    }
+
+    /// The retained bytes of the strip banks of `plan` at `width`: each bank kind's processors,
+    /// members and scratch, and the stored fader automation lowering installs on the fader banks
+    /// (#1646 D4). The one sum the preflight and the lowering both take.
+    fn strip_bank_resource(
+        &self,
+        plan: &[(TrackStage, Vec<Box<[GraphNodeId]>>); 3],
+        width: BankWidth,
+    ) -> Option<GraphBuiltinBankResourceEstimate> {
         let mut total = GraphBuiltinBankResourceEstimate::default();
-        for (stage, groups) in planned_strip_banks(&self.seal.tracks, dispatch, levels, classes) {
-            let processor_bytes = strip_processor_bytes(stage, width)?;
-            let kind = builtin_bank_resource(&groups, width, self.seal.quantum, processor_bytes)?;
+        for (stage, groups) in plan {
+            let processor_bytes = strip_processor_bytes(*stage, width)?;
+            let kind = builtin_bank_resource(groups, width, self.seal.quantum, processor_bytes)?;
             total = add_bank_resource(total, kind)?;
         }
-        Some(total)
+        let fader_groups = plan
+            .iter()
+            .find(|(stage, _)| *stage == TrackStage::PostFader)
+            .map_or(&[][..], |(_, groups)| groups.as_slice());
+        add_bank_resource(
+            total,
+            self.fader_automation_bank_resource(fader_groups, width)?,
+        )
+    }
+
+    /// The stored fader automation the fader banks of `groups` retain (#1646 D4), as bank payload:
+    /// the program once (its shared allocation and the builder's report), one lane slot per bank
+    /// lane of each bank with an automated member, and one offsets cell per automated channel.
+    /// Nothing when no member is automated.
+    fn fader_automation_bank_resource(
+        &self,
+        groups: &[Box<[GraphNodeId]>],
+        width: BankWidth,
+    ) -> Option<GraphBuiltinBankResourceEstimate> {
+        let none = GraphBuiltinBankResourceEstimate::default();
+        let Some(automation) = &self.fader_automation else {
+            return Some(none);
+        };
+        let sizes = fader_automation_sizes();
+        let slots_per_bank = sizes
+            .lane_slot_bytes
+            .checked_mul(u64::from(width.lanes()))?;
+        let mut payload_bytes = 0_u64;
+        for members in groups {
+            let channels =
+                automation.automated_channels(members.iter().filter_map(
+                    |member| match member {
+                        GraphNodeId::TrackStage { track_id, .. } => Some(track_id.as_str()),
+                        _ => None,
+                    },
+                ))?;
+            if channels == 0 {
+                continue;
+            }
+            payload_bytes = payload_bytes
+                .checked_add(slots_per_bank)?
+                .checked_add(sizes.offsets_cell_bytes.checked_mul(channels)?)?;
+        }
+        if payload_bytes == 0 {
+            return Some(none);
+        }
+        let program_bytes = automation.retained_program_bytes()?;
+        Some(GraphBuiltinBankResourceEstimate {
+            payload_bytes: payload_bytes.checked_add(program_bytes)?,
+            // A ceiling on the largest single allocation: the program's arrays are each within its
+            // report.
+            largest_allocation_bytes: slots_per_bank
+                .max(sizes.offsets_cell_bytes)
+                .max(sizes.program_overhead_bytes)
+                .max(automation.program_bytes),
+            ..none
+        })
     }
 
     /// Exact pre-bind charge for live scalar owners. Vector backends consume every strip into
@@ -3665,20 +4019,56 @@ impl PreparedBuiltinsSession {
         } else {
             graph::GraphScalarSplitRuntimeResourceEstimate::default()
         };
+        // #1646 D4 (R17-4): the stored fader automation an unbanked strip's fader owner holds,
+        // boxed, with its offsets cells, and the program once.
+        let (automation_bytes, automation_largest) = match &self.fader_automation {
+            None => (0, 0),
+            Some(plan) => {
+                let sizes = fader_automation_sizes();
+                let lane = u64::try_from(core::mem::size_of::<LaneFaderAutomation>()).ok()?;
+                let unbanked = self
+                    .strips
+                    .iter()
+                    .filter(|strip| !banked.contains(&strip.track_id))
+                    .map(|strip| strip.track_id.as_ref());
+                let strips = u64::try_from(
+                    unbanked
+                        .clone()
+                        .filter(|track| plan.strip(track).is_some())
+                        .count(),
+                )
+                .ok()?;
+                let channels = plan.automated_channels(unbanked)?;
+                if strips == 0 {
+                    (0, 0)
+                } else {
+                    (
+                        lane.checked_mul(strips)?
+                            .checked_add(sizes.offsets_cell_bytes.checked_mul(channels)?)?
+                            .checked_add(plan.retained_program_bytes()?)?,
+                        lane.max(sizes.offsets_cell_bytes)
+                            .max(sizes.program_overhead_bytes)
+                            .max(plan.program_bytes),
+                    )
+                }
+            }
+        };
         // This owner term adds only the distinct boxed split table. The containing runtime owner
         // and the per-op split-slot layout are admitted once by the graph compiler.
         let total_bytes = owners
             .checked_add(outer_total)?
-            .checked_add(split_runtime.split_pair_table_bytes)?;
+            .checked_add(split_runtime.split_pair_table_bytes)?
+            .checked_add(automation_bytes)?;
         Some(graph::GraphScalarOwnerResourceEstimate {
             total_bytes,
             largest_allocation_bytes: if count == 0 {
-                0
+                automation_largest
             } else {
                 fader
                     .max(matrix)
                     .max(if outer_total == 0 { 0 } else { outer })
                     .max(split_runtime.split_pair_table_bytes)
+                    .max(automation_largest)
             },
             split_pair_table_bytes: split_runtime.split_pair_table_bytes,
         })
@@ -3762,18 +4152,11 @@ impl PreparedBuiltinsSession {
                 meter_consumers: self.meter_consumers,
             };
         }
-        let mut resource = GraphBuiltinBankResourceEstimate::default();
-        for (stage, groups) in &plan {
-            let kind = builtin_bank_resource(
-                groups,
-                width,
-                self.seal.quantum,
-                strip_processor_bytes(*stage, width).expect("bankable stage"),
-            )
+        let resource = self
+            .strip_bank_resource(&plan, width)
             .expect("preflighted builtin-bank resource");
-            resource =
-                add_bank_resource(resource, kind).expect("preflighted builtin-bank resource");
-        }
+        // Borrowed: a strip no bank claims keeps its automation for the scalar oracle's bindings.
+        let fader_automation = &self.fader_automation;
 
         let mut bank_inputs: BTreeMap<Box<str>, InputBuiltins> =
             core::mem::take(&mut self.bank_inputs).into_iter().collect();
@@ -3842,10 +4225,30 @@ impl PreparedBuiltinsSession {
                                 .and_then(|control| control.fader.take());
                             claimed_fader.insert(strip.track_id.clone());
                         }
+                        // #1646 D1: one slot per bank lane when a member's fader is automated,
+                        // charged by `fader_automation_bank_resource`.
+                        let automation: Box<[Option<LaneFaderAutomation>]> =
+                            match fader_automation.as_ref() {
+                                Some(plan)
+                                    if members
+                                        .iter()
+                                        .any(|member| plan.strip(track_of(member)).is_some()) =>
+                                {
+                                    (0..lanes)
+                                        .map(|lane| {
+                                            let track = members.get(lane).map(track_of)?;
+                                            let cells = plan.strip(track)?;
+                                            Some(LaneFaderAutomation::new(&plan.program, cells))
+                                        })
+                                        .collect()
+                                }
+                                _ => Box::default(),
+                            };
                         Box::new(FaderBankProcessor {
                             bank: BuiltinFaderBank::new(dispatch, width, parameters)
                                 .expect("planner emits 1..=W members at the selected width"),
                             controls: controls.into_boxed_slice(),
+                            automation,
                             process_calls: 0,
                             frames_processed: 0,
                             control_delivery: self.control_delivery,
@@ -4747,6 +5150,18 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     if !diagnostics.is_empty() {
         return Err(BuiltinDiagnosticSet::sorted(diagnostics));
     }
+    // #1646 D1, D2: every form compiles the stored fader automation here, before phase two (its
+    // program and cells are graph plan payload, charged by the bank estimate, D4).
+    let fader_automation = prepare_fader_automation(session, effective)
+        .map_err(|diagnostic| BuiltinDiagnosticSet::sorted(vec![diagnostic]))?;
+    // The fader each strip prepares: its effective fader, and on an automated lane the lane's
+    // prepared value composed with its `S` (D2).
+    let prepared_fader = |strip: &StripRef<'_>, fader: &controls::EffectiveStrip| {
+        let fader_db = fader_automation.as_ref().map_or(fader.fader_db, |plan| {
+            plan.fader_db(strip.id.as_str(), fader.fader_db)
+        });
+        (fader_db, fader.mute)
+    };
     let resources = resource_plan.expect("validated resource plan").report;
     // #1242 D2, decision 17 C7: lowering bakes each strip's effective fader and mute, which the
     // caller computed (strip `i` is entry `i`).
@@ -4786,7 +5201,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
             .map(|(strip, fader)| {
                 strip_parameters(
                     &strip,
-                    (fader.fader_db, fader.mute),
+                    prepared_fader(&strip, fader),
                     caps.maximum_smoothing_samples,
                 )
                 .expect("preflighted parameters")
@@ -4813,9 +5228,11 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     let mut track_controls = Vec::with_capacity(controls.len());
     let mut control_seal: Vec<(Box<str>, bool)> = Vec::with_capacity(controls.len());
     for (strip, fader) in session.normalized_model().strips().zip(effective_faders) {
+        // An automated lane's prepared value is in the fader domain: `vca_compose_db` clamps and
+        // `prepare_fader_automation` checked its gain.
         let parameters = strip_parameters(
             &strip,
-            (fader.fader_db, fader.mute),
+            prepared_fader(&strip, fader),
             caps.maximum_smoothing_samples,
         )
         .expect("preflighted parameters");
@@ -4962,6 +5379,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         requests: request_seals,
         resources,
         route_follow: effective.routes.iter().map(|route| route.follow).collect(),
+        fader_automation,
     })
 }
 
@@ -5411,7 +5829,16 @@ impl GraphRuntimeProcessor for InputProcessor {
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-struct FaderProcessor(FaderMuteBuiltins);
+struct FaderProcessor(
+    FaderMuteBuiltins,
+    /// The strip's stored fader automation (#1646 D1, R17-4), boxed so a strip without it keeps
+    /// one word.
+    #[expect(
+        dead_code,
+        reason = "#1647 drives it in the oracle's render, in the same push (batch R1)"
+    )]
+    Option<Box<LaneFaderAutomation>>,
+);
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for FaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
@@ -5598,6 +6025,12 @@ struct LiveControlFaderProcessor {
     fader: FaderMuteRampBuiltins,
     control: FaderReader,
     control_delivery: BuiltinControlDelivery,
+    /// The strip's stored fader automation (#1646 D1, R17-4): the bank's event driver, per strip.
+    #[expect(
+        dead_code,
+        reason = "#1647 drives it in the oracle's render, in the same push (batch R1)"
+    )]
+    automation: Option<Box<LaneFaderAutomation>>,
     #[cfg(any(test, feature = "test-support"))]
     test_only_owner: u16,
 }
@@ -11244,6 +11677,7 @@ mod tests {
                     controls: core::iter::once(Some(fader_rx))
                         .chain((1..width.lanes()).map(|_| None))
                         .collect(),
+                    automation: Box::default(),
                     process_calls: 0,
                     frames_processed: 0,
                     control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
@@ -11698,6 +12132,7 @@ mod tests {
                 controls: core::iter::once(Some(reader))
                     .chain((1..4).map(|_| None))
                     .collect(),
+                automation: Box::default(),
                 process_calls: 0,
                 frames_processed: 0,
                 control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
@@ -11754,6 +12189,7 @@ mod tests {
             controls: core::iter::once(Some(reader))
                 .chain((1..width.lanes()).map(|_| None))
                 .collect(),
+            automation: Box::default(),
             process_calls: 0,
             frames_processed: 0,
             control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
@@ -11931,6 +12367,7 @@ mod tests {
                 fader: FaderMuteRampBuiltins::new(parameters).expect("fader"),
                 control: fader_rx,
                 control_delivery: fader_delivery,
+                automation: None,
                 #[cfg(any(test, feature = "test-support"))]
                 test_only_owner: u16::MAX,
             }),
@@ -13038,7 +13475,8 @@ mod tests {
         );
         let fader_fields = core::mem::size_of::<FaderMuteRampBuiltins>()
             + core::mem::size_of::<FaderReader>()
-            + core::mem::size_of::<BuiltinControlDelivery>();
+            + core::mem::size_of::<BuiltinControlDelivery>()
+            + core::mem::size_of::<Option<Box<LaneFaderAutomation>>>();
         let matrix_fields = core::mem::size_of::<MatrixBuiltins>()
             + core::mem::size_of::<MatrixReader>()
             + core::mem::size_of::<BuiltinControlDelivery>();
@@ -15016,6 +15454,7 @@ mod tests {
                 bank: BuiltinFaderBank::new(backend, width, parameters.clone())
                     .expect("fader bank"),
                 controls,
+                automation: Box::default(),
                 process_calls: 0,
                 frames_processed: 0,
                 control_delivery: BuiltinControlDelivery::BetweenRenderCalls,

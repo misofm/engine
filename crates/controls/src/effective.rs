@@ -198,6 +198,11 @@ pub struct EffectiveStrip {
     pub mute: [bool; 2],
     /// Whether any reaching VCA mutes the lane.
     pub vca_mute: [bool; 2],
+    /// `S`, the lane's offset sum (#1646 D1, D6): [`session::vca_offsets_sum`] of the reaching
+    /// VCAs' offsets, in ascending VCA-ID order, and `+0.0` when no VCA reaches the lane. A stored
+    /// fader automation value `v` renders as `session::vca_compose_db(v, S)`; the static path
+    /// composes the member with the same sum (`fader_db`).
+    pub offsets_sum: [f64; 2],
 }
 
 /// One route's effective values.
@@ -305,7 +310,8 @@ pub fn solo_term(inputs: &impl EffectiveInputs, strip: usize, any_solo: bool) ->
 /// One strip's effective values. `any_solo` is [`any_solo`]'s result for the same inputs.
 ///
 /// Per lane: `fader_db = vca_effective_db(own, the reaching VCAs' offsets in ascending VCA-ID
-/// order)`; `vca_mute` = any reaching VCA mutes; `mute = own || vca_mute || solo_term` with
+/// order)`; `offsets_sum` = their [`session::vca_offsets_sum`], or `+0.0` with none; `vca_mute` =
+/// any reaching VCA mutes; `mute = own || vca_mute || solo_term` with
 /// `solo_term = any_solo && !solo_safe && !soloed`.
 #[must_use]
 pub fn effective_strip(
@@ -329,6 +335,7 @@ pub fn effective_strip(
     }
     for lane in 0..2 {
         out.fader_db[lane] = sums[lane].compose(own_db[lane]);
+        out.offsets_sum[lane] = sums[lane].sum().unwrap_or(0.0);
         out.mute[lane] = own_mute[lane] || out.vca_mute[lane] || solo_term;
     }
     out

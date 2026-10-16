@@ -9968,3 +9968,192 @@ mod session_seek {
         assert_eq!(rig.timeline(swap), 3_000);
     }
 }
+
+/// #1646 gate 1 (browser): the parity fixture's first three tracks, with empty console sections,
+/// no inserts and the input filters off, so the static fader is the one value a case moves.
+fn flat_fader_base() -> session::SessionModel {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+    ))
+    .expect("accepted nine-track fixture");
+    model.tracks.truncate(3);
+    model.routes.truncate(3);
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    for track in &mut model.tracks {
+        track.console.clear();
+        track.inserts.effects.clear();
+        for builtins in [&mut track.builtins.left, &mut track.builtins.right] {
+            builtins.hpf_hz = 0.0;
+            builtins.lpf_hz = 0.0;
+        }
+    }
+    model
+}
+
+/// A VCA `id` at `offset` dB on both lanes, holding the tracks `members`.
+fn flat_fader_vca(
+    model: &session::SessionModel,
+    id: &str,
+    offset: f32,
+    members: &[usize],
+) -> session::Vca {
+    session::Vca {
+        id: session::StableId::parse(id).expect("VCA ID"),
+        fader: session::DualMonoFader {
+            left_db: offset,
+            right_db: offset,
+            left_mute: false,
+            right_mute: false,
+        },
+        members: members
+            .iter()
+            .map(|track| model.tracks[*track].id.clone())
+            .collect(),
+    }
+}
+
+/// One VCA of a gate 1 case: its ID, its offset in dB and the tracks it holds.
+type FlatFaderVca<'a> = (&'a str, f32, &'a [usize]);
+
+/// `(label, automated, reference)`: the automated session holds a `both` flat fader automation
+/// at `value` on `track`, whose static fader is `static_db`; the reference holds the static fader
+/// at `value` and no automation. The four cases are the C ABI's gate 1 cases
+/// (`crates/capi/src/runtime/tests.rs`, `flat_fader_cases`).
+fn flat_fader_sessions() -> Vec<(&'static str, session::SessionModel, session::SessionModel)> {
+    let crafted_offsets = [0xc1af_fc6c, 24.0_f32.to_bits(), 0x2624_8cd2].map(f32::from_bits);
+    let crafted = f32::from_bits(0x405a_f905);
+    let cases: [(&str, usize, f32, f32, &[FlatFaderVca]); 4] = [
+        ("no VCA", 0, -7.25, 0.0, &[]),
+        ("one +3 dB VCA", 1, -7.25, 0.0, &[("v-plus", 3.0, &[1])]),
+        (
+            "three VCAs, crafted",
+            1,
+            crafted,
+            0.0,
+            &[
+                ("va", crafted_offsets[0], &[1]),
+                ("vb", crafted_offsets[1], &[1]),
+                ("vc", crafted_offsets[2], &[1]),
+            ],
+        ),
+        (
+            "-0.0 dB, two VCAs elsewhere",
+            2,
+            -0.0,
+            -3.0,
+            &[("va", -1.0, &[0]), ("vb", 2.0, &[0, 1])],
+        ),
+    ];
+    // The crafted case: the two composition orders give different gain bits, so a render that
+    // kept the member-first order could not equal the static path (#1646 D6).
+    let member_first = crafted_offsets
+        .iter()
+        .fold(f64::from(crafted), |sum, offset| sum + f64::from(*offset))
+        as f32;
+    let offsets_first = session::vca_compose_db(
+        crafted,
+        session::vca_offsets_sum(crafted_offsets).expect("three offsets"),
+    );
+    let gain = |db: f32| {
+        builtins::checked_fader_gain(db)
+            .expect("in domain")
+            .to_bits()
+    };
+    assert_ne!(gain(member_first), gain(offsets_first));
+
+    let base = flat_fader_base();
+    cases
+        .into_iter()
+        .map(|(label, track, value, static_db, vcas)| {
+            let mut reference = base.clone();
+            reference.vcas = vcas
+                .iter()
+                .map(|(id, offset, members)| flat_fader_vca(&reference, id, *offset, members))
+                .collect();
+            let fader = &mut reference.tracks[track].fader;
+            (fader.left_db, fader.right_db) = (value, value);
+            let mut automated = reference.clone();
+            let fader = &mut automated.tracks[track].fader;
+            (fader.left_db, fader.right_db) = (static_db, static_db);
+            automated.automation = vec![session::Automation {
+                id: session::StableId::parse("fader-ride").expect("automation ID"),
+                target: session::ControlAddress {
+                    owner: session::Owner::Strip(automated.tracks[track].id.clone()),
+                    section: session::Section::Builtins,
+                    control: 5,
+                    lane: session::ParameterChannel::Both,
+                },
+                segments: vec![session::AutomationSegment {
+                    shape: session::AutomationShape::Linear,
+                    start_sample: 0,
+                    end_sample: 1 << 20,
+                    start_value: value,
+                    end_value: value,
+                    unit: session::ParameterUnit::Db,
+                }],
+            }];
+            (label, automated, reference)
+        })
+        .collect()
+}
+
+/// Boots `model` on a live-controlled browser host and renders `blocks` blocks of
+/// [`strip_planes`], returning each block's output bits.
+fn render_flat_fader_web(model: &session::SessionModel, blocks: u64) -> Vec<Vec<u32>> {
+    let document = canonical_session_json(model).expect("canonical");
+    let mut host = strip_boot(
+        &document,
+        WebBootOptions {
+            require_sample_rate_hz: 48_000,
+            require_quantum_frames: STRIP_QUANTUM,
+            source_ring_frames: STRIP_QUANTUM * 4,
+            ..WebBootOptions::live_control_defaults()
+        },
+    );
+    (0..blocks)
+        .map(|block| {
+            submit_strip_source(&mut host, "fixture-source", block, &strip_planes(0, block));
+            assert_eq!(host.render_next(), RESULT_OK, "block {block}");
+            host.output_pcm()
+                .expect("output")
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect()
+        })
+        .collect()
+}
+
+/// #1646 gate 1 (browser): a flat stored fader automation renders, bit for bit, the static fader
+/// at its value for 64 blocks on a live-controlled browser host, in the C ABI's four cases (no
+/// VCA, one `+3` dB VCA, the crafted three-VCA offsets, `-0.0` dB on a lane no VCA reaches), and
+/// each automated session renders differently without its automation.
+///
+/// Test value: red if the browser's preparation composes the offsets in another order than the
+/// static path, if the `+0.0` of a lane no VCA reaches changes the gain bits, if the prepared value
+/// is not the curve's, or if the browser converts dB differently from the static fader.
+#[test]
+fn a_flat_fader_automation_renders_the_static_fader_bits_in_the_browser() {
+    const BLOCKS: u64 = 64;
+    for (label, automated, reference) in flat_fader_sessions() {
+        let rendered = render_flat_fader_web(&automated, BLOCKS);
+        let expected = render_flat_fader_web(&reference, BLOCKS);
+        let mut unautomated = automated.clone();
+        unautomated.automation.clear();
+        let without = render_flat_fader_web(&unautomated, BLOCKS);
+        assert!(
+            expected
+                .iter()
+                .flatten()
+                .any(|bits| f32::from_bits(*bits) != 0.0),
+            "{label}: the reference plays"
+        );
+        assert_ne!(without, expected, "{label}: the automation is heard");
+        for (block, (rendered, expected)) in rendered.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                rendered, expected,
+                "{label}: block {block} renders the static fader's bits"
+            );
+        }
+    }
+}
