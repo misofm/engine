@@ -1,6 +1,6 @@
 # Report the timeline seek position to hosts
 
-Placeholder from root ruling B16-R4 (batch 16, 2026-10-16). A draft for root to file.
+Filed by root from ruling B16-R4 (batch 16, 2026-10-16).
 
 ## Product outcome
 
