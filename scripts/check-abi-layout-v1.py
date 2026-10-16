@@ -156,6 +156,8 @@ EXPORTS = [
     "miso_engine_web_v1_observation_tap_count",
     "miso_engine_web_v1_observation_tap_id",
     "miso_engine_web_v1_observation_track_index",
+    "miso_engine_web_v1_plan_latency_ptr",
+    "miso_engine_web_v1_plan_latency_read",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_resource_ptr",
@@ -233,6 +235,7 @@ STRUCTURES = {
     "meterHeader": 88,
     "commandReport": 48,
     "planWatermark": 96,
+    "planLatency": 64,
     "observationSelection": 32,
     "observationResult": 96,
     "spectrumRequest": 40,
@@ -269,6 +272,10 @@ COMMAND_RECORD_FIELDS = [
 PLAN_WATERMARK_FIELDS = [
     "structSize", "reserved0", "revision", "firstSample", "outcomeFlags", "exactCount",
     "transitionFallbackCount", "supersededCount", "reserved",
+]
+# The plan latency record (#1688 D2): the C ABI report's latency and tail words.
+PLAN_LATENCY_FIELDS = [
+    "structSize", "reserved0", "latencySamples", "tailKind", "tailSamples", "reserved",
 ]
 # The status block (#1349 D2): offset 48 `liveValuesSuperseded` (#1399), then the applied-revision
 # watermark words at 56, 64 and 72, and no reserved word.
@@ -465,6 +472,7 @@ def validate(document: object) -> None:
                     f"status.{row['name']} is a u64 at {STATUS_WATERMARK_OFFSETS[row['name']]}")
     for name, expected_fields in (
         ("planWatermark", PLAN_WATERMARK_FIELDS),
+        ("planLatency", PLAN_LATENCY_FIELDS),
         ("observationSelection", OBSERVATION_SELECTION_FIELDS),
         ("observationResult", OBSERVATION_RESULT_FIELDS),
     ):
@@ -613,6 +621,16 @@ def self_test() -> int:
     def drop_watermark_field(document: dict) -> None:
         document["structures"]["planWatermark"]["fields"].pop(2)
 
+    def drop_plan_latency_export(document: dict) -> None:
+        export = "miso_engine_web_v1_plan_latency_read"
+        try:
+            document["exports"].remove(export)
+        except ValueError as error:
+            raise AssertionError("the plan latency export exists in the valid fixture") from error
+
+    def drop_plan_latency_field(document: dict) -> None:
+        document["structures"]["planLatency"]["fields"].pop(2)
+
     def drop_status_watermark_word(document: dict) -> None:
         document["structures"]["status"]["fields"].pop()
 
@@ -695,6 +713,8 @@ def self_test() -> int:
         ("an export is dropped", drop_export),
         ("the service export is dropped", drop_service_export),
         ("the watermark record omits a field", drop_watermark_field),
+        ("the plan latency record omits a field", drop_plan_latency_field),
+        ("the plan latency read export is dropped", drop_plan_latency_export),
         ("the status omits a watermark word", drop_status_watermark_word),
         ("the spectrum-hop capability export is dropped", drop_spectrum_hop_capability_export),
         ("the export set is unsorted", unsorted_exports),

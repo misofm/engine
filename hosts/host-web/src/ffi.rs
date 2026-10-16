@@ -3445,6 +3445,28 @@ pub extern "C" fn miso_engine_web_v1_watermark_ptr(handle: u32) -> u32 {
     })
 }
 
+/// Copy the active plan's output latency and tail into their fixed record (issue #1688 D2),
+/// found at [`miso_engine_web_v1_plan_latency_ptr`]. Control side only.
+///
+/// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle, which writes nothing;
+/// [`RESULT_WRONG_STATE`] for a host that is not ready, which leaves the record alone. The
+/// record's words are the control plane's row for the plan that renders now; a rebuild's
+/// successor shows from the first read after the block that adopts it.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_plan_latency_read(handle: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.read_plan_latency()
+    })
+}
+
+/// Return the stable address of the 64-byte plan latency record or zero for an invalid handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_plan_latency_ptr(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        pointer_u32(ptr::from_ref(host.plan_latency()))
+    })
+}
+
 /// Return the stable prepared resource-report address or zero for an invalid handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_resource_ptr(handle: u32) -> u32 {
@@ -4117,6 +4139,12 @@ pub mod native_staging {
     /// reads it through `miso_engine_web_v1_watermark_ptr`; `None` for an unknown handle.
     pub fn watermark(handle: u32) -> Option<crate::WebPlanWatermark> {
         super::with_host(handle, None, |host| Some(*host.watermark()))
+    }
+
+    /// The plan latency record the host `handle` names last copied (#1688), as the worklet reads
+    /// it through `miso_engine_web_v1_plan_latency_ptr`; `None` for an unknown handle.
+    pub fn plan_latency(handle: u32) -> Option<crate::WebPlanLatency> {
+        super::with_host(handle, None, |host| Some(*host.plan_latency()))
     }
 
     /// The meter header and frame the host `handle` names last published, as the worklet reads

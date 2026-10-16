@@ -1217,6 +1217,34 @@ pub struct WebPlanWatermark {
 /// Exact byte size of [`WebPlanWatermark`], equal to the C ABI watermark's.
 pub const WATERMARK_BYTES: u32 = size_of::<WebPlanWatermark>() as u32;
 
+/// The active plan's output latency and tail (#1688 D2), in the order and sizes of the C ABI
+/// report's `latency_samples`, `tail_kind` and `tail_samples` words.
+///
+/// The host keeps one at a stable address, written by
+/// [`AudioWorkletEngineHost::read_plan_latency`] and found through
+/// `miso_engine_web_v1_plan_latency_ptr`. The words are the control plane's row for the active
+/// plan epoch, copied: the browser computes nothing.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebPlanLatency {
+    /// Exact structure byte size ([`PLAN_LATENCY_BYTES`]); zero until the first successful read.
+    pub struct_size: u32,
+    /// Required zero.
+    pub reserved0: u32,
+    /// The plan's output latency in samples.
+    pub latency_samples: u64,
+    /// `0` for a tail that ends after `tail_samples`, `1` for an unbounded one: the C ABI's
+    /// `TAIL_FINITE` and `TAIL_INFINITE`.
+    pub tail_kind: u64,
+    /// The finite tail in samples; zero for an unbounded tail.
+    pub tail_samples: u64,
+    /// Required-zero expansion words.
+    pub reserved: [u64; 4],
+}
+
+/// Exact byte size of [`WebPlanLatency`].
+pub const PLAN_LATENCY_BYTES: u32 = size_of::<WebPlanLatency>() as u32;
+
 /// Exact retained-resource projection for the browser bridge and production artifacts.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2091,6 +2119,9 @@ pub struct AudioWorkletEngineHost {
     /// The watermark `read_watermark` last copied (#1381a D5), at a stable address in the
     /// control half: all zero until the first successful read.
     watermark: WebPlanWatermark,
+    /// The plan latency `read_plan_latency` last copied (#1688 D2), at a stable address in the
+    /// control half: all zero until the first successful read.
+    plan_latency: WebPlanLatency,
     /// First sample eligible for the current lease. A snapshot that opens before this boundary
     /// is an old/partial interval and is dropped rather than presented as a clean measurement.
     meter_activation_sample: u64,
@@ -2290,6 +2321,7 @@ impl AudioWorkletEngineHost {
                 struct_size: WATERMARK_BYTES,
                 ..WebPlanWatermark::default()
             },
+            plan_latency: WebPlanLatency::default(),
             meter_lease: false,
             meter_activation_sample: 0,
             buffers: Some(buffers),
@@ -2625,6 +2657,38 @@ impl AudioWorkletEngineHost {
             reserved: [0; 5],
         };
         RESULT_OK
+    }
+
+    /// Copy the active plan's output latency and tail into the host's record (#1688 D2).
+    ///
+    /// The words are the control plane's resource row for the active plan epoch, the same
+    /// `PlanQueries::resources()` row the C ABI reports, with the tail in the control plane's
+    /// two-word encoding: a successor's values appear from the first read after the block that
+    /// adopts it. Like [`Self::service`] it leaves the status's last result alone.
+    pub fn read_plan_latency(&mut self) -> u32 {
+        if self.status.state != STATE_READY {
+            return RESULT_WRONG_STATE;
+        }
+        let Some(ready) = self.ready.as_ref() else {
+            return RESULT_WRONG_STATE;
+        };
+        let resources = ready.queries.resources();
+        let (tail_kind, tail_samples) = control_plane::tail_words(resources.output_tail);
+        self.plan_latency = WebPlanLatency {
+            struct_size: PLAN_LATENCY_BYTES,
+            reserved0: 0,
+            latency_samples: resources.latency_samples,
+            tail_kind,
+            tail_samples,
+            reserved: [0; 4],
+        };
+        RESULT_OK
+    }
+
+    /// The record [`Self::read_plan_latency`] fills.
+    #[must_use]
+    pub const fn plan_latency(&self) -> &WebPlanLatency {
+        &self.plan_latency
     }
 
     /// The record [`Self::read_watermark`] fills.

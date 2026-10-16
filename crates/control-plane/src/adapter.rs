@@ -89,6 +89,22 @@ pub struct ControlLimits {
     pub maximum_replacement_peak_bytes: u64,
 }
 
+/// The tail kind word of a tail that terminates after its sample count (#1688 D1).
+pub const TAIL_FINITE: u64 = 0;
+/// The tail kind word of an unbounded tail, which reports zero samples (#1688 D1).
+pub const TAIL_INFINITE: u64 = 1;
+
+/// The two-word encoding of an output tail every host reports: `(kind, samples)` with
+/// [`TAIL_FINITE`] and the sample count, or [`TAIL_INFINITE`] and zero. The C ABI's report and
+/// the browser's plan-latency record both call it, so they cannot encode a tail differently.
+#[must_use]
+pub const fn tail_words(tail: TailSamples) -> (u64, u64) {
+    match tail {
+        TailSamples::Finite(samples) => (TAIL_FINITE, samples),
+        TailSamples::Infinite => (TAIL_INFINITE, 0),
+    }
+}
+
 /// One plan's frozen resource accounting (#1309 D4): every field of the C ABI's
 /// `PlanResourceReport` except its ABI header and reserved words, with the output tail as
 /// [`TailSamples`] and the control plane's own retained bytes as `control_retained_bytes`.

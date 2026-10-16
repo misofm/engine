@@ -8808,6 +8808,109 @@ mod structural_apply {
             "the adopted plan has no master"
         );
     }
+    /// The latency and tail words a fresh boot of `model` reports, the oracle a rebuilt plan's
+    /// record is compared with.
+    fn plan_latency_of_boot(model: &SessionModel) -> WebPlanLatency {
+        let mut fresh = Rig::boot(model, options(), None);
+        assert_eq!(fresh.host.read_plan_latency(), RESULT_OK);
+        *fresh.host.plan_latency()
+    }
+
+    /// Issue #1688 gate 2: the plan latency record is the control plane's row for the plan that
+    /// renders now. It is refused (and left zero) while the host is not ready, holds the boot
+    /// plan's words after boot, keeps them while a rebuild that adds a true-peak limiter insert
+    /// waits for its adoption block, and holds the successor's words from the first read after it,
+    /// equal to a fresh boot of the committed model.
+    ///
+    /// Test value: red if the read reports the candidate's latency before render adopts it, keeps
+    /// the boot value after a rebuild (a boot-time copy like `WebResourceReport`), or answers a
+    /// host that is not ready.
+    #[test]
+    fn the_plan_latency_record_follows_the_active_plan() {
+        const LIMITER_ID: &str = "added-limiter";
+        let model = gate_model();
+        let mut rig = Rig::boot(&model, options(), None);
+        assert_eq!(PLAN_LATENCY_BYTES, 64);
+
+        // A host that is not ready refuses and leaves the record alone.
+        rig.host.status.state = STATE_FAILED;
+        assert_eq!(rig.host.read_plan_latency(), RESULT_WRONG_STATE);
+        assert_eq!(*rig.host.plan_latency(), WebPlanLatency::default());
+        rig.host.status.state = STATE_READY;
+
+        // After boot the record holds the boot plan's row, copied.
+        assert_eq!(rig.host.read_plan_latency(), RESULT_OK);
+        let boot = *rig.host.plan_latency();
+        let row = rig.host.ready.as_ref().expect("ready").queries.resources();
+        assert_eq!(boot.struct_size, PLAN_LATENCY_BYTES);
+        assert_eq!(boot.reserved0, 0);
+        assert_eq!(boot.reserved, [0; 4]);
+        assert_eq!(boot.latency_samples, row.latency_samples);
+        assert_eq!(
+            (boot.tail_kind, boot.tail_samples),
+            control_plane::tail_words(row.output_tail)
+        );
+
+        for _ in 0..APPLY_BEFORE {
+            rig.step();
+        }
+        let (_, _, _, mut limiter, _) = strip_base();
+        limiter.id = strip_id(LIMITER_ID);
+        limiter.identity = session::EffectIdentity::Native {
+            effect_id: strip_id("miso.true-peak-limiter"),
+        };
+        limiter.params = vec![session::EffectParam {
+            parameter_id: 1,
+            channel: session::ParameterChannel::Both,
+            unit: session::ParameterUnit::Db,
+            value: -6.0,
+        }];
+        let mut committed = model.clone();
+        committed.tracks[0].inserts.effects.push(limiter.clone());
+        committed.revision += 1;
+        let base = rig.host.committed_revision();
+        assert_eq!(
+            rig.apply(
+                &[SessionEdit::PutTrackEffect {
+                    track_id: model.tracks[0].id.clone(),
+                    rack_name: session::RackName::Inserts,
+                    final_position: 0,
+                    effect: limiter,
+                }],
+                1
+            ),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                revision: base + 1
+            }
+        );
+        let successor = plan_latency_of_boot(&committed);
+        assert!(
+            successor.latency_samples > boot.latency_samples,
+            "the limiter's lookahead moves the plan latency ({} -> {})",
+            boot.latency_samples,
+            successor.latency_samples
+        );
+
+        // Committed but not adopted: the plan that renders is the boot plan.
+        assert!(rig.pending());
+        assert_eq!(rig.host.read_plan_latency(), RESULT_OK);
+        assert_eq!(
+            *rig.host.plan_latency(),
+            boot,
+            "the record is the active plan's"
+        );
+
+        // The first read after the adopting block holds the successor's words.
+        rig.step();
+        assert_eq!(rig.epoch(), 1);
+        assert_eq!(rig.host.read_plan_latency(), RESULT_OK);
+        assert_eq!(
+            *rig.host.plan_latency(),
+            successor,
+            "the adopted plan's row equals a fresh boot of the committed model"
+        );
+    }
 }
 
 /// The encoded bytes of the one `OBSERVATION_ENDED` frame that ends the insert taps keyed by
