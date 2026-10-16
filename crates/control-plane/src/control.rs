@@ -2369,7 +2369,7 @@ where
         // #1310, root rulings of 2026-10-16 (no ack before a drop; M-A of fold 3): a ring A
         // created (A added or redeclared the source) that the host fed and the donation above does
         // not move to B would drop with A, and with it PCM the host was acked for. Until an issue
-        // lets B read it (TBD42 for a source B reverts to its P0 form), such a supersession is
+        // lets B read it (#1698 for a source B reverts to its P0 form), such a supersession is
         // refused here as backpressure. The guard reads the donation plan itself, so it sits after
         // the check, still before the commit: the reservation it follows is cancelled by the
         // return (it returns its credit and consumes no epoch), nothing else has changed, the

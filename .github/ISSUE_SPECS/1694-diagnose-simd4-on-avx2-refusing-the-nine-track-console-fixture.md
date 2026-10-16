@@ -3,7 +3,7 @@
 Found by #1344's implementer (batch 15a). Code anchors verified on the batch 15a branch
 `codex/controls-batch-15a` at `f74f39951`, on an AVX2 x86-64 host (`avx2` set in `/proc/cpuinfo`;
 the workspace pins `+avx2,+fma` in `.cargo/config.toml`). Issue number: assigned at filing
-(written here as TBD38). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a
+(written here as #1694). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a
 batch review.
 
 ## Product outcome
@@ -215,6 +215,6 @@ Nothing under `hosts/`, `crates/capi`, `crates/host-core` or `tools/` changes in
 
 Half a day.
 
-## Decision record: TBD38
+## Decision record: #1694
 
 To be filled by the implementer. Gate 1's verdict goes first.

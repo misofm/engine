@@ -590,7 +590,7 @@ pub fn check_donation(
 ///
 /// The caller refuses the replacement before its commit as retryable backpressure: once render
 /// adopts the donor, X's ring is the running plan's and the same edit commits on it. Read-only;
-/// it allocates nothing. Issue TBD42 lifts the reverted case only (it carries X from the running
+/// it allocates nothing. Issue #1698 lifts the reverted case only (it carries X from the running
 /// plan); the others stay refused until an issue gives the replacement a way to read those chunks
 /// or the owner rules that a removed source's chunks may drop.
 #[must_use]

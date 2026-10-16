@@ -4,7 +4,7 @@ Successor of #1679 (the successor's armed bits come from the core's mask) and #1
 records addressed by stable key in the core), decision 17 C1 and C13. Code anchors verified on the
 batch 15a branch `codex/controls-batch-15a` at `e8f72edc5`, and read-only on the in-progress #1310
 tree `codex/controls-batch-15aw` (uncommitted). Issue number: assigned at filing (written here as
-TBD39). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
+#1695). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch review.
 
 ## Product outcome
 
@@ -178,6 +178,6 @@ re-derives at every plan change is host logic.
 
 Half a day.
 
-## Decision record: TBD39
+## Decision record: #1695
 
 To be filled by the implementer. The accessor decision goes first.

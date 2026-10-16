@@ -2,7 +2,7 @@
 
 Split from #1386 (root ruling 2026-10-16), decision 17 C1 and C13. Code anchors verified on the
 batch 15a fold branch `codex/controls-b15a-fold` at `804fe6939`. Issue number: assigned at filing
-(written here as TBD41). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a
+(written here as #1697). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a
 batch review.
 
 ## Product outcome

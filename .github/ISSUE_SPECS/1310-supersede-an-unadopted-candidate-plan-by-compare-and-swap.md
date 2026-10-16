@@ -541,11 +541,11 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
   revision, no browser event, retry commits alike, same bits after). Red without the guard: capi
   `Ok(80)`; parity `(0, 0)` against `(6, 6)`. The header, `CONTROL_PROTOCOL_SEMANTICS.md` and
   `C_ABI_V1_QUALIFICATION.md` now say such a supersession is refused with `BACKPRESSURE` until A
-  adopts; TBD42 lifts the guard (a line added to its spec).
+  adopts; #1698 lifts the guard (a line added to its spec).
 - *Edits outside the original authorized paths.* `hosts/host-web/src/lib.rs` (`promote_spectrum`
   only), `hosts/host-web/tests/structural_apply_realtime.rs` (the m-5 cost test),
   `hosts/host-web/tests/control_parity.rs` (the guard's parity row),
-  `.github/ISSUE_SPECS/TBD42-*.md` (one line). No edit under
+  `.github/ISSUE_SPECS/1698-carry-an-owner-or-source-a-superseding-candidate-keeps-unchanged-from-p0.md` (one line). No edit under
   `crates/engine/src/realtime/`.
 - *Parity row's silent adoption block (harness, not engine).* A plain run of this session (no
   edit) first outputs a non-zero sample at frame 459 at 48 kHz and 939 at 96 kHz (the plan's
@@ -590,13 +590,13 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
   removed and (d) redeclared each commit (`Ok(80)`); parity `(0, 0)` against `(6, 6)` at 48 kHz
   case (b). Docs: the header supersession paragraph, `CONTROL_PROTOCOL_SEMANTICS.md` and
   `C_ABI_V1_QUALIFICATION.md` state the widened rule, the paused-host cost, and that a source the
-  caller's own edit removes discards its queued audio. TBD42 now lifts only case (a).
+  caller's own edit removes discards its queued audio. #1698 now lifts only case (a).
 - *Removal contract (root ruling, fold 3).* A source the caller's own edit removes discards its
   queued audio: a direct P0 -> B removal, and B removing a source A carried unchanged from P0. The
   caller asked for it, so it is not an unintended drop; the header and
   `CONTROL_PROTOCOL_SEMANTICS.md` say so. No counter or telemetry field reports those frames
   (source telemetry is per live source and leaves with it; the watermark outcome flags and the
-  counters name none): TBD43 (placeholder, no spec yet) is the successor issue for a counter of
+  counters name none): #1699 (placeholder, no spec yet) is the successor issue for a counter of
   the frames such a removal discards.
 - *m-A.* B-1's red text corrected above: with both halves reverted, the wedge test fails at the
   held service step.

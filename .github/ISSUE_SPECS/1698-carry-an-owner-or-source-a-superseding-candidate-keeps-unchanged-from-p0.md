@@ -5,7 +5,7 @@ unadopted candidate plan by compare and swap), both batch 15a. Found in the batc
 ruling 2026-10-16. Code anchors verified on the batch 15a fold branch `codex/controls-b15a-fold`
 at `804fe6939` (committed tree; the branch has uncommitted edits in `control.rs` while this is
 written, so the implementer re-reads the line numbers). Issue number: assigned at filing (written
-here as TBD42). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch
+here as #1698). Feature sprint mode (owner, 2026-10-13): one implementer, normal tests, a batch
 review.
 
 ## Product outcome
@@ -117,7 +117,7 @@ fresh in B whenever A restarted or removed it.
   ruling M-A of 2026-10-16) refuses with `BACKPRESSURE` a supersession B that leaves behind a ring
   A created (A added or redeclared the source) whose producer has acked anything
   (`host_core::drops_acked_fresh_source`, called in `SessionState::rebuild` right after
-  `check_donation`). TBD42 lifts only case (a), where B declares X as P0 does, once D1's mechanism
+  `check_donation`). #1698 lifts only case (a), where B declares X as P0 does, once D1's mechanism
   lets B read A's acked chunks: that case leaves the guard and its rows in
   `supersede_tests::a_supersession_that_would_drop_acked_pcm_on_a_fresh_source_is_backpressure`
   and `control_parity::a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_hosts`
@@ -135,6 +135,6 @@ fresh in B whenever A restarted or removed it.
 
 Half a day.
 
-## Decision record: TBD42
+## Decision record: #1698
 
 To be filled by the implementer. The base decision goes first.
