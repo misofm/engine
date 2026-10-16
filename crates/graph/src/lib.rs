@@ -1354,6 +1354,22 @@ impl<'a> GraphBlockTime<'a> {
 }
 // REALTIME_POLICY_END
 
+/// Node `node`'s floored input arrival `a(n)` in `arrivals`, `GraphCompileReport::input_arrivals`
+/// (#1285 D2: every node with a nonzero floored arrival, sorted by node ID): its row, or 0 for a
+/// node absent from it. The one lookup both fader owners' installs take (#1647a, #1647b): a
+/// builtin bank's members and the scalar oracle's bound fader nodes.
+#[must_use]
+pub fn floored_input_arrival(
+    arrivals: &[(GraphNodeId, LatencySamples)],
+    node: &GraphNodeId,
+) -> u64 {
+    arrivals
+        .binary_search_by(|(row, _)| row.cmp(node))
+        .ok()
+        .and_then(|row| arrivals.get(row))
+        .map_or(0, |(_, arrival)| arrival.0)
+}
+
 /// What the plan's jump-length cell shares between its writer (control) and its reader (render):
 /// one #1312 latest-target cell and its dirty word (#1639 D1).
 struct JumpLengthLane {
@@ -2123,13 +2139,7 @@ impl PreparedGraphPlan {
             let lanes: Vec<u64> = bank
                 .members
                 .iter()
-                .map(|member| {
-                    arrivals
-                        .binary_search_by(|(node, _)| node.cmp(member))
-                        .ok()
-                        .and_then(|row| arrivals.get(row))
-                        .map_or(0, |(_, arrival)| arrival.0)
-                })
+                .map(|member| floored_input_arrival(arrivals, member))
                 .collect();
             bank.processor.set_input_arrivals(&lanes);
         }
@@ -2965,6 +2975,14 @@ impl GraphNodeBinding {
             processor: None,
         }
     }
+    /// Give the bound processor its node's floored input arrival `a(n)` through
+    /// [`GraphRuntimeProcessor::set_input_arrival`] (#1647b); an identity binding has none. Off
+    /// the render thread, before bind.
+    pub fn set_input_arrival(&mut self, arrival: u64) {
+        if let Some(processor) = self.processor.as_mut() {
+            processor.set_input_arrival(arrival);
+        }
+    }
 }
 pub struct GraphBindingBlock<'a> {
     pub left: &'a mut [f32],
@@ -3012,6 +3030,12 @@ pub trait GraphRuntimeSplitPairProcessor: Send + Any {
     /// The graph executor supplies a block shape validated by the prepared render quantum, so
     /// this operation cannot fail and never drains the matrix owner.
     fn complete_pending(&mut self, block: GraphBindingBlock<'_>);
+
+    /// Take this block's node-time context before [`Self::begin_fader`] (#1647b), as
+    /// [`GraphRuntimeProcessor::set_block_time`] does for a bound node. The default keeps nothing.
+    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
+        let _ = time;
+    }
 }
 
 /// Preparation-only constructor of a split scalar fader/matrix owner; test-only like
@@ -3043,6 +3067,22 @@ pub trait GraphRuntimeProcessor: Send + Any {
     /// A bound node that *does* have graph inputs is handed its reduction, exactly as before, and
     /// may read the block it is given.
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
+
+    /// Take the node's floored input arrival `a(n)` (#1647b, R17-4): the scalar oracle's bound
+    /// fader owners take it as a builtin bank takes its members' through
+    /// [`GraphPreparedBuiltinBankProcessor::set_input_arrivals`]. Called once, off the render
+    /// thread, before bind ([`GraphNodeBinding::set_input_arrival`]). The default keeps nothing.
+    fn set_input_arrival(&mut self, arrival: u64) {
+        let _ = arrival;
+    }
+
+    /// Take this block's node-time context (#1647b, R17-4): the executor calls it on a bound node
+    /// right before [`Self::process`] of the same block, as it sets a bank's builtin slots before
+    /// their chain runs ([`GraphPreparedBuiltinBankProcessor::set_block_time`]). Render-thread
+    /// code: allocation-, lock- and syscall-free and bounded. The default keeps nothing.
+    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
+        let _ = time;
+    }
 
     /// Copy this scalar owner's retained response words without advancing render state.
     fn copy_response_snapshot(

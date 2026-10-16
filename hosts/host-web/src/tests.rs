@@ -9967,6 +9967,77 @@ mod session_seek {
         assert_eq!(rig.landed(ADDED), (2, swap, 3_000));
         assert_eq!(rig.timeline(swap), 3_000);
     }
+
+    /// `one_source()` with track `0`'s fader on a ride (`automated`): `0` dB before timeline
+    /// 2,000 and `-9` dB from it on; or, as the reference, its static fader at `-9` dB.
+    fn seek_ride(automated: bool) -> SessionModel {
+        let mut model = one_source();
+        if automated {
+            model.automation = vec![session::Automation {
+                id: StableId::parse("ride").expect("automation ID"),
+                target: session::ControlAddress {
+                    owner: session::Owner::Strip(model.tracks[0].id.clone()),
+                    section: session::Section::Builtins,
+                    control: 5,
+                    lane: session::ParameterChannel::Both,
+                },
+                segments: vec![session::AutomationSegment {
+                    shape: session::AutomationShape::Step,
+                    start_sample: 0,
+                    end_sample: 2_000,
+                    start_value: 0.0,
+                    end_value: -9.0,
+                    unit: session::ParameterUnit::Db,
+                }],
+                offset: session::AutomationOffset::default(),
+            }];
+        } else {
+            let fader = &mut model.tracks[0].fader;
+            (fader.left_db, fader.right_db) = (-9.0, -9.0);
+        }
+        model
+    }
+
+    /// Boot the ride, seek to timeline 6,000 through `miso_engine_web_v1_session_seek` after the
+    /// four primed blocks, and render six blocks of generation 2: the blocks before and from the
+    /// seek, and the render sample the seek applied at.
+    fn seek_ride_blocks(automated: bool) -> (Vec<Vec<u32>>, u64) {
+        let mut rig = Rig::boot(&seek_ride(automated), &[LONG]);
+        rig.feed(1, rig.next());
+        let mut blocks = vec![rig.render()];
+        assert_eq!(
+            miso_engine_web_v1_session_seek(rig.handle, 2, 6_000),
+            RESULT_OK
+        );
+        for step in 0..6 {
+            rig.feed(2, 6_000 + step * Q);
+            blocks.push(rig.render());
+        }
+        let (generation, first, frame) = rig.landed(LONG);
+        assert_eq!((generation, frame), (2, 6_000));
+        (blocks, first)
+    }
+
+    /// #1647 gate 4, the browser leg (decision 17 C1): after `miso_engine_web_v1_session_seek` to
+    /// a timeline where the ride is flat at `-9` dB, the automated fader renders the static `-9`
+    /// dB fader's bits from the block the seek applied at, with no ramp, and the `0` dB of the
+    /// ride's start before it: the same core seek as `miso_engine_v1_session_seek`.
+    ///
+    /// Test value: red if the browser's seek ramps an automated lane, lands it at another block,
+    /// or reaches the fader without moving it.
+    #[test]
+    fn a_session_seek_sets_an_automated_fader_exactly_in_the_browser() {
+        let (automated, r) = seek_ride_blocks(true);
+        let (reference, reference_r) = seek_ride_blocks(false);
+        assert_eq!(r, reference_r);
+        assert_eq!(r, 5 * Q, "the seek applies at the block after it");
+        assert_ne!(automated[0], reference[0], "the ride starts at 0 dB");
+        assert_eq!(
+            automated[1..],
+            reference[1..],
+            "the static fader's bits from r"
+        );
+    }
 }
 
 /// #1646 gate 1 (browser): the parity fixture's first three tracks, with empty console sections,

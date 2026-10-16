@@ -121,8 +121,9 @@ validator checks only that the owner, slot or insert exists; whether the row is 
 rebuild-only like `delay_samples` 11 or an EQ band's `enabled`, not derived, not a monitor or
 setting row, and not a send's `follows_mute` (route row 7) or a strip's `matrix_mode` (own row 1): live controls that a ruling keeps out of automation, #1632), takes the lane, unit and values is `control.address.unknown`,
 `control.automation.target`, `control.inactive`, `control.lane` or `control.domain` at prepare-effects. A
-parameter does not have to be declared on the strip. Stored automation is inert today: it authors
-and round-trips, and renders nothing.
+parameter does not have to be declared on the strip. Stored automation renders on the fader row
+(builtins 5) today, on every host (#1647); an entry on any other row authors and round-trips and
+renders nothing yet.
 
 Every automation entry ends with a required `offset` record after `segments`:
 `"offset": {"left_db": 0.0, "right_db": 0.0}`. It is the dB a hand move adds to the curve of each

@@ -3242,6 +3242,7 @@ impl Runtime {
                     route_activity
                         .as_deref_mut()
                         .map(|activity| (activity, index)),
+                    block_time,
                 )
             }
             RuntimeUnit::Bank {
@@ -3279,6 +3280,7 @@ impl Runtime {
                             snapshot,
                             None,
                             None,
+                            block_time,
                         )?;
                         bank_inputs[lane] = member.output;
                     }
@@ -3654,6 +3656,7 @@ fn execute_op(
     snapshot: LiveSnapshot,
     mut host: Option<HostMaster<'_>>,
     routes: Option<(&mut RouteActivity, usize)>,
+    block_time: &crate::GraphBlockTime<'_>,
 ) -> Result<(), RenderError> {
     let output = op.output;
     if let NodeKind::TrackDelay { line, .. } = op.kind {
@@ -3768,7 +3771,11 @@ fn execute_op(
                     live_snapshot: snapshot,
                 };
                 return match slot.role {
-                    SplitPairRole::Fader => split_pairs[slot.pair].begin_fader(block),
+                    SplitPairRole::Fader => {
+                        // #1647b: the pair's fader half takes the block's node time first.
+                        split_pairs[slot.pair].set_block_time(block_time);
+                        split_pairs[slot.pair].begin_fader(block)
+                    }
                     SplitPairRole::Matrix => split_pairs[slot.pair].finish_matrix(block),
                 };
             }
@@ -3789,6 +3796,8 @@ fn execute_op(
         }
         NodeKind::Bound(processor) => {
             let (out_left, out_right) = output_planes(arena, &mut host, output);
+            // #1647b (R17-4): a bound node takes the block's node time before it processes.
+            processor.set_block_time(block_time);
             processor.process(GraphBindingBlock {
                 left: out_left,
                 right: out_right,
@@ -10144,6 +10153,7 @@ mod tests {
             LiveSnapshot::ALL,
             None,
             None,
+            &crate::GraphBlockTime::new(None, 0, None, None),
         )
         .expect("earlier fader");
         assert_eq!(
@@ -10156,7 +10166,8 @@ mod tests {
                 0,
                 LiveSnapshot::ALL,
                 None,
-                None
+                None,
+                &crate::GraphBlockTime::new(None, 0, None, None),
             ),
             Err(RenderError::InvalidEnvelope)
         );
@@ -12018,6 +12029,7 @@ mod tests {
                 LiveSnapshot::ALL,
                 None,
                 None,
+                &crate::GraphBlockTime::new(None, 0, None, None),
             )
             .expect("op");
             let (left, right) = arena.read_stereo(ARENA_BASE);

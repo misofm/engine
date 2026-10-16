@@ -3,7 +3,13 @@
 //! the static bits) is on the two hosts: `crates/capi/src/runtime/tests.rs` and
 //! `hosts/host-web/src/tests.rs`. The render plumbing (#1647a): each automated fader lane takes
 //! its `a(n)` and, per block, its node-time mapping and the fader row's jump length, with no
-//! render allocation.
+//! render allocation. The events on the fader (#1647b): completion samples, jumps, latency, the
+//! session seek, quantum invariance, allocation and the scalar oracle's parity (#1647 gates 1-6,
+//! R17-4).
+
+#[cfg(feature = "test-support")]
+#[path = "support/successor.rs"]
+mod successor;
 
 use automation::ProgramBuilder;
 use builtins_compiler::fader_automation_sizes;
@@ -429,4 +435,830 @@ fn each_automated_fader_lane_takes_its_arrival_and_node_time_per_block() {
         (0, 0, 0),
         "the context-set path allocates and frees nothing"
     );
+}
+
+// #1647b: the events on the fader.
+
+const NINE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+const NINE_SOURCE: &[u8] = b"fixture-source";
+
+/// The first `tracks` tracks of the nine-track fixture at render quantum `quantum`: no console,
+/// no insert, no input filter, each routed to the output, on the fixture's one source made long
+/// enough for every test. On a DC source of `1.0` a track's output is its fader gain.
+fn plain(tracks: usize, quantum: u32) -> SessionModel {
+    let mut model = parse_session_json(NINE).expect("fixture parses");
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    model.tracks.truncate(tracks);
+    let kept: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+    model.routes.retain(|route| match &route.source {
+        session::RouteSource::Track { track_id, .. } => kept.contains(track_id),
+        _ => false,
+    });
+    for track in &mut model.tracks {
+        track.console.clear();
+        track.inserts.effects.clear();
+        for channel in [&mut track.builtins.left, &mut track.builtins.right] {
+            channel.hpf_hz = 0.0;
+            channel.lpf_hz = 0.0;
+        }
+        track.matrix_or_pan = session::MatrixOrPan::Matrix {
+            ll: 1.0,
+            lr: 0.0,
+            rl: 0.0,
+            rr: 1.0,
+            smoothing_samples: 0,
+        };
+    }
+    model.sources[0].frames = 1 << 20;
+    model.quantum_frames = quantum;
+    model
+}
+
+/// `control_smoothing` explicit with fader length `fader_ms` (mute and pan 5 ms).
+fn smoothing(fader_ms: f32) -> Option<ControlSmoothing> {
+    Some(ControlSmoothing {
+        mute_ms: 5.0,
+        fader_ms,
+        pan_ms: 5.0,
+    })
+}
+
+/// A fader entry on `lane` of track `track` with `segments`.
+fn fader_entry(
+    model: &SessionModel,
+    track: usize,
+    lane: ParameterChannel,
+    segments: Vec<AutomationSegment>,
+) -> Automation {
+    let mut entry = flat_fader(model, track, lane, 0.0);
+    entry.id = id(&format!("ride-{track}"));
+    entry.segments = segments;
+    entry
+}
+
+/// A segment of `shape` from `start` to `end` and `start_value` to `end_value` dB.
+fn segment(
+    shape: AutomationShape,
+    start: u64,
+    end: u64,
+    start_value: f32,
+    end_value: f32,
+) -> AutomationSegment {
+    AutomationSegment {
+        shape,
+        start_sample: start,
+        end_sample: end,
+        start_value,
+        end_value,
+        unit: ParameterUnit::Db,
+    }
+}
+
+/// The linear dB fade of gate 1: `-40` to `0` dB over 48,000 samples.
+fn fade() -> Vec<AutomationSegment> {
+    vec![segment(AutomationShape::Linear, 0, 48_000, -40.0, 0.0)]
+}
+
+/// Steps at each `(sample, dB)` of `steps`, from `0` dB.
+fn steps(steps: &[(u64, f32)]) -> Vec<AutomationSegment> {
+    let mut from = (0_u64, 0.0_f32);
+    steps
+        .iter()
+        .map(|&(at, value)| {
+            let step = segment(AutomationShape::Step, from.0, at, from.1, value);
+            from = (at, value);
+            step
+        })
+        .collect()
+}
+
+/// The curve of `entry` at node time `t`, through the one evaluator render uses.
+fn curve(entry: &Automation, t: i64) -> f32 {
+    automation::value_at(&controls::stored_segments(entry), t)
+}
+
+/// The fader gain of `db` with no VCA (`S = +0.0`, #1646 D1).
+fn gain(db: f32) -> f32 {
+    builtins::checked_fader_gain(session::vca_compose_db(db, 0.0)).expect("fader domain")
+}
+
+/// The caps a [`Rig`] prepares under: a source ring of 32 quanta.
+fn rig_caps(model: &SessionModel) -> HostPrepareCaps {
+    HostPrepareCaps {
+        source_ring_frames: 32 * model.quantum_frames,
+        ..caps(1_000_000_000)
+    }
+}
+
+/// A prepared plan, rendered block by block on a DC source of `1.0`.
+struct Rig {
+    prepared: PreparedHost,
+    handles: Option<host_core::HostLiveControlHandles>,
+    gate: Option<engine::realtime::PlanRevisionGate>,
+    quantum: usize,
+    /// The source generation and the source frame the next block submits.
+    generation: u64,
+    frame: u64,
+    rendered: u64,
+    out: [Vec<f32>; 2],
+    /// The render calls' allocations, reallocations and frees since the last take.
+    allocations: (u64, u64, u64),
+}
+
+impl Rig {
+    fn from(prepared: PreparedHost, model: &SessionModel) -> Self {
+        Self {
+            prepared,
+            handles: None,
+            gate: None,
+            quantum: model.quantum_frames as usize,
+            generation: 1,
+            frame: 0,
+            rendered: 0,
+            out: [Vec::new(), Vec::new()],
+            allocations: (0, 0, 0),
+        }
+    }
+
+    fn new(model: &SessionModel) -> Self {
+        let document = canonical_session_json(model).expect("canonical");
+        let prepared = prepare_host_session(&document, &rig_caps(model))
+            .map(|(_, prepared)| prepared)
+            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+        Self::from(prepared, model)
+    }
+
+    /// With live controls on every strip and the plan's revision gate, for a jump-length write.
+    fn live(model: &SessionModel) -> Self {
+        let document = canonical_session_json(model).expect("canonical");
+        let compiled = host_core::compile_host_session(&document, &rig_caps(model))
+            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+        let (mut prepared, handles) = host_core::prepare_host_runtime_with_live_lanes(
+            &compiled,
+            &rig_caps(model),
+            &host_core::HostLiveControlRequest::default(),
+            host_core::HostLiveLanes::ALL,
+            &host_core::LiveValuesSuperseded::default(),
+        )
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+        let gate = prepared.plan.take_revision_gate();
+        let mut rig = Self::from(prepared, model);
+        rig.handles = Some(handles);
+        rig.gate = gate;
+        rig
+    }
+
+    /// Write `fader` samples as the plan's fader jump length (mute and pan unchanged), applied
+    /// at the next block entry (#1639).
+    fn write_fader_jump(&mut self, model: &SessionModel, fader: u32) {
+        use builtins_compiler::TestOnlyWriteGate;
+        let mut lengths = host_core::session_jump_lengths(model);
+        lengths.fader_samples = fader;
+        let producer = self
+            .handles
+            .as_mut()
+            .and_then(|handles| handles.jump_lengths.as_mut())
+            .expect("the plan's jump-length cell");
+        self.gate
+            .as_mut()
+            .expect("the plan's gate")
+            .write_published(|stamp| producer.write(stamp, lengths));
+    }
+
+    /// A plain session seek to timeline sample `timeline` (#1641): the source's next PCM is the
+    /// new generation's, from that frame.
+    fn seek(&mut self, timeline: u64) {
+        self.generation += 1;
+        self.prepared
+            .sources
+            .seek_session(self.generation, timeline, None)
+            .expect("the seek is admitted");
+        self.frame = timeline;
+    }
+
+    /// Render one block; returns its first render sample.
+    fn block(&mut self) -> u64 {
+        let quantum = self.quantum;
+        let plane = vec![1.0_f32; quantum];
+        self.prepared
+            .sources
+            .submit(
+                NINE_SOURCE,
+                SourceSubmission {
+                    generation: self.generation,
+                    start_frame: self.frame,
+                    sample_rate_hz: RATE,
+                    planes: &[&plane, &plane],
+                    frames: quantum as u32,
+                    end_of_region: false,
+                },
+            )
+            .expect("source block");
+        self.frame += quantum as u64;
+        let mut samples = vec![0.0_f32; quantum * 2];
+        let output =
+            PlanarBufferMut::try_new(&mut samples, 2, quantum, quantum).expect("output planes");
+        let first = self.rendered;
+        let mark = bench_support::alloc::current_thread_counters();
+        self.prepared
+            .plan
+            .render(
+                RenderIo { output },
+                RenderTime {
+                    absolute_sample: first,
+                },
+            )
+            .expect("render");
+        let delta = bench_support::alloc::current_thread_delta_since(mark);
+        self.allocations.0 += delta.allocations;
+        self.allocations.1 += delta.reallocations;
+        self.allocations.2 += delta.deallocations;
+        self.out[0].extend_from_slice(&samples[..quantum]);
+        self.out[1].extend_from_slice(&samples[quantum..]);
+        self.rendered += quantum as u64;
+        first
+    }
+
+    /// Render until at least `frames` samples are out.
+    fn until(&mut self, frames: u64) {
+        while self.rendered < frames {
+            self.block();
+        }
+    }
+}
+
+/// The stage driven directly: a width-one ramped fader from `start` dB, given each
+/// `(sample, operation)` of `operations` at its sample (#1638), over `frames` samples of DC `1.0`.
+fn reference(start: f32, operations: &[(u64, builtins::FaderOperation)], frames: u64) -> Vec<f32> {
+    let mut stage = builtins::FaderMuteRampBuiltins::new(builtins::BuiltinParameters::default())
+        .expect("default parameters");
+    stage
+        .apply_fader_operation(
+            builtins::BuiltinLaneSelector::Both,
+            builtins::FaderOperation::SetGain { gain: gain(start) },
+        )
+        .expect("prepared gain");
+    let mut out = Vec::with_capacity(frames as usize);
+    let mut next = operations.iter().peekable();
+    let mut at = 0_u64;
+    while at < frames {
+        while let Some(&&(sample, operation)) = next.peek()
+            && sample == at
+        {
+            stage
+                .apply_fader_operation(builtins::BuiltinLaneSelector::Both, operation)
+                .expect("operation");
+            next.next();
+        }
+        let end = next
+            .peek()
+            .map_or(frames, |&&(sample, _)| sample.min(frames));
+        let length = (end - at) as usize;
+        let mut left = vec![1.0_f32; length];
+        let mut right = vec![1.0_f32; length];
+        stage.process(builtins::DualMonoBlock::new(&mut left, &mut right, at).expect("block"));
+        out.extend_from_slice(&left);
+        at = end;
+    }
+    out
+}
+
+/// The grid retargets of a curve with no discontinuity, from node time 0 to `frames`, as #1637
+/// emits them on a cell seeded with the curve's first value: at each `64k`, toward the curve at
+/// `64k + 63` over 64 samples, when that value changes.
+fn grid_operations(entry: &Automation, frames: u64) -> Vec<(u64, builtins::FaderOperation)> {
+    let mut held = curve(entry, 0);
+    (0..frames)
+        .step_by(64)
+        .filter_map(|at| {
+            let value = curve(entry, at as i64 + 63);
+            (value.to_bits() != held.to_bits()).then(|| {
+                held = value;
+                (
+                    at,
+                    builtins::FaderOperation::RetargetGain {
+                        gain: gain(value),
+                        samples: 64,
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
+/// The first sample index at which `a` and `b` differ by bits.
+fn first_difference(a: &[f32], b: &[f32]) -> Option<usize> {
+    a.iter()
+        .zip(b)
+        .position(|(a, b)| a.to_bits() != b.to_bits())
+}
+
+/// #1647 gate 1: a linear dB fade from `-40` to `0` dB over 48,000 samples on a DC source of
+/// `1.0`, `control_smoothing` explicit 0. At each completion sample `64k + 63` the output equals
+/// `checked_fader_gain(curve(64k + 63))` exactly, and every sample equals the stage driven
+/// directly with the grid's retargets (the ramp kernel's interpolation between them).
+///
+/// Test value: red if a completion is off by one, if the grid follows render samples instead of
+/// node time, if an event's gain is not composed and converted as the static fader's, or if the
+/// first grid event is lost to the seed.
+#[test]
+fn a_fader_fade_reaches_the_curve_at_each_completion_sample() {
+    const FRAMES: u64 = 48_000 + 1_024;
+    let mut model = plain(1, 128);
+    model.control_smoothing = smoothing(0.0);
+    let entry = fader_entry(&model, 0, ParameterChannel::Both, fade());
+    model.automation = vec![entry.clone()];
+    let mut rig = Rig::new(&model);
+    rig.until(FRAMES);
+    for k in 0..FRAMES / 64 {
+        let t = 64 * k + 63;
+        for plane in &rig.out {
+            assert_eq!(
+                plane[t as usize].to_bits(),
+                gain(curve(&entry, t as i64)).to_bits(),
+                "completion sample {t}"
+            );
+        }
+    }
+    let expected = reference(-40.0, &grid_operations(&entry, FRAMES), FRAMES);
+    for plane in &rig.out {
+        assert_eq!(
+            first_difference(&plane[..FRAMES as usize], &expected),
+            None,
+            "every sample is the ramp kernel's"
+        );
+    }
+}
+
+/// #1647 gate 2: a `step` from `0` to `-6` dB at sample 1,000 (not a grid sample). With
+/// `control_smoothing` explicit 0 the output changes exactly at sample 1,000; with the default
+/// table the ramp starts at 1,000 and ends at `1,000 + J - 1`, `J` the session's fader length.
+///
+/// Test value: red if a jump snaps to the grid, ignores `control_smoothing`, starts a sample late
+/// or early, or completes off by one.
+#[test]
+fn a_fader_step_jumps_at_its_exact_sample() {
+    const FRAMES: u64 = 4_096;
+    for fader_ms in [None, Some(0.0)] {
+        let mut model = plain(1, 128);
+        model.control_smoothing = fader_ms.and_then(smoothing);
+        let ramp = controls::LiveRamps::for_session(&model).fader_samples;
+        model.automation = vec![fader_entry(
+            &model,
+            0,
+            ParameterChannel::Both,
+            steps(&[(1_000, -6.0)]),
+        )];
+        let mut rig = Rig::new(&model);
+        rig.until(FRAMES);
+        let expected = reference(
+            0.0,
+            &[(
+                1_000,
+                builtins::FaderOperation::RetargetGain {
+                    gain: gain(-6.0),
+                    samples: ramp,
+                },
+            )],
+            FRAMES,
+        );
+        for plane in &rig.out {
+            assert_eq!(plane[999].to_bits(), 1.0_f32.to_bits(), "{fader_ms:?}");
+            assert_ne!(plane[1_000].to_bits(), 1.0_f32.to_bits(), "{fader_ms:?}");
+            let end = 1_000 + ramp.max(1) as usize - 1;
+            assert_eq!(plane[end].to_bits(), gain(-6.0).to_bits(), "{fader_ms:?}");
+            if ramp > 1 {
+                assert_ne!(
+                    plane[end - 1].to_bits(),
+                    gain(-6.0).to_bits(),
+                    "{fader_ms:?}"
+                );
+            }
+            assert_eq!(
+                first_difference(&plane[..FRAMES as usize], &expected),
+                None,
+                "{fader_ms:?}: the stage driven directly"
+            );
+        }
+    }
+}
+
+/// #1647 gate 2, the next jump and not the one in flight: steps at 1,000 and 3,000 with a fader
+/// length of 480; a write of 960 to the plan's jump-length cell (#1639) at the block entry at
+/// 1,152, while the first jump ramps. The first completes over 480 and the second ramps over 960,
+/// bit for bit the stage driven directly with those two retargets.
+///
+/// Test value: red if a written length cuts the jump in flight, or if the length is read only at
+/// preparation or a block late.
+#[test]
+fn a_written_jump_length_reaches_the_next_jump_not_the_one_in_flight() {
+    const FRAMES: u64 = 4_608;
+    let mut model = plain(1, 128);
+    model.control_smoothing = smoothing(10.0);
+    assert_eq!(controls::LiveRamps::for_session(&model).fader_samples, 480);
+    model.automation = vec![fader_entry(
+        &model,
+        0,
+        ParameterChannel::Both,
+        steps(&[(1_000, -6.0), (3_000, -12.0)]),
+    )];
+    let mut rig = Rig::live(&model);
+    while rig.rendered < 1_152 {
+        rig.block();
+    }
+    rig.write_fader_jump(&model, 960);
+    rig.until(FRAMES);
+    let retarget = |db: f32, samples: u32| builtins::FaderOperation::RetargetGain {
+        gain: gain(db),
+        samples,
+    };
+    let expected = reference(
+        0.0,
+        &[(1_000, retarget(-6.0, 480)), (3_000, retarget(-12.0, 960))],
+        FRAMES,
+    );
+    for plane in &rig.out {
+        assert_eq!(first_difference(&plane[..FRAMES as usize], &expected), None);
+        assert_eq!(plane[1_479].to_bits(), gain(-6.0).to_bits());
+        assert_eq!(plane[3_959].to_bits(), gain(-12.0).to_bits());
+        assert_ne!(plane[3_958].to_bits(), gain(-12.0).to_bits());
+    }
+}
+
+/// #1647 gate 3: two tracks on one source, the first behind a true-peak limiter (latency `λ`)
+/// before its fader, each with a fader step at timeline 4,800 (`control_smoothing` explicit 0).
+/// The event probe puts each step at render sample `4,800 + a(n)`, so the two are `λ` apart, and
+/// in the output both steps meet the source frame 4,800 they act on: the output equals the
+/// session with both faders at `0` dB before that frame's output sample and the session with both
+/// at `-6` dB from it.
+///
+/// Test value: red if node time ignores `a(n)`: the latent track's automation would lead its
+/// audio by `λ`.
+#[test]
+fn a_fader_step_meets_its_source_frame_through_a_latent_insert() {
+    const FRAMES: u64 = 8_192;
+    let mut base = with_limiter(plain(2, 128), 0);
+    base.control_smoothing = smoothing(0.0);
+    let mut automated = base.clone();
+    automated.automation = (0..2)
+        .map(|track| {
+            fader_entry(
+                &automated,
+                track,
+                ParameterChannel::Both,
+                steps(&[(4_800, -6.0)]),
+            )
+        })
+        .collect();
+    let mut low = base.clone();
+    for track in &mut low.tracks {
+        (track.fader.left_db, track.fader.right_db) = (-6.0, -6.0);
+    }
+
+    let mut rig = Rig::new(&automated);
+    let latent = fader_arrival(&rig.prepared, &automated, 0);
+    let plain_arrival = fader_arrival(&rig.prepared, &automated, 1);
+    assert!(latent > 0 && plain_arrival == 0, "{latent} {plain_arrival}");
+    let _ = builtins_compiler::test_only_take_fader_events();
+    rig.until(FRAMES);
+    let (events, overflow) = builtins_compiler::test_only_take_fader_events();
+    assert!(!overflow);
+    let mut samples: Vec<u64> = events.iter().map(|event| event.sample).collect();
+    samples.sort_unstable();
+    samples.dedup();
+    assert_eq!(samples, [4_800, 4_800 + latent], "{events:?}");
+
+    let mut high = Rig::new(&base);
+    high.until(FRAMES);
+    let mut low = Rig::new(&low);
+    low.until(FRAMES);
+    let reach = high.out[0]
+        .iter()
+        .position(|value| *value != 0.0)
+        .expect("the source reaches the output") as u64;
+    let step = (4_800 + reach) as usize;
+    for plane in 0..2 {
+        assert_eq!(
+            first_difference(&rig.out[plane][..step], &high.out[plane][..step]),
+            None,
+            "plane {plane}: before the step"
+        );
+        assert_eq!(
+            first_difference(
+                &rig.out[plane][step..FRAMES as usize],
+                &low.out[plane][step..FRAMES as usize]
+            ),
+            None,
+            "plane {plane}: from the step"
+        );
+    }
+}
+
+/// #1647 gate 4 (host-core): after a session seek to `T` through #1641's producer, the seek
+/// reaches the fader at the render sample `r` of the block it applies at (no latency here), and
+/// the lane equals `checked_fader_gain(curve(T))` exactly from `r`, with no ramp: the probe shows
+/// one `Set` at `r` with the curve's value.
+///
+/// Test value: red if a seek ramps the lane, lands at the wrong sample, or the cell repositions
+/// without a `Set`.
+#[test]
+fn a_session_seek_sets_the_fader_lane_exactly() {
+    const T: u64 = 24_000;
+    let mut model = plain(1, 128);
+    let entry = fader_entry(&model, 0, ParameterChannel::Both, fade());
+    model.automation = vec![entry.clone()];
+    let mut rig = Rig::new(&model);
+    rig.until(1_280);
+    let _ = builtins_compiler::test_only_take_fader_events();
+    rig.seek(T);
+    let r = rig.block();
+    let (events, _) = builtins_compiler::test_only_take_fader_events();
+    let sets: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == automation::EventKind::Set)
+        .map(|event| (event.channel, event.sample, event.value.to_bits()))
+        .collect();
+    let value = curve(&entry, T as i64).to_bits();
+    assert_eq!(sets, [(0, r, value), (1, r, value)], "{events:?}");
+    for plane in &rig.out {
+        assert_eq!(
+            plane[r as usize].to_bits(),
+            gain(curve(&entry, T as i64)).to_bits(),
+            "exact at r"
+        );
+    }
+}
+
+/// The output of `model` at `quantum`, over `frames`, with an optional session seek to timeline
+/// `seek.1` pushed before the block that starts at render sample `seek.0`.
+fn render_at(
+    model: &SessionModel,
+    quantum: u32,
+    frames: u64,
+    seek: Option<(u64, u64)>,
+) -> [Vec<f32>; 2] {
+    let mut model = model.clone();
+    model.quantum_frames = quantum;
+    let mut rig = Rig::new(&model);
+    while rig.rendered < frames {
+        if let Some((at, timeline)) = seek
+            && rig.rendered == at
+        {
+            rig.seek(timeline);
+        }
+        rig.block();
+    }
+    rig.out.map(|mut plane| {
+        plane.truncate(frames as usize);
+        plane
+    })
+}
+
+/// #1647 gate 5: the same session at quantum 128 and at quantum 100 gives the same output bits,
+/// sample for sample from sample 0, with and without a session seek (at render sample 3,200, a
+/// block entry at both quanta). The ride holds a fade, steps and the default jump length.
+///
+/// Test value: red if any value depends on the quantum (README blocker B1): a grid on render
+/// blocks, a jump or a seek landing on a block boundary.
+#[test]
+fn the_fader_events_do_not_depend_on_the_quantum() {
+    const FRAMES: u64 = 9_600;
+    let mut model = plain(1, 128);
+    let mut segments = vec![segment(AutomationShape::Linear, 0, 2_000, -30.0, -3.0)];
+    segments.push(segment(AutomationShape::Step, 2_000, 4_321, -3.0, -18.0));
+    segments.push(segment(AutomationShape::Linear, 4_321, 9_000, -18.0, 2.0));
+    model.automation = vec![fader_entry(&model, 0, ParameterChannel::Left, segments)];
+    for seek in [None, Some((3_200, 7_777))] {
+        let a = render_at(&model, 128, FRAMES, seek);
+        let b = render_at(&model, 100, FRAMES, seek);
+        for plane in 0..2 {
+            assert_eq!(
+                first_difference(&a[plane], &b[plane]),
+                None,
+                "{seek:?} plane {plane}"
+            );
+        }
+        assert_ne!(a[0], a[1], "the left lane moves");
+    }
+}
+
+/// #1647 gate 6: 1,000 blocks with events on eight lanes (eight tracks, each a fade with steps on
+/// its left lane) allocate and free nothing after a warm-up.
+///
+/// Test value: red if render allocates for events.
+#[test]
+fn rendering_fader_events_allocates_nothing() {
+    let mut model = plain(8, 128);
+    model.automation = (0..8)
+        .map(|track| {
+            let mut segments = vec![segment(
+                AutomationShape::Linear,
+                0,
+                60_000,
+                -40.0 + track as f32,
+                0.0,
+            )];
+            segments.push(segment(AutomationShape::Step, 60_000, 90_000, 0.0, -12.0));
+            segments.push(segment(
+                AutomationShape::Linear,
+                90_000,
+                128_000,
+                -12.0,
+                -40.0,
+            ));
+            fader_entry(&model, track, ParameterChannel::Left, segments)
+        })
+        .collect();
+    let mut rig = Rig::new(&model);
+    rig.until(4 * 128);
+    let _ = builtins_compiler::test_only_take_fader_events();
+    rig.allocations = (0, 0, 0);
+    let mut lanes = std::collections::BTreeSet::new();
+    for _ in 0..1_000 {
+        rig.block();
+        let (events, _) = builtins_compiler::test_only_take_fader_events();
+        lanes.extend(events.iter().map(|event| (event.lane, event.channel)));
+    }
+    assert_eq!(lanes.len(), 8, "events on eight lanes: {lanes:?}");
+    assert_eq!(rig.allocations, (0, 0, 0), "1,000 blocks of fader events");
+}
+
+/// The session of the oracle parity test: a fade on both lanes of track 0, steps on the left lane
+/// and a fade on the right lane of track 1, no automation on track 2; the default jump length.
+#[cfg(feature = "test-support")]
+fn parity_model() -> SessionModel {
+    let mut model = plain(3, 128);
+    let mut right = fade();
+    right[0].start_value = -12.0;
+    model.automation = vec![
+        fader_entry(&model, 0, ParameterChannel::Both, fade()),
+        fader_entry(
+            &model,
+            1,
+            ParameterChannel::Left,
+            steps(&[(700, -6.0), (2_900, -24.0), (5_000, 3.0)]),
+        ),
+        {
+            let mut entry = fader_entry(&model, 1, ParameterChannel::Right, right);
+            entry.id = id("ride-1-right");
+            entry
+        },
+    ];
+    model
+}
+
+/// Render `rig` for `blocks` blocks; with handles, a live mute ramp of 300 samples starts on track
+/// 1's left lane at block 10 and an unmute ramp at block 20, so a held ramp is reported (D1.2).
+#[cfg(feature = "test-support")]
+fn render_parity(mut rig: Rig, blocks: usize) -> [Vec<f32>; 2] {
+    use builtins_compiler::TestOnlyWriteGate;
+    let mut gate = rig.handles.is_some().then(|| {
+        rig.prepared
+            .plan
+            .take_revision_gate()
+            .expect("the plan's gate")
+    });
+    for block in 0..blocks {
+        if let (Some(gate), Some(handles)) = (gate.as_mut(), rig.handles.as_mut())
+            && (block == 10 || block == 20)
+        {
+            gate.write_published(|stamp| {
+                handles.strip_controls[1].fader.write(
+                    stamp,
+                    builtins_compiler::TrackFaderRecord::Mute {
+                        lanes: builtins::BuiltinLaneSelector::Left,
+                        muted: block == 10,
+                        smoothing_samples: 300,
+                    },
+                );
+            });
+        }
+        rig.block();
+    }
+    rig.out
+}
+
+/// R17-4: the test-only scalar oracle renders the stored fader events through the one event
+/// driver, so a `Backend::Scalar` plan renders the bank's bits: with no live control (the oracle's
+/// automated strip binds the ramped fader), with live controls (the live fader owner and its pair
+/// with the matrix), and prepared between render calls (the split pair), each with a live mute
+/// and unmute ramp on an automated lane.
+///
+/// Test value: red if the oracle's fader owners ignore the program, take no node time or `a(n)`,
+/// defer or fuse an automated fader past its events, or convert an event differently from the
+/// bank: "a placement change moves no bit" would fail for automated sessions.
+#[cfg(feature = "test-support")]
+#[test]
+fn the_scalar_oracle_renders_the_banks_fader_events() {
+    use graph_compiler::Backend;
+    const BLOCKS: usize = 64;
+    let model = parity_model();
+    let document = canonical_session_json(&model).expect("canonical");
+    let caps = rig_caps(&model);
+    let compiled = host_core::compile_host_session(&document, &caps)
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+    let request = host_core::HostLiveControlRequest::default();
+    let plain_on = |backend| {
+        let prepared = host_core::test_only_prepare_host_runtime_on(&compiled, &caps, backend)
+            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+        render_parity(Rig::from(prepared, &model), BLOCKS)
+    };
+    let live_on = |backend, between: bool| {
+        let (prepared, handles) = if between {
+            host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
+                &compiled, &caps, &request, backend,
+            )
+        } else {
+            host_core::test_only_prepare_host_runtime_with_live_controls_on(
+                &compiled, &caps, &request, backend,
+            )
+        }
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+        let mut rig = Rig::from(prepared, &model);
+        rig.handles = Some(handles);
+        render_parity(rig, BLOCKS)
+    };
+    let mut unautomated = model.clone();
+    unautomated.automation.clear();
+    let without = render_parity(Rig::new(&unautomated), BLOCKS);
+    for (label, bank, oracle) in [
+        (
+            "no live control",
+            plain_on(Backend::Simd4),
+            plain_on(Backend::Scalar),
+        ),
+        (
+            "live controls",
+            live_on(Backend::Simd4, false),
+            live_on(Backend::Scalar, false),
+        ),
+        (
+            "between render calls",
+            live_on(Backend::Simd4, true),
+            live_on(Backend::Scalar, true),
+        ),
+    ] {
+        assert_ne!(bank, without, "{label}: the automation is heard");
+        for plane in 0..2 {
+            assert_eq!(
+                first_difference(&bank[plane], &oracle[plane]),
+                None,
+                "{label}: plane {plane}"
+            );
+        }
+    }
+}
+
+/// #1647 D2 (departure 4): a lane a successor adds starts at its prepared value, the curve's
+/// first value, and its first block lands a `Set` when the curve at that block's node time
+/// differs. Track 1 gains a fader step from `0` to `-9` dB at timeline 300 in a successor swapped
+/// in at block 6 (render sample 768, no seek): from the swap block the output equals, bit for bit,
+/// the successor's session rendered fresh from sample 0, whose lane took the jump at 300 (over
+/// 240 samples) and holds `-9` dB.
+///
+/// Test value: red if a restarted or added lane keeps its prepared value into the successor (it
+/// would glide from `0` dB on the first grid event instead of standing at the curve).
+#[cfg(feature = "test-support")]
+#[test]
+fn a_lane_a_successor_adds_starts_at_its_curve() {
+    use successor::{Feed, SWAP_BLOCK, Session, Successor, reference_run, swapped_run};
+    let mut base = plain(2, 128);
+    // A 240-sample jump: the fresh reference's ramp at 300 completes before the swap block.
+    base.control_smoothing = smoothing(5.0);
+    let mut ride = base.clone();
+    ride.automation = vec![fader_entry(
+        &ride,
+        1,
+        ParameterChannel::Both,
+        steps(&[(300, -9.0)]),
+    )];
+    let a = Session::compile(base);
+    let b = Session::compile(ride);
+    let feed = Feed::new("fixture-source", 7);
+    for backend in [
+        #[cfg(target_feature = "avx2")]
+        graph_compiler::Backend::Simd8,
+        graph_compiler::Backend::Simd4,
+    ] {
+        let swapped = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
+        let reference = reference_run(&b, &[&feed], backend);
+        let without = reference_run(&a, &[&feed], backend);
+        for (block, (swapped, reference)) in swapped.blocks[SWAP_BLOCK..]
+            .iter()
+            .zip(&reference[SWAP_BLOCK..])
+            .enumerate()
+        {
+            assert_eq!(
+                swapped.bits,
+                reference.bits,
+                "{backend:?}: block {}",
+                SWAP_BLOCK + block
+            );
+        }
+        assert_ne!(
+            reference[SWAP_BLOCK].bits, without[SWAP_BLOCK].bits,
+            "the ride is heard"
+        );
+    }
 }
