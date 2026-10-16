@@ -510,3 +510,9 @@ Built on `51ec4fd67` (tranche 1).
   public-doc links to private items: three in `crates/source/src/lib.rs` (`TimelineConsumer`,
   `begin_block_at` and `prime_ready`, from #1640/#1641) and one in
   `crates/control-plane/src/compile.rs:734`, each turned into a code span.
+
+**Root ruling B16-R8 (2026-10-16).** `RealtimePlanOwner::active_plan_mut` is gated behind a new
+`engine/test-support` feature (`#[cfg(feature = "test-support")]`), because its only caller is test
+code. capi's dev-dependency on `engine` turns the feature on. The workspace debug-test and doctest
+steps of `qualification.yml` name `engine/test-support`, so `scripts/check-test-support-ci.py`
+passes (13 packages). The release `capi` build does not see the accessor.

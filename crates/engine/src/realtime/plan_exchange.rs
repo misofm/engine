@@ -779,7 +779,9 @@ impl RealtimePlanOwner {
     }
     /// The currently active complete plan, for the plan's exclusive owner between render calls
     /// (#1642): a test reads the plan's own state, such as its timeline, through it. Nothing here
-    /// adopts, swaps or renders; the borrow ends before the next render call.
+    /// adopts, swaps or renders; the borrow ends before the next render call. Test support only
+    /// (root ruling B16-R8): no production caller needs `&mut` access to the active plan.
+    #[cfg(feature = "test-support")]
     pub fn active_plan_mut(&mut self) -> &mut PreparedRenderPlan {
         &mut self.active.1
     }
