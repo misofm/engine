@@ -188,8 +188,10 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
         ),
         # Issue #1381a D4: the browser renders through the plan owner, so the block boundary's
         # swap decision is in the closure. The plan's own `render` entry is not: the owner calls
-        # `render_inner` and counts a failed block itself.
-        "_RNvMs6_NtNtCs_6engine8realtime13plan_exchangeNtB5_17RealtimePlanOwner11enter_block": (
+        # `render_inner` and counts a failed block itself. The `Ms7` impl index moved from `Ms6`
+        # when #1396 added `impl PlanClocks` above `impl RealtimePlanOwner`; the sites and their
+        # count are unchanged (owner-approved pin edit, 2026-10-16).
+        "_RNvMs7_NtNtCs_6engine8realtime13plan_exchangeNtB5_17RealtimePlanOwner11enter_block": (
             4,
             "`running.prime_ready(...)`, the running plan's readiness hook, asked for a `Primed` "
             "candidate only (#1311), and `carry_from`'s executor hand-over at an adopted swap "
