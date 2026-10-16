@@ -343,3 +343,72 @@ in the plain seek, outside this slice. Stop and report it; do not change the pla
 `SessionState::seek_report`); host-web keeps staging, pointer checks and the record copy. The
 widened C13 list names the C seek report only; B15-R8 and the batch 15c ruling approved D5 and D6.
 Root may add the three browser names to the list.
+
+## Decision record: #1293 (batch 16)
+
+Root ruling R7 (2026-10-16): the record is 64 bytes, the C struct's layout, reserved words zero.
+
+**Shipped (D5, D6, D7; gates 3 to 6 and the batch 15c parity row).**
+- `miso_engine_web_v1_source_seek_at(handle, source_id_bytes, generation, source_frame,
+  anchor_sample)`: the staged-ID checks (count inside the staging) only, then
+  `AudioWorkletEngineHost::seek_source_at`, which calls `SessionState::seek_at` and maps a refusal
+  through `source_failure_result`. It never calls `plan.prepare_source_seek` (the D4 trap) and is not
+  `render_locked`: it runs the service step, so the page calls it from the message handler only.
+- `miso_engine_web_v1_source_seek_report(handle, source_id_bytes)` and
+  `miso_engine_web_v1_source_seek_report_ptr(handle)`: `read_seek_report` calls
+  `SessionState::seek_report` (the C ABI's call) and copies its five words into `WebSeekReport`, 64
+  bytes: `struct_size u32`, `reserved0 u32`, `generation`, `first_sample`, `source_frame`,
+  `cumulative_underrun_frames`, `cumulative_held_frames` (`u64` each), `reserved [u64; 2]`. Busy is
+  `RESULT_BACKPRESSURE`, an unknown source `RESULT_INVALID_ARGUMENT`. A refusal leaves the record
+  alone. host-web holds no seek or report logic.
+- A host that is not ready (no control half today) refuses both with `RESULT_REFUSED_LIFECYCLE` and
+  changes nothing; the pointer export returns 0.
+- Mirrors: exports 105 -> 108 in `check-web-audioworklet.sh`, `abi_layout.rs` `EXPORTS`,
+  `check-abi-layout-v1.py` and its self-test fixture; the `seekReport` structure (64 bytes, eight
+  fields) in `abi_layout.rs`, the checker's `STRUCTURES`/`SEEK_REPORT_FIELDS` and the fixture;
+  `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts` regenerated with
+  `cargo run -p parameter-metadata -- --print-abi-layout`, `node codegen/assets.mjs` and
+  `node codegen/generate.mjs`.
+
+**Departures from the text.**
+- `scripts/check-session-map-shape.py` (not in the authorized paths) treated every
+  `source_*(handle) -> u32` export as a source-map query, so it flagged `source_seek_report_ptr`.
+  Mechanical fix: it skips that one name, with a comment. No other behavior changed.
+- The plain seek is unchanged. The amendment's hazard did not materialize: the parity row shows the
+  browser's report after a plain seek equals the C ABI's at the call (the old generation) and at
+  every later block (`first_sample` = the first block that begins after the call), at 48 and 96 kHz.
+  `prepare_source_seek` at the call changes what the consumer reads, not the published report.
+- Gate 5 for the pointer export is partly unobservable natively: `pointer_u32` truncates a 64-bit
+  native address to 0, so a native test cannot tell "not ready" from "ready" for
+  `source_seek_report_ptr`. The not-ready refusal of both call exports is tested; the pointer's
+  not-ready 0 follows from the same `status().state` check.
+- Gate 3's "silence until the anchor" is set up with no PCM of the old generation queued.
+
+**Gates -> tests.**
+- Gate 3 and 4: `tests::the_anchored_seek_exports_play_at_the_anchor_and_report_where_it_landed`
+  (raw exports: an unaligned anchor and an unknown source are `RESULT_INVALID_ARGUMENT`; an anchor two
+  quanta ahead is `RESULT_OK`; two silent blocks then the sought frame; the record reads
+  `(2, 256, 10000)`, 256 held frames, 0 underrun frames, reserved zero).
+- Gate 5: `tests::the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing`.
+- Parity row (`hosts/host-web/tests/control_parity.rs`):
+  `the_seek_report_is_alike_on_both_hosts_for_plain_late_and_future_seeks` (plain seek, late
+  `seek_at` whose anchor is behind the render clock, and `seek_at` two quanta ahead; 48 and 96 kHz;
+  record equals the C struct field by field at the call and after every block; output bits equal).
+- Gate 6: `python3 -B scripts/check-abi-layout-v1.py --self-test` (36 mutations caught, including
+  dropping each of the three exports and a record field), `parameter-metadata --check sdk/assets`,
+  `check-web-audioworklet.sh` (compares the wasm's exports with `expected_exports`),
+  `check-sdk-generated.sh target/ci/h1293/a`.
+
+**Commands run.** `cargo test --locked -p host-web --features host-web/test-support` (all pass);
+`cargo clippy --locked -p host-web -p parameter-metadata --all-targets --all-features -- -D
+warnings`; `cargo fmt --all`; `build-web-audioworklet.sh --named-twin target/ci/h1293/n
+target/ci/h1293/a`; `check-web-audioworklet.sh`; `check-sdk-generated.sh target/ci/h1293/a`;
+`test-web-audioworklet.sh`; `check-workspace-policy.sh`; `cargo run -p realtime-policy`.
+
+**Artifact.** `miso-engine-v1-audio-worklet.simd128.wasm`: 4,198,551 bytes, sha256
+`20b08c9049f20b898676f17ea1fda74ea18eda4eabe8a94526c1e80eeb07b5be` (named twin 4,818,838 bytes,
+`965b71c5265c0fa8cfa10579856e3f0274b1fba634423edf8e6fd69aba8ec5d7`).
+
+**Successors.** The SDK binding for the three exports and the message-handler-only rule for
+`source_seek_at` (the feed worklet's render-side seek must keep the plain seek) are #1294 and #1297.
+A `seek_at_unserviced` for a render-side caller stays unbuilt until a caller needs it.

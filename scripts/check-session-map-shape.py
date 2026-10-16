@@ -54,6 +54,7 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 RUST_FFI = pathlib.Path("hosts/host-web/src/ffi.rs")
+SEEK_REPORT_RECORD_POINTER = "miso_engine_web_v1_source_seek_report_ptr"
 EXPORT_GATE = pathlib.Path("scripts/check-web-audioworklet.sh")
 WORKLET_JS = pathlib.Path("hosts/host-web/web/miso-engine-v1-audio-worklet.js")
 HOST_JS = pathlib.Path("hosts/host-web/web/miso-engine-v1-audio-worklet-host.js")
@@ -139,6 +140,10 @@ def rust_introspection_exports(text: str) -> dict[str, str]:
     for name, params, width in re.findall(
         r'pub extern "C" fn (miso_engine_web_v1_source_[a-z_]+)\(([^)]*)\) -> (u32|u64)', text
     ):
+        if name == SEEK_REPORT_RECORD_POINTER:
+            # The seek report's record address (#1293 D6) takes only the handle, like a count
+            # query, but it is the control half's record pointer, not a source-map query.
+            continue
         signature = [part.strip() for part in params.split(",") if part.strip()]
         if signature in (["handle: u32"], ["handle: u32", "index: u32"]):
             found[name] = width
