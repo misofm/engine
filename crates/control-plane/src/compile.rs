@@ -23,6 +23,10 @@ pub(crate) struct PreparedRuntime {
     pub(crate) carried: CarriedSourceBytes,
     /// What the plan holds, for preparing its successor (issue #1273 D1).
     pub(crate) inventory: PlanStateInventory,
+    /// What the plan carries from the plan it was prepared to displace (#1344 D1), the base its
+    /// replacement is prepared from should it be withdrawn before render adopts it (#1310 D2).
+    /// `None` for a plan prepared without a successor base.
+    pub(crate) carried_base: Option<PlanStateInventory>,
     pub(crate) control_catalog: ControlCatalog,
     pub(crate) capi: CapiResources,
     /// The designated master strip the plan was prepared with, as a strip index (#1683): a first
@@ -78,7 +82,8 @@ pub(crate) struct CarriedSourceBytes {
 }
 
 /// Every compiled model's charge while a prospective session lives beside the ones the control
-/// plane holds (#1398 D4): the committed model, any model a withdrawn candidate keeps (#1310 D3),
+/// plane holds (#1398 D4): the committed model, the model an epoch keeps while a successor of it
+/// is pending (#1310 D3),
 /// and the prospective one.
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
@@ -89,22 +94,6 @@ pub struct CompiledModelAdmission {
     pub retained_bytes: u64,
     /// The largest of the models' largest single allocation.
     pub largest_allocation_bytes: u64,
-}
-
-pub(crate) fn compiled_model_admission(
-    current: &CompiledSession,
-    prospective: &CompiledSession,
-) -> Result<CompiledModelAdmission, CompileFailure> {
-    compiled_model_admission_between(current.resource_estimate(), prospective.resource_estimate())
-}
-
-/// [`compiled_model_admission`] from the two models' resource estimates, for a prospective model
-/// that is not held as a compilation (#1613).
-pub(crate) fn compiled_model_admission_between(
-    current: session::ResourceEstimate,
-    prospective: session::ResourceEstimate,
-) -> Result<CompiledModelAdmission, CompileFailure> {
-    compiled_model_admission_over(&[current], prospective)
 }
 
 /// [`CompiledModelAdmission`] over every model the control plane holds, `held`, and the
@@ -255,6 +244,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     strip_table_bytes: u64,
     provider: host_core::SessionControlProviderResources,
     inventory_bytes: u64,
+    carried_base_bytes: u64,
     effect_controls: host_core::EffectControlResources,
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
@@ -323,6 +313,9 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         source_id_row,
         // Issue #1273 D5: each epoch keeps its plan's state inventory for the successor.
         inventory_bytes,
+        // #1310 D2 (#1344 D1): and the base a successor is prepared from should this epoch's plan
+        // be withdrawn before render adopts it; zero for a plan prepared without a base.
+        carried_base_bytes,
         strip_table_bytes,
         effect_row,
         route_row,
@@ -446,10 +439,12 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     compiled: &CompiledSession,
     catalog: &ControlCatalog,
     inventory: &PlanStateInventory,
+    carried_base_bytes: u64,
     effect_controls: host_core::EffectControlResources,
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
@@ -489,6 +484,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
             .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
         provider,
         inventory.retained_bytes(),
+        carried_base_bytes,
         effect_controls,
         route_controls,
         observation,
@@ -1172,6 +1168,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         compiled,
         &prepared.control_catalog,
         &prepared.inventory,
+        prepared.report.carried_base_retained_bytes,
         prepared.report.effect_control_resources,
         prepared.report.route_control_resources,
         observation_resources(&effects, observation_slots_high_water)?,
@@ -1245,6 +1242,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         },
         carried,
         inventory: prepared.inventory,
+        carried_base: prepared.carried_base,
         control_catalog: prepared.control_catalog,
         capi,
         master_track,
@@ -1335,6 +1333,8 @@ where
         resources,
         carried: _,
         inventory,
+        // A boot plan is prepared without a successor base, so it has none.
+        carried_base: _,
         control_catalog,
         capi,
         master_track: _,
@@ -1436,6 +1436,7 @@ where
         observation_wire: observation_wire(limits.maximum_control_frame_bytes)?,
         observation_armed_bytes: 0,
         observation_slots_high_water: 0,
+        observation_forwarded: Vec::new(),
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,
@@ -1680,7 +1681,7 @@ mod admission_tests {
         );
         // Today's check, for the same candidate beside the running plan alone.
         let today =
-            compiled_model_admission_between(model(1 << 20, 3), model(1 << 22, 7)).expect("models");
+            compiled_model_admission_over(&[model(1 << 20, 3)], model(1 << 22, 7)).expect("models");
         assert_each_cap(
             "one held",
             &held[..1],

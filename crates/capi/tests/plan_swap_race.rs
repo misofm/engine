@@ -49,8 +49,9 @@ fn one_race_at_a_time() -> MutexGuard<'static, ()> {
     RACES.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Render blocks after an admission beyond which `RESULT_BACKPRESSURE` is a wedge. A healthy
-/// replacement is admitted again once its swapping block has rendered.
+/// Render blocks an admission may wait for before the race counts it as wedged. Since #1310 a
+/// structural edit is never refused as backpressure for a pending candidate, so this only bounds
+/// the blocks the race renders.
 const WEDGE_BLOCKS: u64 = 256;
 
 fn limits() -> CompileLimits {
@@ -296,6 +297,14 @@ struct Control<'a> {
     admission_block: u64,
     next_frame: u64,
     fed_blocks: u64,
+    /// The frames fed so far, for a render thread that does not lock the control state.
+    fed_frames: &'a AtomicU64,
+    /// Offer the next structural transaction at once, not two blocks after the last admission
+    /// (#1310 gate 5): an edit then lands while the last candidate may still be unadopted.
+    back_to_back: bool,
+    /// The control plane's withdrawal outcomes on this, the control, thread (#1310 D1):
+    /// `(withdrawn, taken, superseded)`.
+    outcomes: (u64, u64, u64),
 }
 
 impl Control<'_> {
@@ -318,6 +327,7 @@ impl Control<'_> {
             RESULT_OK => {
                 self.next_frame += accepted;
                 self.fed_blocks += 1;
+                self.fed_frames.store(self.next_frame, Ordering::Release);
                 Ok(())
             }
             RESULT_BACKPRESSURE => Ok(()),
@@ -336,11 +346,26 @@ impl Control<'_> {
     /// resource query against the render thread, and, once two blocks have rendered since the
     /// last admission, offer the next structural transaction.
     fn step(&mut self) {
+        // #1310 gate 5: back to back, every other step feeds only after its submit, so no block
+        // can start while the command runs and the candidate before it stays unadopted
+        // (`Withdrawn`); the others feed first, so render may adopt it during the command
+        // (`Taken`).
+        let starve = self.back_to_back && self.admitted % 2 == 1;
+        self.step_feeding(!starve);
+        if starve && !self.is_done() {
+            let admitted = self.admitted;
+            if let Err(refusal) = self.feed() {
+                self.fail(format!("after {admitted} swaps: {refusal}"));
+            }
+        }
+    }
+
+    fn step_feeding(&mut self, feed: bool) {
         if self.is_done() {
             return;
         }
         let admitted = self.admitted;
-        if let Err(refusal) = self.feed() {
+        if feed && let Err(refusal) = self.feed() {
             return self.fail(format!("after {admitted} swaps: {refusal}"));
         }
         let session = self.session_address as *mut Session;
@@ -362,7 +387,7 @@ impl Control<'_> {
         }
         // The block in flight at admission may predate the publication; the next one swaps.
         let blocks = self.rendered.load(Ordering::Acquire);
-        if blocks < self.admission_block + 2 {
+        if !self.back_to_back && blocks < self.admission_block + 2 {
             return;
         }
         let mut output = BytesOut {
@@ -413,11 +438,18 @@ impl Control<'_> {
                     self.admitted.is_multiple_of(2),
                 );
                 self.admission_block = self.rendered.load(Ordering::Acquire);
+                let counters = control_plane::test_lifecycle_counters();
+                self.outcomes = (
+                    counters.candidate_withdrawn,
+                    counters.candidate_taken,
+                    counters.candidate_superseded,
+                );
                 if self.is_done() {
                     self.done.store(true, Ordering::Release);
                 }
             }
-            RESULT_BACKPRESSURE if blocks - self.admission_block <= WEDGE_BLOCKS => {}
+            // #1310 gate 5: a structural edit behind a pending candidate supersedes it, so any
+            // `RESULT_BACKPRESSURE` here fails.
             other => self.fail(format!(
                 "submit after {admitted} swaps and {} blocks: {other}",
                 blocks - self.admission_block
@@ -454,7 +486,7 @@ impl Control<'_> {
 /// block waits until its PCM is queued. A submit may only be accepted or backpressured by a full
 /// ring: `source.ring.vacated` (a submit routed to an epoch whose producer has moved) or
 /// `source.frame.noncontiguous` (a ring that lost its write position) fails.
-fn race_plan_swaps(swaps: u64, readers: usize) {
+fn race_plan_swaps(swaps: u64, readers: usize, back_to_back: bool) {
     let _race = one_race_at_a_time();
     assert_installed();
     // Warm the JSON frontend's lazily boxed process statics before anything is observed.
@@ -463,6 +495,21 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
     let mut model = session::parse_session_json(SESSION).expect("fixture");
     // A region the race never reaches the end of.
     model.sources[0].frames = 1 << 40;
+    if back_to_back {
+        // #1310 gate 5 compares the settled output with a fresh plan of the final model, so the
+        // session holds no DSP state a swap could carry: no console slot, no insert, and the
+        // input filters off.
+        model.console.pre_insert.clear();
+        model.console.post_insert.clear();
+        for track in &mut model.tracks {
+            track.console.clear();
+            track.inserts.effects.clear();
+            for lane in [&mut track.builtins.left, &mut track.builtins.right] {
+                lane.hpf_hz = 0.0;
+                lane.lpf_hz = 0.0;
+            }
+        }
+    }
     let document = session::canonical_session_json(&model).expect("canonical");
     // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
     let (session, plan) = unsafe { compile_c(&document, &limits()) };
@@ -471,6 +518,7 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
     let in_render = AtomicBool::new(false);
     let done = AtomicBool::new(false);
     let rendered = AtomicU64::new(0);
+    let fed_frames = AtomicU64::new(0);
     let request = track_command(1, 42, &model, true);
     let mut control = Control {
         session_address: session as usize,
@@ -492,6 +540,9 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
         admission_block: 0,
         next_frame: 0,
         fed_blocks: 0,
+        fed_frames: &fed_frames,
+        back_to_back,
+        outcomes: (0, 0, 0),
     };
 
     let mut pcm = [f32::NAN; 256];
@@ -526,34 +577,69 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
         // Stops the reader threads however the render loop leaves their scope, so a failed
         // assertion cannot hang the join. (`render_while_producing` stops its own producer thread.)
         let stop_readers = StopOnDrop(&stop);
-        render_while_producing(
-            block_bound,
-            &mut control,
-            |control| control.step(),
-            |control| control.ready(),
-            |_| {
-                if done.load(Ordering::Acquire) {
-                    return;
+        let render_next = || {
+            if done.load(Ordering::Acquire) {
+                return;
+            }
+            let plan = plan_address as *mut Plan;
+            let block = rendered.load(Ordering::Acquire);
+            let mark = current_thread_counters();
+            in_render.store(true, Ordering::SeqCst);
+            // SAFETY: This thread is the plan's only renderer; `output` is owned storage.
+            let code = unsafe {
+                miso_engine_v1_render_f32_planar(plan, block * u64::from(QUANTUM), &output)
+            };
+            in_render.store(false, Ordering::SeqCst);
+            let delta = current_thread_delta_since(mark);
+            assert_eq!(code, RESULT_OK, "render refused block {block}");
+            assert_eq!(
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (0, 0, 0),
+                "block {block}: the render thread allocated or freed across a plan swap"
+            );
+            rendered.store(block + 1, Ordering::Release);
+        };
+        if back_to_back {
+            // #1310 gate 5: the control thread runs unlocked, so a block renders whenever its PCM
+            // is queued, concurrently with a command: render may adopt a candidate before the
+            // command's service step (an ordinary rebuild), between it and the withdrawal
+            // (`Taken`), or not before it (`Withdrawn`).
+            let control = &mut control;
+            let stop = &stop;
+            let producer = scope.spawn(move || {
+                while !stop.load(Ordering::Acquire) && !control.is_done() {
+                    control.step();
+                    std::thread::yield_now();
                 }
-                let plan = plan_address as *mut Plan;
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            for _ in 0..block_bound {
+                if done.load(Ordering::Acquire) {
+                    break;
+                }
                 let block = rendered.load(Ordering::Acquire);
-                let mark = current_thread_counters();
-                in_render.store(true, Ordering::SeqCst);
-                // SAFETY: This thread is the plan's only renderer; `output` is owned storage.
-                let code = unsafe {
-                    miso_engine_v1_render_f32_planar(plan, block * u64::from(QUANTUM), &output)
-                };
-                in_render.store(false, Ordering::SeqCst);
-                let delta = current_thread_delta_since(mark);
-                assert_eq!(code, RESULT_OK, "render refused block {block}");
-                assert_eq!(
-                    (delta.allocations, delta.reallocations, delta.deallocations),
-                    (0, 0, 0),
-                    "block {block}: the render thread allocated or freed across a plan swap"
-                );
-                rendered.store(block + 1, Ordering::Release);
-            },
-        );
+                while fed_frames.load(Ordering::Acquire) < (block + 1) * u64::from(QUANTUM)
+                    && !done.load(Ordering::Acquire)
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "block {block}: no PCM was queued"
+                    );
+                    std::thread::yield_now();
+                }
+                render_next();
+            }
+            stop.store(true, Ordering::Release);
+            producer.join().expect("control thread");
+        } else {
+            render_while_producing(
+                block_bound,
+                &mut control,
+                |control| control.step(),
+                |control| control.ready(),
+                |_| render_next(),
+            );
+        }
         drop(stop_readers);
         pollers
             .into_iter()
@@ -570,6 +656,68 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
             plan_carry_counts(plan),
         )
     };
+    // #1310 gate 5: after quiescence the raced plan renders what a fresh plan of the final model
+    // renders. The race toggles a muted track, so an even count of admissions ends on the boot
+    // model; the feed is constant, so once every ramp has settled the block is the twin's.
+    let settled = back_to_back.then(|| {
+        let ramps = control.model.control_smoothing_samples();
+        let settle = u64::from(ramps.fader.max(ramps.mute)).div_ceil(u64::from(QUANTUM)) + 2;
+        let mut raced = Vec::new();
+        let mut next_frame = control.next_frame;
+        for block in blocks + 1..=blocks + settle {
+            // SAFETY: The race has joined, so this thread is the session's and plan's only caller.
+            unsafe {
+                while next_frame < (block + 1) * u64::from(QUANTUM) {
+                    let (code, accepted) =
+                        submit_dc_block::<{ QUANTUM as usize }>(session, next_frame);
+                    if code != RESULT_OK {
+                        break;
+                    }
+                    next_frame += accepted;
+                }
+                assert_eq!(
+                    miso_engine_v1_render_f32_planar(plan, block * u64::from(QUANTUM), &output),
+                    RESULT_OK
+                );
+            }
+            raced = pcm
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>();
+        }
+        assert!(swaps.is_multiple_of(2), "the race ends on the boot model");
+        // SAFETY: These handles are uniquely owned until the matching destroy calls below.
+        let twin = unsafe {
+            let (twin_session, twin_plan) = compile_c(&document, &limits());
+            let mut twin_pcm = [f32::NAN; 256];
+            let twin_output = PlanarOutput {
+                samples: twin_pcm.as_mut_ptr(),
+                ..output
+            };
+            for block in 0..=settle {
+                let (code, _) = submit_dc_block::<{ QUANTUM as usize }>(
+                    twin_session,
+                    block * u64::from(QUANTUM),
+                );
+                assert_eq!(code, RESULT_OK);
+                assert_eq!(
+                    miso_engine_v1_render_f32_planar(
+                        twin_plan,
+                        block * u64::from(QUANTUM),
+                        &twin_output
+                    ),
+                    RESULT_OK
+                );
+            }
+            miso_engine_v1_session_destroy(twin_session);
+            miso_engine_v1_plan_destroy(twin_plan);
+            twin_pcm
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>()
+        };
+        (raced, twin)
+    });
     // SAFETY: These are the exact live handles returned by `compile_c` and are destroyed once.
     unsafe {
         miso_engine_v1_session_destroy(session);
@@ -591,13 +739,39 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
         control.admitted, swaps,
         "every swap admitted within the block bound"
     );
+    let (withdrawn, taken, superseded) = control.outcomes;
     assert_eq!(
         carry_counts,
-        (control.admitted, 0),
-        "every applied swap carried the source's ring"
+        (control.admitted - superseded, 0),
+        "every applied swap carried the source's ring; a superseded candidate never swapped"
     );
+    assert_eq!(
+        withdrawn, superseded,
+        "every withdrawn candidate was superseded"
+    );
+    if let Some((raced, twin)) = settled {
+        assert!(
+            raced == twin,
+            "the settled raced plan renders as a fresh plan of the final model: {:?} against {:?} \
+             ({withdrawn} withdrawn, {taken} taken, carry {carry_counts:?}, blocks {blocks})",
+            [f32::from_bits(raced[0]), f32::from_bits(raced[128])],
+            [f32::from_bits(twin[0]), f32::from_bits(twin[128])],
+        );
+        println!("{swaps} back-to-back edits: {withdrawn} withdrawn, {taken} taken");
+        assert!(
+            withdrawn > 0 && taken > 0,
+            "vacuous: {withdrawn} withdrawn and {taken} taken over {swaps} back-to-back edits"
+        );
+    } else {
+        assert_eq!(
+            superseded, 0,
+            "two blocks between admissions adopt every candidate"
+        );
+    }
+    // Back to back, one block is fed per admission (the last admission's step ends the race).
+    let fed_floor = if back_to_back { swaps - 1 } else { swaps + 1 };
     assert!(
-        control.fed_blocks > swaps,
+        control.fed_blocks >= fed_floor,
         "vacuous: {} source blocks fed across {swaps} swaps",
         control.fed_blocks
     );
@@ -605,7 +779,11 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
         control.overlapped > 0,
         "vacuous: no control call overlapped a render call"
     );
-    assert!(blocks > swaps, "each swap rendered its own block");
+    // Back to back, a superseded candidate never renders a block of its own.
+    assert!(
+        blocks > swaps - superseded,
+        "each adopted swap rendered its own block"
+    );
 }
 
 /// Issue #1042, F1: on the unmodified base, a control call that fell between the swap at the start
@@ -613,7 +791,7 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
 /// every structural command after it returned `RESULT_BACKPRESSURE` for good.
 #[test]
 fn control_calls_racing_plan_swapping_renders_never_wedge_replacement() {
-    race_plan_swaps(24, 0);
+    race_plan_swaps(24, 0, false);
 }
 
 /// Issue #1042, attempt 2: `miso_engine_v1_plan_resources` may run on any thread, concurrently with
@@ -623,7 +801,7 @@ fn control_calls_racing_plan_swapping_renders_never_wedge_replacement() {
 /// (and a release build, with `panic = "abort"`, aborts).
 #[test]
 fn resource_queries_racing_plan_swaps_always_find_the_published_row() {
-    race_plan_swaps(200, 2);
+    race_plan_swaps(200, 2, false);
 }
 
 /// One applied-revision watermark read through the any-thread entry, or `None` if it was busy.
@@ -1191,4 +1369,19 @@ fn a_two_strip_transaction_lands_in_one_block_and_the_watermark_names_it() {
         "vacuous: {early} of {timed} thin-sweep revision stores returned within 1/16 of a \
          commit's duration of their render call's start, fewer than {THIN_FLOOR}"
     );
+}
+
+/// #1310 gate 5: a control thread submitting 64 structural edits back to back while a render
+/// thread renders. Each edit lands while the last candidate is pending or just adopted: every
+/// submit commits (`RESULT_OK`, never `RESULT_BACKPRESSURE`), the run withdraws and supersedes some
+/// candidates and finds others taken by render first, and after quiescence the plan renders what a
+/// fresh plan of the final model renders.
+///
+/// Test value: red if a structural edit behind a pending candidate is refused, if the withdrawal
+/// races render's claim into a lost or doubly owned plan (a failed render, a carry count that
+/// misses a swap, or output other than the twin's), or if the run never reaches one of the two
+/// outcomes it is judged by.
+#[test]
+fn structural_edits_back_to_back_supersede_or_swap_and_never_backpressure() {
+    race_plan_swaps(64, 0, true);
 }

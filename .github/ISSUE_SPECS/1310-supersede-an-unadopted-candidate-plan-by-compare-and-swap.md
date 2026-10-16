@@ -336,3 +336,85 @@ control-plane `test-support`).
 
 **Realtime-path edits.** None planned under `crates/engine/src/realtime`. The exchange's
 `withdraw`, `republish` and `set_superseded` exist.
+
+## Decision record: #1310 (batch 15a)
+
+**Shipped.**
+- D1-D6 in `crates/control-plane/src/control.rs`: the structural arm withdraws the newest pending
+  candidate (`withdraw_pending_candidate`), then `rebuild` prepares, admits, reserves, checks the
+  donation and the observation forwards, checks the protocol predicate and commits; a refusal
+  leaves the candidate in `withdrawn` and `command` republishes it. After the commit, in D5's
+  order: `apply_donation` and `adopt_persisting` from A, B's `superseded` word
+  (`r_B - 1 - last_published(P0's gate)`) and revision, publication, `adopt_persisting` of A's
+  remaining producers back into P0's epoch, then A's plan and epoch drop. The one-candidate
+  `Backpressure` check is deleted. `Taken`/`Nothing` take the old path with A as base.
+- D2/D3 (root ruling Q3): `ProviderEpoch::carried_base` (from `PreparedHost::carried_base`, charged
+  as a capi epoch row with `carried_base_retained_bytes`) and `ProviderEpoch::kept: KeptBase
+  { model, monitor, edit_ramps }`, set on the epoch a rebuild succeeds, extended by every later
+  live or superseding commit (`merged_ramps`, the later edit winning), dropped when that epoch is
+  promoted out. B's base across a withdrawn A is `{ A.carried_base, kept.model, merged ramps,
+  MonitorBase { kept.monitor, next, ramp } }`. `held_models()` charges every kept model in both
+  admissions (`compiled_model_admission_over`); the two-model helpers are deleted.
+- D3 protocol: `SessionStore::commit_prepared_displacing` and
+  `CommittedCommandFrame::take_displaced` (`crates/protocol`).
+- Q4 (root ruling): an `ObservationSlot::queued` flag marks a tap whose record waits on an
+  unadopted plan; `observation_forwards` re-queues the tap's bound state on B's matching instance
+  before publication, room checked before the commit. The observation queue holds only `Observe`
+  records, which the bindings express; but a tap B carries from P0 takes P0's state at the swap
+  and never sees a binding, so the record moves (route 2).
+- Header, `CONTROL_PROTOCOL_SEMANTICS.md`, `C_ABI_V1_QUALIFICATION.md`: deliverables 3 and 4.
+
+**Departures and findings.**
+- `crates/engine/src/realtime/plan_exchange.rs` (one attempt, accepted): the reservation owns B's
+  plan, so D4's check and D5's donation need `PlanReplacementReservation::{plan, plan_mut}`
+  (control side, outside every realtime-policy region). The amendment's "no edit needed" missed it.
+- Found by gate 5: with A taken but not promoted, B committed on it leaves two adopted candidates
+  pending; when the atomic names B, `promote_pending_provider` now retires every older pending
+  epoch with the running one. Before the fix a race reached `capi.source.epoch` and
+  `source.ring.vacated`.
+- Gate 1: "insert quality" does not prepare (#1344); T2 replaces the insert's effect. Gate 1 adds a
+  fourth track whose fader T1 moves with its own ramp length, so a base of the current model or a
+  lost ramp merge is red.
+- Gate 3: the cap is `maximum_effect_state_bytes` one byte below B's own; `ProtocolCommit` is in
+  the fault list (returns `INTERNAL`).
+- Gate 5: a new back-to-back race (`structural_edits_back_to_back_supersede_or_swap_and_never_
+  backpressure`) with an unlocked control thread; the old races keep their pacing and now fail on
+  any structural `BACKPRESSURE`. Typical run: 32 withdrawn, 31 taken of 64.
+- Gate 7: `paused_bursts` now expects the second paused edit to commit; the swap-window, epoch,
+  lifecycle, double-live oracle and pressure tests were updated (`resource_lifecycle.rs`,
+  `runtime/tests.rs`). The live peak with a pending candidate gains the kept model.
+- Browser gap (Q4), closed in the follow-up below.
+
+**Gates** (all pass): `supersede_tests::{a_superseding_replacement_renders_as_one_combined_
+transaction, a_donated_source_keeps_its_pcm_and_its_held_seek, a_refused_replacement_restores_the_
+withdrawn_candidate, a_replacement_over_the_three_plan_ceiling_is_refused_and_the_candidate_kept,
+a_removed_sources_producer_returns_to_the_running_epoch}` (gates 1-4, 6; red checked for: step 5
+removed, donation skipped, superseded word 0, base model current, base inventory A's, ramps not
+merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
+`model::tests::a_compiled_commit_returns_the_compilation_it_displaced` (D3);
+`host-web structural_apply::a_structural_edit_behind_an_unadopted_candidate_supersedes_it`.
+
+**Follow-up (coordinator, same batch).**
+1. *Browser copy of forwarded records (Q4).* The core keeps the records the last rebuild queued
+   again (`SessionState::observation_forwarded() -> &[ObservationForward]`, set by the
+   superseding commit, empty otherwise). The browser's `run_command` copies each onto the new
+   plan's `PlanShape` through `note_observe`, the same note `record_observe` makes for an
+   admitted record (armed bit, arm sample at the command's `next_absolute_sample`, commanded
+   bit), so the hand-over keeps it; the browser decides nothing itself. Test
+   `a_subscription_queued_on_a_superseded_candidate_publishes_on_its_replacement` (host-web):
+   red without the browser copy (mask 0) and red without the core's re-queue (no window). No
+   parity row: the C ABI admits no observation record, so it cannot reach the case.
+2. *B wins on every row it writes (Q3).* `session::EditRamps` now also records rows written with
+   no length and targets rewritten whole (`clear_target`); `EditRamps::overlay` lays a later
+   transaction over an earlier one with the later winning on every row it wrote; `get` and
+   `entries` are unchanged. `merged_ramps` uses it, and the live path's merge runs for any edit
+   that writes a live row (`is_untouched`). Tests: `edit_ramp::tests::an_overlay_lets_the_later_
+   transaction_win_on_every_row_it_wrote` and capi `a_superseding_edit_without_a_ramp_length_
+   takes_the_default_on_its_row` (red with the old merge). One transaction may not give a row two
+   lengths (`control.ramp.conflict`), so that test's reference is the transaction holding T1's
+   structural edit and T2.
+3. *Kept monitor overlay.* `KeptBase::monitor_ramp` keeps the ramp of the latest overlay change
+   committed since the epoch's last revision; a replacement that writes no monitor row renders
+   the change between the kept overlay and its own with it. Test `a_solo_committed_while_a_
+   candidate_waits_holds_on_its_replacement` (capi): equal to one transaction of T1, the solo and
+   T2; red with the current overlay as the base and red without the kept ramp.

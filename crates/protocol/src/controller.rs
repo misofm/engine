@@ -1245,12 +1245,22 @@ impl Drop for PreparedStructuralCommand {
 /// A committed structural response kept private until the caller has published its matched plan.
 pub struct CommittedCommandFrame {
     bytes: Vec<u8>,
+    /// The compiled session the commit displaced (#1310 D3), until the caller takes it.
+    displaced: Option<session::CompiledSession>,
 }
 
 impl CommittedCommandFrame {
     /// Atomically copy the complete committed response to caller output.
     pub fn write_into(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
         copy_complete_frame(&self.bytes, output)
+    }
+
+    /// The compiled session this commit displaced (#1310 D3): `Some` once for a transaction
+    /// installed as a whole compilation (every rebuild), so a host keeps the predecessor's model
+    /// while a successor prepared from it is pending; `None` for a transaction committed in place
+    /// or of monitor writes only, which displace none. A frame dropped untaken drops it.
+    pub fn take_displaced(&mut self) -> Option<session::CompiledSession> {
+        self.displaced.take()
     }
 }
 
@@ -2286,8 +2296,10 @@ impl<P: ControlProvider> ProtocolController<P> {
             monitor_only || path != EditPath::Monitor,
             "only a transaction of monitor writes has the monitor path"
         );
+        let mut displaced = None;
         if !monitor_only {
-            let commit = self.session.commit_prepared(session);
+            let (commit, previous) = self.session.commit_prepared_displacing(session);
+            displaced = previous;
             debug_assert_eq!(
                 commit.applied_operations,
                 prepared.applied_operations as usize
@@ -2367,7 +2379,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         self.structural_generation
             .store(prepared.generation.saturating_add(1), Ordering::Release);
         prepared.armed = false;
-        Ok(CommittedCommandFrame { bytes })
+        Ok(CommittedCommandFrame { bytes, displaced })
     }
 
     fn process_command_frame_into_legacy(

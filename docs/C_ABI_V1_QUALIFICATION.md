@@ -816,9 +816,8 @@ that window is admitted against the plan that renders.
 - **Admission.** A structural candidate is admitted against every plan the session holds
   unreclaimed (the running plan and every pending or withdrawn candidate) plus itself, and every
   compiled model it holds plus its own, in every cap the replacement peak checks; the live
-  admission sums the same held plans. Until supersession (#1310) at most one candidate is pending,
-  and a transaction submitted while it is pending stays `BACKPRESSURE`, so no admission that
-  passed before refuses now.
+  admission sums the same held plans. Since supersession (#1310) a transaction submitted while a
+  candidate is pending commits, and that admission holds three plans.
 - **Sizing rule.** The header states it beside `maximum_graph_session_plus_plan_bytes`: each
   resource cap must be at least three times one plan's row, and the graph cap must also cover three
   compiled models. The repository's reference limits (`tools/audit/src/capi.rs`,
@@ -831,3 +830,19 @@ that window is admitted against the plan that renders.
   `capi_retained_bytes`: on the nine-track EQ reference session the row moves 159,354 -> 161,258
   bytes (+1,904). A caller whose `maximum_capi_retained_bytes` was exact must raise it. No symbol,
   result code or event is added.
+
+## Supersession of an unadopted candidate (#1310)
+
+- **Behavior.** A structural transaction submitted while an earlier replacement is unadopted
+  commits (`RESULT_OK`); `RESULT_BACKPRESSURE` for a pending candidate is gone. The session takes
+  the candidate back, prepares one successor of the running plan that carries both transactions
+  (from the candidate's carried base and the running plan's kept model, monitor overlay and edit
+  ramps), moves the rings of the sources the candidate added into it, and publishes it. A refusal
+  after the withdrawal republishes the candidate unchanged. The watermark completes the displaced
+  revisions with `MISO_ENGINE_V1_OUTCOME_SUPERSEDED` when the successor is adopted.
+- **Admission.** While a successor of the running plan is pending, the running plan's model is
+  kept, so the replacement and the live admissions count it: three plans and three models when a
+  candidate is superseded, three models when a live edit lands while one waits.
+- **Resource movement.** Each candidate epoch keeps its carried base (#1344), charged in its capi
+  epoch row (`carried_base_retained_bytes`); the boot plan has none, so the reference session's
+  boot `capi_retained_bytes` does not move. No symbol, result code or event is added.

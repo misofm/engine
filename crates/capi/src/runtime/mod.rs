@@ -30,6 +30,8 @@ mod live_peak_tests;
 #[cfg(test)]
 mod live_tests;
 #[cfg(test)]
+mod supersede_tests;
+#[cfg(test)]
 mod tests;
 
 pub(crate) use error::*;

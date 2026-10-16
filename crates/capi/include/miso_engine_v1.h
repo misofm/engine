@@ -201,6 +201,19 @@ extern "C" {
  * generation 1, frame 0, with the PCM accepted for it before the command discarded with its plan;
  * the host restarts its feed.
  *
+ * A transaction behind an unadopted replacement (issue 1310). A SESSION_TRANSACTION_APPLY that
+ * needs a new plan while an earlier transaction's replacement plan has not been adopted by
+ * render (a paused host never adopts one) commits as any other: it is never refused as
+ * backpressure because a replacement waits. The engine takes the waiting replacement back,
+ * prepares one plan that carries both transactions against the plan that renders, and publishes
+ * it; nothing of the earlier transaction is lost. A source the earlier transaction added keeps
+ * playing: the PCM accepted for it and a seek or seek_at queued on it move into the new plan, so
+ * the host neither refeeds nor reseeks it. Should the new transaction be refused (for example
+ * for a resource cap, which now counts the running plan, the waiting replacement and the new
+ * one), the waiting replacement stays published unchanged. When render adopts the new plan, the
+ * watermark advances to its revision with MISO_ENGINE_V1_OUTCOME_SUPERSEDED set, and
+ * superseded_count grows by the revisions the earlier replacements carried.
+ *
  * Starting an added stem in time (issue 1275). miso_engine_v1_source_seek_at is
  * miso_engine_v1_source_seek with an anchor: source_frame enters the graph in the block that starts
  * at absolute render sample anchor_sample, the clock miso_engine_v1_render_f32_planar takes and

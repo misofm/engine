@@ -637,6 +637,20 @@ impl PlanReplacementReservation<'_> {
         self.adoption
     }
 
+    /// The bound candidate, unpublished (#1310 D4): a control-side check reads it before the
+    /// commit that decides whether it is published.
+    #[must_use]
+    pub const fn plan(&self) -> &PreparedRenderPlan {
+        &self.plan
+    }
+
+    /// The bound candidate, unpublished and owned by this control thread (#1310 D5): a source
+    /// donation moves rings into it after the protocol commit and before [`Self::commit`]
+    /// publishes it. Nothing here changes its envelope, which the reservation checked.
+    pub fn plan_mut(&mut self) -> &mut PreparedRenderPlan {
+        &mut self.plan
+    }
+
     /// Set how many revisions the candidate folds in from candidates it replaced (#1314 D1,
     /// #1310): its adoption completes them as `superseded`.
     pub fn set_superseded(&mut self, superseded: u64) {
