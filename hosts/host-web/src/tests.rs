@@ -1359,8 +1359,8 @@ impl SeekExports {
 ///
 /// Test value: red if `source_seek_at` is wired through `plan.prepare_source_seek` (the D4 trap:
 /// the future anchor would be `RESULT_INTERNAL`), if it queues a plain seek (sound from the next
-/// block), or if the report export reads another source's ring, another word order or a stale
-/// record.
+/// block), or if the report export reads another word order or a stale record. The session has
+/// one source, so this test cannot show which source's ring the report reads.
 #[test]
 fn the_anchored_seek_exports_play_at_the_anchor_and_report_where_it_landed() {
     let rig = SeekExports::boot();
@@ -1428,7 +1428,9 @@ fn the_anchored_seek_exports_play_at_the_anchor_and_report_where_it_landed() {
 /// words, and a wrong handle or an ID count past the staging is `RESULT_INVALID_ARGUMENT`.
 ///
 /// Test value: red if either export runs on a host with no control half (it would reach for
-/// control state the instance does not hold) or overwrites the record on a refusal.
+/// control state the instance does not hold) or overwrites the record on a refusal, if the
+/// pointer export names anything but the record while ready or anything at all once not ready,
+/// or if the report export records a staged-ID refusal as the last result (it records none).
 #[test]
 fn the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
     let rig = SeekExports::boot();
@@ -1437,6 +1439,9 @@ fn the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
     let _ = rig.render();
     let (code, before) = rig.report();
     assert_eq!(code, RESULT_OK);
+    // A ready host's pointer export names the record.
+    let (pointer, record) = crate::ffi::test_seek_report_addresses(rig.handle);
+    assert!(record != 0 && pointer == record);
 
     // Argument checks on a live host.
     assert_eq!(
@@ -1451,9 +1456,23 @@ fn the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
         miso_engine_web_v1_source_seek_at(rig.handle, u32::MAX, 3, 0, 512),
         RESULT_INVALID_ARGUMENT
     );
+    // The anchored seek records its refusal; the report leaves the last result alone.
+    assert_eq!(
+        crate::ffi::test_status(rig.handle)
+            .expect("status")
+            .last_result,
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(rig.seek_at(3, 0, 1024), RESULT_OK);
     assert_eq!(
         miso_engine_web_v1_source_seek_report(rig.handle, u32::MAX),
         RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        crate::ffi::test_status(rig.handle)
+            .expect("status")
+            .last_result,
+        RESULT_OK
     );
     assert_eq!(
         crate::ffi::native_staging::seek_report(rig.handle),
@@ -1476,6 +1495,9 @@ fn the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
         Some(before),
         "a refusal leaves the record alone"
     );
+    // A host that is not ready has no record address to give.
+    let (pointer, record) = crate::ffi::test_seek_report_addresses(rig.handle);
+    assert!(record != 0 && pointer == 0);
     assert_eq!(miso_engine_web_v1_source_seek_report_ptr(0), 0);
 }
 
@@ -6145,8 +6167,11 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
             .prepare(&compiled, &caps, lanes, Some(base), &superseded)
             .unwrap_or_else(|failure| panic!("{capture:?} successor: {failure:?}"));
         check(&mut successor, &successor_handles, "successor");
+        // Every successor carries the timeline's command queue (#1641 D7), which is overhead
+        // only; a carried ring also brings its PCM payload.
         assert!(
-            successor.report.carried_source_total_bytes > 0,
+            successor.report.carried_source_total_bytes
+                > successor.report.carried_source_overhead_bytes,
             "{capture:?}: the successor prepares the unchanged source vacant"
         );
     }

@@ -345,9 +345,9 @@ Built on `3f53c0755` (worktree `codex/controls-batch-16a`, #1640's timeline type
 - **D3.** `SourceTimeline::prepare_vacant(q, K)`: its own history, no command queue
   (`command_consumer: Option<_>`). `GraphCarryProgram { timeline: bool }`; `adopt_predecessor`
   calls `adopt_sources` when `!sources.is_empty() || timeline`. The driver moves the timeline when
-  its own is vacant: the predecessor's must be occupied (else nothing moves, `PredecessorMismatch`),
-  then `TimelineConsumer::adopt_from` swaps seek state, command consumer and position and calls
-  `copy_history_from`. Nothing is allocated or freed. A vacant timeline never adopted advances
+  its own is vacant and the predecessor's is occupied (any other pairing leaves both timelines as
+  they are and still moves the sources; fold M3), through `TimelineConsumer::adopt_from`, which
+  swaps seek state, command consumer and position and calls `copy_history_from`. Nothing is allocated or freed. A vacant timeline never adopted advances
   from 0 and pops nothing. `swap_sources` (donation) leaves the timeline where it is.
 - **D4.** No extra code: the discontinuity successor carries as D3 (its program now always exists).
 - **D5 (B16-R3).** `TimelineConsumer::prime_ready(first, lead)` and `prime_block_at(sample)`. The
@@ -375,8 +375,8 @@ Built on `3f53c0755` (worktree `codex/controls-batch-16a`, #1640's timeline type
   `adopt_sources` signature is unchanged. The flag makes the call happen.
 - **The `has_carry_program` fallback** in `prepare.rs` (a program for delay/route carries) is kept
   with `timeline: false`; it is reached only by a successor whose timeline does not carry.
-- **Gate 4** is in both files: `timeline.rs` on the direct `adopt_predecessor_plan` path, and the
-  one `successor_swap.rs` case through the real plan exchange.
+- **Gate 4** is in `timeline.rs`, on the direct `adopt_predecessor_plan` path. (The
+  `successor_swap.rs` case through the plan exchange was deleted in the batch 16a fold.)
 - **D6** is out (B16-R4): no seek-report record, bytes or move. Gate 1 has no report clause.
 
 **Re-pins** (each "the timeline consumer's fixed bytes (#1641 D7)"; ceilings are the new value
@@ -404,8 +404,7 @@ The native step is 480 bytes (queue 320, history 16, consumer 144); the wasm32 s
    `a_latent_successor_keeps_the_newest_entries_in_a_history_of_its_own_size` (K 5 -> 9).
 3. `a_discontinuity_keeps_the_sources_and_the_timeline_in_step`;
    `a_prime_advances_the_timeline_as_it_advances_a_source`.
-4. `the_timeline_carry_and_the_blocks_after_it_allocate_and_free_nothing`;
-   `successor_swap::the_timeline_carry_allocates_and_frees_nothing_through_the_exchange`.
+4. `the_timeline_carry_and_the_blocks_after_it_allocate_and_free_nothing`.
 5. No render arithmetic changed. `./target/release/audit capi`: `pcm_digest` `4f52089e4a8cf83c`
    at base and head, 0 violations. The browser oracle's three PCM digests agree with
    `expected.json` (`scripts/check-browser-expected-resources.py`, which also measured the wasm
@@ -418,3 +417,39 @@ existing regions; the timeline's pop is a `match`, not a closure, which the poli
 `check-cross-targets.sh`, `check-host-core-policy.sh`, `check-workspace-policy.sh`; clippy
 `-D warnings` on the six touched crates; `cargo fmt --all -- --check`. The workspace-wide clippy
 was not run (worker rules).
+
+**Fold (batch 16a review).**
+
+- **M2.** The D3 flag had no test: dropping `|| program.timeline` (graph) or `timeline_carries ||`
+  (host-core) passed every test, because the successor always carried a source or strip state
+  too. `timeline::a_rebuild_that_carries_no_source_still_carries_the_timeline`: the successor
+  changes the source's declaration and renames the track, so the timeline is the program's only
+  move (`carried_source_total_bytes` equals the timeline queue's bytes); the timeline continues
+  with no gap and a seek through the moved producer lands. Red on each of the two removals
+  (each run).
+- **M3.** `adopt_sources` refused every source move when both timelines were vacant. The timeline
+  clause left `movable`; the timeline moves only from an occupied predecessor into a vacant
+  successor. `source::tests::carry::the_source_moves_carry_whatever_the_two_timelines_hold`
+  (all four pairings) is red on the unfixed code (the both-vacant pairing).
+- **MINOR 1 (D9).** On a `PredecessorMismatch` the timeline producer has already moved
+  (`adopt_persisting`) while the successor's vacant timeline advances from 0 and observes no seek,
+  and nothing reports the vacant timeline itself beyond the mismatch count. Unreachable on both
+  hosts (#1269 P11), the same contract as a vacant source; stated in the `adopt_persisting` doc.
+- **MINOR 2.** The capi `resource_lifecycle` and host-web companion non-vacuity guards compare
+  `carried_source_total_bytes > carried_source_overhead_bytes`: the timeline queue is overhead
+  only, a carried ring adds its PCM payload. (Not `timeline_queue_bytes()` as in
+  `successor_swap.rs`: host-web does not depend on `source`, and this needs no new dependency.)
+- **MINOR 3.** `timeline::a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline` (red when
+  the guard is `successor.is_some()`), `timeline::a_seek_queued_at_the_swap_block_lands_in_the_successors_first_block`
+  (red when the carry does not swap the command consumer), and the vacant-timeline unit test
+  `source::tests::timeline::a_vacant_timeline_never_adopted_advances_from_zero`.
+- **MINOR 4.** The discontinuity gate's claim that it reads the overlap's older entry is removed:
+  its plan has `K = 1`, so no overlap is held. The overlap rule is `source`'s
+  `a_node_block_reports_the_steps_of_a_source_read_step_back` (#1640 fold M1).
+- **MINOR 11.** `install_carry_program` refuses `timeline: true` on a plan with no source set
+  (`NoSourceSet`): `graph::tests::install_refuses_a_timeline_carry_on_a_plan_with_no_source_set`.
+- **Test value.** `successor_swap::the_timeline_carry_allocates_and_frees_nothing_through_the_exchange`
+  is deleted: the exchange owner exposes no timeline to show that the held seek lands, and
+  `timeline.rs`'s gate 4 already counts the same carry and blocks.
+- No charged byte moved (#1640 fold MINOR 6 removed only unread rows); `realtime_policy` 153
+  regions, unchanged.

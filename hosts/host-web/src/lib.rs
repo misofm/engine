@@ -3650,7 +3650,7 @@ impl AudioWorkletEngineHost {
     /// anchored seek is held by the ring and the consumer applies it at its anchor block, where
     /// `prepare_source_seek` would refuse a held seek. A host that is not ready refuses with
     /// [`RESULT_REFUSED_LIFECYCLE`] and changes nothing; the core's refusals map through
-    /// [`source_failure_result`] (an unknown source or an anchor that is not a quantum multiple is
+    /// `source_failure_result` (an unknown source or an anchor that is not a quantum multiple is
     /// [`RESULT_INVALID_ARGUMENT`]).
     pub fn seek_source_at(
         &mut self,

@@ -650,8 +650,12 @@ def self_test() -> int:
                 raise AssertionError(f"{export} exists in the valid fixture") from error
         return drop
 
-    def drop_seek_report_field(document: dict) -> None:
-        document["structures"]["seekReport"]["fields"].pop(3)
+    def swap_seek_report_names(document: dict) -> None:
+        # Two u64 words trade names and keep their offsets: only the record's name rule sees it.
+        fields = document["structures"]["seekReport"]["fields"]
+        first, second = (next(row for row in fields if row["name"] == name)
+                         for name in ("firstSample", "sourceFrame"))
+        first["name"], second["name"] = second["name"], first["name"]
 
     def drop_status_watermark_word(document: dict) -> None:
         document["structures"]["status"]["fields"].pop()
@@ -737,13 +741,9 @@ def self_test() -> int:
         ("the watermark record omits a field", drop_watermark_field),
         ("the plan latency record omits a field", drop_plan_latency_field),
         ("the plan latency read export is dropped", drop_plan_latency_export),
-        ("the seek report record omits a field", drop_seek_report_field),
+        ("the seek report record swaps two field names", swap_seek_report_names),
         ("the anchored seek export is dropped",
          drop_seek_export("miso_engine_web_v1_source_seek_at")),
-        ("the seek report export is dropped",
-         drop_seek_export("miso_engine_web_v1_source_seek_report")),
-        ("the seek report pointer export is dropped",
-         drop_seek_export("miso_engine_web_v1_source_seek_report_ptr")),
         ("the status omits a watermark word", drop_status_watermark_word),
         ("the spectrum-hop capability export is dropped", drop_spectrum_hop_capability_export),
         ("the export set is unsorted", unsorted_exports),

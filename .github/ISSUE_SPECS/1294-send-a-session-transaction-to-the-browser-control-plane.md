@@ -196,3 +196,53 @@ worklet only renders and swaps.
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310).
 
 **Decision 17 amendment (2026-10-13).** D1's `miso.document.v1` message and D6's `committedDocument()` wrapper method are withdrawn: #1571 reads the committed document with `SESSION_SNAPSHOT_GET` frames through #1562's `control` message. Every event the control plane stages, `SESSION_COMMITTED` included, reaches the page through #1570's `control-event` message. D2-D5 stay.
+
+## Amendment (controls coordinator, batch 16a review, 2026-10-16)
+
+Anchors checked against `35ac17545` plus the batch 16a tree. Earlier text is kept.
+
+**Finding (review M4).** D1 names exports that #1293 dropped.
+- `miso_engine_web_v1_edit_ptr` and `miso_engine_web_v1_apply`, and the "outcome record", do not exist.
+  Root ruling B15-R8 dropped D1's staging, and decision 17 dropped D2's `apply` and D3's outcome record
+  (see #1293, "Decision 17 amendment (2026-10-13)" and "B15-R8" in its batch 15 check).
+- `miso_engine_web_v1_replace` (#1386 D3) is not built either. #1386 is re-scoped under C1
+  (`docs/rulings/one-control-abstraction-2026-10-13.md`, C1 and C13): the replace is a protocol frame
+  through the same generic entry. Its browser transport is #1697. See #1386's amendments.
+
+**Rule, replacing D1's call path.**
+- A transaction is staged in `miso_engine_web_v1_control_request_ptr` (`hosts/host-web/src/ffi.rs:3450`)
+  and applied with `miso_engine_web_v1_control_command` (`:3469`), on the control half only. The worklet
+  already has the staging helper: `readControlCommand`
+  (`hosts/host-web/web/miso-engine-v1-audio-worklet.js:1727`) and the message `miso.control.v1`
+  (`CONTROL_FIELDS = ["tag", "requestId", "frame"]`, `:93`; dispatched at `:1116`).
+- The outcome is the response frame, read with `miso_engine_web_v1_control_response_ptr` (`ffi.rs:3502`)
+  and `_control_response_bytes` (`:3515`): `revision`, `edit_path` and the diagnostics. `miso.edit.v1`
+  `{ result, revision, path, diagnostic }` is built from that frame and from the call's result code.
+  `path` is the frame's `edit_path`; `diagnostic` is the frame's diagnostic text, empty on success.
+- `miso.apply.v1` and `miso.replace.v1` stay as the SDK's internal messages only if the root re-brief
+  keeps them. They may be dropped for `miso.control.v1` frames. Root decides in the #1386 re-brief; this
+  issue does not add a message that has no export behind it.
+
+**Other text that names the dropped exports.**
+- Context, the exports bullet (`:47-53`): "the exports come from #1293" is now only `source_seek_at` and
+  `source_seek_report`. Apply and replace come from #1562's generic entry and #1386/#1697. The service and
+  watermark exports stay with #1381.
+- D2 (`:71-75`): `source_seek_at` is real (`ffi.rs:3311`) and is control half only: it runs the service
+  step (`crates/control-plane/src/control.rs:4073-4081`) and must never run in `process()`. Its sentence
+  "Feeds that use the shared PCM ring do not use it" is amended: a ring's anchored seek is applied by this
+  handler between blocks (#1297 amendment of 2026-10-16). The feed worklet's render path keeps the plain
+  seek. No render-side caller is added.
+- D6 (`:118-120`): `apply(transaction)` and `replace(document)` call the generic entry; they need no
+  `edit_ptr`.
+- Non-goals (`:140`, "every export used here comes from #1293, #1381 or #1386"): read it as #1293
+  (`source_seek_at`, `source_seek_report`), #1381, #1562 and #1697.
+- Gate 1 (`:145-147`, "calls `edit_ptr` then `apply`"): replace with "stages the frame through
+  `control_request_ptr`, calls `control_command` once, and replies from the response frame". A malformed
+  message still calls no export.
+- Gate 5 (`:162-163`, "typed result and diagnostic"): read both from the response frame.
+- Test value, gate 1 (`:173-174`, "replies before the outcome record is written"): read it as "replies
+  before the response frame is read, or from a stale response of the previous command". The worklet
+  has this hazard today (`readControlCommand`, `:1727-1747`, returns an empty response when staging
+  refuses).
+- Dependencies (`:187`, `:193-194`): #1293 supplies only the seek exports. Add #1562 (the generic entry)
+  and #1697 (document-replace transport). #1386 is a dependency only through its re-brief.

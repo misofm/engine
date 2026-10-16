@@ -244,8 +244,9 @@ Built on `eab696d09` (worktree `codex/controls-batch-16a`).
 - **D4.** `TimelineProducer` (`try_seek`, `check_seek`, `active_generation`),
   `TIMELINE_SAMPLE_LIMIT = 1 << 53`, `SourceSeekError::FrameOutOfRange`.
 - **D5.** `TimelineResourceReport`: `history_blocks`, `command_queue_bytes` (the ring formula),
-  `history_bytes` (`16·K`), `consumer_bytes` (`size_of::<TimelineConsumer>()`), `overhead_bytes`
-  (the sum of the three), `largest_allocation_bytes`. No seek-report row (B16-R4).
+  `command_queue_largest_allocation_bytes` (#1641 D7) and `history_bytes` (`16·K`). No
+  seek-report row (B16-R4). The batch 16a fold removed `consumer_bytes`, `overhead_bytes` and
+  `largest_allocation_bytes` (see the fold paragraph).
 - **Host-core.** The `FrameOutOfRange` arm, `source.seek.frame_out_of_range`, and its row 20 in
   `crates/host-core/tests/source_diagnostics.rs`.
 
@@ -261,28 +262,29 @@ Built on `eab696d09` (worktree `codex/controls-batch-16a`).
   position. `copy_history_from` carries it.
 - `timeline_at` with no entry treats the position as standing at source-read sample 0. A sample in
   a gap or after the newest entry extrapolates forward from the newest entry that starts at or
-  before it. A step is reported only when its entry is the one that resolves its own first sample
-  (newest first), so the step and `timeline_at` always agree.
+  before it. A step is reported at the first sample `s` of the node block where
+  `timeline_at(s) != timeline_at(s - 1) + 1` (a seek, or a source-read step-back's overlap; fold
+  M1), so for a node block with at most one step, which is every block without a step-back inside
+  it, the step and `timeline_at` agree on every sample. Of two steps, the first is reported.
 - `timeline_block(first, frames)` takes the node block's length as `frames`.
 
 **Departures:**
 
-- Gate 2 "unchanged": the assertions are unchanged. Two of the four named tests and six others
-  read the moved fields, so they now read `consumer.seek.active_generation` and
+- Gate 2 "unchanged": the assertions are unchanged. Two of the four named tests, seven others and
+  the shared `twin` helper read the moved fields, so they now read `consumer.seek.active_generation` and
   `consumer.seek.held_seek` (a path rewrite only). `crates/source/tests/seek_schedule_model.rs` is
   textually unchanged. `crates/source/tests/randomized.rs` gains one `unreachable!` arm for the new
   variant (exhaustive match).
 - `tools/realtime-policy/src/policy.rs`: `marked_regions_floor` 151 -> 153, for the two new regions
   (mechanical, outside the authorized paths).
 
-**For #1641:** `consumer_bytes` is the inline value. If #1641 stores the consumer inside an
-allocation it already counts (the driver), it must not charge that row twice.
+**For #1641:** the consumer value is inline. #1641 stores it inside an allocation it already
+counts (the driver), so no row charges it (fold MINOR 6 removed `consumer_bytes`).
 
 **Gates:**
 
-- Gate 1, `cargo test --locked -p source`, `tests::timeline::*` (11 new):
-  `a_fresh_timeline_starts_at_zero_and_advances_a_quantum_every_block`,
-  `a_plain_seek_reads_its_frame_at_the_next_blocks_first_sample`,
+- Gate 1, `cargo test --locked -p source`, `tests::timeline::*` (11 new; the fold replaced the
+  first two, see below):
   `an_anchored_seek_is_held_until_its_anchor_and_applies_with_its_lateness`,
   `a_newer_seek_plain_or_anchored_replaces_a_held_one`,
   `the_producer_refuses_without_changing_anything`,
@@ -300,3 +302,34 @@ allocation it already counts (the driver), it must not charge that row twice.
   `check-workspace-policy.sh`, `cargo test -p realtime-policy`, `source_diagnostics` (2),
   clippy `-p source -p host-core --all-targets --all-features -D warnings`, and
   `cargo fmt --all -- --check`. The workspace-wide clippy was not run (worker rules).
+
+**Fold (batch 16a review).**
+
+- **M1.** `timeline_block` reported a step only at a seek entry, so a node block that straddles a
+  source-read step-back (#1641 D4) read part of its samples a whole overlap off (`q = 128`, blocks
+  at 0, 128, 256, 384, 256: `timeline_block(216, 128)` gave no step while `timeline_at(256)` is
+  512). It now checks every entry's first sample and its end (`sr + q`) inside the node block and
+  reports the first sample `s` where `timeline_at(s) != timeline_at(s - 1) + 1`. Where no held entry
+  starts at or before `s - 1` (or `s` is 0), the entry at `s` is a step when it is a seek, read
+  against `oldest_expected_timeline` as before. Bound: at most `6K² + 6K` entry reads,
+  allocation-free. Test `a_node_block_reports_the_steps_of_a_source_read_step_back` (red on the
+  unfixed code: `{start: 216, step: None}`), which also checks every block's span against
+  `timeline_at` sample by sample.
+- **MINOR 4.** `the_reader_reads_the_newest_overlap_and_reports_the_first_step` (`K` 4 and 3): red
+  for a `resolve` searched oldest first, a later step reported instead of the first, and an
+  eviction that does not update `oldest_expected_timeline` (each mutation run).
+- **MINOR 5.** D6 and `TimelineProducer::try_seek` now read: an accepted seek applies unless a newer
+  accepted seek replaces it first (#1274); it is never dropped silently.
+- **MINOR 6.** `TimelineResourceReport` drops `consumer_bytes`, `overhead_bytes` and
+  `largest_allocation_bytes`: nothing read them after #1641, and the two sums counted the inline
+  consumer, which no allocation of the timeline holds. No charged byte moved (the source set never
+  read them).
+- **MINOR 7.** `offset_timeline` is inside the marked region (its END marker moved below it; 153
+  regions, unchanged).
+- **Test value.** `a_fresh_timeline_starts_at_zero_and_advances_a_quantum_every_block` and
+  `a_plain_seek_reads_its_frame_at_the_next_blocks_first_sample` are deleted (no unique catch: the
+  anchored, newer-seek and history tests cover both). `the_resource_report_states_each_row` lost
+  its `consumer_bytes` check with the row. New: `a_vacant_timeline_never_adopted_advances_from_zero`
+  (#1641's, in this module).
+- Rustdoc: the public docs no longer link the private `SeekState`, `SeekClock::At` and
+  `SeekState::prime_window_clear` (`cargo doc -D warnings`).

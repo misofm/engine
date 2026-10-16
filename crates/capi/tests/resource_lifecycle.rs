@@ -1808,8 +1808,10 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     .unwrap_or_else(|_| panic!("the prospective session prepares as a successor"))
     .0
     .report;
+    // Every successor carries the timeline's command queue (#1641 D7), which is overhead only; a
+    // carried ring also brings its PCM payload.
     assert!(
-        successor.carried_source_total_bytes > 0,
+        successor.carried_source_total_bytes > successor.carried_source_overhead_bytes,
         "vacuous: the replacement carries no ring"
     );
     assert_eq!(

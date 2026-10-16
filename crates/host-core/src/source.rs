@@ -448,7 +448,11 @@ impl SourceControlSet {
     /// The producers move before the plan swap that moves their consumers. Should that swap's
     /// carry report `PredecessorMismatch` -- unreachable on both hosts by construction (issue
     /// #1269 P11) -- the successor's vacant sources render `+0.0` from the swap block on, since
-    /// their producers have already moved here and their rings stay with the retired plan.
+    /// their producers have already moved here and their rings stay with the retired plan. The
+    /// timeline keeps the same contract: its producer has moved here too, and the successor's
+    /// vacant timeline advances from timeline sample 0 and observes no seek. Its one exception
+    /// (#1641 D9): nothing reports the vacant timeline itself; the swap's mismatch count is the
+    /// only sign.
     pub fn adopt_persisting(&mut self, predecessor: &mut SourceControlSet) -> usize {
         let mut moved = 0;
         for index in 0..self.sources.len() {
