@@ -216,3 +216,74 @@ Checked against `12d4a4f9d`.
 - **VCA automation renders in #1655** (root's F20 ruling, README "Root's rulings
   (2026-10-14)"). It extends this slice's offsets cell and write: automated VCA curves add to `S` at
   each event. This slice's non-goal stands for itself.
+
+## Amendment (controls coordinator, batch 17 spec check, 2026-10-16)
+
+Checked against `31fa33fee`. This amendment overrides the filed text and the earlier amendments
+where they differ.
+
+- **Anchors moved.** `vca_effective_db` `crates/session/src/vca.rs:26` and `VcaSum` `:37-66`
+  (still member first until #1646 D6). `effective_strip_faders` is gone: `controls::effective`
+  (`crates/controls/src/effective.rs:399`, per strip `effective_strip` `:311`) composes every
+  effective fader. The order test is `crates/controls/tests/composition.rs`;
+  `crates/session/tests/vca_composition.rs` is gone. #1247's "strip step" is
+  `LevelDiff::level_records` (`crates/host-core/src/live_delta.rs:1015-1019`), implemented by
+  `EffectiveDiff` (`crates/host-core/src/prepare.rs:4449-4540`, full path and strip join) and
+  `LocalDiff` (`live_delta.rs:1085`, `:1246`, the fast path of #1612/#1613). The record length
+  rule is `LevelRules::lengths` (`prepare.rs:4310`). The live-ramp row is
+  `LiveRampRow::VcaOffset` (`crates/effect-contract/src/control.rs:77-78`); `VcaFader` does not
+  exist. Fader cells: `FaderCells` `crates/builtins-compiler/src/lib.rs:298`, `FaderReader`
+  `:396`, `FaderBankProcessor` `:1519`, `FaderMatrixBankProcessor` `:1831` (the fused bank also
+  holds the fader). `scripts/check-bench-policy.sh`'s host ban is `:257-283`.
+- **Landed deps and what they give.** #1247 is the effective diff (VCA rides, membership, nested
+  VCAs, added and removed VCAs are live today; step 1 masks the VCAs whole). #1312: `LatestCell<N>`
+  is generic (`crates/engine/src/realtime/latest_cell.rs:590`), so a three-word cell needs no
+  realtime edit. #1309: the commit writes cells in `commit_live_once`
+  (`crates/control-plane/src/control.rs:2905`), to the newest epoch's producers. #1639: the
+  jump-length cell. #1562b: the browser commits the same way.
+- **Departure 1: one length rule.** D4's ramp word is the lane's fader length from
+  `LevelRules::lengths` (own edit: row `Fader`; else the first reaching VCA whose offset changed:
+  row `VcaOffset` with that edit's length; else `VcaOffset` with no edit length). So an automated
+  member and a plain member of one VCA edit take one length by construction.
+- **Departure 2: both classifier paths.** The `S` comparison and the offsets-cell record go in the
+  shared `level_records` (both `EffectiveDiff` and `LocalDiff`), in the branch #1648 adds for
+  automated lanes. A fast-path-only or full-path-only rule would make the result depend on the
+  edit's shape.
+- **Departure 3: `S` has one author.** `S` per strip lane is computed in `controls::effective`
+  (C7), beside the effective fader, so preparation (#1646), this slice's classifier and #1650's
+  offset read one function. `EffectiveStrip` gains the lane's `S` (`f64`), written by
+  `effective_into` with no allocation. If #1646 adds it, this slice only reads it.
+- **Departure 4: a new record in the strip-level family.** `LiveStripRecords` gains the
+  offsets-cell write (`S` and the ramp word per lane); `FaderCells` (or a sibling writer on the same
+  lane) gains the three-word cell writer that #1646 creates. This stays in decision 17's strip
+  level family; no family is added.
+- **Departure 5: rebuilds.** A rebuild seeds `S` from the successor's model (#1646), and #1648's
+  adoption rule compares the composed gain (its amendment, departure 4), so a VCA edit inside a
+  structural transaction is heard at adoption. This slice adds nothing to the carry.
+- **VCA automation** renders in #1655 (batch 10 amendment); the non-goal "out of scope by decision
+  13" is superseded.
+- **Authorized paths, as they now must read:**
+  - `crates/host-core/src/live_delta.rs` (the `LiveStripRecords` field, `LocalDiff`'s automated-lane
+    branch), `crates/host-core/src/prepare.rs` (`EffectiveDiff`'s automated-lane branch only)
+  - `crates/controls/src/effective.rs` (the lane's `S`, only if #1646 did not add it),
+    `crates/controls/tests/effective.rs`
+  - `crates/control-plane/src/control.rs` (the offsets-cell write in `commit_live_once`)
+  - `crates/builtins-compiler/src/lib.rs` (the offsets-cell writer, the fader and fused banks'
+    dirty read at block entry and the jump)
+  - `crates/host-core/tests/live_delta.rs`, `crates/host-core/tests/vca.rs`,
+    `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/tests/control_parity.rs`,
+    `crates/control-plane/tests/vca_automation_realtime.rs` (new)
+  - `crates/control-plane/Cargo.toml` and `Cargo.lock` drop out: control-plane already has the
+    `bench-support` dev-dependency (`crates/control-plane/Cargo.toml:29`).
+  - No path under `crates/engine/src/realtime/`. The render read in builtins-compiler sits in
+    realtime-policy regions; their count may move.
+- **Gates' test files.** Gates 1-4: `crates/capi/src/runtime/live_tests.rs` and
+  `hosts/host-web/tests/control_parity.rs` (not `hosts/host-web/src/tests.rs`); gate 5:
+  `crates/host-core/tests/live_delta.rs`; gate 6: `crates/control-plane/tests/vca_automation_realtime.rs`.
+  Commands: `cargo test --locked -p controls` replaces `-p session` for the order test;
+  `bash scripts/check-realtime-policy.sh` is replaced by
+  `cargo build --locked --release -p realtime-policy && ./target/release/realtime_policy`.
+- **Size.** About 12-15 implementer hours: classifier branch on both paths and `S` 3 h, the record
+  and the control-plane write 2 h, the cell writer, the dirty read and the jump on both bank kinds
+  3-4 h, tests (both hosts, the nested-order case, realtime binary) 5 h. One attempt; no split
+  (the classifier and the render halves are not useful apart).

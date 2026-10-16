@@ -257,3 +257,111 @@ three #1638 reviews measured; the mechanism is this slice's design, reviewed wit
 - #1285 landed first (batch 15b). `a(n)` above must therefore be the floored input arrival
   (`GraphCompileReport::input_arrivals`, kept in `PlanStateInventory::input_floors()`), not the
   arrival the graph compiler computes without floors.
+
+## Amendment (controls coordinator, batch 17 spec check, 2026-10-16)
+
+Checked against `31fa33fee`.
+
+**Anchors moved.**
+
+- `FaderBankProcessor` `crates/builtins-compiler/src/lib.rs:1519`; its `begin_block` (the drain)
+  and `process` `:1630-1660` (`process` calls `bank.process`, not `process_with`). Fused
+  `FaderMatrixBankProcessor` `:1831`, `process` `:2334` (fuses through
+  `try_process_settled_with_matrix`).
+- The chain call is in `rack`, not graph: `Runtime::execute` (`crates/graph/src/runtime.rs:3188`)
+  calls `BankChain::run` / `run_with_resident_input` (`:3310-3318`); `BankChain::run` (`crates/rack/src/lib.rs`
+  about `:3230-3245`) calls each slot's `begin_block` then `process(BankBlock)`; the adapter
+  `BuiltinStage` (`runtime.rs:4325-4349`) forwards to `GraphPreparedBuiltinBankProcessor::process`
+  (`crates/graph/src/lib.rs:1737`) and `begin_block` (`:1782`).
+- The source set's block entry and the read clock: `crates/graph/src/lib.rs:4983-4996`
+  (`source_read_sample = absolute_sample + source_read_offset`, #1396). The jump lengths are read at
+  `:4965-4971` into a local and are not passed on.
+- `#1640`'s reader is `TimelineConsumer::timeline_block(first_source_read_sample: u64, frames) ->
+  TimelineSpan` (`crates/source/src/lib.rs:2791`); the driver trait has only `timeline_at`
+  (`crates/graph/src/lib.rs:2672`; impl `crates/source/src/lib.rs:3361`).
+- D4: the inert text is `docs/SESSION_SCHEMA_V1.md:286-291`; `validate.rs` no longer says the table
+  is inert (`:868-870` now says "structure only"), so `crates/session/src/validate.rs` leaves the
+  list. `docs/REALTIME_MEMORY.md:13` is unchanged.
+
+**Landed deps and what they give.**
+
+- #1640/#1641: every host-core plan has a timeline (`prepare.rs:2949-2990`), history
+  `K = ⌈A_max/q⌉ + 1`. #1637 shipped node time as `timeline(r + ΣP - a(n))`.
+- #1639: `GraphJumpLengths` held per block in the executor; `LiveRamps::for_row`
+  (`crates/controls/src/live_ramps.rs:44`).
+- #1638: `BuiltinFaderBank::process_with`, `FaderOperationSink`, `gain_held`, `ramp_remaining`,
+  `BuiltinProcessReport::fader_operations_stopped` (`crates/builtins/src/lib.rs:160`, `:4564-4625`).
+- #1642/#1643, B16-R9: `SessionState::session_seek` (`crates/control-plane/src/control.rs:4119`) is the
+  one core function behind `miso_engine_v1_session_seek[_at]` and
+  `miso_engine_web_v1_session_seek[_at]`. A plain seek declares a discontinuity first; when the
+  newest plan has a raised floor or `ΣP > 0`, that publishes a successor whose owners start at
+  rest, so its automated lanes start fresh (D2's "restarts" case). An anchored seek declares
+  nothing.
+- #1285: `a(n)` is the floored arrival, known only after `compile_with_builtins`.
+
+**Departures from the filed text.**
+
+1. **`process_timed` cannot be a defaulted forward through the chain** without editing `rack`
+   (`BankStage`/`BankBlock` carry no context). Ruling Q2.
+2. **`a(n)` has no path to the fader stage** (the program holds none; #1646 now leaves it here).
+   Ruling Q1.
+3. **Negative node samples.** At `r + ΣP < a(n)` the node block starts before source-read sample 0,
+   which `timeline_block(u64, ..)` cannot take. The driver-trait method and the source reader take a
+   signed first sample and extrapolate back as `timeline_at` does (README A1.4, "New lanes":
+   node time `-a(n)` at render 0). This widens the `crates/source/src/lib.rs` path to the reader.
+4. **A restart's first-block `Set`** (D2) has no seek step to come from: the processor builds that
+   block's `NodeSpan` with a step at offset 0 (`NodeSpan::new(t, Some((0, t)), q)`), so
+   `SeekMode::Exact` emits the `Set`.
+5. **The scalar track is the test-only oracle** (#1646 Q2). With #1646 Q2 = B, its render path gets
+   the same event driver; with A, nothing here.
+6. **Counters.** D1's refusal counter and the stage's `fader_operations_stopped` are
+   `FaderBankProcessor` fields read off render (a test-support read and its qualification counters);
+   name them in the brief. Each condition is unreachable and `debug_assert`s.
+7. **Jump lengths.** Build `LiveRamps` from the three held words through one `controls` constructor
+   (the link length equals the fader length), so the render path writes no row rule.
+8. **Parity (decision 17 C1).** Gate 4 has no browser leg; both hosts now have a session seek behind
+   one core function, so add it (`hosts/host-web/src/tests.rs`, through
+   `miso_engine_web_v1_session_seek`). Gate 4 also covers a plan with a raised floor, so the plain
+   seek's discontinuity successor is tested (D2 restart path).
+
+**Ruling questions.**
+
+- **Q1. How `a(n)` reaches the fader stage.** (A) at the end of `compile_with_builtins` the graph
+  compiler hands each builtin bank its members' floored input arrivals through a new defaulted
+  method on `GraphPreparedBuiltinBankProcessor`; (B) host-core installs them after the compile
+  through a new artifact method that downcasts the fader banks; (C) the graph runtime keeps each
+  lane's arrival and passes a node-time sample per lane. **Recommendation: A** (one rule in the core,
+  no host step; adds `crates/graph-compiler/src/compile.rs`).
+- **Q2. How the block's node-time context reaches the processor.** (A) `rack`'s `BankBlock` (or a
+  new `BankStage` method) carries the source-read sample, the timeline view and the jump lengths
+  (adds `crates/rack/src/lib.rs`); (B) graph's runtime sets the context on each builtin slot
+  through `builtin_processor_mut` (`runtime.rs:4389`) with a new defaulted
+  `GraphPreparedBuiltinBankProcessor` method before `chain.run`, and `process` reads it; `rack` is
+  not edited. **Recommendation: B** (no change to the generic chain contract; the context is
+  graph's own).
+
+**Authorized paths, as they now must read.**
+
+- `crates/builtins-compiler/src/lib.rs` (fader bank, fused processor, the oracle per #1646 Q2)
+- `crates/graph/src/lib.rs` (the context method, the driver trait's signed `timeline_block`, the
+  arrivals method of Q1), `crates/graph/src/runtime.rs` (the context set before `chain.run`; the
+  `GraphSourcePlanes` view), `crates/graph-compiler/src/compile.rs` (Q1 = A only)
+- `crates/source/src/lib.rs` (`TimelineConsumer::timeline_block` signed form and the driver's
+  `timeline_block`, with their tests)
+- `crates/controls/src/live_ramps.rs` (the constructor of departure 7)
+- `crates/host-core/tests/stored_fader_automation.rs`, `crates/capi/src/runtime/tests.rs`,
+  `hosts/host-web/src/tests.rs` (gate 4's browser leg)
+- `docs/SESSION_SCHEMA_V1.md` (`:286-291`), `docs/REALTIME_MEMORY.md` (`:13`)
+- No path under `crates/engine/src/realtime/`. Every edited render function sits in a
+  `REALTIME_POLICY` region and `scripts/check-realtime-policy.sh` must stay green.
+
+**Gates' test files.** Gates 1-3, 5, 6, 8: `crates/host-core/tests/stored_fader_automation.rs`.
+Gate 4: the same file, `crates/capi/src/runtime/tests.rs` and `hosts/host-web/src/tests.rs`.
+Departure 3: a unit test beside the reader in `crates/source/src/lib.rs`. Gate 7 adds
+`cargo test --locked -p source`, `-p controls`, `-p control-plane` and (Q1 = A) `-p graph-compiler`.
+
+**Size.** About 16 implementer hours: too big for one slice. Split, in this order, all in batch R1:
+**#1647a** the plumbing (Q1, Q2, the signed reader; a test-support probe shows each lane's
+`NodeSpan`, `a(n)` and jump length per block; no audible change; about 4 h); **#1647b** events on
+the fader (D1.1-D1.5, D2, D3, D4; gates 1-6; about 7 h); **#1647c** the held-ramp obligation of
+the batch 13b amendment (gate 8; about 5 h).

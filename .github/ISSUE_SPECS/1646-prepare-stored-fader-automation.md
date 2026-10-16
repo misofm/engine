@@ -319,3 +319,128 @@ Checked against `12d4a4f9d`.
   `SessionState`) has landed; #1562b (the browser's rebuild path) is a dependency of batch R1,
   because every fader automation edit is a rebuild after #1648.
 - **Must-land group** is #1646, #1647, #1648, #1649 and #1650.
+
+## Amendment (controls coordinator, batch 17 spec check, 2026-10-16)
+
+Checked against `31fa33fee`.
+
+**Anchors moved.**
+
+- Inert-table text: `docs/SESSION_SCHEMA_V1.md:286-291` (was `:220-225`). The builtin target list
+  left `validate.rs` (#1566); the fader row is `BUILTIN_PARAMETER_DESCRIPTORS` row `id: 5`
+  (`crates/builtins/src/lib.rs:488`, `:596-598`), and the row rule is
+  `controls::automation_diagnostics` (`crates/controls/src/automation.rs:89`).
+- Composition: `session::vca_effective_db` and `VcaSum` (`crates/session/src/vca.rs:26-67`,
+  member first); the one caller that composes is `controls::effective_strip`
+  (`crates/controls/src/effective.rs:311-334`); preparation takes `controls::effective` output
+  (`crates/host-core/src/prepare.rs:2756`). `pub use` is `crates/session/src/lib.rs:38` (not `:31`).
+  The schema sentence of D6 is `docs/SESSION_SCHEMA_V1.md:83-84` (not `:80`).
+- Order test: `crates/controls/tests/composition.rs:82-83`, its `reference_db` `:37-45`, its rustdoc
+  `:47-52`. Host oracle: `crates/host-core/tests/vca.rs:270-279`. The two browser oracles of D6 are
+  gone (#1565).
+- `checked_fader_gain` `crates/builtins/src/lib.rs:5298`, `db_gain` `:6430`.
+- `FaderBankProcessor` `crates/builtins-compiler/src/lib.rs:1519-1700`; fused
+  `FaderMatrixBankProcessor` `:1831` (`process` `:2334`); `FaderCells` `:298`, `FaderLane` `:266`;
+  `SEAM_SIDE_WITNESS` `:1141`; `track_mono_source` `:5184`; bank bytes
+  `graph_builtin_bank_resource` `:3593` and `strip_processor_bytes` `:2480`.
+- `TrackStage::PostFader` `crates/graph/src/lib.rs:258-266`; `checked_add_builtin_banks` `:666-698`.
+  Host admission `host.graph.resource.limit` `crates/host-core/src/prepare.rs:2939`. Replacement
+  admission `crates/control-plane/src/compile.rs:824` onward.
+- `CanonicalFpEnv` `crates/lane/src/fpenv.rs:432` (wasm form `:527`); render enters it at
+  `crates/host-core/src/render_session.rs:121`.
+
+**Landed deps and what they give.**
+
+- #1637: `automation::{ProgramBuilder, CellDescription, CellState, CellEvents, NodeSpan,
+  JumpLength::Block}`. `ProgramBuilder::bytes` is the byte report. No program field holds `a(n)`.
+  `CellState::new` has no target and no setter exists.
+- #1638: `BuiltinFaderBank::apply_fader_operation(lane, channels, FaderOperation::SetGain)`
+  (`crates/builtins/src/lib.rs:4591`), and the same on `FaderMuteRampBuiltins` (`:5198`).
+- #1639: `GraphJumpLengths` and its reader (`crates/graph/src/lib.rs:1234-1430`), charged by
+  `graph::jump_length_retained_bytes()` in `prepare.rs`.
+- #1312: `LatestCell<const N>` is generic. A three-word cell already exists in production: the
+  jump-length cell is `LatestCell<3>`. Deliverable 2 and gate 5 fall away; no file under
+  `crates/engine/src/realtime/` is edited.
+- #1285: floored arrivals are `GraphCompileReport::input_arrivals`, known only after
+  `compile_with_builtins` (`prepare.rs:2810`), which runs after the builtins are prepared.
+- #1562a/b, #1309: both hosts prepare through host-core's one backend (the C ABI through
+  `control-plane`; the browser calls four `prepare_host_runtime_*` forms, `hosts/host-web/src/lib.rs:5575-5655`).
+- #1650 has not landed: no hand-offset field exists yet.
+
+**Departures from the filed text.**
+
+1. **`a(n)` is not this slice's.** The builder has no `a(n)` field, and D2 proves the prepared value
+   is the first `start_value` for every `a(n)`. So this slice needs no `a(n)`. It moves to #1647
+   (ruling Q1 below).
+2. **The scalar track is the test-only oracle.** Shipped builds bank every strip; the per-node
+   `LiveControlFaderProcessor` exists only under `test-support` (#1059, `lib.rs:3704-3723`). See
+   ruling Q2.
+3. **Cell bytes.** `LatestCell<3>` is not 36 bytes: each slot also holds a `u64` key and a `u64`
+   sequence. Charge `size_of::<LatestCell<3>>()` (96 bytes, measured on x86-64) plus its
+   writer, reader and dirty share, as measured, never a literal. The README F16 figure is wrong in
+   the same way; it is still a fixed size per lane, so F16's decision stands.
+4. **Charge every retained byte.** D4 also charges each cell's `CellState` (32 bytes) and the per-lane
+   automation slots on the fader processor, not only the program and the offsets cell.
+5. **Seed, not write.** A #1312 cell cannot be written without a gate stamp. Seed `S` as #1639 does:
+   the render reader holds the prepared words until its first applied write. This is not a "static
+   copy in the program"; the cell is still the one source after the first write.
+6. **Thick core (decision 17 C1, C7).** `S` per lane is a derived value: `controls::effective`
+   returns it (a new `EffectiveStrip` field, from `vca_offsets_sum`), and preparation reads it from
+   the `Effective` argument; no other crate computes it. The fader row's cell parameters (grid 64,
+   grid ramp 64, `End`, `JumpLength::Block`, `SeekMode::Exact`) and the segment conversion
+   (`stored_segment`, `crates/controls/src/automation.rs:282`, now private) are written once in
+   `controls`, so #1651-#1667 reuse them. Host-core builds the `Program` and passes it to the
+   builtins preparation with `&effective`.
+7. **Every builtins preparation form installs it.** The four forms in `prepare.rs:2757-2797`
+   (selected meters, between render calls, live controls) all install the program, so the result
+   does not depend on which form a host calls.
+8. **Event state lives in `FaderBankProcessor`** (builtins-compiler), per lane and channel, beside
+   the cell readers. #1648 extends `FaderBankProcessor::adopt_lane` (`lib.rs:1557`) to move it;
+   `crates/builtins` is not edited.
+9. **The seed method lands here.** A fresh `CellState` has no target, so #1647's first grid event
+   would always emit. This slice adds the one seeding method to `crates/automation/src/events.rs`
+   and seeds each cell with its prepared curve value; #1648 reuses it.
+10. **D2's mechanism.** Setting the lane's prepared fader parameter to `vca_compose_db(first value, S)`
+    through the existing `checked_fader_gain` path gives the same bits as a `SetGain`; either is D2.
+11. **Strips, not tracks.** Submix strips carry the same fader bank; D1-D4 apply to every strip.
+
+**Ruling questions.**
+
+- **Q1. How `a(n)` reaches the fader stage** (decided in #1647; repeated there). Options:
+  (A) at the end of `compile_with_builtins` the graph compiler hands each builtin bank its members'
+  floored input arrivals through a new defaulted method on `GraphPreparedBuiltinBankProcessor`;
+  (B) host-core installs them after the compile through a new artifact method that downcasts the
+  fader banks; (C) the graph runtime keeps each lane's arrival and passes a node-time sample per
+  lane. **Recommendation: A** (one core rule, no host step, the value sits beside the lane's
+  program).
+- **Q2. The test-only scalar oracle.** Options: (A) bank only; a `Backend::Scalar` preparation of a
+  session with stored fader automation is refused with a typed diagnostic; (B) install the program
+  on the oracle too, with one event driver shared by both processors, as #1638 gave both its
+  operations. **Recommendation: B**: it keeps the oracle a full reference for "a placement change
+  moves no bit" (about 1 h more).
+
+**Authorized paths, as they now must read.**
+
+- `crates/session/src/vca.rs`, `crates/session/src/lib.rs` (`:38` only),
+  `docs/SESSION_SCHEMA_V1.md` (`:83-84` only)
+- `crates/controls/src/effective.rs` (`S` per lane, `VcaSum` order), `crates/controls/src/automation.rs`
+  and `crates/controls/src/lib.rs` (the fader row's cell descriptions), `crates/controls/tests/composition.rs`
+- `crates/host-core/src/prepare.rs`, `crates/host-core/tests/vca.rs` (`reference_db` only),
+  `crates/host-core/tests/stored_fader_automation.rs` (new), `crates/host-core/Cargo.toml`
+  (`automation`), `crates/builtins-compiler/Cargo.toml` (`automation`), `Cargo.lock`
+- `crates/builtins-compiler/src/lib.rs` (program, event state, offsets cell and its writer handle,
+  seed, prepared value, bank bytes; the oracle per Q2)
+- `crates/automation/src/events.rs` (the seed method and its test)
+- `crates/capi/src/runtime/tests.rs`, `hosts/host-web/src/tests.rs` (gate 1)
+- No path under `crates/engine/src/realtime/`. `crates/engine/src/realtime/latest_cell.rs` is
+  removed from the list.
+
+**Gates' test files.** Gate 1: `crates/capi/src/runtime/tests.rs`, `hosts/host-web/src/tests.rs`.
+Gates 2-3: `crates/host-core/tests/stored_fader_automation.rs`. Gate 5: dropped (no new cell form).
+Gate 6: `crates/controls/tests/composition.rs`. Gate 7 adds `cargo test --locked -p controls` and
+`-p automation`, and drops the loom command.
+
+**Size.** About 9 implementer hours. Split into the smallest closable slices, in this order:
+**#1646a** D6 only (session, controls effective and its test, host-core oracle, schema sentence;
+about 2 h, closable alone: class B, ruled) and **#1646b** the preparation (about 7 h). Both stay in
+batch R1.

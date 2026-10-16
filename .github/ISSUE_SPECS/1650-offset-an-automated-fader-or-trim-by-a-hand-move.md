@@ -232,3 +232,105 @@ owner's answer covers level controls, and the DAW trim modes include sends.
   control too; #1655 adds it to `takes_offset` (a reading of root's ruling for root to confirm).
 - **Gate 1** gains: an entry on a send `gain_db` whose two offset fields differ is refused
   `control.automation.offset`; a non-zero offset on a send matrix row is refused.
+
+## Amendment (controls coordinator, batch 17 spec check, 2026-10-16)
+
+Checked against `31fa33fee`. This amendment overrides the filed text and the earlier amendments
+where they differ.
+
+- **Anchors moved.** `Automation` `crates/session/src/model.rs:977-985`; the automation walk keys
+  `crates/session/src/visit.rs:143`, walk `:299`; `parse_automation`
+  `crates/session/src/parse.rs:1569`; wire message `automation`
+  `crates/protocol/src/schema.rs:1321-1333`, encode `crates/protocol/src/session_wire.rs:1072-1080`;
+  the edits `crates/protocol/src/model.rs:81-89`, `:315-327`. `automation_diagnostics`
+  `crates/controls/src/automation.rs:89`; its callers `crates/host-core/src/prepare.rs:2529`,
+  `crates/host-core/src/live_delta.rs:388-395` (step 2), `tools/session-validator/src/lib.rs:396`.
+  Builtin rows: `read` and `write` `crates/controls/src/builtin_rows.rs:121-188`; the model write
+  `crates/controls/src/registry.rs:518-560`. `trim_db` `crates/builtins/src/lib.rs:514-540`,
+  `fader_db` `:596-619`. `control_entry` `crates/protocol/src/schema.rs:407-441` (31
+  `automatable`, 33 `active`, 34 `value`; 35 is free); the catalog row
+  `crates/host-core/src/control_provider.rs` (`automatable` `:1969`, `:2072`), the structure epoch
+  `:441-453`; the SDK decode `sdk/src/core/control-list.ts:275`, `:586`. Schema hash
+  `crates/conformance/src/protocol_corpus.rs:928`.
+- **Landed deps.** #1566 (address target, row rule), #1568 (equal keys) and #1569 (generated SDK
+  key tables, `sdk/src/generated/session-keys.ts` from `sdk/assets/miso-engine-v1-session-keys.json`)
+  have landed, so D1's "whichever lands first" is moot: regenerate. #1631/#1632 (the row rule on
+  activity changes; `follows_mute` and `matrix_mode` not automatable). #1612/#1613/#1620 (the fast
+  and in-place `SetControl` paths). #1562b (the browser rebuild path).
+- **Departure 1: the binding needs the model; the in-place path does not have it.** `builtin_rows`
+  reads and writes through a `StripRef`/`StripMut`, and the in-place path (#1613,
+  `crates/protocol/src/model.rs:1435-1500`) applies `SET_CONTROL` to an owners model
+  (`controls::OwnerEdits`, `crates/controls/src/owner_edits.rs`) whose `automation` is empty and
+  whose `OwnerSlots` (`crates/session/src/in_place.rs:30`) hold no automation entry. D3 as written
+  would make the in-place path see "not automated" and write the static field, and the fast
+  classifier would lower a `FaderDb` onto the automated lane: an ack of a value the curve then
+  overrides. **Ruling question R17-1** below.
+- **Departure 2: the static fallback is no control value on an automated lane.** Because the row
+  reads the offset there, `controls::mask_values` copies the offset, and a change of the static
+  field by any edit is step 1 `Structure` (a rebuild that seeds the release value, #1648). This is
+  D3's intent ("not reachable by `SET_CONTROL`"); record it in `docs/SESSION_SCHEMA_V1.md`.
+- **Departure 3: #1648 D1 excludes the offset** (#1648's amendment, departure 3), so an offset-only
+  `UpsertAutomation` stays `live` as D5 says.
+- **Departure 4: D6 is no render change.** Render composes with `S` from the cell (#1646, #1649).
+  This slice changes who computes `S`: `controls::effective` adds the lane's own offset first, then
+  the reaching VCA offsets (#1649's amendment, departure 3), and #1646's preparation seeds it. So
+  `crates/builtins-compiler/src/lib.rs` drops out of this slice.
+- **Trim.** Trim automation renders in #1658, which is not in this batch. This slice can close the
+  trim part as grammar and row rule only: a trim entry carries an offset that is checked and stored
+  and is inert (D3's last bullet); `SET_CONTROL trim_db` keeps writing the static field until #1658
+  adds trim to `automation_row_renders`. No trim gate is needed here; #1658 owns the flip and its
+  gates. The same holds for the send gain (#1654).
+- **Split (recommended).** **#1650a** D1, D2, the docs and gate 1: the field, the grammar, the wire,
+  the SDK, the fixtures and the row rule. It is inert, so it can land in its own push before
+  #1646, which then seeds `S` from a field that exists. **#1650b** D3-D5, the list flag and gates
+  2-6, in the R1 push with #1646-#1649 (the "no middle state" hazard applies to #1650b only).
+- **Authorized paths, as they now must read:**
+  - #1650a: `crates/session/src/{model.rs,parse.rs,visit.rs,lib.rs}`, `crates/session/tests/**`;
+    `crates/protocol/src/{schema.rs,session_wire.rs,model.rs}`, `crates/protocol/src/session_wire/**`
+    and their tests; `crates/controls/src/automation.rs`, `crates/controls/tests/automation.rs`;
+    `crates/conformance/src/protocol_corpus.rs` (re-pin); `fixtures/session/v1/canonical.json`,
+    `fixtures/session/v1/builtins-automation.json`, `fixtures/session-canonical/**`;
+    `.claude/skills/author-session/{SKILL.md,worked-session.json}`;
+    `sdk/assets/miso-engine-v1-session-keys.json`, `sdk/src/generated/*` (regenerated),
+    `sdk/src/core/session.ts`, `sdk/src/internal/session-json.ts`, `sdk/test/**`;
+    `docs/SESSION_SCHEMA_V1.md`, `docs/session-v1.schema.json`.
+  - #1650b: `crates/controls/src/{builtin_rows.rs,registry.rs,strip.rs,mask.rs,diff.rs,effective.rs,view.rs,owner_edits.rs,lib.rs}`
+    and `crates/controls/tests/**`; `crates/session/src/in_place.rs` (if R17-1 = A);
+    `crates/protocol/src/model.rs` (`prepare_in_place`), `crates/protocol/src/message_wire.rs`
+    and `crates/protocol/src/schema.rs` (field 35); `crates/host-core/src/control_provider.rs` (the
+    `automated` row field); `crates/host-core/src/live_delta.rs`,
+    `crates/host-core/tests/live_delta.rs`; `sdk/src/core/control-list.ts`,
+    `sdk/src/generated/*`, `sdk/test/**`; `crates/capi/src/runtime/live_tests.rs`,
+    `hosts/host-web/tests/control_parity.rs`, `crates/control-plane/tests/` (gate 6);
+    `docs/CONTROL_PROTOCOL_REGISTRY.md`.
+  - No path under `crates/engine/src/realtime/`; no render file.
+- **Gates' test files.** Gate 1 `crates/session/tests/` and `crates/controls/tests/automation.rs`
+  (the wire round trip in `crates/protocol`'s tests); gates 2 and 4
+  `hosts/host-web/tests/control_parity.rs` (both hosts) and `crates/capi/src/runtime/live_tests.rs`;
+  gate 3 `crates/capi/src/runtime/live_tests.rs`; gate 5 `crates/host-core` (control provider) and
+  `control_parity.rs`; gate 6 `crates/control-plane/tests/vca_automation_realtime.rs` (shared with
+  #1649). Add to gate 2: the same `SET_CONTROL` through the in-place path (a transaction of only
+  that edit) gives the same reply and bits as through the full path. `./target/release/realtime_policy`
+  needs `cargo build --locked --release -p realtime-policy` first.
+- **Size.** #1650a about 8-10 implementer hours (grammar, wire, SDK regeneration, fixtures, row
+  rule, docs). #1650b about 10-14 hours with R17-1 = A (binding with model scope, the in-place
+  owners, the list flag on both sides, the classifier, tests on both hosts); about 7-9 with
+  R17-1 = B.
+
+### Ruling question R17-1: how a hand move on an automated lane reaches the offset on every path
+
+- **A. The automation entry is an owner of the in-place edit.** `OwnerEdits` clones, with the
+  strip, the rendered entries that drive the written lane; `OwnerSlots` and `ModelView` carry them;
+  the builtin row's read and write for rows 2 and 5 take the entry. Keeps D1, keeps the in-place
+  cost (independent of the session's size) for the most frequent hand move, a fan riding a fader.
+  Widest edit (`session::in_place`, `controls` view, owner edits, effective inputs).
+- **B. The in-place path declines it.** A `controls` check on the committed model declines a
+  `fader_db` or `trim_db` write on a lane a rendered entry drives; the full path (model clone,
+  canonical JSON) commits it. Smallest edit; every hand move on an automated lane then pays the
+  full-path cost that #1613 and #1620 removed for large sessions.
+- **C. The offset lives on the strip** (`DualMonoFader` and `ChannelBuiltins` gain offset fields).
+  In-place works unchanged, but D1 changes: `RemoveAutomation` must reset the offset and the
+  binding still needs the table to choose offset or static.
+- **Recommendation: A.** It is the correct long-term shape (no path-dependent cost, no D1 change)
+  and keeps decision 17 C3's one binding place in `controls`. B would be a shortcut that a later
+  issue must remove.

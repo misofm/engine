@@ -278,3 +278,97 @@ Checked against `12d4a4f9d`.
 - **Gate.** Add to the objective gates: `control_smoothing` changed on a session with no reading
   automation, then a fader entry added: from the adoption block, the block holds the new lengths
   (`graph::test_only_block_jump_lengths`).
+
+## Amendment (controls coordinator, batch 17 spec check, 2026-10-16)
+
+Checked against `31fa33fee`. This amendment overrides the filed text and the earlier amendments
+where they differ.
+
+- **Anchors moved.** `classify_live_delta` `crates/host-core/src/live_delta.rs:341`, its body
+  `classify_live_delta_with_monitor` `:360-466`; the automation mask line `:376-378`; the step list
+  in the rustdoc `:252-285` and the model-only paragraph `:287-302`. The steps are now: 1
+  `Structure`, 2 `AutomationTarget` (`:388-395`, #1335, #1566, #1631, #1645), 3 changed controls, 4
+  unresolvable effect params, 5 lowering. D1's new check runs after step 2 and before step 3.
+  `LiveRebuild` is `crates/host-core/src/prepare.rs:4818-4838`; `PlanStateInventory` `:728-789`;
+  `SuccessorBase` `:1287`; `across_withdrawn` `:1240`; the carry program `:2467-2486` and its
+  install `:3147-3150`; the strip join `join_strips` `:5087-5160` (`StripJoin` `:5031`).
+  `CellState` is `crates/automation/src/events.rs:91-155`. Tests: `fader_ride`
+  `crates/host-core/tests/live_delta.rs:1103`, `model_only_edits` `:1282-1303`,
+  `model_only_edits_are_live_with_no_records` `:1307`, `eq_automation` `:3232`; the C ABI twin
+  `model_only_edits` `crates/capi/src/runtime/live_tests.rs:2356-2420` (the `control_smoothing`
+  case now comes before the upsert, #1639) and `model_only_edits_commit_without_a_plan_rebuild`
+  `:2430`. Docs: `crates/capi/include/miso_engine_v1.h:46-47`,
+  `docs/CONTROL_PROTOCOL_SEMANTICS.md:21` (the "#1260" sentence),
+  `docs/C_ABI_V1_QUALIFICATION.md:623-630`.
+- **Landed deps and what they give.** #1645 (step 2 route), #1637 (`CellState`, `reposition`,
+  `hold_until`; no seeding method yet), #1638 (the timed fader stage), #1639 (the jump-length cell;
+  a successor seeds it from its own model, `a_successor_prepared_with_a_control_smoothing_edit_holds_the_new_lengths`),
+  #1277/#1280 (the strip join and carry retarget), #1312 (cells; `LatestCell<N>` is generic, so no
+  new cell form), #1309 (`commit_live_once`, `crates/control-plane/src/control.rs:2905`: any
+  classifier `Err` is `LiveCommit::Rebuild`, so D1 needs no control-plane edit), #1641 (every plan
+  carries the timeline), #1642/#1643 (session seek: `miso_engine_v1_session_seek`,
+  `SessionState::session_seek`, gate 2's reference), #1698 (`across_withdrawn`), #1562b (the
+  browser rebuild path; on a page without cross-origin isolation it is a blocking rebuild, counted).
+- **Departure 1: two classifier paths.** #1612/#1613 added a fast path (`classify_rows`,
+  `:557-734`, and the in-place `classify_live_staged`) for transactions of `SetControl`s. It
+  assumes "the edits leave the automation table as committed" (`:576-577`). D1 holds there today.
+  It stops holding when #1650 makes `SET_CONTROL fader_db` write an automation entry's offset; see
+  departure 3.
+- **Departure 2: D3 goes in the shared level lowering.** VCA and own-fader records come from
+  `LevelDiff::level_records` (`live_delta.rs:1015-1019`), implemented by `EffectiveDiff`
+  (`prepare.rs:4526`, the full path and the strip join) and `LocalDiff` (`live_delta.rs:1246`, the
+  fast path). D3's "no `FaderDb` for an automated lane" must be applied there, once, so the full
+  path, the fast path and a successor's carry retarget (`join_strips`, #1277 D5) all obey it. A
+  suppressed lane gives no record, not an error, so the stage still joins as `Same` and carries.
+  No #1277 predicate edit is needed: an automation change moves no static level value.
+- **Departure 3: D1's comparison excludes the offset.** #1650 stores the hand offset in the entry
+  and makes an offset-only change `live` (#1650 D5). D1 compares each rendered entry's `id`,
+  `target` and `segments` (canonical bytes), never its `offset`.
+- **Departure 4: the adoption rule compares the composed gain.** A rebuild can also change `S`
+  (a VCA or hand-offset edit in the same transaction). D2's adoption test is: if
+  `checked_fader_gain(vca_compose_db(curve(t), S_successor))` differs in bits from the carried
+  stage gain target, jump. A comparison on the curve value alone would keep the old `S` heard.
+  The same holds for gained and release cells.
+- **Departure 5: D3's gate cases move.** Under #1650 the static fallback of an automated fader lane
+  is no control value (the row reads the offset), so a static change by any edit other than
+  `SET_CONTROL` is step 1 `Structure`, a rebuild that seeds the release value. Gate 1's static
+  `left_db` case and gate 5 are therefore not this slice's: the fader hand move is #1650 gate 2, the
+  VCA case is #1649 gate 5, the `model_only` case is #1657's. Gate 1 keeps the add, change, remove,
+  mute-row, combined and `linear`-unit cases. Under #1650's binding the combined case (a static
+  change and an automation change) can be step 1 `Structure` before D1's check; it asserts a
+  rebuild, not the variant. A test written here and superseded by #1649 or #1650 in the same push
+  is not written.
+- **Inventory and supersession.** The cell-address rows join `PlanStateInventory` and must pass
+  through `across_withdrawn` unchanged, so a superseding candidate carries cell state from P0 as
+  #1698 carries every other owner.
+- **The #1639 gap closes here.** A fader automation edit is a rebuild, and the successor seeds its
+  jump-length cell from its own model, so an entry added after a `control_smoothing` change that
+  was not written (no reading entry then) reads the new lengths from its first block. The batch
+  13b gate stands, in `crates/capi/src/runtime/live_tests.rs`.
+- **`automation_row_renders`** is one function in `crates/controls/src/automation.rs`. #1646's
+  preparation and this slice's classifier both call it; whichever lands first adds it.
+- **Authorized paths, as they now must read:**
+  - `crates/host-core/src/live_delta.rs`, `crates/host-core/tests/live_delta.rs`
+  - `crates/host-core/src/prepare.rs` (`LiveRebuild::Automation`, the inventory cell rows, the
+    join, `across_withdrawn`, release cells, the `level_records` suppression in `EffectiveDiff`)
+  - `crates/controls/src/automation.rs`, `crates/controls/src/lib.rs` (`automation_row_renders`,
+    `automated_cell` and their exports), `crates/controls/tests/automation.rs`
+  - `crates/automation/src/events.rs` (one seeding method, batch 13b amendment)
+  - `crates/builtins-compiler/src/lib.rs` (the fader and fused bank processors' carry of cell event
+    state), `crates/graph/src/lib.rs`, `crates/graph/src/runtime.rs` (the strip move only)
+  - `crates/host-core/tests/successor_swap.rs`, `crates/capi/src/runtime/live_tests.rs`,
+    `hosts/host-web/tests/control_parity.rs`
+  - `crates/capi/include/miso_engine_v1.h` (comment), `docs/CONTROL_PROTOCOL_SEMANTICS.md`,
+    `docs/C_ABI_V1_QUALIFICATION.md`
+  - No path under `crates/engine/src/realtime/`. `crates/control-plane/src/` drops out (no edit
+    needed); `hosts/host-web/src/tests.rs` drops out.
+- **Gates' test files.** Gate 1 `crates/host-core/tests/live_delta.rs`; gates 2-4 and the #1639
+  gap gate `crates/capi/src/runtime/live_tests.rs`; the browser leg of gate 2
+  `hosts/host-web/tests/control_parity.rs`; gate 6 `crates/host-core/tests/successor_swap.rs`.
+  `bash scripts/check-realtime-policy.sh` no longer exists: use
+  `cargo build --locked --release -p realtime-policy && ./target/release/realtime_policy`.
+- **Size and split.** About 16-20 implementer hours: D1 and the docs 3 h, the suppression hook 1 h,
+  D2's carry (rows, join, reposition, composed-gain jump, gained and release cells, the held-ramp
+  obligation, `across_withdrawn`) 8-10 h, tests 5 h. Split into two attempt-bounded slices in the
+  same push: **#1648a** classification (D1, D3's hook and predicate, D4, gate 1, the #1639 gap
+  gate) and **#1648b** carry (D2 and the batch 13b items, gates 2-4 and 6).
