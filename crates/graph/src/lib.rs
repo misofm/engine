@@ -1808,18 +1808,21 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         false
     }
     /// Copy `predecessor`'s lane `predecessor_lane` -- the whole state of `owner`'s stage: its
-    /// gains, mutes or matrix and any ramp in flight -- into this bank's lane `lane`, at the swap
-    /// block (issue #1277 D8). The caller has applied `predecessor`'s pending live values first
-    /// ([`Self::drain_strip_for_carry`]). `false` (the default) copies nothing. Render-thread code:
-    /// allocation-free and bounded.
+    /// gains, mutes or matrix and any ramp in flight, and a fader stage's stored automation event
+    /// state (#1648 D2) -- into this bank's lane `lane`, at the swap block (issue #1277 D8). The
+    /// caller has applied `predecessor`'s pending live values first
+    /// ([`Self::drain_strip_for_carry`]). `continued_cells` is the move's
+    /// [`GraphStripMove::continued_cells`]. `false` (the default) copies nothing. Render-thread
+    /// code: allocation-free and bounded.
     fn adopt_strip_lane(
         &mut self,
         owner: BuiltinStripOwner,
         lane: usize,
         predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
         predecessor_lane: usize,
+        continued_cells: u8,
     ) -> bool {
-        let _ = (owner, lane, predecessor, predecessor_lane);
+        let _ = (owner, lane, predecessor, predecessor_lane, continued_cells);
         false
     }
     /// The lanes (bit `n` is lane `n`) whose [`Self::begin_block`] drains a live lane, or `0` for
@@ -3644,6 +3647,11 @@ pub struct GraphStripMove {
     pub successor: GraphLaneLocation,
     /// The lane in the plan the successor displaces.
     pub predecessor: GraphLaneLocation,
+    /// The fader stage's automated cells (bit 0 left, bit 1 right) whose stored automation table
+    /// the successor's model keeps bit for bit from the predecessor's (#1648 D2): such a cell's
+    /// carried event state continues verbatim, and every other carried cell is repositioned in its
+    /// own table at adoption. `0` for a matrix move.
+    pub continued_cells: u8,
 }
 
 /// One strip stage owner's lane in a bound graph plan (issue #1277 D1).

@@ -659,6 +659,25 @@ struct AutomatedFaderCell {
     offsets_ramp: u32,
     /// The held-ramp obligation (#1647 D1.6, batch 13b amendment).
     obligation: HeldRampObligation,
+    /// What the cell's first block after a plan swap that carried its lane owes (#1648 D2).
+    adoption: Adoption,
+}
+
+/// What an automated channel's first block after a plan swap owes (#1648 D2). Set by
+/// [`LaneFaderAutomation::adopt`] at the swap block, taken by the lane's next block, which knows
+/// the node time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Adoption {
+    /// Nothing: the cell has rendered a block since it was prepared or adopted, or it continues
+    /// its carried state verbatim (the same table, `a(n)` and `S`: the uninterrupted events).
+    None,
+    /// The cell continues its carried table and cursor, but its `S` changed: the adoption rule
+    /// alone (the jump when the composed gain differs from the stage's).
+    Compare,
+    /// The cell's table is not the one its state was built on (a changed or gained curve, or a
+    /// moved `a(n)`): it repositions its cursor in its own table, takes the stage's held ramp
+    /// again, then applies the adoption rule.
+    Reposition,
 }
 
 /// One automated channel's obligation to move to its cell's target where a held ramp ends with
@@ -728,6 +747,7 @@ impl LaneFaderAutomation {
                         offsets_sum: cell.offsets_sum,
                         offsets_ramp: cell.offsets_ramp,
                         obligation: HeldRampObligation::default(),
+                        adoption: Adoption::None,
                     }
                 })
             }),
@@ -741,6 +761,48 @@ impl LaneFaderAutomation {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// #1648 D2: this lane's stage was carried from `predecessor`'s lane at the swap block (the
+    /// predecessor lane's automation, `None` when it had none). Each automated channel takes the
+    /// carried cell's event state and held-ramp obligation by its stable address (the strip, row 5
+    /// and the channel; the strip move paired the strip) and owes its first block an adoption:
+    /// none when its table continues bit for bit (`continued_cells`, from the join) at the same
+    /// `a(n)` and `S`, the adoption rule alone when only `S` moved, and a reposition otherwise. A
+    /// channel the predecessor did not automate (a gained cell) keeps its prepared state and
+    /// repositions. The lane is not fresh: its stage holds the carried gain, so no `Set` lands
+    /// (#1647 D2 is for a lane that starts at its prepared value). A channel the successor does
+    /// not automate is released by the join's retarget record, not here. Allocation-free: plain
+    /// copies.
+    fn adopt(&mut self, predecessor: Option<&Self>, continued_cells: u8) {
+        self.fresh = false;
+        let arrival = self.arrival;
+        for (channel, cell) in self.channels.iter_mut().enumerate() {
+            let Some(cell) = cell else {
+                continue;
+            };
+            let carried = predecessor.and_then(|predecessor| {
+                predecessor
+                    .channels
+                    .get(channel)?
+                    .as_ref()
+                    .map(|carried| (carried, predecessor.arrival))
+            });
+            cell.adoption = match carried {
+                Some((carried, carried_arrival)) => {
+                    cell.state = carried.state;
+                    cell.obligation = carried.obligation;
+                    if continued_cells & (1 << channel) == 0 || carried_arrival != arrival {
+                        Adoption::Reposition
+                    } else if carried.offsets_sum.to_bits() == cell.offsets_sum.to_bits() {
+                        Adoption::None
+                    } else {
+                        Adoption::Compare
+                    }
+                }
+                None => Adoption::Reposition,
+            };
+        }
+    }
+
     /// Take the block's node-time mapping and the fader row's jump length (#1647a, R17-3): the
     /// one path of both fader owners, the bank per lane and the scalar oracle per strip.
     fn take_block_time(&mut self, time: &GraphBlockTime<'_>, fader_jump: Option<u32>) {
@@ -827,6 +889,10 @@ struct ChannelHold {
     muted: bool,
     /// Frames left in the channel's ramp.
     remaining: u32,
+    /// The fader gain the stage aims for, whatever its mute (#1648 D2: an adopted cell compares
+    /// its curve with it). `None` on the scalar oracle, which no plan swap carries (its fader
+    /// owners are bound nodes, not bank lanes).
+    fader_gain: Option<f32>,
 }
 
 /// One channel's block cut at the end `E` of a held ramp (#1647 D1.6, constraint 2): the first
@@ -999,6 +1065,7 @@ impl<'a> FaderEventDriver<'a> {
                     state,
                     offsets_sum,
                     obligation,
+                    adoption,
                     ..
                 }) = cell.as_mut()
                 else {
@@ -1014,7 +1081,7 @@ impl<'a> FaderEventDriver<'a> {
                     refused(&mut driver);
                     continue;
                 };
-                let step = span
+                let mut step = span
                     .step
                     .map(|step| (step.offset, step.timeline))
                     .or_else(|| {
@@ -1022,7 +1089,25 @@ impl<'a> FaderEventDriver<'a> {
                         (first_block && state.target().map(f32::to_bits) != Some(value.to_bits()))
                             .then_some((0, span.start))
                     });
-                let (free_from, at) = obligation.block(hold(lane, channel), frames);
+                let hold_now = hold(lane, channel);
+                let mut mode = controls::FADER_CELL_RULE.seek;
+                if settle_adoption(
+                    core::mem::replace(adoption, Adoption::None),
+                    AdoptionBlock {
+                        program: &cell_program,
+                        span,
+                        offsets_sum: *offsets_sum,
+                        hold: hold_now,
+                    },
+                    state,
+                ) && step.is_none()
+                {
+                    // The adoption jump (#1648 D2): a ramped landing at the block's first sample
+                    // over the block's jump length, to the curve at the jump's completion.
+                    step = Some((0, span.start));
+                    mode = automation::SeekMode::Ramp;
+                }
+                let (free_from, at) = obligation.block(hold_now, frames);
                 let end = at.map(|at| hold_end(span.start, step, at, frames));
                 let first = match end {
                     Some(Some(end)) => automation::NodeSpan::new(
@@ -1050,7 +1135,7 @@ impl<'a> FaderEventDriver<'a> {
                         cell_program,
                         state,
                         node,
-                        controls::FADER_CELL_RULE.seek,
+                        mode,
                         jump,
                     )),
                     base: 0,
@@ -1125,6 +1210,7 @@ impl HeldRampObligation {
                 held: true,
                 muted: false,
                 remaining,
+                ..
             }) if remaining > 0 => {
                 if remaining < frames {
                     (remaining, Some(remaining))
@@ -1142,6 +1228,63 @@ impl HeldRampObligation {
             None => (0, None),
         }
     }
+}
+
+/// What the adoption rule of one automated channel reads at its first block after a plan swap.
+struct AdoptionBlock<'p, 'a> {
+    program: &'p automation::CellProgram<'a>,
+    span: TimelineSpan,
+    offsets_sum: f64,
+    hold: Option<ChannelHold>,
+}
+
+/// #1648 D2, at an adopted channel's first block: settle what [`LaneFaderAutomation::adopt`] left
+/// owed, and whether the block must open with the adoption jump.
+///
+/// A [`Adoption::Reposition`] places the cursor at the block's node time in the cell's own table
+/// (#1637 D4) and reports the stage's held ramp again (batch 13b: `reposition` drops the one the
+/// carried state held). Then, for a reposition or [`Adoption::Compare`], the adoption rule: when
+/// the curve at the block's first sample, composed with this plan's `S`
+/// (`checked_fader_gain(vca_compose_db(curve, S))`, #1648 departure 4), differs in bits from the
+/// gain the stage aims for, the block opens with a jump (returns `true`). Otherwise a repositioned
+/// cell takes the curve's value as its current target (`seed_target`: the stage already holds its
+/// gain), and a continued one keeps its carried state. A block with a seek step lands the seek
+/// instead (the caller's step wins): the seek sets the lane exactly where it applies.
+fn settle_adoption(
+    adoption: Adoption,
+    block: AdoptionBlock<'_, '_>,
+    state: &mut automation::CellState,
+) -> bool {
+    let AdoptionBlock {
+        program,
+        span,
+        offsets_sum,
+        hold,
+    } = block;
+    if adoption == Adoption::None {
+        return false;
+    }
+    if adoption == Adoption::Reposition {
+        state.reposition(program, span.start);
+        if let Some(ChannelHold {
+            held: true,
+            remaining,
+            ..
+        }) = hold
+            && let Some(last) = remaining.checked_sub(1)
+            && let Some(end) = node_time_at(span, u64::from(last))
+        {
+            state.hold_until(end);
+        }
+    }
+    let value = automation::value_at(program.segments(), span.start);
+    let differs = FaderEventDriver::gain(value, offsets_sum)
+        .zip(hold.and_then(|hold| hold.fader_gain))
+        .is_some_and(|(gain, stage)| gain.to_bits() != stage.to_bits());
+    if !differs && adoption == Adoption::Reposition {
+        state.seed_target(value);
+    }
+    differs
 }
 
 /// The cut of a block of `frames` samples whose offset 0 is node time `start`, with seek step
@@ -2586,8 +2729,15 @@ impl FaderBankProcessor {
 
     /// Copy `predecessor`'s lane `predecessor_lane` into lane `lane` (#1277 D7, D8). The cell
     /// reader stays: the successor's own cells take every later value, and it takes the carry
-    /// marks of the values the carry drain applied (#1630 f).
-    fn adopt_lane(&mut self, lane: usize, predecessor: &Self, predecessor_lane: usize) -> bool {
+    /// marks of the values the carry drain applied (#1630 f). The lane's stored automation takes
+    /// the predecessor lane's event state (#1648 D2, [`LaneFaderAutomation::adopt`]).
+    fn adopt_lane(
+        &mut self,
+        lane: usize,
+        predecessor: &Self,
+        predecessor_lane: usize,
+        continued_cells: u8,
+    ) -> bool {
         let adopted = predecessor
             .bank
             .export_lane(predecessor_lane)
@@ -2599,6 +2749,15 @@ impl FaderBankProcessor {
                 |reader| &mut reader.marks,
                 |reader| &reader.marks,
             );
+            if let Some(Some(automation)) = self.automation.get_mut(lane) {
+                automation.adopt(
+                    predecessor
+                        .automation
+                        .get(predecessor_lane)
+                        .and_then(Option::as_ref),
+                    continued_cells,
+                );
+            }
         }
         adopted
     }
@@ -2675,12 +2834,15 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
         lane: usize,
         predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
         predecessor_lane: usize,
+        continued_cells: u8,
     ) -> bool {
         owner == BuiltinStripOwner::Fader
             && predecessor
                 .as_any_mut()
                 .and_then(|any| any.downcast_mut::<Self>())
-                .is_some_and(|predecessor| self.adopt_lane(lane, predecessor, predecessor_lane))
+                .is_some_and(|predecessor| {
+                    self.adopt_lane(lane, predecessor, predecessor_lane, continued_cells)
+                })
     }
 
     /// Issue #1277 D8: apply every pending cell value of the carried lanes with every revision,
@@ -2770,6 +2932,7 @@ fn bank_hold(bank: &BuiltinFaderBank) -> impl Fn(usize, usize) -> Option<Channel
             held: bank.gain_held(lane, channel)?,
             muted: bank.is_muted(lane, channel)?,
             remaining: bank.ramp_remaining(lane, channel)?,
+            fader_gain: bank.fader_gain(lane, channel),
         })
     }
 }
@@ -2902,7 +3065,9 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
         lane: usize,
         predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
         predecessor_lane: usize,
+        continued_cells: u8,
     ) -> bool {
+        let _ = continued_cells;
         owner == BuiltinStripOwner::Matrix
             && predecessor
                 .as_any_mut()
@@ -3450,15 +3615,18 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
         lane: usize,
         predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
         predecessor_lane: usize,
+        continued_cells: u8,
     ) -> bool {
         predecessor
             .as_any_mut()
             .and_then(|any| any.downcast_mut::<Self>())
             .is_some_and(|predecessor| match owner {
-                BuiltinStripOwner::Fader => {
-                    self.fader
-                        .adopt_lane(lane, &predecessor.fader, predecessor_lane)
-                }
+                BuiltinStripOwner::Fader => self.fader.adopt_lane(
+                    lane,
+                    &predecessor.fader,
+                    predecessor_lane,
+                    continued_cells,
+                ),
                 BuiltinStripOwner::Matrix => {
                     self.matrix
                         .adopt_lane(lane, &predecessor.matrix, predecessor_lane)
@@ -6863,6 +7031,7 @@ fn render_oracle_fader(
                         held: fader.gain_held(channel)?,
                         muted: fader.is_muted(channel),
                         remaining: fader.ramp_remaining(channel)?,
+                        fader_gain: None,
                     })
                 },
             );

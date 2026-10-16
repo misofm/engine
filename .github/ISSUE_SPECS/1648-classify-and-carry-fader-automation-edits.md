@@ -467,3 +467,100 @@ fader stage carries its ramp as `Same` when no static level moved, but the cell 
 not carry (`adopt_lane`), so the successor's cell starts at its prepared value. The D3 hook already
 makes the join read a static change on an automated lane as `Same`, so #1648b's carry sees no
 retarget record for it.
+
+## Decision record: #1648b (batch 17)
+
+The carry (D2, the batch 13b items, gates 2-4 and 6). Uncommitted on `codex/controls-batch-17k`
+over `5e695ecb6` for the coordinator.
+
+**What shipped.**
+
+- **The seam (`builtins-compiler`).** `FaderBankProcessor::adopt_lane` (both bank kinds: the fused
+  fader-matrix bank forwards to it) calls `LaneFaderAutomation::adopt` after the stage import. Each
+  automated channel of the successor lane takes, by its stable address (the strip move pairs the
+  strip; the channel index is the lane), the carried `CellState` and `HeldRampObligation`
+  (`owed`, `due_at_entry`), and `fresh` is cleared. It moves only the event state and the
+  obligation: the successor keeps its own offsets cell and `S`. Plain copies at the swap block, no
+  allocation. Each channel then owes its first block an `Adoption`:
+  - `None`: the table continues bit for bit (`continued_cells`), at the same `a(n)` and the same
+    `S` bits. The state continues verbatim, so the events are the uninterrupted ones (gate 3).
+  - `Compare`: the same table and `a(n)`, but `S` moved. Only the adoption rule runs.
+  - `Reposition`: a changed table, a moved `a(n)`, or a gained cell (no carried cell). The cursor
+    is repositioned in the cell's own table at the block's node time. The stage's held ramp is
+    reported again with `hold_until`, because `reposition` drops it. Then the adoption rule runs.
+- **The adoption rule (departure 4).** At the first block, if the span has no seek step, this
+  test runs: `checked_fader_gain(vca_compose_db(curve(t0), S_successor))` against the stage's
+  fader gain (`BuiltinFaderBank::fader_gain`, the gain the lane aims for whatever its mute). If
+  the bits differ, the block opens with a ramped landing (`SeekMode::Ramp` step at offset 0, over
+  the block's fader jump length, to the curve at the jump's completion). That sets the cell's
+  target and holds the grid for the jump. Inside a held ramp the stage only remembers it, and
+  #1647c's obligation moves the lane at `E`. If the bits are equal, a repositioned cell is seeded
+  with `curve(t0)` (`seed_target`).
+- **The join (`host-core`).** `StripJoin::continued_cells` comes from
+  `controls::continued_fader_lanes(committed, model, strip)`: both models drive the lane with
+  bit-identical segments. It reaches the fader move as `graph::GraphStripMove::continued_cells`,
+  and `adopt_strip_lane` gains that argument. `committed` is P0's model across a withdrawn plan,
+  so the flag needs no `across_withdrawn` change (#1698).
+- **The release ("a cell lost").** `EffectiveDiff::join_level_records` (used by `join_strips`
+  only) adds a `FaderDb` of the lane's effective `next` value, over the lane's fader length. It
+  does this for each lane that `current` automates and `next` does not, and that has no
+  `FaderDb` yet. The successor's cells receive it as a carry retarget (#1277 D5).
+
+**Departures.**
+
+1. **No release cell.** A released lane is moved by the join's carry retarget record, not by a
+   table-less cell in the successor. The successor has no slot storage for a lane it does not
+   automate, and a cell would need new preparation plumbing and bytes for every such lane. The
+   record goes to the static value over the fader length, from whatever gain the stage holds.
+   The stage's live-write rule then gives the batch 13b behaviour: inside an unmute ramp the write
+   retargets and ends the hold, and while muted the stage remembers it for the unmute. If the
+   target is already equal, the ramp goes from `g` to `g`. A plan with no live cells cannot
+   receive a record, so there the strip restarts at its prepared static value.
+2. **Verbatim continuation for an unchanged table.** The filed rule ("reposition each carried
+   cursor; jump if `curve(t0)` differs") jumps on every swap of a moving curve. Mid-ride the
+   carried target is the grid's completion value, not `curve(t0)`, and gate 3 measured this (red
+   with `Reposition` forced). So a cell whose table, `a(n)` and `S` all continue keeps its state
+   as it is. The table identity is decided at preparation from the two models (an exact segment
+   compare, off render) and carried in the strip move, so render never compares tables.
+3. **A seek in the adoption block wins.** If the adoption block has a seek step, the seek lands
+   exactly, as #1647 D3 says, and no adoption jump is made.
+4. **Superseded #1647b test rewritten.** `a_lane_a_successor_adds_starts_at_its_curve` (a gained
+   lane on a carried stage landed a `Set`) is now `a_lane_a_successor_adds_jumps_to_its_curve`
+   (`crates/host-core/tests/stored_fader_automation.rs`). Per D2 the lane ramps over `J` and then
+   equals the fresh reference. The `Set` of a restarted stage's fresh lane (#1647 D2) is no longer
+   gated by a host-core test; the C ABI raised-floor seek test still reaches the fresh-lane path.
+5. **Gates 2 and 4 use a stateless session** (`stateless_session`, a long source). A fresh
+   reference after a session seek matches a playing plan only when no strip has IIR or other
+   history state. Gate 3 runs on the same session.
+6. **Out-of-path edits, one each:** `crates/builtins/src/lib.rs`
+   (`BuiltinFaderBank::fader_gain`, the one accessor) and
+   `crates/host-core/tests/stored_fader_automation.rs` (deviation 4). The scalar oracle never
+   adopts (strip carry is bank-only), so its `ChannelHold::fader_gain` is `None`.
+
+**Gates and tests (all pass, x86-64 AVX2).**
+
+- Gate 2: `a_changed_fader_ride_rebuilds_and_carries_into_its_jump`
+  (`crates/capi/src/runtime/live_tests.rs`). Path `rebuild`, watermark `EXACT` at `T`, source
+  generation still 1. In the jump's last block the lane still differs from the seeked fresh
+  reference. From `T + 960 + 63` every sample is equal.
+- Gate 3: `an_unchanged_fader_ride_carries_with_no_jump` (same file). Every block from the swap is
+  bit-identical to the uninterrupted render.
+- Gate 4: `a_removed_fader_ride_releases_to_the_static_fader` (same file). The lane differs inside
+  the release. From the release's last sample it equals the seeked fresh static plan.
+- Browser leg: `a_fader_automation_edit_rebuilds_alike_on_both_hosts`
+  (`hosts/host-web/tests/control_parity.rs`, four rates) also changes and then removes the ride.
+  Both get the same verdict and reply (`rebuild`), and the same bits across each carried swap.
+- Gate 6: `fader_automation_carry::carrying_fader_automation_allocates_and_frees_nothing`
+  (`crates/host-core/tests/successor_swap.rs`, Simd8 and Simd4, live controls). It covers a
+  changed ride, a gained left cell and a released right cell. The hand-over plus the successor's
+  first block give `((0, 0, 0), (0, 0))` and `Carried`. A kept ride with an added muted track is
+  bit-identical to the uninterrupted run.
+- Red on revert, checked once each: with no `adopt` call, gates 2 and 3 and gate 6's kept-ride
+  check go red. With `Reposition` forced, gate 3 and gate 6's kept-ride check go red. With the
+  join reading `level_records` (no release), gate 4 goes red.
+- `realtime-policy`: ok, 159 regions in 33 files (unchanged). `./target/release/audit capi`:
+  `pcm_digest` `bffc21e857b5e134` (unchanged), 0 violations, 0 allocations.
+  `check-capi-abi`, `check-host-core-policy`, `check-graph-policy` and `check-workspace-policy`
+  all pass.
+- Bytes: `Adoption` (one byte) sits in `AutomatedFaderCell`'s padding and
+  `GraphStripMove::continued_cells` in the move's padding. No existing byte gate moved.

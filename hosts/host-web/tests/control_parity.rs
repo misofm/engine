@@ -2765,6 +2765,9 @@ fn both_hosts_refuse_a_source_of_more_than_two_channels_alike() {
 /// an entry on a row that does not render yet (the mute, row 6) commits `model_only` on both.
 /// Both hosts call the one shared classifier, so neither has its own rule for automation edits.
 ///
+/// A changed ride and its removal then rebuild alike too, and both hosts render the same bits
+/// through the carried cell's adoption jump and the release (#1648b).
+///
 /// Test value: red if either host acks a fader automation edit as `model_only` (an edit that is
 /// never heard), if the two hosts answer it differently, or if the browser's rebuild renders other
 /// bits than the C ABI's.
@@ -2794,6 +2797,18 @@ fn a_fader_automation_edit_rebuilds_alike_on_both_hosts() {
             end_sample: 960,
             start_value: 0.0,
             end_value: -6.0,
+            unit: session::ParameterUnit::Db,
+        },
+    );
+    let changed = entry(
+        "t1-fader-ride",
+        5,
+        session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: 9_600,
+            start_value: 0.0,
+            end_value: -18.0,
             unit: session::ParameterUnit::Db,
         },
     );
@@ -2840,6 +2855,32 @@ fn a_fader_automation_edit_rebuilds_alike_on_both_hosts() {
             "{rate} Hz: a mute entry is model-only"
         );
         same_blocks(&mut browser, &mut c_abi, 8..10, "after the mute entry");
+        // #1648b (gate 2's browser leg): a changed ride and a removed ride rebuild alike, and the
+        // carried cell's adoption jump and the release render the same bits on both hosts.
+        for (step, edit, blocks) in [
+            (3, changed.clone(), 10..18),
+            (
+                4,
+                SessionEdit::RemoveAutomation {
+                    automation_id: id("t1-fader-ride"),
+                },
+                18..26,
+            ),
+        ] {
+            let (b, b_reply) = browser.transaction_reply(std::slice::from_ref(&edit));
+            let (c, c_reply) = c_abi.transaction(std::slice::from_ref(&edit));
+            assert_eq!(b, c, "{rate} Hz: one verdict for edit {step}");
+            assert_eq!(b_reply, c_reply, "{rate} Hz: one reply for edit {step}");
+            assert_eq!(
+                b,
+                Verdict::Applied {
+                    path: EditPath::Rebuild,
+                    revision: model.revision + step
+                },
+                "{rate} Hz: edit {step} rebuilds"
+            );
+            same_blocks(&mut browser, &mut c_abi, blocks, "across the carried swap");
+        }
     }
 }
 

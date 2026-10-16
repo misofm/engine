@@ -8,7 +8,7 @@ use super::tests::{
     SESSION, add_muted_track, boxed_c_children_with_limits, command_bytes,
     command_bytes_at_revision, command_c, control_list_all_c, control_list_c, control_state_all_c,
     control_state_c, counter_telemetry_for, event_c, generated_parity_session, limits,
-    lossy_counter_snapshots, submit_c,
+    lossy_counter_snapshots, stateless_session, submit_c,
 };
 use super::*;
 use protocol::{ExpectedRevision, SessionEdit, SessionRevision};
@@ -8938,4 +8938,216 @@ fn a_successor_prepared_with_a_control_smoothing_edit_holds_the_new_lengths() {
         Some(written),
         "the successor's cell holds the committed lengths"
     );
+}
+
+/// #1648b: the fader ride of gates 2-4, on the first track's both lanes: linear from `0` dB at
+/// timeline 0 to `end_db` at 6,000, so it moves through every adoption block below.
+fn ride_entry(track: &StableId, end_db: f32) -> session::Automation {
+    session::Automation {
+        id: StableId::parse("fader-ride").expect("automation ID"),
+        target: session::ControlAddress {
+            owner: session::Owner::Strip(track.clone()),
+            section: session::Section::Builtins,
+            control: 5,
+            lane: session::ParameterChannel::Both,
+        },
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: 6_000,
+            start_value: 0.0,
+            end_value: end_db,
+            unit: session::ParameterUnit::Db,
+        }],
+        offset: session::AutomationOffset::default(),
+    }
+}
+
+/// #1648b: a stateless session (no effect, no input filter, so a fresh plan's strips render a
+/// playing plan's bits once their faders agree) with a long source and, when `end_db` is given,
+/// [`ride_entry`] on its first track.
+fn ride_document(end_db: Option<f32>) -> String {
+    let mut model = stateless_session(48_000);
+    model.sources[0].frames = SOURCE_FRAMES;
+    if let Some(end_db) = end_db {
+        let track = model.tracks[0].id.clone();
+        model.automation.push(ride_entry(&track, end_db));
+    }
+    session::canonical_session_json(&model).expect("canonical ride session")
+}
+
+/// #1648b: send `edits` on `rig`, which must answer `rebuild`, and render until render adopts the
+/// successor. The watermark then publishes the revision `EXACT` at the adoption block (#1314),
+/// and the source was never reseeked. Returns the adoption block's first sample `T` and the
+/// blocks rendered from it on, the adoption block first, `blocks` long.
+fn rebuild_and_adopt(rig: &mut Rig, edits: &[SessionEdit], blocks: usize) -> (u64, Vec<Vec<f32>>) {
+    let bytes = rig.transaction(edits);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+    let revision = rig.summary().0;
+    let mut rendered = Vec::new();
+    while rig.summary().3 != 0 {
+        rendered.push((rig.block, rig.step()));
+        assert!(rendered.len() < 16, "the candidate is adopted");
+    }
+    let (applied, first, flags, _) = watermark(rig);
+    assert_eq!(
+        (applied, flags),
+        (revision, crate::OUTCOME_EXACT),
+        "the revision completes exactly at adoption"
+    );
+    let adoption = first / rig.quantum as u64;
+    let mut from: Vec<Vec<f32>> = rendered
+        .into_iter()
+        .filter(|(block, _)| *block >= adoption)
+        .map(|(_, pcm)| pcm)
+        .collect();
+    assert!(!from.is_empty(), "the adoption block was rendered");
+    while from.len() < blocks {
+        from.push(rig.step());
+    }
+    let (result, report) = crate::ffi::test_source_seek_report(rig.session, SOURCE);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(report.generation, 1, "no source is reseeked");
+    (first, from)
+}
+
+/// #1648b: a fresh plan of `document`, session-seeked to timeline sample `timeline` (#1642) and
+/// fed the PCM from there: `blocks` blocks.
+fn seeked_reference(document: &str, timeline: u64, blocks: usize) -> Vec<Vec<f32>> {
+    let mut rig = Rig::new(document);
+    rig.generation = 2;
+    assert_eq!(
+        crate::ffi::test_session_seek(rig.session, 2, timeline, None),
+        crate::RESULT_OK
+    );
+    rig.fed = timeline;
+    (0..blocks).map(|_| rig.step()).collect()
+}
+
+/// One plane of `blocks`, sample by sample, as bits.
+fn plane_bits(blocks: &[Vec<f32>], plane: usize, quantum: usize) -> Vec<u32> {
+    blocks
+        .iter()
+        .flat_map(|block| block[plane * quantum..(plane + 1) * quantum].iter())
+        .map(|sample| sample.to_bits())
+        .collect()
+}
+
+/// #1648b blocks: blocks rendered from the adoption block in gates 2 and 4.
+const ADOPTED_BLOCKS: usize = 16;
+
+/// #1648 gate 2. A playing session with a linear fader ride on track 0 takes an
+/// `UpsertAutomation` that changes the ride: the path is `rebuild`, the watermark publishes the
+/// revision `EXACT` at the adoption block `T`, and no source is reseeked. The carried lane jumps
+/// to the new curve over the fader jump length `J` (960 samples, the default table at 48 kHz):
+/// it still differs from a fresh plan of the new session, session-seeked to `T` and fed the same
+/// PCM, in the jump's last block; and from the completion sample of the first grid ramp that
+/// starts after the jump ends (`T + J + 63`), every sample equals that reference.
+///
+/// Test value: red if the cell does not carry (the lane restarts with a `Set`), its cursor is not
+/// repositioned in the new table, or the adoption jump is missing or not `J` long.
+#[test]
+fn a_changed_fader_ride_rebuilds_and_carries_into_its_jump() {
+    let (old, new) = (ride_document(Some(-12.0)), ride_document(Some(-24.0)));
+    let mut rig = Rig::new(&old);
+    for _ in 0..4 {
+        rig.step();
+    }
+    let track = parse_session_json(&old).expect("model").tracks[0]
+        .id
+        .clone();
+    let edit = SessionEdit::UpsertAutomation {
+        automation: ride_entry(&track, -24.0),
+    };
+    let (adoption, live) = rebuild_and_adopt(&mut rig, &[edit], ADOPTED_BLOCKS);
+    assert_eq!(
+        rig.model().automation,
+        parse_session_json(&new).expect("new model").automation
+    );
+    let reference = seeked_reference(&new, adoption, ADOPTED_BLOCKS);
+    let jump = 960_usize;
+    let settled = jump + 63;
+    let quantum = rig.quantum;
+    for plane in 0..2 {
+        let (live, reference) = (
+            plane_bits(&live, plane, quantum),
+            plane_bits(&reference, plane, quantum),
+        );
+        assert_ne!(
+            live[jump - quantum..jump],
+            reference[jump - quantum..jump],
+            "plane {plane}: the lane is still in its adoption jump"
+        );
+        assert_eq!(
+            live[settled..],
+            reference[settled..],
+            "plane {plane}: the new curve's bits from the first grid ramp after the jump"
+        );
+    }
+}
+
+/// #1648 gate 3. A transaction that adds a muted track and keeps the ride rebuilds, and every
+/// block from the swap on is bit-identical to the uninterrupted render of the old session.
+///
+/// Test value: red if adoption emits a jump to an unchanged target, or the carried cell restarts
+/// or repositions (a moving curve's in-flight state would be dropped).
+#[test]
+fn an_unchanged_fader_ride_carries_with_no_jump() {
+    let document = ride_document(Some(-12.0));
+    let model = parse_session_json(&document).expect("model");
+    let mut rig = Rig::new(&document);
+    let mut uninterrupted = Rig::new(&document);
+    for _ in 0..4 {
+        assert_eq!(bits(&rig.step()), bits(&uninterrupted.step()), "warm-up");
+    }
+    let (adoption, live) = rebuild_and_adopt(&mut rig, &add_muted_track(&model, "added"), 12);
+    let mut reference = Vec::new();
+    while (uninterrupted.block as usize) * uninterrupted.quantum < adoption as usize {
+        uninterrupted.step();
+    }
+    for _ in 0..live.len() {
+        reference.push(uninterrupted.step());
+    }
+    for (index, (live, reference)) in live.iter().zip(&reference).enumerate() {
+        assert_eq!(bits(live), bits(reference), "block {index} from the swap");
+    }
+}
+
+/// #1648 gate 4. Removing the ride rebuilds; the released lane ramps from the curve's last target
+/// to its static value over the fader jump length, and from the end of that release every sample
+/// equals a fresh plan of the new session (a static fader), session-seeked to the adoption block.
+///
+/// Test value: red if a removed entry leaves the lane on its last automated value, or steps it.
+#[test]
+fn a_removed_fader_ride_releases_to_the_static_fader() {
+    let (old, new) = (ride_document(Some(-12.0)), ride_document(None));
+    let mut rig = Rig::new(&old);
+    for _ in 0..8 {
+        rig.step();
+    }
+    let edit = SessionEdit::RemoveAutomation {
+        automation_id: StableId::parse("fader-ride").expect("automation ID"),
+    };
+    let (adoption, live) = rebuild_and_adopt(&mut rig, &[edit], ADOPTED_BLOCKS);
+    let reference = seeked_reference(&new, adoption, ADOPTED_BLOCKS);
+    let jump = 960_usize;
+    let quantum = rig.quantum;
+    for plane in 0..2 {
+        let (live, reference) = (
+            plane_bits(&live, plane, quantum),
+            plane_bits(&reference, plane, quantum),
+        );
+        assert_ne!(
+            live[jump - quantum..jump - 1],
+            reference[jump - quantum..jump - 1],
+            "plane {plane}: the lane is still in its release"
+        );
+        assert_eq!(
+            live[jump - 1..],
+            reference[jump - 1..],
+            "plane {plane}: the static fader's bits from the release's last sample"
+        );
+    }
 }

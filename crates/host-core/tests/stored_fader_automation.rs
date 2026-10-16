@@ -1241,21 +1241,23 @@ fn the_scalar_oracle_renders_the_banks_fader_events() {
     }
 }
 
-/// #1647 D2 (departure 4): a lane a successor adds starts at its prepared value, the curve's
-/// first value, and its first block lands a `Set` when the curve at that block's node time
-/// differs. Track 1 gains a fader step from `0` to `-9` dB at timeline 300 in a successor swapped
-/// in at block 6 (render sample 768, no seek): from the swap block the output equals, bit for bit,
-/// the successor's session rendered fresh from sample 0, whose lane took the jump at 300 (over
-/// 240 samples) and holds `-9` dB.
+/// #1648 D2, "a cell gained" (superseding #1647b's restart `Set` for a lane whose stage
+/// carries): a lane a successor adds to stored fader automation on a carried stage is not set
+/// exactly; it jumps from the carried gain to its curve over the fader jump length. Track 1 gains a
+/// fader step from `0` to `-9` dB at timeline 300 in a successor swapped in at block 6 (render
+/// sample 768, no seek), with a 240-sample jump: the swap block differs from the successor's
+/// session rendered fresh from sample 0 (whose lane took its own jump at 300 and stands at `-9`
+/// dB), and from the block after the adoption jump completes every block equals it bit for bit.
 ///
-/// Test value: red if a restarted or added lane keeps its prepared value into the successor (it
-/// would glide from `0` dB on the first grid event instead of standing at the curve).
+/// Test value: red if the gained cell keeps its prepared value (`0` dB, the curve's first value)
+/// into the successor, or lands a `Set` instead of the adoption jump.
 #[cfg(feature = "test-support")]
 #[test]
-fn a_lane_a_successor_adds_starts_at_its_curve() {
-    use successor::{Feed, SWAP_BLOCK, Session, Successor, reference_run, swapped_run};
+fn a_lane_a_successor_adds_jumps_to_its_curve() {
+    use successor::{Feed, QUANTUM, SWAP_BLOCK, Session, Successor, reference_run, swapped_run};
     let mut base = plain(2, 128);
-    // A 240-sample jump: the fresh reference's ramp at 300 completes before the swap block.
+    // A 240-sample jump: the fresh reference's ramp at 300 completes before the swap block, and
+    // the adoption jump inside the swap block's successor.
     base.control_smoothing = smoothing(5.0);
     let mut ride = base.clone();
     ride.automation = vec![fader_entry(
@@ -1267,30 +1269,42 @@ fn a_lane_a_successor_adds_starts_at_its_curve() {
     let a = Session::compile(base);
     let b = Session::compile(ride);
     let feed = Feed::new("fixture-source", 7);
+    let settled = SWAP_BLOCK + 240_usize.div_ceil(QUANTUM);
+    assert!(settled < successor::BLOCKS);
     for backend in [
         #[cfg(target_feature = "avx2")]
         graph_compiler::Backend::Simd8,
         graph_compiler::Backend::Simd4,
     ] {
         let swapped = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
+        assert!(
+            swapped.restarted.is_empty(),
+            "{backend:?}: the stage carries"
+        );
         let reference = reference_run(&b, &[&feed], backend);
         let without = reference_run(&a, &[&feed], backend);
-        for (block, (swapped, reference)) in swapped.blocks[SWAP_BLOCK..]
-            .iter()
-            .zip(&reference[SWAP_BLOCK..])
-            .enumerate()
-        {
-            assert_eq!(
-                swapped.bits,
-                reference.bits,
-                "{backend:?}: block {}",
-                SWAP_BLOCK + block
-            );
-        }
-        assert_ne!(
-            reference[SWAP_BLOCK].bits, without[SWAP_BLOCK].bits,
-            "the ride is heard"
+        assert_eq!(
+            swapped.blocks[SWAP_BLOCK - 1].bits,
+            without[SWAP_BLOCK - 1].bits,
+            "{backend:?}: the predecessor"
         );
+        assert_ne!(
+            swapped.blocks[SWAP_BLOCK].bits, reference[SWAP_BLOCK].bits,
+            "{backend:?}: the swap block ramps, it is not set"
+        );
+        assert_ne!(
+            swapped.blocks[SWAP_BLOCK].bits, without[SWAP_BLOCK].bits,
+            "{backend:?}: the swap block moves toward the curve"
+        );
+        for (block, (swapped, reference)) in swapped
+            .blocks
+            .iter()
+            .zip(&reference)
+            .enumerate()
+            .skip(settled)
+        {
+            assert_eq!(swapped.bits, reference.bits, "{backend:?}: block {block}");
+        }
     }
 }
 

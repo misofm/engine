@@ -5150,7 +5150,13 @@ impl crate::runtime::Runtime {
             let Some(into) = builtin_processor_mut(chain, slot) else {
                 continue;
             };
-            let adopted = into.adopt_strip_lane(step.owner, lane, from, predecessor_lane);
+            let adopted = into.adopt_strip_lane(
+                step.owner,
+                lane,
+                from,
+                predecessor_lane,
+                step.continued_cells,
+            );
             debug_assert!(adopted, "a checked strip move is adopted");
         }
     }

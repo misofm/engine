@@ -488,9 +488,13 @@ pub fn rendered_automation_changed(current: &SessionModel, next: &SessionModel) 
 
 /// Whether two entries have the same `id`, `target` and `segments`, `f32` values by bits.
 fn same_curve(before: &Automation, after: &Automation) -> bool {
-    before.id == after.id
-        && before.target == after.target
-        && before.segments.len() == after.segments.len()
+    before.id == after.id && before.target == after.target && same_segments(before, after)
+}
+
+/// Whether two entries have the same `segments`, `f32` values by bits: the same table, whatever
+/// their `id`, `target` or offset.
+fn same_segments(before: &Automation, after: &Automation) -> bool {
+    before.segments.len() == after.segments.len()
         && before
             .segments
             .iter()
@@ -503,6 +507,30 @@ fn same_curve(before: &Automation, after: &Automation) -> bool {
                     && before.end_value.to_bits() == after.end_value.to_bits()
                     && before.unit == after.unit
             })
+}
+
+/// The lanes of strip `strip`'s fader (`[left, right]`) that both models automate with the same
+/// table (#1648 D2): the entry that drives the lane in `current` and the one that drives it in
+/// `next` ([`fader_automation`]) have the same segments, `f32` values by bits. A successor's strip
+/// join reads it: such a lane's cell continues its carried event state verbatim, and every other
+/// carried cell is repositioned in its own table at adoption.
+#[must_use]
+pub fn continued_fader_lanes(
+    current: &SessionModel,
+    next: &SessionModel,
+    strip: &StableId,
+) -> [bool; 2] {
+    if current.automation.is_empty() || next.automation.is_empty() {
+        return [false; 2];
+    }
+    let (before, after) = (
+        fader_automation(current, strip),
+        fader_automation(next, strip),
+    );
+    [0, 1].map(|lane| {
+        matches!((before[lane], after[lane]), (Some(before), Some(after))
+            if same_segments(before, after))
+    })
 }
 
 /// An entry's segments in the evaluator's type, in table order: the one conversion of a stored

@@ -4564,6 +4564,69 @@ impl<'a> EffectiveDiff<'a> {
         )
     }
 
+    /// The carry retargets of one strip's fader/mute stage at a successor's strip join (#1277 D5):
+    /// its [`Self::level_records`], plus the release of each lane whose stored fader automation
+    /// the change removes (#1648 D2, "a cell lost"). Such a lane's carried stage holds the curve's
+    /// last target, which no model holds, so the static values of the two models cannot show the
+    /// difference; a `FaderDb` of the lane's effective value in `next` moves it there over the
+    /// lane's fader length, as a live write does (the stage's live-write rule then holds the
+    /// batch 13b obligation: inside an unmute ramp the write retargets, while muted the stage
+    /// remembers it for the unmute). A released lane whose static value changed already has its
+    /// record. The live classifier never reaches a removal (#1648 D1 rebuilds it), so this is the
+    /// join's alone.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfDomain`] as [`fader_records`].
+    pub(crate) fn join_level_records(
+        &self,
+        before: usize,
+        after: usize,
+    ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
+        let mut records = self.level_records(before, after)?;
+        let change = self.change(before, after);
+        let automated_before = controls::automated_fader_lanes(self.rules.current, change.id);
+        if automated_before == [false; 2] {
+            return Ok(records);
+        }
+        let automated_after =
+            controls::automated_fader_lanes(self.rules.next.structure(), change.id);
+        let mut released = [0, 1].map(|lane| automated_before[lane] && !automated_after[lane]);
+        for record in records.iter().flatten() {
+            if let TrackFaderRecord::FaderDb { lanes, .. } = record {
+                let covered = match lanes {
+                    BuiltinLaneSelector::Left => [true, false],
+                    BuiltinLaneSelector::Right => [false, true],
+                    BuiltinLaneSelector::Both => [true, true],
+                };
+                for (released, covered) in released.iter_mut().zip(covered) {
+                    *released &= !covered;
+                }
+            }
+        }
+        if released == [false; 2] {
+            return Ok(records);
+        }
+        let lengths = self.rules.lengths(&change);
+        let db = self.after.strips[after].fader_db;
+        // The array holds at most one `FaderDb` and one `Mute` per lane, and a released lane has
+        // no `FaderDb` yet, so a free slot is always there.
+        let mut free = records.iter_mut().filter(|record| record.is_none());
+        for (lanes, lane) in lane_records(
+            released,
+            db[0].to_bits() == db[1].to_bits() && lengths.fader[0] == lengths.fader[1],
+        ) {
+            if let Some(slot) = free.next() {
+                *slot = Some(TrackFaderRecord::FaderDb {
+                    lanes,
+                    db: db[lane],
+                    smoothing_samples: lengths.fader[lane],
+                });
+            }
+        }
+        Ok(records)
+    }
+
     #[cfg(feature = "control-provider")]
     /// The effective gate of route `index`, per source lane, in `[current, next]`.
     pub(crate) fn gates(&self, index: usize) -> [[bool; 2]; 2] {
@@ -5067,6 +5130,10 @@ struct StripJoin<'a> {
     id: &'a str,
     fader: FamilyJoin<[Option<TrackFaderRecord>; 4]>,
     matrix: FamilyJoin<TrackControlRecord>,
+    /// The fader lanes whose stored automation table both models hold bit for bit (#1648 D2,
+    /// [`controls::continued_fader_lanes`]), bit 0 left and bit 1 right: the fader move's
+    /// [`graph::GraphStripMove::continued_cells`].
+    continued_cells: u8,
 }
 
 impl StripJoin<'_> {
@@ -5153,6 +5220,7 @@ fn join_strips<'a>(
                     id,
                     fader: FamilyJoin::Prepared,
                     matrix: FamilyJoin::Prepared,
+                    continued_cells: 0,
                 });
             }
             continue;
@@ -5163,7 +5231,7 @@ fn join_strips<'a>(
         // A retarget is the record of the same edit, so it carries the length that edit gave its
         // row (#1394 D6), else the session's.
         let edit = StripEditRamps::of(edit_ramps, strip.id);
-        let fader_records = diff.level_records(position, index);
+        let fader_records = diff.join_level_records(position, index);
         let matrix_record = matrix_record(before_matrix, strip.matrix_or_pan, ramps, edit);
         let fader_live = live && fader_records.is_ok();
         let matrix_live = live && matrix_record.is_ok();
@@ -5179,7 +5247,14 @@ fn join_strips<'a>(
             Ok(Some(_)) if !matrix_live => FamilyJoin::Prepared,
             Ok(Some(record)) => FamilyJoin::Live(record),
         };
-        joins.push(StripJoin { id, fader, matrix });
+        let continued = controls::continued_fader_lanes(committed, model, strip.id);
+        let continued_cells = u8::from(continued[0]) | (u8::from(continued[1]) << 1);
+        joins.push(StripJoin {
+            id,
+            fader,
+            matrix,
+            continued_cells,
+        });
     }
     joins
 }
@@ -5449,6 +5524,11 @@ fn resolve_strip_carry<'a>(
                     owner,
                     successor: own.location,
                     predecessor: before.location,
+                    continued_cells: if owner == Fader {
+                        join.continued_cells
+                    } else {
+                        0
+                    },
                 });
             }
         }
