@@ -219,3 +219,84 @@ Checked against `35ac17545`.
   (the new row is index 20). No other crate matches on `SourceSeekError`.
 - **No `crates/engine/src/realtime/` edit.** The SPSC and seqlock types are used as they are.
 - **Decision 17.** No change. C13 (ruling 2026-10-15) calls seeks and the seek report transport.
+
+## Decision record: #1640 (batch 16)
+
+Built on `eab696d09` (worktree `codex/controls-batch-16a`).
+
+**What shipped** (`crates/source/src/lib.rs`):
+
+- **D1.** `SeekState` (owns `active_generation` and `held_seek`) with one `observe(command,
+  clock)` over all three `SeekClock` cases, plus the shared reads `holds_anchor_before`,
+  `holds_generation` and `is_unobserved`. The PCM consumer calls `observe` at both of its points
+  (`begin_block_observe` and the acquire's re-observe, both through
+  `observe_seek_at_block_boundary`) and runs only source work on the result: the stale pending
+  block discard on a newly held seek, and `apply_seek`. `prime_ready`, `settle_block` and
+  `is_unobserved_generation` read the held seek through the shared methods, so B16-R3's readiness
+  rule exists once for #1641. `SeekProducer` (command producer, generation, quantum, optional frame
+  limit) has `check_seek` and `try_seek`. `PcmSourceProducer::try_seek` is the shared `try_seek`
+  plus its PCM-only work (`next_write_frame`, `end_of_region_submitted`).
+  `PcmSourceProducer::check_seek` and `HostChunkProvider::check_seek` forward to the shared check.
+- **D2-D3.** `TimelineConsumer` (`begin_block_at`, `timeline_at`, `timeline_block`,
+  `copy_history_from`, `position`, `active_generation`, `history_capacity`), with history entries
+  `(u64, u64)` in a fixed `K`-entry ring. `SourceTimeline::prepare(quantum, K)` builds it at
+  generation 1, position 0. `TimelineSpan { start, step: Option<TimelineStep { offset, timeline }> }`.
+- **D4.** `TimelineProducer` (`try_seek`, `check_seek`, `active_generation`),
+  `TIMELINE_SAMPLE_LIMIT = 1 << 53`, `SourceSeekError::FrameOutOfRange`.
+- **D5.** `TimelineResourceReport`: `history_blocks`, `command_queue_bytes` (the ring formula),
+  `history_bytes` (`16·K`), `consumer_bytes` (`size_of::<TimelineConsumer>()`), `overhead_bytes`
+  (the sum of the three), `largest_allocation_bytes`. No seek-report row (B16-R4).
+- **Host-core.** The `FrameOutOfRange` arm, `source.seek.frame_out_of_range`, and its row 20 in
+  `crates/host-core/tests/source_diagnostics.rs`.
+
+**Choices the text left open:**
+
+- `check_seek` reports a full slot as `Backpressure` with the current `full_count`, through
+  `available_capacity`. It does not count a refusal. `try_seek` still gets backpressure from its own
+  push, so the PCM producer's full count moves exactly as before.
+- The frame limit applies to the timeline only (`frame_limit: None` for a PCM source). The rule is
+  written once in the shared check.
+- A seek in the history's oldest entry is still a step: the consumer keeps one `u64`,
+  `oldest_expected_timeline`, which is the evicted entry's timeline plus `q`, or the starting
+  position. `copy_history_from` carries it.
+- `timeline_at` with no entry treats the position as standing at source-read sample 0. A sample in
+  a gap or after the newest entry extrapolates forward from the newest entry that starts at or
+  before it. A step is reported only when its entry is the one that resolves its own first sample
+  (newest first), so the step and `timeline_at` always agree.
+- `timeline_block(first, frames)` takes the node block's length as `frames`.
+
+**Departures:**
+
+- Gate 2 "unchanged": the assertions are unchanged. Two of the four named tests and six others
+  read the moved fields, so they now read `consumer.seek.active_generation` and
+  `consumer.seek.held_seek` (a path rewrite only). `crates/source/tests/seek_schedule_model.rs` is
+  textually unchanged. `crates/source/tests/randomized.rs` gains one `unreachable!` arm for the new
+  variant (exhaustive match).
+- `tools/realtime-policy/src/policy.rs`: `marked_regions_floor` 151 -> 153, for the two new regions
+  (mechanical, outside the authorized paths).
+
+**For #1641:** `consumer_bytes` is the inline value. If #1641 stores the consumer inside an
+allocation it already counts (the driver), it must not charge that row twice.
+
+**Gates:**
+
+- Gate 1, `cargo test --locked -p source`, `tests::timeline::*` (11 new):
+  `a_fresh_timeline_starts_at_zero_and_advances_a_quantum_every_block`,
+  `a_plain_seek_reads_its_frame_at_the_next_blocks_first_sample`,
+  `an_anchored_seek_is_held_until_its_anchor_and_applies_with_its_lateness`,
+  `a_newer_seek_plain_or_anchored_replaces_a_held_one`,
+  `the_producer_refuses_without_changing_anything`,
+  `the_history_reads_both_sides_of_a_seek_and_extrapolates_below_its_oldest_entry`,
+  `a_node_block_reports_the_step_of_a_seek_inside_it_or_at_its_first_sample`,
+  `a_seek_in_the_oldest_entry_is_still_a_step`,
+  `copying_a_history_keeps_its_newest_entries_in_order`,
+  `the_resource_report_states_each_row` and
+  `a_source_check_seek_agrees_with_its_try_seek_and_pushes_nothing`. PASS.
+- Gate 2: all 68 lib tests (the four named seek tests among them), `seek_schedule_model`,
+  `randomized` and `prime`. PASS.
+- Gate 3: no render arithmetic changed. The source tests, plus host-core `successor_swap` (14)
+  and `prepare` (139), PASS.
+- Commands, all PASS: `realtime_policy` (153 regions in 33 files), `check-cross-targets.sh`,
+  `check-workspace-policy.sh`, `cargo test -p realtime-policy`, `source_diagnostics` (2),
+  clippy `-p source -p host-core --all-targets --all-features -D warnings`, and
+  `cargo fmt --all -- --check`. The workspace-wide clippy was not run (worker rules).

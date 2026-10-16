@@ -108,6 +108,7 @@ impl SourceControlError {
             Self::Vacated => "source.ring.vacated",
             Self::Seek(SourceSeekError::AnchorUnaligned) => "source.seek.anchor_unaligned",
             Self::ReportBusy => "source.report.busy",
+            Self::Seek(SourceSeekError::FrameOutOfRange) => "source.seek.frame_out_of_range",
         }
     }
 
