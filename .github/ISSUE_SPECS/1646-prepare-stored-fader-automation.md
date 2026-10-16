@@ -582,3 +582,44 @@ grows by 16 bytes per fader bank, a fixed structural change inside every ceiling
   fader owner's new `automation` field. Gate 6 landed with #1646a. `S` in
   `vca_reach_counts_a_diamond_once_and_includes_nested_parents_in_id_order`
   (`crates/controls/tests/composition.rs`) now also pins `offsets_sum`, `+0.0` by bits.
+
+## U1 fold (batch 17)
+
+Folds the U1 review of #1646b.
+
+- **D2, canonical environment (MAJOR 1).** The builtins preparation body
+  (`prepare_session_builtins_with_live_controls_and_policy`) holds `lane::CanonicalFpEnv` for its
+  whole run, and both lowerings (`into_graph_artifact_with_banks`, the oracle's
+  `into_graph_artifact`) hold their own, so every strip's fader gain and input coefficients,
+  automated or static, are baked in the canonical environment. host-core's
+  `prepare_host_runtime_with_live_controls_policy_and_spectrum` computes `controls::effective` (the static VCA composition) inside
+  the guard too, so a flat automated lane and a static fader compose and convert alike by
+  construction. An automated lane's composed dB is computed once in `prepare_fader_automation`,
+  stored on its `PreparedFaderCell` and read by `FaderAutomationPlan::fader_db`; the discarded
+  `black_box` conversion is gone. Its domain check stays as a defensive typed refusal.
+  Gate: `canonical_preparation::a_hostile_caller_environment_prepares_the_canonical_faders`
+  (`crates/host-core/tests/stored_fader_automation.rs`, x86-64 and AArch64): a caller word with
+  FTZ, DAZ and round-toward-zero prepares the plan a canonical thread prepares, bit for bit over 16
+  blocks; the fixture asserts its own conversions and one VCA composition round differently under
+  that word. Red, checked once, with any one of the three guards removed (body, bank lowering,
+  host-core effective).
+- **`host.automation.fader` is defensive (MINOR 3, follow-up of departure 2).** A validated
+  session reaches none of its causes: the validator refuses an empty segment list, a `start_value`
+  outside the fader domain (`vca_compose_db` then clamps), and every segment the builder refuses.
+  Only `TooLarge` and `Allocation` (at `$.automation`) can reach a validated session. The code
+  comments say so; no test reaches the per-entry refusal, because no validated session can. The
+  host diagnostics are not listed in `docs/SESSION_SCHEMA_V1.md`, so no doc row is added.
+- **Scalar oracle charge (MINOR 1, R17-4).** Gate:
+  `tests::the_scalar_owner_row_charges_one_automated_fader_lane` (`crates/builtins-compiler`):
+  at `Backend::Scalar` the owner row grows by `size_of::<LaneFaderAutomation>()` plus one offsets
+  cell plus the program (overhead and report), once.
+- **Gate 2 cross-check (MINOR 2).** `a_fader_automation_is_charged_to_the_graph_plan_rows_and_the_cap`
+  now also measures the heap with `bench_support::alloc`'s thread-scoped counters: the automated
+  prepared host holds exactly the charge (1,212 bytes on x86-64 AVX2) more than the plain one.
+- **Departure (NIT 1).** `FaderBankProcessor::automation` is a `Box<[Option<LaneFaderAutomation>]>`
+  on every fader bank: `size_of` 16 bytes (x86-64), so `builtin_bank_bytes` grows by 16 per fader
+  bank for every session, with or without automation. Kept: an empty boxed slice does not allocate,
+  and one owner shape for every bank keeps the carry (#1648) and the render path (#1647) without a
+  second type.
+- `./target/release/audit capi`: `pcm_digest` `bffc21e857b5e134` (unchanged), 0 violations, 0
+  allocations.

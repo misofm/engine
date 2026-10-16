@@ -2753,7 +2753,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     };
     // Decision 17, C7: every effective value is computed once per preparation, here, under the
     // overlay the successor renders with (#1559 D9); a first plan has no solo.
-    let effective = controls::effective(compiled.normalized_model(), overlay);
+    // #1646 D2: composed in the canonical floating-point environment, as the builtins
+    // preparation composes an automated lane, so a flat automated lane and a static fader round
+    // alike whatever the caller's thread has set.
+    let effective = {
+        let _canonical = lane::CanonicalFpEnv::enter();
+        controls::effective(compiled.normalized_model(), overlay)
+    };
     let builtins = if selected_meters.is_some() {
         // #1401 D2: a selected-meter request follows the caller's delivery contract, like every
         // other request. The serialized form keeps its fused fader and matrix banks.

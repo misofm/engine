@@ -701,6 +701,10 @@ struct PreparedFaderCell {
     /// The prepared curve value: the entry's first `start_value`, the curve at node time `-a(n)`
     /// for every `a(n)` (D2, the hold rule).
     value: f32,
+    /// The lane's prepared fader dB, `vca_compose_db(value, S)`, composed once inside
+    /// [`lane::fpenv::CanonicalFpEnv`] (D2). It is the lane's prepared fader parameter, so the
+    /// lowering bakes it through the same `checked_fader_gain` path a static fader takes.
+    fader_db: f32,
     /// `S` (`controls::EffectiveStrip::offsets_sum`).
     offsets_sum: f64,
     /// The offsets cell's ramp word.
@@ -723,17 +727,13 @@ impl FaderAutomationPlan {
         self.strips.get(track)
     }
 
-    /// The prepared dB of each lane of strip `track`: `vca_compose_db(value, S)` on an automated
-    /// lane (D2), `effective` elsewhere.
+    /// The prepared dB of each lane of strip `track`: the cell's composed `fader_db` on an
+    /// automated lane (D2), `effective` elsewhere.
     fn fader_db(&self, track: &str, effective: [f32; 2]) -> [f32; 2] {
         let Some(cells) = self.strip(track) else {
             return effective;
         };
-        [0, 1].map(|lane| {
-            cells[lane].map_or(effective[lane], |cell| {
-                session::vca_compose_db(cell.value, cell.offsets_sum)
-            })
-        })
+        [0, 1].map(|lane| cells[lane].map_or(effective[lane], |cell| cell.fader_db))
     }
 
     /// The bytes the program retains: its shared allocation and the builder's report.
@@ -789,14 +789,19 @@ pub fn fader_automation_sizes() -> FaderAutomationSizes {
 /// a session without fader automation prepares exactly as before.
 ///
 /// Each lane's prepared value is its entry's first `start_value` and its `S` the strip's
-/// [`controls::EffectiveStrip::offsets_sum`]; the composition `vca_compose_db(value, S)` and its
-/// gain conversion run inside [`lane::fpenv::CanonicalFpEnv`], as render's do (D2).
+/// [`controls::EffectiveStrip::offsets_sum`]; the composition `vca_compose_db(value, S)` runs
+/// here, and its gain is baked by the lowering, both inside the [`lane::fpenv::CanonicalFpEnv`]
+/// the caller holds, as render's are (D2).
 ///
 /// # Errors
 ///
-/// `host.automation.fader` at the entry when a lane's composed value has no fader gain or the
-/// program builder refuses its cell (a segment end at or past `2^53` samples), and at
-/// `$.automation` when the program does not fit.
+/// `host.automation.fader` at the entry when the entry has no segment, a lane's composed value
+/// has no fader gain or the program builder refuses its cell, and at `$.automation` when the
+/// program does not fit or cannot be allocated. The refusals at an entry are defensive: the
+/// session validator refuses an empty segment list, a `start_value` outside the fader domain
+/// (`vca_compose_db` then clamps), and every segment the builder would refuse (a time at or past
+/// `2^53` samples, an order or spacing fault) before preparation, so a validated session reaches
+/// none of them. They stay typed refusals so a broken invariant never panics in preparation.
 fn prepare_fader_automation(
     session: &CompiledSession,
     effective: &controls::Effective,
@@ -828,19 +833,23 @@ fn prepare_fader_automation(
         for (lane, entry) in entries.into_iter().enumerate() {
             let Some(entry) = entry else { continue };
             let segments = controls::stored_segments(entry);
+            // Defensive: the session validator refuses an entry with no segment.
             let value = segments.first().ok_or_else(|| refuse(entry))?.start_value;
             let offsets_sum = values.offsets_sum[lane];
-            {
-                let _canonical = lane::fpenv::CanonicalFpEnv::enter();
-                let composed = session::vca_compose_db(core::hint::black_box(value), offsets_sum);
-                core::hint::black_box(builtins::checked_fader_gain(composed))
-                    .map_err(|_| refuse(entry))?;
-            }
+            // The caller's body holds `CanonicalFpEnv` across this composition and the lowering
+            // that bakes its gain (D2).
+            let fader_db = session::vca_compose_db(value, offsets_sum);
+            // Defensive: the session validator bounds every `start_value` to the fader domain
+            // (#1645) and `vca_compose_db` clamps to it, so a validated session never fails this
+            // domain check. It refuses with a typed diagnostic rather than reach the lowering's
+            // `expect("preflighted parameters")`.
+            builtins::checked_fader_gain(fader_db).map_err(|_| refuse(entry))?;
             let cell = u32::try_from(tables.len())
                 .map_err(|_| diag("host.automation.fader", "$.automation"))?;
             cells[lane] = Some(PreparedFaderCell {
                 cell,
                 value,
+                fader_db,
                 offsets_sum,
                 offsets_ramp: ramp,
             });
@@ -853,6 +862,9 @@ fn prepare_fader_automation(
         .map(|(_, segments)| controls::FADER_CELL_RULE.describe(segments))
         .collect();
     let program_bytes = automation::ProgramBuilder::bytes(&descriptions);
+    // A refusal at a cell is defensive: the session validator refuses every segment the builder
+    // refuses (#1646b departure 2, batch 17 follow-up), so only `TooLarge` and `Allocation`, the
+    // program's own size and memory, can reach a validated session.
     let program = automation::ProgramBuilder::build(&descriptions).map_err(|error| {
         let cell = match error {
             automation::BuildError::NoSegments { cell }
@@ -3737,6 +3749,8 @@ impl PreparedBuiltinsSession {
         graph: PreparedGraphPlan,
         report: R,
     ) -> PreparedBuiltinsGraphArtifact<R> {
+        // #1646 D2: the scalar oracle rebuilds the ramped fader from the prepared parameters here.
+        let _canonical = lane::CanonicalFpEnv::enter();
         let mut processors = core::mem::take(&mut self.processors);
         processors.append(&mut self.strip_bindings());
         PreparedBuiltinsGraphArtifact {
@@ -4130,6 +4144,9 @@ impl PreparedBuiltinsSession {
         levels: &[DependencyLevel],
         classes: &SessionPoolClasses,
     ) -> PreparedBuiltinsGraphArtifact<R> {
+        // #1646 D2: the banks bake each lane's prepared fader gain and input coefficients here, so
+        // lowering runs in the canonical floating-point environment, as preparation does.
+        let _canonical = lane::CanonicalFpEnv::enter();
         let Some(width) = BankWidth::for_backend(dispatch) else {
             #[cfg(any(test, feature = "test-support"))]
             return self.into_graph_artifact(graph, report);
@@ -5040,6 +5057,13 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     caps: BuiltinCompileCaps,
     control_delivery: BuiltinControlDelivery,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
+    // #1646 D2: every curve evaluation and conversion of preparation runs in the canonical
+    // floating-point environment, as render's do. The whole body is held so a strip's prepared
+    // fader (automated or static) and its input coefficients are computed under one environment,
+    // whatever the caller's thread has set: a flat automated lane bakes the bits a static fader
+    // bakes by construction. The lowerings hold their own (`into_graph_artifact_with_banks`,
+    // `into_graph_artifact`).
+    let _canonical = lane::CanonicalFpEnv::enter();
     let mut diagnostics = Vec::new();
     if [
         caps.maximum_total_state_bytes,
@@ -13550,6 +13574,91 @@ mod tests {
             graph::GraphScalarOwnerResourceEstimate::default(),
             "planned banks consume both controlled post-fader and post-matrix owners"
         );
+    }
+
+    /// #1646 D4 (R17-4): the scalar oracle's owner row charges one automated fader lane exactly:
+    /// the boxed `LaneFaderAutomation` its strip's fader owner holds, one offsets cell, and the
+    /// program once (its shared allocation and the builder's byte report).
+    ///
+    /// Test value: red if the scalar owner row drops or double-counts any term of the stored
+    /// fader automation (the boxed slot, the offsets cell or the program), which no vector-bank
+    /// test sees because a vector dispatch leaves no scalar owner.
+    #[test]
+    fn the_scalar_owner_row_charges_one_automated_fader_lane() {
+        let plain = n_track_session(3);
+        let mut model = plain.normalized_model().clone();
+        let entry = session::Automation {
+            id: session::StableId::parse("fader-t01").expect("id"),
+            target: session::ControlAddress {
+                owner: session::Owner::Strip(
+                    session::StableId::parse(&track_name(1)).expect("track"),
+                ),
+                section: session::Section::Builtins,
+                control: 5,
+                lane: session::ParameterChannel::Left,
+            },
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 4_096,
+                start_value: -6.5,
+                end_value: -2.0,
+                unit: session::ParameterUnit::Db,
+            }],
+            offset: session::AutomationOffset::default(),
+        };
+        let segments = controls::stored_segments(&entry);
+        model.automation = vec![entry];
+        let automated = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("the automated session compiles");
+        let controls = (0..3)
+            .map(|index| TrackControlRequest {
+                track_id: track_name(index),
+                superseded: LiveValuesSuperseded::default(),
+                input_lane: false,
+            })
+            .collect::<Vec<_>>();
+        let (_, levels) = track_graph(3);
+        let scalar = |compiled: &CompiledSession| {
+            let classes = SessionPoolClasses::from_session(compiled);
+            prepare_session_builtins_between_render_calls(
+                compiled,
+                &effective_of(compiled),
+                &[],
+                &controls,
+                caps(),
+            )
+            .expect("scalar owners")
+            .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
+            .expect("checked scalar estimate")
+        };
+        let without = scalar(&plain);
+        let with = scalar(&automated);
+        let sizes = fader_automation_sizes();
+        let program =
+            automation::ProgramBuilder::bytes(&[controls::FADER_CELL_RULE.describe(&segments)]);
+        assert!(program > 0, "the program holds the segment");
+        let slot = core::mem::size_of::<LaneFaderAutomation>() as u64;
+        assert_eq!(
+            with.total_bytes - without.total_bytes,
+            slot + sizes.offsets_cell_bytes + sizes.program_overhead_bytes + program,
+            "one boxed slot, one offsets cell and the program, once"
+        );
+        assert_eq!(
+            with.split_pair_table_bytes, without.split_pair_table_bytes,
+            "the automation adds no split table entry"
+        );
+        assert!(with.largest_allocation_bytes >= slot.max(sizes.offsets_cell_bytes).max(program));
     }
 
     struct HarnessSink;
