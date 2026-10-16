@@ -403,6 +403,9 @@ pub enum SourceSeekError {
     /// A [`SourceCommand::SeekAt`] anchor that is not a multiple of the render quantum: no block
     /// starts there.
     AnchorUnaligned,
+    /// A timeline seek to a sample above [`TIMELINE_SAMPLE_LIMIT`] (#1640 D4): past it a
+    /// timeline value would stop being an exact `i64` for every reader.
+    FrameOutOfRange,
 }
 
 /// Failure to copy one prepared source quantum into caller-owned source planes.
@@ -695,7 +698,7 @@ impl PcmSourceRing {
             channel_count: config.channel_count,
             quantum_frames: config.quantum_frames.0,
             transfer_block_count: shape.transfer_block_count.get(),
-            active_generation: config.initial_generation,
+            seek: SeekState::new(config.initial_generation),
             next_frame: initial_frame,
             end_frame: None,
             end_of_region: false,
@@ -712,7 +715,6 @@ impl PcmSourceRing {
             held_blocks: 0,
             native_decoder_sanitized_samples: 0,
             generation_changed: false,
-            held_seek: None,
             begun_block: false,
             seek_report: seek_report_writer,
             published_seek_report: SourceSeekReport::default(),
@@ -732,11 +734,15 @@ impl PcmSourceRing {
             PcmSourceProducer {
                 data_producer,
                 recycle_consumer,
-                command_producer,
+                seek: SeekProducer {
+                    command_producer,
+                    active_generation: config.initial_generation,
+                    quantum_frames: config.quantum_frames.0,
+                    frame_limit: None,
+                },
                 shape: consumer.shape,
                 channel_count: config.channel_count,
                 quantum_frames: config.quantum_frames.0,
-                active_generation: config.initial_generation,
                 next_write_frame: initial_frame,
                 end_of_region_submitted: false,
                 cumulative_written_frames: 0,
@@ -819,11 +825,12 @@ impl PreparedShape {
 pub struct PcmSourceProducer {
     data_producer: Producer<Box<TransferBlock>>,
     recycle_consumer: Consumer<Box<TransferBlock>>,
-    command_producer: Producer<SourceCommand>,
+    /// The command producer and the generation in effect: the seek producer every
+    /// source-transport producer shares (#1640 D1).
+    seek: SeekProducer,
     shape: PcmSourceShape,
     channel_count: u32,
     quantum_frames: u32,
-    active_generation: SourceGeneration,
     next_write_frame: SourceFrame,
     end_of_region_submitted: bool,
     cumulative_written_frames: u64,
@@ -886,37 +893,20 @@ impl PcmSourceProducer {
     /// Either command switches this producer to the new generation at once, so the host submits
     /// that generation's PCM from `frame` straight away.
     pub fn try_seek(&mut self, command: SourceCommand) -> Result<(), SourceSeekError> {
-        let (generation, frame, anchor_sample) = match command {
-            SourceCommand::Seek { generation, frame } => (generation, frame, None),
-            SourceCommand::SeekAt {
-                generation,
-                frame,
-                anchor_sample,
-            } => (generation, frame, Some(anchor_sample)),
-        };
-        if !generation.is_valid() {
-            return Err(SourceSeekError::GenerationZero);
-        }
-        if generation <= self.active_generation {
-            return Err(SourceSeekError::GenerationNotStrictlyIncreasing {
-                active: self.active_generation,
-                requested: generation,
-            });
-        }
-        if anchor_sample
-            .is_some_and(|anchor| !anchor.is_multiple_of(u64::from(self.quantum_frames)))
-        {
-            return Err(SourceSeekError::AnchorUnaligned);
-        }
-        match self.command_producer.try_push(command) {
-            Ok(()) => {
-                self.active_generation = generation;
-                self.next_write_frame = frame;
-                self.end_of_region_submitted = false;
-                Ok(())
-            }
-            Err(QueueFull { full_count, .. }) => Err(SourceSeekError::Backpressure { full_count }),
-        }
+        self.seek.try_seek(command)?;
+        let (SourceCommand::Seek { frame, .. } | SourceCommand::SeekAt { frame, .. }) = command;
+        self.next_write_frame = frame;
+        self.end_of_region_submitted = false;
+        Ok(())
+    }
+
+    /// Whether [`Self::try_seek`] would accept `command` now, pushing nothing and changing
+    /// nothing: every rule of [`Self::try_seek`], with a full command slot reported as the
+    /// backpressure its push would return (#1640 D1). An all-or-nothing caller checks every
+    /// producer before it pushes to any. Only this producer pushes to its slot and the consumer
+    /// only empties it, so an accepted check stays accepted until this producer pushes.
+    pub fn check_seek(&self, command: SourceCommand) -> Result<(), SourceSeekError> {
+        self.seek.check_seek(command)
     }
 
     /// The ring's seek report as render last published it (#1316 D2): bounded retries, then
@@ -938,7 +928,7 @@ impl PcmSourceProducer {
     #[must_use]
     pub fn telemetry(&self) -> SourceProducerTelemetry {
         SourceProducerTelemetry {
-            active_generation: self.active_generation,
+            active_generation: self.seek.active_generation,
             cumulative_written_frames: self.cumulative_written_frames,
             data_full_count: self.data_producer.full_count(),
             recycle_empty_count: self.recycle_consumer.empty_count(),
@@ -1004,7 +994,7 @@ impl PcmSourceProducer {
                 Ok(SubmitReport {
                     accepted_frames: frames,
                     cumulative_written_frames: self.cumulative_written_frames,
-                    active_generation: self.active_generation,
+                    active_generation: self.seek.active_generation,
                 })
             }
             Err(QueueFull {
@@ -1038,6 +1028,11 @@ impl HostChunkProvider {
     /// Submit a bounded generation-tagged seek request.
     pub fn try_seek(&mut self, command: SourceCommand) -> Result<(), SourceSeekError> {
         self.producer.try_seek(command)
+    }
+
+    /// Check a seek request without pushing it; see [`PcmSourceProducer::check_seek`].
+    pub fn check_seek(&self, command: SourceCommand) -> Result<(), SourceSeekError> {
+        self.producer.check_seek(command)
     }
 
     /// Copy producer telemetry outside render.
@@ -1090,9 +1085,9 @@ fn validate_submission_metadata(
     end_of_region: bool,
     channel_count: u32,
 ) -> Result<(), HostChunkError> {
-    if generation != producer.active_generation {
+    if generation != producer.seek.active_generation {
         return Err(HostChunkError::StaleGeneration {
-            active: producer.active_generation,
+            active: producer.seek.active_generation,
             submitted: generation,
         });
     }
@@ -1159,7 +1154,9 @@ pub struct PcmSourceConsumer {
     channel_count: u32,
     quantum_frames: u32,
     transfer_block_count: usize,
-    active_generation: SourceGeneration,
+    /// The generation in effect and the held anchored seek: the seek state every source-transport
+    /// consumer shares (#1640 D1).
+    seek: SeekState,
     next_frame: SourceFrame,
     end_frame: Option<SourceFrame>,
     end_of_region: bool,
@@ -1177,8 +1174,6 @@ pub struct PcmSourceConsumer {
     held_blocks: u64,
     native_decoder_sanitized_samples: u64,
     generation_changed: bool,
-    /// An observed [`SourceCommand::SeekAt`] whose anchor block has not begun yet (issue #1274).
-    held_seek: Option<HeldSeek>,
     /// Whether any block has begun on this consumer (#1344 D5): render-owned, set at block entry
     /// and never cleared.
     begun_block: bool,
@@ -1219,6 +1214,235 @@ enum SeekClock {
     Hold,
 }
 
+/// The seek state machine every source-transport consumer shares (#1640 D1): the
+/// [`PcmSourceConsumer`] and the [`TimelineConsumer`] each own one, so no seek rule is written
+/// twice. It owns the generation in effect and the held anchored seek; [`Self::observe`] takes one
+/// popped command against a [`SeekClock`] and says what to do now. Render-owned, `Copy`, with no
+/// allocation.
+#[derive(Clone, Copy, Debug)]
+struct SeekState {
+    /// The generation in effect.
+    active_generation: SourceGeneration,
+    /// An observed [`SourceCommand::SeekAt`] whose anchor block has not begun yet (issue #1274).
+    held_seek: Option<HeldSeek>,
+}
+
+/// What one [`SeekState::observe`] decided.
+#[derive(Clone, Copy, Debug)]
+struct SeekObservation {
+    /// An anchored seek this observation started to hold, replacing any held before it.
+    newly_held: Option<NewlyHeldSeek>,
+    /// The seek to apply in this block, lateness included. The seek state has already made its
+    /// generation the one in effect.
+    apply: Option<AppliedSeek>,
+}
+
+/// An anchored seek [`SeekState::observe`] started to hold.
+#[derive(Clone, Copy, Debug)]
+struct NewlyHeldSeek {
+    /// The generation in effect when the command was popped, before any seek of this observation
+    /// applied.
+    active: SourceGeneration,
+    /// The held seek's generation.
+    generation: SourceGeneration,
+}
+
+/// A seek to apply now: its generation and the frame the block starts at.
+#[derive(Clone, Copy, Debug)]
+struct AppliedSeek {
+    generation: SourceGeneration,
+    frame: SourceFrame,
+}
+
+impl SeekState {
+    const fn new(initial_generation: SourceGeneration) -> Self {
+        Self {
+            active_generation: initial_generation,
+            held_seek: None,
+        }
+    }
+    // REALTIME_POLICY_BEGIN
+    /// Observe one popped command (or none) at a block boundary, then apply a held anchored seek
+    /// whose block has come. A plain seek clears any held seek and applies at once; an anchored
+    /// seek replaces the held one; a held seek applies in the first block whose
+    /// [`SeekClock::At`] sample is at or past its anchor, at `frame + lateness` (saturating), at
+    /// once on [`SeekClock::Now`], and never on [`SeekClock::Hold`]. Allocation-free and
+    /// wait-free.
+    fn observe(&mut self, command: Option<SourceCommand>, clock: SeekClock) -> SeekObservation {
+        let mut newly_held = None;
+        match command {
+            Some(SourceCommand::Seek { generation, frame }) => {
+                self.held_seek = None;
+                self.active_generation = generation;
+                return SeekObservation {
+                    newly_held,
+                    apply: Some(AppliedSeek { generation, frame }),
+                };
+            }
+            Some(SourceCommand::SeekAt {
+                generation,
+                frame,
+                anchor_sample,
+            }) => {
+                newly_held = Some(NewlyHeldSeek {
+                    active: self.active_generation,
+                    generation,
+                });
+                self.held_seek = Some(HeldSeek {
+                    generation,
+                    frame,
+                    anchor_sample,
+                });
+            }
+            None => {}
+        }
+        let unapplied = SeekObservation {
+            newly_held,
+            apply: None,
+        };
+        let Some(held) = self.held_seek else {
+            return unapplied;
+        };
+        let late_by = match clock {
+            SeekClock::Now => 0,
+            SeekClock::At { source_read_sample } if source_read_sample >= held.anchor_sample => {
+                source_read_sample - held.anchor_sample
+            }
+            SeekClock::At { .. } | SeekClock::Hold => return unapplied,
+        };
+        self.held_seek = None;
+        self.active_generation = held.generation;
+        SeekObservation {
+            newly_held,
+            apply: Some(AppliedSeek {
+                generation: held.generation,
+                frame: SourceFrame(held.frame.0.saturating_add(late_by)),
+            }),
+        }
+    }
+
+    /// Whether a held anchored seek is anchored before `sample`: it would apply in a block that
+    /// starts before `sample`, a late one included.
+    fn holds_anchor_before(&self, sample: u64) -> bool {
+        self.held_seek
+            .is_some_and(|held| held.anchor_sample < sample)
+    }
+
+    /// The seek half of a prime's readiness, which every source-transport consumer shares
+    /// (#1320 D3, #1641 D5): no command is queued (`queued` is the command queue's count at entry)
+    /// and no held anchored seek is anchored before the end of the window of `lead_blocks + 1`
+    /// blocks of `quantum_frames` from `first_sample`. An overflowing window is not clear.
+    fn prime_window_clear(
+        &self,
+        queued: usize,
+        quantum_frames: u32,
+        first_sample: u64,
+        lead_blocks: u32,
+    ) -> bool {
+        if queued != 0 {
+            return false;
+        }
+        let Some(window_end) = u64::from(lead_blocks)
+            .checked_add(1)
+            .and_then(|blocks| blocks.checked_mul(u64::from(quantum_frames)))
+            .and_then(|window| first_sample.checked_add(window))
+        else {
+            return false;
+        };
+        // A held anchor is always past the last block's sample, so this is every held seek that
+        // would apply at one of the blocks, a late one at `first_sample` included.
+        !self.holds_anchor_before(window_end)
+    }
+
+    /// Whether the held anchored seek, if any, is of `generation`.
+    fn holds_generation(&self, generation: SourceGeneration) -> bool {
+        self.held_seek
+            .is_some_and(|held| held.generation == generation)
+    }
+
+    /// Whether `generation` is newer than every seek this state has observed.
+    fn is_unobserved(&self, generation: SourceGeneration) -> bool {
+        generation > self.active_generation
+            && self
+                .held_seek
+                .is_none_or(|held| generation > held.generation)
+    }
+    // REALTIME_POLICY_END
+}
+
+/// The seek producer every source-transport producer shares (#1640 D1): the
+/// [`PcmSourceProducer`] and the [`TimelineProducer`] each own one, so no seek admission rule is
+/// written twice. It owns the one-slot command producer and the generation in effect.
+struct SeekProducer {
+    command_producer: Producer<SourceCommand>,
+    /// The newest generation this producer accepted.
+    active_generation: SourceGeneration,
+    /// The render quantum an anchor must be a multiple of.
+    quantum_frames: u32,
+    /// The largest frame a seek may name, if any: [`TIMELINE_SAMPLE_LIMIT`] for a timeline,
+    /// `None` for a PCM source.
+    frame_limit: Option<u64>,
+}
+
+impl SeekProducer {
+    /// Every admission rule but the slot: a nonzero, strictly newer generation, an anchor that is
+    /// a quantum multiple and a frame within the limit. Returns the command's generation.
+    fn check_rules(&self, command: SourceCommand) -> Result<SourceGeneration, SourceSeekError> {
+        let (generation, frame, anchor_sample) = match command {
+            SourceCommand::Seek { generation, frame } => (generation, frame, None),
+            SourceCommand::SeekAt {
+                generation,
+                frame,
+                anchor_sample,
+            } => (generation, frame, Some(anchor_sample)),
+        };
+        if !generation.is_valid() {
+            return Err(SourceSeekError::GenerationZero);
+        }
+        if generation <= self.active_generation {
+            return Err(SourceSeekError::GenerationNotStrictlyIncreasing {
+                active: self.active_generation,
+                requested: generation,
+            });
+        }
+        if anchor_sample
+            .is_some_and(|anchor| !anchor.is_multiple_of(u64::from(self.quantum_frames)))
+        {
+            return Err(SourceSeekError::AnchorUnaligned);
+        }
+        if self.frame_limit.is_some_and(|limit| frame.0 > limit) {
+            return Err(SourceSeekError::FrameOutOfRange);
+        }
+        Ok(generation)
+    }
+
+    /// Every rule of [`Self::try_seek`] with nothing pushed or changed. A full slot is the
+    /// [`SourceSeekError::Backpressure`] the push would return, carrying the current full count
+    /// (a check counts no refusal).
+    fn check_seek(&self, command: SourceCommand) -> Result<(), SourceSeekError> {
+        self.check_rules(command)?;
+        if self.command_producer.available_capacity() == 0 {
+            return Err(SourceSeekError::Backpressure {
+                full_count: self.command_producer.full_count(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The rules of [`Self::check_seek`], then the push; the generation switches only when the
+    /// push lands. A full slot changes nothing but the queue's full count.
+    fn try_seek(&mut self, command: SourceCommand) -> Result<(), SourceSeekError> {
+        let generation = self.check_rules(command)?;
+        match self.command_producer.try_push(command) {
+            Ok(()) => {
+                self.active_generation = generation;
+                Ok(())
+            }
+            Err(QueueFull { full_count, .. }) => Err(SourceSeekError::Backpressure { full_count }),
+        }
+    }
+}
+
 /// Whether an acquire may observe the admitted command when it meets a block of an unobserved
 /// generation (#1320 D3).
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1246,8 +1470,8 @@ impl PcmSourceConsumer {
         self.observe_seek_at_block_boundary(SeekClock::Hold);
         // The held-seek test is not redundant: a caller may prepare the playing generation again
         // while a newer anchored seek is held, and that is not ready.
-        if self.held_seek.is_some()
-            || self.active_generation != generation
+        if self.seek.held_seek.is_some()
+            || self.seek.active_generation != generation
             || self.next_frame != frame
         {
             return false;
@@ -1256,7 +1480,7 @@ impl PcmSourceConsumer {
         // A producer running concurrently may push a newer seek and its block between the command
         // pop above and the data pop in the acquire; the acquire's re-observe takes that seek.
         // Readiness is granted for `generation` alone, so check again.
-        self.held_seek.is_none() && self.active_generation == generation
+        self.seek.held_seek.is_none() && self.seek.active_generation == generation
     }
 
     /// Immutable prepared ring shape shared with the producer endpoint.
@@ -1382,7 +1606,7 @@ impl PcmSourceConsumer {
             );
             // After the acquire step, which can set or apply a held seek (`acquire_current_block`):
             // missing PCM while an anchored seek is still held is a planned wait, not starvation.
-            if self.held_seek.is_some() {
+            if self.seek.held_seek.is_some() {
                 held_frames = missing_frames;
                 if held_frames != 0 {
                     self.held_frames = self.held_frames.saturating_add(u64::from(held_frames));
@@ -1409,7 +1633,7 @@ impl PcmSourceConsumer {
             held_frames,
             held: held_frames != 0,
             end_of_region: self.end_of_region,
-            active_generation: self.active_generation,
+            active_generation: self.seek.active_generation,
             generation_changed: self.generation_changed,
             cumulative_read_frames: self.cumulative_read_frames,
             cumulative_underrun_frames: self.underrun_frames,
@@ -1536,7 +1760,7 @@ impl PcmSourceConsumer {
     #[must_use]
     pub fn telemetry(&self) -> SourceConsumerTelemetry {
         SourceConsumerTelemetry {
-            active_generation: self.active_generation,
+            active_generation: self.seek.active_generation,
             cumulative_read_frames: self.cumulative_read_frames,
             stale_generation_discard_count: self.stale_generation_discard_count,
             underrun_frames: self.underrun_frames,
@@ -1574,8 +1798,8 @@ impl PcmSourceConsumer {
     /// alone. Otherwise nothing is written. Wait-free, allocation-free.
     fn publish_seek_report(&mut self, source_read_sample: u64, source_frame: SourceFrame) {
         let mut report = self.published_seek_report;
-        if report.generation != self.active_generation.0 {
-            report.generation = self.active_generation.0;
+        if report.generation != self.seek.active_generation.0 {
+            report.generation = self.seek.active_generation.0;
             report.first_sample = source_read_sample;
             report.source_frame = source_frame.0;
         }
@@ -1588,56 +1812,32 @@ impl PcmSourceConsumer {
     }
 
     /// Pop the admitted command, if any, then apply a held anchored seek whose block has come.
+    ///
+    /// The seek rules are the shared [`SeekState::observe`]; the source's own work runs on its
+    /// result: a newly held anchored seek makes the pending block of a replaced generation stale,
+    /// and a seek to apply repositions the PCM.
     fn observe_seek_at_block_boundary(&mut self, clock: SeekClock) {
-        match self.command_consumer.try_pop() {
-            Ok(SourceCommand::Seek { generation, frame }) => {
-                self.held_seek = None;
-                self.apply_seek(generation, frame);
+        let command = self.command_consumer.try_pop().ok();
+        let observation = self.seek.observe(command, clock);
+        if let Some(held) = observation.newly_held {
+            // A newer command replaces a held one; the replaced seek's pending block is stale.
+            if let Some(block) = self.current.take_if(|block| {
+                block.generation != held.active && block.generation != held.generation
+            }) {
+                self.discard_block(block);
             }
-            Ok(SourceCommand::SeekAt {
-                generation,
-                frame,
-                anchor_sample,
-            }) => {
-                // A newer command replaces a held one; the replaced seek's pending block is stale.
-                self.held_seek = Some(HeldSeek {
-                    generation,
-                    frame,
-                    anchor_sample,
-                });
-                let active = self.active_generation;
-                if let Some(block) = self
-                    .current
-                    .take_if(|block| block.generation != active && block.generation != generation)
-                {
-                    self.discard_block(block);
-                }
-            }
-            Err(_) => {}
         }
-        let Some(held) = self.held_seek else {
-            return;
-        };
-        let late_by = match clock {
-            SeekClock::Now => 0,
-            SeekClock::At { source_read_sample } if source_read_sample >= held.anchor_sample => {
-                source_read_sample - held.anchor_sample
-            }
-            SeekClock::At { .. } | SeekClock::Hold => return,
-        };
-        self.held_seek = None;
-        self.apply_seek(
-            held.generation,
-            SourceFrame(held.frame.0.saturating_add(late_by)),
-        );
+        if let Some(seek) = observation.apply {
+            self.apply_seek(seek.generation, seek.frame);
+        }
     }
     // REALTIME_POLICY_END
-    /// Make `generation` audible from `frame`. A pending `current` block of that generation that
-    /// does not start behind `frame` is kept -- an anchored seek's primed block -- and any other is
-    /// discarded, noting the region end it carries.
+    /// Make `generation` audible from `frame`; the seek state has already made it the generation
+    /// in effect. A pending `current` block of that generation that does not start behind `frame`
+    /// is kept -- an anchored seek's primed block -- and any other is discarded, noting the region
+    /// end it carries.
     fn apply_seek(&mut self, generation: SourceGeneration, frame: SourceFrame) {
         self.generation_changed = true;
-        self.active_generation = generation;
         self.next_frame = frame;
         self.end_frame = None;
         self.end_of_region = false;
@@ -1674,23 +1874,12 @@ impl PcmSourceConsumer {
     /// observes no command.
     #[must_use]
     pub fn prime_ready(&self, first_sample: u64, lead_blocks: u32) -> bool {
-        if self.command_consumer.available_at_entry() != 0 {
-            return false;
-        }
-        let quantum = u64::from(self.quantum_frames);
-        let Some(window_end) = u64::from(lead_blocks)
-            .checked_add(1)
-            .and_then(|blocks| blocks.checked_mul(quantum))
-            .and_then(|window| first_sample.checked_add(window))
-        else {
-            return false;
-        };
-        // A held anchor is always past the last block's sample, so this is every held seek that
-        // would apply at one of the blocks, a late one at `first_sample` included.
-        if self
-            .held_seek
-            .is_some_and(|held| held.anchor_sample < window_end)
-        {
+        if !self.seek.prime_window_clear(
+            self.command_consumer.available_at_entry(),
+            self.quantum_frames,
+            first_sample,
+            lead_blocks,
+        ) {
             return false;
         }
         let mut frame = self.next_frame.0;
@@ -1711,7 +1900,7 @@ impl PcmSourceConsumer {
                 queued += 1;
                 &**block
             };
-            if block.generation != self.active_generation
+            if block.generation != self.seek.active_generation
                 || block.start_frame.0 != frame
                 || (block.frames < self.quantum_frames && !block.end_of_region)
             {
@@ -1838,17 +2027,16 @@ impl PcmSourceConsumer {
     /// Keep `block` as the pending block (`true`) when it is the active generation at or after
     /// `next_frame`, or a held seek's first block; otherwise discard it (`false`). Pops nothing.
     fn settle_block(&mut self, block: Box<TransferBlock>) -> bool {
-        if block.generation == self.active_generation && block.start_frame.0 >= self.next_frame.0 {
+        if block.generation == self.seek.active_generation
+            && block.start_frame.0 >= self.next_frame.0
+        {
             if block.end_of_region {
                 self.note_end_frame(&block);
             }
             self.current = Some(block);
             return true;
         }
-        if self
-            .held_seek
-            .is_some_and(|held| held.generation == block.generation)
-        {
+        if self.seek.holds_generation(block.generation) {
             // A held anchored seek's first block: kept unexamined as the pending block until
             // the seek applies (its end, if it carries one, is noted then), and the blocks
             // behind it stay queued.
@@ -1868,20 +2056,17 @@ impl PcmSourceConsumer {
 
     /// Whether `generation` is newer than every seek this consumer has observed.
     fn is_unobserved_generation(&self, generation: SourceGeneration) -> bool {
-        generation > self.active_generation
-            && self
-                .held_seek
-                .is_none_or(|held| generation > held.generation)
+        self.seek.is_unobserved(generation)
     }
 
     fn current_matches_next_frame(&self) -> bool {
         self.current.as_ref().is_some_and(|block| {
-            block.generation == self.active_generation && block.start_frame == self.next_frame
+            block.generation == self.seek.active_generation && block.start_frame == self.next_frame
         })
     }
 
     fn note_end_and_discard(&mut self, block: Box<TransferBlock>) {
-        if block.end_of_region && block.generation == self.active_generation {
+        if block.end_of_region && block.generation == self.seek.active_generation {
             self.note_end_frame(&block);
         }
         self.discard_block(block);
@@ -1941,6 +2126,479 @@ impl PcmSourceConsumer {
         self.end_frame.is_some_and(|end| self.next_frame.0 >= end.0)
     }
 }
+
+/// The largest timeline sample a seek may name (#1640 D4): `2^53`, about 2,970 years at 96 kHz.
+/// It leaves `2^63 - 2^53` samples of headroom, so every timeline value and every node time
+/// derived from it stays an exact `i64` for any run a host can render.
+pub const TIMELINE_SAMPLE_LIMIT: u64 = 1 << 53;
+
+/// Exact fixed bytes of one prepared timeline (#1640 D5), row by row: the allocations it owns.
+/// #1641 adds them to the source set's overhead. The [`TimelineConsumer`] value itself has no row:
+/// it is inline in its owner (the source set's driver), whose own allocation counts it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimelineResourceReport {
+    /// The history's entries, `K`.
+    pub history_blocks: u64,
+    /// One-slot seek-command SPSC header plus slot: a ring's `command_queue_bytes` formula.
+    pub command_queue_bytes: u64,
+    /// The largest single allocation of the command queue (#1641 D7: a carried queue's row).
+    pub command_queue_largest_allocation_bytes: u64,
+    /// The history allocation: `16 * K` bytes.
+    pub history_bytes: u64,
+}
+
+/// Prepared timeline constructor: the session's playhead as a source consumer with no PCM and no
+/// ring (#1640).
+pub struct SourceTimeline;
+
+impl SourceTimeline {
+    /// Compute the exact timeline bytes without creating anything.
+    pub fn resource_report(
+        quantum_frames: QuantumFrames,
+        history_blocks: NonZeroUsize,
+    ) -> Result<TimelineResourceReport, PcmSourceRingError> {
+        if quantum_frames.0 == 0 {
+            return Err(PcmSourceRingError::ZeroQuantumFrames);
+        }
+        let command_queue = queue_bytes::<SourceCommand>(NonZeroUsize::MIN)?;
+        let history = u64::try_from(
+            Layout::array::<TimelineEntry>(history_blocks.get())
+                .map_err(|_| PcmSourceRingError::ArithmeticOverflow)?
+                .size(),
+        )
+        .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?;
+        let queue_largest = largest_queue_allocation::<SourceCommand>(NonZeroUsize::MIN)?;
+        Ok(TimelineResourceReport {
+            history_blocks: u64::try_from(history_blocks.get())
+                .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?,
+            command_queue_bytes: command_queue,
+            command_queue_largest_allocation_bytes: queue_largest,
+            history_bytes: history,
+        })
+    }
+
+    /// Allocate a timeline at generation 1, timeline sample 0, with a history of `history_blocks`
+    /// entries, and split producer and render ownership. Control thread only.
+    pub fn prepare(
+        quantum_frames: QuantumFrames,
+        history_blocks: NonZeroUsize,
+    ) -> Result<(TimelineProducer, TimelineConsumer, TimelineResourceReport), PcmSourceRingError>
+    {
+        let report = Self::resource_report(quantum_frames, history_blocks)?;
+        let initial_generation = SourceGeneration(1);
+        let (command_producer, command_consumer) =
+            bounded_spsc(NonZeroUsize::MIN, QueueGeneration(initial_generation.0))
+                .map_err(map_spsc_error)?;
+        let consumer =
+            TimelineConsumer::with_history(quantum_frames, history_blocks, Some(command_consumer))?;
+        Ok((
+            TimelineProducer {
+                seek: SeekProducer {
+                    command_producer,
+                    active_generation: initial_generation,
+                    quantum_frames: quantum_frames.0,
+                    frame_limit: Some(TIMELINE_SAMPLE_LIMIT),
+                },
+            },
+            consumer,
+            report,
+        ))
+    }
+
+    /// Allocate a vacant timeline (#1641 D3): its own history of `history_blocks` entries and no
+    /// command queue, for a successor plan that carries its predecessor's timeline at the swap
+    /// block. Until a carry fills it, it advances from timeline sample 0 and observes no seek, so
+    /// render stays defined. Its report's command-queue rows name the queue the carry brings,
+    /// which the successor does not allocate. Control thread only.
+    pub fn prepare_vacant(
+        quantum_frames: QuantumFrames,
+        history_blocks: NonZeroUsize,
+    ) -> Result<(TimelineConsumer, TimelineResourceReport), PcmSourceRingError> {
+        let report = Self::resource_report(quantum_frames, history_blocks)?;
+        let consumer = TimelineConsumer::with_history(quantum_frames, history_blocks, None)?;
+        Ok((consumer, report))
+    }
+}
+
+/// The timeline's seek producer (#1640 D4): the shared seek producer and nothing else. Plain and
+/// anchored seeks, a generation strictly above the current one, an anchor that is a quantum
+/// multiple, a frame at most [`TIMELINE_SAMPLE_LIMIT`], one slot. Control thread only.
+pub struct TimelineProducer {
+    seek: SeekProducer,
+}
+
+impl TimelineProducer {
+    /// Request a strictly newer generation at `frame`, a timeline sample. It applies on the next
+    /// block, or for [`SourceCommand::SeekAt`] on the block its anchor names. A full slot is
+    /// [`SourceSeekError::Backpressure`] and changes nothing. An accepted seek applies unless a
+    /// newer accepted seek replaces it first (#1274): it is never dropped silently.
+    pub fn try_seek(&mut self, command: SourceCommand) -> Result<(), SourceSeekError> {
+        self.seek.try_seek(command)
+    }
+
+    /// Whether [`Self::try_seek`] would accept `command` now, pushing nothing and changing nothing
+    /// (#1640 D1), so an all-or-nothing caller checks every producer before it pushes to any.
+    pub fn check_seek(&self, command: SourceCommand) -> Result<(), SourceSeekError> {
+        self.seek.check_seek(command)
+    }
+
+    /// The newest generation this producer accepted.
+    #[must_use]
+    pub const fn active_generation(&self) -> SourceGeneration {
+        self.seek.active_generation
+    }
+}
+
+/// One history entry: the block that read source time from `source_read_sample` started at
+/// timeline sample `timeline`. 16 bytes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TimelineEntry {
+    source_read_sample: u64,
+    timeline: u64,
+}
+
+/// The node-time mapping of one node block (#1640 D3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimelineSpan {
+    /// The timeline value at the node block's first sample.
+    pub start: i64,
+    /// The seek that reaches the node block, if any.
+    pub step: Option<TimelineStep>,
+}
+
+/// A seek inside a node block: from sample `offset` of the block on, the timeline reads
+/// `timeline + (i - offset)`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimelineStep {
+    /// The node block's sample the seek takes effect at, from `0` to the block length minus one.
+    pub offset: u32,
+    /// The timeline value at that sample.
+    pub timeline: i64,
+}
+
+/// The session's playhead (#1640 D2): a source consumer with no PCM, no data queue and no
+/// recycle queue. It starts at generation 1, timeline sample 0, takes plain and anchored seeks
+/// through the shared seek state (`SeekState`), advances one quantum on every block and keeps a
+/// fixed history of `K` blocks, newest last, so a reader can map any source-read sample a node of
+/// the plan can still be processing to its timeline sample. Every value is an exact integer.
+pub struct TimelineConsumer {
+    seek: SeekState,
+    /// `None` while vacant (#1641 D3): a successor's timeline before its carry.
+    command_consumer: Option<Consumer<SourceCommand>>,
+    quantum_frames: u32,
+    /// The timeline sample of the next block.
+    position: u64,
+    /// `capacity` entries; the `len` valid ones are a ring that starts at index `oldest`.
+    history: Box<[TimelineEntry]>,
+    capacity: NonZeroUsize,
+    oldest: usize,
+    len: usize,
+    /// The timeline the oldest entry holds if no seek applied at it: the evicted entry's timeline
+    /// plus a quantum, or the starting position while nothing is evicted. With it the oldest entry
+    /// reports a seek as every other entry does.
+    oldest_expected_timeline: u64,
+}
+
+impl TimelineConsumer {
+    /// A timeline at generation 1, timeline sample 0, with an empty history of `history_blocks`
+    /// entries. Control thread only.
+    fn with_history(
+        quantum_frames: QuantumFrames,
+        history_blocks: NonZeroUsize,
+        command_consumer: Option<Consumer<SourceCommand>>,
+    ) -> Result<Self, PcmSourceRingError> {
+        let mut history = Vec::new();
+        history
+            .try_reserve_exact(history_blocks.get())
+            .map_err(|_| PcmSourceRingError::AllocationFailure)?;
+        history.resize(history_blocks.get(), TimelineEntry::default());
+        Ok(Self {
+            seek: SeekState::new(SourceGeneration(1)),
+            command_consumer,
+            quantum_frames: quantum_frames.0,
+            position: 0,
+            history: history.into_boxed_slice(),
+            capacity: history_blocks,
+            oldest: 0,
+            len: 0,
+            oldest_expected_timeline: 0,
+        })
+    }
+
+    /// Whether this timeline is vacant: it has no command queue, because it waits for a carry
+    /// (#1641 D3) or a carry has moved its queue to a successor.
+    #[must_use]
+    pub const fn is_vacant(&self) -> bool {
+        self.command_consumer.is_none()
+    }
+
+    /// The quantum every block advances the timeline by.
+    #[must_use]
+    pub const fn quantum_frames(&self) -> u32 {
+        self.quantum_frames
+    }
+
+    /// The history's entries, `K`.
+    #[must_use]
+    pub const fn history_capacity(&self) -> usize {
+        self.capacity.get()
+    }
+
+    /// The timeline sample the next block starts at.
+    #[must_use]
+    pub const fn position(&self) -> u64 {
+        self.position
+    }
+
+    /// The generation in effect.
+    #[must_use]
+    pub const fn active_generation(&self) -> SourceGeneration {
+        self.seek.active_generation
+    }
+    // REALTIME_POLICY_BEGIN
+    /// Begin the block that reads source time from `source_read_sample`: observe one command
+    /// through the shared seek state (`SeekClock::At`), set the position to a seek's frame if
+    /// one applies, record `(source_read_sample, position)` in the history, then advance one
+    /// quantum. It runs on every block, so the timeline never stops. Allocation-free, lock-free
+    /// and bounded.
+    pub fn begin_block_at(&mut self, source_read_sample: u64) {
+        // A vacant timeline has no queue and observes nothing.
+        let command = match self.command_consumer.as_mut() {
+            Some(consumer) => consumer.try_pop().ok(),
+            None => None,
+        };
+        let observation = self
+            .seek
+            .observe(command, SeekClock::At { source_read_sample });
+        if let Some(seek) = observation.apply {
+            self.position = seek.frame.0;
+        }
+        self.advance(source_read_sample);
+    }
+
+    /// Whether a prime of `lead_blocks + 1` blocks from `first_sample` can run (#1641 D5,
+    /// B16-R3): the source consumer's non-PCM test, written once in
+    /// `SeekState::prime_window_clear`. The command queue is empty and no held anchored seek
+    /// falls before the prime window's end, so a prime never skips a seek. A timeline has no PCM
+    /// to run out of, so that is the whole test.
+    #[must_use]
+    pub fn prime_ready(&self, first_sample: u64, lead_blocks: u32) -> bool {
+        let queued = self
+            .command_consumer
+            .as_ref()
+            .map_or(0, Consumer::available_at_entry);
+        self.seek
+            .prime_window_clear(queued, self.quantum_frames, first_sample, lead_blocks)
+    }
+
+    /// Advance one block from `source_read_sample` as [`Self::begin_block_at`] would, without
+    /// observing any command (#1641 D5): a warm successor's prime. It neither pops the command
+    /// queue nor applies a held seek; it records the history entry and advances one quantum.
+    /// Precondition, as for [`PcmSourceConsumer::prime_block_at`]: [`Self::prime_ready`] was
+    /// `true` for the window in this render callback. Allocation-free and wait-free.
+    pub fn prime_block_at(&mut self, source_read_sample: u64) {
+        self.advance(source_read_sample);
+    }
+
+    /// Take `predecessor`'s timeline at a carry (#1641 D3): swap the seek state, the command
+    /// consumer and the position, and copy the predecessor's newest history entries into this
+    /// timeline's own history. Nothing is allocated or freed; the predecessor is left vacant.
+    /// Both timelines have the same quantum.
+    fn adopt_from(&mut self, predecessor: &mut Self) {
+        core::mem::swap(&mut self.seek, &mut predecessor.seek);
+        core::mem::swap(
+            &mut self.command_consumer,
+            &mut predecessor.command_consumer,
+        );
+        core::mem::swap(&mut self.position, &mut predecessor.position);
+        self.copy_history_from(predecessor);
+    }
+
+    /// Record `(source_read_sample, position)` and advance one quantum.
+    fn advance(&mut self, source_read_sample: u64) {
+        self.record(TimelineEntry {
+            source_read_sample,
+            timeline: self.position,
+        });
+        self.position = self.position.saturating_add(u64::from(self.quantum_frames));
+    }
+
+    /// The timeline sample at `source_read_sample` (#1640 D3). The entries are searched newest
+    /// first for the block that contains the sample. With none, the newest entry that starts
+    /// before the sample extrapolates forward, and a sample before every entry extrapolates back
+    /// from the oldest one (negative before a fresh plan's first block). With no entry yet, the
+    /// position stands at source-read sample 0. Exact; saturates at the `i64` range.
+    #[must_use]
+    pub fn timeline_at(&self, source_read_sample: u64) -> i64 {
+        self.resolve(source_read_sample).1
+    }
+
+    /// The node-time mapping of the node block of `frames` samples from
+    /// `first_source_read_sample` (#1640 D3): its `start`, and a step at the first sample `s` of
+    /// the block where the timeline is not the sample before it plus one (`timeline_at(s) !=
+    /// timeline_at(s - 1) + 1`): a seek, or a source-read clock step-back whose newer entry
+    /// covers or uncovers an older one (#1641 D4). A step can only fall where an entry starts or
+    /// ends, so those are the samples checked. When the node block starts exactly at a step the
+    /// step is `(0, start)`. A node block with at most one step, every block
+    /// a host renders without a step-back inside it, agrees with `timeline_at` on every sample;
+    /// of several, the first is reported. Read-only and allocation-free, with at most
+    /// `6K² + 10K + 1` entry reads.
+    #[must_use]
+    pub fn timeline_block(&self, first_source_read_sample: u64, frames: u32) -> TimelineSpan {
+        let start = self.timeline_at(first_source_read_sample);
+        let quantum = u64::from(self.quantum_frames);
+        let mut step: Option<TimelineStep> = None;
+        for age in 0..self.len {
+            let Some(entry) = self.entry(age) else {
+                break;
+            };
+            for sample in [
+                entry.source_read_sample,
+                entry.source_read_sample.saturating_add(quantum),
+            ] {
+                let Some(offset) = sample
+                    .checked_sub(first_source_read_sample)
+                    .and_then(|offset| u32::try_from(offset).ok())
+                    .filter(|&offset| offset < frames)
+                else {
+                    continue;
+                };
+                if step.is_some_and(|earlier| earlier.offset <= offset) {
+                    continue;
+                }
+                if let Some(timeline) = self.step_at(sample) {
+                    step = Some(TimelineStep { offset, timeline });
+                }
+            }
+        }
+        TimelineSpan { start, step }
+    }
+
+    /// The timeline value at `sample` when the timeline steps there: when it is not the value at
+    /// `sample - 1` plus one. When no held entry starts at or before `sample - 1` (that value is
+    /// extrapolated back from the oldest entry, or `sample` is 0), the entry that starts at
+    /// `sample` is also a step when it is a seek, read against `oldest_expected_timeline` for the
+    /// oldest entry: the history no longer holds the block it stepped from.
+    fn step_at(&self, sample: u64) -> Option<i64> {
+        let (resolving, timeline) = self.resolve(sample);
+        let stepped = match sample.checked_sub(1) {
+            Some(previous) => {
+                self.resolve(previous).1.checked_add(1) != Some(timeline)
+                    || (!self.starts_at_or_before(previous)
+                        && resolving.is_some_and(|age| self.is_seek_entry(age)))
+            }
+            None => resolving.is_some_and(|age| self.is_seek_entry(age)),
+        };
+        stepped.then_some(timeline)
+    }
+
+    /// Whether a held entry starts at or before `sample`.
+    fn starts_at_or_before(&self, sample: u64) -> bool {
+        (0..self.len)
+            .filter_map(|age| self.entry(age))
+            .any(|entry| entry.source_read_sample <= sample)
+    }
+
+    /// Replace this history with the newest `min(len_other, K_self)` entries of `other`, oldest
+    /// first (#1641's carry): a bounded copy with no allocation. Both timelines have the same
+    /// quantum.
+    pub fn copy_history_from(&mut self, other: &Self) {
+        let count = other.len.min(self.capacity.get());
+        for index in 0..count {
+            let age = count - 1 - index;
+            if let (Some(entry), Some(slot)) = (other.entry(age), self.history.get_mut(index)) {
+                *slot = entry;
+            }
+        }
+        self.oldest = 0;
+        self.len = count;
+        self.oldest_expected_timeline = match other.entry(count) {
+            Some(older) => older
+                .timeline
+                .saturating_add(u64::from(other.quantum_frames)),
+            None => other.oldest_expected_timeline,
+        };
+    }
+
+    /// Append `entry` as the newest, evicting the oldest when the history is full.
+    fn record(&mut self, entry: TimelineEntry) {
+        if self.len < self.capacity.get() {
+            let index = self.oldest.saturating_add(self.len) % self.capacity;
+            if let Some(slot) = self.history.get_mut(index) {
+                *slot = entry;
+            }
+            self.len += 1;
+            return;
+        }
+        if let Some(slot) = self.history.get_mut(self.oldest) {
+            self.oldest_expected_timeline =
+                slot.timeline.saturating_add(u64::from(self.quantum_frames));
+            *slot = entry;
+        }
+        self.oldest = self.oldest.saturating_add(1) % self.capacity;
+    }
+
+    /// The entry `age` blocks before the newest (age 0 is the newest), if held.
+    fn entry(&self, age: usize) -> Option<TimelineEntry> {
+        let back = self.len.checked_sub(1)?.checked_sub(age)?;
+        let index = self.oldest.checked_add(back)? % self.capacity;
+        self.history.get(index).copied()
+    }
+
+    /// Whether the entry of `age` is a seek: its timeline is not its previous entry's plus a
+    /// quantum (for the oldest entry, not `oldest_expected_timeline`).
+    fn is_seek_entry(&self, age: usize) -> bool {
+        let Some(entry) = self.entry(age) else {
+            return false;
+        };
+        let expected = match age.checked_add(1).and_then(|older| self.entry(older)) {
+            Some(previous) => previous
+                .timeline
+                .saturating_add(u64::from(self.quantum_frames)),
+            None => self.oldest_expected_timeline,
+        };
+        entry.timeline != expected
+    }
+
+    /// The age of the entry whose block contains `sample` (`None` when the value is
+    /// extrapolated), and the timeline value at `sample`.
+    fn resolve(&self, sample: u64) -> (Option<usize>, i64) {
+        let quantum = u64::from(self.quantum_frames);
+        let mut before = None;
+        for age in 0..self.len {
+            let Some(entry) = self.entry(age) else {
+                break;
+            };
+            if let Some(offset) = sample.checked_sub(entry.source_read_sample) {
+                if offset < quantum {
+                    return (Some(age), offset_timeline(entry, sample));
+                }
+                if before.is_none() {
+                    before = Some(entry);
+                }
+            }
+        }
+        let anchor = before
+            .or_else(|| {
+                self.len
+                    .checked_sub(1)
+                    .and_then(|oldest| self.entry(oldest))
+            })
+            .unwrap_or(TimelineEntry {
+                source_read_sample: 0,
+                timeline: self.position,
+            });
+        (None, offset_timeline(anchor, sample))
+    }
+}
+
+/// `entry.timeline + (sample - entry.source_read_sample)`, exact, saturated to the `i64` range.
+fn offset_timeline(entry: TimelineEntry, sample: u64) -> i64 {
+    let value =
+        i128::from(entry.timeline) + i128::from(sample) - i128::from(entry.source_read_sample);
+    i64::try_from(value).unwrap_or(if value < 0 { i64::MIN } else { i64::MAX })
+}
+// REALTIME_POLICY_END
 
 fn queue_bytes<T>(capacity: NonZeroUsize) -> Result<u64, PcmSourceRingError> {
     let payload = bounded_spsc_retained_payload::<T>(capacity).map_err(map_spsc_error)?;
@@ -2036,6 +2694,8 @@ pub enum SourceGraphSourceSetError {
     SourceIndex,
     ChannelIndex,
     ArithmeticOverflow,
+    /// The timeline's quantum is not the envelope's (#1641 D1).
+    TimelineQuantum,
 }
 
 struct GraphSourceEntry {
@@ -2046,6 +2706,8 @@ struct GraphSourceEntry {
 }
 
 struct SourceGraphSourceSetDriver {
+    /// The session's playhead (#1641 D1), inline: the driver's own allocation counts its value.
+    timeline: TimelineConsumer,
     sources: Box<[GraphSourceEntry]>,
     mappings: Box<[SourceGraphTrackMapping]>,
     quantum_frames: u32,
@@ -2148,6 +2810,9 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             source_generation_changed: self.pending_generation_change,
         };
         self.pending_generation_change = false;
+        // #1641 D1: the timeline first, at the sample the sources read, so it observes a seek in
+        // the same block as a source given the same seek. It applies no state to the sources.
+        self.timeline.begin_block_at(first_sample);
         for source in &mut self.sources {
             // A vacant entry has nothing to play: its block is an underrun.
             let Some(consumer) = source.consumer.as_mut() else {
@@ -2286,6 +2951,11 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
     /// is checked first -- both indices in range, this entry vacant, the predecessor's occupied,
     /// the channel counts and quanta equal -- and any failure moves nothing. The predecessor's
     /// pending generation change (a seek prepared since its last block) is carried too.
+    ///
+    /// A vacant timeline takes an occupied predecessor's (#1641 D3): its seek state, command
+    /// consumer and position by swap and its newest history entries by copy, into this
+    /// timeline's own history. Any other pair of timelines stays as it is and does not refuse
+    /// the source moves: a timeline vacant on both sides keeps advancing from its own position.
     fn adopt_sources(
         &mut self,
         predecessor: &mut dyn GraphPreparedSourceSetDriver,
@@ -2320,8 +2990,16 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
                 &mut predecessor.sources[source as usize].consumer,
             );
         }
+        if self.timeline.is_vacant() && !predecessor.timeline.is_vacant() {
+            self.timeline.adopt_from(&mut predecessor.timeline);
+        }
         self.pending_generation_change |= predecessor.pending_generation_change;
         true
+    }
+
+    /// The timeline sample at `source_read_sample` (#1641 D8), from the timeline's history.
+    fn timeline_at(&self, source_read_sample: u64) -> Option<i64> {
+        Some(self.timeline.timeline_at(source_read_sample))
     }
     // REALTIME_POLICY_END
 
@@ -2415,18 +3093,36 @@ impl SourceGraphSourceSetDriver {
 
 /// Seal one or more prepared source consumers into a graph-owned fan-out source set.
 ///
-/// The wrapper owns exactly one consumer per source. The graph calls `begin_block` once, then each
-/// mapping copies directly from the retained played block, which stays the consumer's until the
-/// next `begin_block` or seek preparation (#917).
+/// The wrapper owns exactly one consumer per source and the session's timeline (#1641 D1). The
+/// graph calls `begin_block` once, which begins the timeline's block and then each source's, then
+/// each mapping copies directly from the retained played block, which stays the consumer's until
+/// the next `begin_block` or seek preparation (#917).
+///
+/// The timeline's fixed bytes join the set's overhead and largest allocation (#1641 D7): its
+/// history, and for an occupied timeline its command queue. A vacant timeline's queue arrives
+/// with its carry, so its host counts it with the carried source overhead. The consumer value is
+/// inline in the driver, whose own allocation already counts it.
 pub fn prepare_graph_source_set(
     envelope: engine::realtime::RenderEnvelope,
     sources: Vec<SourceGraphSource>,
+    timeline: TimelineConsumer,
     mappings: Vec<SourceGraphTrackMapping>,
 ) -> Result<GraphPreparedSourceSet, SourceGraphSourceSetError> {
+    if timeline.quantum_frames != envelope.quantum.0 {
+        return Err(SourceGraphSourceSetError::TimelineQuantum);
+    }
     let retained = source_set_retained_resources(&sources, &mappings)?;
+    let timeline_report = SourceTimeline::resource_report(envelope.quantum, timeline.capacity)
+        .map_err(|_| SourceGraphSourceSetError::ArithmeticOverflow)?;
     let mut pcm_payload = 0_u64;
-    let mut overhead = 0_u64;
-    let mut largest = 0_u64;
+    let mut overhead = timeline_report.history_bytes;
+    let mut largest = timeline_report.history_bytes;
+    if !timeline.is_vacant() {
+        overhead = overhead
+            .checked_add(timeline_report.command_queue_bytes)
+            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        largest = largest.max(timeline_report.command_queue_largest_allocation_bytes);
+    }
     let mut entries = Vec::with_capacity(sources.len());
     for source in sources {
         // A vacant source owns no ring: it charges no PCM payload and no ring overhead.
@@ -2485,6 +3181,7 @@ pub fn prepare_graph_source_set(
             largest_allocation_bytes: largest,
         },
         Box::new(SourceGraphSourceSetDriver {
+            timeline,
             sources: entries.into_boxed_slice(),
             mappings: mappings.into_boxed_slice(),
             quantum_frames: envelope.quantum.0,
@@ -2499,6 +3196,13 @@ mod tests {
     use super::*;
 
     const RATE: SampleRateHz = SampleRateHz(48_000);
+
+    /// An occupied timeline of one history entry at `quantum` frames, for a hand-built source set.
+    fn test_timeline(quantum: u32) -> TimelineConsumer {
+        SourceTimeline::prepare(QuantumFrames(quantum), NonZeroUsize::MIN)
+            .expect("timeline")
+            .1
+    }
 
     fn config(channels: u32, quantum: u32, capacity: u64) -> PcmSourceRingConfig {
         PcmSourceRingConfig {
@@ -2710,7 +3414,7 @@ mod tests {
         }
         let (output, _) = render_at(&mut consumer, 24);
         assert_eq!(output, [0.0; 4], "the replaced seek never applies");
-        assert_eq!(consumer.active_generation, SourceGeneration(3));
+        assert_eq!(consumer.seek.active_generation, SourceGeneration(3));
     }
 
     /// #1274 D3. Red if the held generation's primed block plays before its anchor because it
@@ -2748,7 +3452,7 @@ mod tests {
         host.submit(chunk(1, 0, &[&[1.0; 4]], 4, false)).unwrap();
         host.try_seek(seek_at(2, 100, 8)).unwrap();
         assert!(!consumer.prepare_seek(SourceGeneration(2), SourceFrame(100)));
-        assert_eq!(consumer.active_generation, SourceGeneration(1));
+        assert_eq!(consumer.seek.active_generation, SourceGeneration(1));
         host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false)).unwrap();
         let (output, report) = render_at(&mut consumer, 4);
         assert_eq!(
@@ -2864,7 +3568,7 @@ mod tests {
                 assert_eq!(output, [2.0; 4], "plain: the acked block plays at once");
                 assert!(report.generation_changed);
             }
-            assert_eq!(consumer.active_generation, SourceGeneration(2));
+            assert_eq!(consumer.seek.active_generation, SourceGeneration(2));
             assert_eq!(consumer.stale_generation_discard_count, 0);
             // The anchored run waited one block for its anchor: held, never an underrun.
             assert_eq!(consumer.underrun_events, 0);
@@ -2894,7 +3598,7 @@ mod tests {
             "late by one block: frame 104 plays at block 8"
         );
         assert!(report.generation_changed);
-        assert_eq!(consumer.active_generation, SourceGeneration(2));
+        assert_eq!(consumer.seek.active_generation, SourceGeneration(2));
         assert_eq!(
             consumer.stale_generation_discard_count, 1,
             "the late-skipped block"
@@ -2952,11 +3656,11 @@ mod tests {
         let mut host = producer.into_host_chunk_provider(RATE);
         host.try_seek(seek_at(2, 100, 64)).unwrap();
         render_at(&mut consumer, 0);
-        assert!(consumer.held_seek.is_some());
+        assert!(consumer.seek.held_seek.is_some());
         let next = consumer.next_frame;
         assert!(!consumer.prepare_seek(SourceGeneration(1), next));
         assert!(
-            consumer.held_seek.is_some(),
+            consumer.seek.held_seek.is_some(),
             "the held seek survives preparation"
         );
     }
@@ -3244,6 +3948,7 @@ mod tests {
         mappings: Vec<SourceGraphTrackMapping>,
     ) -> SourceGraphSourceSetDriver {
         SourceGraphSourceSetDriver {
+            timeline: test_timeline(4),
             sources: vec![GraphSourceEntry {
                 channel_count: consumer.channel_count(),
                 consumer: Some(consumer),
@@ -3310,6 +4015,7 @@ mod tests {
                 .consumer
                 .as_ref()
                 .unwrap()
+                .seek
                 .held_seek
                 .is_none()
         );
@@ -3918,6 +4624,7 @@ mod tests {
             prepare_graph_source_set(
                 envelope,
                 vec![SourceGraphSource::new(consumer, resources, 0, 0)],
+                test_timeline(2),
                 mappings,
             )
             .expect("source set")
@@ -4469,7 +5176,9 @@ mod tests {
             mappings: Vec<SourceGraphTrackMapping>,
             validity: &Arc<AtomicU8>,
         ) -> PreparedRenderPlan {
-            let set = prepare_graph_source_set(envelope(), sources, mappings).expect("source set");
+            let set =
+                prepare_graph_source_set(envelope(), sources, test_timeline(FRAMES), mappings)
+                    .expect("source set");
             let bindings = GraphRuntimeBindings {
                 envelope: envelope(),
                 nodes: vec![graph::GraphNodeBinding::new(output(), Box::new(Noop))],
@@ -4614,6 +5323,7 @@ mod tests {
             GraphCarryProgram {
                 predecessor,
                 sources: vec![(0, 0)].into_boxed_slice(),
+                timeline: false,
             }
         }
 
@@ -4676,6 +5386,7 @@ mod tests {
                 Some(GraphCarryProgram {
                     predecessor: identity,
                     sources: vec![(0, 1)].into_boxed_slice(),
+                    timeline: false,
                 })
             });
             assert_eq!(carry, CarryOutcome::PredecessorMismatch);
@@ -4751,6 +5462,7 @@ mod tests {
             let program = |sources: &[(u32, u32)]| GraphCarryProgram {
                 predecessor: 1,
                 sources: sources.into(),
+                timeline: false,
             };
             assert_eq!(
                 graph::install_carry_program(&mut vacant, program(&[(1, 0)])),
@@ -4793,11 +5505,17 @@ mod tests {
         fn a_vacant_source_charges_no_ring_and_is_counted_apart() {
             let (_host, occupied_source) = filled_source();
             let ring = occupied_source.resources.expect("ring report");
-            let occupied = prepare_graph_source_set(envelope(), vec![occupied_source], mappings())
-                .expect("occupied set");
+            let occupied = prepare_graph_source_set(
+                envelope(),
+                vec![occupied_source],
+                test_timeline(FRAMES),
+                mappings(),
+            )
+            .expect("occupied set");
             let vacant = prepare_graph_source_set(
                 envelope(),
                 vec![SourceGraphSource::vacant(2)],
+                test_timeline(FRAMES),
                 mappings(),
             )
             .expect("vacant set");
@@ -4821,6 +5539,7 @@ mod tests {
                 prepare_graph_source_set(
                     envelope(),
                     vec![SourceGraphSource::vacant(1)],
+                    test_timeline(FRAMES),
                     mappings()
                 ),
                 Err(SourceGraphSourceSetError::ChannelIndex)
@@ -4870,6 +5589,7 @@ mod tests {
                 GraphCarryProgram {
                     predecessor: identity,
                     sources: vec![(0, 0), (1, 5)].into_boxed_slice(),
+                    timeline: false,
                 },
             )
             .expect("install");
@@ -4898,6 +5618,7 @@ mod tests {
                     GraphCarryProgram {
                         predecessor: 1,
                         sources: vec![(0, 0), (1, 0)].into_boxed_slice(),
+                        timeline: false,
                     },
                 ),
                 Err(GraphCarryInstallError::DuplicateSourceIndex)
@@ -4910,6 +5631,7 @@ mod tests {
         fn a_vacant_claim_writes_positive_zero_over_dirty_buffers_and_refuses_seek() {
             let [a, _] = inputs();
             let mut driver = SourceGraphSourceSetDriver {
+                timeline: test_timeline(FRAMES),
                 sources: vec![GraphSourceEntry {
                     consumer: None,
                     channel_count: 2,
@@ -5030,6 +5752,7 @@ mod tests {
             let (_host, source) = filled_source();
             let driver =
                 |sources: Vec<GraphSourceEntry>, quantum_frames| SourceGraphSourceSetDriver {
+                    timeline: test_timeline(quantum_frames),
                     sources: sources.into_boxed_slice(),
                     mappings: Vec::new().into_boxed_slice(),
                     quantum_frames,
@@ -5056,12 +5779,63 @@ mod tests {
             assert!(same_quantum.adopt_sources(&mut predecessor, &[(0, 0)]));
         }
 
+        /// Batch 16a fold M3 (#1641 D3): the timeline moves only from an occupied predecessor
+        /// into a vacant successor, and no pairing of the two timelines refuses the source moves.
+        ///
+        /// Test value: red if a timeline vacant on both sides refuses the carry (every source of
+        /// that swap would render silence), or a timeline moves in any other pairing.
+        #[test]
+        fn the_source_moves_carry_whatever_the_two_timelines_hold() {
+            let vacant_timeline = || {
+                SourceTimeline::prepare_vacant(QuantumFrames(FRAMES), NonZeroUsize::MIN)
+                    .expect("vacant timeline")
+                    .0
+            };
+            for (successor_vacant, predecessor_vacant) in
+                [(true, true), (true, false), (false, true), (false, false)]
+            {
+                let pairing = (successor_vacant, predecessor_vacant);
+                let (_host, entry) = occupied(2);
+                let mut predecessor = swap_driver(vec![entry], FRAMES);
+                if predecessor_vacant {
+                    predecessor.timeline = vacant_timeline();
+                }
+                let mut successor = swap_driver(
+                    vec![GraphSourceEntry {
+                        consumer: None,
+                        channel_count: 2,
+                    }],
+                    FRAMES,
+                );
+                if successor_vacant {
+                    successor.timeline = vacant_timeline();
+                }
+                assert!(
+                    successor.adopt_sources(&mut predecessor, &[(0, 0)]),
+                    "{pairing:?}"
+                );
+                assert!(successor.sources[0].consumer.is_some(), "{pairing:?}");
+                let moved = successor_vacant && !predecessor_vacant;
+                assert_eq!(
+                    successor.timeline.is_vacant(),
+                    successor_vacant && !moved,
+                    "{pairing:?}"
+                );
+                assert_eq!(
+                    predecessor.timeline.is_vacant(),
+                    predecessor_vacant || moved,
+                    "{pairing:?}"
+                );
+            }
+        }
+
         /// A hand-built driver over `entries` at `quantum_frames`.
         fn swap_driver(
             entries: Vec<GraphSourceEntry>,
             quantum_frames: u32,
         ) -> SourceGraphSourceSetDriver {
             SourceGraphSourceSetDriver {
+                timeline: test_timeline(quantum_frames),
                 sources: entries.into_boxed_slice(),
                 mappings: Vec::new().into_boxed_slice(),
                 quantum_frames,
@@ -5361,6 +6135,7 @@ mod tests {
                 commands_popped: consumer.command_consumer.success_count(),
                 data_popped: consumer.data_consumer.success_count(),
                 held: consumer
+                    .seek
                     .held_seek
                     .map(|held| (held.generation, held.frame, held.anchor_sample)),
                 current: consumer
@@ -5522,7 +6297,7 @@ mod tests {
             }
             let first = ordinary(&mut consumer, 0);
             assert!(!first.generation_changed && first.copied_frames == Q);
-            assert!(consumer.held_seek.is_some());
+            assert!(consumer.seek.held_seek.is_some());
             assert!(
                 !prime_ready_checked(&consumer, u64::from(Q), K),
                 "held, anchored at the next block"
@@ -5542,7 +6317,7 @@ mod tests {
                 .expect("seek");
             assert!(!prime_ready_checked(&consumer, 0, K), "queued");
             ordinary(&mut consumer, 0);
-            assert!(consumer.held_seek.is_some());
+            assert!(consumer.seek.held_seek.is_some());
             assert!(
                 prime_ready_checked(&consumer, u64::from(Q), K),
                 "held past the window"
@@ -5560,7 +6335,7 @@ mod tests {
             let window_end = first_sample + u64::from(K + 1) * u64::from(Q);
             assert!(prime_ready_checked(&consumer, first_sample, K));
             let hold = |consumer: &mut PcmSourceConsumer, anchor_sample| {
-                consumer.held_seek = Some(HeldSeek {
+                consumer.seek.held_seek = Some(HeldSeek {
                     generation: SourceGeneration(2),
                     frame: SourceFrame(9_000),
                     anchor_sample,
@@ -5587,7 +6362,7 @@ mod tests {
             let (mut host, mut consumer) = ring();
             // The consumer reads generation 2 from frame 0; two generation-1 blocks are queued
             // ahead of its PCM.
-            consumer.active_generation = SourceGeneration(2);
+            consumer.seek.active_generation = SourceGeneration(2);
             push_raw(&mut host, 1, 0);
             push_raw(&mut host, 1, u64::from(Q));
             for block in 0..5 {
@@ -5614,6 +6389,522 @@ mod tests {
             );
             ordinary(&mut consumer, u64::from(Q));
             assert!(prime_ready_checked(&consumer, 2 * u64::from(Q), K - 1));
+        }
+    }
+
+    /// #1640 gate 1: the timeline consumer and producer, at quantum 128.
+    mod timeline {
+        use super::*;
+
+        const Q: u32 = 128;
+        const QU: u64 = Q as u64;
+
+        fn timeline(history_blocks: usize) -> (TimelineProducer, TimelineConsumer) {
+            let (producer, consumer, _) = SourceTimeline::prepare(
+                QuantumFrames(Q),
+                NonZeroUsize::new(history_blocks).unwrap(),
+            )
+            .unwrap();
+            (producer, consumer)
+        }
+
+        fn seek(generation: u64, frame: u64) -> SourceCommand {
+            SourceCommand::Seek {
+                generation: SourceGeneration(generation),
+                frame: SourceFrame(frame),
+            }
+        }
+
+        /// Run blocks `from..to` (block indices) on the source-read clock; return the timeline
+        /// value each block started at.
+        fn run(consumer: &mut TimelineConsumer, from: u64, to: u64) -> Vec<u64> {
+            (from..to)
+                .map(|block| {
+                    consumer.begin_block_at(block * QU);
+                    let start = consumer.timeline_at(block * QU);
+                    assert_eq!(consumer.position(), u64::try_from(start).unwrap() + QU);
+                    u64::try_from(start).unwrap()
+                })
+                .collect()
+        }
+
+        /// Begin one block at each source-read sample of `samples`, in order.
+        fn blocks_at(consumer: &mut TimelineConsumer, samples: &[u64]) {
+            for &sample in samples {
+                consumer.begin_block_at(sample);
+            }
+        }
+
+        /// The span's value at sample `i` of its node block.
+        fn span_value(span: TimelineSpan, i: u32) -> i64 {
+            match span.step {
+                Some(step) if i >= step.offset => step.timeline + i64::from(i - step.offset),
+                _ => span.start + i64::from(i),
+            }
+        }
+
+        /// Batch 16a fold M1: a source-read clock step-back (#1641 D4) overlaps a newer entry on
+        /// an older one, so the timeline steps where the newer entry starts and again where it
+        /// ends, with no seek entry in sight.
+        ///
+        /// Test value: red if `timeline_block` reports only seek entries (a node block that
+        /// straddles the step-back reads 88 of its 128 samples 256 off), or misses the step where
+        /// the newer entry ends.
+        #[test]
+        fn a_node_block_reports_the_steps_of_a_source_read_step_back() {
+            let (_producer, mut consumer) = timeline(4);
+            blocks_at(&mut consumer, &[0, QU, 2 * QU, 3 * QU, 2 * QU]);
+            assert_eq!(consumer.timeline_at(2 * QU), 512);
+            assert_eq!(
+                consumer.timeline_block(216, Q),
+                TimelineSpan {
+                    start: 216,
+                    step: Some(TimelineStep {
+                        offset: 40,
+                        timeline: 512,
+                    }),
+                }
+            );
+            // The newer entry ends at 384, where the older entry of the same samples resumes.
+            assert_eq!(
+                consumer.timeline_block(344, Q),
+                TimelineSpan {
+                    start: 600,
+                    step: Some(TimelineStep {
+                        offset: 40,
+                        timeline: 384,
+                    }),
+                }
+            );
+            // Every node block with one step at most agrees with `timeline_at` sample by sample.
+            for first in (0..5 * QU).step_by(8) {
+                let span = consumer.timeline_block(first, Q);
+                for i in 0..Q {
+                    assert_eq!(
+                        span_value(span, i),
+                        consumer.timeline_at(first + u64::from(i)),
+                        "block from {first}, sample {i}"
+                    );
+                }
+            }
+        }
+
+        /// Batch 16a fold 2, M1: after a step-back the oldest held entry is not the lowest
+        /// source-read sample, so a sample before every held entry is extrapolated back from an
+        /// entry that does not start next to it, and the timeline can step where a newer entry
+        /// starts although that entry is no seek.
+        ///
+        /// Test value: red if `timeline_block` tests only for a seek entry where no held entry
+        /// starts at or before `s - 1` (`K` 3: samples 124 to 127 read 128 off; `K` 2: samples 56
+        /// to 127 read 256 off).
+        #[test]
+        fn a_step_back_steps_where_no_held_entry_starts_before_it() {
+            let (_producer, mut consumer) = timeline(3);
+            blocks_at(&mut consumer, &[0, QU, 2 * QU, 3 * QU, 3 * QU, 4 * QU]);
+            assert_eq!(consumer.timeline_at(383), 383);
+            assert_eq!(consumer.timeline_at(384), 512);
+            assert_eq!(
+                consumer.timeline_block(260, Q),
+                TimelineSpan {
+                    start: 260,
+                    step: Some(TimelineStep {
+                        offset: 124,
+                        timeline: 512,
+                    }),
+                }
+            );
+
+            let (_producer, mut consumer) = timeline(2);
+            blocks_at(&mut consumer, &[0, QU, 2 * QU, 3 * QU, 2 * QU]);
+            assert_eq!(consumer.timeline_at(255), 255);
+            assert_eq!(consumer.timeline_at(256), 512);
+            assert_eq!(
+                consumer.timeline_block(200, Q),
+                TimelineSpan {
+                    start: 200,
+                    step: Some(TimelineStep {
+                        offset: 56,
+                        timeline: 512,
+                    }),
+                }
+            );
+        }
+
+        /// Batch 16a fold 2, M1 sweep: `K` 1 to 5, a step-back of 64, 128, 200, 256 or 384
+        /// samples after four plain blocks, and a node block from every fourth sample.
+        ///
+        /// Test value: red if any node block with at most one step disagrees with `timeline_at`
+        /// on any sample (a missed or a misplaced step, whatever entry is the oldest).
+        #[test]
+        fn every_node_block_with_one_step_agrees_with_timeline_at_after_a_step_back() {
+            for history in 1..=5 {
+                for back in [64, 128, 200, 256, 384] {
+                    let (_producer, mut consumer) = timeline(history);
+                    blocks_at(
+                        &mut consumer,
+                        &[0, QU, 2 * QU, 3 * QU, 4 * QU - back, 5 * QU - back],
+                    );
+                    for first in (0..6 * QU).step_by(4) {
+                        let steps = (0..Q)
+                            .filter(|&i| {
+                                let sample = first + u64::from(i);
+                                sample > 0
+                                    && consumer.timeline_at(sample)
+                                        != consumer.timeline_at(sample - 1) + 1
+                            })
+                            .count();
+                        if steps > 1 {
+                            continue;
+                        }
+                        let span = consumer.timeline_block(first, Q);
+                        for i in 0..Q {
+                            assert_eq!(
+                                span_value(span, i),
+                                consumer.timeline_at(first + u64::from(i)),
+                                "K {history}, back {back}, block from {first}, sample {i}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Batch 16a fold MINOR 4, `K` of 3 and 4: the reader's search order.
+        ///
+        /// Test value: red if `timeline_at` searches the history oldest first (an overlap reads
+        /// the older entry), if `timeline_block` reports any step but the first of two, or if an
+        /// eviction does not update the oldest entry's expected timeline (a plain oldest entry
+        /// would read as a seek).
+        #[test]
+        fn the_reader_reads_the_newest_overlap_and_reports_the_first_step() {
+            let (mut producer, mut consumer) = timeline(4);
+            blocks_at(&mut consumer, &[0, QU, 2 * QU]);
+            producer.try_seek(seek(2, 10_000)).unwrap();
+            // A seek at 384, then a step-back of 64 samples: the history holds (256, 256),
+            // (384, 10_000), (512, 10_128) and (448, 10_256).
+            blocks_at(&mut consumer, &[3 * QU, 4 * QU, 448]);
+            assert_eq!(
+                consumer.timeline_at(460),
+                10_268,
+                "the newest overlapping entry"
+            );
+            assert_eq!(consumer.timeline_at(520), 10_328);
+            assert_eq!(
+                consumer.timeline_at(580),
+                10_196,
+                "after the newest entry ends"
+            );
+            // Two steps in one node block: the seek at 384, then the step-back at 448.
+            assert_eq!(
+                consumer.timeline_block(380, Q),
+                TimelineSpan {
+                    start: 380,
+                    step: Some(TimelineStep {
+                        offset: 4,
+                        timeline: 10_000,
+                    }),
+                }
+            );
+            assert_eq!(
+                consumer.timeline_block(400, Q).step,
+                Some(TimelineStep {
+                    offset: 48,
+                    timeline: 10_256,
+                })
+            );
+
+            // Evictions keep the oldest entry's expectation: a plain oldest entry is no step.
+            let (_producer, mut plain) = timeline(3);
+            run(&mut plain, 0, 6);
+            assert_eq!(plain.timeline_block(3 * QU, Q).step, None);
+            assert_eq!(plain.timeline_block(3 * QU - 40, Q).step, None);
+        }
+
+        /// Batch 16a fold MINOR 3: a vacant timeline that no carry fills (#1641 D3).
+        ///
+        /// Test value: red if a vacant timeline stands still, starts anywhere but sample 0, or
+        /// records no history (its reader would extrapolate from a position it never held).
+        #[test]
+        fn a_vacant_timeline_never_adopted_advances_from_zero() {
+            let (mut consumer, _) =
+                SourceTimeline::prepare_vacant(QuantumFrames(Q), NonZeroUsize::new(2).unwrap())
+                    .unwrap();
+            assert!(consumer.is_vacant());
+            assert!(consumer.prime_ready(0, 3), "nothing is queued");
+            assert_eq!(run(&mut consumer, 0, 4), vec![0, 128, 256, 384]);
+            assert_eq!(consumer.timeline_at(3 * QU - 1), 383);
+            assert_eq!(consumer.active_generation(), SourceGeneration(1));
+        }
+
+        #[test]
+        fn an_anchored_seek_is_held_until_its_anchor_and_applies_with_its_lateness() {
+            let anchor = 4 * QU;
+            // On time: held while the block sample is below the anchor, the timeline advancing.
+            let (mut producer, mut consumer) = timeline(4);
+            producer
+                .try_seek(SourceCommand::SeekAt {
+                    generation: SourceGeneration(2),
+                    frame: SourceFrame(50_000),
+                    anchor_sample: anchor,
+                })
+                .unwrap();
+            assert_eq!(run(&mut consumer, 0, 4), vec![0, 128, 256, 384]);
+            assert_eq!(consumer.active_generation(), SourceGeneration(1));
+            assert!(consumer.seek.held_seek.is_some());
+            assert_eq!(run(&mut consumer, 4, 6), vec![50_000, 50_128]);
+            assert_eq!(consumer.active_generation(), SourceGeneration(2));
+
+            // Observed late at anchor + 256: it applies at frame + 256.
+            let (mut producer, mut consumer) = timeline(4);
+            producer
+                .try_seek(SourceCommand::SeekAt {
+                    generation: SourceGeneration(2),
+                    frame: SourceFrame(50_000),
+                    anchor_sample: anchor,
+                })
+                .unwrap();
+            consumer.begin_block_at(anchor + 256);
+            assert_eq!(consumer.timeline_at(anchor + 256), 50_256);
+        }
+
+        #[test]
+        fn a_newer_seek_plain_or_anchored_replaces_a_held_one() {
+            let held = |generation: u64, frame: u64, anchor_sample: u64| SourceCommand::SeekAt {
+                generation: SourceGeneration(generation),
+                frame: SourceFrame(frame),
+                anchor_sample,
+            };
+            // Anchored over anchored: the first anchor passes with nothing applied.
+            let (mut producer, mut consumer) = timeline(4);
+            producer.try_seek(held(2, 20_000, 2 * QU)).unwrap();
+            consumer.begin_block_at(0);
+            producer.try_seek(held(3, 30_000, 4 * QU)).unwrap();
+            assert_eq!(run(&mut consumer, 1, 4), vec![128, 256, 384]);
+            assert_eq!(run(&mut consumer, 4, 5), vec![30_000]);
+            assert_eq!(consumer.active_generation(), SourceGeneration(3));
+
+            // Plain over anchored: applies at once and the held seek never applies.
+            let (mut producer, mut consumer) = timeline(4);
+            producer.try_seek(held(2, 20_000, 3 * QU)).unwrap();
+            consumer.begin_block_at(0);
+            producer.try_seek(seek(3, 7_000)).unwrap();
+            assert_eq!(run(&mut consumer, 1, 5), vec![7_000, 7_128, 7_256, 7_384]);
+            assert!(consumer.seek.held_seek.is_none());
+            assert_eq!(consumer.active_generation(), SourceGeneration(3));
+        }
+
+        #[test]
+        fn the_producer_refuses_without_changing_anything() {
+            let (mut producer, mut consumer) = timeline(4);
+            for (command, error) in [
+                (seek(0, 5), SourceSeekError::GenerationZero),
+                (
+                    seek(1, 5),
+                    SourceSeekError::GenerationNotStrictlyIncreasing {
+                        active: SourceGeneration(1),
+                        requested: SourceGeneration(1),
+                    },
+                ),
+                (
+                    SourceCommand::SeekAt {
+                        generation: SourceGeneration(2),
+                        frame: SourceFrame(5),
+                        anchor_sample: QU + 1,
+                    },
+                    SourceSeekError::AnchorUnaligned,
+                ),
+                (
+                    seek(2, TIMELINE_SAMPLE_LIMIT + 1),
+                    SourceSeekError::FrameOutOfRange,
+                ),
+            ] {
+                assert_eq!(producer.check_seek(command), Err(error));
+                assert_eq!(producer.try_seek(command), Err(error));
+                assert_eq!(producer.active_generation(), SourceGeneration(1));
+            }
+            producer.try_seek(seek(2, TIMELINE_SAMPLE_LIMIT)).unwrap();
+            // The one slot is taken: a second seek is backpressure, checked or pushed, and the
+            // first one still applies.
+            assert!(matches!(
+                producer.check_seek(seek(3, 9)),
+                Err(SourceSeekError::Backpressure { .. })
+            ));
+            assert!(matches!(
+                producer.try_seek(seek(3, 9)),
+                Err(SourceSeekError::Backpressure { .. })
+            ));
+            assert_eq!(producer.active_generation(), SourceGeneration(2));
+            consumer.begin_block_at(0);
+            assert_eq!(consumer.position(), TIMELINE_SAMPLE_LIMIT + QU);
+            assert_eq!(consumer.active_generation(), SourceGeneration(2));
+            assert_eq!(producer.check_seek(seek(3, 9)), Ok(()));
+        }
+
+        #[test]
+        fn the_history_reads_both_sides_of_a_seek_and_extrapolates_below_its_oldest_entry() {
+            let (mut producer, mut consumer) = timeline(4);
+            run(&mut consumer, 0, 6);
+            producer.try_seek(seek(2, 10_000)).unwrap();
+            run(&mut consumer, 6, 8);
+            // The window holds blocks 4..8: 512, 640, then the seek, 10_000, 10_128.
+            assert_eq!(consumer.timeline_at(6 * QU - 1), 767);
+            assert_eq!(consumer.timeline_at(6 * QU), 10_000);
+            assert_eq!(consumer.timeline_at(7 * QU + 5), 10_133);
+            // Below the oldest entry (block 4): back from it.
+            assert_eq!(consumer.timeline_at(4 * QU - 1), 511);
+            assert_eq!(consumer.timeline_at(0), 0);
+
+            // A fresh plan's first block reads negative node times before it.
+            let (_producer, mut fresh) = timeline(2);
+            fresh.begin_block_at(256);
+            assert_eq!(fresh.timeline_at(256 - 40), -40);
+        }
+
+        #[test]
+        fn a_node_block_reports_the_step_of_a_seek_inside_it_or_at_its_first_sample() {
+            let (mut producer, mut consumer) = timeline(4);
+            run(&mut consumer, 0, 3);
+            producer.try_seek(seek(2, 10_000)).unwrap();
+            run(&mut consumer, 3, 5);
+            // Straddling: the node block starts 40 samples before the seek's block.
+            assert_eq!(
+                consumer.timeline_block(3 * QU - 40, Q),
+                TimelineSpan {
+                    start: 3 * 128 - 40,
+                    step: Some(TimelineStep {
+                        offset: 40,
+                        timeline: 10_000,
+                    }),
+                }
+            );
+            // Exactly at the seek's block: the step is at offset 0.
+            assert_eq!(
+                consumer.timeline_block(3 * QU, Q),
+                TimelineSpan {
+                    start: 10_000,
+                    step: Some(TimelineStep {
+                        offset: 0,
+                        timeline: 10_000,
+                    }),
+                }
+            );
+            // A plain advance is no step, inside or at the first sample.
+            assert_eq!(
+                consumer.timeline_block(4 * QU - 40, Q),
+                TimelineSpan {
+                    start: 10_088,
+                    step: None,
+                }
+            );
+            assert_eq!(consumer.timeline_block(2 * QU, Q).step, None);
+        }
+
+        #[test]
+        fn a_seek_in_the_oldest_entry_is_still_a_step() {
+            let (mut producer, mut consumer) = timeline(2);
+            run(&mut consumer, 0, 2);
+            producer.try_seek(seek(2, 9_000)).unwrap();
+            // Block 2 seeks; block 3 evicts block 1, so block 2 becomes the oldest entry.
+            run(&mut consumer, 2, 4);
+            assert_eq!(
+                consumer.timeline_block(2 * QU, Q).step,
+                Some(TimelineStep {
+                    offset: 0,
+                    timeline: 9_000,
+                })
+            );
+            assert_eq!(consumer.timeline_block(3 * QU, Q).step, None);
+        }
+
+        #[test]
+        fn copying_a_history_keeps_its_newest_entries_in_order() {
+            let (mut producer, mut large) = timeline(6);
+            run(&mut large, 0, 4);
+            producer.try_seek(seek(2, 10_000)).unwrap();
+            run(&mut large, 4, 8);
+            let snapshot = |consumer: &TimelineConsumer| {
+                (0..consumer.len)
+                    .rev()
+                    .map(|age| consumer.entry(age).unwrap())
+                    .map(|entry| (entry.source_read_sample, entry.timeline))
+                    .collect::<Vec<_>>()
+            };
+            // From a larger K: the newest three, oldest first, and the seek still a step.
+            let (_p, mut small) = timeline(3);
+            run(&mut small, 0, 1);
+            small.copy_history_from(&large);
+            assert_eq!(
+                snapshot(&small),
+                vec![(5 * QU, 10_128), (6 * QU, 10_256), (7 * QU, 10_384)]
+            );
+            assert_eq!(small.timeline_at(5 * QU - 1), 10_127);
+            assert_eq!(small.timeline_block(5 * QU, Q).step, None);
+            // From a smaller K: all three, in order, then the copy keeps recording after them.
+            let (_p, mut larger) = timeline(5);
+            larger.copy_history_from(&small);
+            assert_eq!(snapshot(&larger), snapshot(&small));
+            // The copy's oldest entry is a plain advance from the entry before it.
+            assert!(!larger.is_seek_entry(2));
+            larger.begin_block_at(8 * QU);
+            assert_eq!(snapshot(&larger).len(), 4);
+            // A copy that keeps the seek's entry as its oldest still reports it.
+            let (_p, mut five) = timeline(5);
+            five.copy_history_from(&large);
+            assert_eq!(snapshot(&five).first(), Some(&(3 * QU, 384)));
+            let (_p, mut four) = timeline(4);
+            four.copy_history_from(&large);
+            assert_eq!(snapshot(&four).first(), Some(&(4 * QU, 10_000)));
+            assert_eq!(
+                four.timeline_block(4 * QU, Q).step,
+                Some(TimelineStep {
+                    offset: 0,
+                    timeline: 10_000,
+                })
+            );
+        }
+
+        #[test]
+        fn the_resource_report_states_each_row() {
+            let report =
+                SourceTimeline::resource_report(QuantumFrames(Q), NonZeroUsize::new(5).unwrap())
+                    .unwrap();
+            let ring = PcmSourceRing::resource_report(config(1, Q, QU)).unwrap();
+            assert_eq!(report.history_blocks, 5);
+            assert_eq!(report.history_bytes, 80);
+            assert_eq!(report.command_queue_bytes, ring.command_queue_bytes);
+            assert_eq!(
+                report.command_queue_largest_allocation_bytes,
+                largest_queue_allocation::<SourceCommand>(NonZeroUsize::MIN).unwrap()
+            );
+            assert!(report.command_queue_largest_allocation_bytes <= report.command_queue_bytes);
+            assert_eq!(
+                SourceTimeline::resource_report(QuantumFrames(0), NonZeroUsize::MIN),
+                Err(PcmSourceRingError::ZeroQuantumFrames)
+            );
+        }
+
+        /// #1640 D1 on the PCM side: `check_seek` forwards to the shared seek producer, agrees
+        /// with `try_seek` and pushes nothing.
+        #[test]
+        fn a_source_check_seek_agrees_with_its_try_seek_and_pushes_nothing() {
+            let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+            let mut host = producer.into_host_chunk_provider(RATE);
+            assert_eq!(
+                host.check_seek(seek_at(2, 100, 6)),
+                Err(SourceSeekError::AnchorUnaligned)
+            );
+            assert_eq!(host.check_seek(seek(2, 100)), Ok(()));
+            assert_eq!(host.telemetry().active_generation, SourceGeneration(1));
+            consumer.begin_block();
+            assert_eq!(consumer.telemetry().active_generation, SourceGeneration(1));
+            host.try_seek(seek(2, 100)).unwrap();
+            assert!(matches!(
+                host.check_seek(seek(3, 0)),
+                Err(SourceSeekError::Backpressure { .. })
+            ));
+            // A source seek has no frame limit.
+            consumer.begin_block();
+            assert_eq!(host.check_seek(seek(3, u64::MAX)), Ok(()));
         }
     }
 }

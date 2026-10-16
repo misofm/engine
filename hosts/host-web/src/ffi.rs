@@ -3275,6 +3275,105 @@ pub extern "C" fn miso_engine_web_v1_source_seek(
     })
 }
 
+/// Run `operation` on the first `id_count` bytes of the source ID staging and return its result,
+/// or refuse with `Err(`[`RESULT_INVALID_ARGUMENT`]`)` for a count past the staging
+/// (`Err(`[`RESULT_INTERNAL`]`)` with no staging). A refusal is not recorded: the caller records
+/// it exactly when its operation would record its own results. The prefix is only read during
+/// the synchronous call.
+fn with_staged_source_id(
+    host: &mut AudioWorkletEngineHost,
+    id_count: usize,
+    operation: impl FnOnce(&mut AudioWorkletEngineHost, &[u8]) -> u32,
+) -> Result<u32, u32> {
+    let Some(ids) = host.source_id_mut() else {
+        return Err(RESULT_INTERNAL);
+    };
+    let Some(source_id) = ids.get(..id_count) else {
+        return Err(RESULT_INVALID_ARGUMENT);
+    };
+    let source_id_pointer = source_id.as_ptr();
+    // SAFETY: The checked ID prefix lies in stable staging and is only read during the synchronous
+    // safe-host call; neither anchored-seek operation mutates staging.
+    let source_id = unsafe { slice::from_raw_parts(source_id_pointer, id_count) };
+    Ok(operation(host, source_id))
+}
+
+/// Queue one generation-tagged anchored source seek for the staged source ID (issue #1293 D5):
+/// `source_frame` enters the graph in the block that starts at absolute render sample
+/// `anchor_sample`. It runs the control plane's `SessionState::seek_at`, the call the C ABI's
+/// `miso_engine_v1_source_seek_at` runs, so the control Worker (or in `single` mode the worklet's
+/// message handler) calls it, never `process()`: it runs the service step. It never prepares the
+/// plan's consumer, which the anchor block applies.
+///
+/// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle, an ID count past the
+/// staging, an unknown source, an anchor that is not a quantum multiple or any other malformed
+/// seek; [`RESULT_BACKPRESSURE`] for a full control queue; [`RESULT_REFUSED_LIFECYCLE`] for a host
+/// that is not ready (nothing changes); [`RESULT_INTERNAL`].
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_seek_at(
+    handle: u32,
+    source_id_bytes: u32,
+    generation: u64,
+    source_frame: u64,
+    anchor_sample: u64,
+) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        if host.status().state != STATE_READY {
+            return host.seek_source_at(&[], 0, 0, 0);
+        }
+        // `seek_source_at` records its result, so its staged-ID refusal is recorded too.
+        match with_staged_source_id(host, source_id_bytes as usize, |host, source_id| {
+            host.seek_source_at(source_id, generation, source_frame, anchor_sample)
+        }) {
+            Ok(code) => code,
+            Err(code) => host.record_boundary_result(code),
+        }
+    })
+}
+
+/// Copy where the staged source landed after its newest seek into the fixed 64-byte record at
+/// [`miso_engine_web_v1_source_seek_report_ptr`] (issue #1293 D6): the generation in effect, the
+/// source-read sample and source frame of its first block, and the cumulative underrun and held
+/// frames. It runs the control plane's `SessionState::seek_report`, the call the C ABI's
+/// `miso_engine_v1_source_seek_report` runs, so it is control side only.
+///
+/// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle, an ID count past the
+/// staging or an unknown source; [`RESULT_BACKPRESSURE`] for a read that landed inside render's
+/// publication (read again); [`RESULT_REFUSED_LIFECYCLE`] for a host that is not ready;
+/// [`RESULT_INTERNAL`]. A refusal leaves the record alone, and no result changes the status's last
+/// result.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_seek_report(handle: u32, source_id_bytes: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        if host.status().state != STATE_READY {
+            return host.read_seek_report(&[]);
+        }
+        // `read_seek_report` leaves the status's last result alone, so its staged-ID refusal
+        // does too.
+        let (Ok(code) | Err(code)) =
+            with_staged_source_id(host, source_id_bytes as usize, |host, source_id| {
+                host.read_seek_report(source_id)
+            });
+        code
+    })
+}
+
+/// Return the stable address of the 64-byte seek report record, or zero for an invalid handle or a
+/// host that is not ready (issue #1293 D6).
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_seek_report_ptr(handle: u32) -> u32 {
+    with_host(handle, 0, |host| pointer_u32(seek_report_pointer(host)))
+}
+
+/// The seek report record's address for a ready host, else null (#1293 D6).
+fn seek_report_pointer(host: &AudioWorkletEngineHost) -> *const crate::WebSeekReport {
+    if host.status().state == STATE_READY {
+        ptr::from_ref(host.seek_report())
+    } else {
+        ptr::null()
+    }
+}
+
 /// Render one exact prepared quantum after validating the browser's actual frame count.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> u32 {
@@ -4159,6 +4258,12 @@ pub mod native_staging {
         super::with_host(handle, None, |host| Some(*host.watermark()))
     }
 
+    /// The seek report record the host `handle` names last copied (#1293 D6), as the worklet reads
+    /// it through `miso_engine_web_v1_source_seek_report_ptr`; `None` for an unknown handle.
+    pub fn seek_report(handle: u32) -> Option<crate::WebSeekReport> {
+        super::with_host(handle, None, |host| Some(*host.seek_report()))
+    }
+
     /// The plan latency record the host `handle` names last copied (#1688), as the worklet reads
     /// it through `miso_engine_web_v1_plan_latency_ptr`; `None` for an unknown handle.
     pub fn plan_latency(handle: u32) -> Option<crate::WebPlanLatency> {
@@ -4251,6 +4356,18 @@ pub(crate) fn test_fill_source_pcm(handle: u32, value: f32) -> u32 {
 #[cfg(test)]
 pub(crate) fn test_buffer_address(handle: u32, kind: u32) -> usize {
     with_host_mut(handle, 0, |host| buffer_pointer(host, kind).addr())
+}
+
+/// The address `miso_engine_web_v1_source_seek_report_ptr` returns before its `u32` cast (a
+/// native address does not fit it), and the record's own address.
+#[cfg(test)]
+pub(crate) fn test_seek_report_addresses(handle: u32) -> (usize, usize) {
+    with_host(handle, (0, 0), |host| {
+        (
+            seek_report_pointer(host).addr(),
+            ptr::from_ref(host.seek_report()).addr(),
+        )
+    })
 }
 
 #[cfg(test)]

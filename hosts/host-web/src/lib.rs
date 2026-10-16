@@ -1245,6 +1245,39 @@ pub struct WebPlanLatency {
 /// Exact byte size of [`WebPlanLatency`].
 pub const PLAN_LATENCY_BYTES: u32 = size_of::<WebPlanLatency>() as u32;
 
+/// Where a source landed after its newest seek (#1293 D6), in the order and sizes of the C ABI's
+/// `miso_engine_v1_seek_report`.
+///
+/// The host keeps one at a stable address, written by
+/// [`AudioWorkletEngineHost::read_seek_report`] and found through
+/// `miso_engine_web_v1_source_seek_report_ptr`. The words are the control plane's
+/// `SessionState::seek_report`, copied: the browser computes nothing (root ruling R7: 64 bytes,
+/// the C struct's layout, reserved words zero).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebSeekReport {
+    /// Exact structure byte size ([`SEEK_REPORT_BYTES`]); zero until the first successful read.
+    pub struct_size: u32,
+    /// Required zero.
+    pub reserved0: u32,
+    /// The generation in effect; `0` until the source's ring has rendered a block.
+    pub generation: u64,
+    /// The source-read sample of the first block `generation` played in: the clock
+    /// `miso_engine_web_v1_source_seek_at`'s anchor is on.
+    pub first_sample: u64,
+    /// The source frame that block started at; a late anchored seek's includes its lateness.
+    pub source_frame: u64,
+    /// Saturating cumulative missing in-region frames (true underruns).
+    pub cumulative_underrun_frames: u64,
+    /// Saturating cumulative in-region frames held while an anchored seek waited.
+    pub cumulative_held_frames: u64,
+    /// Required-zero expansion words.
+    pub reserved: [u64; 2],
+}
+
+/// Exact byte size of [`WebSeekReport`], equal to the C ABI seek report's.
+pub const SEEK_REPORT_BYTES: u32 = size_of::<WebSeekReport>() as u32;
+
 /// Exact retained-resource projection for the browser bridge and production artifacts.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2150,6 +2183,9 @@ pub struct AudioWorkletEngineHost {
     /// The plan latency `read_plan_latency` last copied (#1688 D2), at a stable address in the
     /// control half: all zero until the first successful read.
     plan_latency: WebPlanLatency,
+    /// The seek report `read_seek_report` last copied (#1293 D6), at a stable address in the
+    /// control half: all zero until the first successful read.
+    seek_report: WebSeekReport,
     /// First sample eligible for the current lease. A snapshot that opens before this boundary
     /// is an old/partial interval and is dropped rather than presented as a clean measurement.
     meter_activation_sample: u64,
@@ -2350,6 +2386,7 @@ impl AudioWorkletEngineHost {
                 ..WebPlanWatermark::default()
             },
             plan_latency: WebPlanLatency::default(),
+            seek_report: WebSeekReport::default(),
             meter_lease: false,
             meter_activation_sample: 0,
             buffers: Some(buffers),
@@ -2752,6 +2789,46 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub const fn plan_latency(&self) -> &WebPlanLatency {
         &self.plan_latency
+    }
+
+    /// Copy where the staged source landed after its newest seek into the host's record (#1293
+    /// D6): the control plane's `SessionState::seek_report`, the call the C ABI's
+    /// `miso_engine_v1_source_seek_report` runs, after its service step. Control side only: the
+    /// message handler, never `process()`.
+    ///
+    /// A host that is not ready refuses with [`RESULT_REFUSED_LIFECYCLE`]; a read that landed
+    /// inside render's publication on every bounded attempt is [`RESULT_BACKPRESSURE`] (read
+    /// again); a source the session does not declare is [`RESULT_INVALID_ARGUMENT`]. Every refusal
+    /// leaves the record alone. Like [`Self::service`] it leaves the status's last result alone.
+    pub fn read_seek_report(&mut self, source_id: &[u8]) -> u32 {
+        if self.status.state != STATE_READY {
+            return RESULT_REFUSED_LIFECYCLE;
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return RESULT_REFUSED_LIFECYCLE;
+        };
+        match ready.control.seek_report(source_id) {
+            Ok(report) => {
+                self.seek_report = WebSeekReport {
+                    struct_size: SEEK_REPORT_BYTES,
+                    reserved0: 0,
+                    generation: report.generation,
+                    first_sample: report.first_sample,
+                    source_frame: report.source_frame,
+                    cumulative_underrun_frames: report.cumulative_underrun_frames,
+                    cumulative_held_frames: report.cumulative_held_frames,
+                    reserved: [0; 2],
+                };
+                RESULT_OK
+            }
+            Err(failure) => source_failure_result(failure),
+        }
+    }
+
+    /// The record [`Self::read_seek_report`] fills.
+    #[must_use]
+    pub const fn seek_report(&self) -> &WebSeekReport {
+        &self.seek_report
     }
 
     /// The record [`Self::read_watermark`] fills.
@@ -3559,6 +3636,40 @@ impl AudioWorkletEngineHost {
                     RESULT_INTERNAL
                 }
             }
+            Err(failure) => source_failure_result(failure),
+        };
+        self.record(code)
+    }
+
+    /// Queue one anchored source seek (#1293 D5): `source_frame` enters the graph in the block that
+    /// starts at absolute render sample `anchor_sample`.
+    ///
+    /// It runs the control plane's `SessionState::seek_at`, the call the C ABI's
+    /// `miso_engine_v1_source_seek_at` runs, after its service step, so it is a control-side call
+    /// (the message handler, never `process()`). It never prepares the plan's consumer: the
+    /// anchored seek is held by the ring and the consumer applies it at its anchor block, where
+    /// `prepare_source_seek` would refuse a held seek. A host that is not ready refuses with
+    /// [`RESULT_REFUSED_LIFECYCLE`] and changes nothing; the core's refusals map through
+    /// `source_failure_result` (an unknown source or an anchor that is not a quantum multiple is
+    /// [`RESULT_INVALID_ARGUMENT`]).
+    pub fn seek_source_at(
+        &mut self,
+        source_id: &[u8],
+        generation: u64,
+        source_frame: u64,
+        anchor_sample: u64,
+    ) -> u32 {
+        if self.status.state != STATE_READY {
+            return self.record(RESULT_REFUSED_LIFECYCLE);
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return self.record(RESULT_REFUSED_LIFECYCLE);
+        };
+        let code = match ready
+            .control
+            .seek_at(source_id, generation, source_frame, anchor_sample)
+        {
+            Ok(()) => RESULT_OK,
             Err(failure) => source_failure_result(failure),
         };
         self.record(code)

@@ -1242,6 +1242,14 @@ impl Budget {
 /// tables. `capi_retained_bytes` measured 167,514 before and 167,754 after (x86-64, +240: the
 /// two tables in the inventory the provider epochs keep), within the 175,296 ceiling, so the
 /// ceiling stays.
+///
+/// #1641 (batch 16) gives every plan a timeline consumer: the timeline consumer's fixed bytes
+/// (#1641 D7), its one-slot command queue, its one-entry history (the reference session has no
+/// latency, so `K = 1`) and the consumer inline in the source driver. `source_overhead_bytes`
+/// measured 4,174 before and 4,654 after (x86-64, +480; the row does not depend on the lane width),
+/// so its ceiling is 4,654 plus 10 %, rounded up to 64: 5,119.4 -> 5,120 (was 4,352).
+/// `source_total_bytes` moved 12,366 -> 12,846 and `capi_retained_bytes` 167,754 -> 168,378 (the
+/// timeline producer in each kept source control set), both within their ceilings.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1306,8 +1314,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "source_overhead_bytes",
         value: |report| report.source_overhead_bytes,
-        eight_lanes: 4_352,
-        four_lanes: 4_352,
+        eight_lanes: 5_120,
+        four_lanes: 5_120,
     },
     Budget {
         row: "source_total_bytes",
@@ -1800,8 +1808,10 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     .unwrap_or_else(|_| panic!("the prospective session prepares as a successor"))
     .0
     .report;
+    // Every successor carries the timeline's command queue (#1641 D7), which is overhead only; a
+    // carried ring also brings its PCM payload.
     assert!(
-        successor.carried_source_total_bytes > 0,
+        successor.carried_source_total_bytes > successor.carried_source_overhead_bytes,
         "vacuous: the replacement carries no ring"
     );
     assert_eq!(

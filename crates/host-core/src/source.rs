@@ -12,7 +12,7 @@ use engine::realtime::PreparedRenderPlan;
 use session::SessionModel;
 use source::{
     HostChunkError, HostChunkProvider, HostPlanarChunk, SourceCommand, SourceFrame,
-    SourceGeneration, SourceSeekError, SourceSeekReport, SubmitReport,
+    SourceGeneration, SourceSeekError, SourceSeekReport, SubmitReport, TimelineProducer,
 };
 
 use crate::PlanStateInventory;
@@ -108,6 +108,7 @@ impl SourceControlError {
             Self::Vacated => "source.ring.vacated",
             Self::Seek(SourceSeekError::AnchorUnaligned) => "source.seek.anchor_unaligned",
             Self::ReportBusy => "source.report.busy",
+            Self::Seek(SourceSeekError::FrameOutOfRange) => "source.seek.frame_out_of_range",
         }
     }
 
@@ -137,11 +138,30 @@ impl SourceControlError {
 pub struct SourceControlSet {
     ids: Box<[u8]>,
     sources: Box<[ControlSource]>,
+    /// The session timeline's producer (#1641 D2). `None` while vacant: a successor's, until
+    /// [`Self::adopt_persisting`] moves its predecessor's in, or a predecessor's once moved.
+    timeline: Option<TimelineProducer>,
 }
 
 impl SourceControlSet {
     pub(crate) fn new(ids: Box<[u8]>, sources: Box<[ControlSource]>) -> Self {
-        Self { ids, sources }
+        Self {
+            ids,
+            sources,
+            timeline: None,
+        }
+    }
+
+    /// Give the set its plan's fresh timeline producer (#1641 D2). Preparation only.
+    pub(crate) fn set_timeline(&mut self, producer: TimelineProducer) {
+        self.timeline = Some(producer);
+    }
+
+    /// The session timeline's producer, for a test that seeks the timeline directly (#1641
+    /// gates). `None` while vacant. Host-core has no public timeline seek; #1642 adds it.
+    #[cfg(feature = "test-support")]
+    pub fn test_only_timeline_producer(&mut self) -> Option<&mut TimelineProducer> {
+        self.timeline.as_mut()
     }
 
     fn id(&self, source: &ControlSource) -> &[u8] {
@@ -306,7 +326,9 @@ impl SourceControlSet {
     }
 
     /// Move into this set the producer of every source it holds vacant, from `predecessor`'s
-    /// entry with the same ID, leaving that entry vacant. Returns how many producers moved.
+    /// entry with the same ID, leaving that entry vacant. Returns how many source producers
+    /// moved. A vacant timeline producer moves by the same rule (#1641 D2) and is not counted:
+    /// every successor carries the timeline.
     ///
     /// A host calls this after preparing a successor with
     /// [`crate::prepare_host_runtime_successor`] (or its live-control form) and after its last
@@ -317,7 +339,11 @@ impl SourceControlSet {
     /// The producers move before the plan swap that moves their consumers. Should that swap's
     /// carry report `PredecessorMismatch` -- unreachable on both hosts by construction (issue
     /// #1269 P11) -- the successor's vacant sources render `+0.0` from the swap block on, since
-    /// their producers have already moved here and their rings stay with the retired plan.
+    /// their producers have already moved here and their rings stay with the retired plan. The
+    /// timeline keeps the same contract: its producer has moved here too, and the successor's
+    /// vacant timeline advances from timeline sample 0 and observes no seek. Its one exception
+    /// (#1641 D9): nothing reports the vacant timeline itself; the swap's mismatch count is the
+    /// only sign.
     pub fn adopt_persisting(&mut self, predecessor: &mut SourceControlSet) -> usize {
         let mut moved = 0;
         for index in 0..self.sources.len() {
@@ -331,6 +357,9 @@ impl SourceControlSet {
                 self.sources[index].provider = Some(provider);
                 moved += 1;
             }
+        }
+        if self.timeline.is_none() {
+            self.timeline = predecessor.timeline.take();
         }
         moved
     }

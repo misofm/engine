@@ -166,6 +166,12 @@ const TABLE: &[(SourceControlError, &str, bool, bool)] = &[
         true,
         false,
     ),
+    (
+        SourceControlError::Seek(SourceSeekError::FrameOutOfRange),
+        "source.seek.frame_out_of_range",
+        false,
+        false,
+    ),
 ];
 
 /// The two codes a host must see from more than one variant, and why. Anything else sharing a
@@ -201,6 +207,7 @@ const fn variant_index(error: SourceControlError) -> usize {
         SourceControlError::Vacated => 17,
         SourceControlError::Seek(SourceSeekError::AnchorUnaligned) => 18,
         SourceControlError::ReportBusy => 19,
+        SourceControlError::Seek(SourceSeekError::FrameOutOfRange) => 20,
     }
 }
 

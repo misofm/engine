@@ -86,6 +86,9 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_source_frames",
     "miso_engine_web_v1_source_id",
     "miso_engine_web_v1_source_seek",
+    "miso_engine_web_v1_source_seek_at",
+    "miso_engine_web_v1_source_seek_report",
+    "miso_engine_web_v1_source_seek_report_ptr",
     "miso_engine_web_v1_source_submit",
     "miso_engine_web_v1_spectrum_analysis",
     "miso_engine_web_v1_spectrum_arm",
@@ -625,6 +628,51 @@ export const ABI_LAYOUT = deepFreeze(
           "name": "reserved",
           "offset": 32,
           "type": "u64[4]"
+        }
+      ]
+    },
+    "seekReport": {
+      "bytes": 64,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "reserved0",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "generation",
+          "offset": 8,
+          "type": "u64"
+        },
+        {
+          "name": "firstSample",
+          "offset": 16,
+          "type": "u64"
+        },
+        {
+          "name": "sourceFrame",
+          "offset": 24,
+          "type": "u64"
+        },
+        {
+          "name": "cumulativeUnderrunFrames",
+          "offset": 32,
+          "type": "u64"
+        },
+        {
+          "name": "cumulativeHeldFrames",
+          "offset": 40,
+          "type": "u64"
+        },
+        {
+          "name": "reserved",
+          "offset": 48,
+          "type": "u64[2]"
         }
       ]
     },

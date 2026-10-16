@@ -233,3 +233,229 @@ Checked against `12d4a4f9d`.
   the browser half of gate 2 waits for #1562b.
 - **Realtime policy** as in #1640's amendment (`./target/release/realtime_policy`).
 - **Dependencies.** #1285, #1316, #1320, #1323 and #1396 are still open.
+
+## Amendment (controls coordinator, batch 16 check, 2026-10-16)
+
+Checked against `35ac17545`.
+
+- **Landed deps.** #1285, #1309, #1316, #1318, #1320, #1323, #1396 and #1562 (with #1562b) are
+  closed and on `main`. #1355 (warm adoption) and #1647 are open.
+- **The browser runs successors now** (#1562b-W, `2b79cec44`), through the same control plane,
+  each one counted as a blocking rebuild. The note "the browser half of gate 2 waits for #1562b"
+  is void.
+- **Moved anchors, `crates/source/src/lib.rs`.** `SourceGraphSource` `:1978-2021` (`vacant`
+  `:2013`). `GraphSourceEntry` `:2041-2046`. Driver `SourceGraphSourceSetDriver` `:2048-2054`.
+  Its `begin_block` `:2138-2174` (the call `:2159`). `adopt_sources` `:2289-2325`.
+  `prepare_graph_source_set` `:2421-2497`.
+- **Moved anchors, `crates/graph/src/lib.rs`.** Driver trait `:2565-2667`. `GraphCarryProgram`
+  `:3310-3324`. `install_carry_program` `:3699`. `carry_program_retained_bytes` `:4349`.
+  `adopt_predecessor` `:4728-4830`; it calls `adopt_sources` only `if !program.sources.is_empty()`
+  (`:4794-4803`), so D3's flag goes into that condition. Block entry: `:4964-4978`, which reads
+  `time.absolute_sample + source_read_offset` (#1396 D1). `PreparedRenderPlan::executor_any_mut`
+  is `crates/engine/src/realtime/plan.rs:1252`, `executor_any` `:1261`.
+- **Moved anchors, `crates/host-core/src/prepare.rs`.** Source loop with the carry `:2234-2295`
+  (vacant push `:2273`, carried overhead `:2253-2263`). Region `0..frames`: `builder.push`
+  `:2264-2271` and `:2281-2288`. Carry program `:2441-2457`. Floored arrivals
+  `artifact.report().input_arrivals` `:2846-2851`. `prepare_graph_source_set` and the overhead cap
+  `:2916-2932`. Offset set `:3439-3440`. `at_discontinuity` `:1032-1056`.
+- **Moved anchors, host-core and control plane.** `SourceControlSet` `crates/host-core/src/source.rs:137-140`,
+  `adopt_persisting` `:321-336`, `diagnostic` `:86-118`. The control plane calls `adopt_persisting`
+  at three places: `crates/control-plane/src/control.rs:2705` (across a withdrawn candidate),
+  `:2732` (an ordinary commit) and `:2816` (#1310 D5 step 5, the hand-back to P0). D2's timeline
+  producer moves at all three, with no new call.
+- **`A_max` is readable in time.** `input_arrivals` (floored, nonzero rows only) exists before
+  `prepare_graph_source_set` is called. So K is `⌈max / q⌉ + 1`, or 1 when it is empty. The
+  inventory keeps the same rows (`PlanStateInventory::input_floors()`, `:1000`).
+- **Stale: the empty-source refusal.** `prepare_graph_source_set` no longer refuses an empty source
+  list. Host-core still always builds a source set (`:2916`), so a session with no sources also
+  gets a timeline. The Non-goal "a plan with no source set" stands.
+- **Discontinuity (#1323).** `at_discontinuity` keeps only the source rows and sets
+  `source_read_offset` to 0, so the step back is #1396 D3 as written. D4 holds. The carry program
+  exists at a discontinuity only when something carries; D3's flag makes it exist on every
+  successor.
+- **Donation (#1344).** `swap_sources` and `donate_sources` (`graph` `:4431-4475`) exchange
+  *fresh* entries between two unpublished plans. Every control-plane candidate is a successor, so
+  its timeline is vacant and is never donated. The driver's `swap_sources` leaves the timeline
+  where it is.
+- **D3 also moves the seek report.** If D6 stands, the adopt step also swaps the timeline's
+  seek-report writer and its last published copy, as a source's report moves with its consumer
+  (#1316 D5).
+- **D6 is per ring, not a row in a table.** There is no shared report table. Each ring has a
+  5-word seqlock record (`crates/engine/src/realtime/seqlock.rs`). Host-core reads it per source
+  ID (`SourceControlSet::seek_report`, `:258`); the C ABI reads it with
+  `miso_engine_v1_source_seek_report` (`crates/capi/src/ffi.rs:652`). The timeline's "row" is its
+  own record of the same words. #1642 lists it as a non-goal, so no host reads it after this
+  slice.
+- **D5: no prime path exists above the consumer.** #1320 shipped `PcmSourceConsumer::prime_ready`
+  (`:1676`) and `prime_block_at` (`:1742`) and the `prime_required` flag. `GraphExecutor` does not
+  implement `PreparedPlanExecutor::prime_ready` (the default `false`,
+  `crates/engine/src/realtime/plan.rs:356`), and the driver has no prime call. #1355 adds them,
+  and its spec does not name the timeline yet. Until then, gate 3's prime half can only compare
+  the two consumers directly.
+- **D7 byte pins (measured on `35ac17545`, x86-64).** `hosts/host-web/tests/retained_ceilings.rs`
+  `source_overhead_bytes` is 2,658 of 2,688, and
+  `crates/capi/tests/resource_lifecycle.rs` is 4,174 of 4,352. The timeline's bytes will very
+  likely cross both ceilings. The browser's wasm `sourceOverheadBytes` ceiling (2,496,
+  `hosts/host-web/tests/browser-v1/expected.json:73`) is likely to cross too. Re-pin each one with
+  the reason. Keep the identity `source_overhead + carried_source_overhead == fresh`
+  (`crates/host-core/tests/successor_swap.rs:197-200`).
+- **Gate 1 hazard, plain seeks pushed while render runs.** One driver call cannot put a timeline
+  and a source in the same block on its own. The two queues are popped at different instants, so
+  a plain seek pushed during a block can land one block apart. Gate 1 pushes between blocks, so
+  it is deterministic. Only anchored seeks are exact under concurrency (#1642's concern).
+- **Realtime policy.** The floors are now `tools/realtime-policy/src/policy.rs:228-229`. New
+  regions only add to them.
+- **Decision 17.** No change. C13 (rulings 2026-10-15 and 2026-10-16) calls seeks and the seek
+  report transport. Exposing a timeline report to a host would need a new direct export or a
+  protocol message, and a new direct export needs its own root ruling.
+
+## Amendment (root rulings, batch 16, 2026-10-16)
+
+- **B16-R3, D5 readiness.** The timeline is not "always ready". Its readiness is the source
+  consumer's non-PCM test, written once (#1640 D1's shared seek state): its command queue is empty
+  and it holds no anchored seek whose anchor falls before the end of the prime window. So a prime
+  never skips a held anchored seek. Its prime still advances it by `k` blocks, as `k` calls of
+  `begin_block_at` that observe no command. #1355 calls the readiness check and the prime on the
+  timeline as on each carried consumer (amended there). Gate 3's prime half compares the timeline
+  and a source consumer directly until #1355 wires the prime above the consumer.
+- **B16-R4, D6 deferred.** No host reads a timeline seek report after this batch. D6 (the
+  timeline's seek-report record), its bytes in D7 and its move in D3 are taken out of this slice.
+  #1704 *Report the timeline seek position to hosts* keeps them, for the first slice
+  that needs a host reader. Gate 1 compares `test_only_timeline_at` with the frame each block's
+  source read starts at; its seek-report clause is dropped.
+
+## Decision record: #1641 (batch 16)
+
+Built on `3f53c0755` (worktree `codex/controls-batch-16a`, #1640's timeline types).
+
+**What shipped:**
+
+- **D1** (`crates/source/src/lib.rs`, `crates/host-core/src/prepare.rs`). `prepare_graph_source_set`
+  takes a `TimelineConsumer` (a new third argument; refused with
+  `SourceGraphSourceSetError::TimelineQuantum` when its quantum is not the envelope's). The driver
+  holds it inline and calls its `begin_block_at(first_sample)` at block entry, after the quantum
+  check and before the sources, with the sample the sources get. Host-core sizes it
+  `K = ⌈A_max / q⌉ + 1` from `artifact.report().input_arrivals` (1 when empty), just before the
+  source set is sealed.
+- **D2** (`crates/host-core/src/source.rs`). `SourceControlSet` holds `Option<TimelineProducer>`:
+  a fresh plan's, set at preparation; `None` on a successor until `adopt_persisting` takes the
+  predecessor's by the same rule as a vacant source's producer. The return value still counts
+  source producers only (callers assert it). No public timeline seek; a `test-support` accessor
+  `test_only_timeline_producer` serves the gates.
+- **D3.** `SourceTimeline::prepare_vacant(q, K)`: its own history, no command queue
+  (`command_consumer: Option<_>`). `GraphCarryProgram { timeline: bool }`; `adopt_predecessor`
+  calls `adopt_sources` when `!sources.is_empty() || timeline`. The driver moves the timeline when
+  its own is vacant and the predecessor's is occupied (any other pairing leaves both timelines as
+  they are and still moves the sources; fold M3), through `TimelineConsumer::adopt_from`, which
+  swaps seek state, command consumer and position and calls `copy_history_from`. Nothing is allocated or freed. A vacant timeline never adopted advances
+  from 0 and pops nothing. `swap_sources` (donation) leaves the timeline where it is.
+- **D4.** No extra code: the discontinuity successor carries as D3 (its program now always exists).
+- **D5 (B16-R3).** `TimelineConsumer::prime_ready(first, lead)` and `prime_block_at(sample)`. The
+  seek half of readiness is written once, `SeekState::prime_window_clear` (no queued command, no
+  held anchor before the window end); `PcmSourceConsumer::prime_ready` now calls it too. No
+  driver prime path (#1355).
+- **D7.** The set's overhead gains the history (`16·K`) and, for an occupied timeline, the command
+  queue; its largest allocation the larger of the two (`TimelineResourceReport` gains
+  `command_queue_largest_allocation_bytes` for this). `consumer_bytes` is not charged again: the
+  consumer is inline in the driver, whose own allocation row counts it. A vacant timeline's queue
+  is added to `carried_source_total_bytes`, `carried_source_overhead_bytes` and the carried largest
+  allocation, so `source_overhead + carried_source_overhead == fresh` holds.
+- **D8.** `GraphPreparedSourceSetDriver::timeline_at` (default `None`), `graph::test_only_timeline_at`
+  (test-support), re-exported by host-core under `test-support`, whose feature gains
+  `graph/test-support`. `Cargo.lock` did not change (features are not locked).
+
+**Departures:**
+
+- **The timeline flag needs the same rate and quantum.** `timeline_carries` is true for a successor
+  whose inventory rate and quantum equal the compiled session's. Both hosts refuse a change of
+  either (#1290a), so on both hosts it is every successor; a hand-prepared test successor at
+  another quantum gets a fresh timeline instead of a carry that would be refused at the swap and
+  take every other carry down with it.
+- **The vacancy, not the flag, tells the driver to move the timeline**, so the trait's
+  `adopt_sources` signature is unchanged. The flag makes the call happen.
+- **The `has_carry_program` fallback** in `prepare.rs` (a program for delay/route carries) is kept
+  with `timeline: false`; it is reached only by a successor whose timeline does not carry.
+- **Gate 4** is in `timeline.rs`, on the direct `adopt_predecessor_plan` path. (The
+  `successor_swap.rs` case through the plan exchange was deleted in the batch 16a fold.)
+- **D6** is out (B16-R4): no seek-report record, bytes or move. Gate 1 has no report clause.
+
+**Re-pins** (each "the timeline consumer's fixed bytes (#1641 D7)"; ceilings are the new value
+plus 10 %, rounded up to 64):
+
+| Pin | Before | After | Ceiling |
+|---|---|---|---|
+| `crates/capi/tests/resource_lifecycle.rs` `source_overhead_bytes` (x86-64) | 4,174 | 4,654 | 4,352 -> 5,120 |
+| `hosts/host-web/tests/retained_ceilings.rs` `source_overhead_bytes` (x86-64) | 2,658 | 3,138 | 2,688 -> 3,456 |
+| `hosts/host-web/tests/retained_ceilings.rs` `source_total_bytes` (x86-64) | 3,682 | 4,162 | 3,840 -> 4,608 |
+| `expected.json` `sourceOverheadBytes` (wasm32 simd128, measured) | 2,474 | 2,922 | 2,496 -> 3,264 |
+| `expected.json` `sourceTotalBytes` (wasm32 simd128, measured) | 3,498 | 3,946 | 3,648 -> 4,352 |
+
+The native step is 480 bytes (queue 320, history 16, consumer 144); the wasm32 step is 448
+(consumer 112). capi `source_total_bytes` (12,366 -> 12,846) and `capi_retained_bytes`
+(167,754 -> 168,378) stay under their ceilings. `crates/host-core/tests/successor_swap.rs`: five
+`carried_source_total_bytes` checks that meant "no ring carried" (`== 0`) or "a ring carried"
+(`> 0`) now compare with the timeline's carried queue (`timeline_queue_bytes()`), and
+`a_changed_source_gets_its_own_ring` compares allocated plus carried with a fresh plan.
+
+**Gates** (`crates/host-core/tests/timeline.rs`, new, and one case in `successor_swap.rs`):
+
+1. `a_source_and_the_timeline_given_the_same_seeks_read_the_same_frame_in_every_block`.
+2. `a_rebuild_carries_the_timeline_its_history_and_its_producer`;
+   `a_latent_successor_keeps_the_newest_entries_in_a_history_of_its_own_size` (K 5 -> 9).
+3. `a_discontinuity_keeps_the_sources_and_the_timeline_in_step`;
+   `a_prime_advances_the_timeline_as_it_advances_a_source`.
+4. `the_timeline_carry_and_the_blocks_after_it_allocate_and_free_nothing`.
+5. No render arithmetic changed. `./target/release/audit capi`: `pcm_digest` `4f52089e4a8cf83c`
+   at base and head, 0 violations. The browser oracle's three PCM digests agree with
+   `expected.json` (`scripts/check-browser-expected-resources.py`, which also measured the wasm
+   rows above).
+
+Commands, all PASS: `cargo test --locked` for `source`, `graph --features graph/test-support`,
+`host-core --features host-core/test-support`, `capi`, `control-plane`, and host-web
+`retained_ceilings`; `realtime_policy` (153 regions, unchanged: the new render code sits in
+existing regions; the timeline's pop is a `match`, not a closure, which the policy refuses);
+`check-cross-targets.sh`, `check-host-core-policy.sh`, `check-workspace-policy.sh`; clippy
+`-D warnings` on the six touched crates; `cargo fmt --all -- --check`. The workspace-wide clippy
+was not run (worker rules).
+
+**Fold (batch 16a review).**
+
+- **M2.** The D3 flag had no test: dropping `|| program.timeline` (graph) or `timeline_carries ||`
+  (host-core) passed every test, because the successor always carried a source or strip state
+  too. `timeline::a_rebuild_that_carries_no_source_still_carries_the_timeline`: the successor
+  changes the source's declaration and renames the track, so the timeline is the program's only
+  move (`carried_source_total_bytes` equals the timeline queue's bytes); the timeline continues
+  with no gap and a seek through the moved producer lands. Red on each of the two removals
+  (each run).
+- **M3.** `adopt_sources` refused every source move when both timelines were vacant. The timeline
+  clause left `movable`; the timeline moves only from an occupied predecessor into a vacant
+  successor. `source::tests::carry::the_source_moves_carry_whatever_the_two_timelines_hold`
+  (all four pairings) is red on the unfixed code (the both-vacant pairing).
+- **MINOR 1 (D9).** On a `PredecessorMismatch` the timeline producer has already moved
+  (`adopt_persisting`) while the successor's vacant timeline advances from 0 and observes no seek,
+  and nothing reports the vacant timeline itself beyond the mismatch count. Unreachable on both
+  hosts (#1269 P11), the same contract as a vacant source; stated in the `adopt_persisting` doc.
+- **MINOR 2.** The capi `resource_lifecycle` and host-web companion non-vacuity guards compare
+  `carried_source_total_bytes > carried_source_overhead_bytes`: the timeline queue is overhead
+  only, a carried ring adds its PCM payload. (Not `timeline_queue_bytes()` as in
+  `successor_swap.rs`: host-web does not depend on `source`, and this needs no new dependency.)
+- **MINOR 3.** `timeline::a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline` (red
+  when the guard is `successor.is_some()`),
+  `timeline::a_seek_queued_at_the_swap_block_lands_in_the_successors_first_block` (its unique
+  catch: a carry that drains the queue, so the seek queued at the swap block is lost), and the
+  vacant-timeline unit test
+  `source::tests::timeline::a_vacant_timeline_never_adopted_advances_from_zero`.
+- **MINOR 4.** The discontinuity gate's claim that it reads the overlap's older entry is removed:
+  its plan has `K = 1`, so no overlap is held. The overlap rule is `source`'s
+  `a_node_block_reports_the_steps_of_a_source_read_step_back` (#1640 fold M1).
+- **MINOR 11.** `install_carry_program` refuses `timeline: true` on a plan with no source set
+  (`NoSourceSet`): `graph::tests::install_refuses_a_timeline_carry_on_a_plan_with_no_source_set`.
+- **Test value.** `successor_swap::the_timeline_carry_allocates_and_frees_nothing_through_the_exchange`
+  is deleted: the exchange owner exposes no timeline to show that the held seek lands, and
+  `timeline.rs`'s gate 4 already counts the same carry and blocks.
+- No charged byte moved (#1640 fold MINOR 6 removed only unread rows); `realtime_policy` 153
+  regions, unchanged.
+- **Fold 2.** M1 is completed in `source` (#1640 "Fold 2"): a node block now also steps where a
+  newer entry starts below every older entry after a step-back, so a carried timeline's step-back
+  reads right in every node block with at most one step. This record's MINOR 3 line now names the
+  queued-seek test's unique catch. No charged byte moved; `realtime_policy` regions unchanged.

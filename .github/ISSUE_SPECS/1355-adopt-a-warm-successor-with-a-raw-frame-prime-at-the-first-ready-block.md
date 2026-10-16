@@ -240,3 +240,10 @@ successor makes the source-read offset nonzero, this slice amends that sentence 
 first seek paragraph, in `docs/C_ABI_V1_QUALIFICATION.md` and in the `SourceControlSet::seek_at`
 doc. It also calls #1320's `prime_ready` with the source-read sample (S + O), not the render
 sample, and wires the prime on both hosts.
+
+**Amendment (root ruling B16-R3, batch 16, 2026-10-16).** The plan's timeline consumer (#1640,
+#1641) is a carried consumer for this slice. The warm adoption calls its readiness check and its
+prime with the same source-read sample and `k` as the sources. Its readiness is the non-PCM test
+(#1641's amendment: command queue empty and no held anchored seek before the end of the prime
+window), and its prime advances it by `k` blocks. So the timeline moves exactly as the sources'
+frames move, and a held anchored seek is never skipped.

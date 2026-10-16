@@ -437,6 +437,9 @@ fn schedule(seed: u64, reach: &mut Reach) {
                     Err(SourceSeekError::AnchorUnaligned) => {
                         unreachable!("{context}: a plain seek has no anchor")
                     }
+                    Err(SourceSeekError::FrameOutOfRange) => {
+                        unreachable!("{context}: a source seek has no frame limit")
+                    }
                 };
                 let expected = model.seek(target, frame);
                 assert_eq!(

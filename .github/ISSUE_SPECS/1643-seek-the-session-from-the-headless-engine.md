@@ -189,3 +189,70 @@ Checked against `12d4a4f9d`.
   export, as a C ABI host declares before its session seek (#1642). So browser latency floors reset
   as they do on the C ABI. `WasmBoundary` gets the call. #1323 adds the export and its mirrors and
   is a dependency. Gate 2 asserts the declaration comes first.
+
+## Amendment (controls coordinator, batch 16 check, 2026-10-16)
+
+Checked against `35ac17545`.
+
+**Landed dependencies.** #1309, #1316, #1323 (with `miso_engine_web_v1_declare_discontinuity`,
+`hosts/host-web/src/ffi.rs:3354`) and #1562 are closed and on main. #1642 and #1293 are open and in
+this batch; both land first. #1387 and #1332 stay open: `single` mode only, as the amendment of
+2026-10-14 says. #1644 is open and not in this batch.
+
+**Moved anchors.**
+- `miso_engine_web_v1_source_seek` is `hosts/host-web/src/ffi.rs:3251-3276`. `seek_source` is
+  `hosts/host-web/src/lib.rs:3533-3565`; it calls `ready.control.seek_unserviced` (`:3551-3553`),
+  then `plan.prepare_source_seek` (`:3556`). `ready.control` is the `SessionState` (#1381a).
+- D1 "maps an error through `source_result`": `SessionState` returns `SourceFailure`, so the map
+  is `source_failure_result` (`lib.rs:5197`), which calls `source_result` (`:5181`).
+- Headless: `OfflineEngine` is `sdk/src/headless/engine.ts:125`; `submitSource` `:419-427`;
+  `seekSource` `:429-435`. `WasmBoundary.seekSource` is `sdk/src/core/boundary.ts:1144-1167`. The
+  headless seek eval is `sdk/test/capability-evals.mjs:197`.
+- Mirrors: `expected_exports` `scripts/check-web-audioworklet.sh:274`; `EXPORTS`
+  `tools/parameter-metadata/src/abi_layout.rs:126` (105 today, 108 after #1293, 110 after this
+  slice) and `scripts/check-abi-layout-v1.py:120`. The list is sorted: `session_seek*` goes after
+  `service`, #1293's `source_seek_*` after `source_seek`. Merge #1293 first.
+- The mock in `scripts/test-web-audioworklet.mjs` (`:2741`) lists only exports the worklet script
+  calls. This slice adds no worklet call, so the mock needs no edit.
+
+**The code's truth.**
+- **No generation tracking today.** The headless SDK passes the caller's generation straight
+  through (`seekSource`, `submitSource`); it keeps no generation state. D2's default adds the
+  first such state to `OfflineEngine`.
+- **No discontinuity call today.** No SDK file calls `miso_engine_web_v1_declare_discontinuity`
+  (only `sdk/src/generated/abi.ts` names it). B15-R7's `WasmBoundary` call is new here.
+- **Prepare.** The browser's plain seek prepares the consumer at the call, so new PCM enters at
+  once. D1's session seek does not (C ABI parity): a ring full of old-generation PCM refuses the
+  first submission with backpressure until one block renders. Gates 1 and 2 feed rings with room.
+- **Thread.** In `single` mode the worklet instance is the control half, so only the caller keeps
+  the export out of `process()` (the SDK calls it from the message handler, as for
+  `declare_discontinuity`). Gate 3a's "not ready" case cannot show a render-half call.
+- **Paths.** `crates/control-plane/src/` and `hosts/host-web/web/` need no edit:
+  `SessionState::session_seek` is #1642's, and no worklet script changes.
+- Gate 3a's structural transaction goes through #1562's control entry, as amended on 2026-10-15.
+
+**Hazard (#1644 not in this batch).** After this slice, the headless `seek` is the export's only
+SDK caller. The browser SDK and the PCM feed do not call it until #1644, so the stale-ring stall
+in the hazards cannot happen in this batch. The headless default generation counts `seekSource`
+and `submitSource` too, so a headless caller that mixes them stays ahead.
+
+**Decision 17.** D1 calls the one core function (`SessionState::session_seek`); host-web keeps
+pointer checks and the result map. Open points are in the coordinator's report: the two new
+exports and the C13 list, the SDK-chosen generation (D2), and a parity row in
+`hosts/host-web/tests/control_parity.rs` (browser session seek against the C ABI session seek).
+
+## Amendment (root rulings, batch 16, 2026-10-16)
+
+- **B16-R1.** The two exports `miso_engine_web_v1_session_seek` and `_session_seek_at` are in
+  decision 17 C13's list of approved direct exports (seek transport behind
+  `SessionState::session_seek`).
+- **B16-R5, D2 stands.** The SDK chooses the generation, one above the largest it has used. It is a
+  host transport token, as on the C ABI (#1642 D3). The core refuses a stale one (and, under
+  #1642's B16-R2 fence, a generation not above every generation published on the session).
+- **B16-R6, new gate 6 (parity row).** In `hosts/host-web/tests/control_parity.rs` (now an
+  authorized path): a plain session seek and a late anchored session seek on both hosts at 48 and
+  96 kHz, two sources of different lengths. After each block, from the call through the applying
+  block and after, the browser and C ABI seek reports of both sources are equal field by field,
+  and the timeline (#1641's host-core test reader) reads the same value on both hosts. Red if
+  either host splits the seek across blocks, clamps differently or drops the lateness. It needs
+  #1642's C export.

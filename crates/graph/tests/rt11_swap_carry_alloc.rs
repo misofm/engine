@@ -236,6 +236,7 @@ fn the_swap_block_carry_allocates_and_frees_nothing() {
         GraphCarryProgram {
             predecessor: identity,
             sources: vec![(0, 0)].into_boxed_slice(),
+            timeline: false,
         },
     )
     .expect("install");

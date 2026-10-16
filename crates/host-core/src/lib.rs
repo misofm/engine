@@ -225,6 +225,10 @@ pub use effect_compiler::{
 pub use effect_compiler::{
     test_only_parametric_eq_design_call_count, test_only_reset_parametric_eq_design_calls,
 };
+/// The session timeline's sample in a prepared plan (#1641 D8), for tests of hosts that do not
+/// name `graph` (host-web).
+#[cfg(feature = "test-support")]
+pub use graph::test_only_timeline_at;
 #[cfg(feature = "test-support")]
 pub use prepare::{
     test_only_prepare_host_runtime_on, test_only_prepare_host_runtime_successor_on,

@@ -224,9 +224,11 @@ impl Policy {
             // and its block-entry read) and #1630's one (`crates/builtins-compiler`: the cell
             // readers' carry marks, D15-2) and #1316's (`seqlock.rs`, the engine's one seqlock
             // writer, B15-R1). The floors had fallen behind the tree before #1637; they are set to
-            // its counts again. A change that adds a marker raises them in the same change.
+            // its counts again. A change that adds a marker raises them in the same change: #1640
+            // adds two in `crates/source` (the shared seek state's observe and reads, and the
+            // timeline consumer's block entry and history readers).
             marked_files_floor: 33,
-            marked_regions_floor: 151,
+            marked_regions_floor: 153,
             render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
                 .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
             unwrapped_exports: UNWRAPPED_EXPORTS

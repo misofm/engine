@@ -51,6 +51,18 @@ fn strip_moves(moves: u64) -> u64 {
     moves * core::mem::size_of::<graph::GraphStripMove>() as u64
 }
 
+/// The command queue a successor's carried timeline brings (#1641 D7): every successor's carried
+/// source bytes hold it, as they hold a carried ring's overhead, so a successor that carries no
+/// ring still carries these bytes.
+fn timeline_queue_bytes() -> u64 {
+    source::SourceTimeline::resource_report(
+        engine::QuantumFrames(QUANTUM as u32),
+        core::num::NonZeroUsize::MIN,
+    )
+    .expect("timeline report")
+    .command_queue_bytes
+}
+
 fn id(value: &str) -> StableId {
     StableId::parse(value).expect("stable ID")
 }
@@ -188,7 +200,7 @@ fn added_muted_track_keeps_playing(backend: Backend) {
     // source bytes are exactly a fresh plan's.
     let fresh = b.prepare(backend).report;
     let report = run.successor;
-    assert!(report.carried_source_total_bytes > 0);
+    assert!(report.carried_source_total_bytes > timeline_queue_bytes());
     assert_eq!(
         report.source_total_bytes + report.carried_source_total_bytes,
         fresh.source_total_bytes,
@@ -293,15 +305,22 @@ fn a_changed_source_gets_its_own_ring() {
             .prepare_successor(&predecessor.inventory, &a.model, &caps(), backend)
             .expect("successor");
         let fresh = b.prepare(backend).report;
-        assert_eq!(prepared.report.carried_source_total_bytes, 0);
+        // The timeline's carried command queue only (#1641 D7).
+        assert_eq!(
+            prepared.report.carried_source_total_bytes,
+            timeline_queue_bytes()
+        );
         assert_eq!(
             prepared.report.carry_program_retained_bytes,
             2 * core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(4),
             "no source move; the two unchanged input sections (#1276) and the fader and matrix \
              stage of both strips (#1277)"
         );
+        // Allocated plus carried is a fresh plan's: the ring is new, and only the timeline's
+        // command queue is carried (#1641 D7).
         assert_eq!(
-            prepared.report.source_total_bytes, fresh.source_total_bytes,
+            prepared.report.source_total_bytes + prepared.report.carried_source_total_bytes,
+            fresh.source_total_bytes,
             "{backend:?}: the successor allocates and charges a new ring"
         );
         let mut predecessor_sources = predecessor.sources;
@@ -329,7 +348,9 @@ fn a_successor_charges_allocated_and_carried_rings_to_the_source_cap() {
         .prepare_successor(&predecessor.inventory, &a.model, &caps(), backend)
         .expect("successor")
         .report;
-    assert!(roomy.source_total_bytes > 0 && roomy.carried_source_total_bytes > 0);
+    assert!(
+        roomy.source_total_bytes > 0 && roomy.carried_source_total_bytes > timeline_queue_bytes()
+    );
     let required = roomy.source_total_bytes + roomy.carried_source_total_bytes;
     let mut exact = caps();
     exact.maximum_source_total_bytes = required;
@@ -344,7 +365,7 @@ fn a_successor_charges_allocated_and_carried_rings_to_the_source_cap() {
     assert_eq!(refused.as_bytes(), b"host.source.resource.limit\t$\n");
 
     // The overhead cap counts carried overhead too.
-    assert!(roomy.carried_source_overhead_bytes > 0);
+    assert!(roomy.carried_source_overhead_bytes > timeline_queue_bytes());
     let mut below = caps();
     below.maximum_source_overhead_bytes =
         roomy.source_overhead_bytes + roomy.carried_source_overhead_bytes - 1;
@@ -369,7 +390,7 @@ fn another_ring_size_or_changed_content_carries_no_ring() {
         .prepare_successor(&predecessor.inventory, &a.model, &caps(), backend)
         .expect("successor");
     assert!(
-        same.report.carried_source_total_bytes > 0,
+        same.report.carried_source_total_bytes > timeline_queue_bytes(),
         "the control case carries"
     );
     let mut smaller = caps();
@@ -377,7 +398,11 @@ fn another_ring_size_or_changed_content_carries_no_ring() {
     let resized = b
         .prepare_successor(&predecessor.inventory, &a.model, &smaller, backend)
         .expect("successor with smaller rings");
-    assert_eq!(resized.report.carried_source_total_bytes, 0);
+    // The timeline's carried command queue only (#1641 D7).
+    assert_eq!(
+        resized.report.carried_source_total_bytes,
+        timeline_queue_bytes()
+    );
 
     let mut c_model = session_a();
     let template = c_model.sources[0].clone();
@@ -390,7 +415,10 @@ fn another_ring_size_or_changed_content_carries_no_ring() {
     let changed = c
         .prepare_successor(&predecessor.inventory, &a.model, &caps(), backend)
         .expect("successor with changed content");
-    assert_eq!(changed.report.carried_source_total_bytes, 0);
+    assert_eq!(
+        changed.report.carried_source_total_bytes,
+        timeline_queue_bytes()
+    );
 }
 
 /// #1272 follow-up MINOR 4. Red if the largest-allocation fold leaves out a carried ring: with
@@ -415,7 +443,7 @@ fn the_largest_allocation_counts_a_carried_ring() {
         .prepare_successor(&predecessor.inventory, &a.model, &long_rings, backend)
         .expect("successor")
         .report;
-    assert!(successor.carried_source_total_bytes > 0);
+    assert!(successor.carried_source_total_bytes > timeline_queue_bytes());
     assert_eq!(
         successor.largest_engine_allocation_bytes,
         fresh.largest_engine_allocation_bytes
@@ -2377,6 +2405,7 @@ fn a_bad_input_move_is_refused_whole() {
         GraphCarryProgram {
             predecessor: predecessor.inventory.plan_identity(),
             sources: Box::default(),
+            timeline: false,
         },
     )
     .expect("a program that moves no source");

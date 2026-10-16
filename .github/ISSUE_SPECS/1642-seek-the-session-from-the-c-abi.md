@@ -246,3 +246,115 @@ Checked against `12d4a4f9d`.
   family. Root confirms this reading at filing; the alternative is a protocol command whose reply
   carries the generation.
 - **Dependencies.** #1317, #1319 and #1323 are still open.
+
+## Amendment (controls coordinator, batch 16 check, 2026-10-16)
+
+Checked against `35ac17545`.
+
+**Landed dependencies.** #1309, #1316, #1317, #1319 and #1323 are closed and on main. #1640 and
+#1641 are open, in this batch, and land first (in that order).
+
+**Moved anchors.**
+- `SessionState` (`crates/control-plane/src/control.rs`): `seek` `:4048`, `seek_unserviced`
+  `:4059`, `seek_at` `:4073`, `seek_report` `:4090`, `newest_providers` `:3547`,
+  `newest_providers_mut` `:3580`, `declare_discontinuity` `:2154`, `SourceFailure` `:4106`.
+- `SourceFailure::report` is the trait method in `crates/capi/src/runtime/error.rs:124-128`.
+- `crates/capi/src/ffi.rs`: `miso_engine_v1_source_seek` `:525`, `_seek_at` `:556`,
+  `source_seek_entry` `:582-639`, `_source_seek_report` `:652`, `_declare_discontinuity` `:774`.
+- `crates/host-core/src/source.rs`: `SourceControlSet` `:137-140`, `ControlSource` `:21-31`,
+  `queue_seek` `:271-296`, `seek_report` `:258`, `diagnostic` `:86-112`, `is_internal`
+  `:127-129`. The producer table is filled at `crates/host-core/src/prepare.rs:2265-2286`.
+- `ControlSource` now holds `region_start..region_end`, not `0..frames`. host-core always sets
+  `region_start` to 0 (`prepare.rs:2269`, `:2283`), so D1's `min(timeline_sample, region_end)` is
+  always inside the region.
+- `scripts/check-capi-abi.sh`: the frozen list is `:248-268`, 19 names. It grows to 21.
+- `audit capi` (`tools/audit/src/capi.rs`): `run` `:518-599`; the liveness witness
+  `replacements == 1` is `:579-582`; `apply_structural_transaction` `:193-249`, with #1319 D4's
+  anchored seek at `:225-237`; `SEEK_ANCHOR_SAMPLE` `:61`. The qualification job checks only the
+  digest's shape (`.github/workflows/qualification.yml:834-854`). The digest on main is
+  `4f52089e4a8cf83c`.
+- `docs/C_ABI_V1_QUALIFICATION.md`: the #1275 paragraph is still `:106-122`; the session-call
+  list `:168-169`; the seek report `:194-219` (frozen count "19" at `:215`); #1317's seek
+  contract `:221-230`; ABI growth `:231`.
+
+**Feature bits.** The last bit is `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT` (512), mask 1023
+(`crates/capi/include/miso_engine_v1.h:418-428`; `crates/capi/src/abi.rs:53-87`). The next free
+bit today is 1024 (mask 2047). D4 still takes the next free bit at merge. The new bit joins the
+`features` array of `masks_and_result_codes_are_frozen` (`abi.rs:588-625`), which checks the mask
+is the OR of every bit.
+
+**Header text (#1317 shipped).** "Starting an added stem in time" is gone. The seek paragraphs
+are "The source-read clock" `:272`, "Seek." `:281`, "Anchored seek." `:293-299`, "Choosing the
+anchor." `:301-310`, then Held, Replacement, One seek in flight, "Seeks across a structural
+transaction", "Far past anchors", Rate and "Where a seek landed" (`:350-370`). D5's paragraph
+goes right after "Anchored seek." The prototypes are at `:629-643`. "Declared discontinuity"
+(`:95-117`) already says the host declares "before a seek of every source". Two more lists name
+every session call and must gain the two new symbols: the thread table (`:19-20`) and "Control
+service" (`:181-182`).
+
+**Stale text.**
+- `crates/capi/Cargo.toml` needs no edit: the `graph` dev-dependency already has
+  `features = ["test-support"]` (`:32`, #1639). Drop that path and `Cargo.lock`.
+- `crates/capi/src/lib.rs` needs no edit: it re-exports `ffi::*` (`:11`).
+- D1 "synchronizes the epochs": today `seek` and `seek_at` run the service step
+  (`self.service()`), which includes the epoch sync. `session_seek` does the same.
+- **Gap for D1 step 2.** `SourceControlSet` holds `HostChunkProvider`, which exposes only
+  `try_seek` (`crates/source/src/lib.rs:1039`). #1640 D1 puts `check_seek` on the seek-producer
+  type, but neither #1640 nor #1641 names a `HostChunkProvider::check_seek`. Either #1640 adds the
+  forward (its paths cover `crates/source/src/lib.rs`), or this slice needs that path.
+
+**D6 still holds.** #1323 shipped the condition D6 relies on:
+`PlanStateInventory::runs_behind_natural_timing` is `raised_arrivals` non-empty or
+`source_read_offset > 0` (`crates/host-core/src/prepare.rs:1017-1019`). When neither holds,
+`declare_discontinuity` returns `Ok` and publishes nothing (`control.rs:2154-2162`). The audit's
+transaction adds a new muted track (no carried floor on a new node) and its route. No audit plan
+has a source-read offset. So the declaration publishes nothing and `replacements == 1` stays true.
+Code reading only; gate 7's run is the proof. Declare and seek after call 4's render, outside
+every render scope, as written.
+
+**Decision 17.** C13 calls seeks transport under C1, with one core function behind both hosts
+(`docs/rulings/one-control-abstraction-2026-10-13.md:287-309`). But the root's widened list of
+2026-10-16 does not name `miso_engine_v1_session_seek` or `_session_seek_at`, and says a new
+direct export not in the list needs its own root ruling. Root rules before this slice merges.
+`SessionState::session_seek` is the one core function; capi keeps only the pointer checks and
+the result mapping.
+
+**Hazard.** A new `impl` block in a render-path crate can move the impl index that
+`scripts/check-web-audioworklet-callgraph.py` pins (see `c48cc3875`). Add `session_seek` inside
+the existing `impl SessionState`.
+
+## Amendment (root rulings, batch 16, 2026-10-16)
+
+- **B16-R1.** `miso_engine_v1_session_seek` and `_session_seek_at` are in decision 17 C13's list
+  of approved direct exports (seek transport behind `SessionState::session_seek`).
+- **B16-R2, the publish fence.** A session seek is one committed act, so every consumer sees it in
+  the same render block, on both hosts. D1 as filed does not give that for a plain seek: render
+  pops the timeline's queue and each source's queue at different instants while the session
+  thread pushes, so a plain seek pushed during a block can split across two blocks. The fix:
+  - One atomic published-generation word per session, shared by every source producer, the
+    timeline producer and the source-set driver of every plan of that session. It is carried to a
+    successor with the producers, so a fresh and a carried consumer of one plan read the same
+    word. It is allocated on the control thread, never on render.
+  - The driver loads it once per block entry (acquire), before the timeline and the sources, and
+    passes the value to each consumer's observe step (#1640 D1's shared function).
+  - A consumer whose next command (read with the queue's `peek`, which #1320 added) has a
+    generation above the loaded value leaves it in the queue for a later block. Nothing is
+    dropped; the slot stays full, so a new push is still backpressure.
+  - Every seek push ends with a release store of `max(word, g)`: the per-source seek after its
+    one push, the session seek after its last push (D1 step 3). So all of a session seek's
+    commands become visible to render at one block entry.
+  - The session seek also refuses a generation not above the word (`source.generation.stale`),
+    so a source removed with a higher generation cannot let a command through early. This matches
+    D3's rule for the host (one above the largest generation it has used on the session).
+  - One atomic load per block. No allocation, lock or syscall on render; no `engine/realtime`
+    edit is expected. If one is needed, one attempt; on a refusal stop and report.
+- **Paths added for B16-R2.** `crates/source/src/lib.rs` (the word in the driver, the observe
+  step and the producers' push), `crates/host-core/src/prepare.rs` and
+  `crates/host-core/src/source.rs` (the word shared into each plan's source set and carried with
+  the producers), and `crates/control-plane/src/control.rs` only if the carry needs it.
+- **New gate 1b (concurrency).** A native test runs a session thread that pushes plain and anchored
+  session seeks (each one strictly newer) while a render thread renders, for many iterations
+  (at least 10,000 seeks). In every block, either the timeline and every source apply the seek or
+  none of them does: no seek is split across blocks. Run at both bank widths the native build
+  covers. The render thread's allocation and free counts stay 0 (`bench_support::alloc` thread
+  counters after warming).
