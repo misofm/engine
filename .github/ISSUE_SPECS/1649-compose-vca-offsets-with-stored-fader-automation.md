@@ -413,3 +413,10 @@ the predecessor's heard `S`, against the successor's curve composed with its see
 `offsets_jump`'s shape. **For #1650b.** A hand move on an automated fader changes `S` through
 `EffectiveStrip::offsets_sum`; `level_records_between` then writes the offsets cell with no other
 change (the `Fader` row length via `LevelRules::lengths`).
+
+## U3 fold (batch 17)
+
+- U3 MINOR 2: the #1649 row of both `canonical_live` modules (C ABI and browser) was vacuous (an
+  exact `f64` `S`). It now moves the VCA to `20` dB over a lane whose stored hand offset is
+  `-1e-30` dB, so `S` rounds differently under the hostile word and reaches another gain; red with
+  the `SessionState::command` guard removed. Details in the TBD48 spec's "U3 fold (batch 17)".

@@ -1721,7 +1721,8 @@ fn a_vca_move_writes_the_automated_lanes_offsets_cell() {
 /// give the full classifier's delta.
 ///
 /// Test value: red if the hand move lands on the static fader (`model_only` or a `FaderDb` the
-/// curve overrides), if `S` leaves out the hand offset or adds it after the VCA, if the move takes
+/// curve overrides), if `S` leaves out the hand offset or adds it after the VCAs (two VCAs and a
+/// hand offset below half an ulp of their sum's first term), if the move takes
 /// the VCA row's length, if a static fallback change commits live without being heard, or if the
 /// in-place view reads the lane's committed offset instead of the edited one.
 #[test]
@@ -1794,6 +1795,56 @@ fn a_hand_move_on_an_automated_fader_writes_the_lanes_offsets_cell() {
         )
         .map(|delta| level(&delta)),
         Err(LiveRebuild::Structure)
+    );
+    // D6 order (U3 fold, batch 17): two VCAs at +24 and -24 dB reach the track, and a hand move of
+    // 1e-10 dB is below half an ulp of 24 in `f64`. `S` adds the hand offset first, then the VCAs
+    // in ascending ID order: `(1e-10 + 24) + -24`, which keeps only the rounded part of 1e-10; the
+    // order that adds the hand offset last gives `1e-10` itself.
+    let two_vcas = normalized(&edited(&current, |model| {
+        let track = model.tracks[0].id.clone();
+        model.vcas = vec![
+            Vca {
+                id: id("vca-a"),
+                fader: DualMonoFader {
+                    left_db: 24.0,
+                    right_db: 24.0,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: vec![track.clone()],
+            },
+            Vca {
+                id: id("vca-b"),
+                fader: DualMonoFader {
+                    left_db: -24.0,
+                    right_db: -24.0,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: vec![track],
+            },
+        ];
+    }));
+    let tiny = 1e-10_f32;
+    let ordered = (f64::from(tiny) + 24.0) + -24.0;
+    assert_ne!(
+        ordered.to_bits(),
+        f64::from(tiny).to_bits(),
+        "the two orders differ"
+    );
+    assert_eq!(
+        classify_live_delta(
+            &two_vcas,
+            &edited(&two_vcas, |next| {
+                controls::set(next, &fader(ParameterChannel::Left), tiny, None, rate)
+                    .expect("a hand move");
+            }),
+            session_ramps,
+            &EditRamps::new(),
+        )
+        .map(|delta| level(&delta)),
+        Ok(vec![(first.clone(), Vec::new(), [sum(ordered, 100), None])]),
+        "the hand offset first, then the VCAs"
     );
 
     #[cfg(feature = "test-support")]
