@@ -35,7 +35,10 @@ pub use in_place::{
 };
 pub use model::*;
 pub use parse::parse_session_json;
-pub use vca::{FADER_MAXIMUM_DB, FADER_MINIMUM_DB, VcaNesting, VcaSum, vca_effective_db};
+pub use vca::{
+    FADER_MAXIMUM_DB, FADER_MINIMUM_DB, VcaNesting, VcaSum, vca_compose_db, vca_effective_db,
+    vca_offsets_sum,
+};
 pub use visit::{FieldKey, ModelVisitor, Token, VARIANT_ARMS, VisitModel, WalkOrder, keys};
 
 /// The only schema version accepted by [`parse_session_json`].

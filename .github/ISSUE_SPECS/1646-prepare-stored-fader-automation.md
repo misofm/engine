@@ -444,3 +444,40 @@ Gate 6: `crates/controls/tests/composition.rs`. Gate 7 adds `cargo test --locked
 **#1646a** D6 only (session, controls effective and its test, host-core oracle, schema sentence;
 about 2 h, closable alone: class B, ruled) and **#1646b** the preparation (about 7 h). Both stay in
 batch R1.
+
+
+## Decision record: #1646a (batch 17)
+
+D6 only. Shipped:
+
+- `crates/session/src/vca.rs`: `vca_offsets_sum(offsets) -> Option<f64>` (first offset starts the
+  sum, no `+0.0` seed) and `vca_compose_db(member, sum) -> f32`
+  (`(f64(member) + sum).clamp(-144, 24) as f32`); `vca_effective_db` is written from them (member
+  bit for bit with no offset). `pub use` in `crates/session/src/lib.rs`.
+- Departure in shape, not in arithmetic: `VcaSum` no longer takes the member. `VcaSum::new()` is an
+  empty offsets accumulator with `add`, `sum() -> Option<f64>` and `compose(member) -> f32`
+  (replacing `finish`), because the member now joins after the offsets. Its only caller is
+  `controls::effective_strip` (`crates/controls/src/effective.rs`), which now builds
+  `[VcaSum::new(); 2]` and calls `compose(own_db[lane])`. No per-lane `S` field (that is #1646b).
+- `docs/SESSION_SCHEMA_V1.md:83-84` states the new order.
+- Gate 6 is `vca_effective_db_sums_in_f64_in_order_and_clamps_once`
+  (`crates/controls/tests/composition.rs`), rewritten in place: reference sums offsets first, also
+  checks `vca_offsets_sum` + `vca_compose_db` against it, crafted cases
+  `(24, [-24, 1e-30]) == 0.0`, `(1e-30, [24, -24]) == 1e-30`, `(0, [24, -24, 1e-30]) == 1e-30`
+  (plus `(0, [1e-30, 24, -24]) == 0.0` for the offset order and a `-0.0` lone-offset case for the
+  no-seed rule).
+- Host oracle `reference_db` in `crates/host-core/tests/vca.rs` rewritten to the new order. The
+  other callers (`crates/capi/src/runtime/live_tests.rs:7040,7082`) call `vca_effective_db`
+  itself, so they follow without edits. The two browser oracles of D6 no longer exist (#1565).
+- Measured: `./target/release/audit capi` pcm_digest `bffc21e857b5e134` (unchanged from base),
+  0 violations. No pinned render or digest moved; `-p session`, `-p controls`,
+  `-p host-core --features host-core/test-support`, `-p capi`, `-p host-web --features
+  host-web/test-support` all pass; clippy (`--all-features`) and no-feature `cargo check` clean.
+
+## Rulings (root, batch 17, 2026-10-16)
+
+- **Q1 (R17-2): A.** `a(n)` belongs to #1647. At the end of `compile_with_builtins` the graph
+  compiler gives each builtin bank its members' floored input arrivals through a new defaulted
+  processor method. No downcast in host-core. This slice needs no `a(n)` (departure 1).
+- **Q2 (R17-4): B.** The program is installed on the test-only scalar oracle too, through the one
+  shared event driver. The scalar backend is not refused.

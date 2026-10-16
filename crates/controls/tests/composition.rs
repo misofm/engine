@@ -4,7 +4,8 @@
 
 use controls::{EffectiveStrip, MonitorOverlay, effective};
 use session::{
-    DualMonoFader, SessionModel, StableId, Submix, Vca, parse_session_json, vca_effective_db,
+    DualMonoFader, SessionModel, StableId, Submix, Vca, parse_session_json, vca_compose_db,
+    vca_effective_db, vca_offsets_sum,
 };
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -32,24 +33,28 @@ impl Rng {
     }
 }
 
-/// The composition's own statement, evaluated independently: an `f64` sum in the given order, then
-/// the domain clamp, then one rounding.
+/// The composition's own statement (#1646 D6), evaluated independently: the offsets summed first in
+/// `f64`, in the given order, from the first offset; then the member added in `f64`; then the domain
+/// clamp; then one rounding.
 fn reference_db(member: f32, offsets: &[f32]) -> f32 {
-    if offsets.is_empty() {
+    let Some((first, rest)) = offsets.split_first() else {
         return member;
-    }
-    let total = offsets
+    };
+    let sum = rest
         .iter()
-        .fold(f64::from(member), |sum, offset| sum + f64::from(*offset));
-    total.clamp(-144.0, 24.0) as f32
+        .fold(f64::from(*first), |sum, offset| sum + f64::from(*offset));
+    (f64::from(member) + sum).clamp(-144.0, 24.0) as f32
 }
 
-/// Gate 1, the gain: random sums equal the `f64` reference bit for bit; no offset is the member's
-/// own value bit for bit (`-0.0` and an out-of-domain value included); the sum clamps at both
-/// edges; and the crafted order case is `(24 - 24) + 1e-30`, never `(24 + 1e-30) - 24 = 0`.
+/// Gate 6 (#1646 D6, gate 1 of #1242 rewritten in place), the gain: random sums equal the `f64`
+/// reference bit for bit, the offsets summed first and the member added to that sum; no offset is
+/// the member's own value bit for bit (`-0.0` and an out-of-domain value included); the sum clamps
+/// at both edges; and the crafted cases pin the order: `24 + (-24 + 1e-30) = 0` (the offsets' sum
+/// rounds `-24 + 1e-30` to `-24`), `1e-30 + (24 - 24) = 1e-30`, and the offsets in the order
+/// given (`0 + ((24 - 24) + 1e-30) = 1e-30`).
 ///
-/// Red if the sum accumulates in `f32` (the random draws round differently), runs in another order
-/// (the crafted case), clamps a member with no VCA, or does not clamp.
+/// Red if the sum accumulates in `f32` (the random draws round differently), adds the member first
+/// (the crafted cases), runs in another offset order, clamps a member with no VCA, or does not clamp.
 #[test]
 fn vca_effective_db_sums_in_f64_in_order_and_clamps_once() {
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
@@ -64,6 +69,11 @@ fn vca_effective_db_sums_in_f64_in_order_and_clamps_once() {
             expected.to_bits(),
             "{member} + {offsets:?}: {actual} != {expected}"
         );
+        let sum = vca_offsets_sum(offsets.iter().copied());
+        assert_eq!(sum.is_none(), offsets.is_empty());
+        if let Some(sum) = sum {
+            assert_eq!(vca_compose_db(member, sum).to_bits(), expected.to_bits());
+        }
     }
     for member in [-0.0_f32, 0.0, 24.5, -144.5, -6.25, f32::MIN_POSITIVE] {
         assert_eq!(
@@ -72,15 +82,28 @@ fn vca_effective_db_sums_in_f64_in_order_and_clamps_once() {
             "{member} with no offset"
         );
     }
+    assert_eq!(vca_offsets_sum([]), None);
+    // The sum starts at the first offset, with no `+0.0` seed.
+    assert_eq!(
+        vca_offsets_sum([-0.0]).map(f64::to_bits),
+        Some((-0.0_f64).to_bits())
+    );
+    assert_eq!(vca_offsets_sum([1.5, 2.25, -0.5]), Some(3.25));
     assert_eq!(vca_effective_db(20.0, [3.0, 2.0]), 24.0);
     assert_eq!(vca_effective_db(-140.0, [-6.0]), -144.0);
     assert_eq!(vca_effective_db(-144.0, [-144.0, -144.0]), -144.0);
     assert_eq!(vca_effective_db(24.0, [24.0]), 24.0);
-    // An in-domain sum is not clamped: 24 + 6 - 6.
+    // An in-domain sum is not clamped: 24 + (6 - 6).
     assert_eq!(vca_effective_db(24.0, [6.0, -6.0]), 24.0);
     assert_eq!(vca_effective_db(-6.0, [6.0]).to_bits(), 0.0_f32.to_bits());
-    assert_eq!(vca_effective_db(24.0, [-24.0, 1e-30]), 1e-30);
-    assert_eq!(vca_effective_db(24.0, [1e-30, -24.0]), 0.0);
+    // Member first (the old order) gave 1e-30 here: (24 - 24) + 1e-30. The offsets first round
+    // -24 + 1e-30 to -24, so the member cancels it.
+    assert_eq!(vca_effective_db(24.0, [-24.0, 1e-30]), 0.0);
+    // Member first gave 0.0 here: (1e-30 + 24) - 24.
+    assert_eq!(vca_effective_db(1e-30, [24.0, -24.0]), 1e-30);
+    // The offsets in the order given: (24 - 24) + 1e-30 survives; 1e-30 + 24 - 24 does not.
+    assert_eq!(vca_effective_db(0.0, [24.0, -24.0, 1e-30]), 1e-30);
+    assert_eq!(vca_effective_db(0.0, [1e-30, 24.0, -24.0]), 0.0);
 }
 
 /// The fixture's `vocal`, two copies `t0` and `t1`, and submix `bus-a`: strips 0 to 3.

@@ -80,8 +80,8 @@ while a diamond (one VCA reachable along two paths) is legal. Canonically `vcas`
 own fader, never an effective value. VCAs apply at preparation on every host (#1242): a strip's
 reach is the set of VCAs it is reachable from through membership, directly or through nested
 VCAs, each once even along several paths; its effective lane gain is
-`clamp(own_db + sum(offsets), -144, 24)`, summed in `f64` (its own value first, then the reaching
-VCAs' offsets in ascending VCA ID), clamped in `f64` and rounded once to `f32`, and exactly its own
+`clamp(own_db + sum(offsets), -144, 24)`, summed in `f64` (the reaching VCAs' offsets first, in
+ascending VCA ID, then its own value added to that sum), clamped in `f64` and rounded once to `f32`, and exactly its own
 value with an empty reach; its effective lane mute is its own mute or any reaching VCA's mute. The
 prepared fader section bakes the effective values, so post-fader and post-pan sends follow a VCA,
 and a `follows_mute` route reads its source's effective mute. A member's own fader is still checked

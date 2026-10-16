@@ -317,8 +317,9 @@ pub fn effective_strip(
     let reach = inputs.reach(strip);
     let solo_term = solo_term(inputs, strip, any_solo);
     let mut out = EffectiveStrip::default();
-    // One read of each reaching VCA feeds both lanes; the sum is `vca_effective_db`'s.
-    let mut sums = [VcaSum::new(own_db[0]), VcaSum::new(own_db[1])];
+    // One read of each reaching VCA feeds both lanes; the sum is `vca_effective_db`'s: the
+    // offsets first, then the member.
+    let mut sums = [VcaSum::new(); 2];
     for &vca in reach {
         let (offset_db, muted) = inputs.vca(vca);
         for lane in 0..2 {
@@ -327,7 +328,7 @@ pub fn effective_strip(
         }
     }
     for lane in 0..2 {
-        out.fader_db[lane] = sums[lane].finish();
+        out.fader_db[lane] = sums[lane].compose(own_db[lane]);
         out.mute[lane] = own_mute[lane] || out.vca_mute[lane] || solo_term;
     }
     out
