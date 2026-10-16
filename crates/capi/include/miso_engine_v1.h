@@ -226,7 +226,7 @@ extern "C" {
  * way. A source the caller's own transaction removes discards its queued audio, whether the plan
  * that renders or the waiting replacement (carrying it unchanged) holds it: the caller asked for
  * the removal, so this is not an unintended drop. No counter reports the discarded frames yet; a
- * counter for the discarded frames is a successor issue (placeholder TBD43). A resource cap counts
+ * counter for the discarded frames is a successor issue (placeholder #1699). A resource cap counts
  * every plan the session still holds and the new one: the running plan, the waiting replacement,
  * and a plan render has displaced until a later call reclaims it. A refusal is
  * MISO_ENGINE_V1_BACKPRESSURE when the new plan fit against the newest held plan alone, so a retry

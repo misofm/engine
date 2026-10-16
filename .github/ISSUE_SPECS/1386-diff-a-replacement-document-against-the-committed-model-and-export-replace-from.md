@@ -555,7 +555,7 @@ already carry both rulings.
 ## Amendment (controls coordinator, batch 15a fold, root ruling 2026-10-16): the split
 
 **#1386 is now part (a), core and C ABI.** The browser transport moves to the placeholder
-*Export the browser session replace transport* (TBD41, `.github/ISSUE_SPECS/TBD41-export-the-browser-session-replace-transport.md`).
+*Export the browser session replace transport* (#1697, `.github/ISSUE_SPECS/1697-export-the-browser-session-replace-transport.md`).
 
 - **(a) stays here.** D1 (`SESSION_REPLACE` `0x0013` in `crates/protocol`), D2 (the diff in
   `crates/control-plane/src/document.rs`), D3 (`SessionState::command_with_document`, the one core
@@ -564,17 +564,17 @@ already carry both rulings.
   which is `command_with_document(request, &[], ...)`, so a `SESSION_REPLACE` frame sent through
   `miso_engine_web_v1_control_command` today gets D4's `session.replace.document_length` refusal
   through the same core path. That is the both-host core path of (a).
-- **TBD41 takes** D7's browser half (`miso_engine_web_v1_replace_document_ptr`, the staging
+- **#1697 takes** D7's browser half (`miso_engine_web_v1_replace_document_ptr`, the staging
   consumption in `control_command`, the worklet message's `document` field), both `.d.ts` twins,
   the ABI layout mirrors of that export, gate 6 and gate 8's browser half.
 - **Gates of (a).** Gates 1-5 and 7 as filed. Gate 6 becomes a C ABI and browser parity row for
   the refusal only: the same `SESSION_REPLACE` frame with no document gives the same reply bytes
   (request ID aside) on both hosts, and changes nothing. Gate 8 keeps its C ABI half: a document of
   more than 64 KiB and the large live replace through `miso_engine_v1_submit_document_command`,
-  with 0 retained bytes after the reply. Gate 7's "the ABI layout mirrors move" is TBD41's.
+  with 0 retained bytes after the reply. Gate 7's "the ABI layout mirrors move" is #1697's.
 - **Authorized paths of (a).** As filed, without `hosts/host-web/src/{ffi.rs,lib.rs}`, the
   worklet, the `.d.ts`, the artifact digest, `scripts/check-web-audioworklet.sh`, the ABI layout
-  tools and mirrors and `scripts/test-web-audioworklet.mjs` (all TBD41's). Added: see the feature
+  tools and mirrors and `scripts/test-web-audioworklet.mjs` (all #1697's). Added: see the feature
   bit below. `hosts/host-web/tests/control_parity.rs` stays, for gate 6's refusal row.
 
 **Corrections to the re-brief (it predates #1310, which ships in batch 15a).**
@@ -586,7 +586,7 @@ already carry both rulings.
 - **Non-goal "No supersession of a pending candidate (#1310)"** (`:433`) is void. The replace
   inherits #1310's supersession through the shared path and adds no supersession code of its own.
 - **Non-goal "No browser replace export"** (`:429`) contradicted D7 and its root approval. It now
-  reads: no browser export in (a); the browser export is TBD41's.
+  reads: no browser export in (a); the browser export is #1697's.
 - **The C export needs a feature bit** (#1317 D2: each added symbol gets its own bit, the next
   free one when it merges). `miso_engine_v1_submit_document_command` gets
   `MISO_ENGINE_V1_FEATURE_SESSION_REPLACE`, and `FEATURE_MASK` grows to include it. Added to

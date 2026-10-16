@@ -395,7 +395,7 @@ The coordinator added it, as recorded above.
   (`source.rs`, beside `check_donation`, reusing `unfed`) reports a source the donor redeclared
   from the running plan, fed since, that the successor declares as the running plan does: the one
   case the donation cannot move and the acked chunks would drop. #1310's rebuild refuses it as
-  `BACKPRESSURE` (see #1310's fold 2); TBD42 lifts it.
+  `BACKPRESSURE` (see #1310's fold 2); #1698 lifts it.
 - *Fold 3 (M-A, root ruling of 2026-10-16).* The guard is widened and renamed
   `host_core::drops_acked_fresh_source(donor side, &DonationPlan)`: any fed ring the donor created
   (`can_prepare_source_seek` on the donor, as in `check_donation`) that the donation does not move

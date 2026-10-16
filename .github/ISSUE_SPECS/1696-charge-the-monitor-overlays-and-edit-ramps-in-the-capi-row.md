@@ -4,7 +4,7 @@ Successor of #1310 (supersede an unadopted candidate; it adds the kept base) and
 row joined the overlay), decision 17 C1 (one core, one accounting on both hosts). Code anchors
 verified on the batch 15a branch `codex/controls-batch-15a` at `e8f72edc5`, and read-only on the
 in-progress #1310 tree `codex/controls-batch-15aw` (uncommitted; its names are marked below).
-Issue number: assigned at filing (written here as TBD40). Feature sprint mode (owner, 2026-10-13):
+Issue number: assigned at filing (written here as #1696). Feature sprint mode (owner, 2026-10-13):
 one implementer, normal tests, a batch review.
 
 ## Product outcome
@@ -171,6 +171,6 @@ hosts charge the same, because the row is computed once, in the core.
 
 Half a day.
 
-## Decision record: TBD40
+## Decision record: #1696
 
 To be filled by the implementer. The bounds decision goes first.

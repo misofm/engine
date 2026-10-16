@@ -868,7 +868,7 @@ that window is admitted against the plan that renders.
   getting `RESULT_BACKPRESSURE` until it renders. A source the candidate carries unchanged from the
   running plan is not refused. Both hosts answer alike
   (`control_parity::a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_
-  hosts`, cases reverted, redeclared a third way and removed). TBD42 lifts only the reverted case.
+  hosts`, cases reverted, redeclared a third way and removed). #1698 lifts only the reverted case.
 - **Displaced plans are charged until reclaimed (batch 15a fold 2).** When a transaction finds the
   candidate taken by render and builds on it, the plan render displaced may not yet be reclaimed
   (a render preempted between its claim and its retirement). The session keeps that plan's
