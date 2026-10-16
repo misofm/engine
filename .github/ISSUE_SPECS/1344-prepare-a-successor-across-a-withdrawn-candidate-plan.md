@@ -307,11 +307,68 @@ control thread.
 5. `a_refused_or_mismatched_donation_moves_nothing`.
 6. `cargo test --locked -p host-core --all-features` (41 targets ok), `-p graph --features
    test-support`, `-p source`, `-p host-web --all-features`: pass. `-p capi`: passes with the
-   mechanical one-line fix below applied (not left in the tree). `audit capi`: `pcm_digest
+   mechanical one-line fix below applied (the coordinator later committed it; see below). `audit capi`: `pcm_digest
    bf7dcedd1d92621f`, 0 violations. `realtime-policy`: ok, 150 regions (none added).
    `check-graph-policy.sh`, `check-host-core-policy.sh`, `check-workspace-policy.sh`, fmt, clippy
    on `engine`, `graph`, `source`, `host-core` (`--all-targets --all-features -D warnings`): pass.
 
-**Open, outside this slice's paths.** `crates/capi/tests/resource_lifecycle.rs:810` destructures
-`PreparedHost` exhaustively and needs `carried_base,` plus `assert!(carried_base.is_none())`; it
-was not edited here (batch 15a rule for `crates/capi`).
+**Edits outside the original authorized paths, and who accepted them.**
+- `crates/engine/src/realtime/plan.rs`: the read-only `PreparedPlanExecutor::as_any` and
+  `PreparedRenderPlan::executor_any` (control-side, no render code); one attempt, accepted by root
+  on 2026-10-16.
+- `crates/host-core/src/lib.rs` (re-exports) and `crates/host-core/src/render_session.rs` (the
+  `carried_base` field): mechanical.
+- `crates/capi/tests/resource_lifecycle.rs`: the coordinator added the `carried_base,`
+  destructure and `assert!(carried_base.is_none())` (mechanical). This corrects the attempt's
+  record, which said the file was not edited: the attempt did not edit it, the coordinator did.
+
+**Review fold (batch 15a).**
+- M3, gate 2: the session now has track `t` and source `a`, which sort first, and A removes both,
+  so A's keys are not P0's; A also redeclares `c` and replaces `t0000`'s insert. Under live input
+  lanes an input-section or strip-stage value edit carries and retargets, so those families (and
+  meters, delay lines, strip delays, live routes) restart by removal only; the plan's one spectrum
+  capture carries. The test compares sets, not counts, through two test-support views
+  (`test_only_inventory_rows`, `test_only_carry_read_keys` in `prepare.rs`): base keys equal read
+  keys, and base owners equal the owners both plans hold less those A restarted. Red evidence:
+  `restricted_to` returning the full inventory fails "base keys equal read keys";
+  `installed_carry_reads` reporting successor keys fails for each section on its own (sources,
+  delay lines and strip delays on the owner set; input lanes, strip lanes, meters and live
+  routes on the key set; effect sites and observation taps on "base rows are P0 rows"; spectrum
+  on prepare's own pairing assertion).
+- M3, gate 1: gate 1's plans are now prepared with live controls, so inserts bank with live
+  lanes and can carry. `t3` carries a transient shaper (audible state, its own bank), and every
+  input section carries its high-pass state. Red evidence: dropping the effect-lane or
+  input-section rows from the restriction fails gate 1. The reviewer's "an unrestricted base is
+  red" assertion is not added. That assertion and root's item 7 cannot both hold: the restricted
+  base and P0's full inventory differ only in rows A restarted or removed, and an owner from
+  those rows carries from P0 only when B reverts it to its P0 form. So the assertion would lock in
+  the behaviour that root ruled a defect (an owner or source that A restarts and B reverts starts
+  fresh in B). Item 7 is not small, and it is not coded here, for three reasons. (1) The fix
+  removes the restriction: the control plane passes P0's inventory as the base, which reverses D1
+  and D2. (2) It needs a P0 producer pass before the donor pass: for a source that A redeclared and
+  B reverts, the donor's producer feeds A's ring and not the P0 ring that B reads. (3) It must
+  decide where host submits made between A's commit and B's swap go. Successor placeholder (the
+  coordinator writes it): *B carries an owner or source it keeps unchanged from P0 from P0's state*.
+- m1: `donate_producers` now moves the donor's producer into the successor and leaves the donor
+  vacant, so a later submit or seek to the donor is refused (`Vacated`) and never acked. The
+  successor's own fresh producer is dropped. `check_donation` refuses a successor producer that
+  has already been fed with the new `DonationError::SuccessorFed`, so that drop never loses acked
+  PCM. `apply_donation` first re-reads both halves' preconditions (producer pairs resolve,
+  `can_donate_sources`) and moves nothing if either fails. It then runs the consumer swap (all or
+  nothing) and, only if that moved, the producers, so a donated ring and its producer are never
+  separated. Test: `a_donation_never_separates_an_acked_ring_from_its_producer`, and gate 4 now
+  asserts the donor's `Vacated`. Red evidence: restoring the producer swap fails gate 4; removing
+  the fed check fails the new test; the old producers-first order fails the new test.
+- m2: `crates/source` tests `a_source_swap_refuses_every_unswappable_pair_and_moves_nothing`
+  (every `swappable` refusal: either index out of range, either entry vacant, channel counts, quanta,
+  either index repeated, a foreign driver; nothing moves) and
+  `a_source_swap_carries_a_prepared_seek_into_the_next_block`. Each `swappable` condition removed
+  on its own and the `pending_generation_change` OR removed are each red. The OR stays set-wide.
+  A comment at the OR records why this is safe. It can only over-report one block's
+  generation-change validity and never hides a real change. It cannot be reached in production,
+  because a donor never had `prepare_source_seek`. A per-entry flag would add reads on render.
+
+**Open, outside this slice's paths (resolved).** `crates/capi/tests/resource_lifecycle.rs:810`
+destructures `PreparedHost` exhaustively and needed `carried_base,` plus
+`assert!(carried_base.is_none())`. The attempt did not edit it (batch 15a rule for `crates/capi`).
+The coordinator added it, as recorded above.

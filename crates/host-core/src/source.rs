@@ -454,6 +454,11 @@ pub enum DonationError {
     /// the two plans' source entries cannot exchange (another quantum or channel count, or not
     /// graph plans).
     Unswappable,
+    /// A successor ring the donation would replace has already been fed: its producer accepted
+    /// PCM, an end of region or a seek. The donation drops that producer and moves its ring to the
+    /// donor, so the host would lose what it was acked for. An unpublished successor is not
+    /// reachable by a host submit, so only a caller that fed it by hand (a test) is refused.
+    SuccessorFed,
 }
 
 /// The producer half of a [`DonationPlan`]: `(successor entry, donor entry)` positions in the two
@@ -539,10 +544,14 @@ pub fn check_donation(
         ) else {
             return Err(DonationError::Unswappable);
         };
-        if successor.sources.sources[into].provider.is_none()
-            || donor.sources.sources[from].provider.is_none()
-        {
+        let (Some(fresh_producer), Some(_)) = (
+            successor.sources.sources[into].provider.as_ref(),
+            donor.sources.sources[from].provider.as_ref(),
+        ) else {
             return Err(DonationError::Unswappable);
+        };
+        if !unfed(fresh_producer) {
+            return Err(DonationError::SuccessorFed);
         }
         producers.push((into, from));
         consumers.push((row.index, given.index));
@@ -561,10 +570,42 @@ pub fn check_donation(
     })
 }
 
-/// The producer half of [`apply_donation`] (#1344 D3): swap each checked pair's producers between
-/// the two control sets, so the successor feeds the donated ring and the donor holds the
-/// successor's fresh one. Infallible on a plan [`check_donation`] returned for these sets;
-/// allocation-free. Returns how many moved.
+/// Whether a fresh producer is exactly as preparation made it: generation 1 (the prepared initial
+/// generation), nothing written, no end of region. Such a producer has acked nothing, so dropping
+/// it (with the ring it feeds) loses nothing the host is owed.
+fn unfed(provider: &HostChunkProvider) -> bool {
+    let telemetry = provider.telemetry();
+    telemetry.active_generation == SourceGeneration(1)
+        && telemetry.cumulative_written_frames == 0
+        && !telemetry.end_of_region_submitted
+}
+
+/// Whether every producer pair resolves to an occupied entry on both sides: the producer half's
+/// precondition, re-read by [`apply_donation`] before anything moves.
+fn producers_resolve(
+    successor: &SourceControlSet,
+    donor: &SourceControlSet,
+    producers: &ProducerDonation,
+) -> bool {
+    producers.0.iter().all(|&(into, from)| {
+        successor
+            .sources
+            .get(into)
+            .is_some_and(|source| source.provider.is_some())
+            && donor
+                .sources
+                .get(from)
+                .is_some_and(|source| source.provider.is_some())
+    })
+}
+
+/// The producer half of [`apply_donation`] (#1344 D3): move each checked pair's donor producer
+/// into the successor's entry, so the successor feeds the donated ring. The donor's entry is left
+/// vacant, so a later submit or seek to the donor is refused with [`SourceControlError::Vacated`]
+/// and never acked into a ring nobody plays. The successor's own fresh producer, which
+/// [`check_donation`] proved unfed, is dropped; its ring moves to the donor with
+/// [`donate_consumers`] and drops with it. Infallible on a plan [`check_donation`] returned for
+/// these sets; allocates nothing. Returns how many moved.
 pub fn donate_producers(
     successor: &mut SourceControlSet,
     donor: &mut SourceControlSet,
@@ -574,8 +615,13 @@ pub fn donate_producers(
     for &(into, from) in &producers.0 {
         if let (Some(into), Some(from)) =
             (successor.sources.get_mut(into), donor.sources.get_mut(from))
+            && let Some(provider) = from.provider.take()
         {
-            core::mem::swap(&mut into.provider, &mut from.provider);
+            debug_assert!(
+                into.provider.as_ref().is_some_and(unfed),
+                "a checked successor producer is unfed"
+            );
+            into.provider = Some(provider);
             moved += 1;
         }
     }
@@ -600,13 +646,21 @@ pub fn donate_consumers(
     if moved { consumers.0.len() } else { 0 }
 }
 
-/// Apply a donation [`check_donation`] returned (#1344 D3): [`donate_producers`], then
-/// [`donate_consumers`]. Infallible; returns how many sources moved. The donor ends with the
-/// successor's fresh rings and drops them with itself.
+/// Apply a donation [`check_donation`] returned (#1344 D3). Returns how many sources moved. The
+/// donor ends with the successor's fresh, unfed rings and drops them with itself; its donated
+/// producer entries are vacant.
 ///
 /// Neither side can have changed since the check: the successor is unpublished and the donor
 /// withdrawn, both held by the control thread. Call it after the protocol commit, when the
 /// donor is never republished.
+///
+/// The order is chosen so that no failure can lose PCM the host was acked for, even if a caller
+/// breaks that contract (passes sets or plans other than the ones checked). First it re-reads,
+/// without moving anything, both halves' preconditions: every producer pair resolves, and the
+/// consumer pairs pass [`graph::can_donate_sources`]. If either fails, nothing moves and it
+/// returns `0`: the donor keeps its fed rings and their producers, together. Then
+/// [`donate_consumers`], which is all or nothing; only if it moved does [`donate_producers`] run.
+/// So a donated ring and its producer are never separated.
 pub fn apply_donation(
     successor: DonationSideMut<'_>,
     donor: DonationSideMut<'_>,
@@ -616,8 +670,17 @@ pub fn apply_donation(
         producers,
         consumers,
     } = plan;
-    let producers = donate_producers(successor.sources, donor.sources, producers);
+    let checked = producers.0.len() == consumers.0.len()
+        && producers_resolve(successor.sources, donor.sources, &producers)
+        && graph::can_donate_sources(successor.plan, donor.plan, &consumers.0).is_ok();
+    if !checked {
+        return 0;
+    }
     let consumers = donate_consumers(successor.plan, donor.plan, consumers);
+    if consumers == 0 {
+        return 0;
+    }
+    let producers = donate_producers(successor.sources, donor.sources, producers);
     debug_assert_eq!(producers, consumers, "both halves move every pair");
     consumers
 }

@@ -227,7 +227,8 @@ pub use effect_compiler::{
 };
 #[cfg(feature = "test-support")]
 pub use prepare::{
-    test_only_prepare_host_runtime_on, test_only_prepare_host_runtime_successor_on,
+    test_only_carry_read_keys, test_only_inventory_rows, test_only_prepare_host_runtime_on,
+    test_only_prepare_host_runtime_successor_on,
     test_only_prepare_host_runtime_with_live_controls_on,
     test_only_prepare_host_runtime_with_live_controls_successor_on,
     test_only_prepare_host_runtime_with_selected_meters_on,

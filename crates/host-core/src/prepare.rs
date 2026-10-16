@@ -1168,6 +1168,179 @@ impl PlanStateInventory {
     }
 }
 
+/// Test-support view of an inventory (#1344 fold M3): every row as `(family, owner, key)`, where
+/// `owner` names what the row belongs to by session identity (a strip, an effect, a route, a
+/// source) and `key` is the predecessor key a successor's hand-over names it by, formatted as
+/// [`test_only_carry_read_keys`] formats the same key. A gate compares the two to prove a
+/// restricted base holds exactly the rows the hand-over reads, and that those rows belong to the
+/// owners the test expects.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_inventory_rows(
+    inventory: &PlanStateInventory,
+) -> BTreeSet<(&'static str, String, String)> {
+    let PlanStateInventory {
+        plan_identity: _,
+        sources,
+        input_sections,
+        strip_stages,
+        effect_lanes,
+        meters,
+        observations,
+        sample_rate_hz: _,
+        quantum_frames: _,
+        spectrum,
+        spectrum_collection: _,
+        spectrum_pairing: _,
+        delay_lines,
+        strip_delays,
+        live_routes,
+        restarted: _,
+    } = inventory;
+    let mut rows = BTreeSet::new();
+    let mut add = |family, owner: String, key: String| {
+        rows.insert((family, owner, key));
+    };
+    for row in sources.iter() {
+        add("sources", row.id.to_string(), format!("{:?}", row.index));
+    }
+    for row in input_sections.iter() {
+        add(
+            "input sections",
+            row.id.to_string(),
+            format!("{:?}", row.location),
+        );
+    }
+    for row in strip_stages.iter() {
+        add(
+            "strip stages",
+            format!("{} {:?}", row.id, row.owner),
+            format!("{:?}", (row.owner, row.location)),
+        );
+    }
+    let effect_owner = |location: &graph::GraphEffectSite| {
+        effect_lanes
+            .iter()
+            .find(|lane| lane.location == *location)
+            .map_or_else(
+                || "unknown effect".to_owned(),
+                |lane| format!("{} {:?} {}", lane.id, lane.rack, lane.effect_id),
+            )
+    };
+    for row in effect_lanes.iter() {
+        add(
+            "effect lanes",
+            effect_owner(&row.location),
+            format!("{:?}", row.location),
+        );
+    }
+    for row in meters.iter() {
+        add(
+            "meters",
+            format!("{} {:?} {:?}", row.id, row.tap, row.metrics),
+            format!("{:?}", row.location),
+        );
+    }
+    for row in observations.iter() {
+        add(
+            "observations",
+            effect_owner(&row.location),
+            format!("{:?}", row.location),
+        );
+    }
+    for row in spectrum.iter() {
+        add(
+            "spectrum",
+            format!("{:?} {:?}", row.target, row.channels),
+            format!("{:?}", row.location),
+        );
+    }
+    for row in delay_lines.iter() {
+        add(
+            "delay lines",
+            format!("{:?}", row.edge),
+            format!("{:?}", row.line),
+        );
+    }
+    for row in strip_delays.iter() {
+        add(
+            "strip delays",
+            row.strip.to_string(),
+            format!("{:?}", row.line),
+        );
+    }
+    for row in live_routes.iter() {
+        add(
+            "live routes",
+            row.route_id.to_string(),
+            format!("{:?}", row.unit),
+        );
+    }
+    rows
+}
+
+/// Test-support view of a hand-over's reads (#1344 fold M3): every predecessor key as `(family,
+/// key)`, formatted as [`test_only_inventory_rows`] formats it.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_carry_read_keys(
+    reads: &graph::GraphCarryReads,
+) -> BTreeSet<(&'static str, String)> {
+    let graph::GraphCarryReads {
+        predecessor: _,
+        sources,
+        input_lanes,
+        strip_lanes,
+        effect_sites,
+        observers,
+        observation_sites,
+        delay_lines,
+        strip_delay_lines,
+        live_routes,
+    } = reads;
+    let mut keys = BTreeSet::new();
+    let mut add = |family, key: String| {
+        keys.insert((family, key));
+    };
+    sources
+        .iter()
+        .for_each(|key| add("sources", format!("{key:?}")));
+    input_lanes
+        .iter()
+        .for_each(|key| add("input sections", format!("{key:?}")));
+    strip_lanes
+        .iter()
+        .for_each(|key| add("strip stages", format!("{key:?}")));
+    effect_sites
+        .iter()
+        .for_each(|key| add("effect lanes", format!("{key:?}")));
+    for (kind, location) in observers {
+        let family = match kind {
+            engine::realtime::ObserverKind::Meter => "meters",
+            engine::realtime::ObserverKind::Spectrum => "spectrum",
+            // The observation taps' readers move with their effect instance; the restriction
+            // keys observation rows by `observation_sites`, below.
+            engine::realtime::ObserverKind::Observation => continue,
+        };
+        add(family, format!("{location:?}"));
+    }
+    observation_sites
+        .iter()
+        .for_each(|key| add("observations", format!("{key:?}")));
+    delay_lines
+        .iter()
+        .for_each(|key| add("delay lines", format!("{key:?}")));
+    strip_delay_lines
+        .iter()
+        .for_each(|key| add("strip delays", format!("{key:?}")));
+    live_routes
+        .iter()
+        .for_each(|key| add("live routes", format!("{key:?}")));
+    keys
+}
+
 /// The plan a successor is prepared to displace (issue #1272 D2, umbrella #1269 P1).
 ///
 /// `committed` is the predecessor's base at the moment the successor is prepared. An input
