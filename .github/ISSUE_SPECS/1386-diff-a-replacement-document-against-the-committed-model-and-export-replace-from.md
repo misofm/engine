@@ -603,4 +603,4 @@ already carry both rulings.
   7): OK, `applied_operations` 0, the unchanged revision, no `SESSION_COMMITTED`, no candidate.
   The alternative is to commit it (`model_only`, revision + 1, one `SESSION_COMMITTED` with 0
   operations). Gate 3's identical case and gate 6 follow the ruling.
-  NEEDS ROOT CHECK: an identical-document replace replies with a new `EditPath::Unchanged` (5), OK, 0 operations, unchanged revision, no event (or root picks: commit as `model_only` with revision + 1).
+  ROOT DECISION (2026-10-16): an identical-document replace replies with a new `EditPath::Unchanged` (5): OK, 0 operations, unchanged revision, no event. Nothing changed, so the revision does not move. The `edit_path` vocabulary (protocol, registry, the vocabulary gates), the SDK decoder and the parity row all include 5.
