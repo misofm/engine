@@ -2462,6 +2462,18 @@ impl AudioWorkletEngineHost {
         self.plan.as_ref().map(|plan| plan.owner().active_epoch().0)
     }
 
+    /// The session timeline's sample at `source_read_sample` in the plan that renders (#1641's
+    /// test reader, #1643 gates); `None` for a host with no plan, a plan with no timeline, or a
+    /// sample the reader has no record for. Between render calls only.
+    #[cfg(feature = "test-support")]
+    pub fn timeline_at_for_test(&mut self, source_read_sample: u64) -> Option<i64> {
+        let plan = self.plan.as_mut()?;
+        host_core::test_only_timeline_at(
+            plan.test_owner_mut().active_plan_mut(),
+            source_read_sample,
+        )
+    }
+
     /// Render one block through the plan owner at `absolute_sample` rather than the host's clock,
     /// and nothing else (#1398 gate 1b); `false` when the owner refused it or the host is not
     /// ready. A mistimed block adopts a published successor before the owner checks its time, and
@@ -3668,6 +3680,40 @@ impl AudioWorkletEngineHost {
         let code = match ready
             .control
             .seek_at(source_id, generation, source_frame, anchor_sample)
+        {
+            Ok(()) => RESULT_OK,
+            Err(failure) => source_failure_result(failure),
+        };
+        self.record(code)
+    }
+
+    /// Seek the timeline and every source of the newest committed session to timeline sample
+    /// `timeline_frame` under one new `generation`, all or nothing (#1643 D1).
+    ///
+    /// It runs the control plane's `SessionState::session_seek`, the call the C ABI's
+    /// `miso_engine_v1_session_seek` and `_session_seek_at` run, after its service step, so it is
+    /// a control-side call (the message handler, never `process()`). With `anchor_sample`, every
+    /// consumer applies the seek in the block that starts there. This adapter holds no seek
+    /// logic, and it never prepares the plan's consumer: every consumer observes the seek through
+    /// its command queue at the next block, the timeline included. A host that is not ready
+    /// refuses with [`RESULT_REFUSED_LIFECYCLE`] and changes nothing; the core's refusals map
+    /// through `source_failure_result` (a stale generation or an anchor that is not a quantum
+    /// multiple is [`RESULT_INVALID_ARGUMENT`], one full slot [`RESULT_BACKPRESSURE`]).
+    pub fn session_seek(
+        &mut self,
+        generation: u64,
+        timeline_frame: u64,
+        anchor_sample: Option<u64>,
+    ) -> u32 {
+        if self.status.state != STATE_READY {
+            return self.record(RESULT_REFUSED_LIFECYCLE);
+        }
+        let Some(ready) = self.ready.as_mut() else {
+            return self.record(RESULT_REFUSED_LIFECYCLE);
+        };
+        let code = match ready
+            .control
+            .session_seek(generation, timeline_frame, anchor_sample)
         {
             Ok(()) => RESULT_OK,
             Err(failure) => source_failure_result(failure),

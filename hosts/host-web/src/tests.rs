@@ -9534,3 +9534,420 @@ fn a_subscription_past_the_frame_is_refused_and_an_unsubscribe_makes_room() {
     );
     assert_eq!(armed(&host), probe_cap);
 }
+
+/// Issue #1643: the session seek exports, driven as the page's message handler drives them.
+mod session_seek {
+    use super::*;
+    use protocol::{
+        CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
+        EditPath, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionRevision,
+        TypedCommandFrame,
+    };
+    use session::{RouteSource, SessionModel, StableId};
+
+    const LONG: &[u8] = b"fixture-source";
+    const SHORT: &[u8] = b"short-source";
+    const ADDED: &[u8] = b"added-source";
+    const Q: u64 = 128;
+
+    /// `base` with one more source, track and route: ID `source_id`, `frames` long.
+    fn add_source(
+        base: &SessionModel,
+        source_id: &str,
+        track_id: &str,
+        frames: u64,
+    ) -> [SessionEdit; 3] {
+        let mut source = base.sources[0].clone();
+        source.id = StableId::parse(source_id).expect("source ID");
+        source.frames = frames;
+        let mut track = base.tracks[0].clone();
+        track.id = StableId::parse(track_id).expect("track ID");
+        track.source_id = source.id.clone();
+        let mut route = base.routes[0].clone();
+        route.id = StableId::parse(&format!("{track_id}-main")).expect("route ID");
+        let RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("a track route")
+        };
+        *track_id = track.id.clone();
+        [
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ]
+    }
+
+    /// The identity fixture at quantum 128 with `fixture-source` 10,000 frames long.
+    fn one_source() -> SessionModel {
+        let mut model = parse_session_json(&identity_session(Q as u32, 10_000)).expect("session");
+        model.sources[0].frames = 10_000;
+        model
+    }
+
+    /// `fixture-source` (10,000 frames) and `short-source` (4,000 frames), one track each.
+    fn two_sources() -> SessionModel {
+        let mut model = one_source();
+        let [
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ] = add_source(&model, "short-source", "t2", 4_000)
+        else {
+            panic!("three upserts")
+        };
+        model.sources.push(source);
+        model.tracks.push(track);
+        model.routes.push(route);
+        model
+    }
+
+    /// One booted host driven through the raw exports, with `fixture-source` primed for four
+    /// blocks of generation 1 (and `short-source`, if the session has it).
+    struct Rig {
+        handle: u32,
+        block: u64,
+        sources: Vec<&'static [u8]>,
+    }
+
+    impl Rig {
+        fn boot(model: &SessionModel, sources: &[&'static [u8]]) -> Self {
+            let document = canonical_session_json(model).expect("canonical session");
+            let options = WebBootOptions {
+                source_ring_frames: 512,
+                ..boot_options(Q as u32)
+            };
+            let handle = crate::ffi::test_boot(document.as_bytes(), options);
+            assert_ne!(handle, 0);
+            assert_eq!(crate::ffi::test_fill_source_pcm(handle, 0.25), RESULT_OK);
+            let mut rig = Self {
+                handle,
+                block: 0,
+                sources: sources.to_vec(),
+            };
+            for _ in 0..4 {
+                for id in sources {
+                    assert_eq!(rig.submit(id, 1, rig.block * Q), RESULT_OK);
+                }
+                rig.render();
+            }
+            rig
+        }
+
+        fn stage(&self, id: &[u8]) {
+            assert_eq!(
+                crate::ffi::test_copy_staging(self.handle, BUFFER_SOURCE_ID, id),
+                RESULT_OK
+            );
+        }
+
+        /// One quantum of `id`'s generation `generation` from source frame `frame`.
+        fn submit(&self, id: &[u8], generation: u64, frame: u64) -> u32 {
+            self.stage(id);
+            miso_engine_web_v1_source_submit(
+                self.handle,
+                id.len() as u32,
+                generation,
+                frame,
+                2,
+                Q as u32,
+                0,
+            )
+        }
+
+        fn feed(&self, generation: u64, frame: u64) {
+            for id in &self.sources {
+                assert_eq!(self.submit(id, generation, frame), RESULT_OK);
+            }
+        }
+
+        fn render(&mut self) -> Vec<u32> {
+            assert_eq!(miso_engine_web_v1_render(self.handle, Q as u32), RESULT_OK);
+            self.block += 1;
+            crate::ffi::native_staging::output_pcm(self.handle)
+                .expect("output")
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect()
+        }
+
+        /// The first sample of the next block.
+        fn next(&self) -> u64 {
+            self.block * Q
+        }
+
+        fn timeline(&self, sample: u64) -> i64 {
+            crate::ffi::native_staging::timeline_at(self.handle, sample).expect("a timeline")
+        }
+
+        /// `(generation, first_sample, source_frame)` of `id`'s seek report.
+        fn landed(&self, id: &[u8]) -> (u64, u64, u64) {
+            self.stage(id);
+            assert_eq!(
+                miso_engine_web_v1_source_seek_report(self.handle, id.len() as u32),
+                RESULT_OK
+            );
+            let record = crate::ffi::native_staging::seek_report(self.handle).expect("record");
+            (record.generation, record.first_sample, record.source_frame)
+        }
+
+        fn last_result(&self) -> u32 {
+            crate::ffi::test_status(self.handle)
+                .expect("status")
+                .last_result
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            assert_eq!(miso_engine_web_v1_dispose(self.handle), RESULT_OK);
+        }
+    }
+
+    /// Gate 1 up to its anchored seek: `session_seek(2, 6_000)` and the block that applied it.
+    fn after_plain_seek() -> Rig {
+        let mut rig = Rig::boot(&two_sources(), &[LONG, SHORT]);
+        assert_eq!(
+            miso_engine_web_v1_session_seek(rig.handle, 2, 6_000),
+            RESULT_OK
+        );
+        // The long source's PCM from the sought frame. The short source clamps to its end, 4,000,
+        // where it has no frame to submit: its seek report still names that frame.
+        assert_eq!(rig.submit(LONG, 2, 6_000), RESULT_OK);
+        let sample = rig.next();
+        rig.render();
+        assert_eq!(rig.landed(LONG), (2, sample, 6_000));
+        assert_eq!(rig.landed(SHORT), (2, sample, 4_000), "clamped to its end");
+        assert_eq!(rig.timeline(sample), 6_000);
+        rig
+    }
+
+    /// Gate 1, both forms move the timeline and every source in the one block.
+    ///
+    /// Test value: red if the export seeks the consumers in different blocks (for example through
+    /// `prepare_source_seek` for the sources only, which would also leave the timeline behind),
+    /// clamps a short source wrongly, or drops the anchor of the anchored form.
+    #[test]
+    fn both_forms_move_the_timeline_and_every_source_at_one_block() {
+        let mut rig = after_plain_seek();
+        let anchor = rig.next() + 2 * Q;
+        assert_eq!(
+            miso_engine_web_v1_session_seek_at(rig.handle, 3, 1_000, anchor),
+            RESULT_OK
+        );
+        // Held before the anchor: the plain seek's generation and a timeline that runs on.
+        for block in 1..=2 {
+            let sample = rig.next();
+            rig.render();
+            assert_eq!(rig.landed(LONG).0, 2);
+            assert_eq!(rig.landed(SHORT).0, 2);
+            assert_eq!(rig.timeline(sample), (6_000 + block * Q) as i64);
+        }
+        rig.feed(3, 1_000);
+        let sample = rig.next();
+        assert_eq!(sample, anchor);
+        rig.render();
+        assert_eq!(rig.landed(LONG), (3, anchor, 1_000));
+        assert_eq!(rig.landed(SHORT), (3, anchor, 1_000));
+        assert_eq!(rig.timeline(anchor), 1_000);
+    }
+
+    /// Gate 1, a stale generation changes nothing, under the consumers' own rule and under the
+    /// session's published generation.
+    ///
+    /// Test value: red if the export checks the generation per consumer after earlier pushes, or
+    /// only against the consumers' own generations and not the largest the session has used.
+    #[test]
+    fn a_stale_generation_changes_nothing() {
+        // The twin takes no stale call. The host holds one instance per thread, so it runs and is
+        // disposed first.
+        let (twin_bits, twin_timeline) = {
+            let mut twin = after_plain_seek();
+            let sample = twin.next();
+            assert_eq!(twin.submit(LONG, 2, 6_000 + Q), RESULT_OK);
+            (twin.render(), twin.timeline(sample))
+        };
+        let mut refused = after_plain_seek();
+        assert_eq!(
+            miso_engine_web_v1_session_seek(refused.handle, 2, 0),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(refused.last_result(), RESULT_INVALID_ARGUMENT);
+        let sample = refused.next();
+        assert_eq!(refused.submit(LONG, 2, 6_000 + Q), RESULT_OK);
+        assert_eq!(refused.render(), twin_bits, "the next block is the same");
+        assert_eq!(refused.timeline(sample), twin_timeline);
+        assert_eq!(refused.timeline(sample), (6_000 + Q) as i64);
+
+        // A per-source seek to generation 5 makes a session seek at 4 stale: the timeline is
+        // still at generation 2, so only the session's published generation refuses it.
+        refused.stage(LONG);
+        assert_eq!(
+            miso_engine_web_v1_source_seek(refused.handle, LONG.len() as u32, 5, 0),
+            RESULT_OK
+        );
+        refused.render();
+        assert_eq!(
+            miso_engine_web_v1_session_seek(refused.handle, 4, 0),
+            RESULT_INVALID_ARGUMENT
+        );
+        let sample = refused.next();
+        refused.render();
+        assert_eq!(refused.landed(SHORT).0, 2, "the refusal pushed nothing");
+        assert_eq!(refused.timeline(sample), (6_000 + 3 * Q) as i64);
+        assert_eq!(
+            miso_engine_web_v1_session_seek(refused.handle, 6, 0),
+            RESULT_OK
+        );
+    }
+
+    /// Gate 1, one full source slot refuses every consumer.
+    ///
+    /// Test value: red if a slot is pushed before every slot is checked (the partial seek the
+    /// acked-batch rule forbids): the short source or the timeline would have moved.
+    #[test]
+    fn one_full_slot_refuses_every_consumer() {
+        let mut rig = Rig::boot(&two_sources(), &[LONG, SHORT]);
+        let anchor = rig.next() + 4 * Q;
+        // An anchored seek holds the long source's slot until its anchor block.
+        rig.stage(LONG);
+        assert_eq!(
+            miso_engine_web_v1_source_seek_at(rig.handle, LONG.len() as u32, 2, 640, anchor),
+            RESULT_OK
+        );
+        assert_eq!(
+            miso_engine_web_v1_session_seek(rig.handle, 3, 2_000),
+            RESULT_BACKPRESSURE
+        );
+        assert_eq!(rig.last_result(), RESULT_BACKPRESSURE);
+        // The short source's slot and the timeline's stayed empty.
+        rig.stage(SHORT);
+        assert_eq!(
+            miso_engine_web_v1_source_seek_at(rig.handle, SHORT.len() as u32, 3, 100, anchor),
+            RESULT_OK
+        );
+        let sample = rig.next();
+        rig.render();
+        assert_eq!(rig.landed(SHORT).0, 1, "held until the anchor");
+        assert_eq!(
+            rig.timeline(sample),
+            sample as i64,
+            "the timeline did not move"
+        );
+    }
+
+    /// Gate 3a, the role: on an instance that holds no control half (a failed host) both exports
+    /// refuse with `RESULT_REFUSED_LIFECYCLE` and change nothing.
+    ///
+    /// Test value: red if either export runs without checking the host is ready (it would reach
+    /// for control state the instance does not hold), or moves the report record or the timeline
+    /// on a refusal.
+    #[test]
+    fn the_session_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
+        let mut rig = Rig::boot(&one_source(), &[LONG]);
+        assert_eq!(
+            miso_engine_web_v1_session_seek(0, 2, 0),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_session_seek_at(0, 2, 0, 256),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            miso_engine_web_v1_session_seek(rig.handle, 2, 3_000),
+            RESULT_OK
+        );
+        assert_eq!(rig.submit(LONG, 2, 3_000), RESULT_OK);
+        let sample = rig.next();
+        rig.render();
+        let landed = rig.landed(LONG);
+        assert_eq!(landed, (2, sample, 3_000));
+        let timeline = rig.timeline(sample);
+        assert_eq!(timeline, 3_000);
+
+        // An output-shape mismatch makes the host sticky-failed: no control half to run on.
+        assert_eq!(
+            miso_engine_web_v1_render(rig.handle, 0),
+            RESULT_REPREPARE_REQUIRED
+        );
+        assert_eq!(
+            crate::ffi::test_status(rig.handle).expect("status").state,
+            STATE_FAILED
+        );
+        let record = crate::ffi::native_staging::seek_report(rig.handle);
+        assert_eq!(
+            miso_engine_web_v1_session_seek(rig.handle, 3, 0),
+            RESULT_REFUSED_LIFECYCLE
+        );
+        assert_eq!(
+            miso_engine_web_v1_session_seek_at(rig.handle, 4, 0, 1_024),
+            RESULT_REFUSED_LIFECYCLE
+        );
+        assert_eq!(crate::ffi::native_staging::seek_report(rig.handle), record);
+        assert_eq!(rig.timeline(sample), timeline);
+    }
+
+    /// Gate 3a, the pending candidate: a transaction that adds a source is committed through the
+    /// control entry, and a session seek before its swap reaches the carried source, the added
+    /// source and the timeline in the swap block.
+    ///
+    /// Test value: red if the export seeks the running plan's producers instead of the newest
+    /// committed session's: the added source would not be sought, and the carried source's seek
+    /// would land in a ring the candidate does not hold.
+    #[test]
+    fn a_seek_before_the_swap_reaches_the_carried_and_the_added_source_and_the_timeline() {
+        let model = one_source();
+        let mut rig = Rig::boot(&model, &[LONG]);
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(1).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Exact(SessionRevision(model.revision)),
+                    payload: CommandPayload::SessionTransactionApply(&add_source(
+                        &model,
+                        "added-source",
+                        "t2",
+                        5_000,
+                    )),
+                },
+                &mut bytes,
+            )
+            .expect("a transaction frame");
+        let (result, response) =
+            crate::ffi::native_staging::control_command(rig.handle, &bytes[..length])
+                .expect("the control staging");
+        assert_eq!(result, RESULT_OK, "the control plane answers the frame");
+        let mut fields = [0_u16; 64];
+        let DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+            ..
+        } = codec
+            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+            .expect("a transaction response")
+        else {
+            panic!("the transaction is applied")
+        };
+        assert_eq!(applied.edit_path, EditPath::Rebuild);
+        assert_eq!(
+            crate::ffi::native_staging::active_plan_epoch(rig.handle),
+            Some(0),
+            "the candidate waits for its swap"
+        );
+
+        assert_eq!(
+            miso_engine_web_v1_session_seek(rig.handle, 2, 3_000),
+            RESULT_OK
+        );
+        assert_eq!(rig.submit(LONG, 2, 3_000), RESULT_OK);
+        let swap = rig.next();
+        rig.render();
+        assert_eq!(
+            crate::ffi::native_staging::active_plan_epoch(rig.handle),
+            Some(1),
+            "the seek block is the swap block"
+        );
+        assert_eq!(rig.landed(LONG), (2, swap, 3_000));
+        assert_eq!(rig.landed(ADDED), (2, swap, 3_000));
+        assert_eq!(rig.timeline(swap), 3_000);
+    }
+}

@@ -217,6 +217,83 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     }
   });
 
+  test("session seek declares the discontinuity first and moves the sources in the next block", async () => {
+    // Issue #1643 gate 2. Red if `seek` does not call the session seek export (the generation-2
+    // PCM is then refused, the twin comparison below fails), if it calls it before the
+    // discontinuity declaration (B15-R7), or if it picks a stale generation.
+    const calls = [];
+    const instantiate = asset.instantiate.bind(asset);
+    asset.instantiate = async () => {
+      const instance = await instantiate();
+      const exports = {};
+      for (const [name, value] of Object.entries(instance.exports)) {
+        exports[name] = typeof value === "function" && /declare_discontinuity$|session_seek$/.test(name)
+          ? (...args) => { calls.push(name.replace("miso_engine_web_v1_", "")); return value(...args); }
+          : value;
+      }
+      return { exports };
+    };
+    let engine;
+    let twin;
+    try {
+      engine = await createOfflineEngine(sessionDocument(), { asset });
+      twin = await createOfflineEngine(sessionDocument(), { asset });
+    } finally {
+      delete asset.instantiate;
+    }
+    try {
+      assert.throws(
+        () => engine.seek(-1n),
+        (error) => error instanceof MisoUsageError && /non-negative bigint/.test(error.message),
+      );
+      assert.throws(
+        () => engine.seek(0n, { generation: 0n }),
+        (error) => error instanceof MisoUsageError && /positive bigint/.test(error.message),
+      );
+      assert.deepEqual(calls, [], "a usage error reaches no export");
+
+      const seek = engine.seek(4_096n);
+      assert.deepEqual(seek, { generation: 2n, ok: true, result: 0, code: "ok" });
+      assert.deepEqual(calls, ["declare_discontinuity", "session_seek"]);
+      feed(engine, 2n, 4_096n, 17);
+      const block = engine.render();
+
+      // The per-source seek reads the same frame in its first block, so the two outputs match.
+      assert.deepEqual(twin.seekSource({ sourceId: "s", generation: 2n, sourceFrame: 4_096n }),
+        { ok: true, result: 0, code: "ok" });
+      feed(twin, 2n, 4_096n, 17);
+      const expected = twin.render();
+      assert.ok(block.left.some((sample) => sample !== 0), "the sought frame renders audio");
+      assert.deepEqual(block.left, expected.left);
+      assert.deepEqual(block.right, expected.right);
+
+      // The default generation is one above the largest passed, and a stale one changes nothing.
+      // One block between seeks drains each consumer's command slot.
+      const settle = (generation, frame) => {
+        feed(engine, generation, frame);
+        engine.render();
+      };
+      assert.equal(engine.seek(0n).generation, 3n);
+      settle(3n, 0n);
+      const stale = engine.seek(0n, { generation: 3n });
+      assert.equal(stale.generation, 3n);
+      assert.equal(stale.ok, false);
+      assert.equal(stale.code, "invalidArgument");
+      assert.equal(engine.seek(0n, { generation: 9n }).ok, true);
+      settle(9n, 0n);
+      assert.equal(engine.seek(0n).generation, 10n, "an explicit generation moves the counter");
+      settle(10n, 0n);
+      assert.equal(engine.seekSource({ sourceId: "s", generation: 12n, sourceFrame: 0n }).ok, true);
+      settle(12n, 0n);
+      assert.equal(engine.seek(0n).generation, 13n, "seekSource moves the counter");
+      settle(13n, 0n);
+      assert.equal(engine.seek(0n).generation, 14n);
+    } finally {
+      engine?.dispose();
+      twin?.dispose();
+    }
+  });
+
   test("meter lease and poll return one copied, ABI-shaped sample window", async () => {
     const meterBlocks = 2;
     const engine = await createOfflineEngine(compressorDocument(), {

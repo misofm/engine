@@ -3946,3 +3946,217 @@ fn the_seek_report_is_alike_on_both_hosts_for_plain_late_and_future_seeks() {
         assert!(ahead.4 > 0, "{label} ahead: the wait held frames");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Session seek (#1642, #1643 gate 6)
+// ---------------------------------------------------------------------------------------------
+
+impl CAbi {
+    fn session_seek(&self, generation: u64, timeline_frame: u64, anchor: Option<u64>) {
+        // SAFETY: The session is live and used by this thread alone.
+        let code = unsafe {
+            match anchor {
+                None => capi::miso_engine_v1_session_seek(self.session, generation, timeline_frame),
+                Some(anchor) => capi::miso_engine_v1_session_seek_at(
+                    self.session,
+                    generation,
+                    timeline_frame,
+                    anchor,
+                ),
+            }
+        };
+        assert_eq!(code, C_RESULT_OK, "C ABI session seek");
+    }
+}
+
+/// Block `block` on both hosts: `feeds[i]` is the generation and the first source block of the
+/// chunk fed to `src-t(i + 1)`, or `None` for no chunk. The output bits equal.
+fn session_block(
+    browser: &mut Rig,
+    c_abi: &mut CAbi,
+    block: u64,
+    feeds: [Option<(u64, u64)>; 3],
+    label: &str,
+) {
+    let rate = browser.rate;
+    for (feed, strip) in [T1, T2, T3].into_iter().enumerate() {
+        let Some((generation, start)) = feeds[feed] else {
+            continue;
+        };
+        let source = format!("src-{}", strip.id);
+        let [left, right] = planes(feed as u64, block);
+        assert_eq!(
+            browser.host.submit_source(
+                source.as_bytes(),
+                generation,
+                start * u64::from(QUANTUM),
+                rate,
+                &[&left, &right],
+                QUANTUM,
+                false,
+            ),
+            host_web::RESULT_OK,
+            "{label}: browser {source}"
+        );
+        c_abi.submit_from(&source, feed as u64, block, start, generation);
+    }
+    assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+    let b = bits(browser.host.output_pcm().expect("browser output"));
+    assert_eq!(b, c_abi.render(block), "{label}: block {block} bits");
+}
+
+/// All three sources' seek reports, equal field by field on both hosts.
+fn same_session_reports(
+    browser: &mut Rig,
+    c_abi: &CAbi,
+    label: &str,
+) -> [(u64, u64, u64, u64, u64); 3] {
+    ["src-t1", "src-t2", "src-t3"].map(|name| same_seek_report(browser, c_abi, name, label))
+}
+
+/// #1643 gate 6: a plain session seek and a late anchored session seek, on both hosts at 48 and
+/// 96 kHz, over sources of different lengths (`src-t2` is shorter than the other two and clamps
+/// to its end). At the call, after every block through the applying one and after, the browser's
+/// and the C ABI's seek reports of every source are equal field by field, the output bits are
+/// equal, and the browser's timeline (#1641's host-core test reader) reads the frame the long
+/// sources' reports name. The C ABI's timeline is not readable from outside the `capi` crate; its
+/// own gate (`capi` `runtime::tests::session_seek`) pins it to the same frames, so the row ties
+/// the two through the reports both hosts publish.
+///
+/// Test value: red if either host splits the session seek across blocks (a source reporting the
+/// new generation a block before or after another, or before the timeline), clamps the short
+/// source differently, or drops a late anchored seek's lateness (the report's `first_sample` is
+/// the block that played, after the anchor). The rows are not vacuous: the reports name the new
+/// generation, the short source reports its own end, and the late seek lands after its anchor.
+#[cfg(feature = "test-support")]
+#[test]
+fn the_session_seek_is_alike_on_both_hosts_for_plain_and_late_seeks() {
+    let quantum = u64::from(QUANTUM);
+    for rate in [48_000, 96_000] {
+        let mut model = model_at(rate);
+        for source in &mut model.sources {
+            source.frames = if source.id.as_str() == "src-t2" {
+                24 * quantum
+            } else {
+                64 * quantum
+            };
+        }
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let label = format!("{rate} Hz");
+        for block in 0..4 {
+            session_block(
+                &mut browser,
+                &mut c_abi,
+                block,
+                [Some((1, block)); 3],
+                &label,
+            );
+        }
+        let boot = same_session_reports(&mut browser, &c_abi, &label);
+        assert!(boot.iter().all(|report| report.0 == 1), "{label}: boot");
+
+        // 1. A plain session seek to 40 quanta: the short source clamps to its end (24 quanta).
+        let call_block = 4_u64;
+        let frame = 40 * quantum;
+        assert_eq!(
+            browser.host.session_seek(2, frame, None),
+            host_web::RESULT_OK
+        );
+        c_abi.session_seek(2, frame, None);
+        let at_call = same_session_reports(&mut browser, &c_abi, &format!("{label} plain: call"));
+        assert!(
+            at_call.iter().all(|report| report.0 == 1),
+            "{label} plain: the call alone reports generation 1"
+        );
+        for step in 0..4 {
+            let block = call_block + step;
+            session_block(
+                &mut browser,
+                &mut c_abi,
+                block,
+                [Some((2, 40 + step)), None, Some((2, 40 + step))],
+                &format!("{label} plain"),
+            );
+            let reports = same_session_reports(
+                &mut browser,
+                &c_abi,
+                &format!("{label} plain: after block {block}"),
+            );
+            assert!(
+                reports.iter().all(|report| report.0 == 2),
+                "{label} plain: generation 2 in effect for every source"
+            );
+            assert_eq!(
+                browser.host.timeline_at_for_test(block * quantum),
+                Some((frame + step * quantum) as i64),
+                "{label} plain: the timeline in block {block}"
+            );
+        }
+        let plain = same_session_reports(&mut browser, &c_abi, &format!("{label} plain: end"));
+        for (index, expected_frame) in [frame, 24 * quantum, frame].into_iter().enumerate() {
+            assert_eq!(
+                (plain[index].0, plain[index].1),
+                (2, call_block * quantum),
+                "{label} plain: source {index} landed in the first block after the call"
+            );
+            assert_eq!(
+                plain[index].2, expected_frame,
+                "{label} plain: source {index}"
+            );
+        }
+
+        // 2. A late anchored session seek: its anchor (block 3) is behind the render clock.
+        let late_call = call_block + 4;
+        let late_frame = 30 * quantum;
+        let anchor = 3 * quantum;
+        assert_eq!(
+            browser.host.session_seek(3, late_frame, Some(anchor)),
+            host_web::RESULT_OK
+        );
+        c_abi.session_seek(3, late_frame, Some(anchor));
+        same_session_reports(&mut browser, &c_abi, &format!("{label} late: call"));
+        let mut first_late = None;
+        for step in 0..4 {
+            let block = late_call + step;
+            session_block(
+                &mut browser,
+                &mut c_abi,
+                block,
+                [Some((3, 30 + step)), None, Some((3, 30 + step))],
+                &format!("{label} late"),
+            );
+            let reports = same_session_reports(
+                &mut browser,
+                &c_abi,
+                &format!("{label} late: after block {block}"),
+            );
+            let timeline = browser.host.timeline_at_for_test(block * quantum);
+            let landed = *first_late.get_or_insert((reports[0].1, reports[0].2, timeline));
+            assert_eq!(
+                timeline,
+                Some(landed.2.expect("a timeline") + (step * quantum) as i64),
+                "{label} late: the timeline runs on from where it landed"
+            );
+        }
+        let late = same_session_reports(&mut browser, &c_abi, &format!("{label} late: end"));
+        assert!(
+            late.iter().all(|report| report.0 == 3),
+            "{label} late: generation 3 in effect"
+        );
+        let (first_sample, source_frame, timeline) = first_late.expect("a late block");
+        assert!(
+            first_sample > anchor,
+            "{label} late: it played after its anchor ({first_sample} vs {anchor})"
+        );
+        assert_eq!(
+            timeline,
+            Some(source_frame as i64),
+            "{label} late: the timeline and the long source land on the same frame"
+        );
+        assert_ne!(
+            late[1].2, late[0].2,
+            "{label} late: the short source clamped, so it lands on another frame"
+        );
+    }
+}

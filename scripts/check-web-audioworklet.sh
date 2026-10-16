@@ -323,6 +323,8 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_response_frame_submit \
   miso_engine_web_v1_resource_ptr \
   miso_engine_web_v1_service \
+  miso_engine_web_v1_session_seek \
+  miso_engine_web_v1_session_seek_at \
   miso_engine_web_v1_source_channels \
   miso_engine_web_v1_source_count \
   miso_engine_web_v1_source_frames \

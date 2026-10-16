@@ -256,3 +256,100 @@ exports and the C13 list, the SDK-chosen generation (D2), and a parity row in
   and the timeline (#1641's host-core test reader) reads the same value on both hosts. Red if
   either host splits the seek across blocks, clamps differently or drops the lateness. It needs
   #1642's C export.
+
+## Decision record: #1643 (batch 16)
+
+Built on `5567f7487` (worktree `codex/controls-batch-16b`).
+
+**What shipped.**
+- **D1.** `miso_engine_web_v1_session_seek(handle, generation, frame)` and
+  `miso_engine_web_v1_session_seek_at(handle, generation, frame, anchor)` in
+  `hosts/host-web/src/ffi.rs`, one shared body `AudioWorkletEngineHost::session_seek(generation,
+  frame, Option<anchor>)` in `lib.rs`: it calls `SessionState::session_seek` (the C ABI's call,
+  after its service step) and maps a refusal through `source_failure_result`. host-web holds no seek
+  logic and never calls `prepare_source_seek`. A host that is not ready refuses with
+  `RESULT_REFUSED_LIFECYCLE` and changes nothing; both exports run the service step, so the page
+  calls them from the message handler only (neither is `render_locked`).
+- **D2.** `OfflineEngine.seek(frame, options?) -> { generation } & EngineCallResult`
+  (`sdk/src/headless/engine.ts`) and `WasmBoundary.declareDiscontinuity()` / `sessionSeek()`
+  (`sdk/src/core/boundary.ts`). `sessionSeek` calls `miso_engine_web_v1_declare_discontinuity`
+  first (B15-R7), stops at its refusal, then calls the session seek export. The generation is
+  `options.generation`, else one above the largest this object has passed (starts at 1). The
+  counter (`#highestGeneration`) is the only state added; `seek`, `seekSource` and `submitSource`
+  raise it on an `ok` result only, so a refusal (backpressure, stale) never moves it.
+- **D3.** Mirrors: `check-web-audioworklet.sh` `expected_exports`, `abi_layout.rs` `EXPORTS` (108 ->
+  110), `check-abi-layout-v1.py` `EXPORTS` and the fixture, `sdk/assets/miso-engine-v1-abi-layout.json`
+  and `sdk/src/generated/abi.ts` (regenerated with `node codegen/assets.mjs` and `node
+  codegen/generate.mjs`). The ABI self-test gains two mutations (each new export dropped): 36
+  caught, from 34. The test-worklet mock needed no edit.
+
+**Departures.**
+- **Test-support plumbing outside the listed paths** (mechanical): `hosts/host-web/Cargo.toml`
+  `test-support` now also names `control-plane/test-support` and `engine/test-support`, so a native
+  host-web test reaches the active plan's timeline through `PlanState::test_owner_mut` and
+  `RealtimePlanOwner::active_plan_mut` (B16-R8) and `host_core::test_only_timeline_at`:
+  `AudioWorkletEngineHost::timeline_at_for_test` and `native_staging::timeline_at`, both
+  `cfg(feature = "test-support")`. The workspace test steps already name both features
+  (`check-test-support-ci.py` passes, 13 packages). No file under `crates/engine/src/realtime/`
+  changed.
+- **Gate 6: the C ABI's timeline is not read.** `capi::Plan` and `Session` expose no accessor
+  outside the crate (`test_plan_timeline_at` is `cfg(test)` and crate-private), and a new public
+  capi test hook is not mechanical. The parity row therefore compares the browser's and the C
+  ABI's seek reports of all three sources field by field (at the call, after every block through
+  the applying one and after), the output bits, and reads the browser's timeline: it moves in the
+  applying block, runs on one quantum per block, and in the late seek lands on the frame the long
+  sources' reports (equal on both hosts) name. The C ABI's timeline is pinned by capi's own gate
+  (`runtime::tests::session_seek`). The row is `cfg(feature = "test-support")`.
+- **Gate 1/6: the short source is not fed at its clamped frame.** A source clamped to its end has
+  no frame to submit there (a chunk from the end is `RESULT_INVALID_ARGUMENT`), so the long source
+  is fed and the short source underruns; its report still names the clamped frame.
+- **Gate 1's full-slot case** holds the slot with an anchored `source_seek_at` (which, unlike the
+  plain `source_seek`, does not prepare the consumer and so does not drain the slot).
+- **A refused session seek still declares the discontinuity first** (the SDK holds no
+  generation state beyond its counter, so it cannot know the core would refuse). The declaration
+  resets latency floors and publishes nothing else; it is the C ABI host's order.
+- **Gate 4** (no rendered bit moves) is the unchanged `browser` job digests; this slice adds no
+  render code and no worklet call. Not run here (CI job).
+
+**Gates -> tests.**
+- Gate 1 (`hosts/host-web/src/tests.rs`, `tests::session_seek`):
+  `both_forms_move_the_timeline_and_every_source_at_one_block` (plain seek at 2/6,000: long at
+  6,000, short at 4,000, timeline 6,000 in one block; anchored seek held two blocks then landing
+  at the anchor), `a_stale_generation_changes_nothing` (next block bits and timeline equal a run
+  without the call; a per-source seek to 5 makes a session seek at 4 stale), 
+  `one_full_slot_refuses_every_consumer` (`RESULT_BACKPRESSURE`; the short source's slot and the
+  timeline stay untouched). All call the `extern "C"` exports.
+- Gate 2 (`sdk/test/capability-evals.mjs`): "session seek declares the discontinuity first and moves
+  the sources in the next block" (export call order `declare_discontinuity`, `session_seek`; output
+  equals a `seekSource` twin and is not silent; default generations 2, 3, 10, 13, 14; a stale
+  explicit generation is `invalidArgument`; usage errors reach no export).
+- Gate 3: `check-web-audioworklet.sh` (compares the wasm's exports with `expected_exports`),
+  `check-abi-layout-v1.py` and `--self-test` (36 mutations), `check-sdk-generated.sh`.
+- Gate 3a (`tests::session_seek`):
+  `the_session_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing` and
+  `a_seek_before_the_swap_reaches_the_carried_and_the_added_source_and_the_timeline` (the
+  transaction goes through `native_staging::control_command`, the `control_command` export; the
+  seek before the swap reaches the carried source, the added source and the timeline in the swap
+  block, active epoch 0 -> 1).
+- Gate 6 (`hosts/host-web/tests/control_parity.rs`):
+  `the_session_seek_is_alike_on_both_hosts_for_plain_and_late_seeks` (48 and 96 kHz).
+
+**Commands run (all pass).** `cargo test --locked -p host-web --features host-web/test-support`
+(lib 145 passed, control_parity 20 passed, every other binary green); `cargo clippy --locked -p
+host-web -p parameter-metadata --all-targets --all-features -- -D warnings`; `cargo fmt --all --
+--check`; `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps -p host-web --all-features`;
+`build-web-audioworklet.sh --named-twin`; `check-web-audioworklet.sh`; `test-web-audioworklet.sh`;
+`check-sdk-generated.sh`, `check-sdk-types.sh`, `check-sdk-headless.sh` (565 SDK tests pass);
+`check-abi-layout-v1.py` (document and `--self-test`); `check-session-map-shape.py` (and
+`--self-test`); `check-cross-targets.sh` (PASS, no new `memset_pattern16` call);
+`check-workspace-policy.sh`; `check-test-support-ci.py`; `cargo run -p realtime-policy` (153
+regions, unchanged). The workspace-wide clippy runs at the batch gates.
+
+**Artifact.** `miso-engine-v1-audio-worklet.simd128.wasm`: 4,207,840 bytes, sha256
+`2fc4d8aaa1b9fb49f18c71cc8f2e0fc8fd1f096b96324e86bc6312e64bf92a74` (named twin 4,830,433 bytes,
+`f6cb1e2c5d2a5d1ea88327d6331c2473ff7eeaa5d5f75eff550a8b19a2521b01`). The committed pin is not
+re-pinned.
+
+**Successors.** (1) A capi test hook that reads the active plan's timeline would let the parity row
+compare both timelines directly. (2) #1644 (browser SDK `seek` and the PCM feed's ring rule) is the
+next caller of the exports.

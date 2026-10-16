@@ -3331,6 +3331,40 @@ pub extern "C" fn miso_engine_web_v1_source_seek_at(
     })
 }
 
+/// Seek the timeline and every source to timeline frame `frame` under one new `generation`, all or
+/// nothing (issue #1643 D1). It runs the control plane's `SessionState::session_seek`, the call the
+/// C ABI's `miso_engine_v1_session_seek` runs, so the control Worker (or in `single` mode the
+/// worklet's message handler) calls it, never `process()`: it runs the service step. It never
+/// prepares the plan's consumer; every consumer observes the seek at the next block.
+///
+/// Results: [`RESULT_OK`]; [`RESULT_INVALID_ARGUMENT`] for a wrong handle, a generation that is
+/// zero or not above every generation the session has published (`source.generation.stale`) or any
+/// other malformed seek; [`RESULT_BACKPRESSURE`] when one consumer's slot is full (nothing
+/// changes); [`RESULT_REFUSED_LIFECYCLE`] for a host that is not ready (nothing changes);
+/// [`RESULT_INTERNAL`].
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_session_seek(handle: u32, generation: u64, frame: u64) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.session_seek(generation, frame, None)
+    })
+}
+
+/// The anchored form of [`miso_engine_web_v1_session_seek`] (issue #1643 D1): every consumer
+/// applies the seek in the block that starts at absolute render sample `anchor`, which must be a
+/// quantum multiple. Same function, same results and same thread rule as the C ABI's
+/// `miso_engine_v1_session_seek_at`.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_session_seek_at(
+    handle: u32,
+    generation: u64,
+    frame: u64,
+    anchor: u64,
+) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        host.session_seek(generation, frame, Some(anchor))
+    })
+}
+
 /// Copy where the staged source landed after its newest seek into the fixed 64-byte record at
 /// [`miso_engine_web_v1_source_seek_report_ptr`] (issue #1293 D6): the generation in effect, the
 /// source-read sample and source frame of its first block, and the cumulative underrun and held
@@ -4239,6 +4273,15 @@ pub mod native_staging {
     #[cfg(feature = "test-support")]
     pub fn active_plan_epoch(handle: u32) -> Option<u64> {
         super::with_host(handle, None, |host| host.active_plan_epoch_for_test())
+    }
+
+    /// The session timeline's sample at `source_read_sample` in the plan that renders, for the
+    /// host `handle` names (#1643 gates); `None` for an unknown handle.
+    #[cfg(feature = "test-support")]
+    pub fn timeline_at(handle: u32, source_read_sample: u64) -> Option<i64> {
+        super::with_host_mut(handle, None, |host| {
+            host.timeline_at_for_test(source_read_sample)
+        })
     }
 
     /// The status record of the host `handle` names; `None` for an unknown handle.
