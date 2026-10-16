@@ -3454,6 +3454,11 @@ fn a_declared_discontinuity_resets_the_floors_alike_on_both_hosts() {
         );
         let floored = c_latency(&c_abi);
         assert_eq!(
+            browser_plan_latency(&mut browser).0,
+            floored,
+            "{rate} Hz: both hosts report the floored latency"
+        );
+        assert_eq!(
             browser.host.declare_discontinuity(None),
             host_web::RESULT_OK,
             "{rate} Hz"
@@ -3470,6 +3475,11 @@ fn a_declared_discontinuity_resets_the_floors_alike_on_both_hosts() {
         assert!(
             c_latency(&c_abi) < floored,
             "{rate} Hz: the declaration resets the floors ({floored})"
+        );
+        assert_eq!(
+            browser_plan_latency(&mut browser).0,
+            c_latency(&c_abi),
+            "{rate} Hz: both hosts report the reset latency"
         );
     }
 }

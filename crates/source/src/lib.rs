@@ -1132,8 +1132,8 @@ impl PcmSourceConsumer {
     /// anchor_sample)` (saturating). While it is held, queued PCM of the playing generation still
     /// plays, the new generation's first block is kept as the pending block, and with nothing
     /// playable the block is **held**, not an underrun (the host asked the source to wait; underrun
-    /// means the host owed PCM and did not deliver it). A newer command replaces a held one. This render-path
-    /// operation allocates nothing and never blocks.
+    /// means the host owed PCM and did not deliver it). A newer command replaces a held one. This
+    /// render-path operation allocates nothing and never blocks.
     pub fn begin_block_at(&mut self, first_sample: u64) -> SourceReadReport {
         self.begin_block_with(SeekClock::At(first_sample))
     }

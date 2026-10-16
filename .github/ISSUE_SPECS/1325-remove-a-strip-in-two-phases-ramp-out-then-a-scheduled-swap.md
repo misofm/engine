@@ -268,3 +268,11 @@ two render calls, so the ramp starts at `p`).
 - *Ramp a route that a plan swap adds to or removes from a surviving strip* (#1363).
 - *Give every route whose tap precedes its strip's fader a live lane on every plan* (#1391).
 - *Hold route-lane values in latest-target cells* (#1347).
+
+## Amendment (controls coordinator, batch 15b fold, 2026-10-16)
+
+- #1698 (batch 15b) removed `PreparedHost::carried_base`. The text above that reads the candidate's
+  base inventory as `A.carried_base` (*A restored source keeps its ring*) now reads: B's base across
+  a withdrawn candidate is the running plan P0's own inventory
+  (`PlanStateInventory::across_withdrawn`), with its source rows filtered to those that A carried
+  vacant. The restored source's carry program, the producer check and the adoption are unchanged.

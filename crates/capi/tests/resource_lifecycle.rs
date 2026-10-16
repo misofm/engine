@@ -1237,6 +1237,11 @@ impl Budget {
 /// measured 168,810 before and 167,514 after (x86-64, -1,296: one 216-byte
 /// `Option<PlanStateInventory>` in each of the six provider epochs, the current one, two pending
 /// and three retired), within the 175,296 ceiling, so the ceiling stays.
+///
+/// #1285 (batch 15b) adds the plan state inventory's `input_floors` and `raised_arrivals`
+/// tables. `capi_retained_bytes` measured 167,514 before and 167,754 after (x86-64, +240: the
+/// two tables in the inventory the provider epochs keep), within the 175,296 ceiling, so the
+/// ceiling stays.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
