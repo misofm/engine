@@ -160,6 +160,12 @@ const TABLE: &[(SourceControlError, &str, bool, bool)] = &[
         false,
         false,
     ),
+    (
+        SourceControlError::ReportBusy,
+        "source.report.busy",
+        true,
+        false,
+    ),
 ];
 
 /// The two codes a host must see from more than one variant, and why. Anything else sharing a
@@ -194,6 +200,7 @@ const fn variant_index(error: SourceControlError) -> usize {
         SourceControlError::Seek(SourceSeekError::Backpressure { .. }) => 16,
         SourceControlError::Vacated => 17,
         SourceControlError::Seek(SourceSeekError::AnchorUnaligned) => 18,
+        SourceControlError::ReportBusy => 19,
     }
 }
 

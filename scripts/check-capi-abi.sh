@@ -262,6 +262,7 @@ printf '%s\n' \
     miso_engine_v1_session_destroy \
     miso_engine_v1_source_seek \
     miso_engine_v1_source_seek_at \
+    miso_engine_v1_source_seek_report \
     miso_engine_v1_source_submit_planar_f32 \
     miso_engine_v1_submit_command \
     | sort >"$expected_symbols"

@@ -72,6 +72,7 @@ pub use error::{CompileFailure, ResourceFault};
 /// One planar chunk a host submits to a source of the session ([`SessionState::submit`]).
 pub use host_core::SourceSubmission;
 pub use plan::{PlanQueries, PlanState};
+pub use source::SourceSeekReport;
 
 #[cfg(feature = "test-support")]
 pub use compile::{

@@ -1450,6 +1450,211 @@ fn an_added_c_abi_source_starts_at_its_anchored_render_sample() {
     an_added_source_starts_at_its_anchor_at(48_000, 0);
 }
 
+/// The seek report of `id` through the exported entry point, as `(generation, first_sample,
+/// source_frame, cumulative_underrun_frames, cumulative_held_frames)`.
+fn seek_report_c(session: *mut crate::Session, id: &[u8]) -> (u64, u64, u64, u64, u64) {
+    let (result, report) = crate::ffi::test_source_seek_report(session, id);
+    assert_eq!(result, crate::RESULT_OK);
+    (
+        report.generation,
+        report.first_sample,
+        report.source_frame,
+        report.cumulative_underrun_frames,
+        report.cumulative_held_frames,
+    )
+}
+
+/// Issue #1316 gate 1: a plain seek during playback is reported at the block that applied it.
+/// Blocks 0-5 play generation 1; the host seeks to generation 2 at frame 4096 and submits it from
+/// there, and block 6 (render sample 768) reports `(2, 768, 4096, 0, 0)`.
+///
+/// Test value: red if the report follows the producer's generation at the call (it reads 2
+/// before block 6 renders), or names the block after the one that applied the seek.
+#[test]
+fn a_plain_seek_is_reported_at_the_block_that_applied_it() {
+    let model = stateless_session(48_000);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let (session, plan) = boxed_c_children(&document);
+    const SOURCE: &[u8] = b"fixture-source";
+    assert_eq!(seek_report_c(session, SOURCE), (0, 0, 0, 0, 0));
+    let (left, right) = continuity_block(0, 0);
+    submit_c(session, 1, 0, 48_000, &left, &right, false);
+    let _ = feed_and_render_c(session, plan, 48_000, 0, 6);
+    assert_eq!(seek_report_c(session, SOURCE), (1, 0, 0, 0, 0));
+    assert_eq!(
+        crate::ffi::test_source_seek(session, SOURCE, 2, 4_096),
+        crate::RESULT_OK
+    );
+    submit_block_c(session, SOURCE, 2, 32, 0, 48_000);
+    assert_eq!(
+        seek_report_c(session, SOURCE),
+        (1, 0, 0, 0, 0),
+        "nothing has played generation 2 yet"
+    );
+    let _ = render_c(plan, 6);
+    assert_eq!(seek_report_c(session, SOURCE), (2, 768, 4_096, 0, 0));
+    submit_block_c(session, SOURCE, 2, 33, 0, 48_000);
+    let _ = render_c(plan, 7);
+    assert_eq!(seek_report_c(session, SOURCE), (2, 768, 4_096, 0, 0));
+    crate::ffi::test_plan_destroy(plan);
+    crate::ffi::test_session_destroy(session);
+}
+
+/// Issue #1316 gate 2: an anchored seek render reaches after its anchor starts at its frame plus
+/// the lateness, and the report says so. After block 9, `seek_at(2, F = 384, A = 896)`; block 10
+/// (render sample 1280) starts at `384 + (1280 - 896) = 768` and reports `(2, 1280, 768)`. The
+/// session holds no DSP state, so block 10 is bit-identical to block 6, which read frames 768 on.
+///
+/// Test value: red if the report omits the lateness (reports 384), or the block plays from it.
+#[test]
+fn a_late_anchored_seek_reports_its_frame_plus_the_lateness() {
+    let model = stateless_session(48_000);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let (session, plan) = boxed_c_children(&document);
+    const SOURCE: &[u8] = b"fixture-source";
+    let (left, right) = continuity_block(0, 0);
+    submit_c(session, 1, 0, 48_000, &left, &right, false);
+    let played = feed_and_render_c(session, plan, 48_000, 0, 10);
+    assert_eq!(
+        crate::ffi::test_source_seek_at(session, SOURCE, 2, 384, 896),
+        crate::RESULT_OK
+    );
+    // The producer takes generation 2 from frame 384; render discards what precedes 768.
+    for block in 3..=6 {
+        submit_block_c(session, SOURCE, 2, block, 0, 48_000);
+    }
+    let late = render_c(plan, 10);
+    assert_eq!(seek_report_c(session, SOURCE), (2, 1_280, 768, 0, 0));
+    assert_bit_identical("late anchored seek", 10, &[late], &played[6..7]);
+    crate::ffi::test_plan_destroy(plan);
+    crate::ffi::test_session_destroy(session);
+}
+
+/// Issue #1316 gates 3 and 4: scrub one stem, then start another aligned to it.
+///
+/// One track plays stem X. After block 5 the host plain-seeks X to generation 2 at frame 4096 and
+/// reads its report `(g, s, f)` after block 6. A transaction then adds stem Y on its own track;
+/// before the swap block renders, Y reads generation 0. The host anchors Y at `A` = 1280 (block
+/// 10) on frame `f + (A - s)` and submits it from there. From A on, every block is bit-identical
+/// to the committed session compiled fresh and fed both stems from the aligned frames. X's report
+/// is unchanged by the swap that carries it; Y reads `(1, 896, 0)` after the swap block (held
+/// while its seek waits) and `(2, A, f + (A - s))` from A. One starved block after the run shows
+/// the carried ring still publishes to the host's reader.
+///
+/// Test value: red if the report's sample and frame are not on the anchor's clock (Y is then out of
+/// time with X from A), if the record lives on the plan instead of the ring (X's report is lost at
+/// the swap, or no longer moves after it), or if an added ring inherits a predecessor's record.
+#[test]
+fn a_scrubbed_stem_and_a_stem_started_from_its_report_stay_aligned() {
+    const X: &[u8] = b"fixture-source";
+    const Y: &[u8] = b"s2-source";
+    const ANCHOR_BLOCK: u64 = 10;
+    const BLOCKS: u64 = 16;
+    let anchor = ANCHOR_BLOCK * 128;
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let (session, plan) = boxed_c_children(&document);
+    let (left, right) = continuity_block(0, 0);
+    submit_c(session, 1, 0, 48_000, &left, &right, false);
+    let _ = feed_and_render_c(session, plan, 48_000, 0, 6);
+
+    // Scrub X during playback.
+    assert_eq!(
+        crate::ffi::test_source_seek(session, X, 2, 4_096),
+        crate::RESULT_OK
+    );
+    submit_block_c(session, X, 2, 32, 0, 48_000);
+    let _ = render_c(plan, 6);
+    let (g, s, f, _, _) = seek_report_c(session, X);
+    assert_eq!((g, s, f), (2, 768, 4_096));
+    // X's frame at render sample `t` is `f + (t - s)`, in blocks of 128.
+    let x_block = |block: u64| (f + block * 128 - s) / 128;
+
+    transact_c(
+        session,
+        1,
+        42,
+        &add_source_and_track(&model, "s2-source", "t2"),
+    );
+    assert_eq!(
+        seek_report_c(session, Y),
+        (0, 0, 0, 0, 0),
+        "an added ring has not rendered"
+    );
+    let y_frame = f + (anchor - s);
+    assert_eq!(
+        crate::ffi::test_source_seek_at(session, Y, 2, y_frame, anchor),
+        crate::RESULT_OK
+    );
+    let mut rendered = Vec::new();
+    for block in 7..BLOCKS {
+        submit_block_c(session, X, 2, x_block(block), 0, 48_000);
+        if block >= ANCHOR_BLOCK {
+            submit_block_c(session, Y, 2, x_block(block), 1, 48_000);
+        }
+        rendered.push(render_c(plan, block));
+        assert_eq!(
+            seek_report_c(session, X),
+            (2, 768, 4_096, 0, 0),
+            "block {block}"
+        );
+        let held = 128 * (block.min(ANCHOR_BLOCK - 1) - 6);
+        let expected_y = if block < ANCHOR_BLOCK {
+            (1, 896, 0, 0, held)
+        } else {
+            (2, anchor, y_frame, 0, held)
+        };
+        assert_eq!(seek_report_c(session, Y), expected_y, "block {block}");
+    }
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(plan),
+        (1, 0),
+        "one swap, and it carried X"
+    );
+    // A starved block after the swap: the carried ring still publishes to the host's reader.
+    let _ = render_c(plan, BLOCKS);
+    assert_eq!(seek_report_c(session, X), (2, 768, 4_096, 128, 0));
+    let committed = snapshot_c(session);
+    crate::ffi::test_plan_destroy(plan);
+    crate::ffi::test_session_destroy(session);
+
+    // The reference reads both stems from the aligned frames, from its own block 0.
+    let reference = render_fresh_reference(&committed, BLOCKS - ANCHOR_BLOCK, &|session, block| {
+        submit_c_to_block(session, X, x_block(ANCHOR_BLOCK + block), block, 0);
+        submit_c_to_block(session, Y, x_block(ANCHOR_BLOCK + block), block, 1);
+    });
+    assert_bit_identical(
+        "scrubbed X with Y aligned from its report",
+        ANCHOR_BLOCK,
+        &rendered[(ANCHOR_BLOCK - 7) as usize..],
+        &reference,
+    );
+}
+
+/// Submits the content of block `content` (salt `salt`) as generation 1 at source frame
+/// `block * 128` of `source`.
+fn submit_c_to_block(
+    session: *mut crate::Session,
+    source: &[u8],
+    content: u64,
+    block: u64,
+    salt: u64,
+) {
+    let (left, right) = continuity_block(content, salt);
+    submit_c_to(
+        session,
+        source,
+        1,
+        block * 128,
+        48_000,
+        &left,
+        &right,
+        false,
+    );
+}
+
 /// Submits block `block` of each of `ids`' signals (salted by position) through the session state.
 pub(super) fn submit_direct(children: &mut CompiledChildren, ids: &[&[u8]], block: u64) {
     for (salt, id) in ids.iter().enumerate() {

@@ -190,3 +190,64 @@ the lines moved.
 exact-mask tests.
 
 **Realtime-path edits.** None. This slice is header text, one doc and one C test.
+
+## Decision record: #1317 (batch 15c)
+
+**Shipped.** D1-D4 and B15-R3, comment text and one C test; no declaration, symbol or Rust change.
+
+- Header (`crates/capi/include/miso_engine_v1.h`): "Starting an added stem in time" and the two-line
+  seek-report note are replaced by ten paragraphs in D1's order: the source-read clock, seek,
+  anchored seek, choosing the anchor, held, replacement, one seek in flight, seeks across a
+  structural transaction, far-past anchors, rate, and where a seek landed. A new comment block
+  before `MISO_ENGINE_V1_ABI_VERSION` states the growth rule (D2) with B15-R3's two sentences. The
+  cross reference in the live-edit paragraph now points at the new paragraphs, and the #1310
+  paragraph is rewrapped to 100 columns (one line was 135 wide); "placeholder #1699" became "issue
+  1699 is the successor issue for one".
+- `docs/C_ABI_V1_QUALIFICATION.md` (D3): the `seek_at` paragraph no longer implies the bit protects
+  a directly linked host and names the source-read clock; a paragraph records the seek contract and
+  one "ABI growth" paragraph states D2 once.
+- `crates/capi/tests/c/abi_smoke.c` (D4): `reports_every_defined_feature` requires one `&` per
+  `MISO_ENGINE_V1_FEATURE_*` symbol (ten); the `!= MISO_ENGINE_V1_FEATURE_MASK` comparison is gone.
+  The compile-time pins are kept.
+
+**Statements checked against the code** (file, function): clock origin 0 and `render.time.discontinuity`
+(`plan.rs` `render_contiguous`, `plan_exchange.rs` `adopt_absolute_sample`, `ffi.rs` render test);
+quantum-multiple anchor and the check order (`source/src/lib.rs` `try_seek`); producer switches to
+`g` at the call and refuses other generations (`validate_submission_metadata`); held, replacement,
+late apply and region end (`observe_seek_at_block_boundary`, `begin_block_play`, `settle_block`,
+tests `a_late_anchored_seek_past_the_region_end_is_the_end_of_region`); one command slot
+(`command_capacity = 1`, `source.seek.backpressure` in `host-core/src/source.rs`); consumer carry
+including `held_seek` (`adopt_sources`); report words and 64-attempt bound (`publish_seek_report`,
+`seqlock.rs`); source rate equals the session rate (`prepare.rs` pushes `compiled.sample_rate()`).
+
+**Departures.**
+
+- The text says a seek takes effect "no later than the first block that begins after the call
+  returns", not "at the next block render begins": a producer that pushes a seek and its PCM
+  between a block's command pop and its data pop is observed by the acquire's re-observe in that
+  same block (#1274 MINOR-3).
+- Far-past text says the seek applies in the block that pops it (not "the next block after it is
+  popped"), as `observe_seek_at_block_boundary` pops and applies in one block.
+- The end-of-region sentence is conditional on a region the host closed with `end_of_region`; with
+  no end known the block is an underrun.
+- Feature mask is 1023 (bit 8 landed with #1323, bit 9 with #1316), not the amendment's 255.
+- #1320's prime has no host-visible API, so the header says nothing about it. #1396 has not landed,
+  so "equal to the render clock in this version" stands and #1396 is not named in the header.
+
+**Gates.**
+
+1. `bash scripts/check-capi-abi.sh`: ok (C11 and C++17 at `-Wall -Wextra -Werror -pedantic`, symbol
+   set, smoke run, shared and static); `--self-test`: ok.
+2. Smoke is a bit test, by a local patch of `FEATURE_MASK` in `crates/capi/src/abi.rs`, reverted
+   after each run: clearing `FEATURE_SERVICE` makes `check-capi-abi.sh` exit 1; OR-ing in unknown bit
+   `1 << 9` passes.
+3. `cargo test --locked -p capi`: 158 lib tests and every integration test pass (the Rust exact-mask
+   tests are unchanged).
+4. Review gate: every D1 statement is checked above against its code anchor.
+5. `bash scripts/check-workspace-policy.sh`, `cargo fmt --all -- --check`,
+   `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: pass.
+
+**Successor work.** #1355 must amend the "equal to the render clock in this version" sentence (the
+header's first seek paragraph, the qualification record and `SourceControlSet::seek_at`'s doc) when
+a warm successor makes the source-read offset nonzero; the amendment asks for this to be recorded in
+#1355, whose spec does not yet carry it. #1699 owns the counter the header says does not exist yet.

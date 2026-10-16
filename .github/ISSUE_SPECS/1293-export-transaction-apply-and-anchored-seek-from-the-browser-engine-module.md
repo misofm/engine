@@ -264,3 +264,21 @@ Done under B15-R8: #1386 and #1643 each carry an amendment of 2026-10-15.
 **Gates and commands.** Every named script and file exists. `build-web-audioworklet.sh
 --named-twin`, `check-sdk-generated.sh [DIR]`, the parameter-metadata `--check`
 (`tools/parameter-metadata/src/lib.rs:1143`) and `check-abi-layout-v1.py --self-test` are valid.
+
+## Amendment (root ruling, batch 15c, 2026-10-16): D6 owns the browser seek report
+
+- #1316 (batch 15c) shipped the core seek report and its C ABI export,
+  `miso_engine_v1_source_seek_report` (struct `miso_engine_v1_seek_report`, 64 bytes; the core
+  reads it through `SessionState::seek_report`, which runs the service step first). The browser
+  export is this issue's D6, in batch 16. It does not wait for #1332 or #1387, because #1332 waits
+  on the owner's iOS test and a parity gap there could wait indefinitely. In `single` mode D6
+  ships on its own (B15-R8).
+- D6 reads the same core call as the C ABI (thick core, thin clients): no seek-report logic in
+  host-web. Its record carries the same fields as the C struct, in the same order and with the
+  same meanings (generation in effect, source-read sample and source frame of its first block,
+  cumulative underrun and held frames). A busy read is `RESULT_BACKPRESSURE` and an unknown source
+  `RESULT_INVALID_ARGUMENT`, as the C ABI's `source.report.busy` and `source.id.unknown`.
+- **New gate (parity row).** In `hosts/host-web/tests/control_parity.rs`: a plain seek and a late
+  `seek_at` on both hosts at 48 and 96 kHz; after each block, the browser record and the C ABI
+  struct are equal field by field, from the seek call to the block that applies it and after.
+  Red if either host reports at the call, names a different block, or drops the lateness.

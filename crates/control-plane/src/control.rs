@@ -408,6 +408,9 @@ thread_local! {
         const { core::cell::Cell::new(([None; 2], 0)) };
     static TEST_NEXT_ADOPTION: core::cell::Cell<Option<PlanAdoption>> =
         const { core::cell::Cell::new(None) };
+    /// The source-read offset the next plan this thread prepares is given (#1396 deliverable 3).
+    static TEST_NEXT_SOURCE_READ_OFFSET: core::cell::Cell<Option<u64>> =
+        const { core::cell::Cell::new(None) };
     static FORCE_FULL_PREPARATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
     /// Whether the service step leaves displaced plans in the retirement queue (batch 15a review
     /// fold M1): a render preempted between claiming a candidate and retiring the plan it displaced.
@@ -470,7 +473,15 @@ pub fn test_reset_lifecycle_observer() {
     TEST_FAULT_STATE.with(|state| state.set(([None; 2], 0)));
     TEST_OWNER_STATE.with(|state| state.set(TestOwnerCounters::default()));
     TEST_NEXT_ADOPTION.with(|state| state.set(None));
+    TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(None));
     TEST_HOLD_RECLAMATION.with(|state| state.set(false));
+}
+
+/// Takes the source-read offset [`SessionState::test_set_next_source_read_offset`] scheduled for
+/// the next plan this thread prepares (#1396 deliverable 3), once.
+#[cfg(feature = "test-support")]
+pub(crate) fn take_test_next_source_read_offset() -> Option<u64> {
+    TEST_NEXT_SOURCE_READ_OFFSET.with(core::cell::Cell::take)
 }
 
 /// Makes this thread's control commands prepare their transactions by the full path (#1613): a
@@ -1646,6 +1657,29 @@ where
             .find(|provider| provider.epoch == epoch)
     }
 
+    /// Gives the next plan this thread prepares the source-read offset `offset` (#1396
+    /// deliverable 3): [`host_core::test_only_set_source_read_offset`] on that plan and its
+    /// inventory row, before it is published. Taken once, by the next preparation on this thread.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_next_source_read_offset(&mut self, offset: u64) {
+        let _ = self;
+        TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(Some(offset)));
+    }
+
+    /// The running plan's render clock, as render stored it after its last block
+    /// ([`PlanPublisher::render_clock`], #1396 D4).
+    #[cfg(feature = "test-support")]
+    pub fn test_render_clock(&self) -> u64 {
+        self.publisher.render_clock()
+    }
+
+    /// The running plan's source-read clock, as render stored it after its last block
+    /// ([`PlanPublisher::source_read_clock`], #1396 D4).
+    #[cfg(feature = "test-support")]
+    pub fn test_source_read_clock(&self) -> u64 {
+        self.publisher.source_read_clock()
+    }
+
     /// Schedules the next structural publication's adoption (#1348 gate 4): `command` reserves
     /// that one candidate with `adoption` instead of [`PlanAdoption::Next`]. Taken once, by the
     /// next structural publication on this thread.
@@ -2090,7 +2124,9 @@ where
     ///
     /// After the service step, it rebuilds only if the newest plan (the pending candidate, else
     /// the running plan) runs behind its natural timing
-    /// ([`PlanStateInventory::runs_behind_natural_timing`]). It then prepares the committed model
+    /// ([`PlanStateInventory::runs_behind_natural_timing`]): a floor raised above a natural
+    /// arrival, or a source-read offset above 0 (#1396 D2), which a plan can hold with no raised
+    /// floor. The successor's offset is 0. It then prepares the committed model
     /// as a successor at a discontinuity (`SuccessorBase::discontinuity`): no floors, only the
     /// source consumers carried, every other owner at rest. It is published
     /// [`PlanAdoption::Next`] with the committed revision and its retirement credit reserved, as a
@@ -4047,6 +4083,17 @@ where
             .seek_at(id, generation, source_frame, anchor_sample)
             .map_err(SourceFailure::Control)
     }
+
+    /// Where a source of the newest committed session landed, as render last published it, after
+    /// the service step (#1316 D6, D7): [`host_core::SourceControlSet::seek_report`] of the ring
+    /// the newest session's producer feeds, which is the one `seek` queues on.
+    pub fn seek_report(&mut self, id: &[u8]) -> Result<source::SourceSeekReport, SourceFailure> {
+        self.service().map_err(|_| SourceFailure::Internal)?;
+        self.newest_providers()
+            .sources
+            .seek_report(id)
+            .map_err(SourceFailure::Control)
+    }
 }
 
 /// A source submission or seek that the adapter's boundary must report.
@@ -4080,5 +4127,188 @@ mod tests {
             b"control.event.backpressure"
         );
         assert_eq!(EventError::Internal.diagnostic(), b"control.event.internal");
+    }
+
+    /// #1396 gate 5: a declaration resets a source-read offset that no raised floor goes with.
+    #[cfg(feature = "test-support")]
+    mod source_read_offset {
+        use crate::{
+            CompiledChildren, ControlAdapter, ControlLimits, PlanResources, RuntimePreparer,
+            compile_children,
+        };
+        use engine::realtime::PlanarBufferMut;
+        use host_core::{
+            CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
+            HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics, PreparedHost, SuccessorBase,
+            prepare_host_runtime_with_live_lanes, prepare_host_runtime_with_live_lanes_successor,
+        };
+        use protocol::{
+            CommandPayload, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit,
+            TypedCommandFrame,
+        };
+        use session::{RouteSource, StableId, parse_session_json};
+
+        /// 48 kHz, quantum 128.
+        const SESSION: &str =
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        const QUANTUM: u64 = 128;
+        const OFFSET: u64 = 3 * QUANTUM;
+
+        struct Adapter;
+
+        impl ControlAdapter for Adapter {
+            type Row = PlanResources;
+            const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+        }
+
+        /// The C ABI's own preparation: host-core's live-lanes entries.
+        struct Preparer;
+
+        impl RuntimePreparer for Preparer {
+            fn prepare(
+                &self,
+                compiled: &CompiledSession,
+                caps: &HostPrepareCaps,
+                lanes: HostLiveLanes,
+                successor: Option<SuccessorBase<'_>>,
+                superseded: &LiveValuesSuperseded,
+            ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+                let live = HostLiveControlRequest::default();
+                match successor {
+                    Some(base) => prepare_host_runtime_with_live_lanes_successor(
+                        compiled, caps, &live, lanes, base, superseded,
+                    ),
+                    None => prepare_host_runtime_with_live_lanes(
+                        compiled, caps, &live, lanes, superseded,
+                    ),
+                }
+            }
+        }
+
+        fn limits() -> ControlLimits {
+            ControlLimits {
+                source_ring_frames: 1_024,
+                maximum_automation_spans_per_block: 128,
+                maximum_document_bytes: 1_000_000,
+                maximum_diagnostic_bytes: 4_096,
+                maximum_tracks: 100,
+                maximum_sources: 100,
+                maximum_routes: 100,
+                maximum_effects: 100,
+                maximum_graph_session_plus_plan_bytes: 100_000_000,
+                maximum_source_total_bytes: 10_000_000,
+                maximum_source_overhead_bytes: 10_000_000,
+                maximum_effect_state_bytes: 100_000_000,
+                maximum_effect_scratch_bytes: 100_000_000,
+                maximum_builtin_retained_bytes: 100_000_000,
+                maximum_control_retained_bytes: 10_000_000,
+                maximum_named_allocation_bytes: 100_000_000,
+                maximum_meter_streams: 1,
+                maximum_meter_items: 1,
+                maximum_meter_bytes: 1,
+                maximum_control_frame_bytes: 4_096,
+                maximum_replay_bytes: 8_192,
+                maximum_replay_entries: 16,
+                maximum_submixes: 0,
+                maximum_vcas: 0,
+                maximum_vca_reach_pairs: u64::MAX,
+                maximum_replacement_peak_bytes: u64::MAX,
+            }
+        }
+
+        /// A structural transaction that raises no floor: a muted copy of the first track and
+        /// its route, so every natural arrival stays where it was.
+        fn add_muted_track(children: &mut CompiledChildren<Adapter>) {
+            let model = parse_session_json(SESSION).expect("fixture");
+            let mut track = model.tracks[0].clone();
+            track.id = StableId::parse("a-added").expect("track ID");
+            track.fader.left_mute = true;
+            track.fader.right_mute = true;
+            let mut route = model.routes[0].clone();
+            route.id = StableId::parse("a-added-main").expect("route ID");
+            let RouteSource::Track { track_id, .. } = &mut route.source else {
+                panic!("track route")
+            };
+            *track_id = track.id.clone();
+            let edits = [
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ];
+            let codec = ProtocolCodec::default();
+            let frame = TypedCommandFrame {
+                request_id: RequestId::new(1).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(
+                    children.session.test_controller().session().revision(),
+                ),
+                payload: CommandPayload::SessionTransactionApply(&edits),
+            };
+            let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+            let length = codec
+                .encode_command_frame_into(&frame, &mut bytes)
+                .expect("typed command");
+            children
+                .session
+                .command(&bytes[..length], 4_096)
+                .expect("structural transaction");
+        }
+
+        /// Render the next block, then run the service step.
+        fn render(children: &mut CompiledChildren<Adapter>, start: u64) {
+            let mut samples = [0.0_f32; 2 * QUANTUM as usize];
+            let output =
+                PlanarBufferMut::try_new(&mut samples, 2, QUANTUM as usize, QUANTUM as usize)
+                    .expect("output");
+            children.plan.render(start, output).expect("render");
+            children.session.service().expect("service");
+        }
+
+        /// One run: the running plan has no raised floor and offset `offset`; then declare.
+        /// Returns the plan epochs the declaration published.
+        fn declare_after(offset: u64) -> u64 {
+            super::super::test_reset_lifecycle_observer();
+            let mut children =
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer)).expect("boot");
+            if offset > 0 {
+                children.session.test_set_next_source_read_offset(offset);
+            }
+            add_muted_track(&mut children);
+            render(&mut children, 0);
+            let inventory = children.session.test_providers().test_inventory();
+            assert!(inventory.raised_arrivals().is_empty(), "no floor is raised");
+            assert_eq!(inventory.source_read_offset(), offset);
+            assert_eq!(children.session.test_render_clock(), QUANTUM);
+            assert_eq!(children.session.test_source_read_clock(), QUANTUM + offset);
+
+            let epoch = children.session.newest_plan_epoch();
+            children
+                .session
+                .declare_discontinuity()
+                .expect("declaration");
+            let published = children.session.newest_plan_epoch() - epoch;
+            render(&mut children, QUANTUM);
+            assert_eq!(
+                children
+                    .session
+                    .test_providers()
+                    .test_inventory()
+                    .source_read_offset(),
+                0
+            );
+            assert_eq!(children.session.test_render_clock(), 2 * QUANTUM);
+            assert_eq!(
+                children.session.test_source_read_clock(),
+                children.session.test_render_clock()
+            );
+            published
+        }
+
+        /// Test value: red if the declaration tests floors only (a plan that reads ahead with no
+        /// raised floor publishes nothing, so `ΣP` never resets and the source-read clock stays
+        /// ahead), or if a discontinuity successor inherits its predecessor's offset.
+        #[test]
+        fn a_declaration_resets_an_offset_with_no_raised_floor() {
+            assert_eq!(declare_after(OFFSET), 1, "the offset alone rebuilds");
+            assert_eq!(declare_after(0), 0, "nothing to reset (#1323 gate 3)");
+        }
     }
 }

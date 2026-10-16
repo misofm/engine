@@ -58,7 +58,7 @@ use core::{
     cell::Cell,
     fmt,
     num::NonZeroUsize,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use std::sync::Arc;
 
@@ -75,8 +75,8 @@ pub struct PlanExchangeConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlanExchangeResourceReport {
     /// Sum of the mailbox (its state word and two cells with their adoption schedules), the
-    /// retirement SPSC header and backing, the shared credit-counter allocation and the
-    /// applied-revision watermark record.
+    /// retirement SPSC header and backing, the shared credit-counter allocation, the
+    /// applied-revision watermark record and the shared clock record (#1396 D4).
     pub retained_payload_bytes: u64,
     /// Largest single requested heap payload allocation among those rows.
     pub largest_allocation_bytes: u64,
@@ -87,6 +87,32 @@ struct SharedCounterAllocation {
     strong: AtomicUsize,
     weak: AtomicUsize,
     value: AtomicUsize,
+}
+
+/// The two clocks render publishes after each rendered block (#1396 D4): the active plan's next
+/// render sample, and that sample plus the plan's source-read offset. Each is one word, stored
+/// `Release` by render and loaded `Acquire` by the control thread, so neither read can tear.
+/// The two loads are not a snapshot: render stores the source-read clock and then the render
+/// clock, so a reader that needs both together would need them published as one record through
+/// `seqlock.rs`; no reader needs that today.
+struct PlanClocks {
+    render: AtomicU64,
+    source_read: AtomicU64,
+}
+
+impl PlanClocks {
+    /// The clocks of `plan` as it stands: its next render sample and its source-read sample.
+    fn of(plan: &PreparedRenderPlan) -> (u64, u64) {
+        let render = plan.next_absolute_sample();
+        (render, render.saturating_add(plan.source_read_offset()))
+    }
+}
+
+#[repr(C)]
+struct SharedClockAllocation {
+    strong: AtomicUsize,
+    weak: AtomicUsize,
+    clocks: PlanClocks,
 }
 /// Result of one render-entry swap decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,6 +176,7 @@ pub struct PlanPublisher {
     envelope: super::RenderEnvelope,
     retirement_credits: Arc<AtomicUsize>,
     watermark: PlanWatermarkReader,
+    clocks: Arc<PlanClocks>,
 }
 /// Control-side retirement owner. Reclamation happens only by popping here.
 pub struct PlanRetirer {
@@ -165,6 +192,8 @@ pub struct RealtimePlanOwner {
     /// Blocks the executor failed after the live snapshot (#1502 D7), saturating.
     live_block_errors: u64,
     watermark: WatermarkWriter,
+    /// The clock record render stores after each rendered block (#1396 D4).
+    clocks: Arc<PlanClocks>,
     _not_sync: Cell<()>,
 }
 /// Fixed report proving which complete plan owned a rendered block.
@@ -344,6 +373,7 @@ pub fn plan_exchange_resource_report(
         retirement.slot_payload_bytes,
         Layout::new::<SharedCounterAllocation>().size(),
         watermark_retained_bytes(),
+        Layout::new::<SharedClockAllocation>().size(),
     ];
     let retained = rows.iter().try_fold(0_u64, |total, row| {
         total
@@ -443,6 +473,12 @@ fn plan_exchange_inner(
         bounded_spsc_internal(config.retirement_capacity, QueueGeneration(2))?;
     let (mailbox_writer, mailbox_reader) = plan_mailbox();
     let (watermark_writer, watermark_reader) = plan_watermark(initial_revision);
+    // #1396 D4: before the first block both clocks read the initial plan's values.
+    let (render, source_read) = PlanClocks::of(&initial);
+    let clocks = Arc::new(PlanClocks {
+        render: AtomicU64::new(render),
+        source_read: AtomicU64::new(source_read),
+    });
     Ok((
         PlanPublisher {
             mailbox: mailbox_writer,
@@ -450,6 +486,7 @@ fn plan_exchange_inner(
             envelope,
             retirement_credits,
             watermark: watermark_reader,
+            clocks: Arc::clone(&clocks),
         },
         RealtimePlanOwner {
             active: (PlanEpoch(0), initial),
@@ -459,6 +496,7 @@ fn plan_exchange_inner(
             carry_mismatched: 0,
             live_block_errors: 0,
             watermark: watermark_writer,
+            clocks,
             _not_sync: Cell::new(()),
         },
         PlanRetirer {
@@ -543,6 +581,23 @@ impl PlanPublisher {
     #[must_use]
     pub fn watermark_reader(&self) -> PlanWatermarkReader {
         self.watermark.clone()
+    }
+
+    /// The running plan's render clock (#1396 D4): the absolute sample its next block renders
+    /// from, as render stored it after its last rendered block, or the initial plan's before the
+    /// first. One `Acquire` load of one word. The warm-successor deadline reads this clock.
+    #[must_use]
+    pub fn render_clock(&self) -> u64 {
+        self.clocks.render.load(Ordering::Acquire)
+    }
+
+    /// The running plan's source-read clock (#1396 D4): the render clock plus the plan's
+    /// source-read offset ([`PreparedRenderPlan::source_read_offset`]), as render stored it after
+    /// its last rendered block, or the initial plan's before the first. One `Acquire` load of one
+    /// word. A host anchors a seek on this clock.
+    #[must_use]
+    pub fn source_read_clock(&self) -> u64 {
+        self.clocks.source_read.load(Ordering::Acquire)
     }
 
     /// Take back the last published candidate if render has not claimed it.
@@ -822,6 +877,12 @@ impl RealtimePlanOwner {
                 let watermark = self
                     .watermark
                     .advance(render.live_snapshot.revision(), time.absolute_sample);
+                // #1396 D4: the plan that rendered the block, after it rendered: two stores.
+                let (render_clock, source_read_clock) = PlanClocks::of(&self.active.1);
+                self.clocks
+                    .source_read
+                    .store(source_read_clock, Ordering::Release);
+                self.clocks.render.store(render_clock, Ordering::Release);
                 Ok((render, watermark))
             }
             Err(failure) => {

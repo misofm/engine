@@ -7,14 +7,21 @@
 
 #![allow(missing_docs)]
 
-use core::{alloc::Layout, cmp, mem::size_of, num::NonZeroUsize};
-use std::fmt;
+use core::{
+    alloc::Layout,
+    cmp,
+    mem::size_of,
+    num::NonZeroUsize,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+use std::{fmt, sync::Arc};
 
 use engine::{
     QuantumFrames, SampleRateHz,
     realtime::{
-        Consumer, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError, bounded_spsc,
-        bounded_spsc_move, bounded_spsc_retained_payload,
+        Consumer, Producer, PublishedWordsReader, PublishedWordsWriter, QueueEmpty, QueueFull,
+        QueueGeneration, SpscError, bounded_spsc, bounded_spsc_move, bounded_spsc_retained_payload,
+        published_words, published_words_retained_bytes,
     },
 };
 use graph::{
@@ -57,22 +64,23 @@ pub enum SourceCommand {
         frame: SourceFrame,
     },
     /// Switch to a strictly newer generation so that `frame` enters the graph in the block that
-    /// starts at absolute render sample `anchor_sample` (issue #1274).
+    /// reads source time from `anchor_sample` (issue #1274).
     ///
-    /// `anchor_sample` is on the plan's absolute render clock -- the first sample the graph hands
-    /// its source set each block, which every plan swap continues -- and must be a multiple of the
+    /// `anchor_sample` is on the plan's source-read clock -- the absolute sample of source time a
+    /// block reads, which the graph hands its source set each block and every plan swap continues;
+    /// equal to the render clock in this version (#1316 D1) -- and must be a multiple of the
     /// quantum. The output hears `frame` the plan's latency later. The render consumer holds the
     /// seek until the first block starting at or after the anchor; observed late, it starts at
-    /// `frame + (block start - anchor_sample)`, so the source is in time either way. While the
-    /// seek is held, already queued PCM of the playing generation keeps playing and the new
-    /// generation's first submitted block waits as the pending block, so a host may prime the
-    /// ring from `frame` as soon as the seek is accepted.
+    /// `frame + (block start - anchor_sample)`, so the source is in time either way. While the seek
+    /// is held, already queued PCM of the playing generation keeps playing and the new generation's
+    /// first submitted block waits as the pending block, so a host may prime the ring from `frame`
+    /// as soon as the seek is accepted.
     SeekAt {
         /// The nonzero generation to make audible.
         generation: SourceGeneration,
         /// Decoded source frame that enters the graph at `anchor_sample`.
         frame: SourceFrame,
-        /// Absolute render sample of the block `frame` enters in; a multiple of the quantum.
+        /// Source-read sample of the block `frame` enters in; a multiple of the quantum.
         anchor_sample: u64,
     },
 }
@@ -220,6 +228,11 @@ pub struct SourceResourceReport {
     pub recycle_queue_bytes: u64,
     /// One-slot seek-command SPSC header plus slots.
     pub command_queue_bytes: u64,
+    /// The ring's shared seek report (#1316 D2): one record, with its shared-owner header.
+    pub seek_report_bytes: u64,
+    /// The ring's shared `prime_required` flag (#1320 D4): one `AtomicBool`, with its
+    /// shared-owner header.
+    pub prime_required_bytes: u64,
     /// One `TransferBlock` allocation per allocated block (configured plus retained), excluding
     /// its PCM allocation.
     pub transfer_block_metadata_bytes: u64,
@@ -460,6 +473,63 @@ pub struct SourceConsumerTelemetry {
     pub native_decoder_sanitized_samples: u64,
 }
 
+/// Where the ring's newest generation landed, as render published it (#1316 D2, D3).
+///
+/// A level, not a queue: render overwrites it at the block a seek applies at, and whenever a
+/// cumulative counter moves. Before the ring's first block it reads generation `0`, meaning "not
+/// yet rendered".
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SourceSeekReport {
+    /// The generation in effect; `0` until the ring's first block.
+    pub generation: u64,
+    /// The plan's source-read sample of the first block `generation` played in: the clock an
+    /// anchored seek's `anchor_sample` is on.
+    pub first_sample: u64,
+    /// The source frame that block started reading at; a late anchored seek's includes its
+    /// lateness.
+    pub source_frame: u64,
+    /// Saturating cumulative missing in-region frames (true underruns).
+    pub cumulative_underrun_frames: u64,
+    /// Saturating cumulative held in-region frames (an anchored seek waiting, #1318).
+    pub cumulative_held_frames: u64,
+}
+
+/// The words of a [`SourceSeekReport`] in the ring's shared record.
+const SEEK_REPORT_WORDS: usize = 5;
+
+impl SourceSeekReport {
+    const fn to_words(self) -> [u64; SEEK_REPORT_WORDS] {
+        [
+            self.generation,
+            self.first_sample,
+            self.source_frame,
+            self.cumulative_underrun_frames,
+            self.cumulative_held_frames,
+        ]
+    }
+
+    const fn from_words(words: [u64; SEEK_REPORT_WORDS]) -> Self {
+        let [
+            generation,
+            first_sample,
+            source_frame,
+            cumulative_underrun_frames,
+            cumulative_held_frames,
+        ] = words;
+        Self {
+            generation,
+            first_sample,
+            source_frame,
+            cumulative_underrun_frames,
+            cumulative_held_frames,
+        }
+    }
+}
+
+/// A seek-report read landed inside render's publication on every bounded attempt; retry later.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceSeekReportBusy;
+
 struct TransferBlock {
     generation: SourceGeneration,
     start_frame: SourceFrame,
@@ -519,6 +589,10 @@ impl PcmSourceRing {
         let retained_block_count = u64::try_from(RETAINED_TRANSFER_BLOCKS)
             .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?;
         let retained_pcm = checked_u64_mul(block_pcm, retained_block_count)?;
+        let seek_report = u64::try_from(published_words_retained_bytes::<SEEK_REPORT_WORDS>())
+            .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?;
+        let prime_required = u64::try_from(prime_flag_retained_bytes())
+            .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?;
         let metadata = checked_u64_mul(
             shape.allocated_block_count_u64,
             u64::try_from(size_of::<TransferBlock>())
@@ -529,7 +603,7 @@ impl PcmSourceRing {
                 checked_u64_add(data_queue, recycle_queue)?,
                 checked_u64_add(command_queue, metadata)?,
             )?,
-            retained_pcm,
+            checked_u64_add(checked_u64_add(retained_pcm, seek_report)?, prime_required)?,
         )?;
         let total = checked_u64_add(pcm, overhead)?;
         let largest = [
@@ -538,6 +612,8 @@ impl PcmSourceRing {
                 .map_err(|_| PcmSourceRingError::PlatformSizeLimit)?,
             largest_queue_allocation::<Box<TransferBlock>>(shape.allocated_block_count)?,
             largest_queue_allocation::<SourceCommand>(command_capacity)?,
+            seek_report,
+            prime_required,
         ]
         .into_iter()
         .max()
@@ -549,6 +625,8 @@ impl PcmSourceRing {
             data_queue_bytes: data_queue,
             recycle_queue_bytes: recycle_queue,
             command_queue_bytes: command_queue,
+            seek_report_bytes: seek_report,
+            prime_required_bytes: prime_required,
             transfer_block_metadata_bytes: metadata,
             transfer_block_pcm_bytes: pcm,
             retained_block_pcm_bytes: retained_pcm,
@@ -599,6 +677,11 @@ impl PcmSourceRing {
             queue_generation,
         )
         .map_err(map_spsc_error)?;
+        // Generation 0 until the first block: "not yet rendered" (#1316 D3).
+        let (seek_report_writer, seek_report_reader) =
+            published_words(SourceSeekReport::default().to_words());
+        // #1320 D4: no warm successor carries a new ring.
+        let prime_required = Arc::new(AtomicBool::new(false));
         let mut consumer = PcmSourceConsumer {
             data_consumer,
             recycle_producer,
@@ -631,6 +714,10 @@ impl PcmSourceRing {
             generation_changed: false,
             held_seek: None,
             begun_block: false,
+            seek_report: seek_report_writer,
+            published_seek_report: SourceSeekReport::default(),
+            next_source_read_sample: 0,
+            prime_required: Arc::clone(&prime_required),
         };
         // The producer starts with exactly the configured blocks; the retained block above never
         // enters the recycle queue until the consumer has a played block to hold instead.
@@ -655,6 +742,8 @@ impl PcmSourceRing {
                 cumulative_written_frames: 0,
                 deferred_block: None,
                 native_decoder_sanitized_samples: 0,
+                seek_report: seek_report_reader,
+                prime_required,
             },
             consumer,
             report,
@@ -740,6 +829,36 @@ pub struct PcmSourceProducer {
     cumulative_written_frames: u64,
     deferred_block: Option<Box<TransferBlock>>,
     native_decoder_sanitized_samples: u64,
+    /// The reader of the ring's seek report, which the consumer publishes (#1316 D2).
+    seek_report: PublishedWordsReader<SEEK_REPORT_WORDS>,
+    /// The ring's `prime_required` flag, shared with the consumer (#1320 D4).
+    prime_required: Arc<AtomicBool>,
+}
+
+/// The control thread's handle on one ring's `prime_required` flag (#1320 D4).
+///
+/// Control sets it for the rings a warm successor carries, before the `Release` that publishes
+/// the candidate; render loads it after its `Acquire` of the plan mailbox, so the flag needs no
+/// ordering of its own. A handle is an `Arc` clone taken off render.
+#[derive(Clone, Debug)]
+pub struct PcmSourcePrimeFlag(Arc<AtomicBool>);
+
+impl PcmSourcePrimeFlag {
+    /// Mark the ring as one a warm successor carries (`true`) or not (`false`).
+    pub fn set(&self, required: bool) {
+        self.0.store(required, Ordering::Relaxed);
+    }
+}
+
+/// Exact bytes of the ring's shared `prime_required` allocation: `Arc`'s `{ strong, weak, data }`.
+fn prime_flag_retained_bytes() -> usize {
+    #[repr(C)]
+    struct SharedAllocation {
+        strong: AtomicUsize,
+        weak: AtomicUsize,
+        flag: AtomicBool,
+    }
+    Layout::new::<SharedAllocation>().size()
 }
 
 /// Name for the prepared producer when it is used solely to control source seeks.
@@ -798,6 +917,21 @@ impl PcmSourceProducer {
             }
             Err(QueueFull { full_count, .. }) => Err(SourceSeekError::Backpressure { full_count }),
         }
+    }
+
+    /// The ring's seek report as render last published it (#1316 D2): bounded retries, then
+    /// [`SourceSeekReportBusy`]. Any thread; it never waits for render.
+    pub fn seek_report(&self) -> Result<SourceSeekReport, SourceSeekReportBusy> {
+        self.seek_report
+            .read()
+            .map(SourceSeekReport::from_words)
+            .map_err(|_| SourceSeekReportBusy)
+    }
+
+    /// A handle on the ring's `prime_required` flag (#1320 D4). Control only; never on render.
+    #[must_use]
+    pub fn prime_flag(&self) -> PcmSourcePrimeFlag {
+        PcmSourcePrimeFlag(Arc::clone(&self.prime_required))
     }
 
     /// Copy producer-local telemetry outside render.
@@ -910,6 +1044,17 @@ impl HostChunkProvider {
     #[must_use]
     pub fn telemetry(&self) -> SourceProducerTelemetry {
         self.producer.telemetry()
+    }
+
+    /// The ring's seek report; see [`PcmSourceProducer::seek_report`].
+    pub fn seek_report(&self) -> Result<SourceSeekReport, SourceSeekReportBusy> {
+        self.producer.seek_report()
+    }
+
+    /// The ring's `prime_required` flag; see [`PcmSourceProducer::prime_flag`].
+    #[must_use]
+    pub fn prime_flag(&self) -> PcmSourcePrimeFlag {
+        self.producer.prime_flag()
     }
 }
 
@@ -1037,6 +1182,16 @@ pub struct PcmSourceConsumer {
     /// Whether any block has begun on this consumer (#1344 D5): render-owned, set at block entry
     /// and never cleared.
     begun_block: bool,
+    /// The ring's seek report: this consumer is its only writer (#1316 D2). It belongs to the
+    /// ring, so it moves with the consumer across a plan swap (D5).
+    seek_report: PublishedWordsWriter<SEEK_REPORT_WORDS>,
+    /// What the seek report holds; render is its only writer, so it never loads it back.
+    published_seek_report: SourceSeekReport,
+    /// The source-read sample of the block after the last one begun: the clock a clockless
+    /// [`PcmSourceConsumer::begin_block`] continues, so its blocks are consecutive quanta.
+    next_source_read_sample: u64,
+    /// The ring's `prime_required` flag, which control sets (#1320 D4).
+    prime_required: Arc<AtomicBool>,
 }
 
 /// A [`SourceCommand::SeekAt`] the consumer has popped and holds until its anchor block.
@@ -1044,6 +1199,7 @@ pub struct PcmSourceConsumer {
 struct HeldSeek {
     generation: SourceGeneration,
     frame: SourceFrame,
+    /// On the plan's source-read clock, as [`SourceCommand::SeekAt::anchor_sample`].
     anchor_sample: u64,
 }
 
@@ -1052,10 +1208,25 @@ struct HeldSeek {
 enum SeekClock {
     /// At once, as a plain seek to its frame: a caller that supplies no block time.
     Now,
-    /// In the block starting at this absolute render sample, if it is at or past the anchor.
-    At(u64),
+    /// In the block that reads source time from `source_read_sample`, if it is at or past the
+    /// anchor.
+    At {
+        /// The plan's source-read clock: the absolute sample of source time this block reads;
+        /// equal to the render clock in this version (#1316 D1).
+        source_read_sample: u64,
+    },
     /// Not now: preparation between blocks, which has no render time.
     Hold,
+}
+
+/// Whether an acquire may observe the admitted command when it meets a block of an unobserved
+/// generation (#1320 D3).
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CommandObservation {
+    /// Every ordinary block and `prepare_seek`: pop the block, then observe its seek.
+    Allowed,
+    /// A prime: stop before such a block and leave it and its command queued.
+    Withheld,
 }
 
 impl PcmSourceConsumer {
@@ -1081,7 +1252,7 @@ impl PcmSourceConsumer {
         {
             return false;
         }
-        self.acquire_current_block(SeekClock::Hold);
+        self.acquire_current_block(SeekClock::Hold, CommandObservation::Allowed);
         // A producer running concurrently may push a newer seek and its block between the command
         // pop above and the data pop in the acquire; the acquire's re-observe takes that seek.
         // Readiness is granted for `generation` alone, so check again.
@@ -1125,23 +1296,29 @@ impl PcmSourceConsumer {
         self.begin_block_with(SeekClock::Now)
     }
 
-    /// [`Self::begin_block`] for the block that starts at absolute render sample `first_sample`.
+    /// [`Self::begin_block`] for the block that reads source time from `source_read_sample`: the
+    /// plan's source-read clock, the absolute sample of source time this block reads (#1316 D1):
+    /// the render clock plus the plan's source-read offset (#1396 D1). The offset is 0 unless a
+    /// plan is prepared to read ahead, so in this version the two clocks are equal.
     ///
-    /// An anchored seek ([`SourceCommand::SeekAt`]) is held while `first_sample` is before its
-    /// anchor; the block that starts at or past it applies the seek at `frame + (first_sample -
-    /// anchor_sample)` (saturating). While it is held, queued PCM of the playing generation still
-    /// plays, the new generation's first block is kept as the pending block, and with nothing
-    /// playable the block is **held**, not an underrun (the host asked the source to wait; underrun
-    /// means the host owed PCM and did not deliver it). A newer command replaces a held one. This
-    /// render-path operation allocates nothing and never blocks.
-    pub fn begin_block_at(&mut self, first_sample: u64) -> SourceReadReport {
-        self.begin_block_with(SeekClock::At(first_sample))
+    /// An anchored seek ([`SourceCommand::SeekAt`]) is held while `source_read_sample` is before
+    /// its anchor; the block that starts at or past it applies the seek at `frame +
+    /// (source_read_sample - anchor_sample)` (saturating). While it is held, queued PCM of the
+    /// playing generation still plays, the new generation's first block is kept as the pending
+    /// block, and with nothing playable the block is **held**, not an underrun (the host asked the
+    /// source to wait; underrun means the host owed PCM and did not deliver it). A newer command
+    /// replaces a held one. This render-path operation allocates nothing and never blocks.
+    ///
+    /// The block publishes the ring's seek report when a seek applies at it, at the ring's first
+    /// block and when a cumulative counter moves ([`SourceSeekReport`], #1316 D3).
+    pub fn begin_block_at(&mut self, source_read_sample: u64) -> SourceReadReport {
+        self.begin_block_with(SeekClock::At { source_read_sample })
     }
 
     fn begin_block_with(&mut self, clock: SeekClock) -> SourceReadReport {
         self.begun_block = true;
         self.begin_block_observe(clock);
-        self.begin_block_play(clock)
+        self.begin_block_play(clock, CommandObservation::Allowed)
     }
 
     /// The first half of [`Self::begin_block_with`]: release the played block and observe the
@@ -1155,8 +1332,21 @@ impl PcmSourceConsumer {
     }
 
     /// The second half of [`Self::begin_block_with`]: acquire and play this block.
-    fn begin_block_play(&mut self, clock: SeekClock) -> SourceReadReport {
-        self.acquire_current_block(clock);
+    fn begin_block_play(
+        &mut self,
+        clock: SeekClock,
+        observation: CommandObservation,
+    ) -> SourceReadReport {
+        self.acquire_current_block(clock, observation);
+        // Every seek this block can apply has applied by now (the observe step or the acquire's
+        // re-observe), and nothing below has advanced: this is the frame the block reads from.
+        let source_frame = self.next_frame;
+        let source_read_sample = match clock {
+            SeekClock::At { source_read_sample } => source_read_sample,
+            SeekClock::Now | SeekClock::Hold => self.next_source_read_sample,
+        };
+        self.next_source_read_sample =
+            source_read_sample.saturating_add(u64::from(self.quantum_frames));
         let mut copied_frames = 0_u32;
         let mut underrun_frames = 0_u32;
         let mut held_frames = 0_u32;
@@ -1211,6 +1401,7 @@ impl PcmSourceConsumer {
                 self.end_of_region = true;
             }
         }
+        self.publish_seek_report(source_read_sample, source_frame);
         SourceReadReport {
             copied_frames,
             underrun_frames,
@@ -1312,6 +1503,14 @@ impl PcmSourceConsumer {
     }
     // REALTIME_POLICY_END
 
+    /// Whether a warm successor carries this ring and so needs it primed (#1320 D4). Control sets
+    /// it through [`PcmSourcePrimeFlag`] before it publishes that successor; render reads it
+    /// after its `Acquire` of the plan mailbox, so the `Relaxed` load is ordered by that.
+    #[must_use]
+    pub fn prime_required(&self) -> bool {
+        self.prime_required.load(Ordering::Relaxed)
+    }
+
     /// Exact source channel count.
     #[must_use]
     pub const fn channel_count(&self) -> u32 {
@@ -1369,6 +1568,25 @@ impl PcmSourceConsumer {
         Ok(())
     }
     // REALTIME_POLICY_BEGIN
+    /// Publish the ring's seek report if this block changed it (#1316 D3): a new generation in
+    /// effect (the ring's first block, or one a seek applied at) takes this block's
+    /// `source_read_sample` and `source_frame`; a moved cumulative counter rewrites the counters
+    /// alone. Otherwise nothing is written. Wait-free, allocation-free.
+    fn publish_seek_report(&mut self, source_read_sample: u64, source_frame: SourceFrame) {
+        let mut report = self.published_seek_report;
+        if report.generation != self.active_generation.0 {
+            report.generation = self.active_generation.0;
+            report.first_sample = source_read_sample;
+            report.source_frame = source_frame.0;
+        }
+        report.cumulative_underrun_frames = self.underrun_frames;
+        report.cumulative_held_frames = self.held_frames;
+        if report != self.published_seek_report {
+            self.published_seek_report = report;
+            self.seek_report.publish(&report.to_words());
+        }
+    }
+
     /// Pop the admitted command, if any, then apply a held anchored seek whose block has come.
     fn observe_seek_at_block_boundary(&mut self, clock: SeekClock) {
         match self.command_consumer.try_pop() {
@@ -1402,10 +1620,10 @@ impl PcmSourceConsumer {
         };
         let late_by = match clock {
             SeekClock::Now => 0,
-            SeekClock::At(first_sample) if first_sample >= held.anchor_sample => {
-                first_sample - held.anchor_sample
+            SeekClock::At { source_read_sample } if source_read_sample >= held.anchor_sample => {
+                source_read_sample - held.anchor_sample
             }
-            SeekClock::At(_) | SeekClock::Hold => return,
+            SeekClock::At { .. } | SeekClock::Hold => return,
         };
         self.held_seek = None;
         self.apply_seek(
@@ -1435,13 +1653,123 @@ impl PcmSourceConsumer {
         }
     }
     // REALTIME_POLICY_BEGIN
+    /// Whether this consumer would play each of its next `lead_blocks + 1` blocks from queued PCM,
+    /// with no underrun, no discard and no command (#1320 D2): the readiness check render makes
+    /// in the block before it adopts a warm successor whose sources read `lead_blocks` quanta
+    /// further ahead.
+    ///
+    /// `first_sample` is the source-read sample of the block render is about to run on the active
+    /// plan. `true` exactly when the command queue is empty, no held anchored seek is anchored
+    /// before `first_sample + (lead_blocks + 1) * quantum`, and for each of those blocks either
+    /// the region's end is reached or the next block in queue order (the pending block first, then
+    /// the data queue) is of the active generation and starts exactly where the consumer reads.
+    /// A short block must carry `end_of_region`.
+    ///
+    /// `false` (a gap, another generation, a block the consumer would discard, a held seek's
+    /// pending block, too few blocks queued) only delays adoption: each clears as render keeps
+    /// playing. Read-only: it changes no state, and costs one command-queue load and at most
+    /// `lead_blocks + 1` data-queue loads, all `Acquire`, with no allocation, lock or syscall.
+    /// Only render changes the consumer and the producer can only add blocks or a command, so the
+    /// answer holds for the rest of the render callback for [`Self::prime_block_at`], which
+    /// observes no command.
+    #[must_use]
+    pub fn prime_ready(&self, first_sample: u64, lead_blocks: u32) -> bool {
+        if self.command_consumer.available_at_entry() != 0 {
+            return false;
+        }
+        let quantum = u64::from(self.quantum_frames);
+        let Some(window_end) = u64::from(lead_blocks)
+            .checked_add(1)
+            .and_then(|blocks| blocks.checked_mul(quantum))
+            .and_then(|window| first_sample.checked_add(window))
+        else {
+            return false;
+        };
+        // A held anchor is always past the last block's sample, so this is every held seek that
+        // would apply at one of the blocks, a late one at `first_sample` included.
+        if self
+            .held_seek
+            .is_some_and(|held| held.anchor_sample < window_end)
+        {
+            return false;
+        }
+        let mut frame = self.next_frame.0;
+        let mut end = self.end_frame.map(|end| end.0);
+        let mut pending = self.current.as_deref();
+        let mut queued = 0_usize;
+        for _ in 0..=lead_blocks {
+            if end.is_some_and(|end| frame >= end) {
+                // At the region's end a block reads nothing and moves no frame: so are the rest.
+                return true;
+            }
+            let block = if let Some(block) = pending.take() {
+                block
+            } else {
+                let Some(block) = self.data_consumer.peek(queued) else {
+                    return false;
+                };
+                queued += 1;
+                &**block
+            };
+            if block.generation != self.active_generation
+                || block.start_frame.0 != frame
+                || (block.frames < self.quantum_frames && !block.end_of_region)
+            {
+                return false;
+            }
+            frame = frame.saturating_add(u64::from(block.frames));
+            if block.end_of_region {
+                end = Some(frame);
+            }
+        }
+        true
+    }
+
+    /// Replay the next block exactly as [`Self::begin_block_at`]`(source_read_sample)` would play
+    /// it, without observing any command (#1320 D3): a warm successor's prime, in its adoption
+    /// block.
+    ///
+    /// It releases the played block and plays, discards and recycles as an ordinary block does,
+    /// but neither pops the command queue nor applies a held seek, and its acquire stops before a
+    /// block of a generation it has not observed, so the command queue and any held seek are
+    /// unchanged. The played planes are lent by [`Self::played_plane`] until the next `&mut self`
+    /// call, as for any block.
+    ///
+    /// Precondition: [`Self::prime_ready`]`(first_sample, k)` was `true` in this render callback,
+    /// and the calls are `prime_block_at(first_sample + j * quantum)` for `j = 0..k`, in order.
+    /// Then no call underruns: each block matches the frame the consumer reads, or the region has
+    /// ended. Allocation-free and wait-free.
+    pub fn prime_block_at(&mut self, source_read_sample: u64) -> SourceReadReport {
+        let commands_popped = self.command_consumer.success_count();
+        self.begun_block = true;
+        self.end_block();
+        self.flush_deferred_recycle();
+        self.generation_changed = false;
+        // `Hold` reports on the consumer's own clock; this block's sample is the caller's.
+        self.next_source_read_sample = source_read_sample;
+        let report = self.begin_block_play(SeekClock::Hold, CommandObservation::Withheld);
+        debug_assert!(
+            report.underrun_frames == 0 && report.held_frames == 0,
+            "a prime after a true readiness neither underruns nor holds"
+        );
+        debug_assert_eq!(
+            self.command_consumer.success_count(),
+            commands_popped,
+            "a prime observes no command"
+        );
+        report
+    }
+
     /// Pop toward the block to play. `clock` is the block's, for a seek observed here.
     ///
     /// The call pops at most the blocks queued when it begins (`available`), never the blocks the
     /// host publishes while it runs: a count taken at entry, not the ring's capacity, bounds it, so
     /// a host that keeps the ring fed cannot hold the render here. Two counted phases, with the
     /// one seek re-observe between them and in neither loop.
-    fn acquire_current_block(&mut self, clock: SeekClock) {
+    ///
+    /// With [`CommandObservation::Withheld`] (a prime) it stops before a block of an unobserved
+    /// generation, which stays queued with its command, so it never observes a command.
+    fn acquire_current_block(&mut self, clock: SeekClock, observation: CommandObservation) {
         if self.current.is_some() {
             return;
         }
@@ -1452,6 +1780,14 @@ impl PcmSourceConsumer {
         let mut popped = 0_usize;
         let mut unobserved = None;
         for _ in 0..available {
+            if observation == CommandObservation::Withheld
+                && self
+                    .data_consumer
+                    .peek(0)
+                    .is_some_and(|block| self.is_unobserved_generation(block.generation))
+            {
+                return;
+            }
             let Ok(block) = self.data_consumer.try_pop() else {
                 break;
             };
@@ -1818,7 +2154,8 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
                 self.block_validity.source_underrun = true;
                 continue;
             };
-            // The block's absolute render sample is the clock an anchored seek waits on.
+            // The graph passes the plan's source-read sample, which an anchored seek waits on: the
+            // render clock plus the plan's source-read offset (#1316 D1, #1396 D1).
             let report = consumer.begin_block_at(first_sample);
             self.block_validity.source_underrun |= report.underrun_event;
             self.block_validity.source_generation_changed |= report.generation_changed;
@@ -2211,6 +2548,20 @@ mod tests {
                 + report.command_queue_bytes
                 + report.transfer_block_metadata_bytes
                 + report.retained_block_pcm_bytes
+                + report.seek_report_bytes
+                + report.prime_required_bytes
+        );
+        // #1316 D2: the seek report is one shared record of a sequence word and five report
+        // words, behind `Arc`'s two counters, on every target.
+        assert_eq!(
+            report.seek_report_bytes,
+            u64::try_from(2 * size_of::<usize>() + 6 * size_of::<u64>()).expect("record size")
+        );
+        // #1320 D4: the `prime_required` flag is one `AtomicBool` behind `Arc`'s two counters,
+        // padded to the counters' alignment: three words on every target.
+        assert_eq!(
+            report.prime_required_bytes,
+            u64::try_from(3 * size_of::<usize>()).expect("flag size")
         );
         // The memory delta over the pre-#917 two-block ring, which sized both queues and the
         // metadata at two blocks: one block's PCM, one block's metadata and one pointer slot in
@@ -2218,6 +2569,8 @@ mod tests {
         let two = NonZeroUsize::new(2).expect("configured blocks");
         let pre_change_overhead = 2 * queue_bytes::<Box<TransferBlock>>(two).expect("queue")
             + report.command_queue_bytes
+            + report.seek_report_bytes
+            + report.prime_required_bytes
             + 2 * metadata;
         let slot = u64::try_from(size_of::<Box<TransferBlock>>()).expect("slot size");
         assert_eq!(
@@ -2232,7 +2585,11 @@ mod tests {
             largest_queue_allocation::<Box<TransferBlock>>(three).expect("largest queue");
         assert_eq!(
             report.largest_allocation_bytes,
-            largest_queue.max(32).max(metadata)
+            largest_queue
+                .max(32)
+                .max(metadata)
+                .max(report.seek_report_bytes)
+                .max(report.prime_required_bytes)
         );
     }
 
@@ -2245,7 +2602,7 @@ mod tests {
             host.submit(chunk(1, 0, &[&old], 4, false)).unwrap();
             host.submit(chunk(1, 4, &[&old], 4, false)).unwrap();
             if retained {
-                consumer.acquire_current_block(SeekClock::Now);
+                consumer.acquire_current_block(SeekClock::Now, CommandObservation::Allowed);
             }
             host.try_seek(SourceCommand::Seek {
                 generation: SourceGeneration(2),
@@ -2462,7 +2819,7 @@ mod tests {
     ) -> ([f32; 4], SourceReadReport) {
         consumer.begin_block_observe(clock);
         producer();
-        let report = consumer.begin_block_play(clock);
+        let report = consumer.begin_block_play(clock, CommandObservation::Allowed);
         let mut output = [f32::NAN; 4];
         consumer.copy_channel(0, &mut output).unwrap();
         consumer.end_block();
@@ -2486,12 +2843,17 @@ mod tests {
                     frame: SourceFrame(100),
                 }
             };
-            let (output, report) =
-                render_with_producer_in_window(&mut consumer, SeekClock::At(4), || {
+            let (output, report) = render_with_producer_in_window(
+                &mut consumer,
+                SeekClock::At {
+                    source_read_sample: 4,
+                },
+                || {
                     host.try_seek(command).unwrap();
                     host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false))
                         .expect("accepted");
-                });
+                },
+            );
             if anchored {
                 assert_eq!(output, [0.0; 4], "held until its anchor");
                 assert_eq!(report.active_generation, SourceGeneration(1));
@@ -2514,14 +2876,19 @@ mod tests {
         // plays frame 104, and only the skipped block at frame 100 is discarded.
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 16)).unwrap();
         let mut host = producer.into_host_chunk_provider(RATE);
-        let (output, report) =
-            render_with_producer_in_window(&mut consumer, SeekClock::At(8), || {
+        let (output, report) = render_with_producer_in_window(
+            &mut consumer,
+            SeekClock::At {
+                source_read_sample: 8,
+            },
+            || {
                 host.try_seek(seek_at(2, 100, 4)).unwrap();
                 host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false))
                     .expect("accepted");
                 host.submit(chunk(2, 104, &[&[2.5; 4]], 4, false))
                     .expect("accepted");
-            });
+            },
+        );
         assert_eq!(
             output, [2.5; 4],
             "late by one block: frame 104 plays at block 8"
@@ -3027,6 +3394,108 @@ mod tests {
     /// #1318 gate 2. Red if held is decided by `held_seek` alone: the playing generation's
     /// queued PCM still plays while a seek is held, and those blocks are neither held nor
     /// underruns.
+    fn seek_report(
+        generation: u64,
+        first_sample: u64,
+        source_frame: u64,
+        cumulative_underrun_frames: u64,
+        cumulative_held_frames: u64,
+    ) -> SourceSeekReport {
+        SourceSeekReport {
+            generation,
+            first_sample,
+            source_frame,
+            cumulative_underrun_frames,
+            cumulative_held_frames,
+        }
+    }
+
+    /// #1316 D3. Red if the report moves at the seek call (the producer's generation) rather than
+    /// at the block that applies the seek, if it names the block after that one, if a late
+    /// anchored seek reports its frame without the lateness, or if a block that applied nothing
+    /// rewrites the sample and frame.
+    #[test]
+    fn the_seek_report_names_the_block_and_frame_each_generation_started_at() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 16)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        assert_eq!(host.seek_report(), Ok(SourceSeekReport::default()));
+        for block in 0..2_u64 {
+            host.submit(chunk(1, 4 * block, &[&[1.0; 4]], 4, false))
+                .unwrap();
+        }
+        let _ = render_at(&mut consumer, 0);
+        assert_eq!(host.seek_report(), Ok(seek_report(1, 0, 0, 0, 0)));
+        let _ = render_at(&mut consumer, 4);
+        assert_eq!(host.seek_report(), Ok(seek_report(1, 0, 0, 0, 0)));
+
+        // A plain seek lands at the next block.
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(400),
+        })
+        .unwrap();
+        host.submit(chunk(2, 400, &[&[2.0; 4]], 4, false)).unwrap();
+        assert_eq!(
+            host.seek_report(),
+            Ok(seek_report(1, 0, 0, 0, 0)),
+            "not at the call"
+        );
+        let (output, _) = render_at(&mut consumer, 8);
+        assert_eq!(output, [2.0; 4]);
+        assert_eq!(host.seek_report(), Ok(seek_report(2, 8, 400, 0, 0)));
+
+        // An anchored seek render reaches one block late starts at its frame plus the lateness.
+        host.try_seek(seek_at(3, 96, 12)).unwrap();
+        host.submit(chunk(3, 96, &[&[-3.0; 4]], 4, false)).unwrap();
+        host.submit(chunk(3, 100, &[&[3.0; 4]], 4, false)).unwrap();
+        let (output, _) = render_at(&mut consumer, 16);
+        assert_eq!(output, [3.0; 4]);
+        assert_eq!(host.seek_report(), Ok(seek_report(3, 16, 100, 0, 0)));
+    }
+
+    /// #1316 D3 for a clockless consumer: its blocks are consecutive quanta from 0. Red if
+    /// `begin_block` publishes no sample, or does not continue its own clock.
+    #[test]
+    fn a_clockless_consumer_reports_consecutive_quanta() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        let mut output = [0.0; 4];
+        host.submit(chunk(1, 0, &[&[1.0; 4]], 4, false)).unwrap();
+        consumer.read_block(&mut [&mut output]).unwrap();
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(40),
+        })
+        .unwrap();
+        host.submit(chunk(2, 40, &[&[2.0; 4]], 4, false)).unwrap();
+        consumer.read_block(&mut [&mut output]).unwrap();
+        assert_eq!(output, [2.0; 4]);
+        assert_eq!(host.seek_report(), Ok(seek_report(2, 4, 40, 0, 0)));
+    }
+
+    /// #1316 gate 5. Red if the report carries a block's own held or underrun frames instead of
+    /// the cumulative counters, or if a counter-only publication rewrites the generation's sample
+    /// and frame.
+    #[test]
+    fn the_seek_report_carries_the_cumulative_held_and_underrun_frames() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.try_seek(seek_at(2, 100, 16)).unwrap();
+        for block in 0..4_u64 {
+            let _ = render_at(&mut consumer, 4 * block);
+            assert_eq!(
+                host.seek_report(),
+                Ok(seek_report(1, 0, 0, 0, 4 * (block + 1))),
+                "held block {block}"
+            );
+        }
+        // The anchor block applies the seek; the host owed PCM and delivered none.
+        let _ = render_at(&mut consumer, 16);
+        assert_eq!(host.seek_report(), Ok(seek_report(2, 16, 100, 4, 16)));
+        let _ = render_at(&mut consumer, 20);
+        assert_eq!(host.seek_report(), Ok(seek_report(2, 16, 100, 8, 16)));
+    }
+
     #[test]
     fn queued_pcm_of_the_playing_generation_plays_while_a_seek_is_held() {
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
@@ -4090,17 +4559,26 @@ mod tests {
         /// Plan A over the filled ring for `SWAP_BLOCK` blocks through a plan exchange, then the
         /// vacant plan B, given the program `program(identity of A)`, for the rest. Returns every
         /// block, the swap block's carry outcome, and each block's `(underrun, generation)` facts.
-        fn swap(
-            program: impl FnOnce(u64) -> Option<GraphCarryProgram>,
-        ) -> (Vec<Block>, CarryOutcome, Vec<(bool, bool)>) {
+        /// What [`swap`] returns: each block's bits, the carry outcome, each block's validity
+        /// facts and the source's seek report after each block.
+        type SwapRun = (
+            Vec<Block>,
+            CarryOutcome,
+            Vec<(bool, bool)>,
+            Vec<SourceSeekReport>,
+        );
+
+        /// Renders `BLOCKS` blocks, swapping at `SWAP_BLOCK`.
+        fn swap(program: impl FnOnce(u64) -> Option<GraphCarryProgram>) -> SwapRun {
             let validity = Arc::new(AtomicU8::new(0));
-            let (_host, source) = filled_source();
+            let (host, source) = filled_source();
             let mut predecessor = bind(source, &validity);
             let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
             let (mut publisher, mut owner, _retirer) =
                 plan_exchange(predecessor, exchange_config()).expect("exchange");
             let mut blocks = Vec::new();
             let mut facts = Vec::new();
+            let mut reports = Vec::new();
             let mut carry = CarryOutcome::NotRequested;
             let mut successor = Some(bind(SourceGraphSource::vacant(2), &validity));
             let mut program = Some(program);
@@ -4127,8 +4605,9 @@ mod tests {
                 assert_eq!(report.swap, expected_swap, "block {block}");
                 blocks.push(bits(&output));
                 facts.push(take_validity(&validity));
+                reports.push(host.seek_report().expect("a quiescent read"));
             }
-            (blocks, carry, facts)
+            (blocks, carry, facts, reports)
         }
 
         fn carry_source_zero(predecessor: u64) -> GraphCarryProgram {
@@ -4143,9 +4622,20 @@ mod tests {
         #[test]
         fn a_carried_consumer_continues_the_predecessor_audio_gap_free() {
             let reference = reference();
-            let (blocks, carry, facts) = swap(|identity| Some(carry_source_zero(identity)));
+            let (blocks, carry, facts, reports) =
+                swap(|identity| Some(carry_source_zero(identity)));
             assert_eq!(blocks, reference);
             assert_eq!(carry, CarryOutcome::Carried);
+            // #1316 gate 4: the seek report is the ring's, so it moves with the consumer and
+            // reads the same before, at and after the swap block.
+            assert!(
+                reports.iter().all(|report| *report
+                    == SourceSeekReport {
+                        generation: 1,
+                        ..SourceSeekReport::default()
+                    }),
+                "{reports:?}"
+            );
             assert!(
                 facts.iter().all(|&fact| fact == (false, false)),
                 "{facts:?}"
@@ -4164,7 +4654,7 @@ mod tests {
                 (CarryOutcome::PredecessorMismatch, Some(1_u64)),
             ];
             for (expected, offset) in outcomes {
-                let (blocks, carry, facts) = swap(|identity| {
+                let (blocks, carry, facts, _) = swap(|identity| {
                     offset.map(|offset| carry_source_zero(identity.wrapping_add(offset)))
                 });
                 assert_eq!(carry, expected);
@@ -4182,7 +4672,7 @@ mod tests {
                 );
             }
             // A predecessor index the predecessor does not have refuses the whole move.
-            let (blocks, carry, _) = swap(|identity| {
+            let (blocks, carry, _, _) = swap(|identity| {
                 Some(GraphCarryProgram {
                     predecessor: identity,
                     sources: vec![(0, 1)].into_boxed_slice(),
@@ -4782,6 +5272,348 @@ mod tests {
             };
             assert!(swapped(&[(0, 0)]), "the donated seek is reported");
             assert!(!swapped(&[]), "an empty donation takes nothing");
+        }
+    }
+
+    /// #1320 gate 2: readiness at its exact boundaries, on a two-channel ring of quantum 128
+    /// with `k = 3`. Every readiness call is wrapped by [`prime_ready_checked`], which asserts the
+    /// call changed nothing a twin that made no call would show.
+    mod prime_readiness {
+        use super::*;
+
+        const Q: u32 = 128;
+        const K: u32 = 3;
+
+        fn ring() -> (HostChunkProvider, PcmSourceConsumer) {
+            let (producer, consumer, _) =
+                PcmSourceRing::prepare(config(2, Q, 16 * u64::from(Q))).expect("ring");
+            (producer.into_host_chunk_provider(RATE), consumer)
+        }
+
+        fn sample(frame: u64, channel: u64) -> f32 {
+            #[allow(clippy::cast_precision_loss)]
+            let value = (frame * 2 + channel) as f32;
+            value
+        }
+
+        /// Submit one block of `frames` encoded frames through the validating host path.
+        fn submit(
+            host: &mut HostChunkProvider,
+            generation: u64,
+            start: u64,
+            frames: u32,
+            end: bool,
+        ) {
+            let planes: [Vec<f32>; 2] = core::array::from_fn(|channel| {
+                (0..u64::from(frames))
+                    .map(|frame| sample(start + frame, channel as u64))
+                    .collect()
+            });
+            host.submit(chunk(
+                generation,
+                start,
+                &[&planes[0], &planes[1]],
+                frames,
+                end,
+            ))
+            .expect("valid block");
+        }
+
+        /// Publish one block with no submission check: a gap or a stale block the host path
+        /// refuses, as a ring the consumer advanced past would hold it.
+        fn push_raw(host: &mut HostChunkProvider, generation: u64, start: u64) {
+            let producer = &mut host.producer;
+            let mut block = producer.take_recycled_block().expect("free block");
+            block.generation = SourceGeneration(generation);
+            block.start_frame = SourceFrame(start);
+            block.frames = Q;
+            block.end_of_region = false;
+            assert!(
+                producer.data_producer.try_push(block).is_ok(),
+                "queue space"
+            );
+        }
+
+        #[derive(Debug, PartialEq)]
+        struct Twin {
+            telemetry: SourceConsumerTelemetry,
+            next_frame: SourceFrame,
+            end_frame: Option<SourceFrame>,
+            data_queued: usize,
+            recycle_free: usize,
+            commands_queued: usize,
+            commands_popped: u64,
+            data_popped: u64,
+            held: Option<(SourceGeneration, SourceFrame, u64)>,
+            current: Option<(SourceGeneration, SourceFrame)>,
+            next_source_read_sample: u64,
+            seek_report: SourceSeekReport,
+        }
+
+        fn twin(consumer: &PcmSourceConsumer) -> Twin {
+            Twin {
+                telemetry: consumer.telemetry(),
+                next_frame: consumer.next_frame,
+                end_frame: consumer.end_frame,
+                data_queued: consumer.data_consumer.available_at_entry(),
+                recycle_free: consumer.recycle_producer.available_capacity(),
+                commands_queued: consumer.command_consumer.available_at_entry(),
+                commands_popped: consumer.command_consumer.success_count(),
+                data_popped: consumer.data_consumer.success_count(),
+                held: consumer
+                    .held_seek
+                    .map(|held| (held.generation, held.frame, held.anchor_sample)),
+                current: consumer
+                    .current
+                    .as_ref()
+                    .map(|block| (block.generation, block.start_frame)),
+                next_source_read_sample: consumer.next_source_read_sample,
+                seek_report: consumer.published_seek_report,
+            }
+        }
+
+        fn prime_ready_checked(consumer: &PcmSourceConsumer, first_sample: u64, k: u32) -> bool {
+            let before = twin(consumer);
+            let ready = consumer.prime_ready(first_sample, k);
+            assert_eq!(twin(consumer), before, "readiness changed the consumer");
+            ready
+        }
+
+        /// One ordinary block at `first_sample`.
+        fn ordinary(consumer: &mut PcmSourceConsumer, first_sample: u64) -> SourceReadReport {
+            let report = consumer.begin_block_at(first_sample);
+            consumer.end_block();
+            report
+        }
+
+        #[test]
+        fn k_plus_one_contiguous_blocks_are_ready_and_k_are_not() {
+            let (mut host, consumer) = ring();
+            for block in 0..3 {
+                submit(&mut host, 1, block * u64::from(Q), Q, false);
+            }
+            assert!(!prime_ready_checked(&consumer, 0, K), "only k blocks");
+            assert!(
+                prime_ready_checked(&consumer, 0, K - 1),
+                "k blocks for k - 1"
+            );
+            submit(&mut host, 1, 3 * u64::from(Q), Q, false);
+            assert!(prime_ready_checked(&consumer, 0, K), "k + 1 blocks");
+            assert!(!prime_ready_checked(&consumer, 0, K + 1), "one block past");
+        }
+
+        #[test]
+        fn a_held_current_block_is_block_zero() {
+            let (mut host, mut consumer) = ring();
+            for block in 0..3 {
+                submit(&mut host, 1, block * u64::from(Q), Q, false);
+            }
+            // `prepare_seek` of the playing generation pops block 0 into `current`.
+            assert!(consumer.prepare_seek(SourceGeneration(1), SourceFrame(0)));
+            assert!(consumer.current.is_some());
+            assert!(
+                !prime_ready_checked(&consumer, 0, K),
+                "current plus two queued"
+            );
+            assert!(prime_ready_checked(&consumer, 0, K - 1));
+            submit(&mut host, 1, 3 * u64::from(Q), Q, false);
+            assert!(
+                prime_ready_checked(&consumer, 0, K),
+                "current plus three queued"
+            );
+        }
+
+        #[test]
+        fn a_region_ending_inside_the_window_is_ready_only_with_its_end_block() {
+            let (mut host, consumer) = ring();
+            submit(&mut host, 1, 0, Q, false);
+            assert!(
+                !prime_ready_checked(&consumer, 0, K),
+                "the end block is missing"
+            );
+            submit(&mut host, 1, u64::from(Q), Q / 2, true);
+            assert!(
+                prime_ready_checked(&consumer, 0, K),
+                "a short end block at j = 1"
+            );
+            assert!(
+                prime_ready_checked(&consumer, 0, K + 8),
+                "the end holds past it"
+            );
+        }
+
+        #[test]
+        fn a_short_block_without_its_end_is_not_ready() {
+            let (mut host, consumer) = ring();
+            submit(&mut host, 1, 0, Q, false);
+            let producer = &mut host.producer;
+            let mut block = producer.take_recycled_block().expect("free block");
+            block.generation = SourceGeneration(1);
+            block.start_frame = SourceFrame(u64::from(Q));
+            block.frames = Q / 2;
+            block.end_of_region = false;
+            assert!(
+                producer.data_producer.try_push(block).is_ok(),
+                "queue space"
+            );
+            assert!(!prime_ready_checked(&consumer, 0, K));
+            assert!(
+                prime_ready_checked(&consumer, 0, 0),
+                "block 0 alone is whole"
+            );
+        }
+
+        #[test]
+        fn a_one_quantum_gap_at_j_two_is_not_ready() {
+            let (mut host, consumer) = ring();
+            push_raw(&mut host, 1, 0);
+            push_raw(&mut host, 1, u64::from(Q));
+            push_raw(&mut host, 1, 3 * u64::from(Q));
+            push_raw(&mut host, 1, 4 * u64::from(Q));
+            assert!(!prime_ready_checked(&consumer, 0, K), "a gap at j = 2");
+            assert!(
+                prime_ready_checked(&consumer, 0, 1),
+                "the window before the gap"
+            );
+        }
+
+        #[test]
+        fn a_queued_plain_seek_is_not_ready_until_an_ordinary_block_applies_it() {
+            let (mut host, mut consumer) = ring();
+            for block in 0..4 {
+                submit(&mut host, 1, block * u64::from(Q), Q, false);
+            }
+            assert!(prime_ready_checked(&consumer, 0, K));
+            host.try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(5_000),
+            })
+            .expect("seek");
+            assert!(!prime_ready_checked(&consumer, 0, K), "a queued seek");
+            for block in 0..5 {
+                submit(&mut host, 2, 5_000 + block * u64::from(Q), Q, false);
+            }
+            assert!(!prime_ready_checked(&consumer, 0, K), "still queued");
+            let report = ordinary(&mut consumer, 0);
+            assert!(report.generation_changed && report.copied_frames == Q);
+            assert!(
+                prime_ready_checked(&consumer, u64::from(Q), K),
+                "k + 1 new blocks"
+            );
+            assert!(!prime_ready_checked(&consumer, u64::from(Q), K + 1));
+        }
+
+        #[test]
+        fn a_queued_anchored_seek_is_not_ready_until_it_applies() {
+            let (mut host, mut consumer) = ring();
+            for block in 0..4 {
+                submit(&mut host, 1, block * u64::from(Q), Q, false);
+            }
+            // Anchored at the second block: the first block observes and holds it, the second
+            // applies it.
+            host.try_seek(seek_at(2, 5_000, u64::from(Q)))
+                .expect("seek");
+            assert!(
+                !prime_ready_checked(&consumer, 0, K),
+                "a queued anchored seek"
+            );
+            for block in 0..5 {
+                submit(&mut host, 2, 5_000 + block * u64::from(Q), Q, false);
+            }
+            let first = ordinary(&mut consumer, 0);
+            assert!(!first.generation_changed && first.copied_frames == Q);
+            assert!(consumer.held_seek.is_some());
+            assert!(
+                !prime_ready_checked(&consumer, u64::from(Q), K),
+                "held, anchored at the next block"
+            );
+            let second = ordinary(&mut consumer, u64::from(Q));
+            assert!(second.generation_changed && second.copied_frames == Q);
+            assert!(prime_ready_checked(&consumer, 2 * u64::from(Q), K));
+        }
+
+        #[test]
+        fn a_far_anchored_seek_once_held_leaves_the_window_ready() {
+            let (mut host, mut consumer) = ring();
+            for block in 0..5 {
+                submit(&mut host, 1, block * u64::from(Q), Q, false);
+            }
+            host.try_seek(seek_at(2, 5_000, 64 * u64::from(Q)))
+                .expect("seek");
+            assert!(!prime_ready_checked(&consumer, 0, K), "queued");
+            ordinary(&mut consumer, 0);
+            assert!(consumer.held_seek.is_some());
+            assert!(
+                prime_ready_checked(&consumer, u64::from(Q), K),
+                "held past the window"
+            );
+        }
+
+        #[test]
+        fn a_held_seek_anchored_inside_the_window_or_late_is_not_ready() {
+            let (mut host, mut consumer) = ring();
+            for block in 0..6 {
+                submit(&mut host, 1, block * u64::from(Q), Q, false);
+            }
+            ordinary(&mut consumer, 0);
+            let first_sample = u64::from(Q);
+            let window_end = first_sample + u64::from(K + 1) * u64::from(Q);
+            assert!(prime_ready_checked(&consumer, first_sample, K));
+            let hold = |consumer: &mut PcmSourceConsumer, anchor_sample| {
+                consumer.held_seek = Some(HeldSeek {
+                    generation: SourceGeneration(2),
+                    frame: SourceFrame(9_000),
+                    anchor_sample,
+                });
+            };
+            hold(&mut consumer, window_end - 1);
+            assert!(
+                !prime_ready_checked(&consumer, first_sample, K),
+                "last frame inside"
+            );
+            hold(&mut consumer, window_end);
+            assert!(
+                prime_ready_checked(&consumer, first_sample, K),
+                "first frame past"
+            );
+            // Held because the last block began at `first_sample - q`, before the anchor; it
+            // applies late at `first_sample`.
+            hold(&mut consumer, first_sample - 1);
+            assert!(!prime_ready_checked(&consumer, first_sample, K), "late");
+        }
+
+        #[test]
+        fn stale_blocks_ahead_are_not_ready_until_ordinary_blocks_discard_them() {
+            let (mut host, mut consumer) = ring();
+            // The consumer reads generation 2 from frame 0; two generation-1 blocks are queued
+            // ahead of its PCM.
+            consumer.active_generation = SourceGeneration(2);
+            push_raw(&mut host, 1, 0);
+            push_raw(&mut host, 1, u64::from(Q));
+            for block in 0..5 {
+                push_raw(&mut host, 2, block * u64::from(Q));
+            }
+            assert!(!prime_ready_checked(&consumer, 0, K), "stale blocks ahead");
+            let report = ordinary(&mut consumer, 0);
+            assert_eq!(report.copied_frames, Q);
+            assert_eq!(consumer.telemetry().stale_generation_discard_count, 2);
+            assert!(prime_ready_checked(&consumer, u64::from(Q), K), "discarded");
+        }
+
+        #[test]
+        fn a_block_behind_the_read_frame_is_not_ready() {
+            let (mut host, mut consumer) = ring();
+            // An underrun moved the read frame a quantum past the host's next block.
+            ordinary(&mut consumer, 0);
+            for block in 0..5 {
+                submit(&mut host, 1, block * u64::from(Q), Q, false);
+            }
+            assert!(
+                !prime_ready_checked(&consumer, u64::from(Q), K),
+                "block 0 is behind"
+            );
+            ordinary(&mut consumer, u64::from(Q));
+            assert!(prime_ready_checked(&consumer, 2 * u64::from(Q), K - 1));
         }
     }
 }

@@ -20,6 +20,11 @@ ABI_ASSERT(MISO_ENGINE_V1_TAIL_FINITE == 0);
 ABI_ASSERT(MISO_ENGINE_V1_TAIL_INFINITE == 1);
 ABI_ASSERT(MISO_ENGINE_V1_EXACT_LAUNCH_RATE_MASK == 15);
 ABI_ASSERT(MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT == 32);
+ABI_ASSERT(MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY == 256);
+ABI_ASSERT(MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT == 512);
+ABI_ASSERT(MISO_ENGINE_V1_FEATURE_MASK == 1023);
+ABI_ASSERT((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT) ==
+           MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT);
 ABI_ASSERT((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY) ==
            MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY);
 ABI_ASSERT((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SERVICE) ==
@@ -41,6 +46,9 @@ ABI_ASSERT(sizeof(miso_engine_v1_plan_resource_report) ==
            MISO_ENGINE_V1_PLAN_RESOURCE_REPORT_SIZE);
 ABI_ASSERT(sizeof(miso_engine_v1_watermark) == MISO_ENGINE_V1_WATERMARK_SIZE);
 ABI_ASSERT(MISO_ENGINE_V1_WATERMARK_SIZE == 96);
+ABI_ASSERT(sizeof(miso_engine_v1_seek_report) ==
+           MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE);
+ABI_ASSERT(MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE == 64);
 
 ABI_ASSERT(_Alignof(miso_engine_v1_engine_config) == 8);
 ABI_ASSERT(_Alignof(miso_engine_v1_compile_limits) == 8);
@@ -51,6 +59,7 @@ ABI_ASSERT(_Alignof(miso_engine_v1_planar_output) == 8);
 ABI_ASSERT(_Alignof(miso_engine_v1_capabilities) == 8);
 ABI_ASSERT(_Alignof(miso_engine_v1_plan_resource_report) == 8);
 ABI_ASSERT(_Alignof(miso_engine_v1_watermark) == 8);
+ABI_ASSERT(_Alignof(miso_engine_v1_seek_report) == 8);
 
 ABI_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_document_bytes) == 16);
 ABI_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_replay_entries) == 168);
@@ -68,6 +77,9 @@ ABI_ASSERT(offsetof(miso_engine_v1_plan_resource_report, source_count) == 16);
 ABI_ASSERT(offsetof(miso_engine_v1_plan_resource_report, reserved) == 208);
 ABI_ASSERT(offsetof(miso_engine_v1_watermark, revision) == 8);
 ABI_ASSERT(offsetof(miso_engine_v1_watermark, reserved) == 56);
+ABI_ASSERT(offsetof(miso_engine_v1_seek_report, generation) == 8);
+ABI_ASSERT(offsetof(miso_engine_v1_seek_report, cumulative_held_frames) == 40);
+ABI_ASSERT(offsetof(miso_engine_v1_seek_report, reserved) == 48);
 
 static uint32_t (*const abi_version_signature)(void) = miso_engine_v1_abi_version;
 static uint32_t (*const query_capabilities_signature)(miso_engine_v1_capabilities *) =
@@ -102,6 +114,11 @@ static uint32_t (*const source_seek_at_signature)(miso_engine_v1_session *,
                                                   uint64_t,
                                                   uint64_t,
                                                   uint64_t) = miso_engine_v1_source_seek_at;
+static uint32_t (*const source_seek_report_signature)(miso_engine_v1_session *,
+                                                      const uint8_t *,
+                                                      uint64_t,
+                                                      miso_engine_v1_seek_report *) =
+    miso_engine_v1_source_seek_report;
 static uint32_t (*const submit_command_signature)(miso_engine_v1_session *,
                                                   const uint8_t *,
                                                   uint64_t,
@@ -157,6 +174,7 @@ static int check_plan_watermark(miso_engine_v1_engine *engine) {
     miso_engine_v1_session *session = NULL;
     miso_engine_v1_plan *plan = NULL;
     miso_engine_v1_watermark watermark = {0};
+    miso_engine_v1_seek_report seek_report = {0};
     int failed = 0;
 
     limits.struct_size = MISO_ENGINE_V1_COMPILE_LIMITS_SIZE;
@@ -206,9 +224,49 @@ static int check_plan_watermark(miso_engine_v1_engine *engine) {
         failed = 3;
     }
 
+    /* Issue 1316: before its first block the source reports generation 0, "not yet rendered"; an
+     * unknown source and a wrong struct size are refused. */
+    seek_report.struct_size = MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE;
+    if (failed == 0 &&
+        (source_seek_report_signature(session, (const uint8_t *)"voice", 5, &seek_report) !=
+             MISO_ENGINE_V1_OK ||
+         seek_report.struct_size != MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE ||
+         seek_report.generation != 0)) {
+        failed = 4;
+    }
+    if (failed == 0 &&
+        source_seek_report_signature(session, (const uint8_t *)"none", 4, &seek_report) !=
+            MISO_ENGINE_V1_INVALID_ARGUMENT) {
+        failed = 5;
+    }
+    seek_report.struct_size = MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE - 8;
+    if (failed == 0 &&
+        source_seek_report_signature(session, (const uint8_t *)"voice", 5, &seek_report) !=
+            MISO_ENGINE_V1_INVALID_ARGUMENT) {
+        failed = 6;
+    }
+
     plan_destroy_signature(plan);
     session_destroy_signature(session);
     return failed;
+}
+
+/* A host tests each feature bit it needs with `&` and tolerates bits it does not know; it never
+ * compares the mask with `==` (header, "ABI growth"). This requires every bit the header defines,
+ * one test per symbol and never a bit number, so a library that stops reporting one fails and a
+ * library that reports an extra unknown bit passes. The exact mask is asserted by the Rust tests
+ * (`version_and_capabilities_are_exact`). */
+static int reports_every_defined_feature(uint64_t mask) {
+    return (mask & MISO_ENGINE_V1_FEATURE_IMMUTABLE_SESSION) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_HOST_PLANAR_SOURCE) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_PLANAR_STEREO_RENDER) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_CAPABILITY_COMMAND) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_SERVICE) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY) != 0 &&
+           (mask & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT) != 0;
 }
 
 int main(void) {
@@ -221,7 +279,7 @@ int main(void) {
         query_capabilities_signature(&capabilities) != MISO_ENGINE_V1_OK ||
         capabilities.abi_version != MISO_ENGINE_V1_ABI_VERSION ||
         capabilities.exact_launch_rate_mask != MISO_ENGINE_V1_EXACT_LAUNCH_RATE_MASK ||
-        capabilities.feature_mask != MISO_ENGINE_V1_FEATURE_MASK) {
+        !reports_every_defined_feature(capabilities.feature_mask)) {
         return 1;
     }
 
@@ -230,8 +288,10 @@ int main(void) {
     if (engine_create_signature(&config, &engine) != MISO_ENGINE_V1_OK || engine == NULL) {
         return 2;
     }
-    /* A host checks the watermark bit before calling the symbol (issue 1314). */
+    /* A host checks the watermark and seek-report bits before calling the symbols (issues 1314,
+     * 1316). */
     if ((capabilities.feature_mask & MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK) == 0 ||
+        (capabilities.feature_mask & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT) == 0 ||
         check_plan_watermark(engine) != 0) {
         engine_destroy_signature(engine);
         return 5;
@@ -261,7 +321,8 @@ int main(void) {
     }
 
     return compile_session_signature == NULL || source_submit_signature == NULL ||
-                   source_seek_signature == NULL || submit_command_signature == NULL ||
+                   source_seek_signature == NULL || source_seek_report_signature == NULL ||
+                   submit_command_signature == NULL ||
                    dequeue_event_signature == NULL ||
                    render_signature == NULL || resources_signature == NULL ||
                    watermark_signature == NULL || service_signature == NULL ||

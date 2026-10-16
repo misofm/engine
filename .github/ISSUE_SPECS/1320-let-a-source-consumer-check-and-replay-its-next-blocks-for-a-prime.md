@@ -256,3 +256,60 @@ is not a control.
 the timeline consumer is for #1355 or #1641 to decide.
 
 **Dependencies.** #1316, #1318 and #1319 are open and in the batch. Nothing outside the batch.
+
+## Decision record: #1320 (batch 15c)
+
+**What shipped.**
+- D1: `Consumer::peek(&self, i) -> Option<&T>` in `crates/engine/src/realtime/spsc.rs`, inside the
+  consumer's existing realtime-policy region. One `Acquire` load of the producer cursor (through
+  `available_at_entry`), no cursor, cache or counter change. A shared-access `sync::with` helper
+  (loom: `UnsafeCell::with`) sits beside `with_mut` in both `sync` shims; it is peek's read path.
+- D2: `PcmSourceConsumer::prime_ready(&self, first_sample, lead_blocks)`. One command-queue load
+  and at most `lead_blocks + 1` peeks; the walk takes `current` first, then the queue; it returns
+  `true` as soon as the region's end is reached, because later blocks move no frame.
+- D3: `PcmSourceConsumer::prime_block_at(&mut self, sample)`: `end_block`,
+  `flush_deferred_recycle`, `generation_changed = false`, then `begin_block_play(SeekClock::Hold)`.
+  Debug assertions check no underrun, no held frames and no command pop.
+- D4: `prime_required` is one `Arc<AtomicBool>` per ring, made at preparation.
+  `PcmSourceProducer::prime_flag()` and `HostChunkProvider::prime_flag()` return a
+  `PcmSourcePrimeFlag` with `set(bool)` (`Relaxed`). `PcmSourceConsumer::prime_required()` loads it
+  (`Relaxed`). New resource row `SourceResourceReport::prime_required_bytes`. It is in
+  `overhead_bytes` and in the largest-allocation list.
+
+**Departures.**
+- The prime's acquire stops before a block of an unobserved generation
+  (`CommandObservation::Withheld`, one `peek(0)` per pop in a prime only). D3 says the acquire
+  never pops past block `j`. That is not true at the region's end: there `begin_block_play` still
+  runs the acquire, and the acquire pops everything queued. A `Seek` pushed after a true
+  readiness, with its PCM behind the end block, would then make the prime observe it at once
+  (`:1408-1431`), and a plain seek would apply inside the window. The guard leaves that block
+  and its command queued. Ordinary blocks and `prepare_seek` pass `Allowed` and do not change.
+  Gate 4's end-at-`j = 1` case is red without the guard.
+- The prime sets `next_source_read_sample = sample` before `begin_block_play(Hold)`, because
+  `Hold` reports on the consumer's own clock. Without this, a prime after a source-read clock
+  jump (#1639) would leave a later clockless block, and its seek report, on the old clock.
+  `the_prime_continues_the_callers_clock_across_a_jump` defends this.
+- No new marked region. `peek`, `prime_ready` and `prime_block_at` are in existing regions, so
+  the realtime-policy floors do not change (151 regions in 33 files).
+- No browser or C ABI surface: #1355 owns the callers. The browser's `source_overhead_bytes`
+  grows by the flag's bytes per ring. The host-web ceilings test still passes, so no ceiling moves.
+
+**Gates.**
+1. `realtime::spsc::tests::peek_returns_each_queued_item_in_order_across_wraps_and_changes_nothing`
+   and the loom test `realtime::spsc::loom_tests::spsc_loom_peek_returns_the_item_later_popped`
+   (`spsc_loom` CI command: 15 passed).
+2. `crates/source/src/lib.rs` `tests::prime_readiness::*` (11 tests). Each readiness call
+   asserts that telemetry, `next_frame`, `end_frame`, the data, recycle and command queue counts,
+   the pop counts, the held seek, `current`, the clock and the seek report did not change. Held
+   anchors inside or late in the window are set directly, because `try_seek` refuses unaligned
+   anchors. Gaps and stale blocks are pushed raw, because the host path refuses them.
+3. `crates/source/tests/prime.rs::the_prime_equals_the_blocks_the_consumer_would_have_played`
+   (steady, region end at `j = 1`, a seek 2 blocks earlier).
+4. `the_prime_observes_no_command` (steady and end at `j = 1`, with the seek's PCM queued).
+5. `the_prime_flag_is_shared_between_the_handle_and_the_consumer`.
+6. `readiness_and_sixteen_primes_allocate_nothing`: `k = 16`, 16 primes, 0 allocations and
+   0 frees (current-thread counters).
+
+**Measured.** `prime_required_bytes` = 24 B per ring on 64-bit targets and 12 B on wasm32
+(three words). `audit capi` reports allocations 0 and pcm_digest `4f52089e4a8cf83c`, which is
+unchanged.

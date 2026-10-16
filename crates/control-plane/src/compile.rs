@@ -1162,6 +1162,15 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     let (prepared, handles) = preparer
         .prepare(compiled, &caps, lanes, successor, superseded)
         .map_err(prepare_failure)?;
+    // #1396 deliverable 3: a test gives the next plan a source-read offset before publication.
+    #[cfg(feature = "test-support")]
+    let prepared = {
+        let mut prepared = prepared;
+        if let Some(offset) = crate::control::take_test_next_source_read_offset() {
+            host_core::test_only_set_source_read_offset(&mut prepared, offset);
+        }
+        prepared
+    };
     // #1256 D2: keep only the producers. The strip ID list and the vectors this selection leaves
     // empty drop here, on the control thread; each producer keeps its own `track_id`. The
     // producer vector is built at exactly one entry per strip, so the boxed slice does not

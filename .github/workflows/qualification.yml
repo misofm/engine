@@ -738,6 +738,10 @@ jobs:
       # invalidate the shared release target dir's fingerprints for every step after it.
       - name: Realtime race model (engine SPSC loom leg)
         run: CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom
+      # #1702: the seqlock behind the applied-revision watermark and the seek report, on the same
+      # target dir and flags as the SPSC leg, so it reuses that leg's build.
+      - name: Realtime race model (engine seqlock loom leg)
+        run: CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib seqlock_loom
       # Issue #1609. host-core depends on `lane`, which refuses to compile without the pinned
       # x86-64-v3 features, and a RUSTFLAGS value replaces `.cargo/config.toml`'s rustflags, so this
       # leg names them. The `-C target-feature=+avx2,+fma` below is a copy of `.cargo/config.toml`'s

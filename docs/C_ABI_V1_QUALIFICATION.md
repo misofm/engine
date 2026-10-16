@@ -107,10 +107,13 @@ A host starts a stem a structural transaction added in exact time through
 exported symbol, announced by `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (32) in the capability
 report, whose feature mask becomes 63; no struct, size or `ABI_VERSION` changes. It is
 `miso_engine_v1_source_seek` with an anchor: the seek's source frame enters the graph in the
-block that starts at absolute render sample `anchor_sample`, which must be a multiple of the
-quantum or the call returns `RESULT_INVALID_ARGUMENT` with `source.seek.anchor_unaligned`; its
-thread rule, argument checks and every other result are the plain seek's. The host checks the bit
-before calling the symbol, since a library older than #1275 does not export it. After the
+block that starts at sample `anchor_sample` of the plan's source-read clock (equal to the render
+clock in this version, #1316 D1), which must be a multiple of the quantum or the call returns
+`RESULT_INVALID_ARGUMENT` with `source.seek.anchor_unaligned`; its
+thread rule, argument checks and every other result are the plain seek's. A host that resolves
+the symbol at run time checks the bit before calling it; a host that links the symbol directly
+fails to load against a library older than #1275 before it can check anything (see "ABI growth"
+below). After the
 transaction returns, the host picks `A` a few quanta past the last rendered block, calls
 `seek_at(id, g, F, A)` with `F` the frame the playing stems read at `A`, then submits generation
 `g` from `F`; the stem renders silence until `A` and plays `F` from `A` on, bit-identical to the
@@ -187,6 +190,59 @@ mask and calls `service(NULL)` for `INVALID_ARGUMENT`, `header_smoke.cpp` pins t
 mask and the signature, and the capi runtime tests cover reclaim by `service` alone, the step
 inside a source submit, the counter refresh, a scheduled candidate kept across 1,000 calls, and
 idle calls that change nothing.
+
+A host learns where a seek landed through `miso_engine_v1_source_seek_report` (#1316, decision 15
+D15-12), an in-place V1 amendment: one new exported symbol and one new 64-byte struct,
+`miso_engine_v1_seek_report` (`MISO_ENGINE_V1_SOURCE_SEEK_REPORT_SIZE`; not D6's
+`miso_engine_v1_source_seek_report`, which is the function's name, and C gives a typedef and a
+function one name space), announced by `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT` (bit 9, 512;
+#1323 took bit 8 first) in the capability report, whose feature mask grows to include it; no other
+struct, size or `ABI_VERSION` changes. It is a session call, serialized with the others, and runs
+the service step first. It copies the source ring's `(generation, first_sample, source_frame)` and
+its cumulative underrun and held frames: the generation in effect, the source-read sample (the
+render clock in this version) of the first block it played in, and the source frame that block
+started at, a late anchored seek's frame including its lateness. Render publishes the record from
+the source consumer at the end of a block's acquire step, only when a new generation took effect or
+a cumulative counter moved, through the engine's one single-writer seqlock
+(`crates/engine/src/realtime/seqlock.rs`), so it is a level, not a queue: no ack can precede a drop.
+Before the ring's first block it reads generation 0. The record belongs to the ring (one shared
+record charged as `seek_report_bytes` in the source's overhead), so a plan swap that carries the
+source keeps it and an added or redeclared source starts at 0. A host that plain-seeks one stem and
+reads `(g, s, f)` then starts another with `seek_at(Y, g', f + (A - s), A)` and the two align
+exactly. Results: `OK`; `INVALID_ARGUMENT` for a wrong `struct_size`, a nonzero reserved word or a
+malformed source ID, and with `source.id.unknown` for an undeclared source; `BACKPRESSURE` with
+`source.report.busy` when every bounded read (64 attempts) landed inside render's publication, `out`
+untouched. The frozen exported set is now 19 `miso_engine_v1_*` definitions (with #1323's);
+`abi_smoke.c` checks the bit against the queried mask and reads a compiled session's source
+(generation 0), an unknown source and a wrong size, `header_smoke.cpp` pins the size, every field
+offset and the signature, and the capi runtime tests cover a plain seek, a late anchored seek, a
+scrub-then-align across a transaction, a carried and an added ring, and the two counters.
+
+The seek contract in the header (#1317, decision 15 D15-12) states, from the code, the source-read
+clock and its origin (0 at compile, one quantum per render call, continued by a swapped-in plan),
+the plain and the anchored seek, how to choose the anchor, held behaviour (queued PCM of the
+playing generation plays, then silence counted as held frames, never as underrun frames),
+replacement of a held seek, the one-slot refusal (`BACKPRESSURE`, `source.seek.backpressure`),
+displacement by a structural transaction, far-past anchors and the region end, the source-rate
+assumption (`source.rate.mismatch`), and how `miso_engine_v1_source_seek_report` reports a seek's
+landing. It promises nothing the code does not do; a source-read clock that leads the render clock
+is a later change and amends the "equal to the render clock in this version" sentence.
+
+ABI growth (#1317, decision 15 D15-3). `MISO_ENGINE_V1_ABI_VERSION` changes only on a break. Each
+added exported symbol, and each former reserved struct word given a name, gets its own
+`MISO_ENGINE_V1_FEATURE_*` bit, the next free one when it merges. A new value of an existing enum or
+result code, and a field added in place to a V1 protocol message, takes no bit, so a host tolerates
+an enum value it does not know and treats a result code it does not know as a failure. A feature
+added as a protocol message is announced by its protocol capability flag in the `CAPABILITIES`
+reply, not by a feature bit; the control protocol registry, not this rule, governs protocol flags. A
+host tests each bit it needs with `&`, tolerates bits it does not know and never compares
+`feature_mask` with `==`. A feature bit protects only a host that resolves the symbol at run time: a
+host that links a symbol directly fails to load against a library that lacks it, before it can test
+anything. The library's own Rust tests compare the reported mask with the library's `FEATURE_MASK`
+(`version_and_capabilities_are_exact` and the constant pins in `abi.rs`); the C smoke test does not
+compare the reported mask. `abi_smoke.c` tests one `&` per `MISO_ENGINE_V1_FEATURE_*` symbol (it
+fails when the library stops reporting a defined bit and passes when it reports an extra unknown
+one) and keeps its compile-time pins of the header's constants.
 
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was
@@ -932,13 +988,14 @@ that window is admitted against the plan that renders.
   exported symbol, announced by `MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY` (the next free bit,
   256) in the capability report, whose feature mask grows to include it; no struct, size or
   `ABI_VERSION` changes. The mask is the OR of every feature symbol and is never compared with a
-  literal (`capi` `abi::tests::masks_and_result_codes_are_frozen` folds the symbols; `abi_smoke.c`
-  and `header_smoke.cpp` pin the bit inside the mask and the signature, and `abi_smoke.c` calls
-  the symbol with a null session for `INVALID_ARGUMENT`). The frozen exported set is now 18
+  literal, except the C smoke test's header-constant pins (`capi`
+  `abi::tests::masks_and_result_codes_are_frozen` folds the symbols; `abi_smoke.c` and
+  `header_smoke.cpp` pin the bit inside the mask and the signature, and `abi_smoke.c` calls the
+  symbol with a null session for `INVALID_ARGUMENT`). The frozen exported set is now 18
   `miso_engine_v1_*` definitions. It is a session call, serialized with the others; it runs the
   service step first. The browser's `miso_engine_web_v1_declare_discontinuity(handle)` forwards to
-  the same control-plane function, `control_plane::SessionState::declare_discontinuity` (root
-  ruling B15-R7); the browser SDK surface is #1296's.
+  the same control-plane function, `control_plane::SessionState::declare_discontinuity` (root ruling
+  B15-R7); the browser SDK surface is #1296's.
 - **Duty.** A host calls it at a stop, and before a seek of every source: the next block it renders
   need not continue the previous output.
 - **Behavior.** If the newest plan (the waiting replacement, else the running plan) runs behind its

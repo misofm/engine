@@ -11,6 +11,7 @@ mod latest_cell;
 mod observe;
 mod plan;
 mod plan_exchange;
+mod seqlock;
 mod spsc;
 mod watermark;
 
@@ -41,6 +42,10 @@ pub use plan_exchange::{
     RealtimePlanOwner, RealtimeRenderReport, RealtimeResponseSnapshot, SwapOutcome,
     UnadoptedCandidate, Withdrawal, plan_exchange, plan_exchange_at_revision,
     plan_exchange_resource_report,
+};
+pub use seqlock::{
+    MAXIMUM_READ_ATTEMPTS, PublishedWords, PublishedWordsBusy, PublishedWordsReader,
+    PublishedWordsWriter, published_words, published_words_retained_bytes,
 };
 pub use spsc::{
     Consumer, PlanAdoption, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError,
@@ -216,6 +221,107 @@ mod tests {
         plan.render_contiguous(RenderIo { output }, 4)
             .expect("second block");
         assert_eq!(plan.next_absolute_sample(), 8);
+    }
+
+    /// A silent executor that records the source-read offset its plan hands it.
+    struct OffsetExecutor {
+        offset: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl PreparedPlanExecutor for OffsetExecutor {
+        fn set_source_read_offset(&mut self, offset: u64) {
+            self.offset
+                .store(offset, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn render(
+            &mut self,
+            _arena: &mut BufferArena,
+            mut output: PlanarBufferMut<'_>,
+            _time: RenderTime,
+        ) -> Result<(), RenderError> {
+            output.plane_mut(0)?.fill(0.0);
+            Ok(())
+        }
+    }
+
+    /// #1396 gate 4: through 8 blocks and two swaps (offset 384, then 0), after each block the
+    /// publisher's render clock is the active plan's next sample and its source-read clock is that
+    /// plus the active plan's offset; before the first block both read the initial plan's.
+    ///
+    /// Test value: red if render stores the outgoing plan's offset after a swap, stores the clocks
+    /// before the block renders, or never stores them; or if a plan does not forward its offset
+    /// to its executor.
+    #[test]
+    fn the_publisher_reads_both_clocks_of_the_active_plan_after_each_block() {
+        const QUANTUM: u64 = 128;
+        let offset_plan = |id: u64, offset: u64| {
+            let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+            let mut plan = PreparedRenderPlan::prepare_with_executor(
+                PrepareRenderPlan {
+                    plan_id: id,
+                    envelope: RenderEnvelope {
+                        sample_rate: SampleRateHz(48_000),
+                        quantum: QuantumFrames(QUANTUM as u32),
+                        output_channels: NonZeroUsize::new(1).expect("one"),
+                    },
+                    scratch: &[],
+                },
+                Box::new(OffsetExecutor {
+                    offset: std::sync::Arc::clone(&seen),
+                }),
+            )
+            .expect("plan");
+            plan.set_source_read_offset(offset);
+            assert_eq!(plan.source_read_offset(), offset);
+            assert_eq!(seen.load(std::sync::atomic::Ordering::Relaxed), offset);
+            plan
+        };
+        let mut initial = offset_plan(1, 0);
+        initial.set_source_read_offset(QUANTUM);
+        let (mut publisher, mut realtime, mut retirer) = plan_exchange(
+            initial,
+            PlanExchangeConfig {
+                retirement_capacity: NonZeroUsize::new(2).expect("two"),
+            },
+        )
+        .expect("exchange");
+        assert_eq!(publisher.render_clock(), 0);
+        assert_eq!(publisher.source_read_clock(), QUANTUM);
+
+        let mut active_offset = QUANTUM;
+        let mut samples = [0.0_f32; QUANTUM as usize];
+        for block in 0..8_u64 {
+            let swap = match block {
+                2 => Some(3 * QUANTUM),
+                5 => Some(0),
+                _ => None,
+            };
+            if let Some(offset) = swap {
+                let _ = publisher
+                    .publish(offset_plan(block + 2, offset))
+                    .map_err(|_| "publish")
+                    .expect("publish");
+            }
+            let output =
+                PlanarBufferMut::try_new(&mut samples, 1, QUANTUM as usize, QUANTUM as usize)
+                    .expect("output");
+            let report = realtime
+                .render_contiguous(RenderIo { output }, block * QUANTUM)
+                .expect("block");
+            if let Some(offset) = swap {
+                assert_eq!(report.swap, SwapOutcome::Applied);
+                active_offset = offset;
+            }
+            let next = (block + 1) * QUANTUM;
+            assert_eq!(publisher.render_clock(), next, "block {block}");
+            assert_eq!(
+                publisher.source_read_clock(),
+                next + active_offset,
+                "block {block}"
+            );
+            while retirer.try_reclaim().is_ok() {}
+        }
     }
 
     #[test]
