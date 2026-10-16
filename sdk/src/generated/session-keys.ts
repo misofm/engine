@@ -767,6 +767,24 @@ export const SESSION_KEYS = deepFreeze(
         [
           "segments",
           "array"
+        ],
+        [
+          "offset",
+          "record"
+        ]
+      ]
+    },
+    {
+      "module": "automation_offset",
+      "arm": null,
+      "keys": [
+        [
+          "left_db",
+          "float"
+        ],
+        [
+          "right_db",
+          "float"
         ]
       ]
     },
@@ -1044,6 +1062,15 @@ export const SESSION_KEYS = deepFreeze(
         {
           "module": "matrix_or_pan",
           "arm": "matrix"
+        }
+      ]
+    },
+    {
+      "key": "offset",
+      "records": [
+        {
+          "module": "automation_offset",
+          "arm": null
         }
       ]
     },

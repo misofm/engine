@@ -2411,6 +2411,7 @@ fn model_only_edits(model: &SessionModel) -> [(&'static str, SessionEdit); 5] {
                         end_value: -3.0,
                         unit: session::ParameterUnit::Db,
                     }],
+                    offset: session::AutomationOffset::default(),
                 },
             },
         ),
@@ -4436,6 +4437,7 @@ fn eq_automation_edit(
                 end_value: 1.0,
                 unit,
             }],
+            offset: session::AutomationOffset::default(),
         },
     }
 }
@@ -4542,6 +4544,7 @@ fn builtin_automation_edit(
                 end_value,
                 unit,
             }],
+            offset: session::AutomationOffset::default(),
         },
     }
 }
@@ -8010,6 +8013,7 @@ mod set_control {
                     end_value: 0.5,
                     unit: session::ParameterUnit::Linear,
                 }],
+                offset: session::AutomationOffset::default(),
             },
         };
         assert_eq!(
@@ -8590,6 +8594,7 @@ fn with_fader_automation(document: &str) -> String {
                 end_value: -3.0,
                 unit: session::ParameterUnit::Db,
             }],
+            offset: session::AutomationOffset::default(),
         });
     })
 }

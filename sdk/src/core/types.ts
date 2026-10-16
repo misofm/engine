@@ -336,8 +336,22 @@ export interface AutomationSegment {
  */
 export type AutomationTarget = ControlAddress | ControlWireAddress;
 
+/**
+ * The stored hand-move offset of an automation entry, in dB per lane (#1650). A hand move on an
+ * automated fader is heard on top of the ride as this offset. Only a `fader_db` entry may hold a
+ * non-zero offset, and only on a lane it drives; every other lane holds `0`. The engine checks
+ * that rule and the fader's `[-144, 24]` dB domain, and its refusal (`control.automation.offset`,
+ * `control.domain`) comes back from `validate()` and preparation.
+ */
+export interface AutomationOffset {
+  readonly leftDb?: number;
+  readonly rightDb?: number;
+}
+
 export interface AutomationSpec {
   readonly id: string;
   readonly target: AutomationTarget;
   readonly segments: readonly AutomationSegment[];
+  /** The stored hand-move offset; omitted, both lanes are `0` (no offset). */
+  readonly offset?: AutomationOffset;
 }

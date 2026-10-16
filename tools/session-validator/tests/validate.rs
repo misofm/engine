@@ -605,7 +605,8 @@ fn an_automation_on_a_prepared_effect_parameter_fails_effect_preparation() {
                 "start_value": 1.0,
                 "end_value": 1.0,
                 "unit": unit
-            }]
+            }],
+            "offset": { "left_db": 0.0, "right_db": 0.0 }
         }]);
         let report = validate_session_document(&serde_json::to_string(&value).unwrap());
         if !expected {

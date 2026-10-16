@@ -152,7 +152,7 @@ fn maximum_document_with_dense_invalid_automation() -> DenseInvalidAutomationDoc
     const EMPTY_AUTOMATION: &str = "\"automation\": []";
     const HEADER: &str = r#""automation": [{"id":"dense-invalid","target":{"owner":"strip","owner_id":"track","section":"builtins","control":5,"lane":"both"},"segments":["#;
     const INVALID_SEGMENT: &str = "{\"shape\":\"step\",\"start_sample\":\"0\",\"end_sample\":\"0\",\"start_value\":0.0,\"end_value\":0.0,\"unit\":\"db\"}";
-    const FOOTER: &str = "]}]";
+    const FOOTER: &str = r#"],"offset":{"left_db":0.0,"right_db":0.0}}]"#;
 
     let (before, after) = BASE
         .split_once(EMPTY_AUTOMATION)

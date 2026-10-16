@@ -140,7 +140,11 @@
           "end_value": -3.0,
           "unit": "db"
         }
-      ]
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": 0.0
+      }
     }
   ]
 }

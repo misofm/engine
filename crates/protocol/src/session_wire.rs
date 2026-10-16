@@ -4,11 +4,11 @@
 //! the same field specifications used by validation and decoding.
 
 use session::{
-    Automation, AutomationSegment, AutomationShape, ChannelBuiltins, ChannelMatrix, Console,
-    ConsoleEntry, ConsoleSlot, DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity,
-    EffectParam, EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile,
-    Route, RouteDestination, RouteSource, SidechainDeclaration, Source, SourceBitDepth, StableId,
-    Submix, Vca,
+    Automation, AutomationOffset, AutomationSegment, AutomationShape, ChannelBuiltins,
+    ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins, DualMonoFader, Effect,
+    EffectIdentity, EffectParam, EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName,
+    RenderProfile, Route, RouteDestination, RouteSource, SidechainDeclaration, Source,
+    SourceBitDepth, StableId, Submix, Vca,
 };
 
 use crate::{
@@ -1081,7 +1081,25 @@ fn tx_automation(sink: &mut dyn Sink, value: &Automation) -> Result<(), EncodeEr
             tx_automation_segment(v, segment)
         })?;
     }
-    Ok(())
+    tx_message(sink, schema::session::automation::OFFSET, |v| {
+        tx_automation_offset(v, &value.offset)
+    })
+}
+fn tx_automation_offset(sink: &mut dyn Sink, value: &AutomationOffset) -> Result<(), EncodeError> {
+    tx_start_message(
+        sink,
+        schema::session::automation_offset::SPEC.field_count(&[])?,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::automation_offset::LEFT_DB,
+        value.left_db,
+    )?;
+    tx_f32(
+        sink,
+        schema::session::automation_offset::RIGHT_DB,
+        value.right_db,
+    )
 }
 
 fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
@@ -1729,6 +1747,22 @@ fn parse_automation(message: Message<'_>) -> Result<Automation, DecodeError> {
         segments: values_spec!(message, schema::session::automation::SEGMENT)?
             .map(|value| parse_automation_segment(message.nested_value(value)?))
             .collect::<Result<Vec<_>, _>>()?,
+        offset: parse_automation_offset(
+            message.nested_value(one_spec!(message, schema::session::automation::OFFSET)?)?,
+        )?,
+    })
+}
+fn parse_automation_offset(message: Message<'_>) -> Result<AutomationOffset, DecodeError> {
+    let message = message.schema_spec(&schema::session::automation_offset::SPEC)?;
+    Ok(AutomationOffset {
+        left_db: read_f32_exact(one_spec!(
+            message,
+            schema::session::automation_offset::LEFT_DB
+        )?)?,
+        right_db: read_f32_exact(one_spec!(
+            message,
+            schema::session::automation_offset::RIGHT_DB
+        )?)?,
     })
 }
 fn parse_track_effect_ref(

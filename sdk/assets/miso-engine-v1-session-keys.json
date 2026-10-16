@@ -339,7 +339,16 @@
       "keys": [
         ["id", "id"],
         ["target", "record"],
-        ["segments", "array"]
+        ["segments", "array"],
+        ["offset", "record"]
+      ]
+    },
+    {
+      "module": "automation_offset",
+      "arm": null,
+      "keys": [
+        ["left_db", "float"],
+        ["right_db", "float"]
       ]
     },
     {
@@ -482,6 +491,12 @@
       "key": "matrix",
       "records": [
         { "module": "matrix_or_pan", "arm": "matrix" }
+      ]
+    },
+    {
+      "key": "offset",
+      "records": [
+        { "module": "automation_offset", "arm": null }
       ]
     },
     {

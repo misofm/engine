@@ -1117,6 +1117,7 @@ fn fader_ride(model: &SessionModel) -> Automation {
             end_value: -3.0,
             unit: ParameterUnit::Db,
         }],
+        offset: session::AutomationOffset::default(),
     }
 }
 
@@ -3246,6 +3247,7 @@ fn eq_automation(model: &SessionModel, parameter_id: u32, unit: ParameterUnit) -
             end_value: 1.0,
             unit,
         }],
+        offset: session::AutomationOffset::default(),
     }
 }
 

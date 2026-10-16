@@ -1281,6 +1281,12 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
                 unit: ParameterUnit::Ratio,
             },
         ],
+        // #1650 D1: a stored offset crosses the codec as field 4. Distinct lanes and a `-0.0`
+        // catch a codec that swaps the two fields or drops a zero's sign.
+        offset: session::AutomationOffset {
+            left_db: 2.5,
+            right_db: -0.0,
+        },
     };
     let edits = vec![
         SessionEdit::UpsertSubmix {
@@ -2122,5 +2128,45 @@ fn an_automation_target_cannot_be_owned_by_the_session() {
     assert_eq!(
         codec.encode_session_transaction(&transaction, &mut bytes),
         Err(EncodeError::InvalidField)
+    );
+}
+
+/// #1650 D1: the automation offset is a required nested message of two required finite `F32`
+/// lanes, field 1 left and field 2 right.
+///
+/// Red if a lane becomes optional, if a non-finite offset decodes, or if the decoder swaps the
+/// two lanes.
+#[test]
+fn automation_offset_is_two_required_finite_lanes() {
+    let lane = |value: f32| value.to_le_bytes().to_vec();
+    let decode = |fields: Vec<(u16, u8, bool, Vec<u8>)>| {
+        let bytes = raw_message(fields);
+        parse_automation_offset(Message::nested(&bytes).expect("nested offset"))
+    };
+    assert_eq!(
+        decode(vec![
+            (1, WIRE_F32, true, lane(-1.5)),
+            (2, WIRE_F32, true, lane(3.0)),
+        ]),
+        Ok(AutomationOffset {
+            left_db: -1.5,
+            right_db: 3.0,
+        })
+    );
+    assert!(
+        decode(vec![(1, WIRE_F32, true, lane(0.0))]).is_err(),
+        "a missing right lane"
+    );
+    assert!(
+        decode(vec![(2, WIRE_F32, true, lane(0.0))]).is_err(),
+        "a missing left lane"
+    );
+    assert!(
+        decode(vec![
+            (1, WIRE_F32, true, lane(f32::NAN)),
+            (2, WIRE_F32, true, lane(0.0)),
+        ])
+        .is_err(),
+        "a non-finite lane"
     );
 }

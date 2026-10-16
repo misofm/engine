@@ -1575,3 +1575,104 @@ describe("issue 1364 -- the builder authors controlSmoothing", () => {
     );
   });
 });
+
+describe("issue #1650 -- the builder authors an automation entry's offset", () => {
+  const base = () => session({ id: "offset.eval", sampleRateHz: 48_000, revision: 1 })
+    .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
+    .track("t", { source: "stem" })
+    .output("out")
+    .route({
+      id: "main",
+      source: { kind: "track", trackId: "t", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "out" },
+    });
+  const fader = (lane) => ({
+    owner: { kind: "strip", id: "t" },
+    section: { kind: "builtins" },
+    control: "fader_db",
+    lane,
+  });
+  const ride = (id, lane, offset) => ({
+    id,
+    target: fader(lane),
+    segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue: -6, endValue: 0 }],
+    ...(offset === undefined ? {} : { offset }),
+  });
+
+  test("the offset is written after the segments, 0 per lane when omitted", () => {
+    // Red if the builder leaves the required key out, writes it in another place, or loses a
+    // lane or the sign of a -0.
+    const omitted = base().automation(ride("ride", "left")).toJSON();
+    assert.deepEqual(omitted.automation[0].offset, { left_db: 0, right_db: 0 });
+    assert.deepEqual(Object.keys(omitted.automation[0]), ["id", "target", "segments", "offset"]);
+    const json = base().automation(ride("ride", "both", { leftDb: 3, rightDb: -0 })).toJson();
+    assert.match(json, /"segments": \[[\s\S]*\],\n {6}"offset": \{\n {8}"left_db": 3\.0,\n {8}"right_db": -0\.0\n {6}\}\n {4}\}/);
+    assert.throws(
+      () => base().automation(ride("ride", "left", { leftDb: Number.NaN })),
+      /automation\("ride"\)\.offset\.leftDb: expected a finite number/,
+    );
+  });
+
+  test("a strict request with an offset builds the session the builder builds", () => {
+    // Red if the request decoder drops the offset or lets a misspelled key through.
+    const request = (offset) => ({
+      schemaVersion: 1,
+      session: { id: "offset.eval", sampleRateHz: 48_000, revision: 1 },
+      sources: [{ id: "stem", spec: { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A } }],
+      tracks: [{ id: "t", spec: { source: "stem" } }],
+      outputs: ["out"],
+      routes: [{
+        id: "main",
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      }],
+      automation: [{
+        id: "ride",
+        target: { owner: { kind: "strip", id: "t" }, section: { kind: "builtins" }, control: "fader_db", lane: "left" },
+        segments: [{ shape: "linear", startSample: 0, endSample: 480, startValue: -6, endValue: 0 }],
+        ...(offset === undefined ? {} : { offset }),
+      }],
+    });
+    assert.equal(
+      sessionBuilderFromRequest(request({ leftDb: 3 })).toJson(),
+      base().automation(ride("ride", "left", { leftDb: 3 })).toJson(),
+    );
+    assert.equal(
+      sessionBuilderFromRequest(request(undefined)).toJson(),
+      base().automation(ride("ride", "left")).toJson(),
+    );
+    assert.throws(
+      () => sessionBuilderFromRequest(request({ leftDB: 3 })),
+      (error) => error.message === "$.automation[0].offset.leftDB: unknown key",
+    );
+  });
+
+  test("which row and lane take an offset is the engine's rule", async () => {
+    // #1650 D2: only a lane a `fader_db` entry drives takes an offset, inside [-144, 24] dB.
+    // Red if the builder starts judging the row (the engine's code is never observed) or the
+    // engine accepts an offset on a lane no one reads.
+    const outcome = async (builder) => {
+      const result = await validate(builder, { asset });
+      return result.ok ? "ok" : [result.diagnostics[0]?.code, result.diagnostics[0]?.path];
+    };
+    assert.equal(await outcome(base().automation(ride("ride", "left", { leftDb: 3 }))), "ok");
+    assert.deepEqual(
+      await outcome(base().automation(ride("ride", "left", { rightDb: 3 }))),
+      ["control.automation.offset", "$.automation[id=ride].offset.right_db"],
+    );
+    assert.deepEqual(
+      await outcome(base().automation(ride("ride", "both", { leftDb: 30 }))),
+      ["control.domain", "$.automation[id=ride].offset.left_db"],
+    );
+    const trim = {
+      id: "trim",
+      target: { ...fader("left"), control: "trim_db" },
+      segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue: -6, endValue: 0 }],
+      offset: { leftDb: 1 },
+    };
+    assert.deepEqual(
+      await outcome(base().automation(trim)),
+      ["control.automation.offset", "$.automation[id=trim].offset.left_db"],
+    );
+  });
+});

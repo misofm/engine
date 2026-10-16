@@ -420,7 +420,11 @@
           "end_value": 4.0,
           "unit": "db"
         }
-      ]
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": 0.0
+      }
     }
   ]
 }

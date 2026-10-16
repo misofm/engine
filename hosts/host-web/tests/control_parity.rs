@@ -2787,6 +2787,7 @@ fn a_mode_switch_under_a_stored_pan_entry_is_refused_alike_on_both_hosts() {
                 end_value: 0.5,
                 unit: session::ParameterUnit::Linear,
             }],
+            offset: session::AutomationOffset::default(),
         });
         let mut browser = Rig::new(&model);
         let mut c_abi = CAbi::new(&model);
