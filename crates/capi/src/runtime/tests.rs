@@ -6492,3 +6492,141 @@ fn a_flat_fader_automation_renders_the_static_fader_bits_on_the_c_abi() {
         }
     }
 }
+
+/// #1647 gate 4 (C ABI): the timeline sample of the seek and the fader ride that is flat around
+/// it: `0` dB before timeline 20,000 and [`SEEK_RIDE_DB`] from it on.
+const SEEK_TIMELINE: u64 = 40_000;
+const SEEK_RIDE_DB: f32 = -9.0;
+
+/// `model` with track 1's fader on the ride (automated) or held at [`SEEK_RIDE_DB`] (reference).
+fn seek_ride(mut model: session::SessionModel, automated: bool) -> session::SessionModel {
+    if automated {
+        model.automation = vec![session::Automation {
+            id: session::StableId::parse("ride").expect("automation ID"),
+            target: session::ControlAddress {
+                owner: session::Owner::Strip(model.tracks[1].id.clone()),
+                section: session::Section::Builtins,
+                control: 5,
+                lane: session::ParameterChannel::Both,
+            },
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Step,
+                start_sample: 0,
+                end_sample: 20_000,
+                start_value: 0.0,
+                end_value: SEEK_RIDE_DB,
+                unit: session::ParameterUnit::Db,
+            }],
+            offset: session::AutomationOffset::default(),
+        }];
+    } else {
+        let fader = &mut model.tracks[1].fader;
+        (fader.left_db, fader.right_db) = (SEEK_RIDE_DB, SEEK_RIDE_DB);
+    }
+    model
+}
+
+/// Renders `model` on the C ABI: ten blocks of generation 1 (after the removal transaction of
+/// [`limited_session`] at block 6 when `floored`), a plain session seek to [`SEEK_TIMELINE`] and
+/// eight blocks of generation 2 from there. Returns the output, block by block, and the render
+/// sample the seek applied at (the source's seek report).
+fn render_seek_ride_c(
+    model: &session::SessionModel,
+    floored: Option<&[protocol::SessionEdit; 2]>,
+) -> (Vec<Vec<f32>>, u64) {
+    let document = session::canonical_session_json(model).expect("canonical");
+    let (c_session, c_plan) = boxed_c_children(&document);
+    let (left, right) = continuity_block(0, 0);
+    submit_c(c_session, 1, 0, 48_000, &left, &right, false);
+    let mut blocks = feed_and_render_c(c_session, c_plan, 48_000, 0, 6);
+    if let Some(edits) = floored {
+        let latency = crate::ffi::test_plan_latency(c_plan);
+        assert!(latency > 0, "the limiter delays the plan");
+        assert_eq!(
+            command_c(c_session, &transaction_at(1, 42, edits)).0,
+            crate::RESULT_OK
+        );
+        blocks.extend(feed_and_render_c(c_session, c_plan, 48_000, 6, 4));
+        assert_eq!(
+            crate::ffi::test_plan_latency(c_plan),
+            latency,
+            "#1285 floors"
+        );
+    } else {
+        blocks.extend(feed_and_render_c(c_session, c_plan, 48_000, 6, 4));
+    }
+    assert_eq!(
+        crate::ffi::test_session_seek(c_session, 2, SEEK_TIMELINE, None),
+        crate::RESULT_OK
+    );
+    for step in 0..8_u64 {
+        let block = 10 + step;
+        let (left, right) = continuity_block(block + 1, 0);
+        submit_c(
+            c_session,
+            2,
+            SEEK_TIMELINE + step * 128,
+            48_000,
+            &left,
+            &right,
+            false,
+        );
+        blocks.push(render_c(c_plan, block));
+    }
+    let (generation, first, frame, _, _) = seek_report_c(c_session, b"fixture-source");
+    assert_eq!((generation, frame), (2, SEEK_TIMELINE));
+    if floored.is_some() {
+        assert!(
+            crate::ffi::test_plan_latency(c_plan) == 0,
+            "the plain seek's successor resets the floors"
+        );
+    }
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+    (blocks, first)
+}
+
+/// #1647 gate 4 on the C ABI: after `miso_engine_v1_session_seek` to `T` on a ride that is flat
+/// at `-9` dB around `T` and `0` dB where the session played before, the automated lane equals the
+/// static fader at `-9` dB exactly from the render sample `r` the seek applied at (the fader has
+/// no latency before it), with no ramp, and differs before it. Twice: on a plan with no raised
+/// floor (the seek lands on the running plan as a `Set`), and on a plan whose floors #1285 raised,
+/// where the plain seek publishes a discontinuity successor whose lanes start fresh (D2: the
+/// restarted lane's first block takes a `Set`).
+///
+/// Test value: red if a seek ramps the lane or reaches the fader at the wrong sample, or if a
+/// restarted lane keeps its prepared value, on the C ABI.
+#[test]
+fn a_session_seek_sets_an_automated_fader_exactly_on_the_c_abi() {
+    let (limited, edits) = limited_session();
+    for (label, base, floored) in [
+        ("running plan", stateless_session(48_000), None),
+        ("raised floor", limited, Some(&edits)),
+    ] {
+        let (automated, r) = render_seek_ride_c(&seek_ride(base.clone(), true), floored);
+        let (reference, reference_r) = render_seek_ride_c(&seek_ride(base, false), floored);
+        assert_eq!(r, reference_r, "{label}");
+        assert_eq!(r % 128, 0, "{label}: the seek applies at a block entry");
+        let flat = |blocks: &[Vec<f32>], plane: usize| -> Vec<u32> {
+            blocks
+                .iter()
+                .flat_map(|block| block[plane * 128..(plane + 1) * 128].iter())
+                .map(|value| value.to_bits())
+                .collect()
+        };
+        let r = r as usize;
+        for plane in 0..2 {
+            let (automated, reference) = (flat(&automated, plane), flat(&reference, plane));
+            assert_eq!(
+                automated[r..],
+                reference[r..],
+                "{label}, plane {plane}: the static fader's bits from r"
+            );
+            assert_ne!(
+                automated[r - 128..r],
+                reference[r - 128..r],
+                "{label}, plane {plane}: the lane was elsewhere before r"
+            );
+        }
+    }
+}

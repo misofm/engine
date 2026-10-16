@@ -287,11 +287,17 @@ segment whose unit is not the row's, or a value the row refuses), `control.autom
 addresses that submix's entry for the slot (#1202). A session does not have to state a parameter
 value for the row it automates: the row exists whether or not the session states it.
 
-**The automation table is consumed by nothing today.** No lowering reads it, for the strip, a
-console slot or an insert: a valid target is valid-and-inert syntax that authors, round-trips
-and renders nothing. Extending the vocabulary unblocks authoring and the SDK's builder. Rendering
-the stored automation table, builtin targets included, identically on every platform is owned by
-issue #1058 (research first); #140, which once gated it, was descoped
+**The fader row renders; every other row is inert today.** An entry on a strip's fader
+(`builtins` row 5) is compiled into the plan as a table (#1646) and rendered on the C ABI and in
+the browser alike (#1647): the lane follows its curve in node time, reaching the curve's value at
+the end of each 64-sample retarget on a fixed grid, taking each discontinuity at its exact sample
+over the session's fader ramp length (`control_smoothing.fader_ms`), lined up with the audio it
+acts on through every latent insert, and set exactly, with no ramp, where a session seek reaches
+the fader. The output does not depend on the render quantum or on where a seek landed. Stored
+automation has no queue: render generates its events from the plan. An entry on any other row,
+for the strip, a console slot or an insert, is valid and inert: it authors and round-trips and
+renders nothing until its row's slice lands. Rendering the whole table identically on every
+platform is owned by issue #1058; #140, which once gated it, was descoped
 (`rulings/engine-footprint-2026-09-28.md`).
 
 **What the table means: the hold rule (#1626, #1058 A3).** One entry is one curve of one lane over

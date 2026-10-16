@@ -29,11 +29,20 @@ impl LiveRamps {
     #[must_use]
     pub fn for_session(model: &SessionModel) -> Self {
         let samples = model.control_smoothing_samples();
+        Self::from_lengths(samples.fader, samples.mute, samples.pan)
+    }
+
+    /// The ramps of the three session lengths `fader_ms`, `mute_ms` and `pan_ms`, in samples: the
+    /// one place that derives the rest of the table from them (the link glide reads the fader
+    /// length). Render builds it from the three words a plan's jump-length cell holds for the
+    /// block (#1639 D2, #1647 departure 7), so no render path writes a row rule.
+    #[must_use]
+    pub const fn from_lengths(fader_samples: u32, mute_samples: u32, pan_samples: u32) -> Self {
         Self {
-            fader_samples: samples.fader,
-            mute_samples: samples.mute,
-            pan_samples: samples.pan,
-            link_samples: samples.fader,
+            fader_samples,
+            mute_samples,
+            pan_samples,
+            link_samples: fader_samples,
         }
     }
 
