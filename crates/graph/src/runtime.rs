@@ -3185,6 +3185,9 @@ impl Runtime {
     /// with no source set. One read uses it: a bank's gather, only on a lane its unit marks
     /// (`UnitIdentity::source_lanes`) for a buffer [`Self::source_plane_of_buffer`] names. Every
     /// other read of the arena is unchanged.
+    ///
+    /// `block_time` is the block's node-time context (#1647a, R17-3): a bank unit sets it on each
+    /// of its builtin slots before its chain runs. Other units ignore it.
     pub(crate) fn execute(
         &mut self,
         index: usize,
@@ -3192,6 +3195,7 @@ impl Runtime {
         snapshot: LiveSnapshot,
         host: HostMaster<'_>,
         sources: Option<&dyn crate::GraphSourcePlanes>,
+        block_time: &crate::GraphBlockTime<'_>,
     ) -> Result<(), RenderError> {
         let Self {
             arena,
@@ -3301,6 +3305,7 @@ impl Runtime {
                     },
                 };
                 let frames = u32::try_from(frames).unwrap_or(u32::MAX);
+                set_block_time(chain, block_time);
                 if let Some(predecessor) = predecessor {
                     #[cfg(any(test, feature = "test-support"))]
                     TEST_ONLY_RESIDENT_COUNTS.with(|count| {
@@ -4395,6 +4400,18 @@ fn builtin_processor_mut(
         .as_any_mut()?
         .downcast_mut::<BuiltinStage>()?;
     Some(stage.0.as_mut())
+}
+
+/// Set the block's node-time context on every builtin slot of `chain` (#1647a, R17-3), before
+/// the chain runs. Allocation-free and O(slots): a slot borrow, two downcasts and one call each.
+fn set_block_time(chain: &mut BankChain, time: &crate::GraphBlockTime<'_>) {
+    let mut slot = 0;
+    while chain.slot_stage_mut(slot).is_some() {
+        if let Some(processor) = builtin_processor_mut(chain, slot) {
+            processor.set_block_time(time);
+        }
+        slot += 1;
+    }
 }
 
 /// Bit `lane` of a carry mask. A bank has at most eight lanes, the width of the `u8` mask: debug
@@ -13878,7 +13895,19 @@ mod tests {
                 before_master = Some(stereo_bits(runtime.buffer(slot)));
             }
             runtime
-                .execute(unit, first_sample, LiveSnapshot::ALL, host.reborrow(), None)
+                .execute(
+                    unit,
+                    first_sample,
+                    LiveSnapshot::ALL,
+                    host.reborrow(),
+                    None,
+                    &crate::GraphBlockTime::new(
+                        Some(first_sample),
+                        u32::try_from(frames).expect("oracle frames"),
+                        None,
+                        None,
+                    ),
+                )
                 .expect("oracle unit");
             runtime
                 .observe_unit(unit, first_sample, validity, &host)

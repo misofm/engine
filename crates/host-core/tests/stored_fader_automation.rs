@@ -1,7 +1,9 @@
 //! Stored fader automation at preparation (#1646): its bytes are charged as builtin bank payload
 //! (gate 2), and a fader automation keeps a mono track's collapse (gate 3). Gate 1 (flat renders
 //! the static bits) is on the two hosts: `crates/capi/src/runtime/tests.rs` and
-//! `hosts/host-web/src/tests.rs`.
+//! `hosts/host-web/src/tests.rs`. The render plumbing (#1647a): each automated fader lane takes
+//! its `a(n)` and, per block, its node-time mapping and the fader row's jump length, with no
+//! render allocation.
 
 use automation::ProgramBuilder;
 use builtins_compiler::fader_automation_sizes;
@@ -11,8 +13,10 @@ use host_core::{
     prepare_host_session,
 };
 use session::{
-    Automation, AutomationSegment, AutomationShape, ControlAddress, Owner, ParameterChannel,
-    ParameterUnit, Section, SessionModel, StableId, canonical_session_json, parse_session_json,
+    Automation, AutomationSegment, AutomationShape, ControlAddress, ControlSmoothing, Effect,
+    EffectIdentity, EffectParam, EffectQuality, LinkMode, Owner, ParameterChannel, ParameterUnit,
+    Section, SessionModel, SidechainDeclaration, StableId, canonical_session_json,
+    parse_session_json,
 };
 
 /// Eight tracks on one two-channel source, one banked parametric EQ each as the console slot.
@@ -276,4 +280,153 @@ fn a_left_only_fader_automation_keeps_a_mono_tracks_collapse() {
             "plane {plane}: the collapsed render equals the twin's dual render"
         );
     }
+}
+
+/// `model` with a true-peak limiter insert of 5 ms lookahead on track `track`: a latent node
+/// before the fader.
+fn with_limiter(mut model: SessionModel, track: usize) -> SessionModel {
+    let param = |parameter_id, unit, value| EffectParam {
+        parameter_id,
+        channel: ParameterChannel::Both,
+        unit,
+        value,
+    };
+    let strip = &mut model.tracks[track];
+    strip.inserts.effects.push(Effect {
+        id: id(&format!("limiter-{track}")),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.true-peak-limiter"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::Maximum,
+        params: vec![
+            param(1, ParameterUnit::Db, -8.0),
+            param(2, ParameterUnit::Milliseconds, 60.0),
+            param(3, ParameterUnit::Milliseconds, 5.0),
+        ],
+        sidechain: SidechainDeclaration::None,
+    });
+    model
+}
+
+/// A moving fader automation on the left lane of track `track`: `-40` to `0` dB over a second.
+fn fader_ride(model: &SessionModel, track: usize) -> Automation {
+    let mut entry = flat_fader(model, track, ParameterChannel::Left, -40.0);
+    entry.segments[0].end_value = 0.0;
+    entry
+}
+
+/// The floored input arrival `a(n)` of track `track`'s fader node in `prepared`'s plan: its row in
+/// the plan inventory's input floors (#1285), or 0.
+fn fader_arrival(prepared: &PreparedHost, model: &SessionModel, track: usize) -> u64 {
+    let track_id = model.tracks[track].id.as_str();
+    prepared
+        .inventory
+        .input_floors()
+        .iter()
+        .find(|(node, _)| {
+            matches!(
+                node,
+                graph::GraphNodeId::TrackStage {
+                    track_id: id,
+                    stage: graph::TrackStage::PostFader,
+                } if id.as_str() == track_id
+            )
+        })
+        .map_or(0, |(_, arrival)| *arrival)
+}
+
+/// #1647a (R17-2, R17-3): two automated fader lanes, the first behind a latent insert. At every
+/// block each lane's bank holds its `a(n)` (the plan's floored arrival), the node-time mapping
+/// `timeline_block(r + ΣP - a(n))` (`-a(n)` at render sample 0 of a fresh plan, then the render
+/// clock behind by `a(n)`, with no step) and the fader row's jump length from the session's
+/// `fader_ms`; rendering those blocks after a warm-up allocates and frees nothing.
+///
+/// Test value: red if the graph compiler does not hand `a(n)` to the bank (or hands the natural
+/// arrival or another member's), if the graph does not set a block's context before the chain
+/// runs (a stale or missing span), if the signed read clamps a negative node sample to 0, if the
+/// jump length is read from the mute or pan key, or if the context-set path allocates.
+#[test]
+fn each_automated_fader_lane_takes_its_arrival_and_node_time_per_block() {
+    const PROBED: usize = 12;
+    let mut model = with_limiter(bank_model(), 0);
+    model.control_smoothing = Some(ControlSmoothing {
+        mute_ms: 5.0,
+        fader_ms: 20.0,
+        pan_ms: 10.0,
+    });
+    model.automation = vec![fader_ride(&model, 0), fader_ride(&model, 1)];
+    let mut prepared = prepare(&model, 100_000_000).expect("prepares");
+    let latent = fader_arrival(&prepared, &model, 0);
+    let plain = fader_arrival(&prepared, &model, 1);
+    assert!(latent > 0, "the limiter delays track 0's fader");
+    assert_eq!(plain, 0, "track 1's fader has no latency before it");
+    let fader_jump = controls::LiveRamps::for_session(&model).fader_samples;
+    assert_eq!(fader_jump, 960, "20 ms at 48 kHz");
+
+    let _ = builtins_compiler::test_only_take_fader_lane_times();
+    let mut allocations = (0, 0, 0);
+    for block in 0..PROBED {
+        let base = block * QUANTUM;
+        let plane: Vec<f32> = (0..QUANTUM).map(|frame| signal(base + frame)).collect();
+        prepared
+            .sources
+            .submit(
+                b"fixture-source",
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: base as u64,
+                    sample_rate_hz: RATE,
+                    planes: &[&plane, &plane],
+                    frames: QUANTUM as u32,
+                    end_of_region: false,
+                },
+            )
+            .expect("source block");
+        let mut samples = [0.0_f32; QUANTUM * 2];
+        let output =
+            PlanarBufferMut::try_new(&mut samples, 2, QUANTUM, QUANTUM).expect("output planes");
+        let mark = bench_support::alloc::current_thread_counters();
+        prepared
+            .plan
+            .render(
+                RenderIo { output },
+                RenderTime {
+                    absolute_sample: base as u64,
+                },
+            )
+            .expect("render");
+        let delta = bench_support::alloc::current_thread_delta_since(mark);
+        if block >= 2 {
+            allocations.0 += delta.allocations;
+            allocations.1 += delta.reallocations;
+            allocations.2 += delta.deallocations;
+        }
+        let (times, overflow) = builtins_compiler::test_only_take_fader_lane_times();
+        assert!(!overflow, "block {block}: the probe holds every lane");
+        assert_eq!(
+            times.len(),
+            2,
+            "block {block}: one entry per automated lane"
+        );
+        let mut arrivals: Vec<u64> = times.iter().map(|time| time.arrival).collect();
+        arrivals.sort_unstable();
+        assert_eq!(arrivals, [plain, latent], "block {block}: each lane's a(n)");
+        for time in &times {
+            let start = base as i64 - time.arrival as i64;
+            assert_eq!(
+                time.span,
+                Some(graph::TimelineSpan { start, step: None }),
+                "block {block}, lane {}: node time r + ΣP - a(n)",
+                time.lane
+            );
+            assert_eq!(time.fader_jump, Some(fader_jump), "block {block}");
+        }
+    }
+    assert_eq!(
+        allocations,
+        (0, 0, 0),
+        "the context-set path allocates and frees nothing"
+    );
 }

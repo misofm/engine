@@ -416,3 +416,84 @@ The signed form of `TimelineConsumer::timeline_block` and of the driver's `timel
   a first sample above `i64::MAX`, at `i64::MAX`, at `0` and at `i64::MIN`, and a block that crosses
   each of them. It checks that nothing panics and nothing wraps.
 - This is part of #1647a.
+
+## Decision record: #1647a (batch 17)
+
+The plumbing (R17-2, R17-3, R17-5, departure 7). No audible change: nothing reads the new values
+in render yet except the test-support probe.
+
+**Shipped.**
+
+- **`a(n)` (R17-2).** `GraphPreparedBuiltinBankProcessor::set_input_arrivals(&[u64])` (defaulted,
+  lane order). `PreparedGraphPlan::install_builtin_input_arrivals` looks each bank member up in
+  `GraphCompileReport::input_arrivals` (absent = 0) and calls it; `compile_with_builtins` calls it
+  once through `PreparedBuiltinsGraphArtifact::install_builtin_input_arrivals` (a narrow,
+  doc-hidden forward; the artifact's graph stays read-only). No downcast, no host-core step. The
+  fader bank keeps `a(n)` in each automated lane's `LaneFaderAutomation`; the fused fader-matrix
+  bank forwards to its fader stage.
+- **Block context (R17-3).** `GraphBlockTime<'a>` (graph): the block's source-read sample
+  `r + ΣP` (`Option`, `None` only on `u64` overflow, which a plan with a source set already refuses
+  as `TimeOverflow`), the block length, the held `GraphJumpLengths` (#1639) and a borrow of the
+  source-set driver; `node_span(a)` reads `timeline_block(r + ΣP - a, frames)`.
+  `GraphPreparedBuiltinBankProcessor::set_block_time(&GraphBlockTime)` (defaulted). The executor
+  builds the context once per block after the source set's block entry and passes it to
+  `Runtime::execute`, which calls `set_block_time` on every builtin slot of a bank unit
+  (`builtin_processor_mut`, a `slot_stage_mut` walk) before `chain.run` or
+  `run_with_resident_input`. No `rack` edit. The fader bank, when it has automated lanes, stores per
+  automated lane the block's `TimelineSpan` and the fader row's jump length; a bank without
+  automation returns at once.
+- **Signed reader (R17-5).** `TimelineConsumer::timeline_block(first: i128, frames)` and the
+  driver trait's `timeline_block(i128, u32) -> Option<TimelineSpan>` (source driver implements
+  it). `i128` holds every `u64 - u64` exactly, so `r + ΣP - a(n)` needs no conversion; `resolve`
+  works in `i128` with checked differences, `offset_timeline` saturates in `i128` then to the
+  `i64` range. `step_at` keeps `u64` (steps only fall at entry boundaries, which are `u64`), so
+  every existing `u64` result is unchanged. `TimelineSpan`/`TimelineStep` now live in `graph` and
+  `source` re-exports them (one type across the driver trait).
+- **Jump length (departure 7).** `controls::LiveRamps::from_lengths(fader, mute, pan)` (link =
+  fader); `for_session` now goes through it. The fader bank resolves its row with
+  `for_row(LiveRampRow::Fader)` once per block.
+- **`expect(dead_code)`.** Removed from `FaderBankProcessor::automation` (now read by
+  `set_block_time` and `set_input_arrivals`). The ones on `LaneFaderAutomation`,
+  `AutomatedFaderCell` and `OffsetsLane` stay (their program/state/offsets readers are #1647b and
+  #1649).
+
+**Departure.** The per-block span and jump length are stored per automated lane inside
+`LaneFaderAutomation`, not as a fixed per-bank array: a per-bank array grew every fader bank by
+320 bytes and moved the graph fixture `direct-route.resources.json` (a session with no
+automation). Now only automated sessions pay: `lane_slot_bytes` 120 -> 168 (x86-64), measured by
+`fader_automation_sizes()` and charged by #1646's existing sum; no fixture moved.
+
+**Gates.**
+
+- Probe and allocation (gate 6's counter on the context-set path):
+  `each_automated_fader_lane_takes_its_arrival_and_node_time_per_block`
+  (`crates/host-core/tests/stored_fader_automation.rs`): two automated lanes, one behind a 5 ms
+  true-peak limiter (`a(n)` = 486 from the plan inventory), `fader_ms` 20 (960 samples) apart from
+  `mute_ms`/`pan_ms`; for 12 blocks each lane holds its `a(n)`, span `start = r - a(n)` (`-486` at
+  block 0) with no step, and jump 960; blocks 2-11 allocate, reallocate and free 0. Red on the
+  revert of the compile-end install (`[0, 0]` against `[0, 486]`), checked once.
+- R17-5: `tests::timeline::the_signed_reader_extrapolates_back_and_saturates_at_the_limits`
+  (`crates/source/src/lib.rs`): first samples `i128::MIN`, below/at `i64::MIN`, `-300`, `-40`
+  (crossing 0, no step, values continuous), 0, `i64::MAX - 40`, `i64::MAX`, above it, `u64::MAX`,
+  `i128::MAX`, and a history at the `u64` end of the clock with blocks crossing it.
+- `cargo test --locked -p source -p graph -p graph-compiler -p builtins-compiler -p controls
+  --features builtins-compiler/test-support,graph/test-support`: pass. `-p host-core --all-features
+  --test stored_fader_automation`: 3 pass. `-p capi`: 198 pass.
+- `realtime-policy`: ok, 155 regions in 33 files (base 153: `GraphBlockTime`'s impl and the fader
+  bank's `set_block_time`).
+- `./target/release/audit capi`: `pcm_digest` `bffc21e857b5e134` (unchanged), 0 violations, 0
+  allocations.
+- fmt; clippy `-D warnings` (touched crates, all targets, all features); no-feature
+  `cargo check --all-targets` on the touched crates; `cargo check --workspace --all-targets
+  --all-features`.
+
+**Notes for #1647b.**
+
+- Read `LaneFaderAutomation::{span, fader_jump}` in `process` (set before `begin_block` of the same
+  block); build `NodeSpan` from `span` and add the restart `Set` step of departure 4 there.
+  `span.start + i` must be checked: it saturates at the `i64` edges.
+- The scalar oracle (R17-4) gets neither `a(n)` nor the block context: its fader owners are bound
+  node processors run by `execute_op`, not bank slots. #1647b needs a matching path there (the
+  bound-node processor trait and the graph-compiler install, or a per-node arrival at binding).
+- A plan with no source set or no jump-length cell gives `span`/`fader_jump` `None`; every
+  host-core plan has both.

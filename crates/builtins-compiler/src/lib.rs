@@ -41,10 +41,11 @@ use engine::realtime::{
 };
 use graph::{
     BuiltinControlDelivery, BuiltinPairFactory, BuiltinProcessor, BuiltinStripOwner,
-    BuiltinStripStage, DependencyLevel, GraphBuiltinBankResourceEstimate, GraphNodeId,
-    GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
+    BuiltinStripStage, DependencyLevel, GraphBlockTime, GraphBuiltinBankResourceEstimate,
+    GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
     GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor, GraphPreparedSourceSet,
-    GraphRuntimeBindings, GraphRuntimeObserver, PreparedGraphPlan, StableGraphId, TrackStage,
+    GraphRuntimeBindings, GraphRuntimeObserver, PreparedGraphPlan, StableGraphId, TimelineSpan,
+    TrackStage,
 };
 use lane::Backend;
 use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
@@ -664,6 +665,16 @@ struct LaneFaderAutomation {
     program: Arc<automation::Program>,
     /// `[left, right]`; `None` for a channel no entry drives.
     channels: [Option<AutomatedFaderCell>; 2],
+    /// The lane's floored input arrival `a(n)` (#1647a, R17-2): the graph compiler's, given to a
+    /// bank lane at the end of `compile_with_builtins`; `0` until then.
+    arrival: u64,
+    /// The node-time mapping of the block the graph last set (#1647a, R17-3):
+    /// `timeline_block(r + ΣP - a(n))`, `None` in a plan with no timeline. #1647b builds the
+    /// lane's `NodeSpan` from it.
+    span: Option<TimelineSpan>,
+    /// The fader row's jump length of that block, from the three lengths the graph holds (#1639
+    /// D2); `None` in a plan with no jump-length cell. #1647b passes it to `CellEvents::new`.
+    fader_jump: Option<u32>,
 }
 
 impl LaneFaderAutomation {
@@ -688,6 +699,9 @@ impl LaneFaderAutomation {
                     }
                 })
             }),
+            arrival: 0,
+            span: None,
+            fader_jump: None,
         }
     }
 }
@@ -1793,15 +1807,101 @@ struct FaderBankProcessor {
     /// The stored fader automation of the bank's lanes (#1646 D1): one slot per bank lane when a
     /// member's fader is automated, `None` on a lane that is not; empty (no allocation) when no
     /// member is.
-    #[expect(
-        dead_code,
-        reason = "#1647 drives it in render and #1648 carries it in `adopt_lane`, in the same push \
-                  (batch R1)"
-    )]
     automation: Box<[Option<LaneFaderAutomation>]>,
     process_calls: u64,
     frames_processed: u64,
     control_delivery: BuiltinControlDelivery,
+}
+
+/// Test-only: one automated fader lane's node time for one block, as the bank took it (#1647a).
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct TestOnlyFaderLaneTime {
+    /// The bank lane.
+    pub lane: usize,
+    /// The lane's `a(n)`.
+    pub arrival: u64,
+    /// The block's node-time mapping, `None` with no timeline.
+    pub span: Option<TimelineSpan>,
+    /// The fader row's jump length, `None` with no jump-length cell.
+    pub fader_jump: Option<u32>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+const FADER_LANE_TIME_CAPACITY: usize = 16;
+
+/// Test-only: the automated fader lanes' node times the banks took since the last take, in the
+/// order they took them, and whether more than the capacity arrived.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy)]
+struct TestOnlyFaderLaneTimes {
+    len: usize,
+    overflow: bool,
+    entries: [TestOnlyFaderLaneTime; FADER_LANE_TIME_CAPACITY],
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static FADER_LANE_TIMES: core::cell::Cell<TestOnlyFaderLaneTimes> =
+        const {
+            core::cell::Cell::new(TestOnlyFaderLaneTimes {
+                len: 0,
+                overflow: false,
+                entries: [TestOnlyFaderLaneTime {
+                    lane: 0,
+                    arrival: 0,
+                    span: None,
+                    fader_jump: None,
+                }; FADER_LANE_TIME_CAPACITY],
+            })
+        };
+}
+
+/// Append each automated lane's node time to this thread's probe. Allocation-free: a copy in and
+/// out of a fixed array.
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_record_fader_lane_times(automation: &[Option<LaneFaderAutomation>]) {
+    FADER_LANE_TIMES.with(|cell| {
+        let mut times = cell.get();
+        for (lane, slot) in automation.iter().enumerate() {
+            let Some(slot) = slot else {
+                continue;
+            };
+            let entry = TestOnlyFaderLaneTime {
+                lane,
+                arrival: slot.arrival,
+                span: slot.span,
+                fader_jump: slot.fader_jump,
+            };
+            match times.entries.get_mut(times.len) {
+                Some(free) => {
+                    *free = entry;
+                    times.len += 1;
+                }
+                None => times.overflow = true,
+            }
+        }
+        cell.set(times);
+    });
+}
+
+/// Test-only (#1647a): take the automated fader lanes' node times this thread's banks took since
+/// the last take, in order, and whether the probe's capacity overflowed. Each block's
+/// `set_block_time` adds one entry per automated lane of every fader bank.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_take_fader_lane_times() -> (Vec<TestOnlyFaderLaneTime>, bool) {
+    FADER_LANE_TIMES.with(|cell| {
+        let times = cell.get();
+        cell.set(TestOnlyFaderLaneTimes {
+            len: 0,
+            overflow: false,
+            ..times
+        });
+        (times.entries[..times.len].to_vec(), times.overflow)
+    })
 }
 
 impl FaderBankProcessor {
@@ -1866,6 +1966,40 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     fn control_delivery(&self) -> BuiltinControlDelivery {
         self.control_delivery
     }
+    /// #1647a (R17-2): each automated lane keeps its member's `a(n)`.
+    fn set_input_arrivals(&mut self, arrivals: &[u64]) {
+        for (slot, &arrival) in self.automation.iter_mut().zip(arrivals) {
+            if let Some(slot) = slot {
+                slot.arrival = arrival;
+            }
+        }
+    }
+    // REALTIME_POLICY_BEGIN
+    /// #1647a (R17-3): each automated lane takes the block's node-time mapping
+    /// `timeline_block(r + ΣP - a(n))` and the fader row's jump length, resolved once from the
+    /// three lengths the graph holds through `LiveRamps`, which owns the row rule. A bank with no
+    /// automated lane keeps nothing and reads no timeline. Allocation-free; one timeline read per
+    /// automated lane.
+    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
+        if self.automation.is_empty() {
+            return;
+        }
+        let fader_jump = time.jump_lengths().map(|lengths| {
+            controls::LiveRamps::from_lengths(
+                lengths.fader_samples,
+                lengths.mute_samples,
+                lengths.pan_samples,
+            )
+            .for_row(effect_contract::control::LiveRampRow::Fader)
+        });
+        for slot in self.automation.iter_mut().flatten() {
+            slot.span = time.node_span(slot.arrival);
+            slot.fader_jump = fader_jump;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        test_only_record_fader_lane_times(&self.automation);
+    }
+    // REALTIME_POLICY_END
     // REALTIME_POLICY_BEGIN
     fn carried_strip_lanes(&self) -> Option<(BuiltinStripStage, usize)> {
         Some((BuiltinStripStage::Fader, self.bank.active_lanes()))
@@ -2529,7 +2663,14 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
     fn control_delivery(&self) -> BuiltinControlDelivery {
         BuiltinControlDelivery::BetweenRenderCalls
     }
+    fn set_input_arrivals(&mut self, arrivals: &[u64]) {
+        self.fader.set_input_arrivals(arrivals);
+    }
     // REALTIME_POLICY_BEGIN
+    /// The fader stage's context (#1647a); the matrix stage takes none.
+    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
+        self.fader.set_block_time(time);
+    }
     fn carried_strip_lanes(&self) -> Option<(BuiltinStripStage, usize)> {
         Some((
             BuiltinStripStage::FaderMatrix,
@@ -4517,6 +4658,17 @@ fn restore_graph_bind_failure<R>(
 }
 
 impl<R> PreparedBuiltinsGraphArtifact<R> {
+    /// Give each builtin bank its members' floored input arrivals `a(n)` (#1647a, R17-2), from
+    /// `GraphCompileReport::input_arrivals`. The graph compiler's one call at the end of
+    /// `compile_with_builtins`; it changes nothing but what the banks hold of `a(n)`. Off the
+    /// render thread.
+    #[doc(hidden)]
+    pub fn install_builtin_input_arrivals(
+        &mut self,
+        arrivals: &[(GraphNodeId, effect_contract::LatencySamples)],
+    ) {
+        self.graph.install_builtin_input_arrivals(arrivals);
+    }
     /// Immutable caller-owned graph report.
     #[must_use]
     /// The sealed graph, by shared reference.

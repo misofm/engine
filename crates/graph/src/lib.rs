@@ -1267,6 +1267,93 @@ impl GraphJumpLengths {
     // REALTIME_POLICY_END
 }
 
+/// The node-time mapping of one node block (#1640 D3): the timeline value at the block's first
+/// sample, and the seek that reaches the block, if any. The source crate's timeline reader returns
+/// it, and graph hands it to a builtin bank through [`GraphBlockTime::node_span`] (#1647a).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimelineSpan {
+    /// The timeline value at the node block's first sample.
+    pub start: i64,
+    /// The seek that reaches the node block, if any.
+    pub step: Option<TimelineStep>,
+}
+
+/// A seek inside a node block: from sample `offset` of the block on, the timeline reads
+/// `timeline + (i - offset)`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimelineStep {
+    /// The node block's sample the seek takes effect at, from `0` to the block length minus one.
+    pub offset: u32,
+    /// The timeline value at that sample.
+    pub timeline: i64,
+}
+
+/// One graph block's node-time context (#1647a, R17-3): what a builtin bank needs to map its
+/// lanes' samples to session timeline samples for the block. The graph builds it once per block,
+/// after the source set's block entry, and sets it on every builtin slot of a bank unit through
+/// [`GraphPreparedBuiltinBankProcessor::set_block_time`] before the unit's chain runs. It borrows
+/// the source set's driver for the block; a stage reads what it needs during that call and keeps
+/// no reference.
+#[derive(Clone, Copy)]
+pub struct GraphBlockTime<'a> {
+    source_read_sample: Option<u64>,
+    frames: u32,
+    jump_lengths: Option<GraphJumpLengths>,
+    timeline: Option<&'a dyn GraphPreparedSourceSetDriver>,
+}
+
+// REALTIME_POLICY_BEGIN
+impl<'a> GraphBlockTime<'a> {
+    /// The context of a block of `frames` samples whose first sample reads source time from
+    /// `source_read_sample` (`r + ΣP`, #1396; `None` when that sum leaves the `u64` range, which a
+    /// plan with a source set refuses as `TimeOverflow` first), holding `jump_lengths` (#1639 D2),
+    /// with `timeline` the source set's driver or `None` in a plan with no source set.
+    #[must_use]
+    pub const fn new(
+        source_read_sample: Option<u64>,
+        frames: u32,
+        jump_lengths: Option<GraphJumpLengths>,
+        timeline: Option<&'a dyn GraphPreparedSourceSetDriver>,
+    ) -> Self {
+        Self {
+            source_read_sample,
+            frames,
+            jump_lengths,
+            timeline,
+        }
+    }
+
+    /// The source-read sample `r + ΣP` of the block's first sample.
+    #[must_use]
+    pub const fn source_read_sample(&self) -> Option<u64> {
+        self.source_read_sample
+    }
+
+    /// The block length.
+    #[must_use]
+    pub const fn frames(&self) -> u32 {
+        self.frames
+    }
+
+    /// The three jump lengths the graph holds for the block (#1639 D2), or `None` for a plan with
+    /// no jump-length cell.
+    #[must_use]
+    pub const fn jump_lengths(&self) -> Option<GraphJumpLengths> {
+        self.jump_lengths
+    }
+
+    /// The node-time mapping of this block for a node of input arrival `arrival` (`a(n)`, the
+    /// floored arrival of #1285): the timeline read from source-read sample `r + ΣP - a(n)`,
+    /// which is negative while `r + ΣP < a(n)` (R17-5). The difference is exact in `i128`. `None`
+    /// in a plan with no timeline or when the block's source-read sample is unknown.
+    #[must_use]
+    pub fn node_span(&self, arrival: u64) -> Option<TimelineSpan> {
+        let first = i128::from(self.source_read_sample?) - i128::from(arrival);
+        self.timeline?.timeline_block(first, self.frames)
+    }
+}
+// REALTIME_POLICY_END
+
 /// What the plan's jump-length cell shares between its writer (control) and its reader (render):
 /// one #1312 latest-target cell and its dirty word (#1639 D1).
 struct JumpLengthLane {
@@ -1734,6 +1821,21 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     fn pair_factory(&self) -> Option<BuiltinPairFactory> {
         None
     }
+    /// Take the floored input arrival `a(n)` of each member, in lane order (#1647a, R17-2):
+    /// `arrivals[l]` is lane `l`'s, and a lane past the slice is padding. The graph compiler calls
+    /// it once, off the render thread, at the end of `compile_with_builtins`, from
+    /// `GraphCompileReport::input_arrivals` (#1285). The default keeps nothing.
+    fn set_input_arrivals(&mut self, arrivals: &[u64]) {
+        let _ = arrivals;
+    }
+    /// Take this block's node-time context (#1647a, R17-3). The graph calls it on every builtin
+    /// slot of a bank unit once per block, before the unit's chain runs, so `begin_block` and
+    /// `process` of the same block read what it kept. The context borrows the source set only for
+    /// the call. Render-thread code: allocation-, lock- and syscall-free and bounded. The default
+    /// keeps nothing.
+    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
+        let _ = time;
+    }
     fn process(
         &mut self,
         left: &mut [f32],
@@ -2010,6 +2112,27 @@ impl PreparedGraphPlan {
                 members: &bank.members,
                 control_delivery: bank.processor.control_delivery(),
             })
+    }
+    /// Give each builtin bank its members' floored input arrivals `a(n)` (#1647a, R17-2), through
+    /// [`GraphPreparedBuiltinBankProcessor::set_input_arrivals`]. `arrivals` is
+    /// `GraphCompileReport::input_arrivals` (#1285 D2): every node with a nonzero floored arrival,
+    /// sorted by node ID; a member absent from it has arrival 0. Off the render thread, once,
+    /// after the banks are attached and before bind.
+    pub fn install_builtin_input_arrivals(&mut self, arrivals: &[(GraphNodeId, LatencySamples)]) {
+        for bank in &mut self.builtin_banks {
+            let lanes: Vec<u64> = bank
+                .members
+                .iter()
+                .map(|member| {
+                    arrivals
+                        .binary_search_by(|(node, _)| node.cmp(member))
+                        .ok()
+                        .and_then(|row| arrivals.get(row))
+                        .map_or(0, |(_, arrival)| arrival.0)
+                })
+                .collect();
+            bank.processor.set_input_arrivals(&lanes);
+        }
     }
     /// Attach sealed fixed-stage banks before binding.  The graph compiler remains responsible
     /// for deciding eligibility; this validates only the immutable graph shape.
@@ -2670,6 +2793,18 @@ pub trait GraphPreparedSourceSetDriver: Send {
     /// timeline history, or `None` (the default) for a driver with no timeline. Read-only and
     /// bounded.
     fn timeline_at(&self, _source_read_sample: u64) -> Option<i64> {
+        None
+    }
+    /// The node-time mapping of the node block of `frames` samples from the signed source-read
+    /// sample `first_source_read_sample` (#1640 D3, #1647a), from the driver's timeline history,
+    /// or `None` (the default) for a driver with no timeline. Render reads it once per automated
+    /// lane per block, through [`GraphBlockTime::node_span`]. Read-only, allocation-free and
+    /// bounded; no input overflows or panics (R17-5).
+    fn timeline_block(
+        &self,
+        _first_source_read_sample: i128,
+        _frames: u32,
+    ) -> Option<TimelineSpan> {
         None
     }
 }
@@ -4982,10 +5117,10 @@ impl PreparedPlanExecutor for GraphExecutor {
         if let Some(probe) = probe.as_mut() {
             probe.enter(test_only_phase_profile::SOURCE);
         }
+        // #1396 D1: the source-read sample, `ΣP` ahead of the render clock.
+        let block_source_read_sample = time.absolute_sample.checked_add(*source_read_offset);
         let source_validity = if let Some(source_set) = source_set.as_mut() {
-            // #1396 D1: the source-read sample, `ΣP` ahead of the render clock.
-            let Some(source_read_sample) = time.absolute_sample.checked_add(*source_read_offset)
-            else {
+            let Some(source_read_sample) = block_source_read_sample else {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
                 host.silence();
                 return Err(RenderError::TimeOverflow);
@@ -5018,6 +5153,16 @@ impl PreparedPlanExecutor for GraphExecutor {
         // `&mut`, so none can run while a unit borrows a plane; the next `begin_block` is the
         // next render's.
         let sources = source_set.as_ref().map(|set| set as &dyn GraphSourcePlanes);
+        // #1647a (R17-3): the block's node-time context, set on every builtin slot of a bank unit
+        // before its chain runs.
+        let block_time = GraphBlockTime::new(
+            block_source_read_sample,
+            u32::try_from(runtime.arena.frames()).unwrap_or(u32::MAX),
+            jump_lengths.as_deref().map(|reader| reader.held),
+            source_set
+                .as_ref()
+                .map(|set| &*set.driver as &dyn GraphPreparedSourceSetDriver),
+        );
         // Issue #936: only the units bind found to do work. An inert unit's `execute` and
         // `observe_unit` return at once, so skipping it moves no bit.
         #[cfg(any(test, feature = "test-support"))]
@@ -5031,9 +5176,14 @@ impl PreparedPlanExecutor for GraphExecutor {
             if let Some(probe) = probe.as_mut() {
                 probe.unit(runtime.test_only_unit_phase(unit));
             }
-            if let Err(error) =
-                runtime.execute(unit, time.absolute_sample, live, host.reborrow(), sources)
-            {
+            if let Err(error) = runtime.execute(
+                unit,
+                time.absolute_sample,
+                live,
+                host.reborrow(),
+                sources,
+                &block_time,
+            ) {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
                 host.silence();
                 #[cfg(any(test, feature = "test-support"))]
