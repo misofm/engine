@@ -1471,44 +1471,214 @@ fn a_fader_automation_edit_is_a_rebuild() {
     );
 }
 
-/// #1648 D3, the hook in the shared level lowering: a lane that `next` automates gets no
-/// `FaderDb`, by the full classifier and by the fast path alike; the other lane and the mute keep
-/// their records. A VCA move is the case that reaches an automated lane in this slice (the own
-/// fader's hand move is #1650's offset write).
+/// One strip's level records, owned: its ID, its fader/mute records in push order and its
+/// offsets-cell writes `[left, right]` as `(S bits, ramp)` (#1649 D4).
+type Level = (String, Vec<TrackFaderRecord>, [Option<(u64, u32)>; 2]);
+
+fn level(delta: &LiveDelta<'_>) -> Vec<Level> {
+    delta
+        .strips
+        .iter()
+        .map(|strip| {
+            (
+                strip.strip_id.to_owned(),
+                strip.fader_records().collect(),
+                strip.offsets.map(|record| {
+                    record.map(|record| (record.offsets_sum.to_bits(), record.smoothing_samples))
+                }),
+            )
+        })
+        .collect()
+}
+
+/// `(S bits, ramp)` of an offsets-cell write.
+fn sum(offsets_sum: f64, ramp: u32) -> Option<(u64, u32)> {
+    Some((offsets_sum.to_bits(), ramp))
+}
+
+/// #1648 D3 and #1649 D4, gate 5, in the shared level lowering: a VCA edit gives a lane that
+/// `next` automates no `FaderDb` and, when the lane's `S` changes, one offsets-cell write of the
+/// new `S` with the lane's fader length (departure 1: the one length rule), on the full
+/// classifier and the fast path alike. Track 0 rides its fader on both lanes and is a member of
+/// `vca`; track 1 is a member with no automation, and takes one `FaderDb` per lane as before.
 ///
-/// Test value: red if either classifier path still writes a static `FaderDb` onto an automated
-/// lane (a record that fights the curve), if the suppression drops the other lane's record or a
-/// mute record, or if a suppressed lane turns into a refusal.
+/// Test value: red if a VCA move does not reach an automated lane's offsets cell (an acked ride
+/// that is never heard), if a static `FaderDb` still lands on it (a record that fights the curve),
+/// if the automated and the plain member take different lengths, if an unchanged `S` still
+/// writes, if a nested VCA's `S` is summed in another order than `controls::effective` (the one
+/// author of `S`), or if the fast path decides otherwise than the full path.
 #[test]
-fn an_automated_fader_lane_takes_no_fader_record() {
-    use BuiltinLaneSelector::{Left, Right};
+fn a_vca_move_writes_the_automated_lanes_offsets_cell() {
+    use BuiltinLaneSelector::{Both, Left, Right};
+    let session_ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 300,
+        pan_samples: 200,
+        link_samples: 0,
+    };
     let current = normalized(&edited(&with_vca(0.0, 0.0, [false; 2]), |model| {
-        let ride = left_fader_ride(model);
+        let second = model.tracks[1].id.clone();
+        model.vcas[0].members.push(second);
+        let ride = fader_ride(model);
         model.automation.push(ride);
     }));
-    let first = track_id(&current, 0);
+    let (first, second) = (track_id(&current, 0), track_id(&current, 1));
+    let run = |current: &SessionModel, edit: &dyn Fn(&mut SessionModel), ramps: &EditRamps| {
+        let next = edited(current, edit);
+        classify_live_delta(current, &next, session_ramps, ramps).map(|delta| level(&delta))
+    };
     let both = |next: &mut SessionModel| {
         next.vcas[0].fader.left_db = -6.0;
         next.vcas[0].fader.right_db = -6.0;
     };
     assert_eq!(
-        classify(&current, both),
-        Ok(vec![(first.clone(), vec![fader_db(Right, -6.0, 0)], None)]),
-        "the automated left lane takes no record"
+        run(&current, &both, &EditRamps::new()),
+        Ok(vec![
+            (first.clone(), Vec::new(), [sum(-6.0, 100), sum(-6.0, 100)]),
+            (second.clone(), vec![fader_db(Both, -6.0, 100)], [None; 2]),
+        ]),
+        "the automated member's cell and the plain member's record, at one length"
+    );
+    // The edit's own length reaches both members alike.
+    let mut ramp = EditRamps::new();
+    ramp.set(
+        &EditRampTarget::Vca(current.vcas[0].id.clone()),
+        EditRampRow::VcaFader,
+        Some(256),
     );
     assert_eq!(
-        classify(&current, |next| next.vcas[0].fader.left_db = -6.0),
-        Ok(Vec::new()),
-        "a move of the automated lane alone is no record"
+        run(&current, &both, &ramp),
+        Ok(vec![
+            (first.clone(), Vec::new(), [sum(-6.0, 256), sum(-6.0, 256)]),
+            (second.clone(), vec![fader_db(Both, -6.0, 256)], [None; 2]),
+        ])
     );
     assert_eq!(
-        classify(&current, |next| {
-            next.vcas[0].fader.left_db = -6.0;
-            next.vcas[0].fader.left_mute = true;
-        }),
-        Ok(vec![(first, vec![mute(Left, true, 0)], None)]),
+        run(
+            &current,
+            &|next: &mut SessionModel| next.vcas[0].fader.left_db = -6.0,
+            &EditRamps::new()
+        ),
+        Ok(vec![
+            (first.clone(), Vec::new(), [sum(-6.0, 100), None]),
+            (second.clone(), vec![fader_db(Left, -6.0, 100)], [None; 2]),
+        ]),
+        "one lane's move writes that lane's cell"
+    );
+    assert_eq!(
+        run(
+            &current,
+            &|next: &mut SessionModel| {
+                next.vcas[0].fader.left_db = -6.0;
+                next.vcas[0].fader.left_mute = true;
+            },
+            &EditRamps::new()
+        ),
+        Ok(vec![
+            (
+                first.clone(),
+                vec![mute(Left, true, 300)],
+                [sum(-6.0, 100), None]
+            ),
+            (
+                second.clone(),
+                vec![fader_db(Left, -6.0, 100), mute(Left, true, 300)],
+                [None; 2]
+            ),
+        ]),
         "the automated lane's mute keeps its record"
     );
+    // Gate 3: a move to the current value, or of a VCA that reaches neither track, writes nothing.
+    assert_eq!(
+        run(
+            &current,
+            &|next: &mut SessionModel| next.vcas[0].fader.left_db = 0.0,
+            &EditRamps::new()
+        ),
+        Ok(Vec::new())
+    );
+    let lone = normalized(&edited(&current, |model| {
+        let mut other = vca();
+        other.id = id("other");
+        model.vcas.push(other);
+    }));
+    assert_eq!(
+        run(
+            &lone,
+            &|next: &mut SessionModel| {
+                let other = next.vcas.iter_mut().find(|vca| vca.id == id("other"));
+                other.expect("other").fader.left_db = -6.0;
+            },
+            &EditRamps::new()
+        ),
+        Ok(Vec::new())
+    );
+    // A lane the entry does not drive keeps its `FaderDb` (#1648 D3).
+    let left_only = normalized(&edited(&with_vca(0.0, 0.0, [false; 2]), |model| {
+        let ride = left_fader_ride(model);
+        model.automation.push(ride);
+    }));
+    assert_eq!(
+        run(&left_only, &both, &EditRamps::new()),
+        Ok(vec![(
+            first.clone(),
+            vec![fader_db(Right, -6.0, 100)],
+            [sum(-6.0, 100), None]
+        )]),
+    );
+
+    // Three nested VCAs reach track 0, declared and nested out of ID order, offsets 24, -24 and
+    // 2e-30 in ascending ID order. Moving the third to 1e-30 writes the `S` a fresh plan of the
+    // edited session computes: `(24 + -24) + 1e-30`, not the `0.0` of an order that adds `1e-30`
+    // before `-24`.
+    let nested = normalized(&edited(&two_tracks(), |model| {
+        let track = model.tracks[0].id.clone();
+        let vca = |name: &str, db: f32, members: Vec<StableId>| Vca {
+            id: id(name),
+            fader: DualMonoFader {
+                left_db: db,
+                right_db: db,
+                left_mute: false,
+                right_mute: false,
+            },
+            members,
+        };
+        // `vca-c` holds the track, `vca-a` holds `vca-c`, `vca-b` holds `vca-a`.
+        model.vcas = vec![
+            vca("vca-c", 2e-30, vec![track]),
+            vca("vca-b", -24.0, vec![id("vca-a")]),
+            vca("vca-a", 24.0, vec![id("vca-c")]),
+        ];
+        let ride = fader_ride(model);
+        model.automation.push(ride);
+    }));
+    let edit = |next: &mut SessionModel| {
+        let third = next
+            .vcas
+            .iter_mut()
+            .find(|vca| vca.id == id("vca-c"))
+            .expect("vca-c");
+        third.fader.left_db = 1e-30;
+        third.fader.right_db = 1e-30;
+    };
+    let after = edited(&nested, edit);
+    let fresh =
+        controls::effective(&after, &controls::MonitorOverlay::default()).strips[0].offsets_sum[0];
+    assert_eq!(fresh.to_bits(), f64::from(1e-30_f32).to_bits(), "ID order");
+    assert_ne!(
+        fresh.to_bits(),
+        ((f64::from(24.0_f32) + f64::from(1e-30_f32)) + f64::from(-24.0_f32)).to_bits(),
+        "another order gives other bits"
+    );
+    assert_eq!(
+        run(&nested, &edit, &EditRamps::new()),
+        Ok(vec![(
+            first.clone(),
+            Vec::new(),
+            [sum(fresh, 100), sum(fresh, 100)]
+        )])
+    );
+
     #[cfg(feature = "test-support")]
     {
         let next = edited(&current, both);
@@ -1518,12 +1688,12 @@ fn an_automated_fader_lane_takes_no_fader_record() {
             control: 1,
             lane: ParameterChannel::Both,
         }];
-        let full = classify_live_delta(&current, &next, STEP, &EditRamps::new());
+        let full = classify_live_delta(&current, &next, session_ramps, &EditRamps::new());
         let _ = host_core::take_fast_classification_count();
         let fast = host_core::classify_live_edit(
             &current,
             &next,
-            STEP,
+            session_ramps,
             &EditRamps::new(),
             host_core::MonitorBase::NONE,
             Some(&rows),
@@ -1537,7 +1707,7 @@ fn an_automated_fader_lane_takes_no_fader_record() {
             delta.derived_owners = None;
             delta
         });
-        assert_eq!(fast, full, "the fast path suppresses the same lane");
+        assert_eq!(fast, full, "the fast path writes the same cells");
     }
 }
 

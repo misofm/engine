@@ -384,6 +384,9 @@ pub struct TestTransactionSnapshot<Row> {
     /// pending candidate: `(epoch, strip ID, fader left, fader right, mute left, mute right,
     /// matrix)`. A cell's count is its write sequence (#1312 D3).
     pub strip_cells: Vec<(u64, Box<str>, [u64; 4], u64)>,
+    /// How many writes every strip producer's offsets cells have taken (#1649), in the order of
+    /// `strip_cells`: `(epoch, strip ID, [left, right])`, `None` for a channel with no cell.
+    pub strip_offsets_cells: Vec<(u64, Box<str>, [Option<u64>; 2])>,
     /// How many writes every send producer's cell has taken, current epoch first, then each
     /// pending candidate: `(epoch, route ID, writes)` (#1557).
     pub route_cells: Vec<(u64, Box<str>, u64)>,
@@ -1550,6 +1553,18 @@ where
                             producer.track_id.clone(),
                             producer.fader.test_only_write_counts(),
                             producer.producer.test_only_write_count(),
+                        )
+                    })
+                })
+                .collect(),
+            strip_offsets_cells: core::iter::once(&self.providers)
+                .chain(&self.pending_providers)
+                .flat_map(|provider| {
+                    provider.strips.controls.iter().map(|producer| {
+                        (
+                            provider.epoch,
+                            producer.track_id.clone(),
+                            producer.fader.test_only_offsets_write_counts(),
                         )
                     })
                 })
@@ -3101,8 +3116,20 @@ where
 
         // 2b. A strip with input records has an input writer, and every filter target passes the
         // contract the writer assumes (#1556 D5). Both are checked before the first write: the
-        // cells' write cannot fail and panics on a target it was never validated for.
+        // cells' write cannot fail and panics on a target it was never validated for. A strip
+        // with offsets-cell writes has an offsets cell on each lane it writes (#1649 D4, D7): the
+        // newest epoch's plan automates the lanes the committed model does, so a missing cell is
+        // an internal fault, refused before any write, never acknowledged and then dropped.
         for (strip, &index) in delta.strips.iter().zip(&resolved) {
+            let fader = &strip_lanes[index].fader;
+            if strip
+                .offsets
+                .iter()
+                .enumerate()
+                .any(|(channel, record)| record.is_some() && !fader.has_offsets(channel))
+            {
+                return LiveCommit::Done(Err(CommandError::Internal));
+            }
             if strip.input.is_empty() {
                 continue;
             }
@@ -3243,6 +3270,12 @@ where
                 let producer = &mut strip_lanes[index];
                 for record in strip.fader_records() {
                     producer.fader.write(stamp, record);
+                }
+                // #1649 D4: each automated lane's new `S`, the whole slot at once.
+                for (channel, record) in strip.offsets.iter().enumerate() {
+                    if let Some(record) = *record {
+                        producer.fader.write_offsets(stamp, channel, record);
+                    }
                 }
                 if let Some(record) = strip.matrix {
                     producer.producer.write(stamp, record);

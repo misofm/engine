@@ -25,7 +25,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::route_controls::RouteControlRecord;
 use builtins::{checked_trim_gain, validate_prepared_input_filter_target};
-use builtins_compiler::{TrackControlRecord, TrackFaderRecord, TrackInputRecord};
+use builtins_compiler::{
+    FaderOffsetsRecord, TrackControlRecord, TrackFaderRecord, TrackInputRecord,
+};
 use controls::{
     ChangedControl, ControlAddress, ControlClass, EffectiveStrip, Family, LocalInputs, ModelView,
     Owner, Section,
@@ -53,8 +55,8 @@ pub fn take_fast_classification_count() -> usize {
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
 use crate::prepare::{
-    EffectiveDiff, LevelRules, OutOfDomain, RouteEditRamps, StripChange, StripEditRamps,
-    effect_instance_records, effective_fader, fader_records, input_records, level_differs,
+    EffectiveDiff, LevelRecords, LevelRules, OutOfDomain, RouteEditRamps, StripChange,
+    StripEditRamps, effect_instance_records, input_records, level_differs, level_records_between,
     matrix_record, route_record_between, route_source_strip, same_params, strip_at,
 };
 use crate::prepare::{GraphJumpLengths, LiveRampRow, LiveRamps, MonitorBase, session_jump_lengths};
@@ -67,6 +69,10 @@ pub struct LiveStripRecords<'a> {
     /// For the strip's fader/mute queue, in push order: `FaderDb` records first, then `Mute`
     /// records, each left before right; `None` after the last one.
     pub fader: [Option<TrackFaderRecord>; 4],
+    /// For the offsets cells of the strip's automated fader lanes (#1649 D4), `[left, right]`:
+    /// the lane's new `S` and the length of its jump, when `S` changes on a lane the post-commit
+    /// model automates. A host writes each to the lane's cell (`FaderCells::write_offsets`).
+    pub offsets: [Option<FaderOffsetsRecord>; 2],
     /// For the strip's matrix/pan queue: the new lowered target, when it changes.
     pub matrix: Option<TrackControlRecord>,
     /// For the strip's input cells (#1556 D2), in write order: the `TrimDb` records, then the
@@ -924,6 +930,7 @@ fn lower_strips<'a>(
         let mut records = LiveStripRecords {
             strip_id: after.id.as_str(),
             fader: [None; 4],
+            offsets: [None; 2],
             matrix: None,
             input: Vec::new(),
         };
@@ -941,13 +948,20 @@ fn lower_strips<'a>(
                 instance: None,
             });
             match lower(family, &ctx, &subject)? {
-                Lowered::Fader(fader) => records.fader = fader,
+                Lowered::Fader(level) => {
+                    records.fader = level.fader;
+                    records.offsets = level.offsets;
+                }
                 Lowered::Matrix(matrix) => records.matrix = matrix,
                 Lowered::Input(input) => records.input = input,
                 Lowered::Effect(_) | Lowered::Route(_) | Lowered::Nothing => {}
             }
         }
-        if records.fader[0].is_some() || records.matrix.is_some() || !records.input.is_empty() {
+        if records.fader[0].is_some()
+            || records.offsets.iter().any(Option::is_some)
+            || records.matrix.is_some()
+            || !records.input.is_empty()
+        {
             delta.strips.push(records);
         }
         for section in &item.instances {
@@ -1032,8 +1046,8 @@ fn lower_routes<'a>(
 trait LevelDiff {
     /// Whether strip `strip`'s effective fader or mute differs, as bits, between the models.
     fn level_changed(&self, strip: usize) -> bool;
-    /// The level records of strip `strip`.
-    fn level_records(&self, strip: usize) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain>;
+    /// The level records of strip `strip`, with its offsets-cell writes (#1649 D4).
+    fn level_records(&self, strip: usize) -> Result<LevelRecords, OutOfDomain>;
     /// The effective gate of route `route` per source lane, in `[current, next]`, or `None` when
     /// the form does not hold it.
     fn gates(&self, route: usize) -> Option<[[bool; 2]; 2]>;
@@ -1053,8 +1067,8 @@ impl LevelDiff for EffectiveDiff<'_> {
         EffectiveDiff::level_changed(self, strip, strip)
     }
 
-    fn level_records(&self, strip: usize) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
-        EffectiveDiff::level_records(self, strip, strip)
+    fn level_records(&self, strip: usize) -> Result<LevelRecords, OutOfDomain> {
+        EffectiveDiff::strip_level_records(self, strip, strip)
     }
 
     fn gates(&self, route: usize) -> Option<[[bool; 2]; 2]> {
@@ -1260,12 +1274,12 @@ impl LevelDiff for LocalDiff<'_> {
             .is_some_and(|strip| level_differs(&strip.before, &strip.after))
     }
 
-    fn level_records(&self, strip: usize) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
+    fn level_records(&self, strip: usize) -> Result<LevelRecords, OutOfDomain> {
         let strip = self.strip(strip).ok_or(OutOfDomain)?;
         let change = self.change(strip);
-        fader_records(
-            &effective_fader(&strip.before),
-            &effective_fader(&strip.after),
+        level_records_between(
+            &strip.before,
+            &strip.after,
             self.rules.lengths(&change),
             || controls::automated_fader_lanes(self.rules.next.structure(), change.id),
         )
@@ -1362,7 +1376,7 @@ struct Target<'s, 'm, 'a> {
 
 /// What one lowering produced.
 enum Lowered<'a> {
-    Fader([Option<TrackFaderRecord>; 4]),
+    Fader(LevelRecords),
     Matrix(Option<TrackControlRecord>),
     Input(Vec<TrackInputRecord>),
     Effect(Option<LiveEffectRecords<'a>>),

@@ -12,9 +12,10 @@ use builtins::{
     PreparedInputFilterTarget, checked_fader_gain, checked_trim_gain, validate_input_filter_pair,
 };
 use builtins_compiler::{
-    BuiltinCompileCaps, LiveValuesSuperseded, MeterConsumer, MeterRequest, SelectedMeterRequest,
-    TrackControlProducer, TrackControlRecord, TrackControlRequest, TrackFaderRecord,
-    TrackInputRecord, lower_matrix_or_pan, prepare_selected_session_builtins_between_render_calls,
+    BuiltinCompileCaps, FaderOffsetsRecord, LiveValuesSuperseded, MeterConsumer, MeterRequest,
+    SelectedMeterRequest, TrackControlProducer, TrackControlRecord, TrackControlRequest,
+    TrackFaderRecord, TrackInputRecord, lower_matrix_or_pan,
+    prepare_selected_session_builtins_between_render_calls,
     prepare_selected_session_builtins_with_live_controls,
     prepare_session_builtins_between_render_calls, prepare_session_builtins_with_live_controls,
     session_structural_symmetry,
@@ -4272,10 +4273,60 @@ pub(crate) fn fader_records(
     Ok(fader)
 }
 
-/// A strip's effective fader and mute as a [`session::DualMonoFader`], the shape its stage's
-/// records are derived from.
-/// Whether a strip's effective fader or mute differs, as bits: the one test of "this strip's level
-/// moved", for the dense diff and the local one.
+/// The level records of one strip: the [`fader_records`] of its fader/mute stage and the
+/// offsets-cell writes of its automated fader lanes (#1649 D4), `[left, right]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct LevelRecords {
+    pub(crate) fader: [Option<TrackFaderRecord>; 4],
+    pub(crate) offsets: [Option<FaderOffsetsRecord>; 2],
+}
+
+/// The level records that bring a strip from `before`'s effective values to `after`'s: its
+/// [`fader_records`], and for each lane that `automated` names (the lanes the post-change model
+/// automates) whose `S` ([`controls::EffectiveStrip::offsets_sum`]) differs in bits, one
+/// offsets-cell write of `after`'s `S` with the lane's fader length (#1649 D4, departure 1: the
+/// one length rule, so an automated and a plain member of one VCA edit ramp alike). A VCA ride, a
+/// membership change, a nested VCA, an added and a removed VCA each change only `S` on such a
+/// lane. `automated` is asked at most once.
+///
+/// # Errors
+///
+/// [`OutOfDomain`] as [`fader_records`].
+pub(crate) fn level_records_between(
+    before: &controls::EffectiveStrip,
+    after: &controls::EffectiveStrip,
+    lengths: LevelLengths,
+    automated: impl Fn() -> [bool; 2],
+) -> Result<LevelRecords, OutOfDomain> {
+    let lanes = core::cell::OnceCell::new();
+    let automated = || *lanes.get_or_init(&automated);
+    let fader = fader_records(
+        &effective_fader(before),
+        &effective_fader(after),
+        lengths,
+        automated,
+    )?;
+    let mut offsets = [None; 2];
+    let moved =
+        [0, 1].map(|lane| before.offsets_sum[lane].to_bits() != after.offsets_sum[lane].to_bits());
+    if moved.contains(&true) {
+        let automated = automated();
+        for lane in 0..2 {
+            if moved[lane] && automated[lane] {
+                offsets[lane] = Some(FaderOffsetsRecord {
+                    offsets_sum: after.offsets_sum[lane],
+                    smoothing_samples: lengths.fader[lane],
+                });
+            }
+        }
+    }
+    Ok(LevelRecords { fader, offsets })
+}
+
+/// Whether a strip's effective fader, mute or offset sum `S` differs, as bits: the one test of
+/// "this strip's level moved", for the dense diff and the local one. `S` moves alone when a VCA
+/// edit leaves the effective fader's bits (a clamp, a zero's sign), and an automated lane hears
+/// `S` (#1649).
 #[cfg(feature = "control-provider")]
 pub(crate) fn level_differs(
     before: &controls::EffectiveStrip,
@@ -4283,8 +4334,11 @@ pub(crate) fn level_differs(
 ) -> bool {
     before.fader_db.map(f32::to_bits) != after.fader_db.map(f32::to_bits)
         || before.mute != after.mute
+        || before.offsets_sum.map(f64::to_bits) != after.offsets_sum.map(f64::to_bits)
 }
 
+/// A strip's effective fader and mute as a [`session::DualMonoFader`], the shape its stage's
+/// records are derived from.
 pub(crate) fn effective_fader(effective: &controls::EffectiveStrip) -> session::DualMonoFader {
     session::DualMonoFader {
         left_db: effective.fader_db[0],
@@ -4555,10 +4609,25 @@ impl<'a> EffectiveDiff<'a> {
         before: usize,
         after: usize,
     ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
+        self.strip_level_records(before, after)
+            .map(|records| records.fader)
+    }
+
+    /// The level records of one strip with its offsets-cell writes (#1649 D4): the live path's
+    /// form of [`Self::level_records`].
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfDomain`] as [`fader_records`].
+    pub(crate) fn strip_level_records(
+        &self,
+        before: usize,
+        after: usize,
+    ) -> Result<LevelRecords, OutOfDomain> {
         let change = self.change(before, after);
-        fader_records(
-            &effective_fader(&self.before.strips[before]),
-            &effective_fader(&self.after.strips[after]),
+        level_records_between(
+            &self.before.strips[before],
+            &self.after.strips[after],
             self.rules.lengths(&change),
             || controls::automated_fader_lanes(self.rules.next.structure(), change.id),
         )

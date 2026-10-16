@@ -8093,6 +8093,31 @@ mod set_control {
             })
         }
 
+        /// [`document`] with `eq0`'s left fader also automated, flat at `member` (#1649): its
+        /// gain is composed at render from the curve and the offsets cell's `S`.
+        fn automated_document(member: f32, offset: f32) -> String {
+            with_model(&document(member, offset), |model| {
+                model.automation.push(session::Automation {
+                    id: id("eq0-flat"),
+                    target: session::ControlAddress {
+                        owner: session::Owner::Strip(id("eq0")),
+                        section: session::Section::Builtins,
+                        control: FADER_DB,
+                        lane: session::ParameterChannel::Left,
+                    },
+                    segments: vec![session::AutomationSegment {
+                        shape: session::AutomationShape::Step,
+                        start_sample: 0,
+                        end_sample: SOURCE_FRAMES,
+                        start_value: member,
+                        end_value: member,
+                        unit: session::ParameterUnit::Db,
+                    }],
+                    offset: session::AutomationOffset::default(),
+                });
+            })
+        }
+
         /// The fixture is not vacuous: the hostile word composes the pair to another `f32`, and
         /// that `f32` converts to another gain.
         fn assert_the_hostile_word_rounds_the_composition() {
@@ -8171,8 +8196,9 @@ mod set_control {
             }
         }
 
-        /// TBD48 D2 (C ABI): a live fader move on a VCA member, and a live VCA offset move over
-        /// it, each made while the caller's thread runs FTZ, DAZ and round toward zero, render
+        /// TBD48 D2 (C ABI): a live fader move on a VCA member, a live VCA offset move over it,
+        /// and (#1649) that VCA move over a member whose fader is automated, which writes its
+        /// offsets cell, each made while the caller's thread runs FTZ, DAZ and round toward zero, render
         /// from the end of their ramp the bits of the same committed session prepared on a
         /// canonical thread, and the catalog's derived fader row holds the canonical composition.
         /// The pair's composition rounds to another `f32`, and another gain, under that word
@@ -8193,6 +8219,269 @@ mod set_control {
                 &document(MEMBER_DB, 0.0),
                 set(vca_row("inner", VCA_OFFSET_DB, Lane::Left), OFFSET_DB, None),
             );
+            // #1649: the same VCA move over an automated member writes its offsets cell.
+            live_move_under_hostile_word(
+                "a live VCA move on an automated lane",
+                &automated_document(MEMBER_DB, 0.0),
+                set(vca_row("inner", VCA_OFFSET_DB, Lane::Left), OFFSET_DB, None),
+            );
+        }
+    }
+
+    /// #1649: a VCA edit over a member with stored fader automation, on the C ABI.
+    mod automated_vca {
+        use super::*;
+
+        /// The fader ride of `eq0` (both lanes): linear from 0 dB at sample 0 to -12 dB at the
+        /// source's end, so every grid point moves the lane.
+        fn ride() -> session::Automation {
+            session::Automation {
+                id: id("eq0-fader-ride"),
+                target: session::ControlAddress {
+                    owner: session::Owner::Strip(id("eq0")),
+                    section: session::Section::Builtins,
+                    control: FADER_DB,
+                    lane: session::ParameterChannel::Both,
+                },
+                segments: vec![session::AutomationSegment {
+                    shape: session::AutomationShape::Linear,
+                    start_sample: 0,
+                    end_sample: SOURCE_FRAMES,
+                    start_value: 0.0,
+                    end_value: -12.0,
+                    unit: session::ParameterUnit::Db,
+                }],
+                offset: session::AutomationOffset::default(),
+            }
+        }
+
+        /// The ten-track session at 48 kHz with `eq0` riding its fader, VCA `v` holding `eq0` and
+        /// `eq1` (which has no automation), and `change` applied.
+        fn document(change: impl FnOnce(&mut SessionModel)) -> String {
+            with_model(&long_session(10, 48_000), |model| {
+                model.automation.push(ride());
+                model.vcas.push(vca_of("v", &["eq0", "eq1"]));
+                change(model);
+            })
+        }
+
+        /// A VCA of `db` on both lanes holding `members`.
+        fn vca_at(name: &str, db: f32, members: &[&str]) -> session::Vca {
+            let mut vca = vca_of(name, members);
+            vca.fader.left_db = db;
+            vca.fader.right_db = db;
+            vca
+        }
+
+        /// `(eq0's offsets-cell writes [left, right], eq1's fader/mute cell writes)` in the current
+        /// epoch.
+        fn writes(rig: &Rig) -> ([Option<u64>; 2], [u64; 4]) {
+            let snapshot = crate::ffi::test_transaction_snapshot(rig.session);
+            let epoch = snapshot.provider_epoch;
+            let offsets = snapshot
+                .strip_offsets_cells
+                .iter()
+                .find(|(row, strip, _)| *row == epoch && &**strip == "eq0")
+                .map(|&(_, _, writes)| writes)
+                .expect("eq0's producer");
+            let fader = snapshot
+                .strip_cells
+                .iter()
+                .find(|(row, strip, ..)| *row == epoch && &**strip == "eq1")
+                .map(|&(_, _, fader, _)| fader)
+                .expect("eq1's producer");
+            (offsets, fader)
+        }
+
+        /// One case: a rig on `before` plays four blocks and takes `edits` with path `path`, one
+        /// revision on the same plan with no candidate. From the end of a jump of `jump` samples
+        /// and the first grid ramp after it (two grid periods of 64), the output equals a plan
+        /// prepared from the committed session fed the same PCM from frame 0, and no render block
+        /// allocates or frees. `heard`: the output differs from `before`'s own plan there. Returns
+        /// the cell writes the edit made, as [`writes`] counts them.
+        fn case(
+            label: &str,
+            before: &str,
+            edits: &[SessionEdit],
+            path: protocol::EditPath,
+            jump: u32,
+            heard: bool,
+        ) -> ([Option<u64>; 2], [u64; 4]) {
+            let mut rig = Rig::new(before);
+            for _ in 0..4 {
+                rig.step();
+            }
+            let (revision, _, epoch, pending) = rig.summary();
+            let (offsets_before, fader_before) = writes(&rig);
+            let bytes = rig.transaction(edits);
+            let (result, response) = rig.send(&bytes);
+            assert_eq!(result, crate::RESULT_OK, "{label}");
+            assert_eq!(edit_path_of(&response), path, "{label}: path");
+            assert_eq!(
+                (rig.summary().0, rig.summary().2, rig.summary().3),
+                (revision + 1, epoch, pending),
+                "{label}: one revision, the same plan, no candidate"
+            );
+            let (offsets_after, fader_after) = writes(&rig);
+            let committed = rig.snapshot();
+            let k = window(rig.latency(), jump + 128, rig.quantum);
+            let edit_block = rig.block;
+            let mut live = Vec::new();
+            for _ in 0..k + 4 {
+                let (pcm, used) = rig.step_counted();
+                assert_eq!(
+                    (used.allocations, used.deallocations),
+                    (0, 0),
+                    "{label}: a render block allocated or freed"
+                );
+                live.push(pcm);
+            }
+            let reference = Reference::run(&committed, rig.block);
+            let unedited = Reference::run(before, rig.block);
+            let mut moved = false;
+            for (offset, pcm) in live.iter().enumerate().skip(k as usize) {
+                let block = edit_block as usize + offset;
+                assert_eq!(
+                    bits(pcm),
+                    bits(&reference[block]),
+                    "{label}: block {block} renders the committed session's plan"
+                );
+                moved |= bits(pcm) != bits(&unedited[block]);
+            }
+            assert_eq!(
+                moved, heard,
+                "{label}: heard exactly when the edit moves a value"
+            );
+            let delta = |after: Option<u64>, before: Option<u64>| {
+                after.zip(before).map(|(after, before)| after - before)
+            };
+            (
+                [
+                    delta(offsets_after[0], offsets_before[0]),
+                    delta(offsets_after[1], offsets_before[1]),
+                ],
+                core::array::from_fn(|cell| fader_after[cell] - fader_before[cell]),
+            )
+        }
+
+        /// The session's fader length, in samples: the `VcaOffset` row's length of a VCA edit with
+        /// no length of its own.
+        fn fader_length(document: &str) -> u32 {
+            parse_session_json(document)
+                .expect("model")
+                .control_smoothing_samples()
+                .fader
+        }
+
+        /// #1649 gates 1 and 3 (C ABI). A -6 dB move of `v` on a playing engine is `live`: the
+        /// automated member `eq0` takes one offsets-cell write per lane and the plain member `eq1`
+        /// one `FaderDb` (a `Both` record: one write to each fader cell), and from the end of the
+        /// jump and the first grid ramp after it the output equals a plan prepared with `v` at
+        /// -6 dB and the same automation. With the edit's own ramp of 256 samples both members
+        /// settle within 256 samples (a longer ramp on either would still differ in the window).
+        /// A move of `v` to its current value, and a move of a VCA that does not reach `eq0`,
+        /// write no offsets cell and move no bit of `eq0`.
+        ///
+        /// Test value: red if a VCA move does not reach the offsets cell (the ride keeps the old
+        /// composition, so the window differs from the plan), if the automated or the plain
+        /// member takes another length than the edit's, if the plain member loses its record, or
+        /// if an unchanged offset still writes the cell or retargets the lane.
+        #[test]
+        fn a_vca_move_over_an_automated_member_is_live_and_renders_the_prepared_plan() {
+            bench_support::alloc::assert_installed();
+            let before = document(|_| {});
+            let fader = fader_length(&before);
+            let both = |ramp| vec![set(vca_row("v", VCA_OFFSET_DB, Lane::Both), -6.0, ramp)];
+            for (label, ramp, jump) in [
+                ("the session's length", None, fader),
+                ("the edit's own 256 samples", Some(256), 256),
+            ] {
+                let (offsets, fader_cells) = case(
+                    label,
+                    &before,
+                    &both(ramp),
+                    protocol::EditPath::Live,
+                    jump,
+                    true,
+                );
+                assert_eq!(offsets, [Some(1), Some(1)], "{label}: eq0's offsets cells");
+                assert_eq!(fader_cells, [1, 1, 0, 0], "{label}: eq1's one `FaderDb`");
+            }
+            let (offsets, fader_cells) = case(
+                "v to its current value",
+                &before,
+                &[set(vca_row("v", VCA_OFFSET_DB, Lane::Both), 0.0, None)],
+                protocol::EditPath::ModelOnly,
+                fader,
+                false,
+            );
+            assert_eq!((offsets, fader_cells), ([Some(0), Some(0)], [0; 4]));
+            let far = document(|model| model.vcas.push(vca_of("far", &["eq2"])));
+            let (offsets, _) = case(
+                "a VCA that does not reach eq0",
+                &far,
+                &[set(vca_row("far", VCA_OFFSET_DB, Lane::Both), -6.0, None)],
+                protocol::EditPath::Live,
+                fader,
+                true,
+            );
+            assert_eq!(offsets, [Some(0), Some(0)], "eq0's cells are not written");
+        }
+
+        /// #1649 gate 4 (C ABI). Each edit that changes which VCAs reach the automated member, or
+        /// how many VCAs the session has, is `live` and from the end of the jump renders a plan
+        /// prepared from the committed session: `eq0` added to a second VCA; that VCA (holding
+        /// `eq0`) made a member of `v`, so `v` reaches `eq0` through it; a new VCA that reaches
+        /// `eq0`; the first VCA of a session that had none; a VCA that reaches `eq0` removed.
+        ///
+        /// Test value: red if any of these rebuilds, if a lane no VCA reached had no cell to write
+        /// when a VCA is added, or if a removed VCA leaves its offset in `S`.
+        #[test]
+        fn vca_reach_and_count_changes_over_an_automated_member_are_live() {
+            bench_support::alloc::assert_installed();
+            let upsert = |vca: session::Vca| SessionEdit::UpsertVca { vca };
+            let base = document(|model| {
+                model.vcas[0] = vca_at("v", -3.0, &["eq0", "eq1"]);
+                model.vcas.push(vca_at("w", -4.0, &["eq2"]));
+            });
+            let nested = document(|model| {
+                model.vcas[0] = vca_at("v", -3.0, &["eq1"]);
+                model.vcas.push(vca_at("w", -4.0, &["eq0"]));
+            });
+            let bare = document(|model| model.vcas.clear());
+            let fader = fader_length(&base);
+            let cases: [(&str, &str, Vec<SessionEdit>); 5] = [
+                (
+                    "eq0 added to a second VCA",
+                    &base,
+                    vec![upsert(vca_at("w", -4.0, &["eq0", "eq2"]))],
+                ),
+                (
+                    "the VCA holding eq0 nested in v",
+                    &nested,
+                    vec![upsert(vca_at("v", -3.0, &["eq1", "w"]))],
+                ),
+                (
+                    "a new VCA that reaches eq0",
+                    &base,
+                    vec![upsert(vca_at("x", -2.0, &["eq0"]))],
+                ),
+                (
+                    "the first VCA of the session",
+                    &bare,
+                    vec![upsert(vca_at("v", -6.0, &["eq0", "eq1"]))],
+                ),
+                (
+                    "a VCA that reaches eq0 removed",
+                    &base,
+                    vec![SessionEdit::RemoveVca { vca_id: id("v") }],
+                ),
+            ];
+            for (label, before, edits) in cases {
+                let (offsets, _) =
+                    case(label, before, &edits, protocol::EditPath::Live, fader, true);
+                assert_eq!(offsets, [Some(1), Some(1)], "{label}: eq0's offsets cells");
+            }
         }
     }
 }
