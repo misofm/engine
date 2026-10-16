@@ -3359,3 +3359,77 @@ fn a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_hosts(
         }
     }
 }
+
+/// The C ABI plan's `latency_samples`, through the exported resource query.
+fn c_latency(c_abi: &CAbi) -> u64 {
+    // SAFETY: Every field of the report is an integer, for which zero is a valid value.
+    let mut report: capi::PlanResourceReport = unsafe { core::mem::zeroed() };
+    report.struct_size = capi::PLAN_RESOURCE_REPORT_SIZE;
+    // SAFETY: The plan is live; `report` is one complete local report.
+    let code = unsafe { capi::miso_engine_v1_plan_resources(c_abi.plan, &mut report) };
+    assert_eq!(code, C_RESULT_OK);
+    report.latency_samples
+}
+
+/// #1323 on both hosts: removing the true-peak limiter insert keeps every node's latency (#1285),
+/// and a declared discontinuity, `miso_engine_v1_declare_discontinuity` on the C ABI and the
+/// browser host's `declare_discontinuity`, publishes the committed session with no floors on both.
+/// From the block after it the two hosts render the same bits, and the C ABI reports a lower
+/// latency than before the declaration.
+///
+/// Test value: red if one host's entry does not reach the control plane's declaration, or
+/// reaches another rule (that host keeps the floors, and its remaining tracks play later than the
+/// other host's), or if the declaration is a no-op on both (the C ABI latency stays floored).
+#[test]
+fn a_declared_discontinuity_resets_the_floors_alike_on_both_hosts() {
+    for rate in [48_000, 96_000] {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..4, &format!("{rate} Hz before"));
+        let edits = [SessionEdit::RemoveTrackEffect {
+            track_id: id(LIMITER.track.id),
+            rack_name: session::RackName::Inserts,
+            effect_id: id(LIMITER.id),
+        }];
+        let (b_verdict, _) = browser.transaction_reply(&edits);
+        let (c_verdict, _) = c_abi.transaction(&edits);
+        c_abi.drain_reliable();
+        assert!(
+            matches!(
+                b_verdict,
+                Verdict::Applied {
+                    path: EditPath::Rebuild,
+                    ..
+                }
+            ),
+            "{rate} Hz: {b_verdict:?}"
+        );
+        assert_eq!(b_verdict, c_verdict, "{rate} Hz");
+        same_blocks(
+            &mut browser,
+            &mut c_abi,
+            4..8,
+            &format!("{rate} Hz floored"),
+        );
+        let floored = c_latency(&c_abi);
+        assert_eq!(
+            browser.host.declare_discontinuity(None),
+            host_web::RESULT_OK,
+            "{rate} Hz"
+        );
+        // SAFETY: The session is live and used by this thread alone.
+        let code = unsafe { capi::miso_engine_v1_declare_discontinuity(c_abi.session) };
+        assert_eq!(code, C_RESULT_OK, "{rate} Hz");
+        same_blocks(
+            &mut browser,
+            &mut c_abi,
+            8..16,
+            &format!("{rate} Hz declared"),
+        );
+        assert!(
+            c_latency(&c_abi) < floored,
+            "{rate} Hz: the declaration resets the floors ({floored})"
+        );
+    }
+}

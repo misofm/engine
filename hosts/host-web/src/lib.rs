@@ -1620,12 +1620,40 @@ impl ReadyOwnership {
         analysis: Option<&mut SpectrumAnalysis>,
         applied_at_sample: u64,
     ) -> Result<usize, control_plane::CommandError> {
+        self.run_control(analysis, applied_at_sample, |control| {
+            control.command(request, output_capacity)
+        })
+    }
+
+    /// Declare a discontinuity through the control plane (#1323), the function the C ABI's
+    /// `miso_engine_v1_declare_discontinuity` runs. A plan it publishes is kept and counted as
+    /// [`Self::run_command`] keeps a rebuild's.
+    fn declare_discontinuity(
+        &mut self,
+        analysis: Option<&mut SpectrumAnalysis>,
+        applied_at_sample: u64,
+    ) -> Result<(), control_plane::CommandError> {
+        self.run_control(analysis, applied_at_sample, |control| {
+            control.declare_discontinuity().map(|()| 0)
+        })
+        .map(|_| ())
+    }
+
+    /// Run one control-plane call that may publish a replacement plan (#1290a, #1323): reclaim
+    /// first, check the room for the plan's tables, run `call`, and keep the tables of a plan it
+    /// published for its adoption block.
+    fn run_control(
+        &mut self,
+        analysis: Option<&mut SpectrumAnalysis>,
+        applied_at_sample: u64,
+        call: impl FnOnce(&mut WebSession) -> Result<usize, control_plane::CommandError>,
+    ) -> Result<usize, control_plane::CommandError> {
         self.reclaim_shapes(analysis);
         if self.pending_shapes.len() == self.pending_shapes.capacity() {
             return Err(control_plane::CommandError::Backpressure);
         }
         let before = self.control.newest_plan_epoch();
-        let result = self.control.command(request, output_capacity);
+        let result = call(&mut self.control);
         // Whatever the preparer left is taken: a command refused after its preparation leaves
         // tables nothing will read.
         let (prepared, handover) = self.record.lock().map_or((None, None), |mut record| {
@@ -2443,28 +2471,63 @@ impl AudioWorkletEngineHost {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
             }
-            Err(error) => {
-                let diagnostic = error.diagnostic();
-                let kept = diagnostic.len().min(buffers.diagnostic.len());
-                buffers.diagnostic[..kept].copy_from_slice(&diagnostic[..kept]);
-                self.diagnostic_len = kept;
-                self.control_response = ControlResponse::Diagnostic;
-                self.record(match error {
-                    control_plane::CommandError::Invalid => RESULT_INVALID_ARGUMENT,
-                    control_plane::CommandError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
-                    control_plane::CommandError::Backpressure => RESULT_BACKPRESSURE,
-                    // #1290a: a transaction that changes the rate or the quantum cannot be applied
-                    // to a running plan; the page re-prepares the session from its document.
-                    control_plane::CommandError::CompileRejected(_)
-                        if diagnostic.starts_with(control_plane::REPREPARE_REQUIRED.as_bytes()) =>
-                    {
-                        RESULT_REPREPARE_REQUIRED
-                    }
-                    control_plane::CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
-                    control_plane::CommandError::Internal => RESULT_INTERNAL,
-                })
-            }
+            Err(error) => self.refuse_control(&error),
         }
+    }
+
+    /// Declare a discontinuity (#1323): the next block this host renders need not continue the
+    /// previous output, because the page has stopped or is about to seek every source. The page
+    /// calls it at a stop and before a seek of every source. It runs the control plane's
+    /// `SessionState::declare_discontinuity`, the function the C ABI's
+    /// `miso_engine_v1_declare_discontinuity` runs: if the newest plan runs behind its natural
+    /// timing (a latency floor of a structural transaction raised it, #1285), the committed
+    /// session is prepared again with no floors and only its sources carried, and published for
+    /// the next block; otherwise nothing is published. The model and the revision do not change.
+    /// Control work, as [`Self::control_command`]: never `process()`.
+    ///
+    /// Results: [`RESULT_OK`]; [`RESULT_WRONG_STATE`] for a host that is not ready; and the
+    /// refusals of [`Self::control_command`] for a rebuild, with the core's diagnostic at
+    /// [`Self::control_response`]. A refusal changes nothing.
+    pub fn declare_discontinuity(&mut self, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
+        self.control_response = ControlResponse::None;
+        if self.status.state != STATE_READY {
+            return self.record(RESULT_WRONG_STATE);
+        }
+        let applied_at_sample = self.status.next_absolute_sample;
+        let Some(ready) = self.ready.as_mut() else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        };
+        match ready.declare_discontinuity(analysis, applied_at_sample) {
+            Ok(()) => self.record(RESULT_OK),
+            Err(error) => self.refuse_control(&error),
+        }
+    }
+
+    /// A refused control call (#1562a D1, #1323): the core's diagnostic into the session
+    /// diagnostic and the response, and the result code for `error`.
+    fn refuse_control(&mut self, error: &control_plane::CommandError) -> u32 {
+        let Some(buffers) = self.buffers.as_mut() else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        };
+        let diagnostic = error.diagnostic();
+        let kept = diagnostic.len().min(buffers.diagnostic.len());
+        buffers.diagnostic[..kept].copy_from_slice(&diagnostic[..kept]);
+        self.diagnostic_len = kept;
+        self.control_response = ControlResponse::Diagnostic;
+        self.record(match error {
+            control_plane::CommandError::Invalid => RESULT_INVALID_ARGUMENT,
+            control_plane::CommandError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
+            control_plane::CommandError::Backpressure => RESULT_BACKPRESSURE,
+            // #1290a: a transaction that changes the rate or the quantum cannot be applied
+            // to a running plan; the page re-prepares the session from its document.
+            control_plane::CommandError::CompileRejected(_)
+                if diagnostic.starts_with(control_plane::REPREPARE_REQUIRED.as_bytes()) =>
+            {
+                RESULT_REPREPARE_REQUIRED
+            }
+            control_plane::CommandError::CompileRejected(_) => RESULT_COMPILE_REJECTED,
+            control_plane::CommandError::Internal => RESULT_INTERNAL,
+        })
     }
 
     /// Dequeue the next event of `lane` (issue #1570b D1): `0` is the reliable lane, `1` the lossy

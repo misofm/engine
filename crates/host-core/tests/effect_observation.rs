@@ -547,12 +547,8 @@ fn prepare_successor(
             &caps(),
             &successor_request,
             host_core::SuccessorBase {
-                inventory: &first.prepared.inventory,
-                committed,
-                revision: 2,
-                edit_ramps: &session::EditRamps::new(),
-                monitor: host_core::MonitorBase::NONE,
                 observation: bindings,
+                ..host_core::SuccessorBase::new(&first.prepared.inventory, committed, 2)
             },
         ),
         None => host_core::prepare_host_runtime_with_live_controls(compiled, &caps(), &request),

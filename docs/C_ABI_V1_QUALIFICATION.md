@@ -917,9 +917,51 @@ that window is admitted against the plan that renders.
   first plan's timing. A successor prepared across a withdrawn candidate takes the running plan's
   floors (#1698's base is the running plan's inventory). A fresh `miso_engine_v1_compile_session`
   and a browser boot compile with no floors; the lower latency returns there, or at a
-  host-declared discontinuity once #1323 provides one. There is no permanent latency reserve.
+  host-declared discontinuity (#1323, below). There is no permanent latency reserve.
 - **Evidence.** `capi` `runtime::tests::removing_a_limited_track_keeps_the_plan_latency`
   (`RemoveTrack` of a limited track: an unchanged `latency_samples` after the swap, and every
   block equal to the floored reference). With no floors neither the program nor its canonical bytes
   change: the graph fixture corpus, `scripts/check-graph-determinism.sh` and `console-workload`
   keep their digests.
+
+## A host-declared discontinuity resets the floors (#1323)
+
+- **Surface.** `miso_engine_v1_declare_discontinuity(session)`, an in-place V1 amendment: one new
+  exported symbol, announced by `MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY` (the next free bit,
+  256) in the capability report, whose feature mask grows to include it; no struct, size or
+  `ABI_VERSION` changes. The mask is the OR of every feature symbol and is never compared with a
+  literal (`capi` `abi::tests::masks_and_result_codes_are_frozen` folds the symbols; `abi_smoke.c`
+  and `header_smoke.cpp` pin the bit inside the mask and the signature, and `abi_smoke.c` calls
+  the symbol with a null session for `INVALID_ARGUMENT`). The frozen exported set is now 18
+  `miso_engine_v1_*` definitions. It is a session call, serialized with the others; it runs the
+  service step first. The browser's `miso_engine_web_v1_declare_discontinuity(handle)` forwards to
+  the same control-plane function, `control_plane::SessionState::declare_discontinuity` (root
+  ruling B15-R7); the browser SDK surface is #1296's.
+- **Duty.** A host calls it at a stop, and before a seek of every source: the next block it renders
+  need not continue the previous output.
+- **Behavior.** If the newest plan (the waiting replacement, else the running plan) runs behind its
+  natural timing (a floor raised some node's input arrival above its natural one; the inventory
+  records each raised node's natural arrival beside its floored one), the committed model is
+  prepared again as a successor at a discontinuity (`SuccessorBase::discontinuity`): no floors, and
+  only the source consumers (ring, generation, read position) carry, so no frame is repeated or
+  skipped and every other owner starts at rest. It is published `Next` with the committed
+  revision and its retirement credit reserved. A waiting replacement, a `Primed` warm successor
+  included (it always runs behind its natural timing), is superseded through #1310: withdrawn, the
+  donor of the rings it created, its persisting producers returned to the running epoch, then
+  dropped. Its revisions complete when the successor is adopted: `EXACT`, with `SUPERSEDED` for
+  the revisions it had folded in, never `TRANSITION_FALLBACK`. With nothing to reset, or at
+  revision 0 (root ruling B15-R6), the call returns `OK` and publishes nothing. The model and the
+  revision never change; a refusal (a preparation or cap rejection, backpressure) changes nothing,
+  and a withdrawn replacement is published again whole.
+- **Supersession of the successor.** A structural transaction that supersedes the discontinuity
+  successor before render adopts it is prepared at the same discontinuity: render never played the
+  successor, so the pair is one transaction "declare, then edit" against the running plan, whose
+  combined twin has no floors.
+- **Evidence.** `capi` `runtime::tests::` gates
+  `a_declared_discontinuity_reports_the_natural_latency_on_the_c_abi`,
+  `a_declaration_with_nothing_to_reset_publishes_nothing`, `a_refused_declaration_changes_nothing`,
+  `a_declared_stop_supersedes_a_pending_warm_successor_alone_and_folded` and
+  `an_edit_that_supersedes_a_discontinuity_successor_is_prepared_at_it`; `host-core`
+  `successor_swap::a_declared_discontinuity_resets_the_floors_at_every_rate_and_width`; `host-web`
+  `tests::structural_apply::a_declared_discontinuity_resets_the_floors_on_the_browser` and the
+  parity row `control_parity::a_declared_discontinuity_resets_the_floors_alike_on_both_hosts`.

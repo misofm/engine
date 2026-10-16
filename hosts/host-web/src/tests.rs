@@ -5936,12 +5936,8 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
 
         let edit_ramps = session::EditRamps::new();
         let base = host_core::SuccessorBase {
-            inventory: &boot.inventory,
-            committed: model,
-            revision: 1,
             edit_ramps: &edit_ramps,
-            monitor: host_core::MonitorBase::NONE,
-            observation: &host_core::NO_OBSERVATION,
+            ..host_core::SuccessorBase::new(&boot.inventory, model, 1)
         };
         let (mut successor, successor_handles) = preparer
             .prepare(&compiled, &caps, lanes, Some(base), &superseded)
@@ -7061,6 +7057,149 @@ mod structural_apply {
         assert!(
             rig.host.read_observation_addresses(&[address]).is_ok(),
             "the reader the catalog names is the successor's"
+        );
+        assert_eq!(rig.host.service(None), RESULT_OK);
+    }
+
+    /// #1323 gate 2 on the browser: the #1285 removal of a muted track behind a true-peak limiter
+    /// keeps A's latency; `declare_discontinuity`, the host method
+    /// `miso_engine_web_v1_declare_discontinuity` runs, then publishes the committed session with no
+    /// floors. After one render the plan's latency is the natural one, and from that block every
+    /// block equals a fresh boot of the committed model fed from the frame the carried source stood
+    /// at. The revision does not move. A wrong handle is refused.
+    ///
+    /// Test value: red if the browser entry does not reach the control plane's declaration (the
+    /// floors survive, no plan is pending and the remaining tracks stay late), or if the successor
+    /// carries any state but the source (the filters differ from a fresh boot's).
+    #[test]
+    fn a_declared_discontinuity_resets_the_floors_on_the_browser() {
+        const DECLARED_AT: u64 = 10;
+        let mut model = gate_model();
+        let limited = &mut model.tracks[0];
+        limited.fader.left_mute = true;
+        limited.fader.right_mute = true;
+        limited.inserts.effects.push(session::Effect {
+            id: StableId::parse("lim").expect("insert ID"),
+            identity: session::EffectIdentity::Native {
+                effect_id: StableId::parse("miso.true-peak-limiter").expect("limiter id"),
+            },
+            quality: session::EffectQuality::Normal,
+            bypass: false,
+            link_mode: session::LinkMode::Maximum,
+            params: Vec::new(),
+            sidechain: session::SidechainDeclaration::None,
+        });
+        let edits = [
+            SessionEdit::RemoveRoute {
+                route_id: model.routes[0].id.clone(),
+            },
+            SessionEdit::RemoveTrack {
+                track_id: model.tracks[0].id.clone(),
+            },
+        ];
+        let latency = |rig: &Rig| {
+            rig.host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .queries
+                .resources()
+                .latency_samples
+        };
+        assert_eq!(
+            crate::ffi::miso_engine_web_v1_declare_discontinuity(u32::MAX),
+            RESULT_INVALID_ARGUMENT
+        );
+        let mut rig = Rig::boot(&model, options(), None);
+        let floored = latency(&rig);
+        assert!(floored > 0, "the limiter delays A");
+        for _ in 0..APPLY_BEFORE {
+            rig.step();
+        }
+        assert!(matches!(
+            rig.apply(&edits, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        while rig.block < DECLARED_AT {
+            rig.step();
+        }
+        assert_eq!(
+            latency(&rig),
+            floored,
+            "the removal keeps A's latency (#1285)"
+        );
+        let revision = rig.host.committed_revision();
+        assert_eq!(rig.host.declare_discontinuity(None), RESULT_OK);
+        assert!(rig.pending(), "the declaration published a plan");
+        while rig.block < BLOCKS {
+            rig.step();
+        }
+        assert_eq!(rig.host.committed_revision(), revision);
+
+        let document = canonical_session_json(
+            rig.host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .control
+                .committed_session()
+                .normalized_model(),
+        )
+        .expect("canonical session");
+        let committed = parse_session_json(&document).expect("the committed model parses");
+        let mut fresh = Rig::boot(&committed, options(), None);
+        let natural = latency(&fresh);
+        assert!(natural < floored, "B's natural latency is lower");
+        assert_eq!(
+            latency(&rig),
+            natural,
+            "the plan runs at its natural latency"
+        );
+        // The fresh boot reads the PCM from the frame the carried source stood at.
+        let quantum = u64::from(QUANTUM);
+        let offset = DECLARED_AT * quantum;
+        let expected: Vec<Vec<u32>> = (0..BLOCKS - DECLARED_AT)
+            .map(|block| {
+                let lane = |lane: u64| {
+                    (block * quantum..(block + 1) * quantum)
+                        .map(|frame| strip_sample(0, lane, frame + offset))
+                        .collect::<Vec<f32>>()
+                };
+                let planes = [lane(0), lane(1)];
+                let views: [&[f32]; 2] = [&planes[0], &planes[1]];
+                assert_eq!(
+                    fresh.host.submit_source(
+                        SOURCE,
+                        1,
+                        block * quantum,
+                        48_000,
+                        &views,
+                        QUANTUM,
+                        false
+                    ),
+                    RESULT_OK
+                );
+                assert_eq!(fresh.host.render_next(), RESULT_OK);
+                fresh
+                    .host
+                    .output_pcm()
+                    .expect("output")
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect()
+            })
+            .collect();
+        assert!(
+            expected.iter().flatten().any(|bits| *bits != 0),
+            "the fresh boot plays"
+        );
+        assert_eq!(
+            first_difference(&rig.bits[DECLARED_AT as usize..], &expected),
+            None,
+            "from the declaration on, the output is a fresh boot's"
         );
         assert_eq!(rig.host.service(None), RESULT_OK);
     }

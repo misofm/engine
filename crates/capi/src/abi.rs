@@ -68,6 +68,9 @@ pub const FEATURE_PLAN_WATERMARK: u64 = 1 << 6;
 /// Control-service capability: `miso_engine_v1_service` (#1348), an in-place V1 amendment. A host
 /// checks this bit before calling the symbol.
 pub const FEATURE_SERVICE: u64 = 1 << 7;
+/// Declared-discontinuity capability: `miso_engine_v1_declare_discontinuity` (#1323), an in-place
+/// V1 amendment. A host checks this bit before calling the symbol.
+pub const FEATURE_DECLARE_DISCONTINUITY: u64 = 1 << 8;
 /// All ABI V1 feature capability bits.
 pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_HOST_PLANAR_SOURCE
@@ -76,7 +79,8 @@ pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_CAPABILITY_COMMAND
     | FEATURE_SOURCE_SEEK_AT
     | FEATURE_PLAN_WATERMARK
-    | FEATURE_SERVICE;
+    | FEATURE_SERVICE
+    | FEATURE_DECLARE_DISCONTINUITY;
 
 /// Watermark outcome flag: the covered revisions completed exactly as committed.
 pub const OUTCOME_EXACT: u64 = 1;
@@ -551,7 +555,31 @@ mod tests {
             FEATURE_PLAN_WATERMARK
         );
         assert_eq!(FEATURE_MASK & FEATURE_SERVICE, FEATURE_SERVICE);
-        assert_eq!(FEATURE_MASK, 0xff);
+        // #1323 gate 6 (#1317's growth rule): the mask is the OR of every feature symbol, each one
+        // bit of its own, never a literal.
+        let features = [
+            FEATURE_IMMUTABLE_SESSION,
+            FEATURE_HOST_PLANAR_SOURCE,
+            FEATURE_SOURCE_SEEK,
+            FEATURE_PLANAR_STEREO_RENDER,
+            FEATURE_CAPABILITY_COMMAND,
+            FEATURE_SOURCE_SEEK_AT,
+            FEATURE_PLAN_WATERMARK,
+            FEATURE_SERVICE,
+            FEATURE_DECLARE_DISCONTINUITY,
+        ];
+        assert!(features.iter().all(|feature| feature.count_ones() == 1));
+        assert_eq!(
+            features.iter().fold(0, |mask, feature| {
+                assert_eq!(mask & feature, 0, "every feature has its own bit");
+                mask | feature
+            }),
+            FEATURE_MASK
+        );
+        assert_eq!(
+            FEATURE_MASK & FEATURE_DECLARE_DISCONTINUITY,
+            FEATURE_DECLARE_DISCONTINUITY
+        );
         assert_eq!(
             [
                 OUTCOME_EXACT,

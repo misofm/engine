@@ -761,6 +761,10 @@ pub struct PlanStateInventory {
     /// They are the floored values, not the natural ones, so a chain of successors keeps the
     /// first plan's timing until a declared discontinuity (#1323).
     input_floors: Box<[(graph::GraphNodeId, u64)]>,
+    /// The natural input arrival of every node whose floor raised it (#1323 D3), sorted by node
+    /// ID: its latest incoming arrival, below its floored arrival in `input_floors`. Empty when the
+    /// plan runs at its natural timing.
+    raised_arrivals: Box<[(graph::GraphNodeId, u64)]>,
 }
 
 /// One strip stage of a prepared plan, owner key `(strip ID, PostFader)` or `(strip ID,
@@ -983,6 +987,49 @@ impl PlanStateInventory {
         &self.input_floors
     }
 
+    /// The natural input arrival of every node a floor raised in this plan (#1323 D3), sorted by
+    /// node ID; each node's floored arrival is its row in [`Self::input_floors`].
+    #[must_use]
+    pub fn raised_arrivals(&self) -> &[(graph::GraphNodeId, u64)] {
+        &self.raised_arrivals
+    }
+
+    /// Whether this plan runs behind its natural timing (#1323 D2): a floor raised some node's
+    /// input arrival above its natural one. A host-declared discontinuity rebuilds only such a
+    /// plan. (*Give a plan a source-read clock that leads its render clock*, #1396 D2, adds a
+    /// source-read offset above 0 to this test.)
+    #[must_use]
+    pub fn runs_behind_natural_timing(&self) -> bool {
+        !self.raised_arrivals.is_empty()
+    }
+
+    /// The base inventory of a successor at a host-declared discontinuity (#1323 D3): this
+    /// inventory's identity, rate, quantum and source rows, and nothing else. A successor prepared
+    /// against it has no floors and carries only its source consumers (ring, generation and read
+    /// position); every other owner starts at rest.
+    fn at_discontinuity(&self) -> Self {
+        Self {
+            plan_identity: self.plan_identity,
+            sources: self.sources.clone(),
+            input_sections: Box::default(),
+            strip_stages: Box::default(),
+            effect_lanes: Box::default(),
+            meters: Box::default(),
+            observations: Box::default(),
+            sample_rate_hz: self.sample_rate_hz,
+            quantum_frames: self.quantum_frames,
+            spectrum: Box::default(),
+            spectrum_collection: false,
+            spectrum_pairing: Box::default(),
+            delay_lines: Box::default(),
+            strip_delays: Box::default(),
+            live_routes: Box::default(),
+            restarted: Box::default(),
+            input_floors: Box::default(),
+            raised_arrivals: Box::default(),
+        }
+    }
+
     /// An inventory that holds only this inventory's input floors (#1285, deliverable 2): a
     /// successor prepared against it carries no state, so a test renders it from frame 0 as the
     /// fresh reference of a plan compiled with the same floors.
@@ -1007,6 +1054,7 @@ impl PlanStateInventory {
             live_routes: Box::default(),
             restarted: Box::default(),
             input_floors: self.input_floors.clone(),
+            raised_arrivals: self.raised_arrivals.clone(),
         }
     }
 
@@ -1087,6 +1135,7 @@ impl PlanStateInventory {
             + self
                 .input_floors
                 .iter()
+                .chain(self.raised_arrivals.iter())
                 .map(|(node, _)| graph_node_heap_bytes(node))
                 .sum::<usize>();
         u64::try_from(
@@ -1103,6 +1152,7 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[graph::GraphLiveRoute]>(&self.live_routes)
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
                 + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.input_floors)
+                + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.raised_arrivals)
                 + ids,
         )
         .unwrap_or(u64::MAX)
@@ -1223,10 +1273,44 @@ pub struct SuccessorBase<'a> {
     /// takes the predecessor's own state instead, and is never restarted by this.
     /// [`NO_OBSERVATION`] for a host without subscriptions.
     pub observation: &'a controls::ObservationBindings,
+    /// The host declared a discontinuity (#1323 D3): the successor need not continue the
+    /// predecessor's output. It is compiled with no input floors, so it runs at its natural
+    /// timing, and its join carries only the source consumers (ring, generation and read
+    /// position), so no frame is repeated or skipped; every other owner starts at rest, with no
+    /// continuity constraint. `false` is the neutral value: a successor continues its
+    /// predecessor.
+    pub discontinuity: bool,
+}
+
+impl<'a> SuccessorBase<'a> {
+    /// The base of a successor of the plan whose inventory is `inventory`, prepared from
+    /// `committed` and committing as `revision` (#1323 D3, #1277 D10). Every other field takes
+    /// its neutral value: no edit ramps, no monitor overlay ([`MonitorBase::NONE`]), no armed
+    /// tap ([`NO_OBSERVATION`]) and no discontinuity. A field added later extends this with its
+    /// own neutral value; a base that needs another value sets it with struct update syntax.
+    #[must_use]
+    pub fn new(
+        inventory: &'a PlanStateInventory,
+        committed: &'a SessionModel,
+        revision: u64,
+    ) -> Self {
+        Self {
+            inventory,
+            committed,
+            revision,
+            edit_ramps: &NO_EDIT_RAMPS,
+            monitor: MonitorBase::NONE,
+            observation: &NO_OBSERVATION,
+            discontinuity: false,
+        }
+    }
 }
 
 /// The bindings that arm nothing, for a [`SuccessorBase`] of a host without subscriptions.
 pub static NO_OBSERVATION: controls::ObservationBindings = controls::ObservationBindings::new();
+
+/// The edit ramps of a successor whose transaction gave no row a length ([`SuccessorBase::new`]).
+static NO_EDIT_RAMPS: EditRamps = EditRamps::new();
 
 /// The host-local monitor values (solo) a successor is prepared under (decision 17, C8, #1559).
 ///
@@ -2043,6 +2127,17 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     if successor.is_some_and(|base| !(1..=GATE_REVISION_MAX).contains(&base.revision)) {
         return Err(successor_revision_refusal());
     }
+    // #1323 D3: at a host-declared discontinuity the successor joins against its predecessor's
+    // sources only, so it has no input floors and every owner but a source consumer starts at
+    // rest. Every join below reads the base's inventory, so this one substitution is the whole
+    // rule.
+    let discontinuity_inventory = successor
+        .filter(|base| base.discontinuity)
+        .map(|base| base.inventory.at_discontinuity());
+    let successor = successor.map(|base| match discontinuity_inventory.as_ref() {
+        Some(inventory) => SuccessorBase { inventory, ..base },
+        None => base,
+    });
     // #1312 D2: the session's count when the host passed one, else this preparation's own, which
     // the handles hand back. Made before any observed allocation of the preparation.
     let live_superseded = superseded.cloned().unwrap_or_default();
@@ -2729,6 +2824,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .iter()
         .map(|(node, arrival)| (node.clone(), arrival.0))
         .collect();
+    let raised_arrivals: Box<[(graph::GraphNodeId, u64)]> = artifact
+        .report()
+        .raised_arrivals
+        .iter()
+        .map(|(node, arrival)| (node.clone(), arrival.0))
+        .collect();
     let mut graph_resources = artifact.graph_resource_estimate().clone();
     // The plan's own allocations that the graph row does not count: its revision gate (#1502 D1),
     // its jump-length cell (#1639 D1, attached after bind below) and, when this preparation made
@@ -3325,6 +3426,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         live_routes: live_routes.into_boxed_slice(),
         restarted: restarted.into_boxed_slice(),
         input_floors,
+        raised_arrivals,
     };
     let report = HostPrepareReport {
         sample_rate_hz: compiled.sample_rate().0,
@@ -5978,6 +6080,7 @@ mod tests {
             live_routes: Box::default(),
             restarted: Box::default(),
             input_floors: Box::default(),
+            raised_arrivals: Box::default(),
         }
     }
 

@@ -34,6 +34,9 @@ pub(crate) struct TimingResult {
     pub(crate) output_tail: TailSamples,
     /// Every node whose input arrival (its floored `max`) is nonzero, sorted by node ID (#1285 D2).
     pub(crate) input_arrivals: Vec<(GraphNodeId, LatencySamples)>,
+    /// Every node whose floor raised its input arrival, with its latest incoming arrival, sorted
+    /// by node ID (#1323 D3).
+    pub(crate) raised_arrivals: Vec<(GraphNodeId, LatencySamples)>,
 }
 
 /// Arrivals, compensation and tails for `schedule`.
@@ -66,14 +69,18 @@ pub(crate) fn timings(
     let mut routes = Vec::new();
     let mut delays = Vec::new();
     let mut input_arrivals = Vec::new();
+    let mut raised_arrivals = Vec::new();
     for node in schedule {
         let incoming = &incoming_by_node[node];
-        let max = incoming
+        let latest = incoming
             .iter()
             .filter_map(|edge| arrivals.get(&edge.source.node).copied())
             .max()
-            .unwrap_or(0)
-            .max(floors.get(node).map_or(0, |floor| floor.0));
+            .unwrap_or(0);
+        let max = latest.max(floors.get(node).map_or(0, |floor| floor.0));
+        if max > latest {
+            raised_arrivals.push((node.clone(), LatencySamples(latest)));
+        }
         if max > 0 {
             input_arrivals.push((node.clone(), LatencySamples(max)));
         }
@@ -153,6 +160,7 @@ pub(crate) fn timings(
     routes.sort_by(|a, b| a.route_id.cmp(&b.route_id));
     delays.sort_by(|left, right| left.edge_id.cmp(&right.edge_id));
     input_arrivals.sort_by(|left, right| left.0.cmp(&right.0));
+    raised_arrivals.sort_by(|left, right| left.0.cmp(&right.0));
     let output = schedule
         .iter()
         .find(|node| matches!(node, GraphNodeId::Output { .. }))
@@ -173,6 +181,7 @@ pub(crate) fn timings(
         output_latency,
         output_tail,
         input_arrivals,
+        raised_arrivals,
     })
 }
 pub(crate) fn shifted_tail(value: TailSamples, add: u64) -> Result<TailSamples, GraphDiagnostic> {

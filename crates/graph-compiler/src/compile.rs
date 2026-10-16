@@ -874,6 +874,7 @@ impl GraphCompiler {
                 output_latency: timing.output_latency,
                 output_tail: timing.output_tail,
                 input_arrivals: timing.input_arrivals.into_boxed_slice(),
+                raised_arrivals: timing.raised_arrivals.into_boxed_slice(),
                 semantic_estimate,
                 estimate,
                 rack_cohorts,

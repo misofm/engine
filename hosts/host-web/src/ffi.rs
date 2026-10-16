@@ -3339,6 +3339,24 @@ pub extern "C" fn miso_engine_web_v1_service(handle: u32) -> u32 {
     })
 }
 
+/// Declare a discontinuity (issue #1323): the next block need not continue the previous output,
+/// because the page has stopped or is about to seek every source. The page calls it at a stop and
+/// before a seek of every source. It runs the control plane's `SessionState::declare_discontinuity`,
+/// the function the C ABI's `miso_engine_v1_declare_discontinuity` runs, so both hosts reset the
+/// latency floors alike. Control side only: the control Worker, or in `single` mode the worklet's
+/// message handler, never `process()`; a plan it publishes is counted as a blocking rebuild.
+///
+/// Results: [`RESULT_OK`] (also when nothing needed a reset); [`RESULT_INVALID_ARGUMENT`] for a
+/// wrong handle; [`RESULT_WRONG_STATE`] for a host that is not ready; and the refusals of
+/// [`miso_engine_web_v1_control_command`] for a rebuild, with the core's diagnostic at
+/// [`miso_engine_web_v1_control_response_ptr`]. A refusal changes nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_declare_discontinuity(handle: u32) -> u32 {
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        with_promotion_analysis(host, AudioWorkletEngineHost::declare_discontinuity)
+    })
+}
+
 /// Return the control request staging address for a frame of `len` bytes (issue #1562a D1), or
 /// zero for an invalid handle, a host that is not ready, or a `len` that is zero or over the boot's
 /// `maximum_control_frame_bytes`. The page writes one command frame there, then calls
