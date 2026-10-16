@@ -19,7 +19,8 @@ extern "C" {
  *                miso_engine_v1_source_submit_planar_f32, miso_engine_v1_source_seek,
  *                miso_engine_v1_source_seek_at, miso_engine_v1_source_seek_report,
  *                miso_engine_v1_submit_command, miso_engine_v1_dequeue_event,
- *                miso_engine_v1_service, miso_engine_v1_declare_discontinuity, or
+ *                miso_engine_v1_service, miso_engine_v1_declare_discontinuity,
+ *                miso_engine_v1_session_seek, miso_engine_v1_session_seek_at, or
  *                miso_engine_v1_last_error on the session; they are serialized with each other.
  *   plan         Split ownership.
  *                miso_engine_v1_render_f32_planar: render thread only, never concurrently with
@@ -179,20 +180,20 @@ extern "C" {
  * between edits. miso_engine_v1_service(session) runs one bounded step of it: it reclaims plans
  * render has retired, brings the session's view of the running plan up to render, refreshes the
  * session counters, and stages render telemetry. Every other session call (source submit, seek,
- * seek_at, seek_report, submit_command, dequeue_event) that passes its argument checks runs the
- * same step first; a call refused for its arguments returns before the step. So a host that makes
- * those calls anyway need not also call service. The step never waits for render, never commits or
- * acknowledges anything, and never takes or drops a pending edit; its cost does not grow with the
- * time since the last call. It returns MISO_ENGINE_V1_OK; a null session as
- * MISO_ENGINE_V1_INVALID_ARGUMENT and another handle as MISO_ENGINE_V1_WRONG_HANDLE; and, should
- * the session's plan epochs fail to synchronize, MISO_ENGINE_V1_INTERNAL with the session
- * diagnostic "capi.source.epoch". The host's duty: a pending edit progresses only while the host
- * makes session calls, the same duty as draining events. A host that renders but never calls keeps
- * retired plans allocated, and its next structural edit waits for that reclaim; a warm successor
- * that misses its deadline falls back only at the host's next session call. The plan watermark
- * never covers an edit before it is in effect. While edits are pending, call miso_engine_v1_service
- * (or another session call) at least once per render-buffer period. A host checks
- * MISO_ENGINE_V1_FEATURE_SERVICE before calling the symbol.
+ * seek_at, seek_report, session_seek, session_seek_at, submit_command, dequeue_event) that passes
+ * its argument checks runs the same step first; a call refused for its arguments returns before the
+ * step. So a host that makes those calls anyway need not also call service. The step never waits
+ * for render, never commits or acknowledges anything, and never takes or drops a pending edit; its
+ * cost does not grow with the time since the last call. It returns MISO_ENGINE_V1_OK; a null
+ * session as MISO_ENGINE_V1_INVALID_ARGUMENT and another handle as MISO_ENGINE_V1_WRONG_HANDLE;
+ * and, should the session's plan epochs fail to synchronize, MISO_ENGINE_V1_INTERNAL with the
+ * session diagnostic "capi.source.epoch". The host's duty: a pending edit progresses only while the
+ * host makes session calls, the same duty as draining events. A host that renders but never calls
+ * keeps retired plans allocated, and its next structural edit waits for that reclaim; a warm
+ * successor that misses its deadline falls back only at the host's next session call. The plan
+ * watermark never covers an edit before it is in effect. While edits are pending, call
+ * miso_engine_v1_service (or another session call) at least once per render-buffer period. A host
+ * checks MISO_ENGINE_V1_FEATURE_SERVICE before calling the symbol.
  *
  * Engine memory (issue 1602). The engine owns no control-thread memory outside the compile
  * limits beyond its own handle; miso_engine_v1_engine_destroy frees that handle. Everything a
@@ -297,6 +298,24 @@ extern "C" {
  * results are the seek's, and it too switches the source to g at once, so the host submits g from
  * F before the block at A renders. A host checks MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT before
  * calling it.
+ *
+ * Session seek (issue 1642). The timeline is the session's playhead: it starts at 0 and advances
+ * one quantum per render, and stored automation follows it. miso_engine_v1_session_seek(session,
+ * g, T) moves it and every source of the newest committed session in one step, all or nothing:
+ * the timeline goes to T and each source to min(T, its frames); every one of them takes the seek
+ * in the same render block, or the call changes nothing and returns a refusal. The host then
+ * submits generation g of each source from its frame. g must be above every generation the host
+ * has used on the session, on any source or session seek; one above the largest it has used is
+ * always valid. The refusals, all MISO_ENGINE_V1_INVALID_ARGUMENT unless named: g = 0
+ * ("source.generation.zero"), g not above every generation the session has used
+ * ("source.generation.stale"), T over the timeline limit ("source.seek.frame_out_of_range"), and
+ * MISO_ENGINE_V1_BACKPRESSURE with "source.seek.backpressure" while any source or the timeline
+ * still holds an unpopped seek. miso_engine_v1_session_seek_at(session, g, T, A) is the anchored
+ * form, with the anchor of miso_engine_v1_source_seek_at: every consumer changes at the block at
+ * A, or, reached late, at its frame plus the lateness. A per-source seek leaves the timeline where
+ * it is. A seek of every source is a declared discontinuity: the host calls
+ * miso_engine_v1_declare_discontinuity first. A host checks MISO_ENGINE_V1_FEATURE_SESSION_SEEK
+ * before calling either symbol.
  *
  * Choosing the anchor. To start a stem that a transaction added, after the command returns OK:
  * pick A, a quantum multiple past the last rendered block by enough quanta to cover the time the
@@ -425,7 +444,8 @@ extern "C" {
 #define MISO_ENGINE_V1_FEATURE_SERVICE UINT64_C(128)
 #define MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY UINT64_C(256)
 #define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_REPORT UINT64_C(512)
-#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(1023)
+#define MISO_ENGINE_V1_FEATURE_SESSION_SEEK UINT64_C(1024)
+#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(2047)
 
 #define MISO_ENGINE_V1_OUTCOME_EXACT UINT64_C(1)
 #define MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK UINT64_C(2)
@@ -641,6 +661,13 @@ uint32_t miso_engine_v1_source_seek_report(miso_engine_v1_session *session,
                                            const uint8_t *source_id,
                                            uint64_t source_id_bytes,
                                            miso_engine_v1_seek_report *out);
+uint32_t miso_engine_v1_session_seek(miso_engine_v1_session *session,
+                                     uint64_t generation,
+                                     uint64_t timeline_sample);
+uint32_t miso_engine_v1_session_seek_at(miso_engine_v1_session *session,
+                                        uint64_t generation,
+                                        uint64_t timeline_sample,
+                                        uint64_t anchor_sample);
 uint32_t miso_engine_v1_submit_command(miso_engine_v1_session *session,
                                        const uint8_t *request,
                                        uint64_t request_bytes,

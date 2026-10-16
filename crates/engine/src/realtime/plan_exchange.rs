@@ -777,6 +777,12 @@ impl RealtimePlanOwner {
     pub fn active_attachment_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.active.1.host_attachment_mut::<T>()
     }
+    /// The currently active complete plan, for the plan's exclusive owner between render calls
+    /// (#1642): a test reads the plan's own state, such as its timeline, through it. Nothing here
+    /// adopts, swaps or renders; the borrow ends before the next render call.
+    pub fn active_plan_mut(&mut self) -> &mut PreparedRenderPlan {
+        &mut self.active.1
+    }
     /// Saturating count of applied swaps whose incoming plan took state from its predecessor.
     #[must_use]
     pub const fn carried_count(&self) -> u64 {

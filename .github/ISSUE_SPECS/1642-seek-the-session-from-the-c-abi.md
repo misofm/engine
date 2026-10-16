@@ -444,3 +444,69 @@ header, docs, audit, capi gates 1-7) follows.
   `4f52089e4a8cf83c` (unchanged), 0 violations. `realtime_policy`: ok, 153 regions (unchanged).
   Clippy `-p source -p host-core -p control-plane --all-targets --all-features -D warnings`,
   `cargo check --workspace --all-targets --all-features`, `cargo fmt --all`: clean.
+
+## Decision record: tranche 2, the C ABI (batch 16)
+
+Built on `51ec4fd67` (tranche 1).
+
+**What shipped:**
+
+- **D4.** `miso_engine_v1_session_seek(session, generation, timeline_sample)` and
+  `miso_engine_v1_session_seek_at(session, generation, timeline_sample, anchor_sample)` in
+  `crates/capi/src/ffi.rs`: one shared body (`session_seek_entry`) with the handle check and the
+  `SourceFailure::report` mapping around `SessionState::session_seek`. `FEATURE_SESSION_SEEK = 1 <<
+  10` (1024); the mask is 2047. `masks_and_result_codes_are_frozen` gains the bit in its `features`
+  array (the mask is the OR of every bit) and pins it; `version_and_capabilities_are_exact` checks
+  it is reported. No C export of the published generation (not approved).
+- **Header.** The two prototypes after `miso_engine_v1_source_seek_report`; the constant and
+  mask; D5's paragraph, "Session seek (issue 1642)", right after "Anchored seek.", which also
+  says a host may pick the next generation as one above the largest it has used; the two symbols
+  in the thread table and in "Control service" (that paragraph rewrapped, no word changed but the
+  two names).
+- **Smoke programs.** `abi_smoke.c` pins the bit and the mask, adds it to
+  `reports_every_defined_feature`, checks it against the queried mask and calls both symbols
+  with a null session for `INVALID_ARGUMENT`; `header_smoke.cpp` pins the bit inside the mask and
+  both signatures. `scripts/check-capi-abi.sh`: the frozen list 19 -> 21 (the self-test is
+  generic and needs no change).
+- **Docs.** `docs/C_ABI_V1_QUALIFICATION.md`: the D5 paragraph (with the fence and the frozen count
+  21), and the two calls in the service paragraph's list of session calls.
+- **D6.** `tools/audit/src/capi.rs`: before call 5 (`SESSION_SEEK_CALL`, right after call 4's
+  render applied the anchored seek), outside every render scope, `declare_discontinuity`, then
+  `session_seek(session, 3, 8 * QUANTUM_FRAMES)`, then one generation-3 quantum of
+  `fixture-source` from that frame, each asserted `RESULT_OK`.
+
+**Departures:**
+
+- **One `engine/realtime` edit (accepted on its one attempt).**
+  `RealtimePlanOwner::active_plan_mut` in `crates/engine/src/realtime/plan_exchange.rs`, inside
+  the existing `impl RealtimePlanOwner` (no new impl block), so a capi test can read the active
+  plan's timeline (`crate::ffi::test_plan_timeline_at`, over `graph::test_only_timeline_at`
+  through control-plane's test-support `test_owner_mut`). No other reader of the active plan
+  existed; gate 1 names #1641's reader. It is a borrow for the plan's exclusive owner only.
+- **The D5 paragraph sits after "Anchored seek." in the header** as the batch-16 check says; in
+  the qualification doc it follows the seek-report paragraph (#1316), not the #1275 one, so the
+  frozen counts there stay in order (15, 17, 19, 21).
+- **Test helper.** `crate::ffi::test_session_seek` (the runtime test module forbids `unsafe`).
+
+**Gates** (`crates/capi/src/runtime/tests.rs`, `runtime::tests::session_seek`):
+
+1. `both_forms_move_the_timeline_and_every_source_at_one_block`: `session_seek(2, 6_000)` lands
+   long at 6,000, short at 4,000 and the timeline at 6,000 in one block; `session_seek_at(3, 1_000,
+   A)` holds all three two blocks and lands them at `A`.
+2. `a_stale_generation_changes_nothing`: `session_seek(2, 0)` refuses `source.generation.stale`
+   and the next block's bits and timeline equal a twin's; a per-source seek to 5 makes a session
+   seek at 4 stale through the published generation alone (the timeline is at 2), and pushes
+   nothing.
+3. `one_full_slot_refuses_every_consumer`: `BACKPRESSURE` with `source.seek.backpressure`; the
+   short source's slot and the timeline's stay empty.
+4. `a_seek_before_the_swap_reaches_the_carried_and_the_added_source_and_the_timeline`.
+5. `a_source_seek_leaves_the_timeline`.
+6. `masks_and_result_codes_are_frozen`, `version_and_capabilities_are_exact`,
+   `check-capi-abi.sh` and its `--self-test`.
+7. `audit capi`: 0 violations, `replacements == 1` and the carry assertion hold. `pcm_digest`
+   moved `4f52089e4a8cf83c` -> `bffc21e857b5e134`: call 5 now plays the generation-3 quantum where
+   it rendered underrun silence before (the anchored seek's one quantum ran out at call 4).
+- **`cargo doc -D warnings` repairs (mechanical, outside the paths).** Four pre-existing
+  public-doc links to private items: three in `crates/source/src/lib.rs` (`TimelineConsumer`,
+  `begin_block_at` and `prime_ready`, from #1640/#1641) and one in
+  `crates/control-plane/src/compile.rs:734`, each turned into a code span.

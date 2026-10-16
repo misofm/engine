@@ -627,6 +627,95 @@ unsafe fn source_seek_entry(
     })
 }
 
+/// Seek the session's timeline and every source of the newest committed session to timeline
+/// sample `timeline_sample`, under one new `generation`, all or nothing (#1642 D4).
+///
+/// The timeline goes to `timeline_sample`; each source to `min(timeline_sample, its frames)`.
+/// Every consumer takes the seek in the same render block, or none does. The host then submits
+/// generation `generation` of each source from its frame. `generation` must be above every
+/// generation the host has used on this session (one above the largest is always valid).
+///
+/// Runs the service step first, as every session call does. Returns `RESULT_OK`;
+/// `RESULT_INVALID_ARGUMENT` for a zero (`source.generation.zero`) or stale
+/// (`source.generation.stale`) generation or a timeline sample over the limit
+/// (`source.seek.frame_out_of_range`); `RESULT_BACKPRESSURE` with `source.seek.backpressure` when
+/// any consumer still holds a seek (nothing changed; retry after a render); otherwise the source
+/// seek's mapping, with the diagnostic in `miso_engine_v1_last_error`.
+///
+/// # Safety
+///
+/// `session` must be live.
+///
+/// Thread: control.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_session_seek(
+    session: *mut Session,
+    generation: u64,
+    timeline_sample: u64,
+) -> u32 {
+    // SAFETY: The caller's contract is this entry point's, forwarded unchanged.
+    unsafe { session_seek_entry(session, generation, timeline_sample, None) }
+}
+
+/// [`miso_engine_v1_session_seek`] with every command anchored at `anchor_sample`, as
+/// [`miso_engine_v1_source_seek_at`]'s anchor: the timeline and every source change at the block
+/// that starts at `anchor_sample` (or, reached late, at the first block after it, each at its frame
+/// plus the lateness). An anchor that is not a multiple of the quantum is
+/// `RESULT_INVALID_ARGUMENT` with `source.seek.anchor_unaligned`.
+///
+/// # Safety
+///
+/// `session` must be live.
+///
+/// Thread: control.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_session_seek_at(
+    session: *mut Session,
+    generation: u64,
+    timeline_sample: u64,
+    anchor_sample: u64,
+) -> u32 {
+    // SAFETY: The caller's contract is this entry point's, forwarded unchanged.
+    unsafe { session_seek_entry(session, generation, timeline_sample, Some(anchor_sample)) }
+}
+
+/// The shared body of the two session-seek entry points: the handle check and the result
+/// mapping; the seek itself is `SessionState::session_seek`.
+///
+/// # Safety
+///
+/// `session` must be live.
+unsafe fn session_seek_entry(
+    session: *mut Session,
+    generation: u64,
+    timeline_sample: u64,
+    anchor_sample: Option<u64>,
+) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { session_kind(session) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
+        let session = unsafe { &mut *session };
+        match session
+            .state
+            .session_seek(generation, timeline_sample, anchor_sample)
+        {
+            Ok(()) => {
+                session.last_error.borrow_mut().clear();
+                RESULT_OK
+            }
+            Err(error) => {
+                let (code, diagnostic) = error.report();
+                session.last_error.borrow_mut().set(diagnostic);
+                code
+            }
+        }
+    })
+}
+
 /// Copy where a source of the newest committed session landed, as render last published it
 /// (#1316): the generation in effect, the source-read sample (the render clock in this version) of
 /// the first block it played in, the source frame that block started at, and the source's
@@ -1434,6 +1523,33 @@ pub(crate) fn test_plan_carry_counts(plan: *mut Plan) -> (u64, u64) {
 }
 
 #[cfg(test)]
+pub(crate) fn test_session_seek(
+    session: *mut Session,
+    generation: u64,
+    timeline_sample: u64,
+    anchor_sample: Option<u64>,
+) -> u32 {
+    // SAFETY: Test callers retain the live session for this call.
+    unsafe {
+        match anchor_sample {
+            None => miso_engine_v1_session_seek(session, generation, timeline_sample),
+            Some(anchor) => {
+                miso_engine_v1_session_seek_at(session, generation, timeline_sample, anchor)
+            }
+        }
+    }
+}
+
+/// The active plan's timeline at `source_read_sample` (#1641's test reader, #1642 gates).
+#[cfg(test)]
+pub(crate) fn test_plan_timeline_at(plan: *mut Plan, source_read_sample: u64) -> i64 {
+    // SAFETY: Test callers retain the exclusively owned live plan, with no render in flight.
+    let state = unsafe { &mut (*plan).state };
+    graph::test_only_timeline_at(state.test_owner_mut().active_plan_mut(), source_read_sample)
+        .expect("a graph plan with a timeline")
+}
+
+#[cfg(test)]
 pub(crate) fn test_set_structural_faults(
     session: *mut Session,
     faults: [Option<crate::runtime::TestStructuralFaultPhase>; 2],
@@ -1754,6 +1870,8 @@ mod tests {
             capabilities.feature_mask & crate::FEATURE_SOURCE_SEEK_REPORT,
             0
         );
+        // #1642 gate 6.
+        assert_ne!(capabilities.feature_mask & crate::FEATURE_SESSION_SEEK, 0);
         assert_eq!(capabilities.reserved, [0; 4]);
     }
 

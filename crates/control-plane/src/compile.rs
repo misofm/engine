@@ -731,7 +731,7 @@ pub fn observation_reserve_bytes(
     ))
 }
 
-/// The binding table's charge alone ([`observation_binding_rows`]) for a control frame of
+/// The binding table's charge alone (`observation_binding_rows`) for a control frame of
 /// `frame_bytes` and `slots` observation slots, so a test can hold a measured table to it.
 ///
 /// # Errors

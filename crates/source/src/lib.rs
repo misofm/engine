@@ -2474,7 +2474,7 @@ pub struct TimelineStep {
 
 /// The session's playhead (#1640 D2): a source consumer with no PCM, no data queue and no
 /// recycle queue. It starts at generation 1, timeline sample 0, takes plain and anchored seeks
-/// through the shared [`SeekState`], advances one quantum on every block and keeps a fixed
+/// through the shared `SeekState`, advances one quantum on every block and keeps a fixed
 /// history of `K` blocks, newest last, so a reader can map any source-read sample a node of the
 /// plan can still be processing to its timeline sample. Every value is an exact integer.
 pub struct TimelineConsumer {
@@ -2553,7 +2553,7 @@ impl TimelineConsumer {
     }
     // REALTIME_POLICY_BEGIN
     /// Begin the block that reads source time from `source_read_sample`: observe one command
-    /// through the shared seek state ([`SeekClock::At`]), set the position to a seek's frame if
+    /// through the shared seek state (`SeekClock::At`), set the position to a seek's frame if
     /// one applies, record `(source_read_sample, position)` in the history, then advance one
     /// quantum. It runs on every block, so the timeline never stops. Allocation-free, lock-free
     /// and bounded.
@@ -2579,7 +2579,7 @@ impl TimelineConsumer {
     }
 
     /// Whether a prime of `lead_blocks + 1` blocks from `first_sample` can run (#1641 D5,
-    /// B16-R3): the source consumer's non-PCM test, written once in [`SeekState::prime_window_clear`]. The
+    /// B16-R3): the source consumer's non-PCM test, written once in `SeekState::prime_window_clear`. The
     /// command queue is empty and no held anchored seek falls before the prime window's end, so a
     /// prime never skips a seek. A timeline has no PCM to run out of, so that is the whole test.
     #[must_use]
