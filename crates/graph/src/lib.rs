@@ -3258,6 +3258,10 @@ struct GraphExecutor {
     /// would apply an `Observe` record still queued for a per-node effect, and so where a swap's
     /// carry applies it (#1281; a bank stage keeps its own, #1280 D3). Zero until a block renders.
     next_block_sample: u64,
+    /// How far this plan reads its sources ahead of its render clock (#1396 D1): the source
+    /// section's block entry reads from `time.absolute_sample + source_read_offset`. Set on the
+    /// control thread before publication.
+    source_read_offset: u64,
     /// Restores a swap's carry refused on a per-node successor instance, which no bank stage
     /// counts (#1281, #1279 D6). Saturating; read after render.
     node_carry_refused: u64,
@@ -4555,6 +4559,7 @@ struct GraphExecutorWithoutSplitPairTable {
     carry_effects: Box<[GraphEffectMove]>,
     carry_scratch: Box<[u8]>,
     next_block_sample: u64,
+    source_read_offset: u64,
     node_carry_refused: u64,
     observer_carry: Option<Box<ObserverCarryProgram>>,
     carry_delays: Box<[GraphDelayMove]>,
@@ -4679,6 +4684,7 @@ impl GraphExecutor {
             carry_effects: Box::default(),
             carry_scratch: Box::default(),
             next_block_sample: 0,
+            source_read_offset: 0,
             node_carry_refused: 0,
             observer_carry: None,
             carry_delays: Box::default(),
@@ -4699,6 +4705,10 @@ impl PreparedPlanExecutor for GraphExecutor {
 
     fn as_any(&self) -> Option<&dyn Any> {
         Some(self)
+    }
+
+    fn set_source_read_offset(&mut self, offset: u64) {
+        self.source_read_offset = offset;
     }
 
     // REALTIME_POLICY_BEGIN
@@ -4917,6 +4927,7 @@ impl PreparedPlanExecutor for GraphExecutor {
             carry_effects: _,
             carry_scratch: _,
             next_block_sample,
+            source_read_offset,
             node_carry_refused: _,
             observer_carry: _,
             carry_delays: _,
@@ -4951,8 +4962,15 @@ impl PreparedPlanExecutor for GraphExecutor {
             probe.enter(test_only_phase_profile::SOURCE);
         }
         let source_validity = if let Some(source_set) = source_set.as_mut() {
+            // #1396 D1: the source-read sample, `ΣP` ahead of the render clock.
+            let Some(source_read_sample) = time.absolute_sample.checked_add(*source_read_offset)
+            else {
+                runtime.invalidate_observers_after_failure(time.absolute_sample);
+                host.silence();
+                return Err(RenderError::TimeOverflow);
+            };
             if let Err(error) =
-                source_set.begin_block(time.absolute_sample, source_set.envelope.quantum.0)
+                source_set.begin_block(source_read_sample, source_set.envelope.quantum.0)
             {
                 runtime.invalidate_observers_after_failure(time.absolute_sample);
                 host.silence();

@@ -697,6 +697,16 @@ impl PreparedHost {
     }
 }
 
+/// Set `host`'s source-read offset (#1396 deliverable 2): the plan's
+/// ([`PreparedRenderPlan::set_source_read_offset`]) and its inventory row's together, so a
+/// successor prepared from the inventory inherits it. Call it before the plan is published. The
+/// one production writer of a nonzero offset is a warm successor's preparation (#1355).
+#[cfg(feature = "test-support")]
+pub fn test_only_set_source_read_offset(host: &mut PreparedHost, offset: u64) {
+    host.plan.set_source_read_offset(offset);
+    host.inventory.source_read_offset = offset;
+}
+
 /// One source of a prepared plan, as its successor's preparation sees it (issue #1272 D1).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceInventoryRow {
@@ -765,6 +775,10 @@ pub struct PlanStateInventory {
     /// ID: its latest incoming arrival, below its floored arrival in `input_floors`. Empty when the
     /// plan runs at its natural timing.
     raised_arrivals: Box<[(graph::GraphNodeId, u64)]>,
+    /// `ΣP`, how far the plan reads its sources ahead of its render clock (#1396 D2): its
+    /// predecessor's for an ordinary successor, 0 for a first plan and at a declared
+    /// discontinuity.
+    source_read_offset: u64,
 }
 
 /// One strip stage of a prepared plan, owner key `(strip ID, PostFader)` or `(strip ID,
@@ -995,12 +1009,20 @@ impl PlanStateInventory {
     }
 
     /// Whether this plan runs behind its natural timing (#1323 D2): a floor raised some node's
-    /// input arrival above its natural one. A host-declared discontinuity rebuilds only such a
-    /// plan. (*Give a plan a source-read clock that leads its render clock*, #1396 D2, adds a
-    /// source-read offset above 0 to this test.)
+    /// input arrival above its natural one, or the plan reads its sources ahead of its render
+    /// clock (a [`Self::source_read_offset`] above 0, #1396 D2). A host-declared discontinuity
+    /// rebuilds only such a plan. The offset term matters because a plan can lead with no raised
+    /// floor: after a warm growth a later edit can make every natural arrival equal its floor.
     #[must_use]
     pub fn runs_behind_natural_timing(&self) -> bool {
-        !self.raised_arrivals.is_empty()
+        !self.raised_arrivals.is_empty() || self.source_read_offset > 0
+    }
+
+    /// `ΣP`, how far this plan reads its sources ahead of its render clock (#1396 D2): the
+    /// [`PreparedRenderPlan::source_read_offset`] its preparation set.
+    #[must_use]
+    pub const fn source_read_offset(&self) -> u64 {
+        self.source_read_offset
     }
 
     /// The base inventory of a successor at a host-declared discontinuity (#1323 D3): this
@@ -1027,6 +1049,8 @@ impl PlanStateInventory {
             restarted: Box::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),
+            // #1396 D2: no read-ahead.
+            source_read_offset: 0,
         }
     }
 
@@ -1055,6 +1079,7 @@ impl PlanStateInventory {
             restarted: Box::default(),
             input_floors: self.input_floors.clone(),
             raised_arrivals: self.raised_arrivals.clone(),
+            source_read_offset: 0,
         }
     }
 
@@ -3407,6 +3432,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     restarted.extend(strip_delay_carry.restarted);
     restarted.sort_unstable();
     restarted.dedup();
+    // #1396 D2: an ordinary successor reads its sources as far ahead of its render clock as its
+    // predecessor does, so the source-read clock never moves backwards across a rebuild. A first
+    // plan reads on its render clock, and so does a discontinuity successor, whose base inventory
+    // is `at_discontinuity`'s.
+    let source_read_offset = successor.map_or(0, |base| base.inventory.source_read_offset);
+    plan.set_source_read_offset(source_read_offset);
     let inventory = PlanStateInventory {
         plan_identity: graph::plan_identity(&mut plan)
             .ok_or_else(|| graph_failure("host.inventory.identity"))?,
@@ -3427,6 +3458,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         restarted: restarted.into_boxed_slice(),
         input_floors,
         raised_arrivals,
+        source_read_offset,
     };
     let report = HostPrepareReport {
         sample_rate_hz: compiled.sample_rate().0,
@@ -6081,6 +6113,8 @@ mod tests {
             restarted: Box::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),
+            // #1396 D2: no read-ahead.
+            source_read_offset: 0,
         }
     }
 

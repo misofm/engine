@@ -239,3 +239,59 @@ one attempt.
 
 - **Batch placement.** "Neither is in the batch-15/16 list" (Dependencies on GitHub, about #1310
   and #1344) is void. #1310 and #1344 are batch 15a; #1323 lands after #1310 (B15-R5).
+
+## Decision record: #1396 (batch 15c)
+
+**Shipped.**
+
+- D1: `PreparedRenderPlan::source_read_offset()` and `set_source_read_offset()` (control thread,
+  unpublished plan), forwarding to the new defaulted `PreparedPlanExecutor::set_source_read_offset`.
+  `GraphExecutor` (and its layout mirror `GraphExecutorWithoutSplitPairTable`) stores it, and the
+  source section's block entry reads from `time.absolute_sample.checked_add(offset)`; overflow
+  silences the block and returns `RenderError::TimeOverflow`, as the section's other refusals do.
+  `RenderTime` is unchanged.
+- D2: `PlanStateInventory` records the offset (`source_read_offset()`); preparation sets every
+  plan's offset from `base.inventory` (0 for a first plan; `at_discontinuity` gives 0) and writes
+  the same value to the plan. `host_core::test_only_set_source_read_offset` (test-support) sets
+  plan and row together.
+- D2's declaration term: `PlanStateInventory::runs_behind_natural_timing()` is now "a raised floor
+  or an offset above 0", the one test `SessionState::declare_discontinuity` already calls (#1323's
+  note and the method's own doc named this place). The control-plane hook is
+  `SessionState::test_set_next_source_read_offset` (a thread-local taken once by
+  `prepare_runtime`), with `test_render_clock` / `test_source_read_clock` readers, all test-support.
+- D4: `plan_exchange` allocates one `Arc` clock record (two `AtomicU64`), a new row of
+  `plan_exchange_resource_report`. After each rendered block render stores the active plan's
+  source-read clock, then its render clock (`Release`); `PlanPublisher::render_clock()` and
+  `source_read_clock()` load one word each (`Acquire`). Before the first block both hold the
+  initial plan's values. No host surface (non-goal; #1360, #1361).
+
+**Departures.**
+
+- Gate 2's "fader-only prepared change" is a fader-gain change on a muted second track, so the
+  rebuilt run is bit-comparable with the run without the rebuild.
+- The declaration term lives in host-core's `runs_behind_natural_timing` (called from the control
+  plane), not in a second test inside `crates/control-plane/src/`; gate 5 is in the control plane.
+- Mechanical edits outside the paths: the re-export in `crates/host-core/src/lib.rs`, and two
+  comments in `crates/source/src/lib.rs` that said "#1396 passes the source-read sample here".
+- The offset is nonzero only through the test hook until #1355, so the header's "equal to the
+  render clock in this version", `docs/C_ABI_V1_QUALIFICATION.md` and the `seek_at` doc stay true
+  and are unchanged.
+
+**Gates.**
+
+- Gate 1: `crates/host-core/tests/source_read_clock.rs::a_seek_applies_on_the_source_read_clock`.
+- Gate 2: `an_ordinary_successor_inherits_the_offset` (same file).
+- Gate 3: `a_declaration_resets_the_offset_and_loses_no_frame` (same file; ramp PCM).
+- Gate 4: engine `realtime::tests::
+  the_publisher_reads_both_clocks_of_the_active_plan_after_each_block`.
+- Gate 5: control-plane
+  `control::tests::source_read_offset::a_declaration_resets_an_offset_with_no_raised_floor`.
+- Red evidence: the graph passing the render sample turns gate 1 red; an ordinary successor at
+  offset 0 turns gate 2 red (also by its output alone); a discontinuity successor that keeps the
+  offset turns gate 3 red; render storing the outgoing plan's lead turns gate 4 red (checked in a
+  scratch copy); dropping the offset term turns gate 5 red.
+
+**Measured.** `realtime-policy` ok with no floor change (151 regions in 33 files). Audit capi
+`pcm_digest` 4f52089e4a8cf83c, unchanged, zero violations. The capi `resource_lifecycle` ceilings
+and the browser `expected.json` rows hold without a re-pin (`check-browser-expected-resources.py
+--artifacts` green; the clock record is 32 bytes native, 24 on wasm32).

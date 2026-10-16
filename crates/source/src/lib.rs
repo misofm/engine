@@ -1297,9 +1297,9 @@ impl PcmSourceConsumer {
     }
 
     /// [`Self::begin_block`] for the block that reads source time from `source_read_sample`: the
-    /// plan's source-read clock, the absolute sample of source time this block reads; equal to
-    /// the render clock in this version (#1316 D1). *Give a plan a source-read clock that leads
-    /// its render clock* (#1396) is the issue that makes the two differ.
+    /// plan's source-read clock, the absolute sample of source time this block reads (#1316 D1):
+    /// the render clock plus the plan's source-read offset (#1396 D1). The offset is 0 unless a
+    /// plan is prepared to read ahead, so in this version the two clocks are equal.
     ///
     /// An anchored seek ([`SourceCommand::SeekAt`]) is held while `source_read_sample` is before
     /// its anchor; the block that starts at or past it applies the seek at `frame +
@@ -2154,8 +2154,8 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
                 self.block_validity.source_underrun = true;
                 continue;
             };
-            // The plan's source-read clock, which an anchored seek waits on, equals the render
-            // clock in this version (#1316 D1); #1396 passes the source-read sample here.
+            // The graph passes the plan's source-read sample, which an anchored seek waits on: the
+            // render clock plus the plan's source-read offset (#1316 D1, #1396 D1).
             let report = consumer.begin_block_at(first_sample);
             self.block_validity.source_underrun |= report.underrun_event;
             self.block_validity.source_generation_changed |= report.generation_changed;

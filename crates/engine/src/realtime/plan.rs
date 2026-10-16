@@ -356,6 +356,15 @@ pub trait PreparedPlanExecutor: Send {
     fn prime_ready(&self, _block_start: u64, _lead_blocks: u32) -> bool {
         false
     }
+    /// Read this plan's sources `offset` samples ahead of its render clock (#1396 D1): a block
+    /// that renders from absolute sample `r` reads source time from `r + offset`, its
+    /// source-read sample, on which an anchored seek is compared.
+    ///
+    /// **Where it runs.** On the control thread, on an unpublished plan, through
+    /// [`PreparedRenderPlan::set_source_read_offset`]; never on the render thread.
+    ///
+    /// The default ignores the offset, which is right for an executor that reads no source.
+    fn set_source_read_offset(&mut self, _offset: u64) {}
     /// Invalidate owner-side observers after a render refusal that happened before dispatch.
     ///
     /// This is an internal hook so a prepared executor can discard a partial capture without
@@ -760,6 +769,9 @@ pub struct PreparedRenderPlan {
     arena: BufferArena,
     rendered_blocks: u64,
     next_absolute_sample: u64,
+    /// `ΣP`, how far this plan reads its sources ahead of its render clock (#1396 D1). Set on the
+    /// control thread before publication; render reads it and never changes it.
+    source_read_offset: u64,
     response_snapshot_valid: bool,
     executor: Option<Box<dyn PreparedPlanExecutor>>,
     /// This plan's revision gate (#1502 D1), built at revision 0 on the control thread. Render
@@ -839,6 +851,7 @@ impl PreparedRenderPlan {
             arena: BufferArena::try_new(request.scratch)?,
             rendered_blocks: 0,
             next_absolute_sample: 0,
+            source_read_offset: 0,
             response_snapshot_valid: true,
             executor: None,
             gate: Arc::new(gate),
@@ -924,6 +937,24 @@ impl PreparedRenderPlan {
     /// block boundary, so a plan swap does not restart the host's clock at zero.
     pub(crate) const fn adopt_absolute_sample(&mut self, absolute_sample: u64) {
         self.next_absolute_sample = absolute_sample;
+    }
+    /// How far this plan reads its sources ahead of its render clock, `ΣP` (#1396 D1): a block
+    /// that renders from absolute sample `r` reads source time from `r + ΣP`, the plan's
+    /// source-read clock, on which every anchored seek is compared. 0 (the default) reads sources
+    /// on the render clock.
+    #[must_use]
+    pub const fn source_read_offset(&self) -> u64 {
+        self.source_read_offset
+    }
+    /// Set [`Self::source_read_offset`] and hand it to the executor
+    /// ([`PreparedPlanExecutor::set_source_read_offset`]). A control-thread call on an
+    /// unpublished plan: once published, a plan's offset never changes, and a swap does not carry
+    /// it (each plan is prepared with its own, #1396 D2).
+    pub fn set_source_read_offset(&mut self, offset: u64) {
+        self.source_read_offset = offset;
+        if let Some(executor) = self.executor.as_deref_mut() {
+            executor.set_source_read_offset(offset);
+        }
     }
     /// Immutable structural program.
     #[must_use]
