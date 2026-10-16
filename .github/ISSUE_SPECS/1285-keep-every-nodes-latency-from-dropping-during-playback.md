@@ -154,7 +154,7 @@ Checked against `228fca26c`.
   `route_mute.rs`, `submix_strip.rs`, `tools/audit/src/builtins_graph.rs`, `fixture_builtins.rs`,
   `graph.rs` and `tools/console-workload/src/lib.rs`. Proposed: add them for the neutral field only
   (an empty floor map). Root confirms at filing.
-- **ROOT RULING (2026-10-15) (R9): the eight files above are allowed, for a neutral-field-only
+- **B15-R9, root decision under owner delegation (2026-10-15): the eight files above are allowed, for a neutral-field-only
   addition to the graph request struct literal.** No other edit to them is authorized.
 
 **Decisions.**
@@ -188,3 +188,11 @@ Checked against `228fca26c`.
   `scripts/check-graph-determinism.sh`, `scripts/check-capi-abi.sh`,
   `scripts/check-workspace-policy.sh`, `tools/console-workload`.
 - Gate 6's command is valid. Its features exist.
+
+## Amendment (controls coordinator, batch 15a fold, 2026-10-16)
+
+- **Browser latency.** "No issue is filed yet" (batch-15 amendment, Decisions) is void. It is
+  #1688 (*Report the plan latency on the browser*), which lands after this slice and adds the
+  browser's parity row on the floored latency. D4 and gate 3 still cover the C ABI only here.
+- **Anchor.** The `restarted` field of `PlanStateInventory` is `prepare.rs:750` at `228fca26c`
+  (the batch-15 amendment says `:744`). On `main` at `c5b5c88b2` it is `:757`.

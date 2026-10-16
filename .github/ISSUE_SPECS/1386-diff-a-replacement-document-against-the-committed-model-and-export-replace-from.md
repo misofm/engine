@@ -117,14 +117,14 @@ transaction apply. The SDK's `replaceSession` (*Apply session transactions from 
 
 ## Amendment (controls coordinator, root rulings, 2026-10-15)
 
-- **Re-scoped under decision 17 C1** (root ruling R8, 2026-10-15, recorded in #1293). The diff and
+- **Re-scoped under decision 17 C1** (root ruling B15-R8, 2026-10-15, recorded in #1293). The diff and
   `apply_document` go in the core, `crates/control-plane/src/`, not in `hosts/host-web`. A document
   replace is a protocol frame through `miso_engine_v1_submit_command` on the C ABI and
   `miso_engine_web_v1_control_command` on the browser (#1562's generic entry). Its staging is
   `miso_engine_web_v1_control_request_ptr`, bounded by the boot's `maximum_control_frame_bytes`. Its
   outcome is the response frame (revision, `edit_path`, diagnostics).
 - **Stale references.** `miso_engine_web_v1_edit_ptr` and `miso_engine_web_v1_edit_outcome_ptr`
-  are not built: #1293 dropped D1's staging (R8) and D3's outcome record (decision 17). D3's export
+  are not built: #1293 dropped D1's staging (B15-R8) and D3's outcome record (decision 17). D3's export
   `miso_engine_web_v1_replace` and D4's mirrors go with them. D2's "#1290's `apply`" is the control
   plane's transaction apply.
 - The new message ID, its fields, both hosts' gates and the new authorized paths are re-briefed
@@ -137,7 +137,7 @@ brief. Where it and the filed text above differ, this section governs.
 
 **Superseded filed text (kept above, not deleted).**
 - Title and Product outcome, "export replace from the browser engine module": superseded; the
-  replace is a protocol command on both hosts (decision 17 C1, root ruling R8).
+  replace is a protocol command on both hosts (decision 17 C1, root ruling B15-R8).
 - Context bullets 4 and 5 (#1290's `apply` and D8, #1293's staging, outcome record and mirrors):
   superseded; both hosts already run the core's transaction path.
 - D1's path `hosts/host-web/src/document_diff.rs`: superseded by `crates/control-plane/src/document.rs`.
@@ -526,7 +526,7 @@ Commands:
 - Closed and needed: #1309 (the control plane both hosts call), #1562 (the browser's generic
   command entry), #1381 (the browser runs `SessionState`).
 - Not dependencies any more: #1290 (open; its `apply` is now the core's transaction path) and
-  #1293 (open; R8 dropped the staging this slice used).
+  #1293 (open; B15-R8 dropped the staging this slice used).
 - Ordering only: #1586, #1594 and #1595 (open) hold `0x000f`-`0x0012`. #1310 (open, batch 15a)
   changes what a structural replace gets while a candidate is pending; this slice inherits it.
 - Downstream: #1296 (open) sends this frame from `replaceSession`.
@@ -551,3 +551,56 @@ already carry both rulings.
   adds one case: on a page without cross-origin isolation, the 1 MiB replace runs in the worklet's
   message handler, so it is recorded as a counted blocking rebuild (the documented exception), and
   `process()` still allocates and frees nothing (the render-locked count stays 0).
+
+## Amendment (controls coordinator, batch 15a fold, root ruling 2026-10-16): the split
+
+**#1386 is now part (a), core and C ABI.** The browser transport moves to the placeholder
+*Export the browser session replace transport* (TBD41, `.github/ISSUE_SPECS/TBD41-export-the-browser-session-replace-transport.md`).
+
+- **(a) stays here.** D1 (`SESSION_REPLACE` `0x0013` in `crates/protocol`), D2 (the diff in
+  `crates/control-plane/src/document.rs`), D3 (`SessionState::command_with_document`, the one core
+  path both hosts call), D4, D5, D6 and D7's C ABI half
+  (`miso_engine_v1_submit_document_command`). The browser keeps calling `SessionState::command`,
+  which is `command_with_document(request, &[], ...)`, so a `SESSION_REPLACE` frame sent through
+  `miso_engine_web_v1_control_command` today gets D4's `session.replace.document_length` refusal
+  through the same core path. That is the both-host core path of (a).
+- **TBD41 takes** D7's browser half (`miso_engine_web_v1_replace_document_ptr`, the staging
+  consumption in `control_command`, the worklet message's `document` field), both `.d.ts` twins,
+  the ABI layout mirrors of that export, gate 6 and gate 8's browser half.
+- **Gates of (a).** Gates 1-5 and 7 as filed. Gate 6 becomes a C ABI and browser parity row for
+  the refusal only: the same `SESSION_REPLACE` frame with no document gives the same reply bytes
+  (request ID aside) on both hosts, and changes nothing. Gate 8 keeps its C ABI half: a document of
+  more than 64 KiB and the large live replace through `miso_engine_v1_submit_document_command`,
+  with 0 retained bytes after the reply. Gate 7's "the ABI layout mirrors move" is TBD41's.
+- **Authorized paths of (a).** As filed, without `hosts/host-web/src/{ffi.rs,lib.rs}`, the
+  worklet, the `.d.ts`, the artifact digest, `scripts/check-web-audioworklet.sh`, the ABI layout
+  tools and mirrors and `scripts/test-web-audioworklet.mjs` (all TBD41's). Added: see the feature
+  bit below. `hosts/host-web/tests/control_parity.rs` stays, for gate 6's refusal row.
+
+**Corrections to the re-brief (it predates #1310, which ships in batch 15a).**
+
+- **D4, last bullet.** "Today `BACKPRESSURE`" is void. Since #1310, a structural replace while a
+  candidate is pending gets what a structural transaction gets: it supersedes the unadopted
+  candidate by compare and swap. Gate 4 adds that case: a replace while a candidate is pending
+  commits once and its plan supersedes the candidate, as #1310's transaction case does.
+- **Non-goal "No supersession of a pending candidate (#1310)"** (`:433`) is void. The replace
+  inherits #1310's supersession through the shared path and adds no supersession code of its own.
+- **Non-goal "No browser replace export"** (`:429`) contradicted D7 and its root approval. It now
+  reads: no browser export in (a); the browser export is TBD41's.
+- **The C export needs a feature bit** (#1317 D2: each added symbol gets its own bit, the next
+  free one when it merges). `miso_engine_v1_submit_document_command` gets
+  `MISO_ENGINE_V1_FEATURE_SESSION_REPLACE`, and `FEATURE_MASK` grows to include it. Added to
+  Authorized paths: `crates/capi/src/abi.rs` (the bit and the mask, and its unit-test pins at
+  `abi.rs:548-553`), `crates/capi/src/ffi.rs` (also `version_and_capabilities_are_exact`,
+  `:1558`), `crates/capi/include/miso_engine_v1.h` (the bit and `MISO_ENGINE_V1_FEATURE_MASK`,
+  `:265`) and `crates/capi/tests/c/abi_smoke.c` (the mask pin `:23` and a bit check, no longer
+  conditional). The mask value is the one at merge (#1316 may take a bit first).
+- **D3, the identical document.** The re-brief answers `model_only` with no commit. That conflicts
+  with the wire: `EditPath::ModelOnly` says "the transaction committed"
+  (`crates/protocol/src/message_wire.rs:161-165`), and the registry's `model_only` is a commit
+  that render need not act on. Proposed: an identical document is a refusal-free no-op with a
+  dedicated path, `EditPath::Unchanged = 5` (registry row, decode, corpus, schema re-pin in gate
+  7): OK, `applied_operations` 0, the unchanged revision, no `SESSION_COMMITTED`, no candidate.
+  The alternative is to commit it (`model_only`, revision + 1, one `SESSION_COMMITTED` with 0
+  operations). Gate 3's identical case and gate 6 follow the ruling.
+  NEEDS ROOT CHECK: an identical-document replace replies with a new `EditPath::Unchanged` (5), OK, 0 operations, unchanged revision, no event (or root picks: commit as `model_only` with revision + 1).

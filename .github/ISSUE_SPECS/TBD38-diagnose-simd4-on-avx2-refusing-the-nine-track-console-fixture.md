@@ -45,8 +45,8 @@ the one `eq` slot.)
 **Where `Backend::Simd4` can be selected on an AVX2 build.**
 
 - `lane::Backend` (`crates/lane/src/backend.rs:26`) always has `Simd4`; `Simd8` exists only with
-  `avx2`. `Backend::current()` (`:51`) is a compile-time constant: `Simd8` where `avx2` is set. The
-  doc on `Backend::VECTOR` (`:75`) says tests iterate it so each build runs every vector width it
+  `avx2`. `Backend::current()` (`:49`) is a compile-time constant: `Simd8` where `avx2` is set. The
+  doc on `Backend::VECTOR` (`:74`, the constant at `:80`) says tests iterate it so each build runs every vector width it
   has.
 - `GraphCompiler::compile_with_builtins` takes `dispatch` in its public request
   (`GraphBuiltinsCompileRequest`), so any caller may pass `Simd4`. Every production caller passes

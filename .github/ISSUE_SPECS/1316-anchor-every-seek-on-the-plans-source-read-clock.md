@@ -202,8 +202,8 @@ Checked against `228fca26c`.
   Add both to Authorized paths for re-exports only.
 - D6's feature bit: the mask is 255 today (`MISO_ENGINE_V1_FEATURE_SERVICE` is 128). The rule
   "next free bit when it merges, by symbol" stands.
-- **ROOT RULING (2026-10-15): one shared seqlock module, `crates/engine/src/realtime/seqlock.rs`.
-  #1316 lands first and creates it. #1482 D3 later moves `observe.rs` onto it.** (R1, D2 against
+- **B15-R1, root decision under owner delegation (2026-10-15): one shared seqlock module, `crates/engine/src/realtime/seqlock.rs`.
+  #1316 lands first and creates it. #1482 D3 later moves `observe.rs` onto it.** (D2 against
   #1482 D3.) D2 puts the generic part in `seqlock.rs`, not in `watermark.rs`, and `watermark.rs`
   uses it. Add `crates/engine/src/realtime/seqlock.rs` (new) to Authorized paths. The finding
   follows. D2 makes #1314's record a generic `PublishedWords<const N: usize>` in `watermark.rs`. *Attribute each claim's revisions exactly in
@@ -214,8 +214,8 @@ Checked against `228fca26c`.
   If #1482 lands first, D2 builds the seek report on `seqlock.rs` and leaves `watermark.rs`
   untouched. If this slice lands first, D2 puts the generic part in `seqlock.rs` (added to
   Authorized paths) and #1482 D3 then moves `observe.rs` onto it. Root picks the order.
-- **ROOT RULING (2026-10-15): keep D6 as a direct C export, `miso_engine_v1_source_seek_report`.**
-  (R2, D6 against decision 17 C13.) The logic is one core function,
+- **B15-R2, root decision under owner delegation (2026-10-15): keep D6 as a direct C export, `miso_engine_v1_source_seek_report`.**
+  (D6 against decision 17 C13.) The logic is one core function,
   `SourceControlSet::seek_report`, behind both hosts. Source submission, seeks and the seek report
   are transport under decision 17 C1, so their direct exports are not C13 exceptions. Decision 17's
   C13 line records this (`docs/rulings/one-control-abstraction-2026-10-13.md`). The finding
@@ -236,5 +236,5 @@ the unit test named above. Moved pins from the new per-ring row can reach
 Re-pin from the measurement, with the reason.
 
 **Realtime-path edits.** D2 edits `crates/engine/src/realtime/watermark.rs` and `mod.rs` and adds
-the new `seqlock.rs` (R1). D3 adds a render-side publication in the source consumer. That slice gets
+the new `seqlock.rs` (B15-R1). D3 adds a render-side publication in the source consumer. That slice gets
 one attempt.

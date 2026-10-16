@@ -223,7 +223,7 @@ until #1332 adds `worker` mode.
   `miso_engine_v1_source_seek_report`. So these exports put the same function on the second host
   (C1). They are not a browser-only feature, and source transport is not a control.
 
-**ROOT RULING (2026-10-15): drop D1 from this slice. Re-scope #1386 under C1.** (R8.) #1386's diff
+**B15-R8, root decision under owner delegation (2026-10-15): drop D1 from this slice. Re-scope #1386 under C1.** #1386's diff
 goes in `control-plane` as a protocol frame through `submit_command` and `control_command` on both
 hosts. Its staging is `control_request_ptr`, and its outcome is the response frame. #1386 and #1643
 record this in their own amendments. Deliverable 1 is now D5 and D6. D7's exports are three:
@@ -254,12 +254,12 @@ calls it from the message handler only (#1294, #1297). A render-side caller woul
   source export through `SessionState`, and #1387's amendment only moves that routing to the
   Worker. Proposed: make #1332 and #1387 ordering-only, for the `worker`-mode case of gate 5. D5 and
   D6 in `single` mode do not wait for them. Root confirms.
-- **ROOT RULING (2026-10-15) (R8):** #1293's dependencies drop #1290 and #1313. #1332 and #1387
+- **B15-R8, root decision under owner delegation (2026-10-15):** #1293's dependencies drop #1290 and #1313. #1332 and #1387
   are ordering-only.
 
 **Other specs that name dropped exports.** #1386 names `miso_engine_web_v1_edit_outcome_ptr`.
 #1643 gate uses `miso_engine_web_v1_apply` and cites this slice for it. Root fixes those specs.
-Done under R8: #1386 and #1643 each carry an amendment of 2026-10-15.
+Done under B15-R8: #1386 and #1643 each carry an amendment of 2026-10-15.
 
 **Gates and commands.** Every named script and file exists. `build-web-audioworklet.sh
 --named-twin`, `check-sdk-generated.sh [DIR]`, the parameter-metadata `--check`

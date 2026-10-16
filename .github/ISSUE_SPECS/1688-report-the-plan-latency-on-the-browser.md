@@ -136,3 +136,11 @@ output can do it on the browser.
 ## Size
 
 Half a day.
+
+## Amendment (controls coordinator, batch 15a fold, 2026-10-16)
+
+- **D2's record size.** `WebPlanLatency` is 64 bytes, not 56: `struct_size` and `reserved0` (4 + 4),
+  `latency_samples`, `tail_kind` and `tail_samples` (3 x 8), `reserved: [u64; 4]` (32), with no
+  padding. D2's "(56 bytes)" reads "(64 bytes)". The ABI layout mirrors (D3) record 64.
+- **Decision 17 C13.** The two exports are listed there (root, 2026-10-16) as a transport read of
+  the core's `PlanQueries::resources()` row, so they are not a C13 exception.

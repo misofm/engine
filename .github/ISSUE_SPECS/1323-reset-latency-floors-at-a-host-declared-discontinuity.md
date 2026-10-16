@@ -279,17 +279,17 @@ authorized paths, for the construction sites only: `crates/host-core/tests/brows
 - Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398 and #1310.
   #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288, #1391,
   #1363 and #1325.
-  The rest of batch 15 follows. This slice is in the rest (R5).
+  The rest of batch 15 follows. This slice is in the rest (B15-R5).
 
-**ROOT RULING (2026-10-15): order #1310, #1344 and #1398 before #1323. No placeholder
-refusal.** (R5.) #1344, #1398 and #1310 are in batch 15a; #1323 follows in the rest of batch 15.
+**B15-R5, root decision under owner delegation (2026-10-15): order #1310, #1344 and #1398 before #1323. No placeholder
+refusal.** #1344, #1398 and #1310 are in batch 15a; #1323 follows in the rest of batch 15.
 The finding follows. D2 supersedes a pending candidate
 through #1310, which is not planned for this batch. A declaration while a candidate is pending has
 no rule without it. Proposed: order #1310, #1344 and #1398 before #1323. Do not ship a placeholder,
 such as a typed backpressure refusal while a candidate is pending.
 
-**ROOT RULING (2026-10-15): no revision-0 special case. At revision 0 the call returns OK and
-publishes nothing.** (R6.) D2 adds that sentence. Gate 3 adds a revision-0 case: a declaration
+**B15-R6, root decision under owner delegation (2026-10-15): no revision-0 special case. At revision 0 the call returns OK and
+publishes nothing.** D2 adds that sentence. Gate 3 adds a revision-0 case: a declaration
 on a host at revision 0 returns OK, publishes no candidate, and leaves the next render and the
 reported latency unchanged. The finding follows. Proposed answer: no special
 case. Floors and source-read offsets come only from a successor. A successor needs
@@ -297,8 +297,8 @@ case. Floors and source-read offsets come only from a successor. A successor nee
 only grows. So when D2's test holds, the committed revision is at least 1. At revision 0 the call
 returns OK and publishes nothing. Add that sentence to D2 and a revision-0 case to gate 3.
 
-**ROOT RULING (2026-10-15): this slice also adds `miso_engine_web_v1_declare_discontinuity(handle)
--> u32`.** (R7.) It forwards to the same control-plane function. It adds the export-list mirrors
+**B15-R7, root decision under owner delegation (2026-10-15): this slice also adds `miso_engine_web_v1_declare_discontinuity(handle)
+-> u32`.** It forwards to the same control-plane function. It adds the export-list mirrors
 of #1293 D7 and a native host-web gate equal to gate 2 (in `hosts/host-web/src/tests.rs`).
 #1643 calls it before its seek. Add `hosts/host-web/src/ffi.rs`, `hosts/host-web/src/lib.rs` and
 the mirror files of #1293 D7 to Authorized paths. The finding follows. D5 leaves the browser to #1332 and
@@ -327,3 +327,8 @@ through `submit_command` and `control_command`, C13's form with no new export. B
 - The named files exist, except `withdrawn_successor.rs` (#1344, new there).
 - `tools/audit/src/capi.rs` exists, and `scripts/check-capi-abi.sh` has `--self-test`.
 - Gate 7's commands are valid. Its features exist.
+
+## Amendment (controls coordinator, batch 15a fold, 2026-10-16)
+
+- **Batch placement.** "#1310 is open and not in batch 15/16" (Dependencies) is void. #1310, #1344
+  and #1398 are batch 15a, which lands before this slice (B15-R5).

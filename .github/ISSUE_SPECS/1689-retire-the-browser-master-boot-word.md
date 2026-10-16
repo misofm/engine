@@ -187,3 +187,13 @@ self-test, `bash scripts/check-sdk-generated.sh <artifacts>`, `bash scripts/chec
 ## Size
 
 Half a day.
+
+## Amendment (controls coordinator, batch 15a fold, 2026-10-16)
+
+- **Pin moves: the non-goal governs.** The non-goal allows a memory pin in `expected.json` to move
+  when the measurement moves, with the measured numbers in the PR. Gate 4 now reads: the meter
+  frame bytes and `control-list.json` are unchanged; each memory pin in `expected.json` either
+  equals the base run or moves to the measured value, with the base and measured numbers and the
+  reason in the PR. No other published browser byte moves. Gate 4's test value line reads the same.
+- **Dependencies.** #1381 is closed, so it is not an open stream to rebase after. The open browser streams are #1332 and #1588. #1683 is closed: the `master` row
+  and `sync_master` are on `main`.

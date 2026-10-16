@@ -178,8 +178,7 @@ hand offset; a hand send mute ORs (D5 confirmed); on the send matrix automation 
   stands: the edit stores the fallback and commits `model_only`.
 - **D5 is confirmed** by root: a hand send mute ORs with the automated send mute. D5's "a
   reading for root to confirm" and its alternative are void.
-- **D7 is replaced.** `follows_mute` is not automatable (placeholder
-  `.github/ISSUE_SPECS/1632-make-send-follows-mute-and-matrix-mode-non-automatable.md`): the row
+- **D7 is replaced.** `follows_mute` is not automatable (#1632): the row
   rule refuses an entry on route row 7 with `control.automation.target`, so this slice renders none
   and its flags word gains no automated `follows_mute` bit.
 - **Gate 3** becomes: a send automation edit gives path `rebuild` and completes `exact`; a

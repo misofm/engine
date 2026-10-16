@@ -43,14 +43,16 @@ re-derives at every plan change is host logic.
   `window_of(&TapKey)`). Admission (`admit_and_push_observation_batch`) is the one way a host arms
   or disarms a tap (#1676), and the browser's `record_observe` runs after it, so the two copies are
   written by the same call and held equal by that sequence, not by one owner.
-- **#1310 adds a third writer (verified, not yet in the browser).** In the uncommitted tree,
-  `ObservationSlot` gains `queued` ("a record for this tap waits in the queue of a plan render has
-  not adopted"), and `observation_forwards` (`control.rs:857`) re-queues, on the replacement B, the
-  bound state of every tap whose slot is `queued` on a withdrawn candidate A, because a tap B
-  carries from the running plan P0 takes P0's state at the swap and would lose the record. The
-  batch 15a fold is to copy B's bits into the browser's shape from those forwards after a
-  superseding commit. `hosts/host-web/src/lib.rs` is not modified in that tree as read; the fold
-  is the coordinator's statement, and this issue starts by re-reading it.
+- **#1310 adds a third writer (verified on the batch 15a fold branch `codex/controls-b15a-fold`
+  at `804fe6939`).** `ObservationSlot` gains `queued` (`control.rs:802`: "a record for this tap
+  waits in the queue of a plan render has not adopted"), and `observation_forwards`
+  (`control.rs:869`) re-queues, on the replacement B, the bound state of every tap whose slot is
+  `queued` on a withdrawn candidate A, because a tap B carries from the running plan P0 takes P0's
+  state at the swap and would lose the record. The control plane keeps the result as
+  `SessionState::observation_forwarded()` (`control.rs:3657`; `ObservationForward`, `:843`). The
+  browser copies it: after a committed rebuild, `run_command` (`hosts/host-web/src/lib.rs:1637`-
+  `:1648`) calls `PlanShape::note_observe` (`lib.rs:5952`) on B's `PlanShape` for each forward.
+  That loop is a fourth writer of the copy, and the only reader of `observation_forwarded()`.
 - **The rule that decides the carry** is the same in both copies and exists once in the core after
   #1310: a tap carried across a swap takes the running plan's state unless a command named it
   against the successor. The browser's `observation_commanded` is that "named it" bit; the core's
@@ -94,10 +96,14 @@ re-derives at every plan change is host logic.
    `EffectObservationHandle::armed_taps`, and `carry_tap_state`'s armed-bit merge. The meter
    fold and `read_observation_values` read the core. `observation_armed_taps` (test hook) reads
    the core's count.
-3. After #1310 lands, the superseding commit's forwards reach the browser through the same read;
-   no browser code copies `observation_forwards`' result.
+3. The superseding commit's forwards reach the browser through the same read; no browser code
+   copies `observation_forwards`' result (deliverable 5).
 4. The #1679 test is deleted (its subject, a browser copy of the mask, no longer exists); the
    others are rewritten only where they named a deleted field.
+5. The forward copy in `run_command` (`lib.rs:1637`-`:1648`) is deleted. `note_observe` goes with
+   the fields it writes. `SessionState::observation_forwarded()` and the stored
+   `observation_forwarded` field (`control.rs:568`) are deleted if no reader remains (the C ABI has
+   none); `ObservationForward` stays only if the forwards' own code needs it.
 
 ## Authorized paths
 
@@ -125,9 +131,12 @@ re-derives at every plan change is host logic.
    `observation_*` rows of `hosts/host-web/src/tests.rs`) and the qualification's observation
    rows pass unchanged, apart from the deleted #1679 test and tests that named a deleted field.
 2. A subscription acked across a plan rebuild, across a supersession (#1310: the second structural
-   commit while the first waits unadopted) and across the adoption block publishes windows: a new
-   test drives each of the three sequences and reads at least one window after each, with the
-   subscription taken before the rebuild and no re-arm.
+   commit while the first waits unadopted) and across the adoption block publishes windows. The
+   supersession leg is the existing
+   `a_subscription_queued_on_a_superseded_candidate_publishes_on_its_replacement`, which passes
+   unchanged with the forward copy deleted; a new test drives the rebuild and adoption legs and
+   reads at least one window after each, with the subscription taken before the rebuild and no
+   re-arm.
 3. The browser source holds no per-shape armed or commanded state, **proved by type**: the
    fields `observation_armed` and `observation_commanded` are gone from `PlanShape`, and no type
    in `hosts/host-web/src` has a field of the shape `Box<[u32]>` indexed by dense effect slot that
@@ -146,8 +155,10 @@ re-derives at every plan change is host logic.
 - The sequence test (gate 2): plausible defect that turns it red and no existing test catches: a
   subscription acked while a candidate waits, then superseded by a second structural commit, that
   stops publishing after the adoption because the replacement's armed state came from a source
-  that never saw the queued record. Existing browser tests cover rebuild and adoption separately
-  and take P0's bits; none drives a supersession through the browser's tap state.
+  that never saw the queued record. `a_subscription_queued_on_a_superseded_candidate_publishes_on_its_replacement`
+  (`hosts/host-web/src/tests.rs:7139`, #1310) already drives the supersession leg, through the
+  copy; gate 2's new test covers the other two legs and keeps that test as the supersession leg,
+  so after the deletion it proves the core read, not the copy.
 - The equivalence test for the adoption read (third decision): red if the core's "named against
   the successor" fact differs from the deleted `observation_commanded` bit for any drive of the
   five existing sequences; the deleted bit is the oracle, so the test is written before the

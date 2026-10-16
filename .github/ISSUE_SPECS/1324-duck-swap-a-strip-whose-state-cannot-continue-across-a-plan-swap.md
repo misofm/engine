@@ -353,7 +353,7 @@ lands, D1's forced-restart clause has nothing to read.
 - Open and not in batch 15: #1288 (arm), #1325 (duck, `S`, overlay, `transition.rs`), #1363 (route
   arm, D3) and #1391 (pre-fader route lanes). D1-D5 and every gate need all four.
 - Forward references, not dependencies: #1397, #1354, #1287, #1402 and #1392 (open).
-- **ROOT RULING (2026-10-15): #1324 leaves batch 15a. It lands in a later batch after #1288,
+- **Root decision under owner delegation (2026-10-15; not one of B15-R1 to B15-R9): #1324 leaves batch 15a. It lands in a later batch after #1288,
   #1391, #1363 and #1325, in that order. Batch 15a is #1344, #1398, #1310.**
   The finding follows. It needs #1288, #1325, #1363 and #1391,
   which are open and outside batch 15. None of their code is on `main`. Proposed: move #1324 out

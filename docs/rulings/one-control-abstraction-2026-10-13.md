@@ -296,6 +296,16 @@ builder's checks, canonical-PCM decode and content identity) are recorded for ro
 their own issues under this rule. Source submission, seeks and the seek report are transport under
 C1, with one core function behind both hosts, so their direct exports are not C13 exceptions
 (ruling 2026-10-15, #1316).
+Widened (root, 2026-10-16): each direct export approved in batch 15 is transport of bytes or host
+lifecycle, with one core function behind it on both hosts, so none is a C13 exception. They are:
+the source seek report, `miso_engine_v1_source_seek_report` (#1316, B15-R2);
+`miso_engine_web_v1_declare_discontinuity` (#1323, B15-R7), the browser form of the host's
+discontinuity declaration; the two #1386 document exports, `miso_engine_web_v1_replace_document_ptr`
+(the browser's staging of the replacement document's bytes) and
+`miso_engine_v1_submit_document_command` (the C ABI's transport of the same command); and #1688's
+plan latency read, `miso_engine_web_v1_plan_latency_read` with its record pointer
+`miso_engine_web_v1_plan_latency_ptr`, a copy of the core's `PlanQueries::resources()` row. A new
+direct export that is not in this list needs its own root ruling.
 
 ### How to add a control
 

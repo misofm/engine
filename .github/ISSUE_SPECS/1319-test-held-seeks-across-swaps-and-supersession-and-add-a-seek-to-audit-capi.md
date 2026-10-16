@@ -187,8 +187,8 @@ Checked against `228fca26c`.
 
 - D1 and D4 hold against the code and decision 17.
 - D2 and D3 hold as designs, but they cannot run before #1310.
-- **ROOT RULING (2026-10-15): keep #1319 whole. #1310 and #1344 land first, in batch 15a.**
-  (R4, scope against #1310.) No successor issue is split off. #1319 closes on D1-D4 after #1310,
+- **B15-R4, root decision under owner delegation (2026-10-15): keep #1319 whole. #1310 and #1344 land first, in batch 15a.**
+  (Scope against #1310.) No successor issue is split off. #1319 closes on D1-D4 after #1310,
   in the rest of batch 15.
   The finding follows. Deliverable 1 says D2 and D3 come "after #1310
   has landed", and #1310 is outside the batch-15/16 list. Proposed resolution: split D2 and D3
@@ -201,3 +201,9 @@ Checked against `228fca26c`.
 
 **Realtime-path edits.** None under `crates/engine/src/realtime`. D4 adds a held seek to the
 audited render, so a defect on that path shows up as an audit violation, not as an edit here.
+
+## Amendment (controls coordinator, batch 15a fold, 2026-10-16)
+
+- **Batch placement.** "#1310 ... is not in the batch-15/16 list" and "#1344, also open and not in
+  the list" (Dependencies on GitHub) are void. #1344 and #1310 are in batch 15a (with #1398), which
+  lands before this slice.

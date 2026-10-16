@@ -31,20 +31,27 @@ hosts charge the same, because the row is computed once, in the core.
 - **The overlay is uncharged.** `SessionState::monitor` (`crates/control-plane/src/control.rs:411`)
   holds a `controls::MonitorOverlay` (`crates/controls/src/effective.rs:32`): `soloed:
   Vec<StableId>` (sorted, no duplicate) and `master: Option<StableId>` (#1683). Each `StableId` is
-  a `String` of at most `STABLE_ID_MAXIMUM_BYTES = 127` bytes (`crates/session/src/id.rs:5`). A
+  a `String` of at most `STABLE_ID_MAXIMUM_BYTES = 127` bytes (`crates/session/src/id.rs:7`). A
   search of `compile.rs` for `monitor` or `overlay` finds only the boot seed (`:1207`) and the
   struct's doc (`:29`): no row charges the vector, its spare capacity or the IDs' heap text. Each
   commit also builds the next overlay (`MonitorOverlay::after`, `control.rs:1624` and `:1998`),
   a transient copy that lives until the commit moves it into `self.monitor` (`:1858`, `:2351`).
 - **Edit ramps are transaction metadata that #1310 makes a retained value.** `EditRamps`
-  (`crates/session/src/edit_ramp.rs:95`) is a `BTreeMap<Key, u32>` where `Key { owner, row }`;
-  a prepared transaction carries one (`crates/protocol/src/model.rs:931`) and it dies with the
+  (`crates/session/src/edit_ramp.rs:100`) holds three tables (`:101`-`:106`, verified on
+  `codex/controls-b15a-fold` at `804fe6939`): `entries: BTreeMap<Key, u32>` where
+  `Key { owner, row }` (`:65`); `unset: BTreeSet<Key>`, the rows the latest edit wrote with no
+  length; and `cleared: BTreeSet<Owner>` (`Owner`, `:56`), the targets an upsert rewrote whole
+  (`clear_target`, `:142`). #1310 added the two sets for `overlay` (`:172`). A prepared
+  transaction carries one (`crates/protocol/src/model.rs:931`) and it dies with the
   transaction. Rows: a strip has `Fader`, `Mute`, `Matrix`, `Input`, `Link` (five); a route has
   `RouteGain`, `RouteMute`, `RouteMatrix` (three); a VCA has `VcaFader`, `VcaMute` (two); the
-  console has `Link` (one). So the number of entries is at most `5 x strips + 3 x routes + 2 x VCAs
-  + 1`, each with the owner's ID text (at most 127 bytes) and a `u32`.
-- **#1310's kept base (b15aw; not on b15a).** `KeptBase { model, monitor, edit_ramps,
-  monitor_ramp }` (`control.rs:74` in that tree) is set on the epoch a pending successor succeeds
+  console has `Link` (one). So `entries` and `unset` each hold at most `5 x strips + 3 x routes +
+  2 x VCAs + 1` keys (each key's owner ID text is at most 127 bytes; `entries` adds a `u32`), and
+  `cleared` holds at most one `Owner` per strip, route, VCA and the console. The charge covers all
+  three tables.
+- **#1310's kept base.** `KeptBase { model, monitor, edit_ramps,
+  monitor_ramp }` (`control.rs:78` on `codex/controls-b15a-fold` at `804fe6939`; the other anchors
+  of this bullet are from the b15aw tree and are re-read by the implementer) is set on the epoch a pending successor succeeds
   (`:2380`), extended by every later commit (`:2355`, `:2987`), merged by `merged_ramps` (a clone
   of the kept lengths plus the new transaction's), and dropped when the epoch stops being the
   running one (`:1745`, `:2391`). Only `model` is charged: `held_models` (`:1651`) returns one
@@ -72,9 +79,10 @@ hosts charge the same, because the row is computed once, in the core.
 - **Capacity versus length.** A `Vec` that grows by pushes may hold twice its length. Either the
   overlay reserves `strips` entries when a plan is prepared and the charge is exact on that
   capacity, or the charge is `2 x strips`. The proposal reserves: the charge is then a layout, and
-  a solo write never allocates after the reserve. For the `BTreeMap`, the charge is a per-entry
-  ceiling derived from the layouts of `Key` and `u32` and the leaf node's 11-entry layout, checked
-  against the allocator, because the map's node count is not exact.
+  a solo write never allocates after the reserve. For the `BTreeMap` and the two `BTreeSet`s, the
+  charge is a per-entry ceiling derived from the layouts of `Key`, `u32` and `Owner` and the leaf
+  node's 11-entry layout, checked against the allocator, because a B-tree's node count is not
+  exact.
 - **Retained versus peak.** The retained charge is one overlay and one ramp table on the committed
   state plus, for each pending epoch, a kept overlay and a kept ramp table. The transients (the
   next overlay of `after`, the clone in `merged_ramps`) belong to the peak rows
@@ -125,10 +133,11 @@ hosts charge the same, because the row is computed once, in the core.
 1. **Allocator-measured oracle.** In `crates/capi/tests/resource_lifecycle.rs`, with the
    thread-scoped allocator: populate the committed overlay to its bound (every strip soloed, a
    master set), populate the ramps to the row bound (a transaction that gives every row of every
-   owner a length), and hold a pending candidate so a kept base holds both again (a structural
+   owner a length, a transaction that writes every row with no length so `unset` is full, and
+   one that upserts every owner whole so `cleared` is full), and hold a pending candidate so a kept base holds both again (a structural
    commit followed by a live edit). Then the bytes the control plane retains for those values are
    `<=` the bytes the charge adds. The comparison names the terms observed (overlay vector
-   capacity and ID text, map nodes), not a byte literal.
+   capacity and ID text, the map's and both sets' nodes), not a byte literal.
 2. The existing exact equality `capi_retained_bytes == observed terms` still holds on every
    fixture, with the new term added to the right-hand side as an observed value.
 3. The same session on the browser: `WebResourceReport` reads the same core charge; the

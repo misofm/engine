@@ -214,7 +214,7 @@ Checked against `228fca26c`.
 - Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398 and #1310.
   #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288, #1391,
   #1363 and #1325.
-  The rest of batch 15 follows. #1323 lands after #1310 (R5 in #1323).
+  The rest of batch 15 follows. #1323 lands after #1310 (B15-R5 in #1323).
 - #1314 and #1309 are closed. The control plane is `crates/control-plane/src/`, as the spec says.
 - #1354, #1355, #1320, #1358, #1360 and #1361 are open. They are follow-ons or non-goals, not
   dependencies.
@@ -234,3 +234,8 @@ and package exists (`realtime-policy` is `tools/realtime-policy`). The features
 **Realtime-path edits.** D1 and D4 edit `crates/engine/src/realtime/plan.rs`,
 `plan_exchange.rs` and `mod.rs`. D1 also edits the graph's render block entry. That slice gets
 one attempt.
+
+## Amendment (controls coordinator, batch 15a fold, 2026-10-16)
+
+- **Batch placement.** "Neither is in the batch-15/16 list" (Dependencies on GitHub, about #1310
+  and #1344) is void. #1310 and #1344 are batch 15a; #1323 lands after #1310 (B15-R5).
