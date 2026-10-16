@@ -521,6 +521,40 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
     }
 }
 
+/// A plan's graph bytes and its compiled model's bytes.
+type GraphRow = (u64, u64);
+
+/// The graph rows of P0, of A (P0 with `first`) and of B (A with `second`), each read while its
+/// plan renders (gate 4).
+fn graph_rows(
+    model: &SessionModel,
+    first: &[SessionEdit],
+    second: &[SessionEdit],
+) -> (GraphRow, GraphRow, GraphRow) {
+    let graph = |children: &CompiledChildren| {
+        (
+            children.plan.resources().graph_session_plus_plan_bytes,
+            children
+                .session
+                .committed_session()
+                .resource_estimate()
+                .compiled_model_bytes,
+        )
+    };
+    let mut children = compile(model, limits());
+    let p0 = graph(&children);
+    submit_direct(&mut children, &[FIXTURE], 0);
+    render_direct(&mut children, 0);
+    commit(&mut children, 1, 42, first);
+    render_direct(&mut children, 1);
+    children.session.service().expect("service");
+    let a = graph(&children);
+    commit(&mut children, 2, 43, second);
+    render_direct(&mut children, 2);
+    children.session.service().expect("service");
+    (p0, a, graph(&children))
+}
+
 /// Gate 4: the replacement admission holds the running plan, the withdrawn candidate and the
 /// replacement at once (#1310 D3, #1398 D4). With a graph cap above every two-plan peak and below
 /// that three-plan peak, T2 behind a pending T1 is refused, the revision stays T1's and T1's
@@ -537,31 +571,7 @@ fn a_replacement_over_the_three_plan_ceiling_is_refused_and_the_candidate_kept()
     let model = stateless_session(48_000);
     let first = add_source_track(&model);
     let second = [put(&model, 1, compressor())];
-    let graph = |children: &CompiledChildren| {
-        (
-            children.plan.resources().graph_session_plus_plan_bytes,
-            children
-                .session
-                .committed_session()
-                .resource_estimate()
-                .compiled_model_bytes,
-        )
-    };
-    // The rows of P0, A and B, each read while its plan renders.
-    let (p0, a, b) = {
-        let mut children = compile(&model, limits());
-        let p0 = graph(&children);
-        submit_direct(&mut children, &[FIXTURE], 0);
-        render_direct(&mut children, 0);
-        commit(&mut children, 1, 42, &first);
-        render_direct(&mut children, 1);
-        children.session.service().expect("service");
-        let a = graph(&children);
-        commit(&mut children, 2, 43, &second);
-        render_direct(&mut children, 2);
-        children.session.service().expect("service");
-        (p0, a, graph(&children))
-    };
+    let (p0, a, b) = graph_rows(&model, &first, &second);
     let two_plans = (p0.0 + a.0 + p0.1 + a.1).max(a.0 + b.0 + a.1 + b.1);
     let three_plans = p0.0 + a.0 + b.0 + p0.1 + a.1 + b.1;
     let cap = two_plans + (p0.0 + p0.1) / 2;
@@ -1006,4 +1016,311 @@ fn edits_after_render_took_two_candidates_unretired_each_commit() {
     for (block, (actual, expected)) in raced.iter().zip(&paced).enumerate() {
         assert_eq!(bits(actual), bits(expected), "block {block}");
     }
+}
+
+/// Batch 15a review fold 2, B-1: render claims A and is preempted before it retires P0; edit C
+/// finds A taken and parks P0; render adopts B and retires A; edit D finds B taken and parks A;
+/// render then adopts C and publishes its epoch. The control side now holds two parked epochs, the
+/// running B and the pending C, with the atomic naming C. The next service step reclaims P0's, A's
+/// and B's plans and promotes C, and the session takes edits again.
+///
+/// Test value: red if the parked list holds fewer epochs than the retirement queue has credits
+/// (the step that reclaims nothing cannot park a third), and red if, with that list short, the
+/// service step promotes from the atomic before it reclaims: every later call then answers
+/// `INTERNAL`, permanently.
+#[test]
+fn two_taken_candidates_and_a_published_adoption_never_wedge_the_session() {
+    let model = stateless_session(48_000);
+    let edits = [
+        add_source_track(&model).to_vec(),
+        vec![put(&model, 1, compressor())],
+        vec![put(&model, 2, compressor())],
+    ];
+    control_plane::test_reset_lifecycle_observer();
+    let mut children = compile(&model, limits());
+    submit_direct(&mut children, &[FIXTURE], 0);
+    render_direct(&mut children, 0);
+    control_plane::test_hold_reclamation(true);
+    for (index, edits) in edits.iter().enumerate() {
+        let block = index as u64 + 1;
+        commit(&mut children, block, 41 + block, edits);
+        submit_direct(&mut children, &[ADDED], block - 1);
+        submit_direct(&mut children, &[FIXTURE], block);
+        if index < 2 {
+            render_unpublished(&mut children, block);
+        } else {
+            render_direct(&mut children, block);
+        }
+    }
+    let snapshot = children.session.test_transaction_snapshot();
+    assert_eq!(
+        (
+            snapshot.retired_provider_epochs,
+            snapshot.provider_epoch,
+            snapshot.pending_provider_epochs,
+            snapshot.active_plan_epoch,
+        ),
+        (vec![0, 1], 2, vec![3], 3),
+        "two parked epochs, B running on the control side, C adopted by render"
+    );
+    // A step that reclaims nothing (the seam holds every plan) still promotes C from the atomic:
+    // the parked list holds one epoch per retirement credit, so the third fits.
+    children
+        .session
+        .service()
+        .expect("a step that reclaims nothing promotes C");
+    assert_eq!(
+        children
+            .session
+            .test_transaction_snapshot()
+            .retired_provider_epochs,
+        vec![0, 1, 2]
+    );
+    control_plane::test_hold_reclamation(false);
+    for block in 4..8 {
+        submit_direct(&mut children, &[ADDED], block - 1);
+        submit_direct(&mut children, &[FIXTURE], block);
+        render_direct(&mut children, block);
+        children
+            .session
+            .service()
+            .unwrap_or_else(|error| panic!("block {block}: {error:?}"));
+    }
+    assert_eq!(children.session.test_providers().test_epoch(), 3);
+    assert!(children.session.test_pending_providers().is_empty());
+    assert!(children.session.test_retired_providers().is_empty());
+    commit(&mut children, 4, 45, &[remove(&model, 1)]);
+    render_direct(&mut children, 8);
+    children.session.service().expect("service");
+    drop(children);
+    assert_balanced("wedge", control_plane::test_lifecycle_counters());
+}
+
+/// Batch 15a review fold 2, M-1: render claims A and retires P0, and the service step has not yet
+/// reclaimed P0's plan. Edit T2 finds A taken and promotes it, but P0's plan is still alive, so
+/// the admission charges P0, A and B together. With gate 4's cap (above every two-plan peak,
+/// below the three-plan peak) T2 is refused as `BACKPRESSURE`; one service step reclaims P0 and
+/// the same T2 commits.
+///
+/// With a source-total cap instead, the parked P0 is charged with each carried ring once: T2 is
+/// admitted at the counted-once peak and refused one byte below.
+///
+/// Test value: red if a parked epoch's plan is left out of the admission after a `Taken`
+/// promotion (T2 is then admitted at the three-plan peak while P0's plan still lives, and one
+/// byte below the source peak), and red if the parked epoch's place in the held list double counts
+/// a ring A carried from it (refused at the counted-once peak).
+#[test]
+fn a_displaced_plan_not_yet_reclaimed_is_charged_after_a_taken_promotion() {
+    let model = stateless_session(48_000);
+    let first = add_source_track(&model);
+    let second = [put(&model, 1, compressor())];
+    let (p0, a, b) = graph_rows(&model, &first, &second);
+    let two_plans = (p0.0 + a.0 + p0.1 + a.1).max(a.0 + b.0 + a.1 + b.1);
+    let three_plans = p0.0 + a.0 + b.0 + p0.1 + a.1 + b.1;
+    let cap = two_plans + (p0.0 + p0.1) / 2;
+    assert!(cap < three_plans, "{cap} against {three_plans}");
+    let mut limits = limits();
+    limits.maximum_graph_session_plus_plan_bytes = cap;
+
+    control_plane::test_reset_lifecycle_observer();
+    let mut children = compile(&model, limits);
+    submit_direct(&mut children, &[FIXTURE], 0);
+    render_direct(&mut children, 0);
+    commit(&mut children, 1, 42, &first);
+    control_plane::test_hold_reclamation(true);
+    submit_direct(&mut children, &[ADDED], 0);
+    submit_direct(&mut children, &[FIXTURE, ADDED], 1);
+    render_unpublished(&mut children, 1);
+    let refused = children
+        .session
+        .command(&transaction(2, 43, &second), 4_096);
+    assert!(
+        matches!(refused, Err(CommandError::Backpressure)),
+        "P0's plan is alive and charged: {refused:?} (cap {cap}, three plans {three_plans})"
+    );
+    assert_eq!(children.session.test_owner_counters().candidate_taken, 1);
+    assert_eq!(revision(&children), 43);
+    assert_eq!(
+        children
+            .session
+            .test_transaction_snapshot()
+            .retired_provider_epochs,
+        vec![0],
+        "P0 is parked until its plan is reclaimed"
+    );
+    control_plane::test_hold_reclamation(false);
+    children.session.service().expect("service");
+    assert!(children.session.test_retired_providers().is_empty());
+    commit(&mut children, 3, 43, &second);
+    submit_direct(&mut children, &[FIXTURE, ADDED], 2);
+    render_direct(&mut children, 2);
+    children.session.service().expect("service");
+    drop(children);
+    assert_balanced("parked charge", control_plane::test_lifecycle_counters());
+
+    // #1398 M2 with the parked epoch: each carried ring is counted once, in the oldest held plan
+    // that holds it. The source peak is P0's rows, A's less what A carried from P0, and B's less
+    // what B carried from A: admitted at that cap, `BACKPRESSURE` one byte below.
+    let source_rows = {
+        let mut children = compile(&model, crate::runtime::tests::limits());
+        let row = |children: &CompiledChildren| {
+            (
+                children.plan.resources().source_total_bytes,
+                children.session.test_providers().test_carried().0,
+            )
+        };
+        let p0 = row(&children);
+        submit_direct(&mut children, &[FIXTURE], 0);
+        render_direct(&mut children, 0);
+        commit(&mut children, 1, 42, &first);
+        render_direct(&mut children, 1);
+        children.session.service().expect("service");
+        let a = row(&children);
+        commit(&mut children, 2, 43, &second);
+        render_direct(&mut children, 2);
+        children.session.service().expect("service");
+        [p0, a, row(&children)]
+    };
+    assert!(
+        source_rows[1].1 > 0 && source_rows[2].1 > 0,
+        "A and B carry rings: {source_rows:?}"
+    );
+    let counted_once = source_rows[0].0 + source_rows[1].0 - source_rows[1].1 + source_rows[2].0
+        - source_rows[2].1;
+    for (cap, admitted) in [(counted_once, true), (counted_once - 1, false)] {
+        let mut limits = crate::runtime::tests::limits();
+        limits.maximum_source_total_bytes = cap;
+        let mut children = compile(&model, limits);
+        submit_direct(&mut children, &[FIXTURE], 0);
+        render_direct(&mut children, 0);
+        commit(&mut children, 1, 42, &first);
+        control_plane::test_hold_reclamation(true);
+        submit_direct(&mut children, &[ADDED], 0);
+        submit_direct(&mut children, &[FIXTURE, ADDED], 1);
+        render_unpublished(&mut children, 1);
+        let result = children
+            .session
+            .command(&transaction(2, 43, &second), 4_096);
+        assert_eq!(
+            children
+                .session
+                .test_transaction_snapshot()
+                .retired_provider_epochs,
+            vec![0],
+            "cap {cap}: P0 parked"
+        );
+        control_plane::test_hold_reclamation(false);
+        if admitted {
+            assert!(result.is_ok(), "cap {cap} = {source_rows:?}: {result:?}");
+        } else {
+            assert!(
+                matches!(result, Err(CommandError::Backpressure)),
+                "cap {cap}: {result:?}"
+            );
+        }
+    }
+}
+
+/// `UpsertSource` of `s-source` as `model` declares it, with its content identity replaced when
+/// `redeclared`: a declaration change that restarts the source in a fresh ring.
+fn upsert_added_source(model: &SessionModel, redeclared: bool) -> SessionEdit {
+    let mut source = add_source_track(model)
+        .into_iter()
+        .find_map(|edit| match edit {
+            SessionEdit::UpsertSource { source } => Some(source),
+            _ => None,
+        })
+        .expect("the added source");
+    if redeclared {
+        source.content = source.content.replace("7e94", "0e0e");
+        assert!(
+            source.content != model.sources[0].content,
+            "the content identity changed"
+        );
+    }
+    SessionEdit::UpsertSource { source }
+}
+
+/// #1310, root ruling of 2026-10-16 (no ack before a drop). P0 plays `s-source`. T1 (A)
+/// redeclares it, so A restarts it in a fresh ring, and the host's chunk for it is acked into
+/// A's ring. T2 (B) puts the source back as P0 declares it: B would prepare it fresh, not donated
+/// from A, and A's acked chunk would drop with A. So T2 is refused with `BACKPRESSURE` before its
+/// commit: the revision stays T1's, A stays the candidate, no event is queued. The next block
+/// adopts A and plays the acked chunk; the same T2 then commits on A. Every block equals the
+/// sequential run (T2 submitted only after A's adoption), and the acked chunk is heard (the
+/// block differs from a run whose host never fed A's ring).
+///
+/// Test value: red if the guard is missing (T2 commits at once and supersedes A), or if the
+/// refusal changes anything (a block, the revision, the candidate or an event differs).
+#[test]
+fn a_supersession_that_would_drop_acked_pcm_on_a_redeclared_source_is_backpressure() {
+    let model = stateless_session(48_000);
+    let p0_edits = add_source_track(&model).to_vec();
+    let first = vec![upsert_added_source(&model, true)];
+    let second = vec![upsert_added_source(&model, false)];
+    let run = |attempt_early: bool, feed_a: bool| {
+        let mut children = compile(&model, limits());
+        let mut blocks = Vec::new();
+        submit_direct(&mut children, &[FIXTURE], 0);
+        blocks.push(render_direct(&mut children, 0));
+        commit(&mut children, 1, 42, &p0_edits);
+        submit_direct(&mut children, &[ADDED], 0);
+        submit_direct(&mut children, &[FIXTURE], 1);
+        blocks.push(render_direct(&mut children, 1));
+        children.session.service().expect("service");
+        commit(&mut children, 2, 43, &first);
+        let candidate = children.session.test_pending_providers()[0].test_epoch();
+        if feed_a {
+            // A restarted `s-source` at generation 1, frame 0: this chunk is acked into A's ring.
+            submit_direct(&mut children, &[ADDED], 0);
+        }
+        submit_direct(&mut children, &[FIXTURE], 2);
+        if attempt_early {
+            let refused = children
+                .session
+                .command(&transaction(3, 44, &second), 4_096);
+            assert!(
+                matches!(refused, Err(CommandError::Backpressure)),
+                "the supersession would drop A's acked chunk: {refused:?}"
+            );
+            assert_eq!(revision(&children), 44, "the revision does not move");
+            let pending: Vec<u64> = children
+                .session
+                .test_pending_providers()
+                .iter()
+                .map(|provider| provider.test_epoch())
+                .collect();
+            assert_eq!(pending, vec![candidate], "A stays the candidate");
+            assert!(
+                children
+                    .session
+                    .dequeue_event(EventLane::Reliable, 4_096)
+                    .expect("the event lane")
+                    .is_none(),
+                "the refusal queues no event"
+            );
+        }
+        blocks.push(render_direct(&mut children, 2));
+        children.session.service().expect("service");
+        assert_eq!(children.session.test_providers().test_epoch(), candidate);
+        commit(&mut children, 4, 44, &second);
+        // B restarts `s-source` again: the host refeeds it from frame 0.
+        for block in 3..6 {
+            submit_direct(&mut children, &[ADDED], block - 3);
+            submit_direct(&mut children, &[FIXTURE], block);
+            blocks.push(render_direct(&mut children, block));
+        }
+        blocks
+    };
+    let sequential = run(false, true);
+    let refused = run(true, true);
+    for (block, (actual, expected)) in refused.iter().zip(&sequential).enumerate() {
+        assert_eq!(bits(actual), bits(expected), "block {block}");
+    }
+    let unfed = run(false, false);
+    assert_ne!(
+        bits(&sequential[2]),
+        bits(&unfed[2]),
+        "A's adoption block plays the acked chunk"
+    );
 }

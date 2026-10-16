@@ -372,3 +372,27 @@ control thread.
 destructures `PreparedHost` exhaustively and needed `carried_base,` plus
 `assert!(carried_base.is_none())`. The attempt did not edit it (batch 15a rule for `crates/capi`).
 The coordinator added it, as recorded above.
+
+**Review fold 2 (batch 15a).**
+- *m-2.* A release-build probe fed B's producer between `check_donation` and `apply_donation` and
+  lost the acked chunk: `producers_resolve` did not re-read `unfed`. It now requires the
+  successor's producer to be unfed, so the apply refuses and moves nothing. `donate_producers` and
+  `donate_consumers` are `pub(crate)` (no caller outside `host-core`) and no longer re-exported.
+  Test `a_successor_fed_between_the_check_and_the_apply_moves_nothing`: apply returns 0, both
+  sides keep their rings, B's producer continues after its acked chunk and A's is not vacated.
+  Red with the `unfed` re-read removed: the `debug_assert!` in `donate_producers` (debug) and
+  "a fed successor refuses the apply" (release).
+- *m-3.* `a_seek_or_an_empty_end_of_region_on_the_successor_refuses_the_donation`: a seek alone
+  (generation 2) and a seek to the region's end closed by a zero-frame end-of-region chunk each
+  give `SuccessorFed`. Red with `unfed` reading only the written frames ("seek only"). A
+  zero-frame end-of-region chunk at generation 1 is not reachable: the validator refuses a
+  zero-frame source and the ring refuses the chunk as non-contiguous, so the chunk follows a seek.
+  The removed pre-check is caught by the m-2 test above.
+- *m-4.* The doc of `a_donation_never_separates_an_acked_ring_from_its_producer` no longer claims
+  the old producer swap; it names gate 4's `Vacated` assert
+  (`a_donated_ring_plays_its_acked_pcm_and_held_seek`) as the catch.
+- *Reverted-source guard (root ruling of 2026-10-16).* `host_core::drops_acked_reverted_source`
+  (`source.rs`, beside `check_donation`, reusing `unfed`) reports a source the donor redeclared
+  from the running plan, fed since, that the successor declares as the running plan does: the one
+  case the donation cannot move and the acked chunks would drop. #1310's rebuild refuses it as
+  `BACKPRESSURE` (see #1310's fold 2); TBD42 lifts it.

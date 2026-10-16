@@ -7232,6 +7232,79 @@ mod structural_apply {
         );
     }
 
+    /// #1310 on the browser with a spectrum capture (batch 15a review fold 2, m-5): a candidate
+    /// whose tables carry a spectrum hand-over (its prepared captures and pairing) is superseded
+    /// before render adopts it. The superseding command drops the candidate's entry, captures
+    /// included, on the control side; the replacement's hand-over is the one that waits, and the
+    /// service step after its adoption promotes it, so the stream keeps reading. The render-call
+    /// allocation count of the same script is pinned to zero in `structural_apply_realtime.rs`.
+    ///
+    /// Test value: red if a superseded candidate's tables and hand-over outlive the command that
+    /// superseded it (two entries wait), if the replacement's hand-over is lost (none waits, or
+    /// the stream stops after the swap), or if a service step before the adoption block drops a
+    /// waiting candidate's hand-over.
+    #[test]
+    fn a_superseded_candidates_spectrum_handover_drops_with_the_superseding_command() {
+        let model = gate_model();
+        let mut rig = Rig::boot(&model, options(), single_capture());
+        rig.host
+            .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("the stream starts");
+        for _ in 0..APPLY_BEFORE {
+            rig.step();
+        }
+        let first = add_muted_track(&model, ADDED);
+        let second = add_muted_track(&with_muted_track(&model, ADDED), "a-muted-b");
+        assert!(matches!(
+            rig.apply(&first, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(rig.spectrum_promotions_waiting(), 1, "A's hand-over waits");
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(
+            rig.spectrum_promotions_waiting(),
+            1,
+            "a service step before the adoption block keeps A's hand-over"
+        );
+        assert!(matches!(
+            rig.apply(&second, 2),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(
+            rig.host.ready.as_ref().expect("ready").pending_shapes.len(),
+            1,
+            "the superseded candidate's entry dropped with the command"
+        );
+        assert_eq!(
+            rig.spectrum_promotions_waiting(),
+            1,
+            "only the replacement's hand-over waits"
+        );
+        rig.step();
+        assert_eq!(rig.epoch(), 2, "the replacement is adopted");
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(
+            rig.spectrum_promotions_waiting(),
+            0,
+            "the service step promoted the replacement's captures"
+        );
+        let mut windows = 0;
+        while rig.block < SPECTRUM_BLOCKS {
+            rig.step();
+            let read = rig.read_stream();
+            if read.window.is_some() {
+                windows += 1;
+            }
+        }
+        assert!(windows > 0, "the stream publishes windows after the swap");
+    }
+
     /// #1310 (root ruling B15-Q4) on the browser, the host that admits observation records: a
     /// subscription acked against a candidate that a later structural edit supersedes arms the
     /// replacement and publishes windows there. The replacement carries "track"'s compressor from

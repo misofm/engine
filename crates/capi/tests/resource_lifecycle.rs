@@ -1226,6 +1226,13 @@ impl Budget {
 /// 116713280504, which printed `builtin_bank_bytes: 12969 of 21056`): `builtin_bank_bytes` 12,969
 /// (four lanes), so its ceiling is 12,969 plus 10 %, rounded up to 64: 14,265.9 -> 14,272 (was
 /// 21,056, set before the four-lane value was measured; tightened in batch 15a).
+///
+/// #1310 batch 15a fold 2: the parked-provider list holds one epoch per retirement credit (three,
+/// was two), and each provider epoch keeps the resource row the admissions charge while it is
+/// parked (`ProviderEpoch::parked`, 248 bytes). `capi_retained_bytes` measured 165,922 before and
+/// 168,810 after (x86-64, +2,888: one more 1,648-byte provider-epoch slot and 248 bytes in each of
+/// the five slots; the row does not depend on the lane width), within the 175,296 ceiling, so the
+/// ceiling stays.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",

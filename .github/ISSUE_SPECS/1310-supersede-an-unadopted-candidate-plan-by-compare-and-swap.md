@@ -472,3 +472,77 @@ merged); `plan_swap_race` (gate 5, four tests); `resource_lifecycle` (gate 7);
   (coordinator, under B15-Q4); `crates/engine/src/realtime/plan_exchange.rs`, the reservation
   accessors (one attempt, accepted by root on 2026-10-16); `crates/capi/src/runtime/mod.rs`
   (mechanical).
+
+**Review fold 2 (batch 15a).**
+- *B-1 (C ABI wedge).* Two `Taken` outcomes while render lagged its retirements parked two epochs
+  (`retired [0,1] current 2 pending [3]`); render then adopted C and published epoch 3, and every
+  later call promoted from the atomic before it drained, found `2 + 1 > 2` and answered
+  `INTERNAL` forever. Fix, both halves: `RETIRED_PROVIDERS = RETIREMENT_CAPACITY` (3; each parked
+  epoch's plan holds one retirement credit), and `synchronize_plan_epochs` reclaims every
+  reclaimable plan before it promotes from the atomic. Test capi
+  `supersede_tests::two_taken_candidates_and_a_published_adoption_never_wedge_the_session`
+  (hold-reclamation and unpublished-render seams; asserts the reported state, then four blocks of
+  service and a fourth edit commit, owners balanced). Red: with both halves reverted the first call
+  after the hold clears fails (`capi.source.epoch`, the submit's service step answering
+  `INTERNAL`); with only the capacity reverted, the test's step that reclaims nothing cannot park
+  a third epoch (`Internal`).
+- *M-1 (a displaced plan uncharged after a `Taken` promotion).* `ProviderEpoch::parked:
+  Option<LiveEpochResources>` captures an epoch's report row, capi resources and carried bytes
+  when it is parked (the report table drops the row; no later commit changes it), and
+  `held_epochs` now returns every parked epoch first, then the running plan, then the candidates,
+  so both admissions charge a plan until it is reclaimed. Ordering keeps M2: an epoch carries only
+  from the one before it in that list or from a plan already reclaimed, so "every held epoch but
+  the oldest leaves its carried bytes" counts each ring once. The `held_epochs` and admission docs
+  say so. Test capi `a_displaced_plan_not_yet_reclaimed_is_charged_after_a_taken_promotion`:
+  gate 4's cap (269,263, three-plan peak 311,372) gives `BACKPRESSURE` with P0 parked, one service
+  clears it and the same T2 commits; a source-total cap at the counted-once peak (24,430 = 11,394
+  + 22,478 - 10,640 + 22,478 - 21,280) admits and one byte below refuses. Red: parked epochs left
+  out gives `Ok` at the graph cap and `Ok` at 24,429; parked epochs listed after the running plan
+  (double count) refuses at 24,430.
+- *m-1.* The header (supersession paragraph and the sizing rule), `CONTROL_PROTOCOL_SEMANTICS.md`
+  and `C_ABI_V1_QUALIFICATION.md` no longer promise that a retry after a render commits:
+  `BACKPRESSURE` means the edit fit against the newest held plan alone, so a retry normally
+  commits, within a small band (about +64 graph and +158 capi bytes between B prepared across A
+  and B' on adopted A; a donated ring counted twice in the second check). The sizing rule notes
+  that a plan render has just displaced counts until reclaimed.
+- *m-5 (browser).* Test host-web `structural_apply::a_superseded_candidates_spectrum_handover_
+  drops_with_the_superseding_command` (single capture, stream running): A's entry and hand-over
+  drop with T2's command, B's waits, the service after adoption promotes it and the stream
+  publishes windows; red with the command's `drop_superseded_shapes` disabled. Test
+  `structural_apply_realtime::a_superseded_candidate_with_a_spectrum_hand_over_costs_no_render_
+  call_an_allocation`: render-locked allocator calls 0 over every block, no attachment drop in
+  render; red (7 calls) when the adoption block drops the superseded entry's captures.
+- *Found with m-5, fixed (outside the listed items).* `promote_spectrum` evaluated
+  `entry.spectrum.take()` for every entry before checking `adoption`, so any service step or
+  command between a rebuild's commit and its adoption block dropped the waiting candidate's
+  spectrum hand-over. It now takes only an adopted entry's. The m-5 test asserts the hand-over
+  survives a service step before adoption (red without the fix). A stream test with a single
+  carried capture stayed green on the bug (the service's carried reader keeps serving), so the
+  user-visible effect is unproven for that case and the test was not kept; a non-carried capture,
+  a one-shot or a collection may differ (not investigated).
+- *Re-pin.* Reference session `capi_retained_bytes` 165,922 -> 168,810 (x86-64, +2,888: one more
+  1,648-byte provider-epoch slot and the 248-byte parked row in each of five slots), within the
+  175,296 ceiling, which stays (`resource_lifecycle.rs`, `C_ABI_V1_QUALIFICATION.md`).
+- *Acked PCM on a reverted source (root ruling of 2026-10-16, the acked-batch rule).* The header
+  gap was worse than "starts fresh": when A redeclared a source X, the host fed A's restarted X
+  ring (acked), and B declares X as P0 does, X is not donated (its declaration differs between A
+  and B), B prepares it fresh, and A's acked chunks dropped with A. Guard:
+  `host_core::drops_acked_reverted_source(B's model, A's donation side, P0's kept model)` (true
+  when such an X's producer on A is no longer unfed: a chunk, a seek or an end of region), called
+  in `rebuild` after preparation and before the admission; it answers `BACKPRESSURE`, so the
+  caller republishes A unchanged, no event is queued and the revision stays. After render adopts
+  A, the retry commits on A. It is small (one read-only function, one call; no state), so it was
+  coded. Tests: capi `supersede_tests::a_supersession_that_would_drop_acked_pcm_on_a_redeclared_
+  source_is_backpressure` (refusal, A still the candidate, no event, revision 44; every block
+  bit-identical to the sequential run; the adoption block differs from a run whose host never fed
+  A's ring, so the acked chunk is heard) and parity row `control_parity::a_supersession_that_would_
+  drop_acked_pcm_is_backpressure_alike_on_both_hosts` (48 and 96 kHz: both hosts `6`, same
+  revision, no browser event, retry commits alike, same bits after). Red without the guard: capi
+  `Ok(80)`; parity `(0, 0)` against `(6, 6)`. The header, `CONTROL_PROTOCOL_SEMANTICS.md` and
+  `C_ABI_V1_QUALIFICATION.md` now say such a supersession is refused with `BACKPRESSURE` until A
+  adopts; TBD42 lifts the guard (a line added to its spec).
+- *Edits outside the original authorized paths.* `hosts/host-web/src/lib.rs` (`promote_spectrum`
+  only), `hosts/host-web/tests/structural_apply_realtime.rs` (the m-5 cost test),
+  `hosts/host-web/tests/control_parity.rs` (the guard's parity row),
+  `.github/ISSUE_SPECS/TBD42-*.md` (one line). No edit under
+  `crates/engine/src/realtime/`.

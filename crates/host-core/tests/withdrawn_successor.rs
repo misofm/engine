@@ -940,10 +940,12 @@ fn a_refused_or_mismatched_donation_moves_nothing() {
     }
 }
 
-/// Fold m1 (#1344, batch 15a). Red on the swap the producer half used to make (the donor kept
-/// B's fresh producer and acked into the ring it then dropped), on a check that passes a fed
-/// successor producer the apply then drops, and on an apply that moves the producers before a
-/// consumer swap that fails (the donor's fed producer would leave its ring).
+/// Fold m1 (#1344, batch 15a). Red on a check that passes a fed successor producer the apply
+/// then drops, and on an apply that moves the producers before a consumer swap that fails (the
+/// donor's fed producer would leave its ring). The swap the producer half used to make (the donor
+/// kept B's fresh producer and acked into the ring it then dropped) is caught by gate 4 instead:
+/// its assert that the donor's `c` is `Vacated` after the donation
+/// (`a_donated_ring_plays_its_acked_pcm_and_held_seek`).
 #[test]
 fn a_donation_never_separates_an_acked_ring_from_its_producer() {
     let backend = Backend::current();
@@ -1002,4 +1004,128 @@ fn a_donation_never_separates_an_acked_ring_from_its_producer() {
         &mut withdrawn,
         "apply on another donor plan",
     );
+}
+
+/// Two fresh sides of gate 4's donation: A fed four blocks of `c`, B prepared across it.
+fn fed_withdrawn_and_replacement(
+    sessions: &[Session; 3],
+    backend: Backend,
+    signal: &[[Vec<f32>; 2]; 2],
+) -> (PreparedHost, PreparedHost) {
+    let [p0, a, b] = sessions;
+    let running = running_p0(p0, backend, signal);
+    let mut withdrawn = successor_of(a, &running.inventory, &p0.model, backend);
+    for block in 0..4 {
+        submit(&mut withdrawn.sources, "c", &signal[0], 1, block).expect("feed A's c");
+    }
+    let base = withdrawn.carried_base.clone().expect("A has a base");
+    let replacement = successor_of(b, &base, &p0.model, backend);
+    (withdrawn, replacement)
+}
+
+/// Batch 15a review fold 2, m-3: a successor producer that acked anything is fed, not only one
+/// that acked PCM. A seek alone (the producer's generation moves off 1) and a seek to the region's
+/// end closed by a zero-frame end-of-region chunk each make the check refuse with `SuccessorFed`.
+///
+/// Test value: red if `unfed` reads only the written frames (either case would be donated and
+/// its producer dropped with what it acked).
+#[test]
+fn a_seek_or_an_empty_end_of_region_on_the_successor_refuses_the_donation() {
+    let backend = Backend::current();
+    let sessions = sessions();
+    let [_, a, b] = &sessions;
+    let signal = signal();
+
+    let (withdrawn, mut replacement) = fed_withdrawn_and_replacement(&sessions, backend, &signal);
+    replacement
+        .sources
+        .seek(b"c", 2, 0)
+        .expect("a seek on B's c by hand");
+    let (into, from) = sides(&replacement, &b.model, &withdrawn, &a.model);
+    assert_eq!(
+        check_donation(into, from),
+        Err(DonationError::SuccessorFed),
+        "seek only"
+    );
+
+    // The host seeks to the region's end and closes it with a zero-frame end-of-region chunk:
+    // nothing written, and the producer has acked the end of the region. (A zero-frame
+    // end-of-region chunk at generation 1 needs an empty region, which the validator refuses, so
+    // the chunk only follows a seek.)
+    let (withdrawn, mut replacement) = fed_withdrawn_and_replacement(&sessions, backend, &signal);
+    let region = replacement.sources.region(b"c").expect("c's region");
+    replacement
+        .sources
+        .seek(b"c", 2, region.end)
+        .expect("a seek to the region's end");
+    let empty: [f32; 0] = [];
+    replacement
+        .sources
+        .submit(
+            b"c",
+            SourceSubmission {
+                generation: 2,
+                start_frame: region.end,
+                sample_rate_hz: 48_000,
+                planes: &[&empty, &empty],
+                frames: 0,
+                end_of_region: true,
+            },
+        )
+        .expect("an empty end-of-region chunk on B's c");
+    let (into, from) = sides(&replacement, &b.model, &withdrawn, &a.model);
+    assert_eq!(
+        check_donation(into, from),
+        Err(DonationError::SuccessorFed),
+        "zero-frame end of region"
+    );
+}
+
+/// Batch 15a review fold 2, m-2: the host feeds B's `c` after the donation was checked and
+/// before it is applied (a contract breach the apply must survive). The apply re-reads that the
+/// successor's producer is unfed, refuses, and moves nothing: B keeps its fed ring and the
+/// producer that acked into it (its next chunk continues from the acked one), and A keeps its
+/// own (not vacated).
+///
+/// Test value: red if the apply's re-read does not include the successor producer's `unfed`
+/// state, or if the re-read is removed: the consumer swap would then hand B's acked chunk to A
+/// and drop B's fed producer (`donate_producers`' `debug_assert!` fires in a debug build).
+#[test]
+fn a_successor_fed_between_the_check_and_the_apply_moves_nothing() {
+    let backend = Backend::current();
+    let sessions = sessions();
+    let [_, a, b] = &sessions;
+    let signal = signal();
+    let (mut withdrawn, mut replacement) =
+        fed_withdrawn_and_replacement(&sessions, backend, &signal);
+    let (into, from) = sides(&replacement, &b.model, &withdrawn, &a.model);
+    let plan = check_donation(into, from).expect("the donation checks");
+    assert_eq!(plan.len(), 1);
+    submit(&mut replacement.sources, "c", &signal[1], 1, 0).expect("B's c acks a chunk");
+    assert_eq!(
+        apply_donation(
+            DonationSideMut {
+                plan: &mut replacement.plan,
+                sources: &mut replacement.sources,
+            },
+            DonationSideMut {
+                plan: &mut withdrawn.plan,
+                sources: &mut withdrawn.sources,
+            },
+            plan,
+        ),
+        0,
+        "a fed successor refuses the apply"
+    );
+    for (side, host) in [("B", &replacement), ("A", &withdrawn)] {
+        let index = host.inventory.source("c").expect("c").index;
+        assert!(
+            host.plan.can_prepare_source_seek(index as usize),
+            "{side}'s c owns its ring"
+        );
+    }
+    submit(&mut replacement.sources, "c", &signal[1], 1, 1)
+        .expect("B's producer continues after its acked chunk");
+    submit(&mut withdrawn.sources, "c", &signal[0], 1, 4)
+        .expect("A's producer continues after its acked chunks");
 }

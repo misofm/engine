@@ -1759,7 +1759,13 @@ impl ReadyOwnership {
     /// audio thread, which keeps none, passes `None`.
     fn promote_spectrum(&mut self, mut analysis: Option<&mut SpectrumAnalysis>) {
         for entry in &mut self.pending_shapes {
-            let (Some(carried), Some(handover)) = (entry.adoption, entry.spectrum.take()) else {
+            // A candidate render has not adopted keeps its hand-over: a service step or command
+            // between its commit and its adoption block must not drop it (batch 15a review fold
+            // 2). Only an adopted entry's is taken.
+            let Some(carried) = entry.adoption else {
+                continue;
+            };
+            let Some(handover) = entry.spectrum.take() else {
                 continue;
             };
             let Some(service) = self.spectrum.as_mut() else {

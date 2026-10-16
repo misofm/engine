@@ -826,14 +826,14 @@ that window is admitted against the plan that renders.
   compiled models. The repository's reference limits (`tools/audit/src/capi.rs`,
   `crates/capi/tests/plan_swap_race.rs`, `crates/capi/tests/resource_lifecycle.rs`) admit three
   plans of the nine-track EQ reference session with room to spare (graph 316,350 bytes against
-  100,000,000; capi 165,922 against 10,000,000), so none was raised. The rule is measured from the
+  100,000,000; capi 168,810 against 10,000,000), so none was raised. The rule is measured from the
   row of a running successor plan, which carries its sources and owns their rings. The browser's caps are its
   one memory budget, which charges the same tables through the same control-plane code; its
   replacement-peak term must cover the three-plan peak when a warm candidate is admitted (#1403).
 - **Resource movement.** The larger tables add fixed bytes to every session's
   `capi_retained_bytes` (+1,904 bytes, #1398 D1's tables). On the nine-track EQ reference session
-  the row measures 165,842 bytes at the batch 15a head and 165,922 after its review fold (x86-64;
-  the ceiling in `crates/capi/tests/resource_lifecycle.rs` is 175,296). A caller whose
+  the row measures 165,842 bytes at the batch 15a head, 165,922 after its review fold and 168,810
+  after fold 2 (x86-64; the ceiling in `crates/capi/tests/resource_lifecycle.rs` is 175,296). A caller whose
   `maximum_capi_retained_bytes` was exact must raise it. No symbol, result code or event is added.
 
 ## Supersession of an unadopted candidate (#1310)
@@ -849,10 +849,30 @@ that window is admitted against the plan that renders.
   treats every pending candidate as adopted, so it never holds two taken candidates beside a third.
 - **Refusal at the three-plan peak.** A successor that does not fit beside the running plan, the
   withdrawn candidate and their models is refused. The refusal is `RESULT_BACKPRESSURE` when the
-  successor fits beside the newest plan alone and the committed model, which is all a retry meets
-  once render has adopted the candidate; it is `RESULT_COMPILE_REJECTED` with the cap's diagnostic
-  only when it cannot fit even then. A host that is not rendering keeps getting
+  successor fit against the newest held plan alone and the committed model, so a retry after a
+  render normally commits; it is `RESULT_COMPILE_REJECTED` with the cap's diagnostic when it does
+  not fit even then. The split is approximate: a successor prepared on the adopted candidate
+  differs from one prepared across the withdrawn candidate (about +64 graph and +158 capi bytes
+  on gate 4's session), and the second check counts a donated ring twice, so a retry may still be
+  refused within that small band. A host that is not rendering keeps getting
   `RESULT_BACKPRESSURE` until it renders.
+- **A reverted, fed source is backpressure (batch 15a fold 2, root ruling of 2026-10-16).** When
+  the candidate redeclared a source, its restarted ring holds an accepted chunk, seek or end of
+  region, and the new transaction declares the source again as the running plan does, the
+  successor would start it fresh and the accepted PCM would drop with the candidate. The core
+  (`host_core::drops_acked_reverted_source`, checked before the admission) refuses the
+  transaction with `RESULT_BACKPRESSURE`: nothing is committed, the candidate is republished, no
+  event is queued. After render adopts the candidate, the retry commits on it. Both hosts answer
+  alike (`control_parity::a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_on_both_
+  hosts`). TBD42 lifts the refusal by carrying the source from the running plan.
+- **Displaced plans are charged until reclaimed (batch 15a fold 2).** When a transaction finds the
+  candidate taken by render and builds on it, the plan render displaced may not yet be reclaimed
+  (a render preempted between its claim and its retirement). The session keeps that plan's
+  resource row and charges it in both admissions until a later call reclaims it; a refusal it
+  causes is `RESULT_BACKPRESSURE`, which the next service call clears. The session parks one such
+  epoch per retirement credit (three), and every call reclaims what render handed back before it
+  promotes from the published epoch, so two taken candidates and a published adoption never leave
+  the session answering `RESULT_INTERNAL`.
 - **Admission.** While a successor of the running plan is pending, the running plan's model is
   kept, so the replacement and the live admissions count it: three plans and three models when a
   candidate is superseded, three models when a live edit lands while one waits.
@@ -860,5 +880,6 @@ that window is admitted against the plan that renders.
   epoch row (`carried_base_retained_bytes`); the boot plan has none. The provider epoch itself grew
   (its kept base and carried base, and the batch 15a review fold's carried source bytes), and the
   pending and retired provider lists charge that size, so the reference session's boot
-  `capi_retained_bytes` moves: 165,842 bytes at the batch 15a head, 165,922 after its review fold
-  (x86-64), within the 175,296 ceiling. No symbol, result code or event is added.
+  `capi_retained_bytes` moves: 165,842 bytes at the batch 15a head, 165,922 after its review fold,
+  168,810 after fold 2 (x86-64; a third retired slot and a 248-byte parked row in each of the
+  five slots, +2,888), within the 175,296 ceiling. No symbol, result code or event is added.

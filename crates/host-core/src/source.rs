@@ -570,6 +570,40 @@ pub fn check_donation(
     })
 }
 
+/// Whether a replacement would drop PCM the host was acked for on a withdrawn plan's redeclared
+/// source (#1310, root ruling of 2026-10-16 on the acked-batch rule): some source X that the
+/// withdrawn plan `donor` redeclared from the running plan's declaration in `running` (same ID,
+/// another declaration), whose producer on `donor` has acked anything since its commit (a chunk,
+/// a seek or an end of region: it is no longer [`unfed`]), and that `successor` declares exactly
+/// as `running` does. Such an X is not donated (its declaration differs between the two
+/// candidates), and the successor prepares it fresh, so the donor's ring and its acked chunks
+/// would drop with the donor. The caller refuses the replacement before its commit as retryable
+/// backpressure: once render adopts the donor, the same edit commits on it. Read-only; it
+/// allocates nothing. Issue TBD42 lifts this guard by carrying X from the running plan.
+#[must_use]
+pub fn drops_acked_reverted_source(
+    successor: &SessionModel,
+    donor: DonationSide<'_>,
+    running: &SessionModel,
+) -> bool {
+    fn declaration<'m>(model: &'m SessionModel, id: &str) -> Option<&'m session::Source> {
+        model.sources.iter().find(|source| source.id.as_str() == id)
+    }
+    donor.model.sources.iter().any(|source| {
+        let id = source.id.as_str();
+        let Some(original) = declaration(running, id) else {
+            return false;
+        };
+        original != source
+            && declaration(successor, id) == Some(original)
+            && donor
+                .sources
+                .index_of(id.as_bytes())
+                .and_then(|index| donor.sources.sources[index].provider.as_ref())
+                .is_some_and(|provider| !unfed(provider))
+    })
+}
+
 /// Whether a fresh producer is exactly as preparation made it: generation 1 (the prepared initial
 /// generation), nothing written, no end of region. Such a producer has acked nothing, so dropping
 /// it (with the ring it feeds) loses nothing the host is owed.
@@ -580,8 +614,10 @@ fn unfed(provider: &HostChunkProvider) -> bool {
         && !telemetry.end_of_region_submitted
 }
 
-/// Whether every producer pair resolves to an occupied entry on both sides: the producer half's
-/// precondition, re-read by [`apply_donation`] before anything moves.
+/// Whether every producer pair resolves to an occupied entry on both sides and the successor's
+/// producer is still [`unfed`]: the producer half's precondition, re-read by [`apply_donation`]
+/// before anything moves. A successor producer fed since [`check_donation`] has acked PCM into a
+/// ring the donation would hand to the donor, so it refuses the whole donation.
 fn producers_resolve(
     successor: &SourceControlSet,
     donor: &SourceControlSet,
@@ -591,7 +627,7 @@ fn producers_resolve(
         successor
             .sources
             .get(into)
-            .is_some_and(|source| source.provider.is_some())
+            .is_some_and(|source| source.provider.as_ref().is_some_and(unfed))
             && donor
                 .sources
                 .get(from)
@@ -605,8 +641,9 @@ fn producers_resolve(
 /// and never acked into a ring nobody plays. The successor's own fresh producer, which
 /// [`check_donation`] proved unfed, is dropped; its ring moves to the donor with
 /// [`donate_consumers`] and drops with it. Infallible on a plan [`check_donation`] returned for
-/// these sets; allocates nothing. Returns how many moved.
-pub fn donate_producers(
+/// these sets; allocates nothing. Returns how many moved. Crate-private: only [`apply_donation`]
+/// runs it, after re-reading its precondition.
+pub(crate) fn donate_producers(
     successor: &mut SourceControlSet,
     donor: &mut SourceControlSet,
     producers: ProducerDonation,
@@ -633,7 +670,8 @@ pub fn donate_producers(
 /// entries between the two plans (`graph::donate_sources`), ring, queued blocks, generation, read
 /// position and held seek. Infallible on a plan [`check_donation`] returned for these plans; on
 /// the control thread, on two plans neither of which render owns. Returns how many moved.
-pub fn donate_consumers(
+/// Crate-private: only [`apply_donation`] runs it, after re-reading its precondition.
+pub(crate) fn donate_consumers(
     successor: &mut PreparedRenderPlan,
     donor: &mut PreparedRenderPlan,
     consumers: ConsumerDonation,
@@ -655,10 +693,12 @@ pub fn donate_consumers(
 /// donor is never republished.
 ///
 /// The order is chosen so that no failure can lose PCM the host was acked for, even if a caller
-/// breaks that contract (passes sets or plans other than the ones checked). First it re-reads,
-/// without moving anything, both halves' preconditions: every producer pair resolves, and the
-/// consumer pairs pass [`graph::can_donate_sources`]. If either fails, nothing moves and it
-/// returns `0`: the donor keeps its fed rings and their producers, together. Then
+/// breaks that contract (passes sets or plans other than the ones checked, or feeds a successor
+/// producer between the check and the apply). First it re-reads, without moving anything, both
+/// halves' preconditions: every producer pair resolves, every successor producer is still unfed,
+/// and the consumer pairs pass [`graph::can_donate_sources`]. If any fails, nothing moves and it
+/// returns `0`: the donor keeps its fed rings and their producers, together, and the successor
+/// keeps its own. Then
 /// [`donate_consumers`], which is all or nothing; only if it moved does [`donate_producers`] run.
 /// So a donated ring and its producer are never separated.
 pub fn apply_donation(

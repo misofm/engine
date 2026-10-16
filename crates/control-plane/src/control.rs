@@ -71,6 +71,13 @@ pub struct ProviderEpoch {
     /// Set by the structural commit that displaces this epoch's model, extended by every later
     /// commit until this epoch stops being the running one, and dropped then.
     pub(crate) kept: Option<KeptBase>,
+    /// This epoch's resources as the admissions charge them, captured when the epoch is parked in
+    /// `retired_providers` (batch 15a review fold 2, M-1): its report row as it stood when it was
+    /// promoted out, which no later commit changes, its capi resources and its carried bytes. The
+    /// report table keeps no row for a parked epoch, but its plan lives until the service step
+    /// reclaims it, so both admissions charge it from here until then. `None` while the epoch is
+    /// running or pending.
+    pub(crate) parked: Option<LiveEpochResources>,
 }
 
 /// The committed base an epoch keeps while a successor prepared from it is pending (#1310 D3,
@@ -107,6 +114,13 @@ impl ProviderEpoch {
     #[cfg(feature = "test-support")]
     pub fn test_epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// The source total and overhead bytes this epoch's plan carries from the plan it was
+    /// prepared to displace (#1273 D5).
+    #[cfg(feature = "test-support")]
+    pub fn test_carried(&self) -> (u64, u64) {
+        (self.carried.total, self.carried.overhead)
     }
 
     /// This epoch's source producers.
@@ -175,6 +189,7 @@ impl ProviderEpoch {
             carried_base: None,
             carried: CarriedSourceBytes::default(),
             kept: None,
+            parked: None,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_provider_constructed += 1);
@@ -203,6 +218,7 @@ impl ProviderEpoch {
             carried_base,
             carried,
             kept: None,
+            parked: None,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.candidate_provider_constructed += 1);
@@ -476,10 +492,14 @@ pub fn test_lifecycle_counters() -> TestOwnerCounters {
     TEST_OWNER_STATE.with(core::cell::Cell::get)
 }
 
-/// Every plan the control plane holds unreclaimed, the running plan first (#1398 D4), without an
-/// allocation.
+/// The most plans the control plane can hold unreclaimed (#1398 D4; batch 15a review fold 2,
+/// M-1): every parked epoch, the running one and every pending candidate.
+const HELD_EPOCHS: usize = RETIRED_PROVIDERS + 1 + PENDING_PROVIDERS;
+
+/// Every plan the control plane holds unreclaimed, oldest first: the parked epochs, the running
+/// plan, the pending candidates (#1398 D4), without an allocation.
 pub(crate) struct HeldEpochs {
-    rows: [LiveEpochResources; 1 + PENDING_PROVIDERS],
+    rows: [LiveEpochResources; HELD_EPOCHS],
     len: usize,
 }
 
@@ -1631,15 +1651,20 @@ where
             .values
     }
 
-    /// Every plan the control plane holds unreclaimed, as the admissions read them (#1398 D4): the
-    /// running plan first, then every pending or withdrawn candidate, the newest last.
+    /// Every plan the control plane holds unreclaimed, as the admissions read them (#1398 D4), in
+    /// epoch order, oldest first: every parked epoch whose plan render displaced but the service
+    /// step has not yet reclaimed, then the running plan, then every pending or withdrawn
+    /// candidate, the newest last.
     ///
-    /// Each row is the provider's own epoch's, read from the report table, never the atomic's. A
-    /// plan render has displaced is not charged: render owns it until the retirement queue hands
-    /// it back, and the next service step reclaims it, so a row the atomic still names while it
-    /// lags is not a plan the control plane holds (#1042). Between render's swap and that reclaim
-    /// such a plan lives beside the held ones uncharged; the swap-window tests pin that the
-    /// admission reads the held epochs only.
+    /// The running and pending rows are the provider's own epoch's, read from the report table,
+    /// never the atomic's. A parked epoch's row is the one it captured when it was promoted out
+    /// (`ProviderEpoch::parked`; batch 15a review fold 2, M-1): its plan is alive until the
+    /// service step reclaims it from the retirement queue, so it is charged until then. The
+    /// service step runs first in every command and reclaims every plan render has already
+    /// handed back, so what stays parked is a plan render displaced but has not yet retired (a
+    /// render preempted between its claim and its retirement), or one a `Taken` withdrawal
+    /// promoted past before render retired it. A plan the atomic names while it lags is the
+    /// running provider's or a parked one's, so it is charged once (#1042).
     pub(crate) fn held_epochs(&self) -> Result<HeldEpochs, CommandError> {
         let reports = self
             .shared
@@ -1657,18 +1682,26 @@ where
                 })
                 .ok_or(CommandError::Internal)
         };
-        if self.pending_providers.len() > PENDING_PROVIDERS {
+        if self.pending_providers.len() > PENDING_PROVIDERS
+            || self.retired_providers.len() > RETIRED_PROVIDERS
+        {
             return Err(CommandError::Internal);
         }
         // No allocation: the live arm's admission runs it too.
-        let mut rows = [row(&self.providers)?; 1 + PENDING_PROVIDERS];
-        for (slot, provider) in rows[1..].iter_mut().zip(&self.pending_providers) {
-            *slot = row(provider)?;
+        let running = row(&self.providers)?;
+        let mut rows = [running; HELD_EPOCHS];
+        let mut len = 0;
+        for provider in &self.retired_providers {
+            rows[len] = provider.parked.ok_or(CommandError::Internal)?;
+            len += 1;
         }
-        Ok(HeldEpochs {
-            rows,
-            len: 1 + self.pending_providers.len(),
-        })
+        rows[len] = running;
+        len += 1;
+        for provider in &self.pending_providers {
+            rows[len] = row(provider)?;
+            len += 1;
+        }
+        Ok(HeldEpochs { rows, len })
     }
 
     /// Every compiled model the control plane holds, as both admissions charge them (#1398 D4,
@@ -1707,12 +1740,13 @@ where
     /// candidate has replaced it, and promotes that candidate there. After such a promotion the
     /// atomic lags the providers until the render call returns, so the atomic promotes only when
     /// it is ahead of them.
+    ///
+    /// **Drain first (batch 15a review fold 2, B-1).** Every reclaimable plan is reclaimed, and
+    /// its parked epoch released, before the atomic promotes: a promotion parks epochs, and the
+    /// parked list holds only as many as the retirement queue has credits, so promoting before
+    /// the drain could find it full of epochs whose plans are already reclaimable and refuse
+    /// forever.
     fn synchronize_plan_epochs(&mut self) -> Result<(), CommandError> {
-        let active_epoch = self.shared.active_epoch.load(Ordering::Acquire);
-        if active_epoch > self.providers.epoch {
-            self.promote_pending_provider(active_epoch)?;
-        }
-
         #[cfg(feature = "test-support")]
         let hold = TEST_HOLD_RECLAMATION.with(core::cell::Cell::get);
         #[cfg(not(feature = "test-support"))]
@@ -1733,6 +1767,11 @@ where
                 .position(|provider| provider.epoch == retired_epoch.0)
                 .ok_or(CommandError::Internal)?;
             self.retired_providers.remove(index);
+        }
+
+        let active_epoch = self.shared.active_epoch.load(Ordering::Acquire);
+        if active_epoch > self.providers.epoch {
+            self.promote_pending_provider(active_epoch)?;
         }
 
         // Keep exactly the rows a reader can still ask for: the atomic's (possibly lagging), the
@@ -1762,7 +1801,8 @@ where
     /// The service step promotes the candidate the atomic or a reclaimed plan names; a structural
     /// edit that finds the newest candidate taken promotes up to it before it rebuilds
     /// (`withdraw_pending_candidate`), so after that edit's commit one candidate at most is
-    /// pending.
+    /// pending. Each parked epoch captures its report row first (`ProviderEpoch::parked`): the
+    /// table drops the row, but the admissions charge the plan until it is reclaimed.
     fn promote_pending_provider(&mut self, epoch: u64) -> Result<(), CommandError> {
         let index = self
             .pending_providers
@@ -1772,12 +1812,35 @@ where
         if self.retired_providers.len() + index + 1 > self.retired_providers.capacity() {
             return Err(CommandError::Internal);
         }
-        for _ in 0..=index {
+        // Fold 2, M-1: each parked epoch keeps the row the admissions charge until its plan is
+        // reclaimed. Every row is read before anything moves, so a missing one moves nothing.
+        let mut parked = [None; 1 + PENDING_PROVIDERS];
+        {
+            let reports = self
+                .shared
+                .reports
+                .lock()
+                .map_err(|_| CommandError::Internal)?;
+            let rows = core::iter::once(&self.providers).chain(&self.pending_providers[..index]);
+            for (slot, provider) in parked.iter_mut().zip(rows) {
+                let report = reports
+                    .iter()
+                    .find_map(|(epoch, report)| (*epoch == provider.epoch).then_some(*report))
+                    .ok_or(CommandError::Internal)?;
+                *slot = Some(LiveEpochResources {
+                    report: PlanResources::from(report),
+                    capi: provider.capi,
+                    carried: provider.carried,
+                });
+            }
+        }
+        for row in parked.into_iter().take(index + 1) {
             let next = self.pending_providers.remove(0);
             let mut previous = core::mem::replace(&mut self.providers, next);
             // #1310 D3: render no longer runs the previous plan, so no successor is prepared
             // against its kept base again; the base drops here, on the control thread.
             previous.kept = None;
+            previous.parked = row;
             self.retired_providers.push(previous);
         }
         Ok(())
@@ -2009,7 +2072,10 @@ where
     /// otherwise wait for the displaced plan's retirement or the atomic, which lag render (a render
     /// preempted between its claim and its retirement), and a second `Taken` in that window would
     /// leave two adopted candidates pending beside a third (#1398 D3's accounting fault). So the
-    /// rebuild always finds at most one pending candidate, the one it may supersede.
+    /// rebuild always finds at most one pending candidate, the one it may supersede. The epochs
+    /// it parks keep their resource rows (`ProviderEpoch::parked`), so the rebuild's admission
+    /// still charges a plan render displaced but has not yet retired (batch 15a review fold 2,
+    /// M-1).
     fn withdraw_pending_candidate(
         &mut self,
     ) -> Result<Option<engine::realtime::UnadoptedCandidate>, CommandError> {
@@ -2176,6 +2242,30 @@ where
                 drop(candidate_plan);
                 drop(candidate_provider);
                 drop(prepared);
+                return Err(CommandError::Backpressure);
+            }
+        }
+        // #1310, root ruling of 2026-10-16 (no ack before a drop): a source A redeclared and B
+        // reverts to its P0 form is prepared fresh in B and not donated, so the PCM the host was
+        // acked for on A's ring would drop with A. Until TBD42 carries it, such a supersession is
+        // refused here, before the commit, as backpressure: nothing changed, A is republished, and
+        // once render adopts A the same edit commits on it.
+        if superseding {
+            let donor = self
+                .pending_providers
+                .last()
+                .ok_or(CommandError::Internal)?;
+            let running = self.providers.kept.as_ref().ok_or(CommandError::Internal)?;
+            if host_core::drops_acked_reverted_source(
+                prospective.normalized_model(),
+                host_core::DonationSide {
+                    plan: withdrawn.as_ref().ok_or(CommandError::Internal)?.plan(),
+                    sources: &donor.sources,
+                    inventory: &donor.inventory,
+                    model: self.controller.session().compiled().normalized_model(),
+                },
+                running.model.normalized_model(),
+            ) {
                 return Err(CommandError::Backpressure);
             }
         }

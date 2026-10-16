@@ -231,8 +231,11 @@ pub(crate) const REPORT_ROWS: usize = 4;
 /// until the former is dropped (#1310 D5).
 pub(crate) const PENDING_PROVIDERS: usize = 2;
 
-/// The provider epochs parked until render's displaced plan is reclaimed (#1398 D1).
-pub(crate) const RETIRED_PROVIDERS: usize = 2;
+/// The provider epochs parked until render's displaced plan is reclaimed (#1398 D1): one per
+/// retirement credit, because each parked epoch's plan holds one until the service step reclaims
+/// it (batch 15a review fold 2, B-1). With two, a `Taken` withdrawal in each of two commands while
+/// render lagged its retirements parked two epochs, and a third promotion found the list full.
+pub(crate) const RETIRED_PROVIDERS: usize = RETIREMENT_CAPACITY;
 
 /// The plan exchange's retirement credits (#1398 D1), the exchange and its resource report alike:
 /// a displaced plan not yet reclaimed, a withdrawn candidate's credit (held until the candidate
@@ -831,12 +834,13 @@ pub(crate) struct ProspectivePlan {
 /// The replacement admission (#1042, #1398 D4): may the prospective plan live beside every plan
 /// the control plane holds unreclaimed until each is reclaimed?
 ///
-/// `held` is those plans in epoch order, the running plan first and the newest last: the running
-/// plan, then every pending or withdrawn candidate. It is never empty. `compiled_models` charges
+/// `held` is those plans in epoch order, the oldest first and the newest last: every parked epoch
+/// whose plan render displaced but the service step has not reclaimed (batch 15a review fold 2,
+/// M-1), the running plan, then every pending or withdrawn candidate. It is never empty. `compiled_models` charges
 /// every model the control plane holds plus the prospective one. Each term is the sum over the
 /// held plans plus the candidate, against its own cap: graph plus models, the source totals and
-/// overheads (a carried ring counted once, in the plan it was carried from: the candidate's and
-/// every held epoch's but the running one's carried bytes leave their rows), the
+/// overheads (a carried ring counted once, in the oldest held plan that holds it: the candidate's
+/// and every held epoch's but the oldest one's carried bytes leave their rows), the
 /// replacement peak (graph, models and allocated source bytes, #1290a D3), effect state and
 /// scratch, builtins, and the control plane's retained bytes (the newest plan's row, which holds
 /// the session's fixed rows once, every older held epoch's own rows, and the candidate's epoch and
@@ -862,8 +866,10 @@ pub(crate) fn validate_replacement_peak(
     };
     // Issue #1273 D5: a carried ring is the plan's it was carried from until the swap, so the peak
     // counts it once, there: the candidate's carried bytes leave its row, and every held epoch
-    // after the running one leaves its own (#1398 D4: a ring a pending candidate carried from the
-    // running plan is the running plan's).
+    // after the oldest leaves its own (#1398 D4: a ring a pending candidate carried from the
+    // running plan is the running plan's, and one the running plan carried from a parked epoch
+    // is the parked epoch's; each epoch carries only from the one before it in `held` or from
+    // a plan already reclaimed).
     let allocated = |row: u64, carried: u64| row.checked_sub(carried).ok_or_else(arithmetic);
     let source_peak = |field: fn(&PlanResources) -> u64,
                        carried: fn(&CarriedSourceBytes) -> u64,
@@ -981,7 +987,7 @@ pub struct LiveEpochResources {
     pub capi: CapiResources,
     /// The part of the report's source rows the epoch's plan carries from the plan it was
     /// prepared to displace (#1273 D5): zero for the boot plan. The replacement admission
-    /// subtracts it for every held epoch after the running one, whose carried rings belong to the
+    /// subtracts it for every held epoch after the oldest, whose carried rings belong to the
     /// plan before it while both are held (#1398 D4, batch 15a review fold M2).
     pub carried: CarriedSourceBytes,
 }
@@ -990,8 +996,8 @@ pub struct LiveEpochResources {
 /// live beside the current one, next to the plans that exist, until the commit?
 ///
 /// The live arm prepares no plan, so the plans are those the control plane holds unreclaimed,
-/// `held`, in epoch order: the running plan first, then every pending or withdrawn candidate; the
-/// newest of them is the last. It is never empty. The terms, each against its own cap:
+/// `held`, in epoch order: every parked epoch whose plan is not yet reclaimed, the running plan,
+/// then every pending or withdrawn candidate; the newest of them is the last. It is never empty. The terms, each against its own cap:
 ///
 /// - **graph:** every held plan's `graph_session_plus_plan_bytes` plus every compiled model's
 ///   `retained_bytes` (the held ones and the prospective one);
@@ -1650,9 +1656,9 @@ mod admission_tests {
             .map_err(|failure| String::from_utf8(failure.diagnostic().into_owned()).expect("UTF-8"))
     }
 
-    /// The peak of each cap in [`CAPS`] for `held` (in base units, running plan first) beside a
+    /// The peak of each cap in [`CAPS`] for `held` (in base units, oldest first) beside a
     /// candidate of base `candidate`, with `models` retained model bytes, spelled out term by
-    /// term. `carried` is the source total and overhead bytes every held epoch but the running
+    /// term. `carried` is the source total and overhead bytes every held epoch but the oldest
     /// one carries from the plan before it, summed: each carried ring is counted once.
     fn peaks(held: &[u64], candidate: u64, models: u64, carried: (u64, u64)) -> [u64; 9] {
         let sum =

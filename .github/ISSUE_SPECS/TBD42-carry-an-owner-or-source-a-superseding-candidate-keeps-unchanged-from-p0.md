@@ -113,6 +113,14 @@ fresh in B whenever A restarted or removed it.
 - Gate 2 turns red if a chunk acked into A's ring drops with A.
 - Gate 3 turns red if the producer pass or the D1 mechanism allocates at the swap.
 
+- **Lifts the batch 15a guard.** Batch 15a fold 2 (root ruling 2026-10-16) refuses with
+  `BACKPRESSURE` a supersession B that declares a source X as P0 does while A redeclared X and A's
+  X producer has acked anything (`host_core::drops_acked_reverted_source`, called in
+  `SessionState::rebuild` before the admission). TBD42 removes that guard and its tests
+  (`supersede_tests::a_supersession_that_would_drop_acked_pcm_on_a_redeclared_source_is_
+  backpressure`, `control_parity::a_supersession_that_would_drop_acked_pcm_is_backpressure_alike_
+  on_both_hosts`), replacing them with gate 2, once D1's mechanism lets B read A's acked chunks.
+
 ## Dependencies
 
 - #1344 and #1310 (batch 15a): the withdrawn-candidate base, the donation and the supersession.
