@@ -22,7 +22,7 @@
 use core::sync::atomic::AtomicUsize;
 
 // The ring's shim: core's atomics and `std`'s `Arc` in every shipped build, loom's under
-// `--cfg loom`, so `seqlock_loom` explores this protocol itself (TBD44).
+// `--cfg loom`, so `seqlock_loom` explores this protocol itself (#1702).
 use super::spsc::sync::{Arc, AtomicU64, Ordering, fence};
 
 /// The bound on one read's attempts. It keeps a read provably finite while a writer publishing in
@@ -32,7 +32,7 @@ pub const MAXIMUM_READ_ATTEMPTS: usize = 64;
 
 /// The attempts one read takes. Under `--cfg loom` it is two, so `seqlock_loom` can explore every
 /// interleaving of a read that retries once: each attempt's no-tear argument is independent of the
-/// bound, and 64 spinning attempts are beyond loom's reach (TBD44). Every shipped build takes
+/// bound, and 64 spinning attempts are beyond loom's reach (#1702). Every shipped build takes
 /// [`MAXIMUM_READ_ATTEMPTS`].
 const READ_ATTEMPTS: usize = if cfg!(loom) { 2 } else { MAXIMUM_READ_ATTEMPTS };
 
@@ -218,7 +218,7 @@ mod loom_tests {
     /// mixture of two records is detectable.
     const RECORDS: [[u64; 2]; 3] = [[0, 0], [1, 1], [2, 2]];
 
-    /// TBD44: the real seqlock on loom's atomics and fences. One writer publishes two records
+    /// #1702: the real seqlock on loom's atomics and fences. One writer publishes two records
     /// while one reader reads; under every interleaving loom explores (including the stale loads
     /// its weak memory model allows), an `Ok` is one whole record -- the initial one or a
     /// published one. `Busy` is allowed. After the writer is joined, a read is the last record.

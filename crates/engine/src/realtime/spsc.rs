@@ -15,7 +15,7 @@ use sync::{Arc, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering, UnsafeCel
 /// Under `--cfg loom` the real ring and the real plan mailbox are instantiated on loom's `Arc`,
 /// `AtomicUsize`, `AtomicU64` and `UnsafeCell`, so `spsc_loom` explores *this* code rather than a hand-written model of it
 /// (#84 phase B). The engine's seqlock (`seqlock.rs`) takes its `Arc`, `AtomicU64`, `Ordering`
-/// and `fence` from here too, so `seqlock_loom` explores the real seqlock (TBD44).
+/// and `fence` from here too, so `seqlock_loom` explores the real seqlock (#1702).
 /// `cfg(loom)` is only a supported configuration for `cargo test`; a non-test loom build is not a
 /// shape this crate promises to link.
 #[cfg(not(loom))]

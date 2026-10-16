@@ -2,7 +2,7 @@
 
 Root ruling of 2026-10-16, inside batch 15c. Follows #1316 (B15-R1). Feature sprint mode (owner,
 2026-10-13): one implementer, normal tests, a batch review. Issue number: assigned at filing
-(written as TBD44).
+(written as #1702).
 
 ## Product outcome
 
@@ -74,7 +74,7 @@ writer's `Release` fence is removed or weakened: each lets a reader on a weakly 
 
 - #1316 (the seqlock module, B15-R1).
 
-## Decision record: TBD44 (batch 15c)
+## Decision record: #1702 (batch 15c)
 
 **Shipped.**
 
