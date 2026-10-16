@@ -28,6 +28,7 @@ fn epoch(base: PlanResourceReport, terms: &Terms) -> LiveEpochResources {
             prepared_protocol_retained: terms.prepared_protocol,
             largest: terms.capi_largest,
         },
+        carried: control_plane::CarriedSourceBytes::default(),
     }
 }
 
@@ -46,9 +47,10 @@ fn verdict(
     models: CompiledModelAdmission,
     limits: CompileLimits,
 ) -> Result<(), String> {
+    let held = [Some(current), pending];
+    let held = held.iter().flatten().copied().collect::<Vec<_>>();
     validate_live_peak(
-        current,
-        pending,
+        &held,
         models,
         LiveCatalogAdmission::default(),
         limits.into(),

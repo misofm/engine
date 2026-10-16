@@ -615,6 +615,7 @@ impl PcmSourceRing {
             native_decoder_sanitized_samples: 0,
             generation_changed: false,
             held_seek: None,
+            begun_block: false,
         };
         // The producer starts with exactly the configured blocks; the retained block above never
         // enters the recycle queue until the consumer has a played block to hold instead.
@@ -1016,6 +1017,9 @@ pub struct PcmSourceConsumer {
     generation_changed: bool,
     /// An observed [`SourceCommand::SeekAt`] whose anchor block has not begun yet (issue #1274).
     held_seek: Option<HeldSeek>,
+    /// Whether any block has begun on this consumer (#1344 D5): render-owned, set at block entry
+    /// and never cleared.
+    begun_block: bool,
 }
 
 /// A [`SourceCommand::SeekAt`] the consumer has popped and holds until its anchor block.
@@ -1117,6 +1121,7 @@ impl PcmSourceConsumer {
     }
 
     fn begin_block_with(&mut self, clock: SeekClock) -> SourceReadReport {
+        self.begun_block = true;
         self.begin_block_observe(clock);
         self.begin_block_play(clock)
     }
@@ -1277,6 +1282,15 @@ impl PcmSourceConsumer {
     #[must_use]
     pub const fn channel_count(&self) -> u32 {
         self.channel_count
+    }
+
+    /// Whether a block has ever begun on this consumer (#1344 D5). Until the first block it has
+    /// popped no PCM and played nothing, so every acked chunk, the generation and any seek are
+    /// still in its ring or held by it: the consumer can move to another plan whole with nothing
+    /// lost. A seek prepared between blocks ([`Self::prepare_seek`]) is not a block.
+    #[must_use]
+    pub const fn has_begun_block(&self) -> bool {
+        self.begun_block
     }
 
     /// Exact configured source ring capacity in transfer blocks.
@@ -1937,6 +1951,93 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         true
     }
     // REALTIME_POLICY_END
+
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
+    fn source_has_begun_block(&self, source_index: usize) -> Option<bool> {
+        self.sources
+            .get(source_index)?
+            .consumer
+            .as_ref()
+            .map(PcmSourceConsumer::has_begun_block)
+    }
+
+    /// Every pair names an occupied entry on both sides, of equal channel count, no index twice on
+    /// either side, and the two sets share one quantum.
+    fn can_swap_sources(
+        &self,
+        other: &dyn GraphPreparedSourceSetDriver,
+        pairs: &[(u32, u32)],
+    ) -> bool {
+        other
+            .as_any()
+            .and_then(|any| any.downcast_ref::<Self>())
+            .is_some_and(|other| self.swappable(other, pairs))
+    }
+
+    /// Exchange each pair's entries whole after [`Self::can_swap_sources`]'s check. The other
+    /// set's pending generation change (a seek prepared on a donated consumer) comes with its
+    /// consumers, as in [`Self::adopt_sources`].
+    fn swap_sources(
+        &mut self,
+        other: &mut dyn GraphPreparedSourceSetDriver,
+        pairs: &[(u32, u32)],
+    ) -> bool {
+        let Some(other) = other
+            .as_any_mut()
+            .and_then(|any| any.downcast_mut::<Self>())
+        else {
+            return false;
+        };
+        if !self.swappable(other, pairs) {
+            return false;
+        }
+        for &(own, theirs) in pairs {
+            core::mem::swap(
+                &mut self.sources[own as usize],
+                &mut other.sources[theirs as usize],
+            );
+        }
+        // Set-wide, so over-approximate: a seek prepared on a donor entry this donation does not
+        // move still flags this set's next block. Safe: the flag only marks that block's
+        // observation validity as crossing a generation change, which an observer reads as a
+        // discontinuity; a false mark costs one block of conservative observation and never
+        // hides a real change, and this set's own flag is kept. It is also unreachable in
+        // production, where `prepare_source_seek` runs only on the plan render runs (the active
+        // plan of the exchange) and a donor is a withdrawn candidate that never was. A per-entry
+        // flag would put a new read into `begin_block` and `adopt_sources` on render for no
+        // audible gain.
+        if !pairs.is_empty() {
+            self.pending_generation_change |= other.pending_generation_change;
+        }
+        true
+    }
+}
+
+impl SourceGraphSourceSetDriver {
+    /// [`GraphPreparedSourceSetDriver::can_swap_sources`] against a set of this type.
+    fn swappable(&self, other: &Self, pairs: &[(u32, u32)]) -> bool {
+        other.quantum_frames == self.quantum_frames
+            && pairs.iter().enumerate().all(|(index, &(own, theirs))| {
+                let fresh = pairs[..index].iter().all(|&(earlier_own, earlier_theirs)| {
+                    earlier_own != own && earlier_theirs != theirs
+                });
+                match (
+                    self.sources.get(own as usize),
+                    other.sources.get(theirs as usize),
+                ) {
+                    (Some(own), Some(theirs)) => {
+                        fresh
+                            && own.consumer.is_some()
+                            && theirs.consumer.is_some()
+                            && own.channel_count == theirs.channel_count
+                    }
+                    _ => false,
+                }
+            })
+    }
 }
 
 /// Seal one or more prepared source consumers into a graph-owned fan-out source set.
@@ -4291,6 +4392,224 @@ mod tests {
             assert!(other_quantum.sources[0].consumer.is_none());
             let mut same_quantum = driver(vacant(), FRAMES);
             assert!(same_quantum.adopt_sources(&mut predecessor, &[(0, 0)]));
+        }
+
+        /// A hand-built driver over `entries` at `quantum_frames`.
+        fn swap_driver(
+            entries: Vec<GraphSourceEntry>,
+            quantum_frames: u32,
+        ) -> SourceGraphSourceSetDriver {
+            SourceGraphSourceSetDriver {
+                sources: entries.into_boxed_slice(),
+                mappings: Vec::new().into_boxed_slice(),
+                quantum_frames,
+                block_validity: GraphObservationValidity::CLEAR,
+                pending_generation_change: false,
+            }
+        }
+
+        fn occupied(channel_count: u32) -> (HostChunkProvider, GraphSourceEntry) {
+            let (host, source) = filled_source();
+            (
+                host,
+                GraphSourceEntry {
+                    consumer: source.consumer,
+                    channel_count,
+                },
+            )
+        }
+
+        fn vacant_entry() -> GraphSourceEntry {
+            GraphSourceEntry {
+                consumer: None,
+                channel_count: 2,
+            }
+        }
+
+        /// Which entries own a consumer.
+        fn occupancy(driver: &SourceGraphSourceSetDriver) -> Vec<bool> {
+            driver
+                .sources
+                .iter()
+                .map(|entry| entry.consumer.is_some())
+                .collect()
+        }
+
+        /// #1344 fold m2. Each D4 refusal of `swappable`, through `can_swap_sources` and
+        /// `swap_sources`: red if any one condition is dropped (a swap would then move a vacancy,
+        /// put a consumer under mappings of another channel count, swap one entry twice so a pair
+        /// trades back, index out of range, or cross quanta), or if a refused swap moves anything.
+        #[test]
+        fn a_source_swap_refuses_every_unswappable_pair_and_moves_nothing() {
+            struct Foreign;
+            impl GraphPreparedSourceSetDriver for Foreign {
+                fn claim_count(&self) -> usize {
+                    0
+                }
+                fn begin_block(
+                    &mut self,
+                    _first_sample: u64,
+                    _frames: u32,
+                ) -> Result<(), engine::realtime::RenderError> {
+                    Ok(())
+                }
+                fn copy_track_input(
+                    &mut self,
+                    _claim_index: usize,
+                    _left: &mut [f32],
+                    _right: &mut [f32],
+                ) -> Result<(), engine::realtime::RenderError> {
+                    Ok(())
+                }
+            }
+            let mut hosts = Vec::new();
+            let mut set = |entries: Vec<(u32, bool)>, quantum| {
+                let entries = entries
+                    .into_iter()
+                    .map(|(channels, full)| {
+                        if full {
+                            let (host, entry) = occupied(channels);
+                            hosts.push(host);
+                            entry
+                        } else {
+                            GraphSourceEntry {
+                                channel_count: channels,
+                                ..vacant_entry()
+                            }
+                        }
+                    })
+                    .collect();
+                swap_driver(entries, quantum)
+            };
+            let full = (2, true);
+            let empty = (2, false);
+            let mono = (1, true);
+            type Case = (
+                &'static str,
+                SourceGraphSourceSetDriver,
+                SourceGraphSourceSetDriver,
+                Vec<(u32, u32)>,
+            );
+            let cases: Vec<Case> = vec![
+                (
+                    "own index out of range",
+                    set(vec![full], FRAMES),
+                    set(vec![full], FRAMES),
+                    vec![(1, 0)],
+                ),
+                (
+                    "other index out of range",
+                    set(vec![full], FRAMES),
+                    set(vec![full], FRAMES),
+                    vec![(0, 1)],
+                ),
+                (
+                    "own entry vacant",
+                    set(vec![empty], FRAMES),
+                    set(vec![full], FRAMES),
+                    vec![(0, 0)],
+                ),
+                (
+                    "other entry vacant",
+                    set(vec![full], FRAMES),
+                    set(vec![empty], FRAMES),
+                    vec![(0, 0)],
+                ),
+                (
+                    "channel counts differ",
+                    set(vec![full], FRAMES),
+                    set(vec![mono], FRAMES),
+                    vec![(0, 0)],
+                ),
+                (
+                    "quanta differ",
+                    set(vec![full], FRAMES),
+                    set(vec![full], 2 * FRAMES),
+                    vec![(0, 0)],
+                ),
+                (
+                    "own index repeated",
+                    set(vec![full], FRAMES),
+                    set(vec![full, full], FRAMES),
+                    vec![(0, 0), (0, 1)],
+                ),
+                (
+                    "other index repeated",
+                    set(vec![full, full], FRAMES),
+                    set(vec![full], FRAMES),
+                    vec![(0, 0), (1, 0)],
+                ),
+            ];
+            for (what, mut own, mut other, pairs) in cases {
+                let before = (occupancy(&own), occupancy(&other));
+                assert!(!own.can_swap_sources(&other, &pairs), "{what}: refused");
+                assert!(!own.swap_sources(&mut other, &pairs), "{what}: not swapped");
+                assert_eq!(
+                    (occupancy(&own), occupancy(&other)),
+                    before,
+                    "{what}: nothing moved"
+                );
+            }
+            // A driver of another type is refused both ways.
+            let mut own = set(vec![full], FRAMES);
+            assert!(!own.can_swap_sources(&Foreign, &[(0, 0)]));
+            assert!(!own.swap_sources(&mut Foreign, &[(0, 0)]));
+            assert_eq!(occupancy(&own), [true]);
+            // Not vacuous: a checked pair swaps both entries whole.
+            let mut own = set(vec![full, empty], FRAMES);
+            let mut other = set(vec![empty, full], FRAMES);
+            assert!(own.can_swap_sources(&other, &[(0, 1)]));
+            assert!(own.swap_sources(&mut other, &[(0, 1)]));
+            assert_eq!(
+                (occupancy(&own), occupancy(&other)),
+                (vec![true, false], vec![false, true])
+            );
+            let mut own = set(vec![(2, true), (1, true)], FRAMES);
+            let mut other = set(vec![(1, true), (2, false)], FRAMES);
+            assert!(own.can_swap_sources(&other, &[(1, 0)]));
+            assert!(own.swap_sources(&mut other, &[(1, 0)]));
+            assert_eq!(occupancy(&own), [true, true]);
+        }
+
+        /// #1344 fold m2. Red if `swap_sources` drops the other set's pending generation change
+        /// (a seek prepared on a donated consumer since its last block): the successor's first
+        /// block would not report the generation change the consumer already took. An empty
+        /// donation takes nothing.
+        #[test]
+        fn a_source_swap_carries_a_prepared_seek_into_the_next_block() {
+            let swapped = |pairs: &[(u32, u32)]| {
+                let (_own_host, own_entry) = occupied(2);
+                let (producer, consumer, _) = PcmSourceRing::prepare(PcmSourceRingConfig {
+                    channel_count: 2,
+                    quantum_frames: QuantumFrames(FRAMES),
+                    frame_capacity: BLOCKS as u64 * u64::from(FRAMES),
+                    initial_generation: SourceGeneration(1),
+                })
+                .expect("ring");
+                let mut host = producer.into_host_chunk_provider(RATE);
+                let mut own = swap_driver(vec![own_entry], FRAMES);
+                let mut other = swap_driver(
+                    vec![GraphSourceEntry {
+                        consumer: Some(consumer),
+                        channel_count: 2,
+                    }],
+                    FRAMES,
+                );
+                host.try_seek(SourceCommand::Seek {
+                    generation: SourceGeneration(2),
+                    frame: SourceFrame(0),
+                })
+                .expect("seek");
+                let planes = frame_samples(0);
+                host.submit(chunk(2, 0, &[&planes[0], &planes[1]], FRAMES, false))
+                    .expect("generation 2 PCM");
+                assert!(other.prepare_source_seek(0, 2, 0), "the seek is ready");
+                assert!(own.swap_sources(&mut other, pairs));
+                own.begin_block(0, FRAMES).expect("begin");
+                own.observation_validity().source_generation_changed
+            };
+            assert!(swapped(&[(0, 0)]), "the donated seek is reported");
+            assert!(!swapped(&[]), "an empty donation takes nothing");
         }
     }
 }

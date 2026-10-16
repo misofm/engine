@@ -41,7 +41,7 @@ only after it.
 - The probes are in `hosts/host-web/qualification/sdk-response-entry.ts`: the collection probe
   returns `firstCapturedSample` at `:1259`, and `runConfiguredSpectrumHopQualification` starts at
   `:874`.
-- #1106 (`.github/ISSUE_SPECS/1106-spectrum-hop-probe-waits-on-the-clock.md`) covers a different
+- #1106 covers a different
   symptom of the hop probe: `H1024 browser probe published 1 windows`, seen in Chromium, from a
   poll count that ends before the deadline. It does not explain a failure of `sdk-spectrum-hop`
   that has no such message, and it does not cover the collection gate. #1248 covers the continuous

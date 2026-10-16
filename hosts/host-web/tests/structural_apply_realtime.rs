@@ -21,8 +21,9 @@ use std::sync::Mutex;
 
 use controls::{ControlAddress, Owner, Section};
 use host_web::{
-    RESULT_OK, RenderLockedAllocator, WebBootOptions, companion_drops_on_this_thread,
-    native_staging,
+    ABI_VERSION, RESULT_OK, RenderLockedAllocator, SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH,
+    SPECTRUM_REQUEST_BYTES, SPECTRUM_TARGET_TRACK_POST_PAN, WebBootOptions, WebSpectrumRequest,
+    companion_drops_on_this_thread, native_staging,
 };
 use protocol::{
     CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
@@ -95,7 +96,18 @@ fn muted_track(model: &SessionModel) -> (session::Track, session::Route) {
 }
 
 fn add_muted_track(model: &SessionModel) -> Vec<SessionEdit> {
-    let (track, route) = muted_track(model);
+    add_muted_track_as(model, ADDED)
+}
+
+/// [`add_muted_track`] under the track ID `id`.
+fn add_muted_track_as(model: &SessionModel, id: &str) -> Vec<SessionEdit> {
+    let (mut track, mut route) = muted_track(model);
+    track.id = StableId::parse(id).expect("track ID");
+    route.id = StableId::parse(&format!("{id}-main")).expect("route ID");
+    let RouteSource::Track { track_id, .. } = &mut route.source else {
+        panic!("a track route")
+    };
+    *track_id = track.id.clone();
     vec![
         SessionEdit::UpsertTrack { track },
         SessionEdit::UpsertRoute { route },
@@ -557,4 +569,83 @@ fn a_strip_count_change_publishes_the_successors_frame_on_the_first_block_after_
         );
     }
     assert!(adoption_frame.iter().any(|word| *word != 0.0));
+}
+
+/// #1310 on the browser with a spectrum capture (batch 15a review fold 2, m-5): T1 commits a
+/// candidate whose tables carry a spectrum hand-over, and T2, before any block adopts it,
+/// supersedes it. The superseded candidate's plan and its captures drop in T2's command, on the
+/// control side; render then adopts the replacement and the next service step promotes its
+/// captures. `src/tests.rs` pins which hand-over waits; this binary pins the cost.
+///
+/// Test value: red if a render call allocates or frees across the supersession, the adoption
+/// block included (a superseded candidate's captures or tables reclaimed by the render half),
+/// or if an attachment drops inside a render call.
+#[test]
+fn a_superseded_candidate_with_a_spectrum_hand_over_costs_no_render_call_an_allocation() {
+    let _turn = TURN.lock().expect("the turn");
+    let (render_allocations, drops_in_render, epochs) = std::thread::spawn(|| {
+        let base = model();
+        let target = base.tracks[3].id.as_str().to_owned();
+        native_staging::spectrum_request(
+            WebSpectrumRequest {
+                struct_size: SPECTRUM_REQUEST_BYTES,
+                abi_version: ABI_VERSION,
+                target: SPECTRUM_TARGET_TRACK_POST_PAN,
+                channels: SPECTRUM_CHANNEL_BOTH,
+                target_id_bytes: target.len() as u32,
+                maximum_capture_bytes: SPECTRUM_CAPTURE_BYTES as u64,
+                ..WebSpectrumRequest::default()
+            },
+            target.as_bytes(),
+        );
+        let handle = boot(&base);
+        let mut render_allocations = 0;
+        let mut drops_in_render = 0;
+        let mut epochs = Vec::new();
+        for block in 0..BLOCKS {
+            feed(handle, block);
+            if block == APPLY_BEFORE {
+                for (request, edits) in [
+                    (1, add_muted_track(&base)),
+                    (2, add_muted_track_as(&with_muted_track(&base), "a-muted-b")),
+                ] {
+                    let revision = host_web::miso_engine_web_v1_control_revision(handle);
+                    let (result, response) =
+                        native_staging::control_command(handle, &frame(&edits, request, revision))
+                            .expect("a live handle");
+                    assert_eq!(result, RESULT_OK, "transaction {request}");
+                    assert_eq!(applied(&response), (EditPath::Rebuild, revision + 1));
+                }
+                assert_eq!(
+                    native_staging::active_plan_epoch(handle),
+                    Some(0),
+                    "neither candidate rendered"
+                );
+            }
+            let allocations = host_web::miso_engine_web_v1_render_allocation_count();
+            let drops = companion_drops_on_this_thread();
+            assert_eq!(
+                host_web::miso_engine_web_v1_render(handle, QUANTUM_FRAMES),
+                RESULT_OK,
+                "block {block}"
+            );
+            drops_in_render += companion_drops_on_this_thread() - drops;
+            render_allocations +=
+                host_web::miso_engine_web_v1_render_allocation_count() - allocations;
+            epochs.push(native_staging::active_plan_epoch(handle).expect("a plan"));
+            assert_eq!(host_web::miso_engine_web_v1_service(handle), RESULT_OK);
+        }
+        assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
+        (render_allocations, drops_in_render, epochs)
+    })
+    .join()
+    .expect("the run completes");
+    let mut expected = vec![0; APPLY_BEFORE];
+    expected.extend(vec![2; BLOCKS - APPLY_BEFORE]);
+    assert_eq!(
+        epochs, expected,
+        "the replacement is adopted; T1's candidate never rendered"
+    );
+    assert_eq!(render_allocations, 0, "a render call allocated or freed");
+    assert_eq!(drops_in_render, 0, "render dropped an attachment");
 }

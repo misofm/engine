@@ -159,3 +159,83 @@ both clocks.
 
 - *Anchor every seek on the plan's source-read clock* (#1316).
 - *Reset latency floors at a host-declared discontinuity* (#1323): `SuccessorBase::discontinuity`.
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `228fca26c`.
+
+**Moved anchors.** Each fact in Context still holds; only the lines moved.
+
+- `RenderTime` is `crates/engine/src/realtime/plan.rs:576-579`. The plan's clock field is `:755`,
+  its getter `:910`, `adopt_absolute_sample` `:918`, `render_contiguous` `:1172-1185`,
+  `adopt_predecessor_plan` `:1201-1207`.
+- `PreparedPlanExecutor` is `plan.rs:273`; its defaulted methods now run to about `:360` and
+  include #1311's `prime_ready` (`:349`).
+- The graph's source-section call is `crates/graph/src/lib.rs:4843-4844`, in the block entry that
+  #1639 changed (the jump-length read is `:4823-4826`, just before it). `GraphExecutor` is
+  `:3192`, its `PreparedPlanExecutor` impl `:4588`.
+- The source driver's block entry is `crates/source/src/lib.rs:1752-1785`; the
+  `begin_block_at(first_sample)` call is `:1772`. `begin_block_at` is `:1115`.
+- `miso_engine_v1_render_f32_planar` is `crates/capi/src/ffi.rs:818`.
+- `RealtimePlanOwner::enter_block` is `plan_exchange.rs:742-795`; the clock adoption is `:779`.
+  `plan_exchange` is `:367`, `plan_exchange_at_revision` `:410`, and both call
+  `plan_exchange_inner` (`:436-470`), which is where D4's record is allocated.
+  `plan_exchange_resource_report` is `:337-361`.
+- `SuccessorBase` is `crates/host-core/src/prepare.rs:1070-1097`. It now has `inventory`,
+  `committed`, `revision` (#1277), `edit_ramps` (#1394), `monitor` (#1559) and `observation`
+  (#1584). It has no `new` constructor yet; #1323 D3 adds it. `PlanStateInventory` is `:711-757`.
+- The control plane's successor construction site is `crates/control-plane/src/control.rs:1670`.
+
+**Code notes for the implementer.**
+
+- `GraphExecutorWithoutSplitPairTable` (`crates/graph/src/lib.rs:4438`) mirrors
+  `GraphExecutor`'s layout for the largest-allocation cap. D1's new offset field goes in both.
+  This is inside D1's "offset field" scope.
+- D4's new record and D1's field can move pinned measurements outside the authorized paths:
+  `crates/capi/tests/resource_lifecycle.rs` (the capi retained measurement) and
+  `hosts/host-web/tests/browser-v1/expected.json` (browser boot memory). The control plane
+  charges the exchange through `crates/control-plane/src/compile.rs:237`. If a pin moves, re-pin
+  it from the measurement with the reason, as batch 13a and 13b did. Add those two files to the
+  authorized paths for that purpose only.
+- #1637 shipped node time as `s = r + ΣP - a(n)`. No code reads `ΣP` yet, so it is 0 today.
+  *Build the timeline consumer and producer* (#1640) and *Give every plan a timeline that
+  carries like a source* (#1641) will pass this slice's source-read sample to the timeline.
+  Nothing in this slice changes for that.
+- Host-core builds a source set for every plan (`crates/host-core/src/prepare.rs:2579`), with no
+  entries for an empty session (#1682). D1 then offsets a clock that no source reads, and D4
+  still publishes both clocks.
+
+**Dependencies on GitHub.**
+
+- #1316 and #1323 are open. Both are in the batch-15/16 list.
+- #1323 depends on *Supersede an unadopted candidate plan by compare-and-swap* (#1310, open),
+  and #1310 depends on #1344 (open). Neither is in the batch-15/16 list. So D2's declaration
+  term and gate 5 cannot run until #1310 and #1323 land.
+- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398 and #1310.
+  #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288, #1391,
+  #1363 and #1325.
+  The rest of batch 15 follows. #1323 lands after #1310 (B15-R5 in #1323).
+- #1314 and #1309 are closed. The control plane is `crates/control-plane/src/`, as the spec says.
+- #1354, #1355, #1320, #1358, #1360 and #1361 are open. They are follow-ons or non-goals, not
+  dependencies.
+
+**Decisions.**
+
+- D1-D5 still hold against the code and decision 17. The clocks get no host surface here, and a
+  later host surface goes through the control plane (decision 17, C1).
+- #1323 D1 adds a C export (`miso_engine_v1_declare_discontinuity`). Decision 17 C13 routes
+  new features through protocol messages. That is #1323's question, not this slice's: gate 5
+  calls the control plane, not the export.
+
+**Gates and commands.** `crates/host-core/tests/source_read_clock.rs` is new. Every named script
+and package exists (`realtime-policy` is `tools/realtime-policy`). The features
+`engine/realtime-audit`, `host-core/test-support` and `control-plane/test-support` exist.
+
+**Realtime-path edits.** D1 and D4 edit `crates/engine/src/realtime/plan.rs`,
+`plan_exchange.rs` and `mod.rs`. D1 also edits the graph's render block entry. That slice gets
+one attempt.
+
+## Amendment (controls coordinator, batch 15a fold, 2026-10-16)
+
+- **Batch placement.** "Neither is in the batch-15/16 list" (Dependencies on GitHub, about #1310
+  and #1344) is void. #1310 and #1344 are batch 15a; #1323 lands after #1310 (B15-R5).

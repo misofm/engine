@@ -9,7 +9,7 @@
 //! applies a transaction's edits) and the host-core classifier (which reads them to pick each live
 //! record's length) share them without a new dependency between the two.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::StableId;
 
@@ -91,9 +91,18 @@ fn owner_of(target: &EditRampTarget) -> Owner {
 /// carried a length. An explicit 0 is an entry: it steps that edit and is not "unset". Transaction
 /// metadata, never model state: it is neither compared with nor merged into a session model, and
 /// no canonical JSON shows it.
+///
+/// It also remembers which rows the transaction wrote with no length and which targets it
+/// rewrote whole, so [`Self::overlay`] can lay a later transaction over an earlier one with the
+/// later winning on every row it wrote (#1310). Neither changes [`Self::get`]: such a row has no
+/// length, and the session's `control_smoothing` applies.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EditRamps {
     entries: BTreeMap<Key, u32>,
+    /// Rows the latest edit wrote with no length.
+    unset: BTreeSet<Key>,
+    /// Targets an upsert rewrote whole ([`Self::clear_target`]).
+    cleared: BTreeSet<Owner>,
 }
 
 impl EditRamps {
@@ -102,6 +111,8 @@ impl EditRamps {
     pub const fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            unset: BTreeSet::new(),
+            cleared: BTreeSet::new(),
         }
     }
 
@@ -117,10 +128,12 @@ impl EditRamps {
         let key = Key::new(target, row);
         match samples {
             Some(samples) => {
+                self.unset.remove(&key);
                 self.entries.insert(key, samples);
             }
             None => {
                 self.entries.remove(&key);
+                self.unset.insert(key);
             }
         }
     }
@@ -128,6 +141,12 @@ impl EditRamps {
     /// Remove every entry of `target`: an upsert rewrites all of its rows with no length.
     pub fn clear_target(&mut self, target: &EditRampTarget) {
         let owner = owner_of(target);
+        self.clear_owner(&owner);
+        self.cleared.insert(owner);
+    }
+
+    /// Remove every entry and every unset row of `owner`.
+    fn clear_owner(&mut self, owner: &Owner) {
         // Entries sort by owner, then row, so the target's are one run.
         let start = Key {
             owner: owner.clone(),
@@ -137,12 +156,39 @@ impl EditRamps {
             .entries
             .range(start..)
             .map(|(key, _)| key)
-            .take_while(|key| key.owner == owner)
+            .take_while(|key| key.owner == *owner)
             .cloned()
             .collect();
         for key in doomed {
             self.entries.remove(&key);
         }
+        self.unset.retain(|key| key.owner != *owner);
+    }
+
+    /// Lay `later`, a later transaction's lengths, over these (#1310): `later` wins on every row it
+    /// wrote, with a length or without one, and on every row of a target it rewrote whole; every
+    /// other row keeps its length here. The result is what one transaction holding both sets of
+    /// edits, in order, records.
+    pub fn overlay(&mut self, later: &Self) {
+        for owner in &later.cleared {
+            self.clear_owner(owner);
+            self.cleared.insert(owner.clone());
+        }
+        for (key, samples) in &later.entries {
+            self.unset.remove(key);
+            self.entries.insert(key.clone(), *samples);
+        }
+        for key in &later.unset {
+            self.entries.remove(key);
+            self.unset.insert(key.clone());
+        }
+    }
+
+    /// Whether the transaction wrote no live row at all: no length, no row without one, and no
+    /// target rewritten whole. [`Self::overlay`] of such a transaction changes nothing.
+    #[must_use]
+    pub fn is_untouched(&self) -> bool {
+        self.entries.is_empty() && self.unset.is_empty() && self.cleared.is_empty()
     }
 
     /// Every entry, ordered by target kind, then ID, then row.
@@ -175,6 +221,34 @@ mod tests {
 
     fn id(text: &str) -> StableId {
         StableId::parse(text).expect("valid stable ID")
+    }
+
+    /// #1310: the later transaction wins on every row it wrote, a row it wrote with no length
+    /// included, and on every row of a target it rewrote; the earlier lengths of other rows stay.
+    /// Red if the overlay keeps an earlier length on a row the later one wrote without one.
+    #[test]
+    fn an_overlay_lets_the_later_transaction_win_on_every_row_it_wrote() {
+        let strip = |name: &str| EditRampTarget::Strip(id(name));
+        let mut earlier = EditRamps::new();
+        earlier.set(&strip("a"), EditRampRow::Fader, Some(5));
+        earlier.set(&strip("a"), EditRampRow::Matrix, Some(6));
+        earlier.set(&strip("b"), EditRampRow::Fader, Some(7));
+        earlier.set(&strip("c"), EditRampRow::Fader, Some(8));
+        let mut later = EditRamps::new();
+        later.set(&strip("a"), EditRampRow::Fader, None);
+        later.set(&strip("b"), EditRampRow::Fader, Some(9));
+        later.clear_target(&strip("c"));
+        assert!(!later.is_untouched());
+        earlier.overlay(&later);
+        assert_eq!(earlier.get(&strip("a"), EditRampRow::Fader), None);
+        assert_eq!(
+            earlier.entries(),
+            vec![
+                (strip("a"), EditRampRow::Matrix, 6),
+                (strip("b"), EditRampRow::Fader, 9),
+            ]
+        );
+        assert!(EditRamps::new().is_untouched());
     }
 
     #[test]

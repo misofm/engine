@@ -56,6 +56,57 @@ pub struct ProviderEpoch {
     /// the epoch's life and moves only with the epoch, which holds no open stamp between
     /// commands.
     pub(crate) revision_gate: PlanRevisionGate,
+    /// What this epoch's plan carries from the plan it was prepared to displace (#1344 D1): the
+    /// base inventory of a replacement prepared across this plan should it be withdrawn before
+    /// render adopts it (#1310 D2). `None` for the boot plan.
+    pub(crate) carried_base: Option<PlanStateInventory>,
+    /// The part of this epoch's plan's source rows it carries from the plan it was prepared to
+    /// displace (#1273 D5), kept for the replacement admission while the epoch is a held
+    /// candidate (#1398 D4, batch 15a review fold M2). Zero for the boot plan.
+    pub(crate) carried: CarriedSourceBytes,
+    /// This epoch's committed base while a successor prepared from it is pending (#1310 D3 and the
+    /// batch 15 root ruling): the model its plan was prepared from with every live record pushed
+    /// to it, the monitor overlay its cells hold, and the ramp lengths of every edit committed
+    /// after its last revision. A successor of a withdrawn candidate is prepared against it.
+    /// Set by the structural commit that displaces this epoch's model, extended by every later
+    /// commit until this epoch stops being the running one, and dropped then.
+    pub(crate) kept: Option<KeptBase>,
+    /// This epoch's resources as the admissions charge them, captured when the epoch is parked in
+    /// `retired_providers` (batch 15a review fold 2, M-1): its report row as it stood when it was
+    /// promoted out, which no later commit changes, its capi resources and its carried bytes. The
+    /// report table keeps no row for a parked epoch, but its plan lives until the service step
+    /// reclaims it, so both admissions charge it from here until then. `None` while the epoch is
+    /// running or pending.
+    pub(crate) parked: Option<LiveEpochResources>,
+}
+
+/// The committed base an epoch keeps while a successor prepared from it is pending (#1310 D3,
+/// root ruling of 2026-10-15 on D2 and D3).
+pub(crate) struct KeptBase {
+    /// The compiled session the epoch's plan renders: the model it was prepared from plus every
+    /// live record pushed to it. The structural commit that displaced it returned it. Both
+    /// admissions charge it as a held model (#1398 D4).
+    pub(crate) model: CompiledSession,
+    /// The monitor overlay the epoch's cells hold: the session's overlay when the displacing
+    /// commit landed. A later solo is written to the newer epoch's cells, not to these.
+    pub(crate) monitor: controls::MonitorOverlay,
+    /// The ramp length of every row an edit committed after the epoch's last revision gave one,
+    /// the latest edit winning on every row it wrote (#1394 D2's rule across transactions).
+    pub(crate) edit_ramps: session::EditRamps,
+    /// The ramp of the latest overlay change committed after the epoch's last revision, or `None`
+    /// while no commit since wrote a monitor row: a replacement that writes none renders the
+    /// overlay change between `monitor` and its own with it, as one transaction holding every
+    /// write would (`MonitorChange::ramp`).
+    pub(crate) monitor_ramp: Option<Option<u32>>,
+}
+
+/// `earlier`'s ramp lengths with `later`'s laid over them: `later` wins on every row it wrote, with
+/// or without a length (`EditRamps::overlay`). The
+/// merge of the kept base's lengths with a newer transaction's (#1310, root ruling B15-Q3).
+fn merged_ramps(earlier: &session::EditRamps, later: &session::EditRamps) -> session::EditRamps {
+    let mut merged = earlier.clone();
+    merged.overlay(later);
+    merged
 }
 
 impl ProviderEpoch {
@@ -63,6 +114,13 @@ impl ProviderEpoch {
     #[cfg(feature = "test-support")]
     pub fn test_epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// The source total and overhead bytes this epoch's plan carries from the plan it was
+    /// prepared to displace (#1273 D5).
+    #[cfg(feature = "test-support")]
+    pub fn test_carried(&self) -> (u64, u64) {
+        (self.carried.total, self.carried.overhead)
     }
 
     /// This epoch's source producers.
@@ -89,6 +147,29 @@ impl ProviderEpoch {
         &self.effects
     }
 
+    /// Whether this epoch's set holds source `id` vacant (`Some(true)`), holds its producer
+    /// (`Some(false)`), or does not hold it (`None`) (#1310 gate 6). It probes with a submission
+    /// at a sample rate of 1, which the set refuses before its ring sees it, so nothing changes.
+    #[cfg(feature = "test-support")]
+    pub fn test_source_vacant(&mut self, id: &[u8]) -> Option<bool> {
+        let empty: [f32; 0] = [];
+        match self.sources.submit(
+            id,
+            host_core::SourceSubmission {
+                generation: 1,
+                start_frame: 0,
+                sample_rate_hz: 1,
+                planes: &[&empty, &empty],
+                frames: 0,
+                end_of_region: false,
+            },
+        ) {
+            Err(SourceControlError::UnknownSource) => None,
+            Err(SourceControlError::Vacated) => Some(true),
+            _ => Some(false),
+        }
+    }
+
     pub(crate) fn current(
         sources: SourceControlSet,
         inventory: PlanStateInventory,
@@ -105,15 +186,22 @@ impl ProviderEpoch {
             effects,
             capi,
             revision_gate,
+            carried_base: None,
+            carried: CarriedSourceBytes::default(),
+            kept: None,
+            parked: None,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_provider_constructed += 1);
         owner
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn candidate(
         sources: SourceControlSet,
         inventory: PlanStateInventory,
+        carried_base: Option<PlanStateInventory>,
+        carried: CarriedSourceBytes,
         strips: StripLanes,
         effects: Box<[host_core::EffectControlProducer]>,
         capi: CapiResources,
@@ -127,6 +215,10 @@ impl ProviderEpoch {
             effects,
             capi,
             revision_gate,
+            carried_base,
+            carried,
+            kept: None,
+            parked: None,
         };
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.candidate_provider_constructed += 1);
@@ -219,6 +311,17 @@ pub struct TestOwnerCounters {
     pub reservation_canceled: u64,
     /// Lifecycle count: reservation committed.
     pub reservation_committed: u64,
+    /// Withdrawal outcome (#1310 D1): a structural command took a pending candidate back before
+    /// render adopted it.
+    pub candidate_withdrawn: u64,
+    /// Withdrawal outcome (#1310 D1): render had adopted the pending candidate first.
+    pub candidate_taken: u64,
+    /// A withdrawn candidate published again, unchanged, because its replacement was refused
+    /// (#1310 D4).
+    pub candidate_republished: u64,
+    /// A withdrawn candidate superseded: its replacement committed and was published, and it was
+    /// dropped on the control thread (#1310 D5).
+    pub candidate_superseded: u64,
 }
 
 /// One effect producer's row of `SessionControlSnapshot::effect_cells`: `(epoch, strip ID,
@@ -287,6 +390,9 @@ thread_local! {
     static TEST_NEXT_ADOPTION: core::cell::Cell<Option<PlanAdoption>> =
         const { core::cell::Cell::new(None) };
     static FORCE_FULL_PREPARATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// Whether the service step leaves displaced plans in the retirement queue (batch 15a review
+    /// fold M1): a render preempted between claiming a candidate and retiring the plan it displaced.
+    static TEST_HOLD_RECLAMATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
     /// `(commits made from an in-place token, in-place tokens materialized)` on this thread.
     static IN_PLACE_COUNTS: core::cell::Cell<(usize, usize)> = const { core::cell::Cell::new((0, 0)) };
     static TEST_OWNER_STATE: core::cell::Cell<TestOwnerCounters> =
@@ -311,6 +417,10 @@ thread_local! {
             reservation_constructed: 0,
             reservation_canceled: 0,
             reservation_committed: 0,
+            candidate_withdrawn: 0,
+            candidate_taken: 0,
+            candidate_republished: 0,
+            candidate_superseded: 0,
         }) };
 }
 
@@ -341,6 +451,7 @@ pub fn test_reset_lifecycle_observer() {
     TEST_FAULT_STATE.with(|state| state.set(([None; 2], 0)));
     TEST_OWNER_STATE.with(|state| state.set(TestOwnerCounters::default()));
     TEST_NEXT_ADOPTION.with(|state| state.set(None));
+    TEST_HOLD_RECLAMATION.with(|state| state.set(false));
 }
 
 /// Makes this thread's control commands prepare their transactions by the full path (#1613): a
@@ -349,6 +460,15 @@ pub fn test_reset_lifecycle_observer() {
 #[cfg(feature = "test-support")]
 pub fn test_force_full_preparation(force: bool) {
     FORCE_FULL_PREPARATION.with(|state| state.set(force));
+}
+
+/// Makes this thread's service steps leave every displaced plan in the retirement queue while
+/// `hold` is set (batch 15a review fold M1): the control side then sees what it sees while render,
+/// having claimed a candidate, has not yet retired the plan it displaced. A test interleaves a
+/// structural edit with that window deterministically; clearing it lets the next step reclaim.
+#[cfg(feature = "test-support")]
+pub fn test_hold_reclamation(hold: bool) {
+    TEST_HOLD_RECLAMATION.with(|state| state.set(hold));
 }
 
 /// Whether a live commit on this thread checks, in a debug build, that its catalog stage equals a
@@ -370,6 +490,36 @@ pub fn test_take_in_place_counts() -> (usize, usize) {
 #[cfg(feature = "test-support")]
 pub fn test_lifecycle_counters() -> TestOwnerCounters {
     TEST_OWNER_STATE.with(core::cell::Cell::get)
+}
+
+/// The most plans the control plane can hold unreclaimed (#1398 D4; batch 15a review fold 2,
+/// M-1): every parked epoch, the running one and every pending candidate.
+const HELD_EPOCHS: usize = RETIRED_PROVIDERS + 1 + PENDING_PROVIDERS;
+
+/// Every plan the control plane holds unreclaimed, oldest first: the parked epochs, the running
+/// plan, the pending candidates (#1398 D4), without an allocation.
+pub(crate) struct HeldEpochs {
+    rows: [LiveEpochResources; HELD_EPOCHS],
+    len: usize,
+}
+
+impl HeldEpochs {
+    pub(crate) fn as_slice(&self) -> &[LiveEpochResources] {
+        &self.rows[..self.len]
+    }
+}
+
+/// Every compiled model the control plane holds (#1398 D4, #1310 D3): the committed one, then the
+/// model each held epoch keeps for a pending successor, without an allocation.
+pub(crate) struct HeldModels {
+    rows: [session::ResourceEstimate; 2 + PENDING_PROVIDERS],
+    len: usize,
+}
+
+impl HeldModels {
+    pub(crate) fn as_slice(&self) -> &[session::ResourceEstimate] {
+        &self.rows[..self.len]
+    }
 }
 
 /// One session's control plane: the control-protocol controller, the provider epochs, the plan
@@ -452,6 +602,10 @@ pub struct SessionState<A: ControlAdapter> {
     /// The most observation slots any committed plan has had; the ended-event cells and the
     /// binding table are charged for it (#1676 D2).
     pub(crate) observation_slots_high_water: usize,
+    /// The observation records the last rebuild queued again on the plan it published, taken
+    /// from the candidate it superseded (#1310, root ruling B15-Q4); empty after a rebuild that
+    /// superseded nothing.
+    pub(crate) observation_forwarded: Vec<ObservationForward>,
 }
 
 /// The stable key of one observation tap, borrowed from the bytes that name it (#1677): the strip's
@@ -642,6 +796,7 @@ pub(crate) fn observation_slots(
                 pending: PendingArm::None,
                 mark: 0,
                 key_bytes,
+                queued: false,
             });
         }
     }
@@ -679,6 +834,12 @@ pub(crate) struct ObservationSlot {
     /// The encoded bytes of the tap's key in an `OBSERVATION_ENDED` event (#1685 D2): what arming
     /// it adds to the event that would end every armed tap. Set when the plan's slots are built.
     pub(crate) key_bytes: u16,
+    /// A record for this tap waits in the queue of a plan render has not adopted (#1310, root
+    /// ruling B15-Q4): pushed while the newest plan was a pending candidate, or forwarded to it from
+    /// a candidate it superseded. A replacement of that candidate re-queues the tap's bound state
+    /// on its own instance, because a tap it carries from the running plan takes that plan's
+    /// state and would lose the record.
+    pub(crate) queued: bool,
 }
 
 /// What the host last pushed to one observation slot (#1584 D6a).
@@ -710,6 +871,101 @@ fn tap_key_of(
         section,
         tap_id: tap.id.0,
     })
+}
+
+/// One observation record a superseded candidate's queue held, as it is queued again on its
+/// replacement's matching instance (#1310, root ruling B15-Q4).
+///
+/// A host that keeps its own copy of each plan's armed taps reads them through
+/// [`SessionState::observation_forwarded`] and copies them onto the replacement's copy, as it does
+/// for a record it admitted itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationForward {
+    /// The replacement's effect producer, a position in [`SessionState::effect_producers`].
+    pub position: usize,
+    /// The tap's index in that producer's observation menu.
+    pub tap_index: u32,
+    /// The tap's bound state now: armed, with its window, or disarmed.
+    pub armed: bool,
+    /// The bound window, `0` for the plan's meter window.
+    pub window_blocks: u32,
+}
+
+/// The records a withdrawn candidate's observation queues hold, as the replacement queues them
+/// (#1310, root ruling B15-Q4): one per tap whose slot in `slots` (the candidate's, `offsets` its
+/// producers' first slots) is `queued`, on the `successor` instance with the same strip, rack,
+/// effect ID and tap ID, carrying the tap's state in `bindings`, which every admitted record has
+/// been folded into. An observation queue holds only `Observe` records (arm, with a window, or
+/// disarm), so the bound state is what the last record asked for, and draining it at the
+/// replacement's first block arms the tap where the candidate's first block would have. A tap the
+/// replacement no longer has is skipped: the transaction ended its binding, and the
+/// `OBSERVATION_ENDED` event says so.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] if a successor queue lacks the room, which cannot happen: its queue
+/// is fresh and holds one record per declared tap, and at most one is forwarded per tap.
+/// [`CommandError::CompileRejected`] if the list cannot be allocated.
+pub(crate) fn observation_forwards(
+    donor: &[host_core::EffectControlProducer],
+    offsets: &[u32],
+    slots: &[ObservationSlot],
+    successor: &[host_core::EffectControlProducer],
+    bindings: &controls::ObservationBindings,
+) -> Result<Vec<ObservationForward>, CommandError> {
+    let mut forwards = Vec::new();
+    for (position, producer) in donor.iter().enumerate() {
+        let (Some(&first), Some(&end)) = (offsets.get(position), offsets.get(position + 1)) else {
+            break;
+        };
+        for slot in first..end {
+            if !slots.get(slot as usize).is_some_and(|entry| entry.queued) {
+                continue;
+            }
+            let Some(key) = tap_key_of(producer, slot - first) else {
+                continue;
+            };
+            let target = successor.iter().enumerate().find_map(|(into, candidate)| {
+                if candidate.track_id != producer.track_id
+                    || candidate.address.rack != producer.address.rack
+                    || candidate.effect_id != producer.effect_id
+                {
+                    return None;
+                }
+                let tap = candidate
+                    .descriptor
+                    .observations
+                    .iter()
+                    .position(|declared| declared.id.0 == key.tap_id)
+                    .filter(|tap| *tap < candidate.observe_capacity())?;
+                Some((into, u32::try_from(tap).ok()?))
+            });
+            let Some((position, tap_index)) = target else {
+                continue;
+            };
+            let window = bindings.window_of(&key);
+            forwards
+                .try_reserve(1)
+                .map_err(|_| CommandError::CompileRejected(failure(ResourceFault::Allocation)))?;
+            forwards.push(ObservationForward {
+                position,
+                tap_index,
+                armed: window.is_some(),
+                window_blocks: window.unwrap_or(0),
+            });
+        }
+    }
+    for forward in &forwards {
+        let needed = forwards
+            .iter()
+            .filter(|other| other.position == forward.position)
+            .count();
+        if needed > successor[forward.position].observe_available_capacity() {
+            debug_assert!(false, "a fresh observation queue holds one record per tap");
+            return Err(CommandError::Internal);
+        }
+    }
+    Ok(forwards)
 }
 
 /// The wire key of an ended binding.
@@ -1363,6 +1619,14 @@ where
         &self.retired_providers
     }
 
+    /// The provider epoch `epoch`, current or pending, mutably (#1310 gate 6).
+    #[cfg(feature = "test-support")]
+    pub fn test_epoch_mut(&mut self, epoch: u64) -> Option<&mut ProviderEpoch> {
+        core::iter::once(&mut self.providers)
+            .chain(&mut self.pending_providers)
+            .find(|provider| provider.epoch == epoch)
+    }
+
     /// Schedules the next structural publication's adoption (#1348 gate 4): `command` reserves
     /// that one candidate with `adoption` instead of [`PlanAdoption::Next`]. Taken once, by the
     /// next structural publication on this thread.
@@ -1387,25 +1651,84 @@ where
             .values
     }
 
-    /// The resource row a structural candidate must fit beside (issue #1042).
+    /// Every plan the control plane holds unreclaimed, as the admissions read them (#1398 D4), in
+    /// epoch order, oldest first: every parked epoch whose plan render displaced but the service
+    /// step has not yet reclaimed, then the running plan, then every pending or withdrawn
+    /// candidate, the newest last.
     ///
-    /// That is the newest plan, the one still live when the candidate would be published: the
-    /// pending candidate's while it waits for its swap, else the current provider's. With nothing
-    /// pending and the atomic caught up, this is the rendering plan's row, as before. Pairing a
-    /// candidate with an older row would report a valid edit as a compile rejection whenever the
-    /// two plans could never coexist.
-    pub(crate) fn replacement_base_report(&self) -> Result<PlanResources, CommandError> {
-        let newest = self
-            .pending_providers
-            .last()
-            .map_or(self.providers.epoch, |provider| provider.epoch);
-        self.shared
+    /// The running and pending rows are the provider's own epoch's, read from the report table,
+    /// never the atomic's. A parked epoch's row is the one it captured when it was promoted out
+    /// (`ProviderEpoch::parked`; batch 15a review fold 2, M-1): its plan is alive until the
+    /// service step reclaims it from the retirement queue, so it is charged until then. The
+    /// service step runs first in every command and reclaims every plan render has already
+    /// handed back, so what stays parked is a plan render displaced but has not yet retired (a
+    /// render preempted between its claim and its retirement), or one a `Taken` withdrawal
+    /// promoted past before render retired it. A plan the atomic names while it lags is the
+    /// running provider's or a parked one's, so it is charged once (#1042).
+    pub(crate) fn held_epochs(&self) -> Result<HeldEpochs, CommandError> {
+        let reports = self
+            .shared
             .reports
             .lock()
-            .map_err(|_| CommandError::Internal)?
-            .iter()
-            .find_map(|(epoch, report)| (*epoch == newest).then_some(PlanResources::from(*report)))
-            .ok_or(CommandError::Internal)
+            .map_err(|_| CommandError::Internal)?;
+        let row = |provider: &ProviderEpoch| {
+            reports
+                .iter()
+                .find_map(|(epoch, report)| (*epoch == provider.epoch).then_some(*report))
+                .map(|report| LiveEpochResources {
+                    report: PlanResources::from(report),
+                    capi: provider.capi,
+                    carried: provider.carried,
+                })
+                .ok_or(CommandError::Internal)
+        };
+        if self.pending_providers.len() > PENDING_PROVIDERS
+            || self.retired_providers.len() > RETIRED_PROVIDERS
+        {
+            return Err(CommandError::Internal);
+        }
+        // No allocation: the live arm's admission runs it too.
+        let running = row(&self.providers)?;
+        let mut rows = [running; HELD_EPOCHS];
+        let mut len = 0;
+        for provider in &self.retired_providers {
+            rows[len] = provider.parked.ok_or(CommandError::Internal)?;
+            len += 1;
+        }
+        rows[len] = running;
+        len += 1;
+        for provider in &self.pending_providers {
+            rows[len] = row(provider)?;
+            len += 1;
+        }
+        Ok(HeldEpochs { rows, len })
+    }
+
+    /// Every compiled model the control plane holds, as both admissions charge them (#1398 D4,
+    /// #1310 D3): the committed model, then each held epoch's kept model. A kept model lives only
+    /// while a successor of its epoch is pending, so while one waits and a live edit is admitted,
+    /// three models are charged with the prospective one. No allocation: the live arm runs it.
+    ///
+    /// Every held epoch has a row, so a kept model never lacks one; were it to, the charge would
+    /// miss a model, so it is an accounting fault, never a skipped row.
+    pub(crate) fn held_models(&self) -> Result<HeldModels, CommandError> {
+        let committed = self.controller.session().compiled().resource_estimate();
+        let mut models = HeldModels {
+            rows: [committed; 2 + PENDING_PROVIDERS],
+            len: 1,
+        };
+        for kept in core::iter::once(&self.providers)
+            .chain(&self.pending_providers)
+            .filter_map(|provider| provider.kept.as_ref())
+        {
+            let Some(slot) = models.rows.get_mut(models.len) else {
+                debug_assert!(false, "a row for every held epoch's kept model");
+                return Err(CommandError::Internal);
+            };
+            *slot = kept.model.resource_estimate();
+            models.len += 1;
+        }
+        Ok(models)
     }
 
     /// Brings the provider epochs and the resource-report table up to the render thread.
@@ -1413,17 +1736,25 @@ where
     /// A render call swaps plans and retires the outgoing one at its *start*, but publishes
     /// `active_epoch` only after it returns (issue #1042). A control call in between reads an
     /// atomic that lags the plan actually rendering, so the atomic alone cannot drive promotion:
-    /// a reclaimed plan whose epoch is still the current provider's proves that the one pending
+    /// a reclaimed plan whose epoch is still the current provider's proves that the oldest pending
     /// candidate has replaced it, and promotes that candidate there. After such a promotion the
     /// atomic lags the providers until the render call returns, so the atomic promotes only when
     /// it is ahead of them.
+    ///
+    /// **Drain first (batch 15a review fold 2, B-1).** Every reclaimable plan is reclaimed, and
+    /// its parked epoch released, before the atomic promotes: a promotion parks epochs, and the
+    /// parked list holds only as many as the retirement queue has credits, so promoting before
+    /// the drain could find it full of epochs whose plans are already reclaimable and refuse
+    /// forever. This order is defence in depth, not a tested gate: at the parked list's capacity
+    /// of three each parked plan still holds a retirement credit, so the list has room for every
+    /// epoch a promotion parks whichever order runs, and no test is red without the order (batch
+    /// 15a fold 3, m-B).
     fn synchronize_plan_epochs(&mut self) -> Result<(), CommandError> {
-        let active_epoch = self.shared.active_epoch.load(Ordering::Acquire);
-        if active_epoch > self.providers.epoch {
-            self.promote_pending_provider(active_epoch)?;
-        }
-
-        while let Ok((retired_epoch, retired_plan)) = self.retirer.try_reclaim() {
+        #[cfg(feature = "test-support")]
+        let hold = TEST_HOLD_RECLAMATION.with(core::cell::Cell::get);
+        #[cfg(not(feature = "test-support"))]
+        let hold = false;
+        while !hold && let Ok((retired_epoch, retired_plan)) = self.retirer.try_reclaim() {
             drop(ObservedRetiredPlan::new(retired_plan));
             if retired_epoch.0 == self.providers.epoch {
                 let replacement = self
@@ -1441,9 +1772,14 @@ where
             self.retired_providers.remove(index);
         }
 
+        let active_epoch = self.shared.active_epoch.load(Ordering::Acquire);
+        if active_epoch > self.providers.epoch {
+            self.promote_pending_provider(active_epoch)?;
+        }
+
         // Keep exactly the rows a reader can still ask for: the atomic's (possibly lagging), the
-        // current provider's, and a pending candidate's. The atomic is read under the lock, and
-        // `retain` shrinks in place.
+        // current provider's, and every pending candidate's. The atomic is read under the lock,
+        // and `retain` shrinks in place.
         let current = self.providers.epoch;
         let pending = &self.pending_providers;
         let mut reports = self
@@ -1462,18 +1798,54 @@ where
 
     /// Makes the pending provider of `epoch` current and parks the previous one until its plan
     /// is reclaimed.
+    ///
+    /// Every pending candidate older than `epoch` is parked with it (#1310): render adopts
+    /// candidates in publication order, so one it adopted before `epoch` was displaced in turn.
+    /// The service step promotes the candidate the atomic or a reclaimed plan names; a structural
+    /// edit that finds the newest candidate taken promotes up to it before it rebuilds
+    /// (`withdraw_pending_candidate`), so after that edit's commit one candidate at most is
+    /// pending. Each parked epoch captures its report row first (`ProviderEpoch::parked`): the
+    /// table drops the row, but the admissions charge the plan until it is reclaimed.
     fn promote_pending_provider(&mut self, epoch: u64) -> Result<(), CommandError> {
         let index = self
             .pending_providers
             .iter()
             .position(|provider| provider.epoch == epoch)
             .ok_or(CommandError::Internal)?;
-        if self.retired_providers.len() == self.retired_providers.capacity() {
+        if self.retired_providers.len() + index + 1 > self.retired_providers.capacity() {
             return Err(CommandError::Internal);
         }
-        let next = self.pending_providers.remove(index);
-        let previous = core::mem::replace(&mut self.providers, next);
-        self.retired_providers.push(previous);
+        // Fold 2, M-1: each parked epoch keeps the row the admissions charge until its plan is
+        // reclaimed. Every row is read before anything moves, so a missing one moves nothing.
+        let mut parked = [None; 1 + PENDING_PROVIDERS];
+        {
+            let reports = self
+                .shared
+                .reports
+                .lock()
+                .map_err(|_| CommandError::Internal)?;
+            let rows = core::iter::once(&self.providers).chain(&self.pending_providers[..index]);
+            for (slot, provider) in parked.iter_mut().zip(rows) {
+                let report = reports
+                    .iter()
+                    .find_map(|(epoch, report)| (*epoch == provider.epoch).then_some(*report))
+                    .ok_or(CommandError::Internal)?;
+                *slot = Some(LiveEpochResources {
+                    report: PlanResources::from(report),
+                    capi: provider.capi,
+                    carried: provider.carried,
+                });
+            }
+        }
+        for row in parked.into_iter().take(index + 1) {
+            let next = self.pending_providers.remove(0);
+            let mut previous = core::mem::replace(&mut self.providers, next);
+            // #1310 D3: render no longer runs the previous plan, so no successor is prepared
+            // against its kept base again; the base drops here, on the control thread.
+            previous.kept = None;
+            previous.parked = row;
+            self.retired_providers.push(previous);
+        }
         Ok(())
     }
 
@@ -1595,14 +1967,6 @@ where
                         )));
                     }
                 }
-                // Issue #1042: while the atomic lags the providers, a render call has swapped plans
-                // but not yet published the epoch. The retired plan's row stays for any-thread
-                // readers, so the report table is full and no candidate could be admitted: refuse
-                // before compiling, with retryable backpressure rather than a wasted compile. The
-                // live arm above adds no row, so it skips this (#1053 D7).
-                if self.shared.active_epoch.load(Ordering::Acquire) < self.providers.epoch {
-                    return Err(CommandError::Backpressure);
-                }
                 #[cfg(feature = "test-support")]
                 if self.take_test_fault(TestStructuralFaultPhase::BeforeRuntimePrepare) {
                     drop(prepared);
@@ -1630,8 +1994,6 @@ where
                         .ok_or(CommandError::Internal)?
                         .normalized_model(),
                 );
-                // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
-                // transaction leaves unchanged is prepared to carry that plan's ring.
                 // #1584 D6a: the subscriptions the successor is prepared with, and those the
                 // transaction ends. The room for their one `OBSERVATION_ENDED` event (every ended
                 // key in it) is reserved with the token's `SESSION_COMMITTED`, before anything is
@@ -1678,189 +2040,500 @@ where
                         Err(_) => return Err(CommandError::Internal),
                     }
                 }
-                let prepared_runtime = prepare_runtime::<A>(
-                    &*self.preparer,
-                    prepared
-                        .get()
-                        .prospective_session()
-                        .compiled()
-                        .ok_or(CommandError::Internal)?,
-                    self.limits,
-                    Some(SuccessorBase {
-                        inventory: &self.newest_providers().inventory,
-                        committed: self.controller.session().compiled().normalized_model(),
-                        revision,
-                        // #1394 D6: a carry retarget is the record of the transaction's own
-                        // edit, so it takes that edit's ramp length.
-                        edit_ramps: prepared.get().prospective_session().edit_ramps(),
-                        monitor: host_core::MonitorBase {
-                            committed: &self.monitor,
-                            next: &monitor_change.overlay,
-                            ramp: monitor_change.ramp,
-                        },
-                        observation: &observation_change.bindings,
-                    }),
-                    &self.live_values_superseded,
-                    self.observation_slots_high_water,
-                )
-                .map_err(CommandError::CompileRejected)?;
-                let PreparedRuntime {
-                    sources,
-                    strips,
-                    effects,
-                    plan: candidate_plan,
-                    resources,
-                    carried,
-                    inventory,
-                    control_catalog: candidate_catalog,
-                    capi: prospective_capi,
-                    revision_gate,
-                    master_track: _,
-                } = prepared_runtime;
-                let mut candidate_provider = ProviderEpoch::candidate(
-                    sources,
-                    inventory,
-                    strips,
-                    effects,
-                    prospective_capi,
-                    revision_gate,
+                // #1310 D1: a pending candidate is taken back before anything is prepared, so the
+                // replacement knows the plan render runs and the candidate's host-fed rings can
+                // move while the control thread owns them.
+                let mut withdrawn = self.withdraw_pending_candidate()?;
+                let result = self.rebuild(
+                    prepared,
+                    revision,
+                    monitor_change,
+                    observation_change,
+                    &mut withdrawn,
                 );
-                let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
-                #[cfg(feature = "test-support")]
-                {
-                    if self.take_test_fault(TestStructuralFaultPhase::AfterRuntimePrepare) {
-                        drop(candidate_plan);
-                        drop(candidate_provider);
-                        drop(prepared);
-                        return Err(CommandError::Backpressure);
-                    }
+                // #1310 D4: a refusal leaves the withdrawn candidate here, whole; it is published
+                // again with its own epoch, credit, revision gate and words. Nothing was published
+                // since it was withdrawn, so this cannot fail.
+                if let Some(candidate) = withdrawn.take() {
+                    self.publisher.republish(candidate);
+                    #[cfg(feature = "test-support")]
+                    update_test_owners(|owners| owners.candidate_republished += 1);
                 }
-                validate_replacement_peak(
-                    self.replacement_base_report()?,
+                result
+            }
+        }
+    }
+
+    /// Takes back the newest pending candidate if render has not adopted it (#1310 D1). `None`
+    /// while nothing is pending, or when render adopted it first (`Taken`), which is the path a
+    /// rebuild on the newest plan has always taken.
+    ///
+    /// **Render took the newest candidate (batch 15a review fold, M1).** `Taken`, or an empty
+    /// mailbox while a candidate is still pending, means render has claimed the newest one; it
+    /// adopts candidates in publication order, so it has adopted (or is adopting) every pending
+    /// one. Each is promoted here, up to the newest, before the rebuild runs: the promotion would
+    /// otherwise wait for the displaced plan's retirement or the atomic, which lag render (a render
+    /// preempted between its claim and its retirement), and a second `Taken` in that window would
+    /// leave two adopted candidates pending beside a third (#1398 D3's accounting fault). So the
+    /// rebuild always finds at most one pending candidate, the one it may supersede. The epochs
+    /// it parks keep their resource rows (`ProviderEpoch::parked`), so the rebuild's admission
+    /// still charges a plan render displaced but has not yet retired (batch 15a review fold 2,
+    /// M-1).
+    fn withdraw_pending_candidate(
+        &mut self,
+    ) -> Result<Option<engine::realtime::UnadoptedCandidate>, CommandError> {
+        let Some(newest) = self.pending_providers.last().map(|provider| provider.epoch) else {
+            return Ok(None);
+        };
+        match self.publisher.withdraw() {
+            engine::realtime::Withdrawal::Withdrawn(candidate) => {
+                #[cfg(feature = "test-support")]
+                update_test_owners(|owners| owners.candidate_withdrawn += 1);
+                Ok(Some(candidate))
+            }
+            engine::realtime::Withdrawal::Taken => {
+                #[cfg(feature = "test-support")]
+                update_test_owners(|owners| owners.candidate_taken += 1);
+                self.promote_pending_provider(newest)?;
+                Ok(None)
+            }
+            // An earlier withdrawal found it taken: render runs it.
+            engine::realtime::Withdrawal::Nothing => {
+                self.promote_pending_provider(newest)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// The rebuild of a structural transaction: prepare, admit, reserve and commit a successor plan
+    /// and publish it (#1273, #1398, #1310).
+    ///
+    /// **Supersession (#1310).** With `withdrawn` holding a candidate A taken back unadopted, the
+    /// successor B is prepared against the plan A succeeds, P0 (D2): A's carried base, and P0's
+    /// kept model, monitor overlay and edit ramps merged with B's own (D3, root ruling B15-Q3). Every
+    /// check runs while A is withdrawn, before the commit (D4): preparation, admission,
+    /// reservation, the source donation from A and the room for A's queued observation records
+    /// on B (root ruling B15-Q4), then the protocol's commit predicate. A refusal returns with
+    /// `withdrawn` untouched, and the caller republishes A. After the commit, infallibly and in
+    /// order (D5): the donation and the producer moves, B's `superseded` word and revision, B's
+    /// publication, the return to P0's epoch of every producer A still holds that P0 holds
+    /// vacant, and A's drop.
+    ///
+    /// **Acked-batch question (D8): can an ack ever precede a drop? No.** A's revisions stay
+    /// committed: their edits are in the model B is compiled from, A's host-fed rings move into
+    /// B by a donation checked before the commit, the producers of sources P0 still renders go
+    /// back to P0 before A drops, and every observation record queued on A is queued on B before
+    /// B is published. B is acked only after every fallible step; A's revisions complete as
+    /// `superseded` when B is adopted (D6).
+    #[allow(clippy::too_many_lines)]
+    fn rebuild(
+        &mut self,
+        prepared: ObservedPreparedToken,
+        revision: u64,
+        monitor_change: controls::MonitorChange,
+        observation_change: controls::ObservationChange,
+        withdrawn: &mut Option<engine::realtime::UnadoptedCandidate>,
+    ) -> Result<usize, CommandError> {
+        let superseding = withdrawn.is_some();
+        if let Some(candidate) = withdrawn.as_ref()
+            && self.pending_providers.last().map(|newest| newest.epoch) != Some(candidate.epoch().0)
+        {
+            // The mailbox's last publication is the newest pending candidate by construction.
+            return Err(CommandError::Internal);
+        }
+        let own_ramps = prepared.get().prospective_session().edit_ramps();
+        // Whether B writes a monitor row: then its overlay change's ramp is the latest.
+        let writes_monitor = !prepared.get().monitor_edits().is_empty();
+        // The ramp lengths the epoch B succeeds keeps from now on: B's own, or, across a
+        // withdrawn candidate, the kept base's with B's laid over them (B wins on a shared row).
+        let kept_ramps = if superseding {
+            let kept = self
+                .kept_holder()
+                .and_then(|holder| holder.kept.as_ref())
+                .ok_or(CommandError::Internal)?;
+            merged_ramps(&kept.edit_ramps, own_ramps)
+        } else {
+            own_ramps.clone()
+        };
+        let prospective = prepared
+            .get()
+            .prospective_session()
+            .compiled()
+            .ok_or(CommandError::Internal)?;
+        let base = if superseding {
+            // #1310 D2: A's carried base (every row a P0 row) and P0's kept base.
+            let kept = self
+                .kept_holder()
+                .and_then(|holder| holder.kept.as_ref())
+                .ok_or(CommandError::Internal)?;
+            let inventory = self
+                .pending_providers
+                .last()
+                .and_then(|candidate| candidate.carried_base.as_ref())
+                .ok_or(CommandError::Internal)?;
+            SuccessorBase {
+                inventory,
+                committed: kept.model.normalized_model(),
+                revision,
+                edit_ramps: &kept_ramps,
+                monitor: host_core::MonitorBase {
+                    committed: &kept.monitor,
+                    next: &monitor_change.overlay,
+                    ramp: if writes_monitor {
+                        monitor_change.ramp
+                    } else {
+                        kept.monitor_ramp.unwrap_or(monitor_change.ramp)
+                    },
+                },
+                observation: &observation_change.bindings,
+            }
+        } else {
+            // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
+            // transaction leaves unchanged is prepared to carry that plan's ring.
+            SuccessorBase {
+                inventory: &self.newest_providers().inventory,
+                committed: self.controller.session().compiled().normalized_model(),
+                revision,
+                // #1394 D6: a carry retarget is the record of the transaction's own edit, so it
+                // takes that edit's ramp length.
+                edit_ramps: own_ramps,
+                monitor: host_core::MonitorBase {
+                    committed: &self.monitor,
+                    next: &monitor_change.overlay,
+                    ramp: monitor_change.ramp,
+                },
+                observation: &observation_change.bindings,
+            }
+        };
+        let prepared_runtime = prepare_runtime::<A>(
+            &*self.preparer,
+            prospective,
+            self.limits,
+            Some(base),
+            &self.live_values_superseded,
+            self.observation_slots_high_water,
+        )
+        .map_err(CommandError::CompileRejected)?;
+        let PreparedRuntime {
+            sources,
+            strips,
+            effects,
+            plan: candidate_plan,
+            resources,
+            carried,
+            inventory,
+            carried_base,
+            control_catalog: candidate_catalog,
+            capi: prospective_capi,
+            revision_gate,
+            master_track: _,
+        } = prepared_runtime;
+        let mut candidate_provider = ProviderEpoch::candidate(
+            sources,
+            inventory,
+            carried_base,
+            carried,
+            strips,
+            effects,
+            prospective_capi,
+            revision_gate,
+        );
+        let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
+        #[cfg(feature = "test-support")]
+        {
+            if self.take_test_fault(TestStructuralFaultPhase::AfterRuntimePrepare) {
+                drop(candidate_plan);
+                drop(candidate_provider);
+                drop(prepared);
+                return Err(CommandError::Backpressure);
+            }
+        }
+        // #1398 D4: the candidate beside every plan the control plane holds unreclaimed, a
+        // withdrawn candidate included, and every model it holds, the kept ones included (#1310
+        // D3), checked before anything is reserved or committed.
+        let held = self.held_epochs()?;
+        let models = self.held_models()?;
+        let limits = self.limits;
+        let admit = |held: &[LiveEpochResources], models: &[session::ResourceEstimate]| {
+            validate_replacement_peak(
+                held,
+                ProspectivePlan {
                     resources,
                     carried,
-                    prospective_capi,
-                    compiled_model_admission(
-                        self.controller.session().compiled(),
-                        prepared
-                            .get()
-                            .prospective_session()
-                            .compiled()
-                            .ok_or(CommandError::Internal)?,
+                    capi: prospective_capi,
+                },
+                compiled_model_admission_over(models, prospective.resource_estimate())?,
+                limits,
+            )
+        };
+        if let Err(failure) = admit(held.as_slice(), models.as_slice()) {
+            // Batch 15a review fold, item 2: a refusal is permanent only if the edit cannot fit
+            // even beside the newest plan alone and the committed model, which is all a retry
+            // meets once render has adopted every pending candidate (the plans before it are
+            // then reclaimed and their kept models dropped). Otherwise the peak is the pending
+            // plans', which a render frees, and the refusal is retryable backpressure. The
+            // second check charges the candidate's rows as prepared: a ring it takes from a
+            // withdrawn candidate by donation is counted in both, so it errs toward the
+            // permanent refusal by at most those rings' bytes, never toward an admission.
+            let held = held.as_slice();
+            return Err(
+                match held.split_last().filter(|(_, older)| !older.is_empty()) {
+                    Some((newest, _))
+                        if admit(core::slice::from_ref(newest), &models.as_slice()[..1])
+                            .is_ok() =>
+                    {
+                        CommandError::Backpressure
+                    }
+                    _ => CommandError::CompileRejected(failure),
+                },
+            );
+        }
+        #[cfg(feature = "test-support")]
+        if self.take_test_fault(TestStructuralFaultPhase::AfterAdmission) {
+            drop(candidate_plan);
+            drop(candidate_provider);
+            drop(prepared);
+            return Err(CommandError::Backpressure);
+        }
+        // #1310 D1: B is published with the adoption of its own classification, never A's.
+        #[cfg(feature = "test-support")]
+        let adoption = TEST_NEXT_ADOPTION
+            .with(core::cell::Cell::take)
+            .unwrap_or(PlanAdoption::Next);
+        #[cfg(not(feature = "test-support"))]
+        let adoption = PlanAdoption::Next;
+        let reservation = match self
+            .publisher
+            .reserve_replacement(candidate_plan.take(), adoption)
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                // #1398 D3: the exchange's publication cells and its retirement credits (#1398
+                // D1) hold every plan a candidate can find there, so a full one is an accounting
+                // fault, not backpressure. An incompatible envelope and an exhausted epoch stay as
+                // they were.
+                let (returned, refusal) = match error {
+                    PlanReplacementReservationError::PublicationFull(plan)
+                    | PlanReplacementReservationError::RetirementFull(plan) => {
+                        debug_assert!(false, "#1398 D1 sizes the exchange for every candidate");
+                        (plan, CommandError::Internal)
+                    }
+                    PlanReplacementReservationError::Incompatible(plan)
+                    | PlanReplacementReservationError::EpochExhausted(plan) => {
+                        (plan, CommandError::Backpressure)
+                    }
+                };
+                drop(ObservedCandidatePlan::returned(returned));
+                return Err(refusal);
+            }
+        };
+        let mut reservation = ObservedReservation::new(reservation);
+        #[cfg(feature = "test-support")]
+        {
+            if take_test_fault_state(TestStructuralFaultPhase::AfterPlanReservation) {
+                drop(reservation);
+                drop(candidate_provider);
+                drop(prepared);
+                return Err(CommandError::Backpressure);
+            }
+        }
+        // #1310 D4 (#1344 D3): the rings A created fresh that B keeps, checked while A is
+        // withdrawn; nothing moves until after the commit. A withdrawn candidate was never
+        // rendered, so neither refusal can arise: either is an internal fault.
+        let donation = match withdrawn.as_ref() {
+            Some(candidate) => {
+                let donor = self
+                    .pending_providers
+                    .last()
+                    .ok_or(CommandError::Internal)?;
+                Some(
+                    host_core::check_donation(
+                        host_core::DonationSide {
+                            plan: reservation.plan(),
+                            sources: &candidate_provider.sources,
+                            inventory: &candidate_provider.inventory,
+                            model: prospective.normalized_model(),
+                        },
+                        host_core::DonationSide {
+                            plan: candidate.plan(),
+                            sources: &donor.sources,
+                            inventory: &donor.inventory,
+                            model: self.controller.session().compiled().normalized_model(),
+                        },
                     )
-                    .map_err(CommandError::CompileRejected)?,
-                    self.limits,
+                    .map_err(|_| CommandError::Internal)?,
                 )
-                .map_err(CommandError::CompileRejected)?;
-                #[cfg(feature = "test-support")]
-                if self.take_test_fault(TestStructuralFaultPhase::AfterAdmission) {
-                    drop(candidate_plan);
-                    drop(candidate_provider);
-                    drop(prepared);
-                    return Err(CommandError::Backpressure);
-                }
-                if !self.pending_providers.is_empty() {
-                    return Err(CommandError::Backpressure);
-                }
-                #[cfg(feature = "test-support")]
-                let adoption = TEST_NEXT_ADOPTION
-                    .with(core::cell::Cell::take)
-                    .unwrap_or(PlanAdoption::Next);
-                #[cfg(not(feature = "test-support"))]
-                let adoption = PlanAdoption::Next;
-                let reservation = match self
-                    .publisher
-                    .reserve_replacement(candidate_plan.take(), adoption)
-                {
-                    Ok(reservation) => reservation,
-                    Err(error) => {
-                        let returned = match error {
-                            PlanReplacementReservationError::PublicationFull(plan)
-                            | PlanReplacementReservationError::RetirementFull(plan)
-                            | PlanReplacementReservationError::Incompatible(plan)
-                            | PlanReplacementReservationError::EpochExhausted(plan) => plan,
-                        };
-                        drop(ObservedCandidatePlan::returned(returned));
-                        return Err(CommandError::Backpressure);
-                    }
-                };
-                let reservation = ObservedReservation::new(reservation);
-                #[cfg(feature = "test-support")]
-                {
-                    if take_test_fault_state(TestStructuralFaultPhase::AfterPlanReservation) {
-                        drop(reservation);
-                        drop(candidate_provider);
-                        drop(prepared);
-                        return Err(CommandError::Backpressure);
-                    }
-                }
-                let epoch = reservation.epoch();
-                candidate_provider.epoch = epoch;
-                let mut reports = self
-                    .shared
-                    .reports
-                    .lock()
-                    .map_err(|_| CommandError::Internal)?;
-                if reports.len() == reports.capacity()
-                    || self.pending_providers.len() == self.pending_providers.capacity()
-                {
-                    return Err(CommandError::Backpressure);
-                }
+            }
+            None => None,
+        };
+        // #1310, root rulings of 2026-10-16 (no ack before a drop; M-A of fold 3): a ring A
+        // created (A added or redeclared the source) that the host fed and the donation above does
+        // not move to B would drop with A, and with it PCM the host was acked for. Until an issue
+        // lets B read it (#1698 for a source B reverts to its P0 form), such a supersession is
+        // refused here as backpressure. The guard reads the donation plan itself, so it sits after
+        // the check, still before the commit: the reservation it follows is cancelled by the
+        // return (it returns its credit and consumes no epoch), nothing else has changed, the
+        // caller republishes A, and once render adopts A the same edit commits on it.
+        if let (Some(plan), Some(candidate)) = (donation.as_ref(), withdrawn.as_ref()) {
+            let donor = self
+                .pending_providers
+                .last()
+                .ok_or(CommandError::Internal)?;
+            if host_core::drops_acked_fresh_source(
+                host_core::DonationSide {
+                    plan: candidate.plan(),
+                    sources: &donor.sources,
+                    inventory: &donor.inventory,
+                    model: self.controller.session().compiled().normalized_model(),
+                },
+                plan,
+            ) {
+                return Err(CommandError::Backpressure);
+            }
+        }
+        // #1310 (root ruling B15-Q4): the observation records queued on A, re-queued on B's matching
+        // instances, with their room checked here. A tap B carries from P0 takes P0's state at
+        // the swap, which never saw them; arming from the bindings covers only a tap B starts.
+        let forwards = match self.pending_providers.last() {
+            Some(donor) if superseding => observation_forwards(
+                &donor.effects,
+                &self.observation_offsets,
+                &self.observation_pending,
+                &candidate_provider.effects,
+                &observation_change.bindings,
+            )?,
+            _ => Vec::new(),
+        };
+        let epoch = reservation.epoch();
+        candidate_provider.epoch = epoch;
+        let mut reports = self
+            .shared
+            .reports
+            .lock()
+            .map_err(|_| CommandError::Internal)?;
+        // #1398 D3: the report table and the pending list hold every row a candidate can meet
+        // (#1398 D1), so a full one is an accounting fault. A superseded candidate's row and
+        // entry leave before B's arrive (#1310 D5).
+        let freed = usize::from(superseding);
+        if reports.len().saturating_sub(freed) >= reports.capacity()
+            || self.pending_providers.len().saturating_sub(freed)
+                >= self.pending_providers.capacity()
+        {
+            debug_assert!(
+                false,
+                "#1398 D1 sizes the report table and the pending list"
+            );
+            return Err(CommandError::Internal);
+        }
 
-                #[cfg(feature = "test-support")]
-                if take_test_fault_state(TestStructuralFaultPhase::BeforeProtocolCommit) {
-                    drop(reports);
-                    drop(reservation);
-                    drop(candidate_provider);
-                    drop(prepared);
-                    return Err(CommandError::Backpressure);
-                }
+        #[cfg(feature = "test-support")]
+        if take_test_fault_state(TestStructuralFaultPhase::BeforeProtocolCommit) {
+            drop(reports);
+            drop(reservation);
+            drop(candidate_provider);
+            drop(prepared);
+            return Err(CommandError::Backpressure);
+        }
 
-                // #1312 D7: the candidate's gate is stamped with the structural revision, as the
-                // last fallible step before the protocol commit. A fresh gate takes any revision
-                // in `1..=GATE_REVISION_MAX`, which #1503 holds for a prepared transaction, so
-                // this cannot refuse; were it to, the candidate and its handle are dropped here
-                // with nothing published. Nothing else is stamped on the handle before the
-                // publication below. The handle inherits the open stamp of the carry retargets
-                // preparation wrote (#1277 D5), so this is the same revision again, which the pin
-                // allows.
-                if candidate_provider.revision_gate.stamp(revision).is_err() {
-                    drop(reports);
-                    drop(reservation);
-                    drop(candidate_provider);
-                    drop(prepared);
-                    return Err(CommandError::Internal);
+        // #1312 D7: the candidate's gate is stamped with the structural revision, as the last
+        // fallible step before the protocol commit. A fresh gate takes any revision in
+        // `1..=GATE_REVISION_MAX`, which #1503 holds for a prepared transaction, so this cannot
+        // refuse; were it to, the candidate and its handle are dropped here with nothing
+        // published. Nothing else is stamped on the handle before the publication below. The
+        // handle inherits the open stamp of the carry retargets preparation wrote (#1277 D5), so
+        // this is the same revision again, which the pin allows.
+        if candidate_provider.revision_gate.stamp(revision).is_err() {
+            drop(reports);
+            drop(reservation);
+            drop(candidate_provider);
+            drop(prepared);
+            return Err(CommandError::Internal);
+        }
+        // #1584 D6a: the newest plan's pending-subscription storage is built here, with the other
+        // fallible steps, so no allocation follows the commit; the commit then only assigns it. A
+        // refusal drops what was built and changes nothing.
+        let Ok(mut slots) = observation_slots(
+            &candidate_provider.effects,
+            &observation_change.bindings,
+            self.observation_wire,
+        ) else {
+            drop(reports);
+            drop(reservation);
+            drop(candidate_provider);
+            drop(prepared);
+            return Err(CommandError::CompileRejected(failure(
+                ResourceFault::Allocation,
+            )));
+        };
+        // #1310 D4: the protocol's own commit predicate, the last check.
+        if self
+            .controller
+            .check_prepared_structural(prepared.get())
+            .is_err()
+        {
+            return Err(CommandError::Internal);
+        }
+        // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
+        let mut committed = prepared
+            .commit(&mut self.controller, protocol::EditPath::Rebuild)
+            .map_err(|_| CommandError::Internal)?;
+        // #1310 D3: the model the commit displaced, never one committed in place (#1613).
+        let displaced = committed.take_displaced();
+        debug_assert!(displaced.is_some(), "a rebuild displaces a compiled model");
+        // #1559 D8: the overlay is written after the last fallible step, with the commit.
+        let monitor_ramp = writes_monitor.then_some(monitor_change.ramp);
+        let previous_monitor = core::mem::replace(&mut self.monitor, monitor_change.overlay);
+        // #1584 D6a: and the subscriptions the successor was prepared with.
+        self.observation = observation_change.bindings;
+        // From here on nothing fails.
+        let mut superseded = None;
+        let superseded_revisions = match withdrawn.take() {
+            Some(candidate) => {
+                // #1310 D5 step 2: the checked donation, then the producers of the sources B
+                // carries from P0, which A's commit had moved into A's set. A's own model, which
+                // B's commit displaced, drops here.
+                drop(displaced);
+                let mut donor = self
+                    .pending_providers
+                    .pop()
+                    .expect("the withdrawn candidate is the newest pending epoch");
+                let mut donor_plan = candidate.into_plan();
+                if let Some(donation) = donation {
+                    host_core::apply_donation(
+                        host_core::DonationSideMut {
+                            plan: reservation.plan_mut(),
+                            sources: &mut candidate_provider.sources,
+                        },
+                        host_core::DonationSideMut {
+                            plan: &mut donor_plan,
+                            sources: &mut donor.sources,
+                        },
+                        donation,
+                    );
                 }
-                // #1584 D6a: the newest plan's pending-subscription storage is built here, with
-                // the other fallible steps, so no allocation follows the commit; the commit then
-                // only assigns it. A refusal drops what was built and changes nothing.
-                let slots = match observation_slots(
-                    &candidate_provider.effects,
-                    &observation_change.bindings,
-                    self.observation_wire,
-                ) {
-                    Ok(slots) => slots,
-                    Err(_) => {
-                        drop(reports);
-                        drop(reservation);
-                        drop(candidate_provider);
-                        drop(prepared);
-                        return Err(CommandError::CompileRejected(failure(
-                            ResourceFault::Allocation,
-                        )));
+                candidate_provider
+                    .sources
+                    .adopt_persisting(&mut donor.sources);
+                // P0, the epoch B succeeds, keeps its base with B's edit ramps merged in.
+                let holder = self
+                    .pending_providers
+                    .last_mut()
+                    .unwrap_or(&mut self.providers);
+                if let Some(kept) = holder.kept.as_mut() {
+                    kept.edit_ramps = kept_ramps;
+                    if monitor_ramp.is_some() {
+                        kept.monitor_ramp = monitor_ramp;
                     }
-                };
-                // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
-                let committed = prepared
-                    .commit(&mut self.controller, protocol::EditPath::Rebuild)
-                    .map_err(|_| CommandError::Internal)?;
-                // #1559 D8: the overlay is written after the last fallible step, with the commit.
-                self.monitor = monitor_change.overlay;
-                // #1584 D6a: and the subscriptions the successor was prepared with.
-                self.observation = observation_change.bindings;
+                }
+                // #1310 D6: every revision after the last one P0's gate published and before B's
+                // was committed onto A or a candidate A superseded, and its content is in B.
+                let last_running = holder.revision_gate.last_published();
+                superseded = Some((donor_plan, donor));
+                revision.saturating_sub(1).saturating_sub(last_running)
+            }
+            None => {
                 // Issue #1273 D2: the protocol commit was the last fallible step, so the
-                // persisting producers move now and never move back. Infallible.
-                // The newest epoch, spelled by field: the reservation borrows the publisher.
+                // persisting producers move now and never move back.
                 let newest = self
                     .pending_providers
                     .last_mut()
@@ -1868,45 +2541,100 @@ where
                 candidate_provider
                     .sources
                     .adopt_persisting(&mut newest.sources);
-                self.controller
-                    .provider_mut()
-                    .replace_session_catalog(candidate_catalog, revision);
-                // #1502 D6: the candidate carries the revision just committed. It goes on the
-                // candidate's own gate before the candidate is published, so render reports it
-                // when it adopts the candidate and never earlier, and nothing is stamped on the
-                // handle in between.
-                debug_assert_eq!(
-                    revision,
-                    self.controller.session().revision().0,
-                    "the revision stamped is the revision committed (#1312 D7)"
-                );
-                candidate_provider.revision_gate.publish(revision);
-                self.pending_providers.push(candidate_provider);
-                // #1584 D6a: the newest plan's slots, built above. The fold ran when this command
-                // was serviced and nothing has been pushed since (one thread), so none is lost.
-                (
-                    self.observation_offsets,
-                    self.observation_pending,
-                    self.observation_batch_counts,
-                    self.observation_armed,
-                    self.observation_armed_bytes,
-                ) = slots;
-                self.observation_slots_high_water = self
-                    .observation_slots_high_water
-                    .max(self.observation_pending.len());
-                reports.push((epoch, A::Row::from(resources)));
-                reservation.commit();
-                #[cfg(feature = "test-support")]
-                {
-                    update_test_owners(|owners| {
-                        owners.candidate_provider_published += 1;
+                // #1310 D3: the epoch B succeeds keeps the model the commit displaced, the
+                // overlay its cells hold and B's edit ramps, while B is pending.
+                if let Some(model) = displaced {
+                    newest.kept = Some(KeptBase {
+                        model,
+                        monitor: previous_monitor,
+                        edit_ramps: kept_ramps,
+                        monitor_ramp,
                     });
                 }
-                Ok(committed
-                    .write_into(&mut self.response_scratch)
-                    .expect("prepared response capacity was admitted before protocol commit"))
+                // Nothing was withdrawn, so nothing is pending but B: a taken candidate was
+                // promoted before the rebuild (`withdraw_pending_candidate`), and promotion drops
+                // every older epoch's kept base.
+                debug_assert_eq!(
+                    self.pending_providers.len(),
+                    0,
+                    "a rebuild that supersedes nothing meets no pending candidate"
+                );
+                0
+            }
+        };
+        self.controller
+            .provider_mut()
+            .replace_session_catalog(candidate_catalog, revision);
+        // #1502 D6: the candidate carries the revision just committed. It goes on the candidate's
+        // own gate before the candidate is published, so render reports it when it adopts the
+        // candidate and never earlier, and nothing is stamped on the handle in between.
+        debug_assert_eq!(
+            revision,
+            self.controller.session().revision().0,
+            "the revision stamped is the revision committed (#1312 D7)"
+        );
+        candidate_provider.revision_gate.publish(revision);
+        // #1310 D5 step 3, D6: B's `superseded` word, written before B is published.
+        reservation.set_superseded(superseded_revisions);
+        // #1310 (root ruling B15-Q4): A's queued observation records, on B's queues before B is
+        // published. Their room was checked before the commit.
+        for forward in &forwards {
+            candidate_provider.effects[forward.position]
+                .try_push_observe(forward.tap_index, forward.armed, forward.window_blocks)
+                .expect("the room for every forwarded record was checked before the commit");
+            let first = slots.0[forward.position];
+            if let Some(slot) = slots.1.get_mut((first + forward.tap_index) as usize) {
+                slot.queued = true;
             }
         }
+        // A move: the list was built before the commit.
+        self.observation_forwarded = forwards;
+        self.pending_providers.push(candidate_provider);
+        // #1584 D6a: the newest plan's slots, built above. The fold ran when this command was
+        // serviced and nothing has been pushed since (one thread), so none is lost.
+        (
+            self.observation_offsets,
+            self.observation_pending,
+            self.observation_batch_counts,
+            self.observation_armed,
+            self.observation_armed_bytes,
+        ) = slots;
+        self.observation_slots_high_water = self
+            .observation_slots_high_water
+            .max(self.observation_pending.len());
+        if let Some((_, donor)) = superseded.as_ref() {
+            // #1310 D5 step 6: A's report row leaves; `retain` shrinks in place.
+            let donor_epoch = donor.epoch;
+            reports.retain(|(row, _)| *row != donor_epoch);
+        }
+        reports.push((epoch, A::Row::from(resources)));
+        // #1310 D5 step 4: B is published only now, owning every donated ring and record.
+        reservation.commit();
+        drop(reports);
+        #[cfg(feature = "test-support")]
+        {
+            update_test_owners(|owners| {
+                owners.candidate_provider_published += 1;
+            });
+        }
+        if let Some((donor_plan, mut donor)) = superseded {
+            // #1310 D5 step 5: P0 still renders until B is adopted, so every producer A still
+            // holds that P0 holds vacant (a source B removed or redeclared) goes back to P0's
+            // epoch before A drops. Infallible and allocation-free; keyed by source ID.
+            let holder = self
+                .kept_holder_mut()
+                .expect("B succeeds the epoch A succeeded");
+            holder.sources.adopt_persisting(&mut donor.sources);
+            // Step 6: A's plan, provider epoch (with its gate handle) and credit drop here, on the
+            // control thread. The credit went back when the plan was taken out.
+            drop(ObservedCandidatePlan::returned(donor_plan));
+            drop(donor);
+            #[cfg(feature = "test-support")]
+            update_test_owners(|owners| owners.candidate_superseded += 1);
+        }
+        Ok(committed
+            .write_into(&mut self.response_scratch)
+            .expect("prepared response capacity was admitted before protocol commit"))
     }
 
     /// The live arm of a structural command (#1257 D2, #1053 D6).
@@ -2045,6 +2773,30 @@ where
         // with no record is a revision render has nothing to do for), and a transaction of
         // monitor writes does when the overlay change produced a record (#1559 D4, #1603 D7).
         let publishes = !monitor_only || !delta.is_empty();
+        // #1310 (root ruling B15-Q3): while a successor is pending, the ramp lengths this edit gives
+        // its rows join the kept base of the epoch it succeeds, so a replacement prepared across a
+        // withdrawn candidate ramps them as this edit does. Built before any check, so the commit
+        // below only moves it; `None` when nothing is pending or the edit wrote no live row.
+        let kept_ramps = self
+            .kept_holder()
+            .and_then(|holder| holder.kept.as_ref())
+            .filter(|_| {
+                !prepared
+                    .get()
+                    .prospective_session()
+                    .edit_ramps()
+                    .is_untouched()
+            })
+            .map(|kept| {
+                merged_ramps(
+                    &kept.edit_ramps,
+                    prepared.get().prospective_session().edit_ramps(),
+                )
+            });
+        // And the ramp of the overlay change, when the edit writes a monitor row: a replacement
+        // that writes none renders the solo with it (#1310, kept monitor overlay).
+        let kept_monitor_ramp =
+            (!prepared.get().monitor_edits().is_empty()).then_some(monitor_change.ramp);
 
         // 1. Admission (#1053 D8), with the catalog of the committed model built first, so that
         // its growth is charged and the commit's last steps cannot fail for room (#1552 D3,
@@ -2398,6 +3150,18 @@ where
         if let Some(key) = key {
             revision_gate.publish_key(key);
         }
+        // #1310: the kept base's lengths, built above, now that the edit is committed.
+        if let Some(kept) = self
+            .kept_holder_mut()
+            .and_then(|holder| holder.kept.as_mut())
+        {
+            if let Some(ramps) = kept_ramps {
+                kept.edit_ramps = ramps;
+            }
+            if kept_monitor_ramp.is_some() {
+                kept.monitor_ramp = kept_monitor_ramp;
+            }
+        }
         LiveCommit::Done(Ok(committed.write_into(&mut self.response_scratch).expect(
             "prepared response capacity was admitted before the live commit",
         )))
@@ -2423,7 +3187,7 @@ where
             let next = transaction
                 .in_place_estimate()
                 .unwrap_or_else(|| committed.resource_estimate());
-            compiled_model_admission_between(committed.resource_estimate(), next)
+            compiled_model_admission_over(self.held_models()?.as_slice(), next)
                 .map_err(CommandError::CompileRejected)?
         } else {
             // A live delta may add a VCA, so it meets the counts a rebuild would (#1558 D6): the
@@ -2431,9 +3195,12 @@ where
             host_core::check_counts(view.structure(), &prepare_caps(self.limits)).map_err(
                 |diagnostics| CommandError::CompileRejected(prepare_failure(diagnostics)),
             )?;
-            compiled_model_admission(
-                committed,
-                transaction.compiled().ok_or(CommandError::Internal)?,
+            compiled_model_admission_over(
+                self.held_models()?.as_slice(),
+                transaction
+                    .compiled()
+                    .ok_or(CommandError::Internal)?
+                    .resource_estimate(),
             )
             .map_err(CommandError::CompileRejected)?
         };
@@ -2454,28 +3221,13 @@ where
                 host_core::StagedCatalog::Full(full) => full.resources(),
             },
         );
-        let (current, pending) = {
-            let reports = self
-                .shared
-                .reports
-                .lock()
-                .map_err(|_| CommandError::Internal)?;
-            let row = |provider: &ProviderEpoch| {
-                reports
-                    .iter()
-                    .find_map(|(epoch, report)| (*epoch == provider.epoch).then_some(*report))
-                    .map(|report| LiveEpochResources {
-                        report: PlanResources::from(report),
-                        capi: provider.capi,
-                    })
-                    .ok_or(CommandError::Internal)
-            };
-            let current = row(&self.providers)?;
-            let pending = self.pending_providers.last().map(row).transpose()?;
-            (current, pending)
-        };
-        validate_live_peak(current, pending, models, catalog_admission, self.limits)
-            .map_err(CommandError::CompileRejected)?;
+        validate_live_peak(
+            self.held_epochs()?.as_slice(),
+            models,
+            catalog_admission,
+            self.limits,
+        )
+        .map_err(CommandError::CompileRejected)?;
         Ok(catalog)
     }
 
@@ -2579,10 +3331,42 @@ where
         &self.response_scratch[..bytes]
     }
 
+    /// The epoch the newest pending candidate succeeds, which keeps the committed base a
+    /// replacement of that candidate is prepared from (#1310 D3): the epoch before the newest, or
+    /// `None` while nothing is pending.
+    fn kept_holder(&self) -> Option<&ProviderEpoch> {
+        match self.pending_providers.len() {
+            0 => None,
+            1 => Some(&self.providers),
+            len => self.pending_providers.get(len - 2),
+        }
+    }
+
+    /// [`Self::kept_holder`], mutably.
+    fn kept_holder_mut(&mut self) -> Option<&mut ProviderEpoch> {
+        match self.pending_providers.len() {
+            0 => None,
+            1 => Some(&mut self.providers),
+            len => self.pending_providers.get_mut(len - 2),
+        }
+    }
+
     /// The producers of the newest committed session: the pending candidate's while one waits
     /// for its swap, else the current plan's (issue #1273 D3).
     pub(crate) fn newest_providers(&self) -> &ProviderEpoch {
         self.pending_providers.last().unwrap_or(&self.providers)
+    }
+
+    /// Whether the control plane still holds the plan of `epoch`: the running plan's, or a pending
+    /// candidate's (#1310, batch 15a review fold B1). A candidate a later structural edit
+    /// superseded is dropped with that edit's commit, so a host that keeps tables per plan drops
+    /// the superseded plan's when this turns false, on the core's word, never its own.
+    pub fn holds_plan_epoch(&self, epoch: u64) -> bool {
+        self.providers.epoch == epoch
+            || self
+                .pending_providers
+                .iter()
+                .any(|provider| provider.epoch == epoch)
     }
 
     /// Sets the replacement peak ceiling ([`ControlLimits::maximum_replacement_peak_bytes`]) once
@@ -2927,6 +3711,8 @@ where
             .effects
             .get_mut(position)?;
         let pushed = producer.try_push_observe(tap_index, armed, window_blocks);
+        // #1310 (root ruling B15-Q4): a record on a plan render has not adopted.
+        let on_candidate = !self.pending_providers.is_empty();
         if pushed.is_ok() {
             // #1584 D6a: the push is the acknowledgement, so the state every later successor is
             // prepared from is recorded with it, after the only fallible step and without
@@ -2946,6 +3732,7 @@ where
                 } else {
                     PendingArm::Disarm
                 };
+                entry.queued |= on_candidate;
                 // The count and the bytes follow the slot's state (#1676, #1685): an arm of an
                 // armed tap only changes its window, and a disarm of a tap that is not armed
                 // removes nothing.
@@ -3012,6 +3799,16 @@ where
     #[must_use]
     pub fn master_strip(&self) -> Option<&session::StableId> {
         self.monitor.master()
+    }
+
+    /// The observation records the last rebuild queued again on the plan it published, from the
+    /// unadopted candidate it superseded (#1310, root ruling B15-Q4), each with the tap's bound state.
+    /// Read right after a structural command publishes a plan; empty when it superseded nothing.
+    /// A host that mirrors each plan's armed taps copies these onto the new plan's mirror, as for a
+    /// record it admitted: the plan arms them at its first block, whatever its carry brings.
+    #[must_use]
+    pub fn observation_forwarded(&self) -> &[ObservationForward] {
+        &self.observation_forwarded
     }
 
     /// The taps the host has armed (#1584 D6a), for a test or an adapter that reports them.

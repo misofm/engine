@@ -225,3 +225,16 @@ Checked against `12d4a4f9d`.
 - **The browser's own command path is deleted** (#1565); the session seek message is one more
   control message beside #1562a's.
 - **Dependencies.** #1643; #1294 and #1387 are open; #1332 only for the Worker half.
+
+## Amendment (controls coordinator, batch 15a fold, root ruling 2026-10-16)
+
+- **Discontinuity first (B15-R7 reach).** The browser SDK's seek declares a discontinuity before
+  its session seek, as #1643's headless `seek` does and as a C ABI host does before its session
+  seek (#1642). D1's handler calls `miso_engine_web_v1_declare_discontinuity` (#1323) once, then
+  `miso_engine_web_v1_session_seek`, in the same control turn. If the declaration does not return
+  OK, the handler replies with that result and does not call the seek. So browser latency floors
+  reset at a seek as they do on the C ABI.
+- **Gate 2** adds: the handler calls the declaration before the seek export, once per message; a
+  refused declaration calls no seek export.
+- **Dependencies** gain #1323 (the export and its mirrors). Authorized paths do not change: the
+  call is in D1's handler.

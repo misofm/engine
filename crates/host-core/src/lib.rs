@@ -185,8 +185,9 @@ pub use route_controls::{
 pub use session::SOURCE_CHANNELS_LAUNCH_MAXIMUM;
 pub use shape::{HostSessionShape, compiled_session_shape};
 pub use source::{
-    SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,
-    source_id_arena_bytes,
+    ConsumerDonation, DonationError, DonationPlan, DonationSide, DonationSideMut, ProducerDonation,
+    SourceControlError, SourceControlSet, SourceSubmission, apply_donation, check_donation,
+    control_table_bytes, drops_acked_fresh_source, source_id_arena_bytes,
 };
 pub use spectrum::{
     SPECTRUM_BIN_COUNT, SPECTRUM_FLOOR_DB, SPECTRUM_WINDOW_FRAMES, SpectrumAnalysisError,
@@ -226,7 +227,8 @@ pub use effect_compiler::{
 };
 #[cfg(feature = "test-support")]
 pub use prepare::{
-    test_only_prepare_host_runtime_on, test_only_prepare_host_runtime_successor_on,
+    test_only_carry_read_keys, test_only_inventory_rows, test_only_prepare_host_runtime_on,
+    test_only_prepare_host_runtime_successor_on,
     test_only_prepare_host_runtime_with_live_controls_on,
     test_only_prepare_host_runtime_with_live_controls_successor_on,
     test_only_prepare_host_runtime_with_selected_meters_on,

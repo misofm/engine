@@ -297,6 +297,13 @@ pub trait PreparedPlanExecutor: Send {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         None
     }
+    /// This executor as shared `Any`, so the crate that built it can read its own executor type
+    /// through a shared plan off the render thread (#1344 D3: a donation check reads a withdrawn
+    /// candidate the control thread holds only by shared reference). `None` (the default) offers
+    /// nothing.
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        None
+    }
     /// Take state from the plan this one displaces, in the block that makes this plan active.
     ///
     /// **Where it runs.** On the render thread, inside the render scope, in the one block that
@@ -1213,6 +1220,15 @@ impl PreparedRenderPlan {
     #[doc(hidden)]
     pub fn executor_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         self.executor.as_deref_mut()?.as_any_mut()
+    }
+
+    /// This plan's executor as shared `Any` ([`PreparedPlanExecutor::as_any`]): the read-only twin
+    /// of [`Self::executor_any_mut`], for a check off the render thread that must not take the
+    /// plan mutably. `None` without an executor or when the executor offers none.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn executor_any(&self) -> Option<&dyn core::any::Any> {
+        self.executor.as_deref()?.as_any()
     }
 
     /// The executor's [`PreparedPlanExecutor::prime_ready`]; `false` without an executor.

@@ -311,7 +311,7 @@ unsafe fn submit(session: *mut Session, request: &[u8], response: &mut [u8; 4_09
     }
 }
 
-fn lifecycle(plan_first: bool) -> (Snapshot, Snapshot, Snapshot, Snapshot) {
+fn lifecycle(plan_first: bool) -> (Snapshot, Snapshot, Snapshot) {
     let capability = capability_command();
     let first = command(2, 42, 0x01);
     let second = command(3, 43, 0x02);
@@ -361,9 +361,8 @@ fn lifecycle(plan_first: bool) -> (Snapshot, Snapshot, Snapshot, Snapshot) {
         let cached = submit(session, &capability, &mut response);
         let cached_delta = snapshot().delta(before_cached);
         let first_structural = submit(session, &first, &mut response);
-        let before_full = snapshot();
-        let full = submit(session, &second, &mut response);
-        let full_delta = snapshot().delta(before_full);
+        // #1310: the second structural edit supersedes the first, which waits unadopted.
+        let superseding = submit(session, &second, &mut response);
         let before_render = snapshot();
         let render = miso_engine_v1_render_f32_planar(plan, 0, &output);
         let render_delta = snapshot().delta(before_render);
@@ -384,13 +383,12 @@ fn lifecycle(plan_first: bool) -> (Snapshot, Snapshot, Snapshot, Snapshot) {
                 immediate,
                 cached,
                 first_structural,
-                full,
+                superseding,
                 render,
                 retry,
                 second_render,
             ],
             cached_delta,
-            full_delta,
             render_delta,
         )
     };
@@ -398,18 +396,11 @@ fn lifecycle(plan_first: bool) -> (Snapshot, Snapshot, Snapshot, Snapshot) {
     assert_eq!(
         codes.0,
         [
-            RESULT_OK,
-            RESULT_OK,
-            RESULT_OK,
-            RESULT_OK,
-            RESULT_OK,
-            RESULT_BACKPRESSURE,
-            RESULT_OK,
-            RESULT_OK,
+            RESULT_OK, RESULT_OK, RESULT_OK, RESULT_OK, RESULT_OK, RESULT_OK, RESULT_OK, RESULT_OK,
             RESULT_OK,
         ]
     );
-    (total, codes.1, codes.2, codes.3)
+    (total, codes.1, codes.2)
 }
 
 fn rejected_compile_lifecycle() -> Snapshot {
@@ -465,11 +456,8 @@ fn exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly()
         .0
         .assert_balanced("plan-first complete lifecycle");
     plan_first.1.assert_balanced("cached replay");
-    plan_first
-        .2
-        .assert_balanced("publication-full canceled candidate");
     assert_eq!(
-        plan_first.3,
+        plan_first.2,
         Snapshot {
             allocations: 0,
             deallocations: 0,
@@ -483,10 +471,7 @@ fn exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly()
         .0
         .assert_balanced("session-first complete lifecycle");
     session_first.1.assert_balanced("cached replay");
-    session_first
-        .2
-        .assert_balanced("publication-full canceled candidate");
-    assert_eq!(session_first.3, plan_first.3);
+    assert_eq!(session_first.2, plan_first.2);
     assert_eq!(session_first.0, plan_first.0, "destroy-order ownership");
 }
 
@@ -812,8 +797,10 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         sources,
         report: host_report,
         inventory,
+        carried_base,
         control_catalog,
     } = prepared;
+    assert!(carried_base.is_none(), "a boot plan has no carried base");
     let owners = HostOwners {
         routes: freed_by_drop(routes),
         effects: freed_by_drop(effects),
@@ -1234,6 +1221,18 @@ impl Budget {
 /// up to 64: 17,275.5 -> 17,280 (was 15,680). The four-lane ceiling (21,056) was not re-measured
 /// (no AArch64 run in this fold); `builtin_processor_payload_bytes` moved 36,171 -> 36,387 inside
 /// its ceiling.
+///
+/// The four-lane row, measured on the AArch64 CI job after #1630 (PR #1693; GitHub Actions job
+/// 116713280504, which printed `builtin_bank_bytes: 12969 of 21056`): `builtin_bank_bytes` 12,969
+/// (four lanes), so its ceiling is 12,969 plus 10 %, rounded up to 64: 14,265.9 -> 14,272 (was
+/// 21,056, set before the four-lane value was measured; tightened in batch 15a).
+///
+/// #1310 batch 15a fold 2: the parked-provider list holds one epoch per retirement credit (three,
+/// was two), and each provider epoch keeps the resource row the admissions charge while it is
+/// parked (`ProviderEpoch::parked`, 248 bytes). `capi_retained_bytes` measured 165,922 before and
+/// 168,810 after (x86-64, +2,888: one more 1,648-byte provider-epoch slot and 248 bytes in each of
+/// the five slots; the row does not depend on the lane width), within the 175,296 ceiling, so the
+/// ceiling stays.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1281,7 +1280,7 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
         row: "builtin_bank_bytes",
         value: |report| report.builtin_bank_bytes,
         eight_lanes: 17_280,
-        four_lanes: 21_056,
+        four_lanes: 14_272,
     },
     Budget {
         row: "builtin_bank_scratch_bytes",
@@ -1765,43 +1764,6 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         (current, prospective, prospective_document)
     };
     assert_ne!(prospective_document, session_document);
-    // The swap is also proved by admission: with one publication slot, a second replacement is
-    // admitted only once the render has swapped the first one in.
-    // SAFETY: These handles are uniquely owned until their matching destroy calls.
-    unsafe {
-        let (session, plan) = compile_c(&session_document, &limits());
-        let request = command(1, 42, "a-muted");
-        let mut response = [0xa5_u8; 4_096];
-        assert_eq!(submit(session, &request, &mut response), RESULT_OK);
-        let again = muted_track_command(&prospective_document, 2, 43, "a-muted-2");
-        assert_eq!(
-            submit(session, &again, &mut response),
-            RESULT_BACKPRESSURE,
-            "a second replacement waits for the render"
-        );
-        let mut pcm = [f32::NAN; 256];
-        let output = PlanarOutput {
-            struct_size: PLANAR_OUTPUT_SIZE,
-            channels: 2,
-            samples: pcm.as_mut_ptr(),
-            sample_capacity: pcm.len() as u64,
-            frames: 128,
-            plane_stride_samples: 128,
-            reserved: [0; 2],
-        };
-        assert_eq!(
-            miso_engine_v1_render_f32_planar(plan, 0, &output),
-            RESULT_OK
-        );
-        assert_eq!(
-            submit(session, &again, &mut response),
-            RESULT_OK,
-            "the render swapped the prospective plan in"
-        );
-        miso_engine_v1_session_destroy(session);
-        miso_engine_v1_plan_destroy(plan);
-    }
-
     let current_host = host_half(&session_document, &limits());
     let prospective_host = host_half(&prospective_document, &limits());
     let current_model = current_host.model_estimate();
@@ -1864,9 +1826,12 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     // strips the swap restarts (#1277 D6, #1279 D1). This session's console slots have live
     // effect lanes, which the effect carry does not move (#1280), so every strip restarts and the
     // inventory is that much larger than `capi_epoch_terms` read off the fresh preparation.
+    // It also keeps the base a replacement would be prepared from were it withdrawn unadopted
+    // (#1310 D2, #1344 D1), which a fresh preparation has none of.
     let prospective_epoch = prospective_epoch
         - prospective_host.prepared.report.inventory_retained_bytes
-        + successor.inventory_retained_bytes;
+        + successor.inventory_retained_bytes
+        + successor.carried_base_retained_bytes;
     let rows: [(&str, u64); 8] = [
         (
             "graph",
@@ -2098,7 +2063,8 @@ unsafe fn render_and_destroy(session: *mut Session, plan: *mut Plan) -> Vec<Vec<
 /// JSON, so the prospective compiled model is larger than the current one. Each peak is derived
 /// from observations, never from the arm under test: the C report of the current plan (and, with a
 /// candidate pending, of the candidate, read after the render that swaps it in), each compiled
-/// model's own estimate, and the capi epoch terms from their owning crates' reports.
+/// model's own estimate (with a candidate pending, the running plan's kept model too, #1310 D3),
+/// and the capi epoch terms from their owning crates' reports.
 ///
 /// At each peak the edit commits. One byte below it is `RESULT_COMPILE_REJECTED` with the row's
 /// diagnostic, the committed snapshot and its revision are unchanged, and the plan renders exactly
@@ -2160,8 +2126,11 @@ fn live_edits_are_admitted_at_their_exact_graph_and_capi_peaks_and_refused_one_b
             "graph with a candidate pending",
             true,
             |caps, value| caps.maximum_graph_session_plus_plan_bytes = value,
+            // #1310 D3: while the candidate waits, the running epoch keeps the model it renders,
+            // so three models are charged: the kept one, the committed one and the next one.
             current.graph_session_plus_plan_bytes
                 + candidate.graph_session_plus_plan_bytes
+                + model(&base)
                 + model(&structural)
                 + model(&structural_grown),
             "graph.resource.limit",
@@ -2923,8 +2892,12 @@ struct RaceCounts {
     plan_backpressure: u64,
     event_backpressure: u64,
     retries: u64,
-    /// Plan replacements the render thread swapped in (`plan_replacement_count`).
+    /// The plan epoch render ends on (`plan_replacement_count`): one per published candidate,
+    /// a superseded one's included (#1310).
     replacements: u64,
+    /// Candidates a later structural edit superseded before render adopted them (#1310), from the
+    /// control plane's lifecycle counters on this, the control, thread.
+    superseded: u64,
     overlapped: u64,
     blocks: u64,
 }
@@ -3093,8 +3066,8 @@ impl RaceControl<'_> {
 /// Halfway through, the render thread parks (as a paused audio session does) while this thread
 /// sends forty live fader edits to one track, none of which may be refused (a fader value is a
 /// latest-target cell, #1312), and submits a second structural edit behind a pending candidate,
-/// which is typed plan backpressure; it is retried once the render thread resumes. Without the
-/// pause the render thread outruns this thread, and no plan retry would ever run.
+/// which supersedes it (#1310). Without the pause the render thread outruns this thread, and no
+/// supersession would ever run.
 ///
 /// The render thread never waits for PCM, so the source falls behind the render clock by however
 /// many blocks the render thread outran this thread's feed. The source stays on the render clock:
@@ -3110,6 +3083,7 @@ impl RaceControl<'_> {
 /// its own global allocator, and this file's counting allocator is the one the counts come from.
 fn race_live_edits(run: usize) -> RaceCounts {
     use core::sync::atomic::Ordering;
+    let superseded_before = control_plane::test_lifecycle_counters().candidate_superseded;
 
     let document = race_session();
     // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
@@ -3268,6 +3242,8 @@ fn race_live_edits(run: usize) -> RaceCounts {
         let final_block = fed_render_c(session, plan, &mut feed, block);
         let (committed_revision, final_document) = snapshot_c(session, &mut request_id);
         counts.replacements = plan_replacement_count(plan);
+        counts.superseded =
+            control_plane::test_lifecycle_counters().candidate_superseded - superseded_before;
         miso_engine_v1_session_destroy(session);
         miso_engine_v1_plan_destroy(plan);
         (committed_revision, final_document, latency, final_block)
@@ -3327,9 +3303,8 @@ const PAUSED_LIVE_EDITS: u32 = 40;
 
 /// The paused phase of [`race_live_edits`]: with the render thread parked, [`PAUSED_LIVE_EDITS`]
 /// live edits on the first track, none of which may be refused for room (a fader value is a
-/// latest-target cell), then a structural edit and a second one behind it, which
-/// `control.plan.backpressure` refuses. The render thread resumes and the second structural edit
-/// is retried through [`RaceControl::commit`].
+/// latest-target cell), then a structural edit and a second one behind it, which supersedes the
+/// first while it waits unadopted (#1310): both commit at once, and the render thread resumes.
 fn paused_bursts(
     control: &mut RaceControl<'_>,
     edits: &mut RaceEdits,
@@ -3374,14 +3349,12 @@ fn paused_bursts(
     }
     if !matches!(
         control.submit_once(&second, Kind::Structural)?,
-        Submitted::PlanBackpressure
+        Submitted::Committed
     ) {
-        return Err("a structural edit behind a pending candidate was not refused".to_owned());
+        return Err("a structural edit behind a pending candidate did not supersede it".to_owned());
     }
     paused.store(false, Ordering::Release);
-    // The second structural edit waits for the swap. `retries` counts only the resubmissions
-    // `commit` finds refused again.
-    control.commit(&second, Kind::Structural)
+    Ok(())
 }
 
 /// #1258 gate 1: live fader, mute and pan edits, several per render period, and a structural edit
@@ -3395,8 +3368,8 @@ fn paused_bursts(
 /// Test value: red if a fader or matrix drain allocates or frees on the render thread, if a live
 /// edit that races a plan swap reaches the retiring plan or is lost (the final block differs from
 /// a fresh plan of the final snapshot), if epoch synchronization returns `RESULT_INTERNAL` under
-/// live traffic, if a `RESULT_BACKPRESSURE` carries any other diagnostic or never clears, or if a
-/// live edit rebuilds the plan or a structural one swaps in other than exactly one plan.
+/// live traffic, if any structural edit is refused as plan backpressure (#1310), or if a live edit
+/// rebuilds the plan or a structural one neither swaps in exactly one plan nor is superseded.
 #[test]
 fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free() {
     let mut total = RaceCounts::default();
@@ -3409,12 +3382,18 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
             "run {run}"
         );
         assert!(counts.monitor >= RACE_EDITS / 8, "run {run}");
-        assert!(counts.plan_backpressure >= 1, "run {run}");
-        // Every admitted structural transaction swapped in exactly one plan, and no live edit
-        // swapped in one of its own: a live edit that silently rebuilt is counted here.
+        // #1310: a structural edit behind a pending candidate supersedes it; nothing refuses it.
+        assert_eq!(counts.plan_backpressure, 0, "run {run}");
+        assert!(
+            counts.superseded >= 1,
+            "run {run}: the paused phase supersedes"
+        );
+        // Every admitted structural transaction published exactly one plan epoch (adopted, or
+        // superseded unadopted, #1310), and no live edit published one of its own: a live edit
+        // that silently rebuilt is counted here.
         assert_eq!(
             counts.replacements, counts.structural,
-            "run {run}: plan replacements against admitted structural transactions"
+            "run {run}: plan epochs against admitted structural transactions"
         );
         total.live += counts.live;
         total.monitor += counts.monitor;
@@ -3423,6 +3402,7 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
         total.event_backpressure += counts.event_backpressure;
         total.retries += counts.retries;
         total.replacements += counts.replacements;
+        total.superseded += counts.superseded;
         total.overlapped += counts.overlapped;
         total.blocks += counts.blocks;
     }

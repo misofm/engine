@@ -1457,8 +1457,13 @@ struct PlanShape {
     observation_present: Box<[bool]>,
 }
 
-/// How many replacement plans' tables the host holds at once: the plan exchange admits one
-/// unadopted candidate at a time, and one more waits for the service step after its adoption.
+/// How many replacement plans' tables the host holds at once. After every commit the core holds
+/// at most one unadopted candidate (a structural edit supersedes a waiting one, #1310), and the
+/// host drops a superseded candidate's tables as soon as the core no longer holds its epoch
+/// ([`ReadyOwnership::drop_superseded_shapes`]); the tables of plans adopted since the last
+/// service step wait for it. So a command meets at most one entry after the reclaim and adds one:
+/// four leaves room to spare, and the room check in [`ReadyOwnership::run_command`] never refuses
+/// a structural edit, paused or not.
 const PENDING_SHAPES: usize = 4;
 
 /// One replacement plan's tables, committed with the plan (#1290a).
@@ -1613,6 +1618,7 @@ impl ReadyOwnership {
         request: &[u8],
         output_capacity: u64,
         analysis: Option<&mut SpectrumAnalysis>,
+        applied_at_sample: u64,
     ) -> Result<usize, control_plane::CommandError> {
         self.reclaim_shapes(analysis);
         if self.pending_shapes.len() == self.pending_shapes.capacity() {
@@ -1631,7 +1637,21 @@ impl ReadyOwnership {
             // `Ok` only once it has left the plan's tables in the record (it refuses the
             // preparation, before anything is committed, when it cannot). So a committed rebuild
             // always has its tables, and no refusal can follow a commit.
-            let shape = prepared.expect("a committed rebuild's preparer left the plan's tables");
+            let mut shape =
+                prepared.expect("a committed rebuild's preparer left the plan's tables");
+            // #1310 (root ruling B15-Q4): the records the core queued again on this plan from the
+            // candidate it superseded are noted as admitted records are, so the hand-over keeps
+            // them; the core says which they are and in what state.
+            for forward in self.control.observation_forwarded() {
+                if let Some(&effect) = shape.producer_slots.get(forward.position) {
+                    shape.note_observe(
+                        effect as usize,
+                        forward.tap_index,
+                        forward.armed,
+                        applied_at_sample,
+                    );
+                }
+            }
             self.pending_shapes.push(PendingShape {
                 epoch,
                 shape: Box::new(shape),
@@ -1646,6 +1666,9 @@ impl ReadyOwnership {
                     .name_successor(core::ptr::from_ref(&entry.shape.meter_header));
             }
             self.blocking_rebuilds = self.blocking_rebuilds.saturating_add(1);
+            // #1310: the commit may have superseded the candidate that waited; its tables and
+            // spectrum captures go now, on the control side, as the core says.
+            self.drop_superseded_shapes();
         }
         if result.is_ok() {
             self.stamp_structure_epoch();
@@ -1708,6 +1731,18 @@ impl ReadyOwnership {
     fn reclaim_shapes(&mut self, analysis: Option<&mut SpectrumAnalysis>) {
         self.promote_spectrum(analysis);
         self.pending_shapes.retain(|entry| !entry.adopted);
+        self.drop_superseded_shapes();
+    }
+
+    /// Drop the tables, and the spectrum captures, of every candidate the core no longer holds
+    /// (#1310, batch 15a review fold B1): a structural edit that superseded a waiting candidate
+    /// dropped its plan with the commit, and no block will adopt it. The core decides
+    /// ([`control_plane::SessionState::holds_plan_epoch`]); an adopted entry waits for
+    /// [`Self::reclaim_shapes`], which promotes its spectrum first. Control side only: it frees.
+    fn drop_superseded_shapes(&mut self) {
+        let control = &self.control;
+        self.pending_shapes
+            .retain(|entry| entry.adopted || control.holds_plan_epoch(entry.epoch));
     }
 
     /// Promote the plans the render half has adopted (#1290d2; #1395 D3, D5): install each
@@ -1724,7 +1759,13 @@ impl ReadyOwnership {
     /// audio thread, which keeps none, passes `None`.
     fn promote_spectrum(&mut self, mut analysis: Option<&mut SpectrumAnalysis>) {
         for entry in &mut self.pending_shapes {
-            let (Some(carried), Some(handover)) = (entry.adoption, entry.spectrum.take()) else {
+            // A candidate render has not adopted keeps its hand-over: a service step or command
+            // between its commit and its adoption block must not drop it (batch 15a review fold
+            // 2). Only an adopted entry's is taken.
+            let Some(carried) = entry.adoption else {
+                continue;
+            };
+            let Some(handover) = entry.spectrum.take() else {
                 continue;
             };
             let Some(service) = self.spectrum.as_mut() else {
@@ -2001,27 +2042,14 @@ impl ReadyOwnership {
     /// (#1676 attempt 2: the queue push itself is the core's
     /// [`SessionState::admit_and_push_observation_batch`], which admits the whole batch first).
     fn record_observe(&mut self, staged: StagedObserve, applied_at_sample: u64) {
-        let effect = staged.effect as usize;
         // Issue #143: the armed set is control-plane state and is updated here, where the record
         // is admitted, so it can never disagree with what the render side was told.
-        if let Some(mask) = self.shape.observation_armed.get_mut(effect)
-            && staged.tap_index < u32::BITS
-        {
-            let bit = 1_u32 << staged.tap_index;
-            *mask = if staged.armed {
-                *mask | bit
-            } else {
-                *mask & !bit
-            };
-            if let Some(samples) = self.shape.observation_arm_samples.get_mut(effect)
-                && let Some(sample) = samples.get_mut(staged.tap_index as usize)
-            {
-                *sample = applied_at_sample;
-            }
-            if let Some(commanded) = self.shape.observation_commanded.get_mut(effect) {
-                *commanded |= bit;
-            }
-        }
+        self.shape.note_observe(
+            staged.effect as usize,
+            staged.tap_index,
+            staged.armed,
+            applied_at_sample,
+        );
     }
 }
 
@@ -2337,6 +2365,22 @@ impl AudioWorkletEngineHost {
         self.plan.as_ref().map(|plan| plan.owner().active_epoch().0)
     }
 
+    /// Render one block through the plan owner at `absolute_sample` rather than the host's clock,
+    /// and nothing else (#1398 gate 1b); `false` when the owner refused it or the host is not
+    /// ready. A mistimed block adopts a published successor before the owner checks its time, and
+    /// is refused without publishing the epoch atomic: the window in which render has swapped
+    /// plans and the control plane has not seen the epoch. The host's own records (clock, shape,
+    /// status) do not move.
+    #[cfg(feature = "test-support")]
+    pub fn render_plan_at_for_test(&mut self, absolute_sample: u64) -> bool {
+        let quantum = self.status.quantum_frames as usize;
+        let (Some(plan), Some(buffers)) = (self.plan.as_mut(), self.buffers.as_mut()) else {
+            return false;
+        };
+        PlanarBufferMut::try_new(&mut buffers.output_pcm, 2, quantum, quantum)
+            .is_ok_and(|output| plan.render(absolute_sample, output).is_ok())
+    }
+
     /// The staging buffer for one control command frame of `len` bytes (issue #1562a D1), or
     /// `None` when `len` is zero or exceeds the boot's `maximum_control_frame_bytes`
     /// (16 KiB) or the host is not ready. The page writes the frame here and
@@ -2389,11 +2433,12 @@ impl AudioWorkletEngineHost {
         if len == 0 || u64::from(len) > CONTROL_FRAME_BYTES {
             return self.record(RESULT_INVALID_ARGUMENT);
         }
+        let applied_at_sample = self.status.next_absolute_sample;
         let Some((buffers, ready)) = self.buffers.as_mut().zip(self.ready.as_mut()) else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let request = &buffers.control_request[..len as usize];
-        match ready.run_command(request, CONTROL_FRAME_BYTES, analysis) {
+        match ready.run_command(request, CONTROL_FRAME_BYTES, analysis, applied_at_sample) {
             Ok(length) => {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
@@ -5927,6 +5972,26 @@ fn build_plan_shape(
 }
 
 impl PlanShape {
+    /// Note one observation record queued on this plan's effect slot `effect` for `tap_index`
+    /// (#143, #1381b): the armed bit, the sample its window is fresh from, and the commanded bit
+    /// that keeps the swap's hand-over from overwriting it with the predecessor's state.
+    fn note_observe(&mut self, effect: usize, tap_index: u32, armed: bool, applied_at_sample: u64) {
+        if let Some(mask) = self.observation_armed.get_mut(effect)
+            && tap_index < u32::BITS
+        {
+            let bit = 1_u32 << tap_index;
+            *mask = if armed { *mask | bit } else { *mask & !bit };
+            if let Some(samples) = self.observation_arm_samples.get_mut(effect)
+                && let Some(sample) = samples.get_mut(tap_index as usize)
+            {
+                *sample = applied_at_sample;
+            }
+            if let Some(commanded) = self.observation_commanded.get_mut(effect) {
+                *commanded |= bit;
+            }
+        }
+    }
+
     /// Name `successor` as the header that replaces this plan's (null for none): the `u32` word
     /// the page reads, and beside it the full-width pointer a gate compares.
     #[inline]

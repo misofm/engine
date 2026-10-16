@@ -130,3 +130,80 @@ lateness assertion, test-only untimed reads) are #1350; see Non-goals.
   withdrawal-outcome counters.
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348), for D3's promotion
   before T2.
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `228fca26c`.
+
+**Moved anchors.** Each fact in Context still holds; only the lines moved.
+
+- The decision-15 handoff files are unchanged: the adversary's "MINOR — untested ack path" is
+  `docs/handoffs/decision-15-2026-10-05/PLAN-2026-10-05-adversary-round1.md:460`, and the plan
+  item is `PLAN-2026-10-05-agreed.md:191`.
+- The host-core helper's assertion is `crates/host-core/tests/successor_swap.rs:638`
+  (`anchored_swap_run`, `:631`).
+- In `crates/capi/src/runtime/tests.rs`: `an_added_source_starts_at_its_anchor_at` is
+  `:1333-1455`, `an_added_c_abi_source_starts_at_its_anchored_render_sample` `:1456`,
+  `assert_bit_identical` `:1513`. `test_plan_carry_counts` is `crates/capi/src/ffi.rs:1256`.
+- The carry's `mem::swap` is `crates/source/src/lib.rs:1931` (`adopt_sources`, `:1902-1938`).
+  `held_seek` is still `:1018`.
+- `SessionState::seek_at` is `crates/control-plane/src/control.rs:3028-3041`; it runs the
+  #1348 service step first, then calls `newest_providers_mut` (`:2578`). `adopt_persisting` is
+  still `crates/host-core/src/source.rs:286`; the control plane calls it at `control.rs:1846-1849`.
+- A second structural transaction while a candidate waits is still refused, now at
+  `control.rs:1742-1744` (`pending_providers` is a `Vec`, but this check keeps it at one).
+- `tools/audit/src/capi.rs`: `CALLS_BEFORE_TRANSACTION` is `:52`, `apply_structural_transaction`
+  `:178-211`, `submit_source_chunk` `:213-251`, the run loop `:480-560`. The audit also commits a
+  live edit every 64 calls (`LIVE_EDIT_PERIOD`, `:39`, #1258). CI runs it at
+  `.github/workflows/qualification.yml:777-785` and validates the JSON from `:786`.
+
+**Code notes for the implementer.**
+
+- D2 and D3: decision 17 and its slices make more values live (trim, polarity, input filters,
+  sends, VCA). A value edit can take the live path and publish no candidate. So T1 and T2 must be
+  structural edits (insert quality, or adding or removing an insert or a track). Assert edit-path
+  3 (rebuild) in each response, so that a later live flip turns the test red, not vacuous.
+- D4: `submit_source_chunk` hard-codes generation 1 (`:220`). Give it a generation argument. The
+  structural transaction already submits the generation-1 block at frame 128 before the seek, so
+  the order stays right. The fixture source has 48000 frames, so frame `A = 512` is in its region.
+- D4 runs the seek and the submit outside every render scope, like the transaction. The
+  seek call's service step is control work there too.
+
+**Dependencies on GitHub.**
+
+- #1348 is closed. D3's promotion runs in `SessionState::service` (`control.rs:1486`).
+- #1343 is closed: the engine's withdrawal primitive exists
+  (`PlanPublisher::withdraw`, `crates/engine/src/realtime/plan_exchange.rs:552`). The control
+  plane does not use it yet.
+- *Supersede an unadopted candidate plan by compare-and-swap* (#1310) is open and is not in the
+  batch-15/16 list. #1310 depends on *Prepare a successor across a withdrawn candidate plan*
+  (#1344), also open and not in the list. D2, D3 and the withdrawal counters need both.
+- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398 and #1310.
+  #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288, #1391,
+  #1363 and #1325.
+  The rest of batch 15 follows, so #1310 and #1344 land before this slice.
+
+**Decisions.**
+
+- D1 and D4 hold against the code and decision 17.
+- D2 and D3 hold as designs, but they cannot run before #1310.
+- **B15-R4, root decision under owner delegation (2026-10-15): keep #1319 whole. #1310 and #1344 land first, in batch 15a.**
+  (Scope against #1310.) No successor issue is split off. #1319 closes on D1-D4 after #1310,
+  in the rest of batch 15.
+  The finding follows. Deliverable 1 says D2 and D3 come "after #1310
+  has landed", and #1310 is outside the batch-15/16 list. Proposed resolution: split D2 and D3
+  (with gate 3's D2/D3 records) into a successor issue that depends on #1310. #1319 then closes on
+  D1 and D4 in batch 15. The alternative is to keep #1319 open across batches, which the
+  "smallest closable slice" rule in AGENTS.md argues against.
+
+**Gates and commands.** Every named command, package and file exists. Gate 4's
+`cargo test --locked --release -p audit` is also run by CI (`qualification.yml:775-776`).
+
+**Realtime-path edits.** None under `crates/engine/src/realtime`. D4 adds a held seek to the
+audited render, so a defect on that path shows up as an audit violation, not as an edit here.
+
+## Amendment (controls coordinator, batch 15a fold, 2026-10-16)
+
+- **Batch placement.** "#1310 ... is not in the batch-15/16 list" and "#1344, also open and not in
+  the list" (Dependencies on GitHub) are void. #1344 and #1310 are in batch 15a (with #1398), which
+  lands before this slice.

@@ -7065,6 +7065,333 @@ mod structural_apply {
         assert_eq!(rig.host.service(None), RESULT_OK);
     }
 
+    /// #1310 on the browser path, which runs the same control plane: a structural edit while a
+    /// candidate waits unadopted commits and supersedes it. The first candidate never renders; the
+    /// replacement carries both transactions and is adopted at the next block.
+    ///
+    /// Test value: red if the second structural edit is refused while the first waits (the
+    /// one-candidate backpressure the C ABI dropped), or if the replacement leaves out the first
+    /// transaction's source.
+    #[test]
+    fn a_structural_edit_behind_an_unadopted_candidate_supersedes_it() {
+        let model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+            .expect("accepted command fixture");
+        let mut source = model.sources[0].clone();
+        source.id = StableId::parse("a-source").expect("source ID");
+        let mut track = model.tracks[0].clone();
+        track.id = StableId::parse("a-track").expect("track ID");
+        track.source_id = source.id.clone();
+        let mut route = model.routes[0].clone();
+        route.id = StableId::parse("a-track-main").expect("route ID");
+        let RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("a track route")
+        };
+        *track_id = track.id.clone();
+        let mut later = source.clone();
+        later.id = StableId::parse("b-source").expect("source ID");
+        let first = [
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ];
+        let second = [SessionEdit::UpsertSource { source: later }];
+        let mut rig = Rig::boot(&model, options(), None);
+        rig.step();
+        assert!(matches!(
+            rig.apply(&first, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert!(
+            matches!(
+                rig.apply(&second, 2),
+                Outcome::Applied {
+                    path: EditPath::Rebuild,
+                    ..
+                }
+            ),
+            "a structural edit behind an unadopted candidate supersedes it"
+        );
+        rig.step();
+        assert_eq!(
+            rig.epoch(),
+            2,
+            "the replacement is adopted; the first never rendered"
+        );
+        assert_eq!(rig.host.session_source_count(), 3);
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        rig.step();
+    }
+
+    /// #1310 on a paused page (batch 15a review fold B1): eight structural edits with no render
+    /// between them each commit, each superseding the candidate before it, as on the C ABI. The
+    /// host keeps one table entry per candidate the core holds, so the fifth edit finds room;
+    /// then the next block adopts the newest plan, which holds all eight edits, and from that
+    /// block on the output equals a fresh boot of the committed model.
+    ///
+    /// Test value: red if the host keeps a superseded candidate's tables until a later adoption
+    /// (the fifth paused edit is refused with `BACKPRESSURE`, as before the fold), or if the
+    /// adopted plan misses an edit.
+    #[test]
+    fn paused_structural_edits_all_commit_and_the_newest_renders_as_a_fresh_boot() {
+        const EDITS: u64 = 8;
+        let model = gate_model();
+        let mut rig = Rig::boot(&model, options(), None);
+        for _ in 0..APPLY_BEFORE {
+            rig.step();
+        }
+        let base = rig.host.committed_revision();
+        let mut results = Vec::new();
+        for edit in 0..EDITS {
+            let committed = rig
+                .host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .control
+                .committed_session()
+                .normalized_model()
+                .clone();
+            let edits = add_muted_track(&committed, &format!("a-muted-{edit}"));
+            let (result, response) =
+                rig.entry(&frame(&edits, edit + 1, rig.host.committed_revision()));
+            results.push(result);
+            // A client drains the committed events as it goes, so the event lane never refuses.
+            while rig.host.control_event(EVENT_LANE_RELIABLE) == RESULT_OK
+                && !rig.host.control_response().is_empty()
+            {}
+            if result == RESULT_OK {
+                assert_eq!(
+                    outcome(&response),
+                    Outcome::Applied {
+                        path: EditPath::Rebuild,
+                        revision: base + edit + 1
+                    },
+                    "edit {edit}"
+                );
+            }
+        }
+        assert_eq!(
+            results,
+            vec![RESULT_OK; EDITS as usize],
+            "every paused structural edit commits"
+        );
+        assert_eq!(rig.epoch(), 0, "nothing rendered: the boot plan still runs");
+        assert!(
+            rig.host.ready.as_ref().expect("ready").pending_shapes.len() <= 1,
+            "the host keeps the tables of the one candidate the core holds"
+        );
+        let document = canonical_session_json(
+            rig.host
+                .ready
+                .as_ref()
+                .expect("ready")
+                .control
+                .committed_session()
+                .normalized_model(),
+        )
+        .expect("canonical session");
+        let committed = parse_session_json(&document).expect("the committed model parses");
+        let mut fresh = Rig::boot(&committed, options(), None);
+        for _ in 0..BLOCKS {
+            fresh.step();
+        }
+        let before = rig.watermark();
+        while rig.block < BLOCKS {
+            rig.step();
+        }
+        assert!(!rig.pending(), "render adopted the newest plan");
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(
+            rig.host.live_control_tracks().len(),
+            model.tracks.len() + EDITS as usize,
+            "the adopted plan holds every edit's track"
+        );
+        let watermark = rig.watermark();
+        assert_eq!(watermark.revision, base + EDITS);
+        assert_eq!(
+            watermark.superseded_count,
+            before.superseded_count + EDITS - 1,
+            "the first seven complete as superseded"
+        );
+        assert_eq!(
+            first_difference(
+                &rig.bits[APPLY_BEFORE as usize..],
+                &fresh.bits[APPLY_BEFORE as usize..]
+            ),
+            None,
+            "from the adoption block on, every block equals a fresh boot of the committed model"
+        );
+        assert!(
+            fresh.bits[APPLY_BEFORE as usize..]
+                .iter()
+                .any(|block| block.iter().any(|word| f32::from_bits(*word) != 0.0)),
+            "the compared blocks are not silent"
+        );
+    }
+
+    /// #1310 on the browser with a spectrum capture (batch 15a review fold 2, m-5): a candidate
+    /// whose tables carry a spectrum hand-over (its prepared captures and pairing) is superseded
+    /// before render adopts it. The superseding command drops the candidate's entry, captures
+    /// included, on the control side; the replacement's hand-over is the one that waits, and the
+    /// service step after its adoption promotes it, so the stream keeps reading. The render-call
+    /// allocation count of the same script is pinned to zero in `structural_apply_realtime.rs`.
+    ///
+    /// Test value: red if a superseded candidate's tables and hand-over outlive the command that
+    /// superseded it (two entries wait), if the replacement's hand-over is lost (none waits, or
+    /// the stream stops after the swap), or if a service step before the adoption block drops a
+    /// waiting candidate's hand-over.
+    #[test]
+    fn a_superseded_candidates_spectrum_handover_drops_with_the_superseding_command() {
+        let model = gate_model();
+        let mut rig = Rig::boot(&model, options(), single_capture());
+        rig.host
+            .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
+            .expect("the stream starts");
+        for _ in 0..APPLY_BEFORE {
+            rig.step();
+        }
+        let first = add_muted_track(&model, ADDED);
+        let second = add_muted_track(&with_muted_track(&model, ADDED), "a-muted-b");
+        assert!(matches!(
+            rig.apply(&first, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(rig.spectrum_promotions_waiting(), 1, "A's hand-over waits");
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(
+            rig.spectrum_promotions_waiting(),
+            1,
+            "a service step before the adoption block keeps A's hand-over"
+        );
+        assert!(matches!(
+            rig.apply(&second, 2),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(
+            rig.host.ready.as_ref().expect("ready").pending_shapes.len(),
+            1,
+            "the superseded candidate's entry dropped with the command"
+        );
+        assert_eq!(
+            rig.spectrum_promotions_waiting(),
+            1,
+            "only the replacement's hand-over waits"
+        );
+        rig.step();
+        assert_eq!(rig.epoch(), 2, "the replacement is adopted");
+        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(
+            rig.spectrum_promotions_waiting(),
+            0,
+            "the service step promoted the replacement's captures"
+        );
+        let mut windows = 0;
+        while rig.block < SPECTRUM_BLOCKS {
+            rig.step();
+            let read = rig.read_stream();
+            if read.window.is_some() {
+                windows += 1;
+            }
+        }
+        assert!(windows > 0, "the stream publishes windows after the swap");
+    }
+
+    /// #1310 (root ruling B15-Q4) on the browser, the host that admits observation records: a
+    /// subscription acked against a candidate that a later structural edit supersedes arms the
+    /// replacement and publishes windows there. The replacement carries "track"'s compressor from
+    /// the plan that renders, which never saw the record, so the core queues the record again on
+    /// the replacement and the host copies it onto the replacement's tables.
+    ///
+    /// Test value: red if the record is lost with the superseded candidate, in the engine (the
+    /// carried tap keeps the running plan's unarmed state and no window publishes) or in the
+    /// host's tables (the hand-over copies the running plan's unarmed bit and the read reports
+    /// the tap unarmed).
+    #[test]
+    fn a_subscription_queued_on_a_superseded_candidate_publishes_on_its_replacement() {
+        let mut model =
+            parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
+                .expect("accepted command fixture");
+        model.tracks[0].inserts.effects[0] = observed_compressor_insert();
+        let mut source = model.sources[0].clone();
+        source.id = StableId::parse("a-source").expect("source ID");
+        let mut track = model.tracks[0].clone();
+        track.id = StableId::parse("a-track").expect("track ID");
+        track.source_id = source.id.clone();
+        let mut route = model.routes[0].clone();
+        route.id = StableId::parse("a-track-main").expect("route ID");
+        let RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("a track route")
+        };
+        *track_id = track.id.clone();
+        let mut later = source.clone();
+        later.id = StableId::parse("b-source").expect("source ID");
+        let first = [
+            SessionEdit::UpsertSource { source },
+            SessionEdit::UpsertTrack { track },
+            SessionEdit::UpsertRoute { route },
+        ];
+        let second = [SessionEdit::UpsertSource { source: later }];
+        let mut rig = Rig::boot(&model, options(), None);
+        rig.step();
+        assert!(matches!(
+            rig.apply(&first, 1),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        assert_eq!(
+            observe_key(&mut rig.host, "track", RACK_INSERTS, "comp", 1, 2, true),
+            RESULT_OK,
+            "the subscription is acked against the pending candidate"
+        );
+        assert!(matches!(
+            rig.apply(&second, 2),
+            Outcome::Applied {
+                path: EditPath::Rebuild,
+                ..
+            }
+        ));
+        rig.step();
+        assert_eq!(rig.epoch(), 2, "the replacement is adopted");
+        assert_eq!(
+            (
+                armed_mask(&rig.host, "track", "comp"),
+                armed_mask(&rig.host, "a-track", "comp")
+            ),
+            (Some(1), Some(0)),
+            "the replacement's tables hold the subscription"
+        );
+        for _ in 0..6 {
+            rig.step();
+        }
+        let binding = (0..rig.host.observation_binding_count() as u32)
+            .filter_map(|index| rig.host.observation_binding(index))
+            .find(|binding| binding.address.track_index == 1)
+            .expect("the old track's compressor is bound");
+        let mut address = binding.address;
+        address.tap_id = 1;
+        let read = rig
+            .host
+            .read_observation_addresses(&[address])
+            .expect("a read");
+        assert_eq!(&*read[0].track_id, "track");
+        assert!(
+            read[0].window.is_some(),
+            "the subscription publishes windows on the replacement: {:?}",
+            read[0].status
+        );
+    }
+
     /// Drive `blocks` more blocks with the lease on, polling after each; the windows folded.
     fn poll_blocks(rig: &mut Rig, blocks: u64) -> u32 {
         let mut windows = 0;

@@ -117,3 +117,76 @@ test stops modelling the `==` comparison it tells hosts never to write.
 - *Anchor every seek on the plan's source-read clock* (#1316): the clock name and the seek report
   the text documents.
 - *Report held source blocks apart from underruns* (#1318): the held reporting the text documents.
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `228fca26c`.
+
+**Moved anchors.** The header grew by about 110 lines (the live-edit, solo, response-preview,
+completion, service and engine-memory paragraphs). Each behaviour in Context still holds; only
+the lines moved.
+
+- D1 replaces the paragraph "Starting an added stem in time" at
+  `crates/capi/include/miso_engine_v1.h:204-216` (was `:96-108`). Its clock clause is `:205-207`;
+  the false clause that #1318 deletes is `:214-215`.
+- D2 goes beside `MISO_ENGINE_V1_ABI_VERSION` at `:219` (was `:111`). The feature bits are
+  `:244-252`; the mask is 255.
+- Displacement is the paragraph "Sources across a structural transaction" at `:193-202` (was
+  `:85-94`).
+- Clock origin: a new plan's clock is 0 at `crates/engine/src/realtime/plan.rs:834`;
+  `render_contiguous` is `:1172-1185`; a swapped-in plan continues the clock at
+  `crates/engine/src/realtime/plan_exchange.rs:779`. Anchors must be quantum multiples at
+  `crates/source/src/lib.rs:771-775`.
+- Held: `begin_block_at` doc `crates/source/src/lib.rs:1106-1114`. Replacement:
+  `observe_seek_at_block_boundary`, `:1324-1346`. In flight: `try_seek`'s push and its
+  `Backpressure`, `:776-786`; the string is still `crates/host-core/src/source.rs:99`.
+- Far past: `:1350-1365`. The region-end tests are `:2264-2310`
+  (`a_late_anchored_seek_past_the_region_end_is_the_end_of_region` and the on-time short-block
+  case).
+- Rate: still `crates/host-core/src/source.rs:167-172`.
+- Growth rule: `docs/C_ABI_V1_QUALIFICATION.md:112-113` is unchanged. The `==` model in
+  `crates/capi/tests/c/abi_smoke.c` is now `:221` (the block is `:215-223`). The Rust exact-mask
+  tests are `version_and_capabilities_are_exact` (`crates/capi/src/ffi.rs:1558`) and
+  `crates/capi/src/abi.rs:550-554`.
+
+**Code notes for the implementer.**
+
+- The smoke test also pins header constants at compile time (`abi_smoke.c:22-27`, for example
+  `ABI_ASSERT(MISO_ENGINE_V1_FEATURE_MASK == 255)`). They pin the header, not the library's
+  report, and `scripts/check-capi-abi.sh --self-test` relies on the fixtures' pins (`:87-88`).
+  D4 covers the runtime check only. Keep the static pins.
+- Gate 2: the checker's self-test mutates the staged header and the `nm` output. It cannot
+  change the library's capability report. Use the "local patch, recorded in the PR" route.
+- Since #1348 the seek calls run the service step first (header `:148-153`). D1's `seek`
+  paragraph should not contradict that paragraph. A cross-reference is enough.
+- "Equal to the render clock in this version" stays true after #1396: only a warm successor
+  (#1355) makes the offset nonzero in production. #1355 must amend this text when it lands.
+  Record that in #1355.
+
+**Dependencies on GitHub.** #1316 and #1318 are open. Both are in the batch-15/16 list. #1275,
+#1314 and #1348 are closed. No dependency is outside the batch.
+
+**Decisions.**
+
+- D1, D3 and D4 hold against the code and decision 17.
+- **B15-R3, root decision under owner delegation (2026-10-15): D2 keeps its text and adds two sentences: "A feature added as a
+  protocol message is announced by its protocol capability flag in the CAPABILITIES reply, not by
+  a feature bit. The registry, not this rule, governs protocol flags."** (D2 against decision
+  17 C13.) The header states the two sentences and points to the registry for the rest. The
+  finding follows. Since decision 17, new features reach
+  the C ABI as protocol messages through `miso_engine_v1_submit_command`, with no new export
+  (C13). Each is announced by a protocol capability flag in the `CAPABILITIES` reply, not by a C
+  feature bit (header `:105`, `RESPONSE_GET`, "capability flag bit 14"). The protocol decoder
+  refuses an unknown capability flag (`docs/CONTROL_PROTOCOL_REGISTRY.md:13`), which is the
+  opposite of D2's "tolerate unknown bits" for `feature_mask`. D2 says nothing about protocol
+  flags. So a host author who reads only D2 can apply the C rule to protocol flags. Proposed
+  resolution: D2 keeps its text and adds two sentences: "A feature added as a protocol message
+  is announced by its protocol capability flag in the CAPABILITIES reply, not by a feature bit.
+  The registry, not this rule, governs protocol flags." Root decides whether the header states
+  the protocol rule or points to the registry.
+
+**Gates and commands.** `scripts/check-capi-abi.sh`, its `--self-test`, both C fixtures and
+`scripts/check-workspace-policy.sh` exist. `cargo test --locked -p capi` runs both Rust
+exact-mask tests.
+
+**Realtime-path edits.** None. This slice is header text, one doc and one C test.

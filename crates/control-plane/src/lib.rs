@@ -61,9 +61,10 @@ mod plan;
 pub use adapter::{ControlAdapter, ControlLimits, PlanResources};
 pub use compile::{CompiledChildren, RuntimePreparer, compile_children};
 pub use control::{
-    CommandError, EventError, EventLane, ObservationChange, ObservationKeyError, ObservationKeyRef,
-    ObservationLimit, ObservationRefusal, REPREPARE_REQUIRED, ResolvedObservationTap, SessionState,
-    SourceFailure, resolve_observation_tap,
+    CommandError, EventError, EventLane, ObservationChange, ObservationForward,
+    ObservationKeyError, ObservationKeyRef, ObservationLimit, ObservationRefusal,
+    REPREPARE_REQUIRED, ResolvedObservationTap, SessionState, SourceFailure,
+    resolve_observation_tap,
 };
 pub use error::{CompileFailure, ResourceFault};
 /// One planar chunk a host submits to a source of the session ([`SessionState::submit`]).
@@ -72,14 +73,16 @@ pub use plan::{PlanQueries, PlanState};
 
 #[cfg(feature = "test-support")]
 pub use compile::{
-    CapiResources, CompiledModelAdmission, LiveCatalogAdmission, LiveEpochResources,
-    observation_binding_table_bytes, observation_reserve_bytes, prepare_caps, validate_live_peak,
+    CapiResources, CarriedSourceBytes, CompiledModelAdmission, LiveCatalogAdmission,
+    LiveEpochResources, observation_binding_table_bytes, observation_reserve_bytes, prepare_caps,
+    validate_live_peak,
 };
 #[cfg(feature = "test-support")]
 pub use control::{
     EffectCellRow, ProviderEpoch, TestOwnerCounters, TestOwnerState, TestStructuralFaultPhase,
-    TestTransactionSnapshot, test_force_full_preparation, test_lifecycle_counters,
-    test_reset_lifecycle_observer, test_take_in_place_counts, test_verify_catalog_stages,
+    TestTransactionSnapshot, test_force_full_preparation, test_hold_reclamation,
+    test_lifecycle_counters, test_reset_lifecycle_observer, test_take_in_place_counts,
+    test_verify_catalog_stages,
 };
 
 pub(crate) use compile::*;

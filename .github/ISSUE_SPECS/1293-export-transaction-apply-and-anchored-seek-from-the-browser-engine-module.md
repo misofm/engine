@@ -182,3 +182,85 @@ module* (#1386), which uses this slice's staging and outcome record.
 **Decision 17 amendment (2026-10-13).** #1562 adds one generic command-frame entry on the control half (`miso_engine_web_v1_control_request_ptr`, `_control_command`, `_control_response_ptr`, `_control_response_bytes`) that runs `SessionState::command` for any frame, transactions included. D2 (`miso_engine_web_v1_apply`) and D3 (the outcome record) are dropped: a transaction is applied through that entry and its outcome is the response frame (revision, `edit_path`, diagnostics). D4-D7 (committed document, anchored seek, seek report, mirrors) and D1's staging for #1386's document replace stay.
 
 **Decision 17 amendment (2026-10-13), second line.** D4 is withdrawn too: the committed document reaches the browser as `SESSION_SNAPSHOT_GET` frames through #1562's generic command entry, with the same bytes as on the C ABI, and the SDK reads it with `engine.committedDocument()` (#1571). No `committed_document_ptr` or `committed_document_bytes` export is added. D5-D7 (the anchored seek, the seek report and the mirrors) stay.
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `228fca26c`.
+
+**Moved anchors.**
+- `miso_engine_web_v1_document_ptr` is `hosts/host-web/src/ffi.rs:2959`; its live refusal is
+  `:2960-2970`.
+- `AudioWorkletEngineHost::diagnostic` is `hosts/host-web/src/lib.rs:3175`.
+  `miso_engine_web_v1_buffer_ptr` is `ffi.rs:2996`, and its `BUFFER_DIAGNOSTIC` arm `:723`.
+- `miso_engine_web_v1_source_seek` is `ffi.rs:3251`. Its host method `seek_source` is
+  `lib.rs:3322`. It calls `ready.control.seek_unserviced` and then `plan.prepare_source_seek`
+  (`:3340-3352`).
+- `PcmSourceConsumer::prepare_seek` is `crates/source/src/lib.rs:1049` (doc `:1040-1048`). The
+  D4 trap still holds.
+- The producer-side anchored seek is `SessionState::seek_at`,
+  `crates/control-plane/src/control.rs:3028` (#1309 moved it). It runs the service step first.
+- The mirrors: `expected_exports` is `scripts/check-web-audioworklet.sh:274`, and its call of
+  `check-abi-layout-v1.py` is `:635`. `EXPORTS` is `tools/parameter-metadata/src/abi_layout.rs:125`
+  (102 names) and `scripts/check-abi-layout-v1.py:120`.
+- #1562's generic entry exists: `control_request_ptr` (`ffi.rs:3347`), `control_command`
+  (`:3366`), `control_response_ptr` (`:3399`) and `control_response_bytes` (`:3412`). `service` is
+  `:3336`.
+
+**The control half today.** The browser runs one instance. Since #1381a it holds
+`control_plane::SessionState` (`hosts/host-web/src/lib.rs:6-16`). Today, "no control half" means
+a host that is not ready: `control_event` returns `RESULT_REFUSED_LIFECYCLE` for it
+(`lib.rs:2397-2415`). That code equals `RESULT_WRONG_STATE` (`lib.rs:146`). Gate 5 uses that case
+until #1332 adds `worker` mode.
+
+**After the two decision 17 amendments.**
+- D2, D3 and D4 are dropped. Gates 1 and 2 test only those, so they go too. #1562's gates cover
+  apply through the generic entry.
+- Deliverable 1 is now D1, D5 and D6. D7's "eight exports" is now four: `edit_ptr`,
+  `source_seek_at`, `source_seek_report` and `source_seek_report_ptr`. The one record is D6's. If
+  D1 goes (below), three.
+- D5 and D6 hold against decision 17. The C ABI has both as C exports:
+  `miso_engine_v1_source_seek_at` (header `:425`) and #1316 D6's
+  `miso_engine_v1_source_seek_report`. So these exports put the same function on the second host
+  (C1). They are not a browser-only feature, and source transport is not a control.
+
+**B15-R8, root decision under owner delegation (2026-10-15): drop D1 from this slice. Re-scope #1386 under C1.** #1386's diff
+goes in `control-plane` as a protocol frame through `submit_command` and `control_command` on both
+hosts. Its staging is `control_request_ptr`, and its outcome is the response frame. #1386 and #1643
+record this in their own amendments. Deliverable 1 is now D5 and D6. D7's exports are three:
+`source_seek_at`, `source_seek_report` and `source_seek_report_ptr`. Only D1's staging export
+`edit_ptr` goes. D1's other rule stays: each remaining export runs on the control half and refuses
+with `RESULT_REFUSED_LIFECYCLE` (a pointer export returns 0) on an instance with no control half.
+The finding follows. D1's staging stays only for #1386's document replace. But #1386 (open) also
+uses D3's outcome record, which is dropped. And #1386's diff sits in `hosts/host-web` with no C ABI
+form, which is a browser-only feature under decision 17 C1. The generic entry's staging
+(`control_request_ptr`, bounded by the boot's `maximum_control_frame_bytes`) already carries a
+frame. Proposed: drop D1 from this slice. Re-scope #1386 under C1: the diff goes in the core
+(`control-plane`) as a protocol frame through `submit_command` and `control_command` on both hosts.
+Its staging is `control_request_ptr`, and its outcome is the response frame.
+
+**Hazard on D5.** The SDK PCM feed calls the plain seek from `process()` too: `applySharedSeek` is
+"shared by render and the between-block control handler"
+(`sdk/src/browser-assets/miso-engine-v1-pcm-feed-worklet.js:465-470`). That is why `seek_source`
+uses `seek_unserviced`. `SessionState::seek_at` runs the service step, which `process()` forbids
+(`control.rs:2983-2990`). D1's rule (control half only) holds for `source_seek_at`, so the SDK
+calls it from the message handler only (#1294, #1297). A render-side caller would need a
+`seek_at_unserviced` in `crates/control-plane`, which is outside this slice's paths.
+
+**Dependencies.**
+- Closed: #1309, #1313, #1381 (as #1381a) and #1562.
+- In the batch: #1316 and #1319.
+- #1290 (open) was needed only for D2. #1313 was needed only for D3. Proposed: remove both.
+- #1332 and #1387 are open and not in batch 15/16. In `single` mode, #1381a already routes every
+  source export through `SessionState`, and #1387's amendment only moves that routing to the
+  Worker. Proposed: make #1332 and #1387 ordering-only, for the `worker`-mode case of gate 5. D5 and
+  D6 in `single` mode do not wait for them. Root confirms.
+- **B15-R8, root decision under owner delegation (2026-10-15):** #1293's dependencies drop #1290 and #1313. #1332 and #1387
+  are ordering-only.
+
+**Other specs that name dropped exports.** #1386 names `miso_engine_web_v1_edit_outcome_ptr`.
+#1643 gate uses `miso_engine_web_v1_apply` and cites this slice for it. Root fixes those specs.
+Done under B15-R8: #1386 and #1643 each carry an amendment of 2026-10-15.
+
+**Gates and commands.** Every named script and file exists. `build-web-audioworklet.sh
+--named-twin`, `check-sdk-generated.sh [DIR]`, the parameter-metadata `--check`
+(`tools/parameter-metadata/src/lib.rs:1143`) and `check-abi-layout-v1.py --self-test` are valid.

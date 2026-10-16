@@ -23,6 +23,10 @@ pub(crate) struct PreparedRuntime {
     pub(crate) carried: CarriedSourceBytes,
     /// What the plan holds, for preparing its successor (issue #1273 D1).
     pub(crate) inventory: PlanStateInventory,
+    /// What the plan carries from the plan it was prepared to displace (#1344 D1), the base its
+    /// replacement is prepared from should it be withdrawn before render adopts it (#1310 D2).
+    /// `None` for a plan prepared without a successor base.
+    pub(crate) carried_base: Option<PlanStateInventory>,
     pub(crate) control_catalog: ControlCatalog,
     pub(crate) capi: CapiResources,
     /// The designated master strip the plan was prepared with, as a strip index (#1683): a first
@@ -70,47 +74,59 @@ pub struct CapiResources {
 ///
 /// The successor's [`PlanResources`] count them in its source rows, because it owns those
 /// rings once active; until the swap the running plan owns them, so the double-live admission
-/// subtracts them from the successor's rows and counts each carried ring once.
+/// subtracts them from the successor's rows and counts each carried ring once. A pending
+/// candidate keeps its own (`LiveEpochResources::carried`), so a ring two held plans and the
+/// candidate share is counted once across all three (#1398 D4, batch 15a review fold M2).
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct CarriedSourceBytes {
-    pub(crate) total: u64,
-    pub(crate) overhead: u64,
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub struct CarriedSourceBytes {
+    /// The carried rings' share of `source_total_bytes`.
+    pub total: u64,
+    /// The carried rings' share of `source_overhead_bytes`.
+    pub overhead: u64,
 }
 
-/// Both compiled models' charge while a prospective session lives beside the committed one.
+/// Every compiled model's charge while a prospective session lives beside the ones the control
+/// plane holds (#1398 D4): the committed model, the model an epoch keeps while a successor of it
+/// is pending (#1310 D3),
+/// and the prospective one.
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[derive(Clone, Copy)]
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
 pub struct CompiledModelAdmission {
-    /// Both models' retained bytes.
+    /// Every model's retained bytes.
     pub retained_bytes: u64,
-    /// The larger of the two models' largest single allocation.
+    /// The largest of the models' largest single allocation.
     pub largest_allocation_bytes: u64,
 }
 
-pub(crate) fn compiled_model_admission(
-    current: &CompiledSession,
-    prospective: &CompiledSession,
-) -> Result<CompiledModelAdmission, CompileFailure> {
-    compiled_model_admission_between(current.resource_estimate(), prospective.resource_estimate())
-}
-
-/// [`compiled_model_admission`] from the two models' resource estimates, for a prospective model
-/// that is not held as a compilation (#1613).
-pub(crate) fn compiled_model_admission_between(
-    current: session::ResourceEstimate,
+/// [`CompiledModelAdmission`] over every model the control plane holds, `held`, and the
+/// prospective one (#1398 D4): their retained bytes summed, and the largest of their largest
+/// allocations.
+pub(crate) fn compiled_model_admission_over(
+    held: &[session::ResourceEstimate],
     prospective: session::ResourceEstimate,
 ) -> Result<CompiledModelAdmission, CompileFailure> {
-    Ok(CompiledModelAdmission {
-        retained_bytes: current
-            .compiled_model_bytes
-            .checked_add(prospective.compiled_model_bytes)
-            .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
-        largest_allocation_bytes: current
-            .single_allocation_bytes
-            .max(prospective.single_allocation_bytes),
-    })
+    held.iter().try_fold(
+        CompiledModelAdmission {
+            retained_bytes: prospective.compiled_model_bytes,
+            largest_allocation_bytes: prospective.single_allocation_bytes,
+        },
+        |admission, model| {
+            Ok(CompiledModelAdmission {
+                retained_bytes: admission
+                    .retained_bytes
+                    .checked_add(model.compiled_model_bytes)
+                    .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
+                largest_allocation_bytes: admission
+                    .largest_allocation_bytes
+                    .max(model.single_allocation_bytes),
+            })
+        },
+    )
 }
 
 /// What the committed model's control catalog adds to a live commit's peak (#1558 D6).
@@ -206,6 +222,30 @@ pub(crate) fn protocol_queue_config(
 /// `OBSERVATION_ENDED` (#1584 D6a).
 const RELIABLE_EVENT_SLOTS: usize = 2;
 
+/// The plan-resource report table's rows (#1398 D1): a lagging epoch's row (the atomic names a
+/// plan render has already displaced), the running plan's, a withdrawn candidate's and its
+/// successor's.
+pub(crate) const REPORT_ROWS: usize = 4;
+
+/// The pending provider epochs (#1398 D1): a withdrawn candidate's and its successor's coexist
+/// until the former is dropped (#1310 D5).
+pub(crate) const PENDING_PROVIDERS: usize = 2;
+
+/// The provider epochs parked until render's displaced plan is reclaimed (#1398 D1): one per
+/// retirement credit, because each parked epoch's plan holds one until the service step reclaims
+/// it (batch 15a review fold 2, B-1). With two, a `Taken` withdrawal in each of two commands while
+/// render lagged its retirements parked two epochs, and a third promotion found the list full.
+pub(crate) const RETIRED_PROVIDERS: usize = RETIREMENT_CAPACITY;
+
+/// The plan exchange's retirement credits (#1398 D1), the exchange and its resource report alike:
+/// a displaced plan not yet reclaimed, a withdrawn candidate's credit (held until the candidate
+/// is dropped or republished) and its successor's reservation.
+pub(crate) const RETIREMENT_CAPACITY: usize = 3;
+
+pub(crate) fn retirement_capacity() -> NonZeroUsize {
+    NonZeroUsize::new(RETIREMENT_CAPACITY).expect("three is nonzero")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn capi_resources<A: ControlAdapter>(
     limits: ControlLimits,
@@ -214,6 +254,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     strip_table_bytes: u64,
     provider: host_core::SessionControlProviderResources,
     inventory_bytes: u64,
+    carried_base_bytes: u64,
     effect_controls: host_core::EffectControlResources,
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
@@ -238,7 +279,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     let replay = ReplayCache::resource_report_for_config(replay_config)
         .map_err(|_| failure(ResourceFault::Arithmetic))?;
     let exchange = plan_exchange_resource_report(PlanExchangeConfig {
-        retirement_capacity: NonZeroUsize::new(1).expect("one is nonzero"),
+        retirement_capacity: retirement_capacity(),
     })
     .map_err(|_| failure(ResourceFault::Arithmetic))?;
     // The control-source table and ID arena are the facade's own layout; capi reads the mirror
@@ -282,6 +323,9 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         source_id_row,
         // Issue #1273 D5: each epoch keeps its plan's state inventory for the successor.
         inventory_bytes,
+        // #1310 D2 (#1344 D1): and the base a successor is prepared from should this epoch's plan
+        // be withdrawn before render adopts it; zero for a plan prepared without a base.
+        carried_base_bytes,
         strip_table_bytes,
         effect_row,
         route_row,
@@ -340,8 +384,10 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         provider.fixed_retained_bytes,
         checked_layout::<u32>(maximum_configuration_items)?,
         checked_layout::<protocol::CounterId>(maximum_configuration_items)?,
-        checked_layout::<ProviderEpoch>(2)?,
-        checked_layout::<(u64, A::Row)>(2)?,
+        // #1398 D1: the pending and retired provider lists, and the report table.
+        checked_layout::<ProviderEpoch>(PENDING_PROVIDERS)?,
+        checked_layout::<ProviderEpoch>(RETIRED_PROVIDERS)?,
+        checked_layout::<(u64, A::Row)>(REPORT_ROWS)?,
     ];
     // #1309 D5: the adapter's own per-session handles (capi's `Session` and `Plan`) follow the
     // report table, where capi's two rows stood.
@@ -403,10 +449,12 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     compiled: &CompiledSession,
     catalog: &ControlCatalog,
     inventory: &PlanStateInventory,
+    carried_base_bytes: u64,
     effect_controls: host_core::EffectControlResources,
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
@@ -446,6 +494,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
             .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
         provider,
         inventory.retained_bytes(),
+        carried_base_bytes,
         effect_controls,
         route_controls,
         observation,
@@ -770,88 +819,153 @@ pub(crate) fn controller_retained_capacity(
     })
 }
 
+/// The candidate a structural command prepared, as the replacement admission reads it.
+#[derive(Clone, Copy)]
+pub(crate) struct ProspectivePlan {
+    /// The candidate's plan row: what it owns once active, carried rings included.
+    pub(crate) resources: PlanResources,
+    /// The part of its source rows it carries from the plan it was prepared to displace (#1273
+    /// D5): the newest held plan, or across a withdrawn candidate the running one (#1310 D2).
+    pub(crate) carried: CarriedSourceBytes,
+    /// The capi resources it was prepared with.
+    pub(crate) capi: CapiResources,
+}
+
+/// The replacement admission (#1042, #1398 D4): may the prospective plan live beside every plan
+/// the control plane holds unreclaimed until each is reclaimed?
+///
+/// `held` is those plans in epoch order, the oldest first and the newest last: every parked epoch
+/// whose plan render displaced but the service step has not reclaimed (batch 15a review fold 2,
+/// M-1), the running plan, then every pending or withdrawn candidate. It is never empty. `compiled_models` charges
+/// every model the control plane holds plus the prospective one. Each term is the sum over the
+/// held plans plus the candidate, against its own cap: graph plus models, the source totals and
+/// overheads (a carried ring counted once, in the oldest held plan that holds it: the candidate's
+/// and every held epoch's but the oldest one's carried bytes leave their rows), the
+/// replacement peak (graph, models and allocated source bytes, #1290a D3), effect state and
+/// scratch, builtins, and the control plane's retained bytes (the newest plan's row, which holds
+/// the session's fixed rows once, every older held epoch's own rows, and the candidate's epoch and
+/// prepared-protocol rows). The largest-allocation check folds every held row.
+///
+/// Nothing is committed on a refusal.
 pub(crate) fn validate_replacement_peak(
-    current: PlanResources,
-    prospective: PlanResources,
-    prospective_carried: CarriedSourceBytes,
-    prospective_capi: CapiResources,
+    held: &[LiveEpochResources],
+    prospective: ProspectivePlan,
     compiled_models: CompiledModelAdmission,
     limits: ControlLimits,
 ) -> Result<(), CompileFailure> {
-    let combined = |left: u64, right: u64| {
-        left.checked_add(right)
-            .ok_or_else(|| failure(ResourceFault::Arithmetic))
+    let arithmetic = || failure(ResourceFault::Arithmetic);
+    let newest = held.last().ok_or_else(arithmetic)?;
+    // Each held row's `field`, summed, plus the candidate's `candidate`.
+    let peak = |field: fn(&PlanResources) -> u64, candidate: u64| {
+        held.iter()
+            .try_fold(0_u64, |total, epoch| {
+                total.checked_add(field(&epoch.report))
+            })
+            .and_then(|total| total.checked_add(candidate))
+            .ok_or_else(arithmetic)
     };
-    let graph_peak = combined(
-        current.graph_session_plus_plan_bytes,
-        prospective.graph_session_plus_plan_bytes,
+    // Issue #1273 D5: a carried ring is the plan's it was carried from until the swap, so the peak
+    // counts it once, there: the candidate's carried bytes leave its row, and every held epoch
+    // after the oldest leaves its own (#1398 D4: a ring a pending candidate carried from the
+    // running plan is the running plan's, and one the running plan carried from a parked epoch
+    // is the parked epoch's; each epoch carries only from the one before it in `held` or from
+    // a plan already reclaimed).
+    let allocated = |row: u64, carried: u64| row.checked_sub(carried).ok_or_else(arithmetic);
+    let source_peak = |field: fn(&PlanResources) -> u64,
+                       carried: fn(&CarriedSourceBytes) -> u64,
+                       candidate: u64| {
+        held.iter()
+            .enumerate()
+            .try_fold(0_u64, |total, (index, epoch)| {
+                let row = field(&epoch.report);
+                let own = if index == 0 {
+                    Some(row)
+                } else {
+                    row.checked_sub(carried(&epoch.carried))
+                };
+                own.and_then(|own| total.checked_add(own))
+            })
+            .and_then(|total| total.checked_add(candidate))
+            .ok_or_else(arithmetic)
+    };
+    let candidate = prospective.resources;
+    let graph_peak = peak(
+        |row| row.graph_session_plus_plan_bytes,
+        candidate.graph_session_plus_plan_bytes,
     )?
     .checked_add(compiled_models.retained_bytes)
-    .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    .ok_or_else(arithmetic)?;
     if graph_peak > limits.maximum_graph_session_plus_plan_bytes {
         return Err(diagnostic("graph.resource.limit"));
     }
-    // Issue #1273 D5: a carried ring is the current plan's until the swap, so the double-live
-    // peak counts it once, there.
-    let allocated = |row: u64, carried: u64| {
-        row.checked_sub(carried)
-            .ok_or_else(|| failure(ResourceFault::Arithmetic))
-    };
-    if combined(
-        current.source_total_bytes,
-        allocated(prospective.source_total_bytes, prospective_carried.total)?,
-    )? > limits.maximum_source_total_bytes
-        || combined(
-            current.source_overhead_bytes,
+    let source_total = source_peak(
+        |row| row.source_total_bytes,
+        |carried| carried.total,
+        allocated(candidate.source_total_bytes, prospective.carried.total)?,
+    )?;
+    if source_total > limits.maximum_source_total_bytes
+        || source_peak(
+            |row| row.source_overhead_bytes,
+            |carried| carried.overhead,
             allocated(
-                prospective.source_overhead_bytes,
-                prospective_carried.overhead,
+                candidate.source_overhead_bytes,
+                prospective.carried.overhead,
             )?,
         )? > limits.maximum_source_overhead_bytes
     {
         return Err(diagnostic("source.resource.limit"));
     }
     // #1290a D3: the categories above each fit alone; their sum must fit an adapter's one budget.
-    if combined(
-        graph_peak,
-        combined(
-            current.source_total_bytes,
-            allocated(prospective.source_total_bytes, prospective_carried.total)?,
-        )?,
-    )? > limits.maximum_replacement_peak_bytes
+    if graph_peak
+        .checked_add(source_total)
+        .ok_or_else(arithmetic)?
+        > limits.maximum_replacement_peak_bytes
     {
         return Err(diagnostic("control.resource.replacement_peak"));
     }
-    if combined(
-        current.effect_scalar_state_bytes,
-        prospective.effect_scalar_state_bytes,
+    if peak(
+        |row| row.effect_scalar_state_bytes,
+        candidate.effect_scalar_state_bytes,
     )? > limits.maximum_effect_state_bytes
-        || combined(
-            current.effect_scalar_scratch_bytes,
-            prospective.effect_scalar_scratch_bytes,
+        || peak(
+            |row| row.effect_scalar_scratch_bytes,
+            candidate.effect_scalar_scratch_bytes,
         )? > limits.maximum_effect_scratch_bytes
     {
         return Err(diagnostic("effect.resource.limit"));
     }
-    if combined(
-        current.builtin_retained_payload_bytes,
-        prospective.builtin_retained_payload_bytes,
+    if peak(
+        |row| row.builtin_retained_payload_bytes,
+        candidate.builtin_retained_payload_bytes,
     )? > limits.maximum_builtin_retained_bytes
     {
         return Err(failure(ResourceFault::Limit));
     }
-    let capi_peak = current
-        .control_retained_bytes
-        .checked_add(prospective_capi.epoch_retained)
-        .and_then(|value| value.checked_add(prospective_capi.prepared_protocol_retained))
-        .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    // The newest held row holds the session's fixed rows once and its own epoch's; every older
+    // held epoch adds its own rows, and the candidate its epoch and prepared-protocol rows.
+    let older_epochs = held[..held.len() - 1]
+        .iter()
+        .try_fold(0_u64, |total, epoch| {
+            total.checked_add(epoch.capi.epoch_retained)
+        })
+        .ok_or_else(arithmetic)?;
+    let capi_peak = prospective
+        .capi
+        .epoch_retained
+        .checked_add(prospective.capi.prepared_protocol_retained)
+        .and_then(|candidate| candidate.checked_add(newest.report.control_retained_bytes))
+        .and_then(|value| value.checked_add(older_epochs))
+        .ok_or_else(arithmetic)?;
     if capi_peak > limits.maximum_control_retained_bytes {
         return Err(failure(ResourceFault::Limit));
     }
-    if current
-        .largest_named_allocation_bytes
-        .max(prospective.largest_named_allocation_bytes)
-        .max(prospective_capi.largest)
+    let largest = held
+        .iter()
+        .map(|epoch| epoch.report.largest_named_allocation_bytes)
+        .fold(0, u64::max);
+    if largest
+        .max(prospective.resources.largest_named_allocation_bytes)
+        .max(prospective.capi.largest)
         .max(compiled_models.largest_allocation_bytes)
         > limits.maximum_named_allocation_bytes
     {
@@ -860,8 +974,8 @@ pub(crate) fn validate_replacement_peak(
     Ok(())
 }
 
-/// One provider epoch's resources as the live admission reads them: its plan's report row and the
-/// capi resources it was prepared with (#1257 D4).
+/// One provider epoch's resources as the live and replacement admissions read them: its plan's
+/// report row and the capi resources it was prepared with (#1257 D4, #1398 D4).
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 #[derive(Clone, Copy)]
@@ -871,61 +985,71 @@ pub struct LiveEpochResources {
     pub report: PlanResources,
     /// The capi resources the epoch's plan was prepared with.
     pub capi: CapiResources,
+    /// The part of the report's source rows the epoch's plan carries from the plan it was
+    /// prepared to displace (#1273 D5): zero for the boot plan. The replacement admission
+    /// subtracts it for every held epoch after the oldest, whose carried rings belong to the
+    /// plan before it while both are held (#1398 D4, batch 15a review fold M2).
+    pub carried: CarriedSourceBytes,
 }
 
-/// The live arm's admission (#1053 D8, #1257 D5): may the prospective compiled model live beside
-/// the current one, next to the plans that exist, until the commit?
+/// The live arm's admission (#1053 D8, #1257 D5, #1398 D4): may the prospective compiled model
+/// live beside the current one, next to the plans that exist, until the commit?
 ///
-/// The live arm prepares no plan, so the plans are the current epoch's and, when a candidate is
-/// pending, that candidate's; the newest of them is the pending one if any, else the current one.
-/// The terms, each against its own cap:
+/// The live arm prepares no plan, so the plans are those the control plane holds unreclaimed,
+/// `held`, in epoch order: every parked epoch whose plan is not yet reclaimed, the running plan,
+/// then every pending or withdrawn candidate; the newest of them is the last. It is never empty. The terms, each against its own cap:
 ///
-/// - **graph:** both plans' `graph_session_plus_plan_bytes` plus both compiled models'
-///   `retained_bytes`;
-/// - **capi:** the newest plan's `control_retained_bytes`, plus the current epoch's `epoch_retained`
-///   while a candidate is pending, plus the newest epoch's `prepared_protocol_retained`. That last
-///   term includes a provider catalog (`catalog_retained_bytes`), which a live commit replaces by
-///   the committed model's (#1552 D3), so the term is the same one a rebuild charges;
+/// - **graph:** every held plan's `graph_session_plus_plan_bytes` plus every compiled model's
+///   `retained_bytes` (the held ones and the prospective one);
+/// - **capi:** the newest plan's `control_retained_bytes`, plus every older held epoch's
+///   `epoch_retained`, plus the newest epoch's `prepared_protocol_retained`. That last term
+///   includes a provider catalog (`catalog_retained_bytes`), which a live commit replaces by the
+///   committed model's (#1552 D3), so the term is the same one a rebuild charges;
 /// - **catalog growth:** the new catalog's retained bytes beyond the current catalog's are added to
 ///   the capi term, and its largest single allocation joins the largest-allocation term, so a VCA
 ///   added live that grows the catalog meets the ceiling a rebuild would (#1558 D6);
-/// - **largest allocation:** the largest of both plans' `largest_named_allocation_bytes`, the
-///   newest epoch's capi `largest`, the compiled models' largest allocation and the new catalog's.
+/// - **largest allocation:** the largest of every held plan's `largest_named_allocation_bytes`,
+///   the newest epoch's capi `largest`, the compiled models' largest allocation and the new
+///   catalog's.
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
+///
+/// # Errors
+///
+/// The cap a term exceeds, with its diagnostic; arithmetic overflow, or an empty `held`.
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
 pub fn validate_live_peak(
-    current: LiveEpochResources,
-    pending: Option<LiveEpochResources>,
+    held: &[LiveEpochResources],
     compiled_models: CompiledModelAdmission,
     catalog: LiveCatalogAdmission,
     limits: ControlLimits,
 ) -> Result<(), CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
-    let newest = pending.unwrap_or(current);
-    let graph = current
-        .report
-        .graph_session_plus_plan_bytes
-        .checked_add(pending.map_or(0, |pending| pending.report.graph_session_plus_plan_bytes))
-        .and_then(|value| value.checked_add(compiled_models.retained_bytes))
+    let (newest, older) = held.split_last().ok_or_else(arithmetic)?;
+    let graph = held
+        .iter()
+        .try_fold(compiled_models.retained_bytes, |total, epoch| {
+            total.checked_add(epoch.report.graph_session_plus_plan_bytes)
+        })
         .ok_or_else(arithmetic)?;
     if graph > limits.maximum_graph_session_plus_plan_bytes {
         return Err(diagnostic("graph.resource.limit"));
     }
-    let capi = newest
-        .report
-        .control_retained_bytes
-        .checked_add(pending.map_or(0, |_| current.capi.epoch_retained))
+    let capi = older
+        .iter()
+        .try_fold(newest.report.control_retained_bytes, |total, epoch| {
+            total.checked_add(epoch.capi.epoch_retained)
+        })
         .and_then(|value| value.checked_add(newest.capi.prepared_protocol_retained))
         .and_then(|value| value.checked_add(catalog.growth_bytes))
         .ok_or_else(arithmetic)?;
     if capi > limits.maximum_control_retained_bytes {
         return Err(failure(ResourceFault::Limit));
     }
-    if current
-        .report
-        .largest_named_allocation_bytes
-        .max(pending.map_or(0, |pending| pending.report.largest_named_allocation_bytes))
+    if held
+        .iter()
+        .map(|epoch| epoch.report.largest_named_allocation_bytes)
+        .fold(0, u64::max)
         .max(newest.capi.largest)
         .max(compiled_models.largest_allocation_bytes)
         .max(catalog.largest_allocation_bytes)
@@ -1085,6 +1209,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         compiled,
         &prepared.control_catalog,
         &prepared.inventory,
+        prepared.report.carried_base_retained_bytes,
         prepared.report.effect_control_resources,
         prepared.report.route_control_resources,
         observation_resources(&effects, observation_slots_high_water)?,
@@ -1158,6 +1283,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         },
         carried,
         inventory: prepared.inventory,
+        carried_base: prepared.carried_base,
         control_catalog: prepared.control_catalog,
         capi,
         master_track,
@@ -1230,7 +1356,6 @@ where
         max_string_bytes: control_bytes,
         max_nesting: 4,
     });
-    let one = NonZeroUsize::new(1).expect("one is nonzero");
     let queues = ProtocolQueues::prepare(protocol_queue_config(limits)?)
         .map_err(|_| failure(ResourceFault::ProtocolQueue))?;
     let replay = ReplayCache::try_new(ReplayCacheConfig {
@@ -1249,6 +1374,8 @@ where
         resources,
         carried: _,
         inventory,
+        // A boot plan is prepared without a successor base, so it has none.
+        carried_base: _,
         control_catalog,
         capi,
         master_track: _,
@@ -1260,13 +1387,13 @@ where
         &mut revision_gate,
         store.revision().0,
         PlanExchangeConfig {
-            retirement_capacity: one,
+            retirement_capacity: retirement_capacity(),
         },
     )
     .map_err(|_| failure(ResourceFault::PlanExchange))?;
     let mut reports = Vec::new();
     reports
-        .try_reserve_exact(2)
+        .try_reserve_exact(REPORT_ROWS)
         .map_err(|_| failure(ResourceFault::Allocation))?;
     reports.push((0, A::Row::from(resources)));
     let shared = Arc::new(SharedPlanState {
@@ -1309,11 +1436,11 @@ where
     .map_err(|_| failure(ResourceFault::Allocation))?;
     let mut pending_providers = Vec::new();
     pending_providers
-        .try_reserve_exact(1)
+        .try_reserve_exact(PENDING_PROVIDERS)
         .map_err(|_| failure(ResourceFault::Allocation))?;
     let mut retired_providers = Vec::new();
     retired_providers
-        .try_reserve_exact(1)
+        .try_reserve_exact(RETIRED_PROVIDERS)
         .map_err(|_| failure(ResourceFault::Allocation))?;
     let decode_field_count = control_bytes / size_of::<u16>();
     let mut decode_fields = Vec::new();
@@ -1350,6 +1477,7 @@ where
         observation_wire: observation_wire(limits.maximum_control_frame_bytes)?,
         observation_armed_bytes: 0,
         observation_slots_high_water: 0,
+        observation_forwarded: Vec::new(),
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,
@@ -1367,4 +1495,274 @@ where
         session,
         plan: PlanState::new(owner, shared),
     })
+}
+
+#[cfg(test)]
+mod admission_tests {
+    //! #1398 gate 2: the replacement admission sums every held plan and model.
+
+    use super::*;
+
+    /// The caps the replacement admission checks, each with the diagnostic it refuses with.
+    const CAPS: [(&str, &str); 9] = [
+        ("graph", "graph.resource.limit\t$\n"),
+        ("source total", "source.resource.limit\t$\n"),
+        ("source overhead", "source.resource.limit\t$\n"),
+        ("replacement peak", "control.resource.replacement_peak\t$\n"),
+        ("effect state", "effect.resource.limit\t$\n"),
+        ("effect scratch", "effect.resource.limit\t$\n"),
+        ("builtin", "capi.resource.limit\t$\n"),
+        ("control retained", "capi.resource.limit\t$\n"),
+        ("largest allocation", "capi.resource.limit\t$\n"),
+    ];
+
+    /// One plan whose every term is a multiple of `base`, so a sum that misses or repeats a plan
+    /// misses or repeats a distinct number.
+    fn epoch(base: u64) -> LiveEpochResources {
+        LiveEpochResources {
+            report: PlanResources {
+                sample_rate_hz: 48_000,
+                quantum_frames: 128,
+                source_count: 1,
+                track_count: 1,
+                latency_samples: 0,
+                output_tail: TailSamples::Finite(0),
+                graph_session_plus_plan_bytes: base,
+                graph_incremental_plan_bytes: 0,
+                graph_metadata_bytes: 0,
+                graph_delay_bytes: 0,
+                effect_bank_scratch_bytes: 0,
+                effect_bank_runtime_buffer_bytes: 0,
+                effect_bank_metadata_bytes: 0,
+                builtin_bank_bytes: 0,
+                builtin_bank_scratch_bytes: 0,
+                source_pcm_payload_bytes: base,
+                source_overhead_bytes: 2 * base,
+                source_total_bytes: 3 * base,
+                effect_scalar_state_bytes: 4 * base,
+                effect_scalar_scratch_bytes: 5 * base,
+                builtin_processor_payload_bytes: 6 * base,
+                builtin_meter_payload_bytes: 0,
+                builtin_retained_payload_bytes: 6 * base,
+                control_retained_bytes: 7 * base,
+                largest_named_allocation_bytes: base,
+            },
+            capi: CapiResources {
+                active_retained: 7 * base,
+                epoch_retained: 8 * base,
+                prepared_protocol_retained: 9 * base,
+                largest: base,
+            },
+            carried: CarriedSourceBytes::default(),
+        }
+    }
+
+    /// [`epoch`] carrying `total` source bytes, `overhead` of them overhead, from the plan before.
+    fn carrying(base: u64, total: u64, overhead: u64) -> LiveEpochResources {
+        LiveEpochResources {
+            carried: CarriedSourceBytes { total, overhead },
+            ..epoch(base)
+        }
+    }
+
+    fn model(retained: u64, largest: u64) -> session::ResourceEstimate {
+        session::ResourceEstimate {
+            entity_count: 0,
+            source_count: 0,
+            track_count: 0,
+            effect_count: 0,
+            route_count: 0,
+            automation_segment_count: 0,
+            retained_string_bytes: 0,
+            parameter_count: 0,
+            queue_items: 0,
+            queue_bytes: 0,
+            source_ring_frames: 0,
+            source_ring_bytes: 0,
+            canonical_upper_bound_bytes: 0,
+            canonical_bytes: 0,
+            compiled_model_bytes: retained,
+            requested_runtime_bytes: 0,
+            single_allocation_bytes: largest,
+            platform_allocation_limit_bytes: 0,
+            estimated_bytes: 0,
+        }
+    }
+
+    fn unlimited() -> ControlLimits {
+        ControlLimits {
+            source_ring_frames: 0,
+            maximum_automation_spans_per_block: 0,
+            maximum_document_bytes: 0,
+            maximum_diagnostic_bytes: 0,
+            maximum_tracks: 0,
+            maximum_sources: 0,
+            maximum_routes: 0,
+            maximum_effects: 0,
+            maximum_graph_session_plus_plan_bytes: u64::MAX,
+            maximum_source_total_bytes: u64::MAX,
+            maximum_source_overhead_bytes: u64::MAX,
+            maximum_effect_state_bytes: u64::MAX,
+            maximum_effect_scratch_bytes: u64::MAX,
+            maximum_builtin_retained_bytes: u64::MAX,
+            maximum_control_retained_bytes: u64::MAX,
+            maximum_named_allocation_bytes: u64::MAX,
+            maximum_meter_streams: 0,
+            maximum_meter_items: 0,
+            maximum_meter_bytes: 0,
+            maximum_control_frame_bytes: 0,
+            maximum_replay_bytes: 0,
+            maximum_replay_entries: 0,
+            maximum_submixes: 0,
+            maximum_vcas: 0,
+            maximum_vca_reach_pairs: 0,
+            maximum_replacement_peak_bytes: u64::MAX,
+        }
+    }
+
+    /// `unlimited` with cap `index` of [`CAPS`] set to `value`.
+    fn with_cap(index: usize, value: u64) -> ControlLimits {
+        let mut limits = unlimited();
+        *match index {
+            0 => &mut limits.maximum_graph_session_plus_plan_bytes,
+            1 => &mut limits.maximum_source_total_bytes,
+            2 => &mut limits.maximum_source_overhead_bytes,
+            3 => &mut limits.maximum_replacement_peak_bytes,
+            4 => &mut limits.maximum_effect_state_bytes,
+            5 => &mut limits.maximum_effect_scratch_bytes,
+            6 => &mut limits.maximum_builtin_retained_bytes,
+            7 => &mut limits.maximum_control_retained_bytes,
+            _ => &mut limits.maximum_named_allocation_bytes,
+        } = value;
+        limits
+    }
+
+    fn candidate(base: u64) -> ProspectivePlan {
+        let epoch = epoch(base);
+        ProspectivePlan {
+            resources: epoch.report,
+            carried: CarriedSourceBytes::default(),
+            capi: epoch.capi,
+        }
+    }
+
+    fn verdict(
+        held: &[LiveEpochResources],
+        prospective: ProspectivePlan,
+        models: CompiledModelAdmission,
+        limits: ControlLimits,
+    ) -> Result<(), String> {
+        validate_replacement_peak(held, prospective, models, limits)
+            .map_err(|failure| String::from_utf8(failure.diagnostic().into_owned()).expect("UTF-8"))
+    }
+
+    /// The peak of each cap in [`CAPS`] for `held` (in base units, oldest first) beside a
+    /// candidate of base `candidate`, with `models` retained model bytes, spelled out term by
+    /// term. `carried` is the source total and overhead bytes every held epoch but the oldest
+    /// one carries from the plan before it, summed: each carried ring is counted once.
+    fn peaks(held: &[u64], candidate: u64, models: u64, carried: (u64, u64)) -> [u64; 9] {
+        let sum =
+            |factor: u64| held.iter().map(|base| factor * base).sum::<u64>() + factor * candidate;
+        let graph = sum(1) + models;
+        let (older, newest) = (&held[..held.len() - 1], held[held.len() - 1]);
+        let control =
+            7 * newest + older.iter().map(|base| 8 * base).sum::<u64>() + (8 + 9) * candidate;
+        [
+            graph,
+            sum(3) - carried.0,
+            sum(2) - carried.1,
+            graph + sum(3) - carried.0,
+            sum(4),
+            sum(5),
+            sum(6),
+            control,
+            0,
+        ]
+    }
+
+    fn assert_each_cap(
+        label: &str,
+        held: &[LiveEpochResources],
+        prospective: ProspectivePlan,
+        models: CompiledModelAdmission,
+        expected: [u64; 9],
+    ) {
+        for (index, (cap, code)) in CAPS.iter().enumerate().take(8) {
+            assert_eq!(
+                verdict(held, prospective, models, with_cap(index, expected[index])),
+                Ok(()),
+                "{label}, {cap}: accepted at the peak {}",
+                expected[index]
+            );
+            assert_eq!(
+                verdict(
+                    held,
+                    prospective,
+                    models,
+                    with_cap(index, expected[index] - 1)
+                ),
+                Err((*code).to_owned()),
+                "{label}, {cap}: refused one byte below"
+            );
+        }
+    }
+
+    /// Gate 2. Three held plans and three models (two held, one prospective): each cap one byte
+    /// below the sum refuses with its diagnostic, and at the sum passes; the largest allocation
+    /// folds every held row. A held candidate's carried rings are counted once, in the plan they
+    /// were carried from: the middle row's carried bytes leave the source sums, the running plan's
+    /// do not (it owns its rings). With one held plan the peaks are today's: the running plan
+    /// beside the candidate. Test value: an admission that forgets a held plan or model (a missing
+    /// third term) passes one byte over the cap; one that subtracts only the candidate's carried
+    /// bytes (batch 15a review fold M2) refuses the source caps at the peak, and one that also
+    /// subtracts the running plan's admits one byte below it.
+    #[test]
+    fn the_replacement_admission_sums_every_held_plan_and_model() {
+        let models = compiled_model_admission_over(
+            &[model(1 << 20, 3), model(1 << 21, 5)],
+            model(1 << 22, 7),
+        )
+        .expect("models");
+        assert_eq!(models.retained_bytes, (1 << 20) + (1 << 21) + (1 << 22));
+        assert_eq!(models.largest_allocation_bytes, 7);
+        let held = [epoch(1), epoch(10), epoch(100)];
+        let prospective = candidate(1_000);
+        assert_each_cap(
+            "three held",
+            &held,
+            prospective,
+            models,
+            peaks(&[1, 10, 100], 1_000, models.retained_bytes, (0, 0)),
+        );
+        // The middle row carries 13 source bytes (5 of them overhead) and the running row 2 (1):
+        // only the middle row's leave the sums.
+        let carrying_held = [carrying(1, 2, 1), carrying(10, 13, 5), epoch(100)];
+        assert_each_cap(
+            "three held, a carrying candidate",
+            &carrying_held,
+            prospective,
+            models,
+            peaks(&[1, 10, 100], 1_000, models.retained_bytes, (13, 5)),
+        );
+        // Today's check, for the same candidate beside the running plan alone.
+        let today =
+            compiled_model_admission_over(&[model(1 << 20, 3)], model(1 << 22, 7)).expect("models");
+        assert_each_cap(
+            "one held",
+            &held[..1],
+            prospective,
+            today,
+            peaks(&[1], 1_000, today.retained_bytes, (0, 0)),
+        );
+        // The largest allocation: a middle held plan's is the strict maximum.
+        let mut middle = epoch(10);
+        middle.report.largest_named_allocation_bytes = 50_000;
+        let held = [epoch(1), middle, epoch(100)];
+        for (cap, expected) in [(50_000, Ok(())), (49_999, Err(CAPS[8].1.to_owned()))] {
+            assert_eq!(
+                verdict(&held, prospective, models, with_cap(8, cap)),
+                expected
+            );
+        }
+    }
 }

@@ -120,3 +120,9 @@ seqlock is still guarded by both modules' existing torn-read tests.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
 - Size: under half a day.
+
+## Amendment (controls coordinator, root rulings, 2026-10-15)
+
+- Root ruling B15-R1 (2026-10-15, recorded in #1316): #1316 lands first and creates the shared
+  `crates/engine/src/realtime/seqlock.rs`. This slice's D3 then moves `observe.rs` onto that module
+  and does not create a second one; `seqlock.rs` is no longer new here.

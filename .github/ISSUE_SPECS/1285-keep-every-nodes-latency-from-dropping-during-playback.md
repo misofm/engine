@@ -120,3 +120,79 @@ permanent latency reserve.
 ## Dependencies
 
 - *Carry strip delay lines and live send ramps across a plan swap* (#1284).
+
+## Amendment (controls coordinator, batch 15 check, 2026-10-15)
+
+Checked against `228fca26c`.
+
+**Moved anchors.**
+- `timings` is `crates/graph-compiler/src/pdc.rs:37-160`. `max` is `:61-65`, the edge loop
+  `:66-99`, the arrival `max + latency` `:100-104`, the output latency `:143-150`. It is called
+  from `crates/graph-compiler/src/compile.rs:422`, inside `compile_with_builtins` (`:78`).
+- `GraphBuiltinsCompileRequest` is `crates/graph-compiler/src/lib.rs:41`. Its fields are
+  `plan_id`, `effects`, `builtins`, `caps` and `dispatch`. No floor field exists yet.
+- `HostPrepareReport::latency_samples` is `crates/host-core/src/prepare.rs:273`, filled at
+  `:3134`. The C ABI copies it at `crates/control-plane/src/compile.rs:1003` into
+  `PlanResources::latency_samples` (`crates/control-plane/src/adapter.rs:104`). The ABI field is
+  `crates/capi/src/abi.rs:283`.
+- The inventory is `PlanStateInventory` (`prepare.rs:711`). It already holds the compensation
+  lines (`delay_lines`, #1283 D1), the strip delays and live sends (#1284) and the restart set
+  `restarted` (#1277 D6, `prepare.rs:744`; read by `restarted_strips`, `:688`). D3's "restart set
+  (#1279 D1)" is this field now.
+- Successors are prepared by the control plane: `prepare_runtime`
+  (`crates/control-plane/src/compile.rs:901`) is called with a `SuccessorBase` at
+  `crates/control-plane/src/control.rs:1662-1683`. `SuccessorBase` is `prepare.rs:1070`. The floors
+  travel in the inventory, so D2 needs no control-plane change.
+- The header's latency text is `crates/capi/include/miso_engine_v1.h:54` and `:81` (D6's place).
+
+**Authorized paths.**
+- `crates/builtins-compiler` does not build the graph request. The one product site is
+  `crates/host-core/src/prepare.rs:2466`. Deliverable 1's "plumbed through the builtins graph
+  compile request" means that site. `crates/builtins-compiler/src/lib.rs` leaves the list.
+- The request is a struct literal in 21 files. A new field breaks each one. Outside the list are
+  `crates/graph-compiler/src/bin/graph_fixture.rs`, `crates/host-core/tests/live_routes.rs`,
+  `route_mute.rs`, `submix_strip.rs`, `tools/audit/src/builtins_graph.rs`, `fixture_builtins.rs`,
+  `graph.rs` and `tools/console-workload/src/lib.rs`. Proposed: add them for the neutral field only
+  (an empty floor map). Root confirms at filing.
+- **B15-R9, root decision under owner delegation (2026-10-15): the eight files above are allowed, for a neutral-field-only
+  addition to the graph request struct literal.** No other edit to them is authorized.
+
+**Decisions.**
+- D1-D6 hold against the code and against decision 17. Decision 17 does not touch latency (C11
+  keeps the render rules), and a floor is not a control.
+- Both hosts: since #1381a the browser runs `control_plane::SessionState`
+  (`hosts/host-web/src/lib.rs:6-16`), so a browser rebuild gets floors through the same code. A
+  browser boot is still a no-floor case.
+- The browser reports no plan latency. Decision 17 C13 lists "plan latency and tail" as a one-host
+  difference for root to file; no issue is filed yet. So D4 and gate 3 cover the C ABI only.
+- Empty boot (#1682): an empty plan shares only the output node with its successor, at arrival 0.
+  Its floor changes nothing.
+- Stored automation: #1637's node time is `τ(r) = timeline(r + ΣP - a(n))`. With floors, `a(n)`
+  must be the floored arrival, the one the plan renders. #1647 (open) reads `a(n)`. Whichever of
+  #1285 and #1647 lands second makes it read the floored value.
+
+**Dependencies.**
+- #1284 is closed. #1283, #1279 and #1277 are closed.
+- Batch order (root, 2026-10-15): batch 15a is the controls lane, #1344, #1398 and #1310.
+  #1324 left batch 15a (root ruling, 2026-10-15); it lands in a later batch after #1288, #1391,
+  #1363 and #1325. The rest of batch 15 follows. #1324 is not ordered before this slice. This
+  slice keeps its no-duck fallback until #1324 lands: a restarted strip starts at rest with no
+  duck.
+- #1324 is open and not in batch 15/16. D3's duck-swap needs it. Until it lands, a restarted
+  strip starts at rest with no duck.
+- #1287 is open. D2 names it as later work only. #1323 is in the batch.
+
+**Gates and commands.**
+- Every named file and script exists: `crates/host-core/tests/successor_swap.rs`,
+  `crates/capi/src/runtime/tests.rs`, `docs/C_ABI_V1_QUALIFICATION.md`,
+  `scripts/check-graph-determinism.sh`, `scripts/check-capi-abi.sh`,
+  `scripts/check-workspace-policy.sh`, `tools/console-workload`.
+- Gate 6's command is valid. Its features exist.
+
+## Amendment (controls coordinator, batch 15a fold, 2026-10-16)
+
+- **Browser latency.** "No issue is filed yet" (batch-15 amendment, Decisions) is void. It is
+  #1688 (*Report the plan latency on the browser*), which lands after this slice and adds the
+  browser's parity row on the floored latency. D4 and gate 3 still cover the C ABI only here.
+- **Anchor.** The `restarted` field of `PlanStateInventory` is `prepare.rs:750` at `228fca26c`
+  (the batch-15 amendment says `:744`). On `main` at `c5b5c88b2` it is `:757`.
