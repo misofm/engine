@@ -180,20 +180,19 @@ extern "C" {
  * render has retired, brings the session's view of the running plan up to render, refreshes the
  * session counters, and stages render telemetry. Every other session call (source submit, seek,
  * seek_at, seek_report, submit_command, dequeue_event) that passes its argument checks runs the
- * same step
- * first; a call refused for its arguments returns before the step. So a host that makes those
- * calls anyway need not also call service. The step never waits for render, never commits or
+ * same step first; a call refused for its arguments returns before the step. So a host that makes
+ * those calls anyway need not also call service. The step never waits for render, never commits or
  * acknowledges anything, and never takes or drops a pending edit; its cost does not grow with the
  * time since the last call. It returns MISO_ENGINE_V1_OK; a null session as
  * MISO_ENGINE_V1_INVALID_ARGUMENT and another handle as MISO_ENGINE_V1_WRONG_HANDLE; and, should
  * the session's plan epochs fail to synchronize, MISO_ENGINE_V1_INTERNAL with the session
  * diagnostic "capi.source.epoch". The host's duty: a pending edit progresses only while the host
- * makes session calls, the same duty as draining events. A host that renders but never calls
- * keeps retired plans allocated, and its next structural edit waits for that reclaim; a warm
- * successor that misses its deadline falls back only at the host's next session call. The plan
- * watermark never covers an edit before it is in effect. While edits are pending, call
- * miso_engine_v1_service (or another session call) at least once per render-buffer period. A host
- * checks MISO_ENGINE_V1_FEATURE_SERVICE before calling the symbol.
+ * makes session calls, the same duty as draining events. A host that renders but never calls keeps
+ * retired plans allocated, and its next structural edit waits for that reclaim; a warm successor
+ * that misses its deadline falls back only at the host's next session call. The plan watermark
+ * never covers an edit before it is in effect. While edits are pending, call miso_engine_v1_service
+ * (or another session call) at least once per render-buffer period. A host checks
+ * MISO_ENGINE_V1_FEATURE_SERVICE before calling the symbol.
  *
  * Engine memory (issue 1602). The engine owns no control-thread memory outside the compile
  * limits beyond its own handle; miso_engine_v1_engine_destroy frees that handle. Everything a
@@ -235,40 +234,39 @@ extern "C" {
  * A transaction behind an unadopted replacement (issue 1310). A SESSION_TRANSACTION_APPLY that
  * needs a new plan while an earlier transaction's replacement plan has not been adopted by render
  * (a paused host never adopts one) commits as any other: it is not refused as backpressure because
- * a replacement waits, with the one exception below. The engine takes the waiting replacement
- * back, prepares one plan that carries both transactions against the plan that renders, and
- * publishes it; nothing of the earlier transaction is lost. A source the new plan keeps from the
- * waiting replacement or from the plan that renders keeps playing: the PCM accepted for it and a
- * seek or seek_at queued on it move into the new plan, so the host neither refeeds nor reseeks it.
- * An owner (a strip, an effect, a meter) that the earlier transaction restarted or removed and
- * the new one puts back in its form in the plan that renders carries from the plan that renders,
- * as one transaction of both would carry it (issue 1698). A source does not: its declaration
- * changed against the newest committed session, so the host restarted its feed, and a source the
- * earlier transaction added, redeclared or removed and the new one does not keep as the waiting
- * replacement declares it starts fresh in the new plan (generation 1, frame 0, as an added one),
- * also when the new one puts it back in its form in the plan that renders. No accepted chunk on a
- * ring the waiting replacement created is dropped across a supersession: when the waiting
- * replacement created a source's ring (the earlier transaction added the source, or redeclared
- * it) and the session has accepted PCM, a seek or an end of region for that source since, a new
- * transaction that does not keep the source as the waiting replacement declares it (it declares
- * it as the plan that renders does, redeclares it another way, or removes it) is refused with
- * MISO_ENGINE_V1_BACKPRESSURE before it commits:
- * nothing changes, the waiting replacement stays published, no event is queued and the revision
- * does not move. Once render adopts the waiting replacement, a retry commits. A host that does not
- * render keeps getting MISO_ENGINE_V1_BACKPRESSURE for such a transaction until it renders. A
- * source the waiting replacement carries unchanged from the plan that renders is not refused this
- * way. A source the caller's own transaction removes discards its queued audio, whether the plan
- * that renders or the waiting replacement (carrying it unchanged) holds it: the caller asked for
- * the removal, so this is not an unintended drop. No counter reports the discarded frames yet;
- * issue 1699 is the successor issue for one. A resource cap counts
- * every plan the session still holds and the new one: the running plan, the waiting replacement,
- * and a plan render has displaced until a later call reclaims it. A refusal is
- * MISO_ENGINE_V1_BACKPRESSURE when the new plan fit against the newest held plan alone, so a retry
- * after a render normally commits; the split is approximate, and such a retry may still be refused
- * within a small band (a plan prepared on the adopted replacement differs by a few hundred bytes
- * from one prepared across it). A refusal that does not fit even then is
- * MISO_ENGINE_V1_COMPILE_REJECTED with the cap's diagnostic. When render adopts the new plan, the
- * watermark advances to its revision with MISO_ENGINE_V1_OUTCOME_SUPERSEDED set, and
+ * a replacement waits, with the one exception below. The engine takes the waiting replacement back,
+ * prepares one plan that carries both transactions against the plan that renders, and publishes it;
+ * nothing of the earlier transaction is lost. A source the new plan keeps from the waiting
+ * replacement or from the plan that renders keeps playing: the PCM accepted for it and a seek or
+ * seek_at queued on it move into the new plan, so the host neither refeeds nor reseeks it. An owner
+ * (a strip, an effect, a meter) that the earlier transaction restarted or removed and the new one
+ * puts back in its form in the plan that renders carries from the plan that renders, as one
+ * transaction of both would carry it (issue 1698). A source does not: its declaration changed
+ * against the newest committed session, so the host restarted its feed, and a source the earlier
+ * transaction added, redeclared or removed and the new one does not keep as the waiting replacement
+ * declares it starts fresh in the new plan (generation 1, frame 0, as an added one), also when the
+ * new one puts it back in its form in the plan that renders. No accepted chunk on a ring the
+ * waiting replacement created is dropped across a supersession: when the waiting replacement
+ * created a source's ring (the earlier transaction added the source, or redeclared it) and the
+ * session has accepted PCM, a seek or an end of region for that source since, a new transaction
+ * that does not keep the source as the waiting replacement declares it (it declares it as the plan
+ * that renders does, redeclares it another way, or removes it) is refused with
+ * MISO_ENGINE_V1_BACKPRESSURE before it commits: nothing changes, the waiting replacement stays
+ * published, no event is queued and the revision does not move. Once render adopts the waiting
+ * replacement, a retry commits. A host that does not render keeps getting
+ * MISO_ENGINE_V1_BACKPRESSURE for such a transaction until it renders. A source the waiting
+ * replacement carries unchanged from the plan that renders is not refused this way. A source the
+ * caller's own transaction removes discards its queued audio, whether the plan that renders or the
+ * waiting replacement (carrying it unchanged) holds it: the caller asked for the removal, so this
+ * is not an unintended drop. No counter reports the discarded frames yet; issue 1699 is the
+ * successor issue for one. A resource cap counts every plan the session still holds and the new
+ * one: the running plan, the waiting replacement, and a plan render has displaced until a later
+ * call reclaims it. A refusal is MISO_ENGINE_V1_BACKPRESSURE when the new plan fit against the
+ * newest held plan alone, so a retry after a render normally commits; the split is approximate, and
+ * such a retry may still be refused within a small band (a plan prepared on the adopted replacement
+ * differs by a few hundred bytes from one prepared across it). A refusal that does not fit even
+ * then is MISO_ENGINE_V1_COMPILE_REJECTED with the cap's diagnostic. When render adopts the new
+ * plan, the watermark advances to its revision with MISO_ENGINE_V1_OUTCOME_SUPERSEDED set, and
  * superseded_count grows by the revisions the earlier replacements carried.
  *
  * The source-read clock (issues 1275, 1316). A seek that names a block names it on the plan's

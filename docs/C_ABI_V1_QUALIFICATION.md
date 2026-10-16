@@ -238,11 +238,11 @@ feature added as a protocol message is announced by its protocol capability flag
 protocol flags. A host tests each bit it needs with `&`, tolerates bits it does not know and never
 compares `feature_mask` with `==`. A feature bit protects only a host that resolves the symbol at
 run time: a host that links a symbol directly fails to load against a library that lacks it, before
-it can test anything. The exact mask is asserted by the library's own Rust tests
-(`version_and_capabilities_are_exact` and the constant pins in `abi.rs`), not by the C smoke test:
-`abi_smoke.c` tests one `&` per `MISO_ENGINE_V1_FEATURE_*` symbol (it fails when the library stops
-reporting a defined bit and passes when it reports an extra unknown one) and keeps its compile-time
-pins of the header's constants.
+it can test anything. The library's own Rust tests compare the reported mask with the library's `FEATURE_MASK`
+(`version_and_capabilities_are_exact` and the constant pins in `abi.rs`); the C smoke test does not
+compare the reported mask. `abi_smoke.c` tests one `&` per `MISO_ENGINE_V1_FEATURE_*` symbol (it
+fails when the library stops reporting a defined bit and passes when it reports an extra unknown
+one) and keeps its compile-time pins of the header's constants.
 
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was
@@ -986,7 +986,7 @@ that window is admitted against the plan that renders.
   exported symbol, announced by `MISO_ENGINE_V1_FEATURE_DECLARE_DISCONTINUITY` (the next free bit,
   256) in the capability report, whose feature mask grows to include it; no struct, size or
   `ABI_VERSION` changes. The mask is the OR of every feature symbol and is never compared with a
-  literal (`capi` `abi::tests::masks_and_result_codes_are_frozen` folds the symbols; `abi_smoke.c`
+  literal, except the C smoke test's header-constant pins (`capi` `abi::tests::masks_and_result_codes_are_frozen` folds the symbols; `abi_smoke.c`
   and `header_smoke.cpp` pin the bit inside the mask and the signature, and `abi_smoke.c` calls
   the symbol with a null session for `INVALID_ARGUMENT`). The frozen exported set is now 18
   `miso_engine_v1_*` definitions. It is a session call, serialized with the others; it runs the

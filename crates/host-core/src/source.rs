@@ -221,7 +221,8 @@ impl SourceControlSet {
     ///
     /// `anchor_sample` is on the plan's source-read clock, which every plan swap continues and
     /// which equals the absolute render clock a host renders with in this version (#1316 D1); it
-    /// names when `frame` enters the graph, and the output hears it the plan's latency later. It must be a multiple of the quantum, or the seek is refused with
+    /// names when `frame` enters the graph, and the output hears it the plan's latency later. It
+    /// must be a multiple of the quantum, or the seek is refused with
     /// `source.seek.anchor_unaligned`. The region and generation rules are [`Self::seek`]'s.
     ///
     /// On success the source accepts the new generation's PCM from `frame` at once; submit it

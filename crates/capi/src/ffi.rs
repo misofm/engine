@@ -1742,7 +1742,6 @@ mod tests {
         assert_eq!(query(&mut capabilities), RESULT_OK);
         assert_eq!(capabilities.abi_version, ABI_VERSION);
         assert_eq!(capabilities.exact_launch_rate_mask, 0x0f);
-        assert_eq!(capabilities.feature_mask, 0x3ff);
         assert_eq!(capabilities.feature_mask, crate::FEATURE_MASK);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_SOURCE_SEEK_AT, 0);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_PLAN_WATERMARK, 0);

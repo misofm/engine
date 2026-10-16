@@ -67,14 +67,14 @@ pub enum SourceCommand {
     /// reads source time from `anchor_sample` (issue #1274).
     ///
     /// `anchor_sample` is on the plan's source-read clock -- the absolute sample of source time a
-    /// block reads, which the graph hands its source set each block and every plan swap
-    /// continues; equal to the render clock in this version (#1316 D1) -- and must be a multiple
-    /// of the quantum. The output hears `frame` the plan's latency later. The render consumer holds the
+    /// block reads, which the graph hands its source set each block and every plan swap continues;
+    /// equal to the render clock in this version (#1316 D1) -- and must be a multiple of the
+    /// quantum. The output hears `frame` the plan's latency later. The render consumer holds the
     /// seek until the first block starting at or after the anchor; observed late, it starts at
-    /// `frame + (block start - anchor_sample)`, so the source is in time either way. While the
-    /// seek is held, already queued PCM of the playing generation keeps playing and the new
-    /// generation's first submitted block waits as the pending block, so a host may prime the
-    /// ring from `frame` as soon as the seek is accepted.
+    /// `frame + (block start - anchor_sample)`, so the source is in time either way. While the seek
+    /// is held, already queued PCM of the playing generation keeps playing and the new generation's
+    /// first submitted block waits as the pending block, so a host may prime the ring from `frame`
+    /// as soon as the seek is accepted.
     SeekAt {
         /// The nonzero generation to make audible.
         generation: SourceGeneration,
@@ -1303,11 +1303,11 @@ impl PcmSourceConsumer {
     ///
     /// An anchored seek ([`SourceCommand::SeekAt`]) is held while `source_read_sample` is before
     /// its anchor; the block that starts at or past it applies the seek at `frame +
-    /// (source_read_sample - anchor_sample)` (saturating). While it is held, queued PCM of the playing generation still
-    /// plays, the new generation's first block is kept as the pending block, and with nothing
-    /// playable the block is **held**, not an underrun (the host asked the source to wait; underrun
-    /// means the host owed PCM and did not deliver it). A newer command replaces a held one. This render-path
-    /// operation allocates nothing and never blocks.
+    /// (source_read_sample - anchor_sample)` (saturating). While it is held, queued PCM of the
+    /// playing generation still plays, the new generation's first block is kept as the pending
+    /// block, and with nothing playable the block is **held**, not an underrun (the host asked the
+    /// source to wait; underrun means the host owed PCM and did not deliver it). A newer command
+    /// replaces a held one. This render-path operation allocates nothing and never blocks.
     ///
     /// The block publishes the ring's seek report when a seek applies at it, at the ring's first
     /// block and when a cumulative counter moves ([`SourceSeekReport`], #1316 D3).
