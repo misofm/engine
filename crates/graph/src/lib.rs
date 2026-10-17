@@ -1465,19 +1465,14 @@ pub type GraphRouteGainLaw = fn(curve_db: f32, offset_db: f32) -> f32;
 pub struct GraphFollowRouteSource {
     pub(crate) program: std::sync::Arc<automation::Program>,
     pub(crate) cells: [Option<u32>; 2],
-    #[expect(
-        dead_code,
-        reason = "#1654 T2: the route op's cursor table (T3) reads the route's own row cells"
-    )]
     pub(crate) route_cells: [Option<u32>; GRAPH_ROUTE_ROWS],
     pub(crate) arrival: u64,
     pub(crate) jumps: GraphRouteJumpRule,
-    #[expect(
-        dead_code,
-        reason = "#1654 T2: the route op's gain composition (T3) calls the route's gain law"
-    )]
     pub(crate) gain_law: GraphRouteGainLaw,
     pub(crate) flags: RouteFollowFlags,
+    /// Per route row, whether the predecessor plan holds the same table for it, so a carry keeps
+    /// its cursor verbatim ([`Self::with_continued_rows`]).
+    pub(crate) continued: [bool; GRAPH_ROUTE_ROWS],
 }
 
 impl GraphFollowRouteSource {
@@ -1518,8 +1513,21 @@ impl GraphFollowRouteSource {
                 jumps,
                 gain_law,
                 flags,
+                continued: [false; GRAPH_ROUTE_ROWS],
             },
         )
+    }
+
+    /// This source with `rows[row]` set for each route row (order [`GRAPH_ROUTE_ROWS`]) whose
+    /// table the predecessor plan holds unchanged (#1654 D3, the Carry paragraph): at a plan swap
+    /// that row's cursor carries its event state and heard value verbatim, where every other
+    /// cursor is placed again at the successor's node time and jumps over its own row's length if
+    /// its curve moved. A row the plan does not automate ignores its entry. By default no row
+    /// continues.
+    #[must_use]
+    pub const fn with_continued_rows(mut self, rows: [bool; GRAPH_ROUTE_ROWS]) -> Self {
+        self.continued = rows;
+        self
     }
 
     /// `a(tap)`, the arrival the route's events are timed at.
@@ -1568,6 +1576,10 @@ pub struct GraphFollowRouteControlProducer {
     /// takes `automated` from its own cursors, so a record whose bits differ is refused by the
     /// commit before any write (#1653 D5).
     automated: [bool; 2],
+    /// The bytes of the route op's cursor tables bind allocates (#1654 T3, R19-3: per column with
+    /// a curve, its merged walk's table and its probe twin's), and the largest one.
+    cursor_bytes: u64,
+    cursor_largest: u64,
 }
 
 impl GraphFollowRouteControlProducer {
@@ -1631,6 +1643,7 @@ pub(crate) fn follow_route_control_pair(
         dirty: engine::realtime::DirtyWord::new(),
     });
     let automated = source.flags().automated;
+    let (cursor_bytes, cursor_largest) = runtime::follow_route_cursor_bytes(&source);
     (
         GraphFollowRouteControlBinding {
             node: GraphNodeId::Route {
@@ -1653,6 +1666,8 @@ pub(crate) fn follow_route_control_pair(
             activity_offset_bytes: runtime::route_activity_offset_bytes(activity_routes)
                 .unwrap_or(u64::MAX),
             automated,
+            cursor_bytes,
+            cursor_largest,
         },
     )
 }
@@ -1693,7 +1708,9 @@ pub struct RouteControlResources {
     pub cell_bytes: u64,
     /// Per route: the boxed [`RouteControlLane`], the plan's [`GraphRouteControlBinding`] entry
     /// (held until bind) and the boxed render-side owner bind builds; for a following route the
-    /// boxed [`FollowRouteControlLane`], its [`GraphFollowRouteControlBinding`] and its owner.
+    /// boxed [`FollowRouteControlLane`], its [`GraphFollowRouteControlBinding`], its owner and
+    /// its route op's cursor tables (#1654 T3: per column with a curve, two tables of one cursor
+    /// per curve).
     pub owner_bytes: u64,
     /// The producer tables: one [`GraphRouteControlProducer`] per six-word route and one
     /// [`GraphFollowRouteControlProducer`] per following route.
@@ -1761,6 +1778,10 @@ pub fn route_control_resources(
     let follow_lane = count(core::mem::size_of::<FollowRouteControlLane>());
     let follow_binding = count(core::mem::size_of::<GraphFollowRouteControlBinding>());
     let follow_owner = count(LIVE_FOLLOW_ROUTE_OWNER_BYTES);
+    // #1654 T3: each following route's cursor tables, sized by its own curves.
+    let cursor_bytes = following.iter().fold(0_u64, |sum, producer| {
+        sum.saturating_add(producer.cursor_bytes)
+    });
     let owner_bytes = six
         .saturating_mul(lane.saturating_add(binding).saturating_add(owner))
         .saturating_add(
@@ -1769,7 +1790,11 @@ pub fn route_control_resources(
                     .saturating_add(follow_binding)
                     .saturating_add(follow_owner),
             ),
-        );
+        )
+        .saturating_add(cursor_bytes);
+    for producer in following {
+        largest = largest.max(producer.cursor_largest);
+    }
     let six_producers =
         six.saturating_mul(count(core::mem::size_of::<GraphRouteControlProducer>()));
     let seven_producers = seven.saturating_mul(count(core::mem::size_of::<
@@ -11009,11 +11034,14 @@ mod follow_route_tests {
                 + core::mem::size_of::<GraphRouteControlBinding>()
                 + LIVE_ROUTE_OWNER_BYTES,
         );
+        // #1654 T3: the one-lane source's left column hears one curve: its walk's table and its
+        // probe twin's, one cursor each.
+        let cursors = 2 * size(automation::Composed::<([f32; 2], bool)>::bytes(1));
         let seven_owner = size(
             core::mem::size_of::<FollowRouteControlLane>()
                 + core::mem::size_of::<GraphFollowRouteControlBinding>()
                 + LIVE_FOLLOW_ROUTE_OWNER_BYTES,
-        );
+        ) + cursors;
         let six_table = 2 * size(core::mem::size_of::<GraphRouteControlProducer>());
         let seven_table = 3 * size(core::mem::size_of::<GraphFollowRouteControlProducer>());
         let ids = 2 * (1 + 2 + 3 + 4 + 5);

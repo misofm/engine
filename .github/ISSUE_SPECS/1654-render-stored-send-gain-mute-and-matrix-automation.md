@@ -544,3 +544,68 @@ retarget in between, landing at 1,480 over 256 to the curve at 1,735, grid again
 `a_deferral_holds_the_grid_until_it_fires`, `a_caller_retarget_holds_the_value_grid_until_its_end`,
 and `tests/allocation.rs::the_merged_walk_allocates_nothing` (10,000 blocks, seeks, retargets,
 deferrals: 0 allocations, 0 frees). Realtime policy: 171 marked regions in 35 files (170 before).
+
+## Decision record: T3 (batch 19)
+
+`crates/graph` (the route op, its cursors, the route carry, the source and the charge) and
+`crates/automation/src/compose.rs` (K1, two additions). No six-word route code, byte or bit moved.
+Nothing under `crates/engine/src/realtime/`; no `crates/lane` kernel change.
+
+- **Route op on K1.** `LiveFollowRoute` holds one `RouteColumn` per source column that hears a
+  curve: a `Composed<([f32; 2], bool)>` walk over that column's cursors (source mute of its lane
+  and the route's own mute as `Gate`, gain and the column's two matrix entries as `Value`, each
+  with its row's jump length per block, `GraphRouteJumpLengths::for_row`), a probe twin for the
+  block entry's activity probe, its roles and its carry placement. The two columns' events are
+  merged in offset order (`walk_columns`, over K1's new pull form `start`/`next_event`). One
+  composition, `column_target`: `law(curve, word 0)` when the plan automates the gain, each
+  automated matrix entry from its curve, gate `mute = static mute || route mute curve` (D5) and the
+  column's follow term, `gated_route_coefficients`, the column's entries. A column's entries do not
+  depend on the other column's gate, so the columns compose apart; the route's silence is both
+  columns silent. Retarget per column over the event's own ramp (`ColumnRamps::retarget_column`,
+  replacing `retarget`; `route_mix_column_ramps_block` unchanged). Every #1652 graph test is green
+  unchanged on the new op.
+- **Records.** A record that changes a value word takes each automated value toward the record
+  ramp's completion (`Composed::compose_toward`; gates as heard) and a gate-only record composes
+  with the heard values; a column the record moves is a column jump (`Composed::retarget`: its
+  value cursors defer to the ramp's end, R19-3). A predecessor's last read at a swap composes with
+  the heard values and defers nothing (it is retired).
+- **Carry (D3).** `GraphFollowRouteSource::with_continued_rows([bool; 6])` (new, default none;
+  T4 sets it from `continued_route_rows`). Seven -> seven: per column and role the predecessor's
+  cursor state and heard value are copied; a continued row is kept verbatim, any other cursor is
+  repositioned at the successor's first node time (its target stays the one the column heard; a
+  row the predecessor lacked starts with no target). At the first block: equal column bits leave
+  the ramp; a moved gate retargets the column at once over the mute length (a column jump); moved
+  values alone defer the placed value cursors to the column ramp's first free sample, at once when
+  settled (R19-5, #1711 D1: exact, no flag). Seven -> six keeps `heard_zeroed` over the source
+  mute cursors.
+- **Coordinator question (B lands at an old free time inside A's jump): it can happen, fixed.**
+  K1 now extends a value cursor's pending deferral to the end of a column ramp that another
+  cursor's retarget replaced and outlasts (never shortens; the cursor whose own event it is keeps
+  its cell's rule, so K = 1 stays exactly `CellEvents`: all K1 gates green). Gate:
+  `a_held_value_waits_for_the_end_of_a_jump_that_replaced_the_column_ramp` (red without the
+  extension: block 18). Compatible with the U1 fold to `next_in_run` (a cursor's own discontinuity
+  jump clears its own deferral). `events.rs` is not edited by T3.
+- **K1 additions.** Pull form (`start`, `next_event`; `walk` is built on them); `compose_toward`
+  reads `Gate` cursors as heard and repositions a copy of each value cursor's state at `start`.
+- **Charge.** The producer carries `cursor_bytes` (per column with a curve, two tables of
+  `Composed::bytes(K)`), added to `owner_bytes` and to the largest allocation.
+- **Departure: no graph-level allocation gate.** Linking `bench_support`'s audited allocator into
+  graph's lib test binary makes an existing test abort
+  (`runtime::tests::a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`,
+  green without the allocator). The walk's gate is K1's
+  (`automation/tests/allocation.rs::the_merged_walk_allocates_nothing`); host-core's
+  `route_mute.rs` render gates run the new op for mute-only routes; the send-row render gate is T4.
+
+Gates (`cargo test --locked -p graph --features test-support`, 130 lib tests green), module
+`runtime::send_automation_tests`: `a_flat_send_ride_mixes_the_static_route_bits` (offsets `+0.0`
+and `-0.0`, 40 blocks bit-equal), `a_gain_ride_across_an_unmute_fade_ends_the_fade_at_its_length_and_lands_at_its_end`,
+`a_ride_on_the_left_column_keeps_moving_while_the_right_column_fades`,
+`coincident_send_events_take_the_longest_jump`, `a_hand_offset_record_aims_at_the_curve_at_its_end_and_holds_the_grid`,
+`a_held_value_waits_for_the_end_of_a_jump_that_replaced_the_column_ramp`,
+`a_continued_send_ride_carries_its_cursor_verbatim` (red with no row continued),
+`a_moved_send_table_jumps_over_its_own_length_at_the_first_sample`,
+`a_hand_move_in_flight_at_a_swap_keeps_its_length_and_the_moved_table_lands_after_it`. The route
+op mixes at `FrameLane` on every backend: no bank width applies. host-core `--features
+test-support`: all green. Sizes (x86-64): `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 360 -> 944,
+`GraphFollowRouteSource` 112 -> 120, `GraphFollowRouteControlProducer` 104, `ComposeCursor` 104.
+Realtime policy: 171 regions in 35 files.

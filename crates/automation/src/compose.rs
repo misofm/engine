@@ -121,6 +121,8 @@ pub struct ComposeCursor {
     shown: f32,
     /// Whether the current offset merged an event of this cursor.
     consumed: bool,
+    /// Whether that event was not held (the cursor's own retarget).
+    moved: bool,
 }
 
 impl ComposeCursor {
@@ -212,6 +214,8 @@ pub struct Composed<T> {
     state: CellState,
     target: Option<T>,
     completion: Completion,
+    /// The block begun by [`Self::start`] and its seek mode, until its events end.
+    block: Option<(NodeSpan, SeekMode)>,
 }
 
 impl<T: Composable> Composed<T> {
@@ -260,6 +264,7 @@ impl<T: Composable> Composed<T> {
                 next: None,
                 shown: seed,
                 consumed: false,
+                moved: false,
             });
         }
         Ok(Self {
@@ -267,6 +272,7 @@ impl<T: Composable> Composed<T> {
             state: CellState::new(),
             target: None,
             completion,
+            block: None,
         })
     }
 }
@@ -294,11 +300,19 @@ impl Heard<'_> {
         match self.source {
             Source::Heard => cursor.heard,
             Source::Shown => cursor.shown,
-            Source::Toward { program, start, n } => program
-                .cell(cursor.cell as usize)
-                .map_or(cursor.heard, |cell| {
-                    target_toward(&cell, &cursor.state, start, n)
-                }),
+            // A gate is heard as it is: its value holds until its next jump.
+            Source::Toward { .. } if cursor.kind == CursorKind::Gate => cursor.heard,
+            Source::Toward { program, start, n } => {
+                program
+                    .cell(cursor.cell as usize)
+                    .map_or(cursor.heard, |cell| {
+                        // Read as placed at `start` (a fresh output's first block has not placed
+                        // its cursors yet): the next discontinuity after `start` clips the value.
+                        let mut state = cursor.state;
+                        state.reposition(&cell, start);
+                        target_toward(&cell, &state, start, n)
+                    })
+            }
         }
     }
 }
@@ -346,9 +360,10 @@ impl<T: Composable> Composed<T> {
         compose(self.heard(Source::Heard))
     }
 
-    /// The composition of every curve toward the completion of a ramp of `n` samples from node
-    /// time `start` (the curve at that completion, never past its next discontinuity): the target
-    /// of a record that retargets the output over its own ramp (#1649 D3 on a composed output).
+    /// The composition of every value curve toward the completion of a ramp of `n` samples from
+    /// node time `start` (the curve at that completion, never past its next discontinuity), with
+    /// every gate as heard: the target of a record that retargets the output over its own ramp
+    /// (#1649 D3 on a composed output).
     /// Reads the cursors' positions, so call it at a block entry, after the block's placement.
     pub fn compose_toward(
         &self,
@@ -416,6 +431,7 @@ impl<T: Composable> Composed<T> {
         self.state = other.state;
         self.target = other.target;
         self.completion = other.completion;
+        self.block = other.block;
         true
     }
 
@@ -434,6 +450,7 @@ impl<T: Composable> Composed<T> {
     /// The events of the block `span` in increasing offset, at most one per offset, each passed
     /// to `emit`; `compose` turns the heard values into the output's target. Every cursor's state
     /// advances through the block. A cursor whose cell the program does not hold gives no event.
+    /// [`Self::start`] then [`Self::next_event`] until `None`.
     pub fn walk(
         &mut self,
         program: &Program,
@@ -442,15 +459,36 @@ impl<T: Composable> Composed<T> {
         mut compose: impl FnMut(Heard<'_>) -> T,
         mut emit: impl FnMut(ComposedEvent<T>),
     ) {
+        self.start(program, span, mode);
+        while let Some(event) = self.next_event(program, &mut compose) {
+            emit(event);
+        }
+    }
+
+    /// Begins the block `span`: each cursor pulls its first event. The block's events then come
+    /// out of [`Self::next_event`], one at a time, so a caller can merge several outputs' events
+    /// in offset order (a route's two columns).
+    pub fn start(&mut self, program: &Program, span: NodeSpan, mode: SeekMode) {
         let frames = span.frames();
+        self.block = Some((span, mode));
         for cursor in self.cursors.iter_mut() {
             cursor.next = None;
             cursor.consumed = false;
             cursor.shown = cursor.heard;
             pull(cursor, program, &span, mode, 0, frames);
         }
-        // Each pass merges at least one pulled event, and a cursor gives a bounded number per
-        // block, so the loop ends.
+    }
+
+    /// The block's next event, or `None` at its end (or with no block begun): every offset with
+    /// cursor events is merged and decided in order until one gives the output an event. Bounded:
+    /// each merged offset consumes at least one cursor event.
+    pub fn next_event(
+        &mut self,
+        program: &Program,
+        mut compose: impl FnMut(Heard<'_>) -> T,
+    ) -> Option<ComposedEvent<T>> {
+        let (span, mode) = self.block?;
+        let frames = span.frames();
         while let Some(offset) = self
             .cursors
             .iter()
@@ -467,22 +505,36 @@ impl<T: Composable> Composed<T> {
             // not (every cursor landed itself).
             let column_jump =
                 merged.gate_jump && !landing && event.is_some_and(|event| !event.held);
-            let defer = if column_jump {
+            let retargeted = !landing && event.is_some_and(|event| !event.held);
+            let free = if retargeted {
                 self.state.free_after(self.completion)
             } else {
                 None
             };
-            if let Some(event) = event {
-                emit(event);
-            }
             let next = offset.saturating_add(1);
             for cursor in self.cursors.iter_mut() {
                 cursor.shown = cursor.heard;
                 let value = cursor.kind == CursorKind::Value;
+                // A value cursor deferred to the end of a column ramp that this retarget replaced
+                // and outlasts (another curve's own jump) waits for the new ramp's end instead:
+                // its landing never cuts a ramp short (R19-3). The cursor whose own event this
+                // is follows its own cell's rules.
+                let pending = if cursor.consumed {
+                    cursor.state.deferred_jump()
+                } else {
+                    cursor.before.deferred_jump()
+                };
+                let extend = free.filter(|&free| {
+                    !column_jump
+                        && !cursor.moved
+                        && pending.is_some_and(|at| at > time && at < free)
+                });
+                let defer = if column_jump { free } else { extend };
                 if let (Some(free), true) = (defer, value) {
                     if !cursor.consumed {
-                        // The cursor pulled past this offset before the column jump: replay its
-                        // pull up to here (it gave no event there), then defer and pull again.
+                        // The cursor pulled past this offset before the column ramp changed:
+                        // replay its pull up to here (it gave no event there), then defer and
+                        // pull again.
                         replay(cursor, program, &span, mode, next);
                     }
                     cursor.state.defer_jump(free);
@@ -491,8 +543,14 @@ impl<T: Composable> Composed<T> {
                     pull(cursor, program, &span, mode, next, frames);
                 }
                 cursor.consumed = false;
+                cursor.moved = false;
+            }
+            if event.is_some() {
+                return event;
             }
         }
+        self.block = None;
+        None
     }
 
     /// The output's decision at `offset` (node time `time`) over the events `merged` there;
@@ -578,6 +636,7 @@ fn merge(cursors: &mut [ComposeCursor], offset: u32) -> Merged {
         };
         cursor.next = None;
         cursor.consumed = true;
+        cursor.moved = !event.held;
         cursor.shown = event.value;
         if event.held {
             merged.held = true;
