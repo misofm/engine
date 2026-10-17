@@ -5007,8 +5007,9 @@ pub enum LiveRebuild {
     /// rebuild's preparation refuses it with the row's code; the classifier only routes, so the
     /// refusal has one author and no live commit can ack it first.
     AutomationTarget,
-    /// The stored automation of a row that renders ([`controls::automation_row_renders`]) changes:
-    /// an entry is added, removed, retargeted or given other segments (#1648 D1,
+    /// The stored automation of a row that renders ([`controls::automation_row_renders`]: a
+    /// strip's fader and mute, #1648, #1651) changes: an entry is added, removed, retargeted or
+    /// given other segments (#1648 D1,
     /// [`controls::rendered_automation_changed`]). A plan compiles its cells from the entries at
     /// preparation, so only a successor plan holds the new curve. An entry's hand offset (#1650) is
     /// not part of this comparison.

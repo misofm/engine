@@ -409,3 +409,92 @@ PR #1712).
   test-support`, `-p host-core --features host-core/test-support`, `-p capi`: all pass. fmt,
   clippy (`controls`, `control-plane`, all targets and features) and the no-feature check pass.
 - **Departures.** `automated_cell` is not changed (above). None else.
+
+## Decision record: T3a (batch 18)
+
+- **Shipped (row 6 renders).** `controls::automation_row_renders` is `fader_row || mute_row` (the
+  only reader that gains row 6; T2's fader-only readers are unchanged). New in `controls`:
+  `MUTE_CELL_RULE` (grid 64, `JumpLength::Block`, completion `End`, restartable, seek `Exact`; the
+  caller resolves `LiveRamps::for_row(Mute)`), `mute_row` and `mute_automation` (the
+  `fader_automation` rule on row 6).
+- **Program.** `prepare_fader_automation` pushes every fader cell first (unchanged order), then
+  one mute cell per automated mute lane in strip and channel order. A fader-only session builds
+  the same program; a mute-only session builds mute cells only (the early return already reads
+  `automation_row_renders`). The prepared stage mute of an automated mute lane is
+  `first start_value != 0 || terms`, `terms` seeded with `EffectiveStrip::mute`
+  (`FaderAutomationPlan::mute`, read by `prepared_fader`).
+- **Slot.** `LaneFaderAutomation` gains `mute: [Option<AutomatedMuteCell>; 2]` (cell index,
+  `CellState` seeded with the prepared curve value, `terms`) and `mute_jump`, both from
+  `set_block_time` (`block_jumps` replaces `block_fader_jump` and resolves both rows through
+  `LiveRamps`). A strip with mute automation and no fader automation gets a bank slot and, on the
+  scalar oracle, binds `AutomatedFaderProcessor` (R17-4); the bank resource charges its slots.
+- **Drain branch.** `drain_fader_controls` (bank, block and carry drains) and the oracle's
+  `LiveControlFaderProcessor::drain_controls` give a mute value of an automated channel to
+  `LaneFaderAutomation::mute_terms` (shared helper `apply_mute_value`): it stores `terms`, composes
+  `target != 0 || terms` with the cell's current target and applies `SetMute` over the record's
+  ramp word only when that differs from the stage's mute. A non-automated channel of the same
+  record goes to the stage as before. The commit code does not change.
+- **Driver.** `FaderEventDriver` holds one `MuteCellCursor` per automated mute channel beside the
+  fader cursors (same `a(n)`, same span, same first-block `Set` rule). At each offset the fader
+  cursors push first; then each mute event composes `curve || terms` and pushes `SetMute` only on
+  a change (jump: over the block's mute length; seek `Set`: `0`), into the sink's mute slot, so
+  the stage applies gain before mute. `finish` drains the mute cursors. A mute event in the block
+  makes the fused fader-matrix pair decline that block (its `next_offset` is in the block).
+- **R18-1** holds through the 13b rule and the change-only compare: a seek `Set` that leaves
+  `curve || terms` equal to the stage's mute pushes nothing, so a ramp toward that state finishes.
+- **Export for #1652.** `PreparedBuiltinsSession::strip_mute_cells(&self, track_id: &str) ->
+  Option<(Arc<automation::Program>, [Option<u32>; 2])>`: the plan's one program (`Arc::ptr_eq`
+  with the fader owners') and each lane's mute cell index, `[left, right]`; `None` when the strip
+  automates no mute lane. Read it before lowering (`into_graph_artifact` takes the plan).
+- **Docs.** `host-core/src/live_delta.rs` (step 3 and the `Mute` record paragraph),
+  `host-core/src/prepare.rs` (`LiveRebuild::Automation`), `docs/SESSION_SCHEMA_V1.md` (the mute
+  row renders), `docs/REALTIME_MEMORY.md`.
+- **Superseded tests, rewritten in place.** `crates/host-core/tests/live_delta.rs`
+  (`a_fader_automation_edit_is_a_rebuild`: the three mute asserts expect
+  `Err(LiveRebuild::Automation)`) and `hosts/host-web/tests/control_parity.rs`
+  (`a_fader_automation_edit_rebuilds_alike_on_both_hosts`: the mute entry is `EditPath::Rebuild`).
+  `live_delta.rs` is gated on host-core's `control-provider` feature: run with
+  `--features host-core/test-support,host-core/control-provider` (70 pass).
+- **Gates (all pass).**
+  - `crates/host-core/tests/stored_mute_automation.rs` (new; every form: Simd8 on AVX2, Simd4,
+    scalar oracle; each with no live control, live controls, and between render calls):
+    `a_mute_step_mutes_the_lane_at_its_exact_sample_over_the_mute_length` (steps 0, 1, 0 at 1,000
+    and 2,500, quanta 128, 100 and 37: `SetMute` at exactly those samples over `M = 480`, output
+    bit for bit the stage driven directly; render allocates nothing);
+    `a_curve_that_starts_muted_prepares_the_lane_muted`;
+    `a_seek_that_leaves_the_mute_unchanged_lets_the_unmute_ramp_finish` (R18-1: bit-identical to
+    the no-seek twin; and a seek into the muted span sets the lane exactly, `n = 0`);
+    `a_hand_mute_on_an_automated_lane_composes_with_the_curve` (the drain branch, OQ1 = C);
+    `a_mute_entry_leaves_a_fader_ride_as_it_was`.
+  - `crates/builtins-compiler/src/lib.rs`
+    `tests::the_mute_cells_follow_the_fader_cells_in_the_one_program` (cell order, program bytes,
+    the export, a mute-only program).
+- **Measured.** One-time PR evidence (not committed): a fader-only session (three tracks: a fade,
+  a step and fade, a step; live mutes, a seek; every form; quanta 128 and 100) renders the same
+  bits at base `e7848d05a` and head (FNV digest `a58534af7e8b0509` both). `audit capi`
+  `pcm_digest` `bffc21e857b5e134`, all violation counts 0 (`audit capi` reports no
+  `capi_retained` field). `fader_automation_sizes().lane_slot_bytes` 304 -> 392 (two mute
+  channels and the mute jump word); `program_overhead_bytes` 64 and `offsets_cell_bytes` 120
+  unchanged. `realtime_policy`: ok, 161 marked regions (base 160: `apply_mute_value`).
+- **Departures.**
+  - The slot stores no ramp word and no adoption for a mute channel: the drain uses the ramp word
+    at once and curve events use the block's mute length, so nothing reads them before T4's
+    carry; T4 adds what `adopt` needs.
+  - The defensive refusals of a mute entry use the code `host.automation.mute` (unreachable for a
+    validated session, as the fader's).
+  - `TestOnlyFaderEvent` gains `mute: bool` (the probe records each pushed `SetMute`).
+- **What T3b must add.** A mute event inside a block renders correctly on a lane with no fader
+  automation (all gates above). On a lane with both, the in-block fader cut is missing: after an
+  in-block mute at `o` the fader cursor still pushes its later events as free (the stage only
+  remembers them, and no obligation is set), and after an in-block unmute over `M` the fader
+  events inside `[o, o + M)` are only remembered with no move owed at `E = o + M`, so the lane
+  can end the unmute ramp at a stale gain and the cell's committed target suppresses the
+  correction. T3b: at each pushed `SetMute` at `o` on a channel with a fader cursor, end that
+  channel's fader piece at `o`, start the next at `o + 1` with the hold the `SetMute` gives
+  (muted: held to the block's end; unmute over `M`: `E = o + M`), mark owed events below `E`
+  through the D1.6 obligation and cut at `E`; a gain operation at `o` keeps the old hold (gain
+  before mute). Gate 2 holds it.
+- **For T4.** `LaneFaderAutomation::adopt` does not touch the mute channels yet (a carried lane
+  keeps its prepared mute seed and `terms`, is not fresh, and lands no `Set`); the carry drain
+  already routes an automated channel's mute value to the predecessor slot's `terms`, which
+  composes onto the predecessor's stage before export.

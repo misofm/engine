@@ -10,7 +10,7 @@ channel/frame multiplication and accumulated offset. The borrowed `PlanarBufferM
 slice and scalar shape metadata only. Issue 003 promises contiguous planar `f32`; SIMD alignment
 and AoSoA layout belong to issue 008.
 
-Live parameter delivery is owned by the per-effect `EffectControlLane` (#140 A), fed by the `EffectControlProducer`s prepared with the plan; the protocol crate keeps no automation queue (#1629 deleted it; see `CONTROL_PROTOCOL_SEMANTICS.md`, "Delivery history"). Stored fader automation is a compiled table in the plan (#1646, #1647; the rest of the session's stored automation is owned by #1058): render generates its events from the plan, with no queue. Live fader, mute and pan on the C ABI are owned by #1053, through the same live-control lanes. The plan itself carries no parameter store. (#84 phase C deleted the unused issue-003 slot/event
+Live parameter delivery is owned by the per-effect `EffectControlLane` (#140 A), fed by the `EffectControlProducer`s prepared with the plan; the protocol crate keeps no automation queue (#1629 deleted it; see `CONTROL_PROTOCOL_SEMANTICS.md`, "Delivery history"). Stored fader and mute automation is a compiled table in the plan (#1646, #1647, #1651; the rest of the session's stored automation is owned by #1058): render generates its events from the plan, with no queue. Live fader, mute and pan on the C ABI are owned by #1053, through the same live-control lanes. The plan itself carries no parameter store. (#84 phase C deleted the unused issue-003 slot/event
 store; `PlanEpoch` now lives with the plan exchange, whose publication epochs it names.)
 
 `PreparedRenderPlan` privately separates immutable `PreparedProgram`/`RenderEnvelope` from mutable

@@ -2762,7 +2762,7 @@ fn both_hosts_refuse_a_source_of_more_than_two_channels_alike() {
 
 /// #1648a (D1): adding stored fader automation (builtin row 5, a row that renders) is a rebuild
 /// on both hosts, with the same reply bytes, and both hosts render the same bits across the swap;
-/// an entry on a row that does not render yet (the mute, row 6) commits `model_only` on both.
+/// a mute entry (row 6, which renders since #1651 T3a) rebuilds alike on both.
 /// Both hosts call the one shared classifier, so neither has its own rule for automation edits.
 ///
 /// A changed ride and its removal then rebuild alike too, and both hosts render the same bits
@@ -2849,10 +2849,10 @@ fn a_fader_automation_edit_rebuilds_alike_on_both_hosts() {
         assert_eq!(
             b,
             Verdict::Applied {
-                path: EditPath::ModelOnly,
+                path: EditPath::Rebuild,
                 revision: model.revision + 2
             },
-            "{rate} Hz: a mute entry is model-only"
+            "{rate} Hz: a mute entry rebuilds (#1651 T3a: the mute row renders)"
         );
         same_blocks(&mut browser, &mut c_abi, 8..10, "after the mute entry");
         // #1648b (gate 2's browser leg): a changed ride and a removed ride rebuild alike, and the
