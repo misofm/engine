@@ -1,0 +1,514 @@
+{
+  "schema_version": 1,
+  "session_id": "web-browser-automation",
+  "revision": "1",
+  "sample_rate_hz": 48000,
+  "quantum_frames": 128,
+  "render_profile": {
+    "id": "native",
+    "mode": "single_thread"
+  },
+  "output_profile": {
+    "id": "main",
+    "channels": 2,
+    "sample_format": "f32_planar"
+  },
+  "sources": [
+    {
+      "id": "src-t1",
+      "content": "blake3:08b2490bf336bde77a8e99c5099cf33f98f310f48f015bda3ffe18412427ffc9",
+      "channels": 2,
+      "bit_depth": "32f",
+      "frames": "48000"
+    },
+    {
+      "id": "src-t2",
+      "content": "blake3:83a27b09adbc4ad674939525a95bbe671b15423660508249fc86ee9fea30a1be",
+      "channels": 2,
+      "bit_depth": "32f",
+      "frames": "48000"
+    }
+  ],
+  "console": {
+    "pre_insert": [],
+    "post_insert": []
+  },
+  "tracks": [
+    {
+      "id": "t1",
+      "source_id": "src-t1",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "t2",
+      "source_id": "src-t2",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    }
+  ],
+  "submixes": [
+    {
+      "id": "bus",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0,
+        "smoothing_samples": 0
+      }
+    }
+  ],
+  "vcas": [
+    {
+      "id": "vca",
+      "fader": {
+        "left_db": -2.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "members": [
+        "t1",
+        "t2"
+      ]
+    }
+  ],
+  "control_smoothing": {
+    "kind": "default"
+  },
+  "outputs": [
+    {
+      "id": "main-out"
+    }
+  ],
+  "routes": [
+    {
+      "id": "t1-main",
+      "source": {
+        "kind": "track",
+        "track_id": "t1",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "output_input",
+        "output_id": "main-out"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": false
+    },
+    {
+      "id": "t2-main",
+      "source": {
+        "kind": "track",
+        "track_id": "t2",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "output_input",
+        "output_id": "main-out"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": false
+    },
+    {
+      "id": "t1-bus",
+      "source": {
+        "kind": "track",
+        "track_id": "t1",
+        "tap": "pre_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "bus"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "t2-bus",
+      "source": {
+        "kind": "track",
+        "track_id": "t2",
+        "tap": "pre_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "bus"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": false
+    },
+    {
+      "id": "bus-main",
+      "source": {
+        "kind": "submix",
+        "submix_id": "bus",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "output_input",
+        "output_id": "main-out"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": false
+    }
+  ],
+  "automation": [
+    {
+      "id": "t1-fader",
+      "target": {
+        "owner": "strip",
+        "owner_id": "t1",
+        "section": "builtins",
+        "control": 5,
+        "lane": "both"
+      },
+      "segments": [
+        {
+          "shape": "linear",
+          "start_sample": "256",
+          "end_sample": "2304",
+          "start_value": 0.0,
+          "end_value": -12.0,
+          "unit": "db"
+        },
+        {
+          "shape": "step",
+          "start_sample": "3001",
+          "end_sample": "3601",
+          "start_value": -6.0,
+          "end_value": -9.0,
+          "unit": "db"
+        },
+        {
+          "shape": "linear",
+          "start_sample": "29000",
+          "end_sample": "33000",
+          "start_value": -9.0,
+          "end_value": 3.0,
+          "unit": "db"
+        },
+        {
+          "shape": "step",
+          "start_sample": "34000",
+          "end_sample": "35000",
+          "start_value": 0.0,
+          "end_value": -3.0,
+          "unit": "db"
+        }
+      ],
+      "offset": {
+        "left_db": -1.5,
+        "right_db": 0.0
+      }
+    },
+    {
+      "id": "t1-mute",
+      "target": {
+        "owner": "strip",
+        "owner_id": "t1",
+        "section": "builtins",
+        "control": 6,
+        "lane": "left"
+      },
+      "segments": [
+        {
+          "shape": "step",
+          "start_sample": "0",
+          "end_sample": "1000",
+          "start_value": 0.0,
+          "end_value": 1.0,
+          "unit": "linear"
+        },
+        {
+          "shape": "step",
+          "start_sample": "1600",
+          "end_sample": "4200",
+          "start_value": 0.0,
+          "end_value": 1.0,
+          "unit": "linear"
+        },
+        {
+          "shape": "step",
+          "start_sample": "4800",
+          "end_sample": "29800",
+          "start_value": 0.0,
+          "end_value": 1.0,
+          "unit": "linear"
+        },
+        {
+          "shape": "step",
+          "start_sample": "30600",
+          "end_sample": "33500",
+          "start_value": 0.0,
+          "end_value": 1.0,
+          "unit": "linear"
+        },
+        {
+          "shape": "step",
+          "start_sample": "34000",
+          "end_sample": "36000",
+          "start_value": 0.0,
+          "end_value": 0.0,
+          "unit": "linear"
+        }
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": 0.0
+      }
+    },
+    {
+      "id": "t2-fader",
+      "target": {
+        "owner": "strip",
+        "owner_id": "t2",
+        "section": "builtins",
+        "control": 5,
+        "lane": "right"
+      },
+      "segments": [
+        {
+          "shape": "linear",
+          "start_sample": "1024",
+          "end_sample": "4096",
+          "start_value": -3.0,
+          "end_value": 0.0,
+          "unit": "db"
+        },
+        {
+          "shape": "linear",
+          "start_sample": "29900",
+          "end_sample": "32000",
+          "start_value": 0.0,
+          "end_value": -18.0,
+          "unit": "db"
+        }
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": 0.0
+      }
+    },
+    {
+      "id": "vca-offset",
+      "target": {
+        "owner": "vca",
+        "owner_id": "vca",
+        "section": "own",
+        "control": 1,
+        "lane": "right"
+      },
+      "segments": [
+        {
+          "shape": "linear",
+          "start_sample": "512",
+          "end_sample": "3584",
+          "start_value": 0.0,
+          "end_value": -6.0,
+          "unit": "db"
+        },
+        {
+          "shape": "step",
+          "start_sample": "4096",
+          "end_sample": "4352",
+          "start_value": 2.0,
+          "end_value": 0.0,
+          "unit": "db"
+        },
+        {
+          "shape": "linear",
+          "start_sample": "29500",
+          "end_sample": "31500",
+          "start_value": -4.0,
+          "end_value": 2.0,
+          "unit": "db"
+        },
+        {
+          "shape": "step",
+          "start_sample": "33000",
+          "end_sample": "35500",
+          "start_value": -3.0,
+          "end_value": -3.0,
+          "unit": "db"
+        }
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": -0.5
+      }
+    },
+    {
+      "id": "vca-mute",
+      "target": {
+        "owner": "vca",
+        "owner_id": "vca",
+        "section": "own",
+        "control": 2,
+        "lane": "both"
+      },
+      "segments": [
+        {
+          "shape": "step",
+          "start_sample": "0",
+          "end_sample": "2500",
+          "start_value": 0.0,
+          "end_value": 1.0,
+          "unit": "linear"
+        },
+        {
+          "shape": "step",
+          "start_sample": "2900",
+          "end_sample": "29900",
+          "start_value": 0.0,
+          "end_value": 1.0,
+          "unit": "linear"
+        },
+        {
+          "shape": "step",
+          "start_sample": "30100",
+          "end_sample": "35000",
+          "start_value": 0.0,
+          "end_value": 1.0,
+          "unit": "linear"
+        },
+        {
+          "shape": "step",
+          "start_sample": "35500",
+          "end_sample": "36000",
+          "start_value": 0.0,
+          "end_value": 0.0,
+          "unit": "linear"
+        }
+      ],
+      "offset": {
+        "left_db": 0.0,
+        "right_db": 0.0
+      }
+    }
+  ]
+}

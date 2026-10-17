@@ -2113,6 +2113,124 @@ fn native_set_control_timeline_digest_pins_the_wasm_parity() {
     );
 }
 
+/// The #1669 automation transcript (D2): 96 blocks of 128 frames, one plain session seek to
+/// timeline 30,000 under generation 2 before block 40, one chunk per source before every render.
+/// It returns each block's output (left plane, then right plane). `direct-oracle.mjs`'s
+/// `runAutomationTimeline` replays the same integer PCM formula and chunk schedule.
+fn automation_transcript(document: &[u8]) -> Vec<Vec<f32>> {
+    const QUANTUM: u32 = 128;
+    const RATE: u32 = 48_000;
+    const BLOCKS: u64 = 96;
+    const SEEK_BLOCK: u64 = 40;
+    const SEEK_TIMELINE: u64 = 30_000;
+    // `((f*m) mod 65536 - 32768) / 65536`, exact in `f32`, per source and lane.
+    const SOURCES: [(&[u8], [u32; 2]); 2] =
+        [(b"src-t1", [40_503, 30_011]), (b"src-t2", [52_153, 18_749])];
+    let pcm = |frame: u64, multiplier: u32| -> f32 {
+        let frame = u32::try_from(frame).expect("frame fits u32");
+        let residue = (frame.wrapping_mul(multiplier) & 0xffff) as i32 - 32_768;
+        residue as f32 / 65_536.0
+    };
+
+    let options = WebBootOptions {
+        source_ring_frames: QUANTUM,
+        ..boot_options(QUANTUM)
+    };
+    let mut host = AudioWorkletEngineHost::boot(document, options).unwrap_or_else(|failure| {
+        panic!("boot: {}", String::from_utf8_lossy(failure.diagnostic()))
+    });
+    let mut blocks = Vec::new();
+    for block in 0..BLOCKS {
+        if block == SEEK_BLOCK {
+            assert_eq!(
+                host.session_seek(None, 2, SEEK_TIMELINE, None),
+                RESULT_OK,
+                "the session seek"
+            );
+        }
+        let (generation, start) = if block < SEEK_BLOCK {
+            (1, block * u64::from(QUANTUM))
+        } else {
+            (2, SEEK_TIMELINE + (block - SEEK_BLOCK) * u64::from(QUANTUM))
+        };
+        for (source, multipliers) in SOURCES {
+            let [left, right] = multipliers.map(|multiplier| {
+                (start..start + u64::from(QUANTUM))
+                    .map(|frame| pcm(frame, multiplier))
+                    .collect::<Vec<f32>>()
+            });
+            let planes: [&[f32]; 2] = [&left, &right];
+            assert_eq!(
+                host.submit_source(source, generation, start, RATE, &planes, QUANTUM, false),
+                RESULT_OK,
+                "block {block} submit"
+            );
+        }
+        assert_eq!(host.render_next(), RESULT_OK, "block {block} render");
+        blocks.push(host.output_pcm().expect("prepared output").to_vec());
+    }
+    assert_eq!(host.status().rendered_quanta, BLOCKS);
+    blocks
+}
+
+/// #1669 D3: the stored-automation timeline's native digest. `tests/browser-v1/automation-session.json`
+/// automates every row the engine renders today -- the strip fader (`both` and one lane, with
+/// stored offsets), the strip mute (one lane), the VCA offset and the VCA mute -- with a following
+/// and a non-following send, and is seeked once while it plays (D2). `direct-oracle.mjs` renders
+/// the same session and transcript through the shipped simd128 artifact and asserts its digest
+/// equals the pin this test checks. The digest is over little-endian `f32` words (every left
+/// block, then every right block), so it is a bit comparison.
+///
+/// Test value: red if the simd128 artifact renders an automation event, a composition (fader with
+/// VCA offset, mute OR, the follow gate) or the landing of a plain session seek differently from
+/// x86-64 native. The other artifact-versus-native renders have empty automation.
+#[test]
+fn native_automation_timeline_digest_pins_the_wasm_parity() {
+    use sha2::{Digest, Sha256};
+
+    const QUANTUM: usize = 128;
+    // The fixture file is read verbatim, exactly as `direct-oracle.mjs` reads it.
+    let document = include_str!("../tests/browser-v1/automation-session.json");
+    let blocks = automation_transcript(document.as_bytes());
+
+    // The automation is heard on both sides of the seek: the same session with no entry renders
+    // other bits before the seek and after it.
+    let mut plain = parse_session_json(document).expect("the automation fixture");
+    plain.automation.clear();
+    let plain = automation_transcript(
+        canonical_session_json(&plain)
+            .expect("canonical plain session")
+            .as_bytes(),
+    );
+    assert_ne!(
+        blocks[..40],
+        plain[..40],
+        "automation heard before the seek"
+    );
+    assert_ne!(blocks[40..], plain[40..], "automation heard after the seek");
+
+    let mut digest = Sha256::new();
+    for channel in 0..2_usize {
+        for output in &blocks {
+            for sample in &output[channel * QUANTUM..(channel + 1) * QUANTUM] {
+                digest.update(sample.to_bits().to_le_bytes());
+            }
+        }
+    }
+    let native = engine::hex_lower(&digest.finalize());
+
+    let expected: serde_pin::Pin =
+        serde_pin::read(include_str!("../tests/browser-v1/expected.json"));
+    assert_eq!(
+        native, expected.native_automation,
+        "native and the pinned wasm automation-timeline digest must agree bit for bit"
+    );
+    assert_eq!(
+        native, expected.simd128_automation,
+        "the shipped simd128 artifact renders this automation timeline to the same bits as native"
+    );
+}
+
 /// A three-field reader for `expected.json`, so the test needs no JSON dependency.
 ///
 /// The file is generated by `direct-oracle.mjs` and is machine-formatted, so the two hashes are
@@ -2125,6 +2243,8 @@ mod serde_pin {
         pub(super) simd128_set_control_timeline: String,
         pub(super) native_observation: String,
         pub(super) simd128_observation: String,
+        pub(super) native_automation: String,
+        pub(super) simd128_automation: String,
     }
 
     fn hex_after(text: &str, key: &str) -> String {
@@ -2157,6 +2277,13 @@ mod serde_pin {
                 &text[text
                     .find("\"observationTimeline\"")
                     .expect("expected.json has no observationTimeline")..],
+                "\"pcmF32leSha256\":",
+            ),
+            native_automation: hex_after(text, "\"nativeAutomationPcmF32leSha256\":"),
+            simd128_automation: hex_after(
+                &text[text
+                    .find("\"automationTimeline\"")
+                    .expect("expected.json has no automationTimeline")..],
                 "\"pcmF32leSha256\":",
             ),
         }

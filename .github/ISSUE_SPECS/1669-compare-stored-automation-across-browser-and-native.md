@@ -377,3 +377,34 @@ example `crates/host-core/tests/stored_fader_automation.rs:578`). Do not count t
 - Send-row (route-row) automation (#1654, behind #1718).
 - A following send at a latent tap (an insert with latency) in the oracle fixture.
 - AArch64 and seek-time invariance stay in #1670.
+
+## Decision record: T1+T2 (batch 20)
+
+- **D1 shipped as written.** `hosts/host-web/tests/browser-v1/automation-session.json` has the
+  amendment's sources, tracks, submix, VCA, five routes and five entries with no departure. Every
+  value was accepted: the "0 then 0" and "-3 then -3" steps, the 64-sample jump spacing and the
+  VCA `both` mute lane all parse, validate and prepare (the native pin test boots the file
+  verbatim). Track pan is `left -1.0, right 1.0, smoothing_samples 0` and the bus matrix is the
+  identity with `smoothing_samples 0`, as in `command-session.json` and `builtins-automation.json`.
+  The two `content` digests are placeholders of the valid form (the engine streams the PCM).
+- **D2.** One transcript helper, `automation_transcript` in `hosts/host-web/src/tests.rs`, and its
+  JS twin in `runAutomationTimeline`: the same integer formula and chunk schedule. Every seek,
+  submit and render returns 0 and is asserted on both sides.
+- **D3.** Pin test `native_automation_timeline_digest_pins_the_wasm_parity`; `serde_pin` reads
+  `nativeAutomationPcmF32leSha256` and the `pcmF32leSha256` after `"automationTimeline"`. The test
+  also asserts the automation is heard: the same session with `automation` cleared renders other
+  bits before the seek (blocks 0-39) and after it (blocks 40-95).
+- **Pin discipline.** The native digest and the simd128 oracle digest were read independently
+  before any pin was written (the oracle run against a scratch copy of `expected.json` with a
+  probe pin). Both are
+  `6f82e4668836ea2c7b977f2c322882aea98d73c0dd285caf41e13ccd18186cb6`. The leg's
+  `beforeDisposeStatus.memoryBytes` is 2,949,120 (one 64 KiB page above the other legs; the
+  seek's successor plan is control work).
+- **Script.** `DIGEST_PATHS` gains `("automationTimeline", "pcmF32leSha256")`; the docstring and the
+  comment above it say four digests.
+- **Gates (all green).** `cargo fmt --all`; `cargo clippy --locked -p host-web --all-targets
+  --all-features -- -D warnings`; `cargo check --locked -p host-web --all-targets`;
+  `cargo test --locked -p host-web --features test-support native_` (the four pin tests);
+  `bash scripts/check-web-audioworklet.sh --without-metadata-regeneration ...`;
+  `python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts`
+  and `--self-test` (32 red mutations); `node direct-oracle.mjs` in compare mode.

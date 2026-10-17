@@ -31,8 +31,9 @@ resource row belongs to exactly one class:
   `hosts/host-web/tests/retained_ceilings.rs`.
 
 Everything else in the printed document -- the status snapshots, the result transcripts, the
-SET_CONTROL and observation timelines and the three PCM digests, which `direct-oracle.mjs` has already
-asserted equal to the native digests before printing -- must equal `expected.json` exactly.
+SET_CONTROL, observation and automation timelines and the four PCM digests, which
+`direct-oracle.mjs` has already asserted equal to the native digests before printing -- must equal
+`expected.json` exactly.
 
 `--self-test` proves the comparator discriminates before it is trusted: it fabricates a green
 document at the ceilings, and then requires every red mutation below -- one byte over a ceiling,
@@ -116,12 +117,13 @@ CEILING_ROWS = frozenset(
 
 CEILINGS_KEY = "resourceCeilings"
 
-# The three digests `expected.json` pins. Named here so a report that stops carrying one is a
+# The four digests `expected.json` pins. Named here so a report that stops carrying one is a
 # failure rather than a silently skipped comparison.
 DIGEST_PATHS = (
     ("simd128", "pcmF32leSha256"),
     ("setControlTimeline", "pcmF32leSha256"),
     ("observationTimeline", "pcmF32leSha256"),
+    ("automationTimeline", "pcmF32leSha256"),
 )
 
 
