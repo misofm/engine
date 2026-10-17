@@ -1,7 +1,6 @@
 # Skip the grid walk for step-only automation cells
 
-Placeholder from batch 18 (#1651, #1652; weekly performance pass, phase 2). Root files it and gives it
-a number. Stateless: everything needed is below.
+Filed by root from batch 18 (#1651, #1652; weekly performance pass, phase 2). Stateless: everything needed is below.
 
 ## Problem
 
