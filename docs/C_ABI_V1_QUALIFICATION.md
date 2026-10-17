@@ -153,7 +153,7 @@ untouched, and the host retries. In this slice every revision completes as `exac
 also reports a rebuild that carries a send following a stored mute into one that follows none
 (conservative: it can be set when no send moves at the swap; #1713 removes it; #1652 U2a fold 2).
 It also reports any rebuild that carries an automated following send while a live send move may
-still ramp (conservative; TBD54 removes it; #1654, root rulings B19-R7 and B19-R8).
+still ramp (conservative; #1718 removes it; #1654, root rulings B19-R7 and B19-R8).
 The frozen exported
 set is now 16 `miso_engine_v1_*` definitions;
 `abi_smoke.c` checks the bit against the queried mask and queries a compiled plan with a valid

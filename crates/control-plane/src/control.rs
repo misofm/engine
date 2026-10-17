@@ -647,7 +647,7 @@ pub struct SessionState<A: ControlAdapter> {
     /// superseded nothing.
     pub(crate) observation_forwarded: Vec<ObservationForward>,
     /// The live send moves that may still ramp, as one conservative window (root ruling B19-R7,
-    /// the B17-R14 pattern; TBD54 deletes it): `None` when none may.
+    /// the B17-R14 pattern; #1718 deletes it): `None` when none may.
     pub(crate) send_moves: Option<SendMoveWindow>,
 }
 
@@ -2505,7 +2505,7 @@ where
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
         // candidate's provider epoch.
         let follow_into_six_word = inventory.carries_a_following_route_into_a_six_word_route();
-        // B19-R7/B19-R8 (TBD54 deletes them): the same, for any carried following route that
+        // B19-R7/B19-R8 (#1718 deletes them): the same, for any carried following route that
         // stays following, and for one that loses a curve (its landing joins the window).
         let follow_into_following = inventory.carries_a_following_route_into_a_following_route();
         let follow_loses_a_curve = inventory.carries_a_following_route_that_loses_a_curve();
@@ -2599,7 +2599,7 @@ where
         // transition fallback, whether or not a column moves at the swap: conservative, it
         // over-reports.
         //
-        // B19-R8 (TBD54 deletes this; it widens B19-R7's removed-curve term): a successor whose
+        // B19-R8 (#1718 deletes this; it widens B19-R7's removed-curve term): a successor whose
         // send join carries a following route into a following route may land a carried column
         // at once at the swap (a removed follow curve, or a column that composes otherwise),
         // cutting a live send move still ramping there, which render cannot

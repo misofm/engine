@@ -6501,7 +6501,7 @@ fn an_output_route_entry_is_refused_alike_on_both_hosts() {
     same_blocks(&mut browser, &mut c_abi, 1..3, "after the refusal");
 }
 
-/// Root ruling B19-R10 (send-row rendering is not shipped; #1654 turns it on behind TBD54). A
+/// Root ruling B19-R10 (send-row rendering is not shipped; #1654 turns it on behind #1718). A
 /// session whose send `t1-b` stores automation on its own rows (a `gain_db` ride, a `mute` step,
 /// rides and flat entries on `ll`, `lr`, `rl` and `rr`) behaves exactly as the session without
 /// those entries, as on `main` before batch 19: on both hosts, with `t1-b` six-word (no source

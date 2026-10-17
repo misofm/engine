@@ -1,7 +1,7 @@
 # Land a removed send row exactly across a live move
 
-Placeholder from batch 19 (#1654 U2 review, root ruling B19-R7; controls coordinator, 2026-10-17).
-Phase 2. Root files it. It follows the "split a blocking gate early" practice: #1654 closes on its
+Filed by root from batch 19 (#1654 U2 review, root ruling B19-R7; controls coordinator, 2026-10-17).
+Phase 2. It follows the "split a blocking gate early" practice: #1654 closes on its
 passing gates with a conservative flag, and the exact case moves here.
 
 ## Product outcome

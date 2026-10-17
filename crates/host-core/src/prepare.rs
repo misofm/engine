@@ -772,7 +772,7 @@ impl PlanStateInventory {
     /// ruling B19-R8). `false` for a plan prepared without a predecessor and for a declared
     /// discontinuity, which carries nothing.
     ///
-    /// **Conservative (B19-R8; TBD54 removes it).** Render may land a carried column at once at
+    /// **Conservative (B19-R8; #1718 removes it).** Render may land a carried column at once at
     /// the swap (a removed follow curve, or a column that composes otherwise), so a live send
     /// move still ramping on it is cut. The control plane completes such a
     /// rebuild as [`engine::realtime::CandidateOutcome::TransitionFallback`] while a live send move
@@ -6199,12 +6199,12 @@ fn resolve_route_carry<'a>(
         // one ramp over the longer remaining length). The join cannot tell whether a move is in
         // flight, so it flags every such carry: the conservative rule.
         carry.follow_into_six_word |= follows && !successor_follows;
-        // B19-R7 (TBD54 deletes it): a carried following route that stays seven-word and loses
+        // B19-R7 (#1718 deletes it): a carried following route that stays seven-word and loses
         // a source mute curve lands that column at once over the removed curve's length, cutting
         // a live send move in flight there. The join flags every such carry;
         // the control plane completes it as the fallback while a send move may still ramp.
         carry.follow_loses_a_curve |= follows && successor_follows && loses_a_curve(heard, hears);
-        // B19-R8 (TBD54 deletes it): any carried following route that stays seven-word may land
+        // B19-R8 (#1718 deletes it): any carried following route that stays seven-word may land
         // a column at once at the swap, cutting a live send move in flight there, whether or not
         // it loses a curve. The control plane completes it as the fallback while a send move may
         // still ramp.

@@ -14,8 +14,8 @@ head). Batch R2, after #1651-#1653.
 - **The route-op machinery shipped with batch 19b**: the following route op on K1's merged walk
   (T3), its carry, the U2 fold fixes and the conservative B19-R7/R8/R9 transition-fallback term.
   Its production callers are source-mute and VCA-mute following routes (#1652, #1655).
-- **This issue stays open in phase 2 behind TBD54.** It turns send rows on (route cells, flags
-  bits 6-11, the send-gain offset and the gain law, the send-row gates) after TBD54 lands the
+- **This issue stays open in phase 2 behind #1718.** It turns send rows on (route cells, flags
+  bits 6-11, the send-gain offset and the gain law, the send-row gates) after #1718 lands the
   cut exactly. The decision records below describe the batch 19 attempt; the B19-R10 record at
   the end lists what was removed.
 
@@ -868,7 +868,7 @@ read `size_of`, so no pinned number moved. Realtime policy: 171 marked regions i
 ## Decision record: B19-R7 split (batch 19)
 
 Root ruling B19-R7 after the U2 fold 2 FAIL: the owed landing is removed and the cut it leaves is
-flagged conservatively. TBD54 lands the exact case and deletes the flag. Nothing changed under
+flagged conservatively. #1718 lands the exact case and deletes the flag. Nothing changed under
 `crates/engine/src/realtime/`; no row class or table changed (no SDK regeneration).
 
 - **Render (`crates/graph/src/runtime.rs`).** Deleted `FollowCursors::owed`, `walk_follow`,
@@ -906,7 +906,7 @@ flagged conservatively. TBD54 lands the exact case and deletes the flag. Nothing
   miso_engine_v1.h`, `docs/C_ABI_V1_QUALIFICATION.md`, `hosts/host-web/web/miso-engine-v1-audio-
   worklet-host.d.ts`, `sdk/src/browser/shipped-host.d.ts`: "It also reports a rebuild that carries
   a send into one that no longer hears one of its stored curves while a live send move may still
-  ramp (conservative; TBD54 removes it)."
+  ramp (conservative; #1718 removes it)."
 
 Gates (all green):
 - Graph: `a_removed_send_row_lands_at_once_across_a_move_in_flight` (replaces fold 1's
@@ -966,12 +966,12 @@ Control plane only: no render edit, nothing under `crates/engine/src/realtime/` 
   is on, or which send. A fully applied move whose window has not yet passed `first_sample + ramp`
   by the render clock also flags. Example: R19-5's reposition across a live move keeps the move's
   length bit for bit and is now flagged. A rebuild with no live send move in the window and no
-  ramped send record of its own completes `EXACT`. TBD54 removes the cut and the flag.
+  ramped send record of its own completes `EXACT`. #1718 removes the cut and the flag.
 - **Doc (beside #1713's, one wording on the five surfaces):** `crates/capi/src/abi.rs`,
   `crates/capi/include/miso_engine_v1.h`, `docs/C_ABI_V1_QUALIFICATION.md`,
   `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`, `sdk/src/browser/shipped-host.d.ts`:
   "It also reports any rebuild that carries an automated following send while a live send move may
-  still ramp (conservative; TBD54 removes it)."
+  still ramp (conservative; #1718 removes it)."
 
 Gates (all green; red with the change reverted once):
 - C ABI: `an_unrelated_rebuild_across_a_live_send_move_on_a_riding_send_is_flagged_on_the_c_abi`
@@ -1003,7 +1003,7 @@ Gates (all green; red with the change reverted once):
 On a route column, a value held by an earlier column jump follows the column's current free time and
 never moves earlier (R19-3 (d), T3). It is deterministic and equal to a fresh plan. A single fader cell
 differs: there, a later step's jump replaces the ramp and shortens the hold, so the grid resumes after
-that step's own length. Unifying the two is phase 2 (TBD54, "Related").
+that step's own length. Unifying the two is phase 2 (#1718, "Related").
 
 ## Decision record: B19-R9 (batch 19)
 

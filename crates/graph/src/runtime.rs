@@ -2116,7 +2116,7 @@ impl LiveFollowRoute {
     /// longer one with a coincident gate move, R19-4), also with a column ramp in flight
     /// (B19-R7). With send rows off this is the column jump an uninterrupted gate change makes;
     /// the control plane still marks such a rebuild `TransitionFallback` while a live send move
-    /// may ramp, a conservative over-report (TBD54). Any other move lands at once over the
+    /// may ramp, a conservative over-report (#1718). Any other move lands at once over the
     /// mute length. No landing state survives the carry. A column with no curve compares its
     /// cell's target the same way.
     fn place_carried(&mut self, at: i64) {
