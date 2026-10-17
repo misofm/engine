@@ -2623,9 +2623,10 @@ where
                     )
                 }));
         // The rebuild's own send moves join the window with the commit: its join's records, and
-        // a removed row's landing.
+        // a landing at once at the swap (a removed row's, or one a flagged rebuild may make,
+        // B19-R9), so a second rebuild inside that landing is flagged too.
         let rebuild_send_ramp = match &kind {
-            Rebuild::Transaction(prepared) if follow_loses_a_curve => {
+            Rebuild::Transaction(prepared) if follow_loses_a_curve || send_fallback => {
                 let session = prepared.get().prospective_session();
                 let next = session
                     .compiled()

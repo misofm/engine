@@ -7308,3 +7308,93 @@ fn a_rebuild_carrying_a_following_send_across_a_live_send_move_is_flagged_alike_
         );
     }
 }
+
+/// #1654 root ruling B19-R9 (the B19-R8 check's repro) on both hosts. `t1-b` rides its `gain_db`
+/// (0 to -12 dB; 480-sample landings at quantum 128). A hand gain move of `+3` from 512 over 200
+/// samples is in flight when R1 (the direct route `t1-main` to -3 dB, block 5) rebuilds: it adopts
+/// at 640 flagged (count 1). R2 (`t1-main` to -6 dB, block 7, sample 896) comes after the hand
+/// move ended but inside R1's at-once landing: `TRANSITION_FALLBACK` (count 2). R3 (`t1-main` to
+/// -9 dB, block 16), after every landing ended with no live send move: `EXACT` (count stays 2).
+/// Every block both hosts render the same bits.
+///
+/// Test value: red if either host's flagged rebuild does not fold its own at-once landing into the
+/// send move window (R2 reads `EXACT`), if the window outlives that landing (R3 flagged), or if
+/// the hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_alike_on_both_hosts() {
+    use session::{AutomationShape, ParameterUnit};
+    const RUN: u64 = 24;
+    assert_eq!(QUANTUM, 128);
+    let end = u64::from(QUANTUM) * BLOCKS;
+    let mut model = follow_model(false, false);
+    model.automation.push(send_entry(
+        "t1-b-gain",
+        1,
+        vec![send_piece(
+            AutomationShape::Linear,
+            (0, 0.0),
+            (end, -12.0),
+            ParameterUnit::Db,
+        )],
+    ));
+    let direct = |db: f32| {
+        let mut route = model
+            .routes
+            .iter()
+            .find(|route| route.id.as_str() == "t1-main")
+            .expect("the direct route")
+            .clone();
+        route.gain_db = db;
+        vec![SessionEdit::UpsertRoute { route }]
+    };
+    let hand = send_edit(1, 3.0, Some(200));
+    // (label, rebuild block, edits, outcome, fallback count)
+    let rebuilds = [
+        ("R1", 5, direct(-3.0), capi::OUTCOME_TRANSITION_FALLBACK, 1),
+        ("R2", 7, direct(-6.0), capi::OUTCOME_TRANSITION_FALLBACK, 2),
+        ("R3", 16, direct(-9.0), capi::OUTCOME_EXACT, 2),
+    ];
+    let mut browser = Rig::new(&model);
+    let mut c_abi = CAbi::new(&model);
+    for block in 0..RUN {
+        if block == 4 {
+            both_commit(
+                &mut browser,
+                &mut c_abi,
+                &hand,
+                EditPath::Live,
+                "the hand move",
+            );
+        }
+        let rebuild = rebuilds.iter().find(|rebuild| rebuild.1 == block);
+        if let Some((label, _, edits, _, _)) = rebuild {
+            both_commit(&mut browser, &mut c_abi, edits, EditPath::Rebuild, label);
+        }
+        let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(b, c, "block {block}: the two hosts agree");
+        if let Some((label, _, _, outcome, fallbacks)) = rebuild {
+            let watermark = c_abi.watermark();
+            assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+            assert_eq!(
+                status_watermark(&browser),
+                watermark,
+                "{label}: one watermark"
+            );
+            assert_eq!(
+                watermark.1,
+                block * u64::from(QUANTUM),
+                "{label}: adopted at its submit block"
+            );
+            assert_eq!(watermark.2, *outcome, "{label}: the rebuild's outcome");
+            assert_eq!(
+                (
+                    browser.host.watermark().transition_fallback_count,
+                    c_abi.transition_fallback_count()
+                ),
+                (*fallbacks, *fallbacks),
+                "{label}: the fallback count"
+            );
+        }
+    }
+}

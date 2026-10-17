@@ -12528,3 +12528,54 @@ fn a_send_move_and_a_row_removal_in_one_transaction_are_flagged_on_the_c_abi() {
         );
     }
 }
+
+/// #1654 root ruling B19-R9 (the B19-R8 check's repro) on the C ABI. On [`send_ride_document`]
+/// (quantum 128, 480-sample landings), a hand gain move of `+3` from 512 over 200 samples is in
+/// flight when R1 (the direct route `eq0-main` to -3 dB) rebuilds: R1 adopts at 640 flagged
+/// (count 1), and render may land the riding send at once there over the landing length. R2
+/// (`eq0-main` to -6 dB), submitted at 896 after the hand move ended but inside R1's landing,
+/// completes `TRANSITION_FALLBACK` too (count 2). R3 (`eq0-main` to -9 dB), long after every
+/// landing ended, with no live send move, completes `EXACT` (count stays 2).
+///
+/// Test value: red if a flagged rebuild does not fold its own at-once landing into the send move
+/// window (a second rebuild inside it reads `EXACT`), or if the window outlives that landing.
+#[test]
+fn a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_on_the_c_abi() {
+    let mut rig = Rig::new(&send_ride_document());
+    assert_eq!(rig.quantum, 128);
+    for _ in 0..4 {
+        rig.step();
+    }
+    let (start, _) = live_and_render(&mut rig, &[send_row_edit("gain_db", 3.0, Some(200))], 1);
+    assert_eq!(start, 512, "the hand move starts at 512");
+    let direct = |rig: &mut Rig, db: f32| {
+        let mut route = rig
+            .model()
+            .routes
+            .into_iter()
+            .find(|route| route.id.as_str() == "eq0-main")
+            .expect("the direct route");
+        route.gain_db = db;
+        [SessionEdit::UpsertRoute { route }]
+    };
+    let count = |rig: &Rig| {
+        let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+        assert_eq!(result, crate::RESULT_OK);
+        watermark.transition_fallback_count
+    };
+    // (label, submit block, gain, outcome, fallback count)
+    for (label, block, db, outcome, fallbacks) in [
+        ("R1", 5, -3.0, crate::OUTCOME_TRANSITION_FALLBACK, 1),
+        ("R2", 7, -6.0, crate::OUTCOME_TRANSITION_FALLBACK, 2),
+        ("R3", 16, -9.0, crate::OUTCOME_EXACT, 2),
+    ] {
+        while rig.block < block {
+            rig.step();
+        }
+        assert_eq!(rig.block, block, "{label}: submitted at its block");
+        let edits = direct(&mut rig, db);
+        let (first, _) = rebuild_and_adopt_as(&mut rig, &edits, 1, Some(outcome));
+        assert_eq!(first, block * 128, "{label}: adopted at its submit block");
+        assert_eq!(count(&rig), fallbacks, "{label}: the fallback count");
+    }
+}

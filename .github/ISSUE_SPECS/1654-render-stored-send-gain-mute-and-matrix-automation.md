@@ -991,3 +991,28 @@ On a route column, a value held by an earlier column jump follows the column's c
 never moves earlier (R19-3 (d), T3). It is deterministic and equal to a fresh plan. A single fader cell
 differs: there, a later step's jump replaces the ramp and shortens the hold, so the grid resumes after
 that step's own length. Unifying the two is phase 2 (TBD54, "Related").
+
+## Decision record: B19-R9 (batch 19)
+
+- The fold (root ruling B19-R9, the B17-R15 pattern): a transaction rebuild that the B19-R8 term
+  flags (`send_fallback`) now also folds its own at-once landing into the send move window, as a
+  rebuild that loses a curve already did. In `crates/control-plane/src/control.rs`
+  `rebuild_send_ramp` is `follow_retarget_ramp.max(send_landing_ramp(next))` when
+  `follow_loses_a_curve || send_fallback`. The window then holds (the rebuild's revision, J), so
+  a second rebuild submitted inside the first one's landing is flagged too. Control plane only; no
+  render edit. The doc text keeps its meaning ("whenever any live send move may still ramp") and
+  is unchanged.
+- Gates (`send_ride_document` / `follow_model` with the riding `t1-b` gain, quantum 128, J = 480):
+  a hand `gain_db` `+3` from 512 over 200 samples; R1 (direct route gain -3 dB) adopts at 640
+  `TRANSITION_FALLBACK`, count 1; R2 (-6 dB) at 896, after the hand move ended but inside R1's
+  landing, `TRANSITION_FALLBACK`, count 2; R3 (-9 dB) at block 16 (2,048), no live move, `EXACT`,
+  count 2.
+  - C ABI: `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_on_the_c_abi`
+    (`crates/capi/src/runtime/live_tests.rs`).
+  - Both hosts, same bits every block, one watermark:
+    `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_alike_on_both_hosts`
+    (`hosts/host-web/tests/control_parity.rs`).
+- Red evidence: with the fold reverted (the guard back to `if follow_loses_a_curve`), both gates
+  fail at R2: the C ABI reads outcome 1 (`EXACT`) where 2 (`TRANSITION_FALLBACK`) is expected,
+  and the host parity gate reads "R2: the rebuild's outcome" 1 against 2. Restored, both pass.
+- No other expectation changed.
