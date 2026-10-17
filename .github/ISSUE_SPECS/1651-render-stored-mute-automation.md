@@ -498,3 +498,16 @@ PR #1712).
   keeps its prepared mute seed and `terms`, is not fresh, and lands no `Set`); the carry drain
   already routes an automated channel's mute value to the predecessor slot's `terms`, which
   composes onto the predecessor's stage before export.
+
+## Decision record: T1 gate power check (root, batch 18)
+
+- Each batch 17 mutation was applied again at `0e078aad8`. The nothing-owed gate (P1b at q37) is red
+  under release-only-when-owed and under no-release. The F1 gate is red when the `held_through` reset is
+  deleted, and its rewritten ramping form is red alone.
+- `a_live_write_that_frees_a_held_lane_releases_its_hold` was green under no-release in its T1 form and
+  in its pre-T1 form. It went void at the D1.2 removal (the drain gives the cell no hold), not at T1.
+  The fix puts an offsets write at 3,200 under an 8,000-sample unmute, so the cell holds and owes a move;
+  the lane is then freed at 6,400. The gate is now red under no-release and under
+  release-only-when-nothing-owed, and green on the code.
+- No test catches a free write that keeps the owed flag (deleting `self.owed = false` stays green).
+  Root moved that gap to #1711 (batch 19).
