@@ -12166,9 +12166,9 @@ fn removing_a_send_row_or_its_source_mute_curve_lands_on_the_fresh_plan_on_the_c
 /// `ll` entry, so the send's left source column loses its last curve and lands at once over
 /// `SendMatrix` (240), cutting the move there. The rebuild completes `TRANSITION_FALLBACK`
 /// (count 1). Then: nothing (MAJOR-A); a second rebuild that edits only the direct route
-/// (MAJOR-C: `EXACT`, it loses no curve); or a session seek inside the move, forward or back
-/// (MAJOR-D). From the first block boundary after the move's end and the landing, both planes
-/// are a fresh plan of the committed document, session-seeked to the last adoption or seek. The
+/// (MAJOR-C: also `TRANSITION_FALLBACK` under B19-R8, the move still ramps; count 2); or a
+/// session seek inside the move, forward or back (MAJOR-D). From the first block boundary after
+/// the move's end and the landing, both planes are a fresh plan of the committed document, session-seeked to the last adoption or seek. The
 /// same removal with the move ended long before completes `EXACT` and lands the same way.
 ///
 /// Test value: red if the rebuild completes `EXACT` while the cut move ramps (or is flagged with
@@ -12258,13 +12258,20 @@ fn removing_a_send_row_across_a_live_send_move_is_flagged_and_lands_on_the_fresh
                     .find(|route| route.id.as_str() == "eq0-main")
                     .expect("the direct route");
                 direct.gain_db = -3.0;
+                // B19-R8: the move still ramps, so the unrelated rebuild is flagged too.
                 let (second, after) = rebuild_and_adopt_as(
                     &mut rig,
                     &[SessionEdit::UpsertRoute { route: direct }],
                     BLOCKS,
-                    Some(crate::OUTCOME_EXACT),
+                    Some(fallback),
                 );
                 assert!(second < start + RAMP, "{label}: the move still runs");
+                let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+                assert_eq!(result, crate::RESULT_OK);
+                assert_eq!(
+                    watermark.transition_fallback_count, 2,
+                    "{label}: both rebuilds are flagged"
+                );
                 live = after;
                 (second, second)
             }
@@ -12308,12 +12315,14 @@ fn removing_a_send_row_across_a_live_send_move_is_flagged_and_lands_on_the_fresh
 /// #1654 R19-5 on the C ABI. On [`send_ride_document`], a live send move with its own 4,000
 /// samples (the hand gain offset `+3`, or a D6 `matrix_lr` edit) is in flight when a rebuild
 /// changes the gain ride's table (the carried cursor is repositioned). The rebuild completes
-/// `EXACT`, with no transition fallback; until the move's end every sample is a twin's that took
-/// the same move and no rebuild (the move keeps its length); after the move, the moved row's
-/// jump and the grid ramp after it, the plan renders a fresh plan of the committed document.
+/// `TRANSITION_FALLBACK` (count 1): B19-R8's conservative term flags every rebuild that carries
+/// a following send while a live send move may ramp, though this move is not cut. Until the
+/// move's end every sample is a twin's that took the same move and no rebuild (the move keeps
+/// its length); after the move, the moved row's jump and the grid ramp after it, the plan renders
+/// a fresh plan of the committed document.
 ///
 /// Test value: red if a reposition at the swap cuts the live send move (lands the moved table
-/// at once) or re-times it, or if the rebuild is flagged.
+/// at once) or re-times it.
 #[test]
 fn a_live_send_move_in_flight_at_a_reposition_keeps_its_length_on_the_c_abi() {
     const RAMP: u32 = 4_000;
@@ -12339,7 +12348,12 @@ fn a_live_send_move_in_flight_at_a_reposition_keeps_its_length_on_the_c_abi() {
             automation: changed,
         };
         let writes = rig.current_follow_route_cells();
-        let (adoption, live) = rebuild_and_adopt(&mut rig, std::slice::from_ref(&rebuild), 48);
+        let (adoption, live) = rebuild_and_adopt_as(
+            &mut rig,
+            std::slice::from_ref(&rebuild),
+            48,
+            Some(crate::OUTCOME_TRANSITION_FALLBACK),
+        );
         assert_eq!(
             rig.current_follow_route_cells(),
             vec![0],
@@ -12348,8 +12362,8 @@ fn a_live_send_move_in_flight_at_a_reposition_keeps_its_length_on_the_c_abi() {
         let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
         assert_eq!(result, crate::RESULT_OK);
         assert_eq!(
-            watermark.transition_fallback_count, 0,
-            "{label}: no transition fallback"
+            watermark.transition_fallback_count, 1,
+            "{label}: the conservative transition fallback (B19-R8)"
         );
         while (twin.block as usize) * quantum < adoption as usize {
             twin.step();
@@ -12383,5 +12397,185 @@ fn a_live_send_move_in_flight_at_a_reposition_keeps_its_length_on_the_c_abi() {
             fresh[settled..],
             "{label}: a fresh plan after the landing"
         );
+    }
+}
+
+/// #1654 root ruling B19-R8 (the split verifier's MAJOR-1) on the C ABI. On
+/// [`send_ride_document`] (`eq0-b` rides its gain), a live send move over 4,000 samples (the hand
+/// gain offset `+3`, or a D6 `matrix_lr` edit) is in flight when a rebuild edits only the direct
+/// route `eq0-main`: render may land the riding send's column at once at the swap, so the rebuild
+/// completes `TRANSITION_FALLBACK` (count 1). With the move long finished the same rebuild
+/// completes `EXACT` (with no hand move at all: gate (e) of
+/// `send_row_edits_rebuild_or_commit_as_the_rows_rule_says_on_the_c_abi`).
+///
+/// Test value: red if an unrelated rebuild that carries a following send completes `EXACT` while
+/// a live send move may still ramp (B19-R7's term flagged only a rebuild that loses a curve), or
+/// if it is flagged with no live send move in the window.
+#[test]
+fn an_unrelated_rebuild_across_a_live_send_move_on_a_riding_send_is_flagged_on_the_c_abi() {
+    const RAMP: u32 = 4_000;
+    let document = send_ride_document();
+    // (label, the live send move, its lead before the rebuild in blocks, flagged)
+    for (label, edit, lead, flagged) in [
+        (
+            "the gain offset in flight",
+            send_row_edit("gain_db", 3.0, Some(RAMP)),
+            2,
+            true,
+        ),
+        (
+            "matrix_lr in flight",
+            send_row_edit("matrix_lr", 0.5, Some(RAMP)),
+            2,
+            true,
+        ),
+        (
+            "the move long finished",
+            send_row_edit("gain_db", 3.0, Some(RAMP)),
+            40,
+            false,
+        ),
+    ] {
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (start, _) = live_and_render(&mut rig, std::slice::from_ref(&edit), lead);
+        let now = rig.block * rig.quantum as u64;
+        assert_eq!(
+            now < start + u64::from(RAMP),
+            flagged,
+            "{label}: the move is in flight at the rebuild"
+        );
+        let mut direct = rig
+            .model()
+            .routes
+            .into_iter()
+            .find(|route| route.id.as_str() == "eq0-main")
+            .expect("the direct route");
+        direct.gain_db = -3.0;
+        let outcome = if flagged {
+            crate::OUTCOME_TRANSITION_FALLBACK
+        } else {
+            crate::OUTCOME_EXACT
+        };
+        let _ = rebuild_and_adopt_as(
+            &mut rig,
+            &[SessionEdit::UpsertRoute { route: direct }],
+            1,
+            Some(outcome),
+        );
+        let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(
+            watermark.transition_fallback_count,
+            u64::from(flagged),
+            "{label}: the fallback count"
+        );
+    }
+}
+
+/// #1654 root ruling B19-R8 (the split verifier's MAJOR-2) on the C ABI. The send `eq0-b` hears
+/// flat `ll` (0.5), `rl` (0.1) and `rr` (0.5) entries. One transaction moves `gain_db` to -6 dB
+/// over 4,000 samples, changes the `rl` entry and removes the `ll` entry: it rebuilds, and its
+/// own send move (a join record) is cut where the removed row lands at once. The rebuild
+/// completes `TRANSITION_FALLBACK` (count 1), though no earlier send move is in the window. The
+/// same transaction without the move completes `EXACT`.
+///
+/// Test value: red if the flag reads only the send moves of earlier commits (the window folds the
+/// transaction's own records after the commit), or if a rebuild with no live send move is flagged.
+#[test]
+fn a_send_move_and_a_row_removal_in_one_transaction_are_flagged_on_the_c_abi() {
+    use session::ParameterUnit::Linear;
+    let document = send_rows_document(
+        vec![
+            route_entry("send-ll", "eq0-b", 3, send_flat(0.5, Linear, false)),
+            route_entry("send-rl", "eq0-b", 5, send_flat(0.1, Linear, false)),
+            route_entry("send-rr", "eq0-b", 6, send_flat(0.5, Linear, false)),
+        ],
+        |_| {},
+    );
+    let rows = [
+        SessionEdit::UpsertAutomation {
+            automation: route_entry("send-rl", "eq0-b", 5, send_flat(0.3, Linear, false)),
+        },
+        SessionEdit::RemoveAutomation {
+            automation_id: StableId::parse("send-ll").expect("automation ID"),
+        },
+    ];
+    for (label, moved) in [("the move with the rows", true), ("the rows alone", false)] {
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let mut edits = Vec::new();
+        if moved {
+            edits.push(send_row_edit("gain_db", -6.0, Some(4_000)));
+        }
+        edits.extend(rows.iter().cloned());
+        let outcome = if moved {
+            crate::OUTCOME_TRANSITION_FALLBACK
+        } else {
+            crate::OUTCOME_EXACT
+        };
+        let _ = rebuild_and_adopt_as(&mut rig, &edits, 1, Some(outcome));
+        let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(
+            watermark.transition_fallback_count,
+            u64::from(moved),
+            "{label}: the fallback count"
+        );
+    }
+}
+
+/// #1654 root ruling B19-R9 (the B19-R8 check's repro) on the C ABI. On [`send_ride_document`]
+/// (quantum 128, 480-sample landings), a hand gain move of `+3` from 512 over 200 samples is in
+/// flight when R1 (the direct route `eq0-main` to -3 dB) rebuilds: R1 adopts at 640 flagged
+/// (count 1), and render may land the riding send at once there over the landing length. R2
+/// (`eq0-main` to -6 dB), submitted at 896 after the hand move ended but inside R1's landing,
+/// completes `TRANSITION_FALLBACK` too (count 2). R3 (`eq0-main` to -9 dB), long after every
+/// landing ended, with no live send move, completes `EXACT` (count stays 2).
+///
+/// Test value: red if a flagged rebuild does not fold its own at-once landing into the send move
+/// window (a second rebuild inside it reads `EXACT`), or if the window outlives that landing.
+#[test]
+fn a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_on_the_c_abi() {
+    let mut rig = Rig::new(&send_ride_document());
+    assert_eq!(rig.quantum, 128);
+    for _ in 0..4 {
+        rig.step();
+    }
+    let (start, _) = live_and_render(&mut rig, &[send_row_edit("gain_db", 3.0, Some(200))], 1);
+    assert_eq!(start, 512, "the hand move starts at 512");
+    let direct = |rig: &mut Rig, db: f32| {
+        let mut route = rig
+            .model()
+            .routes
+            .into_iter()
+            .find(|route| route.id.as_str() == "eq0-main")
+            .expect("the direct route");
+        route.gain_db = db;
+        [SessionEdit::UpsertRoute { route }]
+    };
+    let count = |rig: &Rig| {
+        let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+        assert_eq!(result, crate::RESULT_OK);
+        watermark.transition_fallback_count
+    };
+    // (label, submit block, gain, outcome, fallback count)
+    for (label, block, db, outcome, fallbacks) in [
+        ("R1", 5, -3.0, crate::OUTCOME_TRANSITION_FALLBACK, 1),
+        ("R2", 7, -6.0, crate::OUTCOME_TRANSITION_FALLBACK, 2),
+        ("R3", 16, -9.0, crate::OUTCOME_EXACT, 2),
+    ] {
+        while rig.block < block {
+            rig.step();
+        }
+        assert_eq!(rig.block, block, "{label}: submitted at its block");
+        let edits = direct(&mut rig, db);
+        let (first, _) = rebuild_and_adopt_as(&mut rig, &edits, 1, Some(outcome));
+        assert_eq!(first, block * 128, "{label}: adopted at its submit block");
+        assert_eq!(count(&rig), fallbacks, "{label}: the fallback count");
     }
 }

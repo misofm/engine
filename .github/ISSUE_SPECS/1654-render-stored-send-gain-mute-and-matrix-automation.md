@@ -927,3 +927,92 @@ Sizes (x86-64, measured): `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 1,072 -> 952; `GraphLi
 Charges read `size_of`. Realtime policy: 171 marked regions in 35 files (unchanged).
 `scripts/check-graph-policy.sh`: PASS. `check-capi-abi.sh`, `check-sdk-generated.sh`,
 `check-sdk-types.sh`: pass.
+
+## Decision record: B19-R8 (batch 19)
+
+Root ruling B19-R8 after the B19-R7 split verification FAIL (MAJOR-1: any rebuild cuts a live send
+move on an automated following send to `J` at the at-once branch `has_dropped || !any_placed` of
+`place_carried`, flagged `EXACT`; MAJOR-2: a send move and a row removal in one transaction, flagged
+`EXACT` because the flag read the window before the commit folded the transaction's own records).
+Control plane only: no render edit, nothing under `crates/engine/src/realtime/` or in
+`crates/graph/src/runtime.rs`, no row class or table changed (no SDK regeneration).
+
+- **The term (`crates/control-plane/src/control.rs`).** A transaction rebuild completes
+  `TransitionFallback` when `follow_into_six_word` (#1713, unchanged) or when
+  `follow_into_following && (follow_retarget_ramp > 0 || window.may_ramp(watermark, render_clock))`.
+  `follow_into_following` is the new join bit
+  `PlanStateInventory::carries_a_following_route_into_a_following_route` (`crates/host-core/src/
+  prepare.rs`: some carried route follows in both plans, seven-word to seven-word); it includes
+  B19-R7's `carries_a_following_route_that_loses_a_curve`, which now only selects the landing ramp
+  folded into the window. `follow_retarget_ramp` is the transaction's own join records' longest
+  ramp: a rebuild delivers its live send values as join records, so this counts MAJOR-2's own move
+  before the decision (the window still folds them after the commit, as before).
+- **Over-report (stated plainly).** Every transaction rebuild that carries an automated following
+  send is flagged while any live send move of the session may still ramp, or when the rebuild
+  itself writes a send record with a ramp: whether or not render cuts a move, which column the move
+  is on, or which send. A fully applied move whose window has not yet passed `first_sample + ramp`
+  by the render clock also flags. Example: R19-5's reposition across a live move keeps the move's
+  length bit for bit and is now flagged. A rebuild with no live send move in the window and no
+  ramped send record of its own completes `EXACT`. TBD54 removes the cut and the flag.
+- **Doc (beside #1713's, one wording on the five surfaces):** `crates/capi/src/abi.rs`,
+  `crates/capi/include/miso_engine_v1.h`, `docs/C_ABI_V1_QUALIFICATION.md`,
+  `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`, `sdk/src/browser/shipped-host.d.ts`:
+  "It also reports any rebuild that carries an automated following send while a live send move may
+  still ramp (conservative; TBD54 removes it)."
+
+Gates (all green; red with the change reverted once):
+- C ABI: `an_unrelated_rebuild_across_a_live_send_move_on_a_riding_send_is_flagged_on_the_c_abi`
+  (MAJOR-1: a direct-route-only rebuild with the riding send's gain offset or `matrix_lr` move in
+  flight: `TRANSITION_FALLBACK`, count 1; the move long finished: `EXACT`). Red on revert: flags
+  1 (`EXACT`) where 2 was expected.
+- C ABI: `a_send_move_and_a_row_removal_in_one_transaction_are_flagged_on_the_c_abi` (MAJOR-2: one
+  transaction, `gain_db` over 4,000 + upsert `rl` + remove `ll`: `TRANSITION_FALLBACK`; the rows
+  alone: `EXACT`). Red with only the own-ramp operand removed: flags 1.
+- Both hosts: `a_rebuild_carrying_a_following_send_across_a_live_send_move_is_flagged_alike_on_both_hosts`
+  (MAJOR-1, the move long finished, MAJOR-2, MAJOR-2 without the move; one watermark, counts, both
+  hosts bit for bit). Red on revert at MAJOR-1; red with only the own-ramp operand removed at
+  MAJOR-2.
+- Host-core: `the_join_flags_a_following_route_that_loses_a_curve` also asserts the new bit (every
+  seven-to-seven carry, not seven-to-six or six-to-seven). Red with the bit forced off.
+- No live send move stays `EXACT`: gate (e) of
+  `send_row_edits_rebuild_or_commit_as_the_rows_rule_says_on_the_c_abi` and gate 7 of
+  `send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts`, unchanged; the B19-R7
+  "the move ended" cases.
+- Changed expectations (the over-report): MAJOR-C of both B19-R7 gates (the second, unrelated
+  rebuild while the move still ramps) is now `TRANSITION_FALLBACK`, count 2; R19-5 in
+  `a_live_send_move_in_flight_at_a_reposition_keeps_its_length_on_the_c_abi` and in
+  `send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts` is now
+  `TRANSITION_FALLBACK`, count 1 (their bit assertions are unchanged). The other B19-R7 flagged
+  gates stay as they were.
+
+## Defined behaviour: held values on a route column (root, batch 19)
+
+On a route column, a value held by an earlier column jump follows the column's current free time and
+never moves earlier (R19-3 (d), T3). It is deterministic and equal to a fresh plan. A single fader cell
+differs: there, a later step's jump replaces the ramp and shortens the hold, so the grid resumes after
+that step's own length. Unifying the two is phase 2 (TBD54, "Related").
+
+## Decision record: B19-R9 (batch 19)
+
+- The fold (root ruling B19-R9, the B17-R15 pattern): a transaction rebuild that the B19-R8 term
+  flags (`send_fallback`) now also folds its own at-once landing into the send move window, as a
+  rebuild that loses a curve already did. In `crates/control-plane/src/control.rs`
+  `rebuild_send_ramp` is `follow_retarget_ramp.max(send_landing_ramp(next))` when
+  `follow_loses_a_curve || send_fallback`. The window then holds (the rebuild's revision, J), so
+  a second rebuild submitted inside the first one's landing is flagged too. Control plane only; no
+  render edit. The doc text keeps its meaning ("whenever any live send move may still ramp") and
+  is unchanged.
+- Gates (`send_ride_document` / `follow_model` with the riding `t1-b` gain, quantum 128, J = 480):
+  a hand `gain_db` `+3` from 512 over 200 samples; R1 (direct route gain -3 dB) adopts at 640
+  `TRANSITION_FALLBACK`, count 1; R2 (-6 dB) at 896, after the hand move ended but inside R1's
+  landing, `TRANSITION_FALLBACK`, count 2; R3 (-9 dB) at block 16 (2,048), no live move, `EXACT`,
+  count 2.
+  - C ABI: `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_on_the_c_abi`
+    (`crates/capi/src/runtime/live_tests.rs`).
+  - Both hosts, same bits every block, one watermark:
+    `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_alike_on_both_hosts`
+    (`hosts/host-web/tests/control_parity.rs`).
+- Red evidence: with the fold reverted (the guard back to `if follow_loses_a_curve`), both gates
+  fail at R2: the C ABI reads outcome 1 (`EXACT`) where 2 (`TRANSITION_FALLBACK`) is expected,
+  and the host parity gate reads "R2: the rebuild's outcome" 1 against 2. Restored, both pass.
+- No other expectation changed.

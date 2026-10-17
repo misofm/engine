@@ -2508,7 +2508,9 @@ where
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
         // candidate's provider epoch.
         let follow_into_six_word = inventory.carries_a_following_route_into_a_six_word_route();
-        // B19-R7 (TBD54 deletes it): the same, for a carried following route that loses a curve.
+        // B19-R7/B19-R8 (TBD54 deletes them): the same, for any carried following route that
+        // stays following, and for one that loses a curve (its landing joins the window).
+        let follow_into_following = inventory.carries_a_following_route_into_a_following_route();
         let follow_loses_a_curve = inventory.carries_a_following_route_that_loses_a_curve();
         let follow_retarget_ramp = inventory.following_route_retarget_ramp();
         let mut candidate_provider = ProviderEpoch::candidate(
@@ -2600,27 +2602,31 @@ where
         // transition fallback, whether or not a column moves at the swap: conservative, it
         // over-reports.
         //
-        // B19-R7 (TBD54 deletes this): a successor whose send join carries a following route
-        // into a following route that no longer hears one of its row or source mute curves lands
-        // that column at once over the removed row's length, cutting a live send move still
-        // ramping there, which render cannot report. Control cannot tell which column lost the
-        // curve or whether its move is in flight, so such a rebuild completes as the transition
-        // fallback whenever any live send move may still ramp (read here, before the
-        // reservation; a watermark read that gives up counts as "may"). A declared
-        // discontinuity carries nothing. Conservative, it over-reports.
+        // B19-R8 (TBD54 deletes this; it widens B19-R7's removed-curve term): a successor whose
+        // send join carries a following route into a following route may land a carried column
+        // at once at the swap (a removed row or source mute curve, or a column that composes with
+        // no placed value), cutting a live send move still ramping there, which render cannot
+        // report. Control cannot tell which column lands at once or whether its move is in
+        // flight, so such a rebuild completes as the transition fallback whenever any live send
+        // move may still ramp: the transaction's own join records with a ramp (MAJOR-2: they are
+        // not yet in the window, which folds them only after the commit), or a move of the
+        // window (read here, before the reservation; a watermark read that gives up counts as
+        // "may"). A declared discontinuity carries nothing. Conservative, it over-reports.
         let transaction = matches!(kind, Rebuild::Transaction(_));
         let send_fallback = transaction
-            && follow_loses_a_curve
-            && self.send_moves.is_some_and(|window| {
-                window.may_ramp(
-                    self.shared.watermark.read().ok(),
-                    self.publisher.render_clock(),
-                )
-            });
+            && follow_into_following
+            && (follow_retarget_ramp > 0
+                || self.send_moves.is_some_and(|window| {
+                    window.may_ramp(
+                        self.shared.watermark.read().ok(),
+                        self.publisher.render_clock(),
+                    )
+                }));
         // The rebuild's own send moves join the window with the commit: its join's records, and
-        // a removed row's landing.
+        // a landing at once at the swap (a removed row's, or one a flagged rebuild may make,
+        // B19-R9), so a second rebuild inside that landing is flagged too.
         let rebuild_send_ramp = match &kind {
-            Rebuild::Transaction(prepared) if follow_loses_a_curve => {
+            Rebuild::Transaction(prepared) if follow_loses_a_curve || send_fallback => {
                 let session = prepared.get().prospective_session();
                 let next = session
                     .compiled()

@@ -6873,11 +6873,14 @@ fn an_output_route_entry_is_refused_alike_on_both_hosts() {
 /// send's cursors carry verbatim and every block is the never-rebuilt run's, bit for bit;
 /// (R19-5) a live send move with its own 4,000 samples (the hand offset `+3`, or a D6
 /// `matrix_lr` edit) is in flight when a rebuild moves the gain ride's table: until the move's
-/// end every block is the run that took the move and no rebuild. Each rebuild completes `EXACT`
-/// with no transition fallback on either host, and both hosts render the same bits.
+/// end every block is the run that took the move and no rebuild. Gate 7's rebuild completes
+/// `EXACT` with no transition fallback on either host; R19-5's completes `TRANSITION_FALLBACK`
+/// (count 1), B19-R8's conservative term, though its move is not cut. Both hosts render the same
+/// bits.
 ///
 /// Test value: red if a continued ride is repositioned at an unrelated swap (a re-timed ride), if a
-/// reposition cuts or re-times a live send move, or if either rebuild is flagged.
+/// reposition cuts or re-times a live send move, or if gate 7's rebuild (no live send move) is
+/// flagged.
 #[cfg(feature = "test-support")]
 #[test]
 fn send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts() {
@@ -6910,26 +6913,28 @@ fn send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts() {
         };
         SessionEdit::UpsertAutomation { automation: ride }
     };
-    let exact = |browser: &mut Rig, c_abi: &CAbi, label: &str| {
+    let outcome = |browser: &mut Rig, c_abi: &CAbi, label: &str, flagged: bool| {
         let watermark = c_abi.watermark();
         assert_eq!(
             status_watermark(browser),
             watermark,
             "{label}: one watermark"
         );
-        assert_eq!(
-            watermark.2,
-            capi::OUTCOME_EXACT,
-            "{label}: the rebuild is exact"
-        );
+        let expected = if flagged {
+            capi::OUTCOME_TRANSITION_FALLBACK
+        } else {
+            capi::OUTCOME_EXACT
+        };
+        assert_eq!(watermark.2, expected, "{label}: the rebuild's outcome");
         assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+        let count = u64::from(flagged);
         assert_eq!(
             (
                 browser.host.watermark().transition_fallback_count,
                 c_abi.transition_fallback_count()
             ),
-            (0, 0),
-            "{label}: no transition fallback"
+            (count, count),
+            "{label}: the transition fallback count"
         );
     };
     // Gate 7.
@@ -6952,7 +6957,7 @@ fn send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts() {
             "gate 7, block {block}: the never-rebuilt run"
         );
     }
-    exact(&mut browser, &c_abi, "gate 7");
+    outcome(&mut browser, &c_abi, "gate 7", false);
     // R19-5.
     for (label, edits, offset) in [
         ("the gain offset", send_edit(1, 3.0, Some(RAMP)), 3.0),
@@ -6980,7 +6985,8 @@ fn send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts() {
                 "{label}, block {block}: the move runs"
             );
         }
-        exact(&mut browser, &c_abi, label);
+        // B19-R8: the move may still ramp at the rebuild, so it is flagged.
+        outcome(&mut browser, &c_abi, label, true);
     }
 }
 
@@ -7725,7 +7731,8 @@ fn the_reach_pair_cap_bounds_vca_automation_alike_on_both_hosts() {
 /// block 6 removes the `ll` entry: the send's left column loses its last curve and lands at once
 /// over `SendMatrix` (240), cutting the move there. On both hosts the rebuild completes
 /// `TRANSITION_FALLBACK` (one watermark, count 1). Then: nothing (MAJOR-A), a second rebuild before
-/// block 8 that adds a muted, inactive send (MAJOR-C: `EXACT`, it loses no curve), or a session
+/// block 8 that adds a muted, inactive send (MAJOR-C: also `TRANSITION_FALLBACK` under B19-R8, the
+/// move still ramps; count 2), or a session
 /// seek before block 7 inside the move, forward or back (MAJOR-D). From the first block boundary
 /// after the move's end both hosts render, bit for bit, a fresh plan of the committed model fed
 /// and seeked alike. The same removal before block 24, the move long ended, completes `EXACT`.
@@ -7878,9 +7885,11 @@ fn removing_a_send_row_across_a_live_send_move_is_flagged_alike_on_both_hosts() 
                 assert_eq!(watermark.2, outcome, "{label}: the removal's outcome");
             }
             if second && block == rebuild + 2 {
+                // B19-R8: the move still ramps, so the second rebuild is flagged too.
+                assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
                 assert_eq!(
                     c_abi.watermark().2,
-                    capi::OUTCOME_EXACT,
+                    capi::OUTCOME_TRANSITION_FALLBACK,
                     "{label}: the second rebuild"
                 );
             }
@@ -7891,8 +7900,217 @@ fn removing_a_send_row_across_a_live_send_move_is_flagged_alike_on_both_hosts() 
                 browser.host.watermark().transition_fallback_count,
                 c_abi.transition_fallback_count()
             ),
+            {
+                let count = u64::from(flagged) + u64::from(second);
+                (count, count)
+            },
+            "{label}: the fallback count"
+        );
+    }
+}
+
+/// #1654 root ruling B19-R8 on both hosts. MAJOR-1: `t1-b` rides its `gain_db` (0 to -12 dB);
+/// a hand gain move of `+3` over 4,000 samples (before block 4) is in flight when a rebuild before
+/// block 6 adds a muted, inactive send: the rebuild carries the riding send, which render may land
+/// at once at the swap, so it completes `TRANSITION_FALLBACK` (one watermark, count 1). The same
+/// rebuild before block 44 (the move long finished) completes `EXACT` (with no hand move at all:
+/// gate 7 of `send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts`).
+/// MAJOR-2: `t1-b` hears flat `ll`, `rl` and `rr` entries; one transaction before block 4 moves
+/// `gain_db` to -6 dB over 4,000 samples, changes `rl` and removes `ll`: it completes
+/// `TRANSITION_FALLBACK` from its own send move alone; without the move it completes `EXACT`.
+/// Every block both hosts render the same bits.
+///
+/// Test value: red if either host completes a rebuild that carries a following send `EXACT` while
+/// a live send move (an earlier commit's or the transaction's own) may still ramp, if one is
+/// flagged with no live send move, or if the hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_rebuild_carrying_a_following_send_across_a_live_send_move_is_flagged_alike_on_both_hosts() {
+    use session::{AutomationShape, ParameterUnit};
+    const RUN: u64 = 48;
+    const RAMP: u32 = 4_000;
+    let end = u64::from(QUANTUM) * BLOCKS;
+    let flat = |value: f32| {
+        vec![send_piece(
+            AutomationShape::Linear,
+            (0, value),
+            (end, value),
+            ParameterUnit::Linear,
+        )]
+    };
+    let mut riding = follow_model(false, false);
+    riding.automation.push(send_entry(
+        "t1-b-gain",
+        1,
+        vec![send_piece(
+            AutomationShape::Linear,
+            (0, 0.0),
+            (end, -12.0),
+            ParameterUnit::Db,
+        )],
+    ));
+    let mut muted_send = t1_b(&mut riding.clone()).clone();
+    muted_send.id = id("t2-b");
+    muted_send.source = session::RouteSource::Track {
+        track_id: id(T2.id),
+        tap: session::SendTap::PreFader,
+    };
+    muted_send.mute = true;
+    muted_send.follows_mute = false;
+    let unrelated = vec![SessionEdit::UpsertRoute { route: muted_send }];
+    let mut rows = follow_model(false, false);
+    rows.automation.push(send_entry("t1-b-ll", 3, flat(0.5)));
+    rows.automation.push(send_entry("t1-b-rl", 5, flat(0.1)));
+    rows.automation.push(send_entry("t1-b-rr", 6, flat(0.5)));
+    let row_edits = vec![
+        SessionEdit::UpsertAutomation {
+            automation: send_entry("t1-b-rl", 5, flat(0.3)),
+        },
+        SessionEdit::RemoveAutomation {
+            automation_id: id("t1-b-ll"),
+        },
+    ];
+    let mut same_transaction = send_edit(1, -6.0, Some(RAMP));
+    same_transaction.extend(row_edits.iter().cloned());
+    let hand = send_edit(1, 3.0, Some(RAMP));
+    // (label, model, live move block, rebuild block, rebuild edits, flagged)
+    for (label, model, live, rebuild, edits, flagged) in [
+        ("MAJOR-1", &riding, Some(4), 6, &unrelated, true),
+        (
+            "MAJOR-1, the move long finished",
+            &riding,
+            Some(4),
+            44,
+            &unrelated,
+            false,
+        ),
+        ("MAJOR-2", &rows, None, 4, &same_transaction, true),
+        ("MAJOR-2, no move", &rows, None, 4, &row_edits, false),
+    ] {
+        let mut browser = Rig::new(model);
+        let mut c_abi = CAbi::new(model);
+        for block in 0..RUN {
+            if live == Some(block) {
+                both_commit(&mut browser, &mut c_abi, &hand, EditPath::Live, label);
+            }
+            if block == rebuild {
+                both_commit(&mut browser, &mut c_abi, edits, EditPath::Rebuild, label);
+            }
+            let (b, c) = (browser.step(block), c_abi.step(block));
+            assert_eq!(b, c, "{label}, block {block}: the two hosts agree");
+            if block == rebuild {
+                let watermark = c_abi.watermark();
+                assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+                assert_eq!(
+                    status_watermark(&browser),
+                    watermark,
+                    "{label}: one watermark"
+                );
+                let outcome = if flagged {
+                    capi::OUTCOME_TRANSITION_FALLBACK
+                } else {
+                    capi::OUTCOME_EXACT
+                };
+                assert_eq!(watermark.2, outcome, "{label}: the rebuild's outcome");
+            }
+        }
+        assert_eq!(
+            (
+                browser.host.watermark().transition_fallback_count,
+                c_abi.transition_fallback_count()
+            ),
             (u64::from(flagged), u64::from(flagged)),
             "{label}: the fallback count"
         );
+    }
+}
+
+/// #1654 root ruling B19-R9 (the B19-R8 check's repro) on both hosts. `t1-b` rides its `gain_db`
+/// (0 to -12 dB; 480-sample landings at quantum 128). A hand gain move of `+3` from 512 over 200
+/// samples is in flight when R1 (the direct route `t1-main` to -3 dB, block 5) rebuilds: it adopts
+/// at 640 flagged (count 1). R2 (`t1-main` to -6 dB, block 7, sample 896) comes after the hand
+/// move ended but inside R1's at-once landing: `TRANSITION_FALLBACK` (count 2). R3 (`t1-main` to
+/// -9 dB, block 16), after every landing ended with no live send move: `EXACT` (count stays 2).
+/// Every block both hosts render the same bits.
+///
+/// Test value: red if either host's flagged rebuild does not fold its own at-once landing into the
+/// send move window (R2 reads `EXACT`), if the window outlives that landing (R3 flagged), or if
+/// the hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_alike_on_both_hosts() {
+    use session::{AutomationShape, ParameterUnit};
+    const RUN: u64 = 24;
+    assert_eq!(QUANTUM, 128);
+    let end = u64::from(QUANTUM) * BLOCKS;
+    let mut model = follow_model(false, false);
+    model.automation.push(send_entry(
+        "t1-b-gain",
+        1,
+        vec![send_piece(
+            AutomationShape::Linear,
+            (0, 0.0),
+            (end, -12.0),
+            ParameterUnit::Db,
+        )],
+    ));
+    let direct = |db: f32| {
+        let mut route = model
+            .routes
+            .iter()
+            .find(|route| route.id.as_str() == "t1-main")
+            .expect("the direct route")
+            .clone();
+        route.gain_db = db;
+        vec![SessionEdit::UpsertRoute { route }]
+    };
+    let hand = send_edit(1, 3.0, Some(200));
+    // (label, rebuild block, edits, outcome, fallback count)
+    let rebuilds = [
+        ("R1", 5, direct(-3.0), capi::OUTCOME_TRANSITION_FALLBACK, 1),
+        ("R2", 7, direct(-6.0), capi::OUTCOME_TRANSITION_FALLBACK, 2),
+        ("R3", 16, direct(-9.0), capi::OUTCOME_EXACT, 2),
+    ];
+    let mut browser = Rig::new(&model);
+    let mut c_abi = CAbi::new(&model);
+    for block in 0..RUN {
+        if block == 4 {
+            both_commit(
+                &mut browser,
+                &mut c_abi,
+                &hand,
+                EditPath::Live,
+                "the hand move",
+            );
+        }
+        let rebuild = rebuilds.iter().find(|rebuild| rebuild.1 == block);
+        if let Some((label, _, edits, _, _)) = rebuild {
+            both_commit(&mut browser, &mut c_abi, edits, EditPath::Rebuild, label);
+        }
+        let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(b, c, "block {block}: the two hosts agree");
+        if let Some((label, _, _, outcome, fallbacks)) = rebuild {
+            let watermark = c_abi.watermark();
+            assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+            assert_eq!(
+                status_watermark(&browser),
+                watermark,
+                "{label}: one watermark"
+            );
+            assert_eq!(
+                watermark.1,
+                block * u64::from(QUANTUM),
+                "{label}: adopted at its submit block"
+            );
+            assert_eq!(watermark.2, *outcome, "{label}: the rebuild's outcome");
+            assert_eq!(
+                (
+                    browser.host.watermark().transition_fallback_count,
+                    c_abi.transition_fallback_count()
+                ),
+                (*fallbacks, *fallbacks),
+                "{label}: the fallback count"
+            );
+        }
     }
 }
