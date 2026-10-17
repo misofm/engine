@@ -1423,7 +1423,7 @@ fn route_control_resources_cover_the_allocation() {
         let model = two_into_bus(R0, Values { mute: muted, ..R1 });
         let (without, _) = retained(&model, &feeds, false);
         let (with, producers) = retained(&model, &feeds, true);
-        let resources = route_control_resources(&producers);
+        let resources = route_control_resources(&producers, &[]);
 
         let routes = producers.len() as u64;
         assert_eq!(routes, 2);
@@ -1507,7 +1507,7 @@ fn route_control_resources_cover_the_attached_state() {
         .requested_bytes
         .checked_sub(window.released_bytes)
         .expect("the attach frees nothing it did not allocate");
-    let resources = route_control_resources(&producers);
+    let resources = route_control_resources(&producers, &[]);
     assert_eq!(producers.len(), 2);
     assert_eq!(
         resources.activity_bytes, 0,

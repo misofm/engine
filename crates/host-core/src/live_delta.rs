@@ -56,8 +56,9 @@ pub fn take_fast_classification_count() -> usize {
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
 use crate::prepare::{
     EffectiveDiff, LevelRecords, LevelRules, OutOfDomain, RouteEditRamps, StripChange,
-    StripEditRamps, effect_instance_records, input_records, level_differs, level_records_between,
-    matrix_record, route_record_between, route_source_strip, same_params, strip_at,
+    StripEditRamps, effect_instance_records, follows_automated_mute, input_records, level_differs,
+    level_records_between, matrix_record, route_record_between, route_source_strip, same_params,
+    strip_at,
 };
 use crate::prepare::{GraphJumpLengths, LiveRampRow, LiveRamps, MonitorBase, session_jump_lengths};
 
@@ -1467,11 +1468,21 @@ fn lower<'a>(
 /// # Errors
 ///
 /// [`LiveRebuild::Domain`] when either value set is outside the route domain, or a ramp is longer
-/// than the cell's maximum.
+/// than the cell's maximum. [`LiveRebuild::RebuildOnly`] for a route the plan gives the seven-word
+/// cell of a following route (#1652 D1): its live record is #1653's, and until it lands a rebuild
+/// prepares the successor's cell from the committed model and the send join writes its
+/// seven-word record (#1652 D3), so no commit writes a six-word record to a route that has no
+/// six-word cell. Automation is structure for a value transaction, so the predicate reads the
+/// view's structure.
 fn route_records<'a>(
     ctx: &Context<'_>,
     target: &RouteTarget<'_, 'a>,
 ) -> Result<Option<LiveRouteRecord<'a>>, LiveRebuild> {
+    if follows_automated_mute(ctx.next.structure(), target.after) {
+        return Err(LiveRebuild::RebuildOnly(
+            controls::RebuildReason::RuledLiveNotBuilt { issue: 1653 },
+        ));
+    }
     Ok(route_record_between(
         ctx.ramps,
         target.before,

@@ -350,3 +350,364 @@ Checked against `ad03780ee`. The filed text above stays; where it disagrees, thi
 bits (6 and up), the per-event composition and the in-block retarget. It needs the seven-word
 predicate widened to routes with automated rows, and carried cursor state by `(route, row)` for
 curves that move on the grid; this slice's mute cursors are not carried.
+
+## Decision record: #1652a (batch 18)
+
+Tranche R1: the seven-word cell types, the graph -> automation edge and a public `route_values`.
+No render behaviour: no route op evaluation, no attach, no carry.
+
+- **Shipped (`crates/graph/src/lib.rs`).** `FOLLOW_ROUTE_CELL_WORDS = 7`; `RouteFollowFlags` (bit 0
+  `mute`, 1 `follows_mute`, 2-3 `terms[L, R]`, 4-5 `automated[L, R]`; `from_word` refuses any bit
+  from 6 up) with `gate(curve)`, D2's composition
+  `follow_zeroed[lane] = follows_mute && ((automated[lane] && curve[lane]) || terms[lane])`;
+  `FollowRouteControlRecord` (open `RouteTransform`, flags, length; refuses a length over
+  `ROUTE_RAMP_LENGTH_MAXIMUM` and a non-finite transform word) with `to_words`/`from_words`;
+  `FollowRouteLane` (`LatestCell<7>` + dirty word), `FollowRouteControlLane` (render reader half,
+  with `read(snapshot)`), `GraphFollowRouteControlBinding`, `GraphFollowRouteControlProducer`
+  (`write`, `test_only_write_count`), and `follow_route_control_pair`, the one builder of a
+  binding/producer pair, for #1652c's attach.
+- **Render state (`crates/graph/src/runtime.rs`).** `LiveFollowRoute`, its own boxed type beside
+  `LiveRoute` (ramp, position, mute, delayed, route index, transform, flags, control lane);
+  `LiveRoute` is unchanged. #1652b adds its cursors and its constructor.
+- **Charge.** `route_control_resources(producers, following)` charges each kind its own cell,
+  owner and producer bytes and the activity table once; with `following` empty it is the old sum
+  term for term. New `LIVE_FOLLOW_ROUTE_OWNER_BYTES`. Measured (x86-64): six-word cell 144,
+  seven-word cell 168; `LIVE_ROUTE_OWNER_BYTES` 72 (unchanged), `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 96
+  (grows with #1652b's cursors, charged by `size_of`); both lanes 32, both bindings 64, both
+  producers 72.
+- **Departure.** The signature change of `route_control_resources` is a mechanical caller update
+  at `crates/host-core/src/prepare.rs` (one call), `crates/host-core/tests/live_routes.rs` and
+  `crates/graph-compiler/tests/live_routes.rs` (pass `&[]`); the last two are outside this slice's
+  listed paths. `RouteFollowFlags::gate` is the pure composition #1652b and #1652c both call; it
+  lands here with its test.
+- **Edge.** `crates/graph/Cargo.toml`, `Cargo.lock`, `scripts/check-graph-policy.sh` (the pin) and
+  `scripts/test-graph-policy.sh` (the fixture manifest and the partial-output awk shim) gain
+  `automation` only. No source in graph uses it yet; #1652b's cursors do.
+- **`route_values`** is `pub` and re-exported from `graph_compiler`.
+- **Dead-code expects (gone by the PR boundary):** `LiveFollowRoute` (struct, "bound and read by
+  #1652b route op"); `FollowRouteControlLane::read` (non-test, "read by #1652b route op");
+  `follow_route_control_pair` (non-test, "called by #1652c route attach").
+- **Gates.** `crates/graph/src/lib.rs` `follow_route_tests`:
+  `the_flags_word_round_trips_its_six_bits_and_refuses_every_other_bit`,
+  `the_gate_follows_the_curve_only_on_an_automated_lane`,
+  `the_record_round_trips_its_seven_words_and_refuses_out_of_bounds_words`,
+  `the_producer_write_reaches_the_binding_under_the_published_revision`,
+  `the_charge_counts_each_kind_its_own_bytes_and_the_activity_table_once`; all pass. The six-word
+  charge stays held by graph-compiler's `route_control_resources_cover_the_allocation`. The
+  realtime policy reports 164 marked regions (main: 160; four new).
+
+## Decision record: #1652b (batch 18)
+
+Tranche R2: the following route op in render. All in `crates/graph`; no attach, no carry.
+
+- **Shipped (`crates/graph/src/lib.rs`).** `GraphMuteJumpLength = fn(GraphJumpLengths) -> u32`, the
+  mute row's rule host-core hands in, so graph never spells the row. `GraphFollowRouteSource` (the
+  plan's `Arc<automation::Program>`, `cells[L, R]`, `a(tap)`, the jump rule, the seeded flags);
+  `new` refuses no automated lane, a cell outside the program and `flags.automated` that disagree
+  with `cells`. `GraphFollowRouteControlBinding` gains `source`, and `follow_route_control_pair`
+  takes it. A plan field `follow_route_controls` (empty until #1652c's attach) goes to bind.
+- **Render (`crates/graph/src/runtime.rs`).** `LiveFollowRoute::new` seeds each automated lane's
+  `CellState` with its curve's first `start_value` and settles the ramp on
+  `gated_route_coefficients(transform, flags.gate(curve))`, with the plan's `automated`.
+  `NodeKind::LiveFollowRoute`. `node_kind` takes a following lane before a six-word lane; both
+  planning-metadata forms count it as a live route (it never folds); bind gives it its activity
+  index and `delayed` flag. `begin_block`: read the cell; compose with the curve the route has
+  heard; retarget over the record's ramp only on a bits change; take the block's spans from
+  `node_span(a(tap))` (a fresh route's first block lands a `Set` at 0 where the curve differs from
+  the seed, as the strip's fresh lane); then decide activity. `mix`: walk both lanes'
+  `CellEvents` (`SeekMode::Exact`) in offset order, compose at each offset, and retarget only on a
+  bits change: mix `[from, o)`, `IndexedRamp::new(coefficients_at(position), target, J or 0)`,
+  continue. The six-word `LiveRoute` and its arm are unchanged.
+- **Activity (exact).** Active when the route is not muted-settled-undelayed at entry. Otherwise
+  a dry walk over copies of the cursors (`CellState` is `Copy`) finds out whether some change leaves
+  it not muted-settled. An inactive block commits the copies. No change in such a block retargets,
+  because every silencing target is `[+0.0; 4]`. A route that unmutes at `o` mixes the whole
+  block; `[0, o)` mixes the silent coefficients, which can contribute only a signed zero.
+  *Corrected by U2a fold 1 (MAJOR-1):* that signed zero reached the destination (`-0.0` where the
+  block split at `o` gives `+0.0`). The route op now reports its activation offset `o`, and the
+  destination leaves the route out of `[0, o)`; see the fold record below.
+- **Choices.** (1) Events of both lanes at one offset compose once; the length is 0 when one of
+  them is a `Set` (a seek is exact). (2) The `mute` flag follows every composition; only the
+  coefficients' bits decide a retarget. (3) The jump length is clamped to
+  `ROUTE_RAMP_LENGTH_MAXIMUM`. (4) With no timeline, no jump-length cell, or a span at the `i64`
+  edge, the block has no events and the curve holds (the fader driver's rule). (5) A held grid
+  event changes no curve.
+- **R18-4 (root).** No `TransitionFallback` for a route edit. A route retargets only on its own
+  curve's jump or on its own cell's record, so no carried live move is stretched or cut by a
+  rebuild, and B17-R14's window reads no route. *Withdrawn for routes by R18-5 (U2a fold 1):* with
+  one shared ramp, a gate change of one source column restarted the whole ramp, so an open
+  column's move was re-timed (MAJOR-2) and per-lane events closer than `J` stretched the earlier
+  column (MINOR-1). Per-column ramps make the reason true: a gate change retargets its own column
+  only, so no other column's move is stretched or cut.
+- **Owner bytes (x86-64).** `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 96 -> 296 (cursors, spans, program
+  `Arc`, arrival, rule); `GraphFollowRouteControlBinding` 64 -> 112 (`GraphFollowRouteSource` 48).
+  Both are charged by `size_of`. `LIVE_ROUTE_OWNER_BYTES` stays 72.
+- **Gates (`crates/graph/src/runtime.rs` `follow_route_op_tests`, all pass).** Gate 3:
+  `a_retarget_inside_the_block_equals_the_block_split_at_its_offset` (o in {1, 63, 64, 127} at
+  q = 128, {1, 63, 64, 99} at q = 100, against a kernel-level split reference and against the op
+  run as two blocks); `a_route_inactive_at_block_entry_that_unmutes_inside_the_block_mixes_the_rest`;
+  `the_event_lands_where_the_tap_carries_the_curve_sample` (`a(tap) = 64`);
+  `an_event_that_changes_no_target_bit_retargets_nothing`;
+  `a_seek_sets_the_target_exactly_where_it_reaches_the_tap`;
+  `the_bound_target_composes_the_curves_first_values`. In `lib.rs` `follow_route_tests`:
+  `the_source_refuses_no_lane_a_missing_cell_and_disagreeing_flags`. Red checks (temporary
+  mutations, reverted): retarget from the target or from the ramp's start -> gate 3 red; events
+  timed at arrival 0 -> the tap case red; activity decided at entry -> the unmute case red; always
+  active -> the same case red; no bits guard -> the guard case red; a seek ramping over `J` -> the
+  seek case red. None depends on a bank width (the route op mixes at `FrameLane`).
+- **Realtime policy.** 165 marked regions (164 before; one new: the cursors, the walk, the block
+  entry and the mix). `follow_route_control_pair` keeps its dead-code expect until #1652c.
+- **For #1652c (attach).** Pass `GraphFollowRouteSource::new(program, cells, a(tap), rule,
+  flags)`: the program and the two mute cell indices from #1651's export; `a(tap) =
+  floored_input_arrival(report.input_arrivals, route node)`; rule = a non-capturing
+  `|l| LiveRamps::from_lengths(l.fader_samples, l.mute_samples, l.pan_samples).for_row(LiveRampRow::Mute)`;
+  the seeded flags (route mute, `follows_mute`, `terms` from `controls::effective`, `automated ==
+  cells`). Fill `follow_route_controls`, leave those routes out of `route_controls`, and charge
+  them. The carry (`live_route_rows`, `carry_live_routes`, D3) does not list following routes yet.
+
+## Decision record: #1652d graph carry (batch 18)
+
+Tranche R5a: the graph side of D3 (carry). All in `crates/graph`; host-core's join records are a
+later tranche (after #1653).
+
+- **Shipped (`crates/graph/src/runtime.rs`).** `live_route_rows`, `is_live_route`,
+  `can_carry_live_routes` and `carry_live_routes` take a live route of either kind, so a route
+  present in both plans carries by route ID whatever its kind in either plan (six -> six, six ->
+  seven, seven -> seven, seven -> six). One per-move function, `carry_route`, applies the
+  predecessor's pending value under every snapshot (six-word `apply_pending`, seven-word
+  `apply_cell`, the cell half of the block entry factored out), then the successor takes ramp,
+  position and mute. Six -> six still runs `LiveRoute::adopt`, unchanged, so its bits hold.
+- **Seven-word successor.** `LiveFollowRoute::adopt` marks the route `FollowStart::Carried` (the old
+  `fresh: bool` is now `Fresh | Carried | Running`). The follow cursors do not carry: the
+  successor's own unplaced cursors are placed at its first block's `τ_tap`, and each automated
+  lane is seeded with `value_at(span.start)` there (no fresh `Set`). The block entry now takes the
+  spans first, then the cell (the join's record, if any, applies first through the cell and
+  composes with the curve at `τ_tap`), then compares the composed target with the adopted ramp's
+  target and retargets from `coefficients_at(position)` over the block's mute jump length only on a
+  bits change. For a fresh or running route the new order changes nothing: the spans step reads no
+  state the cell writes. The block's jump length is now resolved whenever the block has jump
+  lengths, even with no node span; with no span the block has no events, so only the carried
+  comparison reads it.
+- **Six-word successor of a seven-word predecessor (the curve removed).** The swap block has no
+  jump lengths, so the comparison waits for the first block, and a six-word route holds no mute
+  rule. At the swap, `carry_route` reads the successor's prepared target and mute (its bound,
+  settled ramp: it has rendered no block), adopts the state with `LiveRoute::adopt_state`, and when
+  the bits differ leaves a `SixWordCarryCheck { prepared, mute, mute_jump }` (the predecessor's
+  host-core mute rule) in that move's `RouteCarryStep`. With equal bits it takes the prepared mute
+  and leaves nothing. Render's first block after the swap (`GraphExecutor::render`, before the
+  units, under `route_carry_pending`) runs `finish_route_carry`: per check, the route's cell first
+  (`apply_pending` under the block's snapshot); with a record applied, the record governs (it is
+  this plan's own value); without one, `retarget_carried` to the prepared target over
+  `mute_jump(block lengths)` (clamped to `ROUTE_RAMP_LENGTH_MAXIMUM`, `0` with no lengths) on a bits
+  change. A send the curve held muted therefore reopens over the session mute length.
+- **Bytes.** `LIVE_ROUTE_OWNER_BYTES` and `LIVE_FOLLOW_ROUTE_OWNER_BYTES` are unchanged (the
+  amendment's "every six-word route keeps its bytes"): the check lives in the carry section's move
+  table, `carry_routes: Box<[RouteCarryStep]>` (move + `Option<SixWordCarryCheck>`, about 40 bytes
+  on x86-64 against 8 before), allocated by `install_route_carry` on the control thread and charged
+  by `route_carry_retained_bytes`, the one place the charge is spelled. *Corrected by U2a fold 1
+  (MINOR-3):* `RouteCarryStep` is back to 8 bytes; the checks live in a side table. The executor and its layout
+  twin gain one `route_carry_pending: bool`.
+- **No `TransitionFallback` (R18-4; reason corrected by R18-5, U2a fold 1).** With per-column
+  ramps the reason below holds column by column: a carried column whose target bits do not change
+  keeps its own ramp, length and position, whatever the other column does. The carry never
+  stretches or cuts a move. A carried ramp
+  whose target bits do not change keeps its own ramp and length. A changed target is either the
+  join's record (its own rule and length, as at any block entry) or the curve's own jump at the
+  successor's node time over the session mute length, which an uninterrupted plan would make at a
+  curve event (for seven -> six: the jump the removed curve's absence makes, the same length).
+- **Realtime.** The swap and the first block copy bounded fields and compare bits: no allocation,
+  free, lock, syscall or new panic path. Every new render function sits in an existing marked
+  region; the realtime policy reports 165 marked regions (unchanged).
+- **Hook for the host-core join (#1652 D3, after #1653).** None new: the join feeds the successor's
+  own cell before the swap. For a seven-word successor it writes the seven-word record from
+  `route_record_between` through the successor's `GraphFollowRouteControlProducer::write` under the
+  carry's stamp (today's loop at `prepare.rs` writes only `route_controls`; a seven-word successor
+  with a retarget would fail there with `host.control.order` and must go to the follow producer).
+  For a six-word successor it writes the six-word record as today. Render applies the record first
+  at the successor's first block and then compares. `resolve_route_carry` needs no change: the
+  rows now list following routes.
+- **Departure.** The alloc half of the gate is not in graph: linking `bench_support::alloc` into the
+  graph lib test binary installs the audited allocator for every unit test, and
+  `a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit` then aborts. The
+  route op is `pub(crate)` and following routes cannot be attached from outside graph before
+  #1652c, so the swap-block `allocations == 0 && frees == 0` gate stays with host-core gate 4. A
+  seven -> six successor's first block calls `apply_pending` twice (once in `finish_route_carry`,
+  once in its op), so the test-only drain-call counter counts two calls for that route in that
+  block; the applied count is exact.
+- **Gates (`crates/graph/src/runtime.rs` `follow_route_op_tests::carry`, all pass).**
+  `six_to_seven_keeps_the_ramp_state_by_route_id` ((a) a pure re-adoption mid-ramp equals the
+  never-swapped twin bit for bit and keeps ramp and position; (b) a curve on at the swap ramps from
+  where the route is over the mute length); `seven_to_seven_mid_ramp_keeps_its_position`;
+  `seven_to_six_reopens_a_send_the_removed_curve_held_muted`. Red checks (temporary mutations,
+  reverted): no adopt into a seven-word successor -> six->seven and seven->seven red; no bits
+  guard on the carried comparison -> the same two red; cursor not seeded at `τ_tap` -> six->seven
+  (b) red; carried comparison as a step -> six->seven (b) red; six-word comparison missing ->
+  seven->six red. Six -> six carry keeps today's code path; `host-core` `route_mute` (9) and
+  `live_routes` (13) pass.
+
+## Decision record: #1652c (batch 18)
+
+Tranche R3: the host-core attach, the seven-word record builder and the swap join. No render code
+(`crates/graph/src/runtime.rs` untouched).
+
+- **Attach (`crates/host-core/src/prepare.rs`).** `follows_automated_mute(model, route)` is the
+  one predicate: a route into a submix whose source strip has a mute entry
+  (`controls::mute_automation`, the entries the builtins plan compiles mute cells from). Before
+  lowering, preparation reads `PreparedBuiltinsSession::strip_mute_cells` for each such route and
+  seeds its flags (route `mute`, `follows_mute`, `terms = controls::effective`'s source-lane mute
+  under the plan's overlay, `automated == cells`). After compile it builds
+  `GraphFollowRouteSource::new(program, cells, floored_input_arrival(input_arrivals, route node),
+  follow_mute_jump, flags)`. `follow_mute_jump` is a plain fn:
+  `LiveRamps::from_lengths(f, m, p).for_row(LiveRampRow::Mute)`, in its own realtime-policy
+  region. The attach gives a following lane on every plan, whatever the live options (six-word
+  lanes still only with live controls and `lanes.routes`), and leaves those routes out of
+  `route_controls`. A plan with no following route and no live lane calls no attach and binds what
+  it bound before. Every preparation runs inside #1709's `CanonicalFpEnv` (R17-7); no new guard.
+  A count mismatch between the predicate and the attached lanes is `host.route_control.attach`
+  (unreachable for a validated session).
+- **Graph (`crates/graph/src/lib.rs`, small).** `PreparedGraphPlan::attach_route_controls_following(
+  superseded, six_word, following)` returns both producer lists; `attach_route_controls` calls it
+  with `(true, |_| None)`, so six-word bits and bytes are unchanged. The dead-code expect on
+  `follow_route_control_pair` is gone. Mechanical wrapper in
+  `crates/builtins-compiler/src/lib.rs`: `attach_route_live_controls_following`.
+- **Handles.** `HostLiveControlHandles::follow_route_controls:
+  Vec<graph::GraphFollowRouteControlProducer>` (canonical route-ID order) and
+  `follow_route_producer_position` (re-exported). Charge: `route_control_resources(&six,
+  &following)`. Mechanical: two struct literals in `crates/host-core/tests/{live_routes,
+  effect_observation}.rs` gain the field. control-plane still drops the follow producers (`..`);
+  #1653 keeps them.
+- **Record builder.** `follow_route_record(route, terms, automated, length)` (open transform from
+  `graph_compiler::route_values`) and `follow_route_record_between(ramps, before, after, terms,
+  automated, gates, gate_length, edit)`, next to `route_record_between`. A record only when the
+  transform bits, `mute`, `follows_mute` or `terms` change; `automated` is the next plan's and is
+  never compared, so a change of kind alone writes nothing (coordinator obligation 1). Length:
+  `gate_length` when the effective gate changes, else `SendFollowsMute` when only `follows_mute`
+  changes, else the longest changed `SendGain`/`SendMatrix`, else `SendMute`. `SendRecord {
+  Folded, Following }` is the join's record kind.
+- **Join.** `join_routes` gives a successor following route the seven-word record (terms from
+  `EffectiveDiff::strip_mutes`), any other route today's. The carry loop writes `Folded` through
+  `route_controls` and `Following` through `follow_route_controls[...].write` under the carry's
+  one stamp (the revision the host publishes before the successor's first block).
+- **No `host.control.order` / internal fault for a following route.** Until #1653, the classifier
+  (`live_delta.rs`, `route_records`) answers `RebuildOnly(RuledLiveNotBuilt { issue: 1653 })` for
+  any route lowering of a following route (a send edit, or a strip mute that moves its gate), so no
+  commit writes a six-word record to a route with no six-word cell; the rebuild's join writes the
+  seven-word record. #1653 replaces this branch with its live record.
+- **Departure.** Gate 2 uses `L = 486` (the true-peak limiter at 48 kHz): no native effect declares
+  64. Gate 2 measures at the output (after PDC); "the send ramp starts `L` render samples before
+  the strip's" follows from the bus path's `L`-sample compensation, which the test does not probe
+  at the op.
+- **Gates (all pass unless marked).**
+  - Gate 1: `crates/host-core/tests/route_mute.rs`
+    `a_following_send_leaks_nothing_of_a_stored_mute` (Simd8 on AVX2, Simd4, Scalar; no live
+    control, live controls, between render calls; quanta 128 and 100; signed feed; windows from the
+    next block boundary after each ramp's end); `crates/capi/src/runtime/live_tests.rs`
+    `a_following_send_leaks_nothing_of_a_stored_mute`; `hosts/host-web/tests/control_parity.rs`
+    `a_following_send_leaks_nothing_of_a_stored_mute_on_both_hosts` (both hosts' bits equal per
+    block, and each against its static twins).
+  - Gate 2: `the_send_gates_on_the_timeline_sample_the_strip_mutes` (input and post_fader taps,
+    quanta 128 and 100, every width): mute and unmute start on the strip's output sample
+    (`step + L`), same length (480) for the input tap.
+  - Gate 4(a): `a_rebuild_that_adds_a_mute_entry_keeps_the_sends_ramp` (live predecessor
+    mid-ramp, six -> seven: bit for bit the never-swapped twin until the step, no join write, every
+    block after 0 allocation- and free-free by thread counters and the render audit).
+  - Gate 4(b): `a_rebuild_that_removes_the_mute_entry_reopens_the_send` (seven -> six: silent
+    before the swap, ramps in `[768, 768 + M)`, fresh-plan bits from the next boundary, quiet).
+  - Combined (obligation 3): `a_send_edit_and_a_mute_entry_in_one_rebuild_adopt_over_one_length`
+    is **red and `#[ignore]`d**: the send reaches `+0.0` at 1007 (768 + 239, the join record's
+    `SendGain` length, not `M`), which the graph fold (U2a) addresses; and the strip lane does not
+    mute at all at the swap (the carried strip lane does not adopt a new mute curve: #1651 T4).
+  - Charge (obligation 4): `the_following_route_charge_covers_its_attach_and_bind`: charged 922,
+    retained 683 bytes (x86-64), one route, a seven-word cell.
+  - Rebuild gate: `crates/capi/src/runtime/live_tests.rs` `an_edit_of_a_following_route_rebuilds`.
+  - Gate 5: `crates/control-plane/tests/follow_automation_realtime.rs`
+    `a_following_send_of_a_stored_mute_renders_allocation_free`.
+- **Red checks (temporary mutations, reverted).** No lane attached (predicate false): gates 1 (all
+  three hosts), 2, 4(a), 4(b), 5, the charge and the rebuild gate red. Events at the fader's
+  arrival (`a(tap).max(486)`): gate 2 red (send at 1972). Carry drops the ramp (no join for a
+  following route): 4(a) red. A record on a change of kind (prior with `automated = [false; 2]`):
+  4(a) red. Classifier gate removed: the rebuild gate red (result 255, internal fault).
+- **Realtime.** `realtime_policy`: 167 marked regions (166 before; `follow_mute_jump`).
+
+## Decision record: U2a fold 1 (batch 18)
+
+Fold of the U2a review (FAIL at `3d063f0ed`) under root ruling R18-5 (option (b), per-column
+ramps). Files: `crates/graph/src/{lib.rs,runtime.rs}`, `crates/lane/src/kernels.rs` (one entry),
+`crates/lane/tests/route_ramp.rs`; mechanical caller update in `crates/host-core/src/prepare.rs`.
+
+- **MAJOR-1 (activation offset).** `RouteActivity` gains `from: Box<[u32]>`, one offset per route,
+  allocated at bind only for a plan that binds a following route (empty otherwise).
+  `LiveFollowRoute::begin_block` returns `Option<u32>`: `None` inactive, `Some(o)` mixes from `o`
+  (`Some(0)` when active at entry). `execute_op` writes the bit and the offset each block.
+  `reduce_gated` / `reduce_gated_into` reduce the destination over frame ranges cut at the active
+  routes' offsets: a route counts on a range only from its offset on, so `[0, o)` leaves it out and
+  `[o, q)` sums it. With no offset inside the block the whole block is one range (same segments,
+  same kernels). The reduction kernels take a frame range (`get`/`get_mut`, no new trap). The
+  offsets are charged in `route_control_resources` through the following producers
+  (`activity_offset_bytes`, one `u32` per prepared route, once per plan).
+- **MAJOR-2 / MINOR-1 (R18-5).** `LiveFollowRoute` holds `ColumnRamps`: one `IndexedRamp` and
+  position per source column (left: `ll`, `rl`; right: `lr`, `rr`). A retarget changes only a
+  column whose target bits change, from the coefficients it is at. A column's new ramp holds the
+  target in the other column's entries, so only its own entries decide ramp or step. New kernel
+  `lane::kernels::route_mix_column_ramps_block<L>`: three parts (both columns ramp, one ramps, both
+  settled = `mix2x2_block` of the two targets), vector body at `L` (simd128 / NEON / AVX2) and one
+  outlined non-generic `f32` tail, as `route_mix_ramp_block`. With one ramp in both columns at one
+  position it is `route_mix_ramp_block` bit for bit. A settled following route therefore mixes the
+  static six-word plan's bits. Six-word routes are untouched (code, bytes, bits).
+- **MAJOR-3 (carried record order).** `LiveFollowRoute::adopt` takes the predecessor's column
+  ramps, mute and heard curve (`[false; 2]` from a six-word predecessor). On the carried first
+  block, `FollowCursors::block` seeds the cursors at `τ_tap` but returns the placed curve. The cell
+  applies first, composed with the heard curve, over its own length; then the placed curve composes
+  and each changed column retargets over `J`. Seven -> six: the side-table check carries the
+  columns the heard curve zeroed. `finish_six_word_carry` applies a record composed with them
+  (`LiveRoute::apply_pending_heard`), then reopens to the record's own target over `J` on a bits
+  change; with no record, to the prepared target as before. The check is left whenever the bits
+  differ or the heard curve zeroes a column.
+- **MINOR-2.** `adopt_predecessor` first runs the predecessor's pending comparisons
+  (`finish_route_carry` under `LiveSnapshot::ALL` and its held jump lengths) when that
+  predecessor was displaced before its first block. Not gated in graph (two swaps with a following
+  route need #1652c's attach). Proof comment at the call; the host-core carry tranche gates it.
+- **MINOR-3.** `RouteCarryStep` is `{ successor, predecessor }` (8 B, as before #1652d). The checks
+  live in `GraphExecutor::route_checks: Option<Box<RouteCarryChecks>>`: one `RouteCarryCheck`
+  per move whose predecessor row is a following route (`GraphLiveRoute::following` ->
+  `GraphRouteMove::predecessor_follows`). `None` when no such move exists.
+  `can_carry_live_routes` refuses a seven -> six move without its slot.
+  `route_carry_retained_bytes(moves, following)` charges both.
+- **NIT-1.** Recorded at `FollowCursors::block`: with no jump lengths or no node span the block has
+  no events, nothing is placed and the curve holds. A fresh route keeps its bind seed. A carried
+  route keeps the predecessor's heard curve, and with no lengths its compare is a step (`J = 0`).
+  Production plans always attach both.
+- **Departures / limits.** (1) A six-word successor holds one ramp, so the seven -> six cases are
+  not per column. A record whose heard-curve composition differs from it reopens the whole route
+  over `J`, and the record's open columns take `J`, not `R`. Predecessor columns in different moves
+  become one ramp from where they are to the composite target over the longer remaining length
+  (`ColumnRamps::one_ramp`), which re-times the shorter move. (2) A route that opens inside a block
+  and is muted again by a seek's `Set` in the same block still sums `[set, q)` (no end offset).
+  (3) A column's ramp steps on a non-finite difference of its own entries only; the shared law
+  stepped all four. (4) `GraphRouteMove` and `GraphLiveRoute` gain one public field each.
+  host-core's join, its charge call and one unit test are updated mechanically
+  (`crates/host-core/src/prepare.rs`).
+- **Measured (x86-64).** `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 296 -> 352 (`ColumnRamps` 112). `RouteCarryStep`
+  40 -> 8. `RouteCarryCheck` 40 and `RouteCarryChecks` 24 (side table, automation sessions only).
+  `SixWordCarryCheck` 32. `RouteActivity` 64 -> 80: the `from` box header, in every plan with a
+  live route, charged by `size_of` in `route_activity_bound_bytes`. `LIVE_ROUTE_OWNER_BYTES` 72
+  (unchanged). Realtime policy: 167 marked regions (166 at base; one new region for `ColumnRamps`).
+- **Gates (all pass).** `crates/graph/src/runtime.rs` `follow_route_op_tests::carry::fold`:
+  `an_opening_route_is_left_out_of_its_destination_before_its_offset` (MAJOR-1, through
+  `execute_op`, negative feeds, `o` in {1, 63, 64, 127}, sole / first / second input);
+  `an_open_columns_move_keeps_its_length_across_a_gate_changing_carry` (MAJOR-2);
+  `per_lane_steps_thirty_samples_apart_each_end_with_the_mute_length` (MINOR-1);
+  `a_carried_record_composes_with_the_heard_curve_then_the_curve_jumps` (MAJOR-3, seven-word);
+  `a_six_word_successors_record_composes_with_the_heard_curve_then_reopens` (MAJOR-3, six-word).
+  `crates/lane/tests/route_ramp.rs`:
+  `equal_column_ramps_are_the_six_word_kernel_and_settled_ones_the_static_mix` and
+  `each_column_follows_its_own_ramp` (`each_lane!`: `f32`, `Simd4`, `Simd8` under avx2). Existing
+  #1652b/#1652d cases now expect per-column retargets (gate 3's reference keeps an unchanged
+  column's ramp; six -> seven (b) keeps the right column's move).
+- **Red checks (temporary mutations, reverted).** No offset written -> MAJOR-1 red. M2 (drop
+  `set_active` for `LiveFollowRoute`) -> MAJOR-1 red. One shared ramp (any change restarts both
+  columns) -> MAJOR-2, MINOR-1, MAJOR-3 seven-word, gate 3 and six -> seven red. Curve placed
+  before the record -> MAJOR-3 seven-word red. Record governs alone in `finish_six_word_carry`
+  (the pre-fold code) -> MAJOR-3 six-word red. M1 analogue (drop the `return` after the record)
+  -> MAJOR-3 six-word red. Kernel: right column read from the left ramp -> `each_column...` red.
+  The one-ramping part assigning the ramping column's target -> `each_column...` red.

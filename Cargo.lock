@@ -891,6 +891,7 @@ dependencies = [
 name = "graph"
 version = "0.1.0"
 dependencies = [
+ "automation",
  "bench-support",
  "conformance",
  "effect-contract",

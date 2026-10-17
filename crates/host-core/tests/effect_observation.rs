@@ -138,6 +138,7 @@ fn prepare_from(document: &str, leg: Leg) -> Session {
             meters: Vec::new(),
             effect_observations: Vec::new(),
             route_controls: Vec::new(),
+            follow_route_controls: Vec::new(),
             master_track: None,
             live_values_superseded: LiveValuesSuperseded::default(),
             jump_lengths: None,

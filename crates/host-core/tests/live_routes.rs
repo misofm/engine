@@ -325,6 +325,7 @@ impl Live {
                 meters: Vec::new(),
                 effect_observations: Vec::new(),
                 route_controls: Vec::new(),
+                follow_route_controls: Vec::new(),
                 master_track: None,
                 live_values_superseded: host_core::LiveValuesSuperseded::default(),
                 jump_lengths: None,
@@ -982,7 +983,7 @@ fn graph_route_resources(document: &str) -> RouteControlResources {
     let producers = artifact
         .attach_route_live_controls(&host_core::LiveValuesSuperseded::default())
         .expect("attach");
-    graph::route_control_resources(&producers)
+    graph::route_control_resources(&producers, &[])
 }
 
 /// What host-core admits against `maximum_graph_session_plus_plan_bytes` for one preparation.
