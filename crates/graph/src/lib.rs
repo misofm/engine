@@ -1600,6 +1600,9 @@ pub struct GraphFollowRouteControlBinding {
     /// The source strip's mute cells, the route's own row cells, `a(tap)`, the jump rule, the
     /// gain law and the seeded flags.
     pub source: GraphFollowRouteSource,
+    /// The route op's cursor tables, allocated at attach so a failed allocation is a typed
+    /// refusal ([`GraphRouteControlError::CursorTable`]); bind moves them into the op.
+    pub(crate) columns: runtime::FollowColumns,
 }
 
 /// The control-plane half of one following route's seven-word cell (#1652 D1): the counterpart of
@@ -1680,17 +1683,21 @@ pub(crate) fn follow_route_control_pair(
     activity_bytes: u64,
     activity_largest: u64,
     activity_routes: u64,
-) -> (
-    GraphFollowRouteControlBinding,
-    GraphFollowRouteControlProducer,
-) {
+) -> Result<
+    (
+        GraphFollowRouteControlBinding,
+        GraphFollowRouteControlProducer,
+    ),
+    automation::ComposeError,
+> {
+    let columns = runtime::FollowColumns::bind(&source)?;
     let lane = std::sync::Arc::new(FollowRouteLane {
         cell: engine::realtime::LatestCell::new(),
         dirty: engine::realtime::DirtyWord::new(),
     });
     let automated = source.flags().automated_set();
     let (cursor_bytes, cursor_largest) = runtime::follow_route_cursor_bytes(&source);
-    (
+    Ok((
         GraphFollowRouteControlBinding {
             node: GraphNodeId::Route {
                 route_id: route_id.clone(),
@@ -1702,6 +1709,7 @@ pub(crate) fn follow_route_control_pair(
                 superseded: superseded.clone(),
             }),
             source,
+            columns,
         },
         GraphFollowRouteControlProducer {
             route_id: route_id.as_str().into(),
@@ -1715,7 +1723,7 @@ pub(crate) fn follow_route_control_pair(
             cursor_bytes,
             cursor_largest,
         },
-    )
+    ))
 }
 
 /// Why [`PreparedGraphPlan::attach_route_controls`] refused.
@@ -1726,6 +1734,9 @@ pub enum GraphRouteControlError {
     /// A route into a submix is also a node the plan requires a processor for; a live route is
     /// never a [`GraphNodeBinding`] (its op would not mix).
     BoundRoute,
+    /// A following route's cursor tables were refused (#1654 T3: an allocation failure; a
+    /// source's cells are always its program's).
+    CursorTable(automation::ComposeError),
 }
 
 /// The bytes bind allocates for one live route's render-side owner, its boxed state (issue #1220
@@ -2913,7 +2924,9 @@ impl PreparedGraphPlan {
     /// canonical route-ID order. `following` is asked once per route into a submix, in that
     /// order, so a route into an output never follows (decision 13 P11).
     ///
-    /// Refused as [`Self::attach_route_controls`] is.
+    /// Refused as [`Self::attach_route_controls`] is, and with
+    /// [`GraphRouteControlError::CursorTable`] when a following route's cursor tables cannot be
+    /// allocated (nothing is attached then).
     pub fn attach_route_controls_following(
         &mut self,
         superseded: &engine::realtime::LiveValuesSuperseded,
@@ -3003,7 +3016,8 @@ impl PreparedGraphPlan {
                     activity_bytes,
                     activity_largest,
                     u64::try_from(self.routes.len()).unwrap_or(u64::MAX),
-                );
+                )
+                .map_err(GraphRouteControlError::CursorTable)?;
                 follow_bindings.push(binding);
                 follow_producers.push(producer);
                 continue;
@@ -11043,7 +11057,8 @@ mod follow_route_tests {
     fn the_producer_write_reaches_the_binding_under_the_published_revision() {
         let superseded = LiveValuesSuperseded::new();
         let (mut binding, mut producer) =
-            follow_route_control_pair(&route_id("send"), &superseded, one_lane_source(), 0, 0, 0);
+            follow_route_control_pair(&route_id("send"), &superseded, one_lane_source(), 0, 0, 0)
+                .expect("tables");
         assert_eq!(&*producer.route_id, "send");
         assert_eq!(
             binding.node,
@@ -11121,6 +11136,7 @@ mod follow_route_tests {
                     activity.1,
                     ACTIVITY_ROUTES,
                 )
+                .expect("tables")
                 .1
             })
             .collect();

@@ -3008,7 +3008,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             })
             .map_err(|error| match error {
                 graph::GraphRouteControlError::AlreadyAttached
-                | graph::GraphRouteControlError::BoundRoute => {
+                | graph::GraphRouteControlError::BoundRoute
+                | graph::GraphRouteControlError::CursorTable(_) => {
                     graph_failure("host.route_control.attach")
                 }
             })

@@ -2778,3 +2778,66 @@ fn a_running_send_ride_across_an_unrelated_rebuild_is_the_never_swapped_twin() {
         );
     }
 }
+
+/// #1654 U2 fold 1, MAJOR-3 (every bank width and the scalar oracle). The send `t-b` keeps a flat
+/// `gain_db` ride at -6 dB (its table continues) and a rebuild at block 6 removes either its flat
+/// `rr` entry at 0.5 or its source strip's mute entry (held muted): the send stays a following
+/// route, no join record moves its cell, and no cursor of the successor hears the removed curve.
+/// The carry lands the send on the successor's static value over the removed row's own length
+/// (`SendMatrix`, the pan length, for `rr`; the mute length for the mute curve): from the first
+/// block boundary after that landing, the send's plane is the successor prepared fresh, bit for
+/// bit, and render allocates nothing.
+///
+/// Test value: red if a removed row or source mute curve of a send that stays seven-word leaves
+/// the send on the removed curve's last value.
+#[cfg(feature = "test-support")]
+#[test]
+fn removing_a_send_row_or_its_source_mute_curve_lands_on_the_fresh_plan() {
+    use follow::*;
+    use send_rows::{entry, flat};
+    use session::ParameterUnit;
+    use successor::{BLOCKS, QUANTUM, SWAP_BLOCK};
+    let pcm = successor::Feed::new("t", 29);
+    let mut b = model(QUANTUM as u32, SendTap::PreFader, false, true);
+    b.automation = vec![entry("send-gain", 1, flat(-6.0, ParameterUnit::Db))];
+    let pan = controls::LiveRamps::for_session(&b).pan_samples as usize;
+    let mut with_rr = b.clone();
+    with_rr
+        .automation
+        .push(entry("send-rr", 6, flat(0.5, ParameterUnit::Linear)));
+    let mut with_mute = b.clone();
+    with_mute.automation.push(mute_entry(1.0, &[]));
+    let quiet = |_: usize,
+                 _: &mut host_core::HostLiveControlHandles,
+                 _: &mut engine::realtime::PlanRevisionGate| {};
+    for backend in follow::backends() {
+        let fresh =
+            successor::reference_run(&successor::Session::compile(b.clone()), &[&pcm], backend);
+        let fresh = plane(&fresh, 1);
+        for (name, a, length) in [("rr", &with_rr, pan), ("mute", &with_mute, M as usize)] {
+            let what = format!("{backend:?} {name}");
+            let (swapped, handles) = live_swap(a, Some((&b, a)), backend, &pcm, quiet);
+            assert_eq!(
+                handles
+                    .expect("the successor's handles")
+                    .follow_route_controls
+                    .len(),
+                1,
+                "{what}: the send stays a following route"
+            );
+            assert_quiet(&swapped, &what);
+            let send = plane(&swapped, 1);
+            let at = SWAP_BLOCK * QUANTUM;
+            assert!(
+                first_difference_from(&send[..at], &fresh[..at], 0).is_some(),
+                "{what}: not vacuous, the removed curve is heard before the swap"
+            );
+            let landed = next_boundary(at + length, QUANTUM);
+            assert_bits_equal(
+                &send[landed..BLOCKS * QUANTUM],
+                &fresh[landed..BLOCKS * QUANTUM],
+                &format!("{what}: the fresh plan after the landing"),
+            );
+        }
+    }
+}
