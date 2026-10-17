@@ -646,6 +646,59 @@ pub struct SessionState<A: ControlAdapter> {
     /// from the candidate it superseded (#1310, root ruling B15-Q4); empty after a rebuild that
     /// superseded nothing.
     pub(crate) observation_forwarded: Vec<ObservationForward>,
+    /// The live send moves that may still ramp, as one conservative window (root ruling B19-R7,
+    /// the B17-R14 pattern; TBD54 deletes it): `None` when none may.
+    pub(crate) send_moves: Option<SendMoveWindow>,
+}
+
+/// Every live send move (a following route's record with a ramp, written by a live commit or by a
+/// rebuild's send join) and every landing a rebuild's removed send row starts, folded into one
+/// bound (B19-R7): the newest revision among them and the longest ramp any of them takes. A move
+/// is in effect from at most the watermark's `first_sample` once the watermark covers its revision
+/// (the watermark is monotone), so every move has ended once the watermark covers `revision` and
+/// the render clock is at or past `first_sample + ramp`. The bound only errs toward "may still
+/// ramp", and it is one word pair: nothing grows with the moves.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SendMoveWindow {
+    revision: u64,
+    ramp: u32,
+}
+
+impl SendMoveWindow {
+    /// Whether some move of the window may still ramp, given the watermark (`None` when a read
+    /// gave up: then it may) and the render clock read after it.
+    fn may_ramp(self, watermark: Option<PlanWatermark>, render_clock: u64) -> bool {
+        watermark.is_none_or(|watermark| {
+            watermark.revision < self.revision
+                || render_clock < watermark.first_sample.saturating_add(u64::from(self.ramp))
+        })
+    }
+}
+
+/// Fold a send move of `revision` over `ramp` into the window (B19-R7): the newest revision and
+/// the longest ramp. A zero ramp is a step, which nothing can cut, and folds nothing.
+fn fold_send_move(window: &mut Option<SendMoveWindow>, revision: u64, ramp: u32) {
+    if ramp == 0 {
+        return;
+    }
+    *window = Some(match *window {
+        Some(window) => SendMoveWindow {
+            revision: window.revision.max(revision),
+            ramp: window.ramp.max(ramp),
+        },
+        None => SendMoveWindow { revision, ramp },
+    });
+}
+
+/// The longest length a removed send row's landing takes at its successor's first block (B19-R7):
+/// a following route's `SendGain`, `SendMatrix` and mute lengths are the session's fader, pan and
+/// mute lengths, each at most the route ramp bound.
+fn send_landing_ramp(model: &session::SessionModel) -> u32 {
+    let ramps = controls::LiveRamps::for_session(model);
+    ramps
+        .fader_samples
+        .max(ramps.mute_samples)
+        .max(ramps.pan_samples)
 }
 
 /// The stable key of one observation tap, borrowed from the bytes that name it (#1677): the strip's
@@ -2455,6 +2508,9 @@ where
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
         // candidate's provider epoch.
         let follow_into_six_word = inventory.carries_a_following_route_into_a_six_word_route();
+        // B19-R7 (TBD54 deletes it): the same, for a carried following route that loses a curve.
+        let follow_loses_a_curve = inventory.carries_a_following_route_that_loses_a_curve();
+        let follow_retarget_ramp = inventory.following_route_retarget_ramp();
         let mut candidate_provider = ProviderEpoch::candidate(
             sources,
             inventory,
@@ -2543,7 +2599,39 @@ where
         // a join record, and folds two columns' moves into one. Such a rebuild completes as the
         // transition fallback, whether or not a column moves at the swap: conservative, it
         // over-reports.
-        let outcome = if matches!(kind, Rebuild::Transaction(_)) && follow_into_six_word {
+        //
+        // B19-R7 (TBD54 deletes this): a successor whose send join carries a following route
+        // into a following route that no longer hears one of its row or source mute curves lands
+        // that column at once over the removed row's length, cutting a live send move still
+        // ramping there, which render cannot report. Control cannot tell which column lost the
+        // curve or whether its move is in flight, so such a rebuild completes as the transition
+        // fallback whenever any live send move may still ramp (read here, before the
+        // reservation; a watermark read that gives up counts as "may"). A declared
+        // discontinuity carries nothing. Conservative, it over-reports.
+        let transaction = matches!(kind, Rebuild::Transaction(_));
+        let send_fallback = transaction
+            && follow_loses_a_curve
+            && self.send_moves.is_some_and(|window| {
+                window.may_ramp(
+                    self.shared.watermark.read().ok(),
+                    self.publisher.render_clock(),
+                )
+            });
+        // The rebuild's own send moves join the window with the commit: its join's records, and
+        // a removed row's landing.
+        let rebuild_send_ramp = match &kind {
+            Rebuild::Transaction(prepared) if follow_loses_a_curve => {
+                let session = prepared.get().prospective_session();
+                let next = session
+                    .compiled()
+                    .ok_or(CommandError::Internal)?
+                    .normalized_model();
+                follow_retarget_ramp.max(send_landing_ramp(next))
+            }
+            Rebuild::Transaction(_) => follow_retarget_ramp,
+            Rebuild::Discontinuity(_) => 0,
+        };
+        let outcome = if transaction && (follow_into_six_word || send_fallback) {
             engine::realtime::CandidateOutcome::TransitionFallback
         } else {
             engine::realtime::CandidateOutcome::Exact
@@ -2738,6 +2826,8 @@ where
             // withdrawn candidate, drops below as a commit's displaced model does.
             Rebuild::Discontinuity(model) => (None, Some(*model)),
         };
+        // B19-R7: the rebuild's own send moves ramp from its successor's first block.
+        fold_send_move(&mut self.send_moves, revision, rebuild_send_ramp);
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
         let monitor_ramp = writes_monitor.then_some(monitor_change.ramp);
         let previous_monitor = core::mem::replace(&mut self.monitor, monitor_change.overlay);
@@ -3385,6 +3475,19 @@ where
         } else {
             protocol::EditPath::Live
         };
+        // B19-R7: the longest ramp of the following routes' records this commit writes, folded
+        // into the send-move window once committed.
+        let send_ramp = delta
+            .routes
+            .iter()
+            .filter_map(|route| {
+                route
+                    .record
+                    .following()
+                    .map(host_core::FollowRouteControlRecord::length)
+            })
+            .max()
+            .unwrap_or(0);
         drop(delta);
         let published = core::mem::take(&mut owners.begun);
 
@@ -3400,6 +3503,7 @@ where
         );
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
         self.monitor = monitor_change.overlay;
+        fold_send_move(&mut self.send_moves, revision, send_ramp);
         for index in published {
             owners.effects[index]
                 .commit_owner()

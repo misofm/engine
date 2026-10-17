@@ -5196,6 +5196,10 @@ pub struct GraphLiveRoute {
     /// Whether the route is a following route (#1652 D1): a successor's move from this row
     /// carries [`GraphRouteMove::predecessor_follows`].
     pub following: bool,
+    /// A following route's automated set, the curves its cursors hear (#1654 D2); the default
+    /// (nothing) for a six-word route. A successor's join compares it with its own to find a
+    /// carried route that loses a row or a source mute curve (B19-R7).
+    pub automated: RouteAutomatedSet,
 }
 
 impl GraphLiveRoute {

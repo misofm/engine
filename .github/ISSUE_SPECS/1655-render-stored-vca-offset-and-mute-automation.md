@@ -631,8 +631,8 @@ regeneration).
   compared with the OR the predecessor heard (with the own mute alone this is the old per-cursor
   comparison, so no bit moves). A gate move takes the longest own length among the curves that
   close the column (for an open, among all follow curves; which were closed is not kept across a
-  carry), R19-4. A follow curve is "dropped" (MAJOR-3, owed landing of U2 fold 2) only when no
-  own or VCA mute curve is left; a dropped VCA mute lands over `VcaMute`. A seven -> six carry of
+  carry), R19-4. A follow curve is "dropped" (#1654 U2 fold 1 MAJOR-3) only when no own or VCA mute
+  curve is left; a dropped VCA mute lands at once over `VcaMute` at the carry (B19-R7). A seven -> six carry of
   a predecessor that heard VCA curves reopens over `max(mute, VcaMute)`.
 
 **Departure.** In `place_carried` a moved gate now retargets over its own row's length (was the

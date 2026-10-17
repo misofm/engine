@@ -2779,20 +2779,20 @@ fn a_running_send_ride_across_an_unrelated_rebuild_is_the_never_swapped_twin() {
     }
 }
 
-/// #1654 U2 fold 2, MAJOR-A (every bank width and the scalar oracle). The send `t-b` hears flat
+/// #1654 root ruling B19-R7 (every bank width and the scalar oracle). The send `t-b` hears flat
 /// `ll` and `rr` entries at 0.5; at block 5 a hand move of its gain to -6 dB is written through
 /// its seven-word producer, and a rebuild at block 6 removes the `ll` entry while the move is in
-/// flight: the send's left source column no longer hears a curve. The move keeps its length on
-/// both columns (both planes are the never-swapped twin's, bit for bit, until it ends), the left
-/// column then lands on its static `ll` over `SendMatrix` (the pan length), and from the first
-/// block boundary after that landing both planes are the successor prepared fresh, bit for bit.
-/// Render allocates nothing.
+/// flight: the send's left source column no longer hears a curve. Until the swap both planes are
+/// the never-swapped twin's; at the swap the left column lands at once over `SendMatrix` (the pan
+/// length), cutting the move there (the control plane flags that rebuild), while the right
+/// column's move runs on; from the first block boundary after the move's end and the landing both
+/// planes are the successor prepared fresh, bit for bit. Render allocates nothing.
 ///
-/// Test value: red if a column that loses its last curve retargets at the swap and cuts the
-/// live move in flight.
+/// Test value: red if the removal never lands, lands late (after the move), or leaves the removed
+/// row's value on the column.
 #[cfg(feature = "test-support")]
 #[test]
-fn a_send_column_losing_its_last_curve_keeps_the_hand_move_in_flight() {
+fn a_send_column_losing_its_last_curve_lands_at_once_across_the_hand_move() {
     use follow::*;
     use send_rows::{entry, flat};
     use session::ParameterUnit;
@@ -2820,7 +2820,8 @@ fn a_send_column_losing_its_last_curve_keeps_the_hand_move_in_flight() {
         move_end > SWAP_BLOCK * QUANTUM,
         "the move is in flight at the swap"
     );
-    let landed = next_boundary(move_end + pan, QUANTUM);
+    let at = SWAP_BLOCK * QUANTUM;
+    let landed = next_boundary(move_end.max(at + pan), QUANTUM);
     assert!(landed < BLOCKS * QUANTUM, "the landing ends inside the run");
     let hand = |block: usize,
                 handles: &mut host_core::HostLiveControlHandles,
@@ -2870,9 +2871,9 @@ fn a_send_column_losing_its_last_curve_keeps_the_hand_move_in_flight() {
                 plane(&fresh, index),
             );
             assert_bits_equal(
-                &send[..move_end],
-                &twin[..move_end],
-                &format!("{what}: plane {index}, the move runs to its end"),
+                &send[..at],
+                &twin[..at],
+                &format!("{what}: plane {index}, the twin until the swap"),
             );
             assert_bits_equal(
                 &send[landed..BLOCKS * QUANTUM],
@@ -2880,9 +2881,17 @@ fn a_send_column_losing_its_last_curve_keeps_the_hand_move_in_flight() {
                 &format!("{what}: plane {index}, the fresh plan after the landing"),
             );
         }
+        // The landing starts at the swap: inside the move, the planes leave the twin's.
         assert!(
-            first_difference_from(&plane(&swapped, 0), &plane(&twin, 0), move_end).is_some(),
-            "{what}: not vacuous, the removed ll is heard after the move"
+            (0..2).any(|index| {
+                first_difference_from(
+                    &plane(&swapped, index)[..move_end],
+                    &plane(&twin, index)[..move_end],
+                    at,
+                )
+                .is_some()
+            }),
+            "{what}: the left column lands at the swap, inside the move"
         );
     }
 }

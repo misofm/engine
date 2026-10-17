@@ -851,3 +851,79 @@ Sizes (x86-64, measured): `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 1,000 -> 1,072 (the cu
 `FollowBlock`), `GraphFollowRouteControlBinding` 856 -> 808 (no owed slot per column table). Charges
 read `size_of`, so no pinned number moved. Realtime policy: 171 marked regions in 35 files (unchanged).
 `scripts/check-graph-policy.sh`: PASS.
+
+## Decision record: B19-R7 split (batch 19)
+
+Root ruling B19-R7 after the U2 fold 2 FAIL: the owed landing is removed and the cut it leaves is
+flagged conservatively. TBD54 lands the exact case and deletes the flag. Nothing changed under
+`crates/engine/src/realtime/`; no row class or table changed (no SDK regeneration).
+
+- **Render (`crates/graph/src/runtime.rs`).** Deleted `FollowCursors::owed`, `walk_follow`,
+  `column_window`, `FollowBlock::{steps, seek, frames}` and the owed resets in `apply_cell` and
+  `adopt`; the block entry, the probe and the mix call `walk_columns` over `block.spans` again. In
+  `place_carried` a carried seven-word column that lost a role (`dropped`), or that composes
+  otherwise with no placed value, lands at once over the removed row's own `J` (the mute `J` for a
+  source mute curve, the longer one with a coincident moved value, R19-4), with or without a
+  column ramp in flight: fold 1's settled branch for every case; the no-walk branch lands at once
+  too. No landing state survives a carry, so no owed length can leak (fold 2's P2/P3 property).
+  Fold 1's MAJOR-1, MAJOR-2 (equal branch defers to the free sample, R19-5) and MAJOR-4
+  (`with_held_grid`) are unchanged.
+- **Join (`crates/graph/src/lib.rs`, `crates/host-core/src/prepare.rs`).** `GraphLiveRoute` gains
+  `automated: RouteAutomatedSet` (a following route's bound set; the default for a six-word
+  route), so the join compares both plans' sets: `RouteCarry::follow_loses_a_curve` is set when a
+  carried route is following in both plans and the predecessor's set has a source lane or route
+  row the successor's lacks (`loses_a_curve`). The render's `dropped` roles are exactly these
+  cells, so the term never misses a dropped role. `RouteCarry::follow_retarget_ramp` is the
+  longest ramp of the join's seven-word records. Both reach `PlanStateInventory`
+  (`carries_a_following_route_that_loses_a_curve`, `following_route_retarget_ramp`).
+- **Flag (`crates/control-plane/src/control.rs`, the B17-R14 pattern).** `SessionState::send_moves:
+  Option<SendMoveWindow>` folds (newest revision, longest ramp) of every live commit's seven-word
+  route records with a nonzero ramp, of a rebuild's join records, and, for a rebuild whose join
+  loses a curve, of the landing it starts (the session's longest of the fader, mute and pan
+  lengths). A transaction rebuild completes `TransitionFallback` when `follow_into_six_word`
+  (#1713) or when `follow_loses_a_curve` and the window may ramp (`watermark.revision < revision ||
+  render_clock < watermark.first_sample + ramp`; a watermark read that gives up counts as "may"),
+  read before the reservation. A declared discontinuity is never flagged.
+- **Over-report (documented).** The join reads route-level sets, not which column lost the curve,
+  and the window is one bound over every send move of the session: a removal on one send flags
+  while a move ramps on another send, or on the other column of the same send; a fully applied
+  move whose window has not yet passed `first_sample + ramp` by the render clock also flags. A
+  removal with no live send move in the window completes `EXACT`.
+- **Doc (beside #1713's, one wording):** `crates/capi/src/abi.rs`, `crates/capi/include/
+  miso_engine_v1.h`, `docs/C_ABI_V1_QUALIFICATION.md`, `hosts/host-web/web/miso-engine-v1-audio-
+  worklet-host.d.ts`, `sdk/src/browser/shipped-host.d.ts`: "It also reports a rebuild that carries
+  a send into one that no longer hears one of its stored curves while a live send move may still
+  ramp (conservative; TBD54 removes it)."
+
+Gates (all green):
+- Graph: `a_removed_send_row_lands_at_once_across_a_move_in_flight` (replaces fold 1's
+  `a_removed_send_row_lands_after_a_move_in_flight` and fold 2's
+  `a_column_losing_its_last_curve_keeps_a_move_in_flight`; both cases: the column with a gain
+  ride and the column's last curve) and
+  `a_removed_send_row_leaves_no_stale_value_after_a_seek_or_a_further_rebuild` (the verifier's
+  probe setups, two forms x no event, a second rebuild, identity seeks at 1,920 and 3,136, forward,
+  back, back with a second rebuild: every column aims at the fresh plan's target; red on the fold 2
+  code: form 0, identity seek at 3,136, column 0 stale). Fold 2's P2/P3 gates kept, renamed
+  `a_removed_row_landing_lengthens_no_later_jump` and
+  `a_source_mute_close_after_a_removed_row_fades_over_the_mute_length`.
+- Host-core: `route_mute.rs` `a_send_column_losing_its_last_curve_lands_at_once_across_the_hand_move`
+  (replaces `..._keeps_the_hand_move_in_flight`; Simd8 when avx2, Simd4, scalar; the twin until
+  the swap, a difference inside the move from the swap, the fresh plan after
+  `max(move end, swap + pan)`); `prepare.rs` `the_join_flags_a_following_route_that_loses_a_curve`.
+- C ABI: `removing_a_send_row_across_a_live_send_move_is_flagged_and_lands_on_the_fresh_plan_on_the_c_abi`
+  (replaces `a_send_column_losing_its_last_curve_keeps_the_hand_move_on_the_c_abi`): MAJOR-A, C
+  (a second, unrelated rebuild: `EXACT`), D (session seek inside, forward, back) flagged
+  `TRANSITION_FALLBACK` with count 1, the move ended long before `EXACT`; both planes equal a fresh
+  plan seeked to the last adoption or seek after the move's end and the landing.
+  `rebuild_and_adopt_as` takes the expected outcome.
+- Both hosts: `removing_a_send_row_across_a_live_send_move_is_flagged_alike_on_both_hosts` (the same
+  six cases, one watermark, counts, both hosts bit for bit and the fresh plan after the landing).
+- The fold 1 no-move gates (`removing_a_send_row_or_its_source_mute_curve_lands_*`) stay and assert
+  `EXACT` through `rebuild_and_adopt`.
+- Red with the control-plane term forced off: the C ABI gate ("the revision's outcome at
+  adoption", flags 1) and the both-hosts gate (MAJOR-A outcome 1).
+
+Sizes (x86-64, measured): `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 1,072 -> 952; `GraphLiveRoute` 24 -> 32.
+Charges read `size_of`. Realtime policy: 171 marked regions in 35 files (unchanged).
+`scripts/check-graph-policy.sh`: PASS. `check-capi-abi.sh`, `check-sdk-generated.sh`,
+`check-sdk-types.sh`: pass.
