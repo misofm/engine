@@ -9056,20 +9056,25 @@ mod set_control {
             SessionEdit::UpsertAutomation { automation }
         }
 
-        /// U3 fold 2 (#1648 D2, D15-7). A live level move with its own 4,000 samples on the
-        /// riding fader (a VCA move and a hand move), and a rebuild whose only change is the
-        /// ride's table: the same ride split in two at sample 10,000, or a change only in its
+        /// U3 fold 2 (#1648 D2, D15-7) and #1711 G1. A live level move with its own 4,000 samples
+        /// on the riding fader (a VCA move and a hand move), and a rebuild whose only change is
+        /// the ride's table: the same ride split in two at sample 10,000, or a change only in its
         /// last 2,000 samples. The move is pending at the swap, in the rebuild's transaction, or
-        /// heard 1 and 12 blocks before it. Every block of the rebuilt rig stays within 1e-3 of
-        /// the uninterrupted engine's over 44 blocks, allocation-free, and the successor is
-        /// adopted. Measured: 0 pending, in the transaction and heard 1; 4.6e-6 heard 12, where
-        /// the landing over the rest of the move's ramp recomputes the stage's ramp step at the
-        /// swap (B17-R13, NIT 5).
+        /// heard 1, 12, 24, 26 and 30 blocks before it (3,872, 2,464, 928, 672 and 160 samples
+        /// left, the last three shorter than the fader length `J` = 960). Every block of the
+        /// rebuilt rig is bit-equal to the uninterrupted engine's over 44 blocks, allocation-free,
+        /// and the successor is adopted.
         ///
-        /// Test value: red if the repositioned cell drops the hold of the ramp the free stage
-        /// still runs, or compares the curve at the block's first sample rather than at that
-        /// ramp's end with the stage's target: on a moving ride they differ, and the adoption
-        /// jump replaces the edit's 4,000 samples with the fader length (960; 0.047 at HEAD).
+        /// The watermark outcome is not asserted here: until D2 deletes the B17-R14 window, the
+        /// heard 24, 26 and 30 cases still report `OUTCOME_TRANSITION_FALLBACK`
+        /// (`a_reposition_swap_while_a_level_move_ramps_reports_a_fallback`).
+        ///
+        /// Test value: red if the adoption rule compares the curve with the stage's fader gain
+        /// rather than its ramp's target (#1711 F0: the held grid events only remember a gain, so
+        /// the fader gain follows the ride and every heard move lands at the swap; 4.6e-6 heard
+        /// 12, up to 3.1e-3 heard 24 to 30), if the repositioned cell drops the hold of the ramp
+        /// the free stage still runs, or if it compares the curve at the block's first sample
+        /// rather than at that ramp's end.
         #[test]
         fn a_level_move_across_a_table_change_keeps_its_length() {
             bench_support::alloc::assert_installed();
@@ -9091,6 +9096,9 @@ mod set_control {
                 MoveTiming::SameTransaction,
                 MoveTiming::Heard(1),
                 MoveTiming::Heard(12),
+                MoveTiming::Heard(24),
+                MoveTiming::Heard(26),
+                MoveTiming::Heard(30),
             ];
             for (what, edit) in &moves {
                 for &(change, table) in &changes {
@@ -9131,29 +9139,9 @@ mod set_control {
                                 label,
                             );
                         }
-                        let [a, u, _] = &mut rigs;
-                        let mut worst = (0.0_f32, 0_u64);
-                        for _ in 0..44 {
-                            let block = a.block;
-                            let (x, used) = a.step_counted();
-                            assert_eq!(
-                                (used.allocations, used.deallocations),
-                                (0, 0),
-                                "{label}: block {block} allocated or freed"
-                            );
-                            for (p, q) in x.iter().zip(&u.step()) {
-                                if (p - q).abs() > worst.0 {
-                                    worst = ((p - q).abs(), block);
-                                }
-                            }
-                        }
-                        assert_eq!(a.summary().3, 0, "{label}: the successor is adopted");
-                        assert!(
-                            worst.0 < 1e-3,
-                            "{label}: max |a - u| {} at block {}",
-                            worst.0,
-                            worst.1
-                        );
+                        let (first, _) = lockstep(&mut rigs, 44);
+                        assert_eq!(rigs[0].summary().3, 0, "{label}: the successor is adopted");
+                        assert_eq!(first, None, "{label}: first difference (block, sample)");
                     }
                 }
             }
@@ -9283,6 +9271,175 @@ mod set_control {
                             worst.1
                         );
                     }
+                }
+            }
+        }
+
+        /// A step ride of track `track` through `(start, end, dB)` pieces, with the stored
+        /// `offset`.
+        fn steps_ride(
+            track: &str,
+            pieces: &[(u64, u64, f32)],
+            offset: session::AutomationOffset,
+        ) -> session::Automation {
+            let step = session::AutomationShape::Step;
+            let mut automation = entry(
+                track,
+                pieces
+                    .iter()
+                    .map(|&(start, end, db)| segment(step, (start, end), (db, db)))
+                    .collect(),
+            );
+            automation.offset = offset;
+            automation
+        }
+
+        /// One moved-target case of #1711 G2 and R19-1 on the C ABI: on [`flat`]'s ride (-3 dB),
+        /// a live level move to -6 dB over its own 4,000 samples from block 4 (a VCA move or a
+        /// hand move), heard `heard` blocks, then a table-only rebuild to -5 dB up to 6,000, then
+        /// -3 dB (the move's target moves), and the `later` live moves `(block, dB, ramp)`. The
+        /// rebuilt rig is compared with a fresh plan prepared with the reference table (-3 dB to
+        /// the move's first free sample, -5 dB to 6,000, then -3 dB; with later moves, the
+        /// rebuild's own table) and given the same moves at the same blocks: from sample `from`
+        /// on every sample is bit-equal over 44 blocks after the swap, every block is
+        /// allocation-free, and the successor is adopted.
+        fn moved_target_case(hand: bool, heard: usize, later: &[(u64, f32, u32)], from: u64) {
+            const MOVE: u32 = 4_000;
+            bench_support::alloc::assert_installed();
+            let document = flat();
+            let track = first_track(&document);
+            let label = &format!("hand {hand}, heard {heard}, {} later moves", later.len());
+            let move_of = |document: &str, db: f32, ramp: u32| {
+                if hand {
+                    hand_move(document, db, Some(ramp))
+                } else {
+                    vca_move(db, Some(ramp))
+                }
+            };
+            let mut a = Rig::new(&document);
+            let free = 4 * a.quantum as u64 + u64::from(MOVE);
+            let table = [(0, 6_000, -5.0), (6_000, SOURCE_FRAMES, -3.0)];
+            let fresh_table = [
+                (0, free, -3.0),
+                (free, 6_000, -5.0),
+                (6_000, SOURCE_FRAMES, -3.0),
+            ];
+            let mut model = parse_session_json(&document).expect("model");
+            model.automation[0] = steps_ride(
+                &track,
+                if later.is_empty() {
+                    &fresh_table
+                } else {
+                    &table
+                },
+                session::AutomationOffset::default(),
+            );
+            let fresh = session::canonical_session_json(&model).expect("canonical");
+            let mut r = Rig::new(&fresh);
+            for rig in [&mut a, &mut r] {
+                for _ in 0..4 {
+                    rig.step();
+                }
+            }
+            send(
+                &mut a,
+                &[move_of(&document, -6.0, MOVE)],
+                protocol::EditPath::Live,
+                label,
+            );
+            send(
+                &mut r,
+                &[move_of(&fresh, -6.0, MOVE)],
+                protocol::EditPath::Live,
+                label,
+            );
+            let (mut x, mut y) = (Vec::new(), Vec::new());
+            for _ in 0..heard {
+                x.push(a.step());
+                y.push(r.step());
+            }
+            let offset = a.model().automation[0].offset;
+            send(
+                &mut a,
+                &[SessionEdit::UpsertAutomation {
+                    automation: steps_ride(&track, &table, offset),
+                }],
+                protocol::EditPath::Rebuild,
+                label,
+            );
+            for _ in 0..44 {
+                for &(block, db, ramp) in later {
+                    if a.block == block {
+                        send(
+                            &mut a,
+                            &[move_of(&document, db, ramp)],
+                            protocol::EditPath::Live,
+                            label,
+                        );
+                        send(
+                            &mut r,
+                            &[move_of(&fresh, db, ramp)],
+                            protocol::EditPath::Live,
+                            label,
+                        );
+                    }
+                }
+                let block = a.block;
+                let (out, used) = a.step_counted();
+                assert_eq!(
+                    (used.allocations, used.deallocations),
+                    (0, 0),
+                    "{label}: block {block} allocated or freed"
+                );
+                x.push(out);
+                y.push(r.step());
+            }
+            assert_eq!(a.summary().3, 0, "{label}: the successor is adopted");
+            let quantum = a.quantum as u64;
+            let first = x.iter().zip(&y).enumerate().find_map(|(index, (x, y))| {
+                let start = (4 + index as u64) * quantum;
+                x.iter().zip(y).enumerate().find_map(|(i, (p, q))| {
+                    let sample = start + i as u64 % quantum;
+                    (sample >= from && p.to_bits() != q.to_bits()).then_some((sample, i))
+                })
+            });
+            assert_eq!(first, None, "{label}: first (sample, index) that differs");
+        }
+
+        /// #1711 G2 on the C ABI (A3). A VCA or hand move heard 12 and 30 blocks (2,464 and 160
+        /// samples left; `J` = 960) whose target a table-only rebuild moves: the cell jumps over
+        /// `J` at the move's first free sample (4,512), so every sample is bit-equal to a fresh
+        /// plan whose table has that jump as a real discontinuity there. Case (c): a second live
+        /// move to -9 dB over 1,200 samples from block 35 (before 4,512, ending after
+        /// `4,512 + J`) clears the deferral; from its last sample on every sample is bit-equal to
+        /// a fresh plan with the rebuild's table given both moves.
+        ///
+        /// Test value: red if the adoption lands a moved target at the swap instead of deferring
+        /// its jump (the previous landing over `max(J, remaining)`), or if the grid is not held
+        /// until the deferral fires.
+        #[test]
+        fn a_moved_target_jumps_at_a_live_moves_first_free_sample() {
+            for hand in [false, true] {
+                for heard in [12, 30] {
+                    moved_target_case(hand, heard, &[], 0);
+                    moved_target_case(hand, heard, &[(35, -9.0, 1_200)], 35 * 128 + 1_199);
+                }
+            }
+        }
+
+        /// #1711 R19-1 on the C ABI. A VCA or hand move heard 1 and 12 blocks (3,872 and 2,464
+        /// samples left, both at least `J` = 960) whose target a table-only rebuild moves: the
+        /// move's ramp runs to its end as the uninterrupted engine runs it, then the cell jumps
+        /// over `J`; every sample is bit-equal to the fresh plan with that jump at the move's
+        /// first free sample.
+        ///
+        /// Test value: red if the adoption retargets the move at the swap rather than deferring
+        /// the jump to the ramp's end.
+        #[test]
+        fn a_moved_target_lets_a_live_move_longer_than_the_jump_end_when_it_was_due() {
+            for hand in [false, true] {
+                for heard in [1, 12] {
+                    moved_target_case(hand, heard, &[], 0);
                 }
             }
         }
