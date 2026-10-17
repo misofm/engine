@@ -2991,6 +2991,21 @@ fn level_move_run(
     backend: graph_compiler::Backend,
     blocks: usize,
 ) -> LevelMoveRun {
+    level_move_run_muted(a, b, moves, &[], backend, blocks)
+}
+
+/// [`level_move_run`] with live hand mutes: at each `(block, (muted, window))` of `mutes`, that
+/// block's entry also writes the live mute record `muted` (ramp `window`) on both lanes of track
+/// 0, after the block's live moves, to the plan that renders it.
+#[cfg(feature = "test-support")]
+fn level_move_run_muted(
+    a: &SessionModel,
+    b: Option<(&SessionModel, &SessionModel, usize)>,
+    moves: &[(usize, (f64, u32))],
+    mutes: &[LiveMute],
+    backend: graph_compiler::Backend,
+    blocks: usize,
+) -> LevelMoveRun {
     use builtins_compiler::TestOnlyWriteGate;
     use engine::realtime::{PlanExchangeConfig, SwapOutcome, plan_exchange};
     let quantum = a.quantum_frames as usize;
@@ -3083,6 +3098,22 @@ fn level_move_run(
                         },
                     );
                 }
+            });
+        }
+        for &(_, (muted, smoothing_samples)) in mutes.iter().filter(|(at, _)| *at == block) {
+            let (handles, gate) = match successor_gate.as_mut() {
+                Some((handles, gate)) => (handles, gate),
+                None => (&mut handles, &mut gate),
+            };
+            gate.write_published(|stamp| {
+                handles.strip_controls[0].fader.write(
+                    stamp,
+                    builtins_compiler::TrackFaderRecord::Mute {
+                        lanes: builtins::BuiltinLaneSelector::Both,
+                        muted,
+                        smoothing_samples,
+                    },
+                );
             });
         }
         let at = block * quantum;
@@ -3234,32 +3265,70 @@ fn moved_target_tables() -> [Vec<AutomationSegment>; 3] {
 #[cfg(feature = "test-support")]
 fn moved_target_case(
     backend: graph_compiler::Backend,
-    (what, hand, vca): MovedTargetMove,
+    case: MovedTargetMove,
     heard: usize,
     later: &[(usize, (f64, u32))],
     from: u64,
 ) -> Vec<f32> {
-    const AFTER: usize = 44;
     let [flat, table, fresh] = moved_target_tables();
+    let reference = if later.is_empty() {
+        fresh
+    } else {
+        table.clone()
+    };
+    rebuilt_case(
+        backend,
+        case,
+        heard,
+        [flat, table, reference],
+        (later, &[]),
+        from,
+    )
+}
+
+/// A live move of [`level_move_run`]: `(block, (S, window))`.
+#[cfg(feature = "test-support")]
+type LiveMove = (usize, (f64, u32));
+
+/// A live hand mute of [`level_move_run_muted`]: `(block, (muted, window))`.
+#[cfg(feature = "test-support")]
+type LiveMute = (usize, (bool, u32));
+
+/// [`moved_target_case`] over `[base, rebuild, reference]` tables with `later` live moves and
+/// live hand `mutes` (both given to the rebuilt run and to the fresh reference plan).
+#[cfg(feature = "test-support")]
+fn rebuilt_case(
+    backend: graph_compiler::Backend,
+    (what, hand, vca): MovedTargetMove,
+    heard: usize,
+    [flat, table, fresh]: [Vec<AutomationSegment>; 3],
+    (later, mutes): (&[LiveMove], &[LiveMute]),
+    from: u64,
+) -> Vec<f32> {
+    const AFTER: usize = 44;
     let swap = MOVE_BLOCK + heard;
     let blocks = (swap + AFTER).max(later.iter().map(|(at, _)| at + 20).max().unwrap_or(0));
     let a = move_model(flat.clone(), 0.0, vca.map(|vca| vca.0));
     let committed = move_model(flat, hand, vca.map(|vca| vca.1));
     let next = move_model(table.clone(), hand, vca.map(|vca| vca.1));
-    let reference = move_model(
-        if later.is_empty() { fresh } else { table },
-        0.0,
-        vca.map(|vca| vca.0),
-    );
+    let reference = move_model(fresh, 0.0, vca.map(|vca| vca.0));
     let moves: Vec<_> = core::iter::once(MOVE)
         .chain(later.iter().copied())
         .collect();
+    let blocks = blocks.max(mutes.iter().map(|(at, _)| at + 20).max().unwrap_or(0));
     let label = format!(
-        "{backend:?}, {what}, heard {heard}, {} later moves",
+        "{backend:?}, {what}, heard {heard}, {} later moves, mutes {mutes:?}",
         later.len()
     );
-    let run = level_move_run(&a, Some((&next, &committed, swap)), &moves, backend, blocks);
-    let expected = level_move_run(&reference, None, &moves, backend, blocks);
+    let run = level_move_run_muted(
+        &a,
+        Some((&next, &committed, swap)),
+        &moves,
+        mutes,
+        backend,
+        blocks,
+    );
+    let expected = level_move_run_muted(&reference, None, &moves, mutes, backend, blocks);
     assert_eq!(run.adopted, Some(swap), "{label}: adopted at the swap");
     assert!(run.restarted.is_empty(), "{label}: the strip carries");
     assert_eq!(run.allocations, (0, 0, 0), "{label}: allocation-free");
@@ -3353,6 +3422,91 @@ fn a_moved_target_lets_a_live_move_longer_than_the_jump_end_when_it_was_due() {
         for case in MOVED_TARGET_MOVES {
             for heard in [1, 12] {
                 moved_target_case(backend, case, heard, &[], 0);
+            }
+        }
+    }
+}
+
+/// #1711 U1 fold 1 (MAJOR-1) on host-core, at both bank widths. [`MOVE`] heard 1 and 4 blocks
+/// on the ride flat at -3 dB, then a table-only rebuild to -5 dB up to 2,000, a linear -8 to
+/// -14 dB over 2,000 to 8,000, then -14 dB: the move's target moves, so the cell defers its jump
+/// to the move's first free sample (4,512); the table's step at 2,000 lies inside the move's
+/// remaining ramp, and its jump replaces the ramp the deferral waits for. Every sample is
+/// bit-equal to a fresh plan whose table is -3 dB before 2,000 (the same table after it), given
+/// the same move.
+///
+/// Test value: red if a discontinuity jump on a restartable cell leaves a pending deferral in
+/// place (its grid hold then freezes the lane on the step's target until 4,512; at the fold's
+/// base the first difference was sample 2,944, max 2.9e-2).
+#[cfg(feature = "test-support")]
+#[test]
+fn a_table_step_inside_a_deferred_moves_ramp_drops_the_deferral() {
+    let stepped = |first: f32| {
+        let mut segments = steps_of(&[(0, 2_000, first)]);
+        segments.push(segment(AutomationShape::Linear, 2_000, 8_000, -8.0, -14.0));
+        segments.extend(steps_of(&[(8_000, RIDE_FRAMES, -14.0)]));
+        segments
+    };
+    let [flat, ..] = moved_target_tables();
+    for backend in [
+        #[cfg(target_feature = "avx2")]
+        graph_compiler::Backend::Simd8,
+        graph_compiler::Backend::Simd4,
+    ] {
+        for case in MOVED_TARGET_MOVES {
+            for heard in [1, 4] {
+                rebuilt_case(
+                    backend,
+                    case,
+                    heard,
+                    [flat.clone(), stepped(-5.0), stepped(-3.0)],
+                    (&[], &[]),
+                    0,
+                );
+            }
+        }
+    }
+}
+
+/// #1711 U1 fold 1 (MINOR-2) on host-core, at both bank widths. The G2 setup heard 12 blocks
+/// (swap at 2,048, the deferred jump due at 4,512), with a live hand mute at 2,560 and an unmute
+/// at 3,072 (inside the deferral) or at 5,120 (after it), each ramp 200 samples or exact. The
+/// mute holds the lane and its release clears the deferral, so the lane lands on the new table at
+/// the unmute: from the mute's end on, every sample is bit-equal to a fresh plan with the
+/// rebuild's table given the same move and mutes. An unmute after 4,512 leaves the deferred jump
+/// as it was: every sample is bit-equal to the fresh plan with that jump at 4,512.
+///
+/// Test value: red if the release of a held lane leaves a pending deferral in place (its grid
+/// hold then freezes the lane after the unmute until 4,512).
+#[cfg(feature = "test-support")]
+#[test]
+fn a_hand_mute_inside_a_pending_deferral_lands_the_lane_on_the_new_table_at_the_unmute() {
+    const MUTE: usize = 20;
+    let [flat, _, fresh] = moved_target_tables();
+    let mut table = vec![segment(AutomationShape::Linear, 0, 6_000, -5.0, -8.0)];
+    table.extend(steps_of(&[(6_000, RIDE_FRAMES, -3.0)]));
+    let [_, deferred_table, _] = moved_target_tables();
+    for backend in [
+        #[cfg(target_feature = "avx2")]
+        graph_compiler::Backend::Simd8,
+        graph_compiler::Backend::Simd4,
+    ] {
+        for case in MOVED_TARGET_MOVES {
+            for window in [200, 0] {
+                let muted_from = MUTE as u64 * 128 + u64::from(window);
+                for (unmute, rebuild, reference, from) in [
+                    (24, &table, &table, muted_from),
+                    (40, &deferred_table, &fresh, 0),
+                ] {
+                    rebuilt_case(
+                        backend,
+                        case,
+                        12,
+                        [flat.clone(), rebuild.clone(), reference.clone()],
+                        (&[], &[(MUTE, (true, window)), (unmute, (false, window))]),
+                        from,
+                    );
+                }
             }
         }
     }
