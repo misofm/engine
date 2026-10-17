@@ -12074,6 +12074,149 @@ fn an_output_route_entry_is_refused_on_the_c_abi() {
     assert_eq!(rig.summary(), before, "no revision");
 }
 
+/// #1654 U2 fold 1, MAJOR-3 on the C ABI. The send `eq0-b` keeps a flat `gain_db` ride at -6 dB
+/// (its table continues) and a rebuild removes either its flat `rr` entry at 0.5 or `eq0`'s mute
+/// entry (held muted): the send stays a following route, the join writes no record, and no cursor
+/// hears the removed curve. The rebuild completes `EXACT`; from the first block boundary after the
+/// landing over the removed row's own length (`SendMatrix`, 240, for `rr`; the mute length, 480,
+/// for the mute curve) the send's plane is a fresh plan of the committed document, session-seeked
+/// to the adoption block.
+///
+/// Test value: red if a removed row or source mute curve of a send that stays seven-word leaves
+/// the send on the removed curve's last value.
+#[test]
+fn removing_a_send_row_or_its_source_mute_curve_lands_on_the_fresh_plan_on_the_c_abi() {
+    use session::ParameterUnit::{Db, Linear};
+    let gain = || route_entry("send-gain", "eq0-b", 1, send_flat(-6.0, Db, false));
+    let with_rr = send_rows_document(
+        vec![
+            gain(),
+            route_entry("send-rr", "eq0-b", 6, send_flat(0.5, Linear, false)),
+        ],
+        |_| {},
+    );
+    let with_mute = with_model(&follow_document(true, false), |model| {
+        model.automation[0].segments = send_flat(1.0, Linear, true);
+        model.automation.push(gain());
+    });
+    for (label, document, removed, length) in [
+        ("rr", &with_rr, "send-rr", 240_usize),
+        ("the source mute", &with_mute, "eq0-mute", 480),
+    ] {
+        let mut rig = Rig::new(document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (adoption, live) = rebuild_and_adopt(
+            &mut rig,
+            &[SessionEdit::RemoveAutomation {
+                automation_id: StableId::parse(removed).expect("automation ID"),
+            }],
+            ADOPTED_BLOCKS,
+        );
+        assert_eq!(
+            rig.current_follow_route_cells(),
+            vec![0],
+            "{label}: still one seven-word send, and the join writes no record"
+        );
+        let quantum = rig.quantum;
+        let fresh = seeked_reference(&rig.snapshot(), adoption, ADOPTED_BLOCKS);
+        let (send, fresh) = (
+            plane_bits(&live, 1, quantum),
+            plane_bits(&fresh, 1, quantum),
+        );
+        assert_ne!(
+            send[..64],
+            fresh[..64],
+            "{label}: the send lands, from the old value"
+        );
+        let landed = length.div_ceil(quantum) * quantum;
+        assert_eq!(
+            send[landed..],
+            fresh[landed..],
+            "{label}: a fresh plan after the landing"
+        );
+    }
+}
+
+/// #1654 U2 fold 2, MAJOR-A on the C ABI. The send `eq0-b` hears flat `ll` and `rr` entries at
+/// 0.5; a hand gain move to -6 dB over 1,000 samples is in flight when a rebuild removes the
+/// `ll` entry, so the send's left source column no longer hears a curve. The rebuild completes
+/// `EXACT`, with no transition fallback; until the move's end every sample is a twin's that took
+/// the same move and no rebuild (the move keeps its length on both columns); after the column's
+/// landing over `SendMatrix` (240) the plan renders a fresh plan of the committed document.
+///
+/// Test value: red if a column that loses its last curve retargets at the swap and cuts the
+/// live move in flight.
+#[test]
+fn a_send_column_losing_its_last_curve_keeps_the_hand_move_on_the_c_abi() {
+    use session::ParameterUnit::Linear;
+    const RAMP: u32 = 1_000;
+    let document = send_rows_document(
+        vec![
+            route_entry("send-ll", "eq0-b", 3, send_flat(0.5, Linear, false)),
+            route_entry("send-rr", "eq0-b", 6, send_flat(0.5, Linear, false)),
+        ],
+        |_| {},
+    );
+    let quantum = 128_usize;
+    let edit = send_row_edit("gain_db", -6.0, Some(RAMP));
+    let mut rig = Rig::new(&document);
+    let mut twin = Rig::new(&document);
+    for _ in 0..4 {
+        assert_eq!(bits(&rig.step()), bits(&twin.step()));
+    }
+    let (start, _) = live_and_render(&mut rig, std::slice::from_ref(&edit), 2);
+    let _ = live_and_render(&mut twin, std::slice::from_ref(&edit), 2);
+    let (adoption, live) = rebuild_and_adopt(
+        &mut rig,
+        &[SessionEdit::RemoveAutomation {
+            automation_id: StableId::parse("send-ll").expect("automation ID"),
+        }],
+        48,
+    );
+    let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        watermark.transition_fallback_count, 0,
+        "no transition fallback"
+    );
+    while (twin.block as usize) * quantum < adoption as usize {
+        twin.step();
+    }
+    let reference: Vec<_> = (0..live.len()).map(|_| twin.step()).collect();
+    let end = (start + u64::from(RAMP) - adoption) as usize;
+    assert!(end > 0, "the move is in flight at the adoption");
+    for plane in 0..2 {
+        let (live, twin) = (
+            plane_bits(&live, plane, quantum),
+            plane_bits(&reference, plane, quantum),
+        );
+        assert_eq!(
+            live[..end],
+            twin[..end],
+            "plane {plane}: the move runs to its end"
+        );
+    }
+    let fresh = seeked_reference(&rig.snapshot(), adoption, 48);
+    let landed = (end + 240).div_ceil(quantum) * quantum;
+    let mut lands = false;
+    for plane in 0..2 {
+        let (send, fresh, twin) = (
+            plane_bits(&live, plane, quantum),
+            plane_bits(&fresh, plane, quantum),
+            plane_bits(&reference, plane, quantum),
+        );
+        lands |= send[end..landed] != twin[end..landed];
+        assert_eq!(
+            send[landed..],
+            fresh[landed..],
+            "plane {plane}: a fresh plan after the landing"
+        );
+    }
+    assert!(lands, "the column lands after the move");
+}
+
 /// #1654 R19-5 on the C ABI. On [`send_ride_document`], a live send move with its own 4,000
 /// samples (the hand gain offset `+3`, or a D6 `matrix_lr` edit) is in flight when a rebuild
 /// changes the gain ride's table (the carried cursor is repositioned). The rebuild completes

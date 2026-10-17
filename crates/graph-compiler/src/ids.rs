@@ -317,7 +317,7 @@ pub(crate) fn route_transform(gain_db: f32, matrix: [f32; 4]) -> Option<RouteTra
 /// value alone: the sum differs from `curve` only in the sign of a zero, the clamp changes no value
 /// in the route domain, and `db_to_gain_f32` of `+0.0` and `-0.0` is one gain.
 ///
-/// [`route_transform`] calls it for the static gain, and host-core hands it to the route op as
+/// `route_transform` calls it for the static gain, and host-core hands it to the route op as
 /// its `graph::GraphRouteGainLaw` (graph does not link `math`), so the plan and render derive a
 /// send gain once. A NaN stays NaN (`f64::clamp` keeps it). Called on render: arithmetic and one
 /// `db_to_gain_f32`, allocation-free, lock-free and panic-free (the clamp's bounds are ordered

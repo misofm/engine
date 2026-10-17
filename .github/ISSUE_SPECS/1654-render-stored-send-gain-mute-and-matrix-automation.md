@@ -739,3 +739,115 @@ swap there (outside this issue; not investigated). `docs/SESSION_SCHEMA_V1.md`: 
 the send gain takes the shared offset, routes into the output stay prepared.
 
 Realtime policy: 171 marked regions in 35 files (unchanged). `scripts/check-graph-policy.sh`: PASS.
+
+## Decision record: U2 fold 1 (batch 19)
+
+Review fold of the U2 FAIL (four MAJOR, one MINOR, one NIT). Files: `crates/automation/src/compose.rs`
+(+ `compose/tests.rs`), `crates/graph/src/{runtime.rs,lib.rs}`, `crates/host-core/src/prepare.rs`
+(one match arm, mechanical), and the gates below. Nothing under `crates/engine/src/realtime/`; no
+row class or table changed (no SDK regeneration).
+
+- **MAJOR-1 (R19-3: held events are heard).** K1's `merge` now sets a cursor's heard value from
+  every event, held or not; a held event still does not retarget the output. A gate event or a
+  gate-only record inside a hold composes the grid's value. K = 1 is unchanged (all K1 gates green).
+- **MAJOR-2 (R19-5, equal bits at a swap).** `place_carried`'s equal branch now defers the placed
+  value cursors to the column ramp's first free sample when a ramp is in flight (as the moved-value
+  branch does), so a repositioned table's later moves wait for the live move's end.
+- **MAJOR-3 (a removed row or source mute curve).** `adopt` records per column the roles the
+  predecessor's column heard and the successor's does not (`FollowCursors::dropped`). At the first
+  block a column that composes otherwise with no placed value, or that lost a role, lands over the
+  removed row's own length (`SendMatrix`/`SendGain`, the mute length for a mute curve; the longer
+  one with a coincident moved value, R19-4): at once when settled (a column jump), else at the
+  column ramp's free sample through an owed landing (`RouteColumn::owe_landing`: the column's first
+  value cursor, else its first gate, is placed with no target and defers its jump to the free
+  sample, so its jump there always emits; `apply_owed` gives that jump the owed length per block
+  until it fires). A column with no curve left uses the removed row's length instead of the mute
+  length.
+- **MAJOR-4 (value jumps keep their length).** K1's `with_held_grid` (+ `clear_target`,
+  `output_state`, `set_output`) and its test ported from #1655 V2 (`4d700eee7`), text identical;
+  `RouteColumn::bind` turns it on for every route column. It holds the other value cursors' grid
+  through `hold_until` (never a deferral), so no landing alternates. **Departure:** this replaces
+  K1's "value jumps are not column jumps" departure for route columns; the ported doc line of
+  `with_held_grid` ("Without it (a route column, R19-3) ...") is kept verbatim for a clean merge
+  with #1655 and is stale for the route.
+- **MINOR (not fixed).** A gate change on a column whose entries are both `+0` still commits on the
+  silent bit and defers the value cursors for `J` with no column ramp running. The deferral is made
+  inside K1's walk, which cannot see the route's column ramps; the small fixes either add a K1 hook
+  (a merge conflict with #1655's identical text) or drop the silent bit from change only (which
+  moves the route's activity flag). Phase 2.
+- **NIT.** The cursor tables are now allocated at attach (`FollowColumns::bind` in
+  `follow_route_control_pair`), so a failed allocation is the typed refusal
+  `GraphRouteControlError::CursorTable(ComposeError)` (host-core maps it to
+  `host.route_control.attach`); bind moves the tables into the op. No `expect` remains.
+- **Wasm.** `ColumnRamps::retarget_column` indexes through `get`/`get_mut`; the new render helpers
+  (`apply_owed`, `owe_landing`, the `place_carried` branches) use no index.
+
+Gates (red before the fix, green after):
+- MAJOR-1: graph `a_reopen_inside_a_gate_jump_composes_the_held_grid_values` (red: the reopen aimed
+  at the curve at 1,023, `ll` 0.8424562).
+- MAJOR-2: graph `a_hand_move_in_flight_at_an_equal_swap_keeps_its_length` (red: block 31, the
+  2,000-sample move replaced by a 64-sample grid ramp).
+- MAJOR-3: graph `a_removed_send_row_lands_the_column_on_its_static_value` (red: `ll` stays 0.4375;
+  mute case: column stays `[0, 0]`) and `a_removed_send_row_lands_after_a_move_in_flight` (red: no
+  landing after the move); host-core `route_mute.rs`
+  `removing_a_send_row_or_its_source_mute_curve_lands_on_the_fresh_plan` (Simd8 when avx2, Simd4,
+  scalar; red: rr sample 0 0.10067598 != 0.20135196, mute 0.0 != -0.22991964); capi
+  `removing_a_send_row_or_its_source_mute_curve_lands_on_the_fresh_plan_on_the_c_abi` and host-web
+  `removing_a_send_row_or_its_source_mute_curve_lands_alike_on_both_hosts` (both red on `rr`).
+- MAJOR-4: graph `a_matrix_step_keeps_its_jump_length_under_a_gain_ride` (red: block 16, the
+  960-sample jump cut by the gain's grid) and automation
+  `a_step_keeps_its_jump_length_while_another_curve_rides_on_a_held_grid_output` (ported).
+- Reviewer's missing tests (graph): `a_seek_landing_inside_a_column_jump_ends_the_hold`,
+  `a_hand_mute_and_a_gate_fade_together`,
+  `a_source_mute_added_while_a_move_is_in_flight_fades_its_column_at_once`.
+
+Sizes (x86-64, measured): `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 944 -> 1,000 (the dropped roles and two
+owed slots), `GraphFollowRouteControlBinding` 184 -> 856 (it carries the column tables from attach
+to bind); `GraphFollowRouteSource` 120 and `ComposeCursor` 104 unchanged. Charges read `size_of`,
+so no pinned number moved. Realtime policy: 171 marked regions in 35 files (unchanged).
+`scripts/check-graph-policy.sh`: PASS.
+
+## Decision record: U2 fold 2 (batch 19)
+
+Fold round 2 of the U2 fold-1 FAIL (MAJOR-A, MAJOR-B, one NIT). This is the exact path; the R19-5
+fallback flag is not used. Files: `crates/graph/src/runtime.rs` and the gates in
+`crates/host-core/tests/route_mute.rs` and `crates/capi/src/runtime/live_tests.rs`. Nothing changed
+under `crates/engine/src/realtime/`, in `crates/automation` or in any row class or table, so the SDK
+was not regenerated.
+
+- **The fix: an owed landing belongs to a column.** `FollowCursors::owed: [Option<(free, length)>; 2]`
+  replaces `RouteColumn::owed`, `owe_landing` and `apply_owed`. No cursor carries an owed length
+  now. A new render helper, `walk_follow`, wraps `walk_columns`. When a column owes a landing at
+  offset `o` of the block, the helper cuts the walks at `o` and `o + 1`. The walks run over windows
+  of the column span (`column_window`, the same rule as `NodeSpan::window`), so the cuts move no
+  event. At `o` the column lands on its composition over the owed length: the heard values, or the
+  cell's words when the column has no curve. A coincident event of the column itself takes the
+  longer ramp (R19-4). A column that has a walk also calls `Composed::retarget` between its cut
+  walks, so its value grid holds inside the landing (R19-3). The landing is spent by an event of
+  the column before `o`, or by a record (both compose the column). A seek at or before `o` drops
+  the landing. The begin-block probe walks a copy of the owed landings and commits that copy only
+  when the block is inactive.
+- **MAJOR-A.** In `place_carried`'s branch for a column with no walk: when the column lost a row
+  and a column ramp is in flight, the landing is owed at the ramp's first free sample. The column
+  does not retarget at once. A settled column still lands at once.
+- **NIT.** The fold-1 MAJOR-1 change to K1's `merge` (held events are heard) touches the walk that
+  #1655 V2 also uses. The #1655 merge must take it as it is.
+
+Gates (red before the fix, green after):
+- MAJOR-A, graph: `a_column_losing_its_last_curve_keeps_a_move_in_flight`. Red: at block 20 the
+  2,000-sample move becomes a 960 ramp.
+- MAJOR-A, host-core: `route_mute.rs` `a_send_column_losing_its_last_curve_keeps_the_hand_move_in_flight`
+  (Simd8 when avx2, Simd4, scalar; both planes match the twin until the move ends, then match the
+  fresh plan). Red: Simd8 plane 0, sample 768.
+- MAJOR-A, C ABI: `a_send_column_losing_its_last_curve_keeps_the_hand_move_on_the_c_abi` (the
+  watermark has no transition fallback, so EXACT). Red: plane 0, the move is cut.
+- MAJOR-B P2, graph: `an_owed_landing_lengthens_no_later_jump`. Red: block 54 lands over 960
+  instead of the twin's 480.
+- MAJOR-B P3, graph: `a_source_mute_close_before_an_owed_landing_fades_over_the_mute_length`.
+  Red: the close fades over 960.
+- The fold-1 MAJOR-3 gates stay green.
+
+Sizes (x86-64, measured): `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 1,000 -> 1,072 (the cut steps and seek in
+`FollowBlock`), `GraphFollowRouteControlBinding` 856 -> 808 (no owed slot per column table). Charges
+read `size_of`, so no pinned number moved. Realtime policy: 171 marked regions in 35 files (unchanged).
+`scripts/check-graph-policy.sh`: PASS.

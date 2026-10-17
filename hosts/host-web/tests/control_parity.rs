@@ -6947,3 +6947,59 @@ fn send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts() {
         exact(&mut browser, &c_abi, label);
     }
 }
+
+/// #1654 U2 fold 1, MAJOR-3 on both hosts. `t1-b` keeps a flat `gain_db` ride at -6 dB (its table
+/// continues) and a rebuild before block 4 removes either its flat `rr` entry at 0.5 or `t1`'s
+/// mute entry (held muted): the send stays a following route, no join record moves its cell and no
+/// cursor hears the removed curve. Each rebuild completes `EXACT` on both hosts, and from the
+/// first block boundary after the landing over the removed row's own length (`SendMatrix`, 240,
+/// for `rr`; the mute length, 480, for the mute curve) both hosts render a fresh plan of the
+/// committed model, bit for bit.
+///
+/// Test value: red if a removed row or source mute curve of a send that stays seven-word leaves
+/// the send on the removed curve's last value on either host, or if the hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn removing_a_send_row_or_its_source_mute_curve_lands_alike_on_both_hosts() {
+    use session::{AutomationShape, ParameterUnit};
+    const RUN: u64 = 24;
+    const EDIT: u64 = 4;
+    let end = u64::from(QUANTUM) * BLOCKS;
+    let flat = |value: f32, shape, unit| vec![send_piece(shape, (0, value), (end, value), unit)];
+    let mut kept = follow_model(false, false);
+    kept.automation.push(send_entry(
+        "t1-b-gain",
+        1,
+        flat(-6.0, AutomationShape::Linear, ParameterUnit::Db),
+    ));
+    let mut with_rr = kept.clone();
+    with_rr.automation.push(send_entry(
+        "t1-b-rr",
+        6,
+        flat(0.5, AutomationShape::Linear, ParameterUnit::Linear),
+    ));
+    let mut with_mute = follow_model(true, false);
+    with_mute.automation[0].segments = flat(1.0, AutomationShape::Step, ParameterUnit::Linear);
+    with_mute.automation.extend(kept.automation.iter().cloned());
+    let fresh = both_run(&kept, RUN, &[]);
+    for (label, model, removed, length) in [
+        ("rr", &with_rr, "t1-b-rr", 240_u64),
+        ("the source mute", &with_mute, "t1-mute", 480),
+    ] {
+        let edits = vec![SessionEdit::RemoveAutomation {
+            automation_id: id(removed),
+        }];
+        let run = both_run(model, RUN, &[(EDIT, edits, EditPath::Rebuild)]);
+        assert_ne!(
+            run[..EDIT as usize],
+            fresh[..EDIT as usize],
+            "{label}: not vacuous, the removed curve is heard"
+        );
+        let landed = (EDIT * u64::from(QUANTUM) + length).div_ceil(u64::from(QUANTUM)) as usize;
+        assert_eq!(
+            run[landed..],
+            fresh[landed..],
+            "{label}: the committed model's bits after the landing"
+        );
+    }
+}

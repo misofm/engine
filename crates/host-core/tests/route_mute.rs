@@ -2778,3 +2778,174 @@ fn a_running_send_ride_across_an_unrelated_rebuild_is_the_never_swapped_twin() {
         );
     }
 }
+
+/// #1654 U2 fold 2, MAJOR-A (every bank width and the scalar oracle). The send `t-b` hears flat
+/// `ll` and `rr` entries at 0.5; at block 5 a hand move of its gain to -6 dB is written through
+/// its seven-word producer, and a rebuild at block 6 removes the `ll` entry while the move is in
+/// flight: the send's left source column no longer hears a curve. The move keeps its length on
+/// both columns (both planes are the never-swapped twin's, bit for bit, until it ends), the left
+/// column then lands on its static `ll` over `SendMatrix` (the pan length), and from the first
+/// block boundary after that landing both planes are the successor prepared fresh, bit for bit.
+/// Render allocates nothing.
+///
+/// Test value: red if a column that loses its last curve retargets at the swap and cuts the
+/// live move in flight.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_send_column_losing_its_last_curve_keeps_the_hand_move_in_flight() {
+    use follow::*;
+    use send_rows::{entry, flat};
+    use session::ParameterUnit;
+    use successor::{BLOCKS, QUANTUM, SWAP_BLOCK};
+    const WRITE_BLOCK: usize = 5;
+    let pcm = successor::Feed::new("t", 31);
+    let mut a = model(QUANTUM as u32, SendTap::PreFader, false, true);
+    a.automation = vec![
+        entry("send-ll", 3, flat(0.5, ParameterUnit::Linear)),
+        entry("send-rr", 6, flat(0.5, ParameterUnit::Linear)),
+    ];
+    let mut committed = a.clone();
+    committed.routes[1].gain_db = -6.0;
+    assert_eq!(committed.routes[1].id.as_str(), "t-b");
+    let mut b = committed.clone();
+    b.automation.retain(|entry| entry.id.as_str() != "send-ll");
+    // The record a commit of `committed` writes: the open transform at -6 dB (the automated
+    // entries' words are fallbacks render ignores) and the plan's automated set.
+    let length = 480_usize;
+    let transform =
+        graph_compiler::route_values(-6.0, [0.0, 0.0, 0.0, 1.0]).expect("in-domain send values");
+    let pan = controls::LiveRamps::for_session(&b).pan_samples as usize;
+    let move_end = WRITE_BLOCK * QUANTUM + length;
+    assert!(
+        move_end > SWAP_BLOCK * QUANTUM,
+        "the move is in flight at the swap"
+    );
+    let landed = next_boundary(move_end + pan, QUANTUM);
+    assert!(landed < BLOCKS * QUANTUM, "the landing ends inside the run");
+    let hand = |block: usize,
+                handles: &mut host_core::HostLiveControlHandles,
+                gate: &mut engine::realtime::PlanRevisionGate| {
+        use builtins_compiler::TestOnlyWriteGate;
+        if block == WRITE_BLOCK {
+            let index =
+                host_core::follow_route_producer_position(&handles.follow_route_controls, "t-b")
+                    .expect("t-b's seven-word producer");
+            let automated = handles.follow_route_controls[index].automated();
+            let [automated_gain, automated_mute, ll, lr, rl, rr] = automated.rows;
+            let flags = host_core::RouteFollowFlags {
+                mute: false,
+                follows_mute: true,
+                terms: [false; 2],
+                automated: automated.lanes,
+                automated_gain,
+                automated_mute,
+                automated_matrix: [ll, lr, rl, rr],
+            };
+            let record = host_core::FollowRouteControlRecord::new(transform, flags, length as u32)
+                .expect("a send record");
+            gate.write_published(|stamp| {
+                handles.follow_route_controls[index].write(stamp, record);
+            });
+        }
+    };
+    for backend in follow::backends() {
+        let what = format!("{backend:?}");
+        let (twin, _) = live_swap(&a, None, backend, &pcm, hand);
+        let (swapped, handles) = live_swap(&a, Some((&b, &committed)), backend, &pcm, hand);
+        assert_eq!(
+            handles
+                .expect("the successor's handles")
+                .follow_route_controls
+                .len(),
+            1,
+            "{what}: the send stays a following route"
+        );
+        assert_quiet(&swapped, &what);
+        let fresh =
+            successor::reference_run(&successor::Session::compile(b.clone()), &[&pcm], backend);
+        for index in 0..2 {
+            let (send, twin, fresh) = (
+                plane(&swapped, index),
+                plane(&twin, index),
+                plane(&fresh, index),
+            );
+            assert_bits_equal(
+                &send[..move_end],
+                &twin[..move_end],
+                &format!("{what}: plane {index}, the move runs to its end"),
+            );
+            assert_bits_equal(
+                &send[landed..BLOCKS * QUANTUM],
+                &fresh[landed..BLOCKS * QUANTUM],
+                &format!("{what}: plane {index}, the fresh plan after the landing"),
+            );
+        }
+        assert!(
+            first_difference_from(&plane(&swapped, 0), &plane(&twin, 0), move_end).is_some(),
+            "{what}: not vacuous, the removed ll is heard after the move"
+        );
+    }
+}
+
+/// #1654 U2 fold 1, MAJOR-3 (every bank width and the scalar oracle). The send `t-b` keeps a flat
+/// `gain_db` ride at -6 dB (its table continues) and a rebuild at block 6 removes either its flat
+/// `rr` entry at 0.5 or its source strip's mute entry (held muted): the send stays a following
+/// route, no join record moves its cell, and no cursor of the successor hears the removed curve.
+/// The carry lands the send on the successor's static value over the removed row's own length
+/// (`SendMatrix`, the pan length, for `rr`; the mute length for the mute curve): from the first
+/// block boundary after that landing, the send's plane is the successor prepared fresh, bit for
+/// bit, and render allocates nothing.
+///
+/// Test value: red if a removed row or source mute curve of a send that stays seven-word leaves
+/// the send on the removed curve's last value.
+#[cfg(feature = "test-support")]
+#[test]
+fn removing_a_send_row_or_its_source_mute_curve_lands_on_the_fresh_plan() {
+    use follow::*;
+    use send_rows::{entry, flat};
+    use session::ParameterUnit;
+    use successor::{BLOCKS, QUANTUM, SWAP_BLOCK};
+    let pcm = successor::Feed::new("t", 29);
+    let mut b = model(QUANTUM as u32, SendTap::PreFader, false, true);
+    b.automation = vec![entry("send-gain", 1, flat(-6.0, ParameterUnit::Db))];
+    let pan = controls::LiveRamps::for_session(&b).pan_samples as usize;
+    let mut with_rr = b.clone();
+    with_rr
+        .automation
+        .push(entry("send-rr", 6, flat(0.5, ParameterUnit::Linear)));
+    let mut with_mute = b.clone();
+    with_mute.automation.push(mute_entry(1.0, &[]));
+    let quiet = |_: usize,
+                 _: &mut host_core::HostLiveControlHandles,
+                 _: &mut engine::realtime::PlanRevisionGate| {};
+    for backend in follow::backends() {
+        let fresh =
+            successor::reference_run(&successor::Session::compile(b.clone()), &[&pcm], backend);
+        let fresh = plane(&fresh, 1);
+        for (name, a, length) in [("rr", &with_rr, pan), ("mute", &with_mute, M as usize)] {
+            let what = format!("{backend:?} {name}");
+            let (swapped, handles) = live_swap(a, Some((&b, a)), backend, &pcm, quiet);
+            assert_eq!(
+                handles
+                    .expect("the successor's handles")
+                    .follow_route_controls
+                    .len(),
+                1,
+                "{what}: the send stays a following route"
+            );
+            assert_quiet(&swapped, &what);
+            let send = plane(&swapped, 1);
+            let at = SWAP_BLOCK * QUANTUM;
+            assert!(
+                first_difference_from(&send[..at], &fresh[..at], 0).is_some(),
+                "{what}: not vacuous, the removed curve is heard before the swap"
+            );
+            let landed = next_boundary(at + length, QUANTUM);
+            assert_bits_equal(
+                &send[landed..BLOCKS * QUANTUM],
+                &fresh[landed..BLOCKS * QUANTUM],
+                &format!("{what}: the fresh plan after the landing"),
+            );
+        }
+    }
+}

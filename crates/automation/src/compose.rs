@@ -22,7 +22,8 @@
 //!   retargets the output, and when the caller retargets it ([`Composed::retarget`]: a record's
 //!   ramp, a gate change of the cell), every value cursor defers its jump to the first free sample
 //!   of that ramp ([`CellState::defer_jump`], #1711 D1). Until it fires, the value cursor's grid
-//!   events are held: the heard values do not move and the output does not retarget, so no grid
+//!   events are held: they update the heard values (a gate event or record composes them) but the
+//!   output does not retarget, so no grid
 //!   event cuts the column jump short. At the jump's end each value cursor whose curve moved jumps
 //!   over its own jump length to the curve at the jump's completion (the deferred jump's rule, change
 //!   only, or always with a held event outstanding), and the coincident landings take the longest
@@ -109,7 +110,7 @@ pub struct ComposeCursor {
     state: CellState,
     /// The jump length of a [`crate::JumpLength::Block`] cell for this block.
     jump: u32,
-    /// The value the output has heard from this curve: its last event that was not held.
+    /// The value the output has heard from this curve: its last event, held or not (R19-3).
     heard: f32,
     // The walk's scratch, meaningful only inside [`Composed::walk`].
     /// The state before the pull that produced `next`, and the offset that pull started at.
@@ -697,7 +698,9 @@ struct Merged {
     held_ramp: u32,
 }
 
-/// Take every cursor's event at `offset`: a held event is shown, any other is heard.
+/// Take every cursor's event at `offset`: every event is heard (R19-3: a held grid event updates
+/// the heard values and does not retarget the output, so a later gate event or record composes
+/// the grid's value, U2 fold 1), and a held one is also shown to the held-event rule.
 fn merge(cursors: &mut [ComposeCursor], offset: u32) -> Merged {
     let mut merged = Merged::default();
     for cursor in cursors.iter_mut() {
@@ -708,12 +711,12 @@ fn merge(cursors: &mut [ComposeCursor], offset: u32) -> Merged {
         cursor.consumed = true;
         cursor.moved = !event.held;
         cursor.shown = event.value;
+        cursor.heard = event.value;
         if event.held {
             merged.held = true;
             merged.held_ramp = merged.held_ramp.max(event.ramp);
             continue;
         }
-        cursor.heard = event.value;
         merged.ramp = merged.ramp.max(event.ramp);
         match event.kind {
             EventKind::Set => merged.set = true,
