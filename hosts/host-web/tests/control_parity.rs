@@ -6429,117 +6429,15 @@ fn solo_and_a_vca_mute_compose_with_the_curve_for_a_following_send_on_both_hosts
     }
 }
 
-/// #1654 T4: [`follow_model`]`(false, false)` (no source mute curve) with the send `t1-b` riding
-/// its `gain_db` (route row 1) linearly from 0 to -12 dB over the run, and `change` applied: a
-/// route-row-only send, which the plan gives the seven-word cell.
+/// An entry `name` on `t1-b`'s own row `row` (1 `gain_db`, 2 `mute`, 3-6 the matrix), one segment
+/// of `shape` over `[0, end)` from `from` to `to` in `unit`.
 #[cfg(feature = "test-support")]
-fn send_ride_model(change: impl FnOnce(&mut SessionModel)) -> SessionModel {
-    let mut model = follow_model(false, false);
-    model.automation.push(session::Automation {
-        id: id("t1-b-gain-ride"),
-        target: address(
-            Owner::Route(id("t1-b")),
-            Section::Own,
-            1,
-            ParameterChannel::Both,
-        ),
-        segments: vec![session::AutomationSegment {
-            shape: session::AutomationShape::Linear,
-            start_sample: 0,
-            end_sample: u64::from(QUANTUM) * BLOCKS,
-            start_value: 0.0,
-            end_value: -12.0,
-            unit: session::ParameterUnit::Db,
-        }],
-        offset: session::AutomationOffset::default(),
-    });
-    change(&mut model);
-    model
-}
-
-/// #1654 R17-6 and root's ruling R17-1 on both hosts. On `t1-b`, whose `gain_db` stored entry
-/// renders, `SET_CONTROL gain_db = +3` is `live` alike on both hosts, one revision, with one
-/// reply; the committed document stores `+3` as the entry's offset on both fields and keeps the
-/// static gain. The in-place leg commits in place on both hosts; the same transaction by the full
-/// path (`control_plane::test_force_full_preparation`) gives the same reply, document and bits of
-/// every block, alike on both hosts.
-///
-/// Test value: red if the in-place path answers or renders otherwise than the full path for the
-/// send gain (an owners model without the route entry writes the static gain or commits
-/// `model_only`), or if the two hosts disagree.
-#[cfg(feature = "test-support")]
-#[test]
-fn a_hand_move_on_an_automated_send_gain_is_an_offset_alike_on_both_hosts() {
-    const EDIT: u64 = 4;
-    const END: u64 = 20;
-    let model = send_ride_model(|_| {});
-    let mut expected = send_ride_model(|model| {
-        model.automation[0].offset = session::AutomationOffset {
-            left_db: 3.0,
-            right_db: 3.0,
-        };
-    });
-    expected.revision = model.revision + 1;
-    let edits = [own_edit(Owner::Route(id("t1-b")), 1, 3.0)];
-    let leg = |label: &str| {
-        let mut browser = Rig::new(&model);
-        let mut c_abi = CAbi::new(&model);
-        same_blocks(&mut browser, &mut c_abi, 0..EDIT, label);
-        let (b, reply) = browser.transaction_reply(&edits);
-        let (c, c_reply) = c_abi.transaction(&edits);
-        assert_eq!(b, c, "{label}: one verdict");
-        assert_eq!(reply, c_reply, "{label}: one reply");
-        assert_eq!(
-            b,
-            Verdict::Applied {
-                path: EditPath::Live,
-                revision: model.revision + 1
-            },
-            "{label}: a hand move is live"
-        );
-        let committed = snapshot_bytes(|payload, expected| browser.command(payload, expected));
-        let blocks: Vec<Vec<u32>> = (EDIT..END)
-            .map(|block| {
-                let (b, c) = (browser.step(block), c_abi.step(block));
-                assert_eq!(b, c, "{label}: block {block} alike on both hosts");
-                b
-            })
-            .collect();
-        (reply, committed, blocks)
-    };
-    control_plane::test_take_in_place_counts();
-    let in_place = leg("in place");
-    assert_eq!(
-        control_plane::test_take_in_place_counts(),
-        (2, 0),
-        "both hosts commit the hand move in place"
-    );
-    assert_eq!(
-        in_place.1,
-        canonical_session_json(&expected)
-            .expect("canonical")
-            .as_bytes(),
-        "the entry stores +3 on both fields and the static gain stays"
-    );
-    control_plane::test_force_full_preparation(true);
-    let full = leg("full path");
-    control_plane::test_force_full_preparation(false);
-    assert_eq!(
-        control_plane::test_take_in_place_counts().0,
-        0,
-        "the full leg commits nothing in place"
-    );
-    assert_eq!(full.0, in_place.0, "one reply on both paths");
-    assert_eq!(full.1, in_place.1, "one document");
-    assert_eq!(full.2, in_place.2, "the same bits on both paths");
-}
-
-/// #1654 T5: an entry `name` on `t1-b`'s own row `row` (1 `gain_db`, 2 `mute`, 3-6 the matrix).
-#[cfg(feature = "test-support")]
-fn send_entry(
+fn send_row_entry(
     name: &str,
     row: u32,
-    segments: Vec<session::AutomationSegment>,
+    shape: session::AutomationShape,
+    (from, to): (f32, f32),
+    unit: session::ParameterUnit,
 ) -> session::Automation {
     session::Automation {
         id: id(name),
@@ -6549,278 +6447,16 @@ fn send_entry(
             row,
             ParameterChannel::Both,
         ),
-        segments,
+        segments: vec![session::AutomationSegment {
+            shape,
+            start_sample: 0,
+            end_sample: u64::from(QUANTUM) * BLOCKS,
+            start_value: from,
+            end_value: to,
+            unit,
+        }],
         offset: session::AutomationOffset::default(),
     }
-}
-
-/// #1654 T5: one segment of `shape` from `(start, from)` to `(end, to)` in `unit`.
-#[cfg(feature = "test-support")]
-fn send_piece(
-    shape: session::AutomationShape,
-    (start, from): (u64, f32),
-    (end, to): (u64, f32),
-    unit: session::ParameterUnit,
-) -> session::AutomationSegment {
-    session::AutomationSegment {
-        shape,
-        start_sample: start,
-        end_sample: end,
-        start_value: from,
-        end_value: to,
-        unit,
-    }
-}
-
-/// #1654 T5: `t1-b`'s own row `control` set to `value`, over `ramp` samples when given.
-#[cfg(feature = "test-support")]
-fn send_edit(control: u32, value: f32, ramp: Option<u32>) -> Vec<SessionEdit> {
-    vec![SessionEdit::set_control(
-        address(Owner::Route(id("t1-b")), Section::Own, control, Lane::Both),
-        value,
-        ramp,
-    )]
-}
-
-/// #1654 T5: the send `t1-b` of `model`.
-#[cfg(feature = "test-support")]
-fn t1_b(model: &mut SessionModel) -> &mut session::Route {
-    model
-        .routes
-        .iter_mut()
-        .find(|route| route.id.as_str() == "t1-b")
-        .expect("the send")
-}
-
-/// #1654 gate 1 on both hosts. `t1-b` with a flat `gain_db` ride at -6 dB (hand offset `+0.0`,
-/// then `-0.0`), a flat `rr` entry at 0.5 and a flat route `mute` at 0 renders, on each host and
-/// alike, the bits of the session whose send holds those values statically. Not vacuous: a ride
-/// at -5 dB differs.
-///
-/// Test value: red if either host's route op reads the gain word as the compiler's linear static
-/// gain rather than the seeded offset, or composes the curves with other arithmetic than the
-/// static route, or if the hosts disagree.
-#[cfg(feature = "test-support")]
-#[test]
-fn a_flat_send_ride_renders_the_static_sends_bits_on_both_hosts() {
-    use session::{AutomationShape, ParameterUnit};
-    const RUN: u64 = 24;
-    let end = u64::from(QUANTUM) * BLOCKS;
-    let flat = |value: f32, shape, unit| vec![send_piece(shape, (0, value), (end, value), unit)];
-    let automated = |gain_db: f32, offset: f32| {
-        let mut model = follow_model(false, false);
-        let mut gain = send_entry(
-            "t1-b-gain",
-            1,
-            flat(gain_db, AutomationShape::Linear, ParameterUnit::Db),
-        );
-        gain.offset = session::AutomationOffset {
-            left_db: offset,
-            right_db: offset,
-        };
-        model.automation.extend([
-            gain,
-            send_entry(
-                "t1-b-mute",
-                2,
-                flat(0.0, AutomationShape::Step, ParameterUnit::Linear),
-            ),
-            send_entry(
-                "t1-b-rr",
-                6,
-                flat(0.5, AutomationShape::Linear, ParameterUnit::Linear),
-            ),
-        ]);
-        model
-    };
-    let mut fixed = follow_model(false, false);
-    t1_b(&mut fixed).gain_db = -6.0;
-    t1_b(&mut fixed).channel_matrix.rr = 0.5;
-    let fixed = both_run(&fixed, RUN, &[]);
-    for offset in [0.0_f32, -0.0] {
-        assert_eq!(
-            both_run(&automated(-6.0, offset), RUN, &[]),
-            fixed,
-            "offset {offset:?}: the static send's bits"
-        );
-    }
-    assert_ne!(
-        both_run(&automated(-5.0, 0.0), RUN, &[]),
-        fixed,
-        "a ride at -5 dB is heard"
-    );
-}
-
-/// #1654 gate 3 on both hosts. On [`send_ride_model`] (`t1-b` rides its gain from 0 to -12 dB)
-/// with an `rr` ride from 1 to 0.25, each host gives one verdict and reply and renders the same
-/// bits: (a) an `UpsertAutomation` that changes the gain ride rebuilds and completes `EXACT`, and
-/// once the moved row has landed renders a fresh plan of the new model; (b) `SET_CONTROL gain_db =
-/// +3` is `live` and, after its ramp and the deferred landing, renders a fresh plan whose entry
-/// carries the offset `+3`; (c) `SET_CONTROL matrix_rr` (automated) is `model_only` and moves no
-/// bit; (d) `SET_CONTROL matrix_lr = 0.5` (not automated) is `live` and, after its ramp, renders a
-/// fresh plan with that value.
-///
-/// Test value: red if a send automation edit is not an exact rebuild on either host, a hand send
-/// gain move writes the fallback (or reaches the matrix), a hand edit of an automated matrix row
-/// fights the curve, an un-automated value of the group is lost, or the hosts disagree.
-#[cfg(feature = "test-support")]
-#[test]
-fn send_row_edits_rebuild_or_commit_as_the_rows_rule_says_on_both_hosts() {
-    use session::{AutomationShape, ParameterUnit};
-    const RUN: u64 = 24;
-    const EDIT: u64 = 4;
-    const SETTLED: usize = 10;
-    let end = u64::from(QUANTUM) * BLOCKS;
-    let with_rr = |change: &dyn Fn(&mut SessionModel)| {
-        send_ride_model(|model| {
-            model.automation.push(send_entry(
-                "t1-b-rr",
-                6,
-                vec![send_piece(
-                    AutomationShape::Linear,
-                    (0, 1.0),
-                    (end, 0.25),
-                    ParameterUnit::Linear,
-                )],
-            ));
-            change(model);
-        })
-    };
-    let model = with_rr(&|_| {});
-    let untouched = both_run(&model, RUN, &[]);
-    // (a) A changed gain ride: an exact rebuild, then the new model's bits.
-    let changed = with_rr(&|model| model.automation[0].segments[0].end_value = -24.0);
-    let mut browser = Rig::new(&model);
-    let mut c_abi = CAbi::new(&model);
-    same_blocks(&mut browser, &mut c_abi, 0..EDIT, "(a)");
-    both_commit(
-        &mut browser,
-        &mut c_abi,
-        &[SessionEdit::UpsertAutomation {
-            automation: changed.automation[0].clone(),
-        }],
-        EditPath::Rebuild,
-        "(a)",
-    );
-    let fresh = both_run(&changed, RUN, &[]);
-    for block in EDIT..RUN {
-        let (b, c) = (browser.step(block), c_abi.step(block));
-        assert_eq!(b, c, "(a), block {block}: the two hosts agree");
-        if block as usize >= SETTLED {
-            assert_eq!(
-                b, fresh[block as usize],
-                "(a), block {block}: the new model's bits"
-            );
-        }
-    }
-    let watermark = c_abi.watermark();
-    assert_eq!(status_watermark(&browser), watermark, "(a): one watermark");
-    assert_eq!(
-        watermark.2,
-        capi::OUTCOME_EXACT,
-        "(a): the rebuild is exact"
-    );
-    // (b), (c), (d).
-    let offset = with_rr(&|model| {
-        model.automation[0].offset = session::AutomationOffset {
-            left_db: 3.0,
-            right_db: 3.0,
-        };
-    });
-    let lr = with_rr(&|model| t1_b(model).channel_matrix.lr = 0.5);
-    for (label, edits, path, expected) in [
-        (
-            "(b) the gain offset",
-            send_edit(1, 3.0, None),
-            EditPath::Live,
-            &offset,
-        ),
-        (
-            "(c) an automated matrix_rr",
-            send_edit(6, 0.75, None),
-            EditPath::ModelOnly,
-            &model,
-        ),
-        (
-            "(d) an un-automated matrix_lr",
-            send_edit(4, 0.5, None),
-            EditPath::Live,
-            &lr,
-        ),
-    ] {
-        let run = both_run(&model, RUN, &[(EDIT, edits, path)]);
-        let fresh = both_run(expected, RUN, &[]);
-        let from = if path == EditPath::ModelOnly {
-            0
-        } else {
-            SETTLED
-        };
-        assert_eq!(
-            run[from..],
-            fresh[from..],
-            "{label}: the committed model's bits"
-        );
-        if path == EditPath::Live {
-            assert_ne!(
-                run[EDIT as usize..],
-                untouched[EDIT as usize..],
-                "{label}: heard"
-            );
-        }
-    }
-}
-
-/// #1654 gate 4 on both hosts (D5). `t1-b`'s own mute curve is open until 2,048 and closed after.
-/// A hand mute before block 4 is `live` and, after the mute ramp, renders the plan whose send is
-/// statically muted (the curve is open: the hand mute closes the send); a hand unmute before
-/// block 20 (2,560, the curve closed) is `live` and renders the curve-only plan (the send stays
-/// closed). Both hosts render the same bits.
-///
-/// Test value: red if the composition is not an OR on either host, or the hosts disagree.
-#[cfg(feature = "test-support")]
-#[test]
-fn a_hand_send_mute_ors_with_its_curve_on_both_hosts() {
-    use session::{AutomationShape::Step, ParameterUnit::Linear};
-    const RUN: u64 = 32;
-    let end = u64::from(QUANTUM) * BLOCKS;
-    let curve = |muted: bool| {
-        let mut model = follow_model(false, false);
-        model.automation.push(send_entry(
-            "t1-b-mute",
-            2,
-            vec![
-                send_piece(Step, (0, 0.0), (2_048, 1.0), Linear),
-                send_piece(Step, (2_048, 1.0), (end, 1.0), Linear),
-            ],
-        ));
-        t1_b(&mut model).mute = muted;
-        model
-    };
-    let run = both_run(
-        &curve(false),
-        RUN,
-        &[
-            (4, send_edit(2, 1.0, None), EditPath::Live),
-            (20, send_edit(2, 0.0, None), EditPath::Live),
-        ],
-    );
-    let shut = both_run(&curve(true), RUN, &[]);
-    let curve_only = both_run(&curve(false), RUN, &[]);
-    assert_eq!(
-        run[9..20],
-        shut[9..20],
-        "the hand mute closes the open curve"
-    );
-    assert_ne!(
-        curve_only[9..16],
-        shut[9..16],
-        "not vacuous: the curve is open there"
-    );
-    assert_eq!(
-        run[20..],
-        curve_only[20..],
-        "the hand unmute leaves the closed curve closed"
-    );
 }
 
 /// #1654 gate 5 on both hosts: an automation entry on the route into the output `t1-main` is
@@ -6834,15 +6470,12 @@ fn an_output_route_entry_is_refused_alike_on_both_hosts() {
     let mut browser = Rig::new(&model);
     let mut c_abi = CAbi::new(&model);
     same_blocks(&mut browser, &mut c_abi, 0..1, "before");
-    let mut entry = send_entry(
+    let mut entry = send_row_entry(
         "t1-main-gain",
         1,
-        vec![send_piece(
-            session::AutomationShape::Linear,
-            (0, -6.0),
-            (1_000, -6.0),
-            session::ParameterUnit::Db,
-        )],
+        session::AutomationShape::Linear,
+        (-6.0, -6.0),
+        session::ParameterUnit::Db,
     );
     entry.target.owner = Owner::Route(id("t1-main"));
     let edits = [SessionEdit::UpsertAutomation { automation: entry }];
@@ -6868,181 +6501,324 @@ fn an_output_route_entry_is_refused_alike_on_both_hosts() {
     same_blocks(&mut browser, &mut c_abi, 1..3, "after the refusal");
 }
 
-/// #1654 gate 7 and R19-5 on both hosts. On [`send_ride_model`]: (gate 7) a rebuild that adds a
-/// muted send `t2-b` into the bus (inactive: no bit of the mix moves) keeps the send ride's table, so the
-/// send's cursors carry verbatim and every block is the never-rebuilt run's, bit for bit;
-/// (R19-5) a live send move with its own 4,000 samples (the hand offset `+3`, or a D6
-/// `matrix_lr` edit) is in flight when a rebuild moves the gain ride's table: until the move's
-/// end every block is the run that took the move and no rebuild. Gate 7's rebuild completes
-/// `EXACT` with no transition fallback on either host; R19-5's completes `TRANSITION_FALLBACK`
-/// (count 1), B19-R8's conservative term, though its move is not cut. Both hosts render the same
-/// bits.
+/// Root ruling B19-R10 (send-row rendering is not shipped; #1654 turns it on behind TBD54). A
+/// session whose send `t1-b` stores automation on its own rows (a `gain_db` ride, a `mute` step,
+/// rides and flat entries on `ll`, `lr`, `rl` and `rr`) behaves exactly as the session without
+/// those entries, as on `main` before batch 19: on both hosts, with `t1-b` six-word (no source
+/// mute curve) and seven-word (`t1`'s stored mute), the session prepares with no refusal, every
+/// block renders the bits of the session without the entries (through a live `gain_db` move on
+/// the send and an inert entry upsert, which commits `model_only`), and the control list and
+/// state pages are those of the session without the entries (no send row lists `automated`).
 ///
-/// Test value: red if a continued ride is repositioned at an unrelated swap (a re-timed ride), if a
-/// reposition cuts or re-times a live send move, or if gate 7's rebuild (no live send move) is
-/// flagged.
+/// Test value: red if a send-row entry reaches render (a cell, a seven-word lane or a hand
+/// offset: the bits move), if it is refused or changes an edit's path, or if the control list
+/// flags or values a send row from it.
 #[cfg(feature = "test-support")]
 #[test]
-fn send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts() {
-    const RUN: u64 = 48;
-    const MOVE: u64 = 4;
-    const REBUILD: u64 = 6;
-    const RAMP: u32 = 4_000;
-    let model = send_ride_model(|_| {});
-    // A muted route `t2-b` into the bus: inactive, so the bus sum takes nothing of it.
-    let mut muted_send = model
+fn stored_send_row_automation_is_inert_alike_on_both_hosts() {
+    use session::{AutomationShape, ParameterUnit};
+    const RUN: u64 = 32;
+    let gain = send_row_edit(1, -6.0, Some(480));
+    let upsert = vec![SessionEdit::UpsertAutomation {
+        automation: send_row_entry(
+            "t1-b-lr",
+            4,
+            AutomationShape::Linear,
+            (0.7, 0.7),
+            ParameterUnit::Linear,
+        ),
+    }];
+    let edits = [(4, gain, EditPath::Live), (10, upsert, EditPath::ModelOnly)];
+    for (label, base) in [
+        ("six-word send", follow_model(false, false)),
+        ("seven-word send", follow_model(true, false)),
+    ] {
+        let mut rows = base.clone();
+        rows.automation.extend([
+            send_row_entry(
+                "t1-b-gain",
+                1,
+                AutomationShape::Linear,
+                (0.0, -12.0),
+                ParameterUnit::Db,
+            ),
+            send_row_entry(
+                "t1-b-mute",
+                2,
+                AutomationShape::Step,
+                (0.0, 1.0),
+                ParameterUnit::Linear,
+            ),
+            send_row_entry(
+                "t1-b-ll",
+                3,
+                AutomationShape::Linear,
+                (0.1, 0.9),
+                ParameterUnit::Linear,
+            ),
+            send_row_entry(
+                "t1-b-lr",
+                4,
+                AutomationShape::Linear,
+                (0.5, 0.5),
+                ParameterUnit::Linear,
+            ),
+            send_row_entry(
+                "t1-b-rl",
+                5,
+                AutomationShape::Linear,
+                (0.25, 0.25),
+                ParameterUnit::Linear,
+            ),
+            send_row_entry(
+                "t1-b-rr",
+                6,
+                AutomationShape::Linear,
+                (0.9, 0.1),
+                ParameterUnit::Linear,
+            ),
+        ]);
+        let (mut browser, mut c_abi) = (Rig::new(&rows), CAbi::new(&rows));
+        let (mut plain_browser, mut plain_c_abi) = (Rig::new(&base), CAbi::new(&base));
+        let (b_rows, _) = dump(|payload, expected| browser.command(payload, expected));
+        let (c_rows, _) = dump(|payload, expected| c_abi.send(payload, expected));
+        let (plain_rows, _) = dump(|payload, expected| plain_browser.command(payload, expected));
+        let (plain_c_rows, _) = dump(|payload, expected| plain_c_abi.send(payload, expected));
+        assert_eq!(b_rows, c_rows, "{label}: the hosts list alike");
+        assert_eq!(
+            plain_rows, plain_c_rows,
+            "{label}: the hosts list alike, no entries"
+        );
+        assert_eq!(
+            b_rows, plain_rows,
+            "{label}: the list ignores the send-row entries"
+        );
+        assert!(
+            !b_rows
+                .iter()
+                .any(|row| row.contains("\"t1-b\"") && row.contains("automated: true")),
+            "{label}: no send row lists automated"
+        );
+        let run = both_run(&rows, RUN, &edits);
+        let plain = both_run(&base, RUN, &edits);
+        for (block, (run, plain)) in run.iter().zip(&plain).enumerate() {
+            assert_eq!(run, plain, "{label}, block {block}: the entries are inert");
+        }
+    }
+}
+
+/// `t1-b`'s own row `control` set to `value`, over `ramp` samples when given.
+#[cfg(feature = "test-support")]
+fn send_row_edit(control: u32, value: f32, ramp: Option<u32>) -> Vec<SessionEdit> {
+    vec![SessionEdit::set_control(
+        address(Owner::Route(id("t1-b")), Section::Own, control, Lane::Both),
+        value,
+        ramp,
+    )]
+}
+
+/// [`follow_model`]`(false, false)` whose send `t1-b` follows a stored mute curve held open (`t1`'s
+/// mute entry flat at 0 on both lanes): a seven-word following send whose curves never move, so a
+/// live send move on it is the only ramp in flight.
+#[cfg(feature = "test-support")]
+fn open_follow_model() -> SessionModel {
+    let mut model = follow_model(false, false);
+    model.automation.push(session::Automation {
+        id: id("t1-mute"),
+        target: address(
+            Owner::Strip(id(T1.id)),
+            Section::Builtins,
+            MUTE,
+            ParameterChannel::Both,
+        ),
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Step,
+            start_sample: 0,
+            end_sample: u64::from(QUANTUM) * BLOCKS,
+            start_value: 0.0,
+            end_value: 0.0,
+            unit: session::ParameterUnit::Linear,
+        }],
+        offset: session::AutomationOffset::default(),
+    });
+    model
+}
+
+/// A rebuild that adds the muted, inactive send `t2-b` into the bus: no bit of the mix moves.
+#[cfg(feature = "test-support")]
+fn muted_send_rebuild(model: &SessionModel) -> Vec<SessionEdit> {
+    let mut send = model
         .routes
         .iter()
         .find(|route| route.id.as_str() == "t1-b")
         .expect("the send")
         .clone();
-    muted_send.id = id("t2-b");
-    muted_send.source = session::RouteSource::Track {
+    send.id = id("t2-b");
+    send.source = session::RouteSource::Track {
         track_id: id(T2.id),
         tap: session::SendTap::PreFader,
     };
-    muted_send.mute = true;
-    muted_send.follows_mute = false;
-    let added_route = SessionEdit::UpsertRoute { route: muted_send };
-    let moved_ride = |offset: f32| {
-        let mut ride = model.automation[0].clone();
-        ride.segments[0].end_value = -24.0;
-        ride.offset = session::AutomationOffset {
-            left_db: offset,
-            right_db: offset,
-        };
-        SessionEdit::UpsertAutomation { automation: ride }
-    };
-    let outcome = |browser: &mut Rig, c_abi: &CAbi, label: &str, flagged: bool| {
-        let watermark = c_abi.watermark();
-        assert_eq!(
-            status_watermark(browser),
-            watermark,
-            "{label}: one watermark"
-        );
-        let expected = if flagged {
-            capi::OUTCOME_TRANSITION_FALLBACK
-        } else {
-            capi::OUTCOME_EXACT
-        };
-        assert_eq!(watermark.2, expected, "{label}: the rebuild's outcome");
-        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
-        let count = u64::from(flagged);
+    send.mute = true;
+    send.follows_mute = false;
+    vec![SessionEdit::UpsertRoute { route: send }]
+}
+
+/// #1654 root ruling B19-R8 (MAJOR-1, MAJOR-2) and R19-5 on both hosts, on [`open_follow_model`].
+/// MAJOR-1: a live send move (`gain_db` to -3 dB over 4,000 samples, from block 4) is in flight
+/// when a rebuild before block 6 adds a muted, inactive send: the move keeps its own length (every
+/// block is the never-rebuilt run's, bit for bit), and the rebuild completes
+/// `TRANSITION_FALLBACK` (one watermark, count 1), the conservative term. The same rebuild before
+/// block 44 (the move long finished) completes `EXACT`. MAJOR-2: one transaction before block 4
+/// moves `gain_db` over 4,000 samples and adds the muted send: it completes `TRANSITION_FALLBACK`
+/// from its own send move alone; the rebuild alone completes `EXACT`. Every block both hosts
+/// render the same bits.
+///
+/// Test value: red if either host completes a rebuild that carries a following send `EXACT` while
+/// a live send move (an earlier commit's or the transaction's own) may still ramp, if one is
+/// flagged with no live send move, if the carry cuts the move, or if the hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_rebuild_carrying_a_following_send_across_a_live_send_move_is_flagged_alike_on_both_hosts() {
+    const RUN: u64 = 48;
+    const RAMP: u32 = 4_000;
+    let model = open_follow_model();
+    let unrelated = muted_send_rebuild(&model);
+    let hand = send_row_edit(1, -3.0, Some(RAMP));
+    let mut same_transaction = hand.clone();
+    same_transaction.extend(unrelated.iter().cloned());
+    let moved = both_run(&model, RUN, &[(4, hand.clone(), EditPath::Live)]);
+    // (label, live move block, rebuild block, rebuild edits, flagged)
+    for (label, live, rebuild, edits, flagged) in [
+        ("MAJOR-1", Some(4), 6, &unrelated, true),
+        (
+            "MAJOR-1, the move long finished",
+            Some(4),
+            44,
+            &unrelated,
+            false,
+        ),
+        ("MAJOR-2", None, 4, &same_transaction, true),
+        ("MAJOR-2, no move", None, 4, &unrelated, false),
+    ] {
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        for block in 0..RUN {
+            if live == Some(block) {
+                both_commit(&mut browser, &mut c_abi, &hand, EditPath::Live, label);
+            }
+            if block == rebuild {
+                both_commit(&mut browser, &mut c_abi, edits, EditPath::Rebuild, label);
+            }
+            let (b, c) = (browser.step(block), c_abi.step(block));
+            assert_eq!(b, c, "{label}, block {block}: the two hosts agree");
+            if live.is_some() {
+                assert_eq!(
+                    b, moved[block as usize],
+                    "{label}, block {block}: the never-rebuilt run's bits"
+                );
+            }
+            if block == rebuild {
+                let watermark = c_abi.watermark();
+                assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+                assert_eq!(
+                    status_watermark(&browser),
+                    watermark,
+                    "{label}: one watermark"
+                );
+                let outcome = if flagged {
+                    capi::OUTCOME_TRANSITION_FALLBACK
+                } else {
+                    capi::OUTCOME_EXACT
+                };
+                assert_eq!(watermark.2, outcome, "{label}: the rebuild's outcome");
+            }
+        }
         assert_eq!(
             (
                 browser.host.watermark().transition_fallback_count,
                 c_abi.transition_fallback_count()
             ),
-            (count, count),
-            "{label}: the transition fallback count"
+            (u64::from(flagged), u64::from(flagged)),
+            "{label}: the fallback count"
         );
-    };
-    // Gate 7.
-    let twin = both_run(&model, RUN, &[]);
-    let mut browser = Rig::new(&model);
-    let mut c_abi = CAbi::new(&model);
-    same_blocks(&mut browser, &mut c_abi, 0..REBUILD, "gate 7");
-    both_commit(
-        &mut browser,
-        &mut c_abi,
-        &[added_route],
-        EditPath::Rebuild,
-        "gate 7",
-    );
-    for block in REBUILD..RUN {
-        let (b, c) = (browser.step(block), c_abi.step(block));
-        assert_eq!(b, c, "gate 7, block {block}: the two hosts agree");
-        assert_eq!(
-            b, twin[block as usize],
-            "gate 7, block {block}: the never-rebuilt run"
-        );
-    }
-    outcome(&mut browser, &c_abi, "gate 7", false);
-    // R19-5.
-    for (label, edits, offset) in [
-        ("the gain offset", send_edit(1, 3.0, Some(RAMP)), 3.0),
-        ("matrix_lr", send_edit(4, 0.5, Some(RAMP)), 0.0),
-    ] {
-        let moved = both_run(&model, RUN, &[(MOVE, edits.clone(), EditPath::Live)]);
-        let mut browser = Rig::new(&model);
-        let mut c_abi = CAbi::new(&model);
-        same_blocks(&mut browser, &mut c_abi, 0..MOVE, label);
-        both_commit(&mut browser, &mut c_abi, &edits, EditPath::Live, label);
-        same_blocks(&mut browser, &mut c_abi, MOVE..REBUILD, label);
-        both_commit(
-            &mut browser,
-            &mut c_abi,
-            &[moved_ride(offset)],
-            EditPath::Rebuild,
-            label,
-        );
-        let end = (MOVE * u64::from(QUANTUM) + u64::from(RAMP)) / u64::from(QUANTUM);
-        for block in REBUILD..end {
-            let (b, c) = (browser.step(block), c_abi.step(block));
-            assert_eq!(b, c, "{label}, block {block}: the two hosts agree");
-            assert_eq!(
-                b, moved[block as usize],
-                "{label}, block {block}: the move runs"
-            );
-        }
-        // B19-R8: the move may still ramp at the rebuild, so it is flagged.
-        outcome(&mut browser, &c_abi, label, true);
     }
 }
 
-/// #1654 U2 fold 1, MAJOR-3 on both hosts. `t1-b` keeps a flat `gain_db` ride at -6 dB (its table
-/// continues) and a rebuild before block 4 removes either its flat `rr` entry at 0.5 or `t1`'s
-/// mute entry (held muted): the send stays a following route, no join record moves its cell and no
-/// cursor hears the removed curve. Each rebuild completes `EXACT` on both hosts, and from the
-/// first block boundary after the landing over the removed row's own length (`SendMatrix`, 240,
-/// for `rr`; the mute length, 480, for the mute curve) both hosts render a fresh plan of the
-/// committed model, bit for bit.
+/// #1654 root ruling B19-R9 (the B19-R8 check's repro) on both hosts, on [`open_follow_model`]
+/// (480-sample landings at quantum 128). A live send gain move to -3 dB from 512 over 200 samples
+/// is in flight when R1 (the direct route `t1-main` to -3 dB, block 5) rebuilds: it adopts at 640
+/// flagged (count 1). R2 (`t1-main` to -6 dB, block 7, sample 896) comes after the move ended but
+/// inside R1's at-once landing: `TRANSITION_FALLBACK` (count 2). R3 (`t1-main` to -9 dB, block
+/// 16), after every landing ended with no live send move: `EXACT` (count stays 2). Every block
+/// both hosts render the same bits.
 ///
-/// Test value: red if a removed row or source mute curve of a send that stays seven-word leaves
-/// the send on the removed curve's last value on either host, or if the hosts disagree.
+/// Test value: red if either host's flagged rebuild does not fold its own at-once landing into the
+/// send move window (R2 reads `EXACT`), if the window outlives that landing (R3 flagged), or if
+/// the hosts disagree.
 #[cfg(feature = "test-support")]
 #[test]
-fn removing_a_send_row_or_its_source_mute_curve_lands_alike_on_both_hosts() {
-    use session::{AutomationShape, ParameterUnit};
+fn a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_alike_on_both_hosts() {
     const RUN: u64 = 24;
-    const EDIT: u64 = 4;
-    let end = u64::from(QUANTUM) * BLOCKS;
-    let flat = |value: f32, shape, unit| vec![send_piece(shape, (0, value), (end, value), unit)];
-    let mut kept = follow_model(false, false);
-    kept.automation.push(send_entry(
-        "t1-b-gain",
-        1,
-        flat(-6.0, AutomationShape::Linear, ParameterUnit::Db),
-    ));
-    let mut with_rr = kept.clone();
-    with_rr.automation.push(send_entry(
-        "t1-b-rr",
-        6,
-        flat(0.5, AutomationShape::Linear, ParameterUnit::Linear),
-    ));
-    let mut with_mute = follow_model(true, false);
-    with_mute.automation[0].segments = flat(1.0, AutomationShape::Step, ParameterUnit::Linear);
-    with_mute.automation.extend(kept.automation.iter().cloned());
-    let fresh = both_run(&kept, RUN, &[]);
-    for (label, model, removed, length) in [
-        ("rr", &with_rr, "t1-b-rr", 240_u64),
-        ("the source mute", &with_mute, "t1-mute", 480),
-    ] {
-        let edits = vec![SessionEdit::RemoveAutomation {
-            automation_id: id(removed),
-        }];
-        let run = both_run(model, RUN, &[(EDIT, edits, EditPath::Rebuild)]);
-        assert_ne!(
-            run[..EDIT as usize],
-            fresh[..EDIT as usize],
-            "{label}: not vacuous, the removed curve is heard"
-        );
-        let landed = (EDIT * u64::from(QUANTUM) + length).div_ceil(u64::from(QUANTUM)) as usize;
-        assert_eq!(
-            run[landed..],
-            fresh[landed..],
-            "{label}: the committed model's bits after the landing"
-        );
+    assert_eq!(QUANTUM, 128);
+    let model = open_follow_model();
+    let direct = |db: f32| {
+        let mut route = model
+            .routes
+            .iter()
+            .find(|route| route.id.as_str() == "t1-main")
+            .expect("the direct route")
+            .clone();
+        route.gain_db = db;
+        vec![SessionEdit::UpsertRoute { route }]
+    };
+    let hand = send_row_edit(1, -3.0, Some(200));
+    // (label, rebuild block, edits, outcome, fallback count)
+    let rebuilds = [
+        ("R1", 5, direct(-3.0), capi::OUTCOME_TRANSITION_FALLBACK, 1),
+        ("R2", 7, direct(-6.0), capi::OUTCOME_TRANSITION_FALLBACK, 2),
+        ("R3", 16, direct(-9.0), capi::OUTCOME_EXACT, 2),
+    ];
+    let mut browser = Rig::new(&model);
+    let mut c_abi = CAbi::new(&model);
+    for block in 0..RUN {
+        if block == 4 {
+            both_commit(
+                &mut browser,
+                &mut c_abi,
+                &hand,
+                EditPath::Live,
+                "the hand move",
+            );
+        }
+        let rebuild = rebuilds.iter().find(|rebuild| rebuild.1 == block);
+        if let Some((label, _, edits, _, _)) = rebuild {
+            both_commit(&mut browser, &mut c_abi, edits, EditPath::Rebuild, label);
+        }
+        let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(b, c, "block {block}: the two hosts agree");
+        if let Some((label, _, _, outcome, fallbacks)) = rebuild {
+            let watermark = c_abi.watermark();
+            assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+            assert_eq!(
+                status_watermark(&browser),
+                watermark,
+                "{label}: one watermark"
+            );
+            assert_eq!(
+                watermark.1,
+                block * u64::from(QUANTUM),
+                "{label}: adopted at its submit block"
+            );
+            assert_eq!(watermark.2, *outcome, "{label}: the rebuild's outcome");
+            assert_eq!(
+                (
+                    browser.host.watermark().transition_fallback_count,
+                    c_abi.transition_fallback_count()
+                ),
+                (*fallbacks, *fallbacks),
+                "{label}: the fallback count"
+            );
+        }
     }
 }
 
@@ -7724,393 +7500,4 @@ fn the_reach_pair_cap_bounds_vca_automation_alike_on_both_hosts() {
         c_diagnostics,
         b"host.resource.vca_reach_pairs\t$\n".to_vec()
     );
-}
-
-/// #1654 root ruling B19-R7 on both hosts. `t1-b` hears flat `ll` and `rr` entries at 0.5; a hand
-/// `gain_db` move to -6 dB over 1,000 samples (from block 4) is in flight when a rebuild before
-/// block 6 removes the `ll` entry: the send's left column loses its last curve and lands at once
-/// over `SendMatrix` (240), cutting the move there. On both hosts the rebuild completes
-/// `TRANSITION_FALLBACK` (one watermark, count 1). Then: nothing (MAJOR-A), a second rebuild before
-/// block 8 that adds a muted, inactive send (MAJOR-C: also `TRANSITION_FALLBACK` under B19-R8, the
-/// move still ramps; count 2), or a session
-/// seek before block 7 inside the move, forward or back (MAJOR-D). From the first block boundary
-/// after the move's end both hosts render, bit for bit, a fresh plan of the committed model fed
-/// and seeked alike. The same removal before block 24, the move long ended, completes `EXACT`.
-///
-/// Test value: red if either host completes the cut move's rebuild `EXACT` (or flags a removal
-/// with no move), if a removed row's value survives the landing, a seek or a further rebuild, or
-/// if the hosts disagree.
-#[cfg(feature = "test-support")]
-#[test]
-fn removing_a_send_row_across_a_live_send_move_is_flagged_alike_on_both_hosts() {
-    use session::{AutomationShape, ParameterUnit};
-    const RUN: u64 = 40;
-    const MOVE: u64 = 4;
-    const RAMP: u32 = 1_000;
-    let q = u64::from(QUANTUM);
-    let end = q * BLOCKS;
-    let flat = |value: f32| {
-        vec![send_piece(
-            AutomationShape::Linear,
-            (0, value),
-            (end, value),
-            ParameterUnit::Linear,
-        )]
-    };
-    let mut model = follow_model(false, false);
-    model.automation.push(send_entry("t1-b-ll", 3, flat(0.5)));
-    model.automation.push(send_entry("t1-b-rr", 6, flat(0.5)));
-    let remove = vec![SessionEdit::RemoveAutomation {
-        automation_id: id("t1-b-ll"),
-    }];
-    let mut muted_send = model
-        .routes
-        .iter()
-        .find(|route| route.id.as_str() == "t1-b")
-        .expect("the send")
-        .clone();
-    muted_send.id = id("t2-b");
-    muted_send.source = session::RouteSource::Track {
-        track_id: id(T2.id),
-        tap: session::SendTap::PreFader,
-    };
-    muted_send.mute = true;
-    muted_send.follows_mute = false;
-    let added = vec![SessionEdit::UpsertRoute {
-        route: muted_send.clone(),
-    }];
-    // The committed model after the move and the removal.
-    let mut committed = model.clone();
-    committed
-        .automation
-        .retain(|entry| entry.id.as_str() != "t1-b-ll");
-    t1_b(&mut committed).gain_db = -6.0;
-    let mut committed_added = committed.clone();
-    committed_added.routes.push(muted_send);
-    committed_added
-        .routes
-        .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
-    // (label, rebuild block, second rebuild, seek (block, timeline block), flagged)
-    for (label, rebuild, second, seek, flagged) in [
-        ("MAJOR-A", 6, false, None, true),
-        ("MAJOR-C", 6, true, None, true),
-        ("MAJOR-D inside", 6, false, Some((7, 7)), true),
-        ("MAJOR-D forward", 6, false, Some((7, 20)), true),
-        ("MAJOR-D back", 6, false, Some((7, 2)), true),
-        ("the move ended", 24, false, None, false),
-    ] {
-        let mut browser = Rig::new(&model);
-        let mut c_abi = CAbi::new(&model);
-        let mut fresh = Rig::new(if second { &committed_added } else { &committed });
-        let landed = (MOVE * q + u64::from(RAMP))
-            .max(rebuild * q + 240)
-            .div_ceil(q);
-        let (mut generation, mut timeline) = (1_u64, 0_u64);
-        for block in 0..RUN {
-            if block == MOVE {
-                both_commit(
-                    &mut browser,
-                    &mut c_abi,
-                    &send_edit(1, -6.0, Some(RAMP)),
-                    EditPath::Live,
-                    label,
-                );
-            }
-            if block == rebuild {
-                both_commit(&mut browser, &mut c_abi, &remove, EditPath::Rebuild, label);
-            }
-            if second && block == rebuild + 2 {
-                both_commit(&mut browser, &mut c_abi, &added, EditPath::Rebuild, label);
-            }
-            if let Some((at, to)) = seek
-                && block == at
-            {
-                generation += 1;
-                timeline = to;
-                for host in [&mut browser.host, &mut fresh.host] {
-                    assert_eq!(
-                        host.session_seek(None, generation, to * q, None),
-                        host_web::RESULT_OK
-                    );
-                }
-                c_abi.session_seek(generation, to * q, None);
-            }
-            let mut outputs = Vec::new();
-            for leg in [&mut browser, &mut fresh] {
-                for (feed, strip) in [T1, T2, T3].into_iter().enumerate() {
-                    let name = format!("src-{}", strip.id);
-                    let [left, right] = planes(feed as u64, timeline);
-                    assert_eq!(
-                        leg.host.submit_source(
-                            name.as_bytes(),
-                            generation,
-                            timeline * q,
-                            leg.rate,
-                            &[&left, &right],
-                            QUANTUM,
-                            false,
-                        ),
-                        host_web::RESULT_OK,
-                        "{label}: browser source {name}"
-                    );
-                    if outputs.is_empty() {
-                        c_abi.submit_from(&name, feed as u64, timeline, timeline, generation);
-                    }
-                }
-                assert_eq!(leg.host.render_next(), host_web::RESULT_OK);
-                outputs.push(bits(leg.host.output_pcm().expect("browser output")));
-            }
-            let c = c_abi.render(block);
-            assert_eq!(outputs[0], c, "{label}, block {block}: the two hosts agree");
-            if block >= landed {
-                assert_eq!(
-                    outputs[0], outputs[1],
-                    "{label}, block {block}: the fresh plan after the landing"
-                );
-            }
-            if block == rebuild {
-                // The block that adopts the removal.
-                let watermark = c_abi.watermark();
-                assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
-                assert_eq!(
-                    status_watermark(&browser),
-                    watermark,
-                    "{label}: one watermark"
-                );
-                let outcome = if flagged {
-                    capi::OUTCOME_TRANSITION_FALLBACK
-                } else {
-                    capi::OUTCOME_EXACT
-                };
-                assert_eq!(watermark.2, outcome, "{label}: the removal's outcome");
-            }
-            if second && block == rebuild + 2 {
-                // B19-R8: the move still ramps, so the second rebuild is flagged too.
-                assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
-                assert_eq!(
-                    c_abi.watermark().2,
-                    capi::OUTCOME_TRANSITION_FALLBACK,
-                    "{label}: the second rebuild"
-                );
-            }
-            timeline += 1;
-        }
-        assert_eq!(
-            (
-                browser.host.watermark().transition_fallback_count,
-                c_abi.transition_fallback_count()
-            ),
-            {
-                let count = u64::from(flagged) + u64::from(second);
-                (count, count)
-            },
-            "{label}: the fallback count"
-        );
-    }
-}
-
-/// #1654 root ruling B19-R8 on both hosts. MAJOR-1: `t1-b` rides its `gain_db` (0 to -12 dB);
-/// a hand gain move of `+3` over 4,000 samples (before block 4) is in flight when a rebuild before
-/// block 6 adds a muted, inactive send: the rebuild carries the riding send, which render may land
-/// at once at the swap, so it completes `TRANSITION_FALLBACK` (one watermark, count 1). The same
-/// rebuild before block 44 (the move long finished) completes `EXACT` (with no hand move at all:
-/// gate 7 of `send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts`).
-/// MAJOR-2: `t1-b` hears flat `ll`, `rl` and `rr` entries; one transaction before block 4 moves
-/// `gain_db` to -6 dB over 4,000 samples, changes `rl` and removes `ll`: it completes
-/// `TRANSITION_FALLBACK` from its own send move alone; without the move it completes `EXACT`.
-/// Every block both hosts render the same bits.
-///
-/// Test value: red if either host completes a rebuild that carries a following send `EXACT` while
-/// a live send move (an earlier commit's or the transaction's own) may still ramp, if one is
-/// flagged with no live send move, or if the hosts disagree.
-#[cfg(feature = "test-support")]
-#[test]
-fn a_rebuild_carrying_a_following_send_across_a_live_send_move_is_flagged_alike_on_both_hosts() {
-    use session::{AutomationShape, ParameterUnit};
-    const RUN: u64 = 48;
-    const RAMP: u32 = 4_000;
-    let end = u64::from(QUANTUM) * BLOCKS;
-    let flat = |value: f32| {
-        vec![send_piece(
-            AutomationShape::Linear,
-            (0, value),
-            (end, value),
-            ParameterUnit::Linear,
-        )]
-    };
-    let mut riding = follow_model(false, false);
-    riding.automation.push(send_entry(
-        "t1-b-gain",
-        1,
-        vec![send_piece(
-            AutomationShape::Linear,
-            (0, 0.0),
-            (end, -12.0),
-            ParameterUnit::Db,
-        )],
-    ));
-    let mut muted_send = t1_b(&mut riding.clone()).clone();
-    muted_send.id = id("t2-b");
-    muted_send.source = session::RouteSource::Track {
-        track_id: id(T2.id),
-        tap: session::SendTap::PreFader,
-    };
-    muted_send.mute = true;
-    muted_send.follows_mute = false;
-    let unrelated = vec![SessionEdit::UpsertRoute { route: muted_send }];
-    let mut rows = follow_model(false, false);
-    rows.automation.push(send_entry("t1-b-ll", 3, flat(0.5)));
-    rows.automation.push(send_entry("t1-b-rl", 5, flat(0.1)));
-    rows.automation.push(send_entry("t1-b-rr", 6, flat(0.5)));
-    let row_edits = vec![
-        SessionEdit::UpsertAutomation {
-            automation: send_entry("t1-b-rl", 5, flat(0.3)),
-        },
-        SessionEdit::RemoveAutomation {
-            automation_id: id("t1-b-ll"),
-        },
-    ];
-    let mut same_transaction = send_edit(1, -6.0, Some(RAMP));
-    same_transaction.extend(row_edits.iter().cloned());
-    let hand = send_edit(1, 3.0, Some(RAMP));
-    // (label, model, live move block, rebuild block, rebuild edits, flagged)
-    for (label, model, live, rebuild, edits, flagged) in [
-        ("MAJOR-1", &riding, Some(4), 6, &unrelated, true),
-        (
-            "MAJOR-1, the move long finished",
-            &riding,
-            Some(4),
-            44,
-            &unrelated,
-            false,
-        ),
-        ("MAJOR-2", &rows, None, 4, &same_transaction, true),
-        ("MAJOR-2, no move", &rows, None, 4, &row_edits, false),
-    ] {
-        let mut browser = Rig::new(model);
-        let mut c_abi = CAbi::new(model);
-        for block in 0..RUN {
-            if live == Some(block) {
-                both_commit(&mut browser, &mut c_abi, &hand, EditPath::Live, label);
-            }
-            if block == rebuild {
-                both_commit(&mut browser, &mut c_abi, edits, EditPath::Rebuild, label);
-            }
-            let (b, c) = (browser.step(block), c_abi.step(block));
-            assert_eq!(b, c, "{label}, block {block}: the two hosts agree");
-            if block == rebuild {
-                let watermark = c_abi.watermark();
-                assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
-                assert_eq!(
-                    status_watermark(&browser),
-                    watermark,
-                    "{label}: one watermark"
-                );
-                let outcome = if flagged {
-                    capi::OUTCOME_TRANSITION_FALLBACK
-                } else {
-                    capi::OUTCOME_EXACT
-                };
-                assert_eq!(watermark.2, outcome, "{label}: the rebuild's outcome");
-            }
-        }
-        assert_eq!(
-            (
-                browser.host.watermark().transition_fallback_count,
-                c_abi.transition_fallback_count()
-            ),
-            (u64::from(flagged), u64::from(flagged)),
-            "{label}: the fallback count"
-        );
-    }
-}
-
-/// #1654 root ruling B19-R9 (the B19-R8 check's repro) on both hosts. `t1-b` rides its `gain_db`
-/// (0 to -12 dB; 480-sample landings at quantum 128). A hand gain move of `+3` from 512 over 200
-/// samples is in flight when R1 (the direct route `t1-main` to -3 dB, block 5) rebuilds: it adopts
-/// at 640 flagged (count 1). R2 (`t1-main` to -6 dB, block 7, sample 896) comes after the hand
-/// move ended but inside R1's at-once landing: `TRANSITION_FALLBACK` (count 2). R3 (`t1-main` to
-/// -9 dB, block 16), after every landing ended with no live send move: `EXACT` (count stays 2).
-/// Every block both hosts render the same bits.
-///
-/// Test value: red if either host's flagged rebuild does not fold its own at-once landing into the
-/// send move window (R2 reads `EXACT`), if the window outlives that landing (R3 flagged), or if
-/// the hosts disagree.
-#[cfg(feature = "test-support")]
-#[test]
-fn a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_alike_on_both_hosts() {
-    use session::{AutomationShape, ParameterUnit};
-    const RUN: u64 = 24;
-    assert_eq!(QUANTUM, 128);
-    let end = u64::from(QUANTUM) * BLOCKS;
-    let mut model = follow_model(false, false);
-    model.automation.push(send_entry(
-        "t1-b-gain",
-        1,
-        vec![send_piece(
-            AutomationShape::Linear,
-            (0, 0.0),
-            (end, -12.0),
-            ParameterUnit::Db,
-        )],
-    ));
-    let direct = |db: f32| {
-        let mut route = model
-            .routes
-            .iter()
-            .find(|route| route.id.as_str() == "t1-main")
-            .expect("the direct route")
-            .clone();
-        route.gain_db = db;
-        vec![SessionEdit::UpsertRoute { route }]
-    };
-    let hand = send_edit(1, 3.0, Some(200));
-    // (label, rebuild block, edits, outcome, fallback count)
-    let rebuilds = [
-        ("R1", 5, direct(-3.0), capi::OUTCOME_TRANSITION_FALLBACK, 1),
-        ("R2", 7, direct(-6.0), capi::OUTCOME_TRANSITION_FALLBACK, 2),
-        ("R3", 16, direct(-9.0), capi::OUTCOME_EXACT, 2),
-    ];
-    let mut browser = Rig::new(&model);
-    let mut c_abi = CAbi::new(&model);
-    for block in 0..RUN {
-        if block == 4 {
-            both_commit(
-                &mut browser,
-                &mut c_abi,
-                &hand,
-                EditPath::Live,
-                "the hand move",
-            );
-        }
-        let rebuild = rebuilds.iter().find(|rebuild| rebuild.1 == block);
-        if let Some((label, _, edits, _, _)) = rebuild {
-            both_commit(&mut browser, &mut c_abi, edits, EditPath::Rebuild, label);
-        }
-        let (b, c) = (browser.step(block), c_abi.step(block));
-        assert_eq!(b, c, "block {block}: the two hosts agree");
-        if let Some((label, _, _, outcome, fallbacks)) = rebuild {
-            let watermark = c_abi.watermark();
-            assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
-            assert_eq!(
-                status_watermark(&browser),
-                watermark,
-                "{label}: one watermark"
-            );
-            assert_eq!(
-                watermark.1,
-                block * u64::from(QUANTUM),
-                "{label}: adopted at its submit block"
-            );
-            assert_eq!(watermark.2, *outcome, "{label}: the rebuild's outcome");
-            assert_eq!(
-                (
-                    browser.host.watermark().transition_fallback_count,
-                    c_abi.transition_fallback_count()
-                ),
-                (*fallbacks, *fallbacks),
-                "{label}: the fallback count"
-            );
-        }
-    }
 }

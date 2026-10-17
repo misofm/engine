@@ -3269,10 +3269,6 @@ struct FaderAutomationPlan {
     program_bytes: u64,
     /// Each strip that has an automated fader or mute lane, by track ID.
     strips: BTreeMap<Box<str>, PreparedStripAutomation>,
-    /// Each route into a submix that automates a row 1-6 (#1654 D1), by route ID: the program's
-    /// cell index of each row, in [`controls::route_automation`]'s order, `None` for a row no
-    /// entry drives.
-    routes: BTreeMap<Box<str>, [Option<u32>; 6]>,
     /// Each VCA with an automated `offset_db` or `mute` lane (#1655 D1), by VCA ID: the program's
     /// cell index of each `[row][lane]` (row 0 `offset_db`, row 1 `mute`), `None` for a lane no
     /// entry drives.
@@ -3415,12 +3411,9 @@ pub fn fader_automation_sizes() -> FaderAutomationSizes {
 /// once with the fader row's cell rule (`controls::FADER_CELL_RULE`), then one cell per automated
 /// mute lane in the same order, with the mute row's rule (`controls::MUTE_CELL_RULE`). The mute
 /// cells follow every fader cell, so a session with no mute automation builds the program it built
-/// before #1651, cell for cell. Then one cell per automated row 1-6 of each route into a submix
-/// (#1654 D1), in `model.routes` order and row order, with the fader row's rule for `gain_db` and
-/// the matrix and the mute row's rule for `mute`; they follow every mute cell, so a session with
-/// no route automation builds the program it built before #1654. `None` when no row that renders
-/// is automated, so a session without stored automation prepares exactly as before; a session
-/// with mute (or route) automation only builds those cells only.
+/// before #1651, cell for cell. The VCA cells (#1655 D1) follow every mute cell. `None` when no
+/// row that renders is automated, so a session without stored automation prepares exactly as
+/// before; a session with mute (or VCA) automation only builds those cells only.
 ///
 /// Each automated mute lane is seeded with its entry's first `start_value` and with `terms`, the
 /// strip's [`controls::EffectiveStrip::mute`] (OQ1 = C); its prepared stage mute is
@@ -3478,7 +3471,7 @@ fn prepare_fader_automation(
     };
     let reach_of = |index: usize| reach.get(index).map_or(&[][..], Vec::as_slice);
     // The fader and mute event lanes that automated VCA lanes reach, `(strip, lane, VCAs)`: their
-    // VCA cells follow every route cell, so they are filled in once those exist. Transient.
+    // VCA cells follow every mute cell, so they are filled in once those exist. Transient.
     let mut composed_faders: Vec<(Box<str>, usize, Vec<usize>)> = Vec::new();
     let mut composed_mutes: Vec<(Box<str>, usize, Vec<usize>)> = Vec::new();
     // The reaching VCAs (indices) whose `entries` row drives lane `lane`.
@@ -3635,45 +3628,7 @@ fn prepare_fader_automation(
             })
             .mute = cells;
     }
-    // #1654 D1: the route cells, after every mute cell, in `model.routes` order and row order:
-    // rows 1 (`gain_db`) and 3-6 (the matrix) with the fader's rule (grid 64, `End`), row 2
-    // (`mute`) with the mute rule (step). Only a route into a submix renders a row (an output
-    // route's entry is refused at `.target`, D8), so a session without route automation builds
-    // the program it built before, cell for cell.
-    let mut routes = BTreeMap::new();
-    for route in &model.routes {
-        if !matches!(
-            route.destination,
-            session::RouteDestination::SubmixInput { .. }
-        ) {
-            continue;
-        }
-        let entries = controls::route_automation(model, &route.id);
-        if entries.iter().all(Option::is_none) {
-            continue;
-        }
-        let mut cells = [None; 6];
-        for (row, entry) in entries.into_iter().enumerate() {
-            let Some(entry) = entry else { continue };
-            let segments = controls::stored_segments(entry);
-            // Defensive: the session validator refuses an entry with no segment.
-            if segments.is_empty() {
-                return Err(refuse("host.automation.route", entry));
-            }
-            cells[row] = Some(
-                u32::try_from(tables.len())
-                    .map_err(|_| diag("host.automation.route", "$.automation"))?,
-            );
-            let rule = if row == 1 {
-                controls::MUTE_CELL_RULE
-            } else {
-                controls::FADER_CELL_RULE
-            };
-            tables.push((entry, segments, rule, "host.automation.route"));
-        }
-        routes.insert(Box::<str>::from(route.id.as_str()), cells);
-    }
-    // #1655 D1: the VCA cells, after every route cell, in ascending VCA ID, then row (`offset_db`
+    // #1655 D1: the VCA cells, after every mute cell, in ascending VCA ID, then row (`offset_db`
     // with the fader's rule, `mute` with the mute rule), then lane: one cell per automated VCA
     // lane, shared by every member it reaches. A session without VCA automation builds the program
     // it built before, cell for cell.
@@ -3800,7 +3755,6 @@ fn prepare_fader_automation(
         program: Arc::new(program),
         program_bytes,
         strips,
-        routes,
         vcas,
     }))
 }
@@ -6875,21 +6829,6 @@ impl PreparedBuiltinsSession {
             .iter()
             .any(Option::is_some)
             .then(|| (Arc::clone(&plan.program), cells))
-    }
-
-    /// Route `route_id`'s stored automation (#1654 D1), for its seven-word lane: the plan's one
-    /// automation program (the `Arc` [`Self::strip_mute_cells`] hands out) and the program's cell
-    /// index of each route row 1-6 (`gain_db`, `mute`, `matrix_ll`, `matrix_lr`, `matrix_rl`,
-    /// `matrix_rr`), `None` for a row no entry drives. `None` when the route automates no row (or
-    /// the session has no stored automation that renders). Control side; it clones one `Arc`.
-    #[must_use]
-    pub fn route_cells(
-        &self,
-        route_id: &str,
-    ) -> Option<(Arc<automation::Program>, [Option<u32>; 6])> {
-        let plan = self.fader_automation.as_ref()?;
-        let cells = *plan.routes.get(route_id)?;
-        Some((Arc::clone(&plan.program), cells))
     }
 
     /// VCA `vca_id`'s stored automation (#1655 D1), for the members' records and the following
@@ -17341,182 +17280,6 @@ mod tests {
             .expect("a mute-only session builds its mute cells");
         assert_eq!(cells, [Some(0), Some(1)]);
         assert!(program.cell(2).is_none(), "mute cells only");
-    }
-
-    /// #1654 D1 (T4): the route cells follow every mute cell in the plan's one program, in
-    /// `model.routes` order and row order, with the fader row's rule for `gain_db` and the matrix
-    /// and the mute row's rule for the route's own `mute`; [`PreparedBuiltinsSession::route_cells`]
-    /// names each row's cell in that same program. A session without route automation builds the
-    /// program it built before; one with route automation only builds route cells only.
-    ///
-    /// Test value: red if a route cell is placed before a mute cell (the strip cells move), if a
-    /// row takes another row's rule (a gain on a step table or a mute on the grid), if the export
-    /// names another program, row or cell, or if a route-only session builds no program.
-    #[test]
-    fn the_route_cells_follow_the_mute_cells_in_the_one_program() {
-        let plain = n_track_session(2);
-        let caps_all = CompileCaps {
-            max_compiled_model_bytes: u64::MAX,
-            max_requested_runtime_bytes: u64::MAX,
-            max_single_allocation_bytes: u64::MAX,
-            max_queue_items: u64::MAX,
-            max_source_ring_frames: u64::MAX,
-            max_source_ring_bytes: u64::MAX,
-        };
-        let sid = |text: &str| session::StableId::parse(text).expect("id");
-        let segment = |shape, start_value, end_value, unit| session::AutomationSegment {
-            shape,
-            start_sample: 0,
-            end_sample: 4_096,
-            start_value,
-            end_value,
-            unit,
-        };
-        let entry = |name: &str, owner, section, control, segment| session::Automation {
-            id: sid(name),
-            target: session::ControlAddress {
-                owner,
-                section,
-                control,
-                lane: session::ParameterChannel::Both,
-            },
-            segments: vec![segment],
-            offset: session::AutomationOffset::default(),
-        };
-        let route_entry = |name: &str, control, segment| {
-            entry(
-                name,
-                session::Owner::Route(sid("t00-bus")),
-                session::Section::Own,
-                control,
-                segment,
-            )
-        };
-        let gain = route_entry(
-            "send-gain",
-            1,
-            segment(
-                session::AutomationShape::Linear,
-                -6.0,
-                -2.0,
-                session::ParameterUnit::Db,
-            ),
-        );
-        let send_mute = route_entry(
-            "send-mute",
-            2,
-            segment(
-                session::AutomationShape::Step,
-                0.0,
-                1.0,
-                session::ParameterUnit::Linear,
-            ),
-        );
-        let lr = route_entry(
-            "send-lr",
-            4,
-            segment(
-                session::AutomationShape::Linear,
-                0.0,
-                0.5,
-                session::ParameterUnit::Linear,
-            ),
-        );
-        let strip_mute = entry(
-            "mute-t00",
-            session::Owner::Strip(sid(&track_name(0))),
-            session::Section::Builtins,
-            6,
-            segment(
-                session::AutomationShape::Step,
-                1.0,
-                0.0,
-                session::ParameterUnit::Linear,
-            ),
-        );
-        let prepare = |automation: Vec<session::Automation>| {
-            let mut model = plain.normalized_model().clone();
-            let mut send = model.routes[0].clone();
-            send.id = sid("t00-bus");
-            send.destination = session::RouteDestination::SubmixInput {
-                submix_id: sid("bus"),
-            };
-            let mut out = model.routes[0].clone();
-            out.id = sid("bus-main");
-            out.source = session::RouteSource::Submix {
-                submix_id: sid("bus"),
-                tap: session::SendTap::PostPan,
-            };
-            model.routes.push(send);
-            model.routes.push(out);
-            let console = model.console.clone();
-            model
-                .submixes
-                .push(session::Submix::unity(sid("bus"), &console));
-            model.automation = automation;
-            let compiled = compile_session(&model, caps_all).expect("the session compiles");
-            prepare_session_builtins(&compiled, &[], caps()).expect("prepared")
-        };
-        let mute_segments = controls::stored_segments(&strip_mute);
-        let describe = |entry: &session::Automation, rule: controls::CellRule| {
-            automation::ProgramBuilder::bytes(&[rule.describe(&controls::stored_segments(entry))])
-        };
-
-        let strip_only = prepare(vec![strip_mute.clone()]);
-        assert!(strip_only.route_cells("t00-bus").is_none());
-        let strip_bytes = strip_only
-            .fader_automation
-            .as_ref()
-            .expect("cells")
-            .program_bytes;
-
-        let both = prepare(vec![
-            lr.clone(),
-            strip_mute.clone(),
-            gain.clone(),
-            send_mute.clone(),
-        ]);
-        let plan = both.fader_automation.as_ref().expect("cells");
-        assert_eq!(
-            plan.program_bytes,
-            automation::ProgramBuilder::bytes(&[
-                controls::MUTE_CELL_RULE.describe(&mute_segments),
-                controls::MUTE_CELL_RULE.describe(&mute_segments),
-                controls::FADER_CELL_RULE.describe(&controls::stored_segments(&gain)),
-                controls::MUTE_CELL_RULE.describe(&controls::stored_segments(&send_mute)),
-                controls::FADER_CELL_RULE.describe(&controls::stored_segments(&lr)),
-            ]),
-            "the strip's mute cells, then the route's rows in row order with their rules"
-        );
-        let (program, cells) = both.route_cells("t00-bus").expect("the send's cells");
-        assert!(
-            Arc::ptr_eq(&program, &plan.program),
-            "the plan's one program"
-        );
-        assert_eq!(cells, [Some(2), Some(3), None, Some(4), None, None]);
-        assert_eq!(
-            both.strip_mute_cells(&track_name(0))
-                .map(|(_, cells)| cells),
-            Some([Some(0), Some(1)]),
-            "the strip's cells keep their indices"
-        );
-        assert!(both.route_cells("bus-main").is_none(), "an output route");
-        assert_ne!(strip_bytes, plan.program_bytes);
-
-        let route_only = prepare(vec![gain.clone()]);
-        let (program, cells) = route_only
-            .route_cells("t00-bus")
-            .expect("a route-only session builds its route cells");
-        assert_eq!(cells, [Some(0), None, None, None, None, None]);
-        assert!(program.cell(1).is_none(), "route cells only");
-        assert_eq!(
-            route_only
-                .fader_automation
-                .as_ref()
-                .expect("cells")
-                .program_bytes,
-            describe(&gain, controls::FADER_CELL_RULE)
-        );
     }
 
     struct HarnessSink;

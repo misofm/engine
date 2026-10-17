@@ -287,7 +287,7 @@ segment whose unit is not the row's, or a value the row refuses), `control.autom
 addresses that submix's entry for the slot (#1202). A session does not have to state a parameter
 value for the row it automates: the row exists whether or not the session states it.
 
-**The fader, mute, send and VCA rows render; every other row is inert today.** An entry on a strip's fader
+**The fader, mute and VCA rows render; every other row is inert today.** An entry on a strip's fader
 (`builtins` row 5) is compiled into the plan as a table (#1646) and rendered on the C ABI and in
 the browser alike (#1647): the lane follows its curve in node time, reaching the curve's value at
 the end of each 64-sample retarget on a fixed grid, taking each discontinuity at its exact sample
@@ -306,18 +306,8 @@ curve and a hand unmute leaves a closed curve closed. Only a change of that OR m
 control list marks a lane's `mute` row `automated` (`ControlEntry` field 35) while a mute entry
 drives the lane (#1651, root ruling R18-2); the row's value stays the lane's static (hand) mute. A
 session seek sets it exactly where the seek changes it, and a ramp toward a state the seek leaves
-unchanged finishes. An entry on a send's own rows (#1654: a route into a submix, rows 1 `gain_db`,
-2 `mute` and 3-6 `matrix_ll`, `matrix_lr`, `matrix_rl`, `matrix_rr`) is compiled into the same table
-after every mute entry and rendered on the C ABI and in the browser alike: the send follows its
-curves in the node time of its tap (`input`, `pre_fader`, ...), so a pre-insert send behind a latent
-insert moves on the timeline sample of the audio it carries. The gain and matrix rows take the
-fader's grid (a 64-sample retarget toward the curve's value at each grid end) and jump over the
-session's send gain and send matrix ramp lengths (`fader_ms`, `pan_ms`); the send `mute` row is
-`step` only and moves over the mute ramp length. A flat ride renders the bits of the same static
-send. The send's mute is the curve's OR its static (hand) `mute`, as the strip's is; a hand edit of
-an automated matrix row is stored and commits `model_only` (automation wins), and a live edit of a
-send row the session does not automate stays live. An entry on a VCA's own rows (#1655: row 1
-`offset_db` and row 2 `mute`, per lane) is compiled into the same table after every send entry, one
+unchanged finishes. An entry on a VCA's own rows (#1655: row 1
+`offset_db` and row 2 `mute`, per lane) is compiled into the same table after every mute entry, one
 table per automated VCA lane, and rendered on the C ABI and in the browser alike through the VCA's
 members, since a VCA has no audio: each member lane the VCA reaches, directly or through nested
 VCAs, follows the VCA curves in its own fader node time, so a member behind a latent insert hears
@@ -336,9 +326,11 @@ automated VCA `offset_db` writes the entry's offset (live), a hand VCA mute ORs 
 (live), and a hand fader move of a member with no fader entry of its own stays live. An edit of a
 VCA entry, and a change of which member lanes an automated VCA reaches (membership, nesting, or an
 automated VCA added or removed), is a rebuild; a VCA no entry drives keeps its live edits. A
-session without VCA automation renders the bits it rendered before. A send's `follows_mute` (row 7)
-is not automatable (#1632). A route into the output stays prepared: its rows are rebuild-only, so an entry
-on one is refused `control.automation.target`. Stored automation has no queue: render generates its events from the plan. An entry on any other row,
+session without VCA automation renders the bits it rendered before. Send rows do not render: an
+entry on a send's own rows (a route into a submix, rows 1-6) is valid and inert, as below (#1654
+renders them later). A route into the output stays prepared: its rows are rebuild-only, so an
+entry on one is refused `control.automation.target`. Stored automation has no queue: render
+generates its events from the plan. An entry on any other row,
 for the strip, a console slot or an insert, is valid and inert: it authors and round-trips and
 renders nothing until its row's slice lands. Rendering the whole table identically on every
 platform is owned by issue #1058; #140, which once gated it, was descoped
@@ -368,12 +360,9 @@ fields 1 and 2. A missing record or lane is `schema.missing_field` and a third k
 `schema.unknown_field`, at their paths. The row rule (`controls::automation_diagnostics`) judges
 each lane at `$.automation[id=<id>].offset.left_db` or `.right_db`, after the segments:
 
-- `fader_db` (builtins control 5 of a strip), a send's `gain_db` (own control 1 of a route into
-  a submix, #1654) and a VCA's `offset_db` (own control 1, per lane, #1655) take an offset
-  (`takes_offset`). The input trim does not yet: the slice that
-  renders it (#1658) adds it. The send gain row is shared, so its entry holds one offset: `right_db`
-  must have the bits of `left_db` (`control.automation.offset` at `.offset.right_db` otherwise,
-  `+0.0` with `-0.0` included), in the route gain domain `[-144, 24]` dB.
+- `fader_db` (builtins control 5 of a strip) and a VCA's `offset_db` (own control 1, per lane,
+  #1655) take an offset (`takes_offset`). The input trim and the send gain do not yet: the slices
+  that render them (#1658, #1654) add them.
 - A lane that takes no offset holds exactly `+0.0`, else `control.automation.offset`. That is a
   lane the entry does not drive (`right_db` of a `left` entry, `left_db` of a `right` entry) and
   every lane of an entry whose row takes no offset. `-0.0` is refused there too, so "no offset"
@@ -394,11 +383,7 @@ ID (with VCA automation, the order of the VCA rows above). On a lane a rendered 
 not a control value: the static fallback changes only through a rebuild (remove the automation,
 set the fader, upsert the automation, in one transaction) or a document replacement, and any edit
 that changes it on an automated lane is a change of structure. An `UpsertAutomation` that changes
-only an entry's offset is live, as a hand move is. A send's automated `gain_db` takes its offset
-the same way (#1654): render hears `db_to_gain(clamp(f64(curve) + f64(offset), -144, 24))`, rounded once
-to `f32` before the conversion; `SET_CONTROL gain_db` on that send writes the entry's offset (both
-fields, live), the control list reports the offset as the row's value and marks the row
-`automated`, and the static `gain_db` is the fallback.
+only an entry's offset is live, as a hand move is.
 
 **The input filter order, on curves (#1645).** On each strip lane where HPF (3) or LPF (4) is
 automated (a `both` entry drives both lanes), each side is its entry under the hold rule, or the

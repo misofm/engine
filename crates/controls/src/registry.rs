@@ -24,13 +24,11 @@ pub struct ControlRow {
     /// overlay's, and a row that the owner's shape does not use the descriptor's default.
     pub value: f32,
     /// Whether a rendered stored automation drives the row's lane (#1650 D4): the `fader_db` row,
-    /// since #1651 (root ruling R18-2) the `mute` row, since #1654 a send's rows 1-6, and since
-    /// #1655 a VCA's `offset_db` and `mute`. On such a lane the `fader_db` row's value is the
-    /// driving entry's hand-move offset, not the static fader, and so are a send's `gain_db`
-    /// (R17-6) and a VCA's `offset_db` (#1655 D5); the `mute` rows' values stay the static (hand)
-    /// mute, which render ORs with the curve (OQ1 = C), and a send matrix row's value is its
-    /// static fallback (automation wins). A VCA ride does not mark its members' rows: they list
-    /// their own entries only.
+    /// since #1651 (root ruling R18-2) the `mute` row, and since #1655 a VCA's `offset_db` and
+    /// `mute`. On such a lane the `fader_db` row's value is the driving entry's hand-move offset,
+    /// not the static fader, and so is a VCA's `offset_db` (#1655 D5); the `mute` rows' values stay
+    /// the static (hand) mute, which render ORs with the curve (OQ1 = C). A VCA ride does not mark
+    /// its members' rows: they list their own entries only.
     pub automated: bool,
 }
 
@@ -243,13 +241,7 @@ pub fn owner_rows_in(
             );
         }
         OwnerSlot::Route(index) => {
-            let route = view.route(index);
-            route::push_rows(
-                out,
-                route,
-                view.route_automation(&route.id),
-                effective.route_gate(index),
-            );
+            route::push_rows(out, view.route(index), effective.route_gate(index));
         }
         OwnerSlot::Vca(index) => {
             let vca = view.vca(index);
@@ -601,10 +593,6 @@ fn write(
             effect_rows::write(model, address, value)
         }
         (Owner::Route(id), Section::Own) => {
-            // An automated send gain's value is its entry's hand-move offset (R17-6).
-            if control == route::ROUTE_GAIN_DB && route::write_gain_offset(model, id, value) {
-                return Ok(());
-            }
             let target = model
                 .routes
                 .iter_mut()

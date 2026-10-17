@@ -57,7 +57,7 @@ use crate::prepare::{
     EffectiveDiff, FaderEventLanes, LevelRecords, LevelRules, OutOfDomain, RouteEditRamps,
     SendRecord, StripChange, StripEditRamps, effect_instance_records, follow_route_record_between,
     following_route_lanes, input_records, level_differs, level_records_between, matrix_record,
-    route_gain_offset, route_record_between, route_source_strip, same_params, strip_at,
+    route_record_between, route_source_strip, same_params, strip_at,
 };
 use crate::prepare::{GraphJumpLengths, LiveRampRow, LiveRamps, MonitorBase, session_jump_lengths};
 
@@ -277,8 +277,8 @@ pub use crate::prepare::LiveRebuild;
 ///    over unchanged activity and unchanged filter statics is never re-checked: it was prepared.
 /// 3. [`LiveRebuild::Automation`] if the entries of the rows that render differ
 ///    ([`controls::rendered_automation_changed`], #1648 D1): an entry on such a row (a strip's
-///    fader and mute, builtin rows 5 and 6, a route's rows 1-6 and a VCA's `offset_db` and `mute`,
-///    rows 1 and 2, [`controls::automation_row_renders`], #1651, #1654, #1655 D6) is added,
+///    fader and mute, builtin rows 5 and 6, and a VCA's `offset_db` and `mute`, rows 1 and 2,
+///    [`controls::automation_row_renders`], #1651, #1655 D6) is added,
 ///    removed, retargeted or given other segments, or the `(member strip, lane)` set an automated
 ///    VCA lane reaches differs (a membership or nesting edit of an automated VCA, #1655 D5: each
 ///    new pair needs new event state). A plan compiles its cells from these entries, so only a
@@ -1034,16 +1034,10 @@ fn lower_routes<'a>(
         // #1653: a route the plan gives the seven-word cell also holds its source lanes' effective
         // mute (`terms`), which can change while the gate does not (`follows_mute` off), so the
         // cell always holds the committed words.
-        // #1654 D6: a route that automates a row of its own takes the seven-word record too, with
-        // its automated gain's hand offset in the `gain` word, never the six-word form.
         let following = match following_route_lanes(next.structure(), after) {
             Some(automated) => Some(Following {
                 terms: diff.terms(before, after).ok_or(LiveRebuild::Structure)?,
                 automated,
-                gain_offsets: [
-                    route_gain_offset(ModelView::whole(current), &before.id),
-                    route_gain_offset(next, &after.id),
-                ],
             }),
             None => None,
         };
@@ -1432,12 +1426,8 @@ struct RouteTarget<'m, 'a> {
 struct Following {
     /// The source lanes' effective mute, in `[before, after]` (OQ1 = C: it holds no curve).
     terms: [[bool; 2]; 2],
-    /// The source lanes and route rows the next plan automates (flags bits 4-11, #1654 D2).
-    automated: graph::RouteAutomatedSet,
-    /// The hand offset of the route's `gain_db`, in `[before, after]` (#1654 R17-6): the `gain`
-    /// word when the plan automates the gain. `after` is the view's, so an in-place edit of the
-    /// driving entry's offset (R17-1) reaches the record.
-    gain_offsets: [f32; 2],
+    /// The lanes the next plan automates.
+    automated: [bool; 2],
 }
 
 /// What a strip lowering is of: a strip in both models, or one effect instance of it.
@@ -1553,7 +1543,6 @@ fn route_records<'a>(
             target.after,
             following.terms,
             following.automated,
-            following.gain_offsets,
             target.gates,
             target.gate_length,
             target.edit,

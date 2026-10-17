@@ -6,6 +6,19 @@ platform* (#1058), owner answer OQ2 = yes (2026-10-14, README "Owner answers"), 
 Written by the controls coordinator on 2026-10-14. Code anchors verified on `12d4a4f9d` (batch 9
 head). Batch R2, after #1651-#1653.
 
+## Status (batch 19b, root ruling B19-R10)
+
+- **Send-row rendering is not shipped.** Route rows 1-6 do not render, the send `gain_db` takes no
+  hand offset, and a session with route-row entries validates, prepares, renders and lists its
+  controls exactly as on `main` `323433f6a` (the entries are inert; no new refusal).
+- **The route-op machinery shipped with batch 19b**: the following route op on K1's merged walk
+  (T3), its carry, the U2 fold fixes and the conservative B19-R7/R8/R9 transition-fallback term.
+  Its production callers are source-mute and VCA-mute following routes (#1652, #1655).
+- **This issue stays open in phase 2 behind TBD54.** It turns send rows on (route cells, flags
+  bits 6-11, the send-gain offset and the gain law, the send-row gates) after TBD54 lands the
+  cut exactly. The decision records below describe the batch 19 attempt; the B19-R10 record at
+  the end lists what was removed.
+
 ## Product outcome
 
 A producer's stored send rides play on every host: a route into a submix follows its stored
@@ -1016,3 +1029,66 @@ that step's own length. Unifying the two is phase 2 (TBD54, "Related").
   fail at R2: the C ABI reads outcome 1 (`EXACT`) where 2 (`TRANSITION_FALLBACK`) is expected,
   and the host parity gate reads "R2: the rebuild's outcome" 1 against 2. Restored, both pass.
 - No other expectation changed.
+
+## Decision record: B19-R10 (batch 19b)
+
+Root ruling B19-R10 (option B): send-row automation is off, the route-op machinery stays. Nothing
+under `crates/engine/src/realtime/`; no row class or table changed (the SDK is unchanged).
+
+- **Reverted to `main` `323433f6a`.** `controls`: `automation_row_renders` is fader, mute and VCA
+  rows again (no route rows 1-6); `takes_offset` is `fader_db` and VCA `offset_db`; the shared-row
+  offset branch of `offset_faults` is gone, so a send-row offset other than `+0.0` is
+  `control.automation.offset` as on main; `route.rs` is main's; the route-row paths of
+  `registry`, `view`, `owner_edits` and `mask` and the list flag are gone. Deleted:
+  `route_row`, `route_gain_row`, `route_automation`, `continued_route_rows`,
+  `ModelView::route_automation`. `graph-compiler`: `route_gain_law` deleted (`ids.rs` and `lib.rs`
+  are main's).
+- **Deleted, no production caller left.** `builtins-compiler`: the route cells in the one program
+  and `route_cells` (VCA cells now follow the mute cells). `graph`: `RouteFollowFlags` bits 6-11
+  (`DEFINED = (1 << 6) - 1`), `route_rows`, `automated_set`, `RouteAutomatedSet` (the producer's
+  `automated()` and `GraphLiveRoute::automated` are `[bool; 2]` again), `GRAPH_ROUTE_ROWS`,
+  `GraphRouteGainLaw`, `GraphFollowRouteSource::{route_cells, gain_law, continued,
+  with_continued_rows, with_gain_offset, gain_offset}`, and `GraphRouteCursorRow::{Gain, Mute,
+  Matrix}` with their jump lengths. Render (`runtime.rs`): the gain, route-mute and matrix roles,
+  the gain seed, the value-cursor carry paths (`place_new_values`, `for_placed_values`,
+  `Placement`, `ColumnRamps::remaining`), the `compose_toward` record branch and the route
+  column's `with_held_grid` (value cursors only). `host-core`: the route-cell attach, the flags
+  bits, the gain-offset seed, `route_gain_offset` and the record's offset word
+  (`follow_route_record*` are main's, with `follow_route_flags`).
+- **Kept.** K1, the route op on K1 for source-mute and VCA-mute cursors (column walks, probe twin,
+  carry, R19-4 coincident gate events, the U2 fold fixes that gates reach), `follow_route_producer_for`
+  (the pre-write check, now over the two lane bits), the B19-R7/R8/R9 conservative term and its
+  doc text on the five surfaces: the term still fires without route rows (a live send move on a
+  mute-following send across any seven-to-seven rebuild). `send_landing_ramp` is now the mute
+  length (the only at-once landing length left).
+- **Gates.** Deleted: the send-row gates of T1-T5, U2 folds and B19-R7 (controls, graph
+  `send_automation_tests`, host-core `live_delta`/`route_mute` send rows, control-plane
+  `send_automation_realtime.rs`, capi and control_parity send rows). Adapted to mute curves:
+  graph `follow_curve_tests::{coincident_follow_curve_events_take_the_longest_jump (R19-4),
+  a_live_send_move_in_flight_at_a_swap_keeps_its_length (R19-5),
+  a_removed_follow_curve_lands_the_column_on_its_static_value,
+  a_removed_follow_curve_lands_at_once_across_a_move_in_flight,
+  a_removed_follow_curve_leaves_no_stale_value_after_a_seek_or_a_further_rebuild,
+  a_hand_mute_and_a_gate_fade_together,
+  a_source_mute_added_while_a_move_is_in_flight_fades_its_column_at_once}` and the four VCA
+  gates; host-core `removing_a_source_mute_curve_of_a_following_send_lands_on_the_fresh_plan`
+  (three widths), `a_following_send_binds_its_lanes_and_the_commit_refuses_others`; capi
+  `removing_a_source_mute_curve_of_a_following_send_lands_on_the_fresh_plan_on_the_c_abi`,
+  `an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_flagged_on_the_c_abi`
+  (also twin bits), `a_send_move_inside_a_rebuild_is_flagged_on_the_c_abi`,
+  `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_on_the_c_abi`; control_parity
+  `a_rebuild_carrying_a_following_send_across_a_live_send_move_is_flagged_alike_on_both_hosts`
+  (also never-rebuilt bits), `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_alike_on_both_hosts`.
+  Not expressible with mute curves (deleted): value holds and landings (R19-3 grid holds, value
+  jumps, removed-row lengths on later jumps). Kept as is: the output-route refusal (D8) on both
+  hosts.
+- **New gate (B19-R10).** control_parity `stored_send_row_automation_is_inert_alike_on_both_hosts`:
+  a send with entries on rows 1-6, six-word and seven-word, prepares, renders every block (with a
+  live send gain move and an inert entry upsert, `model_only`) and lists its controls exactly as
+  the session without the entries, on both hosts. Green.
+- **Docs.** `docs/SESSION_SCHEMA_V1.md`: send rows do not render and take no offset (main's text),
+  #1655's VCA text kept.
+- **Sizes (x86-64, measured).** `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 952 -> 824,
+  `GraphFollowRouteSource` 120 -> 80, `RouteFollowFlags` 12 -> 6, `FollowRouteControlRecord`
+  36 -> 32, `GraphLiveRoute` 32 -> 24, `GraphFollowRouteControlBinding` 808 -> 672,
+  `GraphFollowRouteControlProducer` 104. Realtime policy: 171 marked regions in 34 files.

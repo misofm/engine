@@ -34,6 +34,19 @@ keeps its own length, whatever else the rebuild changes.
   MAJOR-C) and broken by a seek (its time was a node time computed from a render-time remaining, and a
   seek dropped it, leaving a stale value: MAJOR-D). Probes: the batch 19 verifier's
   `scratchpad/u2f2v/probes*.rs` (session scratchpad; summarised here).
+- Root ruling B19-R10 (batch 19b): send-row rendering (route rows 1-6, the send-gain offset) is
+  not shipped; #1654 stays open in phase 2 behind this issue and turns send rows on after it. The
+  route-op machinery (the merged walk, the carry, the conservative flag) shipped with batch 19b
+  for its production callers, source-mute and VCA-mute following routes, so the cut and the flag
+  above are reached by those routes today.
+- The last check of the whole send flag term (B19-R9, batch 19) found two more MAJORs, both of
+  the B19-R7/R8/R9 window:
+  - MAJOR-W1: a live send move committed while a rebuild is pending (submitted, not yet adopted)
+    is cut at the candidate's adoption, and the pending candidate is never marked (it reports
+    `OUTCOME_EXACT`).
+  - MAJOR-W2: the window closes at the record ramp's end (`first_sample + ramp`) while the
+    column's R19-3 landing tail still runs, so a rebuild inside that tail can cut the landing and
+    report `OUTCOME_EXACT`.
 - The design this issue must hold: an owed landing kept in render terms (samples left on the column's
   ramp, counted down by `frames`), carried by every carry (merged with a new one by the longer length,
   R19-4), never dropped by a seek unless the seek's landing composes that column, and never leaving a
@@ -48,17 +61,26 @@ keeps its own length, whatever else the rebuild changes.
   unrelated rebuild keeps the move bit-equal to the never-rebuilt twin until its end, then a fresh
   plan; `OUTCOME_EXACT`; both hosts. The same for MAJOR-2 (one transaction: a `gain_db` move over
   4,000, an upsert of one matrix row and the removal of another).
-- G2. The B19-R7/B19-R8 flag (`PlanStateInventory::carries_a_following_route_into_a_following_route`,
-  `SendMoveWindow`) and its doc text on the five surfaces are deleted; its gates
-  (`an_unrelated_rebuild_across_a_live_send_move_on_a_riding_send_is_flagged_on_the_c_abi`,
-  `a_send_move_and_a_row_removal_in_one_transaction_are_flagged_on_the_c_abi`,
-  `a_rebuild_carrying_a_following_send_across_a_live_send_move_is_flagged_alike_on_both_hosts`, and
-  the flagged expectations of the B19-R7 gates) are replaced by G1 and G1b.
+- G1c. MAJOR-W1: a live send move committed while a rebuild is pending keeps its own length
+  across the candidate's adoption (bit-equal to the never-rebuilt twin until its end, then a
+  fresh plan), `OUTCOME_EXACT`, both hosts; with the flag still in place, the pending candidate
+  completes `TRANSITION_FALLBACK`.
+- G1d. MAJOR-W2: a rebuild inside a column's R19-3 landing tail (after the record ramp ended)
+  keeps the landing's own length (twin, then fresh plan), `OUTCOME_EXACT`, both hosts; with the
+  flag still in place, it completes `TRANSITION_FALLBACK`.
+- G2. The B19-R7/B19-R8/B19-R9 flag (`PlanStateInventory::carries_a_following_route_into_a_following_route`,
+  `SendMoveWindow`) and its doc text on the five surfaces are deleted; its gates (batch 19b names,
+  on mute-following sends: `an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_flagged_on_the_c_abi`,
+  `a_send_move_inside_a_rebuild_is_flagged_on_the_c_abi`,
+  `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_on_the_c_abi`,
+  `a_rebuild_carrying_a_following_send_across_a_live_send_move_is_flagged_alike_on_both_hosts` and
+  `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_alike_on_both_hosts`) are replaced
+  by G1 to G1d, which then run on send rows as well (#1654).
 - G3. Allocation-free render; no new panic path.
 
 ## Dependencies
 
-- #1654 (batch 19), #1713 (the seven-to-six flag, separate).
+- #1654 (phase 2; its send rows turn on after this issue), #1713 (the seven-to-six flag, separate).
 
 ## Related
 

@@ -15,7 +15,6 @@ use crate::effect_rows::{has_rows, session_unit};
 use crate::error::ControlError;
 use crate::lane::Side;
 use crate::registry::resolve;
-use crate::route::{ROUTE_AUTOMATED_ROWS, ROUTE_GAIN_DB};
 use crate::vca::{VCA_MUTE, VCA_OFFSET_DB};
 use session::Lane;
 use std::collections::BTreeMap;
@@ -49,35 +48,27 @@ fn effect_has_no_rows(model: &SessionModel, target: &ControlAddress) -> bool {
 }
 
 /// Whether the row at `target` takes a stored hand-move offset (#1650 D2, root's ruling R17-6): a
-/// strip's builtin `fader_db`, a route's `gain_db` (row 1, [`route_gain_row`], #1654) and a VCA's
-/// `offset_db` (row 1, [`vca_offset_row`], per lane, #1655 D5 and root's ruling of 2026-10-14: a
-/// level control). Only a route into a submix can hold an accepted entry on the route row (an
-/// output route's row is not automatable and is refused at `.target` first, D8), so the predicate
-/// needs no model. The slice that renders the input trim (#1658) adds its row here.
+/// strip's builtin `fader_db` and a VCA's `offset_db` (row 1, [`vca_offset_row`], per lane, #1655
+/// D5 and root's ruling of 2026-10-14: a level control). The slices that render the input trim
+/// (#1658) and the send gain (#1654) add their rows here.
 pub(crate) fn takes_offset(target: &ControlAddress) -> bool {
-    fader_row(target) || route_gain_row(target) || vca_offset_row(target)
+    fader_row(target) || vca_offset_row(target)
 }
 
 /// The offset rule of one entry whose target is accepted (#1650 D2), per lane, left then right:
 /// on a lane that takes no offset (the entry does not drive it, or its row takes none) the
 /// offset is exactly `+0.0`, else `control.automation.offset`; on a driven lane of a row that
-/// takes one, the offset lies in the row's own domain (`fader_db`, a send's `gain_db` and a VCA's
-/// `offset_db`: `[-144, 24]` dB), else `control.domain`. `-0.0` is a valid zero only on a lane that takes an
-/// offset, so a lane without one has one spelling.
-///
-/// A shared row (a send's `gain_db`, R17-6) holds one offset in two fields: `left_db` is judged
-/// against the domain, and `right_db` is `control.automation.offset` when its bits differ from
-/// `left_db`'s (so `+0.0` and `-0.0` differ), else accepted with it.
+/// takes one, the offset lies in the row's own domain (`fader_db` and a VCA's `offset_db`:
+/// `[-144, 24]` dB, the VCA offset domain), else `control.domain`. `-0.0` is a valid zero only on
+/// a lane that takes an offset, so a lane without one has one spelling.
 fn offset_faults(
     automation: &Automation,
     descriptor: &ControlDescriptor,
 ) -> impl Iterator<Item = (ControlError, &'static str)> {
     let target = &automation.target;
     let takes = takes_offset(target);
-    let shared = descriptor.lanes == Lanes::Shared;
-    let left = automation.offset.left_db;
     [
-        (Lane::Left, left, ".offset.left_db"),
+        (Lane::Left, automation.offset.left_db, ".offset.left_db"),
         (Lane::Right, automation.offset.right_db, ".offset.right_db"),
     ]
     .into_iter()
@@ -85,10 +76,7 @@ fn offset_faults(
         let driven = target.lane == lane || target.lane == Lane::Both;
         let fault = if !(takes && driven) {
             (value.to_bits() != 0.0_f32.to_bits()).then_some(ControlError::AutomationOffset)
-        } else if shared && lane == Lane::Right {
-            (value.to_bits() != left.to_bits()).then_some(ControlError::AutomationOffset)
         } else {
-            let lane = if shared { Lane::Both } else { lane };
             check(descriptor, lane, value, None)
                 .err()
                 .map(|_| ControlError::Domain)
@@ -129,11 +117,10 @@ pub struct ControlDiagnostic {
 ///   `input_filter_order`). It is reported once per lane, at the LPF entry's segment when the LPF
 ///   is automated, else at the HPF entry's;
 /// - `control.automation.offset`: a hand-move offset (#1650 D2) that is not `+0.0` on a lane the
-///   entry does not drive, or on any lane of a row that takes no offset (only `fader_db`, a
-///   send's `gain_db` and a VCA's `offset_db` take one, R17-6, #1655 D5), or a send `gain_db` entry whose `right_db` bits differ
-///   from its `left_db` (the shared row holds one offset); `control.domain` for an offset outside
-///   the row's domain. Each is reported at `.offset.left_db` or `.offset.right_db`, after the
-///   entry's segments.
+///   entry does not drive, or on any lane of a row that takes no offset (only `fader_db` and a
+///   VCA's `offset_db` take one, #1655 D5); `control.domain` for an offset outside the row's
+///   domain. Each is reported at `.offset.left_db` or `.offset.right_db`, after the entry's
+///   segments.
 ///
 /// A target is reported once, at `.target`; its segments are judged only when the target is
 /// accepted. A segment is reported once, at `.segments[<i>]`: a domain fault first, else a shape
@@ -404,20 +391,20 @@ pub const MUTE_CELL_RULE: CellRule = CellRule {
     seek: SeekMode::Exact,
 };
 
-/// Whether a stored automation of `target` renders (#1646, #1647, #1651, #1654, #1655): the fader
-/// row of a strip (builtin row 5, [`fader_row`]), its mute row (builtin row 6, [`mute_row`]), a
-/// send's rows 1-6 (`gain_db`, `mute`, `matrix_*`, [`route_row`]) and a VCA's rows 1 and 2
-/// (`offset_db`, [`vca_offset_row`], and `mute`, [`vca_mute_row`]). An entry on any other row is
-/// validated and kept in the session but compiles to no cell. Every rendering slice adds its row
-/// here, so preparation and the live classifier (#1648) read one list.
+/// Whether a stored automation of `target` renders (#1646, #1647, #1651, #1655): the fader row of
+/// a strip (builtin row 5, [`fader_row`]), its mute row (builtin row 6, [`mute_row`]) and a VCA's
+/// rows 1 and 2 (`offset_db`, [`vca_offset_row`], and `mute`, [`vca_mute_row`]). An entry on any
+/// other row (a send's rows among them, #1654) is validated and kept in the session but compiles
+/// to no cell. Every rendering slice adds its row here, so preparation and the live classifier
+/// (#1648) read one list.
 ///
-/// A reader that means "the fader" tests [`fader_row`] instead (#1651 T2): neither the mute row,
-/// a route row nor a VCA row gives a lane a fader cell or a fader hand-move offset. A VCA ride
+/// A reader that means "the fader" tests [`fader_row`] instead (#1651 T2): neither the mute row
+/// nor a VCA row gives a lane a fader cell or a fader hand-move offset. A VCA ride
 /// makes its members' lanes event lanes ([`fader_event_lanes`], [`mute_event_lanes`]); it does not
 /// automate a member's own fader.
 #[must_use]
 pub fn automation_row_renders(target: &ControlAddress) -> bool {
-    fader_row(target) || mute_row(target) || route_row(target) || vca_row(target)
+    fader_row(target) || mute_row(target) || vca_row(target)
 }
 
 /// Whether `target` is a VCA's `offset_db` row (row 1, #1655): per lane, a level control that
@@ -514,76 +501,6 @@ fn event_lanes<'a>(
         }
     }
     lanes
-}
-
-/// Whether `target` is one of a route's rendered rows 1-6 (`gain_db`, `mute`, `matrix_ll`,
-/// `matrix_lr`, `matrix_rl`, `matrix_rr`; #1654 D3). Row 7 `follows_mute` is not automatable
-/// (#1632) and is not one. The predicate reads no model: an entry on a route into the output is
-/// refused at `.target` before it is judged (D8), so an accepted entry it admits is a send's.
-#[must_use]
-pub fn route_row(target: &ControlAddress) -> bool {
-    matches!(target.owner, Owner::Route(_))
-        && target.section == Section::Own
-        && ROUTE_AUTOMATED_ROWS.contains(&target.control)
-}
-
-/// Whether `target` is a route's `gain_db` row (row 1): the one route row that takes a hand-move
-/// offset (root's ruling R17-6). The send's offset readers and writers test this predicate.
-#[must_use]
-pub fn route_gain_row(target: &ControlAddress) -> bool {
-    matches!(target.owner, Owner::Route(_))
-        && target.section == Section::Own
-        && target.control == ROUTE_GAIN_DB
-}
-
-/// The stored automation entries that drive route `route`'s rendered rows, in row order
-/// (`[gain_db, mute, matrix_ll, matrix_lr, matrix_rl, matrix_rr]`, rows 1-6, #1654): the first
-/// entry per row in table order. Every route row is shared, so an entry drives its row whole. The
-/// one enumeration that preparation, the classifier and owner edits read. An empty table returns
-/// at once.
-#[must_use]
-pub fn route_automation<'a>(
-    model: &'a SessionModel,
-    route: &StableId,
-) -> [Option<&'a Automation>; 6] {
-    let mut rows = [None; 6];
-    for automation in &model.automation {
-        let target = &automation.target;
-        if !route_row(target) || !matches!(&target.owner, Owner::Route(owner) if owner == route) {
-            continue;
-        }
-        if let Some(row) = ROUTE_AUTOMATED_ROWS
-            .iter()
-            .position(|&control| control == target.control)
-            && rows[row].is_none()
-        {
-            rows[row] = Some(automation);
-        }
-    }
-    rows
-}
-
-/// The rendered rows of route `route` (in [`route_automation`]'s order) that both models
-/// automate with the same table, by the rule of [`continued_fader_lanes`]: such a row's cell
-/// continues its carried event state verbatim, and every other carried route cell is repositioned
-/// at adoption (#1654, Carry).
-#[must_use]
-pub fn continued_route_rows(
-    current: &SessionModel,
-    next: &SessionModel,
-    route: &StableId,
-) -> [bool; 6] {
-    if current.automation.is_empty() || next.automation.is_empty() {
-        return [false; 6];
-    }
-    let (before, after) = (
-        route_automation(current, route),
-        route_automation(next, route),
-    );
-    core::array::from_fn(|row| {
-        matches!((before[row], after[row]), (Some(before), Some(after))
-            if same_segments(before, after))
-    })
 }
 
 /// Whether `target` is a strip's builtin `mute` row (row 6): the rendered row whose entry gives a

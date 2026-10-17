@@ -2530,329 +2530,50 @@ fn the_following_route_charge_covers_its_attach_and_bind() {
     );
 }
 
-/// #1654 T5: stored send-row automation (route rows 1-6) on the send `t-b` of [`follow::model`].
+/// #1654 U2 fold 1, MAJOR-3 on a mute-following send (every bank width and the scalar oracle).
+/// The send `t-b` hears `t`'s right lane, whose mute entry holds it muted; `t`'s left lane has its
+/// own mute entry too. A rebuild at block 6 removes the right lane's entry: the send stays a
+/// following route (the left lane's curve keeps it seven-word), no join record moves its cell, and
+/// no cursor of the successor's right column hears a curve. The carry lands the send's column on
+/// the successor's static value over the removed curve's own length (the mute length): from the
+/// first block boundary after that landing, the send's plane is the successor prepared fresh, bit
+/// for bit, and render allocates nothing.
+///
+/// Test value: red if a removed source mute curve of a send that stays seven-word leaves the send
+/// on the removed curve's last value (muted).
 #[cfg(feature = "test-support")]
-mod send_rows {
-    use super::sid;
-    use session::{
-        Automation, AutomationOffset, AutomationSegment, AutomationShape, ControlAddress, Owner,
-        ParameterChannel, ParameterUnit, Section,
+#[test]
+fn removing_a_source_mute_curve_of_a_following_send_lands_on_the_fresh_plan() {
+    use follow::*;
+    use successor::{BLOCKS, QUANTUM, SWAP_BLOCK};
+    let pcm = successor::Feed::new("t", 29);
+    let lane_entry = |name: &str, lane: session::ParameterChannel, from: f32| {
+        let mut entry = mute_entry(from, &[]);
+        entry.id = sid(name);
+        entry.target.lane = lane;
+        entry
     };
-
-    /// An entry `name` on `t-b`'s route row `row` (1 `gain_db`, 2 `mute`, 3-6 the matrix).
-    pub(super) fn entry(name: &str, row: u32, segments: Vec<AutomationSegment>) -> Automation {
-        Automation {
-            id: sid(name),
-            target: ControlAddress {
-                owner: Owner::Route(sid("t-b")),
-                section: Section::Own,
-                control: row,
-                lane: ParameterChannel::Both,
-            },
-            segments,
-            offset: AutomationOffset::default(),
-        }
-    }
-
-    /// One segment of `shape` from `(start, from)` to `(end, to)` in `unit`.
-    pub(super) fn segment(
-        shape: AutomationShape,
-        (start, from): (u64, f32),
-        (end, to): (u64, f32),
-        unit: ParameterUnit,
-    ) -> AutomationSegment {
-        AutomationSegment {
-            shape,
-            start_sample: start,
-            end_sample: end,
-            start_value: from,
-            end_value: to,
-            unit,
-        }
-    }
-
-    /// A flat curve at `value` in `unit`.
-    pub(super) fn flat(value: f32, unit: ParameterUnit) -> Vec<AutomationSegment> {
-        vec![segment(
-            AutomationShape::Linear,
-            (0, value),
-            (1 << 20, value),
-            unit,
-        )]
-    }
-
-    /// A linear gain ride from 0 dB at 0 to `end_db` at `end`.
-    pub(super) fn gain_ride(end: u64, end_db: f32) -> Vec<AutomationSegment> {
-        vec![segment(
-            AutomationShape::Linear,
-            (0, 0.0),
-            (end, end_db),
-            ParameterUnit::Db,
-        )]
-    }
-}
-
-/// #1654 gate 1 (host-core form, every bank width and the scalar oracle, every live form). The
-/// send `t-b` (`pre_fader`, `rr` only) with a flat `gain_db` ride at -6 dB (hand offset `+0.0`,
-/// then `-0.0` on both fields), a flat `rr` entry at 0.5 and a flat route `mute` at 0 renders, bit
-/// for bit, the session whose send holds those values statically, and render allocates nothing
-/// after the first block. Not vacuous: a flat ride at -5 dB differs.
-///
-/// Test value: red if the route op reads the gain word as the compiler's linear static gain
-/// rather than the seeded offset (the T4 note: `law(-6, 0.5)` is heard), converts the curve with
-/// other arithmetic than the static gain's law, hears an automated matrix entry's fallback, or
-/// retargets a flat ride.
-#[cfg(feature = "test-support")]
-#[test]
-fn a_flat_send_ride_renders_the_static_sends_bits() {
-    use follow::*;
-    use send_rows::{entry, flat};
-    use session::ParameterUnit;
-    const FRAMES: usize = 3_000;
-    let pcm = feed(FRAMES + 256, None);
-    let base = model(128, SendTap::PreFader, false, true);
-    let mut fixed = base.clone();
-    fixed.routes[1].gain_db = -6.0;
-    fixed.routes[1].channel_matrix.rr = 0.5;
-    let automated = |gain_db: f32, offset: f32| {
-        let mut model = base.clone();
-        let mut gain = entry("send-gain", 1, flat(gain_db, ParameterUnit::Db));
-        gain.offset = session::AutomationOffset {
-            left_db: offset,
-            right_db: offset,
-        };
-        model.automation = vec![
-            gain,
-            entry(
-                "send-mute",
-                2,
-                vec![send_rows::segment(
-                    session::AutomationShape::Step,
-                    (0, 0.0),
-                    (1 << 20, 0.0),
-                    ParameterUnit::Linear,
-                )],
-            ),
-            entry("send-rr", 6, flat(0.5, ParameterUnit::Linear)),
-        ];
-        model
-    };
-    for backend in follow::backends() {
-        for live in LIVE_FORMS {
-            let what = format!("{backend:?} {live:?}");
-            let fixed = run(&fixed, backend, live, &pcm, FRAMES);
-            for offset in [0.0_f32, -0.0] {
-                let curve = run(&automated(-6.0, offset), backend, live, &pcm, FRAMES);
-                if live != Live::None {
-                    assert_eq!(curve.follow_routes, 1, "{what}: one following route");
-                }
-                assert_eq!(curve.allocations, (0, 0, 0), "{what}: render allocates");
-                for plane in 0..2 {
-                    assert_bits_equal(
-                        &curve.out[plane],
-                        &fixed.out[plane],
-                        &format!("{what}, offset {offset:?}: plane {plane}"),
-                    );
-                }
-            }
-            let other = run(&automated(-5.0, 0.0), backend, live, &pcm, FRAMES);
-            assert!(
-                first_difference_from(&other.out[1], &fixed.out[1], 0).is_some(),
-                "{what}: a ride at -5 dB is heard"
-            );
-        }
-    }
-}
-
-/// #1654 gate 2 (every bank width and the scalar oracle, quanta 128 and 100). The send `t-b`
-/// rides its gain linearly from 0 to -24 dB over 4,000 samples; track `t` carries a latent
-/// insert of `L` samples before its fader. With an `input` tap the send reads `t` `L` render
-/// samples before the strip's fader and PDC delays the bus path by `L` at the output; with a
-/// `post_fader` tap it reads at the fader's arrival, `L`. In both cases the send's plane (the
-/// output's right plane) is, from sample `L` on, the plane of a twin with no latent insert shifted
-/// by `L`, bit for bit: each grid value of the ride reaches the bus on the timeline sample the
-/// twin's does, and the post-fader ride's ramps start on the strip's render samples.
-///
-/// Test value: red if the send's events use the fader's arrival instead of the tap's (an `input`
-/// tap would ride `L` samples late), the route's own arrival, or the render sample.
-#[cfg(feature = "test-support")]
-#[test]
-fn a_send_ride_is_heard_at_its_taps_time() {
-    use follow::*;
-    use send_rows::{entry, gain_ride};
-    const FRAMES: usize = 4_000;
-    let pcm = feed(FRAMES + 1_024, Some(0.25));
-    for quantum in [128_u32, 100] {
-        for tap in [SendTap::Input, SendTap::PostFader] {
-            let with_ride = |latent: bool| {
-                let mut model = model(quantum, tap, latent, true);
-                model.automation = vec![entry("send-gain", 1, gain_ride(4_000, -24.0))];
-                model
-            };
-            let (latent, twin) = (with_ride(true), with_ride(false));
-            for backend in follow::backends() {
-                let what = format!("q={quantum} {tap:?} {backend:?}");
-                let late = run(&latent, backend, Live::None, &pcm, FRAMES);
-                let early = run(&twin, backend, Live::None, &pcm, FRAMES);
-                assert_eq!(late.allocations, (0, 0, 0), "{what}: render allocates");
-                let shift = L as usize;
-                assert_bits_equal(
-                    &late.out[1][shift..],
-                    &early.out[1][..FRAMES - shift],
-                    &format!("{what}: the send plane, shifted by the latency"),
-                );
-                // Not vacuous: the ride moves over the compared window.
-                assert_ne!(
-                    early.out[1][100].to_bits(),
-                    early.out[1][3_000].to_bits(),
-                    "{what}: the send rides"
-                );
-            }
-        }
-    }
-}
-
-/// #1654 gate 7 (every bank width and the scalar oracle). The send `t-b` rides its gain linearly
-/// from 0 to -24 dB over 4,000 samples and its `ll` entry from 0 to 0.5. A rebuild at block 6
-/// that changes only the direct route `t-main`'s gain (a route into the output: a rebuild row)
-/// keeps both tables, so the send's cursors carry verbatim: the send's plane (the output's right
-/// plane) is bit for bit the never-swapped predecessor's in every block, and the swap allocates
-/// and frees nothing. Not vacuous: the strip's plane moves with the rebuild, and the ride is
-/// still moving at the swap.
-///
-/// Test value: red if the plan does not hand the route op the rows whose tables both models hold
-/// (`controls::continued_route_rows` through `GraphFollowRouteSource::with_continued_rows`): a
-/// repositioned cursor re-times the running ride.
-#[cfg(feature = "test-support")]
-#[test]
-fn a_running_send_ride_across_an_unrelated_rebuild_is_the_never_swapped_twin() {
-    use follow::*;
-    use send_rows::{entry, gain_ride, segment};
-    use session::{AutomationShape, ParameterUnit};
-    use successor::{QUANTUM, SWAP_BLOCK};
-    let pcm = successor::Feed::new("t", 23);
-    let mut a = model(QUANTUM as u32, SendTap::PreFader, false, true);
-    a.automation = vec![
-        entry("send-gain", 1, gain_ride(4_000, -24.0)),
-        entry(
-            "send-ll",
-            3,
-            vec![segment(
-                AutomationShape::Linear,
-                (0, 0.0),
-                (4_000, 0.5),
-                ParameterUnit::Linear,
-            )],
-        ),
-    ];
-    let mut b = a.clone();
-    b.routes[0].gain_db = -3.0;
-    assert_eq!(b.routes[0].id.as_str(), "t-main");
+    let mut b = model(QUANTUM as u32, SendTap::PreFader, false, true);
+    b.automation = vec![lane_entry(
+        "mute-left",
+        session::ParameterChannel::Left,
+        0.0,
+    )];
+    let mut a = b.clone();
+    a.automation.push(lane_entry(
+        "mute-right",
+        session::ParameterChannel::Right,
+        1.0,
+    ));
     let quiet = |_: usize,
                  _: &mut host_core::HostLiveControlHandles,
                  _: &mut engine::realtime::PlanRevisionGate| {};
     for backend in follow::backends() {
         let what = format!("{backend:?}");
-        let (twin, _) = live_swap(&a, None, backend, &pcm, quiet);
+        let fresh =
+            successor::reference_run(&successor::Session::compile(b.clone()), &[&pcm], backend);
+        let fresh = plane(&fresh, 1);
         let (swapped, handles) = live_swap(&a, Some((&b, &a)), backend, &pcm, quiet);
-        assert_eq!(
-            handles
-                .expect("the successor's handles")
-                .follow_route_controls
-                .len(),
-            1,
-            "{what}: the send is a following route"
-        );
-        assert_quiet(&swapped, &what);
-        let (send, twin_send) = (plane(&swapped, 1), plane(&twin, 1));
-        assert_bits_equal(&send, &twin_send, &format!("{what}: the send's plane"));
-        let at = SWAP_BLOCK * QUANTUM;
-        assert!(
-            first_difference_from(&plane(&swapped, 0), &plane(&twin, 0), at).is_some(),
-            "{what}: the rebuild is heard on the strip's plane"
-        );
-        assert_ne!(
-            twin_send[at].to_bits(),
-            twin_send[at + QUANTUM].to_bits(),
-            "{what}: the ride moves at the swap"
-        );
-    }
-}
-
-/// #1654 root ruling B19-R7 (every bank width and the scalar oracle). The send `t-b` hears flat
-/// `ll` and `rr` entries at 0.5; at block 5 a hand move of its gain to -6 dB is written through
-/// its seven-word producer, and a rebuild at block 6 removes the `ll` entry while the move is in
-/// flight: the send's left source column no longer hears a curve. Until the swap both planes are
-/// the never-swapped twin's; at the swap the left column lands at once over `SendMatrix` (the pan
-/// length), cutting the move there (the control plane flags that rebuild), while the right
-/// column's move runs on; from the first block boundary after the move's end and the landing both
-/// planes are the successor prepared fresh, bit for bit. Render allocates nothing.
-///
-/// Test value: red if the removal never lands, lands late (after the move), or leaves the removed
-/// row's value on the column.
-#[cfg(feature = "test-support")]
-#[test]
-fn a_send_column_losing_its_last_curve_lands_at_once_across_the_hand_move() {
-    use follow::*;
-    use send_rows::{entry, flat};
-    use session::ParameterUnit;
-    use successor::{BLOCKS, QUANTUM, SWAP_BLOCK};
-    const WRITE_BLOCK: usize = 5;
-    let pcm = successor::Feed::new("t", 31);
-    let mut a = model(QUANTUM as u32, SendTap::PreFader, false, true);
-    a.automation = vec![
-        entry("send-ll", 3, flat(0.5, ParameterUnit::Linear)),
-        entry("send-rr", 6, flat(0.5, ParameterUnit::Linear)),
-    ];
-    let mut committed = a.clone();
-    committed.routes[1].gain_db = -6.0;
-    assert_eq!(committed.routes[1].id.as_str(), "t-b");
-    let mut b = committed.clone();
-    b.automation.retain(|entry| entry.id.as_str() != "send-ll");
-    // The record a commit of `committed` writes: the open transform at -6 dB (the automated
-    // entries' words are fallbacks render ignores) and the plan's automated set.
-    let length = 480_usize;
-    let transform =
-        graph_compiler::route_values(-6.0, [0.0, 0.0, 0.0, 1.0]).expect("in-domain send values");
-    let pan = controls::LiveRamps::for_session(&b).pan_samples as usize;
-    let move_end = WRITE_BLOCK * QUANTUM + length;
-    assert!(
-        move_end > SWAP_BLOCK * QUANTUM,
-        "the move is in flight at the swap"
-    );
-    let at = SWAP_BLOCK * QUANTUM;
-    let landed = next_boundary(move_end.max(at + pan), QUANTUM);
-    assert!(landed < BLOCKS * QUANTUM, "the landing ends inside the run");
-    let hand = |block: usize,
-                handles: &mut host_core::HostLiveControlHandles,
-                gate: &mut engine::realtime::PlanRevisionGate| {
-        use builtins_compiler::TestOnlyWriteGate;
-        if block == WRITE_BLOCK {
-            let index =
-                host_core::follow_route_producer_position(&handles.follow_route_controls, "t-b")
-                    .expect("t-b's seven-word producer");
-            let automated = handles.follow_route_controls[index].automated();
-            let [automated_gain, automated_mute, ll, lr, rl, rr] = automated.rows;
-            let flags = host_core::RouteFollowFlags {
-                mute: false,
-                follows_mute: true,
-                terms: [false; 2],
-                automated: automated.lanes,
-                automated_gain,
-                automated_mute,
-                automated_matrix: [ll, lr, rl, rr],
-            };
-            let record = host_core::FollowRouteControlRecord::new(transform, flags, length as u32)
-                .expect("a send record");
-            gate.write_published(|stamp| {
-                handles.follow_route_controls[index].write(stamp, record);
-            });
-        }
-    };
-    for backend in follow::backends() {
-        let what = format!("{backend:?}");
-        let (twin, _) = live_swap(&a, None, backend, &pcm, hand);
-        let (swapped, handles) = live_swap(&a, Some((&b, &committed)), backend, &pcm, hand);
         assert_eq!(
             handles
                 .expect("the successor's handles")
@@ -2862,99 +2583,17 @@ fn a_send_column_losing_its_last_curve_lands_at_once_across_the_hand_move() {
             "{what}: the send stays a following route"
         );
         assert_quiet(&swapped, &what);
-        let fresh =
-            successor::reference_run(&successor::Session::compile(b.clone()), &[&pcm], backend);
-        for index in 0..2 {
-            let (send, twin, fresh) = (
-                plane(&swapped, index),
-                plane(&twin, index),
-                plane(&fresh, index),
-            );
-            assert_bits_equal(
-                &send[..at],
-                &twin[..at],
-                &format!("{what}: plane {index}, the twin until the swap"),
-            );
-            assert_bits_equal(
-                &send[landed..BLOCKS * QUANTUM],
-                &fresh[landed..BLOCKS * QUANTUM],
-                &format!("{what}: plane {index}, the fresh plan after the landing"),
-            );
-        }
-        // The landing starts at the swap: inside the move, the planes leave the twin's.
+        let send = plane(&swapped, 1);
+        let at = SWAP_BLOCK * QUANTUM;
         assert!(
-            (0..2).any(|index| {
-                first_difference_from(
-                    &plane(&swapped, index)[..move_end],
-                    &plane(&twin, index)[..move_end],
-                    at,
-                )
-                .is_some()
-            }),
-            "{what}: the left column lands at the swap, inside the move"
+            first_difference_from(&send[..at], &fresh[..at], 0).is_some(),
+            "{what}: not vacuous, the removed curve is heard before the swap"
         );
-    }
-}
-
-/// #1654 U2 fold 1, MAJOR-3 (every bank width and the scalar oracle). The send `t-b` keeps a flat
-/// `gain_db` ride at -6 dB (its table continues) and a rebuild at block 6 removes either its flat
-/// `rr` entry at 0.5 or its source strip's mute entry (held muted): the send stays a following
-/// route, no join record moves its cell, and no cursor of the successor hears the removed curve.
-/// The carry lands the send on the successor's static value over the removed row's own length
-/// (`SendMatrix`, the pan length, for `rr`; the mute length for the mute curve): from the first
-/// block boundary after that landing, the send's plane is the successor prepared fresh, bit for
-/// bit, and render allocates nothing.
-///
-/// Test value: red if a removed row or source mute curve of a send that stays seven-word leaves
-/// the send on the removed curve's last value.
-#[cfg(feature = "test-support")]
-#[test]
-fn removing_a_send_row_or_its_source_mute_curve_lands_on_the_fresh_plan() {
-    use follow::*;
-    use send_rows::{entry, flat};
-    use session::ParameterUnit;
-    use successor::{BLOCKS, QUANTUM, SWAP_BLOCK};
-    let pcm = successor::Feed::new("t", 29);
-    let mut b = model(QUANTUM as u32, SendTap::PreFader, false, true);
-    b.automation = vec![entry("send-gain", 1, flat(-6.0, ParameterUnit::Db))];
-    let pan = controls::LiveRamps::for_session(&b).pan_samples as usize;
-    let mut with_rr = b.clone();
-    with_rr
-        .automation
-        .push(entry("send-rr", 6, flat(0.5, ParameterUnit::Linear)));
-    let mut with_mute = b.clone();
-    with_mute.automation.push(mute_entry(1.0, &[]));
-    let quiet = |_: usize,
-                 _: &mut host_core::HostLiveControlHandles,
-                 _: &mut engine::realtime::PlanRevisionGate| {};
-    for backend in follow::backends() {
-        let fresh =
-            successor::reference_run(&successor::Session::compile(b.clone()), &[&pcm], backend);
-        let fresh = plane(&fresh, 1);
-        for (name, a, length) in [("rr", &with_rr, pan), ("mute", &with_mute, M as usize)] {
-            let what = format!("{backend:?} {name}");
-            let (swapped, handles) = live_swap(a, Some((&b, a)), backend, &pcm, quiet);
-            assert_eq!(
-                handles
-                    .expect("the successor's handles")
-                    .follow_route_controls
-                    .len(),
-                1,
-                "{what}: the send stays a following route"
-            );
-            assert_quiet(&swapped, &what);
-            let send = plane(&swapped, 1);
-            let at = SWAP_BLOCK * QUANTUM;
-            assert!(
-                first_difference_from(&send[..at], &fresh[..at], 0).is_some(),
-                "{what}: not vacuous, the removed curve is heard before the swap"
-            );
-            let landed = next_boundary(at + length, QUANTUM);
-            assert_bits_equal(
-                &send[landed..BLOCKS * QUANTUM],
-                &fresh[landed..BLOCKS * QUANTUM],
-                &format!("{what}: the fresh plan after the landing"),
-            );
-        }
+        let landed = next_boundary(at + M as usize, QUANTUM);
+        assert_bits_equal(
+            &send[landed..BLOCKS * QUANTUM],
+            &fresh[landed..BLOCKS * QUANTUM],
+            &format!("{what}: the fresh plan after the landing"),
+        );
     }
 }

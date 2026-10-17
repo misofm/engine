@@ -652,7 +652,7 @@ pub struct SessionState<A: ControlAdapter> {
 }
 
 /// Every live send move (a following route's record with a ramp, written by a live commit or by a
-/// rebuild's send join) and every landing a rebuild's removed send row starts, folded into one
+/// rebuild's send join) and every landing at once a rebuild's carry starts, folded into one
 /// bound (B19-R7): the newest revision among them and the longest ramp any of them takes. A move
 /// is in effect from at most the watermark's `first_sample` once the watermark covers its revision
 /// (the watermark is monotone), so every move has ended once the watermark covers `revision` and
@@ -690,15 +690,12 @@ fn fold_send_move(window: &mut Option<SendMoveWindow>, revision: u64, ramp: u32)
     });
 }
 
-/// The longest length a removed send row's landing takes at its successor's first block (B19-R7):
-/// a following route's `SendGain`, `SendMatrix` and mute lengths are the session's fader, pan and
-/// mute lengths, each at most the route ramp bound.
+/// The length a landing at once takes at its successor's first block (B19-R7): a carried
+/// following route's column that lost a follow curve (its own source mute or a reaching VCA mute)
+/// or that composes otherwise lands over the `Mute` or `VcaMute` row's length, both the session's
+/// mute length.
 fn send_landing_ramp(model: &session::SessionModel) -> u32 {
-    let ramps = controls::LiveRamps::for_session(model);
-    ramps
-        .fader_samples
-        .max(ramps.mute_samples)
-        .max(ramps.pan_samples)
+    controls::LiveRamps::for_session(model).for_row(controls::LiveRampRow::Mute)
 }
 
 /// The stable key of one observation tap, borrowed from the bytes that name it (#1677): the strip's
@@ -2604,8 +2601,8 @@ where
         //
         // B19-R8 (TBD54 deletes this; it widens B19-R7's removed-curve term): a successor whose
         // send join carries a following route into a following route may land a carried column
-        // at once at the swap (a removed row or source mute curve, or a column that composes with
-        // no placed value), cutting a live send move still ramping there, which render cannot
+        // at once at the swap (a removed follow curve, or a column that composes otherwise),
+        // cutting a live send move still ramping there, which render cannot
         // report. Control cannot tell which column lands at once or whether its move is in
         // flight, so such a rebuild completes as the transition fallback whenever any live send
         // move may still ramp: the transaction's own join records with a ramp (MAJOR-2: they are
@@ -2623,7 +2620,7 @@ where
                     )
                 }));
         // The rebuild's own send moves join the window with the commit: its join's records, and
-        // a landing at once at the swap (a removed row's, or one a flagged rebuild may make,
+        // a landing at once at the swap (a removed curve's, or one a flagged rebuild may make,
         // B19-R9), so a second rebuild inside that landing is flagged too.
         let rebuild_send_ramp = match &kind {
             Rebuild::Transaction(prepared) if follow_loses_a_curve || send_fallback => {
@@ -3227,9 +3224,8 @@ where
         // 2a. Each route's producer, by route ID (#1557 D4): a binary search over the canonical
         // route-ID order, among the six-word producers for a folded record and among the
         // seven-word ones for a following route's record (#1653 D1). A record for a route with no
-        // producer of its kind, or a seven-word record whose automated set (flags bits 4-11: the
-        // source lanes and the route rows, #1654 D2) differs from the plan's (render takes it from
-        // its own cursors), is an internal fault, found before the first write, so no ack
+        // producer of its kind, or a seven-word record whose automated lanes (flags bits 4-5)
+        // differ from the plan's (render takes them from its own cursors), is an internal fault, found before the first write, so no ack
         // precedes a drop (#1653 D5).
         let route_lanes = &mut strips.routes;
         let follow_lanes = &mut strips.follow_routes;
