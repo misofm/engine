@@ -155,3 +155,225 @@ Checked against `12d4a4f9d`.
 - **The fixtures add** a fader offset (#1650), a hand mute over a mute curve (#1651 amended) and a send
   ride (#1654); depend on #1650 and #1654.
 - Native pin tests in `hosts/host-web/src/tests.rs` have moved; re-read at filing.
+
+## Amendment (controls coordinator, batch 20, 2026-10-17): narrowed to the delivered rows
+
+Checked against `e7722bd19`. The owner narrowed this issue on 2026-10-17. This amendment replaces
+D1-D5, the authorized paths, the gates, the test value and the dependencies above, and the
+amendment of 2026-10-14.
+
+### Product outcome (narrowed)
+
+One fixture session automates the rows that the engine renders today: the strip fader, the strip
+mute, the VCA offset, the VCA mute, and a following send that tracks its source's mute and its
+VCA's mute. It uses every shape that each row accepts, and it is seeked once while it plays. The
+shipped `simd128` artifact (the direct oracle), the native browser host on x86-64
+(`AudioWorkletEngineHost`) and the C ABI render the same bits. There is no new digest owner. The
+oracle leg adds one pin beside the existing pins in `expected.json`.
+
+### What the code accepts (anchors at `e7722bd19`)
+
+- **Grammar.** An entry is `{id, target, segments, offset}` (`crates/session/src/parse.rs:1569-1604`).
+  The target is `{owner, owner_id, section, control, lane}` (`:1606-1646`). A segment is
+  `{shape, start_sample, end_sample, start_value, end_value, unit}` (`:1690`). Sample times are
+  JSON strings.
+- **Rows.** Strip fader: `strip`, `builtins`, control 5. Strip mute: control 6
+  (`crates/controls/src/builtin_rows.rs:29-30`). VCA offset: `vca`, `own`, control 1. VCA mute:
+  control 2 (`crates/controls/src/vca.rs:14-15`). Only these four rows compile to cells
+  (`crates/controls/src/automation.rs:394-408`). A route-row entry is kept but inert (#1654).
+- **Shapes.** `step` is always valid. `linear` needs a continuous row. `exponential` needs a
+  continuous row above 0 that is not in dB (`crates/controls/src/automation.rs:255-266`). So the
+  fader and the VCA offset take `step` and `linear`, the two mutes take `step` only (unit
+  `linear`, values 0 and 1), and `exponential` is refused on all five rows with
+  `control.automation.shape`.
+- **Structure** (`crates/session/src/validate.rs`). Segments are ordered and do not overlap
+  (`:1023`, `:1031`). Gaps are valid. The jumps of one entry are at least 64 samples apart
+  (`:1070-1134`). One entry per lane, and `both` claims the two lanes (`:1141-1185`). The hold
+  rule is in `docs/SESSION_SCHEMA_V1.md:339-345`: a `step` holds `start_value` and takes
+  `end_value` at `end_sample`.
+- **Offsets.** The stored hand-move offset (#1650) is `offset.{left_db,right_db}`. A lane that the
+  entry drives on the fader or VCA offset row takes a value in `[-144, 24]` dB. Every other lane
+  holds exactly `+0.0` (`docs/SESSION_SCHEMA_V1.md:363-371`).
+- **Known-good shapes.** `fixtures/session/v1/builtins-automation.json` (fader `:174-197`, VCA
+  offset `:294-318`, VCA members `:106-118`, a following send `:129-148`). Mute entries:
+  `hosts/host-web/tests/stored_mute_automation.rs:184-207`. VCA mute:
+  `crates/host-core/tests/stored_vca_automation.rs:161-184`.
+
+### D1 (replaced). One fixture: `hosts/host-web/tests/browser-v1/automation-session.json`
+
+Copy the frame of `command-session.json` (48 kHz, quantum 128, profiles, `main-out`, default
+smoothing). Then:
+
+- **Sources.** `src-t1` and `src-t2`, 2 channels, `32f`, `frames` `"48000"`. A seek clamps a
+  source to `[0, frames]` (`crates/host-core/src/source.rs:37-39`), so the frames must be more
+  than 37,168.
+- **Tracks.** `t1` on `src-t1` and `t2` on `src-t2`. No console slot, no insert, no input
+  filter. Static faders at 0 dB, all hand mutes `false`.
+- **Submix.** `bus`, with the plain builtins of `builtins-automation.json:68-118`.
+- **VCA.** `vca`, members `["t1", "t2"]`, static `fader.left_db` `-2.0` (the static offset on the
+  left lanes), all other static values zero or `false`.
+- **Routes.** `t1-main` and `t2-main` (`post_pan` to `main-out`). `t1-bus` (`pre_fader` to `bus`,
+  `follows_mute: true`). `t2-bus` (`pre_fader` to `bus`, `follows_mute: false`, the
+  non-following contrast). `bus-main` (`post_pan` to `main-out`).
+- **Entries** (values in dB for the dB rows, 0 or 1 for the mutes):
+  - `t1-fader`, `t1` control 5, lane `both`, offset `{left_db: -1.5, right_db: 0.0}`:
+    linear 256-2304, 0 to -12; a gap; step 3001-3601, -6 then -9 (3001 and 3601 are not grid
+    samples); linear 29000-33000, -9 to +3; step 34000-35000, 0 then -3.
+  - `t1-mute`, `t1` control 6, lane `left`: step 0-1000, 0 then 1; step 1600-4200, 0 then 1;
+    step 4800-29800, 0 then 1; step 30600-33500, 0 then 1; step 34000-36000, 0 then 0. Muted over
+    1000-1600, 4200-4800, 29800-30600 and 33500-34000.
+  - `t2-fader`, `t2` control 5, lane `right`, offset `{left_db: 0.0, right_db: 0.0}`: linear
+    1024-4096, -3 to 0; linear 29900-32000, 0 to -18.
+  - `vca-offset`, `vca` control 1, lane `right`, offset `{left_db: 0.0, right_db: -0.5}`: linear
+    512-3584, 0 to -6; step 4096-4352, +2 then 0; linear 29500-31500, -4 to +2; step 33000-35500,
+    -3 then -3.
+  - `vca-mute`, `vca` control 2, lane `both`: step 0-2500, 0 then 1; step 2900-29900, 0 then 1;
+    step 30100-35000, 0 then 1; step 35500-36000, 0 then 0. Muted over 2500-2900, 29900-30100
+    and 35000-35500.
+- **What this covers.** A `both` entry and single-lane entries. Lanes driven by their own curve,
+  by a VCA curve, by both, and plain lanes. Linear segments, steps on and off the grid, gaps, a
+  hold before the first segment and after the last one, and non-zero stored offsets. Each entry
+  has a segment that starts before the seek target 30,000 and ends after it, and events after the
+  seek. The following send closes for the strip mute (left lane only) and for the VCA mute. The
+  non-following send stays open.
+- **Dropped.** The matrix fixture, effect inserts, and every other row (phase 2, below).
+
+### D2 (replaced). One transcript
+
+- 96 blocks of 128 frames. Blocks 0-39 render timeline 0-5,119. Before block 40 renders, the host
+  makes one plain session seek: generation 2, timeline 30,000. Blocks 40-95 render timeline
+  30,000-37,167.
+- Before each render, submit exactly one 128-frame chunk per source (the oracle's ring holds one
+  quantum, `direct-oracle.mjs:96`). Block `k < 40`: generation 1, start frame `k*128`. Block
+  `k >= 40`: generation 2, start frame `30000 + (k-40)*128`. `final` is always false. Do not
+  submit a generation-1 chunk for block 40. A seek discards stale chunks and needs contiguous new
+  chunks from the seek frame (`crates/source/src/lib.rs:1162-1168`, `:1355-1381`).
+- PCM at source frame `f`: `((f*m) mod 65536 - 32768) / 65536`, with `m` = 40503 (`src-t1` left),
+  30011 (`src-t1` right), 52153 (`src-t2` left), 18749 (`src-t2` right). The value is exact in
+  `f32`. In Rust, compute `(f as u32).wrapping_mul(m) & 0xffff` in integers, then subtract 32768
+  and divide by 65536.0 (plain `i32` multiplication overflows). In JavaScript,
+  `(Math.imul(f, m) >>> 0) & 0xffff` gives the same integer.
+- The seek: `miso_engine_web_v1_session_seek(handle, 2, 30000n)` in the oracle
+  (`hosts/host-web/src/ffi.rs:3351`), `host.session_seek(None, 2, 30000, None)` natively
+  (`hosts/host-web/src/lib.rs:3756`), and `miso_engine_v1_session_seek(session, 2, 30000)` on the
+  C ABI (`crates/capi/src/ffi.rs:660`). All three reach `SessionState::session_seek`
+  (`crates/control-plane/src/control.rs:4327`). A plain seek declares a discontinuity and
+  publishes a successor plan, on every host alike. Every seek and every submit must return 0.
+
+### D3 (replaced). One oracle leg and one pin
+
+- `direct-oracle.mjs` gains `runAutomationTimeline`. It boots `automation-session.json`, runs D2
+  and digests the PCM as the other legs do (`pcmSha256`, every left block then every right block).
+  It records `actual.automationTimeline = {blocks: 96, seekBlock: 40, seekTimelineSample: 30000,
+  beforeDisposeStatus, pcmF32leSha256}`. Before the print branch, it asserts that the digest
+  equals `expected.directOracle.nativeAutomationPcmF32leSha256`, as the other legs do
+  (`:493-576`).
+- The pin key is **`directOracle.nativeAutomationPcmF32leSha256`**. Put `automationTimeline` and
+  the pin after `observationTimeline` in `expected.json`.
+- The native pin test is `native_automation_timeline_digest_pins_the_wasm_parity` in
+  `hosts/host-web/src/tests.rs`, beside its twin at `:2016`. It copies that twin: `include_str!`
+  of the fixture, `AudioWorkletEngineHost::boot` with `source_ring_frames: QUANTUM`,
+  `submit_source`, `render_next`, the same digest. It asserts against both pins.
+- `serde_pin` (`:2120-2164`) gains two fields: the text after `"nativeAutomationPcmF32leSha256":`,
+  and the `"pcmF32leSha256":` after the anchor `"automationTimeline"`.
+- `scripts/check-browser-expected-resources.py` adds `("automationTimeline", "pcmF32leSha256")`
+  to `DIGEST_PATHS` (`:121-125`) and says four PCM digests in its docstring (`:33-35`). The two-class
+  rule covers resource rows only, so the new key needs no class. The oracle (`:599`) and the
+  script (`:274-283`) compare the whole document, so `expected.json`, the oracle and the script
+  change in one commit. No other reader breaks: `qualification/qualification.js:1131-1132` and
+  `run.mjs:204-207` read only the identity pins.
+
+### D4 (replaced). One cross-host case in `hosts/host-web/tests/control_parity.rs`
+
+- `the_automation_fixture_renders_alike_on_both_hosts_across_one_session_seek`. The browser side
+  boots the fixture bytes through `Rig::boot` (`tests/common/mod.rs:363-385`). The C ABI side
+  parses the same bytes with `parse_session_json` and builds `CAbi::new`
+  (`control_parity.rs:922-975`).
+- It runs D2 with `CAbi::session_seek` (`:4949-4972`) and direct submits, as
+  `a_composed_stored_mute_renders_alike_on_both_hosts` does (`:3694-3741`). Do not use `step()`:
+  it hard-codes generation 1 (`common/mod.rs:454-475`).
+- It compares every block's two planes with `bits()` (`common/mod.rs:287-289`) and `assert_eq!`.
+  No digest. The case is under `test-support`.
+
+### D5 (replaced). The plants (PR evidence, not committed)
+
+A plain one-ulp change to the result of `value_at` alone is not valid. The program builder
+compares `value_before` with `value_at` to find jumps (`crates/automation/src/program.rs:330`), so
+the change adds jumps and can make preparation refuse the session. Use these three plants, one at
+a time, and record each leg's result:
+
+- **P1, the evaluator (every row).** Put `f32::from_bits(v.to_bits() + 1)` on every return of
+  `value_at` (`crates/automation/src/evaluate.rs:18-44`) and of `value_before`
+  (`crates/automation/src/program.rs:338-358`). The jumps stay the same. A mute value of 0.0
+  becomes the least subnormal, so every open mute span, VCA mute span and follow gate closes
+  (`value != 0.0`: `crates/builtins-compiler/src/lib.rs:3252`;
+  `crates/graph/src/runtime.rs:1480-1481`, `:2196`). The FP environment keeps subnormals on every
+  target (`crates/lane/src/fpenv.rs:518-530`). Expected red: the native pin test, the oracle leg,
+  and G5 (`g5_native_digests_match_pins` and the wasm leg; `crates/automation/src/corpus.rs:245`).
+  Expected green: D4 (the path is shared).
+- **P2, the dB rows.** On a dB row a P1 ulp can disappear (in `db_gain`, or in
+  `vca_compose_db`). Put `next_up` on the output of `db_gain`
+  (`crates/builtins/src/lib.rs:6472-6479`). It reaches every fader and VCA offset lane. Expected
+  red: the native pin test and the oracle leg.
+- **P3, one host only (does D4 compare?).** After `state.render` returns `Ok` in
+  `miso_engine_v1_render_f32_planar` (`crates/capi/src/ffi.rs:1133`), flip the low bit of the
+  first left sample when `absolute_sample >= 5120`. Expected red: D4 at block 40. Expected green:
+  the pin test and the oracle leg.
+
+Hand-written tests that compute their expected values with `value_at` stay green under P1 (for
+example `crates/host-core/tests/stored_fader_automation.rs:578`). Do not count them.
+
+### Authorized paths (replaced)
+
+- `hosts/host-web/tests/browser-v1/automation-session.json` (new), `direct-oracle.mjs`,
+  `expected.json`.
+- `hosts/host-web/src/tests.rs` (one pin test, `serde_pin`).
+- `hosts/host-web/tests/control_parity.rs` (D4).
+- `scripts/check-browser-expected-resources.py` (`DIGEST_PATHS` and the docstring only).
+
+### Objective gates (replaced)
+
+1. **Browser equals native.** As on main (`.github/workflows/qualification.yml:132`, `:345-348`):
+   `mkdir -p target/ci/qualification-artifacts target/ci/qualification-named-twin && bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts`,
+   then
+   `bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/ci/qualification-artifacts target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm`
+   and `python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts`
+   pass with the automation leg. `python3 -B scripts/check-browser-expected-resources.py --self-test`
+   passes.
+2. **Native pin and cross-host.** `cargo test --locked -p host-web --features test-support` passes,
+   with the new pin test and the D4 case.
+3. **Plants** (D5, PR evidence): P1, P2 and P3 each give the expected red legs.
+4. **Workspace.** The `test-debug-a` step (`qualification.yml:631-638`); G5,
+   `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane` (`:705-706`);
+   `cargo fmt --all -- --check`;
+   `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`.
+
+### Test value (replaced)
+
+- **The oracle leg and its pin** turn red if the `simd128` artifact renders an event, a
+  composition (fader with VCA offsets, mute OR, the follow gate) or the landing of a plain session
+  seek differently from x86-64 native. Today the only artifact-versus-native renders have empty
+  automation (`session.json:62`, `command-session.json:141`, `observation-session.json:159`).
+- **The D4 case** turns red if the C ABI and the browser host prepare the whole fixture or land
+  its seek differently. Today the only cross-host case with a seek automates the mute row only
+  (`control_parity.rs:3571`), and the VCA cases do not seek (`:6916-7395`).
+
+### Dependencies (replaced): all on main
+
+- #1637 and #1639 (PR #1687), #1645 (PR #1692), #1642 and #1643 (PR #1708), #1646-#1650 (PR
+  #1712), #1651-#1653 (PR #1715), #1655 (PR #1719). The harness work #1399 and #1560 is closed.
+  All of these issues are closed on GitHub.
+- The fixture has no live edit. A stored offset (#1650) is a field of the entry. A hand mute
+  (#1651) is the static `fader.*_mute` and would OR to a constant mute, so the fixture keeps it
+  `false`. The live hand mute over a curve is already compared across hosts at `:3571`.
+- #1670 depends on this issue. Its spec names two fixtures and two pin tests; it needs a matching
+  amendment (one fixture, one pin test).
+
+### Phase-2 extensions (not in this issue)
+
+- The matrix fixture `automation-matrix-session.json` and pan and matrix automation (#1657).
+- Input trim and polarity (#1658), input HPF and LPF (#1660), parametric EQ (#1667), and every
+  other effect-parameter row, with effect inserts in the fixture.
+- Send-row (route-row) automation (#1654, behind #1718).
+- A following send at a latent tap (an insert with latency) in the oracle fixture.
+- AArch64 and seek-time invariance stay in #1670.
