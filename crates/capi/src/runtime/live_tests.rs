@@ -11060,6 +11060,86 @@ fn a_following_send_leaks_nothing_of_a_stored_mute() {
     );
 }
 
+/// #1652 U2a fold 2 (MAJOR-A, conservative; TBD51 deletes the flag). A rebuild whose send join
+/// carries a following route into a six-word one (it removes `eq0`'s mute entry while `eq0-b`
+/// follows it) completes as the transition fallback: the C ABI watermark that covers it reads
+/// `OUTCOME_TRANSITION_FALLBACK`, count 1. The removal is sent at block 8 (sample 1,024), while the
+/// send's columns ramp toward the mute the curve stepped on at 1,000 (480 samples). A rebuild that
+/// keeps the entry (the following route stays following, seven -> seven) and a rebuild of a
+/// session with no following route (no mute entry) complete as `OUTCOME_EXACT`, count 0.
+///
+/// Test value: red if the control plane does not mark a seven -> six rebuild (the six-word
+/// successor's re-timed column move then completes exact), or if it marks a rebuild whose
+/// following routes stay following, or one with no following route (the flag must stay narrow).
+#[test]
+fn a_rebuild_that_drops_a_following_route_to_six_words_reports_a_fallback() {
+    let remove = SessionEdit::RemoveAutomation {
+        automation_id: StableId::parse("eq0-mute").expect("automation ID"),
+    };
+    let fallback = crate::OUTCOME_TRANSITION_FALLBACK;
+    let exact = crate::OUTCOME_EXACT;
+    for (label, entry, remove_entry, expected) in [
+        ("seven -> six, a column mid-move", true, true, fallback),
+        ("seven -> seven", true, false, exact),
+        ("no following route", false, false, exact),
+    ] {
+        let document = follow_document(entry, false);
+        let model = parse_session_json(&document).expect("model");
+        let edits = if remove_entry {
+            vec![remove.clone()]
+        } else {
+            // A muted copy of `eq0` with its own route to the output: a rebuild that leaves
+            // `eq0-b` and `eq0`'s mute entry as they are.
+            let mut track = model.tracks[0].clone();
+            track.id = StableId::parse("added").expect("track ID");
+            (track.fader.left_mute, track.fader.right_mute) = (true, true);
+            let mut route = model
+                .routes
+                .iter()
+                .find(|route| route.id.as_str() == "eq0-main")
+                .expect("the direct route")
+                .clone();
+            route.id = StableId::parse("added-main").expect("route ID");
+            route.source = RouteSource::Track {
+                track_id: track.id.clone(),
+                tap: session::SendTap::PostPan,
+            };
+            vec![
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ]
+        };
+        let mut rig = Rig::new(&document);
+        for _ in 0..8 {
+            rig.step();
+        }
+        let bytes = rig.transaction(&edits);
+        let (result, response) = rig.send(&bytes);
+        assert_eq!(result, crate::RESULT_OK, "{label}");
+        assert_eq!(
+            edit_path_of(&response),
+            protocol::EditPath::Rebuild,
+            "{label}"
+        );
+        let revision = rig.summary().0;
+        for _ in 0..4 {
+            rig.step();
+        }
+        assert_eq!(rig.summary().3, 0, "{label}: the successor is adopted");
+        let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(
+            (
+                watermark.revision,
+                watermark.outcome_flags,
+                watermark.transition_fallback_count
+            ),
+            (revision, expected, u64::from(expected == fallback)),
+            "{label}: the rebuild's revision, outcome flags and transition-fallback count"
+        );
+    }
+}
+
 /// #1652c: an edit that lowers a following route (a route into a submix whose source strip has a
 /// mute entry) is a rebuild until #1653 gives the live commit the seven-word record: a send gain
 /// edit on `eq0-b`, and a hand mute of `eq0` (which changes `eq0-b`'s follow gate). Each commits

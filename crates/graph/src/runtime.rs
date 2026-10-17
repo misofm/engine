@@ -18277,6 +18277,73 @@ mod follow_route_op_tests {
             );
         }
 
+        /// U2a fold 2, NIT-D (seven -> seven -> seven). P1 automates both source lanes and has
+        /// heard its left curve on (the left column zeroed); P2 automates only the right lane, so
+        /// its carried first block forgets the left lane's heard curve (no curve gates a lane the
+        /// plan does not automate, so the left column reopens over the mute length); P3 automates
+        /// the left lane again, its curve off, and the join writes a record (`MOVED` over
+        /// `RECORD_RAMP`) for P3's first block. That record composes with the curve P2 heard,
+        /// which is off on both lanes, so both columns move together over `RECORD_RAMP` from the
+        /// open coefficients P2 settled on, and the placed curve then changes no bit.
+        ///
+        /// Test value: red if a carried first block keeps a heard curve on a lane its plan no
+        /// longer automates (the `else if !automated` clear): the stale `on` then reaches P3,
+        /// whose record composes with it and zeroes the left column over `RECORD_RAMP`, and the
+        /// placed curve reopens it over the mute length.
+        #[test]
+        fn a_heard_curve_on_a_lane_the_successor_no_longer_automates_is_forgotten() {
+            let on = steps(&[0], &[1.0], 1 << 20);
+            let off = steps(&[0], &[0.0], 1 << 20);
+            let mut p1 = Fixture::new([Some(&on), Some(&off)], 0, OPEN);
+            let (mut left, mut right) = input(BEFORE);
+            assert!(p1.block(FIRST, None, &mut left, &mut right));
+            assert_eq!(
+                p1.route.ramps,
+                ColumnRamps::settled(gated(OPEN, [true, false])),
+                "P1 holds the left column zeroed"
+            );
+
+            let mut p2 = Fixture::new([None, Some(&off)], 0, OPEN);
+            assert!(!carry_route(
+                CarriedRoute::Seven(&mut p2.route),
+                CarriedRoute::Seven(&mut p1.route),
+                None,
+            ));
+            let (mut left, mut right) = input(AFTER);
+            assert!(p2.block(FIRST + BEFORE as u64, None, &mut left, &mut right));
+            assert!(
+                p2.route.ramps.is_settled(),
+                "P2's reopening ended inside its block"
+            );
+            let open = gated(OPEN, [false; 2]);
+            assert_eq!(p2.route.ramps.target(), open, "P2 settles open");
+
+            let mut p3 = Fixture::new([Some(&off), Some(&off)], 0, OPEN);
+            assert!(!carry_route(
+                CarriedRoute::Seven(&mut p3.route),
+                CarriedRoute::Seven(&mut p2.route),
+                None,
+            ));
+            p3.write(MOVED, RECORD_RAMP);
+            let (mut left, mut right) = input(AFTER);
+            assert!(p3.block(FIRST + (BEFORE + AFTER) as u64, None, &mut left, &mut right));
+            let record = IndexedRamp::new(open, gated(MOVED, [false; 2]), RECORD_RAMP);
+            let (mut want_left, mut want_right) = input(AFTER);
+            route_mix_ramp_block::<FrameLane>(&mut want_left, &mut want_right, &record, 0);
+            assert_eq!(
+                bits((&left, &right)),
+                bits((&want_left, &want_right)),
+                "P3's record moves both columns over its own ramp"
+            );
+            assert_eq!(
+                [
+                    p3.route.ramps.ramps[0].length,
+                    p3.route.ramps.ramps[1].length
+                ],
+                [RECORD_RAMP; 2]
+            );
+        }
+
         /// Gate 4 (b) (seven -> six, the rebuild removes the mute entry): a following route the
         /// curve holds muted (settled and inactive) is carried into a six-word successor whose
         /// prepared target is open. The successor's first block reopens the send from silence
@@ -18332,8 +18399,8 @@ mod follow_route_op_tests {
         /// per-column ramps (R18-5: MAJOR-2, MINOR-1) and the carried record's order (MAJOR-3).
         mod fold {
             use super::super::super::{
-                CompensationDelay, DisjointArena, GraphRuntimeSplitPairProcessor, NodeKind,
-                ROUTE_DESTINATION, RouteActivity, RouteInput, RuntimeOp, TrackDelayLine,
+                CompensationDelay, DisjointArena, GraphRuntimeSplitPairProcessor, HostMaster,
+                NodeKind, ROUTE_DESTINATION, RouteActivity, RouteInput, RuntimeOp, TrackDelayLine,
                 execute_op,
             };
             use super::super::{LENGTHS, Timeline};
@@ -18360,12 +18427,17 @@ mod follow_route_op_tests {
                 destination: RuntimeOp,
                 activity: RouteActivity,
                 gate: engine::realtime::RevisionGate,
+                /// Whether the destination is the session Output, reducing into the host's
+                /// planes ([`HostMaster`], `reduce_gated_into`) instead of its arena buffer
+                /// (`reduce_gated`). U2a fold 2, MINOR-C.
+                host: bool,
             }
 
             impl Graph {
-                /// `fixture`'s route as unit 0, reading `SOURCE`; the destination reads `inputs`.
-                /// The route's activity bit starts set, as a prepared open route's does.
-                fn new(fixture: Fixture, inputs: &[u32], position: u32) -> Self {
+                /// `fixture`'s route as unit 0, reading `SOURCE`; the destination reads `inputs`
+                /// and writes the host's planes when `host`. The route's activity bit starts set,
+                /// as a prepared open route's does.
+                fn new(fixture: Fixture, inputs: &[u32], position: u32, host: bool) -> Self {
                     let Fixture {
                         mut route, gate, ..
                     } = fixture;
@@ -18390,6 +18462,7 @@ mod follow_route_op_tests {
                             from: Box::new([0]),
                         },
                         gate,
+                        host,
                     }
                 }
 
@@ -18425,12 +18498,18 @@ mod follow_route_op_tests {
                         Some(&timeline),
                     );
                     let snapshot = self.gate.snapshot();
+                    // The host's planes start as stale words: the Output op writes every one.
+                    let (mut host_left, mut host_right) = (vec![9.0; frames], vec![9.0; frames]);
                     for (op, unit) in [(&mut self.route, 0), (&mut self.destination, 1)] {
                         let (delays, lines, pairs): (
                             &mut [CompensationDelay],
                             &mut [TrackDelayLine],
                             &mut [Box<dyn GraphRuntimeSplitPairProcessor>],
                         ) = (&mut [], &mut [], &mut []);
+                        let host = (self.host && unit == 1).then(|| {
+                            HostMaster::new(&mut host_left, &mut host_right, frames)
+                                .expect("host planes")
+                        });
                         execute_op(
                             op,
                             &mut arena,
@@ -18439,16 +18518,20 @@ mod follow_route_op_tests {
                             pairs,
                             0,
                             snapshot,
-                            None,
+                            host,
                             Some((&mut self.activity, unit)),
                             &time,
                         )
                         .expect("the block renders");
                     }
-                    (
-                        arena.read(0, DESTINATION).to_vec(),
-                        arena.read(1, DESTINATION).to_vec(),
-                    )
+                    if self.host {
+                        (host_left, host_right)
+                    } else {
+                        (
+                            arena.read(0, DESTINATION).to_vec(),
+                            arena.read(1, DESTINATION).to_vec(),
+                        )
+                    }
                 }
             }
 
@@ -18472,19 +18555,34 @@ mod follow_route_op_tests {
             /// input (`+0.0` against `-0.0`), first beside a `-0.0` input, and second after one
             /// (with positive feeds, `+0.0` after `-0.0`).
             ///
+            /// Every case runs with the destination as a submix (its arena buffer,
+            /// `reduce_gated`) and as the session Output (the host's planes, `reduce_gated_into`,
+            /// U2a fold 2 MINOR-C).
+            ///
             /// Test value: red if the destination sums an opening route over the whole block (the
-            /// signed-zero leak the brief's MAJOR-1 names), or if the route op's activity bit
-            /// is not written each block (mutation M2: the inactive block reads the stale words).
+            /// signed-zero leak the brief's MAJOR-1 names) in either reduction, `reduce_gated_into`
+            /// alone included, or if the route op's activity bit is not written each block
+            /// (mutation M2: the inactive block reads the stale words).
             #[test]
             fn an_opening_route_is_left_out_of_its_destination_before_its_offset() {
                 let frames = 128_usize;
                 // (case, the destination's inputs, the route's position, negative feeds, the
                 // other input's word, the destination's word while the route is left out)
-                for (case, inputs, position, negative_feed, other_word, idle_word) in [
+                let cases = [
                     ("sole", &[ROUTED][..], 0, true, 0.0, 0.0),
                     ("first", &[ROUTED, OTHER][..], 0, true, -0.0, 0.0),
                     ("second", &[OTHER, ROUTED][..], 1, false, -0.0, -0.0),
-                ] {
+                ];
+                for (host, (case, inputs, position, negative_feed, other_word, idle_word)) in
+                    [false, true]
+                        .into_iter()
+                        .flat_map(|host| cases.iter().map(move |case| (host, *case)))
+                {
+                    let case = if host {
+                        format!("{case} into the session Output")
+                    } else {
+                        format!("{case} into a submix")
+                    };
                     for o in [1_usize, 63, 64, 127] {
                         let open = FIRST + frames as u64 + o as u64;
                         let curve = steps(&[0, open], &[1.0, 0.0], 1 << 20);
@@ -18504,7 +18602,7 @@ mod follow_route_op_tests {
                         let other = (vec![other_word; frames], vec![other_word; frames]);
                         let fixture = || Fixture::new([Some(&curve), Some(&curve)], 0, OPEN);
 
-                        let mut whole = Graph::new(fixture(), inputs, position);
+                        let mut whole = Graph::new(fixture(), inputs, position, host);
                         let idle = whole.block(FIRST, (&feed.0, &feed.1), (&other.0, &other.1));
                         let idle_expected = vec![idle_word; frames];
                         assert_eq!(
@@ -18520,7 +18618,7 @@ mod follow_route_op_tests {
                         );
                         assert_eq!(whole.activity.from[0], o as u32, "{case}: the offset");
 
-                        let mut split = Graph::new(fixture(), inputs, position);
+                        let mut split = Graph::new(fixture(), inputs, position, host);
                         split.block(FIRST, (&feed.0, &feed.1), (&other.0, &other.1));
                         let first = split.block(
                             FIRST + frames as u64,

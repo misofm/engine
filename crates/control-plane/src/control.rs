@@ -2516,6 +2516,9 @@ where
             revision_gate,
             master_track: _,
         } = prepared_runtime;
+        // #1652 U2a fold 2 (MAJOR-A; TBD51 deletes it): read before the inventory moves into the
+        // candidate's provider epoch.
+        let follow_into_six_word = inventory.carries_a_following_route_into_a_six_word_route();
         let mut candidate_provider = ProviderEpoch::candidate(
             sources,
             inventory,
@@ -2604,6 +2607,14 @@ where
         // the window with the commit. A declared discontinuity carries nothing. The test is the
         // fader row alone (#1651 T2, root ruling R18-4): a mute cell's adoption never stretches a
         // live move, so a successor that automates only a mute row completes `Exact`.
+        //
+        // #1652 U2a fold 2 (MAJOR-A; TBD51 deletes this): a successor whose send join carries a
+        // following route into a six-word route (the rebuild removes a strip's last mute entry
+        // while a following send of it exists) may re-time a carried column's move, which render
+        // cannot report: one ramp of the six-word route takes the session mute length for a join
+        // record, and folds two columns' moves into one. Such a rebuild completes as the transition
+        // fallback, whether or not a column moves at the swap: conservative, it over-reports. It
+        // is not a level move, so it does not open the level-move window.
         let (outcome, rebuild_level) = match &kind {
             Rebuild::Transaction(prepared) => {
                 let session = prepared.get().prospective_session();
@@ -2622,7 +2633,8 @@ where
                         self.publisher.render_clock(),
                     )
                 });
-                let outcome = if automates && in_flight {
+                let level_fallback = automates && in_flight;
+                let outcome = if level_fallback || follow_into_six_word {
                     engine::realtime::CandidateOutcome::TransitionFallback
                 } else {
                     engine::realtime::CandidateOutcome::Exact
@@ -2630,11 +2642,11 @@ where
                 let moved =
                     rebuild_moves_a_level(committed, next, &self.monitor, &monitor_change.overlay)
                         .then(|| rebuild_level_ramp(next, session.edit_ramps()));
-                // A flagged rebuild may land a stretched move over `J` from its first block, so
-                // the window stays open for `J` from there: a second Reposition inside that
-                // landing stretches it again (verifier MAJOR 1, B17-R13 tranche 5).
-                let landing = (outcome == engine::realtime::CandidateOutcome::TransitionFallback)
-                    .then(|| controls::LiveRamps::for_session(next).fader_samples);
+                // A rebuild flagged for a level move may land a stretched move over `J` from its
+                // first block, so the window stays open for `J` from there: a second Reposition
+                // inside that landing stretches it again (verifier MAJOR 1, B17-R13 tranche 5).
+                let landing =
+                    level_fallback.then(|| controls::LiveRamps::for_session(next).fader_samples);
                 (outcome, moved.max(landing))
             }
             Rebuild::Discontinuity(_) => (engine::realtime::CandidateOutcome::Exact, None),

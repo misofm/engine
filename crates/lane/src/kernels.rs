@@ -1845,8 +1845,14 @@ pub fn route_mix_column_ramps_block<L: Lane>(
     let either = core::cmp::max(ramping[0], ramping[1]);
     let (left_both, left_rest) = left.split_at_mut(both);
     let (right_both, right_rest) = right.split_at_mut(both);
-    let (left_one, left_settled) = left_rest.split_at_mut(either - both);
-    let (right_one, right_settled) = right_rest.split_at_mut(either - both);
+    // `either - both <= count - both` is each rest's length, but the bound is stated so the split
+    // has no panic path in any instantiation (the wasm `f32x4` one kept `mid > len`, U2a fold 2).
+    let one = core::cmp::min(
+        either - both,
+        core::cmp::min(left_rest.len(), right_rest.len()),
+    );
+    let (left_one, left_settled) = left_rest.split_at_mut(one);
+    let (right_one, right_settled) = right_rest.split_at_mut(one);
     column_ramps_part::<L, true, true>(left_both, right_both, ramps, positions, 0);
     if ramping[0] > ramping[1] {
         column_ramps_part::<L, true, false>(left_one, right_one, ramps, positions, both);

@@ -5313,3 +5313,102 @@ fn a_following_send_leaks_nothing_of_a_stored_mute_on_both_hosts() {
         "the strip and its send play before the mute"
     );
 }
+
+/// #1652 U2a fold 2 (MAJOR-A, conservative; TBD51 deletes the flag) on both hosts. A rebuild
+/// whose send join carries a following route into a six-word one (it removes `t1`'s mute entry
+/// while `t1-b` follows it, sent at block 8 while the send's columns ramp toward the mute the
+/// curve stepped on at 1,000) completes as the transition fallback; a rebuild that keeps the
+/// entry (the unmute moved to 3,000: `t1-b` stays following) and a rebuild of a session with no
+/// following route (a fader ride added to `t1`, no move in flight) complete exactly. Both hosts
+/// take the one decision in the shared control plane: the browser's status words carry the C
+/// ABI's watermark, flags included, and both render the same bits.
+///
+/// Test value: red if the shared control plane does not mark a seven -> six rebuild, marks a
+/// rebuild whose following route stays following or one with no following route, or if either
+/// host decides the outcome by a rule of its own.
+#[test]
+fn a_rebuild_that_drops_a_following_route_to_six_words_reports_the_fallback_alike() {
+    let step = |start: u64, end: u64, from: f32, to: f32| session::AutomationSegment {
+        shape: session::AutomationShape::Step,
+        start_sample: start,
+        end_sample: end,
+        start_value: from,
+        end_value: to,
+        unit: session::ParameterUnit::Linear,
+    };
+    let later_unmute = SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-mute"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                MUTE,
+                ParameterChannel::Both,
+            ),
+            segments: vec![step(0, 1_000, 0.0, 1.0), step(1_000, 3_000, 1.0, 0.0)],
+            offset: session::AutomationOffset::default(),
+        },
+    };
+    let ride = SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-fader-ride"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                5,
+                ParameterChannel::Both,
+            ),
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 1_000_000,
+                start_value: 0.0,
+                end_value: -12.0,
+                unit: session::ParameterUnit::Db,
+            }],
+            offset: session::AutomationOffset::default(),
+        },
+    };
+    let remove = SessionEdit::RemoveAutomation {
+        automation_id: id("t1-mute"),
+    };
+    for (label, entry, edit, expected) in [
+        (
+            "seven -> six, a column mid-move",
+            true,
+            remove,
+            capi::OUTCOME_TRANSITION_FALLBACK,
+        ),
+        ("seven -> seven", true, later_unmute, capi::OUTCOME_EXACT),
+        ("no following route", false, ride, capi::OUTCOME_EXACT),
+    ] {
+        let model = follow_model(entry, false);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..8, label);
+        let (b, b_reply) = browser.transaction_reply(std::slice::from_ref(&edit));
+        let (c, c_reply) = c_abi.transaction(std::slice::from_ref(&edit));
+        assert_eq!(b, c, "{label}: one verdict");
+        assert_eq!(b_reply, c_reply, "{label}: one reply");
+        assert_eq!(
+            b,
+            Verdict::Applied {
+                path: EditPath::Rebuild,
+                revision: model.revision + 1
+            },
+            "{label}: the edit rebuilds"
+        );
+        same_blocks(&mut browser, &mut c_abi, 8..12, label);
+        let watermark = c_abi.watermark();
+        assert_eq!(
+            status_watermark(&browser),
+            watermark,
+            "{label}: the browser status carries the C ABI's watermark"
+        );
+        assert_eq!(
+            (watermark.0, watermark.2),
+            (model.revision + 1, expected),
+            "{label}: the rebuild's revision and outcome flags"
+        );
+    }
+}

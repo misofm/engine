@@ -5522,8 +5522,10 @@ impl PreparedPlanExecutor for GraphExecutor {
         // comparisons its carry left. Take them first, as that block would have (under every
         // snapshot and its held jump lengths, as the carry applies pending values), so this
         // plan carries the state the predecessor's next block would have rendered from. (Not
-        // gated in graph: two swaps with a following route need host-core's attach, #1652c; the
-        // host-core carry tranche gates it.)
+        // gated in graph: two swaps with a following route need host-core's attach, #1652c.
+        // Reachable when a render call adopts a plan and is then refused before it renders;
+        // gated by host-core's `route_mute`
+        // `a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison`.)
         if let Some(checks) = predecessor.route_checks.as_deref_mut()
             && core::mem::take(&mut checks.pending)
         {

@@ -711,3 +711,83 @@ ramps). Files: `crates/graph/src/{lib.rs,runtime.rs}`, `crates/lane/src/kernels.
   (the pre-fold code) -> MAJOR-3 six-word red. M1 analogue (drop the `return` after the record)
   -> MAJOR-3 six-word red. Kernel: right column read from the left ramp -> `each_column...` red.
   The one-ramping part assigning the ramping column's target -> `each_column...` red.
+
+## Decision record: U2a fold 2 (batch 18)
+
+Fold of the U2a fold-1 verification (FAIL narrow at `977d6969c`), the last fold round for #1652.
+Root (2026-10-17) accepted the plan as written: MAJOR-A is a conservative flag, gated both ways,
+the exact form is TBD51 (phase 2); MINOR-B must land.
+
+- **MAJOR-A (seven -> six re-times a live move and reported EXACT).** Two render forms, both
+  only on a carry of a following route into a six-word route: (a) `finish_six_word_carry` reopens a
+  record composed with the heard curve over `J`, not the record's `R`; (b) `ColumnRamps::one_ramp`
+  folds two column moves into one ramp over the longer remaining length. Shipped the B17-R14
+  pattern (control-time `CandidateOutcome::TransitionFallback`, no render edit): host-core's send
+  join `resolve_route_carry` now reads the successor row's `following` too and sets
+  `RouteCarry::follow_into_six_word` when a move's predecessor follows and its successor does not;
+  the plan's inventory keeps it (`PlanStateInventory::carries_a_following_route_into_a_six_word_route`,
+  one `bool`, no heap byte), and the control plane's rebuild (`crates/control-plane/src/control.rs`)
+  marks the candidate `TransitionFallback` when it or B17-R14's level condition holds. Both hosts
+  run that one commit. The flag does not open B17-R14's level-move window (it is not a level move:
+  the `landing` fold now reads the level condition alone, which keeps B17-R13 tranche 5's rule
+  as it was). **Conservative:** it over-reports on every rebuild that removes a strip's last mute
+  automation while a following send of it exists, moving or not; TBD51
+  (`.github/ISSUE_SPECS/TBD51-carry-a-following-routes-column-moves-exactly-into-a-six-word-successor.md`)
+  gives the exact form and deletes the flag. Outcome doc text updated in
+  `crates/capi/src/abi.rs`, `crates/capi/include/miso_engine_v1.h`,
+  `docs/C_ABI_V1_QUALIFICATION.md` and the two shipped-host `.d.ts` copies.
+- **MINOR-B (kernel panic path).** `route_mix_column_ramps_block` splits each rest at
+  `one = min(either - both, min(left_rest.len(), right_rest.len()))`, so the wasm `f32x4`
+  instantiation keeps no `mid > len` path. No bit moves (`either - both` is never above the
+  rests' length; `route_ramp` passes).
+- **MINOR-C.** `an_opening_route_is_left_out_of_its_destination_before_its_offset` runs every case
+  twice: into a submix (`reduce_gated`) and into the session Output (`Some(HostMaster)`,
+  `reduce_gated_into`, host planes pre-filled with stale words).
+- **NIT-D.** New gate for the carried first block's `else if !automated { *curve = false }`: a
+  three-plan chain (P1 automates both lanes and hears the left curve on; P2 automates only the
+  right; P3 automates the left again and gets a join record). The record composes with P2's heard
+  curve, so both columns move over `R`.
+- **NIT-E (fold 1's MINOR-2) is reachable and gated in host-core.** A render call that adopts a
+  plan at the boundary and is then refused (a time discontinuity) displaces nothing yet, but the
+  plan has rendered no block; the next swap adopts from it. The proof comment at
+  `adopt_predecessor` names the gate.
+- **Record (c), precedent.** A route that opens inside a block and is muted again by a seek's
+  `Set` in the same block sums `[set, q)` (no end offset), as the #1217/#1220 rule sums a six-word
+  route that a block mutes: a precedent, not a new limit.
+- **Record (d), departure for root to accept (accepted 2026-10-17).** `RouteActivity` grows by
+  16 B (the `from: Box<[u32]>` header) once per plan that has live or gated routes, automation or
+  not: measured `size_of::<RouteActivity>()` 80 (64 before, x86-64), charged by `size_of` in
+  `route_activity_bound_bytes`. This departs from R18-5's literal "no new bytes". The offsets
+  themselves (one `u32` per prepared route) are allocated and charged only in a plan that binds a
+  following route. `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 352 and `LIVE_ROUTE_OWNER_BYTES` 72 unchanged.
+- **Paths.** `crates/host-core/src/prepare.rs` functions touched: `resolve_route_carry` (the flag),
+  `prepare_host_runtime_with_live_controls_policy_and_spectrum` (one inventory field line),
+  `struct RouteCarry` (the field), `PlanStateInventory` (the field, a new accessor
+  `carries_a_following_route_into_a_six_word_route`, and `false` in `at_discontinuity` and
+  `test_only_floors_only`), and the test module (`live_routes_join_by_route_id`, one inventory
+  literal, new `the_join_flags_a_following_route_carried_into_a_six_word_one`). No strip-join
+  code. Mechanical,
+  outside the listed paths: `crates/control-plane/src/control.rs` (the outcome term), the outcome
+  doc text above, `crates/graph/src/lib.rs` (a proof comment only).
+- **Gates (all pass).**
+  - MAJOR-A: `crates/capi/src/runtime/live_tests.rs`
+    `a_rebuild_that_drops_a_following_route_to_six_words_reports_a_fallback` (seven -> six sent at
+    block 8 while the send's columns ramp toward the curve's mute -> `TRANSITION_FALLBACK`, count 1;
+    seven -> seven and no following route -> `EXACT`, count 0);
+    `hosts/host-web/tests/control_parity.rs`
+    `a_rebuild_that_drops_a_following_route_to_six_words_reports_the_fallback_alike` (the same three
+    cases on both hosts, the browser status carries the C ABI's watermark, same bits);
+    `crates/host-core/src/prepare.rs` `the_join_flags_a_following_route_carried_into_a_six_word_one`
+    (the four kind pairs).
+  - MINOR-C: `an_opening_route_is_left_out_of_its_destination_before_its_offset` (graph).
+  - NIT-D: `a_heard_curve_on_a_lane_the_successor_no_longer_automates_is_forgotten` (graph).
+  - NIT-E: `crates/host-core/tests/route_mute.rs`
+    `a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison` (Simd8 on AVX2, Simd4,
+    Scalar; every render after block 0 allocation- and free-free).
+- **Red checks (temporary mutations, reverted).** Control plane ignores the follow flag -> both
+  host gates red (`(flags, count)` `(1, 0)` against `(2, 1)`). The join flags on the predecessor's
+  kind alone -> the host-core unit gate red ("seven -> seven") and the capi gate red (seven ->
+  seven reports the fallback). `reduce_gated_into` sums every active route over the whole block
+  (the verifier's `MAJ1_into_only`) -> MINOR-C red. The `*curve = false` line removed (the
+  verifier's `unautomated_curve_kept`) -> NIT-D red. `adopt_predecessor` skips the predecessor's
+  pending comparisons -> NIT-E red ("the send reopens from the block C first renders").

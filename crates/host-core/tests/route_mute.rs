@@ -2132,6 +2132,151 @@ fn a_rebuild_that_removes_the_mute_entry_reopens_the_send() {
     }
 }
 
+/// #1652 U2a fold 2, NIT-E (fold 1's MINOR-2, two swaps with a pending comparison; every bank
+/// width and the scalar oracle). As gate 4(b), predecessor `A`'s mute entry holds `t` muted and
+/// `B` removes it, so `B`'s six-word `t-b` leaves a comparison for its first block. Render adopts
+/// `B` at block 6 in a call that fails before it renders (a time discontinuity: the host asked for
+/// another sample), so `B` is displaced before its first block by `C`, the same session prepared
+/// from `B`'s inventory, which carries `t-b` six -> six and is adopted by the next call. `C` takes
+/// the state `B`'s first block would have rendered from: the send reopens over the session mute
+/// length from that block, and from the next boundary it is `C` prepared fresh, bit for bit.
+/// Neither swap allocates on render.
+///
+/// Test value: red if adopting a predecessor that never rendered drops the comparisons its own
+/// carry left (`C` then takes the adopted mute, and the send stays silent for good).
+#[cfg(feature = "test-support")]
+#[test]
+fn a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison() {
+    use engine::realtime::{PlanAdoption, PlanarBufferMut, RenderError, RenderIo};
+    use follow::*;
+    use successor::{BLOCKS, QUANTUM, SWAP_BLOCK};
+    let pcm = successor::Feed::new("t", 13);
+    let b = model(QUANTUM as u32, SendTap::PreFader, false, true);
+    let mut a = b.clone();
+    a.automation = vec![mute_entry(1.0, &[])];
+    let request = host_core::HostLiveControlRequest::default();
+    let caps = successor::caps();
+    for backend in follow::backends() {
+        let what = format!("{backend:?}");
+        let prepare =
+            |model: &SessionModel,
+             base: Option<(&host_core::PlanStateInventory, &SessionModel, u64)>| {
+                let session = successor::Session::compile(model.clone());
+                match base {
+                    None => host_core::test_only_prepare_host_runtime_with_live_controls_on(
+                        &session.compiled,
+                        &caps,
+                        &request,
+                        backend,
+                    ),
+                    Some((inventory, committed, revision)) => {
+                        let committed = successor::Session::compile(committed.clone()).model;
+                        host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+                            &session.compiled,
+                            &caps,
+                            &request,
+                            host_core::SuccessorBase::new(inventory, &committed, revision),
+                            backend,
+                        )
+                    }
+                }
+                .unwrap_or_else(|failure| panic!("{what}: prepare: {failure:?}"))
+                .0
+            };
+        let first = prepare(&a, None);
+        let rate = first.report.sample_rate_hz;
+        let PreparedHost {
+            mut plan,
+            sources: mut a_sources,
+            inventory: a_inventory,
+            ..
+        } = first;
+        let gate = plan.take_revision_gate().expect("the plan's gate");
+        let (mut publisher, mut owner, mut retirer) = successor::exchange(plan);
+        pcm.submit(&mut a_sources, rate, 0);
+        let mut blocks = Vec::with_capacity(BLOCKS);
+        for block in 0..SWAP_BLOCK {
+            pcm.submit(&mut a_sources, rate, block + 1);
+            blocks.push(successor::render(&mut owner));
+        }
+        let mut publish = |prepared: PreparedHost, revision: u64| {
+            let PreparedHost {
+                mut plan,
+                sources,
+                inventory,
+                ..
+            } = prepared;
+            plan.take_revision_gate()
+                .expect("the successor's gate")
+                .publish(revision);
+            publisher
+                .reserve_replacement(plan, PlanAdoption::Next)
+                .unwrap_or_else(|_| panic!("{what}: reserve the successor"))
+                .commit();
+            (sources, inventory)
+        };
+        let revision = gate.last_published() + 1;
+        let mut b_prepared = prepare(&b, Some((&a_inventory, &a, revision)));
+        b_prepared.sources.adopt_persisting(&mut a_sources);
+        let (mut b_sources, b_inventory) = publish(b_prepared, revision);
+        // Render adopts B at the block boundary, then refuses the call: B renders nothing.
+        let mut output = [f32::NAN; QUANTUM * 2];
+        let wrong = owner.next_absolute_sample() + 1;
+        let refused = owner.render_contiguous(
+            RenderIo {
+                output: PlanarBufferMut::try_new(&mut output, 2, QUANTUM, QUANTUM).expect("output"),
+            },
+            wrong,
+        );
+        assert!(
+            matches!(refused, Err(RenderError::TimeDiscontinuity { .. })),
+            "{what}: the call is refused after the boundary"
+        );
+        drop(retirer.try_reclaim().expect("A retired at B's adoption"));
+        let mut c_prepared = prepare(&b, Some((&b_inventory, &b, revision + 1)));
+        c_prepared.sources.adopt_persisting(&mut b_sources);
+        let (mut c_sources, _) = publish(c_prepared, revision + 1);
+        for block in SWAP_BLOCK..BLOCKS {
+            if block + 1 < BLOCKS {
+                pcm.submit(&mut c_sources, rate, block + 1);
+            }
+            blocks.push(successor::render(&mut owner));
+        }
+        assert_eq!(
+            blocks[SWAP_BLOCK].swap,
+            engine::realtime::SwapOutcome::Applied,
+            "{what}: C is adopted at the swap block"
+        );
+        assert_quiet(&blocks, &what);
+        let send = plane(&blocks, 1);
+        let at = SWAP_BLOCK * QUANTUM;
+        assert!(
+            send[..at].iter().all(|sample| *sample == 0.0),
+            "{what}: the send is follow-muted before the swaps"
+        );
+        let ramp = &send[at..at + M as usize];
+        assert!(
+            ramp.iter().any(|sample| *sample != 0.0),
+            "{what}: the send reopens from the block C first renders"
+        );
+        assert!(
+            ramp.iter()
+                .zip(&pcm.planes[1][at..])
+                .any(|(sample, source)| sample.to_bits() != source.to_bits()),
+            "{what}: the send ramps open, it does not step"
+        );
+        let open = next_boundary(at + M as usize, QUANTUM);
+        let fresh =
+            successor::reference_run(&successor::Session::compile(b.clone()), &[&pcm], backend);
+        let fresh = plane(&fresh, 1);
+        assert_bits_equal(
+            &send[open..BLOCKS * QUANTUM],
+            &fresh[open..BLOCKS * QUANTUM],
+            &format!("{what}: open after the ramp"),
+        );
+    }
+}
+
 /// #1652 gate 4, the combined transaction (coordinator obligation 3). One rebuild at block 6
 /// changes the send's gain and adds a mute entry that holds `t` muted from the start: the strip
 /// and the send both adopt the curve's mute at the swap, over the same session mute length, so the
