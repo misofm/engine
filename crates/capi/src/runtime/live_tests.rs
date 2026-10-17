@@ -11704,3 +11704,453 @@ fn removing_a_sends_only_route_entry_reports_a_fallback() {
         "the rebuild's revision, outcome flags and transition-fallback count"
     );
 }
+
+/// #1654 T5: an entry `name` on route `route`'s own row `row` (1 `gain_db`, 2 `mute`, 3-6 the
+/// matrix) with `segments`.
+fn route_entry(
+    name: &str,
+    route: &str,
+    row: u32,
+    segments: Vec<session::AutomationSegment>,
+) -> session::Automation {
+    session::Automation {
+        id: StableId::parse(name).expect("automation ID"),
+        target: session::ControlAddress {
+            owner: session::Owner::Route(StableId::parse(route).expect("route ID")),
+            section: session::Section::Own,
+            control: row,
+            lane: session::ParameterChannel::Both,
+        },
+        segments,
+        offset: session::AutomationOffset::default(),
+    }
+}
+
+/// #1654 T5: one segment of `shape` from `(start, from)` to `(end, to)` in `unit`.
+fn send_segment(
+    shape: session::AutomationShape,
+    (start, from): (u64, f32),
+    (end, to): (u64, f32),
+    unit: session::ParameterUnit,
+) -> session::AutomationSegment {
+    session::AutomationSegment {
+        shape,
+        start_sample: start,
+        end_sample: end,
+        start_value: from,
+        end_value: to,
+        unit,
+    }
+}
+
+/// #1654 T5: a flat curve at `value` over the source (step-shaped for a mute row).
+fn send_flat(
+    value: f32,
+    unit: session::ParameterUnit,
+    step: bool,
+) -> Vec<session::AutomationSegment> {
+    let shape = if step {
+        session::AutomationShape::Step
+    } else {
+        session::AutomationShape::Linear
+    };
+    vec![send_segment(
+        shape,
+        (0, value),
+        (SOURCE_FRAMES, value),
+        unit,
+    )]
+}
+
+/// #1654 T5: the send `eq0-b`'s own row `name` (`gain_db`, `mute`, `matrix_lr`, ...) set to
+/// `value`, over `ramp` samples when given.
+fn send_row_edit(name: &str, value: f32, ramp: Option<u32>) -> SessionEdit {
+    use protocol::control_core::{Lane, Owner, Section, row_address};
+    SessionEdit::set_control(
+        row_address(
+            Owner::Route(StableId::parse("eq0-b").expect("route ID")),
+            Section::Own,
+            name,
+            Lane::Both,
+        )
+        .expect("a send row"),
+        value,
+        ramp,
+    )
+}
+
+/// #1654 T5: [`follow_document`]`(false, false)` with `entries` on its rows and `change` applied.
+fn send_rows_document(
+    entries: Vec<session::Automation>,
+    change: impl FnOnce(&mut SessionModel),
+) -> String {
+    with_model(&follow_document(false, false), |model| {
+        model.automation.extend(entries);
+        change(model);
+    })
+}
+
+/// #1654 gate 1 on the C ABI. The send `eq0-b` (`pre_fader`, `rr` only) with a flat `gain_db`
+/// ride at -6 dB (hand offset `+0.0`, then `-0.0`), a flat `rr` entry at 0.5 and a flat route
+/// `mute` at 0 renders, block after block, the bits of the session whose send holds those values
+/// statically. Not vacuous: a ride at -5 dB differs.
+///
+/// Test value: red if the C ABI's route op reads the gain word as the compiler's linear static
+/// gain rather than the seeded offset, or converts or composes the curves with other arithmetic
+/// than the static route.
+#[test]
+fn a_flat_send_ride_renders_the_static_sends_bits_on_the_c_abi() {
+    use session::ParameterUnit::{Db, Linear};
+    let fixed = send_rows_document(Vec::new(), |model| {
+        let send = model
+            .routes
+            .iter_mut()
+            .find(|route| route.id.as_str() == "eq0-b")
+            .expect("the send");
+        send.gain_db = -6.0;
+        send.channel_matrix.rr = 0.5;
+    });
+    let automated = |gain_db: f32, offset: f32| {
+        let mut gain = route_entry("send-gain", "eq0-b", 1, send_flat(gain_db, Db, false));
+        gain.offset = session::AutomationOffset {
+            left_db: offset,
+            right_db: offset,
+        };
+        send_rows_document(
+            vec![
+                gain,
+                route_entry("send-mute", "eq0-b", 2, send_flat(0.0, Linear, true)),
+                route_entry("send-rr", "eq0-b", 6, send_flat(0.5, Linear, false)),
+            ],
+            |_| {},
+        )
+    };
+    for offset in [0.0_f32, -0.0] {
+        let mut curve = Rig::new(&automated(-6.0, offset));
+        let mut fixed = Rig::new(&fixed);
+        assert_eq!(
+            curve.current_follow_route_cells(),
+            vec![0],
+            "one seven-word send"
+        );
+        for block in 0..24 {
+            assert_eq!(
+                bits(&curve.step()),
+                bits(&fixed.step()),
+                "offset {offset:?}, block {block}"
+            );
+        }
+    }
+    let mut other = Rig::new(&automated(-5.0, 0.0));
+    let mut fixed = Rig::new(&fixed);
+    assert!(
+        (0..8).any(|_| bits(&other.step()) != bits(&fixed.step())),
+        "a ride at -5 dB is heard"
+    );
+}
+
+/// #1654 gate 3 on the C ABI, with gate 7 (the unrelated rebuild). On [`send_ride_document`]
+/// (`eq0-b` rides its gain from 0 to -12 dB) with an `rr` ride from 1 to 0.25:
+/// (a) an `UpsertAutomation` that changes the gain ride rebuilds, completes `EXACT`, and from the
+/// end of the moved row's jump (`SendGain`, 240 samples) and the grid ramp after it, renders a
+/// fresh plan of the new document, session-seeked to the adoption block;
+/// (b) `SET_CONTROL gain_db = +3` is `live` and, after its ramp, renders a fresh plan whose entry
+/// carries the offset `+3`;
+/// (c) `SET_CONTROL matrix_rr` (automated) is `model_only` and moves no bit;
+/// (d) `SET_CONTROL matrix_lr = 0.5` (not automated) is `live` and, after its ramp, renders a fresh
+/// plan with that value;
+/// (e) a rebuild that changes only the direct route `eq0-main` (into the output) completes `EXACT`
+/// and the send's plane is bit for bit the never-swapped twin's.
+///
+/// Test value: red if a send automation edit is not a rebuild or does not complete exactly, if a
+/// hand send gain move writes the fallback instead of the offset (or the offset reaches the
+/// matrix), if a hand edit of an automated matrix row fights the curve, if an un-automated value
+/// of the group is lost, or if a running ride is re-timed across an unrelated rebuild.
+#[test]
+fn send_row_edits_rebuild_or_commit_as_the_rows_rule_says_on_the_c_abi() {
+    use session::{AutomationShape::Linear, ParameterUnit};
+    let rr_ride = || {
+        route_entry(
+            "send-rr",
+            "eq0-b",
+            6,
+            vec![send_segment(
+                Linear,
+                (0, 1.0),
+                (SOURCE_FRAMES, 0.25),
+                ParameterUnit::Linear,
+            )],
+        )
+    };
+    let document = with_model(&send_ride_document(), |model| {
+        model.automation.push(rr_ride());
+    });
+    let quantum = 128_usize;
+    // (a) A changed gain ride.
+    {
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let mut changed = parse_session_json(&document).expect("model").automation[0].clone();
+        assert_eq!(changed.id.as_str(), "send-gain");
+        changed.segments[0].end_value = -24.0;
+        let (adoption, live) = rebuild_and_adopt(
+            &mut rig,
+            &[SessionEdit::UpsertAutomation {
+                automation: changed,
+            }],
+            ADOPTED_BLOCKS,
+        );
+        let reference = seeked_reference(&rig.snapshot(), adoption, ADOPTED_BLOCKS);
+        let settled = 240 + 2 * 64;
+        let send = plane_bits(&live, 1, quantum);
+        let fresh = plane_bits(&reference, 1, quantum);
+        assert_ne!(send[..64], fresh[..64], "(a): the moved row jumps");
+        assert_eq!(
+            send[settled..],
+            fresh[settled..],
+            "(a): a fresh plan after the jump"
+        );
+    }
+    // (b) and (d): live hand moves, against a fresh plan of the committed document.
+    for (label, edit) in [
+        ("(b) the gain offset", send_row_edit("gain_db", 3.0, None)),
+        (
+            "(d) an un-automated matrix_lr",
+            send_row_edit("matrix_lr", 0.5, None),
+        ),
+    ] {
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (at, live) = live_and_render(&mut rig, std::slice::from_ref(&edit), 12);
+        let committed = rig.snapshot();
+        if label.starts_with("(b)") {
+            let model = parse_session_json(&committed).expect("model");
+            assert_eq!(
+                model.automation[0].offset.left_db.to_bits(),
+                3.0_f32.to_bits()
+            );
+        }
+        let reference = seeked_reference(&committed, at, 12);
+        // The move's 240 samples, the deferred landing's 240 and the grid ramp after it.
+        let from = 5;
+        assert_ne!(live[0], reference[0], "{label}: the move ramps");
+        for plane in 0..2 {
+            assert_eq!(
+                plane_bits(&live[from..], plane, quantum),
+                plane_bits(&reference[from..], plane, quantum),
+                "{label}, plane {plane}: a fresh plan of the committed document after the ramp"
+            );
+        }
+    }
+    // (c) An automated matrix row: automation wins.
+    {
+        let mut rig = Rig::new(&document);
+        let mut twin = Rig::new(&document);
+        for _ in 0..4 {
+            assert_eq!(bits(&rig.step()), bits(&twin.step()));
+        }
+        let bytes = rig.transaction(&[send_row_edit("matrix_rr", 0.75, None)]);
+        let (result, response) = rig.send(&bytes);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(
+            edit_path_of(&response),
+            protocol::EditPath::ModelOnly,
+            "(c)"
+        );
+        for block in 4..16 {
+            assert_eq!(bits(&rig.step()), bits(&twin.step()), "(c): block {block}");
+        }
+    }
+    // (e) An unrelated rebuild: the send's plane is the never-swapped twin's.
+    {
+        let mut rig = Rig::new(&document);
+        let mut twin = Rig::new(&document);
+        for _ in 0..4 {
+            assert_eq!(bits(&rig.step()), bits(&twin.step()));
+        }
+        let mut direct = parse_session_json(&document)
+            .expect("model")
+            .routes
+            .into_iter()
+            .find(|route| route.id.as_str() == "eq0-main")
+            .expect("the direct route");
+        direct.gain_db = -3.0;
+        let (adoption, live) = rebuild_and_adopt(
+            &mut rig,
+            &[SessionEdit::UpsertRoute { route: direct }],
+            ADOPTED_BLOCKS,
+        );
+        while (twin.block as usize) * quantum < adoption as usize {
+            twin.step();
+        }
+        let reference: Vec<_> = (0..live.len()).map(|_| twin.step()).collect();
+        assert_eq!(
+            plane_bits(&live, 1, quantum),
+            plane_bits(&reference, 1, quantum),
+            "(e): the send's plane across the swap"
+        );
+        assert_ne!(
+            plane_bits(&live, 0, quantum),
+            plane_bits(&reference, 0, quantum),
+            "(e): the rebuild is heard on the strip's plane"
+        );
+    }
+}
+
+/// #1654 gate 4 on the C ABI (D5: a hand send mute ORs with the automated send mute). `eq0-b`'s
+/// own mute curve is open until 2,048 and closed after. At block 4 a hand mute is `live` and,
+/// after the mute ramp, shuts the send while the curve is open; at block 20 (2,560: the curve
+/// closed) a hand unmute is `live` and the send stays shut.
+///
+/// Test value: red if the composition is not an OR (the hand mute does not close an open curve,
+/// or the hand unmute reopens a closed one).
+#[test]
+fn a_hand_send_mute_ors_with_its_curve_on_the_c_abi() {
+    use session::{AutomationShape::Step, ParameterUnit::Linear};
+    let document = send_rows_document(
+        vec![route_entry(
+            "send-mute",
+            "eq0-b",
+            2,
+            vec![
+                send_segment(Step, (0, 0.0), (2_048, 1.0), Linear),
+                send_segment(Step, (2_048, 1.0), (SOURCE_FRAMES, 1.0), Linear),
+            ],
+        )],
+        |_| {},
+    );
+    let quantum = 128_usize;
+    let mut rig = Rig::new(&document);
+    for _ in 0..4 {
+        rig.step();
+    }
+    let (_, muted) = live_and_render(&mut rig, &[send_row_edit("mute", 1.0, None)], 16);
+    let send = plane_bits(&muted, 1, quantum);
+    assert!(
+        send[..64].iter().any(|&word| word != 0),
+        "the send plays at the edit"
+    );
+    assert!(
+        send[480..].iter().all(|&word| f32::from_bits(word) == 0.0),
+        "the hand mute shuts the send while the curve is open"
+    );
+    let (_, unmuted) = live_and_render(&mut rig, &[send_row_edit("mute", 0.0, None)], 12);
+    assert!(
+        plane_bits(&unmuted, 1, quantum)
+            .iter()
+            .all(|&word| f32::from_bits(word) == 0.0),
+        "the hand unmute leaves the closed curve closed"
+    );
+}
+
+/// #1654 gate 5 on the C ABI: an automation entry on the route into the output `eq0-main` is
+/// refused `control.automation.target`, and the revision does not move.
+///
+/// Test value: red if a route into the output's rows became automatable (D8).
+#[test]
+fn an_output_route_entry_is_refused_on_the_c_abi() {
+    let mut rig = Rig::new(&follow_document(false, false));
+    rig.step();
+    let before = rig.summary();
+    let entry = route_entry(
+        "out-gain",
+        "eq0-main",
+        1,
+        send_flat(-6.0, session::ParameterUnit::Db, false),
+    );
+    assert_ne!(
+        rig.apply(&[SessionEdit::UpsertAutomation { automation: entry }]),
+        crate::RESULT_OK
+    );
+    assert!(
+        String::from_utf8_lossy(&rig.last_error()).contains("control.automation.target"),
+        "{}",
+        String::from_utf8_lossy(&rig.last_error())
+    );
+    assert_eq!(rig.summary(), before, "no revision");
+}
+
+/// #1654 R19-5 on the C ABI. On [`send_ride_document`], a live send move with its own 4,000
+/// samples (the hand gain offset `+3`, or a D6 `matrix_lr` edit) is in flight when a rebuild
+/// changes the gain ride's table (the carried cursor is repositioned). The rebuild completes
+/// `EXACT`, with no transition fallback; until the move's end every sample is a twin's that took
+/// the same move and no rebuild (the move keeps its length); after the move, the moved row's
+/// jump and the grid ramp after it, the plan renders a fresh plan of the committed document.
+///
+/// Test value: red if a reposition at the swap cuts the live send move (lands the moved table
+/// at once) or re-times it, or if the rebuild is flagged.
+#[test]
+fn a_live_send_move_in_flight_at_a_reposition_keeps_its_length_on_the_c_abi() {
+    const RAMP: u32 = 4_000;
+    let document = send_ride_document();
+    let quantum = 128_usize;
+    for (label, edit) in [
+        ("the gain offset", send_row_edit("gain_db", 3.0, Some(RAMP))),
+        ("matrix_lr", send_row_edit("matrix_lr", 0.5, Some(RAMP))),
+    ] {
+        let mut rig = Rig::new(&document);
+        let mut twin = Rig::new(&document);
+        for _ in 0..4 {
+            assert_eq!(bits(&rig.step()), bits(&twin.step()));
+        }
+        let (start, _) = live_and_render(&mut rig, std::slice::from_ref(&edit), 2);
+        let _ = live_and_render(&mut twin, std::slice::from_ref(&edit), 2);
+        // The re-authored ride keeps the entry's committed offset (R17-1), so the join writes
+        // no record and the move is the only ramp in flight.
+        let mut changed = rig.model().automation[0].clone();
+        assert_eq!(changed.id.as_str(), "send-gain");
+        changed.segments[0].end_value = -24.0;
+        let rebuild = SessionEdit::UpsertAutomation {
+            automation: changed,
+        };
+        let writes = rig.current_follow_route_cells();
+        let (adoption, live) = rebuild_and_adopt(&mut rig, std::slice::from_ref(&rebuild), 48);
+        assert_eq!(
+            rig.current_follow_route_cells(),
+            vec![0],
+            "{label}: the join writes no record ({writes:?} before)"
+        );
+        let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(
+            watermark.transition_fallback_count, 0,
+            "{label}: no transition fallback"
+        );
+        while (twin.block as usize) * quantum < adoption as usize {
+            twin.step();
+        }
+        let reference: Vec<_> = (0..live.len()).map(|_| twin.step()).collect();
+        let end = (start + u64::from(RAMP) - adoption) as usize;
+        for plane in 0..2 {
+            let (live, twin) = (
+                plane_bits(&live, plane, quantum),
+                plane_bits(&reference, plane, quantum),
+            );
+            assert_eq!(
+                live[..end],
+                twin[..end],
+                "{label}, plane {plane}: the move runs"
+            );
+        }
+        let fresh = seeked_reference(&rig.snapshot(), adoption, 48);
+        let settled = end + 240 + 2 * 64;
+        let (send, fresh) = (
+            plane_bits(&live, 1, quantum),
+            plane_bits(&fresh, 1, quantum),
+        );
+        assert_ne!(
+            send[end..settled],
+            fresh[end..settled],
+            "{label}: the moved row lands"
+        );
+        assert_eq!(
+            send[settled..],
+            fresh[settled..],
+            "{label}: a fresh plan after the landing"
+        );
+    }
+}

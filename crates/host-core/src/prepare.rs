@@ -2922,7 +2922,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         }
         let flags = follow_route_flags(route, effective.strips[source].mute, automated);
         let offset = route_gain_offset(controls::ModelView::whole(model), &route.id);
-        follow_cells.push((route.id.as_str(), (program, cells, rows, flags, offset)));
+        // #1654 D3: the rows whose table the predecessor's model holds unchanged carry their
+        // cursors verbatim at the swap (the source's continued rows, which the route op reads).
+        let continued = successor.map_or([false; graph::GRAPH_ROUTE_ROWS], |base| {
+            controls::continued_route_rows(base.committed, model, &route.id)
+        });
+        follow_cells.push((
+            route.id.as_str(),
+            (program, cells, rows, flags, offset, continued),
+        ));
     }
     let mut artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         dispatch: backend,
@@ -2977,7 +2985,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         let mut sources: BTreeMap<&str, _> = follow_cells.into_iter().collect();
         artifact
             .attach_route_live_controls_following(&live_superseded, six_word, |route_id| {
-                let (program, cells, rows, flags, offset) = sources.remove(route_id.as_str())?;
+                let (program, cells, rows, flags, offset, continued) =
+                    sources.remove(route_id.as_str())?;
                 let node = GraphNodeId::Route {
                     route_id: route_id.clone(),
                 };
@@ -2989,7 +2998,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                     follow_route_jumps,
                     graph_compiler::route_gain_law,
                     flags,
-                )?;
+                )?
+                .with_continued_rows(continued);
                 if flags.automated_gain {
                     source.with_gain_offset(offset)
                 } else {
@@ -5898,9 +5908,6 @@ fn resolve_strip_delay_carry(
 struct RouteJoin<'a> {
     id: &'a str,
     retarget: Option<SendRecord>,
-    /// The route rows 1-6 both models automate with the same table (#1654 D3,
-    /// [`controls::continued_route_rows`]): the move's [`graph::GraphRouteMove::continued_rows`].
-    continued_rows: [bool; graph::GRAPH_ROUTE_ROWS],
 }
 
 /// The model half of the send join (#1284 D2, D3): for every route of `model` into a submix that
@@ -5986,7 +5993,6 @@ fn join_routes<'a>(
         joins.push(RouteJoin {
             id: after.id.as_str(),
             retarget,
-            continued_rows: controls::continued_route_rows(committed, model, &after.id),
         });
     }
     joins
@@ -6034,7 +6040,6 @@ fn resolve_route_carry<'a>(
             successor: after,
             predecessor: before,
             predecessor_follows: follows,
-            continued_rows: join.continued_rows,
         });
         if let Some(record) = join.retarget {
             carry.retargets.push((join.id, record));
@@ -6791,25 +6796,20 @@ mod tests {
             RouteJoin {
                 id: "a-main",
                 retarget: Some(record),
-                continued_rows: [false; graph::GRAPH_ROUTE_ROWS],
             },
-            // #1654 D3: the join's continued rows reach the move as they are.
             RouteJoin {
                 id: "b-main",
                 retarget: None,
-                continued_rows: [true, false, false, false, false, true],
             },
             // Present in the successor only.
             RouteJoin {
                 id: "c-main",
                 retarget: Some(record),
-                continued_rows: [false; graph::GRAPH_ROUTE_ROWS],
             },
             // Present in the predecessor's model but not a live route of either plan.
             RouteJoin {
                 id: "d-main",
                 retarget: Some(record),
-                continued_rows: [false; graph::GRAPH_ROUTE_ROWS],
             },
         ];
         let carry = resolve_route_carry(&before, &own, &joins);
@@ -6820,13 +6820,11 @@ mod tests {
                     successor: 4,
                     predecessor: 3,
                     predecessor_follows: false,
-                    continued_rows: [false; graph::GRAPH_ROUTE_ROWS],
                 },
                 graph::GraphRouteMove {
                     successor: 2,
                     predecessor: 5,
                     predecessor_follows: false,
-                    continued_rows: [true, false, false, false, false, true],
                 },
             ]
         );
@@ -6853,11 +6851,7 @@ mod tests {
             unit,
             following,
         };
-        let join = |id| RouteJoin {
-            id,
-            retarget: None,
-            continued_rows: [false; graph::GRAPH_ROUTE_ROWS],
-        };
+        let join = |id| RouteJoin { id, retarget: None };
         // (case, predecessor following, successor following, flagged)
         for (case, before, after, flagged) in [
             ("six -> six", false, false, false),

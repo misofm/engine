@@ -670,3 +670,72 @@ For T3/T5: the route op must read `source.gain_offset()` as the seeded `gain` wo
 set (the bound transform's `gain` is the compiler's linear static gain) and
 `GraphRouteMove::continued_rows` for the carry. A route-row-only send now binds the seven-word
 lane with no source cells, and renders with the old (static) route op until T3 lands.
+
+## Decision record: T5 (batch 19)
+
+Integration of T3 and T4, the gates and the doc. Nothing under `crates/engine/src/realtime/`; no
+`crates/lane` change; no row class or table changed (no SDK regeneration).
+
+- **One continued-rows path.** Render reads `GraphFollowRouteSource::continued` (T3), so that path
+  stays: host-core's attach now sets `with_continued_rows(controls::continued_route_rows(
+  base.committed, model, route))` for a successor (the route joins are computed before the attach).
+  T4's `GraphRouteMove::continued_rows` and `RouteJoin::continued_rows` are deleted;
+  `GraphRouteMove` 16 -> 12 bytes (x86-64), `RouteCarryStep` unchanged.
+- **Gain word seed (T4 note).** `LiveFollowRoute::new` replaces the bound transform's `gain` (the
+  compiler's linear static gain, a fallback) with `source.gain_offset()` when the flags automate
+  the gain. Before it, a flat ride at -6 dB rendered `law(-6, 1.0)` instead of the static bits.
+- **T3 edge: it was a heard difference, fixed.** A row the predecessor did not automate
+  (`Placement::New`) kept its value cursor's bind seed (the curve at node time 0) through the
+  carried first block's cell, so a gate-only join record (for example a hand unmute in the rebuild
+  that adds a gain ride) aimed the column at the ride's value at 0 dB, no plan's value, and then
+  jumped to the curve. Now `FollowCursors::place_new_values` places such value cursors at the first
+  block's node time before the cell applies, and `place_carried` does not place them again (that
+  dropped the record's column-jump deferral, so the ride's grid cut into the unmute, R19-3).
+  Repositioned and continued cursors keep the value the column heard, as T3 specified.
+- **R19-5 holds: exact, no flag.** Both moves (hand offset, D6 `matrix_lr`) with their own 4,000
+  samples run to their end across a table-moving rebuild, `EXACT`, no transition fallback, on both
+  hosts. While writing the gate a first failure was the test's: an `UpsertAutomation` built from the
+  pre-move document re-authors the entry with offset 0, which is a real offset change (the join
+  writes a record); the gate re-authors from the committed model.
+
+Gates (all green), with red-without-the-feature evidence (once each):
+- Gate 1: host-core `route_mute.rs` `a_flat_send_ride_renders_the_static_sends_bits` (Simd8 when
+  avx2, Simd4, scalar oracle; three live forms; offsets `+0.0`/`-0.0`; flat mute and `rr`; zero
+  render allocations); capi `a_flat_send_ride_renders_the_static_sends_bits_on_the_c_abi`; host-web
+  `a_flat_send_ride_renders_the_static_sends_bits_on_both_hosts`. Red without the seed fix: sample 0
+  -0.13376695 != -0.11921991 (host-core), block 0 (capi).
+- Gate 2: host-core `a_send_ride_is_heard_at_its_taps_time` (input and post-fader taps behind the
+  486-sample limiter vs the twin with no latency, shifted by `L`, bit for bit; quanta 128 and 100;
+  three widths). Red with the route arrival forced to 0: post-fader sample 0 0.1787 != 0.2498.
+- Gate 3: capi `send_row_edits_rebuild_or_commit_as_the_rows_rule_says_on_the_c_abi` ((a) rebuild
+  `EXACT`, fresh seeked plan after the jump; (b) `+3` live then the offset plan's bits; (c) automated
+  `matrix_rr` `model_only`, no bit; (d) un-automated `matrix_lr` live then a fresh plan's bits;
+  (e) gate 7 on the C ABI); host-web `send_row_edits_rebuild_or_commit_as_the_rows_rule_says_on_both_hosts`.
+  Red without the seed fix: (b) differs from the fresh plan after the ramp. The in-place/full
+  equivalence is T4's (`a_hand_move_on_an_automated_send_gain_*`).
+- Gate 4: capi `a_hand_send_mute_ors_with_its_curve_on_the_c_abi`; host-web
+  `a_hand_send_mute_ors_with_its_curve_on_both_hosts`. Red with the curve replacing the static mute
+  (not ORed): "the hand mute shuts the send while the curve is open".
+- Gate 5: capi `an_output_route_entry_is_refused_on_the_c_abi`; host-web
+  `an_output_route_entry_is_refused_alike_on_both_hosts` (one diagnostic,
+  `control.automation.target`).
+- Gate 6: zero render allocations in host-core gates 1, 2 and 7 (`bench_support::alloc` thread
+  counters, the swap block included); control-plane `send_automation_realtime.rs` (T4).
+- Gate 7: host-core `a_running_send_ride_across_an_unrelated_rebuild_is_the_never_swapped_twin`
+  (three widths); capi gate 3 (e); host-web
+  `send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts`. Red without the attach's
+  `with_continued_rows`: host-core sample 768 -0.053634815 != -0.053632714; host-web block 6; capi (e).
+- Gate 8: the controls gates (T1, `the_send_gain_takes_one_shared_offset`), reused.
+- R19-5: capi `a_live_send_move_in_flight_at_a_reposition_keeps_its_length_on_the_c_abi`; host-web
+  (in the gate 7 test); graph `a_hand_move_in_flight_at_a_swap_of_a_riding_table_is_the_twin_until_its_end`.
+- T3 edge: graph `a_new_send_row_at_a_swap_composes_the_join_record_with_its_curve_at_the_first_block`
+  (red before the fix: target bits of `law(0 dB)`, then red with only the pre-placement: the grid
+  retargeted inside the unmute).
+
+Departures: gate 2 runs in host-core only (three widths); the hosts share that route op and its
+arrival, and neither host fixture carries a latent insert. Host-web's gate 7 uses an added muted
+(inactive) send as the unrelated rebuild, because a flat fader ride on `t3` is not bit-neutral at a
+swap there (outside this issue; not investigated). `docs/SESSION_SCHEMA_V1.md`: send rows render,
+the send gain takes the shared offset, routes into the output stay prepared.
+
+Realtime policy: 171 marked regions in 35 files (unchanged). `scripts/check-graph-policy.sh`: PASS.
