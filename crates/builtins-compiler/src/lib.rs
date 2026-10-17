@@ -2075,6 +2075,10 @@ impl HeldRampObligation {
             }
             Some(_) if due && self.owed => (0, Some(0), false),
             Some(_) => {
+                // A live write that freed a held stage at this entry (an exact unmute) discharges
+                // the move the hold owed; a stale `owed` would land a move over `J` at a later
+                // hold's end with nothing remembered there (#1711 G4,
+                // `an_exact_unmute_that_frees_a_held_lane_discharges_the_owed_move`).
                 self.owed = false;
                 (0, None, held_through && !due)
             }

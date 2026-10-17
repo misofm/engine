@@ -93,10 +93,9 @@ pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
 /// Watermark outcome flag: the covered revisions completed exactly as committed.
 pub const OUTCOME_EXACT: u64 = 1;
 /// Watermark outcome flag: a warm successor could not adopt, and the covered revisions completed
-/// through the transition it fell back to, or a Reposition swap while a live level move may still
-/// ramp (conservative: it can be set when the move was not stretched; #1711 removes it), or a
-/// rebuild that carries a send following a stored mute into one that follows none (conservative:
-/// it can be set when no send moves at the swap; #1713 removes it).
+/// through the transition it fell back to, or a rebuild that carries a send following a stored
+/// mute into one that follows none (conservative: it can be set when no send moves at the swap;
+/// #1713 removes it).
 pub const OUTCOME_TRANSITION_FALLBACK: u64 = 2;
 /// Watermark outcome flag: the covered revisions include ones a newer candidate folded in when it
 /// replaced the candidate that carried them.
