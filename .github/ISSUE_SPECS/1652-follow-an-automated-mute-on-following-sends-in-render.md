@@ -215,3 +215,138 @@ Checked against `12d4a4f9d`.
   with an automated mute also uses this slice's seven-word cell, and its follow term ORs those VCA
   curves, evaluated in the tap's node time. #1655 adds it on this slice's route op; this slice
   needs no change for it.
+
+## Amendment (controls coordinator, batch 18 spec check, 2026-10-17)
+
+Checked against `ad03780ee`. The filed text above stays; where it disagrees, this section wins.
+
+**Anchors now.**
+- Route cell: `RouteControlRecord` `crates/graph/src/lib.rs:963`, `ROUTE_CELL_WORDS = 6` `:1007`,
+  `RouteLane` `:1047`, `GraphRouteControlProducer` `:1085`. `RouteGate` `:770`,
+  `gated_route_coefficients` `:801`. `LatestCell<N>` is const-generic
+  (`crates/engine/src/realtime/latest_cell.rs:590`), so a seven-word cell needs no edit under
+  `crates/engine/src/realtime/`.
+- Route op: `LiveRoute` `crates/graph/src/runtime.rs:887` (`apply_pending` `:928`, `active`
+  `:964`, `mix` `:970`, `adopt` `:981`); the drain and activity in `execute_op` `:3676-3688`; the
+  mix arm `:3791`. `execute_op` already takes the block's `GraphBlockTime` (`:3660`).
+- Ramp: `IndexedRamp` `crates/lane/src/kernels.rs:1589`, `coefficients_at` `:1645`,
+  `route_mix_ramp_block` `:1698`. The kernel takes sub-slices and a start position, so the split
+  needs no kernel change. `crates/lane/src/kernels.rs` leaves the paths.
+- `route_values` `crates/graph-compiler/src/ids.rs:322-338` (`pub(crate)`), `route_coefficients`
+  `:362-376`, re-exported at `crates/graph-compiler/src/lib.rs:323`.
+- Node time: `GraphBlockTime` `crates/graph/src/lib.rs:1298` (`node_span` `:1350`,
+  `jump_lengths` `:1341`), `GraphJumpLengths` `:1244`, `floored_input_arrival` `:1362`.
+  `GraphCompileReport::input_arrivals` (`crates/graph-compiler/src/lib.rs:194`) holds every node's
+  floored input arrival, route nodes included. A route op reads its one undelayed input before the
+  consumer's compensation delay, so the route node's floored input arrival is `a(tap)`.
+  `crates/graph-compiler/src/pdc.rs` leaves the paths.
+- Route lanes attach at `crates/host-core/src/prepare.rs:2867-2888`. Since C6 (#1557) every route
+  into a submix is a live row, so every plan on both hosts has its lane (D1's attach is done).
+- Carry: `join_routes` `prepare.rs:5473`, `resolve_route_carry` `:5537`, the join's retarget
+  writes `:3654`; render side `carry_live_routes` `runtime.rs:5261`.
+- The one record function of a send is `route_record_between` (`prepare.rs:4154-4193`). The
+  classifier (`route_records`, `crates/host-core/src/live_delta.rs:1467`) and the join call it.
+- Graph's dependency pin is `scripts/check-graph-policy.sh:21`; the fixture is
+  `scripts/test-graph-policy.sh:7-13`. Batch 17 did not add `automation` to graph (it put the
+  fader program in builtins-compiler), so this slice is still the first to add the edge.
+- `scripts/check-realtime-policy.sh` is deleted (c1aadc234). The gate is
+  `cargo build --locked --release -p realtime-policy && ./target/release/realtime_policy`.
+- `crates/control-plane/Cargo.toml` already has `bench-support` (`vca_automation_realtime.rs`).
+  It leaves the paths.
+
+**How the slice maps onto the landed code.**
+- **Program hand-off.** The plan's `Arc<automation::Program>` is built in builtins-compiler
+  (`prepare_fader_automation`, `crates/builtins-compiler/src/lib.rs:2087`; #1651 adds the mute
+  cells). #1651 exports, per strip, the program and the two mute cell indices to host-core
+  preparation, as a handle type that graph defines. Host-core passes it, with `a(tap)` from
+  `floored_input_arrival(report.input_arrivals, route node)`, to the route attach. Host-core needs
+  no `automation` dependency. The "automated" test is #1651's mute-lane predicate in `controls`
+  (as `automated_fader_lanes`, `crates/controls/src/automation.rs:447`).
+- **Layout.** A seven-word route has its own lane type (`LatestCell<7>`) and its own boxed render
+  state beside the route op. Every six-word route keeps its bytes (`LIVE_ROUTE_OWNER_BYTES`,
+  `route_control_resources`) and its bits. The seven-word lane and its render state are charged in
+  `route_control_resources`; the program is charged once, by builtins-compiler.
+- **Flags word.** Bit 0 route `mute`, bit 1 `follows_mute`, bits 2-3 `terms[L, R]`, bits 4-5
+  `automated[L, R]`, other bits 0 (decode refuses them, as `mute > 1` today). After OQ1 = C,
+  `terms[lane]` is always `controls::effective`'s source-lane mute (it holds no curve), for an
+  automated lane and for one that is not. `automated` is the plan's: render takes it from its own
+  cursors, and the commit refuses, before the first write, a record whose bits differ (#1653).
+- **Node time (R17-3).** The route op takes the same per-block context the builtin banks get
+  (`GraphBlockTime`, set once per block), calls `node_span(a(tap))` (signed, R17-5) and builds its
+  `automation::NodeSpan`. It uses `CellEvents` with the mute cell's rule (#1651; `SeekMode::Exact`,
+  so a seek gives a `Set`, length 0).
+- **Ramp length.** `GraphJumpLengths` "knows no row", so graph must not spell the mute row. The
+  attach passes a resolver from host-core:
+  `LiveRamps::from_lengths(fader, mute, pan).for_row(LiveRampRow::Mute)`, the rule the strip's
+  stage uses. Gate 2 holds that the two lengths agree.
+- **Order in one block.** First the cell at block entry: compose with the curve's value at the
+  block's first sample and retarget over the cell's ramp word on a bits change. Then the curve
+  events in offset order: each composes and retargets over the session mute length (0 for a `Set`)
+  on a bits change. #1651 uses the same order on the strip, so gate 2 holds.
+- **Seed.** The bound target composes the curve's first `start_value` (as #1651's prepared stage
+  mute) with the seeded words. A route of a fresh plan whose curve at its first block's `τ_tap`
+  differs sets exactly there (length 0), as the strip's fresh lane does (#1647 D2, #1651).
+- **Activity (fix).** Today the op decides `active` at block entry, before it mixes. A seven-word
+  route is active in every block where it retargets, so an unmute inside a block is mixed. It finds
+  its changes first (for example on a copy of its `CellState`, which is `Copy`, 32 bytes). A
+  muted, undelayed route with no change in the block stays inactive and moves no bit.
+- **FP (R17-7).** Render composes inside the render entry's `CanonicalFpEnv`; the seed and the
+  commit compose inside R17-7's guards. One `const fn`, `gated_route_coefficients`, gives both.
+- **Scalar oracle (R17-4).** The route op is not banked and has one form. The strip's bank and
+  its oracle are #1651's.
+- **No queue.** D4 holds: render generates the events from the plan.
+
+**D3, made exact (fix).**
+- The lane exists in both plans, so the move by route ID always applies. Ramp, position and mute
+  carry as today (`LiveRoute::adopt`).
+- The follow cursors do not carry. A mute cell has no grid and no hold, so the successor places
+  each cursor fresh at its own `τ_tap` of the first block and seeds it with `value_at` there.
+- At the successor's first block: the join's record (if any) applies first, through the cell. Then
+  the route compares its composed target with the adopted ramp's target. On a bits change it
+  retargets from `coefficients_at(position)` over the session mute length.
+- A six-word successor of a seven-word predecessor (the curve removed) makes the same comparison
+  with its own prepared target. The model diff cannot see the curve, so only render knows the
+  carried state. A six-word pair keeps today's code exactly.
+- The join's record for a seven-word successor route is the seven-word record from
+  `route_record_between` (#1653's branch).
+- No `TransitionFallback` and no new watermark rule. A carried ramp whose target does not change
+  keeps its own length. A changed target is the new curve's own jump, which an uninterrupted plan
+  makes the same way at a curve event (as #1648's "Note 1" for a cell's own jump). B17-R14's
+  window does not read routes.
+
+**Gates (fixes).**
+- Gate 1: drop "With live controls off in the browser too". There is no such option now (C6).
+  Both hosts run it at the native width: `crates/capi/src/runtime/live_tests.rs` and
+  `hosts/host-web/tests/control_parity.rs`. Host-core runs the same script in
+  `crates/host-core/tests/route_mute.rs` at `Backend::Simd8` (`cfg(target_feature = "avx2")`) and
+  `Backend::Simd4`, with the `Scalar` oracle (`test_only_prepare_host_runtime_*_on`).
+- Gates 2 and 4 also run at `Simd8` (avx2) and `Simd4`.
+- Gate 3 is a unit test in `crates/graph/src/runtime.rs`'s test module (the route op is
+  `pub(crate)`). Add one case: a route that unmutes at offset `o` while inactive is mixed on
+  `[o, q)`.
+- Gate 4, new case (b): a rebuild that removes `t`'s mute entry while the curve holds the send
+  muted unmutes the send over the session mute length from the swap block; it allocates nothing.
+  Red if the six-word successor keeps the adopted mute.
+- Gate 6: replace `bash scripts/check-realtime-policy.sh` with the `realtime-policy` binary above;
+  add `bash scripts/test-graph-policy.sh` and `bash scripts/check-builtins-policy.sh`.
+
+**Authorized paths after the check.**
+- `crates/graph/src/lib.rs`, `crates/graph/src/runtime.rs` (route lane, cell, record, producer
+  write, the route op, its activity, its carry). Render code, but not under
+  `crates/engine/src/realtime/`: no root notice is needed.
+- `crates/graph/Cargo.toml`, `Cargo.lock`, `scripts/check-graph-policy.sh`,
+  `scripts/test-graph-policy.sh` (each gains `automation` only).
+- `crates/graph-compiler/src/ids.rs` (`route_values` public), `crates/graph-compiler/src/lib.rs`
+  (its re-export only).
+- `crates/builtins-compiler/src/lib.rs` (only if #1651's export of the program and a strip's mute
+  cells needs a change; after #1651).
+- `crates/host-core/src/prepare.rs` (attach, seed, resolver, join), `crates/host-core/src/lib.rs`
+  (re-exports only), `crates/host-core/tests/route_mute.rs`.
+- `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/tests/control_parity.rs`,
+  `hosts/host-web/src/tests.rs`, `crates/control-plane/tests/follow_automation_realtime.rs` (new).
+- No path under `crates/engine/src/realtime/`.
+
+**For #1654 (phase 2, no scope here).** It reuses the open transform words, the flags word's spare
+bits (6 and up), the per-event composition and the in-block retarget. It needs the seven-word
+predicate widened to routes with automated rows, and carried cursor state by `(route, row)` for
+curves that move on the grid; this slice's mute cursors are not carried.

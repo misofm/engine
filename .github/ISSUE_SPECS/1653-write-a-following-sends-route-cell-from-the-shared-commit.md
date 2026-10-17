@@ -130,3 +130,69 @@ Checked against `12d4a4f9d`.
 - Authorized paths: `crates/host-core/src/{live_delta.rs,route_controls.rs}`,
   `crates/host-core/tests/live_delta.rs`, `crates/control-plane/src/`,
   `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/tests/control_parity.rs`.
+
+## Amendment (controls coordinator, batch 18 spec check, 2026-10-17)
+
+Checked against `ad03780ee`. The filed text above stays; where it disagrees, this section wins.
+
+**Anchors now.**
+- The one record function of a send is `route_record_between`,
+  `crates/host-core/src/prepare.rs:4154-4193`. The classifier (`route_records`,
+  `crates/host-core/src/live_delta.rs:1467`) and the swap join (`join_routes`, `prepare.rs:5473`)
+  both call it. So the branch is in `prepare.rs`, which this slice now needs.
+- The classifier lowers a route only when its rows changed or its effective gate changed
+  (`live_delta.rs:1019`). The gate is `controls::effective_gate`
+  (`crates/controls/src/effective.rs:381`).
+- `route_record` and `RouteControlProducer`: `crates/host-core/src/route_controls.rs:146`, `:201`.
+- The commit resolves route producers at `crates/control-plane/src/control.rs:3226-3242` and
+  writes them at `:3419-3421`, in the same stamp as the strip and jump-length writes.
+- The in-place classifier (`classify_live_staged`, `live_delta.rs:565`) must equal the dense one
+  (#1613; `crates/host-core/tests/in_place_commit.rs`, R17-1).
+
+**How the slice maps onto the landed code.**
+- **D1.** For a route that the next plan gives a seven-word cell (#1652 D1, from the `after`
+  model), `route_record_between` returns a seven-word record: the open transform from
+  `route_values` (#1652 makes it public), the flags word of #1652's amendment, and the ramp from
+  the existing length rule. `LiveRouteRecord` carries either a folded record or a seven-word one.
+  The join gets the same record with no second code.
+- **Trigger (fix).** For a seven-word route, the classifier also lowers it when its source lane's
+  effective mute (`terms`) changes and the gate does not (for example while `follows_mute` is
+  off). So the cell always holds the committed words, and "writes only when a word's bits change"
+  is exact.
+- **D2.** After OQ1 = C, `terms[lane]` is `controls::effective`'s source-lane mute, with the
+  overlay, for every lane (it holds no curve). Solo is on both hosts (C8).
+- **D3.** The mirror and its setter are gone. `follows_mute` is an input of `controls::effective`
+  and the committed model is the shadow. A toggle writes the cell only.
+- **D5 (the acked-batch question), made exact.** Before the first write, the commit checks that
+  each seven-word record goes to a seven-word producer, and that its `automated` bits equal the
+  producer's plan. Any mismatch is `CommandError::Internal`, before any write, so no ack precedes a
+  drop.
+- **Watermark.** The path is `live` (`monitor` for solo), with the existing rule. The strip's
+  terms write (#1651) and the route's cell write of one transaction share one stamp and one block
+  snapshot, so they apply in the same block. No `TransitionFallback` is set.
+- **FP (R17-7).** `route_values` runs inside the guards that R17-7 put at the commit entry and the
+  preparation entry. No new guard.
+
+**Gates (fixes).**
+- Gate 2 runs on both hosts (solo is on the C ABI too): `hosts/host-web/tests/control_parity.rs`.
+- Gate 1 also runs in host-core at `Backend::Simd8` (`cfg(target_feature = "avx2")`) and
+  `Backend::Simd4`, with the `Scalar` oracle: the classifier's records written through the
+  producers (`crates/host-core/tests/live_routes.rs`).
+- Gate 3, rewritten for OQ1 = C: a `follows_mute` toggle gives one seven-word record and no folded
+  record; a hand mute on the automated lane gives #1651's terms write and one seven-word record; a
+  hand mute on the other lane gives that lane's `Mute` record and one seven-word record; a route
+  gain edit gives one seven-word record with the new transform; a terms change while
+  `follows_mute` is off gives one seven-word record; an edit that leaves every word unchanged
+  gives nothing. The same cases pass through the in-place path: add a session with a mute entry
+  and a following send to `crates/host-core/tests/support/edit_sessions.rs`.
+
+**Authorized paths after the check.**
+- `crates/host-core/src/prepare.rs` (`route_record_between`'s branch only; after #1652),
+  `crates/host-core/src/live_delta.rs`, `crates/host-core/src/route_controls.rs`,
+  `crates/host-core/src/lib.rs` (re-exports only).
+- `crates/host-core/tests/live_delta.rs`, `crates/host-core/tests/live_routes.rs`,
+  `crates/host-core/tests/support/edit_sessions.rs`.
+- `crates/control-plane/src/control.rs` (the route write and its pre-write check).
+- `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/tests/control_parity.rs`,
+  `hosts/host-web/src/tests.rs`.
+- No render code and no path under `crates/engine/src/realtime/`.
