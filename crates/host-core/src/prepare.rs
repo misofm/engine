@@ -3502,8 +3502,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let strip_delay_carry_bytes =
         graph::strip_delay_carry_retained_bytes(strip_delay_carry.moves.len())
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    let route_carry_bytes = graph::route_carry_retained_bytes(route_carry.moves.len())
-        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    let route_carry_bytes = graph::route_carry_retained_bytes(
+        route_carry.moves.len(),
+        route_carry
+            .moves
+            .iter()
+            .filter(|step| step.predecessor_follows)
+            .count(),
+    )
+    .ok_or_else(|| resource("host.resource.arithmetic"))?;
     // The effect moves' table and payload scratch are charged at their exact size, against the
     // same cap as the rest of the plan, and the scratch is one allocation (#1279 D3).
     // The carried slots of the successor lanes the moves name are allocated with the table, and
@@ -5810,16 +5817,19 @@ fn resolve_route_carry<'a>(
     let row = |rows: &[graph::GraphLiveRoute], id: &str| {
         rows.binary_search_by(|row| (*row.route_id).cmp(id))
             .ok()
-            .map(|index| rows[index].unit)
+            .map(|index| (rows[index].unit, rows[index].following))
     };
     let mut carry = RouteCarry::default();
     for join in joins {
-        let (Some(before), Some(after)) = (row(predecessor, join.id), row(own, join.id)) else {
+        let (Some((before, follows)), Some((after, _))) =
+            (row(predecessor, join.id), row(own, join.id))
+        else {
             continue;
         };
         carry.moves.push(graph::GraphRouteMove {
             successor: after,
             predecessor: before,
+            predecessor_follows: follows,
         });
         if let Some(record) = join.retarget {
             carry.retargets.push((join.id, record));
@@ -6564,6 +6574,7 @@ mod tests {
         let live = |route: &str, unit| graph::GraphLiveRoute {
             route_id: route.into(),
             unit,
+            following: false,
         };
         let before = [live("a-main", 3), live("b-main", 5)];
         let own = [live("a-main", 4), live("b-main", 2), live("c-main", 9)];
@@ -6598,10 +6609,12 @@ mod tests {
                 graph::GraphRouteMove {
                     successor: 4,
                     predecessor: 3,
+                    predecessor_follows: false,
                 },
                 graph::GraphRouteMove {
                     successor: 2,
                     predecessor: 5,
+                    predecessor_follows: false,
                 },
             ]
         );
