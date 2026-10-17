@@ -3131,9 +3131,10 @@ where
         // 2a. Each route's producer, by route ID (#1557 D4): a binary search over the canonical
         // route-ID order, among the six-word producers for a folded record and among the
         // seven-word ones for a following route's record (#1653 D1). A record for a route with no
-        // producer of its kind, or a seven-word record whose `automated` bits differ from the
-        // plan's (render takes them from its own cursors), is an internal fault, found before the
-        // first write, so no ack precedes a drop (#1653 D5).
+        // producer of its kind, or a seven-word record whose automated set (flags bits 4-11: the
+        // source lanes and the route rows, #1654 D2) differs from the plan's (render takes it from
+        // its own cursors), is an internal fault, found before the first write, so no ack
+        // precedes a drop (#1653 D5).
         let route_lanes = &mut strips.routes;
         let follow_lanes = &mut strips.follow_routes;
         let mut resolved_routes = Vec::new();
@@ -3149,9 +3150,7 @@ where
                     host_core::route_producer_position(route_lanes, route.route_id)
                 }
                 host_core::SendRecord::Following(record) => {
-                    host_core::follow_route_producer_position(follow_lanes, route.route_id).filter(
-                        |&index| follow_lanes[index].automated() == record.flags().automated,
-                    )
+                    host_core::follow_route_producer_for(follow_lanes, route.route_id, &record)
                 }
             };
             let Some(index) = index else {

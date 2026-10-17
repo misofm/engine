@@ -479,3 +479,64 @@ Sizes (x86-64, measured): `RouteFollowFlags` 6 -> 12 bytes, `FollowRouteControlR
 the bind charge) 352 -> 360. Charges read `size_of`, so no pinned number moved. Realtime policy: 170
 marked regions in 34 files (168 before: `GraphRouteJumpLengths::for_row` and `route_gain_law` added;
 host-core's jump-rule region replaced in place).
+
+## Decision record: T4 (batch 19)
+
+Preparation, records and the classifier; no render code (`crates/graph/src/runtime.rs` and
+`crates/automation` untouched). What shipped:
+
+- **Program.** `prepare_fader_automation` appends the route cells after every mute cell, in
+  `model.routes` order (routes into a submix only) and row order: rows 1 and 3-6 with
+  `FADER_CELL_RULE`, row 2 with `MUTE_CELL_RULE`. A session without route automation builds the
+  same program. New `PreparedBuiltinsSession::route_cells(route_id) -> Option<(Arc<Program>,
+  [Option<u32>; 6])>`. A refusal at a route cell is `host.automation.route` (each table now
+  carries its own code).
+- **Predicate.** `following_route_lanes` returns `Option<graph::RouteAutomatedSet>` (new graph
+  type: flags bits 4-5 `lanes`, bits 6-11 `rows`): `Some` when the route goes into a submix and
+  its source mute or any route row 1-6 is automated. `follows_automated_mute` follows it, so the
+  #1713 flag and the `LocalDiff` follower scan widen with no code of their own.
+- **Attach and seed.** The attach reads the source's mute cells and the route's cells (one
+  program, checked against the set), builds the flags with the new `follow_route_flags` (bits
+  6-11 from the set; both "#1654 T2" literals gone) and seeds the row 1 hand offset through the
+  new `GraphFollowRouteSource::with_gain_offset` (`gain_offset()` reads it; `+0.0` by default).
+- **Records.** `follow_route_record(route, terms, automated, gain_offset, length)` writes the
+  offset in word 0 when bit 6 is set. `follow_route_record_between` takes the offsets
+  `[before, after]` (`route_gain_offset`, the view's row 1 entry, so the in-place path reads the
+  edited entry, R17-1) and compares only the words render hears: an automated matrix word is
+  masked, so a hand edit of an automated matrix row gives no record (`model_only`, D4). The ramp
+  of an offset change is `SendGain` (the edit's own length when given).
+- **Classifier.** A send automation edit is step 3 (`LiveRebuild::Automation`); a hand gain move
+  on an automated send is one seven-word record over `SendGain`; an un-automated row of an
+  automated send (gain, matrix, mute) writes the seven-word cell (D6), never the folded form.
+- **Join.** `RouteJoin::continued_rows` (`controls::continued_route_rows`) reaches the move as the
+  new `GraphRouteMove::continued_rows: [bool; 6]`, for T3's carry.
+- **Commit.** `GraphFollowRouteControlProducer::automated()` returns the whole bound set;
+  `RouteFollowFlags::automated_set()`; new `host_core::follow_route_producer_for`, which the
+  pre-write check in `control.rs` now calls (whole set before any write, D9).
+
+Departures: the pre-write refusal is gated at the helper (`follow_route_producer_for`) and the
+producer's write count, not through a commit: a valid session cannot produce a disagreeing set.
+`docs/SESSION_SCHEMA_V1.md` is not touched here (T5 or the docs tranche).
+
+Gates: `builtins-compiler` `the_route_cells_follow_the_mute_cells_in_the_one_program`; `graph`
+`follow_route_tests::the_automated_set_is_bits_4_to_11_and_only_an_automated_gain_takes_a_seed_offset`;
+host-core `tests/live_delta.rs` `a_send_automation_edit_is_a_rebuild`,
+`a_sends_hand_edits_lower_its_offset_and_its_unautomated_rows_only` (offset word, flags, lengths,
+`model_only` matrix, D6, fast path equal), `a_route_row_send_binds_its_set_and_the_commit_refuses_another`,
+and the join's `continued_rows` pass-through in `prepare.rs`'s route-carry unit test;
+control-plane `tests/send_automation_realtime.rs`
+`a_send_with_stored_row_automation_renders_allocation_free` (live, model_only, live, live; zero
+allocations); capi `a_hand_move_on_an_automated_send_gain_commits_alike_in_place_and_full` and
+`removing_a_sends_only_route_entry_reports_a_fallback` (#1713 flag on a route-row-only send);
+host-web `a_hand_move_on_an_automated_send_gain_is_an_offset_alike_on_both_hosts` (R17-1, both
+hosts). Realtime policy 170 regions in 34 files (unchanged).
+
+Sizes (x86-64, measured): `GraphFollowRouteSource` 112 (unchanged, the offset fills padding),
+`GraphRouteMove` 12 -> 16 (control side only; the render step `RouteCarryStep` is unchanged),
+`GraphFollowRouteControlProducer` 88, `RouteAutomatedSet` 8, `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 360
+(unchanged).
+
+For T3/T5: the route op must read `source.gain_offset()` as the seeded `gain` word when bit 6 is
+set (the bound transform's `gain` is the compiler's linear static gain) and
+`GraphRouteMove::continued_rows` for the carry. A route-row-only send now binds the seven-word
+lane with no source cells, and renders with the old (static) route op until T3 lands.

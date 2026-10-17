@@ -152,7 +152,7 @@ pub use prepare::{
     LiveRampRow, LiveRamps, MAXIMUM_VCA_REACH_PAIRS, MAXIMUM_VCAS_BOUNDED, MonitorBase,
     NO_OBSERVATION, PlanStateInventory, PreparedHost, SOURCE_STALL_TOLERANCE_MS, SendRecord,
     SourceInventoryRow, SuccessorBase, check_counts, compile_host_model, compile_host_session,
-    count_effects, default_source_ring_frames, effect_producer_position,
+    count_effects, default_source_ring_frames, effect_producer_position, follow_route_producer_for,
     follow_route_producer_position, jump_length_retained_bytes, pair_carried_meters,
     pair_carried_observations, parse_host_session, prepare_host_runtime,
     prepare_host_runtime_between_render_calls, prepare_host_runtime_successor,

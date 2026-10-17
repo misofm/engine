@@ -6095,3 +6095,108 @@ fn solo_and_a_vca_mute_compose_with_the_curve_for_a_following_send_on_both_hosts
         }
     }
 }
+
+/// #1654 T4: [`follow_model`]`(false, false)` (no source mute curve) with the send `t1-b` riding
+/// its `gain_db` (route row 1) linearly from 0 to -12 dB over the run, and `change` applied: a
+/// route-row-only send, which the plan gives the seven-word cell.
+#[cfg(feature = "test-support")]
+fn send_ride_model(change: impl FnOnce(&mut SessionModel)) -> SessionModel {
+    let mut model = follow_model(false, false);
+    model.automation.push(session::Automation {
+        id: id("t1-b-gain-ride"),
+        target: address(
+            Owner::Route(id("t1-b")),
+            Section::Own,
+            1,
+            ParameterChannel::Both,
+        ),
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: u64::from(QUANTUM) * BLOCKS,
+            start_value: 0.0,
+            end_value: -12.0,
+            unit: session::ParameterUnit::Db,
+        }],
+        offset: session::AutomationOffset::default(),
+    });
+    change(&mut model);
+    model
+}
+
+/// #1654 R17-6 and root's ruling R17-1 on both hosts. On `t1-b`, whose `gain_db` stored entry
+/// renders, `SET_CONTROL gain_db = +3` is `live` alike on both hosts, one revision, with one
+/// reply; the committed document stores `+3` as the entry's offset on both fields and keeps the
+/// static gain. The in-place leg commits in place on both hosts; the same transaction by the full
+/// path (`control_plane::test_force_full_preparation`) gives the same reply, document and bits of
+/// every block, alike on both hosts.
+///
+/// Test value: red if the in-place path answers or renders otherwise than the full path for the
+/// send gain (an owners model without the route entry writes the static gain or commits
+/// `model_only`), or if the two hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_hand_move_on_an_automated_send_gain_is_an_offset_alike_on_both_hosts() {
+    const EDIT: u64 = 4;
+    const END: u64 = 20;
+    let model = send_ride_model(|_| {});
+    let mut expected = send_ride_model(|model| {
+        model.automation[0].offset = session::AutomationOffset {
+            left_db: 3.0,
+            right_db: 3.0,
+        };
+    });
+    expected.revision = model.revision + 1;
+    let edits = [own_edit(Owner::Route(id("t1-b")), 1, 3.0)];
+    let leg = |label: &str| {
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..EDIT, label);
+        let (b, reply) = browser.transaction_reply(&edits);
+        let (c, c_reply) = c_abi.transaction(&edits);
+        assert_eq!(b, c, "{label}: one verdict");
+        assert_eq!(reply, c_reply, "{label}: one reply");
+        assert_eq!(
+            b,
+            Verdict::Applied {
+                path: EditPath::Live,
+                revision: model.revision + 1
+            },
+            "{label}: a hand move is live"
+        );
+        let committed = snapshot_bytes(|payload, expected| browser.command(payload, expected));
+        let blocks: Vec<Vec<u32>> = (EDIT..END)
+            .map(|block| {
+                let (b, c) = (browser.step(block), c_abi.step(block));
+                assert_eq!(b, c, "{label}: block {block} alike on both hosts");
+                b
+            })
+            .collect();
+        (reply, committed, blocks)
+    };
+    control_plane::test_take_in_place_counts();
+    let in_place = leg("in place");
+    assert_eq!(
+        control_plane::test_take_in_place_counts(),
+        (2, 0),
+        "both hosts commit the hand move in place"
+    );
+    assert_eq!(
+        in_place.1,
+        canonical_session_json(&expected)
+            .expect("canonical")
+            .as_bytes(),
+        "the entry stores +3 on both fields and the static gain stays"
+    );
+    control_plane::test_force_full_preparation(true);
+    let full = leg("full path");
+    control_plane::test_force_full_preparation(false);
+    assert_eq!(
+        control_plane::test_take_in_place_counts().0,
+        0,
+        "the full leg commits nothing in place"
+    );
+    assert_eq!(full.0, in_place.0, "one reply on both paths");
+    assert_eq!(full.1, in_place.1, "one document");
+    assert_eq!(full.2, in_place.2, "the same bits on both paths");
+}

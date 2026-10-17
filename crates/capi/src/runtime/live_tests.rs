@@ -11523,3 +11523,189 @@ fn an_edit_of_a_following_route_is_live() {
         );
     }
 }
+
+/// #1654 T4: [`follow_document`]`(false, false)` (no source mute curve) with the send `eq0-b`
+/// riding its `gain_db` linearly from 0 to -12 dB over the source: a route-row-only send, which
+/// the plan gives the seven-word cell.
+fn send_ride_document() -> String {
+    with_model(&follow_document(false, false), |model| {
+        model.automation.push(session::Automation {
+            id: StableId::parse("send-gain").expect("automation ID"),
+            target: session::ControlAddress {
+                owner: session::Owner::Route(StableId::parse("eq0-b").expect("route ID")),
+                section: session::Section::Own,
+                control: 1,
+                lane: session::ParameterChannel::Both,
+            },
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: SOURCE_FRAMES,
+                start_value: 0.0,
+                end_value: -12.0,
+                unit: session::ParameterUnit::Db,
+            }],
+            offset: session::AutomationOffset::default(),
+        });
+    })
+}
+
+/// The send `eq0-b`'s `gain_db` row (route row 1), set to `db`.
+fn send_gain_edit(db: f32) -> SessionEdit {
+    use protocol::control_core::{Lane, Owner, Section, row_address};
+    SessionEdit::set_control(
+        row_address(
+            Owner::Route(StableId::parse("eq0-b").expect("route ID")),
+            Section::Own,
+            "gain_db",
+            Lane::Both,
+        )
+        .expect("the send gain row"),
+        db,
+        None,
+    )
+}
+
+/// #1654 R17-6 and root's ruling R17-1 on the C ABI. On a send whose `gain_db` stored entry
+/// renders, `SET_CONTROL gain_db = +3` is `live`, one revision on the same plan, one write of the
+/// send's seven-word cell; the committed document stores `+3` as the entry's offset on both
+/// fields and keeps the static gain. The in-place leg commits in place; the same transaction by
+/// the full path gives the same reply, document, cell writes and bits, and no render block of
+/// either leg allocates or frees.
+///
+/// Test value: red if the in-place path answers otherwise than the full path for the send gain
+/// (an owners model with no route entry reads the row as not automated and writes the static
+/// gain, or commits `model_only`), or if the move is not one seven-word write.
+#[test]
+fn a_hand_move_on_an_automated_send_gain_commits_alike_in_place_and_full() {
+    bench_support::alloc::assert_installed();
+    struct Leg {
+        reply: Vec<u8>,
+        committed: String,
+        writes: Vec<u64>,
+        blocks: Vec<Vec<u32>>,
+    }
+    let before = send_ride_document();
+    let leg = |label: &str| {
+        let mut rig = Rig::new(&before);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (revision, _, epoch, pending) = rig.summary();
+        let bytes = rig.transaction(&[send_gain_edit(3.0)]);
+        let (result, reply) = rig.send(&bytes);
+        assert_eq!(result, crate::RESULT_OK, "{label}");
+        assert_eq!(edit_path_of(&reply), protocol::EditPath::Live, "{label}");
+        assert_eq!(
+            (rig.summary().0, rig.summary().2, rig.summary().3),
+            (revision + 1, epoch, pending),
+            "{label}: one revision, the same plan, no candidate"
+        );
+        let writes = rig.current_follow_route_cells();
+        let committed = rig.snapshot();
+        let blocks = (0..12)
+            .map(|_| {
+                let (pcm, used) = rig.step_counted();
+                assert_eq!(
+                    (used.allocations, used.deallocations),
+                    (0, 0),
+                    "{label}: a render block allocated or freed"
+                );
+                bits(&pcm)
+            })
+            .collect();
+        Leg {
+            reply,
+            committed,
+            writes,
+            blocks,
+        }
+    };
+    control_plane::test_take_in_place_counts();
+    let in_place = leg("in place");
+    assert_eq!(
+        control_plane::test_take_in_place_counts(),
+        (1, 0),
+        "the hand move commits in place"
+    );
+    assert_eq!(in_place.writes, vec![1], "one seven-word cell write");
+    let model = parse_session_json(&in_place.committed).expect("model");
+    let entry = model
+        .automation
+        .iter()
+        .find(|entry| entry.id.as_str() == "send-gain")
+        .expect("the ride");
+    assert_eq!(
+        (
+            entry.offset.left_db.to_bits(),
+            entry.offset.right_db.to_bits()
+        ),
+        (3.0_f32.to_bits(), 3.0_f32.to_bits()),
+        "the entry stores the move on both fields"
+    );
+    let send = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "eq0-b")
+        .expect("the send");
+    assert_eq!(
+        send.gain_db.to_bits(),
+        0.0_f32.to_bits(),
+        "the static gain stays"
+    );
+
+    control_plane::test_force_full_preparation(true);
+    let full = leg("full path");
+    control_plane::test_force_full_preparation(false);
+    assert_eq!(control_plane::test_take_in_place_counts().0, 0);
+    assert_eq!(full.reply, in_place.reply, "one reply on both paths");
+    assert_eq!(full.committed, in_place.committed, "one document");
+    assert_eq!(full.writes, in_place.writes, "one cell write");
+    assert_eq!(full.blocks, in_place.blocks, "the same bits on both paths");
+}
+
+/// #1654 and the #1713 flag. A rebuild that removes the only route entry of a route-row-only send
+/// (seven words -> six) completes as the transition fallback (`OUTCOME_TRANSITION_FALLBACK`,
+/// count 1), with no code of its own: the join reads the plan's widened `following`.
+///
+/// Test value: red if a route-row-only send is not a following route in the plan's live routes
+/// (its seven -> six carry then completes exact while its ramp may be re-timed).
+#[test]
+fn removing_a_sends_only_route_entry_reports_a_fallback() {
+    let mut rig = Rig::new(&send_ride_document());
+    for _ in 0..8 {
+        rig.step();
+    }
+    assert_eq!(
+        rig.current_follow_route_cells(),
+        vec![0],
+        "one seven-word send"
+    );
+    let bytes = rig.transaction(&[SessionEdit::RemoveAutomation {
+        automation_id: StableId::parse("send-gain").expect("automation ID"),
+    }]);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+    let revision = rig.summary().0;
+    for _ in 0..4 {
+        rig.step();
+    }
+    assert_eq!(rig.summary().3, 0, "the successor is adopted");
+    assert_eq!(
+        rig.current_follow_route_cells(),
+        Vec::<u64>::new(),
+        "the send is six-word again"
+    );
+    let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        (
+            watermark.revision,
+            watermark.outcome_flags,
+            watermark.transition_fallback_count
+        ),
+        (revision, crate::OUTCOME_TRANSITION_FALLBACK, 1),
+        "the rebuild's revision, outcome flags and transition-fallback count"
+    );
+}
