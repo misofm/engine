@@ -1445,6 +1445,10 @@ pub struct GraphFollowRouteControlProducer {
     activity_bytes: u64,
     /// The largest single allocation of that table, or `0` with it.
     activity_largest: u64,
+    /// The route-activity table's activation offsets (#1652 MAJOR-1): one `u32` per prepared
+    /// route, which bind allocates only for a plan with a following route, so the compile-time
+    /// estimate never charges it. The same for every producer of one attach.
+    activity_offset_bytes: u64,
 }
 
 impl GraphFollowRouteControlProducer {
@@ -1483,7 +1487,8 @@ impl GraphFollowRouteControlProducer {
 
 /// One following route's binding and producer over one fresh seven-word cell (#1652 D1), reading
 /// `source` (#1652b). `activity_bytes` and `activity_largest` are the attach's route-activity charge, as for a
-/// six-word producer.
+/// six-word producer; `activity_routes` is the plan's prepared route count, whose activation
+/// offsets bind allocates for a plan with a following route (#1652 MAJOR-1).
 #[cfg_attr(not(test), expect(dead_code, reason = "called by #1652c route attach"))]
 pub(crate) fn follow_route_control_pair(
     route_id: &StableGraphId,
@@ -1491,6 +1496,7 @@ pub(crate) fn follow_route_control_pair(
     source: GraphFollowRouteSource,
     activity_bytes: u64,
     activity_largest: u64,
+    activity_routes: u64,
 ) -> (
     GraphFollowRouteControlBinding,
     GraphFollowRouteControlProducer,
@@ -1518,6 +1524,8 @@ pub(crate) fn follow_route_control_pair(
             writer: engine::realtime::CellWriter::new(),
             activity_bytes,
             activity_largest,
+            activity_offset_bytes: runtime::route_activity_offset_bytes(activity_routes)
+                .unwrap_or(u64::MAX),
         },
     )
 }
@@ -1652,6 +1660,15 @@ pub fn route_control_resources(
     let (activity_bytes, activity_largest) = activity.fold((0, 0), |(bytes, largest), next| {
         (bytes.max(next.0), largest.max(next.1))
     });
+    // #1652 MAJOR-1: the activation offsets bind adds to the table for a plan with a following
+    // route; charged once, with the table.
+    let offsets = following
+        .iter()
+        .map(|producer| producer.activity_offset_bytes)
+        .max()
+        .unwrap_or(0);
+    let activity_bytes = activity_bytes.saturating_add(offsets);
+    let activity_largest = activity_largest.max(offsets);
     if six > 0 {
         largest = largest
             .max(lane)
@@ -3913,12 +3930,13 @@ struct GraphExecutor {
     /// (and never allocated) when no strip delay line carries.
     carry_strip_delays: Box<[GraphStripDelayMove]>,
     /// The live-send section of the hand-over (#1284 D2), sorted by predecessor unit; empty (and
-    /// never allocated) when no live route carries. Each move holds the comparison a six-word
-    /// successor of a following predecessor leaves for its first block (#1652 D3).
+    /// never allocated) when no live route carries.
     carry_routes: Box<[runtime::RouteCarryStep]>,
-    /// Some move of `carry_routes` left a comparison for the first block after the swap (#1652
-    /// D3); taken by that block.
-    route_carry_pending: bool,
+    /// The side table of the moves whose predecessor row is a following route (#1652 D3,
+    /// MINOR-3): the comparisons a six-word successor of a following predecessor leaves for its
+    /// first block. `None` (never allocated) when no such move exists, so a session without
+    /// stored mute automation keeps its bytes.
+    route_checks: Option<Box<RouteCarryChecks>>,
     /// The identity of every strip delay line and live route, read once by
     /// [`take_strip_delay_lines`] and [`take_live_routes`] right after bind and empty afterwards:
     /// a plan retains none of it.
@@ -4871,6 +4889,9 @@ pub struct GraphLiveRoute {
     /// The route's runtime unit in this plan. Meaningful only to this plan's successor's carry
     /// program, which names it as the route to take.
     pub unit: u32,
+    /// Whether the route is a following route (#1652 D1): a successor's move from this row
+    /// carries [`GraphRouteMove::predecessor_follows`].
+    pub following: bool,
 }
 
 impl GraphLiveRoute {
@@ -4889,6 +4910,9 @@ pub struct GraphRouteMove {
     pub successor: u32,
     /// The route's unit in the plan the successor displaces.
     pub predecessor: u32,
+    /// Whether the predecessor's row is a following route ([`GraphLiveRoute::following`]): the
+    /// move then gets a slot in the section's side table (#1652 D3, MINOR-3).
+    pub predecessor_follows: bool,
 }
 
 /// The strip delay lines of a bound graph plan, in line order (#1284 D1); `None` for any other
@@ -4974,11 +4998,31 @@ pub fn install_route_carry(
         }
     }
     moves.sort_unstable_by_key(|step| step.predecessor);
+    let slots: Box<[runtime::RouteCarryCheck]> = moves
+        .iter()
+        .zip(0_u32..)
+        .filter(|(step, _)| step.predecessor_follows)
+        .map(|(_, index)| runtime::RouteCarryCheck::new(index))
+        .collect();
+    executor.route_checks = (!slots.is_empty()).then(|| {
+        Box::new(RouteCarryChecks {
+            slots,
+            pending: false,
+        })
+    });
     executor.carry_routes = moves
         .into_iter()
         .map(runtime::RouteCarryStep::new)
         .collect();
     Ok(())
+}
+
+/// The side table of a live-send section (#1652 D3, MINOR-3): one slot per move whose
+/// predecessor row is a following route, in move order, and whether the swap block left a
+/// comparison in one of them for the successor's first block.
+pub(crate) struct RouteCarryChecks {
+    slots: Box<[runtime::RouteCarryCheck]>,
+    pending: bool,
 }
 
 /// The bytes a strip-delay section of `moves` lines retains in its plan (#1284): its move table.
@@ -4990,11 +5034,20 @@ pub fn strip_delay_carry_retained_bytes(moves: usize) -> Option<u64> {
 }
 
 /// The bytes a live-send section of `moves` routes retains in its plan (#1284, #1652 D3): its move
-/// table, each move with its first-block comparison slot. `None` on overflow; spelled once, as
-/// [`strip_delay_carry_retained_bytes`].
+/// table and, when `following` of its moves have a following route as their predecessor row, its
+/// side table of first-block comparison slots (MINOR-3; nothing with `following == 0`). `None` on
+/// overflow; spelled once, as [`strip_delay_carry_retained_bytes`].
 #[must_use]
-pub fn route_carry_retained_bytes(moves: usize) -> Option<u64> {
-    u64::try_from(moves.checked_mul(core::mem::size_of::<runtime::RouteCarryStep>())?).ok()
+pub fn route_carry_retained_bytes(moves: usize, following: usize) -> Option<u64> {
+    let table = moves.checked_mul(core::mem::size_of::<runtime::RouteCarryStep>())?;
+    let checks = if following == 0 {
+        0
+    } else {
+        following
+            .checked_mul(core::mem::size_of::<runtime::RouteCarryCheck>())?
+            .checked_add(core::mem::size_of::<RouteCarryChecks>())?
+    };
+    u64::try_from(table.checked_add(checks)?).ok()
 }
 
 /// The session timeline's sample at `source_read_sample` in a graph plan's source set (#1641 D8):
@@ -5051,8 +5104,14 @@ pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
                 delay_carry_retained_bytes(executor.carry_delays.len()).unwrap_or(u64::MAX);
             let strip_delays = strip_delay_carry_retained_bytes(executor.carry_strip_delays.len())
                 .unwrap_or(u64::MAX);
-            let routes =
-                route_carry_retained_bytes(executor.carry_routes.len()).unwrap_or(u64::MAX);
+            let routes = route_carry_retained_bytes(
+                executor.carry_routes.len(),
+                executor
+                    .route_checks
+                    .as_deref()
+                    .map_or(0, |checks| checks.slots.len()),
+            )
+            .unwrap_or(u64::MAX);
             sources
                 .saturating_add(delays)
                 .saturating_add(strip_delays)
@@ -5230,7 +5289,7 @@ struct GraphExecutorWithoutSplitPairTable {
     compensation_lines: Vec<GraphDelayLine>,
     carry_strip_delays: Box<[GraphStripDelayMove]>,
     carry_routes: Box<[runtime::RouteCarryStep]>,
-    route_carry_pending: bool,
+    route_checks: Option<Box<RouteCarryChecks>>,
     bind_identities: runtime::BindIdentities,
     live_snapshot: Option<LiveSnapshot>,
     jump_lengths: Option<Box<JumpLengthReader>>,
@@ -5357,7 +5416,7 @@ impl GraphExecutor {
             compensation_lines,
             carry_strip_delays: Box::default(),
             carry_routes: Box::default(),
-            route_carry_pending: false,
+            route_checks: None,
             bind_identities,
             live_snapshot: None,
             jump_lengths: None,
@@ -5406,6 +5465,26 @@ impl PreparedPlanExecutor for GraphExecutor {
         if predecessor.identity != program.predecessor {
             return CarryOutcome::PredecessorMismatch;
         }
+        // #1652 MINOR-2: a predecessor displaced before its own first block still holds the
+        // comparisons its carry left. Take them first, as that block would have (under every
+        // snapshot and its held jump lengths, as the carry applies pending values), so this
+        // plan carries the state the predecessor's next block would have rendered from. (Not
+        // gated in graph: two swaps with a following route need host-core's attach, #1652c; the
+        // host-core carry tranche gates it.)
+        if let Some(checks) = predecessor.route_checks.as_deref_mut()
+            && core::mem::take(&mut checks.pending)
+        {
+            let lengths = predecessor
+                .jump_lengths
+                .as_deref()
+                .map(|reader| reader.held);
+            predecessor.runtime.finish_route_carry(
+                &predecessor.carry_routes,
+                &mut checks.slots,
+                LiveSnapshot::ALL,
+                lengths,
+            );
+        }
         // Issue #1276: every builtin-input move must resolve before anything moves, so a refused
         // hand-over moves nothing at all.
         if !self
@@ -5448,9 +5527,13 @@ impl PreparedPlanExecutor for GraphExecutor {
         if !self
             .runtime
             .can_carry_strip_delays(&predecessor.runtime, &self.carry_strip_delays)
-            || !self
-                .runtime
-                .can_carry_live_routes(&predecessor.runtime, &self.carry_routes)
+            || !self.runtime.can_carry_live_routes(
+                &predecessor.runtime,
+                &self.carry_routes,
+                self.route_checks
+                    .as_deref()
+                    .map_or(&[][..], |checks| &checks.slots[..]),
+            )
         {
             return CarryOutcome::PredecessorMismatch;
         }
@@ -5475,9 +5558,16 @@ impl PreparedPlanExecutor for GraphExecutor {
             .carry_delay_lines(&mut predecessor.runtime, &self.carry_delays);
         self.runtime
             .carry_strip_delays(&mut predecessor.runtime, &self.carry_strip_delays);
-        self.route_carry_pending = self
-            .runtime
-            .carry_live_routes(&mut predecessor.runtime, &mut self.carry_routes);
+        let mut no_checks = [];
+        let checks = self.route_checks.as_deref_mut();
+        let pending = self.runtime.carry_live_routes(
+            &mut predecessor.runtime,
+            &self.carry_routes,
+            checks.map_or(&mut no_checks[..], |checks| &mut checks.slots[..]),
+        );
+        if let Some(checks) = self.route_checks.as_deref_mut() {
+            checks.pending = pending;
+        }
         let refused = self.runtime.carry_effect_lanes(
             &mut predecessor.runtime,
             &self.carry_effects,
@@ -5602,7 +5692,7 @@ impl PreparedPlanExecutor for GraphExecutor {
             compensation_lines: _,
             carry_strip_delays: _,
             carry_routes,
-            route_carry_pending,
+            route_checks,
             bind_identities: _,
             live_snapshot,
             jump_lengths,
@@ -5678,8 +5768,15 @@ impl PreparedPlanExecutor for GraphExecutor {
         );
         // #1652 D3: a six-word successor of a following predecessor compares at its first block,
         // under this block's snapshot and jump lengths, before its op runs.
-        if core::mem::take(route_carry_pending) {
-            runtime.finish_route_carry(carry_routes, live, block_time.jump_lengths());
+        if let Some(checks) = route_checks.as_deref_mut()
+            && core::mem::take(&mut checks.pending)
+        {
+            runtime.finish_route_carry(
+                carry_routes,
+                &mut checks.slots,
+                live,
+                block_time.jump_lengths(),
+            );
         }
         // Issue #936: only the units bind found to do work. An inert unit's `execute` and
         // `observe_unit` return at once, so skipping it moves no bit.
@@ -10526,7 +10623,7 @@ mod follow_route_tests {
     fn the_producer_write_reaches_the_binding_under_the_published_revision() {
         let superseded = LiveValuesSuperseded::new();
         let (mut binding, mut producer) =
-            follow_route_control_pair(&route_id("send"), &superseded, one_lane_source(), 0, 0);
+            follow_route_control_pair(&route_id("send"), &superseded, one_lane_source(), 0, 0, 0);
         assert_eq!(&*producer.route_id, "send");
         assert_eq!(
             binding.node,
@@ -10584,6 +10681,10 @@ mod follow_route_tests {
     fn the_charge_counts_each_kind_its_own_bytes_and_the_activity_table_once() {
         let size = |bytes: usize| bytes as u64;
         let superseded = LiveValuesSuperseded::new();
+        /// The plan's prepared routes: their activation offsets join the activity charge
+        /// once, for a plan with a following route (#1652 MAJOR-1).
+        const ACTIVITY_ROUTES: u64 = 7;
+        let offsets = ACTIVITY_ROUTES * size(core::mem::size_of::<u32>());
         let activity = (4_096, 1_024);
         let six = [
             six_word_producer("a", activity),
@@ -10598,6 +10699,7 @@ mod follow_route_tests {
                     one_lane_source(),
                     activity.0,
                     activity.1,
+                    ACTIVITY_ROUTES,
                 )
                 .1
             })
@@ -10629,7 +10731,7 @@ mod follow_route_tests {
         assert_eq!(both.owner_bytes, 2 * six_owner + 3 * seven_owner);
         assert_eq!(both.producer_table_bytes, six_table + seven_table);
         assert_eq!(both.route_id_bytes, ids);
-        assert_eq!(both.activity_bytes, activity.0);
+        assert_eq!(both.activity_bytes, activity.0 + offsets);
         assert_eq!(
             both.total_bytes,
             2 * six_cell
@@ -10640,6 +10742,7 @@ mod follow_route_tests {
                 + seven_table
                 + ids
                 + activity.0
+                + offsets
         );
         assert!(both.largest_allocation_bytes >= seven_cell.max(activity.1));
 

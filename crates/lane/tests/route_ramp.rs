@@ -9,7 +9,10 @@
 #![allow(missing_docs)]
 
 use dsp_reference::class_a;
-use lane::kernels::{INDEXED_RAMP_LENGTH_MAXIMUM, IndexedRamp, mix2x2_block, route_mix_ramp_block};
+use lane::kernels::{
+    INDEXED_RAMP_LENGTH_MAXIMUM, IndexedRamp, mix2x2_block, route_mix_column_ramps_block,
+    route_mix_ramp_block,
+};
 use lane::{CanonicalFpEnv, Lane};
 
 /// The block lengths of every gate: whole vectors at every width, a tail, and a tail only.
@@ -356,4 +359,203 @@ fn settled_width<L: Lane>() {
 fn a_settled_ramp_is_the_static_mix() {
     let _canonical = CanonicalFpEnv::enter();
     lane::each_lane!(|L| settled_width::<L>());
+}
+
+/// The oracle of `route_mix_column_ramps_block`: column 0 (`ll`, `rl`) by `zero` at
+/// `k = positions[0] + f + 1`, column 1 (`lr`, `rr`) by `one` at `k = positions[1] + f + 1`, then
+/// the 2x2 mix in `mix2x2_block`'s order.
+fn render_columns(laws: [&Law; 2], left: &mut [f32], right: &mut [f32], positions: [u32; 2]) {
+    for (frame, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+        let frame = frame as u32;
+        let zero = laws[0].at(positions[0].saturating_add(frame).saturating_add(1));
+        let one = laws[1].at(positions[1].saturating_add(frame).saturating_add(1));
+        let [ll, _, rl, _] = zero;
+        let [_, lr, _, rr] = one;
+        let (l, r) = (*left, *right);
+        let (left_product, right_product) = (ll * l, rl * l);
+        *left = lr * r + left_product;
+        *right = rr * r + right_product;
+    }
+}
+
+fn shared_width<L: Lane>() {
+    let mut rng = Rng(0x0007_a110_fc01_u64);
+    for case in 0..96 {
+        let start: [f32; 4] = core::array::from_fn(|_| rng.coefficient());
+        let target: [f32; 4] = core::array::from_fn(|_| rng.coefficient());
+        let length = match case % 4 {
+            0 => 0,
+            1 => 1 + rng.next_u32() % 64,
+            2 => 1 + rng.next_u32() % 6000,
+            _ => INDEXED_RAMP_LENGTH_MAXIMUM - rng.next_u32() % 300,
+        };
+        let ramp = IndexedRamp::new(start, target, length);
+        for frames in BLOCKS {
+            let back = rng.next_u32() % 300;
+            for position in [0, 1, length.saturating_sub(back), length] {
+                let (left, right) = planes(&mut rng, frames, case);
+                let (mut got_left, mut got_right) = (left.clone(), right.clone());
+                let (mut want_left, mut want_right) = (left, right);
+                route_mix_column_ramps_block::<L>(
+                    &mut got_left,
+                    &mut got_right,
+                    &[ramp; 2],
+                    [position; 2],
+                );
+                route_mix_ramp_block::<L>(&mut want_left, &mut want_right, &ramp, position);
+                let label = format!(
+                    "width {}, case {case}, length {length}, {frames} frames at {position}",
+                    L::WIDTH
+                );
+                assert_same(
+                    &label,
+                    "left",
+                    &got_left,
+                    &want_left,
+                    "route_mix_ramp_block",
+                );
+                assert_same(
+                    &label,
+                    "right",
+                    &got_right,
+                    &want_right,
+                    "route_mix_ramp_block",
+                );
+            }
+        }
+        // Two settled columns of different targets: the static mix of the two targets, which is
+        // what a prepared route (and the six-word kernel's settled ramp) of those targets mixes.
+        let other: [f32; 4] = core::array::from_fn(|_| rng.coefficient());
+        let composite = [target[0], other[1], target[2], other[3]];
+        let ramps = [ramp, IndexedRamp::new(start, other, length / 2)];
+        for frames in BLOCKS {
+            let (left, right) = planes(&mut rng, frames, case + 1);
+            let (mut got_left, mut got_right) = (left.clone(), right.clone());
+            let (mut want_left, mut want_right) = (left.clone(), right.clone());
+            let (mut static_left, mut static_right) = (left, right);
+            route_mix_column_ramps_block::<L>(
+                &mut got_left,
+                &mut got_right,
+                &ramps,
+                [length, length / 2],
+            );
+            route_mix_ramp_block::<L>(
+                &mut want_left,
+                &mut want_right,
+                &IndexedRamp::settled(composite),
+                0,
+            );
+            mix2x2_block::<f32>(&mut static_left, &mut static_right, composite);
+            let label = format!("width {}, case {case}, settled, {frames} frames", L::WIDTH);
+            assert_same(
+                &label,
+                "left",
+                &got_left,
+                &want_left,
+                "route_mix_ramp_block",
+            );
+            assert_same(
+                &label,
+                "right",
+                &got_right,
+                &want_right,
+                "route_mix_ramp_block",
+            );
+            assert_same(&label, "left", &got_left, &static_left, "mix2x2_block");
+            assert_same(&label, "right", &got_right, &static_right, "mix2x2_block");
+        }
+    }
+}
+
+/// #1652 R18-5 gate: with one ramp in both columns at one position, the column-ramp kernel is the
+/// six-word kernel bit for bit (lengths 0 to `2^22`, from the start, mid-ramp near the snap and
+/// settled); with two settled columns it is `mix2x2_block` of the two targets, the static mix a
+/// prepared route of those targets runs. At every width.
+///
+/// Test value: red if the column kernel splits its parts differently from the six-word kernel
+/// (a frame computed instead of assigned at the snap), reads a coefficient from the wrong
+/// column's ramp, or settles by its own law instead of `mix2x2_block`'s.
+#[test]
+fn equal_column_ramps_are_the_six_word_kernel_and_settled_ones_the_static_mix() {
+    let _canonical = CanonicalFpEnv::enter();
+    lane::each_lane!(|L| shared_width::<L>());
+}
+
+fn columns_width<L: Lane>() {
+    let mut rng = Rng(0x0c01_0000_5eed_u64);
+    let cases = [
+        // (length 0, length 1, position 0, position 1): the left column ends first, the right
+        // first, one settled throughout, both ending in one vector, and a long and a short ramp.
+        (48, 78, 0, 30),
+        (78, 48, 30, 0),
+        (0, 4800, 0, 17),
+        (5, 6, 0, 0),
+        (37, 4800, 2, 4795),
+        (
+            INDEXED_RAMP_LENGTH_MAXIMUM,
+            13,
+            INDEXED_RAMP_LENGTH_MAXIMUM - 129,
+            0,
+        ),
+    ];
+    for (case, (length_zero, length_one, position_zero, position_one)) in
+        cases.into_iter().enumerate()
+    {
+        let starts: [[f32; 4]; 2] =
+            core::array::from_fn(|_| core::array::from_fn(|_| rng.coefficient()));
+        let targets: [[f32; 4]; 2] =
+            core::array::from_fn(|_| core::array::from_fn(|_| rng.coefficient()));
+        let ramps = [
+            IndexedRamp::new(starts[0], targets[0], length_zero),
+            IndexedRamp::new(starts[1], targets[1], length_one),
+        ];
+        let laws = [
+            Law::new(starts[0], targets[0], length_zero),
+            Law::new(starts[1], targets[1], length_one),
+        ];
+        for frames in BLOCKS {
+            let mut positions = [position_zero, position_one];
+            for block in 0..6 {
+                let (left, right) = planes(&mut rng, frames, block);
+                let (mut got_left, mut got_right) = (left.clone(), right.clone());
+                let (mut want_left, mut want_right) = (left, right);
+                route_mix_column_ramps_block::<L>(&mut got_left, &mut got_right, &ramps, positions);
+                render_columns(
+                    [&laws[0], &laws[1]],
+                    &mut want_left,
+                    &mut want_right,
+                    positions,
+                );
+                let label = format!(
+                    "width {}, case {case}, {frames} frames, block {block} at {positions:?}",
+                    L::WIDTH
+                );
+                assert_same(&label, "left", &got_left, &want_left, "the column oracle");
+                assert_same(
+                    &label,
+                    "right",
+                    &got_right,
+                    &want_right,
+                    "the column oracle",
+                );
+                for (position, ramp) in positions.iter_mut().zip(&ramps) {
+                    *position = ramp.length.min(position.saturating_add(frames as u32));
+                }
+            }
+        }
+    }
+}
+
+/// #1652 R18-5 gate: two column ramps of different lengths and positions follow each column's
+/// own indexed law, equal to an independent scalar oracle per column, at every width: the left
+/// column ending before the right and after it, one column settled throughout, both ending in one
+/// vector, and a ramp at the `2^22` bound beside a short one.
+///
+/// Test value: red if a column takes the other column's index or length (the shared-ramp law),
+/// if the one-ramping part assigns the ramping column's target, or if a part's tail starts at the
+/// wrong frame index.
+#[test]
+fn each_column_follows_its_own_ramp() {
+    let _canonical = CanonicalFpEnv::enter();
+    lane::each_lane!(|L| columns_width::<L>());
 }

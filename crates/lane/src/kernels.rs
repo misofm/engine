@@ -1788,3 +1788,210 @@ fn route_mix_ramp_tail(left: &mut [f32], right: &mut [f32], ramp: &IndexedRamp, 
         *right = <f32 as Lane>::fma(rr, old_right, <f32 as Lane>::mul(rl, old_left));
     }
 }
+
+/// The 2x2 route mix of [`route_mix_ramp_block`] with one [`IndexedRamp`] per source column
+/// (#1652, root ruling R18-5): column 0 is the source's left input, coefficients `ll` and `rl`
+/// (indices 0 and 2), read from `ramps[0]` at `positions[0]`; column 1 is the source's right
+/// input, `lr` and `rr` (indices 1 and 3), read from `ramps[1]` at `positions[1]`. A ramp's
+/// entries of the other column are never read.
+///
+/// Frame `f` of the block takes ramp index `k_c = positions[c] + f + 1` in column `c`, and each
+/// coefficient follows [`IndexedRamp`]'s law exactly as [`route_mix_ramp_block`] computes it:
+/// `fma(k, step, start)` while `k < length`, `target` assigned from `k = length`. The frame is
+/// then mixed in [`mix2x2_block`]'s frozen order. The block splits by frame count, decided before
+/// any loop:
+///
+/// 1. the frames where both columns ramp;
+/// 2. the frames where only the column with the longer remaining ramp still ramps (the other
+///    column's coefficients are its target, assigned);
+/// 3. the frames where both have settled: [`mix2x2_block`] with the two targets, unchanged.
+///
+/// Parts 1 and 2 run their whole vectors at `L` (the frame-index vectors and one `fma` per
+/// ramping coefficient, as [`route_mix_ramp_block`]) and their last frames in one outlined,
+/// non-generic `f32` function; part 3 is [`route_mix_ramp_block`]'s settled part. Every
+/// coefficient is a pure function of its column's index, so the result does not depend on the
+/// width, and with `ramps[0] == ramps[1]` and equal positions it is [`route_mix_ramp_block`] of
+/// that ramp bit for bit (the same parts, the same split, the same arithmetic). A route whose two
+/// columns have settled therefore mixes exactly what a prepared route of those targets mixes.
+///
+/// The caller advances each position by the block's length and saturates it at its own ramp's
+/// length. `#[inline(never)]` keeps every instantiation a named function.
+#[inline(never)]
+pub fn route_mix_column_ramps_block<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    ramps: &[IndexedRamp; 2],
+    positions: [u32; 2],
+) {
+    debug_assert_eq!(left.len(), right.len());
+    debug_assert!(
+        ramps
+            .iter()
+            .all(|ramp| ramp.length <= INDEXED_RAMP_LENGTH_MAXIMUM)
+    );
+    // Both planes cut to the shorter one, as in `route_mix_ramp_block`: no index below can fail.
+    let count = core::cmp::min(left.len(), right.len());
+    let (left, right) = (&mut left[..count], &mut right[..count]);
+    // Column `c` ramps for its first `length - position - 1` frames.
+    let ramping = |c: usize| {
+        let frames = ramps[c]
+            .length
+            .saturating_sub(positions[c])
+            .saturating_sub(1);
+        core::cmp::min(count, frames as usize)
+    };
+    let ramping = [ramping(0), ramping(1)];
+    let both = core::cmp::min(ramping[0], ramping[1]);
+    let either = core::cmp::max(ramping[0], ramping[1]);
+    let (left_both, left_rest) = left.split_at_mut(both);
+    let (right_both, right_rest) = right.split_at_mut(both);
+    let (left_one, left_settled) = left_rest.split_at_mut(either - both);
+    let (right_one, right_settled) = right_rest.split_at_mut(either - both);
+    column_ramps_part::<L, true, true>(left_both, right_both, ramps, positions, 0);
+    if ramping[0] > ramping[1] {
+        column_ramps_part::<L, true, false>(left_one, right_one, ramps, positions, both);
+    } else {
+        column_ramps_part::<L, false, true>(left_one, right_one, ramps, positions, both);
+    }
+    let target = [
+        ramps[0].target[0],
+        ramps[1].target[1],
+        ramps[0].target[2],
+        ramps[1].target[3],
+    ];
+    let settled = left_settled.len();
+    let settled_vectored = settled - settled % L::WIDTH;
+    let (left_vectors, left_tail) = left_settled.split_at_mut(settled_vectored);
+    let (right_vectors, right_tail) = right_settled.split_at_mut(settled_vectored);
+    mix2x2_block::<L>(left_vectors, right_vectors, target);
+    if !left_tail.is_empty() {
+        route_mix_settled_tail(left_tail, right_tail, target);
+    }
+}
+
+/// One part of [`route_mix_column_ramps_block`]: frames `first..first + left.len()` of the block,
+/// column 0 ramping when `RAMP0` and column 1 when `RAMP1` (otherwise at its target, assigned).
+/// The whole vectors run at `L`; the last frames go to [`route_mix_column_ramps_tail`].
+#[inline(always)]
+fn column_ramps_part<L: Lane, const RAMP0: bool, const RAMP1: bool>(
+    left: &mut [f32],
+    right: &mut [f32],
+    ramps: &[IndexedRamp; 2],
+    positions: [u32; 2],
+    first: usize,
+) {
+    let count = core::cmp::min(left.len(), right.len());
+    if count == 0 {
+        return;
+    }
+    let (left, right) = (&mut left[..count], &mut right[..count]);
+    let vectored = count - count % L::WIDTH;
+    let (left_vectors, left_tail) = left.split_at_mut(vectored);
+    let (right_vectors, right_tail) = right.split_at_mut(vectored);
+    // A ramping column's frames have `k < length <= 2^22`, so `position + first` is exact.
+    let first = u32::try_from(first).unwrap_or(u32::MAX);
+    let base = positions.map(|position| position.saturating_add(first));
+    let (zero, one) = (&ramps[0], &ramps[1]);
+    let step = [
+        L::splat(zero.step[0]),
+        L::splat(one.step[1]),
+        L::splat(zero.step[2]),
+        L::splat(one.step[3]),
+    ];
+    let start = [
+        L::splat(zero.start[0]),
+        L::splat(one.start[1]),
+        L::splat(zero.start[2]),
+        L::splat(one.start[3]),
+    ];
+    let target = [
+        L::splat(zero.target[0]),
+        L::splat(one.target[1]),
+        L::splat(zero.target[2]),
+        L::splat(one.target[3]),
+    ];
+    let advance = L::splat(L::WIDTH as f32);
+    let offsets = L::load(&FRAME_INDEX_OFFSETS[..L::WIDTH]);
+    let mut index = [
+        L::splat(base[0] as f32).add(offsets),
+        L::splat(base[1] as f32).add(offsets),
+    ];
+    for (left, right) in left_vectors
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right_vectors.chunks_exact_mut(L::WIDTH))
+    {
+        let (ll, rl) = if RAMP0 {
+            (
+                index[0].fma(step[0], start[0]),
+                index[0].fma(step[2], start[2]),
+            )
+        } else {
+            (target[0], target[2])
+        };
+        let (lr, rr) = if RAMP1 {
+            (
+                index[1].fma(step[1], start[1]),
+                index[1].fma(step[3], start[3]),
+            )
+        } else {
+            (target[1], target[3])
+        };
+        let old_left = L::load(left);
+        let old_right = L::load(right);
+        lr.fma(old_right, ll.mul(old_left)).store(left);
+        rr.fma(old_right, rl.mul(old_left)).store(right);
+        if RAMP0 {
+            index[0] = index[0].add(advance);
+        }
+        if RAMP1 {
+            index[1] = index[1].add(advance);
+        }
+    }
+    if !left_tail.is_empty() {
+        let vectored = u32::try_from(vectored).unwrap_or(u32::MAX);
+        route_mix_column_ramps_tail(
+            left_tail,
+            right_tail,
+            ramps,
+            base.map(|base| base.saturating_add(vectored).saturating_add(1)),
+            [RAMP0, RAMP1],
+        );
+    }
+}
+
+/// The frames of a [`route_mix_column_ramps_block`] part that do not fill a vector: the same
+/// arithmetic at `f32`, column `c`'s frame `f` at ramp index `first[c] + f` when `ramping[c]`,
+/// at its target otherwise. Non-generic and never inlined, so no vector instantiation carries a
+/// scalar ramp body (the #926 lesson, as [`route_mix_ramp_block`]'s tails).
+#[inline(never)]
+fn route_mix_column_ramps_tail(
+    left: &mut [f32],
+    right: &mut [f32],
+    ramps: &[IndexedRamp; 2],
+    first: [u32; 2],
+    ramping: [bool; 2],
+) {
+    let (zero, one) = (&ramps[0], &ramps[1]);
+    let coefficient = |ramp: &IndexedRamp, ramps: bool, at: usize, k: u32| {
+        if ramps {
+            // Exact: `k < length <= 2^22`.
+            <f32 as Lane>::fma(k as f32, ramp.step[at], ramp.start[at])
+        } else {
+            ramp.target[at]
+        }
+    };
+    for ((left, right), frame) in left.iter_mut().zip(right.iter_mut()).zip(0_u32..) {
+        let k = [
+            first[0].saturating_add(frame),
+            first[1].saturating_add(frame),
+        ];
+        let ll = coefficient(zero, ramping[0], 0, k[0]);
+        let rl = coefficient(zero, ramping[0], 2, k[0]);
+        let lr = coefficient(one, ramping[1], 1, k[1]);
+        let rr = coefficient(one, ramping[1], 3, k[1]);
+        let old_left = *left;
+        let old_right = *right;
+        *left = <f32 as Lane>::fma(lr, old_right, <f32 as Lane>::mul(ll, old_left));
+        *right = <f32 as Lane>::fma(rr, old_right, <f32 as Lane>::mul(rl, old_left));
+    }
+}

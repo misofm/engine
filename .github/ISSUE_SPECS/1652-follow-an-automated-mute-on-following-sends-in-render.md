@@ -423,6 +423,9 @@ Tranche R2: the following route op in render. All in `crates/graph`; no attach, 
   it not muted-settled. An inactive block commits the copies. No change in such a block retargets,
   because every silencing target is `[+0.0; 4]`. A route that unmutes at `o` mixes the whole
   block; `[0, o)` mixes the silent coefficients, which can contribute only a signed zero.
+  *Corrected by U2a fold 1 (MAJOR-1):* that signed zero reached the destination (`-0.0` where the
+  block split at `o` gives `+0.0`). The route op now reports its activation offset `o`, and the
+  destination leaves the route out of `[0, o)`; see the fold record below.
 - **Choices.** (1) Events of both lanes at one offset compose once; the length is 0 when one of
   them is a `Set` (a seek is exact). (2) The `mute` flag follows every composition; only the
   coefficients' bits decide a retarget. (3) The jump length is clamped to
@@ -431,7 +434,11 @@ Tranche R2: the following route op in render. All in `crates/graph`; no attach, 
   event changes no curve.
 - **R18-4 (root).** No `TransitionFallback` for a route edit. A route retargets only on its own
   curve's jump or on its own cell's record, so no carried live move is stretched or cut by a
-  rebuild, and B17-R14's window reads no route.
+  rebuild, and B17-R14's window reads no route. *Withdrawn for routes by R18-5 (U2a fold 1):* with
+  one shared ramp, a gate change of one source column restarted the whole ramp, so an open
+  column's move was re-timed (MAJOR-2) and per-lane events closer than `J` stretched the earlier
+  column (MINOR-1). Per-column ramps make the reason true: a gate change retargets its own column
+  only, so no other column's move is stretched or cut.
 - **Owner bytes (x86-64).** `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 96 -> 296 (cursors, spans, program
   `Arc`, arrival, rule); `GraphFollowRouteControlBinding` 64 -> 112 (`GraphFollowRouteSource` 48).
   Both are charged by `size_of`. `LIVE_ROUTE_OWNER_BYTES` stays 72.
@@ -497,9 +504,13 @@ later tranche (after #1653).
   amendment's "every six-word route keeps its bytes"): the check lives in the carry section's move
   table, `carry_routes: Box<[RouteCarryStep]>` (move + `Option<SixWordCarryCheck>`, about 40 bytes
   on x86-64 against 8 before), allocated by `install_route_carry` on the control thread and charged
-  by `route_carry_retained_bytes`, the one place the charge is spelled. The executor and its layout
+  by `route_carry_retained_bytes`, the one place the charge is spelled. *Corrected by U2a fold 1
+  (MINOR-3):* `RouteCarryStep` is back to 8 bytes; the checks live in a side table. The executor and its layout
   twin gain one `route_carry_pending: bool`.
-- **No `TransitionFallback` (R18-4).** The carry never stretches or cuts a move. A carried ramp
+- **No `TransitionFallback` (R18-4; reason corrected by R18-5, U2a fold 1).** With per-column
+  ramps the reason below holds column by column: a carried column whose target bits do not change
+  keeps its own ramp, length and position, whatever the other column does. The carry never
+  stretches or cuts a move. A carried ramp
   whose target bits do not change keeps its own ramp and length. A changed target is either the
   join's record (its own rule and length, as at any block entry) or the curve's own jump at the
   successor's node time over the session mute length, which an uninterrupted plan would make at a
@@ -533,3 +544,86 @@ later tranche (after #1653).
   (b) red; carried comparison as a step -> six->seven (b) red; six-word comparison missing ->
   seven->six red. Six -> six carry keeps today's code path; `host-core` `route_mute` (9) and
   `live_routes` (13) pass.
+
+## Decision record: U2a fold 1 (batch 18)
+
+Fold of the U2a review (FAIL at `3d063f0ed`) under root ruling R18-5 (option (b), per-column
+ramps). Files: `crates/graph/src/{lib.rs,runtime.rs}`, `crates/lane/src/kernels.rs` (one entry),
+`crates/lane/tests/route_ramp.rs`; mechanical caller update in `crates/host-core/src/prepare.rs`.
+
+- **MAJOR-1 (activation offset).** `RouteActivity` gains `from: Box<[u32]>`, one offset per route,
+  allocated at bind only for a plan that binds a following route (empty otherwise).
+  `LiveFollowRoute::begin_block` returns `Option<u32>`: `None` inactive, `Some(o)` mixes from `o`
+  (`Some(0)` when active at entry). `execute_op` writes the bit and the offset each block.
+  `reduce_gated` / `reduce_gated_into` reduce the destination over frame ranges cut at the active
+  routes' offsets: a route counts on a range only from its offset on, so `[0, o)` leaves it out and
+  `[o, q)` sums it. With no offset inside the block the whole block is one range (same segments,
+  same kernels). The reduction kernels take a frame range (`get`/`get_mut`, no new trap). The
+  offsets are charged in `route_control_resources` through the following producers
+  (`activity_offset_bytes`, one `u32` per prepared route, once per plan).
+- **MAJOR-2 / MINOR-1 (R18-5).** `LiveFollowRoute` holds `ColumnRamps`: one `IndexedRamp` and
+  position per source column (left: `ll`, `rl`; right: `lr`, `rr`). A retarget changes only a
+  column whose target bits change, from the coefficients it is at. A column's new ramp holds the
+  target in the other column's entries, so only its own entries decide ramp or step. New kernel
+  `lane::kernels::route_mix_column_ramps_block<L>`: three parts (both columns ramp, one ramps, both
+  settled = `mix2x2_block` of the two targets), vector body at `L` (simd128 / NEON / AVX2) and one
+  outlined non-generic `f32` tail, as `route_mix_ramp_block`. With one ramp in both columns at one
+  position it is `route_mix_ramp_block` bit for bit. A settled following route therefore mixes the
+  static six-word plan's bits. Six-word routes are untouched (code, bytes, bits).
+- **MAJOR-3 (carried record order).** `LiveFollowRoute::adopt` takes the predecessor's column
+  ramps, mute and heard curve (`[false; 2]` from a six-word predecessor). On the carried first
+  block, `FollowCursors::block` seeds the cursors at `τ_tap` but returns the placed curve. The cell
+  applies first, composed with the heard curve, over its own length; then the placed curve composes
+  and each changed column retargets over `J`. Seven -> six: the side-table check carries the
+  columns the heard curve zeroed. `finish_six_word_carry` applies a record composed with them
+  (`LiveRoute::apply_pending_heard`), then reopens to the record's own target over `J` on a bits
+  change; with no record, to the prepared target as before. The check is left whenever the bits
+  differ or the heard curve zeroes a column.
+- **MINOR-2.** `adopt_predecessor` first runs the predecessor's pending comparisons
+  (`finish_route_carry` under `LiveSnapshot::ALL` and its held jump lengths) when that
+  predecessor was displaced before its first block. Not gated in graph (two swaps with a following
+  route need #1652c's attach). Proof comment at the call; the host-core carry tranche gates it.
+- **MINOR-3.** `RouteCarryStep` is `{ successor, predecessor }` (8 B, as before #1652d). The checks
+  live in `GraphExecutor::route_checks: Option<Box<RouteCarryChecks>>`: one `RouteCarryCheck`
+  per move whose predecessor row is a following route (`GraphLiveRoute::following` ->
+  `GraphRouteMove::predecessor_follows`). `None` when no such move exists.
+  `can_carry_live_routes` refuses a seven -> six move without its slot.
+  `route_carry_retained_bytes(moves, following)` charges both.
+- **NIT-1.** Recorded at `FollowCursors::block`: with no jump lengths or no node span the block has
+  no events, nothing is placed and the curve holds. A fresh route keeps its bind seed. A carried
+  route keeps the predecessor's heard curve, and with no lengths its compare is a step (`J = 0`).
+  Production plans always attach both.
+- **Departures / limits.** (1) A six-word successor holds one ramp, so the seven -> six cases are
+  not per column. A record whose heard-curve composition differs from it reopens the whole route
+  over `J`, and the record's open columns take `J`, not `R`. Predecessor columns in different moves
+  become one ramp from where they are to the composite target over the longer remaining length
+  (`ColumnRamps::one_ramp`), which re-times the shorter move. (2) A route that opens inside a block
+  and is muted again by a seek's `Set` in the same block still sums `[set, q)` (no end offset).
+  (3) A column's ramp steps on a non-finite difference of its own entries only; the shared law
+  stepped all four. (4) `GraphRouteMove` and `GraphLiveRoute` gain one public field each.
+  host-core's join, its charge call and one unit test are updated mechanically
+  (`crates/host-core/src/prepare.rs`).
+- **Measured (x86-64).** `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 296 -> 352 (`ColumnRamps` 112). `RouteCarryStep`
+  40 -> 8. `RouteCarryCheck` 40 and `RouteCarryChecks` 24 (side table, automation sessions only).
+  `SixWordCarryCheck` 32. `RouteActivity` 64 -> 80: the `from` box header, in every plan with a
+  live route, charged by `size_of` in `route_activity_bound_bytes`. `LIVE_ROUTE_OWNER_BYTES` 72
+  (unchanged). Realtime policy: 167 marked regions (166 at base; one new region for `ColumnRamps`).
+- **Gates (all pass).** `crates/graph/src/runtime.rs` `follow_route_op_tests::carry::fold`:
+  `an_opening_route_is_left_out_of_its_destination_before_its_offset` (MAJOR-1, through
+  `execute_op`, negative feeds, `o` in {1, 63, 64, 127}, sole / first / second input);
+  `an_open_columns_move_keeps_its_length_across_a_gate_changing_carry` (MAJOR-2);
+  `per_lane_steps_thirty_samples_apart_each_end_with_the_mute_length` (MINOR-1);
+  `a_carried_record_composes_with_the_heard_curve_then_the_curve_jumps` (MAJOR-3, seven-word);
+  `a_six_word_successors_record_composes_with_the_heard_curve_then_reopens` (MAJOR-3, six-word).
+  `crates/lane/tests/route_ramp.rs`:
+  `equal_column_ramps_are_the_six_word_kernel_and_settled_ones_the_static_mix` and
+  `each_column_follows_its_own_ramp` (`each_lane!`: `f32`, `Simd4`, `Simd8` under avx2). Existing
+  #1652b/#1652d cases now expect per-column retargets (gate 3's reference keeps an unchanged
+  column's ramp; six -> seven (b) keeps the right column's move).
+- **Red checks (temporary mutations, reverted).** No offset written -> MAJOR-1 red. M2 (drop
+  `set_active` for `LiveFollowRoute`) -> MAJOR-1 red. One shared ramp (any change restarts both
+  columns) -> MAJOR-2, MINOR-1, MAJOR-3 seven-word, gate 3 and six -> seven red. Curve placed
+  before the record -> MAJOR-3 seven-word red. Record governs alone in `finish_six_word_carry`
+  (the pre-fold code) -> MAJOR-3 six-word red. M1 analogue (drop the `return` after the record)
+  -> MAJOR-3 six-word red. Kernel: right column read from the left ramp -> `each_column...` red.
+  The one-ramping part assigning the ramping column's target -> `each_column...` red.
