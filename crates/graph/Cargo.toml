@@ -14,7 +14,8 @@ test-support = ["rack/test-support"]
 
 [dependencies]
 # The route op of a following send evaluates its source strip's stored mute curves with the
-# plan's own cursors (#1652 D2): graph cannot reach them through builtins-compiler.
+# plan's own cursors (#1652 D2). automation is a leaf crate; graph never depends on the strip
+# compiler that also uses it.
 automation.workspace = true
 engine.workspace = true
 effect-contract.workspace = true
