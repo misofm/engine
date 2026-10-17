@@ -395,3 +395,65 @@ No render behaviour: no route op evaluation, no attach, no carry.
   `the_charge_counts_each_kind_its_own_bytes_and_the_activity_table_once`; all pass. The six-word
   charge stays held by graph-compiler's `route_control_resources_cover_the_allocation`. The
   realtime policy reports 164 marked regions (main: 160; four new).
+
+## Decision record: #1652b (batch 18)
+
+Tranche R2: the following route op in render. All in `crates/graph`; no attach, no carry.
+
+- **Shipped (`crates/graph/src/lib.rs`).** `GraphMuteJumpLength = fn(GraphJumpLengths) -> u32`, the
+  mute row's rule host-core hands in, so graph never spells the row. `GraphFollowRouteSource` (the
+  plan's `Arc<automation::Program>`, `cells[L, R]`, `a(tap)`, the jump rule, the seeded flags);
+  `new` refuses no automated lane, a cell outside the program and `flags.automated` that disagree
+  with `cells`. `GraphFollowRouteControlBinding` gains `source`, and `follow_route_control_pair`
+  takes it. A plan field `follow_route_controls` (empty until #1652c's attach) goes to bind.
+- **Render (`crates/graph/src/runtime.rs`).** `LiveFollowRoute::new` seeds each automated lane's
+  `CellState` with its curve's first `start_value` and settles the ramp on
+  `gated_route_coefficients(transform, flags.gate(curve))`, with the plan's `automated`.
+  `NodeKind::LiveFollowRoute`. `node_kind` takes a following lane before a six-word lane; both
+  planning-metadata forms count it as a live route (it never folds); bind gives it its activity
+  index and `delayed` flag. `begin_block`: read the cell; compose with the curve the route has
+  heard; retarget over the record's ramp only on a bits change; take the block's spans from
+  `node_span(a(tap))` (a fresh route's first block lands a `Set` at 0 where the curve differs from
+  the seed, as the strip's fresh lane); then decide activity. `mix`: walk both lanes'
+  `CellEvents` (`SeekMode::Exact`) in offset order, compose at each offset, and retarget only on a
+  bits change: mix `[from, o)`, `IndexedRamp::new(coefficients_at(position), target, J or 0)`,
+  continue. The six-word `LiveRoute` and its arm are unchanged.
+- **Activity (exact).** Active when the route is not muted-settled-undelayed at entry. Otherwise
+  a dry walk over copies of the cursors (`CellState` is `Copy`) finds out whether some change leaves
+  it not muted-settled. An inactive block commits the copies. No change in such a block retargets,
+  because every silencing target is `[+0.0; 4]`. A route that unmutes at `o` mixes the whole
+  block; `[0, o)` mixes the silent coefficients, which can contribute only a signed zero.
+- **Choices.** (1) Events of both lanes at one offset compose once; the length is 0 when one of
+  them is a `Set` (a seek is exact). (2) The `mute` flag follows every composition; only the
+  coefficients' bits decide a retarget. (3) The jump length is clamped to
+  `ROUTE_RAMP_LENGTH_MAXIMUM`. (4) With no timeline, no jump-length cell, or a span at the `i64`
+  edge, the block has no events and the curve holds (the fader driver's rule). (5) A held grid
+  event changes no curve.
+- **R18-4 (root).** No `TransitionFallback` for a route edit. A route retargets only on its own
+  curve's jump or on its own cell's record, so no carried live move is stretched or cut by a
+  rebuild, and B17-R14's window reads no route.
+- **Owner bytes (x86-64).** `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 96 -> 296 (cursors, spans, program
+  `Arc`, arrival, rule); `GraphFollowRouteControlBinding` 64 -> 112 (`GraphFollowRouteSource` 48).
+  Both are charged by `size_of`. `LIVE_ROUTE_OWNER_BYTES` stays 72.
+- **Gates (`crates/graph/src/runtime.rs` `follow_route_op_tests`, all pass).** Gate 3:
+  `a_retarget_inside_the_block_equals_the_block_split_at_its_offset` (o in {1, 63, 64, 127} at
+  q = 128, {1, 63, 64, 99} at q = 100, against a kernel-level split reference and against the op
+  run as two blocks); `a_route_inactive_at_block_entry_that_unmutes_inside_the_block_mixes_the_rest`;
+  `the_event_lands_where_the_tap_carries_the_curve_sample` (`a(tap) = 64`);
+  `an_event_that_changes_no_target_bit_retargets_nothing`;
+  `a_seek_sets_the_target_exactly_where_it_reaches_the_tap`;
+  `the_bound_target_composes_the_curves_first_values`. In `lib.rs` `follow_route_tests`:
+  `the_source_refuses_no_lane_a_missing_cell_and_disagreeing_flags`. Red checks (temporary
+  mutations, reverted): retarget from the target or from the ramp's start -> gate 3 red; events
+  timed at arrival 0 -> the tap case red; activity decided at entry -> the unmute case red; always
+  active -> the same case red; no bits guard -> the guard case red; a seek ramping over `J` -> the
+  seek case red. None depends on a bank width (the route op mixes at `FrameLane`).
+- **Realtime policy.** 165 marked regions (164 before; one new: the cursors, the walk, the block
+  entry and the mix). `follow_route_control_pair` keeps its dead-code expect until #1652c.
+- **For #1652c (attach).** Pass `GraphFollowRouteSource::new(program, cells, a(tap), rule,
+  flags)`: the program and the two mute cell indices from #1651's export; `a(tap) =
+  floored_input_arrival(report.input_arrivals, route node)`; rule = a non-capturing
+  `|l| LiveRamps::from_lengths(l.fader_samples, l.mute_samples, l.pan_samples).for_row(LiveRampRow::Mute)`;
+  the seeded flags (route mute, `follows_mute`, `terms` from `controls::effective`, `automated ==
+  cells`). Fill `follow_route_controls`, leave those routes out of `route_controls`, and charge
+  them. The carry (`live_route_rows`, `carry_live_routes`, D3) does not list following routes yet.

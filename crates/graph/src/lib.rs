@@ -894,6 +894,9 @@ pub struct PreparedGraphPlan {
     /// [`attach_route_controls`](Self::attach_route_controls) runs. `None` and an empty list both
     /// bind every route op to its prepared constants, exactly as a plan without the field did.
     route_controls: Option<Vec<GraphRouteControlBinding>>,
+    /// #1652b: one seven-word lane per route into a submix whose source strip has an automated
+    /// mute lane. Empty until #1652c's attach fills it, so every route binds as it did before.
+    follow_route_controls: Vec<GraphFollowRouteControlBinding>,
     banks: Vec<GraphPreparedEffectBank>,
     builtin_banks: Vec<GraphPreparedBuiltinBank>,
     observers: Vec<GraphNodeObserverBinding>,
@@ -1327,7 +1330,6 @@ impl FollowRouteControlLane {
     /// snapshot` and that this reader has not applied, or `None`. An idle cell costs one
     /// `Relaxed` load. When it applies sequence `s` after `p`, the `s - p - 1` writes it replaced
     /// join the session's `live_values_superseded` (#1312 D2). Allocation-free and lock-free.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by #1652b route op"))]
     pub(crate) fn read(&mut self, snapshot: LiveSnapshot) -> Option<FollowRouteControlRecord> {
         if self.dirty.pending(&self.lane.dirty) & 1 == 0 {
             return None;
@@ -1352,13 +1354,83 @@ impl FollowRouteControlLane {
 }
 // REALTIME_POLICY_END
 
+/// The length, in samples, of one jump of a stored mute curve, resolved from the block's three
+/// session lengths (#1652b). Host-core hands in the row rule (`controls::LiveRamps::from_lengths`
+/// and `for_row(LiveRampRow::Mute)`, the rule the strip's mute stage uses), so graph never spells
+/// the mute row and the strip ramp and the send ramp cannot differ in length.
+pub type GraphMuteJumpLength = fn(GraphJumpLengths) -> u32;
+
+/// What one following route reads of its source strip's stored mute (#1652 D2, #1652b): the plan's
+/// immutable automation program, the source lanes' mute cells in it, the arrival `a(tap)` of the
+/// route's tap, the mute row's jump length and the seeded flags word.
+///
+/// The program is the one the strip's own stage reads (an `Arc` clone, no copy); the route keeps
+/// its own cursors over it, so two readers of one table never share state. `a(tap)` is the route
+/// node's floored input arrival (`floored_input_arrival` of the compile report's
+/// `input_arrivals`): a route op reads its one undelayed input before its consumer's compensation
+/// delay. Only [`Self::new`] builds one, so every cell it names is in its program.
+#[derive(Clone)]
+pub struct GraphFollowRouteSource {
+    pub(crate) program: std::sync::Arc<automation::Program>,
+    pub(crate) cells: [Option<u32>; 2],
+    pub(crate) arrival: u64,
+    pub(crate) mute_jump: GraphMuteJumpLength,
+    pub(crate) flags: RouteFollowFlags,
+}
+
+impl GraphFollowRouteSource {
+    /// The source of a following route: `cells[lane]` is the source lane's mute cell in
+    /// `program`, `None` for a lane the plan does not automate; `arrival` is `a(tap)`;
+    /// `mute_jump` resolves the mute row's jump length; `flags` is the seeded flags word.
+    ///
+    /// `None` when no lane is automated (the route keeps the six-word cell), when a cell is not in
+    /// `program`, or when `flags.automated` disagrees with `cells` (the plan fixes which lanes
+    /// are automated, D1).
+    #[must_use]
+    pub fn new(
+        program: std::sync::Arc<automation::Program>,
+        cells: [Option<u32>; 2],
+        arrival: u64,
+        mute_jump: GraphMuteJumpLength,
+        flags: RouteFollowFlags,
+    ) -> Option<Self> {
+        let automated = cells.map(|cell| cell.is_some());
+        let in_program = cells
+            .iter()
+            .flatten()
+            .all(|&cell| program.cell(cell as usize).is_some());
+        (automated != [false; 2] && in_program && flags.automated == automated).then_some(Self {
+            program,
+            cells,
+            arrival,
+            mute_jump,
+            flags,
+        })
+    }
+
+    /// `a(tap)`, the arrival the route's events are timed at.
+    #[must_use]
+    pub const fn arrival(&self) -> u64 {
+        self.arrival
+    }
+
+    /// The seeded flags word.
+    #[must_use]
+    pub const fn flags(&self) -> RouteFollowFlags {
+        self.flags
+    }
+}
+
 /// One following route's lane, carried beside the prepared routes as
-/// [`GraphRouteControlBinding`] is (#1652 D1).
+/// [`GraphRouteControlBinding`] is (#1652 D1), with what its route op reads of the source strip's
+/// stored mute (#1652b).
 pub struct GraphFollowRouteControlBinding {
     /// The route node this lane drives.
     pub node: GraphNodeId,
     /// Reader half of the seven-word cell; the writer stays on the control plane.
     pub control: Box<FollowRouteControlLane>,
+    /// The source strip's mute cells, `a(tap)`, the jump length and the seeded flags.
+    pub source: GraphFollowRouteSource,
 }
 
 /// The control-plane half of one following route's seven-word cell (#1652 D1): the counterpart of
@@ -1409,13 +1481,14 @@ impl GraphFollowRouteControlProducer {
     }
 }
 
-/// One following route's binding and producer over one fresh seven-word cell (#1652 D1).
-/// `activity_bytes` and `activity_largest` are the attach's route-activity charge, as for a
+/// One following route's binding and producer over one fresh seven-word cell (#1652 D1), reading
+/// `source` (#1652b). `activity_bytes` and `activity_largest` are the attach's route-activity charge, as for a
 /// six-word producer.
 #[cfg_attr(not(test), expect(dead_code, reason = "called by #1652c route attach"))]
 pub(crate) fn follow_route_control_pair(
     route_id: &StableGraphId,
     superseded: &engine::realtime::LiveValuesSuperseded,
+    source: GraphFollowRouteSource,
     activity_bytes: u64,
     activity_largest: u64,
 ) -> (
@@ -1437,6 +1510,7 @@ pub(crate) fn follow_route_control_pair(
                 dirty: engine::realtime::DirtyReader::new(),
                 superseded: superseded.clone(),
             }),
+            source,
         },
         GraphFollowRouteControlProducer {
             route_id: route_id.as_str().into(),
@@ -2769,6 +2843,7 @@ impl PreparedGraphPlan {
             effect_controls: parts.effect_controls,
             effect_observations: parts.effect_observations,
             route_controls: None,
+            follow_route_controls: Vec::new(),
             banks: parts.banks,
             builtin_banks: parts.builtin_banks,
             observers: parts.observers,
@@ -5214,7 +5289,8 @@ impl GraphExecutor {
             plan.track_delays,
             frames,
         )
-        .with_route_controls(plan.route_controls.unwrap_or_default());
+        .with_route_controls(plan.route_controls.unwrap_or_default())
+        .with_follow_route_controls(plan.follow_route_controls);
         // Issue #918: the claims a bank's gather may read in place, in claim order. Only a driver
         // that lends its played planes offers any, and `build_sequential` decides which of them
         // are bound in place.
@@ -10228,6 +10304,100 @@ mod follow_route_tests {
         StableGraphId::parse(value).expect("a route ID")
     }
 
+    /// The mute row's jump length of the tests: the session's `mute_ms` length.
+    pub(crate) fn mute_length(lengths: GraphJumpLengths) -> u32 {
+        lengths.mute_samples
+    }
+
+    /// A program of one mute-shaped cell per given lane (steps, completion `End`, block jump
+    /// length), and the source over it at `arrival`, following, with no other term.
+    pub(crate) fn mute_source(
+        lanes: [Option<&[automation::Segment]>; 2],
+        arrival: u64,
+    ) -> GraphFollowRouteSource {
+        let descriptions: Vec<_> = lanes
+            .iter()
+            .flatten()
+            .map(|segments| automation::CellDescription {
+                segments,
+                grid_ramp: 64,
+                grid: 64,
+                jump: automation::JumpLength::Block,
+                completion: automation::Completion::End,
+                no_restart: false,
+            })
+            .collect();
+        let program =
+            std::sync::Arc::new(automation::ProgramBuilder::build(&descriptions).expect("cells"));
+        let mut next = 0;
+        let cells = lanes.map(|lane| {
+            lane.map(|_| {
+                next += 1;
+                next - 1
+            })
+        });
+        let flags = RouteFollowFlags {
+            follows_mute: true,
+            automated: cells.map(|cell| cell.is_some()),
+            ..RouteFollowFlags::default()
+        };
+        GraphFollowRouteSource::new(program, cells, arrival, mute_length, flags)
+            .expect("a valid source")
+    }
+
+    /// A step curve: `values[i]` from `times[i]` on (the first value from the start).
+    pub(crate) fn steps(times: &[u64], values: &[f32], end: u64) -> Vec<automation::Segment> {
+        times
+            .iter()
+            .zip(values)
+            .enumerate()
+            .map(|(index, (&start, &value))| automation::Segment {
+                start,
+                end: times.get(index + 1).copied().unwrap_or(end),
+                start_value: value,
+                end_value: values.get(index + 1).copied().unwrap_or(value),
+                shape: automation::Shape::Step,
+            })
+            .collect()
+    }
+
+    /// A source refuses no automated lane, a cell outside its program and `automated` flags that
+    /// disagree with its cells.
+    ///
+    /// Test value: red if a route with no automated lane takes the seven-word render state, or if
+    /// render could look up a cell its program does not hold.
+    #[test]
+    fn the_source_refuses_no_lane_a_missing_cell_and_disagreeing_flags() {
+        let curve = steps(&[0, 128], &[0.0, 1.0], 4_096);
+        let source = mute_source([Some(&curve), None], 7);
+        assert_eq!(source.arrival(), 7);
+        let program = std::sync::Arc::clone(&source.program);
+        let flags = source.flags();
+        let new = |cells, flags| {
+            GraphFollowRouteSource::new(
+                std::sync::Arc::clone(&program),
+                cells,
+                0,
+                mute_length,
+                flags,
+            )
+            .is_some()
+        };
+        assert!(new([Some(0), None], flags));
+        assert!(!new([None, None], RouteFollowFlags::default()), "no lane");
+        assert!(!new([Some(1), None], flags), "a cell outside the program");
+        assert!(
+            !new(
+                [Some(0), None],
+                RouteFollowFlags {
+                    automated: [true, true],
+                    ..flags
+                }
+            ),
+            "flags that disagree"
+        );
+    }
+
     /// The layout: bit 0 mute, 1 follows_mute, 2-3 terms L/R, 4-5 automated L/R. Every one of the
     /// 64 defined words decodes to its fields and encodes back to itself; a word with any bit
     /// from 6 up set is refused.
@@ -10339,7 +10509,7 @@ mod follow_route_tests {
     fn the_producer_write_reaches_the_binding_under_the_published_revision() {
         let superseded = LiveValuesSuperseded::new();
         let (mut binding, mut producer) =
-            follow_route_control_pair(&route_id("send"), &superseded, 0, 0);
+            follow_route_control_pair(&route_id("send"), &superseded, one_lane_source(), 0, 0);
         assert_eq!(&*producer.route_id, "send");
         assert_eq!(
             binding.node,
@@ -10373,6 +10543,10 @@ mod follow_route_tests {
         );
     }
 
+    fn one_lane_source() -> GraphFollowRouteSource {
+        mute_source([Some(&steps(&[0], &[0.0], 64)), None], 0)
+    }
+
     fn six_word_producer(id: &str, activity: (u64, u64)) -> GraphRouteControlProducer {
         GraphRouteControlProducer {
             route_id: id.into(),
@@ -10401,7 +10575,14 @@ mod follow_route_tests {
         let seven: Vec<_> = ["ccc", "dddd", "eeeee"]
             .iter()
             .map(|id| {
-                follow_route_control_pair(&route_id(id), &superseded, activity.0, activity.1).1
+                follow_route_control_pair(
+                    &route_id(id),
+                    &superseded,
+                    one_lane_source(),
+                    activity.0,
+                    activity.1,
+                )
+                .1
             })
             .collect();
         let six_cell = size(core::mem::size_of::<

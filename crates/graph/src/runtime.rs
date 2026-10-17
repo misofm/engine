@@ -987,14 +987,17 @@ impl LiveRoute {
 
 // REALTIME_POLICY_END
 
-/// One following route's render state (#1652 D1): a route into a submix whose source strip has an
-/// automated mute lane. Its own type, boxed beside [`LiveRoute`], so a six-word route keeps its
-/// bytes ([`live_route_owner_bytes`]) and its bits.
+/// One following route's render state (#1652 D1, D2): a route into a submix whose source strip has
+/// an automated mute lane. Its own type, boxed beside [`LiveRoute`], so a six-word route keeps its
+/// bytes ([`live_route_owner_bytes`]), its code path and its bits.
 ///
 /// The ramp fields mean what [`LiveRoute`]'s do. `transform` and `flags` are the last applied
-/// cell words (or the prepared ones): render gates the open transform itself
-/// ([`crate::RouteFollowFlags::gate`]) at every curve event of the source's mute.
-#[expect(dead_code, reason = "bound and read by #1652b route op")]
+/// cell words (or the seeded ones): render gates the open transform itself
+/// ([`crate::RouteFollowFlags::gate`], [`gated_route_coefficients`]) at the block entry after its
+/// cell changes and at every event of the source lanes' stored mute curves, which it evaluates
+/// with its own cursors ([`FollowCursors`]) in the node time of its tap,
+/// `τ_tap(r) = timeline(r + ΣP - a(tap))`. Only a target whose bits change retargets: a new
+/// [`IndexedRamp`] from the coefficients the route is at.
 pub(crate) struct LiveFollowRoute {
     /// The current ramp; `ramp.coefficients_at(position)` are the last mixed frame's coefficients.
     ramp: IndexedRamp,
@@ -1008,10 +1011,365 @@ pub(crate) struct LiveFollowRoute {
     route: u32,
     /// The open transform the last applied record (or preparation) gave.
     transform: crate::RouteTransform,
-    /// The flags the last applied record (or preparation) gave.
+    /// The flags the last applied record (or preparation) gave; render composes with the plan's
+    /// `automated` ([`FollowCursors::automated`]), never the record's.
     flags: crate::RouteFollowFlags,
     control: Box<crate::FollowRouteControlLane>,
+    /// The cursors over the source lanes' stored mute cells.
+    follow: FollowCursors,
+    /// This block's node spans and jump length, set by [`Self::begin_block`] and read by
+    /// [`Self::mix`].
+    block: FollowBlock,
 }
+
+/// A following route's own cursors over its source strip's stored mute cells (#1652 D2): the
+/// plan's immutable program, a cell and a [`automation::CellState`] per source lane, the curve
+/// state the route has heard, `a(tap)` and the mute row's jump-length rule.
+struct FollowCursors {
+    program: std::sync::Arc<automation::Program>,
+    /// `[L, R]`; `None` for a lane the plan does not automate.
+    cells: [Option<u32>; 2],
+    states: [automation::CellState; 2],
+    /// Per lane, the curve value the route has heard (`value != 0`), from the seed on.
+    curve: [bool; 2],
+    /// `a(tap)`.
+    arrival: u64,
+    mute_jump: crate::GraphMuteJumpLength,
+    /// The route has rendered no block yet: its first block sets the curve exactly at its first
+    /// sample when the curve there differs from the seed (#1647 D2, as the strip's fresh lane).
+    fresh: bool,
+}
+
+/// One block's node spans per source lane and the block's mute jump length (#1652b). A lane with
+/// no span (no cell, no timeline, no jump-length cell, or a span at the `i64` edge) holds its
+/// curve and emits nothing this block.
+#[derive(Clone, Copy)]
+struct FollowBlock {
+    spans: [Option<automation::NodeSpan>; 2],
+    jump: u32,
+}
+
+impl FollowBlock {
+    const IDLE: Self = Self {
+        spans: [None; 2],
+        jump: 0,
+    };
+}
+
+impl LiveFollowRoute {
+    /// The bound route (#1652b): its open transform `transform` (the plan's prepared route), its
+    /// cell's reader `control` and its source `source`. Each automated lane's cursor is seeded with
+    /// the curve's first `start_value`, and the bound target composes that curve with the seeded
+    /// flags, as #1651's prepared stage mute does; the ramp is settled on it, so an idle route mixes
+    /// exactly what a prepared route of that gate mixes. Control side.
+    pub(crate) fn new(
+        transform: crate::RouteTransform,
+        control: Box<crate::FollowRouteControlLane>,
+        source: &crate::GraphFollowRouteSource,
+    ) -> Self {
+        let mut states = [automation::CellState::new(); 2];
+        let mut curve = [false; 2];
+        for ((state, curve), cell) in states.iter_mut().zip(&mut curve).zip(source.cells) {
+            let seed = cell
+                .and_then(|cell| source.program.cell(cell as usize))
+                .and_then(|cell| cell.segments().first())
+                .map(|segment| segment.start_value);
+            if let Some(seed) = seed {
+                state.seed_target(seed);
+                *curve = seed != 0.0;
+            }
+        }
+        let follow = FollowCursors {
+            program: std::sync::Arc::clone(&source.program),
+            cells: source.cells,
+            states,
+            curve,
+            arrival: source.arrival,
+            mute_jump: source.mute_jump,
+            fresh: true,
+        };
+        let (target, mute) = follow.compose(&transform, source.flags, curve);
+        Self {
+            ramp: IndexedRamp::settled(target),
+            position: 0,
+            mute,
+            delayed: false,
+            route: u32::MAX,
+            transform,
+            flags: source.flags,
+            control,
+            follow,
+            block: FollowBlock::IDLE,
+        }
+    }
+}
+
+// REALTIME_POLICY_BEGIN
+impl FollowCursors {
+    /// The plan's `automated` flags: which source lanes have a cell.
+    const fn automated(&self) -> [bool; 2] {
+        [self.cells[0].is_some(), self.cells[1].is_some()]
+    }
+
+    /// [`follow_target`] with the plan's `automated`.
+    fn compose(
+        &self,
+        transform: &crate::RouteTransform,
+        flags: crate::RouteFollowFlags,
+        curve: [bool; 2],
+    ) -> ([f32; 4], bool) {
+        follow_target(self.automated(), transform, flags, curve)
+    }
+
+    /// The block's spans at the tap's node time (`node_span(a(tap))`, R17-3) and its mute jump
+    /// length (the host-core rule over the block's lengths). Takes the fresh flag: the first block
+    /// with no seek reaching it lands a `Set` at offset 0 on a lane whose curve there differs from
+    /// what the lane holds.
+    fn block(&mut self, time: &crate::GraphBlockTime<'_>) -> FollowBlock {
+        let fresh = core::mem::replace(&mut self.fresh, false);
+        let frames = time.frames();
+        let (Some(span), Some(lengths)) = (time.node_span(self.arrival), time.jump_lengths())
+        else {
+            return FollowBlock::IDLE;
+        };
+        let length = i64::from(frames);
+        if frames == 0
+            || span.start.checked_add(length).is_none()
+            || span
+                .step
+                .is_some_and(|step| step.timeline.checked_add(length).is_none())
+        {
+            return FollowBlock::IDLE;
+        }
+        let jump = core::cmp::min((self.mute_jump)(lengths), crate::ROUTE_RAMP_LENGTH_MAXIMUM);
+        let mut spans = [None; 2];
+        for ((slot, cell), state) in spans.iter_mut().zip(self.cells).zip(&self.states) {
+            let Some(program) = cell.and_then(|cell| self.program.cell(cell as usize)) else {
+                continue;
+            };
+            let step = span
+                .step
+                .map(|step| (step.offset, step.timeline))
+                .or_else(|| {
+                    let value = automation::value_at(program.segments(), span.start);
+                    (fresh && state.target().map(f32::to_bits) != Some(value.to_bits()))
+                        .then_some((0, span.start))
+                });
+            // The graph's step lies inside the block, so the span is valid; a refused one leaves
+            // the lane holding its curve, with no panic.
+            *slot = automation::NodeSpan::new(span.start, step, frames).ok();
+        }
+        FollowBlock { spans, jump }
+    }
+}
+
+/// A following route's target and whether it silences (#1652 D2), for `transform` and `flags`
+/// while the curves are at `curve`, with `automated` the plan's: `gated_route_coefficients` of the
+/// open transform under [`crate::RouteFollowFlags::gate`]. The one composition of the seed, the
+/// cell's block entry and every curve event, so their bits cannot differ.
+fn follow_target(
+    automated: [bool; 2],
+    transform: &crate::RouteTransform,
+    flags: crate::RouteFollowFlags,
+    curve: [bool; 2],
+) -> ([f32; 4], bool) {
+    let gate = crate::RouteFollowFlags { automated, ..flags }.gate(curve);
+    (gated_route_coefficients(transform, gate), gate.silences())
+}
+
+/// Walk one block's events of both source lanes in offset order (#1652 D2), with `states` and
+/// `curve` advanced as the events come out, and call `change(offset, curve, set)` once per offset
+/// that has an event: `curve` after every event at that offset, `set` when one of them is a seek's
+/// exact `Set`. A held grid event changes no curve. Bounded by the cells' per-block event bound
+/// ([`automation::CellProgram::max_events`]); allocation-, lock- and panic-free.
+fn follow_walk(
+    program: &automation::Program,
+    cells: [Option<u32>; 2],
+    states: &mut [automation::CellState; 2],
+    curve: &mut [bool; 2],
+    block: FollowBlock,
+    mut change: impl FnMut(u32, [bool; 2], bool),
+) {
+    let [left, right] = states;
+    let events = |cell: Option<u32>, span: Option<automation::NodeSpan>, state| {
+        let program = program.cell(cell? as usize)?;
+        Some(automation::CellEvents::new(
+            program,
+            state,
+            span?,
+            automation::SeekMode::Exact,
+            block.jump,
+        ))
+    };
+    let mut events = [
+        events(cells[0], block.spans[0], left),
+        events(cells[1], block.spans[1], right),
+    ];
+    let mut next = [None; 2];
+    for (next, events) in next.iter_mut().zip(&mut events) {
+        *next = events.as_mut().and_then(Iterator::next);
+    }
+    // Each pass consumes at least one event, so the loop ends with the iterators.
+    while let Some(offset) = next.iter().flatten().map(|event| event.offset).min() {
+        let mut set = false;
+        for ((next, events), curve) in next.iter_mut().zip(&mut events).zip(curve.iter_mut()) {
+            let Some(event) = next.filter(|event| event.offset == offset) else {
+                continue;
+            };
+            if !event.held {
+                *curve = event.value != 0.0;
+            }
+            set |= event.kind == automation::EventKind::Set;
+            *next = events.as_mut().and_then(Iterator::next);
+        }
+        change(offset, *curve, set);
+    }
+}
+
+impl LiveFollowRoute {
+    /// The route op's block entry (#1652 D2): read the cell under the block's snapshot and, on a
+    /// target whose bits change, retarget from the coefficients the route is at over the
+    /// record's ramp; take the block's spans at the tap's node time; decide the block's
+    /// activity. Returns whether the route mixes this block.
+    ///
+    /// The cell composes with the curve the route has heard (the curve at the block's first
+    /// sample before that sample's events), and the block's curve events follow in offset order,
+    /// as the strip's stage orders them (#1651). Inactive only when the route is muted, past its
+    /// ramp and undelayed at entry and no event of the block leaves it otherwise: the changes are
+    /// found first on copies of the cursors, so a route that unmutes inside the block mixes, and a
+    /// muted route with no change moves no bit. An inactive block commits the copies' cursors (no
+    /// event of it retargets, since every silencing target is `[+0.0; 4]`).
+    #[inline]
+    fn begin_block(&mut self, snapshot: LiveSnapshot, time: &crate::GraphBlockTime<'_>) -> bool {
+        let mut applied = 0;
+        if let Some(record) = self.control.read(snapshot) {
+            self.transform = record.transform();
+            self.flags = record.flags();
+            let (target, mute) =
+                self.follow
+                    .compose(&self.transform, self.flags, self.follow.curve);
+            self.mute = mute;
+            if target.map(f32::to_bits) != self.ramp.target.map(f32::to_bits) {
+                self.ramp = IndexedRamp::new(
+                    self.ramp.coefficients_at(self.position),
+                    target,
+                    record.length(),
+                );
+                self.position = 0;
+            }
+            applied = 1;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        test_only_count_route_drained(self.route as usize, applied, snapshot);
+        let _ = applied;
+        self.block = self.follow.block(time);
+        if !(self.mute && self.position >= self.ramp.length && !self.delayed) {
+            return true;
+        }
+        let mut states = self.follow.states;
+        let mut curve = self.follow.curve;
+        let mut target = self.ramp.target.map(f32::to_bits);
+        let mut active = false;
+        let (follow, transform, flags, jump) =
+            (&self.follow, &self.transform, self.flags, self.block.jump);
+        follow_walk(
+            &follow.program,
+            follow.cells,
+            &mut states,
+            &mut curve,
+            self.block,
+            |_, curve, set| {
+                let (next, mute) = follow.compose(transform, flags, curve);
+                let next = next.map(f32::to_bits);
+                // A retarget is to a target that does not silence, so it always activates.
+                let settled = next == target || set || jump == 0;
+                target = next;
+                active |= !(mute && settled);
+            },
+        );
+        if !active {
+            self.follow.states = states;
+            self.follow.curve = curve;
+        }
+        active
+    }
+
+    /// D2: mix the block, retargeting at each curve event whose target's bits change: mix
+    /// `[0, o)`, retarget from `coefficients_at(position)` over the block's mute jump length (`0`
+    /// for a seek's `Set`), mix `[o, q)`. The indexed law makes the split exact: the result is
+    /// the same block split at `o` with the retarget at the second part's entry, bit for bit.
+    #[inline]
+    fn mix(&mut self, left: &mut [f32], right: &mut [f32]) {
+        let frames = core::cmp::min(left.len(), right.len());
+        let mut from = 0_usize;
+        let automated = self.follow.automated();
+        let Self {
+            ramp,
+            position,
+            mute,
+            transform,
+            flags,
+            follow,
+            block,
+            ..
+        } = self;
+        let FollowCursors {
+            program,
+            cells,
+            states,
+            curve,
+            ..
+        } = follow;
+        let jump = block.jump;
+        follow_walk(
+            program,
+            *cells,
+            states,
+            curve,
+            *block,
+            |offset, curve, set| {
+                let (target, silences) = follow_target(automated, transform, *flags, curve);
+                *mute = silences;
+                if target.map(f32::to_bits) == ramp.target.map(f32::to_bits) {
+                    return;
+                }
+                let at = core::cmp::min(offset as usize, frames);
+                mix_follow_part(left, right, from, at, ramp, position);
+                *ramp = IndexedRamp::new(
+                    ramp.coefficients_at(*position),
+                    target,
+                    if set { 0 } else { jump },
+                );
+                *position = 0;
+                from = at;
+            },
+        );
+        mix_follow_part(left, right, from, frames, ramp, position);
+    }
+}
+
+/// Mix frames `[from, to)` of the block by `ramp` from `position`, then advance and saturate
+/// `position`. An empty or out-of-block range mixes nothing.
+#[inline]
+fn mix_follow_part(
+    left: &mut [f32],
+    right: &mut [f32],
+    from: usize,
+    to: usize,
+    ramp: &IndexedRamp,
+    position: &mut u32,
+) {
+    let (Some(left), Some(right)) = (left.get_mut(from..to), right.get_mut(from..to)) else {
+        return;
+    };
+    if left.is_empty() {
+        return;
+    }
+    route_mix_ramp_block::<FrameLane>(left, right, ramp, *position);
+    let frames = u32::try_from(left.len()).unwrap_or(u32::MAX);
+    *position = core::cmp::min(position.saturating_add(frames), ramp.length);
+}
+// REALTIME_POLICY_END
 
 /// The bytes bind allocates for one following route's render-side owner (#1652 D1): its box.
 #[must_use]
@@ -1291,6 +1649,10 @@ pub(crate) enum NodeKind {
     /// A route whose coefficients change live (issue #1220 D6): it drains its lane at the start
     /// of every block, ramps by the indexed ramp and writes its own activity bit.
     LiveRoute(Box<LiveRoute>),
+    /// A route into a submix whose source strip has an automated mute lane (#1652 D1, D2): it reads
+    /// its seven-word cell at the start of every block, follows the source's stored mute curves in
+    /// its tap's node time, retargets inside the block and writes its own activity bit.
+    LiveFollowRoute(Box<LiveFollowRoute>),
     /// A homogeneous-bank member: the reduction gathers its input, the bank does the work.
     BankMember,
 }
@@ -2089,6 +2451,7 @@ impl NodeKind {
             | Self::SourceInput
             | Self::Route(_)
             | Self::LiveRoute(_)
+            | Self::LiveFollowRoute(_)
             | Self::BankMember => ChannelSymmetryWitness::SYMMETRIC,
         }
     }
@@ -3192,7 +3555,9 @@ impl Runtime {
         match &self.units[index] {
             RuntimeUnit::Op(op) => match (&op.kind, &*op.inputs) {
                 (NodeKind::Bound(_), _) => BOUND,
-                (NodeKind::Route(_) | NodeKind::LiveRoute(_), _) => ROUTE,
+                (NodeKind::Route(_) | NodeKind::LiveRoute(_) | NodeKind::LiveFollowRoute(_), _) => {
+                    ROUTE
+                }
                 (NodeKind::Identity, [single]) if op.split_pair.is_none() => {
                     if *single == op.output {
                         IDENTITY_ALIAS
@@ -3720,6 +4085,17 @@ fn execute_op(
             return Ok(());
         }
     }
+    // #1652 D2: a following route reads its cell and finds its block's curve changes first, so a
+    // route inactive at block entry that unmutes inside the block mixes it.
+    if let NodeKind::LiveFollowRoute(live) = &mut op.kind {
+        let active = live.begin_block(snapshot, block_time);
+        if let Some((activity, _)) = routes.as_mut() {
+            activity.set_active(live.route as usize, active);
+        }
+        if !active {
+            return Ok(());
+        }
+    }
     let routes = routes.map(|(activity, unit)| (&*activity, unit));
     // Issue #1217 D4: an inactive route's op does not run. A route has one undelayed input
     // (its compensation is 0), so there is nothing to stage either, and its destination neither
@@ -3821,6 +4197,12 @@ fn execute_op(
             mix2x2_block::<FrameLane>(out_left, out_right, *coefficients);
         }
         NodeKind::LiveRoute(live) => {
+            #[cfg(any(test, feature = "test-support"))]
+            test_only_count_route_mix(live.route as usize);
+            let (out_left, out_right) = output_planes(arena, &mut host, output);
+            live.mix(out_left, out_right);
+        }
+        NodeKind::LiveFollowRoute(live) => {
             #[cfg(any(test, feature = "test-support"))]
             test_only_count_route_mix(live.route as usize);
             let (out_left, out_right) = output_planes(arena, &mut host, output);
@@ -5951,6 +6333,15 @@ pub(crate) struct RuntimeParts {
     /// Issue #1220 D6: live-route lanes by route node, taken by `node_kind` for that route's op.
     /// Empty for a plan without route controls, so every route binds `NodeKind::Route`.
     route_controls: BTreeMap<GraphNodeId, Box<crate::RouteControlLane>>,
+    /// #1652b: following-route lanes and their sources by route node, taken by `node_kind` for
+    /// that route's op. Empty for a plan with no following route.
+    follow_route_controls: BTreeMap<
+        GraphNodeId,
+        (
+            Box<crate::FollowRouteControlLane>,
+            crate::GraphFollowRouteSource,
+        ),
+    >,
     pub(crate) bindings: BTreeMap<GraphNodeId, Option<Box<dyn GraphRuntimeProcessor>>>,
     pub(crate) split_pairs: BTreeMap<GraphNodeId, SplitPairSlot>,
     pub(crate) observers: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
@@ -6073,6 +6464,7 @@ impl RuntimeParts {
                 .map(|binding| (binding.node, binding.observation))
                 .collect(),
             route_controls: BTreeMap::new(),
+            follow_route_controls: BTreeMap::new(),
             bindings: bindings
                 .into_iter()
                 .map(|binding| (binding.node, binding.processor))
@@ -6103,6 +6495,18 @@ impl RuntimeParts {
         self.route_controls = controls
             .into_iter()
             .map(|binding| (binding.node, binding.control))
+            .collect();
+        self
+    }
+
+    /// #1652b: the plan's following-route lanes, keyed by route node as the six-word lanes are.
+    pub(crate) fn with_follow_route_controls(
+        mut self,
+        controls: Vec<crate::GraphFollowRouteControlBinding>,
+    ) -> Self {
+        self.follow_route_controls = controls
+            .into_iter()
+            .map(|binding| (binding.node, (binding.control, binding.source)))
             .collect();
         self
     }
@@ -6154,13 +6558,21 @@ impl RuntimeParts {
             let prepared = gated_route_coefficients(&transform, gate);
             // Issue #1220 D6: a route with a lane is live; its activity index and delay are set
             // once the plan's route-activity table exists (`bind_live_routes`).
-            match self.route_controls.remove(node) {
-                None => NodeKind::Route(prepared),
-                Some(control) => NodeKind::LiveRoute(Box::new(LiveRoute::new(
-                    prepared,
-                    gate.silences(),
-                    control,
-                ))),
+            if let Some((control, source)) = self.follow_route_controls.remove(node) {
+                // #1652b: a following route composes its own bound target from the open
+                // transform, the seeded flags and the curves' first values.
+                NodeKind::LiveFollowRoute(Box::new(LiveFollowRoute::new(
+                    transform, control, &source,
+                )))
+            } else {
+                match self.route_controls.remove(node) {
+                    None => NodeKind::Route(prepared),
+                    Some(control) => NodeKind::LiveRoute(Box::new(LiveRoute::new(
+                        prepared,
+                        gate.silences(),
+                        control,
+                    ))),
+                }
             }
         } else if let Some([left, right]) = self.track_delays.remove(node) {
             // A delay entry on a node that is not a source input: a submix's `Input`, which
@@ -7236,6 +7648,7 @@ pub(crate) fn build_sequential(
     let route_gates: Vec<(GraphNodeId, RouteGate)> =
         if parts.routes.values().any(|(_, gate)| gate.silences())
             || !parts.route_controls.is_empty()
+            || !parts.follow_route_controls.is_empty()
         {
             parts
                 .routes
@@ -7672,14 +8085,16 @@ fn bind_live_routes(units: &mut [RuntimeUnit], activity: &RouteActivity, delayed
         let RuntimeUnit::Op(op) = owner else {
             continue;
         };
-        let NodeKind::LiveRoute(live) = &mut op.kind else {
-            continue;
+        let (route_index, delayed_flag) = match &mut op.kind {
+            NodeKind::LiveRoute(live) => (&mut live.route, &mut live.delayed),
+            NodeKind::LiveFollowRoute(live) => (&mut live.route, &mut live.delayed),
+            _ => continue,
         };
         let route = activity
             .route_of(unit)
             .expect("a live route's op is a route unit of the activity table");
-        live.route = u32::try_from(route).expect("a route index fits u32");
-        live.delayed = delayed.get(route).copied().unwrap_or(false);
+        *route_index = u32::try_from(route).expect("a route index fits u32");
+        *delayed_flag = delayed.get(route).copied().unwrap_or(false);
     }
 }
 
@@ -8547,7 +8962,7 @@ impl PlanningMetadata for RuntimeParts {
         self.observers.contains_key(node)
     }
     fn has_route_control(&self, node: &GraphNodeId) -> bool {
-        self.route_controls.contains_key(node)
+        self.route_controls.contains_key(node) || self.follow_route_controls.contains_key(node)
     }
     fn route(&self, node: &GraphNodeId) -> Option<(&RouteTransform, RouteGate)> {
         self.routes
@@ -8611,6 +9026,11 @@ impl<'a> BorrowedPlanningMetadata<'a> {
                 .iter()
                 .flatten()
                 .map(|binding| &binding.node)
+                .chain(
+                    plan.follow_route_controls
+                        .iter()
+                        .map(|binding| &binding.node),
+                )
                 .collect(),
         }
     }
@@ -16472,5 +16892,403 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod follow_route_op_tests {
+    //! #1652b: the following route op, driven directly at its block entry and its mix: the
+    //! in-block retarget (gate 3), the activity of a route that unmutes inside a block, the
+    //! event's time at the tap's arrival, the redundant-retarget guard and a seek. The route op is
+    //! not banked and mixes at `FrameLane`, so no case depends on a bank width.
+    use super::{FrameLane, IndexedRamp, LiveFollowRoute, route_mix_ramp_block};
+    use crate::follow_route_tests::{mute_source, steps};
+    use crate::{
+        FollowRouteControlRecord, GraphBlockTime, GraphJumpLengths, GraphPreparedSourceSetDriver,
+        RenderError, RouteFollowFlags, RouteGate, RouteTransform, StableGraphId, TimelineSpan,
+        TimelineStep, gated_route_coefficients,
+    };
+    use engine::realtime::{GatePin, LiveValuesSuperseded, RevisionGate};
+
+    /// The session's mute jump length in these cases.
+    const MUTE: u32 = 48;
+    /// The live record's ramp at the block entry, long enough to run through every block.
+    const RECORD_RAMP: u32 = 256;
+    /// The block's first source-read sample `r + ΣP`.
+    const FIRST: u64 = 1_000;
+
+    /// An identity timeline (`timeline(s) = s`), with an optional seek step.
+    struct Timeline {
+        seek: Option<TimelineStep>,
+    }
+
+    impl GraphPreparedSourceSetDriver for Timeline {
+        fn claim_count(&self) -> usize {
+            0
+        }
+        fn begin_block(&mut self, _first_sample: u64, _frames: u32) -> Result<(), RenderError> {
+            Ok(())
+        }
+        fn copy_track_input(
+            &mut self,
+            _claim_index: usize,
+            _left: &mut [f32],
+            _right: &mut [f32],
+        ) -> Result<(), RenderError> {
+            Ok(())
+        }
+        fn timeline_block(&self, first: i128, _frames: u32) -> Option<TimelineSpan> {
+            Some(TimelineSpan {
+                start: i64::try_from(first).ok()?,
+                step: self.seek,
+            })
+        }
+    }
+
+    const OPEN: RouteTransform = RouteTransform {
+        gain: 0.75,
+        ll: 0.9,
+        lr: 0.2,
+        rl: -0.3,
+        rr: 0.8,
+    };
+    const MOVED: RouteTransform = RouteTransform {
+        gain: 1.25,
+        ll: 0.4,
+        lr: -0.6,
+        rl: 0.5,
+        rr: 0.1,
+    };
+
+    fn gated(transform: RouteTransform, follow_zeroed: [bool; 2]) -> [f32; 4] {
+        gated_route_coefficients(
+            &transform,
+            RouteGate {
+                mute: false,
+                follow_zeroed,
+            },
+        )
+    }
+
+    struct Fixture {
+        route: Box<LiveFollowRoute>,
+        producer: crate::GraphFollowRouteControlProducer,
+        gate: RevisionGate,
+        pin: GatePin,
+        revision: u64,
+    }
+
+    impl Fixture {
+        /// A route of transform `transform` whose source lanes have the given mute curves, at
+        /// `a(tap) = arrival`.
+        fn new(
+            lanes: [Option<&[automation::Segment]>; 2],
+            arrival: u64,
+            transform: RouteTransform,
+        ) -> Self {
+            let source = mute_source(lanes, arrival);
+            let (binding, producer) = crate::follow_route_control_pair(
+                &StableGraphId::parse("send").expect("ID"),
+                &LiveValuesSuperseded::new(),
+                source,
+                0,
+                0,
+            );
+            let route = Box::new(LiveFollowRoute::new(
+                transform,
+                binding.control,
+                &binding.source,
+            ));
+            let (gate, pin) = RevisionGate::pair(0);
+            Self {
+                route,
+                producer,
+                gate,
+                pin,
+                revision: 0,
+            }
+        }
+
+        /// Write and publish one record: `transform`, the source's own flags, over `length`.
+        fn write(&mut self, transform: RouteTransform, length: u32) {
+            self.revision += 1;
+            let record =
+                FollowRouteControlRecord::new(transform, self.route.flags, length).expect("record");
+            self.producer
+                .write(self.pin.stamp(self.revision).expect("stamp"), record);
+            self.pin.publish(&self.gate, self.revision);
+        }
+
+        /// The route op's block of `left.len()` samples whose first source-read sample is
+        /// `first`: its block entry, then its mix when active. Returns the activity.
+        fn block(
+            &mut self,
+            first: u64,
+            seek: Option<TimelineStep>,
+            left: &mut [f32],
+            right: &mut [f32],
+        ) -> bool {
+            let timeline = Timeline { seek };
+            let lengths = GraphJumpLengths {
+                fader_samples: 480,
+                mute_samples: MUTE,
+                pan_samples: 960,
+            };
+            let frames = u32::try_from(left.len()).expect("frames");
+            let time = GraphBlockTime::new(Some(first), frames, Some(lengths), Some(&timeline));
+            let active = self.route.begin_block(self.gate.snapshot(), &time);
+            if active {
+                self.route.mix(left, right);
+            }
+            active
+        }
+    }
+
+    fn input(frames: usize) -> (Vec<f32>, Vec<f32>) {
+        let left = (0..frames)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 17.0)
+            .collect();
+        let right = (0..frames)
+            .map(|i| ((i * 53 % 97) as f32 - 48.0) / 13.0)
+            .collect();
+        (left, right)
+    }
+
+    fn bits(planes: (&[f32], &[f32])) -> Vec<u32> {
+        planes
+            .0
+            .iter()
+            .chain(planes.1)
+            .map(|x| x.to_bits())
+            .collect()
+    }
+
+    /// The reference: mix `[0, o)` by `first` from position 0, then retarget to `target` over
+    /// `length` from `first`'s coefficients at `o`, and mix `[o, q)` from position 0.
+    fn split_reference(
+        first: IndexedRamp,
+        o: usize,
+        target: [f32; 4],
+        length: u32,
+        frames: usize,
+    ) -> Vec<u32> {
+        let (mut left, mut right) = input(frames);
+        let (left_a, left_b) = left.split_at_mut(o);
+        let (right_a, right_b) = right.split_at_mut(o);
+        route_mix_ramp_block::<FrameLane>(left_a, right_a, &first, 0);
+        let at = u32::try_from(o).expect("offset");
+        let second = IndexedRamp::new(first.coefficients_at(at), target, length);
+        route_mix_ramp_block::<FrameLane>(left_b, right_b, &second, 0);
+        bits((&left, &right))
+    }
+
+    /// Gate 3. A route mid-ramp (a live record at the block entry) whose source's left mute steps
+    /// on at offset `o` retargets there from the coefficients it is at: the block equals the same
+    /// block split at `o` with the retarget at the second part's entry, bit for bit, for `o` in
+    /// {1, 63, 64, 127} at `q = 128` and {1, 63, 64, 99} at `q = 100`, and equals the route op
+    /// run as two blocks split at `o`.
+    ///
+    /// Test value: red if the in-block retarget restarts the indexed ramp from its target or from
+    /// rest (its start) instead of `coefficients_at(position)`, if `position` is not advanced by
+    /// the first part, or if the retarget lands one sample early or late.
+    #[test]
+    fn a_retarget_inside_the_block_equals_the_block_split_at_its_offset() {
+        for (frames, offsets) in [(128_usize, [1, 63, 64, 127]), (100, [1, 63, 64, 99])] {
+            for o in offsets {
+                let step = FIRST + o as u64;
+                let curve = steps(&[0, step], &[0.0, 1.0], 1 << 20);
+                let expected = split_reference(
+                    IndexedRamp::new(
+                        gated(OPEN, [false; 2]),
+                        gated(MOVED, [false; 2]),
+                        RECORD_RAMP,
+                    ),
+                    o,
+                    gated(MOVED, [true, false]),
+                    MUTE,
+                    frames,
+                );
+
+                let mut whole = Fixture::new([Some(&curve), None], 0, OPEN);
+                whole.write(MOVED, RECORD_RAMP);
+                let (mut left, mut right) = input(frames);
+                assert!(whole.block(FIRST, None, &mut left, &mut right));
+                assert_eq!(bits((&left, &right)), expected, "q {frames}, o {o}: whole");
+
+                let mut split = Fixture::new([Some(&curve), None], 0, OPEN);
+                split.write(MOVED, RECORD_RAMP);
+                let (mut left, mut right) = input(frames);
+                let (left_a, left_b) = left.split_at_mut(o);
+                let (right_a, right_b) = right.split_at_mut(o);
+                assert!(split.block(FIRST, None, left_a, right_a));
+                assert!(split.block(step, None, left_b, right_b));
+                assert_eq!(bits((&left, &right)), expected, "q {frames}, o {o}: split");
+            }
+        }
+    }
+
+    /// A route muted by its source's curve on both lanes, settled and undelayed, is inactive in a
+    /// block with no curve change (it mixes nothing); in a block whose curve unmutes at offset
+    /// `o` it is active and mixes `[o, q)` from the silent coefficients toward the open ones over
+    /// the mute length. Before `o` it mixes the silent coefficients.
+    ///
+    /// Test value: red if the activity is decided at the block entry before the block's changes
+    /// are found (the unmute would be lost for the block), or if a muted block with no change is
+    /// active "to be safe".
+    #[test]
+    fn a_route_inactive_at_block_entry_that_unmutes_inside_the_block_mixes_the_rest() {
+        let frames = 128_usize;
+        for o in [1_usize, 63, 64, 127] {
+            let unmute = FIRST + frames as u64 + o as u64;
+            let curve = steps(&[0, unmute], &[1.0, 0.0], 1 << 20);
+            let mut route = Fixture::new([Some(&curve), Some(&curve)], 0, OPEN);
+            assert!(route.route.mute, "the seeded curve silences the route");
+
+            let (mut left, mut right) = input(frames);
+            let untouched = bits((&left, &right));
+            assert!(
+                !route.block(FIRST, None, &mut left, &mut right),
+                "no change: inactive"
+            );
+            assert_eq!(
+                bits((&left, &right)),
+                untouched,
+                "an inactive block mixes nothing"
+            );
+
+            let (mut left, mut right) = input(frames);
+            assert!(
+                route.block(FIRST + frames as u64, None, &mut left, &mut right),
+                "o {o}: an unmute inside the block activates it"
+            );
+            let expected = split_reference(
+                IndexedRamp::settled([0.0; 4]),
+                o,
+                gated(OPEN, [false; 2]),
+                MUTE,
+                frames,
+            );
+            assert_eq!(bits((&left, &right)), expected, "o {o}");
+            assert!(!route.route.mute);
+        }
+    }
+
+    /// A curve event at timeline sample `t` falls at the render sample where the tap carries `t`:
+    /// with `a(tap) = 64`, a step at `FIRST + 10` lands at offset 74 of the block whose first
+    /// source-read sample is `FIRST`, not at offset 10.
+    ///
+    /// Test value: red if the route op times its events at another arrival than its tap's (the
+    /// fader's or the route's own, `a = 0` here), the leak a pre-insert send would show.
+    #[test]
+    fn the_event_lands_where_the_tap_carries_the_curve_sample() {
+        let frames = 128_usize;
+        let arrival = 64;
+        let curve = steps(&[0, FIRST + 10], &[0.0, 1.0], 1 << 20);
+        let mut route = Fixture::new([Some(&curve), None], arrival, OPEN);
+        let (mut left, mut right) = input(frames);
+        assert!(route.block(FIRST, None, &mut left, &mut right));
+        let expected = split_reference(
+            IndexedRamp::settled(gated(OPEN, [false; 2])),
+            10 + arrival as usize,
+            gated(OPEN, [true, false]),
+            MUTE,
+            frames,
+        );
+        assert_eq!(bits((&left, &right)), expected);
+    }
+
+    /// An event whose composed target has the bits the route already aims at retargets nothing:
+    /// a mid-ramp route whose left column is already zero keeps its ramp through its source's
+    /// left mute, and the block equals the ramp run straight through.
+    ///
+    /// Test value: red if every curve event retargets (a redundant retarget restarts the ramp at
+    /// `coefficients_at(position)` over the mute length and moves bits, README "Change only").
+    #[test]
+    fn an_event_that_changes_no_target_bit_retargets_nothing() {
+        let frames = 128_usize;
+        let zero_left = RouteTransform {
+            ll: 0.0,
+            rl: 0.0,
+            ..MOVED
+        };
+        let curve = steps(&[0, FIRST + 40], &[0.0, 1.0], 1 << 20);
+        let mut route = Fixture::new([Some(&curve), None], 0, OPEN);
+        route.write(zero_left, RECORD_RAMP);
+        let (mut left, mut right) = input(frames);
+        assert!(route.block(FIRST, None, &mut left, &mut right));
+        assert_eq!(
+            gated(zero_left, [true, false]).map(f32::to_bits),
+            gated(zero_left, [false; 2]).map(f32::to_bits),
+            "the left mute changes no coefficient bit"
+        );
+        let (mut expected_left, mut expected_right) = input(frames);
+        let ramp = IndexedRamp::new(
+            gated(OPEN, [false; 2]),
+            gated(zero_left, [false; 2]),
+            RECORD_RAMP,
+        );
+        route_mix_ramp_block::<FrameLane>(&mut expected_left, &mut expected_right, &ramp, 0);
+        assert_eq!(
+            bits((&left, &right)),
+            bits((&expected_left, &expected_right))
+        );
+        assert_eq!(route.route.ramp, ramp, "the ramp in flight is kept");
+    }
+
+    /// A seek that reaches the tap at offset `s` into a span where the source's left mute is on
+    /// sets the target exactly there: the frames from `s` on mix the gated target, with no ramp.
+    ///
+    /// Test value: red if the seek's landing ramps over the mute length (a `Jump` landing instead
+    /// of the mute cell's exact `Set`), or if it lands at another offset than the seek's.
+    #[test]
+    fn a_seek_sets_the_target_exactly_where_it_reaches_the_tap() {
+        let frames = 128_usize;
+        let s = 37_u32;
+        let curve = steps(&[0, 50_000], &[0.0, 1.0], 1 << 20);
+        let mut route = Fixture::new([Some(&curve), None], 0, OPEN);
+        let (mut left, mut right) = input(frames);
+        let seek = TimelineStep {
+            offset: s,
+            timeline: 60_000,
+        };
+        assert!(route.block(FIRST, Some(seek), &mut left, &mut right));
+        let expected = split_reference(
+            IndexedRamp::settled(gated(OPEN, [false; 2])),
+            s as usize,
+            gated(OPEN, [true, false]),
+            0,
+            frames,
+        );
+        assert_eq!(bits((&left, &right)), expected);
+        assert_eq!(route.route.ramp.length, 0, "a step, no ramp");
+    }
+
+    /// The bound route composes its target from the open transform, the seeded flags and each
+    /// automated lane's first curve value, settled, with the plan's `automated` flags.
+    ///
+    /// Test value: red if the seed ignores the curve's first value (a session that starts muted
+    /// would pass audio until its first event) or reads a lane the plan does not automate.
+    #[test]
+    fn the_bound_target_composes_the_curves_first_values() {
+        let on = steps(&[0, 4_096], &[1.0, 0.0], 1 << 20);
+        let off = steps(&[0, 4_096], &[0.0, 1.0], 1 << 20);
+        for (lanes, zeroed) in [
+            ([Some(&on[..]), None], [true, false]),
+            ([None, Some(&on[..])], [false, true]),
+            ([Some(&off[..]), Some(&on[..])], [false, true]),
+        ] {
+            let route = Fixture::new(lanes, 0, OPEN);
+            assert_eq!(route.route.ramp, IndexedRamp::settled(gated(OPEN, zeroed)));
+            assert_eq!(
+                route.route.flags,
+                RouteFollowFlags {
+                    follows_mute: true,
+                    automated: lanes.map(|lane| lane.is_some()),
+                    ..RouteFollowFlags::default()
+                }
+            );
+        }
+        let both = Fixture::new([Some(&on), Some(&on)], 0, OPEN);
+        assert!(both.route.mute);
     }
 }
