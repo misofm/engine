@@ -5166,12 +5166,6 @@ pub struct GraphRouteMove {
     /// Whether the predecessor's row is a following route ([`GraphLiveRoute::following`]): the
     /// move then gets a slot in the section's side table (#1652 D3, MINOR-3).
     pub predecessor_follows: bool,
-    /// Per route row 1 to 6 ([`RouteFollowFlags::route_rows`]'s order), whether both plans'
-    /// models automate the row with the same segment table (#1654 D3,
-    /// `controls::continued_route_rows`): such a row's cell carries its cell state and heard value
-    /// verbatim, by `(route ID, row)`; another row is repositioned. All `false` for a route
-    /// neither plan gives a route row cell.
-    pub continued_rows: [bool; GRAPH_ROUTE_ROWS],
 }
 
 /// The strip delay lines of a bound graph plan, in line order (#1284 D1); `None` for any other

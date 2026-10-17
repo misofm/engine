@@ -2529,3 +2529,252 @@ fn the_following_route_charge_covers_its_attach_and_bind() {
         resources.total_bytes
     );
 }
+
+/// #1654 T5: stored send-row automation (route rows 1-6) on the send `t-b` of [`follow::model`].
+#[cfg(feature = "test-support")]
+mod send_rows {
+    use super::sid;
+    use session::{
+        Automation, AutomationOffset, AutomationSegment, AutomationShape, ControlAddress, Owner,
+        ParameterChannel, ParameterUnit, Section,
+    };
+
+    /// An entry `name` on `t-b`'s route row `row` (1 `gain_db`, 2 `mute`, 3-6 the matrix).
+    pub(super) fn entry(name: &str, row: u32, segments: Vec<AutomationSegment>) -> Automation {
+        Automation {
+            id: sid(name),
+            target: ControlAddress {
+                owner: Owner::Route(sid("t-b")),
+                section: Section::Own,
+                control: row,
+                lane: ParameterChannel::Both,
+            },
+            segments,
+            offset: AutomationOffset::default(),
+        }
+    }
+
+    /// One segment of `shape` from `(start, from)` to `(end, to)` in `unit`.
+    pub(super) fn segment(
+        shape: AutomationShape,
+        (start, from): (u64, f32),
+        (end, to): (u64, f32),
+        unit: ParameterUnit,
+    ) -> AutomationSegment {
+        AutomationSegment {
+            shape,
+            start_sample: start,
+            end_sample: end,
+            start_value: from,
+            end_value: to,
+            unit,
+        }
+    }
+
+    /// A flat curve at `value` in `unit`.
+    pub(super) fn flat(value: f32, unit: ParameterUnit) -> Vec<AutomationSegment> {
+        vec![segment(
+            AutomationShape::Linear,
+            (0, value),
+            (1 << 20, value),
+            unit,
+        )]
+    }
+
+    /// A linear gain ride from 0 dB at 0 to `end_db` at `end`.
+    pub(super) fn gain_ride(end: u64, end_db: f32) -> Vec<AutomationSegment> {
+        vec![segment(
+            AutomationShape::Linear,
+            (0, 0.0),
+            (end, end_db),
+            ParameterUnit::Db,
+        )]
+    }
+}
+
+/// #1654 gate 1 (host-core form, every bank width and the scalar oracle, every live form). The
+/// send `t-b` (`pre_fader`, `rr` only) with a flat `gain_db` ride at -6 dB (hand offset `+0.0`,
+/// then `-0.0` on both fields), a flat `rr` entry at 0.5 and a flat route `mute` at 0 renders, bit
+/// for bit, the session whose send holds those values statically, and render allocates nothing
+/// after the first block. Not vacuous: a flat ride at -5 dB differs.
+///
+/// Test value: red if the route op reads the gain word as the compiler's linear static gain
+/// rather than the seeded offset (the T4 note: `law(-6, 0.5)` is heard), converts the curve with
+/// other arithmetic than the static gain's law, hears an automated matrix entry's fallback, or
+/// retargets a flat ride.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_flat_send_ride_renders_the_static_sends_bits() {
+    use follow::*;
+    use send_rows::{entry, flat};
+    use session::ParameterUnit;
+    const FRAMES: usize = 3_000;
+    let pcm = feed(FRAMES + 256, None);
+    let base = model(128, SendTap::PreFader, false, true);
+    let mut fixed = base.clone();
+    fixed.routes[1].gain_db = -6.0;
+    fixed.routes[1].channel_matrix.rr = 0.5;
+    let automated = |gain_db: f32, offset: f32| {
+        let mut model = base.clone();
+        let mut gain = entry("send-gain", 1, flat(gain_db, ParameterUnit::Db));
+        gain.offset = session::AutomationOffset {
+            left_db: offset,
+            right_db: offset,
+        };
+        model.automation = vec![
+            gain,
+            entry(
+                "send-mute",
+                2,
+                vec![send_rows::segment(
+                    session::AutomationShape::Step,
+                    (0, 0.0),
+                    (1 << 20, 0.0),
+                    ParameterUnit::Linear,
+                )],
+            ),
+            entry("send-rr", 6, flat(0.5, ParameterUnit::Linear)),
+        ];
+        model
+    };
+    for backend in follow::backends() {
+        for live in LIVE_FORMS {
+            let what = format!("{backend:?} {live:?}");
+            let fixed = run(&fixed, backend, live, &pcm, FRAMES);
+            for offset in [0.0_f32, -0.0] {
+                let curve = run(&automated(-6.0, offset), backend, live, &pcm, FRAMES);
+                if live != Live::None {
+                    assert_eq!(curve.follow_routes, 1, "{what}: one following route");
+                }
+                assert_eq!(curve.allocations, (0, 0, 0), "{what}: render allocates");
+                for plane in 0..2 {
+                    assert_bits_equal(
+                        &curve.out[plane],
+                        &fixed.out[plane],
+                        &format!("{what}, offset {offset:?}: plane {plane}"),
+                    );
+                }
+            }
+            let other = run(&automated(-5.0, 0.0), backend, live, &pcm, FRAMES);
+            assert!(
+                first_difference_from(&other.out[1], &fixed.out[1], 0).is_some(),
+                "{what}: a ride at -5 dB is heard"
+            );
+        }
+    }
+}
+
+/// #1654 gate 2 (every bank width and the scalar oracle, quanta 128 and 100). The send `t-b`
+/// rides its gain linearly from 0 to -24 dB over 4,000 samples; track `t` carries a latent
+/// insert of `L` samples before its fader. With an `input` tap the send reads `t` `L` render
+/// samples before the strip's fader and PDC delays the bus path by `L` at the output; with a
+/// `post_fader` tap it reads at the fader's arrival, `L`. In both cases the send's plane (the
+/// output's right plane) is, from sample `L` on, the plane of a twin with no latent insert shifted
+/// by `L`, bit for bit: each grid value of the ride reaches the bus on the timeline sample the
+/// twin's does, and the post-fader ride's ramps start on the strip's render samples.
+///
+/// Test value: red if the send's events use the fader's arrival instead of the tap's (an `input`
+/// tap would ride `L` samples late), the route's own arrival, or the render sample.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_send_ride_is_heard_at_its_taps_time() {
+    use follow::*;
+    use send_rows::{entry, gain_ride};
+    const FRAMES: usize = 4_000;
+    let pcm = feed(FRAMES + 1_024, Some(0.25));
+    for quantum in [128_u32, 100] {
+        for tap in [SendTap::Input, SendTap::PostFader] {
+            let with_ride = |latent: bool| {
+                let mut model = model(quantum, tap, latent, true);
+                model.automation = vec![entry("send-gain", 1, gain_ride(4_000, -24.0))];
+                model
+            };
+            let (latent, twin) = (with_ride(true), with_ride(false));
+            for backend in follow::backends() {
+                let what = format!("q={quantum} {tap:?} {backend:?}");
+                let late = run(&latent, backend, Live::None, &pcm, FRAMES);
+                let early = run(&twin, backend, Live::None, &pcm, FRAMES);
+                assert_eq!(late.allocations, (0, 0, 0), "{what}: render allocates");
+                let shift = L as usize;
+                assert_bits_equal(
+                    &late.out[1][shift..],
+                    &early.out[1][..FRAMES - shift],
+                    &format!("{what}: the send plane, shifted by the latency"),
+                );
+                // Not vacuous: the ride moves over the compared window.
+                assert_ne!(
+                    early.out[1][100].to_bits(),
+                    early.out[1][3_000].to_bits(),
+                    "{what}: the send rides"
+                );
+            }
+        }
+    }
+}
+
+/// #1654 gate 7 (every bank width and the scalar oracle). The send `t-b` rides its gain linearly
+/// from 0 to -24 dB over 4,000 samples and its `ll` entry from 0 to 0.5. A rebuild at block 6
+/// that changes only the direct route `t-main`'s gain (a route into the output: a rebuild row)
+/// keeps both tables, so the send's cursors carry verbatim: the send's plane (the output's right
+/// plane) is bit for bit the never-swapped predecessor's in every block, and the swap allocates
+/// and frees nothing. Not vacuous: the strip's plane moves with the rebuild, and the ride is
+/// still moving at the swap.
+///
+/// Test value: red if the plan does not hand the route op the rows whose tables both models hold
+/// (`controls::continued_route_rows` through `GraphFollowRouteSource::with_continued_rows`): a
+/// repositioned cursor re-times the running ride.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_running_send_ride_across_an_unrelated_rebuild_is_the_never_swapped_twin() {
+    use follow::*;
+    use send_rows::{entry, gain_ride, segment};
+    use session::{AutomationShape, ParameterUnit};
+    use successor::{QUANTUM, SWAP_BLOCK};
+    let pcm = successor::Feed::new("t", 23);
+    let mut a = model(QUANTUM as u32, SendTap::PreFader, false, true);
+    a.automation = vec![
+        entry("send-gain", 1, gain_ride(4_000, -24.0)),
+        entry(
+            "send-ll",
+            3,
+            vec![segment(
+                AutomationShape::Linear,
+                (0, 0.0),
+                (4_000, 0.5),
+                ParameterUnit::Linear,
+            )],
+        ),
+    ];
+    let mut b = a.clone();
+    b.routes[0].gain_db = -3.0;
+    assert_eq!(b.routes[0].id.as_str(), "t-main");
+    let quiet = |_: usize,
+                 _: &mut host_core::HostLiveControlHandles,
+                 _: &mut engine::realtime::PlanRevisionGate| {};
+    for backend in follow::backends() {
+        let what = format!("{backend:?}");
+        let (twin, _) = live_swap(&a, None, backend, &pcm, quiet);
+        let (swapped, handles) = live_swap(&a, Some((&b, &a)), backend, &pcm, quiet);
+        assert_eq!(
+            handles
+                .expect("the successor's handles")
+                .follow_route_controls
+                .len(),
+            1,
+            "{what}: the send is a following route"
+        );
+        assert_quiet(&swapped, &what);
+        let (send, twin_send) = (plane(&swapped, 1), plane(&twin, 1));
+        assert_bits_equal(&send, &twin_send, &format!("{what}: the send's plane"));
+        let at = SWAP_BLOCK * QUANTUM;
+        assert!(
+            first_difference_from(&plane(&swapped, 0), &plane(&twin, 0), at).is_some(),
+            "{what}: the rebuild is heard on the strip's plane"
+        );
+        assert_ne!(
+            twin_send[at].to_bits(),
+            twin_send[at + QUANTUM].to_bits(),
+            "{what}: the ride moves at the swap"
+        );
+    }
+}

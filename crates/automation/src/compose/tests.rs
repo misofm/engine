@@ -604,3 +604,26 @@ fn a_step_keeps_its_jump_length_while_another_curve_rides_on_a_held_grid_output(
         );
     }
 }
+
+/// R19-3 with a value jump that changes nothing (#1711 U1 fold 2): the unmute at 1,000 jumps over
+/// 480 and defers the value cursor to 1,480. The gain is flat at -5.9921875 to 1,200, then linear
+/// from -4 to -8 over 1,200..1,712; its discontinuity at 1,200 targets the curve at 1,455
+/// (-5.9921875, its value already), so its jump emits nothing and replaces no ramp. The deferral
+/// stays owed: the grid is held until 1,480, where the gain lands over its own length.
+///
+/// Red if a discontinuity whose jump emits nothing drops the deferral (the grid then cuts the
+/// unmute's jump at 1,216 and the landing at 1,480 is skipped).
+#[test]
+fn an_unchanged_value_jump_keeps_the_gate_deferral() {
+    let gain = [
+        seg(0, 1_200, -5.992_187_5, -5.992_187_5, Shape::Step),
+        seg(1_200, 1_712, -4.0, -8.0, Shape::Linear),
+        seg(1_712, 9_000, -8.0, -8.0, Shape::Step),
+    ];
+    let (program, mut composed) = gate_and(&gain, [480, 256]);
+    let (events, _) = retargets(&program, &mut composed, gated, 1_480);
+    assert_eq!(
+        events,
+        [(1_000, EventKind::Jump, 480), (1_480, EventKind::Jump, 256)]
+    );
+}

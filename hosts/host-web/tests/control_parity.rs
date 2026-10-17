@@ -3015,23 +3015,34 @@ fn a_hand_move_in_flight_across_a_table_only_rebuild_completes_exactly_alike_on_
     }
 }
 
+/// The latency upstream of `t1`'s fader in [`model_at`]'s session, in samples: the console
+/// post-insert slot `miso.soft-clip` declares 31 (its descriptor's quality latency); the
+/// pre-insert compressor and `t1`'s EQ and compressor inserts declare 0. The fader's node time is
+/// render time less it. No host reader reports one strip's upstream latency (the plan reports
+/// only the output's, which `t3`'s limiter raises), so it is named here; the bit-equality of
+/// [`a_moved_target_defers_its_jump_alike_on_both_hosts`] fails if it is wrong.
+const T1_FADER_LATENCY: u64 = 31;
+
 /// #1711 G2 across hosts: on a fader ride flat at -3 dB, a hand move with its own 4,000 samples
 /// heard 3 blocks, then a table-only rebuild to -5 dB up to 20,000, then -3 dB (the move's target
 /// moves; the rebuild keeps the hand move's stored offset, R17-1): the adoption defers the cell's
-/// jump to the move's first free sample (4,512) on both hosts alike, through the one shared
-/// driver. Both hosts give one verdict, reply and committed document per edit, render the same
-/// bits in every block, through the move's end and the deferred jump over the fader length, and
-/// the rebuild completes exactly on both (`OUTCOME_EXACT`, no transition fallback; #1711 D2).
-/// Every block before the one holding 4,512 equals a pair that takes the same move and no
-/// rebuild (the move keeps its own ramp), and a later block differs from it (the jump is heard).
+/// jump to the move's first free sample on both hosts alike, through the one shared driver. Both
+/// hosts give one verdict, reply and committed document per edit, render the same bits in every
+/// block, and the rebuild completes exactly on both (`OUTCOME_EXACT`, no transition fallback;
+/// #1711 D2). Every block, at the four rates, is bit-equal to a fresh pair whose table has the
+/// jump as a real step at the move's first free sample in the fader's node time (render time
+/// 4,512 less [`T1_FADER_LATENCY`]), given the same move and, at the same block, a table-only
+/// rebuild that moves nothing (a split at 950,000), both keeping the stored offset.
 ///
 /// Test value: red if either host adopts the moved target differently (an adapter-local rule, or
 /// a browser successor that does not carry the stage's ramp the deferral waits for), or if the
 /// shared adoption does not defer the jump to the move's first free sample (it lands at the swap,
-/// or the grid cuts the move short).
+/// fires at another time, or the grid cuts the move short).
 #[test]
 fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
-    const FREE: u64 = 4 * QUANTUM as u64 + 4_000;
+    // The move's first free sample in the fader's node time: its block-4 entry in render time plus
+    // its 4,000 samples, less the latency upstream of `t1`'s fader.
+    const FREE: u64 = 4 * QUANTUM as u64 + 4_000 - T1_FADER_LATENCY;
     let ride = |pieces: &[(u64, u64, f32)], offset| SessionEdit::UpsertAutomation {
         automation: session::Automation {
             id: id("t1-fader-ride"),
@@ -3068,6 +3079,17 @@ fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
         let model = model_at(rate);
         let (mut browser, mut c_abi) = (Rig::new(&model), CAbi::new(&model));
         let (mut browser_r, mut c_abi_r) = (Rig::new(&model), CAbi::new(&model));
+        let reference = |split: u64, offset| {
+            ride(
+                &[
+                    (0, FREE, -3.0),
+                    (FREE, 20_000, -5.0),
+                    (20_000, split, -3.0),
+                    (split, 1_000_000, -3.0),
+                ],
+                offset,
+            )
+        };
         let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi, label: &str| {
             let (b, b_reply) = browser.transaction_reply(edits);
             let (c, c_reply) = c_abi.transaction(edits);
@@ -3081,16 +3103,15 @@ fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
             "the flat ride",
         );
         both(
-            &[ride(&[(0, 1_000_000, -3.0)], none)],
+            &[reference(900_000, none)],
             &mut browser_r,
             &mut c_abi_r,
-            "the unrebuilt ride",
+            "the reference ride",
         );
-        let mut heard = false;
         for block in 0..60 {
             if block == 4 {
                 both(&hand, &mut browser, &mut c_abi, "the hand move");
-                both(&hand, &mut browser_r, &mut c_abi_r, "the unrebuilt move");
+                both(&hand, &mut browser_r, &mut c_abi_r, "the reference move");
             }
             if block == 7 {
                 let committed =
@@ -3119,20 +3140,19 @@ fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
                     &mut c_abi,
                     "the rebuild",
                 );
+                both(
+                    &[reference(950_000, offset)],
+                    &mut browser_r,
+                    &mut c_abi_r,
+                    "the reference rebuild",
+                );
             }
             let (b, c) = (browser.step(block), c_abi.step(block));
             assert_eq!(b, c, "{rate} Hz: block {block}");
             let (b_r, c_r) = (browser_r.step(block), c_abi_r.step(block));
-            assert_eq!(b_r, c_r, "{rate} Hz: block {block}, the unrebuilt move");
-            if block < FREE / u64::from(QUANTUM) {
-                assert_eq!(
-                    b, b_r,
-                    "{rate} Hz: block {block} against the unrebuilt move"
-                );
-            }
-            heard |= b != b_r;
+            assert_eq!(b_r, c_r, "{rate} Hz: block {block}, the reference");
+            assert_eq!(b, b_r, "{rate} Hz: block {block} against the reference");
         }
-        assert!(heard, "{rate} Hz: the deferred jump is heard");
         let watermark = c_abi.watermark();
         assert_eq!(
             status_watermark(&browser),
@@ -6476,4 +6496,454 @@ fn a_hand_move_on_an_automated_send_gain_is_an_offset_alike_on_both_hosts() {
     assert_eq!(full.0, in_place.0, "one reply on both paths");
     assert_eq!(full.1, in_place.1, "one document");
     assert_eq!(full.2, in_place.2, "the same bits on both paths");
+}
+
+/// #1654 T5: an entry `name` on `t1-b`'s own row `row` (1 `gain_db`, 2 `mute`, 3-6 the matrix).
+#[cfg(feature = "test-support")]
+fn send_entry(
+    name: &str,
+    row: u32,
+    segments: Vec<session::AutomationSegment>,
+) -> session::Automation {
+    session::Automation {
+        id: id(name),
+        target: address(
+            Owner::Route(id("t1-b")),
+            Section::Own,
+            row,
+            ParameterChannel::Both,
+        ),
+        segments,
+        offset: session::AutomationOffset::default(),
+    }
+}
+
+/// #1654 T5: one segment of `shape` from `(start, from)` to `(end, to)` in `unit`.
+#[cfg(feature = "test-support")]
+fn send_piece(
+    shape: session::AutomationShape,
+    (start, from): (u64, f32),
+    (end, to): (u64, f32),
+    unit: session::ParameterUnit,
+) -> session::AutomationSegment {
+    session::AutomationSegment {
+        shape,
+        start_sample: start,
+        end_sample: end,
+        start_value: from,
+        end_value: to,
+        unit,
+    }
+}
+
+/// #1654 T5: `t1-b`'s own row `control` set to `value`, over `ramp` samples when given.
+#[cfg(feature = "test-support")]
+fn send_edit(control: u32, value: f32, ramp: Option<u32>) -> Vec<SessionEdit> {
+    vec![SessionEdit::set_control(
+        address(Owner::Route(id("t1-b")), Section::Own, control, Lane::Both),
+        value,
+        ramp,
+    )]
+}
+
+/// #1654 T5: the send `t1-b` of `model`.
+#[cfg(feature = "test-support")]
+fn t1_b(model: &mut SessionModel) -> &mut session::Route {
+    model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == "t1-b")
+        .expect("the send")
+}
+
+/// #1654 gate 1 on both hosts. `t1-b` with a flat `gain_db` ride at -6 dB (hand offset `+0.0`,
+/// then `-0.0`), a flat `rr` entry at 0.5 and a flat route `mute` at 0 renders, on each host and
+/// alike, the bits of the session whose send holds those values statically. Not vacuous: a ride
+/// at -5 dB differs.
+///
+/// Test value: red if either host's route op reads the gain word as the compiler's linear static
+/// gain rather than the seeded offset, or composes the curves with other arithmetic than the
+/// static route, or if the hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_flat_send_ride_renders_the_static_sends_bits_on_both_hosts() {
+    use session::{AutomationShape, ParameterUnit};
+    const RUN: u64 = 24;
+    let end = u64::from(QUANTUM) * BLOCKS;
+    let flat = |value: f32, shape, unit| vec![send_piece(shape, (0, value), (end, value), unit)];
+    let automated = |gain_db: f32, offset: f32| {
+        let mut model = follow_model(false, false);
+        let mut gain = send_entry(
+            "t1-b-gain",
+            1,
+            flat(gain_db, AutomationShape::Linear, ParameterUnit::Db),
+        );
+        gain.offset = session::AutomationOffset {
+            left_db: offset,
+            right_db: offset,
+        };
+        model.automation.extend([
+            gain,
+            send_entry(
+                "t1-b-mute",
+                2,
+                flat(0.0, AutomationShape::Step, ParameterUnit::Linear),
+            ),
+            send_entry(
+                "t1-b-rr",
+                6,
+                flat(0.5, AutomationShape::Linear, ParameterUnit::Linear),
+            ),
+        ]);
+        model
+    };
+    let mut fixed = follow_model(false, false);
+    t1_b(&mut fixed).gain_db = -6.0;
+    t1_b(&mut fixed).channel_matrix.rr = 0.5;
+    let fixed = both_run(&fixed, RUN, &[]);
+    for offset in [0.0_f32, -0.0] {
+        assert_eq!(
+            both_run(&automated(-6.0, offset), RUN, &[]),
+            fixed,
+            "offset {offset:?}: the static send's bits"
+        );
+    }
+    assert_ne!(
+        both_run(&automated(-5.0, 0.0), RUN, &[]),
+        fixed,
+        "a ride at -5 dB is heard"
+    );
+}
+
+/// #1654 gate 3 on both hosts. On [`send_ride_model`] (`t1-b` rides its gain from 0 to -12 dB)
+/// with an `rr` ride from 1 to 0.25, each host gives one verdict and reply and renders the same
+/// bits: (a) an `UpsertAutomation` that changes the gain ride rebuilds and completes `EXACT`, and
+/// once the moved row has landed renders a fresh plan of the new model; (b) `SET_CONTROL gain_db =
+/// +3` is `live` and, after its ramp and the deferred landing, renders a fresh plan whose entry
+/// carries the offset `+3`; (c) `SET_CONTROL matrix_rr` (automated) is `model_only` and moves no
+/// bit; (d) `SET_CONTROL matrix_lr = 0.5` (not automated) is `live` and, after its ramp, renders a
+/// fresh plan with that value.
+///
+/// Test value: red if a send automation edit is not an exact rebuild on either host, a hand send
+/// gain move writes the fallback (or reaches the matrix), a hand edit of an automated matrix row
+/// fights the curve, an un-automated value of the group is lost, or the hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn send_row_edits_rebuild_or_commit_as_the_rows_rule_says_on_both_hosts() {
+    use session::{AutomationShape, ParameterUnit};
+    const RUN: u64 = 24;
+    const EDIT: u64 = 4;
+    const SETTLED: usize = 10;
+    let end = u64::from(QUANTUM) * BLOCKS;
+    let with_rr = |change: &dyn Fn(&mut SessionModel)| {
+        send_ride_model(|model| {
+            model.automation.push(send_entry(
+                "t1-b-rr",
+                6,
+                vec![send_piece(
+                    AutomationShape::Linear,
+                    (0, 1.0),
+                    (end, 0.25),
+                    ParameterUnit::Linear,
+                )],
+            ));
+            change(model);
+        })
+    };
+    let model = with_rr(&|_| {});
+    let untouched = both_run(&model, RUN, &[]);
+    // (a) A changed gain ride: an exact rebuild, then the new model's bits.
+    let changed = with_rr(&|model| model.automation[0].segments[0].end_value = -24.0);
+    let mut browser = Rig::new(&model);
+    let mut c_abi = CAbi::new(&model);
+    same_blocks(&mut browser, &mut c_abi, 0..EDIT, "(a)");
+    both_commit(
+        &mut browser,
+        &mut c_abi,
+        &[SessionEdit::UpsertAutomation {
+            automation: changed.automation[0].clone(),
+        }],
+        EditPath::Rebuild,
+        "(a)",
+    );
+    let fresh = both_run(&changed, RUN, &[]);
+    for block in EDIT..RUN {
+        let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(b, c, "(a), block {block}: the two hosts agree");
+        if block as usize >= SETTLED {
+            assert_eq!(
+                b, fresh[block as usize],
+                "(a), block {block}: the new model's bits"
+            );
+        }
+    }
+    let watermark = c_abi.watermark();
+    assert_eq!(status_watermark(&browser), watermark, "(a): one watermark");
+    assert_eq!(
+        watermark.2,
+        capi::OUTCOME_EXACT,
+        "(a): the rebuild is exact"
+    );
+    // (b), (c), (d).
+    let offset = with_rr(&|model| {
+        model.automation[0].offset = session::AutomationOffset {
+            left_db: 3.0,
+            right_db: 3.0,
+        };
+    });
+    let lr = with_rr(&|model| t1_b(model).channel_matrix.lr = 0.5);
+    for (label, edits, path, expected) in [
+        (
+            "(b) the gain offset",
+            send_edit(1, 3.0, None),
+            EditPath::Live,
+            &offset,
+        ),
+        (
+            "(c) an automated matrix_rr",
+            send_edit(6, 0.75, None),
+            EditPath::ModelOnly,
+            &model,
+        ),
+        (
+            "(d) an un-automated matrix_lr",
+            send_edit(4, 0.5, None),
+            EditPath::Live,
+            &lr,
+        ),
+    ] {
+        let run = both_run(&model, RUN, &[(EDIT, edits, path)]);
+        let fresh = both_run(expected, RUN, &[]);
+        let from = if path == EditPath::ModelOnly {
+            0
+        } else {
+            SETTLED
+        };
+        assert_eq!(
+            run[from..],
+            fresh[from..],
+            "{label}: the committed model's bits"
+        );
+        if path == EditPath::Live {
+            assert_ne!(
+                run[EDIT as usize..],
+                untouched[EDIT as usize..],
+                "{label}: heard"
+            );
+        }
+    }
+}
+
+/// #1654 gate 4 on both hosts (D5). `t1-b`'s own mute curve is open until 2,048 and closed after.
+/// A hand mute before block 4 is `live` and, after the mute ramp, renders the plan whose send is
+/// statically muted (the curve is open: the hand mute closes the send); a hand unmute before
+/// block 20 (2,560, the curve closed) is `live` and renders the curve-only plan (the send stays
+/// closed). Both hosts render the same bits.
+///
+/// Test value: red if the composition is not an OR on either host, or the hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_hand_send_mute_ors_with_its_curve_on_both_hosts() {
+    use session::{AutomationShape::Step, ParameterUnit::Linear};
+    const RUN: u64 = 32;
+    let end = u64::from(QUANTUM) * BLOCKS;
+    let curve = |muted: bool| {
+        let mut model = follow_model(false, false);
+        model.automation.push(send_entry(
+            "t1-b-mute",
+            2,
+            vec![
+                send_piece(Step, (0, 0.0), (2_048, 1.0), Linear),
+                send_piece(Step, (2_048, 1.0), (end, 1.0), Linear),
+            ],
+        ));
+        t1_b(&mut model).mute = muted;
+        model
+    };
+    let run = both_run(
+        &curve(false),
+        RUN,
+        &[
+            (4, send_edit(2, 1.0, None), EditPath::Live),
+            (20, send_edit(2, 0.0, None), EditPath::Live),
+        ],
+    );
+    let shut = both_run(&curve(true), RUN, &[]);
+    let curve_only = both_run(&curve(false), RUN, &[]);
+    assert_eq!(
+        run[9..20],
+        shut[9..20],
+        "the hand mute closes the open curve"
+    );
+    assert_ne!(
+        curve_only[9..16],
+        shut[9..16],
+        "not vacuous: the curve is open there"
+    );
+    assert_eq!(
+        run[20..],
+        curve_only[20..],
+        "the hand unmute leaves the closed curve closed"
+    );
+}
+
+/// #1654 gate 5 on both hosts: an automation entry on the route into the output `t1-main` is
+/// refused `control.automation.target` alike, with one diagnostic.
+///
+/// Test value: red if a route into the output's rows became automatable on either host (D8).
+#[cfg(feature = "test-support")]
+#[test]
+fn an_output_route_entry_is_refused_alike_on_both_hosts() {
+    let model = follow_model(false, false);
+    let mut browser = Rig::new(&model);
+    let mut c_abi = CAbi::new(&model);
+    same_blocks(&mut browser, &mut c_abi, 0..1, "before");
+    let mut entry = send_entry(
+        "t1-main-gain",
+        1,
+        vec![send_piece(
+            session::AutomationShape::Linear,
+            (0, -6.0),
+            (1_000, -6.0),
+            session::ParameterUnit::Db,
+        )],
+    );
+    entry.target.owner = Owner::Route(id("t1-main"));
+    let edits = [SessionEdit::UpsertAutomation { automation: entry }];
+    let frame = browser.encode(
+        CommandPayload::SessionTransactionApply(&edits),
+        ExpectedRevision::Exact(SessionRevision(browser.revision)),
+    );
+    let (b_code, b_diagnostic) = browser.send_frame(&frame);
+    let (c_code, c_diagnostic) = c_abi.send_status(
+        CommandPayload::SessionTransactionApply(&edits),
+        ExpectedRevision::Exact(SessionRevision(c_abi.revision)),
+    );
+    // Each host has its own result numbering; the diagnostic is the shared contract.
+    assert_ne!(b_code, C_RESULT_OK, "the browser refuses the entry");
+    assert_ne!(c_code, C_RESULT_OK, "the C ABI refuses the entry");
+    assert_eq!(b_diagnostic, c_diagnostic, "one diagnostic");
+    let diagnostic = String::from_utf8_lossy(&c_diagnostic);
+    assert!(
+        diagnostic.contains("control.automation.target")
+            && diagnostic.contains("$.automation[id=t1-main-gain].target"),
+        "{diagnostic}"
+    );
+    same_blocks(&mut browser, &mut c_abi, 1..3, "after the refusal");
+}
+
+/// #1654 gate 7 and R19-5 on both hosts. On [`send_ride_model`]: (gate 7) a rebuild that adds a
+/// muted send `t2-b` into the bus (inactive: no bit of the mix moves) keeps the send ride's table, so the
+/// send's cursors carry verbatim and every block is the never-rebuilt run's, bit for bit;
+/// (R19-5) a live send move with its own 4,000 samples (the hand offset `+3`, or a D6
+/// `matrix_lr` edit) is in flight when a rebuild moves the gain ride's table: until the move's
+/// end every block is the run that took the move and no rebuild. Each rebuild completes `EXACT`
+/// with no transition fallback on either host, and both hosts render the same bits.
+///
+/// Test value: red if a continued ride is repositioned at an unrelated swap (a re-timed ride), if a
+/// reposition cuts or re-times a live send move, or if either rebuild is flagged.
+#[cfg(feature = "test-support")]
+#[test]
+fn send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts() {
+    const RUN: u64 = 48;
+    const MOVE: u64 = 4;
+    const REBUILD: u64 = 6;
+    const RAMP: u32 = 4_000;
+    let model = send_ride_model(|_| {});
+    // A muted route `t2-b` into the bus: inactive, so the bus sum takes nothing of it.
+    let mut muted_send = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "t1-b")
+        .expect("the send")
+        .clone();
+    muted_send.id = id("t2-b");
+    muted_send.source = session::RouteSource::Track {
+        track_id: id(T2.id),
+        tap: session::SendTap::PreFader,
+    };
+    muted_send.mute = true;
+    muted_send.follows_mute = false;
+    let added_route = SessionEdit::UpsertRoute { route: muted_send };
+    let moved_ride = |offset: f32| {
+        let mut ride = model.automation[0].clone();
+        ride.segments[0].end_value = -24.0;
+        ride.offset = session::AutomationOffset {
+            left_db: offset,
+            right_db: offset,
+        };
+        SessionEdit::UpsertAutomation { automation: ride }
+    };
+    let exact = |browser: &mut Rig, c_abi: &CAbi, label: &str| {
+        let watermark = c_abi.watermark();
+        assert_eq!(
+            status_watermark(browser),
+            watermark,
+            "{label}: one watermark"
+        );
+        assert_eq!(
+            watermark.2,
+            capi::OUTCOME_EXACT,
+            "{label}: the rebuild is exact"
+        );
+        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+        assert_eq!(
+            (
+                browser.host.watermark().transition_fallback_count,
+                c_abi.transition_fallback_count()
+            ),
+            (0, 0),
+            "{label}: no transition fallback"
+        );
+    };
+    // Gate 7.
+    let twin = both_run(&model, RUN, &[]);
+    let mut browser = Rig::new(&model);
+    let mut c_abi = CAbi::new(&model);
+    same_blocks(&mut browser, &mut c_abi, 0..REBUILD, "gate 7");
+    both_commit(
+        &mut browser,
+        &mut c_abi,
+        &[added_route],
+        EditPath::Rebuild,
+        "gate 7",
+    );
+    for block in REBUILD..RUN {
+        let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(b, c, "gate 7, block {block}: the two hosts agree");
+        assert_eq!(
+            b, twin[block as usize],
+            "gate 7, block {block}: the never-rebuilt run"
+        );
+    }
+    exact(&mut browser, &c_abi, "gate 7");
+    // R19-5.
+    for (label, edits, offset) in [
+        ("the gain offset", send_edit(1, 3.0, Some(RAMP)), 3.0),
+        ("matrix_lr", send_edit(4, 0.5, Some(RAMP)), 0.0),
+    ] {
+        let moved = both_run(&model, RUN, &[(MOVE, edits.clone(), EditPath::Live)]);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..MOVE, label);
+        both_commit(&mut browser, &mut c_abi, &edits, EditPath::Live, label);
+        same_blocks(&mut browser, &mut c_abi, MOVE..REBUILD, label);
+        both_commit(
+            &mut browser,
+            &mut c_abi,
+            &[moved_ride(offset)],
+            EditPath::Rebuild,
+            label,
+        );
+        let end = (MOVE * u64::from(QUANTUM) + u64::from(RAMP)) / u64::from(QUANTUM);
+        for block in REBUILD..end {
+            let (b, c) = (browser.step(block), c_abi.step(block));
+            assert_eq!(b, c, "{label}, block {block}: the two hosts agree");
+            assert_eq!(
+                b, moved[block as usize],
+                "{label}, block {block}: the move runs"
+            );
+        }
+        exact(&mut browser, &c_abi, label);
+    }
 }

@@ -1670,11 +1670,19 @@ impl LiveFollowRoute {
     /// them with the seeded flags, as #1651's prepared stage mute does; both column ramps are
     /// settled on it, so an idle route mixes exactly what a prepared route of that target mixes.
     /// Control side: it allocates the cursor tables.
+    ///
+    /// When the plan automates the gain (flags bit 6), the cell's `gain` word is the hand offset
+    /// in dB, not a linear gain: the bound word is the source's seeded offset
+    /// ([`crate::GraphFollowRouteSource::gain_offset`]), and `transform.gain` (the compiler's
+    /// static linear gain, a fallback render never hears) is replaced by it (#1654 T4 note).
     pub(crate) fn new(
-        transform: crate::RouteTransform,
+        mut transform: crate::RouteTransform,
         control: Box<crate::FollowRouteControlLane>,
         source: &crate::GraphFollowRouteSource,
     ) -> Self {
+        if source.flags.automated_gain {
+            transform.gain = source.gain_offset;
+        }
         let mut follow = FollowCursors {
             program: std::sync::Arc::clone(&source.program),
             columns: [0, 1].map(|column| RouteColumn::bind(source, column)),
@@ -1976,6 +1984,41 @@ fn next_column_event(
 
 /// Call `each` on every value cursor of `walk` that a carried first block placed (it does not
 /// continue its predecessor's table).
+impl FollowCursors {
+    /// A carried route's first block, before its cell (#1654 T5): each value cursor of a row
+    /// the predecessor did not automate ([`Placement::New`]) hears its curve at node time `at`
+    /// and is placed there, so a join record composes with the value a fresh plan hears at `at`,
+    /// not with the cursor's bind seed (the curve at node time 0), which no plan heard. The
+    /// predecessor heard the row's static value, which the successor's composition cannot
+    /// express; a repositioned or continued cursor keeps the value the column heard.
+    /// [`LiveFollowRoute::place_carried`] leaves it placed, so a join record's column jump keeps
+    /// its deferral (R19-3).
+    fn place_new_values(&mut self, at: i64) {
+        let Self {
+            program, columns, ..
+        } = self;
+        for walk in columns.iter_mut().flatten() {
+            for role in 0..ROLES {
+                let new = walk.placement.get(role) == Some(&Placement::New);
+                let (Some(index), true) = (walk.roles.of(role), new) else {
+                    continue;
+                };
+                let Some(cursor) = walk.walk.cursor_mut(index) else {
+                    continue;
+                };
+                if cursor.kind() != automation::CursorKind::Value {
+                    continue;
+                }
+                let Some(cell) = program.cell(cursor.cell() as usize) else {
+                    continue;
+                };
+                cursor.state_mut().reposition(&cell, at);
+                cursor.set_heard(automation::value_at(cell.segments(), at));
+            }
+        }
+    }
+}
+
 fn for_placed_values(walk: &mut RouteColumn, mut each: impl FnMut(&mut automation::ComposeCursor)) {
     for role in 0..ROLES {
         let placed = walk
@@ -2167,6 +2210,13 @@ impl LiveFollowRoute {
                 let Some(cursor) = walk.walk.cursor_mut(index) else {
                     continue;
                 };
+                // A new value cursor was placed before the cell (`place_new_values`); placing it
+                // again would drop the deferral a join record's column jump gave it.
+                if walk.placement.get(role) == Some(&Placement::New)
+                    && cursor.kind() == automation::CursorKind::Value
+                {
+                    continue;
+                }
                 let Some(cell) = follow.program.cell(cursor.cell() as usize) else {
                     continue;
                 };
@@ -2228,10 +2278,15 @@ impl LiveFollowRoute {
     ) -> Option<u32> {
         let (block, start) = self.follow.block(time);
         self.block = block;
+        let carried = match (start, block.start) {
+            (FollowStart::Carried, Some(at)) => Some(at),
+            _ => None,
+        };
+        if let Some(at) = carried {
+            self.follow.place_new_values(at);
+        }
         self.apply_cell(snapshot, block.start);
-        if start == FollowStart::Carried
-            && let Some(at) = block.start
-        {
+        if let Some(at) = carried {
             self.place_carried(at);
         }
         if !(self.mute && self.ramps.is_settled() && !self.delayed) {
@@ -19531,6 +19586,13 @@ mod send_automation_tests {
             )
             .expect("source")
             .with_continued_rows(continued);
+            // The cell's `gain` word of an automated gain is the hand offset: the harness's
+            // `transform.gain` seeds it.
+            let source = if gain {
+                source.with_gain_offset(transform.gain).expect("offset")
+            } else {
+                source
+            };
             let (binding, producer) = crate::follow_route_control_pair(
                 &StableGraphId::parse("send").expect("ID"),
                 &LiveValuesSuperseded::new(),
@@ -20054,6 +20116,100 @@ mod send_automation_tests {
             assert!(aims(&ramp, target, 480, column), "column {column}");
             // The jump is at 3,152, offset 16 of the block from 3,136.
             assert_eq!(successor.route.ramps.positions[column], 48);
+        }
+    }
+
+    /// R19-5 with riding tables: a hand offset record in flight at a swap whose gain ride's table
+    /// moves keeps its own length: until its end every block is the never-swapped twin's.
+    ///
+    /// Red if the repositioned cursor lands the moved table inside the hand move.
+    #[test]
+    fn a_hand_move_in_flight_at_a_swap_of_a_riding_table_is_the_twin_until_its_end() {
+        let ride = |end_db: f32| Curves {
+            gain: Some(vec![seg(0, 12_288, 0.0, end_db, Shape::Linear)]),
+            ..Curves::default()
+        };
+        let moved = RouteTransform { gain: 3.0, ..OPEN };
+        let mut twin = Send::new(&ride(-12.0), OPEN);
+        let mut predecessor = Send::new(&ride(-12.0), OPEN);
+        for index in 0..4_u64 {
+            assert_eq!(twin.run(index * 64), predecessor.run(index * 64));
+        }
+        twin.write(moved, 4_000);
+        predecessor.write(moved, 4_000);
+        for index in 4..6_u64 {
+            assert_eq!(twin.run(index * 64), predecessor.run(index * 64));
+        }
+        let mut successor = Send::new(&ride(-24.0), moved);
+        swap(&mut successor, &mut predecessor);
+        // The move started at 256 and ends at 4,256: block 66 of 64 holds its end.
+        for index in 6..66_u64 {
+            assert_eq!(
+                successor.run(index * 64),
+                twin.run(index * 64),
+                "block {index}"
+            );
+        }
+    }
+
+    /// T5, a row the predecessor did not automate: a send muted by hand whose successor gains a
+    /// gain ride and is unmuted in the same rebuild (a gate-only join record on the carried first
+    /// block) aims its unmute at the ride's value at the first block's node time, the value a
+    /// fresh plan hears there, not at the ride's value at node time 0 (the new cursor's bind
+    /// seed), which no plan hears.
+    ///
+    /// Red if the record composes with the new cursor's bind seed (the unmute ramps to the gain
+    /// at 0 dB and only then jumps to the ride), or if the carry's placement drops the column
+    /// jump's hold, so the ride's grid retargets inside the unmute (R19-3).
+    #[test]
+    fn a_new_send_row_at_a_swap_composes_the_join_record_with_its_curve_at_the_first_block() {
+        let before = Curves {
+            mute: Some(flat(0.0)),
+            ..Curves::default()
+        };
+        let ride = vec![seg(0, 8_000, 0.0, -24.0, Shape::Linear)];
+        let after = Curves {
+            gain: Some(ride.clone()),
+            mute: Some(flat(0.0)),
+            ..Curves::default()
+        };
+        let mut predecessor = Send::new(&before, OPEN);
+        let muted = RouteFollowFlags {
+            mute: true,
+            ..predecessor.route.flags
+        };
+        predecessor.revision += 1;
+        let record = FollowRouteControlRecord::new(OPEN, muted, 0).expect("record");
+        predecessor.producer.write(
+            predecessor.pin.stamp(predecessor.revision).expect("stamp"),
+            record,
+        );
+        predecessor
+            .pin
+            .publish(&predecessor.gate, predecessor.revision);
+        for index in 0..40_u64 {
+            predecessor.run(index * 64);
+        }
+        assert_eq!(predecessor.route.ramps.target().map(f32::to_bits), [0; 4]);
+        let mut successor = Send::new(&after, OPEN);
+        swap(&mut successor, &mut predecessor);
+        let flags = successor.route.flags;
+        successor.revision += 1;
+        let record = FollowRouteControlRecord::new(OPEN, flags, 200).expect("record");
+        successor.producer.write(
+            successor.pin.stamp(successor.revision).expect("stamp"),
+            record,
+        );
+        successor.pin.publish(&successor.gate, successor.revision);
+        let expected = open(OPEN, law(automation::value_at(&ride, 40 * 64), 0.0));
+        // The unmute's column jump runs to 2,760: the ride's grid is held through block 41.
+        for index in 40..42_u64 {
+            successor.run(index * 64);
+            assert_eq!(
+                successor.route.ramps.target().map(f32::to_bits),
+                expected.map(f32::to_bits),
+                "block {index}"
+            );
         }
     }
 }
