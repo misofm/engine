@@ -920,6 +920,11 @@ fn id(text: &str) -> StableId {
 
 impl CAbi {
     fn new(model: &SessionModel) -> Self {
+        Self::with_limits(model, &limits())
+    }
+
+    /// [`Self::new`] under `limits`.
+    fn with_limits(model: &SessionModel, limits: &CompileLimits) -> Self {
         let document = canonical_session_json(model).expect("canonical session");
         let config = EngineConfig {
             struct_size: ENGINE_CONFIG_SIZE,
@@ -949,7 +954,7 @@ impl CAbi {
                     engine,
                     document.as_ptr(),
                     document.len() as u64,
-                    &limits(),
+                    limits,
                     &mut diagnostics,
                     &mut session,
                     &mut plan,
@@ -1369,6 +1374,26 @@ impl CAbi {
         (out.revision, out.first_sample, out.outcome_flags)
     }
 
+    /// The plan's saturating count of revisions completed as a transition fallback, through
+    /// `miso_engine_v1_plan_watermark`.
+    fn transition_fallback_count(&self) -> u64 {
+        let mut out = capi::Watermark {
+            struct_size: capi::WATERMARK_SIZE,
+            reserved0: 0,
+            revision: 0,
+            first_sample: 0,
+            outcome_flags: 0,
+            exact_count: 0,
+            transition_fallback_count: 0,
+            superseded_count: 0,
+            reserved: [0; 5],
+        };
+        // SAFETY: The plan is live; the query is pure and `out` is owned storage of the exact size.
+        let code = unsafe { capi::miso_engine_v1_plan_watermark(self.plan, &mut out) };
+        assert_eq!(code, C_RESULT_OK, "C ABI watermark");
+        out.transition_fallback_count
+    }
+
     /// The active plan's `(latency_samples, tail_kind, tail_samples)` through
     /// `miso_engine_v1_plan_resources`.
     fn plan_latency(&self) -> (u64, u64, u64) {
@@ -1431,15 +1456,33 @@ impl CAbi {
         generation: u64,
     ) {
         let [left, right] = planes(feed, block);
-        let pointers = [left.as_ptr(), right.as_ptr()];
+        self.submit_planes(
+            name,
+            generation,
+            start_block * u64::from(QUANTUM),
+            [&left, &right],
+        );
+    }
+
+    /// Submit the planes `[left, right]` of `generation` to the source `name` at its frame
+    /// `start_frame`; every frame must be accepted.
+    fn submit_planes(
+        &mut self,
+        name: &str,
+        generation: u64,
+        start_frame: u64,
+        planes: [&[f32]; 2],
+    ) {
+        let frames = u32::try_from(planes[0].len()).expect("a chunk's frames");
+        let pointers = [planes[0].as_ptr(), planes[1].as_ptr()];
         let chunk = SourceChunk {
             struct_size: SOURCE_CHUNK_SIZE,
             sample_rate_hz: self.rate,
             generation,
-            start_frame: start_block * u64::from(QUANTUM),
+            start_frame,
             planes: pointers.as_ptr(),
             plane_count: 2,
-            frames: QUANTUM,
+            frames,
             end_of_region: 0,
             reserved0: 0,
         };
@@ -1462,25 +1505,28 @@ impl CAbi {
             )
         };
         assert_eq!(code, C_RESULT_OK, "C ABI source {name}");
-        assert_eq!(report.accepted_frames, u64::from(QUANTUM));
+        assert_eq!(report.accepted_frames, u64::from(frames));
     }
 
     /// Render block `block` and return the output's bits.
     fn render(&mut self, block: u64) -> Vec<u32> {
-        let mut pcm = vec![f32::NAN; QUANTUM as usize * 2];
+        self.render_frames(block * u64::from(QUANTUM), QUANTUM)
+    }
+
+    /// Render the `frames` samples from render sample `at` and return the output's bits.
+    fn render_frames(&mut self, at: u64, frames: u32) -> Vec<u32> {
+        let mut pcm = vec![f32::NAN; frames as usize * 2];
         let output = PlanarOutput {
             struct_size: PLANAR_OUTPUT_SIZE,
             channels: 2,
             samples: pcm.as_mut_ptr(),
             sample_capacity: pcm.len() as u64,
-            frames: QUANTUM,
-            plane_stride_samples: QUANTUM,
+            frames,
+            plane_stride_samples: frames,
             reserved: [0; 2],
         };
         // SAFETY: This thread is the plan's only renderer; `output` is owned storage.
-        let code = unsafe {
-            capi::miso_engine_v1_render_f32_planar(self.plan, block * u64::from(QUANTUM), &output)
-        };
+        let code = unsafe { capi::miso_engine_v1_render_f32_planar(self.plan, at, &output) };
         assert_eq!(code, C_RESULT_OK, "C ABI render");
         bits(&pcm)
     }
@@ -2762,7 +2808,7 @@ fn both_hosts_refuse_a_source_of_more_than_two_channels_alike() {
 
 /// #1648a (D1): adding stored fader automation (builtin row 5, a row that renders) is a rebuild
 /// on both hosts, with the same reply bytes, and both hosts render the same bits across the swap;
-/// an entry on a row that does not render yet (the mute, row 6) commits `model_only` on both.
+/// a mute entry (row 6, which renders since #1651 T3a) rebuilds alike on both.
 /// Both hosts call the one shared classifier, so neither has its own rule for automation edits.
 ///
 /// A changed ride and its removal then rebuild alike too, and both hosts render the same bits
@@ -2849,10 +2895,10 @@ fn a_fader_automation_edit_rebuilds_alike_on_both_hosts() {
         assert_eq!(
             b,
             Verdict::Applied {
-                path: EditPath::ModelOnly,
+                path: EditPath::Rebuild,
                 revision: model.revision + 2
             },
-            "{rate} Hz: a mute entry is model-only"
+            "{rate} Hz: a mute entry rebuilds (#1651 T3a: the mute row renders)"
         );
         same_blocks(&mut browser, &mut c_abi, 8..10, "after the mute entry");
         // #1648b (gate 2's browser leg): a changed ride and a removed ride rebuild alike, and the
@@ -2961,6 +3007,310 @@ fn a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both
                 watermark.2, expected,
                 "{rate} Hz, {label}: the rebuild's outcome flags"
             );
+        }
+    }
+}
+
+/// #1651 gate 8 (U1 fold 1, MINOR-3): in a mute-only session (a stored mute curve on `t1`, no
+/// fader entry), a rebuild that changes the mute curve while a hand fader move with its own 4,000
+/// samples still ramps completes exactly on both hosts: B17-R14's transition-fallback window is
+/// the fader row's alone, because a mute cell's adoption lands a `SetMute`, never a level move
+/// over `J`. Both hosts report the same watermark, `EXACT`, and no transition fallback, and render
+/// the same bits.
+///
+/// Test value: red if the shared control plane opens the fallback window for a successor that
+/// automates only a mute row (the candidate is flagged `TRANSITION_FALLBACK`), or if either host
+/// marks the rebuild differently.
+#[test]
+fn a_mute_curve_rebuild_while_a_level_move_ramps_completes_exactly_on_both_hosts() {
+    let curve = |close: u64| SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-mute-curve"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                6,
+                ParameterChannel::Both,
+            ),
+            segments: vec![
+                session::AutomationSegment {
+                    shape: session::AutomationShape::Step,
+                    start_sample: 0,
+                    end_sample: close,
+                    start_value: 0.0,
+                    end_value: 0.0,
+                    unit: session::ParameterUnit::Linear,
+                },
+                session::AutomationSegment {
+                    shape: session::AutomationShape::Step,
+                    start_sample: close,
+                    end_sample: 1_000_000,
+                    start_value: 1.0,
+                    end_value: 1.0,
+                    unit: session::ParameterUnit::Linear,
+                },
+            ],
+            offset: session::AutomationOffset::default(),
+        },
+    };
+    let hand = CAbi::edits(
+        Edit::Fader {
+            strip: T1,
+            lanes: Lanes::Both,
+            db: -6.0,
+        },
+        Some(4_000),
+    );
+    for rate in RATES {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi| {
+            let (b, b_reply) = browser.transaction_reply(edits);
+            let (c, c_reply) = c_abi.transaction(edits);
+            assert_eq!(b, c, "{rate} Hz: one verdict");
+            assert_eq!(b_reply, c_reply, "{rate} Hz: one reply");
+            b
+        };
+        let rebuilt = |verdict: Verdict| {
+            assert!(
+                matches!(
+                    verdict,
+                    Verdict::Applied {
+                        path: EditPath::Rebuild,
+                        ..
+                    }
+                ),
+                "{rate} Hz: a mute curve edit rebuilds: {verdict:?}"
+            );
+        };
+        rebuilt(both(&[curve(20_000)], &mut browser, &mut c_abi));
+        same_blocks(&mut browser, &mut c_abi, 0..4, "the mute-only session");
+        both(&hand, &mut browser, &mut c_abi);
+        same_blocks(&mut browser, &mut c_abi, 4..7, "the hand move");
+        rebuilt(both(&[curve(30_000)], &mut browser, &mut c_abi));
+        same_blocks(&mut browser, &mut c_abi, 7..10, "the mute curve rebuild");
+        let watermark = c_abi.watermark();
+        assert_eq!(
+            status_watermark(&browser),
+            watermark,
+            "{rate} Hz: the browser status carries the C ABI's watermark"
+        );
+        assert_eq!(
+            watermark.2,
+            capi::OUTCOME_EXACT,
+            "{rate} Hz: the mute-only rebuild completes exactly"
+        );
+        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+        assert_eq!(
+            (
+                browser.host.watermark().transition_fallback_count,
+                c_abi.transition_fallback_count()
+            ),
+            (0, 0),
+            "{rate} Hz: no transition fallback on either host"
+        );
+    }
+}
+
+/// #1651 gates 1 and 3 across hosts (U1 fold 1, MINOR-4): the strip's stored mute under
+/// composition renders the same bits on the browser and the C ABI. `t1`'s mute curve closes at
+/// 2,000 and opens at 3,500 on both lanes, and VCA `m` holds `t1`. Each of solo on `t2`, a VCA
+/// mute of `t1` and a hand mute of `t1` is set at block 2 (the curve open), then released while
+/// the curve is closed, released while it is open, or kept; after the curve's opening a plain
+/// session seek to timeline 2,600 lands inside the muted span and the curve opens again 900
+/// samples later. Every transaction gets the same verdict and reply bytes on both hosts and
+/// every block the same bits, at quanta 128 and 37 (a quantum that puts the steps, the terms and
+/// the seek off every grid and block boundary). The curve is heard: `t1`'s muted span differs from
+/// a twin with no curve.
+///
+/// Test value: red if a host adapter delivers the seek or a term edit differently (both hosts run
+/// the one core, so the unique catch is the adapter: a step, a term or the seek's exact set landing
+/// at another sample or over another ramp, or a different answer to a term edit). The send follows
+/// `t1`'s mute, so the following route's cell is in the comparison too.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_composed_stored_mute_renders_alike_on_both_hosts() {
+    let curve = || session::Automation {
+        id: id("t1-mute-curve"),
+        target: address(
+            Owner::Strip(id(T1.id)),
+            Section::Builtins,
+            MUTE,
+            ParameterChannel::Both,
+        ),
+        segments: [
+            (0, 2_000, 0.0),
+            (2_000, 3_500, 1.0),
+            (3_500, 1_000_000, 0.0),
+        ]
+        .map(
+            |(start_sample, end_sample, value)| session::AutomationSegment {
+                shape: session::AutomationShape::Step,
+                start_sample,
+                end_sample,
+                start_value: value,
+                end_value: value,
+                unit: session::ParameterUnit::Linear,
+            },
+        )
+        .to_vec(),
+        offset: session::AutomationOffset::default(),
+    };
+    const VCA_M: VcaRef = VcaRef { id: "m" };
+    let rate = 48_000;
+    for quantum in [128_u32, 37] {
+        let q = u64::from(quantum);
+        let mut model = model_at(rate);
+        model.quantum_frames = quantum;
+        model.vcas.push(Vca {
+            id: id(VCA_M.id),
+            fader: DualMonoFader {
+                left_db: 0.0,
+                right_db: 0.0,
+                left_mute: false,
+                right_mute: false,
+            },
+            members: vec![id(T1.id)],
+        });
+        let plain = model.clone();
+        model.automation.push(curve());
+        // The block that holds a sample, and the blocks of the script.
+        let block_of = |sample: u64| sample.div_ceil(q);
+        let (set_at, seek_at) = (2, block_of(4_200));
+        let blocks = seek_at + block_of(1_900);
+        let terms = [
+            (
+                "solo",
+                Edit::Solo {
+                    strip: T2,
+                    on: true,
+                },
+                Edit::Solo {
+                    strip: T2,
+                    on: false,
+                },
+            ),
+            (
+                "vca",
+                Edit::VcaMute {
+                    vca: VCA_M,
+                    lanes: Lanes::Both,
+                    muted: true,
+                },
+                Edit::VcaMute {
+                    vca: VCA_M,
+                    lanes: Lanes::Both,
+                    muted: false,
+                },
+            ),
+            (
+                "hand",
+                Edit::Mute {
+                    strip: T1,
+                    lanes: Lanes::Both,
+                    muted: true,
+                },
+                Edit::Mute {
+                    strip: T1,
+                    lanes: Lanes::Both,
+                    muted: false,
+                },
+            ),
+        ];
+        for (term, on, off) in terms {
+            for release in [Some(block_of(2_600)), Some(block_of(1_000)), None] {
+                let label = format!("quantum {quantum}, {term}, released at block {release:?}");
+                let document = canonical_session_json(&model).expect("canonical session");
+                let mut browser = Rig::boot_at(document.as_bytes(), rate, quantum);
+                let mut c_abi = CAbi::with_limits(
+                    &model,
+                    &CompileLimits {
+                        source_ring_frames: quantum * 2,
+                        ..limits()
+                    },
+                );
+                let plain_document = canonical_session_json(&plain).expect("canonical session");
+                let mut twin = Rig::boot_at(plain_document.as_bytes(), rate, quantum);
+                let (mut generation, mut timeline) = (1, 0);
+                let mut heard = false;
+                for block in 0..blocks {
+                    let edit = if block == set_at {
+                        Some(on)
+                    } else if Some(block) == release {
+                        Some(off)
+                    } else {
+                        None
+                    };
+                    if let Some(edit) = edit {
+                        let edits = CAbi::edits(edit, None);
+                        let (b, b_reply) = browser.transaction_reply(&edits);
+                        let (c, c_reply) = c_abi.transaction(&edits);
+                        assert_eq!(b, c, "{label}: one verdict at block {block}");
+                        assert_eq!(b_reply, c_reply, "{label}: one reply at block {block}");
+                        assert!(
+                            matches!(b, Verdict::Applied { .. }),
+                            "{label}: the term at block {block} commits: {b:?}"
+                        );
+                    }
+                    if block == seek_at {
+                        generation += 1;
+                        timeline = 2_600;
+                        assert_eq!(
+                            browser.host.session_seek(None, generation, timeline, None),
+                            host_web::RESULT_OK
+                        );
+                        assert_eq!(
+                            twin.host.session_seek(None, generation, timeline, None),
+                            host_web::RESULT_OK
+                        );
+                        c_abi.session_seek(generation, timeline, None);
+                    }
+                    let mut outputs = Vec::new();
+                    for leg in [&mut browser, &mut twin] {
+                        for (feed, strip) in [T1, T2, T3].into_iter().enumerate() {
+                            let [left, right] = [0, 1].map(|lane| {
+                                (timeline..timeline + q)
+                                    .map(|frame| sample(feed as u64, lane, frame))
+                                    .collect::<Vec<f32>>()
+                            });
+                            assert_eq!(
+                                leg.host.submit_source(
+                                    format!("src-{}", strip.id).as_bytes(),
+                                    generation,
+                                    timeline,
+                                    rate,
+                                    &[&left, &right],
+                                    quantum,
+                                    false,
+                                ),
+                                host_web::RESULT_OK,
+                                "{label}: browser source {}",
+                                strip.id
+                            );
+                            if outputs.is_empty() {
+                                c_abi.submit_planes(
+                                    &format!("src-{}", strip.id),
+                                    generation,
+                                    timeline,
+                                    [&left, &right],
+                                );
+                            }
+                        }
+                        assert_eq!(leg.host.render_next(), host_web::RESULT_OK);
+                        outputs.push(bits(leg.host.output_pcm().expect("browser output")));
+                    }
+                    let c = c_abi.render_frames(block * q, quantum);
+                    assert_eq!(outputs[0], c, "{label}: block {block} bits");
+                    // Inside the curve's muted span, after its ramp: `t1` is muted there,
+                    // unlike in the twin with no curve and no term.
+                    if (2_600..3_400).contains(&timeline) && outputs[0] != outputs[1] {
+                        heard = true;
+                    }
+                    timeline += q;
+                }
+                assert!(heard, "{label}: the curve's muted span is heard");
+            }
         }
     }
 }
@@ -5207,5 +5557,436 @@ fn re_authoring_keeps_the_hand_offset_and_removal_ends_it_alike_on_both_hosts() 
             stale,
             "{label}: the C ABI refuses the old epoch"
         );
+    }
+}
+
+/// #1652 gate 1's session on both hosts: the command session at 48 kHz with no console slot and
+/// no insert (so no strip state outlives a mute), whose `t1` sends `pre_fader` with
+/// `follows_mute` into bus `b`; `t1` gets a mute entry on `both` with steps 0, 1, 0 at 1,000 and
+/// 2,500 (`entry`), or is muted statically (`muted`). `control_smoothing` is explicit: the mute
+/// length is 480 samples.
+fn follow_model(entry: bool, muted: bool) -> SessionModel {
+    let mut model = model_at(48_000);
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    for track in &mut model.tracks {
+        track.console.clear();
+        track.inserts.effects.clear();
+    }
+    for submix in &mut model.submixes {
+        submix.console.clear();
+        submix.inserts.effects.clear();
+    }
+    model.control_smoothing = Some(session::ControlSmoothing {
+        mute_ms: 10.0,
+        fader_ms: 5.0,
+        pan_ms: 5.0,
+    });
+    let send = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "t1-b")
+        .expect("the command session's following send");
+    assert!(send.follows_mute);
+    let t1 = model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == T1.id)
+        .expect("t1");
+    (t1.fader.left_mute, t1.fader.right_mute) = (muted, muted);
+    if entry {
+        let step = |start: u64, end: u64, from: f32, to: f32| session::AutomationSegment {
+            shape: session::AutomationShape::Step,
+            start_sample: start,
+            end_sample: end,
+            start_value: from,
+            end_value: to,
+            unit: session::ParameterUnit::Linear,
+        };
+        model.automation.push(session::Automation {
+            id: id("t1-mute"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                MUTE,
+                ParameterChannel::Both,
+            ),
+            segments: vec![step(0, 1_000, 0.0, 1.0), step(1_000, 2_500, 1.0, 0.0)],
+            offset: session::AutomationOffset::default(),
+        });
+    }
+    model
+}
+
+/// #1652 gate 1 on both hosts (the browser at its native width, as the C ABI). Both hosts render
+/// the same bits for the session with `t1`'s mute entry. From the first block boundary after the
+/// end of the mute ramp to the unmute, each host's output is bit for bit its plan with `t1`
+/// statically muted, fed the same PCM; from the first block boundary after the end of the unmute
+/// ramp, bit for bit its plan with no mute. Not vacuous: before the mute the curve's plan differs
+/// from the statically muted one.
+///
+/// Test value: red if either host's plan attaches no following lane for `t1-b` (its pre-fader
+/// audio leaks into `b` while `t1` is muted), or if the two hosts disagree.
+#[test]
+fn a_following_send_leaks_nothing_of_a_stored_mute_on_both_hosts() {
+    const BLOCKS: u64 = 32;
+    let quantum = u64::from(QUANTUM);
+    let run = |model: &SessionModel| {
+        let mut browser = Rig::new(model);
+        let mut c_abi = CAbi::new(model);
+        (0..BLOCKS)
+            .map(|block| {
+                let (b, c) = (browser.step(block), c_abi.step(block));
+                assert_eq!(b, c, "block {block}: the two hosts agree");
+                b
+            })
+            .collect::<Vec<_>>()
+    };
+    let curve = run(&follow_model(true, false));
+    let muted = run(&follow_model(false, true));
+    let open = run(&follow_model(false, false));
+    let first_after = |sample: u64| sample.div_ceil(quantum);
+    for block in first_after(1_000 + 480)..2_500 / quantum {
+        assert_eq!(
+            curve[block as usize], muted[block as usize],
+            "block {block}: the statically muted plan's bits while the curve mutes"
+        );
+    }
+    for block in first_after(2_500 + 480)..BLOCKS {
+        assert_eq!(
+            curve[block as usize], open[block as usize],
+            "block {block}: the open plan's bits after the unmute"
+        );
+    }
+    assert_ne!(
+        curve[2], muted[2],
+        "the strip and its send play before the mute"
+    );
+}
+
+/// #1652 U2a fold 2 (MAJOR-A, conservative; #1713 deletes the flag) on both hosts. A rebuild
+/// whose send join carries a following route into a six-word one (it removes `t1`'s mute entry
+/// while `t1-b` follows it, sent at block 8 while the send's columns ramp toward the mute the
+/// curve stepped on at 1,000) completes as the transition fallback; a rebuild that keeps the
+/// entry (the unmute moved to 3,000: `t1-b` stays following) and a rebuild of a session with no
+/// following route (a fader ride added to `t1`, no move in flight) complete exactly. Both hosts
+/// take the one decision in the shared control plane: the browser's status words carry the C
+/// ABI's watermark, flags included, and both render the same bits.
+///
+/// Test value: red if the shared control plane does not mark a seven -> six rebuild, marks a
+/// rebuild whose following route stays following or one with no following route, or if either
+/// host decides the outcome by a rule of its own.
+#[test]
+fn a_rebuild_that_drops_a_following_route_to_six_words_reports_the_fallback_alike() {
+    let step = |start: u64, end: u64, from: f32, to: f32| session::AutomationSegment {
+        shape: session::AutomationShape::Step,
+        start_sample: start,
+        end_sample: end,
+        start_value: from,
+        end_value: to,
+        unit: session::ParameterUnit::Linear,
+    };
+    let later_unmute = SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-mute"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                MUTE,
+                ParameterChannel::Both,
+            ),
+            segments: vec![step(0, 1_000, 0.0, 1.0), step(1_000, 3_000, 1.0, 0.0)],
+            offset: session::AutomationOffset::default(),
+        },
+    };
+    let ride = SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-fader-ride"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                5,
+                ParameterChannel::Both,
+            ),
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 1_000_000,
+                start_value: 0.0,
+                end_value: -12.0,
+                unit: session::ParameterUnit::Db,
+            }],
+            offset: session::AutomationOffset::default(),
+        },
+    };
+    let remove = SessionEdit::RemoveAutomation {
+        automation_id: id("t1-mute"),
+    };
+    for (label, entry, edit, expected) in [
+        (
+            "seven -> six, a column mid-move",
+            true,
+            remove,
+            capi::OUTCOME_TRANSITION_FALLBACK,
+        ),
+        ("seven -> seven", true, later_unmute, capi::OUTCOME_EXACT),
+        ("no following route", false, ride, capi::OUTCOME_EXACT),
+    ] {
+        let model = follow_model(entry, false);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..8, label);
+        let (b, b_reply) = browser.transaction_reply(std::slice::from_ref(&edit));
+        let (c, c_reply) = c_abi.transaction(std::slice::from_ref(&edit));
+        assert_eq!(b, c, "{label}: one verdict");
+        assert_eq!(b_reply, c_reply, "{label}: one reply");
+        assert_eq!(
+            b,
+            Verdict::Applied {
+                path: EditPath::Rebuild,
+                revision: model.revision + 1
+            },
+            "{label}: the edit rebuilds"
+        );
+        same_blocks(&mut browser, &mut c_abi, 8..12, label);
+        let watermark = c_abi.watermark();
+        assert_eq!(
+            status_watermark(&browser),
+            watermark,
+            "{label}: the browser status carries the C ABI's watermark"
+        );
+        assert_eq!(
+            (watermark.0, watermark.2),
+            (model.revision + 1, expected),
+            "{label}: the rebuild's revision and outcome flags"
+        );
+    }
+}
+
+/// #1653: one `SET_CONTROL` of `value` on `owner`'s own row `control` (a route or a VCA row, or a
+/// strip's solo).
+fn own_edit(owner: Owner, control: u32, value: f32) -> SessionEdit {
+    SessionEdit::set_control(
+        address(owner, Section::Own, control, Lane::Both),
+        value,
+        None,
+    )
+}
+
+/// #1653: `edits` on both hosts as one transaction each: one verdict, one reply, path `path`.
+fn both_commit(
+    browser: &mut Rig,
+    c_abi: &mut CAbi,
+    edits: &[SessionEdit],
+    path: EditPath,
+    label: &str,
+) {
+    let (b, b_reply) = browser.transaction_reply(edits);
+    let (c, c_reply) = c_abi.transaction(edits);
+    assert_eq!(b, c, "{label}: one verdict");
+    assert_eq!(b_reply, c_reply, "{label}: one reply");
+    assert!(
+        matches!(b, Verdict::Applied { path: applied, .. } if applied == path),
+        "{label}: {b:?}, not {path:?}"
+    );
+}
+
+/// #1653: `model` on both hosts for `blocks` blocks, with `edits[i] = (block, edits, path)` sent
+/// before block `block` renders. Both hosts render the same bits each block; returns them.
+fn both_run(
+    model: &SessionModel,
+    blocks: u64,
+    edits: &[(u64, Vec<SessionEdit>, EditPath)],
+) -> Vec<Vec<u32>> {
+    let mut browser = Rig::new(model);
+    let mut c_abi = CAbi::new(model);
+    let mut out = Vec::new();
+    for block in 0..blocks {
+        for (at, edit, path) in edits {
+            if *at == block {
+                both_commit(
+                    &mut browser,
+                    &mut c_abi,
+                    edit,
+                    *path,
+                    &format!("block {block}"),
+                );
+            }
+        }
+        let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(b, c, "block {block}: the two hosts agree");
+        out.push(b);
+    }
+    out
+}
+
+/// #1653 gate 1 on both hosts. `t1` is automated-muted from 1,000 (480-sample mute ramps) and
+/// `t1-b` follows it. Before block 8 (1,024) a `SET_CONTROL` turns `t1-b`'s `follows_mute` off,
+/// before block 15 (1,920) one turns it on: on both hosts each is `live`, with one reply. From the
+/// first block boundary after each 480-sample route ramp, each host's output is bit for bit a
+/// fresh plan of the committed model (fed the same PCM from 0): the send open while the curve
+/// mutes, then shut until the curve's unmute. Not vacuous: the two committed models' plans differ
+/// in the first window.
+///
+/// Test value: red if the browser or the C ABI loses a live `follows_mute` toggle on an automated
+/// route (the commit reads `follows_mute` from the prepared route only, or refuses the seven-word
+/// record), or if the hosts disagree.
+#[test]
+fn a_follows_mute_toggle_on_a_following_route_is_live_on_both_hosts() {
+    const BLOCKS: u64 = 32;
+    let quantum = u64::from(QUANTUM);
+    let toggle = |on: bool| {
+        vec![own_edit(
+            Owner::Route(id("t1-b")),
+            ROUTE_FOLLOWS_MUTE_ROW,
+            f32::from(u8::from(on)),
+        )]
+    };
+    let following = follow_model(true, false);
+    let live = both_run(
+        &following,
+        BLOCKS,
+        &[
+            (8, toggle(false), EditPath::Live),
+            (15, toggle(true), EditPath::Live),
+        ],
+    );
+    let mut open = following.clone();
+    for route in &mut open.routes {
+        if route.id.as_str() == "t1-b" {
+            route.follows_mute = false;
+        }
+    }
+    let fresh_open = both_run(&open, 15, &[]);
+    let fresh_shut = both_run(&following, BLOCKS, &[]);
+    let first_after = |sample: u64| sample.div_ceil(quantum);
+    let off = first_after(8 * quantum + 480)..15;
+    for block in off.clone() {
+        assert_eq!(
+            live[block as usize], fresh_open[block as usize],
+            "block {block}: the plan with follows_mute off"
+        );
+    }
+    for block in first_after(15 * quantum + 480)..BLOCKS {
+        assert_eq!(
+            live[block as usize], fresh_shut[block as usize],
+            "block {block}: the plan with follows_mute on"
+        );
+    }
+    assert!(
+        off.clone()
+            .any(|block| fresh_open[block as usize] != fresh_shut[block as usize]),
+        "the toggle is audible"
+    );
+}
+
+/// #1653 gate 2 on both hosts: solo and a VCA mute compose with `t1`'s mute curve for `t1-b` as
+/// for the strip. `t1` has its mute entry (curve 1 on `[1,000, 2,500)`) and, for the VCA case, is
+/// VCA `v`'s only member and sends `t1-pre` from its `pre_fader` tap straight to the output.
+///
+/// - Solo `t2` before block 2 (the curve is 0): from the first block boundary after the 480-sample
+///   ramps to block 14, both hosts render what the session with no mute entry renders under the
+///   same solo: `t1` muted by solo, its send shut with it. Unsolo before block 14 (the curve is 1):
+///   from block 20 on, the curve's own plan with no solo (the send stays shut by the curve, and
+///   reopens with it at 2,500).
+/// - A VCA mute of `v` before block 2 and its release before block 14: the same comparisons.
+/// - A route into the output never follows: under the VCA mute `t1-pre` still plays (the session
+///   without it renders other bits), while the twin comparisons hold.
+///
+/// Test value: red if solo or a VCA mute overwrites the curve instead of composing with it for the
+/// send (the send reopens on the release while the curve still mutes, or does not follow the solo
+/// while the curve is 0), or if the hosts disagree.
+#[test]
+fn solo_and_a_vca_mute_compose_with_the_curve_for_a_following_send_on_both_hosts() {
+    const BLOCKS: u64 = 32;
+    let solo = |on: bool| {
+        vec![own_edit(
+            Owner::Strip(id(T2.id)),
+            SOLO,
+            f32::from(u8::from(on)),
+        )]
+    };
+    let vca_mute = |on: bool| vec![own_edit(Owner::Vca(id("v")), 2, f32::from(u8::from(on)))];
+    // `t1` alone in `v`, with a pre-fader route straight to the output (`pre_out`).
+    let with_vca = |mut model: SessionModel, pre_out: bool| {
+        for vca in &mut model.vcas {
+            if vca.id.as_str() == "v" {
+                vca.members = vec![id(T1.id)];
+            }
+        }
+        if pre_out {
+            let mut route = model
+                .routes
+                .iter()
+                .find(|route| route.id.as_str() == "t1-b")
+                .expect("the send")
+                .clone();
+            route.id = id("t1-pre");
+            route.follows_mute = false;
+            route.destination = model
+                .routes
+                .iter()
+                .find(|route| {
+                    matches!(
+                        route.destination,
+                        session::RouteDestination::OutputInput { .. }
+                    )
+                })
+                .expect("a route to the output")
+                .destination
+                .clone();
+            model.routes.push(route);
+            model.routes.sort_by(|left, right| left.id.cmp(&right.id));
+        }
+        model
+    };
+    for (label, edit, path, curve, twin, bare) in [
+        (
+            "solo",
+            &solo as &dyn Fn(bool) -> Vec<SessionEdit>,
+            EditPath::Monitor,
+            follow_model(true, false),
+            follow_model(false, false),
+            None,
+        ),
+        (
+            "vca",
+            &vca_mute as &dyn Fn(bool) -> Vec<SessionEdit>,
+            EditPath::Live,
+            with_vca(follow_model(true, false), true),
+            with_vca(follow_model(false, false), true),
+            Some(with_vca(follow_model(true, false), false)),
+        ),
+    ] {
+        let composed = both_run(
+            &curve,
+            BLOCKS,
+            &[(2, edit(true), path), (14, edit(false), path)],
+        );
+        let static_twin = both_run(&twin, 14, &[(2, edit(true), path)]);
+        let curve_only = both_run(&curve, BLOCKS, &[]);
+        for block in 6..14 {
+            assert_eq!(
+                composed[block], static_twin[block],
+                "{label}, block {block}: muted by the term while the curve is 0, then by both"
+            );
+        }
+        assert_ne!(
+            composed[6], curve_only[6],
+            "{label}: the term mutes t1 and its send while the curve is 0"
+        );
+        for block in 20..BLOCKS as usize {
+            assert_eq!(
+                composed[block], curve_only[block],
+                "{label}, block {block}: the release restores the curve's state"
+            );
+        }
+        if let Some(bare) = bare {
+            let without = both_run(&bare, 14, &[(2, edit(true), path)]);
+            assert!(
+                (6..14).any(|block| without[block] != composed[block]),
+                "{label}: the route into the output plays while t1 is muted"
+            );
+        }
     }
 }

@@ -894,6 +894,9 @@ pub struct PreparedGraphPlan {
     /// [`attach_route_controls`](Self::attach_route_controls) runs. `None` and an empty list both
     /// bind every route op to its prepared constants, exactly as a plan without the field did.
     route_controls: Option<Vec<GraphRouteControlBinding>>,
+    /// #1652b: one seven-word lane per route into a submix whose source strip has an automated
+    /// mute lane. Empty until #1652c's attach fills it, so every route binds as it did before.
+    follow_route_controls: Vec<GraphFollowRouteControlBinding>,
     banks: Vec<GraphPreparedEffectBank>,
     builtin_banks: Vec<GraphPreparedBuiltinBank>,
     observers: Vec<GraphNodeObserverBinding>,
@@ -1126,6 +1129,419 @@ impl GraphRouteControlProducer {
     }
 }
 
+/// Words of a following route's cell (#1652 D1): the open transform `[gain, ll, lr, rl, rr]`'s
+/// bits, the flags word ([`RouteFollowFlags`]) and the ramp length. A route into a submix whose
+/// source strip has an automated mute lane holds this cell instead of the six folded words, so
+/// render can gate the transform itself at every curve event.
+pub(crate) const FOLLOW_ROUTE_CELL_WORDS: usize = 7;
+
+/// The flags word of a following route's cell (#1652 D1, batch 18 layout): bit 0 the route's own
+/// `mute`, bit 1 `follows_mute`, bits 2 and 3 `terms[L, R]`, bits 4 and 5 `automated[L, R]`. Every
+/// other bit is 0; [`Self::from_word`] refuses a word with any of them set.
+///
+/// `terms[lane]` is the source lane's effective mute without its curve (`controls::effective`'s
+/// source-lane mute: static mute, VCA mute and solo term). `automated[lane]` is fixed by the plan:
+/// whether that source lane has a stored mute curve.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RouteFollowFlags {
+    /// The route's own mute: it silences the route whatever the source does.
+    pub mute: bool,
+    /// Whether the route follows its source strip's mute.
+    pub follows_mute: bool,
+    /// Per source lane `[L, R]`: the lane's mute terms other than its curve.
+    pub terms: [bool; 2],
+    /// Per source lane `[L, R]`: whether the plan automates the lane's mute.
+    pub automated: [bool; 2],
+}
+
+impl RouteFollowFlags {
+    const MUTE: u32 = 1 << 0;
+    const FOLLOWS_MUTE: u32 = 1 << 1;
+    const TERMS: [u32; 2] = [1 << 2, 1 << 3];
+    const AUTOMATED: [u32; 2] = [1 << 4, 1 << 5];
+    /// Every bit the layout defines; any other bit set makes a word no record wrote.
+    const DEFINED: u32 = (1 << 6) - 1;
+
+    /// The flags word.
+    #[must_use]
+    pub const fn to_word(self) -> u32 {
+        const fn bit(set: bool, bit: u32) -> u32 {
+            if set { bit } else { 0 }
+        }
+        bit(self.mute, Self::MUTE)
+            | bit(self.follows_mute, Self::FOLLOWS_MUTE)
+            | bit(self.terms[0], Self::TERMS[0])
+            | bit(self.terms[1], Self::TERMS[1])
+            | bit(self.automated[0], Self::AUTOMATED[0])
+            | bit(self.automated[1], Self::AUTOMATED[1])
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// The flags a word holds, or `None` when a bit above bit 5 is set.
+    #[must_use]
+    pub const fn from_word(word: u32) -> Option<Self> {
+        if word & !Self::DEFINED != 0 {
+            return None;
+        }
+        Some(Self {
+            mute: word & Self::MUTE != 0,
+            follows_mute: word & Self::FOLLOWS_MUTE != 0,
+            terms: [word & Self::TERMS[0] != 0, word & Self::TERMS[1] != 0],
+            automated: [
+                word & Self::AUTOMATED[0] != 0,
+                word & Self::AUTOMATED[1] != 0,
+            ],
+        })
+    }
+
+    /// The route's gate while the source lanes' curves are at `curve` (#1652 D2):
+    /// `follow_zeroed[lane] = follows_mute && ((automated[lane] && curve[lane]) || terms[lane])`. A
+    /// lane the plan does not automate ignores its `curve` entry. Pure; [`gated_route_coefficients`]
+    /// of the open transform with this gate is the route's target.
+    #[must_use]
+    pub const fn gate(self, curve: [bool; 2]) -> RouteGate {
+        let [left, right] = [
+            self.follows_mute && ((self.automated[0] && curve[0]) || self.terms[0]),
+            self.follows_mute && ((self.automated[1] && curve[1]) || self.terms[1]),
+        ];
+        RouteGate {
+            mute: self.mute,
+            follow_zeroed: [left, right],
+        }
+    }
+    // REALTIME_POLICY_END
+}
+
+/// One live change of a following route (#1652 D1): its open transform, its flags and the ramp in
+/// samples, `0` being a step. Render composes the target itself
+/// ([`RouteFollowFlags::gate`], [`gated_route_coefficients`]), so the record holds no folded
+/// coefficients. The constructor is the only way to build one, so every record a lane drains is in
+/// bounds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FollowRouteControlRecord {
+    transform: RouteTransform,
+    flags: RouteFollowFlags,
+    length: u32,
+}
+
+impl FollowRouteControlRecord {
+    // REALTIME_POLICY_BEGIN
+    /// `None` when `length > ROUTE_RAMP_LENGTH_MAXIMUM` or when a transform word is not finite: the
+    /// gate folds the transform at every curve event, so it must give finite coefficients.
+    #[must_use]
+    pub fn new(transform: RouteTransform, flags: RouteFollowFlags, length: u32) -> Option<Self> {
+        let RouteTransform {
+            gain,
+            ll,
+            lr,
+            rl,
+            rr,
+        } = transform;
+        if length > ROUTE_RAMP_LENGTH_MAXIMUM
+            || ![gain, ll, lr, rl, rr].iter().all(|word| word.is_finite())
+        {
+            return None;
+        }
+        Some(Self {
+            transform,
+            flags,
+            length,
+        })
+    }
+    /// The open transform: the route's linear gain and its 2x2, ungated.
+    #[must_use]
+    pub const fn transform(&self) -> RouteTransform {
+        self.transform
+    }
+    /// The flags word's fields.
+    #[must_use]
+    pub const fn flags(&self) -> RouteFollowFlags {
+        self.flags
+    }
+    /// The ramp's length in samples; `0` is a step.
+    #[must_use]
+    pub const fn length(&self) -> u32 {
+        self.length
+    }
+    // REALTIME_POLICY_END
+
+    /// The cell words `[gain, ll, lr, rl, rr, flags, length]`.
+    pub(crate) fn to_words(self) -> [u32; FOLLOW_ROUTE_CELL_WORDS] {
+        let RouteTransform {
+            gain,
+            ll,
+            lr,
+            rl,
+            rr,
+        } = self.transform;
+        [
+            gain.to_bits(),
+            ll.to_bits(),
+            lr.to_bits(),
+            rl.to_bits(),
+            rr.to_bits(),
+            self.flags.to_word(),
+            self.length,
+        ]
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// The record a cell's words hold: `None` for words no record wrote (a flags bit above bit 5,
+    /// a non-finite transform word or a ramp over the bound), which render skips. The words come
+    /// from [`Self::to_words`], so the checks are the constructor's and the flags word's own.
+    pub(crate) fn from_words(words: [u32; FOLLOW_ROUTE_CELL_WORDS]) -> Option<Self> {
+        let [gain, ll, lr, rl, rr, flags, length] = words;
+        Self::new(
+            RouteTransform {
+                gain: f32::from_bits(gain),
+                ll: f32::from_bits(ll),
+                lr: f32::from_bits(lr),
+                rl: f32::from_bits(rl),
+                rr: f32::from_bits(rr),
+            },
+            RouteFollowFlags::from_word(flags)?,
+            length,
+        )
+    }
+    // REALTIME_POLICY_END
+}
+
+/// What one following route shares between its writer (control) and its reader (render): one
+/// seven-word latest-target cell and its dirty word (#1652 D1). Its own type, so a six-word
+/// route's [`RouteLane`] keeps its bytes.
+pub(crate) struct FollowRouteLane {
+    pub(crate) cell: engine::realtime::LatestCell<FOLLOW_ROUTE_CELL_WORDS>,
+    pub(crate) dirty: engine::realtime::DirtyWord,
+}
+
+/// The render-side half of one following route's cell (#1652 D1): the shared cell, the reader's
+/// last applied sequence, the dirty reader and the session's `live_values_superseded` count. The
+/// counterpart of [`RouteControlLane`] for the seven-word cell.
+pub struct FollowRouteControlLane {
+    pub(crate) lane: std::sync::Arc<FollowRouteLane>,
+    pub(crate) reader: engine::realtime::CellReader,
+    pub(crate) dirty: engine::realtime::DirtyReader,
+    pub(crate) superseded: engine::realtime::LiveValuesSuperseded,
+}
+
+// REALTIME_POLICY_BEGIN
+impl FollowRouteControlLane {
+    /// Read the cell under the block's snapshot: the newest record whose revision is `<=
+    /// snapshot` and that this reader has not applied, or `None`. An idle cell costs one
+    /// `Relaxed` load. When it applies sequence `s` after `p`, the `s - p - 1` writes it replaced
+    /// join the session's `live_values_superseded` (#1312 D2). Allocation-free and lock-free.
+    pub(crate) fn read(&mut self, snapshot: LiveSnapshot) -> Option<FollowRouteControlRecord> {
+        if self.dirty.pending(&self.lane.dirty) & 1 == 0 {
+            return None;
+        }
+        let engine::realtime::CellRead::Applied { words, .. } = self.reader.read_counted(
+            &self.lane.cell,
+            snapshot,
+            &mut self.dirty,
+            0,
+            &self.superseded,
+        ) else {
+            return None;
+        };
+        // Only `write` fills the cell, from a validated record, so the words decode.
+        let record = FollowRouteControlRecord::from_words(words);
+        debug_assert!(
+            record.is_some(),
+            "a following route cell held words no record wrote"
+        );
+        record
+    }
+}
+// REALTIME_POLICY_END
+
+/// The length, in samples, of one jump of a stored mute curve, resolved from the block's three
+/// session lengths (#1652b). Host-core hands in the row rule (`controls::LiveRamps::from_lengths`
+/// and `for_row(LiveRampRow::Mute)`, the rule the strip's mute stage uses), so graph never spells
+/// the mute row and the strip ramp and the send ramp cannot differ in length.
+pub type GraphMuteJumpLength = fn(GraphJumpLengths) -> u32;
+
+/// What one following route reads of its source strip's stored mute (#1652 D2, #1652b): the plan's
+/// immutable automation program, the source lanes' mute cells in it, the arrival `a(tap)` of the
+/// route's tap, the mute row's jump length and the seeded flags word.
+///
+/// The program is the one the strip's own stage reads (an `Arc` clone, no copy); the route keeps
+/// its own cursors over it, so two readers of one table never share state. `a(tap)` is the route
+/// node's floored input arrival (`floored_input_arrival` of the compile report's
+/// `input_arrivals`): a route op reads its one undelayed input before its consumer's compensation
+/// delay. Only [`Self::new`] builds one, so every cell it names is in its program.
+#[derive(Clone)]
+pub struct GraphFollowRouteSource {
+    pub(crate) program: std::sync::Arc<automation::Program>,
+    pub(crate) cells: [Option<u32>; 2],
+    pub(crate) arrival: u64,
+    pub(crate) mute_jump: GraphMuteJumpLength,
+    pub(crate) flags: RouteFollowFlags,
+}
+
+impl GraphFollowRouteSource {
+    /// The source of a following route: `cells[lane]` is the source lane's mute cell in
+    /// `program`, `None` for a lane the plan does not automate; `arrival` is `a(tap)`;
+    /// `mute_jump` resolves the mute row's jump length; `flags` is the seeded flags word.
+    ///
+    /// `None` when no lane is automated (the route keeps the six-word cell), when a cell is not in
+    /// `program`, or when `flags.automated` disagrees with `cells` (the plan fixes which lanes
+    /// are automated, D1).
+    #[must_use]
+    pub fn new(
+        program: std::sync::Arc<automation::Program>,
+        cells: [Option<u32>; 2],
+        arrival: u64,
+        mute_jump: GraphMuteJumpLength,
+        flags: RouteFollowFlags,
+    ) -> Option<Self> {
+        let automated = cells.map(|cell| cell.is_some());
+        let in_program = cells
+            .iter()
+            .flatten()
+            .all(|&cell| program.cell(cell as usize).is_some());
+        (automated != [false; 2] && in_program && flags.automated == automated).then_some(Self {
+            program,
+            cells,
+            arrival,
+            mute_jump,
+            flags,
+        })
+    }
+
+    /// `a(tap)`, the arrival the route's events are timed at.
+    #[must_use]
+    pub const fn arrival(&self) -> u64 {
+        self.arrival
+    }
+
+    /// The seeded flags word.
+    #[must_use]
+    pub const fn flags(&self) -> RouteFollowFlags {
+        self.flags
+    }
+}
+
+/// One following route's lane, carried beside the prepared routes as
+/// [`GraphRouteControlBinding`] is (#1652 D1), with what its route op reads of the source strip's
+/// stored mute (#1652b).
+pub struct GraphFollowRouteControlBinding {
+    /// The route node this lane drives.
+    pub node: GraphNodeId,
+    /// Reader half of the seven-word cell; the writer stays on the control plane.
+    pub control: Box<FollowRouteControlLane>,
+    /// The source strip's mute cells, `a(tap)`, the jump length and the seeded flags.
+    pub source: GraphFollowRouteSource,
+}
+
+/// The control-plane half of one following route's seven-word cell (#1652 D1): the counterpart of
+/// [`GraphRouteControlProducer`].
+pub struct GraphFollowRouteControlProducer {
+    /// The route's session ID.
+    pub route_id: Box<str>,
+    lane: std::sync::Arc<FollowRouteLane>,
+    writer: engine::realtime::CellWriter<FOLLOW_ROUTE_CELL_WORDS>,
+    /// As [`GraphRouteControlProducer`]'s: the route-activity bytes this attach added, the same
+    /// for every producer of one attach.
+    activity_bytes: u64,
+    /// The largest single allocation of that table, or `0` with it.
+    activity_largest: u64,
+    /// The route-activity table's activation offsets (#1652 MAJOR-1): one `u32` per prepared
+    /// route, which bind allocates only for a plan with a following route, so the compile-time
+    /// estimate never charges it. The same for every producer of one attach.
+    activity_offset_bytes: u64,
+    /// The lanes the plan automates (the bound source's `flags.automated`, #1652 D1): render
+    /// takes `automated` from its own cursors, so a record whose bits differ is refused by the
+    /// commit before any write (#1653 D5).
+    automated: [bool; 2],
+}
+
+impl GraphFollowRouteControlProducer {
+    /// The source lanes whose mute the plan automates, as bound (#1653 D5): the bits every record
+    /// written to this cell must carry.
+    #[must_use]
+    pub const fn automated(&self) -> [bool; 2] {
+        self.automated
+    }
+
+    /// Write `record` as the route's newest value, stamped with the revision of the transaction
+    /// that commits it. A write cannot fail and never waits; render applies the newest and counts
+    /// each replaced one. Validation is [`FollowRouteControlRecord::new`]'s, made before any
+    /// write. The caller publishes the stamp's revision on the plan's gate after every write of
+    /// the transaction (#1312 D7).
+    pub fn write(
+        &mut self,
+        stamp: engine::realtime::LiveStamp<'_>,
+        record: FollowRouteControlRecord,
+    ) {
+        self.writer.write(
+            &self.lane.cell,
+            &self.lane.dirty,
+            0,
+            stamp,
+            record.to_words(),
+        );
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl GraphFollowRouteControlProducer {
+    /// Test-only: how many writes the cell has taken. Valid while no write is in flight, which a
+    /// quiescent test thread guarantees.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_write_count(&self) -> u64 {
+        engine::realtime::CellReader::new()
+            .peek_unread(&self.lane.cell)
+            .map_or(0, |(_, sequence)| sequence)
+    }
+}
+
+/// One following route's binding and producer over one fresh seven-word cell (#1652 D1), reading
+/// `source` (#1652b). `activity_bytes` and `activity_largest` are the attach's route-activity charge, as for a
+/// six-word producer; `activity_routes` is the plan's prepared route count, whose activation
+/// offsets bind allocates for a plan with a following route (#1652 MAJOR-1).
+pub(crate) fn follow_route_control_pair(
+    route_id: &StableGraphId,
+    superseded: &engine::realtime::LiveValuesSuperseded,
+    source: GraphFollowRouteSource,
+    activity_bytes: u64,
+    activity_largest: u64,
+    activity_routes: u64,
+) -> (
+    GraphFollowRouteControlBinding,
+    GraphFollowRouteControlProducer,
+) {
+    let lane = std::sync::Arc::new(FollowRouteLane {
+        cell: engine::realtime::LatestCell::new(),
+        dirty: engine::realtime::DirtyWord::new(),
+    });
+    let automated = source.flags().automated;
+    (
+        GraphFollowRouteControlBinding {
+            node: GraphNodeId::Route {
+                route_id: route_id.clone(),
+            },
+            control: Box::new(FollowRouteControlLane {
+                lane: std::sync::Arc::clone(&lane),
+                reader: engine::realtime::CellReader::new(),
+                dirty: engine::realtime::DirtyReader::new(),
+                superseded: superseded.clone(),
+            }),
+            source,
+        },
+        GraphFollowRouteControlProducer {
+            route_id: route_id.as_str().into(),
+            lane,
+            writer: engine::realtime::CellWriter::new(),
+            activity_bytes,
+            activity_largest,
+            activity_offset_bytes: runtime::route_activity_offset_bytes(activity_routes)
+                .unwrap_or(u64::MAX),
+            automated,
+        },
+    )
+}
+
 /// Why [`PreparedGraphPlan::attach_route_controls`] refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphRouteControlError {
@@ -1140,6 +1556,10 @@ pub enum GraphRouteControlError {
 /// D8): stated so a caller can check [`route_control_resources`] from first principles.
 pub const LIVE_ROUTE_OWNER_BYTES: usize = runtime::live_route_owner_bytes();
 
+/// The bytes bind allocates for one following route's render-side owner, its boxed state (#1652
+/// D1): stated so a caller can check [`route_control_resources`] from first principles.
+pub const LIVE_FOLLOW_ROUTE_OWNER_BYTES: usize = runtime::live_follow_route_owner_bytes();
+
 /// What attaching route controls and binding the plan add (issue #1220 D8): an upper bound on
 /// what the attached artifact retains before bind and on what the bound plan retains.
 ///
@@ -1153,12 +1573,15 @@ pub struct RouteControlResources {
     pub routes: u64,
     /// Each route's one shared allocation, the `Arc` of its latest-target cell and dirty word
     /// (`SharedAllocation<RouteLane>`: the cell's three slots, the dirty word and the owner
-    /// header). Exact (#1347 D1).
+    /// header; `SharedAllocation<FollowRouteLane>` for a following route). Exact (#1347 D1,
+    /// #1652 D1).
     pub cell_bytes: u64,
     /// Per route: the boxed [`RouteControlLane`], the plan's [`GraphRouteControlBinding`] entry
-    /// (held until bind) and the boxed render-side owner bind builds.
+    /// (held until bind) and the boxed render-side owner bind builds; for a following route the
+    /// boxed [`FollowRouteControlLane`], its [`GraphFollowRouteControlBinding`] and its owner.
     pub owner_bytes: u64,
-    /// The producer table: one [`GraphRouteControlProducer`] per route.
+    /// The producer tables: one [`GraphRouteControlProducer`] per six-word route and one
+    /// [`GraphFollowRouteControlProducer`] per following route.
     pub producer_table_bytes: u64,
     /// The route IDs' bytes, twice: the producer's `route_id`, and the plan's
     /// [`GraphRouteControlBinding`] node ID (held until bind) -- a second heap copy (#1220 verdict
@@ -1171,51 +1594,108 @@ pub struct RouteControlResources {
     pub largest_allocation_bytes: u64,
 }
 
-/// The resources of one [`PreparedGraphPlan::attach_route_controls`] call's `producers` and of the
-/// bind that consumes its lanes (issue #1220 D8): an upper bound on both the attached and the bound
-/// state ([`RouteControlResources`]). Saturating; empty for no producers.
+/// The resources of one [`PreparedGraphPlan::attach_route_controls`] call's `producers` and
+/// `following` producers, and of the bind that consumes their lanes (issue #1220 D8, #1652 D1): an
+/// upper bound on both the attached and the bound state ([`RouteControlResources`]). A six-word
+/// route is charged its `RouteLane` cell, its owner ([`LIVE_ROUTE_OWNER_BYTES`]) and its
+/// producer; a following route its own seven-word cell, owner ([`LIVE_FOLLOW_ROUTE_OWNER_BYTES`])
+/// and producer, so the charge of a plan with no following route is what it was. The
+/// route-activity table is one per plan, charged once. Saturating; empty for no producers.
 #[must_use]
-pub fn route_control_resources(producers: &[GraphRouteControlProducer]) -> RouteControlResources {
+pub fn route_control_resources(
+    producers: &[GraphRouteControlProducer],
+    following: &[GraphFollowRouteControlProducer],
+) -> RouteControlResources {
     let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
-    if producers.is_empty() {
+    if producers.is_empty() && following.is_empty() {
         return RouteControlResources::default();
     }
-    let routes = count(producers.len());
-    // Every route's shared allocation is the same type, so the same bytes.
+    let six = count(producers.len());
+    let seven = count(following.len());
+    let routes = six.saturating_add(seven);
+    // Every route's shared allocation of one kind is the same type, so the same bytes.
     let cell = count(core::mem::size_of::<
         engine::realtime::SharedAllocation<RouteLane>,
     >());
-    let cell_bytes = routes.saturating_mul(cell);
+    let follow_cell = count(core::mem::size_of::<
+        engine::realtime::SharedAllocation<FollowRouteLane>,
+    >());
+    let cell_bytes = six
+        .saturating_mul(cell)
+        .saturating_add(seven.saturating_mul(follow_cell));
     let mut route_id_bytes = 0_u64;
-    let mut largest = cell;
-    for producer in producers {
+    let mut largest = 0_u64;
+    if six > 0 {
+        largest = largest.max(cell);
+    }
+    if seven > 0 {
+        largest = largest.max(follow_cell);
+    }
+    let route_ids = producers
+        .iter()
+        .map(|producer| &producer.route_id)
+        .chain(following.iter().map(|producer| &producer.route_id));
+    for route_id in route_ids {
         // The producer's copy and the binding's node-ID copy.
-        route_id_bytes =
-            route_id_bytes.saturating_add(count(producer.route_id.len()).saturating_mul(2));
-        largest = largest.max(count(producer.route_id.len()));
+        route_id_bytes = route_id_bytes.saturating_add(count(route_id.len()).saturating_mul(2));
+        largest = largest.max(count(route_id.len()));
     }
     let lane = count(core::mem::size_of::<RouteControlLane>());
     let binding = count(core::mem::size_of::<GraphRouteControlBinding>());
     let owner = count(LIVE_ROUTE_OWNER_BYTES);
-    let owner_bytes = routes.saturating_mul(lane.saturating_add(binding).saturating_add(owner));
-    let producer_table_bytes =
-        routes.saturating_mul(count(core::mem::size_of::<GraphRouteControlProducer>()));
-    let activity_bytes = producers
+    let follow_lane = count(core::mem::size_of::<FollowRouteControlLane>());
+    let follow_binding = count(core::mem::size_of::<GraphFollowRouteControlBinding>());
+    let follow_owner = count(LIVE_FOLLOW_ROUTE_OWNER_BYTES);
+    let owner_bytes = six
+        .saturating_mul(lane.saturating_add(binding).saturating_add(owner))
+        .saturating_add(
+            seven.saturating_mul(
+                follow_lane
+                    .saturating_add(follow_binding)
+                    .saturating_add(follow_owner),
+            ),
+        );
+    let six_producers =
+        six.saturating_mul(count(core::mem::size_of::<GraphRouteControlProducer>()));
+    let seven_producers = seven.saturating_mul(count(core::mem::size_of::<
+        GraphFollowRouteControlProducer,
+    >()));
+    let producer_table_bytes = six_producers.saturating_add(seven_producers);
+    let activity = producers
         .iter()
-        .map(|producer| producer.activity_bytes)
+        .map(|producer| (producer.activity_bytes, producer.activity_largest))
+        .chain(
+            following
+                .iter()
+                .map(|producer| (producer.activity_bytes, producer.activity_largest)),
+        );
+    let (activity_bytes, activity_largest) = activity.fold((0, 0), |(bytes, largest), next| {
+        (bytes.max(next.0), largest.max(next.1))
+    });
+    // #1652 MAJOR-1: the activation offsets bind adds to the table for a plan with a following
+    // route; charged once, with the table.
+    let offsets = following
+        .iter()
+        .map(|producer| producer.activity_offset_bytes)
         .max()
         .unwrap_or(0);
-    let activity_largest = producers
-        .iter()
-        .map(|producer| producer.activity_largest)
-        .max()
-        .unwrap_or(0);
-    largest = largest
-        .max(lane)
-        .max(owner)
-        .max(routes.saturating_mul(binding))
-        .max(producer_table_bytes)
-        .max(activity_largest);
+    let activity_bytes = activity_bytes.saturating_add(offsets);
+    let activity_largest = activity_largest.max(offsets);
+    if six > 0 {
+        largest = largest
+            .max(lane)
+            .max(owner)
+            .max(six.saturating_mul(binding))
+            .max(six_producers);
+    }
+    if seven > 0 {
+        largest = largest
+            .max(follow_lane)
+            .max(follow_owner)
+            .max(seven.saturating_mul(follow_binding))
+            .max(seven_producers);
+    }
+    largest = largest.max(activity_largest);
     RouteControlResources {
         routes,
         cell_bytes,
@@ -2236,7 +2716,31 @@ impl PreparedGraphPlan {
         &mut self,
         superseded: &engine::realtime::LiveValuesSuperseded,
     ) -> Result<Vec<GraphRouteControlProducer>, GraphRouteControlError> {
-        if self.route_controls.is_some() {
+        self.attach_route_controls_following(superseded, true, |_| None)
+            .map(|(producers, _)| producers)
+    }
+
+    /// [`Self::attach_route_controls`] with following routes (#1652 D1, #1652c): every route into
+    /// a submix input for which `following` gives a source gets a seven-word lane reading it
+    /// (`follow_route_control_pair`) and no six-word lane; every other such route gets a
+    /// six-word lane when `six_word` is set and none otherwise. Both producer lists are in
+    /// canonical route-ID order. `following` is asked once per route into a submix, in that
+    /// order, so a route into an output never follows (decision 13 P11).
+    ///
+    /// Refused as [`Self::attach_route_controls`] is.
+    pub fn attach_route_controls_following(
+        &mut self,
+        superseded: &engine::realtime::LiveValuesSuperseded,
+        six_word: bool,
+        mut following: impl FnMut(&StableGraphId) -> Option<GraphFollowRouteSource>,
+    ) -> Result<
+        (
+            Vec<GraphRouteControlProducer>,
+            Vec<GraphFollowRouteControlProducer>,
+        ),
+        GraphRouteControlError,
+    > {
+        if self.route_controls.is_some() || !self.follow_route_controls.is_empty() {
             return Err(GraphRouteControlError::AlreadyAttached);
         }
         // D1: the route's destination edge lands on a submix input (a strip `Input` stage, which
@@ -2271,11 +2775,25 @@ impl PreparedGraphPlan {
         if live.iter().any(|node| required.contains(node)) {
             return Err(GraphRouteControlError::BoundRoute);
         }
+        // Which kind of lane each route gets: a following route its source, a six-word route
+        // nothing, a route with no lane is left out.
+        let mut kinds: Vec<(&StableGraphId, Option<GraphFollowRouteSource>)> =
+            Vec::with_capacity(live.len());
+        for node in live {
+            let GraphNodeId::Route { route_id } = node else {
+                continue;
+            };
+            match following(route_id) {
+                Some(source) => kinds.push((route_id, Some(source))),
+                None if six_word => kinds.push((route_id, None)),
+                None => {}
+            }
+        }
         // D8: bind builds the route-activity table for a plan with a live route. The compile-time
         // estimate charged it already when some prepared gate silences; otherwise it is this
         // attach's to state.
         let (activity_bytes, activity_largest) =
-            if live.is_empty() || self.routes.iter().any(|route| route.gate.silences()) {
+            if kinds.is_empty() || self.routes.iter().any(|route| route.gate.silences()) {
                 (0, 0)
             } else {
                 let routes = u64::try_from(self.routes.len()).unwrap_or(u64::MAX);
@@ -2285,15 +2803,30 @@ impl PreparedGraphPlan {
                     runtime::route_activity_largest_bytes(routes, nodes).unwrap_or(u64::MAX),
                 )
             };
-        let mut bindings = Vec::with_capacity(live.len());
-        let mut producers = Vec::with_capacity(live.len());
-        for node in live {
-            let GraphNodeId::Route { route_id } = node else {
+        let follow_count = kinds.iter().filter(|(_, source)| source.is_some()).count();
+        let mut bindings = Vec::with_capacity(kinds.len() - follow_count);
+        let mut producers = Vec::with_capacity(kinds.len() - follow_count);
+        let mut follow_bindings = Vec::with_capacity(follow_count);
+        let mut follow_producers = Vec::with_capacity(follow_count);
+        for (route_id, source) in kinds {
+            if let Some(source) = source {
+                let (binding, producer) = follow_route_control_pair(
+                    route_id,
+                    superseded,
+                    source,
+                    activity_bytes,
+                    activity_largest,
+                    u64::try_from(self.routes.len()).unwrap_or(u64::MAX),
+                );
+                follow_bindings.push(binding);
+                follow_producers.push(producer);
                 continue;
-            };
+            }
             let lane = std::sync::Arc::new(RouteLane::new());
             bindings.push(GraphRouteControlBinding {
-                node: node.clone(),
+                node: GraphNodeId::Route {
+                    route_id: route_id.clone(),
+                },
                 control: Box::new(RouteControlLane {
                     lane: std::sync::Arc::clone(&lane),
                     reader: engine::realtime::CellReader::new(),
@@ -2310,7 +2843,8 @@ impl PreparedGraphPlan {
             });
         }
         self.route_controls = Some(bindings);
-        Ok(producers)
+        self.follow_route_controls = follow_bindings;
+        Ok((producers, follow_producers))
     }
     /// The lowered executable program, or `None` when the plan's schedule, levels and spec
     /// disagree (which bind-time structural validation rejects).
@@ -2392,6 +2926,7 @@ impl PreparedGraphPlan {
             effect_controls: parts.effect_controls,
             effect_observations: parts.effect_observations,
             route_controls: None,
+            follow_route_controls: Vec::new(),
             banks: parts.banks,
             builtin_banks: parts.builtin_banks,
             observers: parts.observers,
@@ -3462,7 +3997,12 @@ struct GraphExecutor {
     carry_strip_delays: Box<[GraphStripDelayMove]>,
     /// The live-send section of the hand-over (#1284 D2), sorted by predecessor unit; empty (and
     /// never allocated) when no live route carries.
-    carry_routes: Box<[GraphRouteMove]>,
+    carry_routes: Box<[runtime::RouteCarryStep]>,
+    /// The side table of the moves whose predecessor row is a following route (#1652 D3,
+    /// MINOR-3): the comparisons a six-word successor of a following predecessor leaves for its
+    /// first block. `None` (never allocated) when no such move exists, so a session without
+    /// stored mute automation keeps its bytes.
+    route_checks: Option<Box<RouteCarryChecks>>,
     /// The identity of every strip delay line and live route, read once by
     /// [`take_strip_delay_lines`] and [`take_live_routes`] right after bind and empty afterwards:
     /// a plan retains none of it.
@@ -3647,10 +4187,11 @@ pub struct GraphStripMove {
     pub successor: GraphLaneLocation,
     /// The lane in the plan the successor displaces.
     pub predecessor: GraphLaneLocation,
-    /// The fader stage's automated cells (bit 0 left, bit 1 right) whose stored automation table
-    /// the successor's model keeps bit for bit from the predecessor's (#1648 D2): such a cell's
-    /// carried event state continues verbatim, and every other carried cell is repositioned in its
-    /// own table at adoption. `0` for a matrix move.
+    /// The fader stage's automated cells whose stored automation table the successor's model
+    /// keeps bit for bit from the predecessor's (#1648 D2): the fader cells (bit 0 left, bit 1
+    /// right) and the mute cells (#1651 T4: bit 2 left, bit 3 right). Such a cell's carried event
+    /// state continues verbatim, and every other carried cell is repositioned in its own table at
+    /// adoption. Graph passes the byte to the stage unchanged. `0` for a matrix move.
     pub continued_cells: u8,
 }
 
@@ -4415,6 +4956,9 @@ pub struct GraphLiveRoute {
     /// The route's runtime unit in this plan. Meaningful only to this plan's successor's carry
     /// program, which names it as the route to take.
     pub unit: u32,
+    /// Whether the route is a following route (#1652 D1): a successor's move from this row
+    /// carries [`GraphRouteMove::predecessor_follows`].
+    pub following: bool,
 }
 
 impl GraphLiveRoute {
@@ -4433,6 +4977,9 @@ pub struct GraphRouteMove {
     pub successor: u32,
     /// The route's unit in the plan the successor displaces.
     pub predecessor: u32,
+    /// Whether the predecessor's row is a following route ([`GraphLiveRoute::following`]): the
+    /// move then gets a slot in the section's side table (#1652 D3, MINOR-3).
+    pub predecessor_follows: bool,
 }
 
 /// The strip delay lines of a bound graph plan, in line order (#1284 D1); `None` for any other
@@ -4518,8 +5065,31 @@ pub fn install_route_carry(
         }
     }
     moves.sort_unstable_by_key(|step| step.predecessor);
-    executor.carry_routes = moves.into_boxed_slice();
+    let slots: Box<[runtime::RouteCarryCheck]> = moves
+        .iter()
+        .zip(0_u32..)
+        .filter(|(step, _)| step.predecessor_follows)
+        .map(|(_, index)| runtime::RouteCarryCheck::new(index))
+        .collect();
+    executor.route_checks = (!slots.is_empty()).then(|| {
+        Box::new(RouteCarryChecks {
+            slots,
+            pending: false,
+        })
+    });
+    executor.carry_routes = moves
+        .into_iter()
+        .map(runtime::RouteCarryStep::new)
+        .collect();
     Ok(())
+}
+
+/// The side table of a live-send section (#1652 D3, MINOR-3): one slot per move whose
+/// predecessor row is a following route, in move order, and whether the swap block left a
+/// comparison in one of them for the successor's first block.
+pub(crate) struct RouteCarryChecks {
+    slots: Box<[runtime::RouteCarryCheck]>,
+    pending: bool,
 }
 
 /// The bytes a strip-delay section of `moves` lines retains in its plan (#1284): its move table.
@@ -4530,11 +5100,21 @@ pub fn strip_delay_carry_retained_bytes(moves: usize) -> Option<u64> {
     u64::try_from(moves.checked_mul(core::mem::size_of::<GraphStripDelayMove>())?).ok()
 }
 
-/// The bytes a live-send section of `moves` routes retains in its plan (#1284): its move table.
-/// `None` on overflow; spelled once, as [`strip_delay_carry_retained_bytes`].
+/// The bytes a live-send section of `moves` routes retains in its plan (#1284, #1652 D3): its move
+/// table and, when `following` of its moves have a following route as their predecessor row, its
+/// side table of first-block comparison slots (MINOR-3; nothing with `following == 0`). `None` on
+/// overflow; spelled once, as [`strip_delay_carry_retained_bytes`].
 #[must_use]
-pub fn route_carry_retained_bytes(moves: usize) -> Option<u64> {
-    u64::try_from(moves.checked_mul(core::mem::size_of::<GraphRouteMove>())?).ok()
+pub fn route_carry_retained_bytes(moves: usize, following: usize) -> Option<u64> {
+    let table = moves.checked_mul(core::mem::size_of::<runtime::RouteCarryStep>())?;
+    let checks = if following == 0 {
+        0
+    } else {
+        following
+            .checked_mul(core::mem::size_of::<runtime::RouteCarryCheck>())?
+            .checked_add(core::mem::size_of::<RouteCarryChecks>())?
+    };
+    u64::try_from(table.checked_add(checks)?).ok()
 }
 
 /// The session timeline's sample at `source_read_sample` in a graph plan's source set (#1641 D8):
@@ -4591,8 +5171,14 @@ pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
                 delay_carry_retained_bytes(executor.carry_delays.len()).unwrap_or(u64::MAX);
             let strip_delays = strip_delay_carry_retained_bytes(executor.carry_strip_delays.len())
                 .unwrap_or(u64::MAX);
-            let routes =
-                route_carry_retained_bytes(executor.carry_routes.len()).unwrap_or(u64::MAX);
+            let routes = route_carry_retained_bytes(
+                executor.carry_routes.len(),
+                executor
+                    .route_checks
+                    .as_deref()
+                    .map_or(0, |checks| checks.slots.len()),
+            )
+            .unwrap_or(u64::MAX);
             sources
                 .saturating_add(delays)
                 .saturating_add(strip_delays)
@@ -4769,7 +5355,8 @@ struct GraphExecutorWithoutSplitPairTable {
     carry_delays: Box<[GraphDelayMove]>,
     compensation_lines: Vec<GraphDelayLine>,
     carry_strip_delays: Box<[GraphStripDelayMove]>,
-    carry_routes: Box<[GraphRouteMove]>,
+    carry_routes: Box<[runtime::RouteCarryStep]>,
+    route_checks: Option<Box<RouteCarryChecks>>,
     bind_identities: runtime::BindIdentities,
     live_snapshot: Option<LiveSnapshot>,
     jump_lengths: Option<Box<JumpLengthReader>>,
@@ -4837,7 +5424,8 @@ impl GraphExecutor {
             plan.track_delays,
             frames,
         )
-        .with_route_controls(plan.route_controls.unwrap_or_default());
+        .with_route_controls(plan.route_controls.unwrap_or_default())
+        .with_follow_route_controls(plan.follow_route_controls);
         // Issue #918: the claims a bank's gather may read in place, in claim order. Only a driver
         // that lends its played planes offers any, and `build_sequential` decides which of them
         // are bound in place.
@@ -4895,6 +5483,7 @@ impl GraphExecutor {
             compensation_lines,
             carry_strip_delays: Box::default(),
             carry_routes: Box::default(),
+            route_checks: None,
             bind_identities,
             live_snapshot: None,
             jump_lengths: None,
@@ -4943,6 +5532,28 @@ impl PreparedPlanExecutor for GraphExecutor {
         if predecessor.identity != program.predecessor {
             return CarryOutcome::PredecessorMismatch;
         }
+        // #1652 MINOR-2: a predecessor displaced before its own first block still holds the
+        // comparisons its carry left. Take them first, as that block would have (under every
+        // snapshot and its held jump lengths, as the carry applies pending values), so this
+        // plan carries the state the predecessor's next block would have rendered from. (Not
+        // gated in graph: two swaps with a following route need host-core's attach, #1652c.
+        // Reachable when a render call adopts a plan and is then refused before it renders;
+        // gated by host-core's `route_mute`
+        // `a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison`.)
+        if let Some(checks) = predecessor.route_checks.as_deref_mut()
+            && core::mem::take(&mut checks.pending)
+        {
+            let lengths = predecessor
+                .jump_lengths
+                .as_deref()
+                .map(|reader| reader.held);
+            predecessor.runtime.finish_route_carry(
+                &predecessor.carry_routes,
+                &mut checks.slots,
+                LiveSnapshot::ALL,
+                lengths,
+            );
+        }
         // Issue #1276: every builtin-input move must resolve before anything moves, so a refused
         // hand-over moves nothing at all.
         if !self
@@ -4985,9 +5596,13 @@ impl PreparedPlanExecutor for GraphExecutor {
         if !self
             .runtime
             .can_carry_strip_delays(&predecessor.runtime, &self.carry_strip_delays)
-            || !self
-                .runtime
-                .can_carry_live_routes(&predecessor.runtime, &self.carry_routes)
+            || !self.runtime.can_carry_live_routes(
+                &predecessor.runtime,
+                &self.carry_routes,
+                self.route_checks
+                    .as_deref()
+                    .map_or(&[][..], |checks| &checks.slots[..]),
+            )
         {
             return CarryOutcome::PredecessorMismatch;
         }
@@ -5012,8 +5627,16 @@ impl PreparedPlanExecutor for GraphExecutor {
             .carry_delay_lines(&mut predecessor.runtime, &self.carry_delays);
         self.runtime
             .carry_strip_delays(&mut predecessor.runtime, &self.carry_strip_delays);
-        self.runtime
-            .carry_live_routes(&mut predecessor.runtime, &self.carry_routes);
+        let mut no_checks = [];
+        let checks = self.route_checks.as_deref_mut();
+        let pending = self.runtime.carry_live_routes(
+            &mut predecessor.runtime,
+            &self.carry_routes,
+            checks.map_or(&mut no_checks[..], |checks| &mut checks.slots[..]),
+        );
+        if let Some(checks) = self.route_checks.as_deref_mut() {
+            checks.pending = pending;
+        }
         let refused = self.runtime.carry_effect_lanes(
             &mut predecessor.runtime,
             &self.carry_effects,
@@ -5137,7 +5760,8 @@ impl PreparedPlanExecutor for GraphExecutor {
             carry_delays: _,
             compensation_lines: _,
             carry_strip_delays: _,
-            carry_routes: _,
+            carry_routes,
+            route_checks,
             bind_identities: _,
             live_snapshot,
             jump_lengths,
@@ -5211,6 +5835,18 @@ impl PreparedPlanExecutor for GraphExecutor {
                 .as_ref()
                 .map(|set| &*set.driver as &dyn GraphPreparedSourceSetDriver),
         );
+        // #1652 D3: a six-word successor of a following predecessor compares at its first block,
+        // under this block's snapshot and jump lengths, before its op runs.
+        if let Some(checks) = route_checks.as_deref_mut()
+            && core::mem::take(&mut checks.pending)
+        {
+            runtime.finish_route_carry(
+                carry_routes,
+                &mut checks.slots,
+                live,
+                block_time.jump_lengths(),
+            );
+        }
         // Issue #936: only the units bind found to do work. An inert unit's `execute` and
         // `observe_unit` return at once, so skipping it moves no bit.
         #[cfg(any(test, feature = "test-support"))]
@@ -9818,5 +10454,385 @@ mod tests {
         );
         assert_eq!(after[0].source, strip("b"));
         assert_eq!(after[0].destination, output);
+    }
+}
+
+#[cfg(test)]
+mod follow_route_tests {
+    //! #1652a: the seven-word cell of a following route: its flags word, its record, the producer
+    //! write and the charge.
+    use super::*;
+    use engine::realtime::{LiveSnapshot, LiveValuesSuperseded, RevisionGate};
+
+    fn flags_of(word: u32) -> RouteFollowFlags {
+        RouteFollowFlags {
+            mute: word & 1 != 0,
+            follows_mute: word & 2 != 0,
+            terms: [word & 4 != 0, word & 8 != 0],
+            automated: [word & 16 != 0, word & 32 != 0],
+        }
+    }
+
+    fn transform() -> RouteTransform {
+        RouteTransform {
+            gain: 0.5,
+            ll: 1.0,
+            lr: -0.0,
+            rl: f32::from_bits(1),
+            rr: -0.75,
+        }
+    }
+
+    fn route_id(value: &str) -> StableGraphId {
+        StableGraphId::parse(value).expect("a route ID")
+    }
+
+    /// The mute row's jump length of the tests: the session's `mute_ms` length.
+    pub(crate) fn mute_length(lengths: GraphJumpLengths) -> u32 {
+        lengths.mute_samples
+    }
+
+    /// A program of one mute-shaped cell per given lane (steps, completion `End`, block jump
+    /// length), and the source over it at `arrival`, following, with no other term.
+    pub(crate) fn mute_source(
+        lanes: [Option<&[automation::Segment]>; 2],
+        arrival: u64,
+    ) -> GraphFollowRouteSource {
+        let descriptions: Vec<_> = lanes
+            .iter()
+            .flatten()
+            .map(|segments| automation::CellDescription {
+                segments,
+                grid_ramp: 64,
+                grid: 64,
+                jump: automation::JumpLength::Block,
+                completion: automation::Completion::End,
+                no_restart: false,
+            })
+            .collect();
+        let program =
+            std::sync::Arc::new(automation::ProgramBuilder::build(&descriptions).expect("cells"));
+        let mut next = 0;
+        let cells = lanes.map(|lane| {
+            lane.map(|_| {
+                next += 1;
+                next - 1
+            })
+        });
+        let flags = RouteFollowFlags {
+            follows_mute: true,
+            automated: cells.map(|cell| cell.is_some()),
+            ..RouteFollowFlags::default()
+        };
+        GraphFollowRouteSource::new(program, cells, arrival, mute_length, flags)
+            .expect("a valid source")
+    }
+
+    /// A step curve: `values[i]` from `times[i]` on (the first value from the start).
+    pub(crate) fn steps(times: &[u64], values: &[f32], end: u64) -> Vec<automation::Segment> {
+        times
+            .iter()
+            .zip(values)
+            .enumerate()
+            .map(|(index, (&start, &value))| automation::Segment {
+                start,
+                end: times.get(index + 1).copied().unwrap_or(end),
+                start_value: value,
+                end_value: values.get(index + 1).copied().unwrap_or(value),
+                shape: automation::Shape::Step,
+            })
+            .collect()
+    }
+
+    /// A source refuses no automated lane, a cell outside its program and `automated` flags that
+    /// disagree with its cells.
+    ///
+    /// Test value: red if a route with no automated lane takes the seven-word render state, or if
+    /// render could look up a cell its program does not hold.
+    #[test]
+    fn the_source_refuses_no_lane_a_missing_cell_and_disagreeing_flags() {
+        let curve = steps(&[0, 128], &[0.0, 1.0], 4_096);
+        let source = mute_source([Some(&curve), None], 7);
+        assert_eq!(source.arrival(), 7);
+        let program = std::sync::Arc::clone(&source.program);
+        let flags = source.flags();
+        let new = |cells, flags| {
+            GraphFollowRouteSource::new(
+                std::sync::Arc::clone(&program),
+                cells,
+                0,
+                mute_length,
+                flags,
+            )
+            .is_some()
+        };
+        assert!(new([Some(0), None], flags));
+        assert!(!new([None, None], RouteFollowFlags::default()), "no lane");
+        assert!(!new([Some(1), None], flags), "a cell outside the program");
+        assert!(
+            !new(
+                [Some(0), None],
+                RouteFollowFlags {
+                    automated: [true, true],
+                    ..flags
+                }
+            ),
+            "flags that disagree"
+        );
+    }
+
+    /// The layout: bit 0 mute, 1 follows_mute, 2-3 terms L/R, 4-5 automated L/R. Every one of the
+    /// 64 defined words decodes to its fields and encodes back to itself; a word with any bit
+    /// from 6 up set is refused.
+    ///
+    /// Test value: red if two fields swap bits, if a field is dropped on the round trip, or if a
+    /// word with an undefined bit decodes (render would apply words no record wrote).
+    #[test]
+    fn the_flags_word_round_trips_its_six_bits_and_refuses_every_other_bit() {
+        for word in 0..64_u32 {
+            let flags = RouteFollowFlags::from_word(word).expect("a defined word");
+            assert_eq!(flags, flags_of(word), "word {word:#b}");
+            assert_eq!(flags.to_word(), word);
+            for bit in 6..32 {
+                assert_eq!(
+                    RouteFollowFlags::from_word(word | 1 << bit),
+                    None,
+                    "bit {bit} set"
+                );
+            }
+        }
+        assert_eq!(RouteFollowFlags::from_word(u32::MAX), None);
+    }
+
+    /// D2's composition, over every flags word and every curve state:
+    /// `follow_zeroed[lane] = follows_mute && ((automated[lane] && curve[lane]) || terms[lane])`,
+    /// and the route's own mute passes through.
+    ///
+    /// Test value: red if a curve value reaches a lane the plan does not automate, if a lane reads
+    /// the other lane's curve or terms, or if the follow ignores `follows_mute`.
+    #[test]
+    fn the_gate_follows_the_curve_only_on_an_automated_lane() {
+        for word in 0..64_u32 {
+            let flags = flags_of(word);
+            for curve in [[false, false], [true, false], [false, true], [true, true]] {
+                let gate = flags.gate(curve);
+                assert_eq!(gate.mute, flags.mute);
+                for lane in 0..2 {
+                    let expected = flags.follows_mute
+                        && ((flags.automated[lane] && curve[lane]) || flags.terms[lane]);
+                    assert_eq!(
+                        gate.follow_zeroed[lane], expected,
+                        "word {word:#b}, curve {curve:?}, lane {lane}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The record keeps the open transform's bits exactly (negative zero and a subnormal
+    /// coefficient included), its flags and its length through the seven cell words, and refuses a
+    /// ramp over the bound, a non-finite transform word and a flags word with an undefined bit.
+    ///
+    /// Test value: red if a word moves in the layout, if a transform word is rounded or
+    /// canonicalised on the way, or if words no record wrote decode.
+    #[test]
+    fn the_record_round_trips_its_seven_words_and_refuses_out_of_bounds_words() {
+        let flags = flags_of(0b10_0110);
+        let record = FollowRouteControlRecord::new(transform(), flags, 480).expect("a record");
+        let words = record.to_words();
+        assert_eq!(
+            words,
+            [
+                0.5_f32.to_bits(),
+                1.0_f32.to_bits(),
+                (-0.0_f32).to_bits(),
+                1,
+                (-0.75_f32).to_bits(),
+                0b10_0110,
+                480,
+            ]
+        );
+        assert_eq!(FollowRouteControlRecord::from_words(words), Some(record));
+        assert_eq!(record.transform(), transform());
+        assert_eq!(record.flags(), flags);
+        assert_eq!(record.length(), 480);
+
+        let bound = FollowRouteControlRecord::new(transform(), flags, ROUTE_RAMP_LENGTH_MAXIMUM)
+            .expect("the bound is in bounds");
+        assert_eq!(
+            FollowRouteControlRecord::from_words(bound.to_words()),
+            Some(bound)
+        );
+        assert_eq!(
+            FollowRouteControlRecord::new(transform(), flags, ROUTE_RAMP_LENGTH_MAXIMUM + 1),
+            None
+        );
+        for word in 0..5 {
+            for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut words = words;
+                words[word] = bad.to_bits();
+                assert_eq!(FollowRouteControlRecord::from_words(words), None);
+            }
+        }
+        let mut long = words;
+        long[6] = ROUTE_RAMP_LENGTH_MAXIMUM + 1;
+        assert_eq!(FollowRouteControlRecord::from_words(long), None);
+        let mut undefined = words;
+        undefined[5] |= 1 << 6;
+        assert_eq!(FollowRouteControlRecord::from_words(undefined), None);
+    }
+
+    /// The producer writes the seven words into the route's own cell, and render's half reads
+    /// them under the block's snapshot: nothing before the revision is published, the newest
+    /// record once it is, each replaced write counted as superseded, nothing on an idle cell.
+    ///
+    /// Test value: red if the producer writes another cell than the binding reads, if a value is
+    /// readable before its revision is published, or if a replaced write is not counted.
+    #[test]
+    fn the_producer_write_reaches_the_binding_under_the_published_revision() {
+        let superseded = LiveValuesSuperseded::new();
+        let (mut binding, mut producer) =
+            follow_route_control_pair(&route_id("send"), &superseded, one_lane_source(), 0, 0, 0);
+        assert_eq!(&*producer.route_id, "send");
+        assert_eq!(
+            binding.node,
+            GraphNodeId::Route {
+                route_id: route_id("send")
+            }
+        );
+        let (gate, mut pin) = RevisionGate::pair(0);
+        let first =
+            FollowRouteControlRecord::new(transform(), flags_of(0b01_0010), 64).expect("first");
+        let second =
+            FollowRouteControlRecord::new(transform(), flags_of(0b01_0011), 0).expect("second");
+
+        assert_eq!(binding.control.read(gate.snapshot()), None, "an idle cell");
+        producer.write(pin.stamp(1).expect("stamp"), first);
+        assert_eq!(
+            binding.control.read(gate.snapshot()),
+            None,
+            "revision 1 is not published"
+        );
+        pin.publish(&gate, 1);
+        producer.write(pin.stamp(2).expect("stamp"), second);
+        pin.publish(&gate, 2);
+        assert_eq!(producer.test_only_write_count(), 2);
+        assert_eq!(binding.control.read(gate.snapshot()), Some(second));
+        assert_eq!(superseded.get(), 1, "the first write was replaced unread");
+        assert_eq!(
+            binding.control.read(LiveSnapshot::ALL),
+            None,
+            "applied once"
+        );
+    }
+
+    fn one_lane_source() -> GraphFollowRouteSource {
+        mute_source([Some(&steps(&[0], &[0.0], 64)), None], 0)
+    }
+
+    fn six_word_producer(id: &str, activity: (u64, u64)) -> GraphRouteControlProducer {
+        GraphRouteControlProducer {
+            route_id: id.into(),
+            lane: std::sync::Arc::new(RouteLane::new()),
+            writer: engine::realtime::CellWriter::new(),
+            activity_bytes: activity.0,
+            activity_largest: activity.1,
+        }
+    }
+
+    /// The charge of six-word and following routes together is each kind's own cell, owner and
+    /// producer bytes, the route IDs twice, and the plan's one route-activity table once. A plan
+    /// with no following route is charged exactly as before (the six-word terms alone).
+    ///
+    /// Test value: red if a following route is charged a six-word cell or owner, if a kind is left
+    /// out, or if the activity table is charged per kind.
+    #[test]
+    fn the_charge_counts_each_kind_its_own_bytes_and_the_activity_table_once() {
+        let size = |bytes: usize| bytes as u64;
+        let superseded = LiveValuesSuperseded::new();
+        /// The plan's prepared routes: their activation offsets join the activity charge
+        /// once, for a plan with a following route (#1652 MAJOR-1).
+        const ACTIVITY_ROUTES: u64 = 7;
+        let offsets = ACTIVITY_ROUTES * size(core::mem::size_of::<u32>());
+        let activity = (4_096, 1_024);
+        let six = [
+            six_word_producer("a", activity),
+            six_word_producer("bb", activity),
+        ];
+        let seven: Vec<_> = ["ccc", "dddd", "eeeee"]
+            .iter()
+            .map(|id| {
+                follow_route_control_pair(
+                    &route_id(id),
+                    &superseded,
+                    one_lane_source(),
+                    activity.0,
+                    activity.1,
+                    ACTIVITY_ROUTES,
+                )
+                .1
+            })
+            .collect();
+        let six_cell = size(core::mem::size_of::<
+            engine::realtime::SharedAllocation<RouteLane>,
+        >());
+        let seven_cell = size(core::mem::size_of::<
+            engine::realtime::SharedAllocation<FollowRouteLane>,
+        >());
+        assert!(seven_cell > six_cell, "the seventh word has its own cell");
+        let six_owner = size(
+            core::mem::size_of::<RouteControlLane>()
+                + core::mem::size_of::<GraphRouteControlBinding>()
+                + LIVE_ROUTE_OWNER_BYTES,
+        );
+        let seven_owner = size(
+            core::mem::size_of::<FollowRouteControlLane>()
+                + core::mem::size_of::<GraphFollowRouteControlBinding>()
+                + LIVE_FOLLOW_ROUTE_OWNER_BYTES,
+        );
+        let six_table = 2 * size(core::mem::size_of::<GraphRouteControlProducer>());
+        let seven_table = 3 * size(core::mem::size_of::<GraphFollowRouteControlProducer>());
+        let ids = 2 * (1 + 2 + 3 + 4 + 5);
+
+        let both = route_control_resources(&six, &seven);
+        assert_eq!(both.routes, 5);
+        assert_eq!(both.cell_bytes, 2 * six_cell + 3 * seven_cell);
+        assert_eq!(both.owner_bytes, 2 * six_owner + 3 * seven_owner);
+        assert_eq!(both.producer_table_bytes, six_table + seven_table);
+        assert_eq!(both.route_id_bytes, ids);
+        assert_eq!(both.activity_bytes, activity.0 + offsets);
+        assert_eq!(
+            both.total_bytes,
+            2 * six_cell
+                + 3 * seven_cell
+                + 2 * six_owner
+                + 3 * seven_owner
+                + six_table
+                + seven_table
+                + ids
+                + activity.0
+                + offsets
+        );
+        assert!(both.largest_allocation_bytes >= seven_cell.max(activity.1));
+
+        let alone = route_control_resources(&six, &[]);
+        assert_eq!(alone.routes, 2);
+        assert_eq!(alone.cell_bytes, 2 * six_cell);
+        assert_eq!(alone.owner_bytes, 2 * six_owner);
+        assert_eq!(alone.producer_table_bytes, six_table);
+        assert_eq!(alone.route_id_bytes, 2 * (1 + 2));
+        assert_eq!(alone.activity_bytes, activity.0);
+        let following = route_control_resources(&[], &seven);
+        assert_eq!(following.cell_bytes, 3 * seven_cell);
+        assert_eq!(following.owner_bytes, 3 * seven_owner);
+        assert_eq!(
+            alone.total_bytes + following.total_bytes - activity.0,
+            both.total_bytes,
+            "the activity table is charged once"
+        );
+        assert_eq!(
+            route_control_resources(&[], &[]),
+            RouteControlResources::default()
+        );
     }
 }

@@ -1180,6 +1180,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         track_count,
         effect_controls,
         route_controls,
+        follow_route_controls,
         jump_lengths,
         master_track,
         ..
@@ -1198,6 +1199,8 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         track_count,
         // #1557 D4: the send producers, at exactly one entry per route lane the plan attached.
         routes: route_controls.into_boxed_slice(),
+        // #1653: the following routes' seven-word producers, one per attached seven-word lane.
+        follow_routes: follow_route_controls.into_boxed_slice(),
         // #1639 D1: the plan's jump-length cell writer.
         jump_lengths,
     };

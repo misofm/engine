@@ -315,6 +315,32 @@ fn the_parity_script_commits_as_the_full_path_does() {
     }
 }
 
+/// #1653 gate 3 through the in-place path (R17-1): the edits of a following route (a mute entry on
+/// `t1`, its following send `t1-b`) through both chains, in order, at two rates; the stores equal
+/// after each, and every value edit takes the in-place form with the full path's delta.
+///
+/// Red if the fast classifier lowers a following route's terms or `follows_mute` change
+/// differently from the dense one (a missing terms trigger, a folded record), or if those rows do
+/// not take the in-place form.
+#[test]
+fn a_following_routes_edits_commit_as_the_full_path_does() {
+    for rate in [48_000, 96_000] {
+        let mut pair = Pair::new(following_session(rate));
+        let mut tally = Tally::default();
+        let script = following_script();
+        for edits in &script {
+            pair.step(edits, &["following"], true, &mut tally);
+        }
+        assert_eq!(tally.refused, 0, "nothing is refused");
+        assert_eq!(tally.monitor_only, 2, "the solo steps");
+        assert_eq!(
+            tally.in_place,
+            script.len() - 2,
+            "every value edit took the in-place form"
+        );
+    }
+}
+
 /// Gate 1b. A seeded random walk of at least 2,400 transactions of one to four edits drawn from
 /// every row of the control list (every class, the session's rows, a strip's matrix mode, an insert's
 /// link mode, the solo rows), with and without a per-edit ramp, over a random committed overlay,

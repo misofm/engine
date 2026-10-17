@@ -534,6 +534,11 @@ pub struct HostLiveControlHandles {
     /// `graph_compiler::route_coefficients`, the function the compiler lowers a prepared
     /// route's constants with.
     pub route_controls: Vec<RouteControlProducer>,
+    /// One seven-word producer per following route (#1652 D1): a route into a submix whose
+    /// source strip automates a lane's mute, in canonical route-ID order. Every plan has them,
+    /// whatever the live options; such a route has no entry in [`Self::route_controls`]. Found
+    /// with [`follow_route_producer_position`].
+    pub follow_route_controls: Vec<graph::GraphFollowRouteControlProducer>,
     /// The designated master strip index, echoed back after validation against `strips.len()`
     /// (issue #1208 D3): tracks first, then submixes. Still a designation, not a discovery.
     pub master_track: Option<u32>,
@@ -573,6 +578,19 @@ impl HostLiveControlHandles {
         )?;
         self.effect_controls.get_mut(index)
     }
+}
+
+/// The position of the seven-word producer of route `id` in `producers`, which are in canonical
+/// route-ID order ([`HostLiveControlHandles::follow_route_controls`]): a binary search, so it
+/// allocates nothing.
+#[must_use]
+pub fn follow_route_producer_position(
+    producers: &[graph::GraphFollowRouteControlProducer],
+    id: &str,
+) -> Option<usize> {
+    producers
+        .binary_search_by(|producer| (*producer.route_id).cmp(id))
+        .ok()
 }
 
 /// The position of strip `id` in the canonical strip order: the tracks, then the submixes, each
@@ -698,6 +716,29 @@ impl PreparedHost {
     }
 }
 
+impl PlanStateInventory {
+    /// Whether this plan's send join carries a route that follows an automated source mute in
+    /// the plan it was prepared to displace into a route that follows none in this plan (a
+    /// seven-word route into a six-word one, #1652 D3). The join flags every such carry by the
+    /// route's kind alone: a carried route whose source strip automates a mute lane in the
+    /// committed plan and automates none in this one (the rebuild removes the strip's last mute
+    /// entry, or retargets it to another strip). `false` for a plan prepared without a
+    /// predecessor and for a declared discontinuity, which carries nothing.
+    ///
+    /// **Conservative (#1652 U2a fold 2, MAJOR-A; #1713 removes it).** A six-word successor holds
+    /// one ramp, so render may re-time a carried column's move: a join record composed with the
+    /// heard curve reopens the route over the session mute length `J` instead of the record's own
+    /// length, and two columns' moves fold into one ramp over the longer remaining length. The
+    /// control plane completes such a rebuild as [`engine::realtime::CandidateOutcome::TransitionFallback`]
+    /// so the watermark never reports it exact. It over-reports: a rebuild that carries a
+    /// following route into a six-word one is flagged whether or not a column is moving at the
+    /// swap.
+    #[must_use]
+    pub fn carries_a_following_route_into_a_six_word_route(&self) -> bool {
+        self.follow_into_six_word
+    }
+}
+
 /// Set `host`'s source-read offset (#1396 deliverable 2): the plan's
 /// ([`PreparedRenderPlan::set_source_read_offset`]) and its inventory row's together, so a
 /// successor prepared from the inventory inherits it. Call it before the plan is published. The
@@ -762,6 +803,11 @@ pub struct PlanStateInventory {
     strip_delays: Box<[graph::GraphStripDelayLine]>,
     /// One row per live send of the plan (#1284 D2), sorted by route ID.
     live_routes: Box<[graph::GraphLiveRoute]>,
+    /// Whether this plan's send join carries a following route of the plan it was prepared to
+    /// displace into a six-word route of its own (#1652 U2a fold 2, MAJOR-A; see
+    /// [`Self::carries_a_following_route_into_a_six_word_route`]). `false` for a plan prepared
+    /// without a predecessor.
+    follow_into_six_word: bool,
     /// The strips this plan restarts relative to the plan it was prepared to displace (#1277 D6):
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
@@ -1052,6 +1098,7 @@ impl PlanStateInventory {
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
+            follow_into_six_word: false,
             restarted: Box::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),
@@ -1084,6 +1131,7 @@ impl PlanStateInventory {
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
+            follow_into_six_word: false,
             restarted: Box::default(),
             input_floors: self.input_floors.clone(),
             raised_arrivals: self.raised_arrivals.clone(),
@@ -2822,6 +2870,32 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         )
     })?;
     let builtin_resources = builtins.resource_report();
+    // #1652 D1 (#1652c): the source of every following route, read before lowering consumes the
+    // builtins plan: the plan's one automation program, the source lanes' mute cells and the
+    // seeded flags word. `terms` is the source lane's effective mute without its curve (OQ1 = C);
+    // `automated` is the plan's. The arrival `a(tap)` is the compile report's, below.
+    let mut follow_cells = Vec::new();
+    for route in &model.routes {
+        if !follows_automated_mute(model, route) {
+            continue;
+        }
+        let Some(source) = route_source_strip(model, route) else {
+            return Err(graph_failure("host.route_control.attach"));
+        };
+        let source_id = route_source_id(route);
+        // `follows_automated_mute` and the builtins plan read the same rendered mute entries, so
+        // a following route always has its cells.
+        let Some((program, cells)) = builtins.strip_mute_cells(source_id.as_str()) else {
+            return Err(graph_failure("host.route_control.attach"));
+        };
+        let flags = graph::RouteFollowFlags {
+            mute: route.mute,
+            follows_mute: route.follows_mute,
+            terms: effective.strips[source].mute,
+            automated: cells.map(|cell| cell.is_some()),
+        };
+        follow_cells.push((route.id.as_str(), (program, cells, flags)));
+    }
     let mut artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         dispatch: backend,
         plan_id: 1,
@@ -2866,26 +2940,62 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     })?;
     // Issue #1221 D1: one live lane per route into a submix, attached before bind and before the
     // caps below, so its charge is refused by the same checks as the effect channels. Without a
-    // control channel nothing is attached and the plan binds exactly what it bound before.
-    let graph_route_controls = if attach_live && lanes.routes {
-        // A route's lane is a latest-target cell with no depth (#1347).
+    // control channel no six-word lane is attached. #1652 D1 (#1652c): a following route gets
+    // its seven-word lane on every plan, whatever the live options, and no six-word lane. A plan
+    // with neither binds exactly what it bound before.
+    let six_word = attach_live && lanes.routes;
+    let (graph_route_controls, follow_route_controls) = if six_word || !follow_cells.is_empty() {
+        let arrivals = artifact.report().input_arrivals.clone();
+        let mut sources: BTreeMap<&str, _> = follow_cells.into_iter().collect();
         artifact
-            .attach_route_live_controls(&live_superseded)
+            .attach_route_live_controls_following(&live_superseded, six_word, |route_id| {
+                let (program, cells, flags) = sources.remove(route_id.as_str())?;
+                let node = GraphNodeId::Route {
+                    route_id: route_id.clone(),
+                };
+                graph::GraphFollowRouteSource::new(
+                    program,
+                    cells,
+                    graph::floored_input_arrival(&arrivals, &node),
+                    follow_mute_jump,
+                    flags,
+                )
+            })
             .map_err(|error| match error {
                 graph::GraphRouteControlError::AlreadyAttached
                 | graph::GraphRouteControlError::BoundRoute => {
                     graph_failure("host.route_control.attach")
                 }
+            })
+            .and_then(|attached| {
+                // Every following route is a route into a submix, so the attach asks for each
+                // source once, and `new` refuses none (its cells are the program's).
+                if sources.is_empty() {
+                    Ok(attached)
+                } else {
+                    Err(graph_failure("host.route_control.attach"))
+                }
             })?
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
-    let route_control_resources = graph::route_control_resources(&graph_route_controls);
+    if follow_route_controls.len()
+        != model
+            .routes
+            .iter()
+            .filter(|route| follows_automated_mute(model, route))
+            .count()
+    {
+        return Err(graph_failure("host.route_control.attach"));
+    }
+    let route_control_resources =
+        graph::route_control_resources(&graph_route_controls, &follow_route_controls);
     // The producers in canonical route-ID order; a carried send's retarget is written through them.
     let mut route_controls: Vec<RouteControlProducer> = graph_route_controls
         .into_iter()
         .map(RouteControlProducer::new)
         .collect();
+    let mut follow_route_controls = follow_route_controls;
     // #1285 D4: the floored output arrival, the one the plan renders.
     let output_latency = artifact.report().output_latency;
     let output_tail = artifact.report().output_tail;
@@ -3422,8 +3532,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let strip_delay_carry_bytes =
         graph::strip_delay_carry_retained_bytes(strip_delay_carry.moves.len())
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    let route_carry_bytes = graph::route_carry_retained_bytes(route_carry.moves.len())
-        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    let route_carry_bytes = graph::route_carry_retained_bytes(
+        route_carry.moves.len(),
+        route_carry
+            .moves
+            .iter()
+            .filter(|step| step.predecessor_follows)
+            .count(),
+    )
+    .ok_or_else(|| resource("host.resource.arithmetic"))?;
     // The effect moves' table and payload scratch are charged at their exact size, against the
     // same cap as the rest of the plan, and the scratch is one allocation (#1279 D3).
     // The carried slots of the successor lanes the moves name are allocated with the table, and
@@ -3546,6 +3663,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         delay_lines: delay_lines.into_boxed_slice(),
         strip_delays: strip_delays.into_boxed_slice(),
         live_routes: live_routes.into_boxed_slice(),
+        follow_into_six_word: route_carry.follow_into_six_word,
         restarted: restarted.into_boxed_slice(),
         input_floors,
         raised_arrivals,
@@ -3651,11 +3769,26 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         // Issue #1284 D3: the carried sends' live differences, through the successor's own
         // producers, in the same block as the strips', with the ramp the record carries. A write
         // to a latest-target cell cannot fail (#1347), and every send of the table has a producer.
+        // #1652 D3 (#1652c): a seven-word successor's record goes to its follow producer. The
+        // join builds the record kind from the model the successor was prepared from, so each
+        // record has its producer.
         for &(route_id, record) in &route_carry.retargets {
-            let Some(position) = route_producer_position(&route_controls, route_id) else {
-                return Err(graph_failure("host.control.order"));
-            };
-            route_controls[position].write(stamp, record);
+            match record {
+                SendRecord::Folded(record) => {
+                    let Some(position) = route_producer_position(&route_controls, route_id) else {
+                        return Err(graph_failure("host.control.order"));
+                    };
+                    route_controls[position].write(stamp, record);
+                }
+                SendRecord::Following(record) => {
+                    let Some(position) =
+                        follow_route_producer_position(&follow_route_controls, route_id)
+                    else {
+                        return Err(graph_failure("host.control.order"));
+                    };
+                    follow_route_controls[position].write(stamp, record);
+                }
+            }
         }
         for retarget in &strip_carry.retargets {
             let Some(&index) = canonical_index.get(retarget.id) else {
@@ -3717,6 +3850,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             meters,
             effect_observations,
             route_controls,
+            follow_route_controls,
             master_track,
             live_values_superseded: live_superseded,
             jump_lengths: Some(jump_lengths),
@@ -4192,6 +4326,133 @@ pub(crate) fn route_record_between(
     build(after, gates[1], length).map(Some)
 }
 
+/// The record a send's cell takes (#1652 D1): the six folded words of #1347, or, for a route a
+/// plan gives the seven-word cell (a route into a submix whose source strip automates its mute),
+/// its open transform and flags. A host writes a `Folded` record through the route's
+/// [`RouteControlProducer`] and a `Following` one through its
+/// [`GraphFollowRouteControlProducer`](graph::GraphFollowRouteControlProducer) (#1653).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SendRecord {
+    /// A six-word route's record (`route_record_between`).
+    Folded(RouteControlRecord),
+    /// A following route's record (`follow_route_record_between`).
+    Following(graph::FollowRouteControlRecord),
+}
+
+impl SendRecord {
+    /// The six-word record, or `None` for a following route's.
+    #[must_use]
+    pub const fn folded(&self) -> Option<&RouteControlRecord> {
+        match self {
+            Self::Folded(record) => Some(record),
+            Self::Following(_) => None,
+        }
+    }
+
+    /// The seven-word record, or `None` for a six-word route's.
+    #[must_use]
+    pub const fn following(&self) -> Option<&graph::FollowRouteControlRecord> {
+        match self {
+            Self::Following(record) => Some(record),
+            Self::Folded(_) => None,
+        }
+    }
+}
+
+/// The seven-word record of a following route (#1652 D1) as `route` holds it: the open transform
+/// (`graph_compiler::route_values`, the derivation the compiler lowers the plan's transform
+/// with, so a record's words and the plan's are one bit pattern), the flags word (the route's
+/// `mute` and `follows_mute`, the source lanes' `terms` and the plan's `automated`) and `length`.
+///
+/// # Errors
+///
+/// [`LiveRebuild::Domain`] when the gain or matrix is outside the route domain, or `length` is
+/// longer than the cell's maximum.
+pub(crate) fn follow_route_record(
+    route: &session::Route,
+    terms: [bool; 2],
+    automated: [bool; 2],
+    length: u32,
+) -> Result<graph::FollowRouteControlRecord, LiveRebuild> {
+    let matrix = &route.channel_matrix;
+    let transform =
+        graph_compiler::route_values(route.gain_db, [matrix.ll, matrix.lr, matrix.rl, matrix.rr])
+            .map_err(|_| LiveRebuild::Domain)?;
+    let flags = graph::RouteFollowFlags {
+        mute: route.mute,
+        follows_mute: route.follows_mute,
+        terms,
+        automated,
+    };
+    graph::FollowRouteControlRecord::new(transform, flags, length).ok_or(LiveRebuild::Domain)
+}
+
+/// The seven-word record that brings a following route from `before`'s committed values to
+/// `after`'s (#1652 D1, D3), the counterpart of [`route_record_between`] for a route the next plan
+/// gives the seven-word cell. The classifier (#1653) and a successor's send join call it, so the
+/// two cannot disagree.
+///
+/// `terms` is the source lane's effective mute without its curve per model, in `[before,
+/// after]` (`controls::effective`, OQ1 = C); `automated` is the next plan's. A record is built only
+/// when a word the models hold changes: the transform's bits, `mute`, `follows_mute` or `terms`.
+/// `automated` is the plan's, not the model's, so a route that only gains or loses its curve
+/// gives no record (render compares the carried ramp with its own target, #1652 D3).
+///
+/// The ramp is the send rule of [`route_record_between`]: `gate_length` when the effective gate
+/// changes in either lane, else the `SendFollowsMute` length when only `follows_mute` changes (the
+/// curve can make that a change of target), else the longest of the changed `SendGain` and
+/// `SendMatrix` lengths, else the `SendMute` length.
+///
+/// # Errors
+///
+/// [`LiveRebuild::Domain`] as [`follow_route_record`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn follow_route_record_between(
+    ramps: LiveRamps,
+    before: &session::Route,
+    after: &session::Route,
+    terms: [[bool; 2]; 2],
+    automated: [bool; 2],
+    gates: [[bool; 2]; 2],
+    gate_length: u32,
+    edit: RouteEditRamps,
+) -> Result<Option<graph::FollowRouteControlRecord>, LiveRebuild> {
+    let prior = follow_route_record(before, terms[0], automated, 0)?;
+    let current = follow_route_record(after, terms[1], automated, 0)?;
+    let transform_bits = |record: &graph::FollowRouteControlRecord| {
+        let graph::RouteTransform {
+            gain,
+            ll,
+            lr,
+            rl,
+            rr,
+        } = record.transform();
+        [gain, ll, lr, rl, rr].map(f32::to_bits)
+    };
+    if transform_bits(&prior) == transform_bits(&current) && prior.flags() == current.flags() {
+        return Ok(None);
+    }
+    let matrix = |route: &session::Route| {
+        let matrix = &route.channel_matrix;
+        [matrix.ll, matrix.lr, matrix.rl, matrix.rr].map(f32::to_bits)
+    };
+    let length = if gates[0] != gates[1] {
+        gate_length
+    } else if before.follows_mute != after.follows_mute {
+        ramps.resolve(LiveRampRow::SendFollowsMute, edit.mute)
+    } else {
+        let gain = (before.gain_db.to_bits() != after.gain_db.to_bits())
+            .then(|| ramps.resolve(LiveRampRow::SendGain, edit.gain));
+        let matrix = (matrix(before) != matrix(after))
+            .then(|| ramps.resolve(LiveRampRow::SendMatrix, edit.matrix));
+        gain.into_iter()
+            .chain(matrix)
+            .max()
+            .unwrap_or_else(|| ramps.resolve(LiveRampRow::SendMute, edit.mute))
+    };
+    follow_route_record(after, terms[1], automated, length).map(Some)
+}
+
 /// A fader or pan value outside the domain its render-side setter accepts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OutOfDomain;
@@ -4654,6 +4915,13 @@ impl<'a> EffectiveDiff<'a> {
     /// record. The live classifier never reaches a removal (#1648 D1 rebuilds it), so this is the
     /// join's alone.
     ///
+    /// #1651 T4, a mute cell lost: each lane whose stored mute automation the change removes gets
+    /// a `Mute` record of its effective mute in `next` (`controls::EffectiveStrip::mute`, the
+    /// static mute with its VCA and solo terms) over the lane's mute length, for the same reason:
+    /// its carried stage holds `curve || terms`. The stage's batch 13b rule makes the record a
+    /// no-op when the stage already agrees. A released lane whose effective mute changed already
+    /// has its record.
+    ///
     /// # Errors
     ///
     /// [`OutOfDomain`] as [`fader_records`].
@@ -4665,35 +4933,47 @@ impl<'a> EffectiveDiff<'a> {
         let mut level = self.strip_level_records(before, after)?;
         let records = &mut level.fader;
         let change = self.change(before, after);
-        let automated_before = controls::automated_fader_lanes(self.rules.current, change.id);
-        if automated_before == [false; 2] {
+        let next = self.rules.next.structure();
+        let lost =
+            |lanes: [bool; 2], kept: [bool; 2]| [0, 1].map(|lane| lanes[lane] && !kept[lane]);
+        let fader_released = lost(
+            controls::automated_fader_lanes(self.rules.current, change.id),
+            controls::automated_fader_lanes(next, change.id),
+        );
+        let automates = |model: &SessionModel, strip: &session::StableId| {
+            controls::mute_automation(model, strip).map(|entry| entry.is_some())
+        };
+        let mute_released = lost(
+            automates(self.rules.current, change.id),
+            automates(next, change.id),
+        );
+        if fader_released == [false; 2] && mute_released == [false; 2] {
             return Ok(level);
         }
-        let automated_after =
-            controls::automated_fader_lanes(self.rules.next.structure(), change.id);
-        let mut released = [0, 1].map(|lane| automated_before[lane] && !automated_after[lane]);
+        let mut released = [fader_released, mute_released];
         for record in records.iter().flatten() {
-            if let TrackFaderRecord::FaderDb { lanes, .. } = record {
-                let covered = match lanes {
-                    BuiltinLaneSelector::Left => [true, false],
-                    BuiltinLaneSelector::Right => [false, true],
-                    BuiltinLaneSelector::Both => [true, true],
-                };
-                for (released, covered) in released.iter_mut().zip(covered) {
-                    *released &= !covered;
-                }
+            let (kind, lanes) = match record {
+                TrackFaderRecord::FaderDb { lanes, .. } => (0, lanes),
+                TrackFaderRecord::Mute { lanes, .. } => (1, lanes),
+            };
+            let covered = match lanes {
+                BuiltinLaneSelector::Left => [true, false],
+                BuiltinLaneSelector::Right => [false, true],
+                BuiltinLaneSelector::Both => [true, true],
+            };
+            for (released, covered) in released[kind].iter_mut().zip(covered) {
+                *released &= !covered;
             }
         }
-        if released == [false; 2] {
-            return Ok(level);
-        }
+        let [fader_released, mute_released] = released;
         let lengths = self.rules.lengths(&change);
-        let db = self.after.strips[after].fader_db;
+        let strip = &self.after.strips[after];
+        let (db, muted) = (strip.fader_db, strip.mute);
         // The array holds at most one `FaderDb` and one `Mute` per lane, and a released lane has
-        // no `FaderDb` yet, so a free slot is always there.
+        // no record of its kind yet, so a free slot is always there.
         let mut free = records.iter_mut().filter(|record| record.is_none());
         for (lanes, lane) in lane_records(
-            released,
+            fader_released,
             db[0].to_bits() == db[1].to_bits() && lengths.fader[0] == lengths.fader[1],
         ) {
             if let Some(slot) = free.next() {
@@ -4701,6 +4981,18 @@ impl<'a> EffectiveDiff<'a> {
                     lanes,
                     db: db[lane],
                     smoothing_samples: lengths.fader[lane],
+                });
+            }
+        }
+        for (lanes, lane) in lane_records(
+            mute_released,
+            muted[0] == muted[1] && lengths.mute[0] == lengths.mute[1],
+        ) {
+            if let Some(slot) = free.next() {
+                *slot = Some(TrackFaderRecord::Mute {
+                    lanes,
+                    muted: muted[lane],
+                    smoothing_samples: lengths.mute[lane],
                 });
             }
         }
@@ -4742,6 +5034,15 @@ impl<'a> EffectiveDiff<'a> {
         )
     }
 
+    /// The effective mute of a strip per lane, at `before` in `current` and at `after` in `next`,
+    /// in `[current, next]`: a following route's `terms` (#1652 D1, OQ1 = C; it holds no curve).
+    pub(crate) fn strip_mutes(&self, before: usize, after: usize) -> [[bool; 2]; 2] {
+        [
+            self.before.strips[before].mute,
+            self.after.strips[after].mute,
+        ]
+    }
+
     /// The strip index of a route's source in the two models, or `None` if it names no strip in
     /// one of them.
     pub(crate) fn source_strips(
@@ -4756,14 +5057,63 @@ impl<'a> EffectiveDiff<'a> {
     }
 }
 
+/// The ID of the strip `route` takes its source from.
+fn route_source_id(route: &session::Route) -> &session::StableId {
+    match &route.source {
+        session::RouteSource::Track { track_id, .. } => track_id,
+        session::RouteSource::Submix { submix_id, .. } => submix_id,
+    }
+}
+
+/// Whether a plan of `model` gives `route` the seven-word cell of a following route (#1652 D1):
+/// it goes into a submix and its source strip automates the mute of a lane
+/// ([`controls::mute_automation`], the entries the builtins plan compiles mute cells from). Every
+/// other route keeps the six-word cell. A route into the output never follows.
+#[must_use]
+pub(crate) fn follows_automated_mute(model: &SessionModel, route: &session::Route) -> bool {
+    following_route_lanes(model, route).is_some()
+}
+
+/// The source lanes whose mute a plan of `model` automates for `route`, when that plan gives
+/// `route` the seven-word cell of a following route ([`follows_automated_mute`]), else `None`:
+/// the `automated` bits of the route's records (#1652 D1, #1653 D1).
+#[must_use]
+pub(crate) fn following_route_lanes(
+    model: &SessionModel,
+    route: &session::Route,
+) -> Option<[bool; 2]> {
+    if !matches!(
+        route.destination,
+        session::RouteDestination::SubmixInput { .. }
+    ) || model.automation.is_empty()
+    {
+        return None;
+    }
+    let automated =
+        controls::mute_automation(model, route_source_id(route)).map(|entry| entry.is_some());
+    (automated != [false; 2]).then_some(automated)
+}
+
+/// The jump length of a stored mute curve on a following route (#1652 D2, #1652b): the mute row's
+/// rule over the block's session lengths, the rule the strip's own mute stage resolves
+/// ([`LiveRamps::for_row`] of [`LiveRampRow::Mute`]), so the strip ramp and the send ramp have
+/// one length. Called on render (through the route's `GraphMuteJumpLength`): two `const fn`
+/// calls, a struct build and a `match` read, allocation-free and panic-free.
+// REALTIME_POLICY_BEGIN: the mute row's jump rule a following route calls once per block.
+fn follow_mute_jump(lengths: GraphJumpLengths) -> u32 {
+    LiveRamps::from_lengths(
+        lengths.fader_samples,
+        lengths.mute_samples,
+        lengths.pan_samples,
+    )
+    .for_row(LiveRampRow::Mute)
+}
+// REALTIME_POLICY_END
+
 /// The index in [`SessionModel::strips`] of the strip `route` takes its source from, or `None` if
 /// the model has no such strip.
 pub(crate) fn route_source_strip(model: &SessionModel, route: &session::Route) -> Option<usize> {
-    let id = match &route.source {
-        session::RouteSource::Track { track_id, .. } => track_id,
-        session::RouteSource::Submix { submix_id, .. } => submix_id,
-    };
-    controls::strip_index(model, id)
+    controls::strip_index(model, route_source_id(route))
 }
 
 /// The matrix record that brings a strip's matrix/pan stage from `before`'s value to `after`'s,
@@ -5007,8 +5357,9 @@ pub enum LiveRebuild {
     /// rebuild's preparation refuses it with the row's code; the classifier only routes, so the
     /// refusal has one author and no live commit can ack it first.
     AutomationTarget,
-    /// The stored automation of a row that renders ([`controls::automation_row_renders`]) changes:
-    /// an entry is added, removed, retargeted or given other segments (#1648 D1,
+    /// The stored automation of a row that renders ([`controls::automation_row_renders`]: a
+    /// strip's fader and mute, #1648, #1651) changes: an entry is added, removed, retargeted or
+    /// given other segments (#1648 D1,
     /// [`controls::rendered_automation_changed`]). A plan compiles its cells from the entries at
     /// preparation, so only a successor plan holds the new curve. An entry's hand offset (#1650) is
     /// not part of this comparison.
@@ -5211,8 +5562,9 @@ struct StripJoin<'a> {
     fader: FamilyJoin<LevelRecords>,
     matrix: FamilyJoin<TrackControlRecord>,
     /// The fader lanes whose stored automation table both models hold bit for bit (#1648 D2,
-    /// [`controls::continued_fader_lanes`]), bit 0 left and bit 1 right: the fader move's
-    /// [`graph::GraphStripMove::continued_cells`].
+    /// [`controls::continued_fader_lanes`]), bit 0 left and bit 1 right, and the mute lanes of
+    /// the same rule (#1651 T4, [`controls::continued_mute_lanes`]), bit 2 left and bit 3 right:
+    /// the fader move's [`graph::GraphStripMove::continued_cells`].
     continued_cells: u8,
 }
 
@@ -5336,7 +5688,11 @@ fn join_strips<'a>(
             Ok(Some(record)) => FamilyJoin::Live(record),
         };
         let continued = controls::continued_fader_lanes(committed, model, strip.id);
-        let continued_cells = u8::from(continued[0]) | (u8::from(continued[1]) << 1);
+        let continued_mute = controls::continued_mute_lanes(committed, model, strip.id);
+        let continued_cells = u8::from(continued[0])
+            | (u8::from(continued[1]) << 1)
+            | (u8::from(continued_mute[0]) << 2)
+            | (u8::from(continued_mute[1]) << 3);
         joins.push(StripJoin {
             id,
             fader,
@@ -5457,7 +5813,7 @@ fn resolve_strip_delay_carry(
 /// carried send from the predecessor's live values to the successor's, when they differ.
 struct RouteJoin<'a> {
     id: &'a str,
-    retarget: Option<RouteControlRecord>,
+    retarget: Option<SendRecord>,
 }
 
 /// The model half of the send join (#1284 D2, D3): for every route of `model` into a submix that
@@ -5511,8 +5867,31 @@ fn join_routes<'a>(
             };
             length
         };
-        let Ok(retarget) = route_record_between(ramps, before, after, gates, gate_length, edit)
-        else {
+        // #1652 D3 (#1652c): a route the successor gives the seven-word cell takes the
+        // seven-word record, written only when a word the models hold changes; any other route
+        // keeps today's record.
+        let retarget = if follows_automated_mute(model, after) {
+            let Some(source) = diff.source_strips(before, after) else {
+                continue;
+            };
+            let automated = controls::mute_automation(model, route_source_id(after))
+                .map(|entry| entry.is_some());
+            follow_route_record_between(
+                ramps,
+                before,
+                after,
+                diff.strip_mutes(source.0, source.1),
+                automated,
+                gates,
+                gate_length,
+                edit,
+            )
+            .map(|record| record.map(SendRecord::Following))
+        } else {
+            route_record_between(ramps, before, after, gates, gate_length, edit)
+                .map(|record| record.map(SendRecord::Folded))
+        };
+        let Ok(retarget) = retarget else {
             continue;
         };
         joins.push(RouteJoin {
@@ -5529,7 +5908,11 @@ struct RouteCarry<'a> {
     moves: Vec<graph::GraphRouteMove>,
     /// The carried sends whose live values differ, by route ID, with the record to write to the
     /// successor's cell.
-    retargets: Vec<(&'a str, RouteControlRecord)>,
+    retargets: Vec<(&'a str, SendRecord)>,
+    /// Whether some move carries a following predecessor route into a six-word successor route
+    /// (#1652 U2a fold 2, MAJOR-A): the rebuild then completes as the transition fallback
+    /// ([`PlanStateInventory::carries_a_following_route_into_a_six_word_route`]).
+    follow_into_six_word: bool,
 }
 
 /// The route half of the send join (#1284 D2): a send carries when both plans hold a live route of
@@ -5542,16 +5925,25 @@ fn resolve_route_carry<'a>(
     let row = |rows: &[graph::GraphLiveRoute], id: &str| {
         rows.binary_search_by(|row| (*row.route_id).cmp(id))
             .ok()
-            .map(|index| rows[index].unit)
+            .map(|index| (rows[index].unit, rows[index].following))
     };
     let mut carry = RouteCarry::default();
     for join in joins {
-        let (Some(before), Some(after)) = (row(predecessor, join.id), row(own, join.id)) else {
+        let (Some((before, follows)), Some((after, successor_follows))) =
+            (row(predecessor, join.id), row(own, join.id))
+        else {
             continue;
         };
+        // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): a following route carried into a
+        // six-word one holds one ramp, so render may re-time a column's move (a record composed
+        // with the heard curve reopens over `J`, not its own length; two columns' moves fold into
+        // one ramp over the longer remaining length). The join cannot tell whether a move is in
+        // flight, so it flags every such carry: the conservative rule.
+        carry.follow_into_six_word |= follows && !successor_follows;
         carry.moves.push(graph::GraphRouteMove {
             successor: after,
             predecessor: before,
+            predecessor_follows: follows,
         });
         if let Some(record) = join.retarget {
             carry.retargets.push((join.id, record));
@@ -6296,12 +6688,14 @@ mod tests {
         let live = |route: &str, unit| graph::GraphLiveRoute {
             route_id: route.into(),
             unit,
+            following: false,
         };
         let before = [live("a-main", 3), live("b-main", 5)];
         let own = [live("a-main", 4), live("b-main", 2), live("c-main", 9)];
-        let record =
+        let record = super::SendRecord::Folded(
             crate::route_controls::route_record(-6.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2], 64)
-                .expect("a record");
+                .expect("a record"),
+        );
         let joins = [
             RouteJoin {
                 id: "a-main",
@@ -6329,14 +6723,56 @@ mod tests {
                 graph::GraphRouteMove {
                     successor: 4,
                     predecessor: 3,
+                    predecessor_follows: false,
                 },
                 graph::GraphRouteMove {
                     successor: 2,
                     predecessor: 5,
+                    predecessor_follows: false,
                 },
             ]
         );
         assert_eq!(carry.retargets, vec![("a-main", record)]);
+        assert!(
+            !carry.follow_into_six_word,
+            "no route follows in either plan"
+        );
+    }
+
+    /// #1652 U2a fold 2 (MAJOR-A): the join flags a carry of a following predecessor route into a
+    /// six-word successor route, and only that kind pair: six -> six, six -> seven and seven ->
+    /// seven moves leave the flag clear, and a following route present in one plan only moves
+    /// nothing and flags nothing.
+    ///
+    /// Test value: red if the flag reads the predecessor's kind alone (seven -> seven flagged:
+    /// a rebuild that keeps the mute entry would over-report), the successor's alone, or ignores
+    /// both (the seven -> six re-timing then completes exact).
+    #[test]
+    fn the_join_flags_a_following_route_carried_into_a_six_word_one() {
+        use super::{RouteJoin, resolve_route_carry};
+        let live = |route: &str, unit, following| graph::GraphLiveRoute {
+            route_id: route.into(),
+            unit,
+            following,
+        };
+        let join = |id| RouteJoin { id, retarget: None };
+        // (case, predecessor following, successor following, flagged)
+        for (case, before, after, flagged) in [
+            ("six -> six", false, false, false),
+            ("six -> seven", false, true, false),
+            ("seven -> seven", true, true, false),
+            ("seven -> six", true, false, true),
+        ] {
+            let predecessor = [live("a-main", 1, false), live("b-main", 2, before)];
+            let own = [live("a-main", 3, false), live("b-main", 4, after)];
+            let carry = resolve_route_carry(&predecessor, &own, &[join("a-main"), join("b-main")]);
+            assert_eq!(carry.moves.len(), 2, "{case}: both sends carry");
+            assert_eq!(carry.follow_into_six_word, flagged, "{case}");
+        }
+        // A following route the successor lacks is not a move.
+        let predecessor = [live("a-main", 1, true)];
+        let carry = resolve_route_carry(&predecessor, &[], &[join("a-main")]);
+        assert!(carry.moves.is_empty() && !carry.follow_into_six_word);
     }
 
     /// #1283 D1: lines join by edge ID and endpoints, never by index. A line moves when its
@@ -6395,6 +6831,7 @@ mod tests {
             delay_lines: Box::default(),
             strip_delays: Box::default(),
             live_routes: Box::default(),
+            follow_into_six_word: false,
             restarted: Box::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),

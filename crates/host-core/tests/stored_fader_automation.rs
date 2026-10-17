@@ -1872,6 +1872,28 @@ fn live_mute(rig: &mut Rig, lanes: builtins::BuiltinLaneSelector, muted: bool, w
         });
 }
 
+/// Write a live offsets record `S = offsets_sum` (ramp `window`) on both channels of track 0,
+/// applied at the next block entry.
+fn live_offsets(rig: &mut Rig, offsets_sum: f64, window: u32) {
+    use builtins_compiler::TestOnlyWriteGate;
+    let handles = rig.handles.as_mut().expect("live controls");
+    rig.gate
+        .as_mut()
+        .expect("the plan's gate")
+        .write_published(|stamp| {
+            for channel in 0..2 {
+                handles.strip_controls[0].fader.write_offsets(
+                    stamp,
+                    channel,
+                    builtins_compiler::FaderOffsetsRecord {
+                        offsets_sum,
+                        smoothing_samples: window,
+                    },
+                );
+            }
+        });
+}
+
 /// The output of `rig` over `frames`, with `script` called before each block (it reads
 /// `rig.rendered` and `rig.quantum`).
 fn scripted(mut rig: Rig, frames: u64, script: &dyn Fn(&mut Rig)) -> [Vec<f32>; 2] {
@@ -2016,30 +2038,49 @@ fn fade_from(from: f32, end: u64) -> Vec<AutomationSegment> {
 
 /// R17-10 (MAJOR-5 of the U2 review): a live write that frees a held lane discharges the
 /// obligation and releases the cell's hold in the same block. The track is prepared muted on a
-/// fade from `-30` to `0` dB; a live unmute of 4,000 samples is drained at 0, and a live unmute of
-/// window 0 at 3,200 ends it there. From 3,200 the lane follows the curve: at each completion
-/// sample `64k + 63` it equals the curve's gain exactly, at quantum 128, 100 and 64 and on the
+/// fade from `-30` to `0` dB; a live unmute of 8,000 samples is drained at 0, an offsets write
+/// `S = -6` dB (ramp 200) at 3,200 under that ramp (the held branch of the offsets jump: the cell
+/// forgets its target and holds to 7,999; the fade's grid events after it leave a move owed). Then
+/// the production trigger (#1651 U1 fold 1, MINOR-5): the shared commit's `Mute` records of a hand
+/// mute and an exact hand unmute, `Mute { true, 0 }` at the block entry before 6,400 (the lane is
+/// held through that block) and `Mute { false, 0 }` at 6,400, which frees the lane at that entry.
+/// From 6,400 the lane follows the composed curve: at each completion sample `64k + 63` it equals
+/// `checked_fader_gain(vca_compose_db(curve, S))` exactly, at quantum 128, 100 and 64 and on the
 /// oracle.
 ///
 /// Test value: red if the cell keeps its hold of the ended ramp (the lane stays at the gain the
-/// live write left, about `-28.5` dB, while the curve moves, until the hold's last grid point), or
-/// if the release is made without the discharge.
+/// exact unmute left while the curve moves, until the hold's last grid point), or if the release
+/// is made only when nothing is owed.
 #[test]
 fn a_live_write_that_frees_a_held_lane_releases_its_hold() {
-    const FRAMES: u64 = 4_800;
+    const FRAMES: u64 = 8_000;
     let (model, entry) = muted_ride(fade_from(-30.0, 48_000), 10.0);
-    let out = scripted_across(&model, &[128, 100, 64], FRAMES, &|rig| match rig.rendered {
-        0 => live_mute(rig, builtins::BuiltinLaneSelector::Both, false, 4_000),
-        3_200 => live_mute(rig, builtins::BuiltinLaneSelector::Both, false, 0),
+    let script = |rig: &mut Rig| match rig.rendered {
+        0 => live_mute(rig, builtins::BuiltinLaneSelector::Both, false, 8_000),
+        3_200 => live_offsets(rig, -6.0, 200),
+        6_400 => live_mute(rig, builtins::BuiltinLaneSelector::Both, false, 0),
+        at if at + rig.quantum as u64 == 6_400 => {
+            live_mute(rig, builtins::BuiltinLaneSelector::Both, true, 0);
+        }
         _ => {}
-    });
-    for plane in &out {
-        for t in (3_200 + 63..FRAMES).step_by(64) {
-            assert_eq!(
-                plane[t as usize].to_bits(),
-                gain(curve(&entry, t as i64)).to_bits(),
-                "completion sample {t}"
-            );
+    };
+    for quantum in [128, 100, 64] {
+        let mut at = model.clone();
+        at.quantum_frames = quantum;
+        #[cfg_attr(not(feature = "test-support"), allow(unused_mut))]
+        let mut outs = vec![("bank", scripted(Rig::live(&at), FRAMES, &script))];
+        #[cfg(feature = "test-support")]
+        outs.push(("oracle", scripted(oracle_rig(&at), FRAMES, &script)));
+        for (form, out) in &outs {
+            for plane in out {
+                for t in (6_400 + 63..FRAMES).step_by(64) {
+                    assert_eq!(
+                        plane[t as usize].to_bits(),
+                        composed(curve(&entry, t as i64), -6.0).to_bits(),
+                        "quantum {quantum}, {form}: completion sample {t}"
+                    );
+                }
+            }
         }
     }
 }
@@ -2098,6 +2139,7 @@ fn form_rig(
 struct Act {
     at: u64,
     mute: Option<(builtins::BuiltinLaneSelector, bool, u32)>,
+    fader: Option<(builtins::BuiltinLaneSelector, f32, u32)>,
     offsets: Option<(f64, u32)>,
     jump: Option<u32>,
 }
@@ -2108,6 +2150,7 @@ const fn act(at: u64) -> Act {
     Act {
         at,
         mute: None,
+        fader: None,
         offsets: None,
         jump: None,
     }
@@ -2149,6 +2192,16 @@ fn acted(
                                 builtins_compiler::TrackFaderRecord::Mute {
                                     lanes,
                                     muted,
+                                    smoothing_samples: window,
+                                },
+                            );
+                        }
+                        if let Some((lanes, db, window)) = act.fader {
+                            handles.strip_controls[0].fader.write(
+                                stamp,
+                                builtins_compiler::TrackFaderRecord::FaderDb {
+                                    lanes,
+                                    db,
                                     smoothing_samples: window,
                                 },
                             );
@@ -2203,7 +2256,8 @@ fn never_muted(model: &SessionModel) -> SessionModel {
 /// over `[0, 2_000]` and then fading to `0` dB at 10,000; at quantum 37 a live unmute of 4,000
 /// samples is drained at 0, an offsets write `S = -6` dB (ramp 200) at 962 under that ramp (the
 /// held branch of the offsets jump: the cell forgets its target and holds to 3,999), and a live
-/// unmute of window 0 at 999 frees the lane. No grid point lies between 962 and 999, so the cell
+/// fader write of `-10` dB over window 0 at 999 frees the lane (a repeated unmute would change
+/// nothing, #1651 batch 13b). No grid point lies between 962 and 999, so the cell
 /// remembers no event and owes nothing. From 1,087 the lane follows the composed curve: at each
 /// completion sample `64k + 63` it equals `checked_fader_gain(vca_compose_db(curve, S))` exactly,
 /// on every render form; both lanes, and a left-only form whose right lane stays muted.
@@ -2238,7 +2292,7 @@ fn a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold() {
                     ..act(962)
                 },
                 Act {
-                    mute: Some((lanes, false, 0)),
+                    fader: Some((lanes, -10.0, 0)),
                     ..act(999)
                 },
             ],
@@ -2265,7 +2319,8 @@ fn a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold() {
 /// keeps its own hold. The track is prepared muted on a curve flat at `-30` dB to 1,100 and then
 /// fading to `0` dB at 10,000; at the entry 1,024 a live unmute of window 0 and an offsets write
 /// `S = -6` dB with a 480-sample ramp land together (and, in a second form, a live unmute of
-/// 4,000 samples is in progress from 0). From 1,024 both lanes equal the never-muted session that
+/// 4,000 samples is in progress from 0, and a live fader write of `-30` dB frees the lane in place
+/// of the repeated unmute). From 1,024 both lanes equal the never-muted session that
 /// takes the same offsets write at 1,024, at quantum 128, 64 and 37, on every render form.
 ///
 /// Test value: red if the R17-10 release of the ended unmute overwrites the hold the offsets
@@ -2301,6 +2356,13 @@ fn an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp() {
         for ramping in [false, true] {
             let mut acts = vec![freeing];
             if ramping {
+                // A repeated unmute would leave the 4,000-sample ramp running (#1651 batch 13b),
+                // so a live fader write at the curve's `-30` dB frees the lane.
+                acts[0] = Act {
+                    mute: None,
+                    fader: Some((Both, -30.0, 0)),
+                    ..freeing
+                };
                 acts.insert(
                     0,
                     Act {

@@ -361,10 +361,15 @@ impl Rig {
     }
 
     pub(crate) fn boot(document: &[u8], rate: u32) -> Self {
+        Self::boot_at(document, rate, QUANTUM)
+    }
+
+    /// [`Self::boot`] at the render quantum `quantum` (the document's own).
+    pub(crate) fn boot_at(document: &[u8], rate: u32, quantum: u32) -> Self {
         let options = WebBootOptions {
             require_sample_rate_hz: rate,
-            require_quantum_frames: QUANTUM,
-            source_ring_frames: QUANTUM * 2,
+            require_quantum_frames: quantum,
+            source_ring_frames: quantum * 2,
             ..WebBootOptions::explicit_defaults()
         };
         let host = AudioWorkletEngineHost::boot(document, options)

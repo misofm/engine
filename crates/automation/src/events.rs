@@ -145,6 +145,17 @@ impl CellState {
         self.ramp_done = completion;
     }
 
+    /// Shortens the hold of the ramp in flight so that it completes no later than node time `t`:
+    /// the caller's stage stopped holding the lane earlier than the hold it reported (a ramp that
+    /// a later operation ended). Shorten-only: a hold that already completes by `t`, or no ramp in
+    /// flight, is left as it is: it never lengthens a hold or starts one, as
+    /// [`Self::hold_until`] would.
+    pub const fn release_hold_by(&mut self, t: i64) {
+        if self.ramp_done != IDLE && self.ramp_done > t {
+            self.ramp_done = t;
+        }
+    }
+
     /// Sets the current target to `value`, as if a retarget to it had completed: the next grid or
     /// jump event to the same bits emits nothing (change only). It clears an outstanding held
     /// event and keeps the cursor, the ramp in flight and a deferred jump.

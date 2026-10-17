@@ -135,6 +135,9 @@ pub use engine::realtime::{
     ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotSection,
     ResponseSnapshotSink,
 };
+/// A following route's seven-word cell (#1652 D1): what a host writes a [`SendRecord::Following`]
+/// with (#1653).
+pub use graph::{FollowRouteControlRecord, GraphFollowRouteControlProducer, RouteFollowFlags};
 #[cfg(feature = "control-provider")]
 pub use live_delta::{
     LiveDelta, LiveRebuild, LiveRouteRecord, LiveStripRecords, automation_jump_row,
@@ -147,13 +150,13 @@ pub use prepare::{
     GraphJumpLengthProducer, GraphJumpLengths, HostLiveControlHandles, HostLiveControlRequest,
     HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
     LiveRampRow, LiveRamps, MAXIMUM_VCA_REACH_PAIRS, MAXIMUM_VCAS_BOUNDED, MonitorBase,
-    NO_OBSERVATION, PlanStateInventory, PreparedHost, SOURCE_STALL_TOLERANCE_MS,
+    NO_OBSERVATION, PlanStateInventory, PreparedHost, SOURCE_STALL_TOLERANCE_MS, SendRecord,
     SourceInventoryRow, SuccessorBase, check_counts, compile_host_model, compile_host_session,
     count_effects, default_source_ring_frames, effect_producer_position,
-    jump_length_retained_bytes, pair_carried_meters, pair_carried_observations, parse_host_session,
-    prepare_host_runtime, prepare_host_runtime_between_render_calls,
-    prepare_host_runtime_successor, prepare_host_runtime_with_live_controls,
-    prepare_host_runtime_with_live_controls_and_spectrum,
+    follow_route_producer_position, jump_length_retained_bytes, pair_carried_meters,
+    pair_carried_observations, parse_host_session, prepare_host_runtime,
+    prepare_host_runtime_between_render_calls, prepare_host_runtime_successor,
+    prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,
     prepare_host_runtime_with_live_controls_and_spectrum_collection_successor,
     prepare_host_runtime_with_live_controls_and_spectrum_successor,

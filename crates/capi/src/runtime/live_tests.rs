@@ -317,6 +317,18 @@ impl Rig {
             .collect()
     }
 
+    /// Every following route's seven-word cell write count in the current epoch, in route-ID
+    /// order (#1653).
+    fn current_follow_route_cells(&self) -> Vec<u64> {
+        let snapshot = crate::ffi::test_transaction_snapshot(self.session);
+        snapshot
+            .follow_route_cells
+            .iter()
+            .filter(|(epoch, ..)| *epoch == snapshot.provider_epoch)
+            .map(|&(_, _, writes)| writes)
+            .collect()
+    }
+
     /// Every strip's cell write counts in the current epoch, per cell: `([fader left, fader
     /// right, mute left, mute right], matrix)`.
     fn current_cells(&self) -> Vec<([u64; 4], u64)> {
@@ -10929,6 +10941,410 @@ fn a_removed_fader_ride_releases_to_the_static_fader() {
             live[jump - 1..],
             reference[jump - 1..],
             "plane {plane}: the static fader's bits from the release's last sample"
+        );
+    }
+}
+
+/// #1652 gate 1: track `eq0` sends `pre_fader` (its right lane, `rr` only) with `follows_mute`
+/// into bus `b`, and its direct route takes only its left lane to the output, so the output's
+/// left plane is the strip and its right plane the send. With `entry`, `eq0` has a mute entry on
+/// `both` with steps 0, 1, 0 at 1,000 and 2,500; with `muted`, `eq0` is muted statically.
+fn follow_document(entry: bool, muted: bool) -> String {
+    use session::{
+        Automation, AutomationOffset, AutomationSegment, AutomationShape, ChannelMatrix,
+        ControlAddress, Owner, ParameterChannel, ParameterUnit, Section, SendTap,
+    };
+    let id = |text: &str| StableId::parse(text).expect("stable ID");
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    model.sources[0].frames = SOURCE_FRAMES;
+    model.control_smoothing = Some(ControlSmoothing {
+        mute_ms: 10.0,
+        fader_ms: 5.0,
+        pan_ms: 5.0,
+    });
+    let track = model.tracks[0].id.clone();
+    (
+        model.tracks[0].fader.left_mute,
+        model.tracks[0].fader.right_mute,
+    ) = (muted, muted);
+    let matrix = |ll: f32, rr: f32| ChannelMatrix {
+        ll,
+        lr: 0.0,
+        rl: 0.0,
+        rr,
+    };
+    model.routes[0].channel_matrix = matrix(1.0, 0.0);
+    let mut send = model.routes[0].clone();
+    send.id = id("eq0-b");
+    send.source = RouteSource::Track {
+        track_id: track.clone(),
+        tap: SendTap::PreFader,
+    };
+    send.destination = RouteDestination::SubmixInput { submix_id: id("b") };
+    send.channel_matrix = matrix(0.0, 1.0);
+    send.follows_mute = true;
+    let mut out = model.routes[0].clone();
+    out.id = id("b-main");
+    out.source = RouteSource::Submix {
+        submix_id: id("b"),
+        tap: SendTap::PostPan,
+    };
+    out.channel_matrix = matrix(1.0, 1.0);
+    model.routes.push(send);
+    model.routes.push(out);
+    let console = model.console.clone();
+    model.submixes.push(Submix::unity(id("b"), &console));
+    if entry {
+        let step = |start: u64, end: u64, from: f32, to: f32| AutomationSegment {
+            shape: AutomationShape::Step,
+            start_sample: start,
+            end_sample: end,
+            start_value: from,
+            end_value: to,
+            unit: ParameterUnit::Linear,
+        };
+        model.automation.push(Automation {
+            id: id("eq0-mute"),
+            target: ControlAddress {
+                owner: Owner::Strip(track),
+                section: Section::Builtins,
+                control: 6,
+                lane: ParameterChannel::Both,
+            },
+            segments: vec![step(0, 1_000, 0.0, 1.0), step(1_000, 2_500, 1.0, 0.0)],
+            offset: AutomationOffset::default(),
+        });
+    }
+    session::canonical_session_json(&model).expect("canonical follow session")
+}
+
+/// #1652 gate 1 on the C ABI. From the first block boundary after the end of the mute ramp (1,000
+/// plus the 480-sample mute length) to the unmute at 2,500, the output is bit for bit the plan with
+/// `eq0` statically muted, fed the same PCM (the right lane is negative, so a signed zero shows);
+/// from the first block boundary after the end of the unmute ramp it is bit for bit the plan with
+/// no mute. Not vacuous: the send's plane differs from the static mute's before the mute.
+///
+/// Test value: red if the C ABI plan attaches no following lane for the send (its pre-fader audio
+/// leaks while the strip is muted), or the send does not reopen after the unmute.
+#[test]
+fn a_following_send_leaks_nothing_of_a_stored_mute() {
+    const BLOCKS: usize = 32;
+    let run = |document: &str| -> Vec<f32> {
+        let mut rig = Rig::new(document);
+        let mut planes = [Vec::new(), Vec::new()];
+        for _ in 0..BLOCKS {
+            let pcm = rig.step();
+            let quantum = rig.quantum;
+            planes[0].extend_from_slice(&pcm[..quantum]);
+            planes[1].extend_from_slice(&pcm[quantum..]);
+        }
+        let [left, right] = planes;
+        left.into_iter().chain(right).collect()
+    };
+    let quantum = 128_usize;
+    let frames = BLOCKS * quantum;
+    let curve = run(&follow_document(true, false));
+    let muted = run(&follow_document(false, true));
+    let open = run(&follow_document(false, false));
+    let muted_window = (1_000 + 480_usize).div_ceil(quantum) * quantum..2_500;
+    let open_window = (2_500 + 480_usize).div_ceil(quantum) * quantum..frames;
+    for plane in 0..2 {
+        let at = |range: &core::ops::Range<usize>| {
+            plane * frames + range.start..plane * frames + range.end
+        };
+        assert_eq!(
+            bits(&curve[at(&muted_window)]),
+            bits(&muted[at(&muted_window)]),
+            "plane {plane}: the statically muted plan's bits while the curve mutes"
+        );
+        assert_eq!(
+            bits(&curve[at(&open_window)]),
+            bits(&open[at(&open_window)]),
+            "plane {plane}: the open plan's bits after the unmute"
+        );
+    }
+    assert_ne!(
+        bits(&curve[frames..frames + 900]),
+        bits(&muted[frames..frames + 900]),
+        "the send carries audio before the mute"
+    );
+}
+
+/// #1652 U2a fold 2 (MAJOR-A, conservative; #1713 deletes the flag). A rebuild whose send join
+/// carries a following route into a six-word one (it removes `eq0`'s mute entry while `eq0-b`
+/// follows it) completes as the transition fallback: the C ABI watermark that covers it reads
+/// `OUTCOME_TRANSITION_FALLBACK`, count 1. The removal is sent at block 8 (sample 1,024), while the
+/// send's columns ramp toward the mute the curve stepped on at 1,000 (480 samples). A rebuild that
+/// keeps the entry (the following route stays following, seven -> seven) and a rebuild of a
+/// session with no following route (no mute entry) complete as `OUTCOME_EXACT`, count 0. A second
+/// rebuild that automates `eq0`'s fader in the block after the first one's adoption (inside `J`)
+/// completes `OUTCOME_EXACT` too, count still 1: only a level fallback opens the level-move window.
+///
+/// Test value: red if the control plane does not mark a seven -> six rebuild (the six-word
+/// successor's re-timed column move then completes exact), or if it marks a rebuild whose
+/// following routes stay following, or one with no following route (the flag must stay narrow),
+/// or if the flagged rebuild opens the level-move window as a level fallback does (the fader
+/// rebuild inside its landing then reports the fallback: `landing` read the whole outcome).
+#[test]
+fn a_rebuild_that_drops_a_following_route_to_six_words_reports_a_fallback() {
+    let remove = SessionEdit::RemoveAutomation {
+        automation_id: StableId::parse("eq0-mute").expect("automation ID"),
+    };
+    let fallback = crate::OUTCOME_TRANSITION_FALLBACK;
+    let exact = crate::OUTCOME_EXACT;
+    for (label, entry, remove_entry, expected) in [
+        ("seven -> six, a column mid-move", true, true, fallback),
+        ("seven -> seven", true, false, exact),
+        ("no following route", false, false, exact),
+    ] {
+        let document = follow_document(entry, false);
+        let model = parse_session_json(&document).expect("model");
+        let edits = if remove_entry {
+            vec![remove.clone()]
+        } else {
+            // A muted copy of `eq0` with its own route to the output: a rebuild that leaves
+            // `eq0-b` and `eq0`'s mute entry as they are.
+            let mut track = model.tracks[0].clone();
+            track.id = StableId::parse("added").expect("track ID");
+            (track.fader.left_mute, track.fader.right_mute) = (true, true);
+            let mut route = model
+                .routes
+                .iter()
+                .find(|route| route.id.as_str() == "eq0-main")
+                .expect("the direct route")
+                .clone();
+            route.id = StableId::parse("added-main").expect("route ID");
+            route.source = RouteSource::Track {
+                track_id: track.id.clone(),
+                tap: session::SendTap::PostPan,
+            };
+            vec![
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ]
+        };
+        let mut rig = Rig::new(&document);
+        for _ in 0..8 {
+            rig.step();
+        }
+        let bytes = rig.transaction(&edits);
+        let (result, response) = rig.send(&bytes);
+        assert_eq!(result, crate::RESULT_OK, "{label}");
+        assert_eq!(
+            edit_path_of(&response),
+            protocol::EditPath::Rebuild,
+            "{label}"
+        );
+        let revision = rig.summary().0;
+        for _ in 0..4 {
+            rig.step();
+        }
+        assert_eq!(rig.summary().3, 0, "{label}: the successor is adopted");
+        let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(
+            (
+                watermark.revision,
+                watermark.outcome_flags,
+                watermark.transition_fallback_count
+            ),
+            (revision, expected, u64::from(expected == fallback)),
+            "{label}: the rebuild's revision, outcome flags and transition-fallback count"
+        );
+    }
+    // Fold-2 NIT-1: the level-move window opens for a level fallback only. The seven -> six
+    // rebuild above is flagged but moves no level, so a second rebuild that automates a fader
+    // in the block after its adoption (inside `J` = 240 samples of it) finds no level move in
+    // flight and completes exact; the count stays 1.
+    let document = follow_document(true, false);
+    let mut rig = Rig::new(&document);
+    for _ in 0..8 {
+        rig.step();
+    }
+    let bytes = rig.transaction(&[remove]);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+    let first = rig.summary().0;
+    rig.step();
+    let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        (watermark.revision, watermark.first_sample),
+        (first, 8 * rig.quantum as u64),
+        "the flagged successor is adopted at the next block"
+    );
+    let ride = session::Automation {
+        id: StableId::parse("eq0-ride").expect("automation ID"),
+        target: session::ControlAddress {
+            owner: session::Owner::Strip(StableId::parse("eq0").expect("strip ID")),
+            section: session::Section::Builtins,
+            // The fader row (builtin parameter 5).
+            control: 5,
+            lane: session::ParameterChannel::Both,
+        },
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: SOURCE_FRAMES,
+            start_value: 0.0,
+            end_value: -12.0,
+            unit: session::ParameterUnit::Db,
+        }],
+        offset: session::AutomationOffset::default(),
+    };
+    let bytes = rig.transaction(&[SessionEdit::UpsertAutomation { automation: ride }]);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+    let revision = rig.summary().0;
+    for _ in 0..4 {
+        rig.step();
+    }
+    assert_eq!(rig.summary().3, 0, "the second successor is adopted");
+    let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        (
+            watermark.revision,
+            watermark.outcome_flags,
+            watermark.transition_fallback_count
+        ),
+        (revision, crate::OUTCOME_EXACT, 1),
+        "a fader rebuild inside a flagged follow rebuild's landing finds no level move"
+    );
+}
+
+/// #1653: sends `edits` on `rig`, which must answer `live`, and renders `blocks` blocks from the
+/// next block on. Returns that block's first sample `T` (the first block that begins after the
+/// submit returns, which applies the transaction's records) and the blocks, `T`'s first.
+fn live_and_render(rig: &mut Rig, edits: &[SessionEdit], blocks: usize) -> (u64, Vec<Vec<f32>>) {
+    let bytes = rig.transaction(edits);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Live);
+    let first = rig.block * rig.quantum as u64;
+    (first, (0..blocks).map(|_| rig.step()).collect())
+}
+
+/// The `follows_mute` row of route `route`, set to `on`.
+fn follows_mute_edit(route: &str, on: bool) -> SessionEdit {
+    use protocol::control_core::{Lane, Owner, Section, row_address};
+    SessionEdit::set_control(
+        row_address(
+            Owner::Route(StableId::parse(route).expect("route ID")),
+            Section::Own,
+            "follows_mute",
+            Lane::Both,
+        )
+        .expect("the follows_mute row"),
+        f32::from(u8::from(on)),
+        None,
+    )
+}
+
+/// #1653 gate 1 on the C ABI. `eq0` is automated-muted from 1,000 (480-sample mute ramps);
+/// `eq0-b` follows it. At 1,024 a transaction turns `follows_mute` off, at 1,920 one turns it on
+/// again: each is `live`. From the first block boundary after each route ramp (480 samples) the
+/// output is bit for bit a fresh plan of the committed document, session-seeked to the edit's
+/// block and fed the same PCM: the send open while the curve mutes, then closed again until the
+/// curve's unmute at 2,500 reopens it. Not vacuous: the send's plane carries audio while it is off
+/// and is silent after it is on again.
+///
+/// Test value: red if `follows_mute` is still read from the prepared route only (the live toggle
+/// on an automated route is lost and the send stays shut), or if the commit refuses the
+/// seven-word record.
+#[test]
+fn a_follows_mute_toggle_on_a_following_route_is_live() {
+    let mut rig = Rig::new(&follow_document(true, false));
+    let quantum = rig.quantum;
+    for _ in 0..8 {
+        rig.step();
+    }
+    let settled = |at: u64| (at as usize + 480).div_ceil(quantum) - at as usize / quantum;
+    assert_eq!(
+        rig.current_route_cells(),
+        Vec::<u64>::new(),
+        "no six-word send"
+    );
+    assert_eq!(
+        rig.current_follow_route_cells(),
+        vec![0],
+        "one seven-word send"
+    );
+    for ((label, on, blocks), writes) in [("off", false, 7), ("on", true, 17)]
+        .into_iter()
+        .zip(1_u64..)
+    {
+        let (at, live) = live_and_render(&mut rig, &[follows_mute_edit("eq0-b", on)], blocks);
+        assert_eq!(
+            rig.current_follow_route_cells(),
+            vec![writes],
+            "{label}: one seven-word cell write"
+        );
+        let reference = seeked_reference(&rig.snapshot(), at, blocks);
+        let from = settled(at);
+        for plane in 0..2 {
+            assert_eq!(
+                plane_bits(&live[from..], plane, quantum),
+                plane_bits(&reference[from..], plane, quantum),
+                "{label}, plane {plane}: a fresh plan of the committed document after the ramp"
+            );
+        }
+        // The send's plane up to the curve's unmute at 2,500 (only the "on" run reaches it).
+        let send = plane_bits(&live[from..], 1, quantum);
+        let window = (2_500_usize.saturating_sub(at as usize + from * quantum)).min(send.len());
+        let silent = send[..window]
+            .iter()
+            .all(|&word| f32::from_bits(word) == 0.0);
+        assert_eq!(
+            silent, on,
+            "{label}: the send is shut exactly when it follows"
+        );
+    }
+}
+
+/// #1653 (replaces #1652c's rebuild gate): a send gain edit on the following route `eq0-b`, and a
+/// hand mute of its source `eq0` (which changes its terms and its gate), are each `live`, and from
+/// the first block boundary after their ramps the C ABI renders what the committed document
+/// renders fresh, session-seeked to the edit's block.
+///
+/// Test value: red if either edit still rebuilds, if the commit refuses the seven-word record
+/// (an internal fault; the edit is lost), or if the record does not carry the committed values.
+#[test]
+fn an_edit_of_a_following_route_is_live() {
+    use protocol::control_core::{Lane, Owner, Section, row_address};
+    let gain = SessionEdit::set_control(
+        row_address(
+            Owner::Route(StableId::parse("eq0-b").expect("route ID")),
+            Section::Own,
+            "gain_db",
+            Lane::Both,
+        )
+        .expect("the send gain row"),
+        -9.0,
+        None,
+    );
+    for edit in [gain, mute_edit("eq0", true)] {
+        let mut rig = Rig::new(&follow_document(true, false));
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (at, live) = live_and_render(&mut rig, std::slice::from_ref(&edit), 12);
+        let reference = seeked_reference(&rig.snapshot(), at, 12);
+        let settle = 4;
+        assert_eq!(
+            live[settle..]
+                .iter()
+                .map(|pcm| bits(pcm))
+                .collect::<Vec<_>>(),
+            reference[settle..]
+                .iter()
+                .map(|pcm| bits(pcm))
+                .collect::<Vec<_>>(),
+            "the plan renders the committed document once its ramps settle"
         );
     }
 }

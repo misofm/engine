@@ -3141,7 +3141,15 @@ impl<L: Lane> FaderRampStage<L> {
     }
 
     /// One channel of [`Self::set_mute`]. A nonzero window starts a mute ramp (D2).
+    ///
+    /// A call whose `muted` equals the channel's current mute state changes nothing (issue #1651,
+    /// batch 13b ruling): no retarget, and the mute ramp flag and the ramp's remaining frames stay
+    /// as they were. So a repeated mute never restarts a fader ramp in flight or a mute ramp, and
+    /// never holds the gain for a window.
     fn mute_channel(&mut self, lane: usize, channel: usize, muted: bool, smoothing_samples: u32) {
+        if self.muted[channel][lane] == muted {
+            return;
+        }
         self.muted[channel][lane] = muted;
         let target = if muted {
             0.0

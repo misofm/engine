@@ -23,8 +23,10 @@ pub struct ControlRow {
     /// The committed value. A derived row reports its computed value, a monitor row (solo) the
     /// overlay's, and a row that the owner's shape does not use the descriptor's default.
     pub value: f32,
-    /// Whether a rendered stored automation drives the row's lane (#1650 D4). On such a lane the
-    /// `fader_db` row's value is the driving entry's hand-move offset, not the static fader.
+    /// Whether a rendered stored automation drives the row's lane (#1650 D4): the `fader_db` row
+    /// and, since #1651 (root ruling R18-2), the `mute` row. On such a lane the `fader_db` row's
+    /// value is the driving entry's hand-move offset, not the static fader; the `mute` row's value
+    /// stays the lane's static (hand) mute, which render ORs with the curve (OQ1 = C).
     pub automated: bool,
 }
 
@@ -218,12 +220,19 @@ pub fn owner_rows_in(
     match owner_slot(model, owner) {
         OwnerSlot::Strip(index) => {
             let strip = view.strip(index);
-            let offsets = builtin_rows::fader_offsets(view.fader_automation(strip.id));
+            let driven = strip::Driven {
+                offsets: builtin_rows::fader_offsets(view.fader_automation(strip.id)),
+                // Which entry drives a mute lane is read from the committed table, as for the
+                // fader (a transaction of values leaves the table's entries and targets as
+                // committed).
+                muted: crate::automation::mute_automation(model, strip.id)
+                    .map(|entry| entry.is_some()),
+            };
             strip::push_rows(
                 out,
                 &model.console,
                 &strip,
-                offsets,
+                driven,
                 &effective.strip(index),
                 overlay,
                 sample_rate,

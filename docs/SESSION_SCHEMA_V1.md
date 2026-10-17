@@ -287,7 +287,7 @@ segment whose unit is not the row's, or a value the row refuses), `control.autom
 addresses that submix's entry for the slot (#1202). A session does not have to state a parameter
 value for the row it automates: the row exists whether or not the session states it.
 
-**The fader row renders; every other row is inert today.** An entry on a strip's fader
+**The fader and mute rows render; every other row is inert today.** An entry on a strip's fader
 (`builtins` row 5) is compiled into the plan as a table (#1646) and rendered on the C ABI and in
 the browser alike (#1647): the lane follows its curve in node time, reaching the curve's value at
 the end of each 64-sample retarget on a fixed grid, taking each discontinuity at its exact sample
@@ -297,8 +297,16 @@ the fader. One exception: while a mute or unmute ramp holds the lane's gain, the
 remembers each value it is given, a seek's included, and where the hold ends with the gain free it
 ramps over the fader ramp length to the curve at that ramp's end (a seek that reaches the fader
 exactly where the hold ends still sets it exactly). The output does not depend on the render
-quantum or on where a seek landed. Stored
-automation has no queue: render generates its events from the plan. An entry on any other row,
+quantum or on where a seek landed. An entry on a strip's mute (`builtins` row 6, `step` only,
+values `0` and `1`) is compiled into the same table after every fader entry (#1651): the lane mutes
+and unmutes at each step's exact sample over the session's mute ramp length
+(`control_smoothing.mute_ms`), and the mute the stage renders is the curve's OR the lane's other
+mute terms (its own static mute, any reaching VCA's mute, and solo), so a hand mute closes an open
+curve and a hand unmute leaves a closed curve closed. Only a change of that OR moves the lane. The
+control list marks a lane's `mute` row `automated` (`ControlEntry` field 35) while a mute entry
+drives the lane (#1651, root ruling R18-2); the row's value stays the lane's static (hand) mute. A
+session seek sets it exactly where the seek changes it, and a ramp toward a state the seek leaves
+unchanged finishes. Stored automation has no queue: render generates its events from the plan. An entry on any other row,
 for the strip, a console slot or an insert, is valid and inert: it authors and round-trips and
 renders nothing until its row's slice lands. Rendering the whole table identically on every
 platform is owned by issue #1058; #140, which once gated it, was descoped

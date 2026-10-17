@@ -23,7 +23,6 @@
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::route_controls::RouteControlRecord;
 use builtins::{checked_trim_gain, validate_prepared_input_filter_target};
 use builtins_compiler::{
     FaderOffsetsRecord, TrackControlRecord, TrackFaderRecord, TrackInputRecord,
@@ -55,9 +54,10 @@ pub fn take_fast_classification_count() -> usize {
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
 use crate::prepare::{
-    EffectiveDiff, LevelRecords, LevelRules, OutOfDomain, RouteEditRamps, StripChange,
-    StripEditRamps, effect_instance_records, input_records, level_differs, level_records_between,
-    matrix_record, route_record_between, route_source_strip, same_params, strip_at,
+    EffectiveDiff, LevelRecords, LevelRules, OutOfDomain, RouteEditRamps, SendRecord, StripChange,
+    StripEditRamps, effect_instance_records, follow_route_record_between, following_route_lanes,
+    input_records, level_differs, level_records_between, matrix_record, route_record_between,
+    route_source_strip, same_params, strip_at,
 };
 use crate::prepare::{GraphJumpLengths, LiveRampRow, LiveRamps, MonitorBase, session_jump_lengths};
 
@@ -138,12 +138,15 @@ pub struct LiveEffectRecords<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LiveRouteRecord<'a> {
     /// The route's ID, borrowed from the post-commit model. A producer is found by it
-    /// ([`crate::route_producer_position`]).
+    /// ([`crate::route_producer_position`] for a `Folded` record,
+    /// [`crate::follow_route_producer_position`] for a `Following` one).
     pub route_id: &'a str,
-    /// The send's new target, its gate and its ramp length: what
+    /// For a six-word route, `Folded`: the send's new target, its gate and its ramp length, what
     /// `graph_compiler::route_coefficients` gives for the post-commit values, which is what
-    /// preparation folds into the route's constants.
-    pub record: RouteControlRecord,
+    /// preparation folds into the route's constants. For a route the plan gives the seven-word
+    /// cell of a following route (#1652 D1), `Following`: the open transform, the flags word and
+    /// the ramp (#1653 D1), which render composes with the source strip's stored mute curve.
+    pub record: SendRecord,
 }
 
 /// A live delta: the records that bring the running plan to the post-commit model.
@@ -272,11 +275,12 @@ pub use crate::prepare::LiveRebuild;
 ///    over unchanged activity and unchanged filter statics is never re-checked: it was prepared.
 /// 3. [`LiveRebuild::Automation`] if the entries of the rows that render differ
 ///    ([`controls::rendered_automation_changed`], #1648 D1): an entry on such a row (today a
-///    strip's fader, builtin row 5, [`controls::automation_row_renders`]) is added, removed,
-///    retargeted or given other segments. A plan compiles its cells from these entries, so only a
-///    rebuild can carry the change; the successor also seeds its jump-length cell from its own
-///    model (#1639 D4). An entry's hand offset (#1650) is not compared. An accepted change on a
-///    row that does not render yet stays live with no records, as #1260 D2 made it.
+///    strip's fader and mute, builtin rows 5 and 6, [`controls::automation_row_renders`], #1651)
+///    is added, removed, retargeted or given other segments. A plan compiles its cells from these
+///    entries, so only a rebuild can carry the change; the successor also seeds its jump-length
+///    cell from its own model (#1639 D4). An entry's hand offset (#1650) is not compared. An
+///    accepted change on a row that does not render yet stays live with no records, as #1260 D2
+///    made it.
 /// 4. With the structure equal, the two models list the same controls in the same order. For each
 ///    control whose value bits differ ([`controls::changed_controls`]): a row that is
 ///    rebuild-only is [`LiveRebuild::RebuildOnly`] with the row's reason; a row of family
@@ -317,7 +321,10 @@ pub use crate::prepare::LiveRebuild;
 /// A static fader value of a lane that `next` automates ([`controls::automated_cell`]) gives no
 /// `FaderDb` record (#1648 D3): the lane's cell renders the curve, and the static value is its
 /// fallback. Since the record comes from the effective value, the rule covers a VCA move that
-/// reaches the lane too. The lane's `Mute` records are unchanged.
+/// reaches the lane too. The lane's `Mute` records are unchanged: on a lane whose mute `next`
+/// automates (#1651 D1, OQ1 = C) the record still carries the effective mute
+/// ([`controls::EffectiveStrip::mute`]: the strip's own static mute, any reaching VCA's, or the
+/// solo term), which is the lane's `terms`, and render composes the stage mute `curve || terms`.
 ///
 /// A record is emitted only when the value the render plane holds changes (`solo.rs`: never a
 /// redundant record): a `FaderDb` per lane whose effective gain bits change (one `Both` when both change to
@@ -1016,7 +1023,19 @@ fn lower_routes<'a>(
             continue;
         }
         let gates = diff.gates(index).ok_or(LiveRebuild::Structure)?;
-        if !(routes.contains(&after.id) || gates[0] != gates[1]) {
+        // #1653: a route the plan gives the seven-word cell also holds its source lanes' effective
+        // mute (`terms`), which can change while the gate does not (`follows_mute` off), so the
+        // cell always holds the committed words.
+        let following = match following_route_lanes(next.structure(), after) {
+            Some(automated) => Some(Following {
+                terms: diff.terms(before, after).ok_or(LiveRebuild::Structure)?,
+                automated,
+            }),
+            None => None,
+        };
+        let terms_changed =
+            following.is_some_and(|following| following.terms[0] != following.terms[1]);
+        if !(routes.contains(&after.id) || gates[0] != gates[1] || terms_changed) {
             continue;
         }
         let edit = RouteEditRamps::of(edit_ramps, &after.id);
@@ -1032,6 +1051,7 @@ fn lower_routes<'a>(
             gates,
             gate_length,
             edit,
+            following,
         });
         if let Lowered::Route(Some(record)) = lower(Family::Route, &ctx, &subject)? {
             delta.routes.push(record);
@@ -1060,6 +1080,9 @@ trait LevelDiff {
         own_edit: Option<u32>,
         gates: [[bool; 2]; 2],
     ) -> Option<u32>;
+    /// The effective mute of the route's source strip per lane, in `[current, next]`: a following
+    /// route's `terms` (#1652 D1, OQ1 = C), or `None` when the form does not hold the source.
+    fn terms(&self, before: &Route, after: &Route) -> Option<[[bool; 2]; 2]>;
 }
 
 impl LevelDiff for EffectiveDiff<'_> {
@@ -1086,6 +1109,11 @@ impl LevelDiff for EffectiveDiff<'_> {
         Some(EffectiveDiff::gate_length(
             self, before, after, own_edit, source, gates,
         ))
+    }
+
+    fn terms(&self, before: &Route, after: &Route) -> Option<[[bool; 2]; 2]> {
+        let source = self.source_strips(before, after)?;
+        Some(self.strip_mutes(source.0, source.1))
     }
 }
 
@@ -1168,13 +1196,14 @@ impl<'a> LocalDiff<'a> {
         }
 
         // The sends that follow a strip whose mute moved: one scan comparing sources, and only when
-        // a mute moved.
+        // a mute moved. A route the plan gives the seven-word cell is held whatever its
+        // `follows_mute`: its cell holds the source lanes' mute (`terms`, #1653).
         if strips
             .iter()
             .any(|strip| strip.before.mute != strip.after.mute)
         {
             for (index, route) in next.routes.iter().enumerate() {
-                if !route.follows_mute {
+                if !route.follows_mute && following_route_lanes(next, route).is_none() {
                     continue;
                 }
                 let Some(source) = route_source_strip(next, route) else {
@@ -1307,6 +1336,11 @@ impl LevelDiff for LocalDiff<'_> {
                 .gate_length(before, after, own_edit, &self.change(source), gates),
         )
     }
+
+    fn terms(&self, _before: &Route, after: &Route) -> Option<[[bool; 2]; 2]> {
+        let source = self.strip(route_source_strip(self.rules.next.structure(), after)?)?;
+        Some([source.before.mute, source.after.mute])
+    }
 }
 
 /// The changed controls of one strip, from the control list's order.
@@ -1364,6 +1398,18 @@ struct RouteTarget<'m, 'a> {
     /// The ramp length of a record whose gate changed (#1558 D7); unused when it did not.
     gate_length: u32,
     edit: RouteEditRamps,
+    /// For a route the next plan gives the seven-word cell (#1652 D1), what its record holds
+    /// besides the route's own values; `None` for a six-word route.
+    following: Option<Following>,
+}
+
+/// What a following route's record reads of its source strip (#1653 D1, D2).
+#[derive(Clone, Copy)]
+struct Following {
+    /// The source lanes' effective mute, in `[before, after]` (OQ1 = C: it holds no curve).
+    terms: [[bool; 2]; 2],
+    /// The lanes the next plan automates.
+    automated: [bool; 2],
 }
 
 /// What a strip lowering is of: a strip in both models, or one effect instance of it.
@@ -1456,9 +1502,13 @@ fn lower<'a>(
     }
 }
 
-/// The record that brings a send from `before`'s live values to `after`'s (#1557 D2, D3), when the
-/// target the render plane holds changes: [`route_record_between`] of the lowering's inputs, the
-/// one function of a send (#1284 D3), which a successor's preparation asks too.
+/// The record that brings a send from `before`'s live values to `after`'s (#1557 D2, D3), when a
+/// word the render plane holds changes: the one function of a send (#1284 D3), which a successor's
+/// preparation asks too. For a six-word route it is [`route_record_between`]; for a route the plan
+/// gives the seven-word cell of a following route (#1652 D1), [`follow_route_record_between`]
+/// with its source lanes' `terms` and the plan's `automated` (#1653 D1), so no folded record, which
+/// the curve's next event would contradict, reaches it. Automation is structure for a value
+/// transaction, so the predicate read the view's structure.
 ///
 /// # Errors
 ///
@@ -1468,15 +1518,29 @@ fn route_records<'a>(
     ctx: &Context<'_>,
     target: &RouteTarget<'_, 'a>,
 ) -> Result<Option<LiveRouteRecord<'a>>, LiveRebuild> {
-    Ok(route_record_between(
-        ctx.ramps,
-        target.before,
-        target.after,
-        target.gates,
-        target.gate_length,
-        target.edit,
-    )?
-    .map(|record| LiveRouteRecord {
+    let record = match target.following {
+        Some(following) => follow_route_record_between(
+            ctx.ramps,
+            target.before,
+            target.after,
+            following.terms,
+            following.automated,
+            target.gates,
+            target.gate_length,
+            target.edit,
+        )?
+        .map(SendRecord::Following),
+        None => route_record_between(
+            ctx.ramps,
+            target.before,
+            target.after,
+            target.gates,
+            target.gate_length,
+            target.edit,
+        )?
+        .map(SendRecord::Folded),
+    };
+    Ok(record.map(|record| LiveRouteRecord {
         route_id: target.after.id.as_str(),
         record,
     }))

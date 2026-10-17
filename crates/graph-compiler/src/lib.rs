@@ -320,7 +320,7 @@ mod ids;
 mod pdc;
 mod schedule;
 
-pub use ids::{RouteValueError, route_coefficients};
+pub use ids::{RouteValueError, route_coefficients, route_values};
 
 #[cfg(test)]
 mod tests {

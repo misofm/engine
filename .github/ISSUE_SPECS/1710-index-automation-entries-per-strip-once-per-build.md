@@ -34,3 +34,10 @@ table, not O(strips × entries). The rows, their values and the `automated` flag
 
 - #1650 (the binding and the flag). Measure first in the weekly pass; no change unless the
   measured build time of a large session warrants it.
+
+## Amendment (controls coordinator, batch 18)
+
+- Mute entries render since #1651 (row 6). The per-owner index also serves the mute row's readers
+  (`controls::mute_automation`, the listing's `automated` flag on a driven mute row, R18-2) and the
+  following-route predicate of #1652 (`following_route_lanes`), so the gate's session also carries
+  one rendered mute entry per strip and a following send per strip.
