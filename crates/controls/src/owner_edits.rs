@@ -10,7 +10,8 @@
 //! that drives the lane (#1650 D3), so that entry is an owner of the edit too (root's ruling
 //! R17-1 = A): a `fader_db` write clones the rendered entries that drive the strip's fader lanes
 //! with the strip, and [`crate::set`] on the owners model reads and writes them as it would on the
-//! whole model.
+//! whole model. A send's `gain_db` takes the same rule (root's ruling R17-6): a write to route row
+//! 1 clones the rendered entry that drives it with the route.
 
 use session::{OwnerSlots, SessionModel};
 
@@ -95,6 +96,11 @@ impl<'m> OwnerEdits<'m> {
         {
             self.take_fader_automation(strip);
         }
+        if let Owner::Route(route) = &address.owner
+            && crate::automation::route_gain_row(address)
+        {
+            self.take_route_gain_automation(route);
+        }
         crate::registry::set(&mut self.owners, address, value, ramp, sample_rate)
             .map_err(OwnerEditError::Control)
     }
@@ -110,6 +116,18 @@ impl<'m> OwnerEdits<'m> {
             .into_iter()
             .flatten()
         {
+            insert_sorted(&mut self.owners.automation, entry, |entry| &entry.id);
+        }
+    }
+
+    /// Clone the rendered entry that drives route `route`'s `gain_db` into the owners model, in ID
+    /// order, unless it is there already (R17-6, R17-1 = A on the send gain). A scan of the
+    /// committed table, with an early out when it is empty.
+    fn take_route_gain_automation(&mut self, route: &session::StableId) {
+        if self.committed.automation.is_empty() {
+            return;
+        }
+        if let Some(entry) = crate::automation::route_automation(self.committed, route)[0] {
             insert_sorted(&mut self.owners.automation, entry, |entry| &entry.id);
         }
     }

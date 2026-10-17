@@ -2893,6 +2893,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             follows_mute: route.follows_mute,
             terms: effective.strips[source].mute,
             automated: cells.map(|cell| cell.is_some()),
+            // #1654 T2: the plan gives a route no row cell yet, so no route row is automated.
+            automated_gain: false,
+            automated_mute: false,
+            automated_matrix: [false; 4],
         };
         follow_cells.push((route.id.as_str(), (program, cells, flags)));
     }
@@ -2956,8 +2960,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 graph::GraphFollowRouteSource::new(
                     program,
                     cells,
+                    [None; graph::GRAPH_ROUTE_ROWS],
                     graph::floored_input_arrival(&arrivals, &node),
-                    follow_mute_jump,
+                    follow_route_jumps,
+                    graph_compiler::route_gain_law,
                     flags,
                 )
             })
@@ -4383,6 +4389,10 @@ pub(crate) fn follow_route_record(
         follows_mute: route.follows_mute,
         terms,
         automated,
+        // #1654 T2: the plan gives a route no row cell yet, so no route row is automated.
+        automated_gain: false,
+        automated_mute: false,
+        automated_matrix: [false; 4],
     };
     graph::FollowRouteControlRecord::new(transform, flags, length).ok_or(LiveRebuild::Domain)
 }
@@ -5094,19 +5104,25 @@ pub(crate) fn following_route_lanes(
     (automated != [false; 2]).then_some(automated)
 }
 
-/// The jump length of a stored mute curve on a following route (#1652 D2, #1652b): the mute row's
-/// rule over the block's session lengths, the rule the strip's own mute stage resolves
-/// ([`LiveRamps::for_row`] of [`LiveRampRow::Mute`]), so the strip ramp and the send ramp have
-/// one length. Called on render (through the route's `GraphMuteJumpLength`): two `const fn`
-/// calls, a struct build and a `match` read, allocation-free and panic-free.
-// REALTIME_POLICY_BEGIN: the mute row's jump rule a following route calls once per block.
-fn follow_mute_jump(lengths: GraphJumpLengths) -> u32 {
-    LiveRamps::from_lengths(
+/// The jump lengths of a following route's cursor rows (#1652 D2, #1652b, #1654 D1): the row
+/// rules over the block's session lengths, the rules the strip's own stages resolve
+/// ([`LiveRamps::for_row`] of [`LiveRampRow::Mute`] for a source lane's and the route's own mute,
+/// of [`LiveRampRow::SendGain`] for the gain and of [`LiveRampRow::SendMatrix`] for a matrix
+/// entry), so the strip ramp and the send ramp have one length. Called on render (through the
+/// route's `GraphRouteJumpRule`): `const fn` calls, struct builds and `match` reads,
+/// allocation-free and panic-free.
+// REALTIME_POLICY_BEGIN: the route rows' jump rule a following route calls once per block.
+fn follow_route_jumps(lengths: GraphJumpLengths) -> graph::GraphRouteJumpLengths {
+    let ramps = LiveRamps::from_lengths(
         lengths.fader_samples,
         lengths.mute_samples,
         lengths.pan_samples,
-    )
-    .for_row(LiveRampRow::Mute)
+    );
+    graph::GraphRouteJumpLengths {
+        mute: ramps.for_row(LiveRampRow::Mute),
+        gain: ramps.for_row(LiveRampRow::SendGain),
+        matrix: ramps.for_row(LiveRampRow::SendMatrix),
+    }
 }
 // REALTIME_POLICY_END
 

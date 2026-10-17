@@ -1438,7 +1438,7 @@ impl ColumnRamps {
 
 /// A following route's own cursors over its source strip's stored mute cells (#1652 D2): the
 /// plan's immutable program, a cell and a [`automation::CellState`] per source lane, the curve
-/// state the route has heard, `a(tap)` and the mute row's jump-length rule.
+/// state the route has heard, `a(tap)` and the cursor rows' jump-length rule.
 struct FollowCursors {
     program: std::sync::Arc<automation::Program>,
     /// `[L, R]`; `None` for a lane the plan does not automate.
@@ -1449,7 +1449,7 @@ struct FollowCursors {
     curve: [bool; 2],
     /// `a(tap)`.
     arrival: u64,
-    mute_jump: crate::GraphMuteJumpLength,
+    jumps: crate::GraphRouteJumpRule,
     /// How the route's next block begins: fresh, carried or running.
     start: FollowStart,
 }
@@ -1514,7 +1514,7 @@ impl LiveFollowRoute {
             states,
             curve,
             arrival: source.arrival,
-            mute_jump: source.mute_jump,
+            jumps: source.jumps,
             start: FollowStart::Fresh,
         };
         let (target, mute) = follow.compose(&transform, source.flags, curve);
@@ -1576,7 +1576,10 @@ impl FollowCursors {
         let Some(lengths) = time.jump_lengths() else {
             return (FollowBlock::IDLE, start, placed);
         };
-        let jump = core::cmp::min((self.mute_jump)(lengths), crate::ROUTE_RAMP_LENGTH_MAXIMUM);
+        let jump = core::cmp::min(
+            (self.jumps)(lengths).for_row(crate::GraphRouteCursorRow::SourceMute),
+            crate::ROUTE_RAMP_LENGTH_MAXIMUM,
+        );
         let idle = FollowBlock {
             spans: [None; 2],
             jump,
@@ -5713,14 +5716,14 @@ impl RouteCarryCheck {
 /// What a six-word successor of a following predecessor compares at its first block (#1652 D3,
 /// the curve removed): its own prepared target and mute, the columns the predecessor's heard
 /// curve zeroed (so a record the join wrote composes with that curve first, MAJOR-3), and the
-/// mute row's jump-length rule the predecessor's source carried, which a six-word route does not
+/// cursor rows' jump-length rule the predecessor's source carried, which a six-word route does not
 /// hold.
 #[derive(Clone, Copy)]
 struct SixWordCarryCheck {
     prepared: [f32; 4],
     mute: bool,
     zeroed: [bool; 2],
-    mute_jump: crate::GraphMuteJumpLength,
+    jumps: crate::GraphRouteJumpRule,
 }
 
 /// One six-word successor's comparison at its first block (#1652 D3, the curve removed), in the
@@ -5737,7 +5740,10 @@ fn finish_six_word_carry(
     lengths: Option<crate::GraphJumpLengths>,
 ) {
     let length = lengths.map_or(0, |lengths| {
-        core::cmp::min((check.mute_jump)(lengths), crate::ROUTE_RAMP_LENGTH_MAXIMUM)
+        core::cmp::min(
+            (check.jumps)(lengths).for_row(crate::GraphRouteCursorRow::SourceMute),
+            crate::ROUTE_RAMP_LENGTH_MAXIMUM,
+        )
     });
     if let Some((target, mute)) = live.apply_pending_heard(snapshot, check.zeroed) {
         live.retarget_carried(target, mute, length);
@@ -5786,7 +5792,7 @@ fn carry_route(
             (
                 from.ramps,
                 from.mute,
-                Some((from.follow.curve, zeroed, from.follow.mute_jump)),
+                Some((from.follow.curve, zeroed, from.follow.jumps)),
             )
         }
     };
@@ -5801,7 +5807,7 @@ fn carry_route(
             let (prepared, prepared_mute) = (into.ramp.target, into.mute);
             let (ramp, position) = ramps.one_ramp();
             into.adopt_state(ramp, position, mute);
-            let Some((_, zeroed, mute_jump)) = follow else {
+            let Some((_, zeroed, jumps)) = follow else {
                 return false;
             };
             if prepared.map(f32::to_bits) == ramp.target.map(f32::to_bits) && zeroed == [false; 2] {
@@ -5818,7 +5824,7 @@ fn carry_route(
                 prepared,
                 mute: prepared_mute,
                 zeroed,
-                mute_jump,
+                jumps,
             });
             true
         }
@@ -6398,8 +6404,8 @@ impl crate::runtime::Runtime {
     /// own cell under the block's snapshot (the join's record, if any, through the cell, as its
     /// block entry would); without one, it compares its prepared target with the adopted ramp's
     /// and, on a bits change, retargets from the coefficients it is at over the session mute
-    /// length (`mute_jump` of the block's `lengths`, `0` with none). Each comparison is taken
-    /// once. Bounded by `moves.len()`; allocation-, lock- and panic-free.
+    /// length (the jump rule's source-mute length of the block's `lengths`, `0` with none). Each
+    /// comparison is taken once. Bounded by `moves.len()`; allocation-, lock- and panic-free.
     pub(crate) fn finish_route_carry(
         &mut self,
         moves: &[RouteCarryStep],

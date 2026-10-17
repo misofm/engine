@@ -291,7 +291,10 @@ pub(crate) fn sidechain_matches(
 /// the gain checks below cannot fail (every gain in `[-144, 24]` dB converts to a normal finite
 /// `f32`); they stay as defence for this function's own contract.
 pub(crate) fn route_transform(gain_db: f32, matrix: [f32; 4]) -> Option<RouteTransform> {
-    let gain = math::db_to_gain_f32(gain_db);
+    // A static gain is the law with no offset. `-0.0` is the exact additive identity of `f64`
+    // (`x + -0.0` is `x` for every `x`, `-0.0` included), and the clamp is the identity on the
+    // route domain `route_values` checks, so this is `db_to_gain_f32(gain_db)` bit for bit.
+    let gain = route_gain_law(gain_db, -0.0);
     let [ll, lr, rl, rr] = matrix;
     (gain_db.is_finite()
         && gain.is_finite()
@@ -305,6 +308,31 @@ pub(crate) fn route_transform(gain_db: f32, matrix: [f32; 4]) -> Option<RouteTra
         rr,
     })
 }
+
+/// The route's dB law (#1654, batch 10 amendment): the linear gain of a send whose `gain_db` curve
+/// is at `curve_db` and whose hand offset is `offset_db`,
+/// `db_to_gain_f32(clamp(f64(curve) + f64(offset), -144, 24) as f32)`. The sum is exact in `f64`
+/// and rounded once to `f32`; the bounds are [`session::ROUTE_GAIN_DB_MINIMUM`] and
+/// [`session::ROUTE_GAIN_DB_MAXIMUM`]. An offset of `+0.0` or `-0.0` gives the bits of the curve
+/// value alone: the sum differs from `curve` only in the sign of a zero, the clamp changes no value
+/// in the route domain, and `db_to_gain_f32` of `+0.0` and `-0.0` is one gain.
+///
+/// [`route_transform`] calls it for the static gain, and host-core hands it to the route op as
+/// its `graph::GraphRouteGainLaw` (graph does not link `math`), so the plan and render derive a
+/// send gain once. A NaN stays NaN (`f64::clamp` keeps it). Called on render: arithmetic and one
+/// `db_to_gain_f32`, allocation-free, lock-free and panic-free (the clamp's bounds are ordered
+/// constants).
+// REALTIME_POLICY_BEGIN: the send gain law a route op calls at each gain event (#1654).
+#[must_use]
+pub fn route_gain_law(curve_db: f32, offset_db: f32) -> f32 {
+    let sum = (f64::from(curve_db) + f64::from(offset_db)).clamp(
+        f64::from(session::ROUTE_GAIN_DB_MINIMUM),
+        f64::from(session::ROUTE_GAIN_DB_MAXIMUM),
+    );
+    // The one rounding of the law: the clamped sum is in the `f32` route domain.
+    math::db_to_gain_f32(sum as f32)
+}
+// REALTIME_POLICY_END
 
 /// The unfolded transform of a route whose values are in domain (issue #1237 D2), then
 /// `route_transform`'s checks. It backs [`route_coefficients`] and the compiler's lowering, so both
@@ -429,5 +457,85 @@ pub(crate) fn diag(code: &'static str, path: &str) -> GraphDiagnostic {
         path: path.to_owned(),
         cycle: Vec::new(),
         cycle_edge_paths: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod gain_law_tests {
+    //! #1654 T2: the send gain law and the static route gain are one derivation.
+    use super::*;
+
+    /// Gain values across the route domain: both zeros, the bounds, a negative and positive range
+    /// and values that are not exact in binary.
+    fn domain_values() -> Vec<f32> {
+        let mut values = vec![
+            0.0,
+            -0.0,
+            session::ROUTE_GAIN_DB_MINIMUM,
+            session::ROUTE_GAIN_DB_MAXIMUM,
+            -6.0,
+            3.0,
+            0.1,
+            -0.1,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            f32::MIN_POSITIVE,
+        ];
+        let mut db = session::ROUTE_GAIN_DB_MINIMUM;
+        while db <= session::ROUTE_GAIN_DB_MAXIMUM {
+            values.push(db);
+            db += 0.37;
+        }
+        values
+    }
+
+    /// A flat curve at `v` with an offset of `+0.0` or `-0.0` gives the bits of the static gain
+    /// `v` (`route_values`, the plan's lowering) and of `db_to_gain_f32(v)`, the conversion before
+    /// the law existed.
+    ///
+    /// Test value: red if the law rounds twice, adds the offset in `f32` with another result, or
+    /// lets the sign of a zero offset reach the gain, so a flat ride would not render the static
+    /// value bit for bit (gate 1).
+    #[test]
+    fn a_zero_offset_gives_the_static_gain_bits() {
+        let matrix = [1.0, 0.0, 0.0, 1.0];
+        for value in domain_values() {
+            let fixed = route_values(value, matrix).expect("in domain").gain;
+            assert_eq!(
+                fixed.to_bits(),
+                math::db_to_gain_f32(value).to_bits(),
+                "static {value}"
+            );
+            for offset in [0.0, -0.0] {
+                assert_eq!(
+                    route_gain_law(value, offset).to_bits(),
+                    fixed.to_bits(),
+                    "curve {value}, offset {offset:?}"
+                );
+            }
+        }
+    }
+
+    /// The sum is taken in `f64`, rounded once and clamped to the route domain; a NaN stays NaN.
+    ///
+    /// Test value: red if the clamp is lost (a ride plus a hand offset past 24 dB would exceed the
+    /// route domain) or if the sum is rounded before it is clamped.
+    #[test]
+    fn the_law_sums_in_f64_and_clamps_to_the_route_domain() {
+        let top = math::db_to_gain_f32(session::ROUTE_GAIN_DB_MAXIMUM);
+        let bottom = math::db_to_gain_f32(session::ROUTE_GAIN_DB_MINIMUM);
+        assert_eq!(route_gain_law(20.0, 10.0).to_bits(), top.to_bits());
+        assert_eq!(route_gain_law(-140.0, -10.0).to_bits(), bottom.to_bits());
+        assert_eq!(
+            route_gain_law(-6.0, 3.0).to_bits(),
+            math::db_to_gain_f32(-3.0).to_bits()
+        );
+        let (curve, offset) = (0.1_f32, 0.2_f32);
+        let once = (f64::from(curve) + f64::from(offset)) as f32;
+        assert_eq!(
+            route_gain_law(curve, offset).to_bits(),
+            math::db_to_gain_f32(once).to_bits()
+        );
+        assert!(route_gain_law(f32::NAN, 0.0).is_nan());
     }
 }

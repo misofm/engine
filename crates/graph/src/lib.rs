@@ -1135,13 +1135,18 @@ impl GraphRouteControlProducer {
 /// render can gate the transform itself at every curve event.
 pub(crate) const FOLLOW_ROUTE_CELL_WORDS: usize = 7;
 
-/// The flags word of a following route's cell (#1652 D1, batch 18 layout): bit 0 the route's own
-/// `mute`, bit 1 `follows_mute`, bits 2 and 3 `terms[L, R]`, bits 4 and 5 `automated[L, R]`. Every
-/// other bit is 0; [`Self::from_word`] refuses a word with any of them set.
+/// The flags word of a following route's cell (#1652 D1, batch 18 layout; #1654 T2): bit 0 the
+/// route's own `mute`, bit 1 `follows_mute`, bits 2 and 3 `terms[L, R]`, bits 4 and 5
+/// `automated[L, R]`, bit 6 `automated_gain`, bit 7 `automated_mute`, bits 8 to 11
+/// `automated_matrix[ll, lr, rl, rr]`. Every other bit is 0; [`Self::from_word`] refuses a word with
+/// any of them set.
 ///
 /// `terms[lane]` is the source lane's effective mute without its curve (`controls::effective`'s
 /// source-lane mute: static mute, VCA mute and solo term). `automated[lane]` is fixed by the plan:
-/// whether that source lane has a stored mute curve.
+/// whether that source lane has a stored mute curve. Bits 6 to 11 are fixed by the plan too: whether
+/// the route's own row 1 (`gain_db`), row 2 (`mute`) and rows 3 to 6 (the matrix) have a stored
+/// curve (#1654 D2). When `automated_gain` is set, the cell's `gain` word holds the hand offset in
+/// dB, not a linear gain (#1654, batch 10 amendment).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RouteFollowFlags {
     /// The route's own mute: it silences the route whatever the source does.
@@ -1152,6 +1157,12 @@ pub struct RouteFollowFlags {
     pub terms: [bool; 2],
     /// Per source lane `[L, R]`: whether the plan automates the lane's mute.
     pub automated: [bool; 2],
+    /// Whether the plan automates the route's own `gain_db` (row 1).
+    pub automated_gain: bool,
+    /// Whether the plan automates the route's own `mute` (row 2).
+    pub automated_mute: bool,
+    /// Per matrix entry `[ll, lr, rl, rr]` (rows 3 to 6): whether the plan automates it.
+    pub automated_matrix: [bool; 4],
 }
 
 impl RouteFollowFlags {
@@ -1159,8 +1170,11 @@ impl RouteFollowFlags {
     const FOLLOWS_MUTE: u32 = 1 << 1;
     const TERMS: [u32; 2] = [1 << 2, 1 << 3];
     const AUTOMATED: [u32; 2] = [1 << 4, 1 << 5];
+    const AUTOMATED_GAIN: u32 = 1 << 6;
+    const AUTOMATED_MUTE: u32 = 1 << 7;
+    const AUTOMATED_MATRIX: [u32; 4] = [1 << 8, 1 << 9, 1 << 10, 1 << 11];
     /// Every bit the layout defines; any other bit set makes a word no record wrote.
-    const DEFINED: u32 = (1 << 6) - 1;
+    const DEFINED: u32 = (1 << 12) - 1;
 
     /// The flags word.
     #[must_use]
@@ -1174,10 +1188,16 @@ impl RouteFollowFlags {
             | bit(self.terms[1], Self::TERMS[1])
             | bit(self.automated[0], Self::AUTOMATED[0])
             | bit(self.automated[1], Self::AUTOMATED[1])
+            | bit(self.automated_gain, Self::AUTOMATED_GAIN)
+            | bit(self.automated_mute, Self::AUTOMATED_MUTE)
+            | bit(self.automated_matrix[0], Self::AUTOMATED_MATRIX[0])
+            | bit(self.automated_matrix[1], Self::AUTOMATED_MATRIX[1])
+            | bit(self.automated_matrix[2], Self::AUTOMATED_MATRIX[2])
+            | bit(self.automated_matrix[3], Self::AUTOMATED_MATRIX[3])
     }
 
     // REALTIME_POLICY_BEGIN
-    /// The flags a word holds, or `None` when a bit above bit 5 is set.
+    /// The flags a word holds, or `None` when a bit above bit 11 is set.
     #[must_use]
     pub const fn from_word(word: u32) -> Option<Self> {
         if word & !Self::DEFINED != 0 {
@@ -1191,7 +1211,23 @@ impl RouteFollowFlags {
                 word & Self::AUTOMATED[0] != 0,
                 word & Self::AUTOMATED[1] != 0,
             ],
+            automated_gain: word & Self::AUTOMATED_GAIN != 0,
+            automated_mute: word & Self::AUTOMATED_MUTE != 0,
+            automated_matrix: [
+                word & Self::AUTOMATED_MATRIX[0] != 0,
+                word & Self::AUTOMATED_MATRIX[1] != 0,
+                word & Self::AUTOMATED_MATRIX[2] != 0,
+                word & Self::AUTOMATED_MATRIX[3] != 0,
+            ],
         })
+    }
+
+    /// Per route row 1 to 6 (`gain_db`, `mute`, `ll`, `lr`, `rl`, `rr`), whether the plan
+    /// automates it: the order of [`GraphFollowRouteSource`]'s route cells.
+    #[must_use]
+    pub const fn route_rows(self) -> [bool; GRAPH_ROUTE_ROWS] {
+        let [ll, lr, rl, rr] = self.automated_matrix;
+        [self.automated_gain, self.automated_mute, ll, lr, rl, rr]
     }
 
     /// The route's gate while the source lanes' curves are at `curve` (#1652 D2):
@@ -1248,7 +1284,9 @@ impl FollowRouteControlRecord {
             length,
         })
     }
-    /// The open transform: the route's linear gain and its 2x2, ungated.
+    /// The open transform: the route's linear gain and its 2x2, ungated. When the flags'
+    /// `automated_gain` is set, `gain` is the hand offset in dB instead (#1654), and a matrix entry
+    /// whose row the plan automates is the static fallback, which render does not hear.
     #[must_use]
     pub const fn transform(&self) -> RouteTransform {
         self.transform
@@ -1286,7 +1324,7 @@ impl FollowRouteControlRecord {
     }
 
     // REALTIME_POLICY_BEGIN
-    /// The record a cell's words hold: `None` for words no record wrote (a flags bit above bit 5,
+    /// The record a cell's words hold: `None` for words no record wrote (a flags bit above bit 11,
     /// a non-finite transform word or a ramp over the bound), which render skips. The words come
     /// from [`Self::to_words`], so the checks are the constructor's and the flags word's own.
     pub(crate) fn from_words(words: [u32; FOLLOW_ROUTE_CELL_WORDS]) -> Option<Self> {
@@ -1354,15 +1392,69 @@ impl FollowRouteControlLane {
 }
 // REALTIME_POLICY_END
 
-/// The length, in samples, of one jump of a stored mute curve, resolved from the block's three
-/// session lengths (#1652b). Host-core hands in the row rule (`controls::LiveRamps::from_lengths`
-/// and `for_row(LiveRampRow::Mute)`, the rule the strip's mute stage uses), so graph never spells
-/// the mute row and the strip ramp and the send ramp cannot differ in length.
-pub type GraphMuteJumpLength = fn(GraphJumpLengths) -> u32;
+/// The route rows 1 to 6 a following route can automate (#1654 D1): `gain_db`, `mute`, `ll`,
+/// `lr`, `rl`, `rr`, in that order. Graph spells no row ID; the order is the one of
+/// [`RouteFollowFlags::route_rows`] and of [`GraphFollowRouteSource`]'s route cells.
+pub const GRAPH_ROUTE_ROWS: usize = 6;
 
-/// What one following route reads of its source strip's stored mute (#1652 D2, #1652b): the plan's
-/// immutable automation program, the source lanes' mute cells in it, the arrival `a(tap)` of the
-/// route's tap, the mute row's jump length and the seeded flags word.
+/// Which jump length one cursor of a following route takes (#1654 D1, batch 19 spec check): the
+/// mute rule for a source lane's mute and for the route's own mute, `SendGain` for the route's
+/// gain and `SendMatrix` for a matrix entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphRouteCursorRow {
+    /// A source lane's stored mute (#1652).
+    SourceMute,
+    /// The route's own `gain_db` (row 1).
+    Gain,
+    /// The route's own `mute` (row 2).
+    Mute,
+    /// One of the route's matrix entries (rows 3 to 6).
+    Matrix,
+}
+
+/// The jump lengths, in samples, of a following route's cursor rows for one block (#1654 D1),
+/// resolved from the block's three session lengths by [`GraphRouteJumpRule`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphRouteJumpLengths {
+    /// The mute row's length: a source lane's mute and the route's own mute.
+    pub mute: u32,
+    /// The `SendGain` row's length.
+    pub gain: u32,
+    /// The `SendMatrix` row's length.
+    pub matrix: u32,
+}
+
+impl GraphRouteJumpLengths {
+    // REALTIME_POLICY_BEGIN
+    /// The jump length of a cursor of `row`.
+    #[must_use]
+    pub const fn for_row(self, row: GraphRouteCursorRow) -> u32 {
+        match row {
+            GraphRouteCursorRow::SourceMute | GraphRouteCursorRow::Mute => self.mute,
+            GraphRouteCursorRow::Gain => self.gain,
+            GraphRouteCursorRow::Matrix => self.matrix,
+        }
+    }
+    // REALTIME_POLICY_END
+}
+
+/// The jump lengths of a following route's cursor rows, resolved from the block's three session
+/// lengths (#1652b, #1654 D1). Host-core hands in the row rules (`controls::LiveRamps::from_lengths`
+/// and `for_row` of `LiveRampRow::Mute`, `SendGain` and `SendMatrix`, the rules the strip's stages
+/// use), so graph never spells a row and the strip ramp and the send ramp cannot differ in length.
+pub type GraphRouteJumpRule = fn(GraphJumpLengths) -> GraphRouteJumpLengths;
+
+/// The route's dB law for an automated send gain (#1654, batch 10 amendment): the linear gain of
+/// the curve value `curve_db` with the hand offset `offset_db`, that is
+/// `db_to_gain_f32(clamp(f64(curve) + f64(offset), -144, 24) as f32)`. Graph does not link
+/// `math`; host-core hands in `graph_compiler::route_gain_law`, the function the plan's own
+/// `route_transform` calls for a static gain, so the two are one derivation.
+pub type GraphRouteGainLaw = fn(curve_db: f32, offset_db: f32) -> f32;
+
+/// What one following route reads of its stored automation (#1652 D2, #1652b, #1654 D2): the
+/// plan's immutable automation program, the source lanes' mute cells in it, the route's own row
+/// cells in it, the arrival `a(tap)` of the route's tap, the cursor rows' jump-length rule, the
+/// route's gain law and the seeded flags word.
 ///
 /// The program is the one the strip's own stage reads (an `Arc` clone, no copy); the route keeps
 /// its own cursors over it, so two readers of one table never share state. `a(tap)` is the route
@@ -1373,39 +1465,61 @@ pub type GraphMuteJumpLength = fn(GraphJumpLengths) -> u32;
 pub struct GraphFollowRouteSource {
     pub(crate) program: std::sync::Arc<automation::Program>,
     pub(crate) cells: [Option<u32>; 2],
+    #[expect(
+        dead_code,
+        reason = "#1654 T2: the route op's cursor table (T3) reads the route's own row cells"
+    )]
+    pub(crate) route_cells: [Option<u32>; GRAPH_ROUTE_ROWS],
     pub(crate) arrival: u64,
-    pub(crate) mute_jump: GraphMuteJumpLength,
+    pub(crate) jumps: GraphRouteJumpRule,
+    #[expect(
+        dead_code,
+        reason = "#1654 T2: the route op's gain composition (T3) calls the route's gain law"
+    )]
+    pub(crate) gain_law: GraphRouteGainLaw,
     pub(crate) flags: RouteFollowFlags,
 }
 
 impl GraphFollowRouteSource {
     /// The source of a following route: `cells[lane]` is the source lane's mute cell in
-    /// `program`, `None` for a lane the plan does not automate; `arrival` is `a(tap)`;
-    /// `mute_jump` resolves the mute row's jump length; `flags` is the seeded flags word.
+    /// `program`, `None` for a lane the plan does not automate; `route_cells[row]` is the route's
+    /// own row cell in `program` (order [`GRAPH_ROUTE_ROWS`]), `None` for a row the plan does not
+    /// automate; `arrival` is `a(tap)`; `jumps` resolves the cursor rows' jump lengths; `gain_law`
+    /// is the route's dB law; `flags` is the seeded flags word.
     ///
-    /// `None` when no lane is automated (the route keeps the six-word cell), when a cell is not in
-    /// `program`, or when `flags.automated` disagrees with `cells` (the plan fixes which lanes
-    /// are automated, D1).
+    /// `None` when no source lane and no route row is automated (the route keeps the six-word
+    /// cell), when a cell is not in `program`, or when `flags.automated` disagrees with `cells` or
+    /// `flags.route_rows()` with `route_cells` (the plan fixes which lanes and rows are automated,
+    /// D1).
     #[must_use]
     pub fn new(
         program: std::sync::Arc<automation::Program>,
         cells: [Option<u32>; 2],
+        route_cells: [Option<u32>; GRAPH_ROUTE_ROWS],
         arrival: u64,
-        mute_jump: GraphMuteJumpLength,
+        jumps: GraphRouteJumpRule,
+        gain_law: GraphRouteGainLaw,
         flags: RouteFollowFlags,
     ) -> Option<Self> {
         let automated = cells.map(|cell| cell.is_some());
+        let rows = route_cells.map(|cell| cell.is_some());
         let in_program = cells
             .iter()
+            .chain(&route_cells)
             .flatten()
             .all(|&cell| program.cell(cell as usize).is_some());
-        (automated != [false; 2] && in_program && flags.automated == automated).then_some(Self {
-            program,
-            cells,
-            arrival,
-            mute_jump,
-            flags,
-        })
+        let any = automated.contains(&true) || rows.contains(&true);
+        (any && in_program && flags.automated == automated && flags.route_rows() == rows).then_some(
+            Self {
+                program,
+                cells,
+                route_cells,
+                arrival,
+                jumps,
+                gain_law,
+                flags,
+            },
+        )
     }
 
     /// `a(tap)`, the arrival the route's events are timed at.
@@ -1429,7 +1543,8 @@ pub struct GraphFollowRouteControlBinding {
     pub node: GraphNodeId,
     /// Reader half of the seven-word cell; the writer stays on the control plane.
     pub control: Box<FollowRouteControlLane>,
-    /// The source strip's mute cells, `a(tap)`, the jump length and the seeded flags.
+    /// The source strip's mute cells, the route's own row cells, `a(tap)`, the jump rule, the
+    /// gain law and the seeded flags.
     pub source: GraphFollowRouteSource,
 }
 
@@ -10470,6 +10585,14 @@ mod follow_route_tests {
             follows_mute: word & 2 != 0,
             terms: [word & 4 != 0, word & 8 != 0],
             automated: [word & 16 != 0, word & 32 != 0],
+            automated_gain: word & 64 != 0,
+            automated_mute: word & 128 != 0,
+            automated_matrix: [
+                word & 256 != 0,
+                word & 512 != 0,
+                word & 1024 != 0,
+                word & 2048 != 0,
+            ],
         }
     }
 
@@ -10487,9 +10610,19 @@ mod follow_route_tests {
         StableGraphId::parse(value).expect("a route ID")
     }
 
-    /// The mute row's jump length of the tests: the session's `mute_ms` length.
-    pub(crate) fn mute_length(lengths: GraphJumpLengths) -> u32 {
-        lengths.mute_samples
+    /// The cursor rows' jump lengths of the tests: the session's `mute_ms`, `fader_ms` and
+    /// `pan_ms` lengths.
+    pub(crate) fn route_jumps(lengths: GraphJumpLengths) -> GraphRouteJumpLengths {
+        GraphRouteJumpLengths {
+            mute: lengths.mute_samples,
+            gain: lengths.fader_samples,
+            matrix: lengths.pan_samples,
+        }
+    }
+
+    /// The gain law of the tests: the plain sum, which no test of this tranche renders.
+    pub(crate) fn sum_law(curve_db: f32, offset_db: f32) -> f32 {
+        curve_db + offset_db
     }
 
     /// A program of one mute-shaped cell per given lane (steps, completion `End`, block jump
@@ -10524,8 +10657,16 @@ mod follow_route_tests {
             automated: cells.map(|cell| cell.is_some()),
             ..RouteFollowFlags::default()
         };
-        GraphFollowRouteSource::new(program, cells, arrival, mute_length, flags)
-            .expect("a valid source")
+        GraphFollowRouteSource::new(
+            program,
+            cells,
+            [None; GRAPH_ROUTE_ROWS],
+            arrival,
+            route_jumps,
+            sum_law,
+            flags,
+        )
+        .expect("a valid source")
     }
 
     /// A step curve: `values[i]` from `times[i]` on (the first value from the start).
@@ -10544,11 +10685,13 @@ mod follow_route_tests {
             .collect()
     }
 
-    /// A source refuses no automated lane, a cell outside its program and `automated` flags that
-    /// disagree with its cells.
+    /// A source refuses no automated lane or row, a cell outside its program and `automated`
+    /// flags that disagree with its cells; it accepts a route whose only automation is its own
+    /// rows (#1654 D2), and refuses route-row flags that disagree with its route cells.
     ///
-    /// Test value: red if a route with no automated lane takes the seven-word render state, or if
-    /// render could look up a cell its program does not hold.
+    /// Test value: red if a route with no automation takes the seven-word render state, if a send
+    /// with only route-row automation is refused it, or if render could look up a cell its program
+    /// does not hold.
     #[test]
     fn the_source_refuses_no_lane_a_missing_cell_and_disagreeing_flags() {
         let curve = steps(&[0, 128], &[0.0, 1.0], 4_096);
@@ -10556,22 +10699,32 @@ mod follow_route_tests {
         assert_eq!(source.arrival(), 7);
         let program = std::sync::Arc::clone(&source.program);
         let flags = source.flags();
-        let new = |cells, flags| {
+        let new = |cells, route_cells, flags| {
             GraphFollowRouteSource::new(
                 std::sync::Arc::clone(&program),
                 cells,
+                route_cells,
                 0,
-                mute_length,
+                route_jumps,
+                sum_law,
                 flags,
             )
             .is_some()
         };
-        assert!(new([Some(0), None], flags));
-        assert!(!new([None, None], RouteFollowFlags::default()), "no lane");
-        assert!(!new([Some(1), None], flags), "a cell outside the program");
+        let no_rows = [None; GRAPH_ROUTE_ROWS];
+        assert!(new([Some(0), None], no_rows, flags));
+        assert!(
+            !new([None, None], no_rows, RouteFollowFlags::default()),
+            "no lane"
+        );
+        assert!(
+            !new([Some(1), None], no_rows, flags),
+            "a cell outside the program"
+        );
         assert!(
             !new(
                 [Some(0), None],
+                no_rows,
                 RouteFollowFlags {
                     automated: [true, true],
                     ..flags
@@ -10579,21 +10732,78 @@ mod follow_route_tests {
             ),
             "flags that disagree"
         );
+
+        // Route-row automation only: the route's gain and its `rl` entry over the one cell.
+        let gain_and_rl = [Some(0), None, None, None, Some(0), None];
+        let rows_only = RouteFollowFlags {
+            automated_gain: true,
+            automated_matrix: [false, false, true, false],
+            ..RouteFollowFlags::default()
+        };
+        assert!(new([None, None], gain_and_rl, rows_only), "route rows only");
+        assert!(
+            !new(
+                [None, None],
+                [Some(0), None, None, None, Some(1), None],
+                rows_only
+            ),
+            "a route cell outside the program"
+        );
+        for disagreeing in [
+            RouteFollowFlags {
+                automated_mute: true,
+                ..rows_only
+            },
+            RouteFollowFlags {
+                automated_matrix: [false, false, false, true],
+                ..rows_only
+            },
+            RouteFollowFlags {
+                automated_gain: false,
+                ..rows_only
+            },
+        ] {
+            assert!(
+                !new([None, None], gain_and_rl, disagreeing),
+                "route-row flags that disagree: {disagreeing:?}"
+            );
+        }
     }
 
-    /// The layout: bit 0 mute, 1 follows_mute, 2-3 terms L/R, 4-5 automated L/R. Every one of the
-    /// 64 defined words decodes to its fields and encodes back to itself; a word with any bit
-    /// from 6 up set is refused.
+    /// The cursor rows' jump lengths: the source mute and the route mute take the mute length,
+    /// the gain the `SendGain` length and a matrix entry the `SendMatrix` length.
+    ///
+    /// Test value: red if a route cursor would jump over another row's length.
+    #[test]
+    fn each_cursor_row_takes_its_own_jump_length() {
+        let lengths = GraphRouteJumpLengths {
+            mute: 3,
+            gain: 5,
+            matrix: 7,
+        };
+        assert_eq!(lengths.for_row(GraphRouteCursorRow::SourceMute), 3);
+        assert_eq!(lengths.for_row(GraphRouteCursorRow::Mute), 3);
+        assert_eq!(lengths.for_row(GraphRouteCursorRow::Gain), 5);
+        assert_eq!(lengths.for_row(GraphRouteCursorRow::Matrix), 7);
+    }
+
+    /// The layout: bit 0 mute, 1 follows_mute, 2-3 terms L/R, 4-5 automated L/R, 6
+    /// automated_gain, 7 automated_mute, 8-11 automated_matrix ll/lr/rl/rr (#1654 T2). Every one of
+    /// the 4096 defined words decodes to its fields and encodes back to itself, and its route rows
+    /// read bits 6 to 11 in row order; a word with any bit from 12 up set is refused.
     ///
     /// Test value: red if two fields swap bits, if a field is dropped on the round trip, or if a
     /// word with an undefined bit decodes (render would apply words no record wrote).
     #[test]
-    fn the_flags_word_round_trips_its_six_bits_and_refuses_every_other_bit() {
-        for word in 0..64_u32 {
+    fn the_flags_word_round_trips_its_twelve_bits_and_refuses_every_other_bit() {
+        for word in 0..4_096_u32 {
             let flags = RouteFollowFlags::from_word(word).expect("a defined word");
             assert_eq!(flags, flags_of(word), "word {word:#b}");
             assert_eq!(flags.to_word(), word);
-            for bit in 6..32 {
+            let rows: [bool; GRAPH_ROUTE_ROWS] =
+                core::array::from_fn(|row| (word >> (6 + row)) & 1 != 0);
+            assert_eq!(flags.route_rows(), rows, "word {word:#b}");
+            for bit in 12..32 {
                 assert_eq!(
                     RouteFollowFlags::from_word(word | 1 << bit),
                     None,
@@ -10657,6 +10867,20 @@ mod follow_route_tests {
         assert_eq!(record.flags(), flags);
         assert_eq!(record.length(), 480);
 
+        // #1654 T2: the route-row bits round trip, and an automated gain's offset word (dB) fits.
+        let rows = flags_of(0b1010_1110_0110);
+        let offset = RouteTransform {
+            gain: -6.0,
+            ..transform()
+        };
+        let record = FollowRouteControlRecord::new(offset, rows, 64).expect("a record");
+        assert_eq!(record.to_words()[0], (-6.0_f32).to_bits());
+        assert_eq!(record.to_words()[5], 0b1010_1110_0110);
+        assert_eq!(
+            FollowRouteControlRecord::from_words(record.to_words()),
+            Some(record)
+        );
+
         let bound = FollowRouteControlRecord::new(transform(), flags, ROUTE_RAMP_LENGTH_MAXIMUM)
             .expect("the bound is in bounds");
         assert_eq!(
@@ -10678,7 +10902,7 @@ mod follow_route_tests {
         long[6] = ROUTE_RAMP_LENGTH_MAXIMUM + 1;
         assert_eq!(FollowRouteControlRecord::from_words(long), None);
         let mut undefined = words;
-        undefined[5] |= 1 << 6;
+        undefined[5] |= 1 << 12;
         assert_eq!(FollowRouteControlRecord::from_words(undefined), None);
     }
 

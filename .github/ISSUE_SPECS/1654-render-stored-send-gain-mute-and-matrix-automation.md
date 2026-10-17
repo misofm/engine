@@ -395,3 +395,87 @@ These override the batch 19 spec-check amendment where they differ.
   (built after #1711, before T3). The composition (law, matrix, gate) stays in the route op. The cursor
   table is a boxed slice sized at bind and charged by `size_of`, not a fixed array.
 - **Two PRs.** This issue ships in batch 19a with #1711 and K1.
+
+## Decision record: T1 (batch 19)
+
+`crates/controls` only. What shipped:
+
+- **Rows (D3).** `automation_row_renders` admits route rows 1-6 through the new `route_row`
+  (`Owner::Route`, `Section::Own`, `ROUTE_AUTOMATED_ROWS`); row 7 `follows_mute` stays out (still
+  `AutomationRule::Excluded`). The predicate reads no model: an output route's entry is refused at
+  `.target` first (D8). `fader_row` is unchanged, so no route entry reaches a fader reader.
+- **Offset (R17-6).** `takes_offset` = `fader_row || route_gain_row`. `offset_faults` judges a
+  shared row's `left_db` against the domain (at lane `both`) and refuses a `right_db` whose bits
+  differ from `left_db`'s at `.offset.right_db` (`+0.0` with `-0.0` is refused). A non-zero offset
+  on route rows 2-6 stays `control.automation.offset`.
+- **Accessors.** `route_automation(model, route) -> [Option<&Automation>; 6]` (rows 1-6, first entry
+  per row in table order), `ModelView::route_automation` (edited entry where the view holds one),
+  `route_gain_row`, `route_row`, and `continued_route_rows` (the Carry paragraph's predicate, by
+  the rule of `continued_fader_lanes`; added here for the render tranche, not yet read).
+- **Owner rule (R17-1).** `OwnerEdits::set` on route row 1 clones the row 1 entry with the route.
+  `route::resolve` reads an automated row 1 as the entry's `offset.left_db`; `registry::write` on
+  route row 1 writes both offset fields through `route::write_gain_offset` when an entry drives it,
+  else the static gain. The list sets `automated` on each of rows 1-6 an entry drives; row 1 lists
+  the offset, rows 2-6 their static values (hand mute; matrix fallback, automation wins).
+- **Mask.** `mask_fader_offsets` copies the offset of every entry on a row that takes one (fader and
+  send gain). The static `gain_db` of a send whose row 1 is driven stays as `into` holds it
+  (fallback = structure, as the fader's #1650 departure 2); mute and matrix stay masked values.
+- No row class or table changed: no SDK regeneration.
+
+Gates (`crates/controls/tests/automation.rs`): `the_send_gain_takes_one_shared_offset` (gate 8),
+`send_rows_render_and_enumerate_in_row_order`, `a_hand_move_on_an_automated_send_gain_writes_its_offset`
+(R17-6 write, list flag, in-place path equal to the whole `set`), and
+`the_mask_copies_a_send_offset_and_keeps_its_fallback`. `cargo test --locked -p controls`,
+`-p host-core --features test-support`, `-p control-plane --features test-support` and
+`-p builtins-compiler`: all green.
+
+For T2: with this change a session whose only rendered entries are route entries enters
+`prepare_fader_automation` (it builds an empty program today, tests green); a send automation edit
+is now step 3 `Automation` (rebuild) in the classifier; a hand move on an automated send gain now
+diffs as a route row 1 change whose value is the offset, and an automated matrix row's hand edit is a
+static-value change the classifier does not yet commit `model_only` (not checked here): the route lowering (offset record, matrix `model_only`) is
+host-core's work.
+
+## Decision record: T2 (batch 19)
+
+Graph types only; no render behaviour changes and no six-word route code, byte or bit moves.
+
+- **Flags word.** `RouteFollowFlags` gains `automated_gain` (bit 6), `automated_mute` (bit 7, the
+  route's own row 2) and `automated_matrix[ll, lr, rl, rr]` (bits 8-11), plan-fixed like bits 4-5;
+  `DEFINED = (1 << 12) - 1`. `from_word` and `FollowRouteControlRecord::{new, from_words}` accept and
+  round-trip them; bits 0-5 are unchanged. `route_rows()` gives bits 6-11 in row order. When bit 6 is
+  set, word 0 is the hand offset in dB (the record checks only finiteness, so it fits). `gate` is
+  unchanged (the route mute curve's OR is T3's composition).
+- **Source.** `GraphFollowRouteSource::new(program, cells, route_cells, arrival, jumps, gain_law,
+  flags)`: `route_cells: [Option<u32>; GRAPH_ROUTE_ROWS]` (rows 1-6, `GRAPH_ROUTE_ROWS = 6`). It
+  accepts a route with no source mute cell when a route row cell is present, and refuses a route cell
+  outside the program and `flags.route_rows()` that disagree with `route_cells`. Host-core passes
+  `[None; 6]` and flags bits 6-11 clear until T3 gives the plan route cells.
+- **Jump rule.** `GraphMuteJumpLength` is replaced by `GraphRouteJumpRule = fn(GraphJumpLengths) ->
+  GraphRouteJumpLengths { mute, gain, matrix }`, with `GraphRouteCursorRow { SourceMute, Gain, Mute,
+  Matrix }` and `GraphRouteJumpLengths::for_row`. Host-core's `follow_mute_jump` became
+  `follow_route_jumps` (`LiveRamps::for_row` of `Mute`, `SendGain`, `SendMatrix`, one realtime-policy
+  region as before). Departure: rather than a second fn pointer beside the mute one, the route op's
+  two reads (`FollowCursors::block`, `finish_six_word_carry`) now take
+  `for_row(SourceMute)` of the one rule, the same value as before; the field is renamed `jumps`.
+- **dB law.** `graph_compiler::route_gain_law(curve_db, offset_db) = db_to_gain_f32(clamp(f64(curve)
+  + f64(offset), -144, 24) as f32)` (bounds `session::ROUTE_GAIN_DB_{MINIMUM,MAXIMUM}`), in its own
+  realtime-policy region in `ids.rs`, re-exported; `route_transform` calls it with offset `-0.0` (the
+  exact `f64` additive identity, so the static gain is `db_to_gain_f32(gain_db)` bit for bit). Graph
+  holds it as `GraphRouteGainLaw`; `check-graph-policy.sh` is unchanged and passes.
+- **Unused until T3** (`#[expect(dead_code)]`): `GraphFollowRouteSource::route_cells` and
+  `GraphFollowRouteSource::gain_law`. The pub types (`GraphRouteCursorRow`, `GraphRouteJumpLengths::for_row`
+  for the gain and matrix rows, `RouteFollowFlags::route_rows`) need no expect.
+
+Tests: `graph` `follow_route_tests::{the_flags_word_round_trips_its_twelve_bits_and_refuses_every_other_bit,
+the_record_round_trips_its_seven_words_and_refuses_out_of_bounds_words,
+the_source_refuses_no_lane_a_missing_cell_and_disagreeing_flags, each_cursor_row_takes_its_own_jump_length}`;
+`graph-compiler` `ids::gain_law_tests::{a_zero_offset_gives_the_static_gain_bits,
+the_law_sums_in_f64_and_clamps_to_the_route_domain}` (flat `v` with offset `+0.0` and `-0.0` gives
+`route_values(v)`'s gain bits and `db_to_gain_f32(v)`'s, over the route domain, both zeros included).
+
+Sizes (x86-64, measured): `RouteFollowFlags` 6 -> 12 bytes, `FollowRouteControlRecord` 32 -> 36,
+`GraphFollowRouteSource` 48 -> 112, `LIVE_FOLLOW_ROUTE_OWNER_BYTES` (`size_of::<LiveFollowRoute>()`,
+the bind charge) 352 -> 360. Charges read `size_of`, so no pinned number moved. Realtime policy: 170
+marked regions in 34 files (168 before: `GraphRouteJumpLengths::for_row` and `route_gain_law` added;
+host-core's jump-rule region replaced in place).
