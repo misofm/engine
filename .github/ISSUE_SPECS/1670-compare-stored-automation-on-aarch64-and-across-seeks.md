@@ -134,3 +134,10 @@ batch 20 amendment).
   timeline 30,000 at block 40, generation 2.
 - The matrix fixture and the rows that #1657, #1658, #1660 and #1667 add are phase-2 extensions,
   as in #1669.
+- The narrowed fixture has no insert, so D2's "equal from 256 samples after" bound (a delay's
+  held jump plus its crossfade) does not apply. The longest ramp a seek leaves is a mute hold
+  (`mute_ms`, 480 samples) followed by a fader ramp to the curve (`fader_ms`, 960 samples), so
+  the bound is 1,440 samples after the seek at 48 kHz (`docs/SESSION_SCHEMA_V1.md`, the
+  fader-row paragraph). A pre-seek unmute ramp still running at the seek carries across it, as
+  documented. Read "five pin tests" in gate 1 and the hazards as four. The LANE-3 compressor and
+  limiter hazard does not apply: the narrowed fixture has no insert.

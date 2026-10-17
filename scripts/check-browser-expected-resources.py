@@ -586,6 +586,7 @@ def self_test() -> int:
         ("the identity-session digest moves", move_digest("simd128"), None),
         ("the SET_CONTROL-timeline digest moves", move_digest("setControlTimeline"), None),
         ("the observation-timeline digest moves", move_digest("observationTimeline"), None),
+        ("the automation-timeline digest moves", move_digest("automationTimeline"), None),
         ("the render transcript moves", move_status("nextAbsoluteSample"), None),
         ("the oracle prints a different schema", with_schema("miso.web.browser.v1"), None),
         # The boot-options vocabulary, and the exact #143 regression this fixture shipped with.

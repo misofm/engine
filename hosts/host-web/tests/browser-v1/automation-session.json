@@ -475,22 +475,22 @@
         {
           "shape": "step",
           "start_sample": "0",
-          "end_sample": "2500",
+          "end_sample": "2000",
           "start_value": 0.0,
           "end_value": 1.0,
           "unit": "linear"
         },
         {
           "shape": "step",
-          "start_sample": "2900",
-          "end_sample": "29900",
+          "start_sample": "2400",
+          "end_sample": "30200",
           "start_value": 0.0,
           "end_value": 1.0,
           "unit": "linear"
         },
         {
           "shape": "step",
-          "start_sample": "30100",
+          "start_sample": "30400",
           "end_sample": "35000",
           "start_value": 0.0,
           "end_value": 1.0,

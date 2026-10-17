@@ -227,9 +227,10 @@ smoothing). Then:
   - `vca-offset`, `vca` control 1, lane `right`, offset `{left_db: 0.0, right_db: -0.5}`: linear
     512-3584, 0 to -6; step 4096-4352, +2 then 0; linear 29500-31500, -4 to +2; step 33000-35500,
     -3 then -3.
-  - `vca-mute`, `vca` control 2, lane `both`: step 0-2500, 0 then 1; step 2900-29900, 0 then 1;
-    step 30100-35000, 0 then 1; step 35500-36000, 0 then 0. Muted over 2500-2900, 29900-30100
-    and 35000-35500.
+  - `vca-mute`, `vca` control 2, lane `both`: step 0-2000, 0 then 1; step 2400-30200, 0 then 1;
+    step 30400-35000, 0 then 1; step 35500-36000, 0 then 0. Muted over 2000-2400, 30200-30400
+    and 35000-35500 (review fold 1, M1: the seek target 30,000 and the step at 3001 are outside
+    every VCA mute hold, so their landings are heard).
 - **What this covers.** A `both` entry and single-lane entries. Lanes driven by their own curve,
   by a VCA curve, by both, and plain lanes. Linear segments, steps on and off the grid, gaps, a
   hold before the first segment and after the last one, and non-zero stored offsets. Each entry
@@ -421,3 +422,16 @@ example `crates/host-core/tests/stored_fader_automation.rs:578`). Do not count t
   submits one quantum per block, so the ring size does not change what renders.
 - **Probe (not committed).** Flipping the low bit of the first C ABI sample at blocks >= 40 in the
   test's read path turns the case red at block 40, left plane.
+
+### Review fold 1
+
+- **M1.** At timeline 30,000 every member lane was inside a closed mute (VCA mute 29900-30100;
+  t1 left 29800-30600). A mute hold only remembers a seek's value (`docs/SESSION_SCHEMA_V1.md`,
+  the fader-row paragraph), so the fader and VCA-offset landings were never heard, and the step
+  at 3001 sat inside the VCA unmute hold. The `vca-mute` segments are now step 0-2000, 2400-30200,
+  30400-35000 and 35500-36000 (D1 above is edited in place); t1 left still lands inside a closed
+  mute. Re-minted pin, measured on both sides independently and equal:
+  `a81d883b3f83eaf629bd78db149d1a39825c821c6cb2e9a53506341a97ed1363` (native pin test, and the
+  oracle against the unchanged artifact). The pin test now also asserts the landing is heard:
+  two copies whose `t1-fader` holds -6 dB or +20 dB over 30000-30064 only render other bits in
+  block 40. It is red on the fixture before this fold and green after it. The expected-resources self-test gains the `automationTimeline` digest mutation.

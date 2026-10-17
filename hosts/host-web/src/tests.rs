@@ -2208,6 +2208,46 @@ fn native_automation_timeline_digest_pins_the_wasm_parity() {
         "automation heard before the seek"
     );
     assert_ne!(blocks[40..], plain[40..], "automation heard after the seek");
+    // The seek's landing is heard (review fold 1, M1): `t1-fader` holds `value` dB over
+    // 30000-30064 only, so two values differ only where the seek lands, and block 40 differs.
+    let landing = |value: f32| {
+        let mut model = parse_session_json(document).expect("the automation fixture");
+        let ride = model
+            .automation
+            .iter_mut()
+            .find(|entry| entry.id.as_str() == "t1-fader")
+            .expect("t1-fader");
+        let segment = |shape, span: (u64, u64), values: (f32, f32)| session::AutomationSegment {
+            shape,
+            start_sample: span.0,
+            end_sample: span.1,
+            start_value: values.0,
+            end_value: values.1,
+            unit: session::ParameterUnit::Db,
+        };
+        let (step, linear) = (
+            session::AutomationShape::Step,
+            session::AutomationShape::Linear,
+        );
+        ride.segments.splice(
+            2..3,
+            [
+                segment(step, (29_000, 30_000), (-9.0, value)),
+                segment(step, (30_000, 30_064), (value, -9.0)),
+                segment(linear, (30_064, 33_000), (-9.0, 3.0)),
+            ],
+        );
+        automation_transcript(
+            canonical_session_json(&model)
+                .expect("canonical")
+                .as_bytes(),
+        )
+    };
+    assert_ne!(
+        landing(-6.0)[40],
+        landing(20.0)[40],
+        "the seek's fader landing is heard"
+    );
 
     let mut digest = Sha256::new();
     for channel in 0..2_usize {
