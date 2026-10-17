@@ -3015,23 +3015,34 @@ fn a_hand_move_in_flight_across_a_table_only_rebuild_completes_exactly_alike_on_
     }
 }
 
+/// The latency upstream of `t1`'s fader in [`model_at`]'s session, in samples: the console
+/// post-insert slot `miso.soft-clip` declares 31 (its descriptor's quality latency); the
+/// pre-insert compressor and `t1`'s EQ and compressor inserts declare 0. The fader's node time is
+/// render time less it. No host reader reports one strip's upstream latency (the plan reports
+/// only the output's, which `t3`'s limiter raises), so it is named here; the bit-equality of
+/// [`a_moved_target_defers_its_jump_alike_on_both_hosts`] fails if it is wrong.
+const T1_FADER_LATENCY: u64 = 31;
+
 /// #1711 G2 across hosts: on a fader ride flat at -3 dB, a hand move with its own 4,000 samples
 /// heard 3 blocks, then a table-only rebuild to -5 dB up to 20,000, then -3 dB (the move's target
 /// moves; the rebuild keeps the hand move's stored offset, R17-1): the adoption defers the cell's
-/// jump to the move's first free sample (4,512) on both hosts alike, through the one shared
-/// driver. Both hosts give one verdict, reply and committed document per edit, render the same
-/// bits in every block, through the move's end and the deferred jump over the fader length, and
-/// the rebuild completes exactly on both (`OUTCOME_EXACT`, no transition fallback; #1711 D2).
-/// Every block before the one holding 4,512 equals a pair that takes the same move and no
-/// rebuild (the move keeps its own ramp), and a later block differs from it (the jump is heard).
+/// jump to the move's first free sample on both hosts alike, through the one shared driver. Both
+/// hosts give one verdict, reply and committed document per edit, render the same bits in every
+/// block, and the rebuild completes exactly on both (`OUTCOME_EXACT`, no transition fallback;
+/// #1711 D2). Every block, at the four rates, is bit-equal to a fresh pair whose table has the
+/// jump as a real step at the move's first free sample in the fader's node time (render time
+/// 4,512 less [`T1_FADER_LATENCY`]), given the same move and, at the same block, a table-only
+/// rebuild that moves nothing (a split at 950,000), both keeping the stored offset.
 ///
 /// Test value: red if either host adopts the moved target differently (an adapter-local rule, or
 /// a browser successor that does not carry the stage's ramp the deferral waits for), or if the
 /// shared adoption does not defer the jump to the move's first free sample (it lands at the swap,
-/// or the grid cuts the move short).
+/// fires at another time, or the grid cuts the move short).
 #[test]
 fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
-    const FREE: u64 = 4 * QUANTUM as u64 + 4_000;
+    // The move's first free sample in the fader's node time: its block-4 entry in render time plus
+    // its 4,000 samples, less the latency upstream of `t1`'s fader.
+    const FREE: u64 = 4 * QUANTUM as u64 + 4_000 - T1_FADER_LATENCY;
     let ride = |pieces: &[(u64, u64, f32)], offset| SessionEdit::UpsertAutomation {
         automation: session::Automation {
             id: id("t1-fader-ride"),
@@ -3068,6 +3079,17 @@ fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
         let model = model_at(rate);
         let (mut browser, mut c_abi) = (Rig::new(&model), CAbi::new(&model));
         let (mut browser_r, mut c_abi_r) = (Rig::new(&model), CAbi::new(&model));
+        let reference = |split: u64, offset| {
+            ride(
+                &[
+                    (0, FREE, -3.0),
+                    (FREE, 20_000, -5.0),
+                    (20_000, split, -3.0),
+                    (split, 1_000_000, -3.0),
+                ],
+                offset,
+            )
+        };
         let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi, label: &str| {
             let (b, b_reply) = browser.transaction_reply(edits);
             let (c, c_reply) = c_abi.transaction(edits);
@@ -3081,16 +3103,15 @@ fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
             "the flat ride",
         );
         both(
-            &[ride(&[(0, 1_000_000, -3.0)], none)],
+            &[reference(900_000, none)],
             &mut browser_r,
             &mut c_abi_r,
-            "the unrebuilt ride",
+            "the reference ride",
         );
-        let mut heard = false;
         for block in 0..60 {
             if block == 4 {
                 both(&hand, &mut browser, &mut c_abi, "the hand move");
-                both(&hand, &mut browser_r, &mut c_abi_r, "the unrebuilt move");
+                both(&hand, &mut browser_r, &mut c_abi_r, "the reference move");
             }
             if block == 7 {
                 let committed =
@@ -3119,20 +3140,19 @@ fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
                     &mut c_abi,
                     "the rebuild",
                 );
+                both(
+                    &[reference(950_000, offset)],
+                    &mut browser_r,
+                    &mut c_abi_r,
+                    "the reference rebuild",
+                );
             }
             let (b, c) = (browser.step(block), c_abi.step(block));
             assert_eq!(b, c, "{rate} Hz: block {block}");
             let (b_r, c_r) = (browser_r.step(block), c_abi_r.step(block));
-            assert_eq!(b_r, c_r, "{rate} Hz: block {block}, the unrebuilt move");
-            if block < FREE / u64::from(QUANTUM) {
-                assert_eq!(
-                    b, b_r,
-                    "{rate} Hz: block {block} against the unrebuilt move"
-                );
-            }
-            heard |= b != b_r;
+            assert_eq!(b_r, c_r, "{rate} Hz: block {block}, the reference");
+            assert_eq!(b, b_r, "{rate} Hz: block {block} against the reference");
         }
-        assert!(heard, "{rate} Hz: the deferred jump is heard");
         let watermark = c_abi.watermark();
         assert_eq!(
             status_watermark(&browser),
