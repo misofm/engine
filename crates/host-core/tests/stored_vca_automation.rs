@@ -1558,4 +1558,135 @@ mod classifier {
         );
         assert_heard_as_fresh(&current, &next, &records);
     }
+
+    /// #1655 U3 fold 1 (MAJOR-1), live: `t0` rides its own fader (flat 0 dB to 3,328, then
+    /// linear to -24 dB over 98,304 samples: every grid target is a multiple of 2^-12 dB) and the
+    /// automated offset of `va` steps from 0 to -6 dB at 3,000 (`J` = 240). At 1,024 a hand move
+    /// of `va` to +3 dB over 8,000 samples writes each lane's `S` with its own ramp, which every
+    /// cursor of the composed lane holds through; the step's jump at 3,000 replaces that ramp on
+    /// the whole lane, as one cell's jump does, so the lane follows the own ride from 3,328 on.
+    /// From the step's jump's end (3,240) every sample equals the session whose `t0` rides the
+    /// summed curve as its own table under a static `va` given the same hand move (one cell), on
+    /// every backend, live and between render calls; the classifier gives both the same records.
+    /// Before 3,000 the two differ: the record's ramp aims at each curve toward its completion,
+    /// clipped at that curve's own next discontinuity (the VCA step), where one cell clips the
+    /// sum at the lane's; the jump's end makes the gains equal.
+    ///
+    /// Test value: red if a jump of one curve of a composed lane leaves the hold the record put
+    /// on every cursor in place (the own cursor's grid then freezes the lane to 9,024).
+    #[test]
+    fn a_vca_step_inside_a_hand_moves_ramp_lets_the_own_ride_move_as_one_cell() {
+        const FROM: usize = 3_000 + J as usize;
+        let ride_from = 3_328_u64;
+        let ride_end = ride_from + 98_304;
+        let session = |composed: bool| {
+            let mut model = plain(1, 128);
+            let t0 = model.tracks[0].id.clone();
+            model.vcas = vec![vca("va", vec![t0.clone()])];
+            let own = if composed {
+                vec![
+                    piece(
+                        AutomationShape::Step,
+                        (0, ride_from),
+                        (0.0, 0.0),
+                        ParameterUnit::Db,
+                    ),
+                    piece(
+                        AutomationShape::Linear,
+                        (ride_from, ride_end),
+                        (0.0, -24.0),
+                        ParameterUnit::Db,
+                    ),
+                ]
+            } else {
+                vec![
+                    piece(
+                        AutomationShape::Step,
+                        (0, 3_000),
+                        (0.0, 0.0),
+                        ParameterUnit::Db,
+                    ),
+                    piece(
+                        AutomationShape::Step,
+                        (3_000, ride_from),
+                        (-6.0, -6.0),
+                        ParameterUnit::Db,
+                    ),
+                    piece(
+                        AutomationShape::Linear,
+                        (ride_from, ride_end),
+                        (-6.0, -30.0),
+                        ParameterUnit::Db,
+                    ),
+                ]
+            };
+            model.automation = vec![entry_of(
+                "t0-ride",
+                Owner::Strip(t0),
+                Section::Builtins,
+                FADER_DB,
+                own,
+            )];
+            if composed {
+                model.automation.push(entry_of(
+                    "va-ride",
+                    Owner::Vca(id("va")),
+                    Section::Own,
+                    VCA_OFFSET,
+                    steps_of(0.0, &[(3_000, -6.0)], ParameterUnit::Db),
+                ));
+            }
+            normalized(&model)
+        };
+        let mut ramp = EditRamps::new();
+        ramp.set(
+            &EditRampTarget::Vca(id("va")),
+            EditRampRow::VcaFader,
+            Some(8_000),
+        );
+        let row = address(Owner::Vca(id("va")), Section::Own, VCA_OFFSET);
+        let pair = |composed: bool| {
+            let current = session(composed);
+            let next = edited(&current, |next| {
+                controls::set(next, &row, 3.0, Some(8_000), RATE).expect("a hand move");
+            });
+            let records = classify(&current, &next, &ramp).expect("live");
+            (current, records)
+        };
+        let ((composed, records), (single, single_records)) = (pair(true), pair(false));
+        let t0 = composed.tracks[0].id.as_str().to_owned();
+        let s = f64::from(3.0_f32);
+        assert_eq!(
+            records,
+            vec![(t0, Vec::new(), [Some(offsets(s, 8_000, None)); 2])]
+        );
+        assert_eq!(records, single_records, "one cell's records");
+        for backend in backends() {
+            for between in [false, true] {
+                let what = format!("{backend:?} between {between}");
+                let run = |model: &SessionModel| {
+                    let mut rig = Rig::new(model, backend, between);
+                    rig.blocks(8);
+                    write(&mut rig, &records);
+                    rig.blocks(92);
+                    assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
+                    rig.out
+                };
+                let (heard, expected) = (run(&composed), run(&single));
+                for lane in 0..2 {
+                    let first = (FROM..heard[lane].len())
+                        .find(|&at| heard[lane][at].to_bits() != expected[lane][at].to_bits());
+                    assert_eq!(
+                        first, None,
+                        "{what}: lane {lane}, first sample that differs"
+                    );
+                }
+                assert_ne!(
+                    heard[0][3_400].to_bits(),
+                    heard[0][9_000].to_bits(),
+                    "{what}: the own ride moves the lane inside the hand move"
+                );
+            }
+        }
+    }
 }

@@ -627,3 +627,65 @@ fn an_unchanged_value_jump_keeps_the_gate_deferral() {
         [(1_000, EventKind::Jump, 480), (1_480, EventKind::Jump, 256)]
     );
 }
+
+/// #1655 U3 fold 1 (MAJOR-1), `with_jump_release`: a hold or a deferral the lane put on every
+/// cursor (a record's ramp, an adoption's ramp and its deferred jump) belongs to the composed
+/// output, and a step of one curve that emits a jump replaces it, as one cell's jump replaces its
+/// ramp in flight. Every cursor holds to 2,999 (and, second, defers its jump to 3,000); the step
+/// at 1,000 jumps over 480. The composed lane's retargets are those of one cell over the summed
+/// curve with the same hold and deferral: the riding curve's grid moves the lane again from
+/// 1,472.
+///
+/// Red if the jump leaves the lane's hold or deferral on the riding cursor (it then freezes the
+/// lane to 2,944 with the hold, to 3,000 with the deferral).
+#[test]
+fn a_step_replaces_a_hold_the_lane_put_on_every_cursor_as_one_cell_does() {
+    let ride = [seg(0, 8_000, 0.0, -24.0, Shape::Linear)];
+    let step = [
+        seg(0, 1_000, -6.0, -6.0, Shape::Step),
+        seg(1_000, 9_000, -12.0, -12.0, Shape::Step),
+    ];
+    let sum = [
+        seg(0, 1_000, -6.0, -9.0, Shape::Linear),
+        seg(1_000, 8_000, -15.0, -36.0, Shape::Linear),
+        seg(8_000, 9_000, -36.0, -36.0, Shape::Step),
+    ];
+    let program = ProgramBuilder::build(&[fader_cell(&ride), fader_cell(&step), fader_cell(&sum)])
+        .expect("program");
+    let span = NodeSpan::new(0, None, 4_000).expect("span");
+    for defer in [None, Some(3_000)] {
+        let mut reference = seeded(&program, 2);
+        reference.hold_until(2_999);
+        if let Some(at) = defer {
+            reference.defer_jump(at);
+        }
+        let cell = program.cell(2).expect("cell");
+        let expected: Vec<_> = CellEvents::new(cell, &mut reference, span, SeekMode::Exact, 480)
+            .filter(|event| !event.held)
+            .map(|event| (event.offset, event.kind, event.ramp))
+            .collect();
+        let mut composed = Composed::<f32>::new(
+            &program,
+            &[(0, CursorKind::Value), (1, CursorKind::Value)],
+            Completion::End,
+        )
+        .expect("bind")
+        .with_held_grid()
+        .with_jump_release();
+        composed.seed(summed);
+        for cursor in composed.cursors_mut() {
+            cursor.set_jump(480);
+            cursor.state_mut().hold_until(2_999);
+        }
+        if let Some(at) = defer {
+            composed.defer_jump(at);
+        }
+        let (actual, _) = retargets(&program, &mut composed, summed, 1_000);
+        assert_eq!(
+            actual.get(..2),
+            Some(&[(1_000, EventKind::Jump, 480), (1_472, EventKind::Grid, 64)][..]),
+            "{defer:?}"
+        );
+        assert_eq!(actual, expected, "{defer:?}");
+    }
+}

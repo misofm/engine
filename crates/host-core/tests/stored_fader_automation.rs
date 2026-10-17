@@ -3304,19 +3304,68 @@ type LiveMute = (usize, (bool, u32));
 #[cfg(feature = "test-support")]
 fn rebuilt_case(
     backend: graph_compiler::Backend,
+    case: MovedTargetMove,
+    heard: usize,
+    tables: [Vec<AutomationSegment>; 3],
+    moves: (&[LiveMove], &[LiveMute]),
+    from: u64,
+) -> Vec<f32> {
+    rebuilt_case_over(backend, case, heard, tables, moves, from, None)
+}
+
+/// `model` with track 0 also in VCA `vca-ride` (0 dB), whose `offset_db` rides `ride` on both
+/// lanes (#1655): track 0's fader channels are then composed lanes over its own curve and the
+/// VCA's.
+#[cfg(feature = "test-support")]
+fn with_vca_ride(mut model: SessionModel, ride: &[AutomationSegment]) -> SessionModel {
+    let vca = id("vca-ride");
+    model.vcas.push(session::Vca {
+        id: vca.clone(),
+        fader: session::DualMonoFader {
+            left_db: 0.0,
+            right_db: 0.0,
+            left_mute: false,
+            right_mute: false,
+        },
+        members: vec![model.tracks[0].id.clone()],
+    });
+    model.automation.push(Automation {
+        id: id("vca-ride-offset"),
+        target: ControlAddress {
+            owner: Owner::Vca(vca),
+            section: Section::Own,
+            control: 1,
+            lane: ParameterChannel::Both,
+        },
+        segments: ride.to_vec(),
+        offset: session::AutomationOffset::default(),
+    });
+    model
+}
+
+/// [`rebuilt_case`], with every model's track 0 also reached by the VCA ride `ride` when given
+/// ([`with_vca_ride`]).
+#[cfg(feature = "test-support")]
+fn rebuilt_case_over(
+    backend: graph_compiler::Backend,
     (what, hand, vca): MovedTargetMove,
     heard: usize,
     [flat, table, fresh]: [Vec<AutomationSegment>; 3],
     (later, mutes): (&[LiveMove], &[LiveMute]),
     from: u64,
+    ride: Option<&[AutomationSegment]>,
 ) -> Vec<f32> {
     const AFTER: usize = 44;
     let swap = MOVE_BLOCK + heard;
     let blocks = (swap + AFTER).max(later.iter().map(|(at, _)| at + 20).max().unwrap_or(0));
-    let a = move_model(flat.clone(), 0.0, vca.map(|vca| vca.0));
-    let committed = move_model(flat, hand, vca.map(|vca| vca.1));
-    let next = move_model(table.clone(), hand, vca.map(|vca| vca.1));
-    let reference = move_model(fresh, 0.0, vca.map(|vca| vca.0));
+    let ridden = |model: SessionModel| match ride {
+        Some(ride) => with_vca_ride(model, ride),
+        None => model,
+    };
+    let a = ridden(move_model(flat.clone(), 0.0, vca.map(|vca| vca.0)));
+    let committed = ridden(move_model(flat, hand, vca.map(|vca| vca.1)));
+    let next = ridden(move_model(table.clone(), hand, vca.map(|vca| vca.1)));
+    let reference = ridden(move_model(fresh, 0.0, vca.map(|vca| vca.0)));
     let moves: Vec<_> = core::iter::once(MOVE)
         .chain(later.iter().copied())
         .collect();
@@ -3467,6 +3516,49 @@ fn a_table_step_inside_a_deferred_moves_ramp_drops_the_deferral() {
                     [flat.clone(), stepped(-5.0), stepped(-3.0)],
                     (&[], &[]),
                     0,
+                );
+            }
+        }
+    }
+}
+
+/// #1655 U3 fold 1 (MAJOR-1): the composed twin of
+/// [`a_table_step_inside_a_deferred_moves_ramp_drops_the_deferral`], at both bank widths. Track
+/// 0 is also in VCA `vca-ride`, whose `offset_db` rides linearly from 0 to -6 dB over 48,000
+/// samples (the same in every plan), so its fader channels are composed lanes over its own curve
+/// and the VCA's. The rebuild moves the own table; the adoption holds every cursor through the
+/// move's ramp and defers every cursor's jump to 4,512; the own table's step at 2,000 replaces
+/// that ramp on the whole lane, as one cell's step does. Every sample is bit-equal to the fresh
+/// plan whose own table is -3 dB before 2,000, given the same move and the same VCA ride.
+///
+/// Test value: red if a composed lane's jump drops only the stepping cursor's deferral and hold
+/// (the VCA cursor then freezes the lane until 4,512 while the fresh plan follows the ride).
+#[cfg(feature = "test-support")]
+#[test]
+fn a_table_step_inside_a_deferred_moves_ramp_releases_every_cursor_of_a_composed_lane() {
+    let stepped = |first: f32| {
+        let mut segments = steps_of(&[(0, 2_000, first)]);
+        segments.push(segment(AutomationShape::Linear, 2_000, 8_000, -8.0, -14.0));
+        segments.extend(steps_of(&[(8_000, RIDE_FRAMES, -14.0)]));
+        segments
+    };
+    let ride = [segment(AutomationShape::Linear, 0, RIDE_FRAMES, 0.0, -6.0)];
+    let [flat, ..] = moved_target_tables();
+    for backend in [
+        #[cfg(target_feature = "avx2")]
+        graph_compiler::Backend::Simd8,
+        graph_compiler::Backend::Simd4,
+    ] {
+        for case in MOVED_TARGET_MOVES {
+            for heard in [1, 4] {
+                rebuilt_case_over(
+                    backend,
+                    case,
+                    heard,
+                    [flat.clone(), stepped(-5.0), stepped(-3.0)],
+                    (&[], &[]),
+                    0,
+                    Some(&ride),
                 );
             }
         }

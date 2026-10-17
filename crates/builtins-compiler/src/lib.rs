@@ -830,9 +830,11 @@ enum FaderCurve {
 /// D2's order: `S` first, then the curves in cursor order), `own` the own curve's value or the
 /// member's static `own_db` (D3). The output keeps one cell's hold rule
 /// ([`automation::Composed::with_held_grid`]), so a step of one curve keeps its jump length while
-/// another rides; every other rule of the single cell (the held-ramp obligation, the R17-10
-/// release, the adoption and its deferred jump, #1711) acts on it through the same driver,
-/// applied to every cursor.
+/// another rides, and one cell's jump rule ([`automation::Composed::with_jump_release`], #1655
+/// U3 fold 1), so a jump the lane emits replaces the hold and the deferral the lane put on every
+/// cursor; every other rule of the single cell (the held-ramp obligation, the R17-10 release, the
+/// adoption and its deferred jump, #1711) acts on it through the same driver, applied to every
+/// cursor.
 #[derive(Debug)]
 struct FaderComposite {
     walk: automation::Composed<f32>,
@@ -891,7 +893,8 @@ impl FaderCurve {
             .collect();
         let mut walk =
             automation::Composed::new(program, &cells, controls::FADER_CELL_RULE.completion)?
-                .with_held_grid();
+                .with_held_grid()
+                .with_jump_release();
         // The prepared value, composed once inside preparation's `CanonicalFpEnv` (D2, R17-7).
         walk.seed_target(cell.fader_db);
         Ok(Self::Composed(Box::new(FaderComposite {

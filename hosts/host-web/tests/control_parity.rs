@@ -3190,6 +3190,42 @@ fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
 /// place (its grid hold freezes the lane on the step's target until 4,512), on either host.
 #[test]
 fn a_table_step_inside_a_deferred_moves_ramp_lands_alike_on_both_hosts() {
+    table_step_inside_a_deferred_move(model_at);
+}
+
+/// #1655 U3 fold 1 (MAJOR-1) across hosts: the composed twin of
+/// [`a_table_step_inside_a_deferred_moves_ramp_lands_alike_on_both_hosts`]. `t1` is also in VCA
+/// `v`, whose `offset_db` rides linearly from 0 to -6 dB over 48,000 samples in every plan, so
+/// `t1`'s fader channels are composed lanes over its own ride and the VCA's. The adoption holds
+/// and defers every cursor; the own table's step at 2,000 replaces the move's ramp on the whole
+/// lane, as one cell's step does. Both hosts render the same bits as each other and as the fresh
+/// pair with the same VCA ride, at the four rates, `EXACT` with no transition fallback.
+///
+/// Test value: red if a composed lane's jump drops only the stepping cursor's deferral and hold
+/// (the VCA cursor then freezes the lane until 4,512 while the fresh pair follows the ride), on
+/// either host.
+#[test]
+fn a_table_step_inside_a_deferred_moves_ramp_releases_a_composed_lane_alike_on_both_hosts() {
+    table_step_inside_a_deferred_move(|rate| {
+        let mut model = model_at(rate);
+        model.vcas = vec![vca_at(VCA.id, 0.0, &[T1.id])];
+        model.automation.push(vca_entry(
+            VCA.id,
+            VCA_OFFSET_DB,
+            vec![vca_piece(
+                session::AutomationShape::Linear,
+                (0, 48_000),
+                (0.0, -6.0),
+                session::ParameterUnit::Db,
+            )],
+        ));
+        model
+    });
+}
+
+/// The body of [`a_table_step_inside_a_deferred_moves_ramp_lands_alike_on_both_hosts`] over the
+/// session `model_of(rate)`.
+fn table_step_inside_a_deferred_move(model_of: fn(u32) -> SessionModel) {
     let segment = |shape, start, end, from, to| session::AutomationSegment {
         shape,
         start_sample: start,
@@ -3236,7 +3272,7 @@ fn a_table_step_inside_a_deferred_moves_ramp_lands_alike_on_both_hosts() {
         Some(4_000),
     );
     for rate in RATES {
-        let model = model_at(rate);
+        let model = model_of(rate);
         let (mut browser, mut c_abi) = (Rig::new(&model), CAbi::new(&model));
         let (mut browser_r, mut c_abi_r) = (Rig::new(&model), CAbi::new(&model));
         let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi, label: &str| {

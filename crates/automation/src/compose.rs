@@ -220,6 +220,10 @@ pub struct Composed<T> {
     /// [`Self::with_held_grid`]: every output retarget holds each value cursor's grid inside the
     /// retarget's ramp, as one cell holds its grid inside its own ramp (#1655 V2, R19-2).
     held_grid: bool,
+    /// [`Self::with_jump_release`]: every jump the output emits replaces the lane's ramp, so it
+    /// shortens each value cursor's hold to the jump's completion and drops its deferral, as one
+    /// cell's jump does (#1655 U3 fold 1).
+    jump_release: bool,
 }
 
 impl<T: Composable> Composed<T> {
@@ -278,6 +282,7 @@ impl<T: Composable> Composed<T> {
             completion,
             block: None,
             held_grid: false,
+            jump_release: false,
         })
     }
 
@@ -294,6 +299,23 @@ impl<T: Composable> Composed<T> {
     #[must_use]
     pub fn with_held_grid(mut self) -> Self {
         self.held_grid = true;
+        self
+    }
+
+    /// The output with the one-cell jump rule on the holds and deferrals its lane put on every
+    /// cursor (#1655 U3 fold 1: a member fader channel, with [`Self::with_held_grid`]). A lane's
+    /// ramp (a record's or an adoption's, reported on every cursor with
+    /// [`CellState::hold_until`] and [`Self::defer_jump`], or a retarget that `with_held_grid`
+    /// reported) belongs to the composed output; one cell's discontinuity jump that emits
+    /// replaces its ramp in flight and drops its deferral. So every jump the output emits (not a
+    /// seek landing, not a held event) shortens each restartable value cursor's hold to the
+    /// jump's completion ([`CellState::release_hold_by`]) and drops its deferral
+    /// ([`CellState::clear_deferred_jump`]); a jump that emits nothing replaces no ramp and
+    /// changes nothing (#1711 U1 fold 2). Without it (a route column) a held value follows the
+    /// column's current free time and never moves earlier (#1654 T3). Control side.
+    #[must_use]
+    pub fn with_jump_release(mut self) -> Self {
+        self.jump_release = true;
         self
     }
 }
@@ -474,6 +496,7 @@ impl<T: Composable> Composed<T> {
         self.completion = other.completion;
         self.block = other.block;
         self.held_grid = other.held_grid;
+        self.jump_release = other.jump_release;
         true
     }
 
@@ -558,9 +581,23 @@ impl<T: Composable> Composed<T> {
             let hold = event
                 .filter(|event| self.held_grid && !event.held && event.ramp > 0)
                 .map(|event| crate::completion_of(self.completion, time, event.ramp));
+            // `with_jump_release`: the completion of the jump this offset emits, which replaces
+            // the lane's ramp on every value cursor.
+            let release = event
+                .filter(|event| {
+                    self.jump_release && !landing && !event.held && event.kind == EventKind::Jump
+                })
+                .map(|event| crate::completion_of(self.completion, time, event.ramp));
             let completion = self.completion;
             let short = |state: &CellState, hold: i64| {
                 state.free_after(completion).is_none_or(|free| free <= hold)
+            };
+            // Whether the release changes `state`: a hold past `at` or a pending deferral.
+            let releases = |state: &CellState, at: i64| {
+                let mut released = *state;
+                released.release_hold_by(at);
+                state.deferred_jump().is_some()
+                    || released.free_after(completion) != state.free_after(completion)
             };
             let next = offset.saturating_add(1);
             for cursor in self.cursors.iter_mut() {
@@ -575,8 +612,23 @@ impl<T: Composable> Composed<T> {
                 } else {
                     cursor.before.deferred_jump()
                 };
+                let released = release.filter(|&at| {
+                    value
+                        && program
+                            .cell(cursor.cell as usize)
+                            .is_some_and(|cell| !cell.no_restart)
+                        && releases(
+                            if cursor.consumed {
+                                &cursor.state
+                            } else {
+                                &cursor.before
+                            },
+                            at,
+                        )
+                });
                 let extend = free.filter(|&free| {
                     !column_jump
+                        && released.is_none()
                         && !cursor.moved
                         && pending.is_some_and(|at| at > time && at < free)
                 });
@@ -594,12 +646,16 @@ impl<T: Composable> Composed<T> {
                             hold,
                         )
                 });
-                if value && (defer.is_some() || held.is_some()) {
+                if value && (defer.is_some() || held.is_some() || released.is_some()) {
                     if !cursor.consumed {
                         // The cursor pulled past this offset before the column ramp changed:
-                        // replay its pull up to here (it gave no event there), then defer (or
-                        // hold) and pull again.
+                        // replay its pull up to here (it gave no event there), then release,
+                        // defer (or hold) and pull again.
                         replay(cursor, program, &span, mode, next);
+                    }
+                    if let Some(at) = released {
+                        cursor.state.release_hold_by(at);
+                        cursor.state.clear_deferred_jump();
                     }
                     if let Some(hold) = held
                         && short(&cursor.state, hold)

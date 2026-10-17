@@ -730,3 +730,62 @@ automation (44), builtins-compiler `--features test-support` (94), graph `--feat
 (159), host-core `--features test-support` (485) and `test-support,control-provider` (613),
 control-plane `--features test-support` (30), capi lib (220), host-web `--features test-support
 --test control_parity` (52): all green. Realtime policy: 172 regions in 35 files (unchanged).
+
+## Decision record: U3 fold 1 (batch 19)
+
+U3 MAJOR-1 and NIT-1. No edit under `crates/engine/src/realtime/`, no row class or table change (no
+SDK regeneration).
+
+- **Fix (K1, opt-in).** `automation::Composed::with_jump_release` (new flag, copied by `copy_from`):
+  every jump the output emits (not a seek landing, not a held event) shortens each restartable value
+  cursor's hold to the jump's completion (`CellState::release_hold_by`) and drops its deferral
+  (`clear_deferred_jump`), before the `with_held_grid` hold and the column-jump deferral; a cursor
+  that pulled ahead is replayed first, as for a hold. A jump that emits nothing changes nothing
+  (#1711 U1 fold 2). It reaches every hold and deferral the lane put on every cursor: the record
+  hold in `offsets_jump`, the adoption hold and deferral of `settle_adoption`, and the holds
+  `with_held_grid` propagates, so a composed lane moves as one cell does (V2 departure 2).
+- **Who uses it.** Only the fader composed lanes (`FaderCurve::prepared`: `.with_held_grid()
+  .with_jump_release()`). The composed mute lanes have gate cursors only. The route column
+  (`crates/graph`, #1654) does not call it and keeps its T3 rule: a held value follows the column's
+  current free time and never moves earlier. No graph file changed; graph tests and #1654 gates
+  unchanged.
+- **NIT-1.** `follow_route_flags`' doc lines moved back above it; `follow_vca_mute_cells` keeps its
+  own doc.
+
+**Departures.**
+1. The host-core live gate compares from the step's jump's end (3,240), not from 0. Before the step
+   the composed lane and one cell over the sum differ: a record's ramp target composes each curve
+   toward the ramp's completion clipped at that curve's own next discontinuity, where one cell clips
+   the sum at the lane's next discontinuity (`FaderComposite::toward` against `curve_toward`). That
+   rule is outside this finding (phase-2 placeholder in the fold report); the jump's end equalizes
+   the gains, and the defect window (3,328 to 9,024) lies after it.
+2. The both-host gate runs at the native width only (control_parity's rule, V5); the two bank widths
+   are the host-core twin's.
+
+**Gates** (red before: the gate with `.with_jump_release()` removed from `FaderCurve::prepared`, or
+from the K1 probe; green after):
+- K1: `compose::tests::a_step_replaces_a_hold_the_lane_put_on_every_cursor_as_one_cell_does` (every
+  cursor held to 2,999, then also deferred to 3,000; the composed retargets equal one cell over the
+  summed curve with the same hold and deferral). Red: `(2944, Grid)` after the step instead of
+  `(1472, Grid)`.
+- host-core live: `stored_vca_automation::classifier::
+  a_vca_step_inside_a_hand_moves_ramp_lets_the_own_ride_move_as_one_cell` (own ride on a 2^-12 dB
+  lattice, VCA step at 3,000, hand VCA move to +3 over 8,000 at 1,024; Simd8, Simd4, scalar, live and
+  between render calls; same classifier records as the summed single-cell session). Red: first
+  differing sample 3,328 (Simd8).
+- host-core rebuild twin: `stored_fader_automation::
+  a_table_step_inside_a_deferred_moves_ramp_releases_every_cursor_of_a_composed_lane` (Simd8 and
+  Simd4; track 0 also in an automated VCA riding 0 to -6 dB). Red: first differing sample 4,544.
+- both hosts: `control_parity::
+  a_table_step_inside_a_deferred_moves_ramp_releases_a_composed_lane_alike_on_both_hosts` (the
+  #1711 body over a session with the VCA ride; four rates). Red: block 39 against the reference at
+  44.1 kHz. The single-cell test now calls the shared body `table_step_inside_a_deferred_move`.
+
+Commands: `cargo fmt --all`; clippy `-D warnings --all-targets --all-features` and no-feature
+`cargo check --locked --all-targets` on automation, builtins-compiler, host-core, graph, host-web;
+tests automation (all features), builtins-compiler `--features test-support` (76 lib), graph
+`--features test-support` (149 lib, unchanged), host-core `--features test-support`
+`stored_vca_automation` (7; 13 with `control-provider`), `stored_fader_automation` (37),
+`stored_mute_automation` (13), `route_mute` (26), `successor_swap` (140), control-plane
+`--features test-support` (30), capi lib (220), host-web `--features test-support --test
+control_parity` (54): all green. Realtime policy: 172 regions in 35 files (unchanged).

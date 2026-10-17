@@ -4474,8 +4474,6 @@ impl SendRecord {
     }
 }
 
-/// The flags word of a following route (#1652 D1, #1654 D2): the route's `mute` and
-/// `follows_mute`, the source lanes' `terms` and the plan's automated set (bits 4-11).
 /// The VCA mute curves of strip `source`'s lanes that a following route's op ORs into its follow
 /// term at `a(tap)` (#1655 D4, R19-2): per source lane `[left, right]`, the program cell index of
 /// each reaching VCA's automated `mute` lane (`PreparedBuiltinsSession::vca_cells`, row 1, the
@@ -4521,6 +4519,8 @@ pub(crate) fn follow_vca_mute_cells<P>(
     Some(lanes)
 }
 
+/// The flags word of a following route (#1652 D1, #1654 D2): the route's `mute` and
+/// `follows_mute`, the source lanes' `terms` and the plan's automated set (bits 4-11).
 pub(crate) fn follow_route_flags(
     route: &session::Route,
     terms: [bool; 2],
