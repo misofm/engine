@@ -1480,7 +1480,6 @@ where
         observation_armed_bytes: 0,
         observation_slots_high_water: 0,
         observation_forwarded: Vec::new(),
-        level_moves: None,
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,

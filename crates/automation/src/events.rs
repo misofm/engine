@@ -98,7 +98,8 @@ pub struct CellState {
     held: bool,
     /// The node time at which the ramp in flight completes, or [`IDLE`].
     ramp_done: i64,
-    /// The node time at which a deferred jump fires (a `no_restart` cell), or [`IDLE`].
+    /// The node time at which a deferred jump fires, or [`IDLE`]: a `no_restart` cell's jump that
+    /// waits for its lane, or a jump the caller deferred ([`Self::defer_jump`]).
     deferred: i64,
 }
 
@@ -153,6 +154,43 @@ impl CellState {
     pub const fn release_hold_by(&mut self, t: i64) {
         if self.ramp_done != IDLE && self.ramp_done > t {
             self.ramp_done = t;
+        }
+    }
+
+    /// Defers the cell's jump to node time `at` (#1711 D1): at the first sample at or after `at`,
+    /// the cell compares its curve with its current target, as at a discontinuity (a
+    /// [`EventKind::Jump`] over the jump length to the curve at the jump's completion, change
+    /// only, or always when a held event is outstanding). It replaces a deferral already pending.
+    ///
+    /// The caller defers the jump of a lane whose table changed while a ramp of its own runs (a
+    /// live move adopted at a plan swap) to that ramp's first free sample, so the ramp keeps its
+    /// own length. Until the deferral fires, every grid event of a restartable cell is held (the
+    /// stage remembers it and does not retarget), so no grid ramp cuts the running ramp short; a
+    /// `no_restart` cell holds them inside the ramp in flight as it always does. Cleared by
+    /// [`Self::clear_deferred_jump`], [`Self::reposition`], a seek landing and, on a restartable
+    /// cell, a discontinuity jump that emits (it replaces the ramp the deferral waits for; one
+    /// that emits nothing replaces no ramp and keeps the deferral). Control-free and
+    /// allocation-free.
+    pub const fn defer_jump(&mut self, at: i64) {
+        self.deferred = at;
+    }
+
+    /// Drops a pending deferred jump ([`Self::defer_jump`]), and with it the grid hold it keeps;
+    /// with none pending it does nothing. The caller clears it where the ramp the deferral waits
+    /// for is replaced (a newer live move keeps its own length) or ends early (a release of the
+    /// lane's hold), so the cell's grid moves the lane again from its next grid point.
+    pub const fn clear_deferred_jump(&mut self) {
+        self.deferred = IDLE;
+    }
+
+    /// The node time of the pending deferred jump, if any ([`Self::defer_jump`], or a
+    /// `no_restart` cell's jump that waits for its lane).
+    #[must_use]
+    pub const fn deferred_jump(&self) -> Option<i64> {
+        if self.deferred == IDLE {
+            None
+        } else {
+            Some(self.deferred)
         }
     }
 
@@ -393,7 +431,13 @@ impl<'a, 's> CellEvents<'a, 's> {
         let value = self.target_at(time, ramp);
         let done = self.completion(time, ramp);
         let in_flight = time < self.free_at();
-        if in_flight && (self.program.no_restart || done < self.state.ramp_done) {
+        // A restartable cell holds its grid until a pending deferral fires (#1711 D1): a grid
+        // ramp that completes after the ramp in flight would otherwise restart it with the new
+        // curve and cut it short. A `no_restart` cell's deferral always lies at its lane's free
+        // time, so its rule is unchanged.
+        let deferring =
+            !self.program.no_restart && self.state.deferred != IDLE && time < self.state.deferred;
+        if (in_flight && (self.program.no_restart || done < self.state.ramp_done)) || deferring {
             let differs = !self.state.has_target || self.state.target != value.to_bits();
             if !differs && !self.state.held {
                 return None;
@@ -491,6 +535,14 @@ impl<'a, 's> CellEvents<'a, 's> {
             } else {
                 self.grid_event(offset, next)
             };
+            // A discontinuity jump on a restartable cell that emits drops a pending deferral
+            // (#1711 U1 fold 1): it replaces the ramp the deferral waits for, so the deferral and
+            // its grid hold are stale (they would freeze the lane on the jump's target until the
+            // deferral's time). A jump that emits nothing (#1711 U1 fold 2: the curve already has
+            // its value and no ramp lags) replaces no ramp, and the deferral stays owed.
+            if is_boundary && !self.program.no_restart && event.is_some() {
+                self.state.deferred = IDLE;
+            }
             if event.is_some() {
                 return event;
             }
@@ -556,6 +608,174 @@ mod tests {
             no_restart: false,
         }])
         .expect("valid cell")
+    }
+
+    /// A restartable cell riding linearly from 0 to -12 over 4,096 samples (a grid event at
+    /// every 64th sample moves it).
+    fn riding() -> crate::Program {
+        let segments = [Segment {
+            start: 0,
+            end: 4_096,
+            start_value: 0.0,
+            end_value: -12.0,
+            shape: Shape::Linear,
+        }];
+        ProgramBuilder::build(&[CellDescription {
+            segments: &segments,
+            grid_ramp: 64,
+            grid: 64,
+            jump: JumpLength::Block,
+            completion: Completion::End,
+            no_restart: false,
+        }])
+        .expect("valid cell")
+    }
+
+    /// The `(offset, kind, held)` of every event of the block of 256 samples from node time 0.
+    fn block_events(
+        program: &crate::Program,
+        state: &mut CellState,
+    ) -> Vec<(u32, EventKind, bool)> {
+        let span = NodeSpan::new(0, None, 256).expect("span");
+        CellEvents::new(
+            program.cell(0).expect("cell"),
+            state,
+            span,
+            SeekMode::Exact,
+            480,
+        )
+        .map(|event| (event.offset, event.kind, event.held))
+        .collect()
+    }
+
+    /// A cell seeded at its curve's start whose caller reported a ramp completing at node time
+    /// 200 (a live move), so its first free sample is 201.
+    fn in_a_move() -> CellState {
+        let mut state = CellState::new();
+        state.seed_target(0.0);
+        state.hold_until(200);
+        state
+    }
+
+    /// #1711 D1: a jump deferred to the first free sample of a ramp in flight fires there over the
+    /// jump length, and every grid event before it is held, also the one whose grid ramp would
+    /// complete after the ramp in flight (which restarts the ramp with no deferral).
+    ///
+    /// Red if the deferral is not fired on a restartable cell, or if the grid event at 192 (its
+    /// ramp completes at 255, after 200) is not held while the deferral is pending.
+    #[test]
+    fn a_deferred_jump_fires_at_its_time_and_holds_the_grid_before_it() {
+        let program = riding();
+        let mut plain = in_a_move();
+        let held = |offset| (offset, EventKind::Grid, true);
+        assert_eq!(
+            block_events(&program, &mut plain),
+            [held(0), held(64), held(128), (192, EventKind::Grid, false)],
+            "no deferral: the grid restarts the ramp at 192"
+        );
+        let mut deferred = in_a_move();
+        deferred.defer_jump(201);
+        assert_eq!(deferred.deferred_jump(), Some(201));
+        assert_eq!(
+            block_events(&program, &mut deferred),
+            [
+                held(0),
+                held(64),
+                held(128),
+                held(192),
+                (201, EventKind::Jump, false)
+            ]
+        );
+        assert_eq!(deferred.deferred_jump(), None, "a fired deferral is spent");
+    }
+
+    /// #1711 D1: a cleared deferral fires nothing and holds no grid event: the cell's events are
+    /// those of a cell that never deferred; a deferral whose target the curve already has emits
+    /// nothing (change only), and `reposition` drops it.
+    ///
+    /// Red if `clear_deferred_jump` leaves the deferral or its grid hold in place (a held grid
+    /// would freeze the lane after an early release, #1651 U1 MAJOR-1).
+    #[test]
+    fn a_cleared_deferral_fires_nothing_and_holds_no_grid() {
+        let program = riding();
+        let mut cleared = in_a_move();
+        cleared.defer_jump(201);
+        cleared.clear_deferred_jump();
+        assert_eq!(cleared.deferred_jump(), None);
+        assert_eq!(
+            block_events(&program, &mut cleared),
+            block_events(&program, &mut in_a_move())
+        );
+
+        let flat = flat(-7.25);
+        let mut settled = CellState::new();
+        settled.seed_target(-7.25);
+        settled.defer_jump(100);
+        assert_eq!(first_block(&flat, &mut settled), [], "change only");
+
+        let mut repositioned = in_a_move();
+        repositioned.defer_jump(201);
+        repositioned.reposition(&program.cell(0).expect("cell"), 0);
+        assert_eq!(repositioned.deferred_jump(), None);
+    }
+
+    /// #1711 U1 fold 2: a discontinuity jump on a restartable cell that emits nothing keeps a
+    /// pending deferral. The curve is flat at -6 to 50, then linear from -4 to -8 over 50..562,
+    /// with a fixed jump length of 257 samples: the jump at 50 aims at the curve at 306 (-6, the
+    /// seeded target), so it emits nothing and replaces no ramp. The deferral to 201 stays owed:
+    /// the grid is held until 201, where the deferred jump fires.
+    ///
+    /// Red if a discontinuity whose jump emits nothing drops the deferral (the fold-1 rule): the
+    /// grid at 64, 128 and 192 then retargets unheld and nothing fires at 201.
+    #[test]
+    fn a_discontinuity_whose_jump_emits_nothing_keeps_a_pending_deferral() {
+        let segments = [
+            Segment {
+                start: 0,
+                end: 50,
+                start_value: -6.0,
+                end_value: -6.0,
+                shape: Shape::Linear,
+            },
+            Segment {
+                start: 50,
+                end: 562,
+                start_value: -4.0,
+                end_value: -8.0,
+                shape: Shape::Linear,
+            },
+            Segment {
+                start: 562,
+                end: 4_096,
+                start_value: -8.0,
+                end_value: -8.0,
+                shape: Shape::Linear,
+            },
+        ];
+        let program = ProgramBuilder::build(&[CellDescription {
+            segments: &segments,
+            grid_ramp: 64,
+            grid: 64,
+            jump: JumpLength::Fixed(257),
+            completion: Completion::End,
+            no_restart: false,
+        }])
+        .expect("valid cell");
+        assert_eq!(program.cell(0).expect("cell").discontinuities(), [50]);
+        let mut state = CellState::new();
+        state.seed_target(-6.0);
+        state.defer_jump(201);
+        let held = |offset| (offset, EventKind::Grid, true);
+        assert_eq!(
+            block_events(&program, &mut state),
+            [
+                held(64),
+                held(128),
+                held(192),
+                (201, EventKind::Jump, false)
+            ]
+        );
+        assert_eq!(state.deferred_jump(), None, "a fired deferral is spent");
     }
 
     fn first_block(program: &crate::Program, state: &mut CellState) -> Vec<(u32, EventKind)> {
