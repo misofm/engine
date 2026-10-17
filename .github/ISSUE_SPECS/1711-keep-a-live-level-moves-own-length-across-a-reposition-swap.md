@@ -433,12 +433,17 @@ measured with temporary probes in a detached worktree at `323433f6a` (removed af
   step one sample after the swap must jump at its own sample (B17-R13's 8.6e-2 measurement kept
   as history). The #1713 test's doc and comment no longer name the level-move window ("the flag
   marks its own candidate only").
-- **Departure: no G4 parity case in `control_parity.rs`.** The coordinator's tranche scoped G4 to
-  host-core (Simd8, Simd4) and the C ABI; the host-web parity leg of A3 G4 is a phase-2
-  placeholder.
+- **G4 on both hosts.** `an_exact_unmute_discharges_the_owed_move_alike_on_both_hosts`
+  (`hosts/host-web/tests/control_parity.rs`): the A1 setup on `t1` at the four rates; the
+  browser and the C ABI give the same verdicts, replies, watermark (`EXACT`, no transition
+  fallback) and bits in every block, and from block 24 on both equal a pair of rigs that took
+  only the second hold. Block 24: the first hold's own difference ends by block 21 at every rate
+  (the session's latency), and the stale obligation's difference spans blocks 21 to 28 at
+  44.1 kHz and 25 to 40 at 96 kHz. Red with the line deleted (run once, restored): block 24 at
+  44.1 kHz.
 - Gates run: `cargo fmt --all`; clippy `-D warnings --all-targets --all-features` on control-plane,
   capi, host-core, builtins-compiler, host-web, controls; `cargo check --locked --all-targets` (no
   features) on the first five; tests: control-plane (`test-support`), capi lib (211 passed, 1
   ignored), host-core `stored_fader_automation` (34), `stored_mute_automation` (13),
-  `successor_swap` (140), host-web `control_parity` (30): all green. `scripts/check-capi-abi.sh`,
+  `successor_swap` (140), host-web `control_parity` (31 with the G4 parity case): all green. `scripts/check-capi-abi.sh`,
   `check-sdk-generated.sh`, `check-sdk-types.sh`: ok. Realtime policy: 168 regions (unchanged).
