@@ -55,7 +55,11 @@ struct Target<'a> {
 /// of `into` drives is masked the same way (R17-6): the entry's offset is copied and the route's
 /// static `gain_db` is left as `into` holds it. A send's automated `mute` and matrix rows keep their
 /// static values as control values (a hand mute ORs with the curve; a matrix fallback is stored by
-/// a hand edit), so they are copied.
+/// a hand edit), so they are copied. A VCA lane whose `offset_db` a VCA-offset entry
+/// ([`crate::vca_offset_row`]) of `into` drives is masked the same way (#1655 D5): the entry's
+/// offset is copied and the VCA's static offset of that lane is left as `into` holds it. A VCA's
+/// automated `mute` keeps its static (hand) mute as a control value, which render ORs with the
+/// curve, so it is copied.
 ///
 /// After this call, `into` and `from` differ only in what is not a control value, and in the
 /// owners they do not share.
@@ -135,7 +139,34 @@ pub fn mask_values(into: &mut SessionModel, from: &SessionModel) {
             route.follows_mute = source.follows_mute;
         }
     }
+    // The VCA lanes whose `offset_db` a VCA-offset entry of `into` drives (#1655 D5): their
+    // static offset is the fallback, not a control value, and stays as `into` holds it.
+    let kept: Vec<(session::StableId, [Option<f32>; 2])> = if into.automation.is_empty() {
+        Vec::new()
+    } else {
+        into.vcas
+            .iter()
+            .filter_map(|vca| {
+                let driven = crate::automation::vca_offset_automation(into, &vca.id);
+                let lanes = [
+                    driven[0].map(|_| vca.fader.left_db),
+                    driven[1].map(|_| vca.fader.right_db),
+                ];
+                (lanes != [None; 2]).then(|| (vca.id.clone(), lanes))
+            })
+            .collect()
+    };
     into.vcas.clone_from(&from.vcas);
+    for (id, lanes) in kept {
+        if let Some(vca) = into.vcas.iter_mut().find(|vca| vca.id == id) {
+            if let Some(left) = lanes[0] {
+                vca.fader.left_db = left;
+            }
+            if let Some(right) = lanes[1] {
+                vca.fader.right_db = right;
+            }
+        }
+    }
 }
 
 /// The item of `items` that `matches`, trying position `index` first: two models of one session
@@ -148,7 +179,8 @@ fn pair<T>(items: &[T], index: usize, matches: impl Fn(&T) -> bool) -> Option<&T
 }
 
 /// Copy the hand-move offset of every entry on a row that takes one (a fader-row entry,
-/// [`crate::fader_row`], and a send-gain entry, [`crate::route_gain_row`], R17-6) of `into` from
+/// [`crate::fader_row`], a send-gain entry, [`crate::route_gain_row`], R17-6, and a VCA-offset
+/// entry, [`crate::vca_offset_row`], #1655 D5) of `into` from
 /// the entry of `from` with the same ID and target (#1650 D5): an offset is a control value, the
 /// value of the `fader_db` row of the lanes the entry drives, or of the send's `gain_db`. An entry
 /// on another rendered row (a mute row, a send matrix row) carries no offset, so it is not masked.

@@ -141,6 +141,28 @@ impl<'a> ModelView<'a> {
         })
     }
 
+    /// The rendered stored automation entries that drive VCA `vca`'s `offset_db`, per lane
+    /// (`[left, right]`, [`crate::vca_offset_automation`]), each the edited entry when the view
+    /// holds one (#1655 D5, R17-1): a hand move on an automated VCA offset writes the driving
+    /// entry's offset, so the binding of the VCA's `offset_db` row and each reached member lane's
+    /// `S` read the entry here. Which entry drives a lane is read from the committed table, and
+    /// only its offset from the edit, as for [`Self::fader_automation`].
+    #[must_use]
+    pub fn vca_automation(&self, vca: &StableId) -> [Option<&'a Automation>; 2] {
+        if self.structure.automation.is_empty() {
+            return [None; 2];
+        }
+        let lanes = crate::automation::vca_offset_automation(self.structure, vca);
+        if self.is_whole() {
+            return lanes;
+        }
+        lanes.map(|entry| {
+            entry.map(|entry| {
+                find(&self.owners.automation, &entry.id, |held| &held.id).unwrap_or(entry)
+            })
+        })
+    }
+
     /// The dense model the view stands for: a clone of the committed model with the edited owners
     /// in place. Linear in the session; for tests and for a caller that has no view-shaped code.
     #[must_use]

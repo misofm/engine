@@ -24,11 +24,13 @@ pub struct ControlRow {
     /// overlay's, and a row that the owner's shape does not use the descriptor's default.
     pub value: f32,
     /// Whether a rendered stored automation drives the row's lane (#1650 D4): the `fader_db` row,
-    /// since #1651 (root ruling R18-2) the `mute` row, and since #1654 a send's rows 1-6. On such
-    /// a lane the `fader_db` row's value is the driving entry's hand-move offset, not the static
-    /// fader, and so is a send's `gain_db` (R17-6); the `mute` rows' values stay the static (hand)
+    /// since #1651 (root ruling R18-2) the `mute` row, since #1654 a send's rows 1-6, and since
+    /// #1655 a VCA's `offset_db` and `mute`. On such a lane the `fader_db` row's value is the
+    /// driving entry's hand-move offset, not the static fader, and so are a send's `gain_db`
+    /// (R17-6) and a VCA's `offset_db` (#1655 D5); the `mute` rows' values stay the static (hand)
     /// mute, which render ORs with the curve (OQ1 = C), and a send matrix row's value is its
-    /// static fallback (automation wins).
+    /// static fallback (automation wins). A VCA ride does not mark its members' rows: they list
+    /// their own entries only.
     pub automated: bool,
 }
 
@@ -249,7 +251,20 @@ pub fn owner_rows_in(
                 effective.route_gate(index),
             );
         }
-        OwnerSlot::Vca(index) => vca::push_rows(out, view.vca(index)),
+        OwnerSlot::Vca(index) => {
+            let vca = view.vca(index);
+            let entries = if model.automation.is_empty() {
+                vca::VcaEntries::default()
+            } else {
+                vca::VcaEntries {
+                    offset: view.vca_automation(&vca.id),
+                    // Which entry drives a mute lane is read from the committed table.
+                    muted: crate::automation::vca_mute_automation(model, &vca.id)
+                        .map(|entry| entry.is_some()),
+                }
+            };
+            vca::push_rows(out, vca, entries);
+        }
         OwnerSlot::Session => session_rows::push_rows(out, model),
         OwnerSlot::None => {}
     }
@@ -598,6 +613,12 @@ fn write(
             route::write(target, control, value)
         }
         (Owner::Vca(id), Section::Own) => {
+            // An automated VCA offset lane's value is its entry's hand-move offset (#1655 D5).
+            let static_sides = if control == vca::VCA_OFFSET_DB {
+                vca::write_offset(model, id, sides, value)
+            } else {
+                [true; 2]
+            };
             let target = model
                 .vcas
                 .iter_mut()
@@ -605,6 +626,7 @@ fn write(
                 .ok_or(ControlError::AddressUnknown)?;
             sides
                 .iter()
+                .filter(|&&side| static_sides[side.pick(0, 1)])
                 .try_for_each(|&side| vca::write(target, control, side, value))
         }
         _ => Err(ControlError::AddressUnknown),

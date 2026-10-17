@@ -386,3 +386,68 @@ These override the batch 19 spec-check amendment where they differ.
   gate at the cap: one pair over is refused with a typed diagnostic, not a panic.
 - **Two PRs.** This issue ships alone in batch 19b, on top of 19a (#1711, K1, #1654). Edit order: every
   shared file after 19a.
+
+## Decision record: V0 (batch 19)
+
+`crates/controls` only. No render, host-core, graph or builtins-compiler code; no row class or
+table change, so no SDK regeneration.
+
+- **Rows (D6).** `automation_row_renders` admits VCA row 1 (`vca_offset_row`) and row 2
+  (`vca_mute_row`). `fader_row` is unchanged, so a VCA entry reaches no fader-only reader. New
+  accessors: `vca_offset_automation`, `vca_mute_automation` (per lane, first entry in table order;
+  the strip readers now share one `owner_row_automation` walk).
+- **Offset (D5).** `takes_offset` = `fader_row || route_gain_row || vca_offset_row`. The VCA row is
+  per lane, so `offset_faults` judges each driven lane against the row's own domain
+  (`[-144, 24]` dB, the fader domain); a lane the entry does not drive holds `+0.0`; the mute row
+  takes no offset.
+- **Owner rule (R17-1).** `registry::write` on an automated VCA `offset_db` lane writes that lane's
+  entry offset (`vca::write_offset`) and the static offset only on lanes no entry drives;
+  `vca::resolve` and the list read the offset as the row's value; both VCA rows list
+  `automated = true` on a driven lane (the `mute` row keeps its static hand mute as its value).
+  `OwnerEdits::set` on VCA row 1 clones the driving entries; `ModelView::vca_automation` reads the
+  edited entry. A member's own rows are not marked by a VCA ride.
+- **Mask.** `mask_fader_offsets` copies VCA-offset entry offsets (through `takes_offset`);
+  `mask_values` keeps `into`'s static offset on each automated VCA lane (fallback = structure),
+  and copies the rest of the VCA list (other lanes, mutes, members) as before.
+- **Event lanes.** `fader_event_lanes(model, strip, reach)` and `mute_event_lanes(model, strip,
+  reach)`: own entry on the row, or a reaching VCA with an entry on the matching VCA row and lane.
+  `reach` is the caller's VCA reach of the strip (`vca_reach` / `vca_reach_of`), so preparation and
+  the classifier, which already hold it, build no second table. The own-entry readers
+  (`fader_automation`, `model_fader_offsets`, `mask_fader_offsets`, the listing flags) stay
+  own-entry only.
+- **Reach rule.** `rendered_automation_changed` also returns `true` when, with equal rendered
+  entries, the strip IDs reached by some VCA that a rendered entry drives differ (inverse of
+  `SessionModel::vca_reach`, which reads a model in any strip order). No table is built when no
+  rendered entry is on a VCA row.
+- **`S` (D2).** `EffectiveInputs` gains `vca_offset(vca)` (the driving entries' hand offsets per
+  lane; `ModelInputs` precomputes it, `LocalInputs` reads the view). `effective_strip` sums: own
+  hand offset, then static offsets of reaching VCAs whose lane is not automated, then hand offsets
+  of those whose lane is, each in ascending VCA ID. With no VCA offset entry the second pass does
+  not run and `S` is today's sum. `fader_db` stays the static composition (a lane an automated VCA
+  reaches is a fader event lane, which takes no `FaderDb` record). Departure: none from the text;
+  `EffectiveInputs` is a public trait with no implementor outside the crate.
+- **Not in V0** (render tranche): `continued_fader_lanes` / `continued_mute_lanes` are not widened
+  to the reaching VCA tables (D6 carry).
+
+Gates (`crates/controls/tests/automation.rs`): `vca_rows_render_and_take_a_per_lane_offset`,
+`a_hand_move_on_an_automated_vca_offset_writes_its_offset` (whole and in-place paths, list flags,
+`S` on both effective paths), `the_mask_copies_a_vca_offset_and_keeps_its_fallback`,
+`event_lanes_take_the_own_entry_and_every_reaching_vca_ride` (lanes, rows, nesting, own-entry
+readers), `a_reach_change_of_an_automated_vca_rebuilds` (members added or removed, nesting, a
+non-automated VCA, a hand offset, the mute row), `the_offset_sum_puts_the_static_vca_offsets_first`
+(values `1, 2^-60, -1` that tell the two orders apart; no VCA offset automation and a VCA mute
+entry alone keep every bit of `S` and `fader_db`).
+
+Commands: `cargo test --locked -p controls` (all green), `cargo clippy --locked -p controls
+--all-targets --all-features -- -D warnings`, `cargo check --locked -p controls --all-targets`,
+`cargo test --locked -p host-core --features test-support` (467 passed),
+`--features test-support,control-provider` (587 passed), `cargo test --locked -p control-plane
+--features test-support` (28 passed). No red: no host-core or control-plane test edits a VCA
+automation entry or an automated VCA's reach today.
+
+For V1: a VCA automation edit and an automated VCA's reach change are now step 3 `Automation`
+(rebuild) in the classifier; a session whose only rendered entries are VCA entries now enters
+`prepare_fader_automation` (it builds no VCA cell yet; tests green); a hand move on an automated
+VCA offset diffs as a VCA row 1 change whose value is the offset and moves `S` of each reached
+lane, which host-core lowers only on lanes that have an offsets cell until V1 gives every event
+lane one.

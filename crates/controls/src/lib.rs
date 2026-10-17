@@ -47,9 +47,11 @@ mod view;
 pub use automation::{
     CellRule, ControlDiagnostic, FADER_CELL_RULE, MUTE_CELL_RULE, automated_cell,
     automated_fader_lanes, automation_diagnostics, automation_row_renders, continued_fader_lanes,
-    continued_mute_lanes, continued_route_rows, fader_automation, fader_row,
-    filter_statics_changed_under_automation, filter_under_automation, mute_automation, mute_row,
-    rendered_automation_changed, route_automation, route_gain_row, route_row, stored_segments,
+    continued_mute_lanes, continued_route_rows, fader_automation, fader_event_lanes, fader_row,
+    filter_statics_changed_under_automation, filter_under_automation, mute_automation,
+    mute_event_lanes, mute_row, rendered_automation_changed, route_automation, route_gain_row,
+    route_row, stored_segments, vca_mute_automation, vca_mute_row, vca_offset_automation,
+    vca_offset_row,
 };
 pub use descriptor::{
     AutomationRule, Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, check,

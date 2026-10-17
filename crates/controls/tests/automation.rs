@@ -1150,3 +1150,441 @@ fn the_mask_copies_a_send_offset_and_keeps_its_fallback() {
         assert_eq!(route.channel_matrix.lr, 0.5);
     }
 }
+
+const VCA_OFFSET_DB: u32 = 1;
+const VCA_MUTE: u32 = 2;
+
+fn vca_own(vca: &str, control: u32, lane: Lane) -> ControlAddress {
+    address(Owner::Vca(id(vca)), Section::Own, control, lane)
+}
+
+fn vca(name: &str, offset: [f32; 2], members: &[&str]) -> session::Vca {
+    session::Vca {
+        id: id(name),
+        fader: session::DualMonoFader {
+            left_db: offset[0],
+            right_db: offset[1],
+            left_mute: false,
+            right_mute: false,
+        },
+        members: members.iter().map(|member| id(member)).collect(),
+    }
+}
+
+/// The fixture with VCA `riders` (over `vocal`) ridden on its left `offset_db` lane (`ride`, hand
+/// offset `0`) and stepped on both `mute` lanes (`steps`).
+fn ridden_vca() -> SessionModel {
+    let mut model = effects_fixture();
+    model.automation = vec![
+        one(
+            "ride",
+            vca_own("riders", VCA_OFFSET_DB, Lane::Left),
+            ParameterUnit::Db,
+            -6.0,
+        ),
+        one(
+            "steps",
+            vca_own("riders", VCA_MUTE, Lane::Both),
+            ParameterUnit::Linear,
+            1.0,
+        ),
+    ];
+    model
+}
+
+/// #1655 D5, D6: a VCA's rows 1 and 2 render ([`controls::automation_row_renders`]), and its
+/// `offset_db` takes a per-lane hand-move offset in the fader domain: a `both` entry may hold two
+/// different offsets (unlike a send's shared gain), a lane the entry does not drive holds `+0.0`,
+/// an offset outside `[-144, 24]` dB is `control.domain`, and the `mute` row takes none.
+///
+/// Red if the VCA rows stay masked from rendering, if the VCA offset takes no offset (the accepted
+/// cases are refused), or if the lane or domain rule is missing on the VCA row.
+#[test]
+fn vca_rows_render_and_take_a_per_lane_offset() {
+    use controls::{automation_row_renders, fader_row, vca_mute_row, vca_offset_row};
+    for lane in [Lane::Left, Lane::Right, Lane::Both] {
+        let offset = vca_own("riders", VCA_OFFSET_DB, lane);
+        let mute = vca_own("riders", VCA_MUTE, lane);
+        assert!(vca_offset_row(&offset) && automation_row_renders(&offset));
+        assert!(vca_mute_row(&mute) && automation_row_renders(&mute));
+        assert!(!vca_offset_row(&mute) && !vca_mute_row(&offset));
+        assert!(!fader_row(&offset), "a VCA ride is not a strip's fader");
+    }
+    let ride = |name: &str, lane: Lane| {
+        one(
+            name,
+            vca_own("riders", VCA_OFFSET_DB, lane),
+            ParameterUnit::Db,
+            -3.0,
+        )
+    };
+    for accepted in [
+        with_offset(ride("both", Lane::Both), 3.0, -6.0),
+        with_offset(ride("left", Lane::Left), 24.0, 0.0),
+        with_offset(ride("right", Lane::Right), 0.0, -144.0),
+    ] {
+        let name = accepted.id.as_str().to_owned();
+        assert_eq!(judged(vec![accepted]), [], "{name}");
+    }
+    let refused = [
+        (
+            with_offset(ride("left-right", Lane::Left), 0.0, 1.0),
+            "control.automation.offset",
+            ".offset.right_db",
+        ),
+        (
+            with_offset(ride("above", Lane::Both), 0.0, 24.5),
+            "control.domain",
+            ".offset.right_db",
+        ),
+        (
+            with_offset(
+                one(
+                    "mute",
+                    vca_own("riders", VCA_MUTE, Lane::Left),
+                    ParameterUnit::Linear,
+                    1.0,
+                ),
+                1.0,
+                0.0,
+            ),
+            "control.automation.offset",
+            ".offset.left_db",
+        ),
+    ];
+    for (entry, code, suffix) in refused {
+        let name = entry.id.as_str().to_owned();
+        assert_eq!(
+            judged(vec![entry]),
+            [(code, format!("$.automation[id={name}]{suffix}"))],
+            "{name}"
+        );
+    }
+}
+
+/// #1655 D5 and R17-1 at the controls level: a `SET_CONTROL` on an automated VCA `offset_db` lane
+/// writes the driving entry's offset of that lane and leaves the static offset (the fallback); a
+/// lane no entry drives keeps the static write; `get` and the list report the offset with
+/// `automated = true`. A hand VCA mute on an automated mute lane stays the static (hand) mute,
+/// listed `automated`. The member's own rows are not marked. The in-place path
+/// ([`controls::OwnerEdits`], read through [`controls::ModelView`]) gives the dense model, the
+/// dense rows and the dense effective `S`.
+///
+/// Red if a hand move on an automated VCA offset writes the static offset (acked, never heard), if
+/// it writes the lane the entry does not drive, if the list hides the offset or the flag, if a VCA
+/// ride marks its member's own fader as automated, or if the in-place path does not clone the
+/// entry with the VCA.
+#[test]
+fn a_hand_move_on_an_automated_vca_offset_writes_its_offset() {
+    use controls::{
+        LocalEffective, ModelView, MonitorOverlay, OwnerEdits, effective, get, owner_index,
+        owner_rows_in, owner_rows_with, set,
+    };
+    let committed = ridden_vca();
+    let left = vca_own("riders", VCA_OFFSET_DB, Lane::Left);
+    let right = vca_own("riders", VCA_OFFSET_DB, Lane::Right);
+    let mute = vca_own("riders", VCA_MUTE, Lane::Left);
+    let riders = |model: &SessionModel| model.vcas[0].clone();
+    let static_left = riders(&committed).fader.left_db;
+
+    let mut whole = committed.clone();
+    set(&mut whole, &left, 3.0, None, RATE).expect("left");
+    set(&mut whole, &right, -1.0, None, RATE).expect("right");
+    set(&mut whole, &mute, 0.0, None, RATE).expect("mute");
+    assert_eq!(whole.automation[0].offset.left_db, 3.0);
+    assert_eq!(
+        whole.automation[0].offset.right_db.to_bits(),
+        0.0f32.to_bits()
+    );
+    assert_eq!(
+        riders(&whole).fader.left_db.to_bits(),
+        static_left.to_bits()
+    );
+    assert_eq!(riders(&whole).fader.right_db, -1.0);
+    assert!(
+        !riders(&whole).fader.left_mute,
+        "the hand mute is the static mute"
+    );
+    let overlay = MonitorOverlay::default();
+    assert_eq!(get(&whole, &overlay, &left, RATE), Ok(3.0));
+    let left_row = common::row_of(&whole, &left);
+    assert!(left_row.automated && left_row.value == 3.0);
+    let right_row = common::row_of(&whole, &right);
+    assert!(!right_row.automated && right_row.value == -1.0);
+    let mute_row = common::row_of(&whole, &mute);
+    assert!(mute_row.automated && mute_row.value == 0.0);
+    let member = common::row_of(&whole, &strip_builtin("vocal", FADER_DB, Lane::Left));
+    assert!(!member.automated, "the member's own fader is not automated");
+
+    // The in-place path: the same writes on the owners model.
+    let mut edits = OwnerEdits::new(&committed);
+    edits.set(&left, 3.0, None, RATE).expect("in-place left");
+    edits.set(&right, -1.0, None, RATE).expect("in-place right");
+    edits.set(&mute, 0.0, None, RATE).expect("in-place mute");
+    let (owners, slots) = edits.finish();
+    assert_eq!(owners.automation.len(), 1, "the ride alone is cloned");
+    assert_eq!(slots.automation, [(0, 0)]);
+    let view = ModelView::edited(&committed, &owners);
+    assert_eq!(view.to_model(), whole);
+    assert_eq!(
+        view.vca_automation(&id("riders"))[0].map(|entry| entry.offset.left_db),
+        Some(3.0)
+    );
+    let owner = owner_index(&committed, &Owner::Vca(id("riders"))).expect("riders");
+    let dense = effective(&whole, &overlay);
+    let (mut dense_rows, mut view_rows) = (Vec::new(), Vec::new());
+    owner_rows_with(&whole, &dense, &overlay, owner, RATE, &mut dense_rows);
+    owner_rows_in(view, &dense, &overlay, owner, RATE, &mut view_rows);
+    assert_eq!(view_rows, dense_rows);
+    // `S` of the member reads the edited offset on the in-place path too.
+    let local = LocalEffective::new(view, &overlay);
+    let vocal = controls::strip_index(&whole, &id("vocal")).expect("vocal");
+    assert_eq!(
+        local.strip(vocal).offsets_sum.map(f64::to_bits),
+        dense.strips[vocal].offsets_sum.map(f64::to_bits)
+    );
+    assert_eq!(
+        dense.strips[vocal].offsets_sum[0], 3.0,
+        "S holds the hand offset"
+    );
+}
+
+/// #1655 mask treatment: [`controls::mask_values`] copies a VCA-offset entry's offset as a control
+/// value and keeps the static offset of an automated VCA lane as structure (its fallback), while
+/// the lane no entry drives, the VCA mutes (a hand mute ORs) and the members stay control values.
+///
+/// Red if a VCA offset change is seen as structure (a live hand move would rebuild), or if a change
+/// of an automated VCA lane's static offset is hidden as a value (it would never rebuild).
+#[test]
+fn the_mask_copies_a_vca_offset_and_keeps_its_fallback() {
+    use controls::mask_values;
+    let mut from = ridden_vca();
+    from.automation[0].offset.left_db = 2.0;
+    from.vcas[0].fader.left_db = -9.0;
+    from.vcas[0].fader.right_db = -9.0;
+    from.vcas[0].fader.left_mute = false;
+    from.vcas[0].members.push(id("guitar"));
+    let mut into = ridden_vca();
+    let kept = into.vcas[0].fader.left_db;
+    mask_values(&mut into, &from);
+    assert_eq!(into.automation[0].offset.left_db, 2.0);
+    assert_eq!(into.vcas[0].fader.left_db.to_bits(), kept.to_bits());
+    assert_eq!(into.vcas[0].fader.right_db, -9.0);
+    assert!(!into.vcas[0].fader.left_mute);
+    assert_eq!(into.vcas[0].members, from.vcas[0].members);
+}
+
+/// #1655 batch 19 amendment, event lanes: [`controls::fader_event_lanes`] holds on a lane whose own
+/// fader is automated or that an automated VCA `offset_db` lane reaches (directly or through a
+/// nested VCA; lane `l` to lane `l`), and [`controls::mute_event_lanes`] by the same rule on the
+/// mute rows. A VCA ride reaches no own-entry reader: [`controls::fader_automation`] and the
+/// member's `fader_offset` stay empty.
+///
+/// Red if the predicate misses a VCA ride (the member would render no VCA curve), takes it across
+/// lanes or rows (an offset ride making a mute event lane), ignores nesting, or if a VCA ride leaks
+/// into a member's own-entry reader.
+#[test]
+fn event_lanes_take_the_own_entry_and_every_reaching_vca_ride() {
+    use controls::{
+        MonitorOverlay, effective, fader_automation, fader_event_lanes, mute_event_lanes,
+    };
+    let mut model = effects_fixture();
+    model.vcas = vec![
+        vca("outer", [0.0, 0.0], &["riders"]),
+        vca("riders", [0.0, 0.0], &["vocal"]),
+    ];
+    let lanes = |model: &SessionModel, strip: &str| {
+        let strip = id(strip);
+        let reach = model.vca_reach_of(&strip);
+        (
+            fader_event_lanes(model, &strip, &reach),
+            mute_event_lanes(model, &strip, &reach),
+        )
+    };
+    assert_eq!(lanes(&model, "vocal"), ([false; 2], [false; 2]));
+
+    // A VCA offset ride on the right lane: vocal's right fader lane, nothing else.
+    model.automation = vec![one(
+        "ride",
+        vca_own("riders", VCA_OFFSET_DB, Lane::Right),
+        ParameterUnit::Db,
+        -6.0,
+    )];
+    assert_eq!(lanes(&model, "vocal"), ([false, true], [false; 2]));
+    assert_eq!(lanes(&model, "guitar"), ([false; 2], [false; 2]));
+    assert_eq!(fader_automation(&model, &id("vocal")), [None, None]);
+    let strip = effective(&model, &MonitorOverlay::default()).strips[0];
+    assert_eq!(strip.fader_offset, [None, None]);
+
+    // A nested VCA's mute steps on the left lane, and the strip's own left fader ride.
+    model.automation.push(one(
+        "steps",
+        vca_own("outer", VCA_MUTE, Lane::Left),
+        ParameterUnit::Linear,
+        1.0,
+    ));
+    model.automation.push(one(
+        "own",
+        strip_builtin("vocal", FADER_DB, Lane::Left),
+        ParameterUnit::Db,
+        -6.0,
+    ));
+    assert_eq!(lanes(&model, "vocal"), ([true, true], [true, false]));
+    assert_eq!(lanes(&model, "guitar"), ([false; 2], [false; 2]));
+
+    // The strip's own mute entry alone.
+    model.automation = vec![one(
+        "own-mute",
+        strip_builtin("guitar", MUTE, Lane::Right),
+        ParameterUnit::Linear,
+        1.0,
+    )];
+    assert_eq!(lanes(&model, "guitar"), ([false; 2], [false, true]));
+}
+
+/// #1655 D5 (root's ruling of 2026-10-14): with equal rendered entries,
+/// [`controls::rendered_automation_changed`] is `true` when the strips an automated VCA reaches
+/// differ (a member added or removed, a nesting edit that reaches another strip), and `false` for a
+/// reach change of a VCA no rendered entry drives, a nesting edit that reaches no other strip, and
+/// a hand offset change.
+///
+/// Red if an automated VCA's membership edit commits live (no event state for the new pair), or if
+/// a non-automated VCA's edit or a hand move rebuilds (D15-6's live set narrowed beyond the
+/// ruling).
+#[test]
+fn a_reach_change_of_an_automated_vca_rebuilds() {
+    use controls::rendered_automation_changed;
+    let mut current = ridden_vca();
+    current.automation.truncate(1);
+    current.vcas.push(vca("plain", [0.0, 0.0], &["guitar"]));
+    let changed = |edit: &dyn Fn(&mut SessionModel)| {
+        let mut next = current.clone();
+        edit(&mut next);
+        rendered_automation_changed(&current, &next)
+    };
+    assert!(!changed(&|_| {}));
+    // The automated VCA: a member added, a member removed, a nested VCA that reaches guitar.
+    assert!(changed(&|next| next.vcas[0].members.push(id("guitar"))));
+    assert!(changed(&|next| next.vcas[0].members.clear()));
+    assert!(changed(&|next| next.vcas[0].members.push(id("plain"))));
+    // A VCA no entry drives: its members, a parent over the automated VCA (riders' own reach is
+    // unchanged), and a hand offset change.
+    assert!(!changed(&|next| next.vcas[1].members.push(id("vocal"))));
+    assert!(!changed(&|next| next.vcas[1].members.push(id("riders"))));
+    assert!(!changed(&|next| next.automation[0].offset.left_db = 3.0));
+    // The mute row counts too.
+    current.automation = vec![one(
+        "steps",
+        vca_own("riders", VCA_MUTE, Lane::Both),
+        ParameterUnit::Linear,
+        1.0,
+    )];
+    let mut next = current.clone();
+    next.vcas[0].members.push(id("guitar"));
+    assert!(rendered_automation_changed(&current, &next));
+}
+
+/// #1655 D2 (root's ruling of 2026-10-14, class B order): on a member lane, `S` is the lane's own
+/// hand offset, then the static offsets of the reaching VCAs whose lane is not automated, then the
+/// hand offsets of the automated ones, each group in ascending VCA ID. The values are chosen so
+/// the two orders give different `f64` bits: VCA `a` (static `1`), `b` (automated, hand
+/// `2^-60`), `c` (static `-1`). `fader_db` stays the static composition. With no VCA offset
+/// automation (none, or a VCA mute entry only) every composed value keeps the bits of the
+/// ascending-ID sum, and the in-place path agrees with the dense one.
+///
+/// Red if the automated VCA's static offset (its fallback) enters `S`, if the hand offsets are
+/// summed in ID order among the statics, or if a session without VCA offset automation moves a
+/// bit of `S` or of the effective fader.
+#[test]
+fn the_offset_sum_puts_the_static_vca_offsets_first() {
+    use controls::{LocalEffective, ModelView, MonitorOverlay, effective};
+    use session::VcaSum;
+    let tiny = f32::from_bits(0x2180_0000); // 2^-60
+    assert_eq!(f64::from(tiny).to_bits(), 0x3C30_0000_0000_0000); // 2^-60
+    let mut model = effects_fixture();
+    model.vcas = vec![
+        vca("a", [1.0, 1.0], &["vocal"]),
+        vca("b", [-12.0, 5.0], &["vocal"]),
+        vca("c", [-1.0, -1.0], &["vocal"]),
+    ];
+    let overlay = MonitorOverlay::default();
+    let vocal = controls::strip_index(&model, &id("vocal")).expect("vocal");
+    let ascending = |values: [f32; 3]| {
+        let mut sum = VcaSum::new();
+        values.into_iter().for_each(|value| sum.add(value));
+        sum
+    };
+
+    // No VCA automation: S and the fader are the ascending-ID sum, bit for bit.
+    let base = effective(&model, &overlay).strips[vocal];
+    for (lane, b) in [-12.0, 5.0].into_iter().enumerate() {
+        let sum = ascending([1.0, b, -1.0]);
+        let own = &model.tracks[vocal].fader;
+        let own = [own.left_db, own.right_db][lane];
+        assert_eq!(
+            base.offsets_sum[lane].to_bits(),
+            sum.sum().unwrap().to_bits()
+        );
+        assert_eq!(base.fader_db[lane].to_bits(), sum.compose(own).to_bits());
+    }
+    // A VCA mute entry alone moves no bit.
+    let mut muted = model.clone();
+    muted.automation = vec![one(
+        "steps",
+        vca_own("b", VCA_MUTE, Lane::Both),
+        ParameterUnit::Linear,
+        1.0,
+    )];
+    assert_eq!(effective(&muted, &overlay).strips[vocal], base);
+
+    // `b` ridden on the left lane with hand offset 2^-60.
+    let mut ridden = model.clone();
+    ridden.automation = vec![with_offset(
+        one(
+            "ride",
+            vca_own("b", VCA_OFFSET_DB, Lane::Left),
+            ParameterUnit::Db,
+            -6.0,
+        ),
+        tiny,
+        0.0,
+    )];
+    let strip = effective(&ridden, &overlay).strips[vocal];
+    let d2 = ascending([1.0, -1.0, tiny]).sum().unwrap();
+    let id_order = ascending([1.0, tiny, -1.0]).sum().unwrap();
+    assert_ne!(
+        d2.to_bits(),
+        id_order.to_bits(),
+        "the values tell the orders apart"
+    );
+    assert_eq!(strip.offsets_sum[0].to_bits(), d2.to_bits());
+    assert_eq!(
+        strip.offsets_sum[1].to_bits(),
+        base.offsets_sum[1].to_bits(),
+        "the right lane is not ridden"
+    );
+    assert_eq!(
+        strip.fader_db.map(f32::to_bits),
+        base.fader_db.map(f32::to_bits)
+    );
+    let local = LocalEffective::new(ModelView::whole(&ridden), &overlay).strip(vocal);
+    assert_eq!(local, strip);
+
+    // With the member's own fader ridden too, its hand offset comes first.
+    ridden.automation.push(with_offset(
+        one(
+            "own",
+            strip_builtin("vocal", FADER_DB, Lane::Left),
+            ParameterUnit::Db,
+            -6.0,
+        ),
+        0.5,
+        0.0,
+    ));
+    let strip = effective(&ridden, &overlay).strips[vocal];
+    let mut sum = VcaSum::new();
+    [0.5, 1.0, -1.0, tiny]
+        .into_iter()
+        .for_each(|value| sum.add(value));
+    assert_eq!(strip.offsets_sum[0].to_bits(), sum.sum().unwrap().to_bits());
+}
