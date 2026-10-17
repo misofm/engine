@@ -837,7 +837,7 @@ batch 9 head").
 | #1628 | `.github/ISSUE_SPECS/1628-retire-the-automation-canceled-event.md` | Retire the AUTOMATION_CANCELED event and the cancellation path | #1627 | P1 |
 | #1629 | `.github/ISSUE_SPECS/1629-delete-the-protocol-automation-queue.md` | Delete the protocol automation queue, its records and counters | #1628 | P1 |
 | #1668 | `.github/ISSUE_SPECS/1668-reserve-the-c-abi-automation-span-limit.md` | Reserve the C ABI's automation span limit | #1629, #1306 | P2 |
-| #1669 | `.github/ISSUE_SPECS/1669-compare-stored-automation-across-browser-and-native.md` | Compare stored automation bits across the browser and native hosts | #1653, #1657, #1658, #1660, #1667, #1399 | Q |
+| #1669 | `.github/ISSUE_SPECS/1669-compare-stored-automation-across-browser-and-native.md` | Compare stored automation bits across the browser and native hosts (narrowed 2026-10-17 to the delivered rows; pan, trim, filters, EQ and the matrix fixture are phase 2) | #1653, #1655, #1399 | Q |
 | #1670 | `.github/ISSUE_SPECS/1670-compare-stored-automation-on-aarch64-and-across-seeks.md` | Compare stored automation bits on AArch64 and across seek times | #1669, #1019 | Q |
 | #1671 | `.github/ISSUE_SPECS/1671-build-the-stored-automation-console-benchmark-row.md` | Build the stored-automation console benchmark row | #1667 | Q |
 | #1672 | `.github/ISSUE_SPECS/1672-record-the-stored-automation-console-benchmark-baseline.md` | Record the stored-automation console benchmark baseline | #1671 | Q |

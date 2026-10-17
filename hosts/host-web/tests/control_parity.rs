@@ -7501,3 +7501,83 @@ fn the_reach_pair_cap_bounds_vca_automation_alike_on_both_hosts() {
         b"host.resource.vca_reach_pairs\t$\n".to_vec()
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The #1669 automation fixture across one session seek (D4)
+// ---------------------------------------------------------------------------------------------
+
+/// `tests/browser-v1/automation-session.json` (the strip fader, strip mute, VCA offset and VCA
+/// mute, with a following and a non-following send) runs the #1669 D2 transcript on the browser
+/// host and the C ABI: 96 blocks, one plain session seek to timeline 30,000 under generation 2
+/// before block 40, one chunk per source before every render. Every block's two planes have the
+/// same bits.
+///
+/// Test value: red if the two hosts prepare the whole automation fixture differently or land its
+/// session seek differently; the only other cross-host seek case automates the mute row alone, and
+/// the VCA cases do not seek.
+#[cfg(feature = "test-support")]
+#[test]
+fn the_automation_fixture_renders_alike_on_both_hosts_across_one_session_seek() {
+    const BLOCKS: u64 = 96;
+    const SEEK_BLOCK: u64 = 40;
+    const SEEK_TIMELINE: u64 = 30_000;
+    // The D2 PCM, `((f*m) mod 65536 - 32768) / 65536`, exact in `f32`, per source and lane.
+    const SOURCES: [(&str, [u32; 2]); 2] =
+        [("src-t1", [40_503, 30_011]), ("src-t2", [52_153, 18_749])];
+    let pcm = |frame: u64, multiplier: u32| -> f32 {
+        let frame = u32::try_from(frame).expect("frame fits u32");
+        let residue = (frame.wrapping_mul(multiplier) & 0xffff) as i32 - 32_768;
+        residue as f32 / 65_536.0
+    };
+
+    let document = include_str!("browser-v1/automation-session.json");
+    let model = session::parse_session_json(document).expect("the automation fixture");
+    let mut browser = Rig::boot(document.as_bytes(), model.sample_rate_hz);
+    let mut c_abi = CAbi::new(&model);
+    let plane = QUANTUM as usize;
+    for block in 0..BLOCKS {
+        if block == SEEK_BLOCK {
+            assert_eq!(
+                browser.host.session_seek(None, 2, SEEK_TIMELINE, None),
+                host_web::RESULT_OK,
+                "browser session seek"
+            );
+            c_abi.session_seek(2, SEEK_TIMELINE, None);
+        }
+        let (generation, start) = if block < SEEK_BLOCK {
+            (1, block * u64::from(QUANTUM))
+        } else {
+            (2, SEEK_TIMELINE + (block - SEEK_BLOCK) * u64::from(QUANTUM))
+        };
+        for (source, multipliers) in SOURCES {
+            let [left, right] = multipliers.map(|multiplier| {
+                (start..start + u64::from(QUANTUM))
+                    .map(|frame| pcm(frame, multiplier))
+                    .collect::<Vec<f32>>()
+            });
+            assert_eq!(
+                browser.host.submit_source(
+                    source.as_bytes(),
+                    generation,
+                    start,
+                    model.sample_rate_hz,
+                    &[&left, &right],
+                    QUANTUM,
+                    false,
+                ),
+                host_web::RESULT_OK,
+                "block {block}: browser source {source}"
+            );
+            c_abi.submit_planes(source, generation, start, [&left, &right]);
+        }
+        assert_eq!(
+            browser.host.render_next(),
+            host_web::RESULT_OK,
+            "block {block}: browser render"
+        );
+        let b = bits(browser.host.output_pcm().expect("browser output"));
+        let c = c_abi.render(block);
+        assert_eq!(b[..plane], c[..plane], "block {block}: left plane bits");
+        assert_eq!(b[plane..], c[plane..], "block {block}: right plane bits");
+    }
+}

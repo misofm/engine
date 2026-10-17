@@ -119,3 +119,25 @@ automation into per-cell events in node time* arrive through #1669.
 Checked against `12d4a4f9d`.
 
 - No design change. It inherits #1669's added rows. #1019 is still open. Anchors re-read at filing.
+
+## Amendment (controls coordinator, batch 20, 2026-10-17)
+
+Checked against `e7722bd19`. The owner narrowed #1669 to the rows that render today (see #1669's
+batch 20 amendment).
+
+- #1669 adds one fixture, `automation-session.json`, one pin test,
+  `native_automation_timeline_digest_pins_the_wasm_parity`, and one pin,
+  `directOracle.nativeAutomationPcmF32leSha256`. There is no `automation-matrix-session.json`.
+  Read "the two automation pin tests", "both fixtures" and "the two pins" in this issue as these
+  single items.
+- D1 and D2 use #1669's narrowed transcript: 96 blocks of 128 frames, a plain session seek to
+  timeline 30,000 at block 40, generation 2.
+- The matrix fixture and the rows that #1657, #1658, #1660 and #1667 add are phase-2 extensions,
+  as in #1669.
+- The narrowed fixture has no insert, so D2's "equal from 256 samples after" bound (a delay's
+  held jump plus its crossfade) does not apply. The longest ramp a seek leaves is a mute hold
+  (`mute_ms`, 480 samples) followed by a fader ramp to the curve (`fader_ms`, 960 samples), so
+  the bound is 1,440 samples after the seek at 48 kHz (`docs/SESSION_SCHEMA_V1.md`, the
+  fader-row paragraph). A pre-seek unmute ramp still running at the seek carries across it, as
+  documented. Read "five pin tests" in gate 1 and the hazards as four. The LANE-3 compressor and
+  limiter hazard does not apply: the narrowed fixture has no insert.

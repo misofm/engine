@@ -130,6 +130,23 @@
       "unboundReason": 7,
       "pcmF32leSha256": "4d1412f875886235dd9295ebfb109dfd54a63004eeea6615b7c8711dbc2203e5"
     },
-    "nativeObservationPcmF32leSha256": "4d1412f875886235dd9295ebfb109dfd54a63004eeea6615b7c8711dbc2203e5"
+    "nativeObservationPcmF32leSha256": "4d1412f875886235dd9295ebfb109dfd54a63004eeea6615b7c8711dbc2203e5",
+    "automationTimeline": {
+      "blocks": 96,
+      "seekBlock": 40,
+      "seekTimelineSample": 30000,
+      "beforeDisposeStatus": {
+        "state": 2,
+        "lastResult": 0,
+        "backend": 1,
+        "sampleRateHz": 48000,
+        "quantumFrames": 128,
+        "nextAbsoluteSample": "12288",
+        "renderedQuanta": "96",
+        "memoryBytes": 2949120
+      },
+      "pcmF32leSha256": "a81d883b3f83eaf629bd78db149d1a39825c821c6cb2e9a53506341a97ed1363"
+    },
+    "nativeAutomationPcmF32leSha256": "a81d883b3f83eaf629bd78db149d1a39825c821c6cb2e9a53506341a97ed1363"
   }
 }

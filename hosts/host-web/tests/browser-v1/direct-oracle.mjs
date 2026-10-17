@@ -461,6 +461,71 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
   };
 }
 
+/// Issue #1669 D2/D3: the stored-automation timeline, through the shipped artifact. The same
+/// session, source feed and seek the native twin
+/// (`tests::native_automation_timeline_digest_pins_the_wasm_parity`) runs.
+///
+/// `automation-session.json` automates the strip fader, the strip mute, the VCA offset and the VCA
+/// mute, with a following and a non-following send. 96 blocks; before block 40 one plain session
+/// seek to timeline 30,000 under generation 2. Before every render each source gets exactly one
+/// 128-frame chunk (the ring holds one quantum): generation 1 from `k*128` before the seek,
+/// generation 2 from `30000 + (k-40)*128` after it. The PCM at source frame `f` is
+/// `((f*m) mod 65536 - 32768) / 65536`, exact in `f32`.
+const AUTOMATION_BLOCKS = 96;
+const AUTOMATION_SEEK_BLOCK = 40;
+const AUTOMATION_SEEK_TIMELINE = 30000;
+const AUTOMATION_SOURCES = [["src-t1", [40503, 30011]], ["src-t2", [52153, 18749]]];
+async function runAutomationTimeline(modulePath, sessionDocument) {
+  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
+  const exports = instance.exports;
+  const handle = boot(exports, sessionDocument);
+
+  // The seek is control work and may grow the memory, so the buffers are re-read at every use.
+  const feed = (sourceId, multipliers, generation, start) => {
+    const id = new TextEncoder().encode(sourceId);
+    const idPointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID);
+    new Uint8Array(exports.memory.buffer, idPointer, id.byteLength).set(id);
+    const pcmPointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_PCM);
+    const pcm = new Float32Array(exports.memory.buffer, pcmPointer, QUANTUM * 2);
+    multipliers.forEach((multiplier, lane) => {
+      for (let index = 0; index < QUANTUM; index += 1) {
+        const residue = (Math.imul(start + index, multiplier) >>> 0) & 0xffff;
+        pcm[lane * QUANTUM + index] = (residue - 32768) / 65536;
+      }
+    });
+    return exports.miso_engine_web_v1_source_submit(
+      handle, id.byteLength, BigInt(generation), BigInt(start), 2, QUANTUM, 0,
+    );
+  };
+  const blocks = [];
+  for (let block = 0; block < AUTOMATION_BLOCKS; block += 1) {
+    if (block === AUTOMATION_SEEK_BLOCK) {
+      assert.equal(
+        exports.miso_engine_web_v1_session_seek(handle, 2n, BigInt(AUTOMATION_SEEK_TIMELINE)),
+        0,
+        "the session seek",
+      );
+    }
+    const [generation, start] = block < AUTOMATION_SEEK_BLOCK
+      ? [1, block * QUANTUM]
+      : [2, AUTOMATION_SEEK_TIMELINE + (block - AUTOMATION_SEEK_BLOCK) * QUANTUM];
+    for (const [sourceId, multipliers] of AUTOMATION_SOURCES) {
+      assert.equal(feed(sourceId, multipliers, generation, start), 0, `block ${block} submit`);
+    }
+    blocks.push(render(exports, handle));
+  }
+  const beforeDisposeStatus = status(exports, handle);
+  const pcm = [blocks.flatMap((block) => block[0]), blocks.flatMap((block) => block[1])];
+  assert.equal(exports.miso_engine_web_v1_dispose(handle), 0);
+  return {
+    blocks: AUTOMATION_BLOCKS,
+    seekBlock: AUTOMATION_SEEK_BLOCK,
+    seekTimelineSample: AUTOMATION_SEEK_TIMELINE,
+    beforeDisposeStatus,
+    pcmF32leSha256: pcmSha256(pcm),
+  };
+}
+
 async function main() {
   if (process.argv.length !== 4) {
     throw new Error("usage: direct-oracle.mjs ARTIFACT_DIRECTORY EXPECTED_JSON");
@@ -573,6 +638,23 @@ async function main() {
     observed.pcmF32leSha256,
     nativeObservation,
     "native and simd128 must render this observation timeline to identical bits",
+  );
+  // Issue #1669 D3: the stored-automation timeline, pinned the same way and asserted before any
+  // print.
+  actual.automationTimeline = await runAutomationTimeline(
+    artifact, await readFile(path.join(fixtureDirectory, "automation-session.json")),
+  );
+  const nativeAutomation = expected.directOracle?.nativeAutomationPcmF32leSha256;
+  assert.equal(
+    typeof nativeAutomation,
+    "string",
+    "expected.json must carry the native automation-timeline digest pin",
+  );
+  actual.nativeAutomationPcmF32leSha256 = nativeAutomation;
+  assert.equal(
+    actual.automationTimeline.pcmF32leSha256,
+    nativeAutomation,
+    "native and simd128 must render this automation timeline to identical bits",
   );
   if (process.env.MISO_ENGINE_WEB_ORACLE_PRINT === "1") {
     process.stdout.write(`${JSON.stringify(actual, null, 2)}\n`);
