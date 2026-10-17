@@ -1,7 +1,7 @@
 # Decide how adoption treats a rounding-only table difference
 
-Placeholder from batch 19 (#1711 F2 and F3/F4 decision records; controls coordinator, 2026-10-17).
-Phase 2. Root files it.
+Filed by root from batch 19 (#1711 F2 and F3/F4 decision records; controls coordinator, 2026-10-17).
+Phase 2.
 
 ## Product outcome
 
