@@ -3016,17 +3016,23 @@ fn a_hand_move_in_flight_across_a_table_only_rebuild_completes_exactly_alike_on_
 }
 
 /// #1711 G2 across hosts: on a fader ride flat at -3 dB, a hand move with its own 4,000 samples
-/// heard 3 blocks, then a table-only rebuild to -5 dB (the move's target moves): the adoption
-/// defers the cell's jump to the move's first free sample on both hosts alike, through the one
-/// shared driver. Both hosts give one verdict and reply per edit and render the same bits in every
-/// block, through the move's end and the deferred jump over the fader length, and the rebuild
-/// completes exactly on both (`OUTCOME_EXACT`, no transition fallback; #1711 D2).
+/// heard 3 blocks, then a table-only rebuild to -5 dB up to 20,000, then -3 dB (the move's target
+/// moves; the rebuild keeps the hand move's stored offset, R17-1): the adoption defers the cell's
+/// jump to the move's first free sample (4,512) on both hosts alike, through the one shared
+/// driver. Both hosts give one verdict, reply and committed document per edit, render the same
+/// bits in every block, through the move's end and the deferred jump over the fader length, and
+/// the rebuild completes exactly on both (`OUTCOME_EXACT`, no transition fallback; #1711 D2).
+/// Every block before the one holding 4,512 equals a pair that takes the same move and no
+/// rebuild (the move keeps its own ramp), and a later block differs from it (the jump is heard).
 ///
 /// Test value: red if either host adopts the moved target differently (an adapter-local rule, or
-/// a browser successor that does not carry the stage's ramp the deferral waits for).
+/// a browser successor that does not carry the stage's ramp the deferral waits for), or if the
+/// shared adoption does not defer the jump to the move's first free sample (it lands at the swap,
+/// or the grid cuts the move short).
 #[test]
 fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
-    let ride = |pieces: &[(u64, u64, f32)]| SessionEdit::UpsertAutomation {
+    const FREE: u64 = 4 * QUANTUM as u64 + 4_000;
+    let ride = |pieces: &[(u64, u64, f32)], offset| SessionEdit::UpsertAutomation {
         automation: session::Automation {
             id: id("t1-fader-ride"),
             target: address(
@@ -3044,6 +3050,283 @@ fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
                     start_value: db,
                     end_value: db,
                     unit: session::ParameterUnit::Db,
+                })
+                .collect(),
+            offset,
+        },
+    };
+    let none = session::AutomationOffset::default();
+    let hand = CAbi::edits(
+        Edit::Fader {
+            strip: T1,
+            lanes: Lanes::Both,
+            db: -6.0,
+        },
+        Some(4_000),
+    );
+    for rate in RATES {
+        let model = model_at(rate);
+        let (mut browser, mut c_abi) = (Rig::new(&model), CAbi::new(&model));
+        let (mut browser_r, mut c_abi_r) = (Rig::new(&model), CAbi::new(&model));
+        let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi, label: &str| {
+            let (b, b_reply) = browser.transaction_reply(edits);
+            let (c, c_reply) = c_abi.transaction(edits);
+            assert_eq!(b, c, "{rate} Hz, {label}: one verdict");
+            assert_eq!(b_reply, c_reply, "{rate} Hz, {label}: one reply");
+        };
+        both(
+            &[ride(&[(0, 1_000_000, -3.0)], none)],
+            &mut browser,
+            &mut c_abi,
+            "the flat ride",
+        );
+        both(
+            &[ride(&[(0, 1_000_000, -3.0)], none)],
+            &mut browser_r,
+            &mut c_abi_r,
+            "the unrebuilt ride",
+        );
+        let mut heard = false;
+        for block in 0..60 {
+            if block == 4 {
+                both(&hand, &mut browser, &mut c_abi, "the hand move");
+                both(&hand, &mut browser_r, &mut c_abi_r, "the unrebuilt move");
+            }
+            if block == 7 {
+                let committed =
+                    snapshot_bytes(|payload, expected| browser.command(payload, expected));
+                assert_eq!(
+                    committed,
+                    snapshot_bytes(|payload, expected| c_abi.send(payload, expected)),
+                    "{rate} Hz: one committed document"
+                );
+                let committed =
+                    session::parse_session_json(core::str::from_utf8(&committed).expect("utf-8"))
+                        .expect("the committed document");
+                let offset = committed
+                    .automation
+                    .iter()
+                    .find(|entry| entry.id == id("t1-fader-ride"))
+                    .expect("the ride")
+                    .offset;
+                assert_ne!(offset, none, "{rate} Hz: the hand move is stored");
+                both(
+                    &[ride(
+                        &[(0, 20_000, -5.0), (20_000, 1_000_000, -3.0)],
+                        offset,
+                    )],
+                    &mut browser,
+                    &mut c_abi,
+                    "the rebuild",
+                );
+            }
+            let (b, c) = (browser.step(block), c_abi.step(block));
+            assert_eq!(b, c, "{rate} Hz: block {block}");
+            let (b_r, c_r) = (browser_r.step(block), c_abi_r.step(block));
+            assert_eq!(b_r, c_r, "{rate} Hz: block {block}, the unrebuilt move");
+            if block < FREE / u64::from(QUANTUM) {
+                assert_eq!(
+                    b, b_r,
+                    "{rate} Hz: block {block} against the unrebuilt move"
+                );
+            }
+            heard |= b != b_r;
+        }
+        assert!(heard, "{rate} Hz: the deferred jump is heard");
+        let watermark = c_abi.watermark();
+        assert_eq!(
+            status_watermark(&browser),
+            watermark,
+            "{rate} Hz: the browser status carries the C ABI's watermark"
+        );
+        assert_eq!(
+            watermark.2,
+            capi::OUTCOME_EXACT,
+            "{rate} Hz: the rebuild's outcome flags"
+        );
+        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+        assert_eq!(
+            (
+                browser.host.watermark().transition_fallback_count,
+                c_abi.transition_fallback_count()
+            ),
+            (0, 0),
+            "{rate} Hz: no transition fallback on either host"
+        );
+    }
+}
+
+/// #1711 U1 fold 1 (MAJOR-1) across hosts: on a fader ride flat at -3 dB, a hand move with its
+/// own 4,000 samples heard 3 blocks, then a table-only rebuild to -5 dB up to 2,000, a linear -8
+/// to -14 dB over 2,000 to 8,000, then -14 dB. The moved target defers the cell's jump to the
+/// move's first free sample (4,512), and the table's step at 2,000, inside the move's ramp,
+/// replaces the ramp the deferral waits for. Both hosts give one verdict and reply per edit, the
+/// same bits in every block and the same watermark (`EXACT`, no transition fallback), and every
+/// block equals the pair of rigs prepared with -3 dB before 2,000 (the same table after it),
+/// given the same move and, at the same block, a table-only rebuild that moves nothing (a split
+/// at 950,000), at the four rates. Both rebuilds keep the hand move's stored offset.
+///
+/// Test value: red if a discontinuity jump on a restartable cell leaves the pending deferral in
+/// place (its grid hold freezes the lane on the step's target until 4,512), on either host.
+#[test]
+fn a_table_step_inside_a_deferred_moves_ramp_lands_alike_on_both_hosts() {
+    let segment = |shape, start, end, from, to| session::AutomationSegment {
+        shape,
+        start_sample: start,
+        end_sample: end,
+        start_value: from,
+        end_value: to,
+        unit: session::ParameterUnit::Db,
+    };
+    let ride = |segments: Vec<session::AutomationSegment>, offset| SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-fader-ride"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                5,
+                ParameterChannel::Both,
+            ),
+            segments,
+            offset,
+        },
+    };
+    let (step, linear) = (
+        session::AutomationShape::Step,
+        session::AutomationShape::Linear,
+    );
+    let stepped = |first: f32, split: u64, offset| {
+        ride(
+            vec![
+                segment(step, 0, 2_000, first, first),
+                segment(linear, 2_000, 8_000, -8.0, -14.0),
+                segment(step, 8_000, split, -14.0, -14.0),
+                segment(step, split, 1_000_000, -14.0, -14.0),
+            ],
+            offset,
+        )
+    };
+    let none = session::AutomationOffset::default();
+    let hand = CAbi::edits(
+        Edit::Fader {
+            strip: T1,
+            lanes: Lanes::Both,
+            db: -6.0,
+        },
+        Some(4_000),
+    );
+    for rate in RATES {
+        let model = model_at(rate);
+        let (mut browser, mut c_abi) = (Rig::new(&model), CAbi::new(&model));
+        let (mut browser_r, mut c_abi_r) = (Rig::new(&model), CAbi::new(&model));
+        let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi, label: &str| {
+            let (b, b_reply) = browser.transaction_reply(edits);
+            let (c, c_reply) = c_abi.transaction(edits);
+            assert_eq!(b, c, "{rate} Hz, {label}: one verdict");
+            assert_eq!(b_reply, c_reply, "{rate} Hz, {label}: one reply");
+        };
+        both(
+            &[ride(vec![segment(step, 0, 1_000_000, -3.0, -3.0)], none)],
+            &mut browser,
+            &mut c_abi,
+            "the flat ride",
+        );
+        both(
+            &[stepped(-3.0, 900_000, none)],
+            &mut browser_r,
+            &mut c_abi_r,
+            "the reference ride",
+        );
+        for block in 0..60 {
+            if block == 4 {
+                both(&hand, &mut browser, &mut c_abi, "the hand move");
+                both(&hand, &mut browser_r, &mut c_abi_r, "the reference move");
+            }
+            if block == 7 {
+                // A table-only rebuild keeps the hand move's stored offset (R17-1).
+                let committed =
+                    snapshot_bytes(|payload, expected| browser.command(payload, expected));
+                assert_eq!(
+                    committed,
+                    snapshot_bytes(|payload, expected| c_abi.send(payload, expected)),
+                    "{rate} Hz: one committed document"
+                );
+                let committed =
+                    session::parse_session_json(core::str::from_utf8(&committed).expect("utf-8"))
+                        .expect("the committed document");
+                let offset = committed
+                    .automation
+                    .iter()
+                    .find(|entry| entry.id == id("t1-fader-ride"))
+                    .expect("the ride")
+                    .offset;
+                both(
+                    &[stepped(-5.0, 900_000, offset)],
+                    &mut browser,
+                    &mut c_abi,
+                    "the rebuild",
+                );
+                both(
+                    &[stepped(-3.0, 950_000, offset)],
+                    &mut browser_r,
+                    &mut c_abi_r,
+                    "the reference rebuild",
+                );
+            }
+            let (b, c) = (browser.step(block), c_abi.step(block));
+            assert_eq!(b, c, "{rate} Hz: block {block}");
+            let (b_r, c_r) = (browser_r.step(block), c_abi_r.step(block));
+            assert_eq!(b_r, c_r, "{rate} Hz: block {block}, the reference");
+            assert_eq!(b, b_r, "{rate} Hz: block {block} against the reference");
+        }
+        let watermark = c_abi.watermark();
+        assert_eq!(
+            status_watermark(&browser),
+            watermark,
+            "{rate} Hz: the browser status carries the C ABI's watermark"
+        );
+        assert_eq!(watermark.2, capi::OUTCOME_EXACT, "{rate} Hz: outcome flags");
+        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+        assert_eq!(
+            (
+                browser.host.watermark().transition_fallback_count,
+                c_abi.transition_fallback_count()
+            ),
+            (0, 0),
+            "{rate} Hz: no transition fallback on either host"
+        );
+    }
+}
+
+/// #1651 gate 8 across hosts (U1 fold 1 NIT of #1711, restored without its B17-R14 window
+/// claim): in a mute-only session (a stored mute curve on `t1`, no fader entry), a rebuild that
+/// changes the mute curve while a hand fader move with its own 4,000 samples still ramps. Both
+/// hosts give one verdict and reply per edit, render the same bits in every block and report the
+/// same watermark.
+///
+/// Test value: red if either host adopts a mute-curve rebuild under a ramping level move
+/// differently (an adapter-local adoption, or a browser successor that does not carry the
+/// fader stage's ramp or the mute cell's state as the C ABI's does).
+#[test]
+fn a_mute_curve_rebuild_while_a_level_move_ramps_renders_alike_on_both_hosts() {
+    let curve = |close: u64| SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-mute-curve"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                6,
+                ParameterChannel::Both,
+            ),
+            segments: [(0, close, 0.0), (close, 1_000_000, 1.0)]
+                .iter()
+                .map(|&(start, end, value)| session::AutomationSegment {
+                    shape: session::AutomationShape::Step,
+                    start_sample: start,
+                    end_sample: end,
+                    start_value: value,
+                    end_value: value,
+                    unit: session::ParameterUnit::Linear,
                 })
                 .collect(),
             offset: session::AutomationOffset::default(),
@@ -3066,36 +3349,30 @@ fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
             let (c, c_reply) = c_abi.transaction(edits);
             assert_eq!(b, c, "{rate} Hz: one verdict");
             assert_eq!(b_reply, c_reply, "{rate} Hz: one reply");
+            b
         };
-        both(&[ride(&[(0, 1_000_000, -3.0)])], &mut browser, &mut c_abi);
-        same_blocks(&mut browser, &mut c_abi, 0..4, "the flat ride");
+        let rebuilt = |verdict: Verdict| {
+            assert!(
+                matches!(
+                    verdict,
+                    Verdict::Applied {
+                        path: EditPath::Rebuild,
+                        ..
+                    }
+                ),
+                "{rate} Hz: a mute curve edit rebuilds: {verdict:?}"
+            );
+        };
+        rebuilt(both(&[curve(20_000)], &mut browser, &mut c_abi));
+        same_blocks(&mut browser, &mut c_abi, 0..4, "the mute-only session");
         both(&hand, &mut browser, &mut c_abi);
         same_blocks(&mut browser, &mut c_abi, 4..7, "the hand move");
-        both(
-            &[ride(&[(0, 20_000, -5.0), (20_000, 1_000_000, -3.0)])],
-            &mut browser,
-            &mut c_abi,
-        );
-        same_blocks(&mut browser, &mut c_abi, 7..60, "the moved target");
-        let watermark = c_abi.watermark();
+        rebuilt(both(&[curve(30_000)], &mut browser, &mut c_abi));
+        same_blocks(&mut browser, &mut c_abi, 7..40, "the mute curve rebuild");
         assert_eq!(
             status_watermark(&browser),
-            watermark,
+            c_abi.watermark(),
             "{rate} Hz: the browser status carries the C ABI's watermark"
-        );
-        assert_eq!(
-            watermark.2,
-            capi::OUTCOME_EXACT,
-            "{rate} Hz: the rebuild's outcome flags"
-        );
-        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
-        assert_eq!(
-            (
-                browser.host.watermark().transition_fallback_count,
-                c_abi.transition_fallback_count()
-            ),
-            (0, 0),
-            "{rate} Hz: no transition fallback on either host"
         );
     }
 }
