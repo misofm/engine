@@ -261,3 +261,37 @@ no placeholder remains. No render code, nothing under `crates/engine/src/realtim
   committed structure (automation is structure, so a value commit cannot change it, and the
   newest epoch is prepared from that structure), so the refusal is unreachable through the public
   paths; it stays as D5's defence.
+
+## Decision record: batch 18 cleanup
+
+Test and doc only (U2b review PASS; U2a fold 2 verification PASS). No render, control or
+preparation logic changed.
+
+- **MINOR-1 (the seeded `mute` bit).** `crates/host-core/tests/route_mute.rs`
+  `a_following_send_leaks_nothing_of_a_stored_mute` gains the case `model(128, PreFader, false,
+  true)` with `routes[1].mute = true` and a `mute_entry(0.0, &[(3_000, 1.0)])`, `Live::None`, at
+  Simd8, Simd4 and the scalar oracle: the send plane is exact `+0.0` while the strip is heard.
+  Red with `mute: false` in the seeded `RouteFollowFlags` (`prepare.rs`): "muted route Simd8: a
+  muted following send leaks".
+- **MINOR-2 (the join's `before` terms).** New `route_mute.rs`
+  `a_rebuild_that_hand_mutes_the_source_ramps_the_send_over_the_edits_length` (all three widths;
+  the strip's reach of `+0.0` asserted on the bank widths only, as the scalar oracle restarts its
+  strip). A rebuild from an open `t` with a held-open mute entry to a hand-muted `t`, with the
+  transaction's `(Strip t, Mute)` edit ramp at 200 (not `M` = 480): the send reaches exact `+0.0`
+  at the swap block plus 199 or 200. Red with `[m[1], m[1]]` for the join's `terms`
+  (`join_routes`): the send reaches `+0.0` at 479. The helper `follow::live_swap_ramped` takes the
+  `EditRamps`; `live_swap` forwards with none.
+- **NIT-1 (capi_retained +96 B).** Read from the code, not re-measured: `StripLanes` gained
+  `follow_routes: Box<[GraphFollowRouteControlProducer]>`, a 16-byte pointer and length held
+  inline in every `ProviderEpoch`. The control row charges the layout of `PENDING_PROVIDERS` (2) +
+  `RETIRED_PROVIDERS` (3) parked epochs, and the running epoch is inline in the charged
+  `SessionState`: six epochs x 16 B = 96 B (168,650 on `main`, 168,746 at head). An empty box
+  allocates nothing. `crates/capi/tests/resource_lifecycle.rs` explains no row by number, so its
+  doc is unchanged.
+- **NIT-2 (realtime gate).** `crates/control-plane/tests/follow_automation_realtime.rs`
+  `a_following_send_of_a_stored_mute_renders_allocation_free` now commits the send's
+  `follows_mute` off at block 9 and on at block 10 (`SetControl` on the route's row 7, each
+  asserted `EditPath::Live`), inside the muted span, with every render block still allocation-
+  and free-free; the silence check moved from block 13 to block 18 so the toggles' ramps end
+  first. Red with the "on" write dropped (the send stays open: "the send follows the curve's
+  mute").

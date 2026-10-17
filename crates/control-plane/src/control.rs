@@ -2630,12 +2630,13 @@ where
         // that automates only a mute row completes `Exact`.
         //
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes this): a successor whose send join carries a
-        // following route into a six-word route (the rebuild removes a strip's last mute entry
-        // while a following send of it exists) may re-time a carried column's move, which render
-        // cannot report: one ramp of the six-word route takes the session mute length for a join
-        // record, and folds two columns' moves into one. Such a rebuild completes as the transition
-        // fallback, whether or not a column moves at the swap: conservative, it over-reports. It
-        // is not a level move, so it does not open the level-move window.
+        // following route into a six-word route (a route whose source strip automates a mute
+        // lane in the committed plan and automates none in the successor: the rebuild removes
+        // that strip's last mute entry, or retargets it) may re-time a carried column's move, which
+        // render cannot report: one ramp of the six-word route takes the session mute length for
+        // a join record, and folds two columns' moves into one. Such a rebuild completes as the
+        // transition fallback, whether or not a column moves at the swap: conservative, it
+        // over-reports. It is not a level move, so it does not open the level-move window.
         let (outcome, rebuild_level) = match &kind {
             Rebuild::Transaction(prepared) => {
                 let session = prepared.get().prospective_session();

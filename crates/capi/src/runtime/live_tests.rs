@@ -11078,11 +11078,15 @@ fn a_following_send_leaks_nothing_of_a_stored_mute() {
 /// `OUTCOME_TRANSITION_FALLBACK`, count 1. The removal is sent at block 8 (sample 1,024), while the
 /// send's columns ramp toward the mute the curve stepped on at 1,000 (480 samples). A rebuild that
 /// keeps the entry (the following route stays following, seven -> seven) and a rebuild of a
-/// session with no following route (no mute entry) complete as `OUTCOME_EXACT`, count 0.
+/// session with no following route (no mute entry) complete as `OUTCOME_EXACT`, count 0. A second
+/// rebuild that automates `eq0`'s fader in the block after the first one's adoption (inside `J`)
+/// completes `OUTCOME_EXACT` too, count still 1: only a level fallback opens the level-move window.
 ///
 /// Test value: red if the control plane does not mark a seven -> six rebuild (the six-word
 /// successor's re-timed column move then completes exact), or if it marks a rebuild whose
-/// following routes stay following, or one with no following route (the flag must stay narrow).
+/// following routes stay following, or one with no following route (the flag must stay narrow),
+/// or if the flagged rebuild opens the level-move window as a level fallback does (the fader
+/// rebuild inside its landing then reports the fallback: `landing` read the whole outcome).
 #[test]
 fn a_rebuild_that_drops_a_following_route_to_six_words_reports_a_fallback() {
     let remove = SessionEdit::RemoveAutomation {
@@ -11150,6 +11154,67 @@ fn a_rebuild_that_drops_a_following_route_to_six_words_reports_a_fallback() {
             "{label}: the rebuild's revision, outcome flags and transition-fallback count"
         );
     }
+    // Fold-2 NIT-1: the level-move window opens for a level fallback only. The seven -> six
+    // rebuild above is flagged but moves no level, so a second rebuild that automates a fader
+    // in the block after its adoption (inside `J` = 240 samples of it) finds no level move in
+    // flight and completes exact; the count stays 1.
+    let document = follow_document(true, false);
+    let mut rig = Rig::new(&document);
+    for _ in 0..8 {
+        rig.step();
+    }
+    let bytes = rig.transaction(&[remove]);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+    let first = rig.summary().0;
+    rig.step();
+    let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        (watermark.revision, watermark.first_sample),
+        (first, 8 * rig.quantum as u64),
+        "the flagged successor is adopted at the next block"
+    );
+    let ride = session::Automation {
+        id: StableId::parse("eq0-ride").expect("automation ID"),
+        target: session::ControlAddress {
+            owner: session::Owner::Strip(StableId::parse("eq0").expect("strip ID")),
+            section: session::Section::Builtins,
+            // The fader row (builtin parameter 5).
+            control: 5,
+            lane: session::ParameterChannel::Both,
+        },
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: SOURCE_FRAMES,
+            start_value: 0.0,
+            end_value: -12.0,
+            unit: session::ParameterUnit::Db,
+        }],
+        offset: session::AutomationOffset::default(),
+    };
+    let bytes = rig.transaction(&[SessionEdit::UpsertAutomation { automation: ride }]);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Rebuild);
+    let revision = rig.summary().0;
+    for _ in 0..4 {
+        rig.step();
+    }
+    assert_eq!(rig.summary().3, 0, "the second successor is adopted");
+    let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        (
+            watermark.revision,
+            watermark.outcome_flags,
+            watermark.transition_fallback_count
+        ),
+        (revision, crate::OUTCOME_EXACT, 1),
+        "a fader rebuild inside a flagged follow rebuild's landing finds no level move"
+    );
 }
 
 /// #1653: sends `edits` on `rig`, which must answer `live`, and renders `blocks` blocks from the

@@ -719,8 +719,10 @@ impl PreparedHost {
 impl PlanStateInventory {
     /// Whether this plan's send join carries a route that follows an automated source mute in
     /// the plan it was prepared to displace into a route that follows none in this plan (a
-    /// seven-word route into a six-word one, #1652 D3): the rebuild that removes a strip's last
-    /// mute entry while a following send of it exists. `false` for a plan prepared without a
+    /// seven-word route into a six-word one, #1652 D3). The join flags every such carry by the
+    /// route's kind alone: a carried route whose source strip automates a mute lane in the
+    /// committed plan and automates none in this one (the rebuild removes the strip's last mute
+    /// entry, or retargets it to another strip). `false` for a plan prepared without a
     /// predecessor and for a declared discontinuity, which carries nothing.
     ///
     /// **Conservative (#1652 U2a fold 2, MAJOR-A; #1713 removes it).** A six-word successor holds
@@ -728,9 +730,9 @@ impl PlanStateInventory {
     /// heard curve reopens the route over the session mute length `J` instead of the record's own
     /// length, and two columns' moves fold into one ramp over the longer remaining length. The
     /// control plane completes such a rebuild as [`engine::realtime::CandidateOutcome::TransitionFallback`]
-    /// so the watermark never reports it exact. It over-reports: a rebuild that removes a strip's
-    /// last mute automation while a following send of it exists is flagged whether or not a
-    /// column is moving at the swap.
+    /// so the watermark never reports it exact. It over-reports: a rebuild that carries a
+    /// following route into a six-word one is flagged whether or not a column is moving at the
+    /// swap.
     #[must_use]
     pub fn carries_a_following_route_into_a_six_word_route(&self) -> bool {
         self.follow_into_six_word

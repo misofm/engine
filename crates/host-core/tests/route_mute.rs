@@ -1742,6 +1742,26 @@ mod follow {
         b: Option<(&SessionModel, &SessionModel)>,
         backend: Backend,
         pcm: &successor::Feed,
+        edit: impl FnMut(
+            usize,
+            &mut host_core::HostLiveControlHandles,
+            &mut engine::realtime::PlanRevisionGate,
+        ),
+    ) -> (
+        Vec<successor::Block>,
+        Option<host_core::HostLiveControlHandles>,
+    ) {
+        live_swap_ramped(a, b, backend, pcm, &session::EditRamps::new(), edit)
+    }
+
+    /// [`live_swap`] with the transaction's edit ramps `edit_ramps` given to the successor's
+    /// base.
+    pub(super) fn live_swap_ramped(
+        a: &SessionModel,
+        b: Option<(&SessionModel, &SessionModel)>,
+        backend: Backend,
+        pcm: &successor::Feed,
+        edit_ramps: &session::EditRamps,
         mut edit: impl FnMut(
             usize,
             &mut host_core::HostLiveControlHandles,
@@ -1793,7 +1813,10 @@ mod follow {
                 &next.compiled,
                 &caps,
                 &request,
-                host_core::SuccessorBase::new(&inventory, &committed, revision),
+                host_core::SuccessorBase {
+                    edit_ramps,
+                    ..host_core::SuccessorBase::new(&inventory, &committed, revision)
+                },
                 backend,
             )
             .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
@@ -1859,9 +1882,13 @@ mod follow {
 /// the unmute ramp it is bit for bit a plan with no mute, at quanta 128 and 100 (the send has no
 /// compensation delay). Each plan has exactly one following route, and render allocates nothing.
 ///
+/// A muted route that follows its source (`mute = true`, the strip open until a late step) renders
+/// exact `+0.0` on the send plane at every width, while the strip is heard (U2b MINOR-1).
+///
 /// Test value: red if a following send ignores the curve (its pre-fader audio leaks while the
-/// strip is muted), if a plan without live controls attaches no lane for it, or if the send does
-/// not reopen after the unmute.
+/// strip is muted), if a plan without live controls attaches no lane for it, if the send does
+/// not reopen after the unmute, or if the seeded flags drop the route's own `mute` (a muted
+/// following send leaks).
 #[cfg(feature = "test-support")]
 #[test]
 fn a_following_send_leaks_nothing_of_a_stored_mute() {
@@ -1911,6 +1938,24 @@ fn a_following_send_leaks_nothing_of_a_stored_mute() {
                 );
             }
         }
+    }
+    // The seeded flags carry the route's own `mute` (U2b MINOR-1): a muted route that follows
+    // its source, whose strip is open until a late step, renders exact `+0.0` on the send plane.
+    let mut stored = model(128, SendTap::PreFader, false, true);
+    stored.routes[1].mute = true;
+    stored.automation = vec![mute_entry(0.0, &[(3_000, 1.0)])];
+    assert_eq!(stored.routes[1].id.as_str(), "t-b");
+    for backend in follow::backends() {
+        let what = format!("muted route {backend:?}");
+        let run = run(&stored, backend, Live::None, &pcm, FRAMES);
+        assert!(
+            run.out[1].iter().all(|sample| sample.to_bits() == 0),
+            "{what}: a muted following send leaks"
+        );
+        assert!(
+            run.out[0].iter().any(|sample| *sample != 0.0),
+            "{what}: the strip itself is heard"
+        );
     }
 }
 
@@ -2140,10 +2185,12 @@ fn a_rebuild_that_removes_the_mute_entry_reopens_the_send() {
 /// from `B`'s inventory, which carries `t-b` six -> six and is adopted by the next call. `C` takes
 /// the state `B`'s first block would have rendered from: the send reopens over the session mute
 /// length from that block, and from the next boundary it is `C` prepared fresh, bit for bit.
-/// Neither swap allocates on render.
+/// Neither swap allocates or frees on render: the refused call that adopts `B` is measured with
+/// the thread counters and the render audit, as is every block after the first.
 ///
 /// Test value: red if adopting a predecessor that never rendered drops the comparisons its own
-/// carry left (`C` then takes the adopted mute, and the send stays silent for good).
+/// carry left (`C` then takes the adopted mute, and the send stays silent for good), or if the
+/// adoption of a displaced plan allocates or frees on the refused call.
 #[cfg(feature = "test-support")]
 #[test]
 fn a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison() {
@@ -2222,11 +2269,26 @@ fn a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison() {
         // Render adopts B at the block boundary, then refuses the call: B renders nothing.
         let mut output = [f32::NAN; QUANTUM * 2];
         let wrong = owner.next_absolute_sample() + 1;
+        audit::reset();
+        let mark = bench_alloc::current_thread_counters();
         let refused = owner.render_contiguous(
             RenderIo {
                 output: PlanarBufferMut::try_new(&mut output, 2, QUANTUM, QUANTUM).expect("output"),
             },
             wrong,
+        );
+        let delta = bench_alloc::current_thread_delta_since(mark);
+        let snapshot = audit::snapshot();
+        assert_eq!(
+            (
+                delta.allocations,
+                delta.reallocations,
+                delta.deallocations,
+                snapshot.allocations,
+                snapshot.deallocations
+            ),
+            (0, 0, 0, 0, 0),
+            "{what}: the call that adopts B and refuses allocates or frees nothing"
         );
         assert!(
             matches!(refused, Err(RenderError::TimeDiscontinuity { .. })),
@@ -2324,6 +2386,69 @@ fn a_send_edit_and_a_mute_entry_in_one_rebuild_adopt_over_one_length() {
             (at + M as usize - 1..=at + M as usize).contains(&send),
             "{what}: over the mute length, at {send}"
         );
+    }
+}
+
+/// #1653 U2b MINOR-2 (every bank width and the scalar oracle). A predecessor whose mute entry
+/// holds `t` open is rebuilt at block 6 with `t` hand-muted (both lanes) and a transaction that
+/// gave the strip's mute row an explicit 200-sample ramp, not the session's `M`. The send follows,
+/// so the join's record is built from the source's effective mute in both models: its `before`
+/// term is the open strip, its `after` term the muted one, so the record exists and ramps over the
+/// gate length, the strip's 200. The send reaches exact `+0.0` 200 samples after the swap block
+/// starts (the strip does too, on the bank widths: the scalar oracle restarts its strip at the
+/// swap).
+///
+/// Test value: red if the join reads the source's mute of the successor for both terms (the
+/// records of the two models then agree, no record is written, and the carried send reopens its
+/// ramp over `M` instead of the edit's length).
+#[cfg(feature = "test-support")]
+#[test]
+fn a_rebuild_that_hand_mutes_the_source_ramps_the_send_over_the_edits_length() {
+    use follow::*;
+    use successor::{QUANTUM, SWAP_BLOCK};
+    const RAMP: u32 = 200;
+    assert_ne!(RAMP, M);
+    let pcm = successor::Feed::new("t", 19);
+    let mut a = model(QUANTUM as u32, SendTap::PreFader, false, true);
+    a.automation = vec![mute_entry(0.0, &[])];
+    let b = statically_muted(a.clone());
+    let mut ramps = session::EditRamps::new();
+    ramps.set(
+        &session::EditRampTarget::Strip(sid("t")),
+        session::EditRampRow::Mute,
+        Some(RAMP),
+    );
+    let quiet = |_: usize,
+                 _: &mut host_core::HostLiveControlHandles,
+                 _: &mut engine::realtime::PlanRevisionGate| {};
+    for backend in follow::backends() {
+        let what = format!("{backend:?}");
+        let (swapped, handles) = live_swap_ramped(&a, Some((&b, &a)), backend, &pcm, &ramps, quiet);
+        assert_eq!(
+            handles
+                .expect("the successor's handles")
+                .follow_route_controls
+                .len(),
+            1,
+            "{what}"
+        );
+        assert_quiet(&swapped, &what);
+        let at = SWAP_BLOCK * QUANTUM;
+        let send = plane(&swapped, 1);
+        assert!(
+            send[at..at + 8].iter().all(|sample| *sample != 0.0),
+            "{what}: the send is open when the swap block starts"
+        );
+        let end = first_zero_from(&send, at).expect("the send mutes");
+        assert!(
+            (at + RAMP as usize - 1..=at + RAMP as usize).contains(&end),
+            "{what}: the send reaches +0.0 over the edit's {RAMP} samples, at {}",
+            end - at
+        );
+        if backend != Backend::Scalar {
+            let strip = first_zero_from(&plane(&swapped, 0), at).expect("the strip mutes");
+            assert_eq!(strip, end, "{what}: the strip and the send ramp together");
+        }
     }
 }
 

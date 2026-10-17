@@ -791,3 +791,18 @@ the exact form is #1713 (phase 2); MINOR-B must land.
   (the verifier's `MAJ1_into_only`) -> MINOR-C red. The `*curve = false` line removed (the
   verifier's `unautomated_curve_kept`) -> NIT-D red. `adopt_predecessor` skips the predecessor's
   pending comparisons -> NIT-E red ("the send reopens from the block C first renders").
+
+## Decision record: batch 18 cleanup (fold 2 NITs)
+
+Test and doc only. NIT-1: `crates/capi/src/runtime/live_tests.rs`
+`a_rebuild_that_drops_a_following_route_to_six_words_reports_a_fallback` gains a second rebuild
+(`UpsertAutomation` of a fader ride on `eq0`) sent in the block after the flagged seven -> six
+rebuild's adoption, inside `J`; it completes `OUTCOME_EXACT` with the fallback count still 1. Red
+when `landing` in `control.rs` is opened by `follow_into_six_word` too (the watermark reads
+`(2, 2)`). NIT-2: `route_mute.rs` `a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison`
+measures the refused, adopting `render_contiguous` call with the thread allocator counters and the
+render audit (zero); red when a throwaway `Vec::with_capacity` is added inside the window. NIT-3:
+the docs of `PlanStateInventory::carries_a_following_route_into_a_six_word_route` (`prepare.rs`)
+and the B17-R14/MAJOR-A comment in `control.rs` state the rule (a route whose source strip automates a
+mute lane in the committed plan and none in the successor, so the successor gives it the
+six-word cell), not the one example; `follows_mute` does not decide the cell.

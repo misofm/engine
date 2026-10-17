@@ -5,8 +5,9 @@
 //! `SessionState::command`, the code the browser Worker and the C ABI both run) and host-core's
 //! render session (`PlanState::render`): track `eq0` sends `pre_fader` with `follows_mute` into bus
 //! `b`, and a mute entry on `both` steps `eq0` muted at 1,000 and open again at 2,500 (not grid
-//! samples). A live move of `b`'s fader (a value the following route does not hold) commits in
-//! the middle of the muted span. Every render call after the warm-up allocates and frees nothing,
+//! samples). A live toggle of the send's `follows_mute` (off and back on, one block each) and a live
+//! move of `b`'s fader (a value the following route does not hold) commit in the middle of the
+//! muted span. Every render call after the warm-up allocates and frees nothing,
 //! measured with the audited allocator's thread-scoped counters: the blocks that cross the curve's
 //! events, the follow's ramps and the bus move.
 
@@ -250,16 +251,34 @@ impl Rig {
 
     /// Commit bus `b`'s fader at `db` on both lanes live, with the session's length.
     fn move_bus(&mut self, db: f32) {
+        let address = ControlAddress {
+            owner: Owner::Strip(id("b")),
+            section: Section::Builtins,
+            control: 5,
+            lane: ParameterChannel::Both,
+        };
+        self.commit_live(address, db);
+    }
+
+    /// Commit the send's `follows_mute` (route row 7) at `on` live, with the session's length
+    /// (#1653: a seven-word cell's follow flag is a live write).
+    fn follow(&mut self, on: bool) {
+        let address = ControlAddress {
+            owner: Owner::Route(id("eq0-b")),
+            section: Section::Own,
+            control: 7,
+            lane: ParameterChannel::Both,
+        };
+        self.commit_live(address, if on { 1.0 } else { 0.0 });
+    }
+
+    /// Commit control `address` at `value` as one live transaction.
+    fn commit_live(&mut self, address: ControlAddress, value: f32) {
         self.request += 1;
         let edits = [SessionEdit::SetControl {
             expected_effect: None,
-            address: ControlAddress {
-                owner: Owner::Strip(id("b")),
-                section: Section::Builtins,
-                control: 5,
-                lane: ParameterChannel::Both,
-            },
-            value: db,
+            address,
+            value,
             ramp_samples: None,
         }];
         let codec = ProtocolCodec::default();
@@ -278,7 +297,7 @@ impl Rig {
         let length = self
             .session
             .command(&bytes, 65_536)
-            .expect("the move commits");
+            .expect("the control commits");
         let mut fields = [0_u16; 64];
         let path = match codec
             .decode_typed_response(
@@ -292,11 +311,11 @@ impl Rig {
                 ..
             } => applied.edit_path,
             DecodedTypedResponseFrame::NonOk { payload, .. } => {
-                panic!("the move is refused: {payload:?}")
+                panic!("the control is refused: {payload:?}")
             }
             DecodedTypedResponseFrame::Success { .. } => panic!("another success payload"),
         };
-        assert_eq!(path, EditPath::Live, "the bus move is live");
+        assert_eq!(path, EditPath::Live, "the control commit is live");
         self.revision += 1;
         while self
             .session
@@ -308,12 +327,14 @@ impl Rig {
 }
 
 /// Gate 5. Every render block after the warm-up allocates and frees nothing, across the curve's
-/// mute at 1,000, a live bus move at 1,792 (inside the muted span) and the unmute at 2,500. Not
-/// vacuous: the send (the output's right plane) is silent in a block of the muted span and
-/// carries the source again after the unmute.
+/// mute at 1,000, the send's `follows_mute` written off at block 9 and back on at block 10 (live
+/// writes of the seven-word cell, #1653), a live bus move at 1,792 (inside the muted span) and the
+/// unmute at 2,500. Not vacuous: the send (the output's right plane) is silent in a block of the
+/// muted span once the toggles' ramps have ended, and carries the source again after the unmute.
 ///
-/// Test value: red if the route op's evaluation of the curve, its cursors, its in-block retarget
-/// or the cell read allocates or frees on render.
+/// Test value: red if the route op's evaluation of the curve, its cursors, its in-block retarget,
+/// the cell read or a live `follows_mute` write allocates or frees on render, or if the toggle
+/// leaves the send open for the rest of the muted span.
 #[test]
 fn a_following_send_of_a_stored_mute_renders_allocation_free() {
     bench_support::alloc::assert_installed();
@@ -324,8 +345,13 @@ fn a_following_send_of_a_stored_mute_renders_allocation_free() {
     let mut silent_while_muted = false;
     let mut open_after = false;
     while rig.block < 32 {
-        if rig.block == 14 {
-            rig.move_bus(-6.0);
+        match rig.block {
+            // The follow flag goes off and back on inside the muted span, the second write
+            // re-timing the first one's open ramp in flight.
+            9 => rig.follow(false),
+            10 => rig.follow(true),
+            14 => rig.move_bus(-6.0),
+            _ => {}
         }
         let block = rig.block;
         let used = rig.block();
@@ -335,7 +361,7 @@ fn a_following_send_of_a_stored_mute_renders_allocation_free() {
             "block {block} allocated or freed"
         );
         let right = &rig.last[QUANTUM..];
-        if block == 13 {
+        if block == 18 {
             silent_while_muted = right.iter().all(|sample| *sample == 0.0);
         }
         if block == 30 {
