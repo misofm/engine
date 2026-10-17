@@ -806,3 +806,48 @@ owed slots), `GraphFollowRouteControlBinding` 184 -> 856 (it carries the column 
 to bind); `GraphFollowRouteSource` 120 and `ComposeCursor` 104 unchanged. Charges read `size_of`,
 so no pinned number moved. Realtime policy: 171 marked regions in 35 files (unchanged).
 `scripts/check-graph-policy.sh`: PASS.
+
+## Decision record: U2 fold 2 (batch 19)
+
+Fold round 2 of the U2 fold-1 FAIL (MAJOR-A, MAJOR-B, one NIT). This is the exact path; the R19-5
+fallback flag is not used. Files: `crates/graph/src/runtime.rs` and the gates in
+`crates/host-core/tests/route_mute.rs` and `crates/capi/src/runtime/live_tests.rs`. Nothing changed
+under `crates/engine/src/realtime/`, in `crates/automation` or in any row class or table, so the SDK
+was not regenerated.
+
+- **The fix: an owed landing belongs to a column.** `FollowCursors::owed: [Option<(free, length)>; 2]`
+  replaces `RouteColumn::owed`, `owe_landing` and `apply_owed`. No cursor carries an owed length
+  now. A new render helper, `walk_follow`, wraps `walk_columns`. When a column owes a landing at
+  offset `o` of the block, the helper cuts the walks at `o` and `o + 1`. The walks run over windows
+  of the column span (`column_window`, the same rule as `NodeSpan::window`), so the cuts move no
+  event. At `o` the column lands on its composition over the owed length: the heard values, or the
+  cell's words when the column has no curve. A coincident event of the column itself takes the
+  longer ramp (R19-4). A column that has a walk also calls `Composed::retarget` between its cut
+  walks, so its value grid holds inside the landing (R19-3). The landing is spent by an event of
+  the column before `o`, or by a record (both compose the column). A seek at or before `o` drops
+  the landing. The begin-block probe walks a copy of the owed landings and commits that copy only
+  when the block is inactive.
+- **MAJOR-A.** In `place_carried`'s branch for a column with no walk: when the column lost a row
+  and a column ramp is in flight, the landing is owed at the ramp's first free sample. The column
+  does not retarget at once. A settled column still lands at once.
+- **NIT.** The fold-1 MAJOR-1 change to K1's `merge` (held events are heard) touches the walk that
+  #1655 V2 also uses. The #1655 merge must take it as it is.
+
+Gates (red before the fix, green after):
+- MAJOR-A, graph: `a_column_losing_its_last_curve_keeps_a_move_in_flight`. Red: at block 20 the
+  2,000-sample move becomes a 960 ramp.
+- MAJOR-A, host-core: `route_mute.rs` `a_send_column_losing_its_last_curve_keeps_the_hand_move_in_flight`
+  (Simd8 when avx2, Simd4, scalar; both planes match the twin until the move ends, then match the
+  fresh plan). Red: Simd8 plane 0, sample 768.
+- MAJOR-A, C ABI: `a_send_column_losing_its_last_curve_keeps_the_hand_move_on_the_c_abi` (the
+  watermark has no transition fallback, so EXACT). Red: plane 0, the move is cut.
+- MAJOR-B P2, graph: `an_owed_landing_lengthens_no_later_jump`. Red: block 54 lands over 960
+  instead of the twin's 480.
+- MAJOR-B P3, graph: `a_source_mute_close_before_an_owed_landing_fades_over_the_mute_length`.
+  Red: the close fades over 960.
+- The fold-1 MAJOR-3 gates stay green.
+
+Sizes (x86-64, measured): `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 1,000 -> 1,072 (the cut steps and seek in
+`FollowBlock`), `GraphFollowRouteControlBinding` 856 -> 808 (no owed slot per column table). Charges
+read `size_of`, so no pinned number moved. Realtime policy: 171 marked regions in 35 files (unchanged).
+`scripts/check-graph-policy.sh`: PASS.
