@@ -719,6 +719,65 @@ mod tests {
         assert_eq!(repositioned.deferred_jump(), None);
     }
 
+    /// #1711 U1 fold 2: a discontinuity jump on a restartable cell that emits nothing keeps a
+    /// pending deferral. The curve is flat at -6 to 50, then linear from -4 to -8 over 50..562,
+    /// with a fixed jump length of 257 samples: the jump at 50 aims at the curve at 306 (-6, the
+    /// seeded target), so it emits nothing and replaces no ramp. The deferral to 201 stays owed:
+    /// the grid is held until 201, where the deferred jump fires.
+    ///
+    /// Red if a discontinuity whose jump emits nothing drops the deferral (the fold-1 rule): the
+    /// grid at 64, 128 and 192 then retargets unheld and nothing fires at 201.
+    #[test]
+    fn a_discontinuity_whose_jump_emits_nothing_keeps_a_pending_deferral() {
+        let segments = [
+            Segment {
+                start: 0,
+                end: 50,
+                start_value: -6.0,
+                end_value: -6.0,
+                shape: Shape::Linear,
+            },
+            Segment {
+                start: 50,
+                end: 562,
+                start_value: -4.0,
+                end_value: -8.0,
+                shape: Shape::Linear,
+            },
+            Segment {
+                start: 562,
+                end: 4_096,
+                start_value: -8.0,
+                end_value: -8.0,
+                shape: Shape::Linear,
+            },
+        ];
+        let program = ProgramBuilder::build(&[CellDescription {
+            segments: &segments,
+            grid_ramp: 64,
+            grid: 64,
+            jump: JumpLength::Fixed(257),
+            completion: Completion::End,
+            no_restart: false,
+        }])
+        .expect("valid cell");
+        assert_eq!(program.cell(0).expect("cell").discontinuities(), [50]);
+        let mut state = CellState::new();
+        state.seed_target(-6.0);
+        state.defer_jump(201);
+        let held = |offset| (offset, EventKind::Grid, true);
+        assert_eq!(
+            block_events(&program, &mut state),
+            [
+                held(64),
+                held(128),
+                held(192),
+                (201, EventKind::Jump, false)
+            ]
+        );
+        assert_eq!(state.deferred_jump(), None, "a fired deferral is spent");
+    }
+
     fn first_block(program: &crate::Program, state: &mut CellState) -> Vec<(u32, EventKind)> {
         let span = NodeSpan::new(0, None, 256).expect("span");
         CellEvents::new(

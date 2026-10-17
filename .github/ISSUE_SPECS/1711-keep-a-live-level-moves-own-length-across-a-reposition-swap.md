@@ -559,3 +559,19 @@ measured with temporary probes in a detached worktree at `323433f6a` (removed af
   (all features), host-core `stored_fader_automation` (36), `stored_mute_automation` (13),
   `successor_swap` (140), capi lib (211, 1 ignored), host-web `control_parity` (37): green.
   Realtime policy: 171 regions (unchanged).
+
+## Note (batch 19a, option C)
+
+- Batch 19a ships #1711 alone (root ruling, option C after the #1654 B19-R8 check). K1, #1654 and
+  #1655 are not in 19a.
+- The U1 fold 2 rule's K1 gate (`an_unchanged_value_jump_keeps_the_gate_deferral`,
+  `crates/automation/src/compose/tests.rs`) ships with K1 in batch 19b.
+- In 19a the rule ("a discontinuity jump on a restartable cell drops a pending deferral only when
+  the jump emits") is held by the events.rs unit tests and the fader gates. No earlier events.rs
+  unit test covered the rule, so 19a adds one:
+  `a_discontinuity_whose_jump_emits_nothing_keeps_a_pending_deferral`
+  (`crates/automation/src/events.rs`): a restartable cell flat at -6 to 50, then linear -4 to -8
+  over 50..562, fixed jump length 257, seeded at -6 and deferred to 201. The jump at 50 aims at
+  -6 and emits nothing; the grid at 64, 128 and 192 is held and the deferred jump fires at 201.
+  Red with the fold-1 rule (the clear without `event.is_some()`, run once, restored): the grid
+  retargets unheld and nothing fires at 201.
