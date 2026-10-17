@@ -5412,3 +5412,231 @@ fn a_rebuild_that_drops_a_following_route_to_six_words_reports_the_fallback_alik
         );
     }
 }
+
+/// #1653: one `SET_CONTROL` of `value` on `owner`'s own row `control` (a route or a VCA row, or a
+/// strip's solo).
+fn own_edit(owner: Owner, control: u32, value: f32) -> SessionEdit {
+    SessionEdit::set_control(
+        address(owner, Section::Own, control, Lane::Both),
+        value,
+        None,
+    )
+}
+
+/// #1653: `edits` on both hosts as one transaction each: one verdict, one reply, path `path`.
+fn both_commit(
+    browser: &mut Rig,
+    c_abi: &mut CAbi,
+    edits: &[SessionEdit],
+    path: EditPath,
+    label: &str,
+) {
+    let (b, b_reply) = browser.transaction_reply(edits);
+    let (c, c_reply) = c_abi.transaction(edits);
+    assert_eq!(b, c, "{label}: one verdict");
+    assert_eq!(b_reply, c_reply, "{label}: one reply");
+    assert!(
+        matches!(b, Verdict::Applied { path: applied, .. } if applied == path),
+        "{label}: {b:?}, not {path:?}"
+    );
+}
+
+/// #1653: `model` on both hosts for `blocks` blocks, with `edits[i] = (block, edits, path)` sent
+/// before block `block` renders. Both hosts render the same bits each block; returns them.
+fn both_run(
+    model: &SessionModel,
+    blocks: u64,
+    edits: &[(u64, Vec<SessionEdit>, EditPath)],
+) -> Vec<Vec<u32>> {
+    let mut browser = Rig::new(model);
+    let mut c_abi = CAbi::new(model);
+    let mut out = Vec::new();
+    for block in 0..blocks {
+        for (at, edit, path) in edits {
+            if *at == block {
+                both_commit(
+                    &mut browser,
+                    &mut c_abi,
+                    edit,
+                    *path,
+                    &format!("block {block}"),
+                );
+            }
+        }
+        let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(b, c, "block {block}: the two hosts agree");
+        out.push(b);
+    }
+    out
+}
+
+/// #1653 gate 1 on both hosts. `t1` is automated-muted from 1,000 (480-sample mute ramps) and
+/// `t1-b` follows it. Before block 8 (1,024) a `SET_CONTROL` turns `t1-b`'s `follows_mute` off,
+/// before block 15 (1,920) one turns it on: on both hosts each is `live`, with one reply. From the
+/// first block boundary after each 480-sample route ramp, each host's output is bit for bit a
+/// fresh plan of the committed model (fed the same PCM from 0): the send open while the curve
+/// mutes, then shut until the curve's unmute. Not vacuous: the two committed models' plans differ
+/// in the first window.
+///
+/// Test value: red if the browser or the C ABI loses a live `follows_mute` toggle on an automated
+/// route (the commit reads `follows_mute` from the prepared route only, or refuses the seven-word
+/// record), or if the hosts disagree.
+#[test]
+fn a_follows_mute_toggle_on_a_following_route_is_live_on_both_hosts() {
+    const BLOCKS: u64 = 32;
+    let quantum = u64::from(QUANTUM);
+    let toggle = |on: bool| {
+        vec![own_edit(
+            Owner::Route(id("t1-b")),
+            ROUTE_FOLLOWS_MUTE_ROW,
+            f32::from(u8::from(on)),
+        )]
+    };
+    let following = follow_model(true, false);
+    let live = both_run(
+        &following,
+        BLOCKS,
+        &[
+            (8, toggle(false), EditPath::Live),
+            (15, toggle(true), EditPath::Live),
+        ],
+    );
+    let mut open = following.clone();
+    for route in &mut open.routes {
+        if route.id.as_str() == "t1-b" {
+            route.follows_mute = false;
+        }
+    }
+    let fresh_open = both_run(&open, 15, &[]);
+    let fresh_shut = both_run(&following, BLOCKS, &[]);
+    let first_after = |sample: u64| sample.div_ceil(quantum);
+    let off = first_after(8 * quantum + 480)..15;
+    for block in off.clone() {
+        assert_eq!(
+            live[block as usize], fresh_open[block as usize],
+            "block {block}: the plan with follows_mute off"
+        );
+    }
+    for block in first_after(15 * quantum + 480)..BLOCKS {
+        assert_eq!(
+            live[block as usize], fresh_shut[block as usize],
+            "block {block}: the plan with follows_mute on"
+        );
+    }
+    assert!(
+        off.clone()
+            .any(|block| fresh_open[block as usize] != fresh_shut[block as usize]),
+        "the toggle is audible"
+    );
+}
+
+/// #1653 gate 2 on both hosts: solo and a VCA mute compose with `t1`'s mute curve for `t1-b` as
+/// for the strip. `t1` has its mute entry (curve 1 on `[1,000, 2,500)`) and, for the VCA case, is
+/// VCA `v`'s only member and sends `t1-pre` from its `pre_fader` tap straight to the output.
+///
+/// - Solo `t2` before block 2 (the curve is 0): from the first block boundary after the 480-sample
+///   ramps to block 14, both hosts render what the session with no mute entry renders under the
+///   same solo: `t1` muted by solo, its send shut with it. Unsolo before block 14 (the curve is 1):
+///   from block 20 on, the curve's own plan with no solo (the send stays shut by the curve, and
+///   reopens with it at 2,500).
+/// - A VCA mute of `v` before block 2 and its release before block 14: the same comparisons.
+/// - A route into the output never follows: under the VCA mute `t1-pre` still plays (the session
+///   without it renders other bits), while the twin comparisons hold.
+///
+/// Test value: red if solo or a VCA mute overwrites the curve instead of composing with it for the
+/// send (the send reopens on the release while the curve still mutes, or does not follow the solo
+/// while the curve is 0), or if the hosts disagree.
+#[test]
+fn solo_and_a_vca_mute_compose_with_the_curve_for_a_following_send_on_both_hosts() {
+    const BLOCKS: u64 = 32;
+    let solo = |on: bool| {
+        vec![own_edit(
+            Owner::Strip(id(T2.id)),
+            SOLO,
+            f32::from(u8::from(on)),
+        )]
+    };
+    let vca_mute = |on: bool| vec![own_edit(Owner::Vca(id("v")), 2, f32::from(u8::from(on)))];
+    // `t1` alone in `v`, with a pre-fader route straight to the output (`pre_out`).
+    let with_vca = |mut model: SessionModel, pre_out: bool| {
+        for vca in &mut model.vcas {
+            if vca.id.as_str() == "v" {
+                vca.members = vec![id(T1.id)];
+            }
+        }
+        if pre_out {
+            let mut route = model
+                .routes
+                .iter()
+                .find(|route| route.id.as_str() == "t1-b")
+                .expect("the send")
+                .clone();
+            route.id = id("t1-pre");
+            route.follows_mute = false;
+            route.destination = model
+                .routes
+                .iter()
+                .find(|route| {
+                    matches!(
+                        route.destination,
+                        session::RouteDestination::OutputInput { .. }
+                    )
+                })
+                .expect("a route to the output")
+                .destination
+                .clone();
+            model.routes.push(route);
+            model.routes.sort_by(|left, right| left.id.cmp(&right.id));
+        }
+        model
+    };
+    for (label, edit, path, curve, twin, bare) in [
+        (
+            "solo",
+            &solo as &dyn Fn(bool) -> Vec<SessionEdit>,
+            EditPath::Monitor,
+            follow_model(true, false),
+            follow_model(false, false),
+            None,
+        ),
+        (
+            "vca",
+            &vca_mute as &dyn Fn(bool) -> Vec<SessionEdit>,
+            EditPath::Live,
+            with_vca(follow_model(true, false), true),
+            with_vca(follow_model(false, false), true),
+            Some(with_vca(follow_model(true, false), false)),
+        ),
+    ] {
+        let composed = both_run(
+            &curve,
+            BLOCKS,
+            &[(2, edit(true), path), (14, edit(false), path)],
+        );
+        let static_twin = both_run(&twin, 14, &[(2, edit(true), path)]);
+        let curve_only = both_run(&curve, BLOCKS, &[]);
+        for block in 6..14 {
+            assert_eq!(
+                composed[block], static_twin[block],
+                "{label}, block {block}: muted by the term while the curve is 0, then by both"
+            );
+        }
+        assert_ne!(
+            composed[6], curve_only[6],
+            "{label}: the term mutes t1 and its send while the curve is 0"
+        );
+        for block in 20..BLOCKS as usize {
+            assert_eq!(
+                composed[block], curve_only[block],
+                "{label}, block {block}: the release restores the curve's state"
+            );
+        }
+        if let Some(bare) = bare {
+            let without = both_run(&bare, 14, &[(2, edit(true), path)]);
+            assert!(
+                (6..14).any(|block| without[block] != composed[block]),
+                "{label}: the route into the output plays while t1 is muted"
+            );
+        }
+    }
+}

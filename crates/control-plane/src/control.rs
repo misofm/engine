@@ -19,6 +19,10 @@ pub(crate) struct StripLanes {
     /// One producer per route into a submix, in canonical route-ID order; empty when the plan
     /// carries no route lane.
     pub(crate) routes: Box<[host_core::RouteControlProducer]>,
+    /// One seven-word producer per route the plan gives the cell of a following route (#1652 D1),
+    /// in canonical route-ID order; empty when the plan has none. A route is in `routes` or here,
+    /// never in both (#1653).
+    pub(crate) follow_routes: Box<[host_core::GraphFollowRouteControlProducer]>,
     /// The writer of the plan's jump-length cell (#1639 D1), held inline; every prepared plan has
     /// one, and preparation refuses a handle set without it.
     pub(crate) jump_lengths: host_core::GraphJumpLengthProducer,
@@ -390,6 +394,9 @@ pub struct TestTransactionSnapshot<Row> {
     /// How many writes every send producer's cell has taken, current epoch first, then each
     /// pending candidate: `(epoch, route ID, writes)` (#1557).
     pub route_cells: Vec<(u64, Box<str>, u64)>,
+    /// The same for every following route's seven-word cell (#1653), in the order of
+    /// `route_cells`: `(epoch, route ID, writes)`.
+    pub follow_route_cells: Vec<(u64, Box<str>, u64)>,
     /// How many writes every effect producer's bypass cell, parameter cells, then target cells,
     /// have taken, current epoch first, then each pending candidate: `(epoch, strip ID, effect
     /// instance ID, writes per cell)`. A cell's count is its write sequence (#1345 D1).
@@ -1659,6 +1666,18 @@ where
                         (
                             provider.epoch,
                             Box::<str>::from(producer.route_id()),
+                            producer.test_only_write_count(),
+                        )
+                    })
+                })
+                .collect(),
+            follow_route_cells: core::iter::once(&self.providers)
+                .chain(&self.pending_providers)
+                .flat_map(|provider| {
+                    provider.strips.follow_routes.iter().map(|producer| {
+                        (
+                            provider.epoch,
+                            producer.route_id.clone(),
                             producer.test_only_write_count(),
                         )
                     })
@@ -3237,9 +3256,13 @@ where
         }
 
         // 2a. Each route's producer, by route ID (#1557 D4): a binary search over the canonical
-        // route-ID order. A record for a route with no producer is an internal fault, found
-        // before the first write.
+        // route-ID order, among the six-word producers for a folded record and among the
+        // seven-word ones for a following route's record (#1653 D1). A record for a route with no
+        // producer of its kind, or a seven-word record whose `automated` bits differ from the
+        // plan's (render takes them from its own cursors), is an internal fault, found before the
+        // first write, so no ack precedes a drop (#1653 D5).
         let route_lanes = &mut strips.routes;
+        let follow_lanes = &mut strips.follow_routes;
         let mut resolved_routes = Vec::new();
         if resolved_routes
             .try_reserve_exact(delta.routes.len())
@@ -3248,8 +3271,17 @@ where
             return LiveCommit::Done(Err(CommandError::Internal));
         }
         for route in &delta.routes {
-            let Some(index) = host_core::route_producer_position(route_lanes, route.route_id)
-            else {
+            let index = match route.record {
+                host_core::SendRecord::Folded(_) => {
+                    host_core::route_producer_position(route_lanes, route.route_id)
+                }
+                host_core::SendRecord::Following(record) => {
+                    host_core::follow_route_producer_position(follow_lanes, route.route_id).filter(
+                        |&index| follow_lanes[index].automated() == record.flags().automated,
+                    )
+                }
+            };
+            let Some(index) = index else {
                 return LiveCommit::Done(Err(CommandError::Internal));
             };
             resolved_routes.push(index);
@@ -3430,8 +3462,17 @@ where
                     }
                 }
             }
+            // #1653: a following route's cell under the same stamp as its source strip's terms
+            // write, so both apply in one block.
             for (route, &index) in delta.routes.iter().zip(&resolved_routes) {
-                route_lanes[index].write(stamp, route.record);
+                match route.record {
+                    host_core::SendRecord::Folded(record) => {
+                        route_lanes[index].write(stamp, record);
+                    }
+                    host_core::SendRecord::Following(record) => {
+                        follow_lanes[index].write(stamp, record);
+                    }
+                }
             }
             // #1639 D3: the new jump lengths, in the same block as the records.
             if let Some(lengths) = delta.jump_lengths {

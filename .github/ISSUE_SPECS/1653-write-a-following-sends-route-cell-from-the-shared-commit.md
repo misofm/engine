@@ -196,3 +196,68 @@ Checked against `ad03780ee`. The filed text above stays; where it disagrees, thi
 - `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/tests/control_parity.rs`,
   `hosts/host-web/src/tests.rs`.
 - No render code and no path under `crates/engine/src/realtime/`.
+
+## Decision record: #1653 (batch 18)
+
+Replaces #1652c's stopgap (`RebuildOnly(RuledLiveNotBuilt { issue: 1653 })` in `route_records`);
+no placeholder remains. No render code, nothing under `crates/engine/src/realtime/`.
+
+- **D1 (classifier, `crates/host-core/src/live_delta.rs`).** `route_records` lowers a route the
+  next plan gives the seven-word cell through `follow_route_record_between` (terms from the diff,
+  `automated` from the structure's `controls::mute_automation`), any other route through
+  `route_record_between`. `LiveRouteRecord::record` is now `SendRecord` (`Folded` | `Following`),
+  public and re-exported (`host_core::SendRecord`, with `folded()` / `following()`); the swap
+  join's `SendRecord` is the same type. The path is `live`.
+- **Trigger (fix).** `LevelDiff` gains `terms(before, after)`: `EffectiveDiff::strip_mutes` (dense)
+  and the held source strip's `EffectiveStrip::mute` (`LocalDiff`, fast path). `lower_routes`
+  lowers a following route also when its terms change with the gate unchanged
+  (`follows_mute` off); `LocalDiff::new` holds such a route when its source's mute moved, whatever
+  its `follows_mute`. A record is written only when a word's bits change
+  (`follow_route_record_between`'s rule, #1652c).
+- **D3.** A `follows_mute` toggle is a route row change and writes the cell only (no mirror).
+- **D5 (control plane, `crates/control-plane/src/{compile.rs,control.rs}`).** `StripLanes` keeps
+  `follow_routes` (the handles' `follow_route_controls`, no longer dropped by `..`). Step 2a
+  resolves a `Folded` record among the six-word producers and a `Following` one with
+  `host_core::follow_route_producer_position`, and refuses with `CommandError::Internal`, before
+  any write, a record with no producer of its kind or whose `automated` bits differ from the
+  producer's plan. The writes go under the transaction's one stamp, with the strip's terms
+  (`Mute`) records, so they apply in one block. No `TransitionFallback`.
+- **Departure (mechanical, outside the listed paths).** `crates/graph/src/lib.rs`:
+  `GraphFollowRouteControlProducer` keeps the bound source's `flags.automated` (one
+  `[bool; 2]` field set in `follow_route_control_pair`) behind `automated()`, which D5's check
+  reads; the producer is charged by `size_of`, so its charge follows. `TestTransactionSnapshot`
+  (test observer) gains `follow_route_cells`. `crates/host-core/tests/in_place_commit.rs` gains the
+  differential case (the `Pair` harness lives there).
+- **`crates/host-core/src/prepare.rs` functions touched.** `SendRecord` (public, accessors, doc),
+  `follows_automated_mute` (now `following_route_lanes(..).is_some()`), new
+  `following_route_lanes` (the predicate and the `automated` bits in one place). The join and
+  `route_record_between` are unchanged.
+- **Gates (all pass).**
+  - Gate 1: `crates/capi/src/runtime/live_tests.rs`
+    `a_follows_mute_toggle_on_a_following_route_is_live`; `hosts/host-web/tests/control_parity.rs`
+    `a_follows_mute_toggle_on_a_following_route_is_live_on_both_hosts`;
+    `crates/host-core/tests/live_routes.rs`
+    `a_follows_mute_toggle_on_a_following_route_settles_on_a_fresh_plan` (Simd8 on AVX2, Simd4,
+    Scalar oracle; the classifier's records written through the seven-word producers; every width
+    equals the oracle bit for bit).
+  - Gate 2: `hosts/host-web/tests/control_parity.rs`
+    `solo_and_a_vca_mute_compose_with_the_curve_for_a_following_send_on_both_hosts` (solo path
+    `monitor`, VCA mute `live`; a pre-fader route into the output still plays under the mute).
+  - Gate 3: `crates/host-core/tests/live_delta.rs`
+    `a_following_routes_edits_write_its_seven_word_cell_only` (every case also through
+    `classify_live_staged`, equal to the dense delta); in-place path:
+    `crates/host-core/tests/in_place_commit.rs`
+    `a_following_routes_edits_commit_as_the_full_path_does` over
+    `edit_sessions::following_session` / `following_script` (48 and 96 kHz).
+  - Superseded rebuild gate `an_edit_of_a_following_route_rebuilds` replaced in place by
+    `an_edit_of_a_following_route_is_live` (send gain and hand mute: `live`, the committed
+    document's fresh bits after the ramps).
+- **Red checks (temporary mutations, reverted).** Folded record still emitted for a following
+  route -> gate 3, host-core gate 1, both capi gates and both parity gates red. Terms trigger
+  missing in both classifiers -> gate 3 red ("one seven-word record", 0). Terms trigger missing in
+  the fast path only -> the in-place differential red. The commit skips the seven-word write ->
+  both capi gates and both parity gates red. The pre-write `automated` check removed -> no test
+  turns red: every record and every producer of a live commit derive `automated` from the same
+  committed structure (automation is structure, so a value commit cannot change it, and the
+  newest epoch is prepared from that structure), so the refusal is unreachable through the public
+  paths; it stays as D5's defence.

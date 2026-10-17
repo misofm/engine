@@ -317,6 +317,18 @@ impl Rig {
             .collect()
     }
 
+    /// Every following route's seven-word cell write count in the current epoch, in route-ID
+    /// order (#1653).
+    fn current_follow_route_cells(&self) -> Vec<u64> {
+        let snapshot = crate::ffi::test_transaction_snapshot(self.session);
+        snapshot
+            .follow_route_cells
+            .iter()
+            .filter(|(epoch, ..)| *epoch == snapshot.provider_epoch)
+            .map(|&(_, _, writes)| writes)
+            .collect()
+    }
+
     /// Every strip's cell write counts in the current epoch, per cell: `([fader left, fader
     /// right, mute left, mute right], matrix)`.
     fn current_cells(&self) -> Vec<([u64; 4], u64)> {
@@ -11140,17 +11152,104 @@ fn a_rebuild_that_drops_a_following_route_to_six_words_reports_a_fallback() {
     }
 }
 
-/// #1652c: an edit that lowers a following route (a route into a submix whose source strip has a
-/// mute entry) is a rebuild until #1653 gives the live commit the seven-word record: a send gain
-/// edit on `eq0-b`, and a hand mute of `eq0` (which changes `eq0-b`'s follow gate). Each commits
-/// with `rebuild`, the successor is adopted, and from the adoption on the rig renders what the
-/// committed document renders fresh, seeked to the adoption sample.
+/// #1653: sends `edits` on `rig`, which must answer `live`, and renders `blocks` blocks from the
+/// next block on. Returns that block's first sample `T` (the first block that begins after the
+/// submit returns, which applies the transaction's records) and the blocks, `T`'s first.
+fn live_and_render(rig: &mut Rig, edits: &[SessionEdit], blocks: usize) -> (u64, Vec<Vec<f32>>) {
+    let bytes = rig.transaction(edits);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(edit_path_of(&response), protocol::EditPath::Live);
+    let first = rig.block * rig.quantum as u64;
+    (first, (0..blocks).map(|_| rig.step()).collect())
+}
+
+/// The `follows_mute` row of route `route`, set to `on`.
+fn follows_mute_edit(route: &str, on: bool) -> SessionEdit {
+    use protocol::control_core::{Lane, Owner, Section, row_address};
+    SessionEdit::set_control(
+        row_address(
+            Owner::Route(StableId::parse(route).expect("route ID")),
+            Section::Own,
+            "follows_mute",
+            Lane::Both,
+        )
+        .expect("the follows_mute row"),
+        f32::from(u8::from(on)),
+        None,
+    )
+}
+
+/// #1653 gate 1 on the C ABI. `eq0` is automated-muted from 1,000 (480-sample mute ramps);
+/// `eq0-b` follows it. At 1,024 a transaction turns `follows_mute` off, at 1,920 one turns it on
+/// again: each is `live`. From the first block boundary after each route ramp (480 samples) the
+/// output is bit for bit a fresh plan of the committed document, session-seeked to the edit's
+/// block and fed the same PCM: the send open while the curve mutes, then closed again until the
+/// curve's unmute at 2,500 reopens it. Not vacuous: the send's plane carries audio while it is off
+/// and is silent after it is on again.
 ///
-/// Test value: red if the live commit writes a six-word record to a route that has no six-word
-/// cell (the commit refuses with an internal fault and the edit is lost), or if the rebuild's
-/// successor does not render the committed values.
+/// Test value: red if `follows_mute` is still read from the prepared route only (the live toggle
+/// on an automated route is lost and the send stays shut), or if the commit refuses the
+/// seven-word record.
 #[test]
-fn an_edit_of_a_following_route_rebuilds() {
+fn a_follows_mute_toggle_on_a_following_route_is_live() {
+    let mut rig = Rig::new(&follow_document(true, false));
+    let quantum = rig.quantum;
+    for _ in 0..8 {
+        rig.step();
+    }
+    let settled = |at: u64| (at as usize + 480).div_ceil(quantum) - at as usize / quantum;
+    assert_eq!(
+        rig.current_route_cells(),
+        Vec::<u64>::new(),
+        "no six-word send"
+    );
+    assert_eq!(
+        rig.current_follow_route_cells(),
+        vec![0],
+        "one seven-word send"
+    );
+    for ((label, on, blocks), writes) in [("off", false, 7), ("on", true, 17)]
+        .into_iter()
+        .zip(1_u64..)
+    {
+        let (at, live) = live_and_render(&mut rig, &[follows_mute_edit("eq0-b", on)], blocks);
+        assert_eq!(
+            rig.current_follow_route_cells(),
+            vec![writes],
+            "{label}: one seven-word cell write"
+        );
+        let reference = seeked_reference(&rig.snapshot(), at, blocks);
+        let from = settled(at);
+        for plane in 0..2 {
+            assert_eq!(
+                plane_bits(&live[from..], plane, quantum),
+                plane_bits(&reference[from..], plane, quantum),
+                "{label}, plane {plane}: a fresh plan of the committed document after the ramp"
+            );
+        }
+        // The send's plane up to the curve's unmute at 2,500 (only the "on" run reaches it).
+        let send = plane_bits(&live[from..], 1, quantum);
+        let window = (2_500_usize.saturating_sub(at as usize + from * quantum)).min(send.len());
+        let silent = send[..window]
+            .iter()
+            .all(|&word| f32::from_bits(word) == 0.0);
+        assert_eq!(
+            silent, on,
+            "{label}: the send is shut exactly when it follows"
+        );
+    }
+}
+
+/// #1653 (replaces #1652c's rebuild gate): a send gain edit on the following route `eq0-b`, and a
+/// hand mute of its source `eq0` (which changes its terms and its gate), are each `live`, and from
+/// the first block boundary after their ramps the C ABI renders what the committed document
+/// renders fresh, session-seeked to the edit's block.
+///
+/// Test value: red if either edit still rebuilds, if the commit refuses the seven-word record
+/// (an internal fault; the edit is lost), or if the record does not carry the committed values.
+#[test]
+fn an_edit_of_a_following_route_is_live() {
     use protocol::control_core::{Lane, Owner, Section, row_address};
     let gain = SessionEdit::set_control(
         row_address(
@@ -11168,8 +11267,8 @@ fn an_edit_of_a_following_route_rebuilds() {
         for _ in 0..4 {
             rig.step();
         }
-        let (adoption, live) = rebuild_and_adopt(&mut rig, std::slice::from_ref(&edit), 8);
-        let reference = seeked_reference(&rig.snapshot(), adoption, 8);
+        let (at, live) = live_and_render(&mut rig, std::slice::from_ref(&edit), 12);
+        let reference = seeked_reference(&rig.snapshot(), at, 12);
         let settle = 4;
         assert_eq!(
             live[settle..]
@@ -11180,7 +11279,7 @@ fn an_edit_of_a_following_route_rebuilds() {
                 .iter()
                 .map(|pcm| bits(pcm))
                 .collect::<Vec<_>>(),
-            "the successor renders the committed document once its ramps settle"
+            "the plan renders the committed document once its ramps settle"
         );
     }
 }

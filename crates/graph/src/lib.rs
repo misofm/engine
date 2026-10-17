@@ -1449,9 +1449,20 @@ pub struct GraphFollowRouteControlProducer {
     /// route, which bind allocates only for a plan with a following route, so the compile-time
     /// estimate never charges it. The same for every producer of one attach.
     activity_offset_bytes: u64,
+    /// The lanes the plan automates (the bound source's `flags.automated`, #1652 D1): render
+    /// takes `automated` from its own cursors, so a record whose bits differ is refused by the
+    /// commit before any write (#1653 D5).
+    automated: [bool; 2],
 }
 
 impl GraphFollowRouteControlProducer {
+    /// The source lanes whose mute the plan automates, as bound (#1653 D5): the bits every record
+    /// written to this cell must carry.
+    #[must_use]
+    pub const fn automated(&self) -> [bool; 2] {
+        self.automated
+    }
+
     /// Write `record` as the route's newest value, stamped with the revision of the transaction
     /// that commits it. A write cannot fail and never waits; render applies the newest and counts
     /// each replaced one. Validation is [`FollowRouteControlRecord::new`]'s, made before any
@@ -1504,6 +1515,7 @@ pub(crate) fn follow_route_control_pair(
         cell: engine::realtime::LatestCell::new(),
         dirty: engine::realtime::DirtyWord::new(),
     });
+    let automated = source.flags().automated;
     (
         GraphFollowRouteControlBinding {
             node: GraphNodeId::Route {
@@ -1525,6 +1537,7 @@ pub(crate) fn follow_route_control_pair(
             activity_largest,
             activity_offset_bytes: runtime::route_activity_offset_bytes(activity_routes)
                 .unwrap_or(u64::MAX),
+            automated,
         },
     )
 }

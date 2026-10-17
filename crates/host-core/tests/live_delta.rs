@@ -482,9 +482,9 @@ fn classify_both(
             .map(|route| {
                 (
                     route.route_id.to_owned(),
-                    route.record.target(),
-                    route.record.mute(),
-                    route.record.length(),
+                    route.record.folded().expect("a six-word route").target(),
+                    route.record.folded().expect("a six-word route").mute(),
+                    route.record.folded().expect("a six-word route").length(),
                 )
             })
             .collect();
@@ -2467,9 +2467,22 @@ fn push_delta(
             }
         }
         for route in &delta.routes {
-            let index = host_core::route_producer_position(&handles.route_controls, route.route_id)
-                .expect("route lane");
-            handles.route_controls[index].write(stamp, route.record);
+            match route.record {
+                host_core::SendRecord::Folded(record) => {
+                    let index =
+                        host_core::route_producer_position(&handles.route_controls, route.route_id)
+                            .expect("route lane");
+                    handles.route_controls[index].write(stamp, record);
+                }
+                host_core::SendRecord::Following(record) => {
+                    let index = host_core::follow_route_producer_position(
+                        &handles.follow_route_controls,
+                        route.route_id,
+                    )
+                    .expect("following route lane");
+                    handles.follow_route_controls[index].write(stamp, record);
+                }
+            }
         }
     });
 }
@@ -4099,9 +4112,9 @@ fn classify_routes_with(
             .map(|route| {
                 (
                     route.route_id.to_owned(),
-                    route.record.target(),
-                    route.record.mute(),
-                    route.record.length(),
+                    route.record.folded().expect("a six-word route").target(),
+                    route.record.folded().expect("a six-word route").mute(),
+                    route.record.folded().expect("a six-word route").length(),
                 )
             })
             .collect()
@@ -4637,9 +4650,9 @@ fn classify_monitor(
             .map(|route| {
                 (
                     route.route_id.to_owned(),
-                    route.record.target(),
-                    route.record.mute(),
-                    route.record.length(),
+                    route.record.folded().expect("a six-word route").target(),
+                    route.record.folded().expect("a six-word route").mute(),
+                    route.record.folded().expect("a six-word route").length(),
                 )
             })
             .collect();
@@ -5154,4 +5167,217 @@ fn a_mute_curve_takes_its_terms_as_mute_records() {
             "{label}: a static fader change is its FaderDb record, not an offsets write"
         );
     }
+}
+
+// ---- #1653 gate 3: a following route's edits ---------------------------------------------------
+
+/// [`with_bus`]`(follows_mute)` with a mute entry on the first track's **left** lane (steps 0, 1,
+/// 0 at 1,000 and 2,500): its send into `bus` is a following route (#1652 D1), automated on the
+/// left lane only.
+fn with_automated_follow(follows_mute: bool) -> SessionModel {
+    let mut model = with_bus(follows_mute);
+    let step = |start: u64, end: u64, from: f32, to: f32| AutomationSegment {
+        shape: AutomationShape::Step,
+        start_sample: start,
+        end_sample: end,
+        start_value: from,
+        end_value: to,
+        unit: ParameterUnit::Linear,
+    };
+    model.automation.push(Automation {
+        id: id("left-mute"),
+        target: ControlAddress {
+            owner: Owner::Strip(model.tracks[0].id.clone()),
+            section: Section::Builtins,
+            control: 6,
+            lane: ParameterChannel::Left,
+        },
+        segments: vec![step(0, 1_000, 0.0, 1.0), step(1_000, 2_500, 1.0, 0.0)],
+        offset: session::AutomationOffset::default(),
+    });
+    normalized(&model)
+}
+
+/// The delta of `current -> next` (the dense classifier), after checking that the fast path over
+/// the rows `rows` gives the same delta (#1613, R17-1).
+fn following_delta<'a>(
+    current: &SessionModel,
+    next: &'a SessionModel,
+    rows: &[ControlAddress],
+) -> LiveDelta<'a> {
+    let ramps = LiveRamps::for_session(next);
+    let dense = host_core::classify_live_delta_with_monitor(
+        current,
+        next,
+        ramps,
+        &EditRamps::new(),
+        host_core::MonitorBase::NONE,
+    )
+    .expect("a live delta");
+    if !rows.is_empty() {
+        let mut staged = host_core::classify_live_staged(
+            current,
+            controls::ModelView::whole(next),
+            ramps,
+            &EditRamps::new(),
+            host_core::MonitorBase::NONE,
+            rows,
+        )
+        .expect("the fast path answers");
+        staged.derived_owners = None;
+        assert_eq!(staged, dense, "the fast path's delta");
+    }
+    dense
+}
+
+/// The seven-word records of `delta`, after checking it holds no folded one.
+fn seven_word(delta: &LiveDelta<'_>) -> Vec<(String, host_core::FollowRouteControlRecord)> {
+    delta
+        .routes
+        .iter()
+        .map(|route| {
+            let record = route
+                .record
+                .following()
+                .unwrap_or_else(|| panic!("{}: a folded record", route.route_id));
+            (route.route_id.to_owned(), *record)
+        })
+        .collect()
+}
+
+/// The `[left, right]` lanes and values of the `Mute` records of the delta's only strip.
+fn mute_records(delta: &LiveDelta<'_>) -> Vec<(BuiltinLaneSelector, bool)> {
+    delta
+        .strips
+        .iter()
+        .flat_map(|strip| strip.fader_records())
+        .filter_map(|record| match record {
+            TrackFaderRecord::Mute { lanes, muted, .. } => Some((lanes, muted)),
+            TrackFaderRecord::FaderDb { .. } => None,
+        })
+        .collect()
+}
+
+/// #1653 gate 3. On a following route (`track 0 -> bus`, left lane automated): a `follows_mute`
+/// toggle gives one seven-word record and no folded record; a hand mute on the automated lane
+/// gives #1651's terms write (its `Mute` record) and one seven-word record with the new `terms`; a
+/// hand mute on the other lane gives that lane's `Mute` record and one seven-word record; a route
+/// gain edit gives one seven-word record with the new open transform; a terms change while
+/// `follows_mute` is off gives one seven-word record whose gate is open whatever the curve (no
+/// audible change); an edit that leaves every word unchanged (a fader move on the source, an
+/// identical rewrite) gives no route record. Each case gives the same delta through the fast path.
+///
+/// Test value: red if an edit still emits a folded record to a route whose cell has seven words
+/// (the curve's next event would contradict it), if a terms change with `follows_mute` off is not
+/// lowered (the cell keeps stale words), or if an unchanged cell is written.
+#[test]
+fn a_following_routes_edits_write_its_seven_word_cell_only() {
+    let current = with_automated_follow(true);
+    let track = current.tracks[0].id.clone();
+    let send = current
+        .routes
+        .iter()
+        .position(|route| route.follows_mute)
+        .expect("the following send");
+    let send_id = current.routes[send].id.clone();
+    let route_row = |control: u32| ControlAddress {
+        owner: Owner::Route(send_id.clone()),
+        section: Section::Own,
+        control,
+        lane: ParameterChannel::Both,
+    };
+    let strip_row = |control: u32, lane: ParameterChannel| ControlAddress {
+        owner: Owner::Strip(track.clone()),
+        section: Section::Builtins,
+        control,
+        lane,
+    };
+    let automated = [true, false];
+
+    // A `follows_mute` toggle.
+    let next = edited(&current, |next| next.routes[send].follows_mute = false);
+    let delta = following_delta(&current, &next, &[route_row(7)]);
+    assert!(delta.strips.is_empty());
+    let records = seven_word(&delta);
+    assert_eq!(records.len(), 1, "one seven-word record");
+    let flags = records[0].1.flags();
+    assert_eq!(
+        (flags.follows_mute, flags.terms, flags.automated),
+        (false, [false; 2], automated)
+    );
+
+    // A hand mute on the automated lane, then on the other lane.
+    for (lane, selector, terms) in [
+        (
+            ParameterChannel::Left,
+            BuiltinLaneSelector::Left,
+            [true, false],
+        ),
+        (
+            ParameterChannel::Right,
+            BuiltinLaneSelector::Right,
+            [false, true],
+        ),
+    ] {
+        let next = edited(&current, |next| match lane {
+            ParameterChannel::Left => next.tracks[0].fader.left_mute = true,
+            _ => next.tracks[0].fader.right_mute = true,
+        });
+        let delta = following_delta(&current, &next, &[strip_row(6, lane)]);
+        assert_eq!(mute_records(&delta), vec![(selector, true)], "{lane:?}");
+        let records = seven_word(&delta);
+        assert_eq!(records.len(), 1, "{lane:?}: one seven-word record");
+        assert_eq!(records[0].1.flags().terms, terms, "{lane:?}");
+        assert!(records[0].1.flags().follows_mute, "{lane:?}");
+    }
+
+    // A route gain edit: the new open transform.
+    let next = edited(&current, |next| next.routes[send].gain_db = -6.0);
+    let delta = following_delta(&current, &next, &[route_row(1)]);
+    assert!(delta.strips.is_empty());
+    let records = seven_word(&delta);
+    assert_eq!(records.len(), 1, "one seven-word record");
+    let matrix = &next.routes[send].channel_matrix;
+    let expected = graph_compiler::route_values(-6.0, [matrix.ll, matrix.lr, matrix.rl, matrix.rr])
+        .expect("in domain");
+    let words = |transform: graph::RouteTransform| {
+        [
+            transform.gain,
+            transform.ll,
+            transform.lr,
+            transform.rl,
+            transform.rr,
+        ]
+        .map(f32::to_bits)
+    };
+    assert_eq!(words(records[0].1.transform()), words(expected));
+
+    // A terms change while `follows_mute` is off: a record, and the gate stays open.
+    let unfollowing = edited(&current, |next| next.routes[send].follows_mute = false);
+    let next = edited(&unfollowing, |next| next.tracks[0].fader.right_mute = true);
+    let delta = following_delta(
+        &unfollowing,
+        &next,
+        &[strip_row(6, ParameterChannel::Right)],
+    );
+    assert_eq!(
+        mute_records(&delta),
+        vec![(BuiltinLaneSelector::Right, true)]
+    );
+    let records = seven_word(&delta);
+    assert_eq!(records.len(), 1, "one seven-word record");
+    let flags = records[0].1.flags();
+    assert_eq!((flags.follows_mute, flags.terms), (false, [false, true]));
+    for curve in [[false; 2], [true, false], [false, true], [true; 2]] {
+        assert_eq!(flags.gate(curve), graph::RouteGate::OPEN, "{curve:?}");
+    }
+
+    // Edits that leave every word of the cell unchanged.
+    let next = edited(&current, |next| next.tracks[0].fader.left_db = -3.0);
+    let delta = following_delta(&current, &next, &[strip_row(5, ParameterChannel::Left)]);
+    assert_eq!(delta.strips.len(), 1, "the fader record");
+    assert!(delta.routes.is_empty(), "a fader move writes no route cell");
+    let next = edited(&current, |_| {});
+    let delta = following_delta(&current, &next, &[]);
+    assert!(delta.is_empty(), "an identical rewrite writes nothing");
 }

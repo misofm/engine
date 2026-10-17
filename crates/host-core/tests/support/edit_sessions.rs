@@ -333,6 +333,62 @@ pub(crate) fn parity_session(rate: u32) -> SessionModel {
     model
 }
 
+/// #1653: [`parity_session`] with a mute entry on `t1`'s left lane (steps 0, 1, 0 at 1,000 and
+/// 2,500), so `t1-b` (pre-fader into `b`, following `t1`'s mute) is a following route (#1652 D1),
+/// automated on the left lane only.
+pub(crate) fn following_session(rate: u32) -> SessionModel {
+    use session::{
+        Automation, AutomationOffset, AutomationSegment, AutomationShape, ParameterUnit,
+    };
+    let mut model = parity_session(rate);
+    let step = |start: u64, end: u64, from: f32, to: f32| AutomationSegment {
+        shape: AutomationShape::Step,
+        start_sample: start,
+        end_sample: end,
+        start_value: from,
+        end_value: to,
+        unit: ParameterUnit::Linear,
+    };
+    model.automation.push(Automation {
+        id: id("t1-mute"),
+        target: strip_row("t1", MUTE, Lane::Left),
+        segments: vec![step(0, 1_000, 0.0, 1.0), step(1_000, 2_500, 1.0, 0.0)],
+        offset: AutomationOffset::default(),
+    });
+    model
+}
+
+/// #1653 gate 3's edits on [`following_session`], in order: `follows_mute` off, a terms change
+/// while it is off, `follows_mute` on, a hand mute on the automated lane and its release, a hand
+/// mute on the other lane and its release, a send gain edit, an identical rewrite of it, a fader
+/// move on the source, and a solo of another track and its release.
+pub(crate) fn following_script() -> Vec<Vec<SessionEdit>> {
+    let route = |control: u32, value: f32| {
+        vec![set(
+            address(Owner::Route(id("t1-b")), Section::Own, control, Lane::Both),
+            value,
+        )]
+    };
+    let mute =
+        |lane: Lane, on: bool| vec![set(strip_row("t1", MUTE, lane), f32::from(u8::from(on)))];
+    let solo = |on: bool| vec![set(own_row("t2", SOLO), f32::from(u8::from(on)))];
+    vec![
+        route(7, 0.0),
+        mute(Lane::Right, true),
+        mute(Lane::Right, false),
+        route(7, 1.0),
+        mute(Lane::Left, true),
+        mute(Lane::Left, false),
+        mute(Lane::Right, true),
+        mute(Lane::Right, false),
+        route(1, -6.0),
+        route(1, -6.0),
+        vec![set(strip_row("t1", FADER_DB, Lane::Both), -3.0)],
+        solo(true),
+        solo(false),
+    ]
+}
+
 /// One scripted edit of `control_parity.rs`'s `script()`, as the `SET_CONTROL` edits both hosts
 /// send.
 pub(crate) struct Scripted {

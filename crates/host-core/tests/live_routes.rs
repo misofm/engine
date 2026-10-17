@@ -1129,3 +1129,200 @@ fn live_sends_render_without_allocating() {
         },
     );
 }
+
+// ---- #1653 gate 1 (host-core form) ----------------------------------------------------------------
+
+/// [`follow_session`] with `t-b` following `t`'s mute, a 480-sample session mute length and a
+/// mute entry on `t`'s `both` lanes with steps 0, 1, 0 at samples 1,000 and 2,500: `t-b` is a
+/// following route (#1652 D1), and `follows_mute` is `follows`.
+#[cfg(all(feature = "test-support", feature = "control-provider"))]
+fn automated_follow_session(follows: bool) -> SessionModel {
+    use session::{
+        Automation, AutomationSegment, AutomationShape, ControlAddress, ControlSmoothing, Owner,
+        ParameterChannel, ParameterUnit, Section,
+    };
+    let mut model = follow_session(Values::UNITY, follows, [false; 2], Values::UNITY);
+    model.control_smoothing = Some(ControlSmoothing {
+        mute_ms: 10.0,
+        fader_ms: 5.0,
+        pan_ms: 5.0,
+    });
+    let step = |start: u64, end: u64, from: f32, to: f32| AutomationSegment {
+        shape: AutomationShape::Step,
+        start_sample: start,
+        end_sample: end,
+        start_value: from,
+        end_value: to,
+        unit: ParameterUnit::Linear,
+    };
+    model.automation.push(Automation {
+        id: sid("t-mute"),
+        target: ControlAddress {
+            owner: Owner::Strip(sid("t")),
+            section: Section::Builtins,
+            control: 6,
+            lane: ParameterChannel::Both,
+        },
+        segments: vec![step(0, 1_000, 0.0, 1.0), step(1_000, 2_500, 1.0, 0.0)],
+        offset: session::AutomationOffset::default(),
+    });
+    model
+}
+
+#[cfg(all(feature = "test-support", feature = "control-provider"))]
+impl Live {
+    /// `model` prepared with live controls on `backend`.
+    fn on(model: &SessionModel, feeds: &Feeds, backend: Backend) -> Self {
+        let compiled = compile_host_session(&document(model), &caps())
+            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+        let (mut host, handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
+            &compiled,
+            &caps(),
+            &HostLiveControlRequest::default(),
+            backend,
+        )
+        .unwrap_or_else(|failure| {
+            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+        });
+        let gate = host
+            .plan
+            .take_revision_gate()
+            .expect("the plan's gate handle");
+        Self {
+            host,
+            handles,
+            snapshot: gate.last_published(),
+            gate: Some(gate),
+            feeds: feeds.clone(),
+            block: 0,
+            pcm: vec![0.0; QUANTUM * 2],
+        }
+    }
+
+    /// Classifies `current -> next` (both normalized) and writes the delta's route records through
+    /// the producers of their kind, as one transaction. Returns the delta's record counts:
+    /// `(strips, folded routes, following routes)`.
+    fn commit(&mut self, current: &SessionModel, next: &SessionModel) -> (usize, usize, usize) {
+        let delta = host_core::classify_live_delta(
+            current,
+            next,
+            host_core::LiveRamps::for_session(next),
+            &session::EditRamps::new(),
+        )
+        .expect("a live delta");
+        let following = delta
+            .routes
+            .iter()
+            .filter(|route| route.record.following().is_some())
+            .count();
+        let counts = (
+            delta.strips.len(),
+            delta.routes.len() - following,
+            following,
+        );
+        let handles = &mut self.handles;
+        self.gate
+            .as_mut()
+            .expect("the gate stays with the host")
+            .write_published(|stamp| {
+                for route in &delta.routes {
+                    let host_core::SendRecord::Following(record) = route.record else {
+                        panic!("a following route takes the seven-word record");
+                    };
+                    let index = host_core::follow_route_producer_position(
+                        &handles.follow_route_controls,
+                        route.route_id,
+                    )
+                    .expect("the route's seven-word producer");
+                    handles.follow_route_controls[index].write(stamp, record);
+                }
+            });
+        counts
+    }
+}
+
+/// #1653 gate 1, host-core form, at every bank width with the `Scalar` oracle (R17-4). Track `t`
+/// is automated-muted from 1,000 to 2,500 and `t-b` follows it into bus `b`. At 1,024 the
+/// classifier's delta for `follows_mute` off (one seven-word record, nothing else) is written
+/// through the route's seven-word producer; at 1,920 the one for `follows_mute` on. From the first
+/// block boundary after each 480-sample route ramp, the output is bit for bit a fresh plan of the
+/// committed model (fed the same sources from 0, on the same backend): the send open while the
+/// curve mutes, then shut until the curve's unmute reopens it. Every width renders the scalar
+/// oracle's bits.
+///
+/// Test value: red if a `follows_mute` toggle on a following route gives a folded record or none
+/// (the toggle is lost, and the send stays shut), or if the seven-word record carries the wrong
+/// flags.
+#[cfg(all(feature = "test-support", feature = "control-provider"))]
+#[test]
+fn a_follows_mute_toggle_on_a_following_route_settles_on_a_fresh_plan() {
+    const BLOCKS: usize = 32;
+    let backends = [
+        #[cfg(target_feature = "avx2")]
+        Backend::Simd8,
+        Backend::Simd4,
+        Backend::Scalar,
+    ];
+    let normalized = |model: &SessionModel| {
+        compile_host_session(&document(model), &caps())
+            .expect("compiles")
+            .normalized_model()
+            .clone()
+    };
+    let following = normalized(&automated_follow_session(true));
+    let send = route_index(&following, "t-b");
+    let mut open = following.clone();
+    open.revision += 1;
+    open.routes[send].follows_mute = false;
+    let mut shut = open.clone();
+    shut.revision += 1;
+    shut.routes[send].follows_mute = true;
+    let mut draw = Draw::new(1_653_001);
+    let feeds = feeds(&mut draw, &["t", "u"], BLOCKS * QUANTUM);
+    let mut oracle: Option<Planes> = None;
+    for backend in backends {
+        let what = format!("{backend:?}");
+        let mut live = Live::on(&following, &feeds, backend);
+        let mut actual = live.render(8);
+        assert_eq!(live.commit(&following, &open), (0, 0, 1), "{what}: off");
+        live.render_into(7, &mut actual);
+        assert_eq!(live.commit(&open, &shut), (0, 0, 1), "{what}: on");
+        live.render_into(BLOCKS - 15, &mut actual);
+        let fresh_open = Live::on(&open, &feeds, backend).render(BLOCKS);
+        let fresh_shut = Live::on(&shut, &feeds, backend).render(BLOCKS);
+        let off_window = (1_024 + 480_usize).div_ceil(QUANTUM) * QUANTUM..15 * QUANTUM;
+        let on_window = (1_920 + 480_usize).div_ceil(QUANTUM) * QUANTUM..BLOCKS * QUANTUM;
+        for plane in 0..2 {
+            assert_eq!(
+                actual[plane][off_window.clone()]
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                fresh_open[plane][off_window.clone()]
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<_>>(),
+                "{what}: plane {plane} with follows_mute off"
+            );
+        }
+        assert_planes(
+            &actual,
+            &fresh_shut,
+            on_window.start,
+            &format!("{what}: on"),
+        );
+        // Not vacuous: the shut plan differs from the open one while the curve mutes.
+        assert!(
+            first_difference(
+                &fresh_open[0][off_window.clone()],
+                &fresh_shut[0][off_window.clone()]
+            )
+            .is_some(),
+            "{what}: the toggle is audible"
+        );
+        match &oracle {
+            None => oracle = Some(actual),
+            Some(oracle) => assert_planes(&actual, oracle, 0, &format!("{what}: the oracle")),
+        }
+    }
+}

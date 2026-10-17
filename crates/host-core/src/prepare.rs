@@ -4325,13 +4325,36 @@ pub(crate) fn route_record_between(
 }
 
 /// The record a send's cell takes (#1652 D1): the six folded words of #1347, or, for a route a
-/// plan gives the seven-word cell ([`follows_automated_mute`]), its open transform and flags.
+/// plan gives the seven-word cell (a route into a submix whose source strip automates its mute),
+/// its open transform and flags. A host writes a `Folded` record through the route's
+/// [`RouteControlProducer`](crate::RouteControlProducer) and a `Following` one through its
+/// [`GraphFollowRouteControlProducer`](graph::GraphFollowRouteControlProducer) (#1653).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum SendRecord {
-    /// A six-word route's record ([`route_record_between`]).
+pub enum SendRecord {
+    /// A six-word route's record (`route_record_between`).
     Folded(RouteControlRecord),
-    /// A following route's record ([`follow_route_record_between`]).
+    /// A following route's record (`follow_route_record_between`).
     Following(graph::FollowRouteControlRecord),
+}
+
+impl SendRecord {
+    /// The six-word record, or `None` for a following route's.
+    #[must_use]
+    pub const fn folded(&self) -> Option<&RouteControlRecord> {
+        match self {
+            Self::Folded(record) => Some(record),
+            Self::Following(_) => None,
+        }
+    }
+
+    /// The seven-word record, or `None` for a six-word route's.
+    #[must_use]
+    pub const fn following(&self) -> Option<&graph::FollowRouteControlRecord> {
+        match self {
+            Self::Following(record) => Some(record),
+            Self::Folded(_) => None,
+        }
+    }
 }
 
 /// The seven-word record of a following route (#1652 D1) as `route` holds it: the open transform
@@ -5046,13 +5069,27 @@ fn route_source_id(route: &session::Route) -> &session::StableId {
 /// other route keeps the six-word cell. A route into the output never follows.
 #[must_use]
 pub(crate) fn follows_automated_mute(model: &SessionModel, route: &session::Route) -> bool {
-    matches!(
+    following_route_lanes(model, route).is_some()
+}
+
+/// The source lanes whose mute a plan of `model` automates for `route`, when that plan gives
+/// `route` the seven-word cell of a following route ([`follows_automated_mute`]), else `None`:
+/// the `automated` bits of the route's records (#1652 D1, #1653 D1).
+#[must_use]
+pub(crate) fn following_route_lanes(
+    model: &SessionModel,
+    route: &session::Route,
+) -> Option<[bool; 2]> {
+    if !matches!(
         route.destination,
         session::RouteDestination::SubmixInput { .. }
-    ) && !model.automation.is_empty()
-        && controls::mute_automation(model, route_source_id(route))
-            .iter()
-            .any(Option::is_some)
+    ) || model.automation.is_empty()
+    {
+        return None;
+    }
+    let automated =
+        controls::mute_automation(model, route_source_id(route)).map(|entry| entry.is_some());
+    (automated != [false; 2]).then_some(automated)
 }
 
 /// The jump length of a stored mute curve on a following route (#1652 D2, #1652b): the mute row's
