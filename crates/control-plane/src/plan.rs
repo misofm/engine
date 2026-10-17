@@ -197,7 +197,7 @@ impl<'a> ObservedReservation<'a> {
     }
 
     /// The outcome the candidate's own revisions complete with (#1314 D1): the transition
-    /// fallback for a rebuild that may stretch a level move in flight (B17-R14).
+    /// fallback for a rebuild that carries a following route into a six-word route (#1713).
     pub(crate) fn set_outcome(&mut self, outcome: engine::realtime::CandidateOutcome) {
         self.inner
             .as_mut()
