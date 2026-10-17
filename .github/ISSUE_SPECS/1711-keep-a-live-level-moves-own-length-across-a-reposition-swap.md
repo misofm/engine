@@ -98,3 +98,12 @@ conservative fallback flag of B17-R14 with the exact behaviour and deletes that 
 ## Dependencies
 
 - #1648 (closed on its gates), B17-R13 and B17-R14 (the conservative flag this issue removes).
+
+## Amendment (controls coordinator, batch 18, root ruling 2026-10-17)
+
+- **Added item: gate or delete the owed discharge on a free fader write.** In
+  `crates/builtins-compiler/src/lib.rs` (about `:1689` on `ad03780ee`), a free live write releases the
+  hold and sets `self.owed = false`. Deleting that line leaves every test green (batch 18 T1 gate
+  power check, `scratchpad/c18t1/`). Prove the discharge observable and gate it, or prove it
+  unobservable and delete it. This slice reworks the same owed and hold machinery at a Reposition,
+  so the item belongs here, not in a phase-2 placeholder.
