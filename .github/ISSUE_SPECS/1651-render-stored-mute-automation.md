@@ -821,8 +821,15 @@ MAJOR-1 may extend the authorized paths to `crates/automation/src/events.rs`.
   host-web/test-support` (214), `-p control-plane --features test-support` (28). fmt, clippy
   (automation, builtins-compiler, control-plane, host-core, host-web; all targets and features,
   `-D warnings`) and the no-feature `cargo check --all-targets` of the same crates and `capi`.
-- **Phase-2 placeholder.** A solo on `t2` in a session where `t1` has a mute curve and a send that
-  follows `t1`'s mute is refused by the browser with `control.internal` (seen while writing
-  MINOR-4; the solo moves a following route's gate, which is a rebuild until #1653, and a monitor
-  write cannot take a rebuild). Not investigated further; #1653's scope.
+- **Resolved by #1653 (verified on the merge `a63588680`).** A solo on `t2` in a session where `t1`
+  has a mute curve and a send that follows `t1`'s mute was refused with `control.internal` on lane M
+  before #1653 landed. On the merged tree it is accepted on both hosts and composes; the MINOR-4 gate
+  now keeps the following send (its `follows_mute = false` override is removed).
+- **U1 fold verification notes (batch 18).** The M > 0 release branch of `rehold` is defensive: a
+  muted span is at least 64 samples, so a grid event before E always owes a move that re-commits the
+  cell, and the M = 48 leg cannot turn red (the verifier confirmed the argument). MINOR-4's unique
+  catch is a divergence in a host adapter's seek or term delivery (both hosts run the one core). When
+  a hand record and a curve edit are both needed for a change (P3), the landing ramps over M and the
+  hand ramp is not used, by the rule "a record that changes nothing against the heard curve is left
+  to the landing".
 

@@ -1597,7 +1597,7 @@ pub struct RouteControlResources {
 /// The resources of one [`PreparedGraphPlan::attach_route_controls`] call's `producers` and
 /// `following` producers, and of the bind that consumes their lanes (issue #1220 D8, #1652 D1): an
 /// upper bound on both the attached and the bound state ([`RouteControlResources`]). A six-word
-/// route is charged its [`RouteLane`] cell, its owner ([`LIVE_ROUTE_OWNER_BYTES`]) and its
+/// route is charged its `RouteLane` cell, its owner ([`LIVE_ROUTE_OWNER_BYTES`]) and its
 /// producer; a following route its own seven-word cell, owner ([`LIVE_FOLLOW_ROUTE_OWNER_BYTES`])
 /// and producer, so the charge of a plan with no following route is what it was. The
 /// route-activity table is one per plan, charged once. Saturating; empty for no producers.
@@ -2722,7 +2722,7 @@ impl PreparedGraphPlan {
 
     /// [`Self::attach_route_controls`] with following routes (#1652 D1, #1652c): every route into
     /// a submix input for which `following` gives a source gets a seven-word lane reading it
-    /// ([`follow_route_control_pair`]) and no six-word lane; every other such route gets a
+    /// (`follow_route_control_pair`) and no six-word lane; every other such route gets a
     /// six-word lane when `six_word` is set and none otherwise. Both producer lists are in
     /// canonical route-ID order. `following` is asked once per route into a submix, in that
     /// order, so a route into an output never follows (decision 13 P11).

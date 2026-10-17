@@ -4329,7 +4329,7 @@ pub(crate) fn route_record_between(
 /// The record a send's cell takes (#1652 D1): the six folded words of #1347, or, for a route a
 /// plan gives the seven-word cell (a route into a submix whose source strip automates its mute),
 /// its open transform and flags. A host writes a `Folded` record through the route's
-/// [`RouteControlProducer`](crate::RouteControlProducer) and a `Following` one through its
+/// [`RouteControlProducer`] and a `Following` one through its
 /// [`GraphFollowRouteControlProducer`](graph::GraphFollowRouteControlProducer) (#1653).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SendRecord {

@@ -1628,6 +1628,8 @@ impl FaderCellCursor<'_> {
             obligation.held_through = true;
             return;
         }
+        // The M > 0 arm is defensive: a muted span is at least 64 samples, so a grid event before
+        // E owes a move whose landing at E re-commits the cell anyway (#1651 U1 fold verification).
         self.release = match samples {
             0 => span_time(self.start, self.step, u64::from(at)),
             samples => span_time(self.start, self.step, u64::from(at) + u64::from(samples))

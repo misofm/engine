@@ -3124,9 +3124,10 @@ fn a_mute_curve_rebuild_while_a_level_move_ramps_completes_exactly_on_both_hosts
 /// the seek off every grid and block boundary). The curve is heard: `t1`'s muted span differs from
 /// a twin with no curve.
 ///
-/// Test value: red if either host composes `curve || terms` differently (the browser's solo
-/// overlay or the C ABI's VCA term), lands a step, a term or the seek's exact set at another
-/// sample or over another ramp, or answers a term edit differently.
+/// Test value: red if a host adapter delivers the seek or a term edit differently (both hosts run
+/// the one core, so the unique catch is the adapter: a step, a term or the seek's exact set landing
+/// at another sample or over another ramp, or a different answer to a term edit). The send follows
+/// `t1`'s mute, so the following route's cell is in the comparison too.
 #[cfg(feature = "test-support")]
 #[test]
 fn a_composed_stored_mute_renders_alike_on_both_hosts() {
@@ -3172,11 +3173,6 @@ fn a_composed_stored_mute_renders_alike_on_both_hosts() {
             },
             members: vec![id(T1.id)],
         });
-        // The send does not follow `t1`'s mute: a strip mute that moves a following route's
-        // gate is a rebuild until #1653, which a solo (monitor) write cannot take.
-        for route in &mut model.routes {
-            route.follows_mute = false;
-        }
         let plain = model.clone();
         model.automation.push(curve());
         // The block that holds a sample, and the blocks of the script.
