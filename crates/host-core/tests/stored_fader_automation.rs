@@ -2239,6 +2239,58 @@ fn acted(
     (outs.swap_remove(0), entries)
 }
 
+/// #1711 G4 (A1): an exact live unmute that frees a lane held over a moving ride discharges the
+/// move the hold owed. Track 0 (prepared unmuted, fader length 20 ms = 960 samples) rides
+/// linearly from `0` to `-6` dB over `[0, 1_280)`, holds `-6` dB to 2,320, then rides on to
+/// `-12` dB. A live mute (window 256) at 512 and an exact live unmute (window 0) at 1,024 hold
+/// the lane over moving grid points (a move is owed, then the unmute frees the lane at that
+/// entry); a mute (256) at 1,536 and an unmute (200) at 2,048 hold it again where the ride is
+/// flat, so nothing is remembered in that hold, whose end `E` is 2,248. From 1,152 on both lanes
+/// equal the rig that takes only the second hold, at quantum 128 on every render form (Simd8 on
+/// AVX2, Simd4, the between-render forms and the scalar oracle).
+///
+/// Test value: red if the free write at the unmute's entry does not discharge the owed move (the
+/// `owed = false` of `HeldRampObligation::block`): the stale obligation then lands a move over
+/// `J` at `E` with nothing remembered.
+#[cfg(feature = "test-support")]
+#[test]
+fn an_exact_unmute_that_frees_a_held_lane_discharges_the_owed_move() {
+    use builtins::BuiltinLaneSelector::Both;
+    const FRAMES: u64 = 5_120;
+    let (model, _) = muted_ride(
+        vec![
+            segment(AutomationShape::Linear, 0, 1_280, 0.0, -6.0),
+            segment(AutomationShape::Linear, 1_280, 2_320, -6.0, -6.0),
+            segment(AutomationShape::Linear, 2_320, 1 << 20, -6.0, -12.0),
+        ],
+        20.0,
+    );
+    let model = never_muted(&model);
+    let mute = |at: u64, muted: bool, window: u32| Act {
+        mute: Some((Both, muted, window)),
+        ..act(at)
+    };
+    let second = [mute(1_536, true, 256), mute(2_048, false, 200)];
+    let both: Vec<Act> = [mute(512, true, 256), mute(1_024, false, 0)]
+        .into_iter()
+        .chain(second)
+        .collect();
+    let (out, entries) = acted(&model, 128, FRAMES, &both);
+    assert_eq!(
+        entries,
+        [512, 1_024, 1_536, 2_048],
+        "each act lands at its own entry"
+    );
+    let (reference, _) = acted(&model, 128, FRAMES, &second);
+    for plane in 0..2 {
+        assert_eq!(
+            first_difference(&out[plane][1_152..], &reference[plane][1_152..]),
+            None,
+            "plane {plane}: first difference after 1,152"
+        );
+    }
+}
+
 /// `model` with track 0 prepared unmuted: the never-muted twin.
 #[cfg(feature = "test-support")]
 fn never_muted(model: &SessionModel) -> SessionModel {
