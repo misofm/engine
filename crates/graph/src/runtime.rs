@@ -983,6 +983,27 @@ impl LiveRoute {
         self.position = from.position;
         self.mute = from.mute;
     }
+
+    /// Take a following predecessor's ramp state (#1652 D3, the curve removed): the ramp, its
+    /// position and its mute, as [`Self::adopt`] takes a six-word one's.
+    fn adopt_state(&mut self, ramp: IndexedRamp, position: u32, mute: bool) {
+        self.ramp = ramp;
+        self.position = position;
+        self.mute = mute;
+    }
+
+    /// #1652 D3: at the first block after a following predecessor's ramp was adopted, retarget to
+    /// this plan's own prepared target `prepared` (gate `mute`) from the coefficients the route is
+    /// at over `length`, only when the bits differ. A send the removed curve held muted reopens
+    /// over the session mute length, as the curve's own jump would have.
+    fn retarget_carried(&mut self, prepared: [f32; 4], mute: bool, length: u32) {
+        self.mute = mute;
+        if prepared.map(f32::to_bits) == self.ramp.target.map(f32::to_bits) {
+            return;
+        }
+        self.ramp = IndexedRamp::new(self.ramp.coefficients_at(self.position), prepared, length);
+        self.position = 0;
+    }
 }
 
 // REALTIME_POLICY_END
@@ -1035,9 +1056,23 @@ struct FollowCursors {
     /// `a(tap)`.
     arrival: u64,
     mute_jump: crate::GraphMuteJumpLength,
-    /// The route has rendered no block yet: its first block sets the curve exactly at its first
-    /// sample when the curve there differs from the seed (#1647 D2, as the strip's fresh lane).
-    fresh: bool,
+    /// How the route's next block begins: fresh, carried or running.
+    start: FollowStart,
+}
+
+/// How a following route's next block begins (#1652b, #1652 D3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FollowStart {
+    /// The route of a fresh plan has rendered no block: its first block sets the curve exactly at
+    /// its first sample when the curve there differs from the seed (#1647 D2, as the strip's
+    /// fresh lane).
+    Fresh,
+    /// The route took a predecessor's ramp at a plan swap (D3): its first block places its
+    /// cursors at its own node time with the curve's value there (no `Set`), and then compares its
+    /// composed target with the adopted ramp's.
+    Carried,
+    /// Every later block.
+    Running,
 }
 
 /// One block's node spans per source lane and the block's mute jump length (#1652b). A lane with
@@ -1086,7 +1121,7 @@ impl LiveFollowRoute {
             curve,
             arrival: source.arrival,
             mute_jump: source.mute_jump,
-            fresh: true,
+            start: FollowStart::Fresh,
         };
         let (target, mute) = follow.compose(&transform, source.flags, curve);
         Self {
@@ -1122,15 +1157,26 @@ impl FollowCursors {
     }
 
     /// The block's spans at the tap's node time (`node_span(a(tap))`, R17-3) and its mute jump
-    /// length (the host-core rule over the block's lengths). Takes the fresh flag: the first block
-    /// with no seek reaching it lands a `Set` at offset 0 on a lane whose curve there differs from
-    /// what the lane holds.
-    fn block(&mut self, time: &crate::GraphBlockTime<'_>) -> FollowBlock {
-        let fresh = core::mem::replace(&mut self.fresh, false);
+    /// length (the host-core rule over the block's lengths, whenever the block has them). Takes
+    /// the start: the first block of a fresh route with no seek reaching it lands a `Set` at
+    /// offset 0 on a lane whose curve there differs from what the lane holds; the first block of a
+    /// carried route instead seeds each lane with the curve's value at its first sample (D3: the
+    /// successor places its cursors fresh, and its block entry compares). Returns whether the
+    /// block is a carried route's first.
+    fn block(&mut self, time: &crate::GraphBlockTime<'_>) -> (FollowBlock, bool) {
+        let start = core::mem::replace(&mut self.start, FollowStart::Running);
+        let carried = start == FollowStart::Carried;
         let frames = time.frames();
-        let (Some(span), Some(lengths)) = (time.node_span(self.arrival), time.jump_lengths())
-        else {
-            return FollowBlock::IDLE;
+        let Some(lengths) = time.jump_lengths() else {
+            return (FollowBlock::IDLE, carried);
+        };
+        let jump = core::cmp::min((self.mute_jump)(lengths), crate::ROUTE_RAMP_LENGTH_MAXIMUM);
+        let idle = FollowBlock {
+            spans: [None; 2],
+            jump,
+        };
+        let Some(span) = time.node_span(self.arrival) else {
+            return (idle, carried);
         };
         let length = i64::from(frames);
         if frames == 0
@@ -1139,27 +1185,39 @@ impl FollowCursors {
                 .step
                 .is_some_and(|step| step.timeline.checked_add(length).is_none())
         {
-            return FollowBlock::IDLE;
+            return (idle, carried);
         }
-        let jump = core::cmp::min((self.mute_jump)(lengths), crate::ROUTE_RAMP_LENGTH_MAXIMUM);
         let mut spans = [None; 2];
-        for ((slot, cell), state) in spans.iter_mut().zip(self.cells).zip(&self.states) {
+        for (((slot, cell), state), curve) in spans
+            .iter_mut()
+            .zip(self.cells)
+            .zip(&mut self.states)
+            .zip(&mut self.curve)
+        {
             let Some(program) = cell.and_then(|cell| self.program.cell(cell as usize)) else {
                 continue;
             };
+            if carried {
+                let value = automation::value_at(program.segments(), span.start);
+                state.seed_target(value);
+                *curve = value != 0.0;
+            }
             let step = span
                 .step
                 .map(|step| (step.offset, step.timeline))
                 .or_else(|| {
+                    if start != FollowStart::Fresh {
+                        return None;
+                    }
                     let value = automation::value_at(program.segments(), span.start);
-                    (fresh && state.target().map(f32::to_bits) != Some(value.to_bits()))
+                    (state.target().map(f32::to_bits) != Some(value.to_bits()))
                         .then_some((0, span.start))
                 });
             // The graph's step lies inside the block, so the span is valid; a refused one leaves
             // the lane holding its curve, with no panic.
             *slot = automation::NodeSpan::new(span.start, step, frames).ok();
         }
-        FollowBlock { spans, jump }
+        (FollowBlock { spans, jump }, carried)
     }
 }
 
@@ -1227,20 +1285,11 @@ fn follow_walk(
 }
 
 impl LiveFollowRoute {
-    /// The route op's block entry (#1652 D2): read the cell under the block's snapshot and, on a
-    /// target whose bits change, retarget from the coefficients the route is at over the
-    /// record's ramp; take the block's spans at the tap's node time; decide the block's
-    /// activity. Returns whether the route mixes this block.
-    ///
-    /// The cell composes with the curve the route has heard (the curve at the block's first
-    /// sample before that sample's events), and the block's curve events follow in offset order,
-    /// as the strip's stage orders them (#1651). Inactive only when the route is muted, past its
-    /// ramp and undelayed at entry and no event of the block leaves it otherwise: the changes are
-    /// found first on copies of the cursors, so a route that unmutes inside the block mixes, and a
-    /// muted route with no change moves no bit. An inactive block commits the copies' cursors (no
-    /// event of it retargets, since every silencing target is `[+0.0; 4]`).
+    /// Read the cell under `snapshot` and, on a target whose bits change, retarget from the
+    /// coefficients the route is at over the record's ramp (#1652 D2). The record composes with
+    /// the curve the route has heard. Returns how many values were applied: `0` or `1`.
     #[inline]
-    fn begin_block(&mut self, snapshot: LiveSnapshot, time: &crate::GraphBlockTime<'_>) -> bool {
+    fn apply_cell(&mut self, snapshot: LiveSnapshot) -> usize {
         let mut applied = 0;
         if let Some(record) = self.control.read(snapshot) {
             self.transform = record.transform();
@@ -1261,8 +1310,57 @@ impl LiveFollowRoute {
         }
         #[cfg(any(test, feature = "test-support"))]
         test_only_count_route_drained(self.route as usize, applied, snapshot);
-        let _ = applied;
-        self.block = self.follow.block(time);
+        applied
+    }
+
+    /// Take the ramp state of the predecessor's live route of the same ID, of either kind
+    /// (#1652 D3): the ramp, its position and its mute. The cursors do not carry: this plan's
+    /// own, unplaced, are placed at its first block's node time, which then compares.
+    fn adopt(&mut self, ramp: IndexedRamp, position: u32, mute: bool) {
+        self.ramp = ramp;
+        self.position = position;
+        self.mute = mute;
+        self.follow.start = FollowStart::Carried;
+    }
+
+    /// The route op's block entry (#1652 D2): take the block's spans at the tap's node time; read
+    /// the cell under the block's snapshot and, on a target whose bits change, retarget from the
+    /// coefficients the route is at over the record's ramp; on a carried route's first block
+    /// (D3), compare the composed target with the adopted ramp's and, on a bits change, retarget
+    /// over the session mute length; decide the block's activity. Returns whether the route
+    /// mixes this block.
+    ///
+    /// The cell composes with the curve the route has heard (the curve at the block's first
+    /// sample before that sample's events), and the block's curve events follow in offset order,
+    /// as the strip's stage orders them (#1651). Inactive only when the route is muted, past its
+    /// ramp and undelayed at entry and no event of the block leaves it otherwise: the changes are
+    /// found first on copies of the cursors, so a route that unmutes inside the block mixes, and a
+    /// muted route with no change moves no bit. An inactive block commits the copies' cursors (no
+    /// event of it retargets, since every silencing target is `[+0.0; 4]`).
+    #[inline]
+    fn begin_block(&mut self, snapshot: LiveSnapshot, time: &crate::GraphBlockTime<'_>) -> bool {
+        // The spans first: a carried route's first block places its curve at its own node time
+        // before anything composes with it. A running or fresh route's curve is unchanged by it.
+        let (block, carried) = self.follow.block(time);
+        self.block = block;
+        self.apply_cell(snapshot);
+        if carried {
+            // #1652 D3: after the join's record (if any, through the cell), the successor
+            // compares its own composed target with the adopted ramp's and retargets over the
+            // session mute length only on a bits change: the curve's own jump.
+            let (target, mute) =
+                self.follow
+                    .compose(&self.transform, self.flags, self.follow.curve);
+            self.mute = mute;
+            if target.map(f32::to_bits) != self.ramp.target.map(f32::to_bits) {
+                self.ramp = IndexedRamp::new(
+                    self.ramp.coefficients_at(self.position),
+                    target,
+                    self.block.jump,
+                );
+                self.position = 0;
+            }
+        }
         if !(self.mute && self.position >= self.ramp.length && !self.delayed) {
             return true;
         }
@@ -5121,26 +5219,156 @@ fn effect_node_mut(
     }
 }
 
-/// The live route whose op sits in runtime unit `unit` (#1284 D2). Allocation-free: a
-/// bounds-checked unit borrow and a match.
-fn live_route_of(units: &[RuntimeUnit], unit: u32) -> Option<&LiveRoute> {
-    match units.get(unit as usize)? {
-        RuntimeUnit::Op(op) => match &op.kind {
-            NodeKind::LiveRoute(live) => Some(live),
+/// Whether runtime unit `unit` holds a live route's op of either kind (#1284 D2, #1652 D3): a
+/// six-word [`LiveRoute`] or a following [`LiveFollowRoute`]. Allocation-free: a bounds-checked
+/// unit borrow and a match.
+fn is_live_route_unit(units: &[RuntimeUnit], unit: u32) -> bool {
+    match units.get(unit as usize) {
+        Some(RuntimeUnit::Op(op)) => {
+            matches!(
+                op.kind,
+                NodeKind::LiveRoute(_) | NodeKind::LiveFollowRoute(_)
+            )
+        }
+        Some(RuntimeUnit::Bank { .. }) | None => false,
+    }
+}
+
+/// One live route's render state, of either kind, borrowed for a plan swap's carry (#1652 D3).
+enum CarriedRoute<'a> {
+    Six(&'a mut LiveRoute),
+    Seven(&'a mut LiveFollowRoute),
+}
+
+/// The live route whose op sits in runtime unit `unit`, of either kind (#1284 D2, #1652 D3).
+/// Allocation-free: a bounds-checked unit borrow and a match.
+fn carried_route_mut(units: &mut [RuntimeUnit], unit: u32) -> Option<CarriedRoute<'_>> {
+    match units.get_mut(unit as usize)? {
+        RuntimeUnit::Op(op) => match &mut op.kind {
+            NodeKind::LiveRoute(live) => Some(CarriedRoute::Six(live)),
+            NodeKind::LiveFollowRoute(live) => Some(CarriedRoute::Seven(live)),
             _ => None,
         },
         RuntimeUnit::Bank { .. } => None,
     }
 }
 
-/// [`live_route_of`], mutably.
+/// The six-word live route whose op sits in runtime unit `unit` (#1652 D3). Allocation-free.
 fn live_route_mut(units: &mut [RuntimeUnit], unit: u32) -> Option<&mut LiveRoute> {
-    match units.get_mut(unit as usize)? {
-        RuntimeUnit::Op(op) => match &mut op.kind {
-            NodeKind::LiveRoute(live) => Some(live),
-            _ => None,
-        },
-        RuntimeUnit::Bank { .. } => None,
+    match carried_route_mut(units, unit)? {
+        CarriedRoute::Six(live) => Some(live),
+        CarriedRoute::Seven(_) => None,
+    }
+}
+
+/// One move of a plan's live-send carry section (#1284 D2) and the comparison it leaves for the
+/// successor's first block (#1652 D3).
+#[derive(Clone, Copy)]
+pub(crate) struct RouteCarryStep {
+    pub(crate) step: crate::GraphRouteMove,
+    /// Set at the swap block when a six-word successor took the ramp of a following predecessor
+    /// whose target's bits differ from the successor's own prepared target; taken by
+    /// [`GraphRuntime::finish_route_carry`] at the successor's first block.
+    check: Option<SixWordCarryCheck>,
+}
+
+impl RouteCarryStep {
+    /// A move with no comparison pending. Control side.
+    pub(crate) const fn new(step: crate::GraphRouteMove) -> Self {
+        Self { step, check: None }
+    }
+}
+
+/// What a six-word successor of a following predecessor compares at its first block (#1652 D3,
+/// the curve removed): its own prepared target and mute, and the mute row's jump-length rule the
+/// predecessor's source carried, which a six-word route does not hold.
+#[derive(Clone, Copy)]
+struct SixWordCarryCheck {
+    prepared: [f32; 4],
+    mute: bool,
+    mute_jump: crate::GraphMuteJumpLength,
+}
+
+/// One six-word successor's comparison at its first block (#1652 D3, the curve removed): its cell
+/// first, under the block's snapshot (the join's record, if any, is this plan's own value and
+/// governs); without a record, [`LiveRoute::retarget_carried`] to its prepared target over the
+/// session mute length. Allocation-, lock- and panic-free.
+fn finish_six_word_carry(
+    live: &mut LiveRoute,
+    check: SixWordCarryCheck,
+    snapshot: LiveSnapshot,
+    lengths: Option<crate::GraphJumpLengths>,
+) {
+    if live.apply_pending(snapshot) != 0 {
+        return;
+    }
+    let length = lengths.map_or(0, |lengths| {
+        core::cmp::min((check.mute_jump)(lengths), crate::ROUTE_RAMP_LENGTH_MAXIMUM)
+    });
+    live.retarget_carried(check.prepared, check.mute, length);
+}
+
+/// One live send's carry at the swap block (#1284 D2, #1652 D3), whatever the kind on either side.
+/// The predecessor's pending value is applied under every snapshot first, as its next block
+/// would apply it; then the successor takes the ramp, its position and the mute.
+///
+/// * six -> six: [`LiveRoute::adopt`], exactly as before #1652.
+/// * either -> seven: [`LiveFollowRoute::adopt`]; its first block places its own cursors at its
+///   own node time and compares ([`LiveFollowRoute::begin_block`]).
+/// * seven -> six: [`LiveRoute::adopt_state`]; when the adopted target's bits differ from the
+///   successor's prepared target, the comparison is left in `check` for the successor's first
+///   block, which knows the block's jump lengths. Returns whether it left one.
+///
+/// Allocation-, lock- and panic-free: bounded copies.
+fn carry_route(
+    into: CarriedRoute<'_>,
+    from: CarriedRoute<'_>,
+    check: &mut Option<SixWordCarryCheck>,
+) -> bool {
+    *check = None;
+    let (ramp, position, mute, mute_jump) = match from {
+        CarriedRoute::Six(from) => {
+            from.apply_pending(LiveSnapshot::ALL);
+            if let CarriedRoute::Six(into) = into {
+                into.adopt(from);
+                return false;
+            }
+            (from.ramp, from.position, from.mute, None)
+        }
+        CarriedRoute::Seven(from) => {
+            from.apply_cell(LiveSnapshot::ALL);
+            (
+                from.ramp,
+                from.position,
+                from.mute,
+                Some(from.follow.mute_jump),
+            )
+        }
+    };
+    match into {
+        CarriedRoute::Seven(into) => {
+            into.adopt(ramp, position, mute);
+            false
+        }
+        CarriedRoute::Six(into) => {
+            // A six-word successor has rendered no block at the swap: its ramp is the settled
+            // prepared target bind gave it, and its mute is the prepared gate's.
+            let (prepared, prepared_mute) = (into.ramp.target, into.mute);
+            into.adopt_state(ramp, position, mute);
+            let Some(mute_jump) = mute_jump else {
+                return false;
+            };
+            if prepared.map(f32::to_bits) == ramp.target.map(f32::to_bits) {
+                into.mute = prepared_mute;
+                return false;
+            }
+            *check = Some(SixWordCarryCheck {
+                prepared,
+                mute: prepared_mute,
+                mute_jump,
+            });
+            true
+        }
     }
 }
 
@@ -5609,9 +5837,10 @@ impl crate::runtime::Runtime {
         }
     }
 
-    /// Whether the unit `unit` of this runtime is a live route's op (#1284 D2).
+    /// Whether the unit `unit` of this runtime is a live route's op of either kind (#1284 D2,
+    /// #1652 D3).
     pub(crate) fn is_live_route(&self, unit: u32) -> bool {
-        live_route_of(&self.units, unit).is_some()
+        is_live_route_unit(&self.units, unit)
     }
 
     /// Whether every move of `moves` names a strip delay line of this (successor) runtime and one
@@ -5654,40 +5883,65 @@ impl crate::runtime::Runtime {
     }
 
     /// Whether every move of `moves` names a live route unit of this (successor) runtime and one
-    /// of `predecessor` (#1284 D2). Checked before anything moves, so the carry is all or nothing.
-    /// Allocation-free.
+    /// of `predecessor`, of either kind on either side (#1284 D2, #1652 D3). Checked before
+    /// anything moves, so the carry is all or nothing. Allocation-free.
     pub(crate) fn can_carry_live_routes(
         &self,
         predecessor: &Self,
-        moves: &[crate::GraphRouteMove],
+        moves: &[RouteCarryStep],
     ) -> bool {
         moves.iter().all(|step| {
-            live_route_of(&self.units, step.successor).is_some()
-                && live_route_of(&predecessor.units, step.predecessor).is_some()
+            is_live_route_unit(&self.units, step.step.successor)
+                && is_live_route_unit(&predecessor.units, step.step.predecessor)
         })
     }
 
-    /// Run the live-send section of a carry program at the swap block (#1284 D2): the
-    /// predecessor's pending value is applied under every snapshot, as its next block would apply
-    /// it ([`LiveRoute::apply_pending`]), and then the successor takes its ramp, position and mute
-    /// ([`LiveRoute::adopt`]). Bounded by `moves.len()`; allocation-free and lock-free. The
-    /// caller has checked [`Self::can_carry_live_routes`].
+    /// Run the live-send section of a carry program at the swap block (#1284 D2, #1652 D3): for
+    /// each move, [`carry_route`], whatever the route's kind in either plan; a lane gained or lost
+    /// for a following route is not a change of the route's structure. Returns whether some move
+    /// left a six-word successor a comparison for its first block
+    /// ([`Self::finish_route_carry`]). Bounded by `moves.len()`; allocation-free and lock-free.
+    /// The caller has checked [`Self::can_carry_live_routes`].
     pub(crate) fn carry_live_routes(
         &mut self,
         predecessor: &mut Self,
-        moves: &[crate::GraphRouteMove],
-    ) {
-        for step in moves.iter() {
+        moves: &mut [RouteCarryStep],
+    ) -> bool {
+        let mut pending = false;
+        for step in moves.iter_mut() {
             let (Some(into), Some(from)) = (
-                live_route_mut(&mut self.units, step.successor),
-                live_route_mut(&mut predecessor.units, step.predecessor),
+                carried_route_mut(&mut self.units, step.step.successor),
+                carried_route_mut(&mut predecessor.units, step.step.predecessor),
             ) else {
                 continue;
             };
             // Admission validated the cell's words; the count of values this applies is the
             // drain's own, added to the session's `live_values_superseded` as at a block.
-            from.apply_pending(LiveSnapshot::ALL);
-            into.adopt(from);
+            pending |= carry_route(into, from, &mut step.check);
+        }
+        pending
+    }
+
+    /// The successor's first block after a carry that left comparisons (#1652 D3, the curve
+    /// removed): each six-word route that took a following predecessor's ramp first applies its
+    /// own cell under the block's snapshot (the join's record, if any, through the cell, as its
+    /// block entry would); without one, it compares its prepared target with the adopted ramp's
+    /// and, on a bits change, retargets from the coefficients it is at over the session mute
+    /// length (`mute_jump` of the block's `lengths`, `0` with none). Each comparison is taken
+    /// once. Bounded by `moves.len()`; allocation-, lock- and panic-free.
+    pub(crate) fn finish_route_carry(
+        &mut self,
+        moves: &mut [RouteCarryStep],
+        snapshot: LiveSnapshot,
+        lengths: Option<crate::GraphJumpLengths>,
+    ) {
+        for step in moves.iter_mut() {
+            let Some(check) = step.check.take() else {
+                continue;
+            };
+            if let Some(live) = live_route_mut(&mut self.units, step.step.successor) {
+                finish_six_word_carry(live, check, snapshot, lengths);
+            }
         }
     }
 
@@ -7942,9 +8196,9 @@ fn strip_delay_rows(
         .collect()
 }
 
-/// The live routes of a bind, in unit order (#1284 D2): the route's session ID and its runtime
-/// unit. `route_gates` are the prepared routes in canonical route-ID order, which a live route's
-/// index points into.
+/// The live routes of a bind, of either kind, in unit order (#1284 D2, #1652 D3): the route's
+/// session ID and its runtime unit. `route_gates` are the prepared routes in canonical route-ID
+/// order, which a live route's index points into.
 fn live_route_rows(
     units: &[RuntimeUnit],
     route_gates: &[(GraphNodeId, RouteGate)],
@@ -7956,10 +8210,14 @@ fn live_route_rows(
             let RuntimeUnit::Op(op) = owner else {
                 return None;
             };
-            let NodeKind::LiveRoute(live) = &op.kind else {
-                return None;
+            // #1652 D3: a following route is listed as a six-word one is, so the successor's
+            // join carries it by route ID whatever its kind in either plan.
+            let route = match &op.kind {
+                NodeKind::LiveRoute(live) => live.route,
+                NodeKind::LiveFollowRoute(live) => live.route,
+                _ => return None,
             };
-            let GraphNodeId::Route { route_id } = &route_gates.get(live.route as usize)?.0 else {
+            let GraphNodeId::Route { route_id } = &route_gates.get(route as usize)?.0 else {
                 return None;
             };
             Some(crate::GraphLiveRoute {
@@ -17290,5 +17548,254 @@ mod follow_route_op_tests {
         }
         let both = Fixture::new([Some(&on), Some(&on)], 0, OPEN);
         assert!(both.route.mute);
+    }
+
+    /// #1652 D3: the carry of a live send across a plan swap, whatever its kind in either plan.
+    /// Each case drives the swap block at the route level: `carry_route` (what
+    /// `carry_live_routes` runs per move), then the successor's first block (with
+    /// `finish_six_word_carry` first for a six-word successor, as render runs it before the
+    /// units), against a never-swapped twin or the ramp the swap must start.
+    mod carry {
+        use super::super::{CarriedRoute, LiveRoute, carry_route, finish_six_word_carry};
+        use super::{
+            FIRST, Fixture, FrameLane, IndexedRamp, MOVED, MUTE, OPEN, RECORD_RAMP, bits, gated,
+            input, route_mix_ramp_block,
+        };
+        use crate::follow_route_tests::steps;
+        use crate::{GraphJumpLengths, GraphRouteControlProducer, RouteControlRecord};
+        use engine::realtime::{GatePin, LiveValuesSuperseded, RevisionGate};
+
+        /// The block lengths [`Fixture::block`] renders with.
+        const LENGTHS: GraphJumpLengths = GraphJumpLengths {
+            fader_samples: 480,
+            mute_samples: MUTE,
+            pan_samples: 960,
+        };
+        /// Frames the predecessor renders before the swap: the swap lands mid-ramp.
+        const BEFORE: usize = 100;
+        /// Frames of the swap block.
+        const AFTER: usize = 128;
+
+        /// A six-word live route with its own cell, gate and pin.
+        struct Six {
+            route: Box<LiveRoute>,
+            producer: GraphRouteControlProducer,
+            gate: RevisionGate,
+            pin: GatePin,
+            revision: u64,
+        }
+
+        impl Six {
+            /// A route bound on the settled `prepared` target with its gate's `mute`.
+            fn new(prepared: [f32; 4], mute: bool) -> Self {
+                let lane = std::sync::Arc::new(crate::RouteLane::new());
+                let control = Box::new(crate::RouteControlLane {
+                    lane: std::sync::Arc::clone(&lane),
+                    reader: engine::realtime::CellReader::new(),
+                    dirty: engine::realtime::DirtyReader::new(),
+                    superseded: LiveValuesSuperseded::new(),
+                });
+                let producer = GraphRouteControlProducer {
+                    route_id: "send".into(),
+                    lane,
+                    writer: engine::realtime::CellWriter::new(),
+                    activity_bytes: 0,
+                    activity_largest: 0,
+                };
+                let (gate, pin) = RevisionGate::pair(0);
+                Self {
+                    route: Box::new(LiveRoute::new(prepared, mute, control)),
+                    producer,
+                    gate,
+                    pin,
+                    revision: 0,
+                }
+            }
+
+            fn write(&mut self, target: [f32; 4], length: u32) {
+                self.revision += 1;
+                let record = RouteControlRecord::new(target, false, length).expect("record");
+                self.producer
+                    .write(self.pin.stamp(self.revision).expect("stamp"), record);
+                self.pin.publish(&self.gate, self.revision);
+            }
+
+            /// The six-word route op's block: the drain, the activity, the mix.
+            fn block(&mut self, left: &mut [f32], right: &mut [f32]) -> bool {
+                self.route.apply_pending(self.gate.snapshot());
+                let active = self.route.active();
+                if active {
+                    self.route.mix(left, right);
+                }
+                active
+            }
+        }
+
+        /// A predecessor six-word route mid-ramp: from the open `OPEN` coefficients toward the
+        /// open `MOVED` ones over `RECORD_RAMP`, `BEFORE` frames in.
+        fn six_mid_ramp() -> Six {
+            let mut route = Six::new(gated(OPEN, [false; 2]), false);
+            route.write(gated(MOVED, [false; 2]), RECORD_RAMP);
+            let (mut left, mut right) = input(BEFORE);
+            assert!(route.block(&mut left, &mut right));
+            route
+        }
+
+        /// A predecessor following route mid-ramp, as [`six_mid_ramp`], over an open curve.
+        fn seven_mid_ramp(open: &[automation::Segment]) -> Fixture {
+            let mut route = Fixture::new([Some(open), None], 0, OPEN);
+            route.write(MOVED, RECORD_RAMP);
+            let (mut left, mut right) = input(BEFORE);
+            assert!(route.block(FIRST, None, &mut left, &mut right));
+            route
+        }
+
+        /// The twin's swap block: the same route, never swapped, `AFTER` more frames.
+        fn twin_block(ramp: IndexedRamp) -> Vec<u32> {
+            let (mut left, mut right) = input(AFTER);
+            route_mix_ramp_block::<FrameLane>(&mut left, &mut right, &ramp, BEFORE as u32);
+            bits((&left, &right))
+        }
+
+        /// Gate 4 (six -> seven, the rebuild adds an automated mute to the source). (a) With the
+        /// curve open at the swap, the successor's composed target has the adopted ramp's bits:
+        /// it keeps the ramp, its position and its mute by route ID and its swap block equals the
+        /// never-swapped twin's, bit for bit. (b) With the curve on at the swap (it stepped on
+        /// before the swap, so its first value is off), the successor places its cursor at its
+        /// own node time and retargets from the coefficients it is at over the session mute
+        /// length: not from rest, not as an exact `Set`.
+        ///
+        /// Test value: red if a following successor is not carried (it starts settled on its own
+        /// target), if the carried first block retargets on equal bits (position reset), if its
+        /// cursor is seeded with the curve's first value instead of its value at the node time,
+        /// or if the carried block lands the fresh route's `Set` instead of the mute length.
+        #[test]
+        fn six_to_seven_keeps_the_ramp_state_by_route_id() {
+            let open = steps(&[0], &[0.0], 1 << 20);
+            let mut predecessor = six_mid_ramp();
+            let ramp = predecessor.route.ramp;
+            assert_eq!(predecessor.route.position, BEFORE as u32);
+            let expected = twin_block(ramp);
+
+            let mut successor = Fixture::new([Some(&open), None], 0, MOVED);
+            let (mut left, mut right) = input(AFTER);
+            let mut check = None;
+            let pending = carry_route(
+                CarriedRoute::Seven(&mut successor.route),
+                CarriedRoute::Six(&mut predecessor.route),
+                &mut check,
+            );
+            assert!(successor.block(FIRST + BEFORE as u64, None, &mut left, &mut right));
+            assert!(!pending && check.is_none());
+            assert_eq!(bits((&left, &right)), expected, "(a) a pure re-adoption");
+            assert_eq!(successor.route.ramp, ramp, "(a) the ramp is kept");
+            assert_eq!(successor.route.position, (BEFORE + AFTER) as u32);
+
+            // (b) The curve stepped on at timeline 500, before the swap block at 1100.
+            let on = steps(&[0, 500], &[0.0, 1.0], 1 << 20);
+            let mut predecessor = six_mid_ramp();
+            let at = predecessor.route.ramp.coefficients_at(BEFORE as u32);
+            let mut successor = Fixture::new([Some(&on), None], 0, MOVED);
+            carry_route(
+                CarriedRoute::Seven(&mut successor.route),
+                CarriedRoute::Six(&mut predecessor.route),
+                &mut None,
+            );
+            let (mut left, mut right) = input(AFTER);
+            assert!(successor.block(FIRST + BEFORE as u64, None, &mut left, &mut right));
+            let reopened = IndexedRamp::new(at, gated(MOVED, [true, false]), MUTE);
+            let (mut expected_left, mut expected_right) = input(AFTER);
+            route_mix_ramp_block::<FrameLane>(
+                &mut expected_left,
+                &mut expected_right,
+                &reopened,
+                0,
+            );
+            assert_eq!(
+                bits((&left, &right)),
+                bits((&expected_left, &expected_right)),
+                "(b) the curve's own jump from where the route is"
+            );
+            assert_eq!(successor.route.ramp, reopened);
+        }
+
+        /// Gate 4 (seven -> seven): a following route mid-ramp keeps its ramp and position into a
+        /// following successor whose composed target has the same bits, and the swap block equals
+        /// the never-swapped twin's, bit for bit.
+        ///
+        /// Test value: red if the seven-word kind is left out of the carry (the successor starts
+        /// settled), or if the first block's comparison retargets on equal bits.
+        #[test]
+        fn seven_to_seven_mid_ramp_keeps_its_position() {
+            let open = steps(&[0], &[0.0], 1 << 20);
+            let mut predecessor = seven_mid_ramp(&open);
+            let ramp = predecessor.route.ramp;
+            assert_eq!(predecessor.route.position, BEFORE as u32);
+            let expected = twin_block(ramp);
+
+            let mut successor = Fixture::new([Some(&open), None], 0, MOVED);
+            let (mut left, mut right) = input(AFTER);
+            let pending = carry_route(
+                CarriedRoute::Seven(&mut successor.route),
+                CarriedRoute::Seven(&mut predecessor.route),
+                &mut None,
+            );
+            assert!(successor.block(FIRST + BEFORE as u64, None, &mut left, &mut right));
+            assert!(!pending);
+            assert_eq!(bits((&left, &right)), expected);
+            assert_eq!(successor.route.ramp, ramp);
+            assert_eq!(successor.route.position, (BEFORE + AFTER) as u32);
+        }
+
+        /// Gate 4 (b) (seven -> six, the rebuild removes the mute entry): a following route the
+        /// curve holds muted (settled and inactive) is carried into a six-word successor whose
+        /// prepared target is open. The successor's first block reopens the send from silence
+        /// over the session mute length.
+        ///
+        /// Test value: red if the six-word successor keeps the adopted mute (the comparison is
+        /// missing: the send stays muted for good, since the model diff cannot see the curve), or
+        /// if it reopens with a step instead of the mute length.
+        #[test]
+        fn seven_to_six_reopens_a_send_the_removed_curve_held_muted() {
+            let on = steps(&[0], &[1.0], 1 << 20);
+            let mut predecessor = Fixture::new([Some(&on), Some(&on)], 0, OPEN);
+            let (mut left, mut right) = input(BEFORE);
+            assert!(!predecessor.block(FIRST, None, &mut left, &mut right));
+            assert!(predecessor.route.mute);
+
+            let prepared = gated(OPEN, [false; 2]);
+            let mut successor = Six::new(prepared, false);
+            let (mut left, mut right) = input(AFTER);
+            let mut check = None;
+            let pending = carry_route(
+                CarriedRoute::Six(&mut successor.route),
+                CarriedRoute::Seven(&mut predecessor.route),
+                &mut check,
+            );
+            if let Some(check) = check {
+                finish_six_word_carry(
+                    &mut successor.route,
+                    check,
+                    successor.gate.snapshot(),
+                    Some(LENGTHS),
+                );
+            }
+            let active = successor.block(&mut left, &mut right);
+            assert!(pending, "a comparison is left for the first block");
+            assert!(active, "the reopened send mixes its swap block");
+            let reopened = IndexedRamp::new([0.0; 4], prepared, MUTE);
+            let (mut expected_left, mut expected_right) = input(AFTER);
+            route_mix_ramp_block::<FrameLane>(
+                &mut expected_left,
+                &mut expected_right,
+                &reopened,
+                0,
+            );
+            assert_eq!(
+                bits((&left, &right)),
+                bits((&expected_left, &expected_right))
+            );
+            assert!(!successor.route.mute);
+        }
     }
 }

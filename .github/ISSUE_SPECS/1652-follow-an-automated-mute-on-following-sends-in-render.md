@@ -457,3 +457,79 @@ Tranche R2: the following route op in render. All in `crates/graph`; no attach, 
   the seeded flags (route mute, `follows_mute`, `terms` from `controls::effective`, `automated ==
   cells`). Fill `follow_route_controls`, leave those routes out of `route_controls`, and charge
   them. The carry (`live_route_rows`, `carry_live_routes`, D3) does not list following routes yet.
+
+## Decision record: #1652d graph carry (batch 18)
+
+Tranche R5a: the graph side of D3 (carry). All in `crates/graph`; host-core's join records are a
+later tranche (after #1653).
+
+- **Shipped (`crates/graph/src/runtime.rs`).** `live_route_rows`, `is_live_route`,
+  `can_carry_live_routes` and `carry_live_routes` take a live route of either kind, so a route
+  present in both plans carries by route ID whatever its kind in either plan (six -> six, six ->
+  seven, seven -> seven, seven -> six). One per-move function, `carry_route`, applies the
+  predecessor's pending value under every snapshot (six-word `apply_pending`, seven-word
+  `apply_cell`, the cell half of the block entry factored out), then the successor takes ramp,
+  position and mute. Six -> six still runs `LiveRoute::adopt`, unchanged, so its bits hold.
+- **Seven-word successor.** `LiveFollowRoute::adopt` marks the route `FollowStart::Carried` (the old
+  `fresh: bool` is now `Fresh | Carried | Running`). The follow cursors do not carry: the
+  successor's own unplaced cursors are placed at its first block's `τ_tap`, and each automated
+  lane is seeded with `value_at(span.start)` there (no fresh `Set`). The block entry now takes the
+  spans first, then the cell (the join's record, if any, applies first through the cell and
+  composes with the curve at `τ_tap`), then compares the composed target with the adopted ramp's
+  target and retargets from `coefficients_at(position)` over the block's mute jump length only on a
+  bits change. For a fresh or running route the new order changes nothing: the spans step reads no
+  state the cell writes. The block's jump length is now resolved whenever the block has jump
+  lengths, even with no node span; with no span the block has no events, so only the carried
+  comparison reads it.
+- **Six-word successor of a seven-word predecessor (the curve removed).** The swap block has no
+  jump lengths, so the comparison waits for the first block, and a six-word route holds no mute
+  rule. At the swap, `carry_route` reads the successor's prepared target and mute (its bound,
+  settled ramp: it has rendered no block), adopts the state with `LiveRoute::adopt_state`, and when
+  the bits differ leaves a `SixWordCarryCheck { prepared, mute, mute_jump }` (the predecessor's
+  host-core mute rule) in that move's `RouteCarryStep`. With equal bits it takes the prepared mute
+  and leaves nothing. Render's first block after the swap (`GraphExecutor::render`, before the
+  units, under `route_carry_pending`) runs `finish_route_carry`: per check, the route's cell first
+  (`apply_pending` under the block's snapshot); with a record applied, the record governs (it is
+  this plan's own value); without one, `retarget_carried` to the prepared target over
+  `mute_jump(block lengths)` (clamped to `ROUTE_RAMP_LENGTH_MAXIMUM`, `0` with no lengths) on a bits
+  change. A send the curve held muted therefore reopens over the session mute length.
+- **Bytes.** `LIVE_ROUTE_OWNER_BYTES` and `LIVE_FOLLOW_ROUTE_OWNER_BYTES` are unchanged (the
+  amendment's "every six-word route keeps its bytes"): the check lives in the carry section's move
+  table, `carry_routes: Box<[RouteCarryStep]>` (move + `Option<SixWordCarryCheck>`, about 40 bytes
+  on x86-64 against 8 before), allocated by `install_route_carry` on the control thread and charged
+  by `route_carry_retained_bytes`, the one place the charge is spelled. The executor and its layout
+  twin gain one `route_carry_pending: bool`.
+- **No `TransitionFallback` (R18-4).** The carry never stretches or cuts a move. A carried ramp
+  whose target bits do not change keeps its own ramp and length. A changed target is either the
+  join's record (its own rule and length, as at any block entry) or the curve's own jump at the
+  successor's node time over the session mute length, which an uninterrupted plan would make at a
+  curve event (for seven -> six: the jump the removed curve's absence makes, the same length).
+- **Realtime.** The swap and the first block copy bounded fields and compare bits: no allocation,
+  free, lock, syscall or new panic path. Every new render function sits in an existing marked
+  region; the realtime policy reports 165 marked regions (unchanged).
+- **Hook for the host-core join (#1652 D3, after #1653).** None new: the join feeds the successor's
+  own cell before the swap. For a seven-word successor it writes the seven-word record from
+  `route_record_between` through the successor's `GraphFollowRouteControlProducer::write` under the
+  carry's stamp (today's loop at `prepare.rs` writes only `route_controls`; a seven-word successor
+  with a retarget would fail there with `host.control.order` and must go to the follow producer).
+  For a six-word successor it writes the six-word record as today. Render applies the record first
+  at the successor's first block and then compares. `resolve_route_carry` needs no change: the
+  rows now list following routes.
+- **Departure.** The alloc half of the gate is not in graph: linking `bench_support::alloc` into the
+  graph lib test binary installs the audited allocator for every unit test, and
+  `a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit` then aborts. The
+  route op is `pub(crate)` and following routes cannot be attached from outside graph before
+  #1652c, so the swap-block `allocations == 0 && frees == 0` gate stays with host-core gate 4. A
+  seven -> six successor's first block calls `apply_pending` twice (once in `finish_route_carry`,
+  once in its op), so the test-only drain-call counter counts two calls for that route in that
+  block; the applied count is exact.
+- **Gates (`crates/graph/src/runtime.rs` `follow_route_op_tests::carry`, all pass).**
+  `six_to_seven_keeps_the_ramp_state_by_route_id` ((a) a pure re-adoption mid-ramp equals the
+  never-swapped twin bit for bit and keeps ramp and position; (b) a curve on at the swap ramps from
+  where the route is over the mute length); `seven_to_seven_mid_ramp_keeps_its_position`;
+  `seven_to_six_reopens_a_send_the_removed_curve_held_muted`. Red checks (temporary mutations,
+  reverted): no adopt into a seven-word successor -> six->seven and seven->seven red; no bits
+  guard on the carried comparison -> the same two red; cursor not seeded at `τ_tap` -> six->seven
+  (b) red; carried comparison as a step -> six->seven (b) red; six-word comparison missing ->
+  seven->six red. Six -> six carry keeps today's code path; `host-core` `route_mute` (9) and
+  `live_routes` (13) pass.

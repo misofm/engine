@@ -3913,8 +3913,12 @@ struct GraphExecutor {
     /// (and never allocated) when no strip delay line carries.
     carry_strip_delays: Box<[GraphStripDelayMove]>,
     /// The live-send section of the hand-over (#1284 D2), sorted by predecessor unit; empty (and
-    /// never allocated) when no live route carries.
-    carry_routes: Box<[GraphRouteMove]>,
+    /// never allocated) when no live route carries. Each move holds the comparison a six-word
+    /// successor of a following predecessor leaves for its first block (#1652 D3).
+    carry_routes: Box<[runtime::RouteCarryStep]>,
+    /// Some move of `carry_routes` left a comparison for the first block after the swap (#1652
+    /// D3); taken by that block.
+    route_carry_pending: bool,
     /// The identity of every strip delay line and live route, read once by
     /// [`take_strip_delay_lines`] and [`take_live_routes`] right after bind and empty afterwards:
     /// a plan retains none of it.
@@ -4970,7 +4974,10 @@ pub fn install_route_carry(
         }
     }
     moves.sort_unstable_by_key(|step| step.predecessor);
-    executor.carry_routes = moves.into_boxed_slice();
+    executor.carry_routes = moves
+        .into_iter()
+        .map(runtime::RouteCarryStep::new)
+        .collect();
     Ok(())
 }
 
@@ -4982,11 +4989,12 @@ pub fn strip_delay_carry_retained_bytes(moves: usize) -> Option<u64> {
     u64::try_from(moves.checked_mul(core::mem::size_of::<GraphStripDelayMove>())?).ok()
 }
 
-/// The bytes a live-send section of `moves` routes retains in its plan (#1284): its move table.
-/// `None` on overflow; spelled once, as [`strip_delay_carry_retained_bytes`].
+/// The bytes a live-send section of `moves` routes retains in its plan (#1284, #1652 D3): its move
+/// table, each move with its first-block comparison slot. `None` on overflow; spelled once, as
+/// [`strip_delay_carry_retained_bytes`].
 #[must_use]
 pub fn route_carry_retained_bytes(moves: usize) -> Option<u64> {
-    u64::try_from(moves.checked_mul(core::mem::size_of::<GraphRouteMove>())?).ok()
+    u64::try_from(moves.checked_mul(core::mem::size_of::<runtime::RouteCarryStep>())?).ok()
 }
 
 /// The session timeline's sample at `source_read_sample` in a graph plan's source set (#1641 D8):
@@ -5221,7 +5229,8 @@ struct GraphExecutorWithoutSplitPairTable {
     carry_delays: Box<[GraphDelayMove]>,
     compensation_lines: Vec<GraphDelayLine>,
     carry_strip_delays: Box<[GraphStripDelayMove]>,
-    carry_routes: Box<[GraphRouteMove]>,
+    carry_routes: Box<[runtime::RouteCarryStep]>,
+    route_carry_pending: bool,
     bind_identities: runtime::BindIdentities,
     live_snapshot: Option<LiveSnapshot>,
     jump_lengths: Option<Box<JumpLengthReader>>,
@@ -5348,6 +5357,7 @@ impl GraphExecutor {
             compensation_lines,
             carry_strip_delays: Box::default(),
             carry_routes: Box::default(),
+            route_carry_pending: false,
             bind_identities,
             live_snapshot: None,
             jump_lengths: None,
@@ -5465,8 +5475,9 @@ impl PreparedPlanExecutor for GraphExecutor {
             .carry_delay_lines(&mut predecessor.runtime, &self.carry_delays);
         self.runtime
             .carry_strip_delays(&mut predecessor.runtime, &self.carry_strip_delays);
-        self.runtime
-            .carry_live_routes(&mut predecessor.runtime, &self.carry_routes);
+        self.route_carry_pending = self
+            .runtime
+            .carry_live_routes(&mut predecessor.runtime, &mut self.carry_routes);
         let refused = self.runtime.carry_effect_lanes(
             &mut predecessor.runtime,
             &self.carry_effects,
@@ -5590,7 +5601,8 @@ impl PreparedPlanExecutor for GraphExecutor {
             carry_delays: _,
             compensation_lines: _,
             carry_strip_delays: _,
-            carry_routes: _,
+            carry_routes,
+            route_carry_pending,
             bind_identities: _,
             live_snapshot,
             jump_lengths,
@@ -5664,6 +5676,11 @@ impl PreparedPlanExecutor for GraphExecutor {
                 .as_ref()
                 .map(|set| &*set.driver as &dyn GraphPreparedSourceSetDriver),
         );
+        // #1652 D3: a six-word successor of a following predecessor compares at its first block,
+        // under this block's snapshot and jump lengths, before its op runs.
+        if core::mem::take(route_carry_pending) {
+            runtime.finish_route_carry(carry_routes, live, block_time.jump_lengths());
+        }
         // Issue #936: only the units bind found to do work. An inert unit's `execute` and
         // `observe_unit` return at once, so skipping it moves no bit.
         #[cfg(any(test, feature = "test-support"))]
