@@ -7003,3 +7003,180 @@ fn removing_a_send_row_or_its_source_mute_curve_lands_alike_on_both_hosts() {
         );
     }
 }
+
+/// #1654 root ruling B19-R7 on both hosts. `t1-b` hears flat `ll` and `rr` entries at 0.5; a hand
+/// `gain_db` move to -6 dB over 1,000 samples (from block 4) is in flight when a rebuild before
+/// block 6 removes the `ll` entry: the send's left column loses its last curve and lands at once
+/// over `SendMatrix` (240), cutting the move there. On both hosts the rebuild completes
+/// `TRANSITION_FALLBACK` (one watermark, count 1). Then: nothing (MAJOR-A), a second rebuild before
+/// block 8 that adds a muted, inactive send (MAJOR-C: `EXACT`, it loses no curve), or a session
+/// seek before block 7 inside the move, forward or back (MAJOR-D). From the first block boundary
+/// after the move's end both hosts render, bit for bit, a fresh plan of the committed model fed
+/// and seeked alike. The same removal before block 24, the move long ended, completes `EXACT`.
+///
+/// Test value: red if either host completes the cut move's rebuild `EXACT` (or flags a removal
+/// with no move), if a removed row's value survives the landing, a seek or a further rebuild, or
+/// if the hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn removing_a_send_row_across_a_live_send_move_is_flagged_alike_on_both_hosts() {
+    use session::{AutomationShape, ParameterUnit};
+    const RUN: u64 = 40;
+    const MOVE: u64 = 4;
+    const RAMP: u32 = 1_000;
+    let q = u64::from(QUANTUM);
+    let end = q * BLOCKS;
+    let flat = |value: f32| {
+        vec![send_piece(
+            AutomationShape::Linear,
+            (0, value),
+            (end, value),
+            ParameterUnit::Linear,
+        )]
+    };
+    let mut model = follow_model(false, false);
+    model.automation.push(send_entry("t1-b-ll", 3, flat(0.5)));
+    model.automation.push(send_entry("t1-b-rr", 6, flat(0.5)));
+    let remove = vec![SessionEdit::RemoveAutomation {
+        automation_id: id("t1-b-ll"),
+    }];
+    let mut muted_send = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "t1-b")
+        .expect("the send")
+        .clone();
+    muted_send.id = id("t2-b");
+    muted_send.source = session::RouteSource::Track {
+        track_id: id(T2.id),
+        tap: session::SendTap::PreFader,
+    };
+    muted_send.mute = true;
+    muted_send.follows_mute = false;
+    let added = vec![SessionEdit::UpsertRoute {
+        route: muted_send.clone(),
+    }];
+    // The committed model after the move and the removal.
+    let mut committed = model.clone();
+    committed
+        .automation
+        .retain(|entry| entry.id.as_str() != "t1-b-ll");
+    t1_b(&mut committed).gain_db = -6.0;
+    let mut committed_added = committed.clone();
+    committed_added.routes.push(muted_send);
+    committed_added
+        .routes
+        .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    // (label, rebuild block, second rebuild, seek (block, timeline block), flagged)
+    for (label, rebuild, second, seek, flagged) in [
+        ("MAJOR-A", 6, false, None, true),
+        ("MAJOR-C", 6, true, None, true),
+        ("MAJOR-D inside", 6, false, Some((7, 7)), true),
+        ("MAJOR-D forward", 6, false, Some((7, 20)), true),
+        ("MAJOR-D back", 6, false, Some((7, 2)), true),
+        ("the move ended", 24, false, None, false),
+    ] {
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let mut fresh = Rig::new(if second { &committed_added } else { &committed });
+        let landed = (MOVE * q + u64::from(RAMP))
+            .max(rebuild * q + 240)
+            .div_ceil(q);
+        let (mut generation, mut timeline) = (1_u64, 0_u64);
+        for block in 0..RUN {
+            if block == MOVE {
+                both_commit(
+                    &mut browser,
+                    &mut c_abi,
+                    &send_edit(1, -6.0, Some(RAMP)),
+                    EditPath::Live,
+                    label,
+                );
+            }
+            if block == rebuild {
+                both_commit(&mut browser, &mut c_abi, &remove, EditPath::Rebuild, label);
+            }
+            if second && block == rebuild + 2 {
+                both_commit(&mut browser, &mut c_abi, &added, EditPath::Rebuild, label);
+            }
+            if let Some((at, to)) = seek
+                && block == at
+            {
+                generation += 1;
+                timeline = to;
+                for host in [&mut browser.host, &mut fresh.host] {
+                    assert_eq!(
+                        host.session_seek(None, generation, to * q, None),
+                        host_web::RESULT_OK
+                    );
+                }
+                c_abi.session_seek(generation, to * q, None);
+            }
+            let mut outputs = Vec::new();
+            for leg in [&mut browser, &mut fresh] {
+                for (feed, strip) in [T1, T2, T3].into_iter().enumerate() {
+                    let name = format!("src-{}", strip.id);
+                    let [left, right] = planes(feed as u64, timeline);
+                    assert_eq!(
+                        leg.host.submit_source(
+                            name.as_bytes(),
+                            generation,
+                            timeline * q,
+                            leg.rate,
+                            &[&left, &right],
+                            QUANTUM,
+                            false,
+                        ),
+                        host_web::RESULT_OK,
+                        "{label}: browser source {name}"
+                    );
+                    if outputs.is_empty() {
+                        c_abi.submit_from(&name, feed as u64, timeline, timeline, generation);
+                    }
+                }
+                assert_eq!(leg.host.render_next(), host_web::RESULT_OK);
+                outputs.push(bits(leg.host.output_pcm().expect("browser output")));
+            }
+            let c = c_abi.render(block);
+            assert_eq!(outputs[0], c, "{label}, block {block}: the two hosts agree");
+            if block >= landed {
+                assert_eq!(
+                    outputs[0], outputs[1],
+                    "{label}, block {block}: the fresh plan after the landing"
+                );
+            }
+            if block == rebuild {
+                // The block that adopts the removal.
+                let watermark = c_abi.watermark();
+                assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+                assert_eq!(
+                    status_watermark(&browser),
+                    watermark,
+                    "{label}: one watermark"
+                );
+                let outcome = if flagged {
+                    capi::OUTCOME_TRANSITION_FALLBACK
+                } else {
+                    capi::OUTCOME_EXACT
+                };
+                assert_eq!(watermark.2, outcome, "{label}: the removal's outcome");
+            }
+            if second && block == rebuild + 2 {
+                assert_eq!(
+                    c_abi.watermark().2,
+                    capi::OUTCOME_EXACT,
+                    "{label}: the second rebuild"
+                );
+            }
+            timeline += 1;
+        }
+        assert_eq!(
+            (
+                browser.host.watermark().transition_fallback_count,
+                c_abi.transition_fallback_count()
+            ),
+            (u64::from(flagged), u64::from(flagged)),
+            "{label}: the fallback count"
+        );
+    }
+}

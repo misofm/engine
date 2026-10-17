@@ -10945,6 +10945,17 @@ fn ride_document(end_db: Option<f32>) -> String {
 /// and the source was never reseeked. Returns the adoption block's first sample `T` and the
 /// blocks rendered from it on, the adoption block first, `blocks` long.
 fn rebuild_and_adopt(rig: &mut Rig, edits: &[SessionEdit], blocks: usize) -> (u64, Vec<Vec<f32>>) {
+    rebuild_and_adopt_as(rig, edits, blocks, None)
+}
+
+/// [`rebuild_and_adopt`] whose revision completes with the outcome flags `outcome` (B19-R7);
+/// `None` is `EXACT` with no transition fallback or supersession on the plan.
+fn rebuild_and_adopt_as(
+    rig: &mut Rig,
+    edits: &[SessionEdit],
+    blocks: usize,
+    outcome: Option<u64>,
+) -> (u64, Vec<Vec<f32>>) {
     let bytes = rig.transaction(edits);
     let (result, response) = rig.send(&bytes);
     assert_eq!(result, crate::RESULT_OK);
@@ -10955,11 +10966,22 @@ fn rebuild_and_adopt(rig: &mut Rig, edits: &[SessionEdit], blocks: usize) -> (u6
         rendered.push((rig.block, rig.step()));
         assert!(rendered.len() < 16, "the candidate is adopted");
     }
-    let (applied, first, flags, _) = watermark(rig);
+    let (applied, first, flags) = if outcome.is_none() {
+        let (applied, first, flags, _) = watermark(rig);
+        (applied, first, flags)
+    } else {
+        let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+        assert_eq!(result, crate::RESULT_OK);
+        (
+            watermark.revision,
+            watermark.first_sample,
+            watermark.outcome_flags,
+        )
+    };
     assert_eq!(
         (applied, flags),
-        (revision, crate::OUTCOME_EXACT),
-        "the revision completes exactly at adoption"
+        (revision, outcome.unwrap_or(crate::OUTCOME_EXACT)),
+        "the revision's outcome at adoption"
     );
     let adoption = first / rig.quantum as u64;
     let mut from: Vec<Vec<f32>> = rendered
@@ -12139,19 +12161,24 @@ fn removing_a_send_row_or_its_source_mute_curve_lands_on_the_fresh_plan_on_the_c
     }
 }
 
-/// #1654 U2 fold 2, MAJOR-A on the C ABI. The send `eq0-b` hears flat `ll` and `rr` entries at
+/// #1654 root ruling B19-R7 on the C ABI. The send `eq0-b` hears flat `ll` and `rr` entries at
 /// 0.5; a hand gain move to -6 dB over 1,000 samples is in flight when a rebuild removes the
-/// `ll` entry, so the send's left source column no longer hears a curve. The rebuild completes
-/// `EXACT`, with no transition fallback; until the move's end every sample is a twin's that took
-/// the same move and no rebuild (the move keeps its length on both columns); after the column's
-/// landing over `SendMatrix` (240) the plan renders a fresh plan of the committed document.
+/// `ll` entry, so the send's left source column loses its last curve and lands at once over
+/// `SendMatrix` (240), cutting the move there. The rebuild completes `TRANSITION_FALLBACK`
+/// (count 1). Then: nothing (MAJOR-A); a second rebuild that edits only the direct route
+/// (MAJOR-C: `EXACT`, it loses no curve); or a session seek inside the move, forward or back
+/// (MAJOR-D). From the first block boundary after the move's end and the landing, both planes
+/// are a fresh plan of the committed document, session-seeked to the last adoption or seek. The
+/// same removal with the move ended long before completes `EXACT` and lands the same way.
 ///
-/// Test value: red if a column that loses its last curve retargets at the swap and cuts the
-/// live move in flight.
+/// Test value: red if the rebuild completes `EXACT` while the cut move ramps (or is flagged with
+/// no move), or if a removed row's value survives the landing, a seek or a further rebuild.
 #[test]
-fn a_send_column_losing_its_last_curve_keeps_the_hand_move_on_the_c_abi() {
+fn removing_a_send_row_across_a_live_send_move_is_flagged_and_lands_on_the_fresh_plan_on_the_c_abi()
+{
     use session::ParameterUnit::Linear;
-    const RAMP: u32 = 1_000;
+    const RAMP: u64 = 1_000;
+    const BLOCKS: usize = 48;
     let document = send_rows_document(
         vec![
             route_entry("send-ll", "eq0-b", 3, send_flat(0.5, Linear, false)),
@@ -12160,61 +12187,122 @@ fn a_send_column_losing_its_last_curve_keeps_the_hand_move_on_the_c_abi() {
         |_| {},
     );
     let quantum = 128_usize;
-    let edit = send_row_edit("gain_db", -6.0, Some(RAMP));
-    let mut rig = Rig::new(&document);
-    let mut twin = Rig::new(&document);
-    for _ in 0..4 {
-        assert_eq!(bits(&rig.step()), bits(&twin.step()));
+    let fallback = crate::OUTCOME_TRANSITION_FALLBACK;
+    let remove = [SessionEdit::RemoveAutomation {
+        automation_id: StableId::parse("send-ll").expect("automation ID"),
+    }];
+    let move_edit = send_row_edit("gain_db", -6.0, Some(RAMP as u32));
+    // (label, the move's lead before the rebuild in blocks, then)
+    #[derive(Clone, Copy, Debug)]
+    enum Then {
+        Nothing,
+        Rebuild,
+        Seek(i64),
     }
-    let (start, _) = live_and_render(&mut rig, std::slice::from_ref(&edit), 2);
-    let _ = live_and_render(&mut twin, std::slice::from_ref(&edit), 2);
-    let (adoption, live) = rebuild_and_adopt(
-        &mut rig,
-        &[SessionEdit::RemoveAutomation {
-            automation_id: StableId::parse("send-ll").expect("automation ID"),
-        }],
-        48,
-    );
-    let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
-    assert_eq!(result, crate::RESULT_OK);
-    assert_eq!(
-        watermark.transition_fallback_count, 0,
-        "no transition fallback"
-    );
-    while (twin.block as usize) * quantum < adoption as usize {
-        twin.step();
-    }
-    let reference: Vec<_> = (0..live.len()).map(|_| twin.step()).collect();
-    let end = (start + u64::from(RAMP) - adoption) as usize;
-    assert!(end > 0, "the move is in flight at the adoption");
-    for plane in 0..2 {
-        let (live, twin) = (
-            plane_bits(&live, plane, quantum),
-            plane_bits(&reference, plane, quantum),
+    for (label, lead, then) in [
+        ("MAJOR-A", 2, Then::Nothing),
+        ("MAJOR-C", 2, Then::Rebuild),
+        ("MAJOR-D inside", 2, Then::Seek(0)),
+        ("MAJOR-D forward", 2, Then::Seek(5_000)),
+        ("MAJOR-D back", 2, Then::Seek(-1)),
+        ("the move ended", 24, Then::Nothing),
+    ] {
+        let mut rig = Rig::new(&document);
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (start, _) = live_and_render(&mut rig, std::slice::from_ref(&move_edit), lead);
+        let ended = lead * quantum > RAMP as usize + 2 * quantum;
+        // A case that continues renders only the adoption block here.
+        let blocks = if matches!(then, Then::Nothing) {
+            BLOCKS
+        } else {
+            1
+        };
+        let (adoption, mut live) = rebuild_and_adopt_as(
+            &mut rig,
+            &remove,
+            blocks,
+            Some(if ended {
+                crate::OUTCOME_EXACT
+            } else {
+                fallback
+            }),
+        );
+        let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+        assert_eq!(result, crate::RESULT_OK);
+        assert_eq!(
+            watermark.transition_fallback_count,
+            u64::from(!ended),
+            "{label}: the fallback count"
         );
         assert_eq!(
-            live[..end],
-            twin[..end],
-            "plane {plane}: the move runs to its end"
+            rig.current_follow_route_cells().len(),
+            1,
+            "{label}: seven-word"
         );
-    }
-    let fresh = seeked_reference(&rig.snapshot(), adoption, 48);
-    let landed = (end + 240).div_ceil(quantum) * quantum;
-    let mut lands = false;
-    for plane in 0..2 {
-        let (send, fresh, twin) = (
-            plane_bits(&live, plane, quantum),
-            plane_bits(&fresh, plane, quantum),
-            plane_bits(&reference, plane, quantum),
-        );
-        lands |= send[end..landed] != twin[end..landed];
+        let end = (start + RAMP).saturating_sub(adoption) as usize;
         assert_eq!(
-            send[landed..],
-            fresh[landed..],
-            "plane {plane}: a fresh plan after the landing"
+            end > 0,
+            !ended,
+            "{label}: the move is in flight at the adoption"
         );
+        // The sample the reference starts at (render and timeline), and the blocks from it.
+        let (from, timeline) = match then {
+            Then::Nothing => (adoption, adoption),
+            Then::Rebuild => {
+                let mut direct = rig
+                    .model()
+                    .routes
+                    .into_iter()
+                    .find(|route| route.id.as_str() == "eq0-main")
+                    .expect("the direct route");
+                direct.gain_db = -3.0;
+                let (second, after) = rebuild_and_adopt_as(
+                    &mut rig,
+                    &[SessionEdit::UpsertRoute { route: direct }],
+                    BLOCKS,
+                    Some(crate::OUTCOME_EXACT),
+                );
+                assert!(second < start + RAMP, "{label}: the move still runs");
+                live = after;
+                (second, second)
+            }
+            Then::Seek(target) => {
+                let at = rig.block * quantum as u64;
+                assert!(at < start + RAMP, "{label}: the seek is inside the move");
+                let timeline = match target {
+                    0 => at,
+                    -1 => 256,
+                    forward => forward as u64,
+                };
+                rig.generation += 1;
+                assert_eq!(
+                    crate::ffi::test_session_seek(rig.session, rig.generation, timeline, None),
+                    crate::RESULT_OK
+                );
+                rig.fed = timeline;
+                live = (0..BLOCKS).map(|_| rig.step()).collect();
+                (at, timeline)
+            }
+        };
+        let fresh = seeked_reference(&rig.snapshot(), timeline, BLOCKS);
+        let landed = ((start + RAMP).saturating_sub(from) as usize)
+            .max(adoption.saturating_sub(from) as usize + 240)
+            .div_ceil(quantum)
+            * quantum;
+        for plane in 0..2 {
+            let (send, fresh) = (
+                plane_bits(&live, plane, quantum),
+                plane_bits(&fresh, plane, quantum),
+            );
+            assert_eq!(
+                send[landed..],
+                fresh[landed..],
+                "{label}, plane {plane}: a fresh plan after the landing"
+            );
+        }
     }
-    assert!(lands, "the column lands after the move");
 }
 
 /// #1654 R19-5 on the C ABI. On [`send_ride_document`], a live send move with its own 4,000
