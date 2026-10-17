@@ -57,3 +57,10 @@ field and its join line, the control plane's `follow_into_six_word` term, and th
 `a_rebuild_that_drops_a_following_route_to_six_words_reports_a_fallback` (capi),
 `a_rebuild_that_drops_a_following_route_to_six_words_reports_the_fallback_alike` (host-web) and
 `the_join_flags_a_following_route_carried_into_a_six_word_one` (host-core), replaced by gate 3.
+
+## Note (controls coordinator, batch 19, 2026-10-17)
+
+With #1654, a route with only route-row automation (rows 1-6, no source mute entry) also uses the
+seven-word cell. Its seven-to-six carry (its last route entry removed) is flagged by the existing
+conservative flag (`resolve_route_carry` reads `GraphLiveRoute::following`); no new code. This issue's
+exact form must also cover that case.

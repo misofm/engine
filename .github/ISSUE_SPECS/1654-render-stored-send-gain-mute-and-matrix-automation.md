@@ -374,3 +374,24 @@ report.
 - `docs/SESSION_SCHEMA_V1.md`.
 - Nothing under `crates/engine/src/realtime/`. No `crates/lane` kernel change unless R19-A picks
   option (b).
+
+## Rulings (root, batch 19, 2026-10-17)
+
+These override the batch 19 spec-check amendment where they differ.
+
+- **R19-3 = (d).** A route column uses the fader's deferred-jump rule. While a column jump runs (a gate
+  change over the mute `J`, a record ramp `R`, or `0` for a Set), a gain or matrix grid event updates
+  the heard values but does not retarget that column; it sets the column's owed bit. At the jump's end
+  the column composes again; if the bits differ it lands over the value row's own `J` (`SendGain` or
+  `SendMatrix`, the longer one if both are owed), as #1711's deferred jump. A free column retargets at
+  once over the event's own ramp. A gate event always retargets at once. The hold is per column, never
+  per cell. No `max(own, remaining)` anywhere. Gates: a gain ride across an unmute fade ends the fade at
+  exactly `J` and lands at its end; a ride on the left column keeps moving while the right column fades.
+- **R19-4.** Events of several curves at one offset take the longest jump among them. Gate it.
+- **R19-5.** A live send move (hand offset or a D6 matrix edit) in flight at a Reposition is exact under
+  R19-3 and #1711's deferred jump, with no flag. If its gate fails, a send-only conservative
+  `TransitionFallback` term (the B17-R14 pattern) is added, and root is told.
+- **K1, the shared walk.** The route table uses the merged walk of `crates/automation/src/compose.rs`
+  (built after #1711, before T3). The composition (law, matrix, gate) stays in the route op. The cursor
+  table is a boxed slice sized at bind and charged by `size_of`, not a fixed array.
+- **Two PRs.** This issue ships in batch 19a with #1711 and K1.

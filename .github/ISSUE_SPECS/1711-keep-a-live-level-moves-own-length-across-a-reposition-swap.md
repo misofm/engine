@@ -279,3 +279,13 @@ measured with temporary probes in a detached worktree at `323433f6a` (removed af
   hook).
 - This spec.
 - Nothing under `crates/engine/src/realtime/`.
+
+## Rulings (root, batch 19, 2026-10-17)
+
+- **R19-1.** Confirmed: for a moved target with `remaining >= J`, the old ramp runs to its end, then
+  the cell jumps over `J`. Today the ramp is retargeted over `remaining`; D1 changes that. A gate holds
+  it (red if the ramp is retargeted at the swap).
+- **R19-2 (shared with #1655).** The deferred jump acts on one composed `CellState` per output. K1
+  (`crates/automation/src/compose.rs`, after this issue) reuses the decisions this issue adds; events.rs
+  exposes them `pub(crate)`, no copy.
+- **Two PRs.** This issue ships in batch 19a with K1 and #1654.

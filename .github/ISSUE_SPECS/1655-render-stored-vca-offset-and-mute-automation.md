@@ -371,3 +371,18 @@ Program cell order: fader cells, mute cells, #1654's route cells, then the VCA c
 row, lane), so each earlier session builds its program cell for cell. If #1654 generalizes
 `follow_walk` to a table of cursors, this slice adds the VCA mute cursors to that table and
 writes no second walk.
+
+## Rulings (root, batch 19, 2026-10-17)
+
+These override the batch 19 spec-check amendment where they differ.
+
+- **R19-2 = (b).** One composed `CellState` per output (a member fader channel, a member mute channel)
+  over all its curves: the merged walk of `crates/automation/src/compose.rs` (K1, built in batch 19a),
+  sum for offsets, OR for mutes. The route op adds the VCA mute curves as more cursors in #1654's route
+  table, ORed into the follow term; no second walk. Fallback (c) if U3 fails its second fix round: VCA
+  mute ships, VCA offset automation goes to phase 2; root is told.
+- **R19-4.** Events of several curves at one offset take the longest jump among them. Gate it.
+- **R19-6.** Reach-pair memory is charged as bank payload under the existing caps; no new host cap. A
+  gate at the cap: one pair over is refused with a typed diagnostic, not a panic.
+- **Two PRs.** This issue ships alone in batch 19b, on top of 19a (#1711, K1, #1654). Edit order: every
+  shared file after 19a.
