@@ -2866,9 +2866,9 @@ const MOVE_BLOCK: usize = 4;
 #[cfg(feature = "test-support")]
 const RIDE_FRAMES: u64 = 48_000;
 
-/// The live move of [`level_move_model`]: `S` to `-6` dB over 4,000 samples.
+/// The live move of [`level_move_model`] at [`MOVE_BLOCK`]: `S` to `-6` dB over 4,000 samples.
 #[cfg(feature = "test-support")]
-const LEVEL_MOVE: (f64, u32) = (-6.0, 4_000);
+const MOVE: (usize, (f64, u32)) = (MOVE_BLOCK, (-6.0, 4_000));
 
 /// Two tracks (two bank lanes) at quantum 128 with fader length 20 ms (`J` = 960), track 0
 /// riding linearly from `0` to `-12` dB over [`RIDE_FRAMES`] (split in two at `split.0` with the
@@ -2876,8 +2876,6 @@ const LEVEL_MOVE: (f64, u32) = (-6.0, 4_000);
 /// stored offset `hand` dB and, for a VCA move, a VCA of track 0 at `vca` dB.
 #[cfg(feature = "test-support")]
 fn level_move_model(split: Option<(u64, f32)>, hand: f32, vca: Option<f32>) -> SessionModel {
-    let mut model = plain(2, 128);
-    model.control_smoothing = smoothing(20.0);
     let lin = AutomationShape::Linear;
     let segments = match split {
         None => vec![segment(lin, 0, RIDE_FRAMES, 0.0, -12.0)],
@@ -2889,6 +2887,14 @@ fn level_move_model(split: Option<(u64, f32)>, hand: f32, vca: Option<f32>) -> S
             ]
         }
     };
+    move_model(segments, hand, vca)
+}
+
+/// [`level_move_model`]'s session with track 0's ride `segments`.
+#[cfg(feature = "test-support")]
+fn move_model(segments: Vec<AutomationSegment>, hand: f32, vca: Option<f32>) -> SessionModel {
+    let mut model = plain(2, 128);
+    model.control_smoothing = smoothing(20.0);
     let mut entry = fader_entry(&model, 0, ParameterChannel::Both, segments);
     (entry.offset.left_db, entry.offset.right_db) = (hand, hand);
     model.automation = vec![entry];
@@ -2921,14 +2927,15 @@ struct LevelMoveRun {
 }
 
 /// `a` prepared with live controls on `backend` and rendered for `blocks` blocks of DC `1.0`;
-/// at [`MOVE_BLOCK`]'s entry the live offsets record [`LEVEL_MOVE`] is written on both channels
-/// of track 0. With `b = Some((next, committed, swap))`, `next` is prepared as the successor of
+/// at each `(block, record)` of `moves`, that block's entry writes the live offsets record
+/// `record` (`S` and its ramp) on both channels of track 0, to the plan that renders it. With `b = Some((next, committed, swap))`, `next` is prepared as the successor of
 /// the plan on the committed model `committed` and swapped in at block `swap` (the C ABI's
 /// carry: `adopt_persisting`, the successor's gate published at the next revision).
 #[cfg(feature = "test-support")]
 fn level_move_run(
     a: &SessionModel,
     b: Option<(&SessionModel, &SessionModel, usize)>,
+    moves: &[(usize, (f64, u32))],
     backend: graph_compiler::Backend,
     blocks: usize,
 ) -> LevelMoveRun {
@@ -3008,8 +3015,11 @@ fn level_move_run(
                 .commit();
             successor_sources = Some(next_sources);
         }
-        if block == MOVE_BLOCK {
-            let (offsets_sum, smoothing_samples) = LEVEL_MOVE;
+        for &(_, (offsets_sum, smoothing_samples)) in moves.iter().filter(|(at, _)| *at == block) {
+            let (handles, gate) = match successor_gate.as_mut() {
+                Some((handles, gate)) => (handles, gate),
+                None => (&mut handles, &mut gate),
+            };
             gate.write_published(|stamp| {
                 for channel in 0..2 {
                     handles.strip_controls[0].fader.write_offsets(
@@ -3100,18 +3110,24 @@ fn a_level_move_in_flight_across_a_table_only_rebuild_keeps_its_bits() {
             for heard in [1, 12, 24, 26, 30] {
                 let swap = MOVE_BLOCK + heard;
                 let blocks = swap + AFTER;
-                let reference = level_move_run(&a, None, backend, blocks);
+                let reference = level_move_run(&a, None, &[MOVE], backend, blocks);
                 assert_eq!(reference.allocations, (0, 0, 0));
                 for (change, split) in changes {
                     let label = format!("{backend:?}, {what}, heard {heard}, {change}");
                     let next = level_move_model(Some(split), hand, vca.map(|vca| vca.1));
-                    let run = level_move_run(&a, Some((&next, &committed, swap)), backend, blocks);
+                    let run = level_move_run(
+                        &a,
+                        Some((&next, &committed, swap)),
+                        &[MOVE],
+                        backend,
+                        blocks,
+                    );
                     assert_eq!(run.adopted, Some(swap), "{label}: adopted at the swap");
                     assert!(run.restarted.is_empty(), "{label}: the strip carries");
                     assert_eq!(run.allocations, (0, 0, 0), "{label}: allocation-free");
                     assert_ne!(
                         reference.blocks[swap - 1],
-                        level_move_run(&committed, None, backend, swap).blocks[swap - 1],
+                        level_move_run(&committed, None, &[], backend, swap).blocks[swap - 1],
                         "{label}: the move is still heard before the swap"
                     );
                     let first = run
@@ -3121,6 +3137,170 @@ fn a_level_move_in_flight_across_a_table_only_rebuild_keeps_its_bits() {
                         .position(|(run, reference)| run != reference);
                     assert_eq!(first, None, "{label}: first block that differs");
                 }
+            }
+        }
+    }
+}
+
+// #1711 G2 and R19-1: a live level move whose target a table-only rebuild moves.
+
+/// The first free sample of [`MOVE`]'s ramp: the block-4 entry plus its 4,000 samples.
+#[cfg(feature = "test-support")]
+const MOVE_FREE: u64 = MOVE_BLOCK as u64 * 128 + MOVE.1.1 as u64;
+
+/// A step ride of track 0 through `(start, end, dB)` pieces.
+#[cfg(feature = "test-support")]
+fn steps_of(pieces: &[(u64, u64, f32)]) -> Vec<AutomationSegment> {
+    pieces
+        .iter()
+        .map(|&(start, end, db)| segment(AutomationShape::Step, start, end, db, db))
+        .collect()
+}
+
+/// The moved-target setup (#1711 A3 G2): the ride flat at -3 dB; the rebuild's table -5 dB to
+/// 6,000, then -3 dB (the move's target moves from -3 to -5 dB); the reference table, -3 dB to the
+/// move's first free sample [`MOVE_FREE`], -5 dB to 6,000, then -3 dB.
+#[cfg(feature = "test-support")]
+fn moved_target_tables() -> [Vec<AutomationSegment>; 3] {
+    [
+        steps_of(&[(0, RIDE_FRAMES, -3.0)]),
+        steps_of(&[(0, 6_000, -5.0), (6_000, RIDE_FRAMES, -3.0)]),
+        steps_of(&[
+            (0, MOVE_FREE, -3.0),
+            (MOVE_FREE, 6_000, -5.0),
+            (6_000, RIDE_FRAMES, -3.0),
+        ]),
+    ]
+}
+
+/// One moved-target case at `backend`: [`MOVE`] heard `heard` blocks on the flat ride, then the
+/// table-only rebuild of [`moved_target_tables`], and the `later` live moves after the swap. The
+/// rebuilt run is compared with a fresh plan prepared with `reference` (the reference table,
+/// or the rebuild's own with later moves) and given the same moves, from sample `from` on: every
+/// sample bit-equal, allocation-free, adopted at the swap block, the strip carries. Returns the
+/// rebuilt run's left plane.
+#[cfg(feature = "test-support")]
+fn moved_target_case(
+    backend: graph_compiler::Backend,
+    (what, hand, vca): MovedTargetMove,
+    heard: usize,
+    later: &[(usize, (f64, u32))],
+    from: u64,
+) -> Vec<f32> {
+    const AFTER: usize = 44;
+    let [flat, table, fresh] = moved_target_tables();
+    let swap = MOVE_BLOCK + heard;
+    let blocks = (swap + AFTER).max(later.iter().map(|(at, _)| at + 20).max().unwrap_or(0));
+    let a = move_model(flat.clone(), 0.0, vca.map(|vca| vca.0));
+    let committed = move_model(flat, hand, vca.map(|vca| vca.1));
+    let next = move_model(table.clone(), hand, vca.map(|vca| vca.1));
+    let reference = move_model(
+        if later.is_empty() { fresh } else { table },
+        0.0,
+        vca.map(|vca| vca.0),
+    );
+    let moves: Vec<_> = core::iter::once(MOVE)
+        .chain(later.iter().copied())
+        .collect();
+    let label = format!(
+        "{backend:?}, {what}, heard {heard}, {} later moves",
+        later.len()
+    );
+    let run = level_move_run(&a, Some((&next, &committed, swap)), &moves, backend, blocks);
+    let expected = level_move_run(&reference, None, &moves, backend, blocks);
+    assert_eq!(run.adopted, Some(swap), "{label}: adopted at the swap");
+    assert!(run.restarted.is_empty(), "{label}: the strip carries");
+    assert_eq!(run.allocations, (0, 0, 0), "{label}: allocation-free");
+    let planes = |run: &LevelMoveRun, plane: usize| -> Vec<u32> {
+        run.blocks
+            .iter()
+            .flat_map(|block| block[plane * 128..(plane + 1) * 128].iter().copied())
+            .collect()
+    };
+    for plane in 0..2 {
+        let (x, y) = (planes(&run, plane), planes(&expected, plane));
+        let first = (from as usize..x.len()).find(|&sample| x[sample] != y[sample]);
+        assert_eq!(
+            first, None,
+            "{label}: plane {plane}, first sample that differs"
+        );
+    }
+    planes(&run, 0).into_iter().map(f32::from_bits).collect()
+}
+
+/// One move of the moved-target cases: (label, the stored hand offset after the move, the VCA
+/// before and after it).
+#[cfg(feature = "test-support")]
+type MovedTargetMove = (&'static str, f32, Option<(f32, f32)>);
+
+/// The two moves of the moved-target cases.
+#[cfg(feature = "test-support")]
+const MOVED_TARGET_MOVES: [MovedTargetMove; 2] = [
+    ("a VCA move", 0.0, Some((0.0, -6.0))),
+    ("a hand move", -6.0, None),
+];
+
+/// #1711 G2 on host-core, at both bank widths. [`MOVE`] heard 12 and 30 blocks (2,464 and 160
+/// samples left; `J` = 960) on a ride flat at -3 dB, then a table-only rebuild to -5 dB up to
+/// 6,000: the move's target moves, so the cell jumps over `J` at the move's first free sample
+/// (4,512), not at the swap. Every sample is bit-equal to a fresh plan whose table has that jump
+/// as a real discontinuity at 4,512 and that is given the same move. Case (c): a second live move
+/// (`S` to -9 dB over 1,200 samples from block 35, before 4,512, ending after `4,512 + J`) clears
+/// the deferral: from its last sample on, every sample is bit-equal to a fresh plan with the new
+/// table given both moves, and the lane still moves on that move's last samples.
+///
+/// Test value: red if the adoption lands a moved target at the swap instead of deferring its jump
+/// (the old landing; checked once), if the grid is not held until the deferral fires (the grid
+/// point 32 samples before the move's end restarts the ramp toward -5 dB; checked once), or, case
+/// (c), if the newer move does not clear the deferral (the deferred jump then cuts the move short
+/// at `4,512 + J`; checked once). The comparison point `at = end` is not observable here (on a
+/// flat table both points read -5 dB); G1 (`a_level_move_in_flight_across_a_table_only_rebuild_
+/// keeps_its_bits`) holds it.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_moved_target_jumps_over_the_fader_length_at_the_moves_first_free_sample() {
+    const SECOND: (usize, (f64, u32)) = (35, (-9.0, 1_200));
+    let second_last = SECOND.0 as u64 * 128 + u64::from(SECOND.1.1) - 1;
+    for backend in [
+        #[cfg(target_feature = "avx2")]
+        graph_compiler::Backend::Simd8,
+        graph_compiler::Backend::Simd4,
+    ] {
+        for case in MOVED_TARGET_MOVES {
+            for heard in [12, 30] {
+                moved_target_case(backend, case, heard, &[], 0);
+                let left = moved_target_case(backend, case, heard, &[SECOND], second_last);
+                let last = second_last as usize;
+                assert_ne!(
+                    left[last - 1].to_bits(),
+                    left[last].to_bits(),
+                    "{backend:?}, {}, heard {heard}: the second move keeps its own length",
+                    case.0
+                );
+            }
+        }
+    }
+}
+
+/// #1711 R19-1 on host-core, at both bank widths. [`MOVE`] heard 1 and 12 blocks (3,872 and
+/// 2,464 samples left, both at least `J` = 960) on the flat ride, then the table-only rebuild that
+/// moves its target: the move's ramp runs to its end as the uninterrupted engine runs it, then
+/// the cell jumps over `J`. Every sample is bit-equal to the fresh plan with that jump at the
+/// move's first free sample.
+///
+/// Test value: red if the adoption retargets the move at the swap (over its remaining frames, or
+/// over `J`) instead of deferring the jump to the ramp's end.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_moved_target_lets_a_live_move_longer_than_the_jump_end_when_it_was_due() {
+    for backend in [
+        #[cfg(target_feature = "avx2")]
+        graph_compiler::Backend::Simd8,
+        graph_compiler::Backend::Simd4,
+    ] {
+        for case in MOVED_TARGET_MOVES {
+            for heard in [1, 12] {
+                moved_target_case(backend, case, heard, &[], 0);
             }
         }
     }

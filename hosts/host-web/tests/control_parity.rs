@@ -3011,6 +3011,75 @@ fn a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both
     }
 }
 
+/// #1711 G2 across hosts: on a fader ride flat at -3 dB, a hand move with its own 4,000 samples
+/// heard 3 blocks, then a table-only rebuild to -5 dB (the move's target moves): the adoption
+/// defers the cell's jump to the move's first free sample on both hosts alike, through the one
+/// shared driver. Both hosts give one verdict and reply per edit and render the same bits in every
+/// block, through the move's end and the deferred jump over the fader length.
+///
+/// Test value: red if either host adopts the moved target differently (an adapter-local rule, or
+/// a browser successor that does not carry the stage's ramp the deferral waits for).
+#[test]
+fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
+    let ride = |pieces: &[(u64, u64, f32)]| SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-fader-ride"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                5,
+                ParameterChannel::Both,
+            ),
+            segments: pieces
+                .iter()
+                .map(|&(start, end, db)| session::AutomationSegment {
+                    shape: session::AutomationShape::Step,
+                    start_sample: start,
+                    end_sample: end,
+                    start_value: db,
+                    end_value: db,
+                    unit: session::ParameterUnit::Db,
+                })
+                .collect(),
+            offset: session::AutomationOffset::default(),
+        },
+    };
+    let hand = CAbi::edits(
+        Edit::Fader {
+            strip: T1,
+            lanes: Lanes::Both,
+            db: -6.0,
+        },
+        Some(4_000),
+    );
+    for rate in RATES {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi| {
+            let (b, b_reply) = browser.transaction_reply(edits);
+            let (c, c_reply) = c_abi.transaction(edits);
+            assert_eq!(b, c, "{rate} Hz: one verdict");
+            assert_eq!(b_reply, c_reply, "{rate} Hz: one reply");
+        };
+        both(&[ride(&[(0, 1_000_000, -3.0)])], &mut browser, &mut c_abi);
+        same_blocks(&mut browser, &mut c_abi, 0..4, "the flat ride");
+        both(&hand, &mut browser, &mut c_abi);
+        same_blocks(&mut browser, &mut c_abi, 4..7, "the hand move");
+        both(
+            &[ride(&[(0, 20_000, -5.0), (20_000, 1_000_000, -3.0)])],
+            &mut browser,
+            &mut c_abi,
+        );
+        same_blocks(&mut browser, &mut c_abi, 7..60, "the moved target");
+        assert_eq!(
+            status_watermark(&browser),
+            c_abi.watermark(),
+            "{rate} Hz: the browser status carries the C ABI's watermark"
+        );
+    }
+}
+
 /// #1651 gate 8 (U1 fold 1, MINOR-3): in a mute-only session (a stored mute curve on `t1`, no
 /// fader entry), a rebuild that changes the mute curve while a hand fader move with its own 4,000
 /// samples still ramps completes exactly on both hosts: B17-R14's transition-fallback window is
