@@ -1091,7 +1091,10 @@ fn the_fader_events_do_not_depend_on_the_quantum() {
 }
 
 /// #1647 gate 6: 1,000 blocks with events on eight lanes (eight tracks, each a fade with steps on
-/// its left lane) allocate and free nothing after a warm-up.
+/// its left lane) allocate and free nothing after a warm-up. Track `t`'s step ends at
+/// `90,000 + 37 t`, so its jump's sample names the track: every one of the eight tracks gives its
+/// jump, whatever the bank width (eight lanes in one bank on AVX2, two banks of four on NEON and
+/// Wasm, where `event.lane` is the lane inside its bank).
 ///
 /// Test value: red if render allocates for events.
 #[test]
@@ -1106,10 +1109,11 @@ fn rendering_fader_events_allocates_nothing() {
                 -40.0 + track as f32,
                 0.0,
             )];
-            segments.push(segment(AutomationShape::Step, 60_000, 90_000, 0.0, -12.0));
+            let jump = 90_000 + 37 * track as u64;
+            segments.push(segment(AutomationShape::Step, 60_000, jump, 0.0, -12.0));
             segments.push(segment(
                 AutomationShape::Linear,
-                90_000,
+                jump,
                 128_000,
                 -12.0,
                 -40.0,
@@ -1121,13 +1125,20 @@ fn rendering_fader_events_allocates_nothing() {
     rig.until(4 * 128);
     let _ = builtins_compiler::test_only_take_fader_events();
     rig.allocations = (0, 0, 0);
-    let mut lanes = std::collections::BTreeSet::new();
+    let mut jumps = std::collections::BTreeSet::new();
     for _ in 0..1_000 {
         rig.block();
         let (events, _) = builtins_compiler::test_only_take_fader_events();
-        lanes.extend(events.iter().map(|event| (event.lane, event.channel)));
+        jumps.extend(
+            events
+                .iter()
+                .filter(|event| event.kind == automation::EventKind::Jump)
+                .map(|event| event.sample),
+        );
     }
-    assert_eq!(lanes.len(), 8, "events on eight lanes: {lanes:?}");
+    let expected: std::collections::BTreeSet<u64> =
+        (0..8).map(|track| 90_000 + 37 * track).collect();
+    assert_eq!(jumps, expected, "one jump on each of the eight tracks");
     assert_eq!(rig.allocations, (0, 0, 0), "1,000 blocks of fader events");
 }
 
