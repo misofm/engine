@@ -508,7 +508,7 @@ No edit under `crates/engine/src/realtime/`; no row class or table change (no SD
    `compose::tests::a_step_keeps_its_jump_length_while_another_curve_rides_on_a_held_grid_output`.
 2. An offsets record on a composed lane takes the single cell's rule (seed, clear the deferral,
    every cursor holds to the jump's completion), not `Composed::retarget` (deferral then each
-   cursor's own `J`), so a composed lane moves as one cell does.
+   cursor's own `J`), so a composed lane moves as one cell does in holds and deferrals.
 3. `own_db` is `Option<f32>`: today's host-core record sites write `None` (mechanical, correct for
    every lane that has a cell today); V3 writes `Some` on static-own event lanes.
 4. `LaneFaderAutomation::new` returns `Result` (the cursor table allocates); bind
@@ -743,7 +743,8 @@ SDK regeneration).
   that pulled ahead is replayed first, as for a hold. A jump that emits nothing changes nothing
   (#1711 U1 fold 2). It reaches every hold and deferral the lane put on every cursor: the record
   hold in `offsets_jump`, the adoption hold and deferral of `settle_adoption`, and the holds
-  `with_held_grid` propagates, so a composed lane moves as one cell does (V2 departure 2).
+  `with_held_grid` propagates, so a composed lane moves as one cell does in holds and deferrals
+  (V2 departure 2).
 - **Who uses it.** Only the fader composed lanes (`FaderCurve::prepared`: `.with_held_grid()
   .with_jump_release()`). The composed mute lanes have gate cursors only. The route column
   (`crates/graph`, #1654) does not call it and keeps its T3 rule: a held value follows the column's
@@ -756,9 +757,13 @@ SDK regeneration).
 1. The host-core live gate compares from the step's jump's end (3,240), not from 0. Before the step
    the composed lane and one cell over the sum differ: a record's ramp target composes each curve
    toward the ramp's completion clipped at that curve's own next discontinuity, where one cell clips
-   the sum at the lane's next discontinuity (`FaderComposite::toward` against `curve_toward`). That
-   rule is outside this finding (phase-2 placeholder in the fold report); the jump's end equalizes
-   the gains, and the defect window (3,328 to 9,024) lies after it.
+   the sum at the lane's next discontinuity (`FaderComposite::toward` against `curve_toward`). The
+   jump's end equalizes the gains, and the defect window (3,328 to 9,024) lies after it.
+   Defined behaviour: on a composed fader lane a record's or an adoption's ramp target composes each
+   curve toward the ramp's completion, each clipped at its own next discontinuity (K1
+   `compose_toward`, #1649 D3), so between the record and another curve's next discontinuity the
+   lane differs from one cell over the summed curve, and that curve's jump makes them equal; a
+   successor plan uses the same rule.
 2. The both-host gate runs at the native width only (control_parity's rule, V5); the two bank widths
    are the host-core twin's.
 
