@@ -601,3 +601,63 @@ regions in 35 files (unchanged).
 For V4: read `follow_vca_mute_cells` in the attach loop (`prepare.rs`, the `follow_cells` push) and
 pass its lists into `GraphFollowRouteSource`; jump row `VcaMute`. For V5: host parity, the cap
 gate (R19-6), gates 1-3 and 7-8 on both hosts.
+
+## Decision record: V4 (batch 19)
+
+The route op's VCA mute follow term (`crates/graph/src/{lib.rs,runtime.rs}`) and the attach in
+`crates/host-core/src/prepare.rs` (the `follow_cells` loop and `follow_route_jumps`). No edit under
+`crates/engine/src/realtime/`, in `crates/automation` or in any row class or table (no SDK
+regeneration).
+
+- **Source (D4).** `GraphFollowRouteSource::new` takes `vca_mutes: [Vec<u32>; 2]` (per source lane,
+  V3's `follow_vca_mute_cells`, ascending VCA ID; stored boxed) and checks `flags.automated[lane] ==
+  own cell || VCA cells`, every cell in the program. This closes V3's interim refusal: a send whose
+  lane only a VCA mute reaches now prepares. `with_continued_vca_mutes([bool; 2])` (host-core:
+  `controls::continued_mute_lanes` of the successor) marks lanes whose VCA mute tables continue.
+  When the source strip has no own mute cell and the route no row cell, the attach takes the VCA
+  cells' program (`follow_vca_mute_cells` now takes `&mut Option<Arc<P>>`).
+- **Jump row (data).** `GraphRouteCursorRow::VcaMute` and `GraphRouteJumpLengths::vca_mute`;
+  host-core's rule reads `LiveRamps::for_row(VcaMute)`.
+- **Walk.** The VCA mute cursors are `Gate` cursors appended after the five role cursors in each
+  column's one K1 table (`ColumnRoles { fixed, vca_start, vca_count }`); no second walk. The follow
+  term is `follows_mute && (own curve || v_1 || ... || v_m || terms)` in `column_target`, in the
+  tap's node time. Because they are gates, a VCA mute fade holds the column's value events and
+  lands them at its end (R19-3, K1's deferral). The table (and its probe twin) is boxed, allocated
+  at attach, charged by `Composed::bytes(K)`; the source's lists are added to the producer's
+  `cursor_bytes`.
+- **Carry (D6, U2 folds).** A lane's VCA mute cursors carry verbatim by position (`Continued`) when
+  the lane continues and `a(tap)` did not move; else they start fresh and are placed at the first
+  block like the source mute. At the first block the follow curves are one gate: its OR is
+  compared with the OR the predecessor heard (with the own mute alone this is the old per-cursor
+  comparison, so no bit moves). A gate move takes the longest own length among the curves that
+  close the column (for an open, among all follow curves; which were closed is not kept across a
+  carry), R19-4. A follow curve is "dropped" (MAJOR-3, owed landing of U2 fold 2) only when no
+  own or VCA mute curve is left; a dropped VCA mute lands over `VcaMute`. A seven -> six carry of
+  a predecessor that heard VCA curves reopens over `max(mute, VcaMute)`.
+
+**Departure.** In `place_carried` a moved gate now retargets over its own row's length (was the
+mute length for every gate; equal for the source and route mutes, so no existing bit moves).
+
+Gates (`cargo test --locked -p graph --features test-support`, 149 lib tests green), module
+`runtime::send_automation_tests`, `VcaMute` = 320 against the mute rule's 200:
+`a_vca_mute_step_closes_a_following_send_at_its_tap_time` (a lane only a VCA mute reaches, `a(tap)`
+0 and 100: the close lands at render sample `1,000 + a(tap)` over 320),
+`a_vca_mute_ors_with_the_source_lanes_own_mute`, `a_vca_unmute_fade_holds_the_columns_value_events_to_its_end`
+(R19-3), `a_carried_vca_mute_renders_the_twins_bits_continued_or_repositioned` (red with the
+continued cursor's state dropped: block 21), `a_moved_vca_mute_table_lands_over_its_own_length_at_the_first_sample`
+(both ways, the OR with a closed own mute, a removed VCA mute); `follow_route_tests`: the source
+accepts VCA-only lanes and refuses a VCA cell outside the program and disagreeing flags.
+
+Commands: `cargo fmt --all`; clippy `-D warnings --all-targets --all-features` on graph, host-core,
+automation; `cargo check --locked --all-targets` (workspace, no features); tests automation, graph
+`--features test-support`, host-core `--features test-support` (all, incl. `route_mute` 26,
+`stored_vca_automation`; with `control-provider` 6), capi lib (220), host-web `--features
+test-support --test control_parity` (44): all green. Realtime policy: 172 regions in 35 files
+(unchanged). `scripts/check-graph-policy.sh`: PASS. Sizes (x86-64, measured):
+`LIVE_FOLLOW_ROUTE_OWNER_BYTES` 1,072 -> 1,120, `GraphFollowRouteSource` 120 -> 152,
+`GraphFollowRouteControlBinding` 808 -> 872, `GraphFollowRouteControlProducer` 104; charges read
+`size_of`.
+
+For V5: host gates for gate 3 (a following send of a member closes at its tap under a VCA mute,
+both hosts, latent tap), a member with no own mute entry, a nested VCA, the carry (continued and
+moved VCA mute tables) and the reach-pair cap gate (R19-6).

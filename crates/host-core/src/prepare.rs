@@ -2905,27 +2905,34 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         // program.
         let mute_cells = builtins.strip_mute_cells(route_source_id(route).as_str());
         let route_cells = builtins.route_cells(route.id.as_str());
-        let (program, cells, rows) = match (mute_cells, route_cells) {
+        let (mut program, cells, rows) = match (mute_cells, route_cells) {
             (Some((program, cells)), Some((other, rows)))
                 if std::sync::Arc::ptr_eq(&program, &other) =>
             {
-                (program, cells, rows)
+                (Some(program), cells, rows)
             }
-            (Some((program, cells)), None) => (program, cells, [None; graph::GRAPH_ROUTE_ROWS]),
-            (None, Some((program, rows))) => (program, [None; 2], rows),
+            (Some((program, cells)), None) => {
+                (Some(program), cells, [None; graph::GRAPH_ROUTE_ROWS])
+            }
+            (None, Some((program, rows))) => (Some(program), [None; 2], rows),
+            // #1655 D4: a send whose source lanes only VCA mutes reach takes the VCA cells'
+            // program below.
+            (None, None) => (None, [None; 2], [None; graph::GRAPH_ROUTE_ROWS]),
             _ => return Err(graph_failure("host.route_control.attach")),
         };
         // #1655 D4: a source lane's curve is its own mute cell, then the reaching automated VCA
         // mute cells in ascending VCA ID; `automated.lanes` names the lanes that have one. The
-        // route op's VCA mute cursors read `vca_mutes` (V4); until then a lane that only a VCA
-        // mute reaches has no own cell, and the graph source refuses its flags.
+        // route op ORs the VCA mute cursors into the lane's follow term at `a(tap)`.
         let vca_mutes = follow_vca_mute_cells(
             |vca| builtins.vca_cells(vca),
             model,
             route_source_id(route),
-            &program,
+            &mut program,
         )
         .ok_or_else(|| graph_failure("host.route_control.attach"))?;
+        let Some(program) = program else {
+            return Err(graph_failure("host.route_control.attach"));
+        };
         let curves = [0, 1].map(|lane| cells[lane].is_some() || !vca_mutes[lane].is_empty());
         if curves != automated.lanes || rows.map(|cell| cell.is_some()) != automated.rows {
             return Err(graph_failure("host.route_control.attach"));
@@ -2937,9 +2944,22 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         let continued = successor.map_or([false; graph::GRAPH_ROUTE_ROWS], |base| {
             controls::continued_route_rows(base.committed, model, &route.id)
         });
+        // #1655 D6: a source lane whose own and reaching VCA mute tables continue carries its
+        // VCA mute cursors verbatim.
+        let continued_vca = successor.map_or([false; 2], |base| {
+            controls::continued_mute_lanes(base.committed, model, route_source_id(route))
+        });
         follow_cells.push((
             route.id.as_str(),
-            (program, cells, rows, flags, offset, continued),
+            (
+                program,
+                cells,
+                vca_mutes,
+                rows,
+                flags,
+                offset,
+                (continued, continued_vca),
+            ),
         ));
     }
     let mut artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
@@ -2995,7 +3015,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         let mut sources: BTreeMap<&str, _> = follow_cells.into_iter().collect();
         artifact
             .attach_route_live_controls_following(&live_superseded, six_word, |route_id| {
-                let (program, cells, rows, flags, offset, continued) =
+                let (program, cells, vca_mutes, rows, flags, offset, (continued, continued_vca)) =
                     sources.remove(route_id.as_str())?;
                 let node = GraphNodeId::Route {
                     route_id: route_id.clone(),
@@ -3003,13 +3023,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 let source = graph::GraphFollowRouteSource::new(
                     program,
                     cells,
+                    vca_mutes,
                     rows,
                     graph::floored_input_arrival(&arrivals, &node),
                     follow_route_jumps,
                     graph_compiler::route_gain_law,
                     flags,
                 )?
-                .with_continued_rows(continued);
+                .with_continued_rows(continued)
+                .with_continued_vca_mutes(continued_vca);
                 if flags.automated_gain {
                     source.with_gain_offset(offset)
                 } else {
@@ -4422,14 +4444,14 @@ impl SendRecord {
 /// each reaching VCA's automated `mute` lane (`PreparedBuiltinsSession::vca_cells`, row 1, the
 /// lane's own index), in ascending VCA ID (the order of [`SessionModel::vca_reach_of`]).
 /// `vca_cells` is the plan's `PreparedBuiltinsSession::vca_cells`. Empty lanes when no entry drives
-/// a VCA `mute` row. `None` when a reaching VCA's entry has no cell in `program`, the plan's one
-/// automation program: a plan that disagrees with its model. Control side; it allocates the two
-/// lists.
+/// a VCA `mute` row. `program` is the plan's one automation program when the caller holds it (else
+/// it takes the VCA cells' own). `None` when a reaching VCA's entry has no cell in that program: a
+/// plan that disagrees with its model. Control side; it allocates the two lists.
 pub(crate) fn follow_vca_mute_cells<P>(
     vca_cells: impl Fn(&str) -> Option<(std::sync::Arc<P>, builtins_compiler::VcaCells)>,
     model: &SessionModel,
     source: &session::StableId,
-    program: &std::sync::Arc<P>,
+    program: &mut Option<std::sync::Arc<P>>,
 ) -> Option<[Vec<u32>; 2]> {
     let mut lanes = [Vec::new(), Vec::new()];
     if !model
@@ -4446,8 +4468,10 @@ pub(crate) fn follow_vca_mute_cells<P>(
             continue;
         }
         let (cells_program, cells) = vca_cells(vca.as_str())?;
-        if !std::sync::Arc::ptr_eq(&cells_program, program) {
-            return None;
+        match program {
+            Some(program) if !std::sync::Arc::ptr_eq(&cells_program, program) => return None,
+            Some(_) => {}
+            None => *program = Some(cells_program),
         }
         for (lane, list) in lanes.iter_mut().enumerate() {
             match (driven[lane], cells[1][lane]) {
@@ -5334,6 +5358,7 @@ fn follow_route_jumps(lengths: GraphJumpLengths) -> graph::GraphRouteJumpLengths
     );
     graph::GraphRouteJumpLengths {
         mute: ramps.for_row(LiveRampRow::Mute),
+        vca_mute: ramps.for_row(LiveRampRow::VcaMute),
         gain: ramps.for_row(LiveRampRow::SendGain),
         matrix: ramps.for_row(LiveRampRow::SendMatrix),
     }

@@ -1421,12 +1421,14 @@ impl FollowRouteControlLane {
 pub const GRAPH_ROUTE_ROWS: usize = 6;
 
 /// Which jump length one cursor of a following route takes (#1654 D1, batch 19 spec check): the
-/// mute rule for a source lane's mute and for the route's own mute, `SendGain` for the route's
-/// gain and `SendMatrix` for a matrix entry.
+/// mute rule for a source lane's mute and for the route's own mute, `VcaMute` for a reaching
+/// VCA's mute (#1655 D4), `SendGain` for the route's gain and `SendMatrix` for a matrix entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphRouteCursorRow {
     /// A source lane's stored mute (#1652).
     SourceMute,
+    /// The stored mute of an automated VCA that reaches the source lane (#1655 D4).
+    VcaMute,
     /// The route's own `gain_db` (row 1).
     Gain,
     /// The route's own `mute` (row 2).
@@ -1441,6 +1443,8 @@ pub enum GraphRouteCursorRow {
 pub struct GraphRouteJumpLengths {
     /// The mute row's length: a source lane's mute and the route's own mute.
     pub mute: u32,
+    /// The `VcaMute` row's length: a reaching VCA's mute curve (#1655 D4).
+    pub vca_mute: u32,
     /// The `SendGain` row's length.
     pub gain: u32,
     /// The `SendMatrix` row's length.
@@ -1454,6 +1458,7 @@ impl GraphRouteJumpLengths {
     pub const fn for_row(self, row: GraphRouteCursorRow) -> u32 {
         match row {
             GraphRouteCursorRow::SourceMute | GraphRouteCursorRow::Mute => self.mute,
+            GraphRouteCursorRow::VcaMute => self.vca_mute,
             GraphRouteCursorRow::Gain => self.gain,
             GraphRouteCursorRow::Matrix => self.matrix,
         }
@@ -1462,9 +1467,10 @@ impl GraphRouteJumpLengths {
 }
 
 /// The jump lengths of a following route's cursor rows, resolved from the block's three session
-/// lengths (#1652b, #1654 D1). Host-core hands in the row rules (`controls::LiveRamps::from_lengths`
-/// and `for_row` of `LiveRampRow::Mute`, `SendGain` and `SendMatrix`, the rules the strip's stages
-/// use), so graph never spells a row and the strip ramp and the send ramp cannot differ in length.
+/// lengths (#1652b, #1654 D1, #1655 D4). Host-core hands in the row rules
+/// (`controls::LiveRamps::from_lengths` and `for_row` of `LiveRampRow::Mute`, `VcaMute`,
+/// `SendGain` and `SendMatrix`, the rules the strip's stages use), so graph never spells a row and
+/// the strip ramp and the send ramp cannot differ in length.
 pub type GraphRouteJumpRule = fn(GraphJumpLengths) -> GraphRouteJumpLengths;
 
 /// The route's dB law for an automated send gain (#1654, batch 10 amendment): the linear gain of
@@ -1474,10 +1480,11 @@ pub type GraphRouteJumpRule = fn(GraphJumpLengths) -> GraphRouteJumpLengths;
 /// `route_transform` calls for a static gain, so the two are one derivation.
 pub type GraphRouteGainLaw = fn(curve_db: f32, offset_db: f32) -> f32;
 
-/// What one following route reads of its stored automation (#1652 D2, #1652b, #1654 D2): the
-/// plan's immutable automation program, the source lanes' mute cells in it, the route's own row
-/// cells in it, the arrival `a(tap)` of the route's tap, the cursor rows' jump-length rule, the
-/// route's gain law and the seeded flags word.
+/// What one following route reads of its stored automation (#1652 D2, #1652b, #1654 D2, #1655
+/// D4): the plan's immutable automation program, the source lanes' mute cells in it, the cells of
+/// the automated VCA mutes that reach each source lane, the route's own row cells in it, the
+/// arrival `a(tap)` of the route's tap, the cursor rows' jump-length rule, the route's gain law
+/// and the seeded flags word.
 ///
 /// The program is the one the strip's own stage reads (an `Arc` clone, no copy); the route keeps
 /// its own cursors over it, so two readers of one table never share state. `a(tap)` is the route
@@ -1488,6 +1495,9 @@ pub type GraphRouteGainLaw = fn(curve_db: f32, offset_db: f32) -> f32;
 pub struct GraphFollowRouteSource {
     pub(crate) program: std::sync::Arc<automation::Program>,
     pub(crate) cells: [Option<u32>; 2],
+    /// Per source lane, the mute cells of the automated VCAs that reach it, in ascending VCA ID
+    /// (#1655 D4): the route ORs them into the lane's follow term at `a(tap)`.
+    pub(crate) vca_mutes: [Box<[u32]>; 2],
     pub(crate) route_cells: [Option<u32>; GRAPH_ROUTE_ROWS],
     pub(crate) arrival: u64,
     pub(crate) jumps: GraphRouteJumpRule,
@@ -1496,6 +1506,9 @@ pub struct GraphFollowRouteSource {
     /// Per route row, whether the predecessor plan holds the same table for it, so a carry keeps
     /// its cursor verbatim ([`Self::with_continued_rows`]).
     pub(crate) continued: [bool; GRAPH_ROUTE_ROWS],
+    /// Per source lane, whether the predecessor plan holds the same VCA mute tables for it, in
+    /// the same order ([`Self::with_continued_vca_mutes`]).
+    pub(crate) continued_vca: [bool; 2],
     /// The seeded hand offset in dB of an automated `gain_db` (#1654, batch 10 amendment): the
     /// cell's `gain` word before any record. `+0.0` when the flags do not automate the gain.
     pub(crate) gain_offset: f32,
@@ -1503,46 +1516,70 @@ pub struct GraphFollowRouteSource {
 
 impl GraphFollowRouteSource {
     /// The source of a following route: `cells[lane]` is the source lane's mute cell in
-    /// `program`, `None` for a lane the plan does not automate; `route_cells[row]` is the route's
-    /// own row cell in `program` (order [`GRAPH_ROUTE_ROWS`]), `None` for a row the plan does not
-    /// automate; `arrival` is `a(tap)`; `jumps` resolves the cursor rows' jump lengths; `gain_law`
-    /// is the route's dB law; `flags` is the seeded flags word.
+    /// `program`, `None` for a lane whose own mute the plan does not automate; `vca_mutes[lane]`
+    /// are the mute cells in `program` of the automated VCAs that reach the lane, in ascending VCA
+    /// ID (#1655 D4, empty when none does); `route_cells[row]` is the route's own row cell in
+    /// `program` (order [`GRAPH_ROUTE_ROWS`]), `None` for a row the plan does not automate;
+    /// `arrival` is `a(tap)`; `jumps` resolves the cursor rows' jump lengths; `gain_law` is the
+    /// route's dB law; `flags` is the seeded flags word.
     ///
     /// `None` when no source lane and no route row is automated (the route keeps the six-word
-    /// cell), when a cell is not in `program`, or when `flags.automated` disagrees with `cells` or
-    /// `flags.route_rows()` with `route_cells` (the plan fixes which lanes and rows are automated,
-    /// D1).
+    /// cell), when a cell is not in `program`, or when `flags.automated` disagrees with the lanes
+    /// that have a curve (own cell or VCA mute cells) or `flags.route_rows()` with `route_cells`
+    /// (the plan fixes which lanes and rows are automated, D1).
     #[must_use]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the plan-fixed parts of one source, each its own type"
+    )]
     pub fn new(
         program: std::sync::Arc<automation::Program>,
         cells: [Option<u32>; 2],
+        vca_mutes: [Vec<u32>; 2],
         route_cells: [Option<u32>; GRAPH_ROUTE_ROWS],
         arrival: u64,
         jumps: GraphRouteJumpRule,
         gain_law: GraphRouteGainLaw,
         flags: RouteFollowFlags,
     ) -> Option<Self> {
-        let automated = cells.map(|cell| cell.is_some());
+        let automated = [0, 1].map(|lane| {
+            cells.get(lane).copied().flatten().is_some()
+                || vca_mutes.get(lane).is_some_and(|list| !list.is_empty())
+        });
         let rows = route_cells.map(|cell| cell.is_some());
         let in_program = cells
             .iter()
             .chain(&route_cells)
             .flatten()
+            .chain(vca_mutes.iter().flatten())
             .all(|&cell| program.cell(cell as usize).is_some());
         let any = automated.contains(&true) || rows.contains(&true);
-        (any && in_program && flags.automated == automated && flags.route_rows() == rows).then_some(
-            Self {
+        (any && in_program && flags.automated == automated && flags.route_rows() == rows).then(
+            || Self {
                 program,
                 cells,
+                vca_mutes: vca_mutes.map(Vec::into_boxed_slice),
                 route_cells,
                 arrival,
                 jumps,
                 gain_law,
                 flags,
                 continued: [false; GRAPH_ROUTE_ROWS],
+                continued_vca: [false; 2],
                 gain_offset: 0.0,
             },
         )
+    }
+
+    /// This source with `lanes[lane]` set for each source lane whose VCA mute tables the
+    /// predecessor plan holds unchanged, the same VCAs in the same order (#1655 D6,
+    /// `controls::continued_mute_lanes`): at a plan swap that lane's VCA mute cursors carry their
+    /// state and heard values verbatim, where otherwise they are placed again at the successor's
+    /// node time. By default no lane continues.
+    #[must_use]
+    pub const fn with_continued_vca_mutes(mut self, lanes: [bool; 2]) -> Self {
+        self.continued_vca = lanes;
+        self
     }
 
     /// This source with `rows[row]` set for each route row (order [`GRAPH_ROUTE_ROWS`]) whose
@@ -10700,6 +10737,7 @@ mod follow_route_tests {
     pub(crate) fn route_jumps(lengths: GraphJumpLengths) -> GraphRouteJumpLengths {
         GraphRouteJumpLengths {
             mute: lengths.mute_samples,
+            vca_mute: lengths.mute_samples,
             gain: lengths.fader_samples,
             matrix: lengths.pan_samples,
         }
@@ -10745,6 +10783,7 @@ mod follow_route_tests {
         GraphFollowRouteSource::new(
             program,
             cells,
+            [Vec::new(), Vec::new()],
             [None; GRAPH_ROUTE_ROWS],
             arrival,
             route_jumps,
@@ -10784,10 +10823,11 @@ mod follow_route_tests {
         assert_eq!(source.arrival(), 7);
         let program = std::sync::Arc::clone(&source.program);
         let flags = source.flags();
-        let new = |cells, route_cells, flags| {
+        let new_with = |cells, vca_mutes, route_cells, flags| {
             GraphFollowRouteSource::new(
                 std::sync::Arc::clone(&program),
                 cells,
+                vca_mutes,
                 route_cells,
                 0,
                 route_jumps,
@@ -10796,8 +10836,32 @@ mod follow_route_tests {
             )
             .is_some()
         };
+        let new = |cells, route_cells, flags| {
+            new_with(cells, [Vec::new(), Vec::new()], route_cells, flags)
+        };
         let no_rows = [None; GRAPH_ROUTE_ROWS];
         assert!(new([Some(0), None], no_rows, flags));
+        // #1655 D4: a lane is automated by its own cell or by a reaching VCA mute's cells.
+        let both = RouteFollowFlags {
+            automated: [true, true],
+            ..flags
+        };
+        assert!(
+            new_with([Some(0), None], [Vec::new(), vec![0]], no_rows, both),
+            "a lane only a VCA mute reaches"
+        );
+        assert!(
+            new_with([None, None], [vec![0, 0], vec![0]], no_rows, both),
+            "VCA mute cells alone"
+        );
+        assert!(
+            !new_with([Some(0), None], [Vec::new(), vec![1]], no_rows, both),
+            "a VCA mute cell outside the program"
+        );
+        assert!(
+            !new_with([Some(0), None], [vec![0], Vec::new()], no_rows, both),
+            "VCA flags that disagree"
+        );
         assert!(
             !new([None, None], no_rows, RouteFollowFlags::default()),
             "no lane"
@@ -10888,6 +10952,7 @@ mod follow_route_tests {
             GraphFollowRouteSource::new(
                 std::sync::Arc::clone(&program),
                 [None, None],
+                [Vec::new(), Vec::new()],
                 [gain.then_some(0), None, Some(0), None, None, None],
                 0,
                 route_jumps,
@@ -10912,17 +10977,20 @@ mod follow_route_tests {
     }
 
     /// The cursor rows' jump lengths: the source mute and the route mute take the mute length,
-    /// the gain the `SendGain` length and a matrix entry the `SendMatrix` length.
+    /// a VCA mute the `VcaMute` length, the gain the `SendGain` length and a matrix entry the
+    /// `SendMatrix` length.
     ///
     /// Test value: red if a route cursor would jump over another row's length.
     #[test]
     fn each_cursor_row_takes_its_own_jump_length() {
         let lengths = GraphRouteJumpLengths {
             mute: 3,
+            vca_mute: 4,
             gain: 5,
             matrix: 7,
         };
         assert_eq!(lengths.for_row(GraphRouteCursorRow::SourceMute), 3);
+        assert_eq!(lengths.for_row(GraphRouteCursorRow::VcaMute), 4);
         assert_eq!(lengths.for_row(GraphRouteCursorRow::Mute), 3);
         assert_eq!(lengths.for_row(GraphRouteCursorRow::Gain), 5);
         assert_eq!(lengths.for_row(GraphRouteCursorRow::Matrix), 7);
