@@ -168,8 +168,9 @@ impl CellState {
     /// stage remembers it and does not retarget), so no grid ramp cuts the running ramp short; a
     /// `no_restart` cell holds them inside the ramp in flight as it always does. Cleared by
     /// [`Self::clear_deferred_jump`], [`Self::reposition`], a seek landing and, on a restartable
-    /// cell, a discontinuity jump (it compares the curve and replaces the ramp the deferral waits
-    /// for). Control-free and allocation-free.
+    /// cell, a discontinuity jump that emits (it replaces the ramp the deferral waits for; one
+    /// that emits nothing replaces no ramp and keeps the deferral). Control-free and
+    /// allocation-free.
     pub const fn defer_jump(&mut self, at: i64) {
         self.deferred = at;
     }
@@ -525,11 +526,7 @@ impl<'a, 's> CellEvents<'a, 's> {
             if is_boundary {
                 self.state.cursor += 1;
             }
-            // A discontinuity jump on a restartable cell drops a pending deferral (#1711 U1 fold
-            // 1): the jump compares the curve with the current target here and replaces the ramp
-            // the deferral waits for, so the deferral and its grid hold are stale (they would
-            // freeze the lane on the jump's target until the deferral's time).
-            if is_deferred || (is_boundary && !self.program.no_restart) {
+            if is_deferred {
                 self.state.deferred = IDLE;
             }
             self.position = offset + 1;
@@ -538,6 +535,14 @@ impl<'a, 's> CellEvents<'a, 's> {
             } else {
                 self.grid_event(offset, next)
             };
+            // A discontinuity jump on a restartable cell that emits drops a pending deferral
+            // (#1711 U1 fold 1): it replaces the ramp the deferral waits for, so the deferral and
+            // its grid hold are stale (they would freeze the lane on the jump's target until the
+            // deferral's time). A jump that emits nothing (#1711 U1 fold 2: the curve already has
+            // its value and no ramp lags) replaces no ramp, and the deferral stays owed.
+            if is_boundary && !self.program.no_restart && event.is_some() {
+                self.state.deferred = IDLE;
+            }
             if event.is_some() {
                 return event;
             }

@@ -457,10 +457,11 @@ measured with temporary probes in a detached worktree at `323433f6a` (removed af
   unchanged. The A2 clear list is now: `reposition`, a seek landing, `clear_deferred_jump()` (the
   free path of `offsets_jump`, the R17-10 release, the `release_hold_by` sites) and a
   discontinuity jump of a restartable cell. `defer_jump`'s doc says so.
-- **Effect on K1.** A value cursor's own discontinuity jump inside a column-jump deferral now drops
-  that cursor's deferral (its grid moves again after its own jump, held by its own ramp by the
-  cell rule) instead of holding its grid to the column ramp's end. The other cursors keep their
-  deferrals. K = 1 still equals `CellEvents` (one rule); the K1 tests and the allocation test are
+- **Effect on K1** (corrected in U1 fold 2). A value cursor's own discontinuity jump inside a
+  column-jump deferral drops that cursor's deferral only when the jump emits (it then replaces the
+  ramp: its grid moves again after its own jump, held by its own ramp by the cell rule); a jump
+  that emits nothing keeps the deferral, which holds the grid to the column ramp's end and lands
+  there. The other cursors keep their deferrals. K = 1 still equals `CellEvents` (one rule); the K1 tests and the allocation test are
   green unchanged.
 - **MAJOR-1 gate (host-core, Simd8 and Simd4).**
   `a_table_step_inside_a_deferred_moves_ramp_drops_the_deferral`
@@ -487,8 +488,10 @@ measured with temporary probes in a detached worktree at `323433f6a` (removed af
   no rebuild; a later block differs (the jump is heard). Red once with the adoption landing at the
   swap instead of deferring (`settle_adoption`, 44.1 kHz, block 10). A fresh-plan reference with a
   real step at 4,512 is not bit-equal in this session (first difference about `J / 2` after
-  4,512 at every rate: 4,959, 4,998, 5,400 and 5,478); not chased here, phase-2 line in the
-  report.
+  4,512 at every rate: 4,959, 4,998, 5,400 and 5,478). Corrected in U1 fold 2: 4,512 is the
+  render time; the post-insert console slot `miso.soft-clip` has 31 samples latency, so the
+  fader's node time is render time less 31 and the deferred jump fires at node 4,481 (correct by
+  D1). A reference stepped at node 4,481 is bit-equal over every block (U1 fold 2).
 - **MINOR-1.** `table_only_rebuilds_around_a_level_move_complete_exactly` is deleted. Its
   no-live-move case moved into G1, `a_level_move_across_a_table_change_keeps_its_length`: a
   table-only rebuild with no move is adopted and reports `OUTCOME_EXACT` (outcome only: the split
@@ -511,3 +514,46 @@ measured with temporary probes in a detached worktree at `323433f6a` (removed af
   tests: automation (43, compose included), builtins-compiler (all features), host-core
   `stored_fader_automation` (36), `stored_mute_automation` (13), `successor_swap` (140), capi
   lib (211), host-web `control_parity` (33): green. Realtime policy: 171 regions (unchanged).
+
+## Decision record: U1 fold 2 (batch 19)
+
+- **MAJOR-A fixed.** `crates/automation/src/events.rs`, `next_in_run`: fold 1 dropped a pending
+  deferral at every discontinuity of a restartable cell before `jump_event` ran, and
+  `jump_event` can emit nothing (the curve already has the target's bits, no held event, the ramp
+  in flight not lagging): then no ramp replaced the one the deferral waits for. A fired deferral
+  is still spent before the event; a discontinuity of a restartable cell now drops the deferral
+  only when its jump emits. `defer_jump`'s doc says so. `no_restart` cells are unchanged.
+- **Gate (K1).** `an_unchanged_value_jump_keeps_the_gate_deferral`
+  (`crates/automation/src/compose/tests.rs`): `gate_and` with the unmute at 1,000 over 480; the
+  gain flat at -5.9921875 to 1,200, then linear -4 to -8 dB over 1,200..1,712, then -8; its
+  jump at 1,200 targets the curve at 1,455 (-5.9921875, unchanged). The retargets are exactly
+  `[(1,000, Jump, 480), (1,480, Jump, 256)]`. Red at the fold's base (4533703d3): `[(1,000, Jump,
+  480), (1,216, Grid, 64), (1,280, Grid, 64), ..., (1,664, Grid, 64)]` (the grid cuts the gate
+  jump, R19-3, and the landing at 1,480 is skipped).
+- **Builtins single cell: no host-core gate.** In a single builtins cell the deferral comes from
+  `settle_adoption`, set only when the curve before the next discontinuity `d` (it is compared at
+  the move's ramp end, clamped before `d`) differs from the stage's target; the cell's target is
+  the live move's (`seed_target`), and `reposition` cleared `held`. Every grid event in
+  `[swap, d)` is held (the deferral holds the grid) and the last one, at or after `d - 64`, aims at
+  the curve at `d - 1`, which differs, so `held` is set and the jump at `d` emits. That holds
+  whenever a grid point lies in `[swap, d)`: always when the swap block's first node time is on
+  the 64-sample grid, as in every host-core harness (quantum 128, no latency). The case is
+  reachable in principle only at a swap block whose first node time is off the grid (a quantum
+  not a multiple of 64, or upstream latency, such as the 31 samples above) with `d` before the
+  first grid point; there the fold-2 rule is the D1 behaviour (the deferral is kept, so the grid
+  does not cut the live move short). No gate here: the host-core moved-target harness swaps only at
+  multiples of 128; phase-2 line in the report.
+- **MINOR-B fixed.** `a_moved_target_defers_its_jump_alike_on_both_hosts`
+  (`hosts/host-web/tests/control_parity.rs`) now compares every block with a fresh pair whose
+  table steps at `FREE` in the fader's node time (4 * 128 + 4,000 - `T1_FADER_LATENCY`), given the
+  same move and, at the rebuild's block, a table-only rebuild that moves nothing (split at
+  950,000), both keeping the stored offset: bit-equal over all 60 blocks at the four rates.
+  `T1_FADER_LATENCY` = 31 is a named constant (the soft-clip slot's descriptor latency; no host
+  reader reports one strip's upstream latency, the plan reports only the output's, which `t3`'s
+  limiter raises). Red with it set to 0 (44.1 kHz, block 38). The unrebuilt pair is removed (the
+  fresh reference subsumes it).
+- Gates run: `cargo fmt --all`; clippy `-D warnings --all-targets --all-features` and no-feature
+  `cargo check --all-targets` on automation and host-web; tests: automation (all), builtins-compiler
+  (all features), host-core `stored_fader_automation` (36), `stored_mute_automation` (13),
+  `successor_swap` (140), capi lib (211, 1 ignored), host-web `control_parity` (37): green.
+  Realtime policy: 171 regions (unchanged).
