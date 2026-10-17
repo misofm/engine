@@ -408,3 +408,16 @@ example `crates/host-core/tests/stored_fader_automation.rs:578`). Do not count t
   `bash scripts/check-web-audioworklet.sh --without-metadata-regeneration ...`;
   `python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts`
   and `--self-test` (32 red mutations); `node direct-oracle.mjs` in compare mode.
+
+### T3
+
+- **D4 shipped.** `the_automation_fixture_renders_alike_on_both_hosts_across_one_session_seek` in
+  `hosts/host-web/tests/control_parity.rs` (under `test-support`). The browser side boots the
+  fixture bytes with `Rig::boot`; the C ABI side builds `CAbi::new` from `parse_session_json` of
+  the same bytes. Both run the D2 schedule with direct submits and `session_seek`; every seek,
+  submit and render returns OK, and each block's left and right planes are compared with `bits()`.
+  Both hosts agree on all 96 blocks.
+- **Ring.** `Rig::boot` and `limits()` both use a ring of two quanta, not one; the transcript
+  submits one quantum per block, so the ring size does not change what renders.
+- **Probe (not committed).** Flipping the low bit of the first C ABI sample at blocks >= 40 in the
+  test's read path turns the case red at block 40, left plane.
