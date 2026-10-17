@@ -59,3 +59,10 @@ keeps its own length, whatever else the rebuild changes.
 ## Dependencies
 
 - #1654 (batch 19), #1713 (the seven-to-six flag, separate).
+
+## Related
+
+- A route column and a single fader cell hold values differently: on a route column a value held by an
+  earlier column jump follows the column's free time and never moves earlier (R19-3 (d), #1654 T3),
+  while in a fader cell a later step's jump shortens the hold. Unifying the two rules is phase 2 (root,
+  batch 19); it is not part of this issue's gates.

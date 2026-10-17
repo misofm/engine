@@ -984,3 +984,10 @@ Gates (all green; red with the change reverted once):
   `send_rides_and_live_send_moves_cross_rebuilds_exactly_on_both_hosts` is now
   `TRANSITION_FALLBACK`, count 1 (their bit assertions are unchanged). The other B19-R7 flagged
   gates stay as they were.
+
+## Defined behaviour: held values on a route column (root, batch 19)
+
+On a route column, a value held by an earlier column jump follows the column's current free time and
+never moves earlier (R19-3 (d), T3). It is deterministic and equal to a fresh plan. A single fader cell
+differs: there, a later step's jump replaces the ramp and shortens the hold, so the grid resumes after
+that step's own length. Unifying the two is phase 2 (TBD54, "Related").
