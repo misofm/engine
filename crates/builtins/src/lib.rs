@@ -4648,6 +4648,18 @@ impl BuiltinFaderBank {
         Some(per_width!(FaderStageKernel(stage) in &self.stage => stage.fader_gain[channel][lane]))
     }
 
+    /// The gain a member lane's ramp on `channel` (`0` left, `1` right) runs toward: its settled
+    /// gain once the ramp ends. Unlike [`Self::fader_gain`], a gain the lane only remembered does
+    /// not move it (#1711 F0: a free carried lane's adoption compares its curve with this).
+    /// `None` for a padding lane or a channel above `1`.
+    #[must_use]
+    pub fn ramp_target(&self, lane: usize, channel: usize) -> Option<f32> {
+        if lane >= self.members || channel > 1 {
+            return None;
+        }
+        Some(per_width!(FaderStageKernel(stage) in &self.stage => stage.target_gain(lane, channel)))
+    }
+
     /// Frames left in a member lane's ramp on `channel`; `0` when settled. `None` for a padding
     /// lane or a channel above `1`.
     #[must_use]

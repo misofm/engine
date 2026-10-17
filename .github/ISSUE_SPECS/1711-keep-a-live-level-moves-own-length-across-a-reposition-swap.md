@@ -289,3 +289,42 @@ measured with temporary probes in a detached worktree at `323433f6a` (removed af
   (`crates/automation/src/compose.rs`, after this issue) reuses the decisions this issue adds; events.rs
   exposes them `pub(crate)`, no copy.
 - **Two PRs.** This issue ships in batch 19a with K1 and #1654.
+
+## Decision record: F1 (batch 19)
+
+- **F0 shipped.** `BuiltinFaderBank::ramp_target(lane, channel)` (`crates/builtins/src/lib.rs`, over
+  the kernel's `target_gain`) is new. `ChannelHold::fader_gain` is renamed `stage_gain`. `bank_hold`
+  fills it with the ramp target on a free stage and with `fader_gain` on a held stage. The
+  scalar oracle still gives `None`. `settle_adoption` compares the curve with `stage_gain`. No
+  other behaviour changes: `long_landing`, `length.max(remaining)` and the B17-R14 flag stay
+  (D1 and D2 are later tranches).
+- **G1, C ABI (Simd8).** `a_level_move_across_a_table_change_keeps_its_length`
+  (`crates/capi/src/runtime/live_tests.rs`) now asserts bit-equality with the uninterrupted engine
+  over 44 blocks after the swap, not 1e-3. Timings: Pending, SameTransaction, heard 1, 12, 24, 26
+  and 30. VCA and hand moves, both tables: 28 cases, all bit-equal, allocation-free, adopted.
+- **G1, host-core (Simd8 and Simd4).** New
+  `a_level_move_in_flight_across_a_table_only_rebuild_keeps_its_bits`
+  (`crates/host-core/tests/stored_fader_automation.rs`, `test-support`), with its own carry
+  harness `level_move_run` (the `carry_run` pattern: a plan exchange, a live offsets write at
+  block 4, a successor prepared on the committed model with the move). Heard 1, 12, 24, 26 and
+  30, VCA and hand moves, both tables: every block bit-equal to the uninterrupted engine,
+  allocation-free, adopted at the swap block, the strip carries. `successor.rs` is not touched.
+- **Red without F0** (`bank_hold` back to `fader_gain`, run once, restored): the C ABI gate fails
+  at "a VCA move, the ride split at 10,000, Heard(12)" (first difference block 25, sample 79); the
+  host-core gate fails (first difference block 28).
+- **Not asserted in F1: `OUTCOME_EXACT`.** The B17-R14 window still flags the heard 24, 26 and 30
+  cases (`a_reposition_swap_while_a_level_move_ramps_reports_a_fallback` is unchanged and green).
+  The outcome assertion of G1 belongs to the tranche that deletes the flag (D2).
+- **Departure: the two-rebuild case of A3 is not in F1.** Two table-only rebuilds 5 blocks apart
+  around a 500-sample move (heard 2) cannot be bit-equal to the uninterrupted engine: the second
+  rebuild comes after the move's ramp ends, the stage is then free and settled on a grid ramp, and
+  the split tables' values differ from the original ride in `f32` rounding, so the cell jumps over
+  `J` (probe: 1.4e-4 to 1.7e-4 with no move at all; 7.7e-5 with only the later rebuild). Its
+  reference must be a fresh plan with the new table (G1's "where the table's own values differ"
+  clause), or its claim is the outcome alone. Moved to the D2 tranche, which owns the outcome
+  assertion and deletes the tranche-5 fallback gate it replaces.
+- Gates run: `cargo fmt --all`; clippy `-D warnings` `--all-targets --all-features` on builtins,
+  builtins-compiler, host-core, capi; `cargo check --locked --all-targets` (no features) on the
+  same; tests of builtins, builtins-compiler, automation (all features), host-core
+  `stored_fader_automation` (31), `stored_mute_automation` (13), `successor_swap` (140),
+  `session_seek`, `browser_successor`, capi lib (209), host-web `control_parity` (30): all green.
