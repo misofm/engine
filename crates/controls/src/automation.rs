@@ -376,11 +376,24 @@ pub const FADER_CELL_RULE: CellRule = CellRule {
 };
 
 /// Whether a stored automation of `target` renders (#1646, #1647): today the fader row of a strip
-/// (builtin row 5). An entry on any other row is validated and kept in the session but compiles
-/// to no cell. Every rendering slice adds its row here, so preparation and the live classifier
-/// (#1648) read one list.
+/// (builtin row 5, [`fader_row`]). An entry on any other row is validated and kept in the session
+/// but compiles to no cell. Every rendering slice adds its row here, so preparation and the live
+/// classifier (#1648) read one list.
+///
+/// A reader that means "the fader" tests [`fader_row`] instead (#1651 T2): a rendered row added
+/// here (the mute row, #1651) gives no lane a fader cell, a hand-move offset or B17-R14's window.
 #[must_use]
 pub fn automation_row_renders(target: &ControlAddress) -> bool {
+    fader_row(target)
+}
+
+/// Whether `target` is a strip's builtin `fader_db` row (row 5): the one rendered row whose entry
+/// gives a lane its fader cell ([`fader_automation`]), its hand-move offset (#1650) and the
+/// B17-R14 transition window. The readers of those test this predicate, not
+/// [`automation_row_renders`], so an entry on another rendered row reaches none of them (#1651
+/// T2).
+#[must_use]
+pub fn fader_row(target: &ControlAddress) -> bool {
     matches!(target.owner, Owner::Strip(_))
         && target.section == Section::Builtins
         && target.control == FADER_DB
@@ -397,9 +410,7 @@ pub fn fader_automation<'a>(
     let mut lanes = [None, None];
     for automation in &model.automation {
         let target = &automation.target;
-        if !automation_row_renders(target)
-            || !matches!(&target.owner, Owner::Strip(owner) if owner == strip)
-        {
+        if !fader_row(target) || !matches!(&target.owner, Owner::Strip(owner) if owner == strip) {
             continue;
         }
         for (index, lane) in [Lane::Left, Lane::Right].into_iter().enumerate() {

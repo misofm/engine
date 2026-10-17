@@ -47,8 +47,8 @@ mod view;
 pub use automation::{
     CellRule, ControlDiagnostic, FADER_CELL_RULE, automated_cell, automated_fader_lanes,
     automation_diagnostics, automation_row_renders, continued_fader_lanes, fader_automation,
-    filter_statics_changed_under_automation, filter_under_automation, rendered_automation_changed,
-    stored_segments,
+    fader_row, filter_statics_changed_under_automation, filter_under_automation,
+    rendered_automation_changed, stored_segments,
 };
 pub use descriptor::{
     AutomationRule, Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion, check,

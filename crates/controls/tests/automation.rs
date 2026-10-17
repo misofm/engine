@@ -821,3 +821,69 @@ fn the_offset_belongs_to_a_driven_fader_lane() {
         ]
     );
 }
+
+/// #1651 T2 (the predicate split): the readers that mean "the fader" test the fader row
+/// ([`controls::fader_row`]), not every rendered row ([`controls::automation_row_renders`]). On
+/// `vocal`, a `both` mute entry (row 6) listed before a `left` fader entry: the fader cells
+/// ([`controls::fader_automation`], [`controls::automated_fader_lanes`]) are the left fader entry
+/// alone, the right lane has no hand offset and its `S` is that of a session without the mute
+/// entry ([`controls::effective`]), and [`controls::mask_values`] masks the right lane's static
+/// fader dB as a control value (a fader edit there stays a `FaderDb` record, not an offsets write).
+///
+/// Red when the mute row joins [`controls::automation_row_renders`] (#1651 T3a) and any of these
+/// readers still tests that list: the mute entry, first in the table, would take both lanes'
+/// fader cells, give the right lane a `+0.0` hand offset, and keep the right lane's static dB
+/// out of the mask. Before T3a the mute row does not render, so the predicate asserts hold the
+/// split itself: the fader row admits no mute target, and every fader target renders.
+#[test]
+fn a_mute_entry_reaches_no_fader_only_reader() {
+    use controls::{
+        MonitorOverlay, automated_fader_lanes, automation_row_renders, effective, fader_automation,
+        fader_row, mask_values,
+    };
+
+    let mute = strip_builtin("vocal", MUTE, Lane::Both);
+    let fader = strip_builtin("vocal", FADER_DB, Lane::Left);
+    assert!(!fader_row(&mute), "the mute row is not the fader row");
+    for lane in [Lane::Left, Lane::Right, Lane::Both] {
+        let target = strip_builtin("vocal", FADER_DB, lane);
+        assert!(fader_row(&target) && automation_row_renders(&target));
+    }
+    assert!(!fader_row(&strip_builtin("vocal", TRIM_DB, Lane::Left)));
+
+    let entries = vec![
+        one("mute-ride", mute, ParameterUnit::Linear, 1.0),
+        with_offset(one("fader-ride", fader, ParameterUnit::Db, -6.0), 2.0, 0.0),
+    ];
+    let mut model = builtins_fixture();
+    model.automation = entries;
+    let vocal = id("vocal");
+
+    let lanes = fader_automation(&model, &vocal);
+    assert_eq!(lanes[0].map(|entry| entry.id.as_str()), Some("fader-ride"));
+    assert!(lanes[1].is_none(), "the mute entry drives no fader cell");
+    assert_eq!(automated_fader_lanes(&model, &vocal), [true, false]);
+
+    let overlay = MonitorOverlay::default();
+    let strip = effective(&model, &overlay).strips[0];
+    assert_eq!(strip.fader_offset, [Some(2.0), None]);
+    let mut fader_only = model.clone();
+    fader_only.automation.remove(0);
+    let reference = effective(&fader_only, &overlay).strips[0];
+    assert_eq!(
+        strip.offsets_sum.map(f64::to_bits),
+        reference.offsets_sum.map(f64::to_bits),
+        "the mute entry moves no lane's S"
+    );
+
+    // The mask: `from` moves both static fader lanes. The automated left lane keeps `into`'s
+    // static dB (its fallback); the right lane, which only the mute entry names, takes `from`'s.
+    let mut from = model.clone();
+    from.tracks[0].fader.left_db = -9.0;
+    from.tracks[0].fader.right_db = -9.0;
+    let mut into = model.clone();
+    let kept = into.tracks[0].fader.left_db;
+    mask_values(&mut into, &from);
+    assert_eq!(into.tracks[0].fader.left_db.to_bits(), kept.to_bits());
+    assert_eq!(into.tracks[0].fader.right_db.to_bits(), (-9.0f32).to_bits());
+}

@@ -369,3 +369,43 @@ PR #1712).
     mechanical to the new rule.
 - **Measured.** `audit capi` `pcm_digest` `bffc21e857b5e134` (base: the same), `allocations` 0.
 - **Departures.** None from the rule's text.
+
+## Decision record: T2 (batch 18)
+
+- **Shipped (no rendered bit moves).** A new `controls::fader_row(target)` (strip, builtins, row
+  5) is the fader-only predicate; `automation_row_renders` is today `fader_row(target)` and T3a
+  adds row 6 to it alone. The fader-only readers now test `fader_row`.
+- **Reader classification** (every reader of `automation_row_renders` at `0e078aad8`):
+  - Fader-only, now `fader_row`: `fader_automation` (`automation.rs`; also feeds
+    `continued_fader_lanes`, `ModelView::fader_automation`, `OwnerEdits::take_fader_automation`
+    and builtins-compiler's per-strip cells), `model_fader_offsets` (`effective.rs`; feeds
+    `EffectiveStrip::fader_offset`/`offsets_sum` and `mask_values`' automated lanes),
+    `mask_fader_offsets` (`mask.rs`), and B17-R14's `automates` (`control-plane/src/control.rs`).
+  - Any rendered row, unchanged: `rendered_automation_changed` (a mute entry change must rebuild,
+    D2), and `automated_cell` (keyed by the address's own row: it already compares
+    `target.control == address.control`, so `automated_fader_lanes`, its one caller, asks at
+    `fader_db` and a mute entry never matches; at a mute address it will say where T3a's mute cell
+    exists, which is the doc's claim).
+  - Any rendered row, outside T2's files: `prepare_fader_automation`'s early return
+    (`builtins-compiler/src/lib.rs:2095`). It is right for T3a (the program then also builds mute
+    cells); until T3a it is the same predicate.
+- **R18-4 (root, accepted).** B17-R14's window stays fader-only because a mute adoption never
+  stretches a live move: a mute cell's adoption jumps over the mute jump length and has no level
+  ramp in flight to land over `J`, so a successor that automates only mute rows completes `Exact`.
+- **Gate.** `crates/controls/tests/automation.rs::a_mute_entry_reaches_no_fader_only_reader`: a
+  `both` mute entry before a `left` fader entry on `vocal`; the fader cells are the fader entry's
+  left lane only, `automated_fader_lanes == [true, false]`, the right lane has no hand offset and
+  the same `S` bits as the session without the mute entry, and `mask_values` masks the right
+  lane's static dB. Row 6 cannot render before T3a, so the test is green on the base too; its
+  predicate asserts (`fader_row` refuses a mute target, every fader target renders) hold the split
+  now. Probe (not committed): with row 6 added to `automation_row_renders`, the test stays green
+  with the split and turns red with `fader_automation` (the mute entry takes the left cell) or
+  `model_fader_offsets` (`[Some(0.0), Some(0.0)]`) reverted to the old predicate.
+  `mask_fader_offsets` reverted is not observable: a validated mute entry holds `+0.0` offsets,
+  so copying one moves nothing. The control-plane `automates` change has no T2 test (no mute row
+  renders yet); T3a's gate 8 (a mute-only rebuild with a fader move in flight completes `Exact`)
+  holds it.
+- **Ran.** `cargo test --locked -p controls --all-features`, `-p control-plane --features
+  test-support`, `-p host-core --features host-core/test-support`, `-p capi`: all pass. fmt,
+  clippy (`controls`, `control-plane`, all targets and features) and the no-feature check pass.
+- **Departures.** `automated_cell` is not changed (above). None else.
