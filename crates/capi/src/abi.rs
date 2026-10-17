@@ -95,9 +95,8 @@ pub const OUTCOME_EXACT: u64 = 1;
 /// Watermark outcome flag: a warm successor could not adopt, and the covered revisions completed
 /// through the transition it fell back to, or a rebuild that carries a send following a stored
 /// mute into one that follows none (conservative: it can be set when no send moves at the swap;
-/// #1713 removes it). It also reports a rebuild that carries a send into one that no longer hears
-/// one of its stored curves while a live send move may still ramp (conservative; TBD54 removes
-/// it).
+/// #1713 removes it). It also reports any rebuild that carries an automated following send while
+/// a live send move may still ramp (conservative; TBD54 removes it).
 pub const OUTCOME_TRANSITION_FALLBACK: u64 = 2;
 /// Watermark outcome flag: the covered revisions include ones a newer candidate folded in when it
 /// replaced the candidate that carried them.

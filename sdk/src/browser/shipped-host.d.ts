@@ -781,9 +781,8 @@ export interface MisoStatus {
   /// The watermark's outcome flags, the C ABI's bits: `EXACT` 1, `TRANSITION_FALLBACK` 2,
   /// `SUPERSEDED` 4. `TRANSITION_FALLBACK` also reports a rebuild that carries a send following a
   /// stored mute into one that follows none (conservative: it can be set when no send moves at the
-  /// swap; #1713 removes it). It also reports a rebuild that carries a send into one that no
-  /// longer hears one of its stored curves while a live send move may still ramp (conservative;
-  /// TBD54 removes it).
+  /// swap; #1713 removes it). It also reports any rebuild that carries an automated following
+  /// send while a live send move may still ramp (conservative; TBD54 removes it).
   /// @internal
   readonly appliedOutcome: bigint;
   /// The module's memory size now: at least the boot size (`MisoAudioWorkletHost.memoryBytes`),

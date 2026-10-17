@@ -759,15 +759,29 @@ impl PlanStateInventory {
     /// (#1654, root ruling B19-R7). `false` for a plan prepared without a predecessor and for a
     /// declared discontinuity, which carries nothing.
     ///
-    /// **Conservative (B19-R7; TBD54 removes it).** Render lands such a column at once over the
-    /// removed row's own length at the swap, so a live send move still ramping on it is cut. The
-    /// control plane completes such a rebuild as
-    /// [`engine::realtime::CandidateOutcome::TransitionFallback`] while a live send move may still
-    /// ramp. It over-reports: the join reads the route's automated sets, not which column lost
-    /// the curve or whether that column moves at the swap.
+    /// Render lands such a column at once over the removed row's own length at the swap; the
+    /// control plane folds that landing into its send-move window. The transition fallback reads
+    /// the wider [`Self::carries_a_following_route_into_a_following_route`] (B19-R8).
     #[must_use]
     pub fn carries_a_following_route_that_loses_a_curve(&self) -> bool {
         self.follow_loses_a_curve
+    }
+
+    /// Whether this plan's send join carries a following route of the plan it was prepared to
+    /// displace into a following route of its own (a seven-word route in both plans; #1654, root
+    /// ruling B19-R8). `false` for a plan prepared without a predecessor and for a declared
+    /// discontinuity, which carries nothing.
+    ///
+    /// **Conservative (B19-R8; TBD54 removes it).** Render may land a carried column at once at
+    /// the swap (a removed row or source mute curve, or a column that composes with no placed
+    /// value), so a live send move still ramping on it is cut. The control plane completes such a
+    /// rebuild as [`engine::realtime::CandidateOutcome::TransitionFallback`] while a live send move
+    /// may still ramp. It over-reports: the join cannot tell which column lands at once or whether
+    /// that column moves at the swap. It includes
+    /// [`Self::carries_a_following_route_that_loses_a_curve`].
+    #[must_use]
+    pub fn carries_a_following_route_into_a_following_route(&self) -> bool {
+        self.follow_into_following
     }
 
     /// The longest ramp of the records this plan's send join writes to its carried following
@@ -848,6 +862,9 @@ pub struct PlanStateInventory {
     /// [`Self::carries_a_following_route_into_a_six_word_route`]). `false` for a plan prepared
     /// without a predecessor.
     follow_into_six_word: bool,
+    /// Whether this plan's send join carries a following route into a following route (B19-R8;
+    /// see [`Self::carries_a_following_route_into_a_following_route`]).
+    follow_into_following: bool,
     /// Whether this plan's send join carries a following route into a following route that hears
     /// fewer curves (B19-R7; see [`Self::carries_a_following_route_that_loses_a_curve`]).
     follow_loses_a_curve: bool,
@@ -1145,6 +1162,7 @@ impl PlanStateInventory {
             strip_delays: Box::default(),
             live_routes: Box::default(),
             follow_into_six_word: false,
+            follow_into_following: false,
             follow_loses_a_curve: false,
             follow_retarget_ramp: 0,
             restarted: Box::default(),
@@ -1180,6 +1198,7 @@ impl PlanStateInventory {
             strip_delays: Box::default(),
             live_routes: Box::default(),
             follow_into_six_word: false,
+            follow_into_following: false,
             follow_loses_a_curve: false,
             follow_retarget_ramp: 0,
             restarted: Box::default(),
@@ -3745,6 +3764,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         strip_delays: strip_delays.into_boxed_slice(),
         live_routes: live_routes.into_boxed_slice(),
         follow_into_six_word: route_carry.follow_into_six_word,
+        follow_into_following: route_carry.follow_into_following,
         follow_loses_a_curve: route_carry.follow_loses_a_curve,
         follow_retarget_ramp: route_carry.follow_retarget_ramp,
         restarted: restarted.into_boxed_slice(),
@@ -6047,6 +6067,9 @@ struct RouteCarry<'a> {
     /// (#1652 U2a fold 2, MAJOR-A): the rebuild then completes as the transition fallback
     /// ([`PlanStateInventory::carries_a_following_route_into_a_six_word_route`]).
     follow_into_six_word: bool,
+    /// Whether some move carries a following route into a following route (B19-R8,
+    /// [`PlanStateInventory::carries_a_following_route_into_a_following_route`]).
+    follow_into_following: bool,
     /// Whether some move carries a following route into a following route that no longer hears
     /// a row or source mute curve of the predecessor's (B19-R7,
     /// [`PlanStateInventory::carries_a_following_route_that_loses_a_curve`]).
@@ -6098,6 +6121,11 @@ fn resolve_route_carry<'a>(
         // length, cutting a live send move in flight there. The join flags every such carry;
         // the control plane completes it as the fallback while a send move may still ramp.
         carry.follow_loses_a_curve |= follows && successor_follows && loses_a_curve(heard, hears);
+        // B19-R8 (TBD54 deletes it): any carried following route that stays seven-word may land
+        // a column at once at the swap, cutting a live send move in flight there, whether or not
+        // it loses a curve. The control plane completes it as the fallback while a send move may
+        // still ramp.
+        carry.follow_into_following |= follows && successor_follows;
         carry.moves.push(graph::GraphRouteMove {
             successor: after,
             predecessor: before,
@@ -6994,6 +7022,8 @@ mod tests {
                 }],
             );
             assert_eq!(carry.follow_loses_a_curve, flagged, "{case}");
+            // B19-R8: every seven-to-seven carry, whatever its sets.
+            assert_eq!(carry.follow_into_following, !case.contains("->"), "{case}");
         }
     }
 
@@ -7054,6 +7084,7 @@ mod tests {
             strip_delays: Box::default(),
             live_routes: Box::default(),
             follow_into_six_word: false,
+            follow_into_following: false,
             follow_loses_a_curve: false,
             follow_retarget_ramp: 0,
             restarted: Box::default(),
