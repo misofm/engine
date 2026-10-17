@@ -2624,8 +2624,10 @@ where
         // lanes reposition or how much is left, so the candidate completes as the transition
         // fallback whenever any level move may still ramp. The rebuild's own level changes join
         // the window with the commit. A declared discontinuity carries nothing. The test is the
-        // fader row alone (#1651 T2, root ruling R18-4): a mute cell's adoption never stretches a
-        // live move, so a successor that automates only a mute row completes `Exact`.
+        // fader row alone (#1651 T2; U1 fold 1, R18-4 withdrawn): a mute cell's adoption lands
+        // only a `SetMute` (the curve's change over the mute length, a terms record committed in
+        // the same transaction over its own ramp), never a level move over `J`, so a successor
+        // that automates only a mute row completes `Exact`.
         //
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes this): a successor whose send join carries a
         // following route into a six-word route (the rebuild removes a strip's last mute entry

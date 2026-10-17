@@ -1053,7 +1053,10 @@ impl LaneFaderAutomation {
     /// stage mute `curve || terms` with the curve state the stage has heard (the cell's current
     /// target); when that differs from the stage's mute it applies `SetMute` at the block
     /// boundary over the record's ramp word `ramp`, as [`Self::read_offsets`] applies its jump.
-    /// The block's curve events then compose with the new `terms`. A channel with no mute cell
+    /// On a cell that owes a reposition (#1651 T4) the same record composes with the curve at the
+    /// block's first node time instead, so it lands as committed and the driver's adoption
+    /// landing pushes only a change the curve itself makes (U1 fold 1). The block's curve events
+    /// then compose with the new `terms`. A channel with no mute cell
     /// is not this cell's (the caller applies its record to the stage). Allocation-, lock- and
     /// syscall-free: one compare and at most one operation.
     fn mute_terms(
@@ -1067,15 +1070,29 @@ impl LaneFaderAutomation {
             return;
         };
         cell.terms = terms;
-        // #1651 T4: a repositioned cell's target is not yet the curve at this block's node time
-        // (the driver repositions it below), so this block's driver composes the new `terms` with
-        // the curve there and lands the one `SetMute` the two changes owe. A lane with no node
-        // time this block renders no curve and keeps the cell owed, so the record applies here.
-        if cell.reposition && self.span.is_some() && self.mute_jump.is_some() {
+        let heard = cell.state.target().is_some_and(curve_mutes) || terms;
+        let stage_muted = stage.muted(channel);
+        if heard == stage_muted {
             return;
         }
-        let muted = cell.state.target().is_some_and(curve_mutes) || terms;
-        if stage.muted(channel) != muted {
+        // #1651 U1 fold 1 (MAJOR-2): a repositioned cell's target is not yet the curve at this
+        // block's node time (the driver repositions it below). The record changes the stage mute
+        // the curve the stage heard gives, so it lands here as committed, over its own ramp word,
+        // composed with the curve at the block's first node time; the driver's landing then
+        // compares with that stage mute and pushes only a change the curve itself makes, over the
+        // mute length. So the swap block lands at most one `SetMute` per channel. A lane with no
+        // node time this block renders no curve and keeps the cell owed: the carried target is
+        // the curve it holds.
+        let at_node = match (cell.reposition, self.mute_jump, self.span) {
+            (true, Some(_), Some(span)) => node_time_at(span, 0)
+                .zip(self.program.cell(cell.cell as usize))
+                .map(|(time, program)| {
+                    curve_mutes(automation::value_at(program.segments(), time)) || terms
+                }),
+            _ => None,
+        };
+        let muted = at_node.unwrap_or(heard);
+        if stage_muted != muted {
             let applied = stage.apply(
                 channel,
                 builtins::FaderOperation::SetMute {
@@ -1467,6 +1484,10 @@ struct FaderCellCursor<'a> {
     end: Option<HoldEnd>,
     /// The offset of the channel's next mute event, while one is ahead (#1651 T3b).
     mute_at: Option<u32>,
+    /// The node time by which the cell's hold must end, set by an unmute the driver pushed
+    /// ([`Self::rehold`]) and applied to the cell's state where the next piece opens
+    /// ([`Self::open`]), shorten-only (#1651 U1 fold 1, MAJOR-1).
+    release: Option<i64>,
     /// The block's node-time mapping: offset 0's node time and the seek step, and its length.
     start: i64,
     step: Option<(u32, i64)>,
@@ -1541,8 +1562,19 @@ impl FaderCellCursor<'_> {
     /// [`Self::piece_last`]. `false` when there is none: `from` is past the block, or a refusal
     /// (unreachable: the block's node times were checked against the `i64` edge, and a step kept
     /// inside the piece lies inside it), which leaves the cell's state where it was.
+    ///
+    /// A release [`Self::rehold`] recorded is applied to the cell's state first, also when no
+    /// piece is left (an unmute on the block's last sample): the next block's events start from
+    /// that state.
     fn open(&mut self, from: u32) -> bool {
         if from >= self.frames {
+            // The block is spent: no later piece reads the events, and the cell's state lives
+            // in its lane slot.
+            if let Some(release) = self.release.take()
+                && let Some(events) = self.events.take()
+            {
+                events.into_state().release_hold_by(release);
+            }
             return false;
         }
         let last = self.piece_last(from);
@@ -1555,9 +1587,13 @@ impl FaderCellCursor<'_> {
         };
         self.base = from;
         self.last = last;
+        let state = events.into_state();
+        if let Some(release) = self.release.take() {
+            state.release_hold_by(release);
+        }
         self.events = Some(automation::CellEvents::new(
             self.program,
-            events.into_state(),
+            state,
             span,
             controls::FADER_CELL_RULE.seek,
             self.jump,
@@ -1575,6 +1611,13 @@ impl FaderCellCursor<'_> {
     /// the next block's to find from the stage. Unmuted exactly (`M = 0`): the stage takes the
     /// remembered gain, the cell's committed target, at `at`, so the gain is free and nothing is
     /// owed. An older cut ahead is dropped: the stage's hold no longer ends there.
+    ///
+    /// #1651 U1 fold 1 (MAJOR-1): an unmute also ends a hold the cell holds of an older ramp (an
+    /// offsets jump's on a lane held by a mute ramp: until that ramp's end at its block's entry),
+    /// which the stage no longer holds: the cell's hold is shortened to end at `node(at)` for an
+    /// exact unmute and at `node(at + M) - 1` otherwise, so its grid moves the lane from the first
+    /// free sample instead of being only remembered on a free stage. Shorten-only: a hold of the
+    /// cell's own that ends earlier is kept.
     fn rehold(&mut self, at: u32, muted: bool, samples: u32) {
         self.end = None;
         let frames = self.frames;
@@ -1585,6 +1628,11 @@ impl FaderCellCursor<'_> {
             obligation.held_through = true;
             return;
         }
+        self.release = match samples {
+            0 => span_time(self.start, self.step, u64::from(at)),
+            samples => span_time(self.start, self.step, u64::from(at) + u64::from(samples))
+                .map(|end| end.saturating_sub(1)),
+        };
         if samples == 0 {
             self.free_from = 0;
             obligation.owed = false;
@@ -1908,6 +1956,7 @@ impl<'a> FaderEventDriver<'a> {
                     free_from,
                     end: end.flatten(),
                     mute_at,
+                    release: None,
                     start: span.start,
                     step,
                     frames,

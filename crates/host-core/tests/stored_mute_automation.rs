@@ -278,6 +278,28 @@ impl Rig {
             });
     }
 
+    /// Write a live offsets record `S = offsets_sum` (ramp `window`) on both channels of track 0,
+    /// applied at the next block entry: the shared commit's record of a VCA fader move.
+    fn live_offsets(&mut self, offsets_sum: f64, window: u32) {
+        use builtins_compiler::TestOnlyWriteGate;
+        let handles = self.handles.as_mut().expect("live controls");
+        self.gate
+            .as_mut()
+            .expect("the plan's gate")
+            .write_published(|stamp| {
+                for channel in 0..2 {
+                    handles.strip_controls[0].fader.write_offsets(
+                        stamp,
+                        channel,
+                        builtins_compiler::FaderOffsetsRecord {
+                            offsets_sum,
+                            smoothing_samples: window,
+                        },
+                    );
+                }
+            });
+    }
+
     /// Render one block; returns its first render sample.
     fn block(&mut self) -> u64 {
         let quantum = self.quantum;
@@ -1101,7 +1123,9 @@ fn compiled(model: &SessionModel) -> host_core::CompiledSession {
 /// `a` prepared in `form` and rendered for [`SWAP_BLOCK`] blocks (`edit` runs before each block,
 /// writing through its live handles and gate), then, with `b = Some((next, committed))`, `next`
 /// prepared as its successor on the committed model `committed`, swapped in and rendered to
-/// `frames`; with `b = None`, `a` alone for every block. Fed `pcm` from frame 0.
+/// `frames` (`edit` then writes through the successor's handles and gate: a record written at the
+/// swap block is one the shared commit wrote for the transaction that rebuilt); with `b = None`,
+/// `a` alone for every block. Fed `pcm` from frame 0.
 fn carry_run(
     a: &SessionModel,
     b: Option<(&SessionModel, &SessionModel)>,
@@ -1172,6 +1196,7 @@ fn carry_run(
     let mut swap_allocations = (0, 0, 0);
     let mut restarted = Vec::new();
     let mut successor_sources = None;
+    let mut successor_live = None;
     let mut block = 0;
     while block * quantum < frames {
         if block == SWAP_BLOCK
@@ -1181,7 +1206,7 @@ fn carry_run(
             let committed = compiled(committed).normalized_model().clone();
             let revision = gate.as_ref().map_or(1, |gate| gate.last_published()) + 1;
             let base = host_core::SuccessorBase::new(&inventory, &committed, revision);
-            let mut prepared = if form.live {
+            let prepared = if form.live {
                 host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
                     &next,
                     &caps,
@@ -1189,7 +1214,7 @@ fn carry_run(
                     base,
                     form.backend,
                 )
-                .map(|(prepared, _)| prepared)
+                .map(|(prepared, handles)| (prepared, Some(handles)))
             } else {
                 host_core::test_only_prepare_host_runtime_successor_on(
                     &next,
@@ -1197,8 +1222,10 @@ fn carry_run(
                     base,
                     form.backend,
                 )
+                .map(|prepared| (prepared, None))
             }
             .unwrap_or_else(|failure| fail(failure));
+            let (mut prepared, next_handles) = prepared;
             prepared.sources.adopt_persisting(&mut sources);
             restarted = prepared.restarted_strips().to_vec();
             let PreparedHost {
@@ -1206,9 +1233,9 @@ fn carry_run(
                 sources: next_sources,
                 ..
             } = prepared;
-            plan.take_revision_gate()
-                .expect("the successor's gate")
-                .publish(revision);
+            let mut next_gate = plan.take_revision_gate().expect("the successor's gate");
+            next_gate.publish(revision);
+            successor_live = next_handles.map(|handles| (handles, next_gate));
             publisher
                 .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
                 .unwrap_or_else(|_| panic!("reserve the successor"))
@@ -1217,7 +1244,9 @@ fn carry_run(
         }
         let at = block * quantum;
         submit(successor_sources.as_mut().unwrap_or(&mut sources), at);
-        if let (Some(handles), Some(gate)) = (handles.as_mut(), gate.as_mut())
+        if let Some((handles, gate)) = successor_live.as_mut() {
+            edit(block, handles, gate);
+        } else if let (Some(handles), Some(gate)) = (handles.as_mut(), gate.as_mut())
             && successor_sources.is_none()
         {
             edit(block, handles, gate);
@@ -1244,6 +1273,7 @@ fn carry_run(
         block += 1;
     }
     drop(handles);
+    drop(successor_live);
     CarryRun {
         out: out.map(|mut plane| {
             plane.truncate(frames);
@@ -1432,7 +1462,7 @@ fn a_rebuild_that_changes_a_mute_curve_jumps_only_when_the_composed_mute_changes
     );
 }
 
-/// #1651 T4, R18-4: a live fader move in flight on track 0 across a rebuild that adds a curve
+/// #1651 T4: a live fader move in flight on track 0 across a rebuild that adds a curve
 /// mute which is on at the swap. A `FaderDb` of -12 dB over 2,000 samples is written before block
 /// 5 and is still ramping at the swap (block 8); the successor's committed model holds the -12
 /// dB and a mute curve muted until timeline 2,600. The adoption mutes the lane over `M` (dual-mono
@@ -1513,6 +1543,147 @@ fn a_mute_adoption_keeps_the_fader_move_in_flight_for_the_unmute() {
                     None,
                     "{what}: plane {plane} after the unmute equals the uninterrupted move"
                 );
+            }
+        }
+    }
+}
+
+/// #1651 U1 fold 1 (MAJOR-2), every bank width: a hand mute of track 0 committed in the same
+/// transaction as a mute curve edit lands as committed. The predecessor's curve closes at 1,500
+/// and opens at 2,500; at block 8 (the curve open) a rebuild moves the closing step to 1,600 (the
+/// adopted cell repositions) and the successor's committed model holds the hand mute on, whose
+/// `Mute` record
+/// (the shared commit's terms write, over the edit's ramp word: `M`, `0` or `2,000`) reaches the
+/// successor's first block. A twin that never swaps takes the same record at the same block. The
+/// curve's change lies inside the span the hand mute holds, so the swapped run equals the twin,
+/// bit for bit, on every sample (live forms; the scalar oracle restarts its strip at a swap, so
+/// it has no carry to hold).
+///
+/// Test value: red if the swap block's adoption drops the record's ramp word and lands the hand
+/// mute over the mute length instead (a `0` step becomes a 480-sample ramp, a 2,000-sample fade
+/// becomes 480), or lands it twice.
+#[test]
+fn a_hand_mute_in_a_curve_rebuild_lands_over_its_own_ramp() {
+    for ramp in [M, 0, 2_000] {
+        let mute = |block: usize,
+                    handles: &mut host_core::HostLiveControlHandles,
+                    gate: &mut engine::realtime::PlanRevisionGate| {
+            use builtins_compiler::TestOnlyWriteGate;
+            if block == SWAP_BLOCK {
+                gate.write_published(|stamp| {
+                    handles.strip_controls[0].fader.write(
+                        stamp,
+                        builtins_compiler::TrackFaderRecord::Mute {
+                            lanes: builtins::BuiltinLaneSelector::Both,
+                            muted: true,
+                            smoothing_samples: ramp,
+                        },
+                    );
+                });
+            }
+        };
+        for quantum in CARRY_QUANTA {
+            let a = with_mute(quantum, Some((0.0, &[(1_500, 1.0), (2_500, 0.0)])));
+            let mut b = with_mute(quantum, Some((0.0, &[(1_600, 1.0), (2_500, 0.0)])));
+            (b.tracks[0].fader.left_mute, b.tracks[0].fader.right_mute) = (true, true);
+            let q = quantum as usize;
+            let frames = 4_096_usize.div_ceil(q) * q;
+            let pcm = carry_pcm(frames);
+            for form in carry_forms()
+                .into_iter()
+                .filter(|form| form.live && form.backend != graph_compiler::Backend::Scalar)
+            {
+                let what = format!("ramp {ramp}, {form:?}, quantum {quantum}");
+                let twin = carry_run(&a, None, form, &pcm, frames, mute).out;
+                let swapped = carry_run(&a, Some((&b, &a)), form, &pcm, frames, mute);
+                assert_eq!(
+                    swapped.swap_allocations,
+                    (0, 0, 0),
+                    "{what}: the swap block"
+                );
+                assert!(swapped.restarted.is_empty(), "{what}: the strip carries");
+                for (plane, (out, twin)) in swapped.out.iter().zip(&twin).enumerate() {
+                    assert_eq!(
+                        first_difference(out, twin),
+                        None,
+                        "{what}: plane {plane} equals the hand mute alone"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// #1651 U1 fold 1 (MAJOR-1): a curve unmute ends the cell's hold of an older ramp. Track 0 rides
+/// a linear fade from `-30` to `0` dB over `[0, 6_400]` and its mute curve closes at 2,001 and
+/// opens at 2,570. A hand mute (exact) is drained at the entry at or after 512 and a hand unmute
+/// over 4,000 samples at the entry at or after 1,024; under that unmute ramp an offsets write
+/// `S = -6` dB (ramp 200) at the entry at or after 1,536 takes the held branch of the offsets
+/// jump, which holds the cell until the stage's ramp end (about 5,023). The curve's mute at 2,001
+/// replaces the hand unmute ramp, and its unmute at 2,570 over the mute length `M` frees the stage
+/// at `E = 2_570 + M`, long before that hold ends. With `M = 0` (`mute_ms` 0) and with `M = 48`
+/// (`mute_ms` 1: below the 64-sample grid, with no grid point in `(2_570, E)`), from `E` plus `J`
+/// the lane follows the composed curve: at each completion sample `64k + 63` it equals
+/// `checked_fader_gain(vca_compose_db(curve, S))` exactly, on every live form (Simd8 on AVX2,
+/// Simd4, between render calls, the scalar oracle) at quanta 128, 100 and 37.
+///
+/// Test value: red at `M = 0` if the unmute leaves the cell's older hold in place: the exact
+/// unmute owes nothing, so its grid events after `E` are only remembered on a free stage and the
+/// ride freezes at `-23.7` dB until the hold's end. At `M = 48` the grid events of the muted span
+/// leave a move owed at `E`, whose landing re-commits the cell, so that leg holds the claim but is
+/// green without the release too.
+#[test]
+fn a_curve_unmute_ends_an_older_hold_of_the_fader_cell() {
+    for mute_ms in [0.0_f32, 1.0] {
+        for quantum in [128, 100, 37] {
+            let mut model = plain_with(1, quantum, mute_ms);
+            let m = controls::LiveRamps::for_session(&model).mute_samples;
+            let ride = fader_entry(
+                &model,
+                0,
+                &[(AutomationShape::Linear, 0, 6_400, -30.0, 0.0)],
+            );
+            model.automation = vec![
+                ride.clone(),
+                mute_entry(
+                    &model,
+                    0,
+                    ParameterChannel::Both,
+                    0.0,
+                    &[(2_001, 1.0), (2_570, 0.0)],
+                ),
+            ];
+            let free = 2_570 + u64::from(m);
+            let check_from = (free + u64::from(J)).div_ceil(64) * 64 + 63;
+            for form in forms().into_iter().filter(|form| form.live) {
+                let what = format!("M {m}, quantum {quantum}, {form:?}");
+                let mut rig = Rig::new(&model, form);
+                let q = rig.quantum as u64;
+                while rig.rendered < 4_800 {
+                    let entry = |at: u64| (at..at + q).contains(&rig.rendered);
+                    if entry(512) {
+                        rig.live_mute(true, 0);
+                    } else if entry(1_024) {
+                        rig.live_mute(false, 4_000);
+                    } else if entry(1_536) {
+                        rig.live_offsets(-6.0, 200);
+                    }
+                    rig.block();
+                }
+                for plane in &rig.out {
+                    for t in (check_from..4_800).step_by(64) {
+                        let value =
+                            automation::value_at(&controls::stored_segments(&ride), t as i64);
+                        let expected =
+                            builtins::checked_fader_gain(session::vca_compose_db(value, -6.0))
+                                .expect("fader domain");
+                        assert_eq!(
+                            plane[t as usize].to_bits(),
+                            expected.to_bits(),
+                            "{what}: completion sample {t}"
+                        );
+                    }
+                }
             }
         }
     }
