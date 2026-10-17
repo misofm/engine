@@ -11072,7 +11072,7 @@ fn a_following_send_leaks_nothing_of_a_stored_mute() {
     );
 }
 
-/// #1652 U2a fold 2 (MAJOR-A, conservative; TBD51 deletes the flag). A rebuild whose send join
+/// #1652 U2a fold 2 (MAJOR-A, conservative; #1713 deletes the flag). A rebuild whose send join
 /// carries a following route into a six-word one (it removes `eq0`'s mute entry while `eq0-b`
 /// follows it) completes as the transition fallback: the C ABI watermark that covers it reads
 /// `OUTCOME_TRANSITION_FALLBACK`, count 1. The removal is sent at block 8 (sample 1,024), while the

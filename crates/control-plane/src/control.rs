@@ -2535,7 +2535,7 @@ where
             revision_gate,
             master_track: _,
         } = prepared_runtime;
-        // #1652 U2a fold 2 (MAJOR-A; TBD51 deletes it): read before the inventory moves into the
+        // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): read before the inventory moves into the
         // candidate's provider epoch.
         let follow_into_six_word = inventory.carries_a_following_route_into_a_six_word_route();
         let mut candidate_provider = ProviderEpoch::candidate(
@@ -2627,7 +2627,7 @@ where
         // fader row alone (#1651 T2, root ruling R18-4): a mute cell's adoption never stretches a
         // live move, so a successor that automates only a mute row completes `Exact`.
         //
-        // #1652 U2a fold 2 (MAJOR-A; TBD51 deletes this): a successor whose send join carries a
+        // #1652 U2a fold 2 (MAJOR-A; #1713 deletes this): a successor whose send join carries a
         // following route into a six-word route (the rebuild removes a strip's last mute entry
         // while a following send of it exists) may re-time a carried column's move, which render
         // cannot report: one ramp of the six-word route takes the session mute length for a join

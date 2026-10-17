@@ -723,7 +723,7 @@ impl PlanStateInventory {
     /// mute entry while a following send of it exists. `false` for a plan prepared without a
     /// predecessor and for a declared discontinuity, which carries nothing.
     ///
-    /// **Conservative (#1652 U2a fold 2, MAJOR-A; TBD51 removes it).** A six-word successor holds
+    /// **Conservative (#1652 U2a fold 2, MAJOR-A; #1713 removes it).** A six-word successor holds
     /// one ramp, so render may re-time a carried column's move: a join record composed with the
     /// heard curve reopens the route over the session mute length `J` instead of the record's own
     /// length, and two columns' moves fold into one ramp over the longer remaining length. The
@@ -5932,7 +5932,7 @@ fn resolve_route_carry<'a>(
         else {
             continue;
         };
-        // #1652 U2a fold 2 (MAJOR-A; TBD51 deletes it): a following route carried into a
+        // #1652 U2a fold 2 (MAJOR-A; #1713 deletes it): a following route carried into a
         // six-word one holds one ramp, so render may re-time a column's move (a record composed
         // with the heard curve reopens over `J`, not its own length; two columns' moves fold into
         // one ramp over the longer remaining length). The join cannot tell whether a move is in

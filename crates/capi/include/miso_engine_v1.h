@@ -183,7 +183,7 @@ extern "C" {
  * transition, or a Reposition swap while a live level move may still ramp (conservative: it can be
  * set when the move was not stretched; #1711 removes it), or a rebuild that carries a send
  * following a stored mute into one that follows none (conservative: it can be set when no send
- * moves at the swap; TBD51 removes it). The host
+ * moves at the swap; #1713 removes it). The host
  * polls the watermark to learn that an edit is audible, never the event lane. The caller zeroes
  * reserved0 and reserved[] and sets struct_size, or the call returns
  * MISO_ENGINE_V1_INVALID_ARGUMENT; a copy that keeps landing inside render's publication

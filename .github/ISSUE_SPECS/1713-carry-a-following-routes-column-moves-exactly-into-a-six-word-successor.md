@@ -1,7 +1,7 @@
 # Carry a following route's column moves exactly into a six-word successor
 
-Placeholder from batch 18 (#1652 U2a fold 2, MAJOR-A; root, 2026-10-17: "exact form not now",
-phase 2). Root files it and gives it a number. Stateless: everything needed is below.
+Filed by root from batch 18 (#1652 U2a fold 2, MAJOR-A; root, 2026-10-17: "exact form not now",
+phase 2). Stateless: everything needed is below.
 
 ## Problem
 

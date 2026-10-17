@@ -5314,7 +5314,7 @@ fn a_following_send_leaks_nothing_of_a_stored_mute_on_both_hosts() {
     );
 }
 
-/// #1652 U2a fold 2 (MAJOR-A, conservative; TBD51 deletes the flag) on both hosts. A rebuild
+/// #1652 U2a fold 2 (MAJOR-A, conservative; #1713 deletes the flag) on both hosts. A rebuild
 /// whose send join carries a following route into a six-word one (it removes `t1`'s mute entry
 /// while `t1-b` follows it, sent at block 8 while the send's columns ramp toward the mute the
 /// curve stepped on at 1,000) completes as the transition fallback; a rebuild that keeps the

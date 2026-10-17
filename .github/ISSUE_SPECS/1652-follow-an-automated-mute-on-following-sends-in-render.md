@@ -716,7 +716,7 @@ ramps). Files: `crates/graph/src/{lib.rs,runtime.rs}`, `crates/lane/src/kernels.
 
 Fold of the U2a fold-1 verification (FAIL narrow at `977d6969c`), the last fold round for #1652.
 Root (2026-10-17) accepted the plan as written: MAJOR-A is a conservative flag, gated both ways,
-the exact form is TBD51 (phase 2); MINOR-B must land.
+the exact form is #1713 (phase 2); MINOR-B must land.
 
 - **MAJOR-A (seven -> six re-times a live move and reported EXACT).** Two render forms, both
   only on a carry of a following route into a six-word route: (a) `finish_six_word_carry` reopens a
@@ -731,8 +731,8 @@ the exact form is TBD51 (phase 2); MINOR-B must land.
   run that one commit. The flag does not open B17-R14's level-move window (it is not a level move:
   the `landing` fold now reads the level condition alone, which keeps B17-R13 tranche 5's rule
   as it was). **Conservative:** it over-reports on every rebuild that removes a strip's last mute
-  automation while a following send of it exists, moving or not; TBD51
-  (`.github/ISSUE_SPECS/TBD51-carry-a-following-routes-column-moves-exactly-into-a-six-word-successor.md`)
+  automation while a following send of it exists, moving or not; #1713
+  (`.github/ISSUE_SPECS/1713-carry-a-following-routes-column-moves-exactly-into-a-six-word-successor.md`)
   gives the exact form and deletes the flag. Outcome doc text updated in
   `crates/capi/src/abi.rs`, `crates/capi/include/miso_engine_v1.h`,
   `docs/C_ABI_V1_QUALIFICATION.md` and the two shipped-host `.d.ts` copies.
