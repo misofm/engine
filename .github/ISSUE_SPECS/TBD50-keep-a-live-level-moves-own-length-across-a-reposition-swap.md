@@ -24,10 +24,24 @@ conservative fallback flag of B17-R14 with the exact behaviour and deletes that 
   keeps_its_length` in `crates/capi/src/runtime/live_tests.rs`) a move heard 24, 26 and 30 blocks
   has 928, 672 and 160 samples left; the rebuilt rig differs from the uninterrupted engine by
   4.8e-4, 3.1e-3 and 2.1e-3 (both table changes, VCA and hand moves).
-- Current behaviour (B17-R13, and B17-R14 once landed): stretched to `J`; the rebuild's candidate is marked
-  `CandidateOutcome::TransitionFallback` on the control thread when it Reposition-adopts an
-  automated lane with a live level move that may still ramp, so the watermark reports
-  `OUTCOME_TRANSITION_FALLBACK`, conservatively (it can be set when the move was not stretched).
+- Current behaviour (B17-R13 and B17-R14): the move is stretched to `J`. The control plane marks a
+  rebuild candidate `CandidateOutcome::TransitionFallback` before it publishes it when the
+  rebuild is a transaction (not a declared discontinuity), the successor's model has at least one
+  stored fader automation entry (`controls::automation_row_renders`), and the session's level
+  move window may still ramp. The window (`LevelMoveWindow` in
+  `crates/control-plane/src/control.rs`) folds every live commit's fader `FaderDb` and offsets
+  records with a nonzero ramp, and every rebuild commit that changes some kept strip's effective
+  fader dB or `S` (`controls::effective`, old model against new) with the ramp
+  `max(fader_samples, the longest explicit ramp of the transaction)`, into one bound: the newest
+  revision and the longest ramp. "May still ramp" is `watermark.revision < revision ||
+  render_clock < watermark.first_sample + ramp` (a watermark read that gives up counts as "may").
+  The watermark and the render clock are read before the reservation.
+  So the watermark reports `OUTCOME_TRANSITION_FALLBACK`. This is conservative: it is also set
+  when no move is stretched (any transaction rebuild of a session with fader automation while any
+  level move may still ramp; see the #1648 decision record "the conservative fallback flag").
+- Also stretched and not flagged: a cell's own jump of `J` that is still running at a Reposition
+  swap (`remaining < J`, landed over `J` again from the swap). This is read from the code, not
+  measured.
 - Found while landing B17-R13 (measured with a temporary probe): for every heard move on the moving
   ride the stage's `fader_gain` at the swap is not the composed curve at the ramp's end (0.398 at
   12 blocks heard and 0.335 at 24, against 0.3018), so the adoption rule's comparison always
@@ -46,9 +60,13 @@ conservative fallback flag of B17-R14 with the exact behaviour and deletes that 
   the block's first sample. A small API in `crates/automation` gives the cell's deferred jump
   (the node time at which it is due and the comparison it makes there), so the driver needs no
   second landing path; the one-sample landing piece and `max(J, remaining)` are deleted.
-- D2. The conservative fallback flag of B17-R14 (control-time `TransitionFallback` on such a
-  rebuild) is deleted; the C header comment, `docs/C_ABI_V1_QUALIFICATION.md` and the d.ts text
-  that B17-R14 appended are removed.
+- D2. The conservative fallback flag of B17-R14 is deleted: `LevelMoveWindow`, `fold_level_move`,
+  `rebuild_level_ramp`, `rebuild_moves_a_level` and the `set_outcome` call in
+  `crates/control-plane/src/control.rs`, with `ObservedReservation::set_outcome` if nothing else
+  uses it. The text that B17-R14 appended is removed from `crates/capi/src/abi.rs`, the C header
+  comment, `docs/C_ABI_V1_QUALIFICATION.md` and the two d.ts files. Its gates
+  (`a_reposition_swap_while_a_level_move_ramps_reports_a_fallback` and its host-web parity test)
+  are replaced by G1.
 - D3. A step of the cell's own at the swap block's first sample keeps the B17-R13 rule: the curve
   is compared there and the landing is over `J` (gate
   `a_step_at_a_reposition_swap_jumps_over_the_fader_length`).

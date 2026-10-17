@@ -2884,6 +2884,87 @@ fn a_fader_automation_edit_rebuilds_alike_on_both_hosts() {
     }
 }
 
+/// B17-R14 (#1648 split, TBD50): a table-only rebuild of a riding fader while a hand move with
+/// its own 4,000 samples may still ramp completes as the transition fallback on both hosts, and
+/// the same rebuild with no move in flight completes exactly. Both hosts take the one decision in
+/// the shared control plane: the browser's status words carry the C ABI's watermark, flags
+/// included, and both hosts render the same bits.
+///
+/// Test value: red if either host marks the rebuild differently (an adapter-local rule), or if
+/// the shared decision is not reached through the browser's control path.
+#[test]
+fn a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both_hosts() {
+    let ride = |end_db: f32| SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-fader-ride"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                5,
+                ParameterChannel::Both,
+            ),
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 1_000_000,
+                start_value: 0.0,
+                end_value: end_db,
+                unit: session::ParameterUnit::Db,
+            }],
+            offset: session::AutomationOffset::default(),
+        },
+    };
+    let hand = CAbi::edits(
+        Edit::Fader {
+            strip: T1,
+            lanes: Lanes::Both,
+            db: -6.0,
+        },
+        Some(4_000),
+    );
+    for rate in RATES {
+        for (label, moved, expected) in [
+            ("no move", false, capi::OUTCOME_EXACT),
+            (
+                "a hand move in flight",
+                true,
+                capi::OUTCOME_TRANSITION_FALLBACK,
+            ),
+        ] {
+            let model = model_at(rate);
+            let mut browser = Rig::new(&model);
+            let mut c_abi = CAbi::new(&model);
+            let mut block = 0;
+            let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi| {
+                let (b, b_reply) = browser.transaction_reply(edits);
+                let (c, c_reply) = c_abi.transaction(edits);
+                assert_eq!(b, c, "{rate} Hz, {label}: one verdict");
+                assert_eq!(b_reply, c_reply, "{rate} Hz, {label}: one reply");
+            };
+            both(&[ride(-12.0)], &mut browser, &mut c_abi);
+            same_blocks(&mut browser, &mut c_abi, block..block + 4, label);
+            block += 4;
+            if moved {
+                both(&hand, &mut browser, &mut c_abi);
+                same_blocks(&mut browser, &mut c_abi, block..block + 3, label);
+                block += 3;
+            }
+            both(&[ride(-6.0)], &mut browser, &mut c_abi);
+            same_blocks(&mut browser, &mut c_abi, block..block + 3, label);
+            let watermark = c_abi.watermark();
+            assert_eq!(
+                status_watermark(&browser),
+                watermark,
+                "{rate} Hz, {label}: the browser status carries the C ABI's watermark"
+            );
+            assert_eq!(
+                watermark.2, expected,
+                "{rate} Hz, {label}: the rebuild's outcome flags"
+            );
+        }
+    }
+}
+
 /// #1631. A `matrix_mode` switch under a stored pan entry is refused alike by both hosts: the same
 /// refusal and the same diagnostic (`control.inactive` at the entry's path, the row rule's
 /// own, through the rebuild route), and nothing commits -- the same expected revision still

@@ -732,9 +732,8 @@ elsewhere. `scripts/check-cross-targets.sh` passes.
   `remaining < J` at a Reposition swap is stretched to `J` by the landing `max(J, remaining)`.
   Gate setup: heard 24, 26 and 30 blocks (928, 672 and 160 samples left; `J` = 960). The rebuilt
   rig differs from the uninterrupted engine by 4.8e-4, 3.1e-3 and 2.1e-3. The watermark marks it
-  as a fallback under root ruling B17-R14 (control-time, conservative), which is not landed yet in
-  this record: see its decision record when it lands. TBD50 replaces that flag with the exact
-  behaviour.
+  as a fallback under root ruling B17-R14 (control-time, conservative; see the next point). TBD50
+  replaces that flag with the exact behaviour and deletes this path.
 - The step guard (regression fix, `settle_adoption` in `crates/builtins-compiler/src/lib.rs`):
   when the cell's program has a discontinuity exactly at the block's first sample
   (`program.discontinuities().binary_search(&span.start)` finds it), the curve is compared there
@@ -756,3 +755,52 @@ elsewhere. `scripts/check-cross-targets.sh` passes.
   numbers (0, and 4.6e-6 at 12 blocks heard, where the landing recomputes the stage's ramp step).
   NIT 6: D2 has a note that points to the fold's longer landing and the step rule.
 - Attempt count: attempt 3 of 5 plus this ruling's landing. There is no attempt 4.
+
+## Decision record: the conservative fallback flag (root ruling B17-R14, batch 17)
+
+- Mechanism: the control plane sets `CandidateOutcome::TransitionFallback` on a rebuild's
+  reservation before it publishes it (the existing writer, `ObservedReservation::set_outcome` in
+  `crates/control-plane/src/plan.rs`). Render is not touched, and nothing under
+  `crates/engine/src/realtime/` changed. The flag is reported on the watermark advance that covers
+  the rebuild's revision: the swap where the stretch happens. Both hosts take the decision in the
+  shared `control-plane` rebuild path.
+- Exact condition: the rebuild is a transaction (not a declared discontinuity), the successor's model has at least
+  one stored fader automation entry (`controls::automation_row_renders`), and the session's level
+  move window may still ramp. The window (`LevelMoveWindow` in
+  `crates/control-plane/src/control.rs`) folds every live commit's fader `FaderDb` and offsets
+  records with a nonzero ramp, and every rebuild commit that changes some kept strip's effective
+  fader dB or `S` (`controls::effective`, old model against new) with the ramp
+  `max(fader_samples, the longest explicit ramp of the transaction)`, into one bound: the newest
+  revision and the longest ramp. "May still ramp" is `watermark.revision < revision ||
+  render_clock < watermark.first_sample + ramp` (a watermark read that gives up counts as "may").
+  The watermark and the render clock are read before the reservation.
+- Departure from the coordinator's per-strip table: one window for the whole session, not one entry
+  per strip. It is a superset of the per-strip test, so it can only over-report. It is two words, so
+  it is bounded with no allocation, and it needs no strip IDs. The per-lane "table changes" test was
+  dropped (coordinator decision): a moved input arrival `a(n)` also Repositions, and control cannot
+  see `a(n)`.
+- Over-report cases: any transaction rebuild of a session with fader automation while any level
+  move may still ramp, on any strip: a move with more than `J` left, a move whose target the new
+  table did not move, a rebuild that Repositions no lane, a move on a strip that has no automation.
+  After a newer revision, the window also over-reports because the newest revision is paired with
+  the longest ramp. A rebuild while a move is still pending (no block has heard it) is flagged too.
+- Not flagged (not a live level move): a cell's own jump of `J` that is still running at a
+  Reposition swap is extended in the same way. This is read from the code, not measured (TBD50
+  context).
+- Gates: `a_reposition_swap_while_a_level_move_ramps_reports_a_fallback`
+  (`crates/capi/src/runtime/live_tests.rs`): a live VCA move heard 24, 26 and 30 blocks, and a
+  move inside a rebuild heard 12 blocks, report `OUTCOME_TRANSITION_FALLBACK` (count 1) on the
+  table-only rebuild. No move, and a move whose ramp has ended (heard 40 blocks), report
+  `OUTCOME_EXACT`. Red with the `set_outcome` line removed (heard 24 reads EXACT), and red with
+  the rebuild path's fold removed (the move inside a rebuild reads EXACT). Each was checked once.
+  `a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both_hosts`
+  (`hosts/host-web/tests/control_parity.rs`): at all four rates, the browser's status words equal
+  the C ABI's watermark, flags included. A hand move in flight flags, no move is exact, and the
+  bits are the same on both hosts. No gap-1 case: the rigs have no cheap way to move `a(n)`
+  alone, and with the wide condition no lane test is left to defend.
+- Doc text appended to the flag: `crates/capi/src/abi.rs` (doc of `OUTCOME_TRANSITION_FALLBACK`),
+  the C header comment (`crates/capi/include/miso_engine_v1.h`, watermark section),
+  `docs/C_ABI_V1_QUALIFICATION.md`, `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`
+  and its SDK copy `sdk/src/browser/shipped-host.d.ts`. The doc of `watermark.rs` under
+  `crates/engine/src/realtime/` is not edited. `scripts/check-capi-abi.sh` and
+  `scripts/check-sdk-generated.sh` pass, and no pin moved.

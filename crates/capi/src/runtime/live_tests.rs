@@ -9275,6 +9275,86 @@ mod set_control {
             }
         }
 
+        /// The outcome flags and the transition-fallback count of `rig`'s watermark.
+        fn outcome(rig: &Rig) -> (u64, u64) {
+            let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+            assert_eq!(result, crate::RESULT_OK);
+            (watermark.outcome_flags, watermark.transition_fallback_count)
+        }
+
+        /// B17-R14 (#1648 split, TBD50). A table-only rebuild of the riding fader while a live
+        /// level move may still ramp completes as the transition fallback: a VCA move with its
+        /// own 4,000 samples heard 24, 26 and 30 blocks (928, 672 and 160 samples left, landed
+        /// over `J` = 960), and a VCA move committed inside a rebuild, heard 12 blocks, then a
+        /// table-only rebuild (the rebuild path's moves). The watermark advance that covers the
+        /// rebuild reports `OUTCOME_TRANSITION_FALLBACK`, not `OUTCOME_EXACT`. A table-only
+        /// rebuild with no move, and one after a move whose ramp has ended (heard 40 blocks),
+        /// report `OUTCOME_EXACT`.
+        ///
+        /// Test value: red if the control plane does not mark the candidate (the stretched move
+        /// then completes as exact, checked once with the `set_outcome` line removed), if a live
+        /// move or a rebuild's level change is not tracked, or if a rebuild with no move in
+        /// flight is marked (the flag must stay narrow).
+        #[test]
+        fn a_reposition_swap_while_a_level_move_ramps_reports_a_fallback() {
+            let fallback = crate::abi::OUTCOME_TRANSITION_FALLBACK;
+            let exact = crate::abi::OUTCOME_EXACT;
+            let document = riding();
+            let model = parse_session_json(&document).expect("model");
+            let track = first_track(&document);
+            let rebuild = split_ride(&track, (10_000, -6.0), session::AutomationOffset::default());
+            let edit = vca_move(-6.0, Some(4_000));
+            // (label, the move: none, live or inside a rebuild, blocks heard, expected flags)
+            let cases = [
+                ("no move", None, 0, exact),
+                ("a live move heard 24", Some(false), 24, fallback),
+                ("a live move heard 26", Some(false), 26, fallback),
+                ("a live move heard 30", Some(false), 30, fallback),
+                ("a live move heard 40 (ended)", Some(false), 40, exact),
+                ("a move inside a rebuild heard 12", Some(true), 12, fallback),
+            ];
+            for (label, inside, heard, expected) in cases {
+                let mut a = Rig::new(&document);
+                for _ in 0..4 {
+                    a.step();
+                }
+                match inside {
+                    None => {}
+                    Some(false) => send(
+                        &mut a,
+                        core::slice::from_ref(&edit),
+                        protocol::EditPath::Live,
+                        label,
+                    ),
+                    Some(true) => {
+                        let mut edits = vec![edit.clone()];
+                        edits.extend(add_muted_track(&model, "added"));
+                        send(&mut a, &edits, protocol::EditPath::Rebuild, label);
+                    }
+                }
+                for _ in 0..heard {
+                    a.step();
+                }
+                send(
+                    &mut a,
+                    core::slice::from_ref(&rebuild),
+                    protocol::EditPath::Rebuild,
+                    label,
+                );
+                for _ in 0..4 {
+                    a.step();
+                }
+                assert_eq!(a.summary().3, 0, "{label}: the successor is adopted");
+                let (flags, fallbacks) = outcome(&a);
+                assert_eq!(flags, expected, "{label}: the rebuild's outcome flags");
+                assert_eq!(
+                    fallbacks,
+                    u64::from(expected == fallback),
+                    "{label}: transition-fallback count"
+                );
+            }
+        }
+
         /// U3 fold 2, MINOR (#1648 D2, D15-2). Two live VCA moves around a rebuild, with no block
         /// between any of them: a move pending at a rebuild whose own transaction moves `v`
         /// again, and a move, a rebuild, then a second live move. The first move is replaced
