@@ -18,7 +18,7 @@ compiler_manifest="crates/graph-compiler/Cargo.toml"
 
 graph_dependencies_raw="$(gate_toml_dependencies "$graph_manifest" graph)" || exit $?
 production_graph_dependencies="$graph_dependencies_raw"
-[[ "$production_graph_dependencies" == $'effect-contract.workspace\nengine.workspace\nlane.workspace\nrack.workspace' ]] ||
+[[ "$production_graph_dependencies" == $'automation.workspace\neffect-contract.workspace\nengine.workspace\nlane.workspace\nrack.workspace' ]] ||
   fail 'render graph dependency boundary changed'
 
 gate_scan_required 'control-plane compiler SHA-256 dependency' '^sha2[.]workspace = true$' '' "$compiler_manifest" >/dev/null || exit $?

@@ -1126,6 +1126,328 @@ impl GraphRouteControlProducer {
     }
 }
 
+/// Words of a following route's cell (#1652 D1): the open transform `[gain, ll, lr, rl, rr]`'s
+/// bits, the flags word ([`RouteFollowFlags`]) and the ramp length. A route into a submix whose
+/// source strip has an automated mute lane holds this cell instead of the six folded words, so
+/// render can gate the transform itself at every curve event.
+pub(crate) const FOLLOW_ROUTE_CELL_WORDS: usize = 7;
+
+/// The flags word of a following route's cell (#1652 D1, batch 18 layout): bit 0 the route's own
+/// `mute`, bit 1 `follows_mute`, bits 2 and 3 `terms[L, R]`, bits 4 and 5 `automated[L, R]`. Every
+/// other bit is 0; [`Self::from_word`] refuses a word with any of them set.
+///
+/// `terms[lane]` is the source lane's effective mute without its curve (`controls::effective`'s
+/// source-lane mute: static mute, VCA mute and solo term). `automated[lane]` is fixed by the plan:
+/// whether that source lane has a stored mute curve.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RouteFollowFlags {
+    /// The route's own mute: it silences the route whatever the source does.
+    pub mute: bool,
+    /// Whether the route follows its source strip's mute.
+    pub follows_mute: bool,
+    /// Per source lane `[L, R]`: the lane's mute terms other than its curve.
+    pub terms: [bool; 2],
+    /// Per source lane `[L, R]`: whether the plan automates the lane's mute.
+    pub automated: [bool; 2],
+}
+
+impl RouteFollowFlags {
+    const MUTE: u32 = 1 << 0;
+    const FOLLOWS_MUTE: u32 = 1 << 1;
+    const TERMS: [u32; 2] = [1 << 2, 1 << 3];
+    const AUTOMATED: [u32; 2] = [1 << 4, 1 << 5];
+    /// Every bit the layout defines; any other bit set makes a word no record wrote.
+    const DEFINED: u32 = (1 << 6) - 1;
+
+    /// The flags word.
+    #[must_use]
+    pub const fn to_word(self) -> u32 {
+        const fn bit(set: bool, bit: u32) -> u32 {
+            if set { bit } else { 0 }
+        }
+        bit(self.mute, Self::MUTE)
+            | bit(self.follows_mute, Self::FOLLOWS_MUTE)
+            | bit(self.terms[0], Self::TERMS[0])
+            | bit(self.terms[1], Self::TERMS[1])
+            | bit(self.automated[0], Self::AUTOMATED[0])
+            | bit(self.automated[1], Self::AUTOMATED[1])
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// The flags a word holds, or `None` when a bit above bit 5 is set.
+    #[must_use]
+    pub const fn from_word(word: u32) -> Option<Self> {
+        if word & !Self::DEFINED != 0 {
+            return None;
+        }
+        Some(Self {
+            mute: word & Self::MUTE != 0,
+            follows_mute: word & Self::FOLLOWS_MUTE != 0,
+            terms: [word & Self::TERMS[0] != 0, word & Self::TERMS[1] != 0],
+            automated: [
+                word & Self::AUTOMATED[0] != 0,
+                word & Self::AUTOMATED[1] != 0,
+            ],
+        })
+    }
+
+    /// The route's gate while the source lanes' curves are at `curve` (#1652 D2):
+    /// `follow_zeroed[lane] = follows_mute && ((automated[lane] && curve[lane]) || terms[lane])`. A
+    /// lane the plan does not automate ignores its `curve` entry. Pure; [`gated_route_coefficients`]
+    /// of the open transform with this gate is the route's target.
+    #[must_use]
+    pub const fn gate(self, curve: [bool; 2]) -> RouteGate {
+        let [left, right] = [
+            self.follows_mute && ((self.automated[0] && curve[0]) || self.terms[0]),
+            self.follows_mute && ((self.automated[1] && curve[1]) || self.terms[1]),
+        ];
+        RouteGate {
+            mute: self.mute,
+            follow_zeroed: [left, right],
+        }
+    }
+    // REALTIME_POLICY_END
+}
+
+/// One live change of a following route (#1652 D1): its open transform, its flags and the ramp in
+/// samples, `0` being a step. Render composes the target itself
+/// ([`RouteFollowFlags::gate`], [`gated_route_coefficients`]), so the record holds no folded
+/// coefficients. The constructor is the only way to build one, so every record a lane drains is in
+/// bounds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FollowRouteControlRecord {
+    transform: RouteTransform,
+    flags: RouteFollowFlags,
+    length: u32,
+}
+
+impl FollowRouteControlRecord {
+    // REALTIME_POLICY_BEGIN
+    /// `None` when `length > ROUTE_RAMP_LENGTH_MAXIMUM` or when a transform word is not finite: the
+    /// gate folds the transform at every curve event, so it must give finite coefficients.
+    #[must_use]
+    pub fn new(transform: RouteTransform, flags: RouteFollowFlags, length: u32) -> Option<Self> {
+        let RouteTransform {
+            gain,
+            ll,
+            lr,
+            rl,
+            rr,
+        } = transform;
+        if length > ROUTE_RAMP_LENGTH_MAXIMUM
+            || ![gain, ll, lr, rl, rr].iter().all(|word| word.is_finite())
+        {
+            return None;
+        }
+        Some(Self {
+            transform,
+            flags,
+            length,
+        })
+    }
+    /// The open transform: the route's linear gain and its 2x2, ungated.
+    #[must_use]
+    pub const fn transform(&self) -> RouteTransform {
+        self.transform
+    }
+    /// The flags word's fields.
+    #[must_use]
+    pub const fn flags(&self) -> RouteFollowFlags {
+        self.flags
+    }
+    /// The ramp's length in samples; `0` is a step.
+    #[must_use]
+    pub const fn length(&self) -> u32 {
+        self.length
+    }
+    // REALTIME_POLICY_END
+
+    /// The cell words `[gain, ll, lr, rl, rr, flags, length]`.
+    pub(crate) fn to_words(self) -> [u32; FOLLOW_ROUTE_CELL_WORDS] {
+        let RouteTransform {
+            gain,
+            ll,
+            lr,
+            rl,
+            rr,
+        } = self.transform;
+        [
+            gain.to_bits(),
+            ll.to_bits(),
+            lr.to_bits(),
+            rl.to_bits(),
+            rr.to_bits(),
+            self.flags.to_word(),
+            self.length,
+        ]
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// The record a cell's words hold: `None` for words no record wrote (a flags bit above bit 5,
+    /// a non-finite transform word or a ramp over the bound), which render skips. The words come
+    /// from [`Self::to_words`], so the checks are the constructor's and the flags word's own.
+    pub(crate) fn from_words(words: [u32; FOLLOW_ROUTE_CELL_WORDS]) -> Option<Self> {
+        let [gain, ll, lr, rl, rr, flags, length] = words;
+        Self::new(
+            RouteTransform {
+                gain: f32::from_bits(gain),
+                ll: f32::from_bits(ll),
+                lr: f32::from_bits(lr),
+                rl: f32::from_bits(rl),
+                rr: f32::from_bits(rr),
+            },
+            RouteFollowFlags::from_word(flags)?,
+            length,
+        )
+    }
+    // REALTIME_POLICY_END
+}
+
+/// What one following route shares between its writer (control) and its reader (render): one
+/// seven-word latest-target cell and its dirty word (#1652 D1). Its own type, so a six-word
+/// route's [`RouteLane`] keeps its bytes.
+pub(crate) struct FollowRouteLane {
+    pub(crate) cell: engine::realtime::LatestCell<FOLLOW_ROUTE_CELL_WORDS>,
+    pub(crate) dirty: engine::realtime::DirtyWord,
+}
+
+/// The render-side half of one following route's cell (#1652 D1): the shared cell, the reader's
+/// last applied sequence, the dirty reader and the session's `live_values_superseded` count. The
+/// counterpart of [`RouteControlLane`] for the seven-word cell.
+pub struct FollowRouteControlLane {
+    pub(crate) lane: std::sync::Arc<FollowRouteLane>,
+    pub(crate) reader: engine::realtime::CellReader,
+    pub(crate) dirty: engine::realtime::DirtyReader,
+    pub(crate) superseded: engine::realtime::LiveValuesSuperseded,
+}
+
+// REALTIME_POLICY_BEGIN
+impl FollowRouteControlLane {
+    /// Read the cell under the block's snapshot: the newest record whose revision is `<=
+    /// snapshot` and that this reader has not applied, or `None`. An idle cell costs one
+    /// `Relaxed` load. When it applies sequence `s` after `p`, the `s - p - 1` writes it replaced
+    /// join the session's `live_values_superseded` (#1312 D2). Allocation-free and lock-free.
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by #1652b route op"))]
+    pub(crate) fn read(&mut self, snapshot: LiveSnapshot) -> Option<FollowRouteControlRecord> {
+        if self.dirty.pending(&self.lane.dirty) & 1 == 0 {
+            return None;
+        }
+        let engine::realtime::CellRead::Applied { words, .. } = self.reader.read_counted(
+            &self.lane.cell,
+            snapshot,
+            &mut self.dirty,
+            0,
+            &self.superseded,
+        ) else {
+            return None;
+        };
+        // Only `write` fills the cell, from a validated record, so the words decode.
+        let record = FollowRouteControlRecord::from_words(words);
+        debug_assert!(
+            record.is_some(),
+            "a following route cell held words no record wrote"
+        );
+        record
+    }
+}
+// REALTIME_POLICY_END
+
+/// One following route's lane, carried beside the prepared routes as
+/// [`GraphRouteControlBinding`] is (#1652 D1).
+pub struct GraphFollowRouteControlBinding {
+    /// The route node this lane drives.
+    pub node: GraphNodeId,
+    /// Reader half of the seven-word cell; the writer stays on the control plane.
+    pub control: Box<FollowRouteControlLane>,
+}
+
+/// The control-plane half of one following route's seven-word cell (#1652 D1): the counterpart of
+/// [`GraphRouteControlProducer`].
+pub struct GraphFollowRouteControlProducer {
+    /// The route's session ID.
+    pub route_id: Box<str>,
+    lane: std::sync::Arc<FollowRouteLane>,
+    writer: engine::realtime::CellWriter<FOLLOW_ROUTE_CELL_WORDS>,
+    /// As [`GraphRouteControlProducer`]'s: the route-activity bytes this attach added, the same
+    /// for every producer of one attach.
+    activity_bytes: u64,
+    /// The largest single allocation of that table, or `0` with it.
+    activity_largest: u64,
+}
+
+impl GraphFollowRouteControlProducer {
+    /// Write `record` as the route's newest value, stamped with the revision of the transaction
+    /// that commits it. A write cannot fail and never waits; render applies the newest and counts
+    /// each replaced one. Validation is [`FollowRouteControlRecord::new`]'s, made before any
+    /// write. The caller publishes the stamp's revision on the plan's gate after every write of
+    /// the transaction (#1312 D7).
+    pub fn write(
+        &mut self,
+        stamp: engine::realtime::LiveStamp<'_>,
+        record: FollowRouteControlRecord,
+    ) {
+        self.writer.write(
+            &self.lane.cell,
+            &self.lane.dirty,
+            0,
+            stamp,
+            record.to_words(),
+        );
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl GraphFollowRouteControlProducer {
+    /// Test-only: how many writes the cell has taken. Valid while no write is in flight, which a
+    /// quiescent test thread guarantees.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_write_count(&self) -> u64 {
+        engine::realtime::CellReader::new()
+            .peek_unread(&self.lane.cell)
+            .map_or(0, |(_, sequence)| sequence)
+    }
+}
+
+/// One following route's binding and producer over one fresh seven-word cell (#1652 D1).
+/// `activity_bytes` and `activity_largest` are the attach's route-activity charge, as for a
+/// six-word producer.
+#[cfg_attr(not(test), expect(dead_code, reason = "called by #1652c route attach"))]
+pub(crate) fn follow_route_control_pair(
+    route_id: &StableGraphId,
+    superseded: &engine::realtime::LiveValuesSuperseded,
+    activity_bytes: u64,
+    activity_largest: u64,
+) -> (
+    GraphFollowRouteControlBinding,
+    GraphFollowRouteControlProducer,
+) {
+    let lane = std::sync::Arc::new(FollowRouteLane {
+        cell: engine::realtime::LatestCell::new(),
+        dirty: engine::realtime::DirtyWord::new(),
+    });
+    (
+        GraphFollowRouteControlBinding {
+            node: GraphNodeId::Route {
+                route_id: route_id.clone(),
+            },
+            control: Box::new(FollowRouteControlLane {
+                lane: std::sync::Arc::clone(&lane),
+                reader: engine::realtime::CellReader::new(),
+                dirty: engine::realtime::DirtyReader::new(),
+                superseded: superseded.clone(),
+            }),
+        },
+        GraphFollowRouteControlProducer {
+            route_id: route_id.as_str().into(),
+            lane,
+            writer: engine::realtime::CellWriter::new(),
+            activity_bytes,
+            activity_largest,
+        },
+    )
+}
+
 /// Why [`PreparedGraphPlan::attach_route_controls`] refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphRouteControlError {
@@ -1140,6 +1462,10 @@ pub enum GraphRouteControlError {
 /// D8): stated so a caller can check [`route_control_resources`] from first principles.
 pub const LIVE_ROUTE_OWNER_BYTES: usize = runtime::live_route_owner_bytes();
 
+/// The bytes bind allocates for one following route's render-side owner, its boxed state (#1652
+/// D1): stated so a caller can check [`route_control_resources`] from first principles.
+pub const LIVE_FOLLOW_ROUTE_OWNER_BYTES: usize = runtime::live_follow_route_owner_bytes();
+
 /// What attaching route controls and binding the plan add (issue #1220 D8): an upper bound on
 /// what the attached artifact retains before bind and on what the bound plan retains.
 ///
@@ -1153,12 +1479,15 @@ pub struct RouteControlResources {
     pub routes: u64,
     /// Each route's one shared allocation, the `Arc` of its latest-target cell and dirty word
     /// (`SharedAllocation<RouteLane>`: the cell's three slots, the dirty word and the owner
-    /// header). Exact (#1347 D1).
+    /// header; `SharedAllocation<FollowRouteLane>` for a following route). Exact (#1347 D1,
+    /// #1652 D1).
     pub cell_bytes: u64,
     /// Per route: the boxed [`RouteControlLane`], the plan's [`GraphRouteControlBinding`] entry
-    /// (held until bind) and the boxed render-side owner bind builds.
+    /// (held until bind) and the boxed render-side owner bind builds; for a following route the
+    /// boxed [`FollowRouteControlLane`], its [`GraphFollowRouteControlBinding`] and its owner.
     pub owner_bytes: u64,
-    /// The producer table: one [`GraphRouteControlProducer`] per route.
+    /// The producer tables: one [`GraphRouteControlProducer`] per six-word route and one
+    /// [`GraphFollowRouteControlProducer`] per following route.
     pub producer_table_bytes: u64,
     /// The route IDs' bytes, twice: the producer's `route_id`, and the plan's
     /// [`GraphRouteControlBinding`] node ID (held until bind) -- a second heap copy (#1220 verdict
@@ -1171,51 +1500,99 @@ pub struct RouteControlResources {
     pub largest_allocation_bytes: u64,
 }
 
-/// The resources of one [`PreparedGraphPlan::attach_route_controls`] call's `producers` and of the
-/// bind that consumes its lanes (issue #1220 D8): an upper bound on both the attached and the bound
-/// state ([`RouteControlResources`]). Saturating; empty for no producers.
+/// The resources of one [`PreparedGraphPlan::attach_route_controls`] call's `producers` and
+/// `following` producers, and of the bind that consumes their lanes (issue #1220 D8, #1652 D1): an
+/// upper bound on both the attached and the bound state ([`RouteControlResources`]). A six-word
+/// route is charged its [`RouteLane`] cell, its owner ([`LIVE_ROUTE_OWNER_BYTES`]) and its
+/// producer; a following route its own seven-word cell, owner ([`LIVE_FOLLOW_ROUTE_OWNER_BYTES`])
+/// and producer, so the charge of a plan with no following route is what it was. The
+/// route-activity table is one per plan, charged once. Saturating; empty for no producers.
 #[must_use]
-pub fn route_control_resources(producers: &[GraphRouteControlProducer]) -> RouteControlResources {
+pub fn route_control_resources(
+    producers: &[GraphRouteControlProducer],
+    following: &[GraphFollowRouteControlProducer],
+) -> RouteControlResources {
     let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
-    if producers.is_empty() {
+    if producers.is_empty() && following.is_empty() {
         return RouteControlResources::default();
     }
-    let routes = count(producers.len());
-    // Every route's shared allocation is the same type, so the same bytes.
+    let six = count(producers.len());
+    let seven = count(following.len());
+    let routes = six.saturating_add(seven);
+    // Every route's shared allocation of one kind is the same type, so the same bytes.
     let cell = count(core::mem::size_of::<
         engine::realtime::SharedAllocation<RouteLane>,
     >());
-    let cell_bytes = routes.saturating_mul(cell);
+    let follow_cell = count(core::mem::size_of::<
+        engine::realtime::SharedAllocation<FollowRouteLane>,
+    >());
+    let cell_bytes = six
+        .saturating_mul(cell)
+        .saturating_add(seven.saturating_mul(follow_cell));
     let mut route_id_bytes = 0_u64;
-    let mut largest = cell;
-    for producer in producers {
+    let mut largest = 0_u64;
+    if six > 0 {
+        largest = largest.max(cell);
+    }
+    if seven > 0 {
+        largest = largest.max(follow_cell);
+    }
+    let route_ids = producers
+        .iter()
+        .map(|producer| &producer.route_id)
+        .chain(following.iter().map(|producer| &producer.route_id));
+    for route_id in route_ids {
         // The producer's copy and the binding's node-ID copy.
-        route_id_bytes =
-            route_id_bytes.saturating_add(count(producer.route_id.len()).saturating_mul(2));
-        largest = largest.max(count(producer.route_id.len()));
+        route_id_bytes = route_id_bytes.saturating_add(count(route_id.len()).saturating_mul(2));
+        largest = largest.max(count(route_id.len()));
     }
     let lane = count(core::mem::size_of::<RouteControlLane>());
     let binding = count(core::mem::size_of::<GraphRouteControlBinding>());
     let owner = count(LIVE_ROUTE_OWNER_BYTES);
-    let owner_bytes = routes.saturating_mul(lane.saturating_add(binding).saturating_add(owner));
-    let producer_table_bytes =
-        routes.saturating_mul(count(core::mem::size_of::<GraphRouteControlProducer>()));
-    let activity_bytes = producers
+    let follow_lane = count(core::mem::size_of::<FollowRouteControlLane>());
+    let follow_binding = count(core::mem::size_of::<GraphFollowRouteControlBinding>());
+    let follow_owner = count(LIVE_FOLLOW_ROUTE_OWNER_BYTES);
+    let owner_bytes = six
+        .saturating_mul(lane.saturating_add(binding).saturating_add(owner))
+        .saturating_add(
+            seven.saturating_mul(
+                follow_lane
+                    .saturating_add(follow_binding)
+                    .saturating_add(follow_owner),
+            ),
+        );
+    let six_producers =
+        six.saturating_mul(count(core::mem::size_of::<GraphRouteControlProducer>()));
+    let seven_producers = seven.saturating_mul(count(core::mem::size_of::<
+        GraphFollowRouteControlProducer,
+    >()));
+    let producer_table_bytes = six_producers.saturating_add(seven_producers);
+    let activity = producers
         .iter()
-        .map(|producer| producer.activity_bytes)
-        .max()
-        .unwrap_or(0);
-    let activity_largest = producers
-        .iter()
-        .map(|producer| producer.activity_largest)
-        .max()
-        .unwrap_or(0);
-    largest = largest
-        .max(lane)
-        .max(owner)
-        .max(routes.saturating_mul(binding))
-        .max(producer_table_bytes)
-        .max(activity_largest);
+        .map(|producer| (producer.activity_bytes, producer.activity_largest))
+        .chain(
+            following
+                .iter()
+                .map(|producer| (producer.activity_bytes, producer.activity_largest)),
+        );
+    let (activity_bytes, activity_largest) = activity.fold((0, 0), |(bytes, largest), next| {
+        (bytes.max(next.0), largest.max(next.1))
+    });
+    if six > 0 {
+        largest = largest
+            .max(lane)
+            .max(owner)
+            .max(six.saturating_mul(binding))
+            .max(six_producers);
+    }
+    if seven > 0 {
+        largest = largest
+            .max(follow_lane)
+            .max(follow_owner)
+            .max(seven.saturating_mul(follow_binding))
+            .max(seven_producers);
+    }
+    largest = largest.max(activity_largest);
     RouteControlResources {
         routes,
         cell_bytes,
@@ -9818,5 +10195,274 @@ mod tests {
         );
         assert_eq!(after[0].source, strip("b"));
         assert_eq!(after[0].destination, output);
+    }
+}
+
+#[cfg(test)]
+mod follow_route_tests {
+    //! #1652a: the seven-word cell of a following route: its flags word, its record, the producer
+    //! write and the charge.
+    use super::*;
+    use engine::realtime::{LiveSnapshot, LiveValuesSuperseded, RevisionGate};
+
+    fn flags_of(word: u32) -> RouteFollowFlags {
+        RouteFollowFlags {
+            mute: word & 1 != 0,
+            follows_mute: word & 2 != 0,
+            terms: [word & 4 != 0, word & 8 != 0],
+            automated: [word & 16 != 0, word & 32 != 0],
+        }
+    }
+
+    fn transform() -> RouteTransform {
+        RouteTransform {
+            gain: 0.5,
+            ll: 1.0,
+            lr: -0.0,
+            rl: f32::from_bits(1),
+            rr: -0.75,
+        }
+    }
+
+    fn route_id(value: &str) -> StableGraphId {
+        StableGraphId::parse(value).expect("a route ID")
+    }
+
+    /// The layout: bit 0 mute, 1 follows_mute, 2-3 terms L/R, 4-5 automated L/R. Every one of the
+    /// 64 defined words decodes to its fields and encodes back to itself; a word with any bit
+    /// from 6 up set is refused.
+    ///
+    /// Test value: red if two fields swap bits, if a field is dropped on the round trip, or if a
+    /// word with an undefined bit decodes (render would apply words no record wrote).
+    #[test]
+    fn the_flags_word_round_trips_its_six_bits_and_refuses_every_other_bit() {
+        for word in 0..64_u32 {
+            let flags = RouteFollowFlags::from_word(word).expect("a defined word");
+            assert_eq!(flags, flags_of(word), "word {word:#b}");
+            assert_eq!(flags.to_word(), word);
+            for bit in 6..32 {
+                assert_eq!(
+                    RouteFollowFlags::from_word(word | 1 << bit),
+                    None,
+                    "bit {bit} set"
+                );
+            }
+        }
+        assert_eq!(RouteFollowFlags::from_word(u32::MAX), None);
+    }
+
+    /// D2's composition, over every flags word and every curve state:
+    /// `follow_zeroed[lane] = follows_mute && ((automated[lane] && curve[lane]) || terms[lane])`,
+    /// and the route's own mute passes through.
+    ///
+    /// Test value: red if a curve value reaches a lane the plan does not automate, if a lane reads
+    /// the other lane's curve or terms, or if the follow ignores `follows_mute`.
+    #[test]
+    fn the_gate_follows_the_curve_only_on_an_automated_lane() {
+        for word in 0..64_u32 {
+            let flags = flags_of(word);
+            for curve in [[false, false], [true, false], [false, true], [true, true]] {
+                let gate = flags.gate(curve);
+                assert_eq!(gate.mute, flags.mute);
+                for lane in 0..2 {
+                    let expected = flags.follows_mute
+                        && ((flags.automated[lane] && curve[lane]) || flags.terms[lane]);
+                    assert_eq!(
+                        gate.follow_zeroed[lane], expected,
+                        "word {word:#b}, curve {curve:?}, lane {lane}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The record keeps the open transform's bits exactly (negative zero and a subnormal
+    /// coefficient included), its flags and its length through the seven cell words, and refuses a
+    /// ramp over the bound, a non-finite transform word and a flags word with an undefined bit.
+    ///
+    /// Test value: red if a word moves in the layout, if a transform word is rounded or
+    /// canonicalised on the way, or if words no record wrote decode.
+    #[test]
+    fn the_record_round_trips_its_seven_words_and_refuses_out_of_bounds_words() {
+        let flags = flags_of(0b10_0110);
+        let record = FollowRouteControlRecord::new(transform(), flags, 480).expect("a record");
+        let words = record.to_words();
+        assert_eq!(
+            words,
+            [
+                0.5_f32.to_bits(),
+                1.0_f32.to_bits(),
+                (-0.0_f32).to_bits(),
+                1,
+                (-0.75_f32).to_bits(),
+                0b10_0110,
+                480,
+            ]
+        );
+        assert_eq!(FollowRouteControlRecord::from_words(words), Some(record));
+        assert_eq!(record.transform(), transform());
+        assert_eq!(record.flags(), flags);
+        assert_eq!(record.length(), 480);
+
+        let bound = FollowRouteControlRecord::new(transform(), flags, ROUTE_RAMP_LENGTH_MAXIMUM)
+            .expect("the bound is in bounds");
+        assert_eq!(
+            FollowRouteControlRecord::from_words(bound.to_words()),
+            Some(bound)
+        );
+        assert_eq!(
+            FollowRouteControlRecord::new(transform(), flags, ROUTE_RAMP_LENGTH_MAXIMUM + 1),
+            None
+        );
+        for word in 0..5 {
+            for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut words = words;
+                words[word] = bad.to_bits();
+                assert_eq!(FollowRouteControlRecord::from_words(words), None);
+            }
+        }
+        let mut long = words;
+        long[6] = ROUTE_RAMP_LENGTH_MAXIMUM + 1;
+        assert_eq!(FollowRouteControlRecord::from_words(long), None);
+        let mut undefined = words;
+        undefined[5] |= 1 << 6;
+        assert_eq!(FollowRouteControlRecord::from_words(undefined), None);
+    }
+
+    /// The producer writes the seven words into the route's own cell, and render's half reads
+    /// them under the block's snapshot: nothing before the revision is published, the newest
+    /// record once it is, each replaced write counted as superseded, nothing on an idle cell.
+    ///
+    /// Test value: red if the producer writes another cell than the binding reads, if a value is
+    /// readable before its revision is published, or if a replaced write is not counted.
+    #[test]
+    fn the_producer_write_reaches_the_binding_under_the_published_revision() {
+        let superseded = LiveValuesSuperseded::new();
+        let (mut binding, mut producer) =
+            follow_route_control_pair(&route_id("send"), &superseded, 0, 0);
+        assert_eq!(&*producer.route_id, "send");
+        assert_eq!(
+            binding.node,
+            GraphNodeId::Route {
+                route_id: route_id("send")
+            }
+        );
+        let (gate, mut pin) = RevisionGate::pair(0);
+        let first =
+            FollowRouteControlRecord::new(transform(), flags_of(0b01_0010), 64).expect("first");
+        let second =
+            FollowRouteControlRecord::new(transform(), flags_of(0b01_0011), 0).expect("second");
+
+        assert_eq!(binding.control.read(gate.snapshot()), None, "an idle cell");
+        producer.write(pin.stamp(1).expect("stamp"), first);
+        assert_eq!(
+            binding.control.read(gate.snapshot()),
+            None,
+            "revision 1 is not published"
+        );
+        pin.publish(&gate, 1);
+        producer.write(pin.stamp(2).expect("stamp"), second);
+        pin.publish(&gate, 2);
+        assert_eq!(producer.test_only_write_count(), 2);
+        assert_eq!(binding.control.read(gate.snapshot()), Some(second));
+        assert_eq!(superseded.get(), 1, "the first write was replaced unread");
+        assert_eq!(
+            binding.control.read(LiveSnapshot::ALL),
+            None,
+            "applied once"
+        );
+    }
+
+    fn six_word_producer(id: &str, activity: (u64, u64)) -> GraphRouteControlProducer {
+        GraphRouteControlProducer {
+            route_id: id.into(),
+            lane: std::sync::Arc::new(RouteLane::new()),
+            writer: engine::realtime::CellWriter::new(),
+            activity_bytes: activity.0,
+            activity_largest: activity.1,
+        }
+    }
+
+    /// The charge of six-word and following routes together is each kind's own cell, owner and
+    /// producer bytes, the route IDs twice, and the plan's one route-activity table once. A plan
+    /// with no following route is charged exactly as before (the six-word terms alone).
+    ///
+    /// Test value: red if a following route is charged a six-word cell or owner, if a kind is left
+    /// out, or if the activity table is charged per kind.
+    #[test]
+    fn the_charge_counts_each_kind_its_own_bytes_and_the_activity_table_once() {
+        let size = |bytes: usize| bytes as u64;
+        let superseded = LiveValuesSuperseded::new();
+        let activity = (4_096, 1_024);
+        let six = [
+            six_word_producer("a", activity),
+            six_word_producer("bb", activity),
+        ];
+        let seven: Vec<_> = ["ccc", "dddd", "eeeee"]
+            .iter()
+            .map(|id| {
+                follow_route_control_pair(&route_id(id), &superseded, activity.0, activity.1).1
+            })
+            .collect();
+        let six_cell = size(core::mem::size_of::<
+            engine::realtime::SharedAllocation<RouteLane>,
+        >());
+        let seven_cell = size(core::mem::size_of::<
+            engine::realtime::SharedAllocation<FollowRouteLane>,
+        >());
+        assert!(seven_cell > six_cell, "the seventh word has its own cell");
+        let six_owner = size(
+            core::mem::size_of::<RouteControlLane>()
+                + core::mem::size_of::<GraphRouteControlBinding>()
+                + LIVE_ROUTE_OWNER_BYTES,
+        );
+        let seven_owner = size(
+            core::mem::size_of::<FollowRouteControlLane>()
+                + core::mem::size_of::<GraphFollowRouteControlBinding>()
+                + LIVE_FOLLOW_ROUTE_OWNER_BYTES,
+        );
+        let six_table = 2 * size(core::mem::size_of::<GraphRouteControlProducer>());
+        let seven_table = 3 * size(core::mem::size_of::<GraphFollowRouteControlProducer>());
+        let ids = 2 * (1 + 2 + 3 + 4 + 5);
+
+        let both = route_control_resources(&six, &seven);
+        assert_eq!(both.routes, 5);
+        assert_eq!(both.cell_bytes, 2 * six_cell + 3 * seven_cell);
+        assert_eq!(both.owner_bytes, 2 * six_owner + 3 * seven_owner);
+        assert_eq!(both.producer_table_bytes, six_table + seven_table);
+        assert_eq!(both.route_id_bytes, ids);
+        assert_eq!(both.activity_bytes, activity.0);
+        assert_eq!(
+            both.total_bytes,
+            2 * six_cell
+                + 3 * seven_cell
+                + 2 * six_owner
+                + 3 * seven_owner
+                + six_table
+                + seven_table
+                + ids
+                + activity.0
+        );
+        assert!(both.largest_allocation_bytes >= seven_cell.max(activity.1));
+
+        let alone = route_control_resources(&six, &[]);
+        assert_eq!(alone.routes, 2);
+        assert_eq!(alone.cell_bytes, 2 * six_cell);
+        assert_eq!(alone.owner_bytes, 2 * six_owner);
+        assert_eq!(alone.producer_table_bytes, six_table);
+        assert_eq!(alone.route_id_bytes, 2 * (1 + 2));
+        assert_eq!(alone.activity_bytes, activity.0);
+        let following = route_control_resources(&[], &seven);
+        assert_eq!(following.cell_bytes, 3 * seven_cell);
+        assert_eq!(following.owner_bytes, 3 * seven_owner);
+        assert_eq!(
+            alone.total_bytes + following.total_bytes - activity.0,
+            both.total_bytes,
+            "the activity table is charged once"
+        );
+        assert_eq!(
+            route_control_resources(&[], &[]),
+            RouteControlResources::default()
+        );
     }
 }

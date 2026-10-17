@@ -319,10 +319,15 @@ pub(crate) fn route_transform(gain_db: f32, matrix: [f32; 4]) -> Option<RouteTra
 /// today's values. A product can still be subnormal (a coefficient below about `1.9e-31` at
 /// today's minimum gain); [`graph::gated_route_coefficients`] flushes it to `+0.0` (issue #1237
 /// D3).
-pub(crate) fn route_values(
-    gain_db: f32,
-    matrix: [f32; 4],
-) -> Result<RouteTransform, RouteValueError> {
+///
+/// Public for a send whose source strip's mute is automated (#1652 D1): its live cell holds this
+/// open transform, and render gates it with [`graph::gated_route_coefficients`] at every curve
+/// event, so the transform a record carries and the one the plan lowers are one derivation.
+///
+/// # Errors
+///
+/// [`RouteValueError::Domain`] outside the route domain above, or for a non-finite value.
+pub fn route_values(gain_db: f32, matrix: [f32; 4]) -> Result<RouteTransform, RouteValueError> {
     // `contains` is false for NaN, so a non-finite value is refused here too.
     let in_domain = (session::ROUTE_GAIN_DB_MINIMUM..=session::ROUTE_GAIN_DB_MAXIMUM)
         .contains(&gain_db)

@@ -2880,7 +2880,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     } else {
         Vec::new()
     };
-    let route_control_resources = graph::route_control_resources(&graph_route_controls);
+    let route_control_resources = graph::route_control_resources(&graph_route_controls, &[]);
     // The producers in canonical route-ID order; a carried send's retarget is written through them.
     let mut route_controls: Vec<RouteControlProducer> = graph_route_controls
         .into_iter()

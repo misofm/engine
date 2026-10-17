@@ -350,3 +350,48 @@ Checked against `ad03780ee`. The filed text above stays; where it disagrees, thi
 bits (6 and up), the per-event composition and the in-block retarget. It needs the seven-word
 predicate widened to routes with automated rows, and carried cursor state by `(route, row)` for
 curves that move on the grid; this slice's mute cursors are not carried.
+
+## Decision record: #1652a (batch 18)
+
+Tranche R1: the seven-word cell types, the graph -> automation edge and a public `route_values`.
+No render behaviour: no route op evaluation, no attach, no carry.
+
+- **Shipped (`crates/graph/src/lib.rs`).** `FOLLOW_ROUTE_CELL_WORDS = 7`; `RouteFollowFlags` (bit 0
+  `mute`, 1 `follows_mute`, 2-3 `terms[L, R]`, 4-5 `automated[L, R]`; `from_word` refuses any bit
+  from 6 up) with `gate(curve)`, D2's composition
+  `follow_zeroed[lane] = follows_mute && ((automated[lane] && curve[lane]) || terms[lane])`;
+  `FollowRouteControlRecord` (open `RouteTransform`, flags, length; refuses a length over
+  `ROUTE_RAMP_LENGTH_MAXIMUM` and a non-finite transform word) with `to_words`/`from_words`;
+  `FollowRouteLane` (`LatestCell<7>` + dirty word), `FollowRouteControlLane` (render reader half,
+  with `read(snapshot)`), `GraphFollowRouteControlBinding`, `GraphFollowRouteControlProducer`
+  (`write`, `test_only_write_count`), and `follow_route_control_pair`, the one builder of a
+  binding/producer pair, for #1652c's attach.
+- **Render state (`crates/graph/src/runtime.rs`).** `LiveFollowRoute`, its own boxed type beside
+  `LiveRoute` (ramp, position, mute, delayed, route index, transform, flags, control lane);
+  `LiveRoute` is unchanged. #1652b adds its cursors and its constructor.
+- **Charge.** `route_control_resources(producers, following)` charges each kind its own cell,
+  owner and producer bytes and the activity table once; with `following` empty it is the old sum
+  term for term. New `LIVE_FOLLOW_ROUTE_OWNER_BYTES`. Measured (x86-64): six-word cell 144,
+  seven-word cell 168; `LIVE_ROUTE_OWNER_BYTES` 72 (unchanged), `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 96
+  (grows with #1652b's cursors, charged by `size_of`); both lanes 32, both bindings 64, both
+  producers 72.
+- **Departure.** The signature change of `route_control_resources` is a mechanical caller update
+  at `crates/host-core/src/prepare.rs` (one call), `crates/host-core/tests/live_routes.rs` and
+  `crates/graph-compiler/tests/live_routes.rs` (pass `&[]`); the last two are outside this slice's
+  listed paths. `RouteFollowFlags::gate` is the pure composition #1652b and #1652c both call; it
+  lands here with its test.
+- **Edge.** `crates/graph/Cargo.toml`, `Cargo.lock`, `scripts/check-graph-policy.sh` (the pin) and
+  `scripts/test-graph-policy.sh` (the fixture manifest and the partial-output awk shim) gain
+  `automation` only. No source in graph uses it yet; #1652b's cursors do.
+- **`route_values`** is `pub` and re-exported from `graph_compiler`.
+- **Dead-code expects (gone by the PR boundary):** `LiveFollowRoute` (struct, "bound and read by
+  #1652b route op"); `FollowRouteControlLane::read` (non-test, "read by #1652b route op");
+  `follow_route_control_pair` (non-test, "called by #1652c route attach").
+- **Gates.** `crates/graph/src/lib.rs` `follow_route_tests`:
+  `the_flags_word_round_trips_its_six_bits_and_refuses_every_other_bit`,
+  `the_gate_follows_the_curve_only_on_an_automated_lane`,
+  `the_record_round_trips_its_seven_words_and_refuses_out_of_bounds_words`,
+  `the_producer_write_reaches_the_binding_under_the_published_revision`,
+  `the_charge_counts_each_kind_its_own_bytes_and_the_activity_table_once`; all pass. The six-word
+  charge stays held by graph-compiler's `route_control_resources_cover_the_allocation`. The
+  realtime policy reports 164 marked regions (main: 160; four new).

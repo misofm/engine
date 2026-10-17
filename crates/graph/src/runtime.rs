@@ -987,6 +987,38 @@ impl LiveRoute {
 
 // REALTIME_POLICY_END
 
+/// One following route's render state (#1652 D1): a route into a submix whose source strip has an
+/// automated mute lane. Its own type, boxed beside [`LiveRoute`], so a six-word route keeps its
+/// bytes ([`live_route_owner_bytes`]) and its bits.
+///
+/// The ramp fields mean what [`LiveRoute`]'s do. `transform` and `flags` are the last applied
+/// cell words (or the prepared ones): render gates the open transform itself
+/// ([`crate::RouteFollowFlags::gate`]) at every curve event of the source's mute.
+#[expect(dead_code, reason = "bound and read by #1652b route op")]
+pub(crate) struct LiveFollowRoute {
+    /// The current ramp; `ramp.coefficients_at(position)` are the last mixed frame's coefficients.
+    ramp: IndexedRamp,
+    /// The ramp index of the last frame mixed, saturated at `ramp.length`; never wraps.
+    position: u32,
+    /// Whether the current target silences the route.
+    mute: bool,
+    /// Whether the route's one consumer input carries a compensation delay.
+    delayed: bool,
+    /// The route's index in the plan's [`RouteActivity`].
+    route: u32,
+    /// The open transform the last applied record (or preparation) gave.
+    transform: crate::RouteTransform,
+    /// The flags the last applied record (or preparation) gave.
+    flags: crate::RouteFollowFlags,
+    control: Box<crate::FollowRouteControlLane>,
+}
+
+/// The bytes bind allocates for one following route's render-side owner (#1652 D1): its box.
+#[must_use]
+pub(crate) const fn live_follow_route_owner_bytes() -> usize {
+    core::mem::size_of::<LiveFollowRoute>()
+}
+
 /// Integer-sample plugin-delay compensation for one stereo edge.
 ///
 /// The line is `samples` words per channel and the block is exchanged with it in at most two
