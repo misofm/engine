@@ -538,3 +538,66 @@ fader event lanes as `automated` in `level_records_between` / `fader_records` (n
 a composed lane: the drain still applies a `FaderDb` to the stage); `has_offsets` is true on every
 fader event lane. For V4: a source lane's VCA mute cells are its reach (ascending VCA ID) mapped
 through `vca_cells(..)[1][lane]`, jump row `VcaMute`.
+
+## Decision record: V3 (batch 19)
+
+host-core preparation and the classifier (`crates/host-core/src/{prepare.rs,live_delta.rs}`). No
+render code, no edit under `crates/engine/src/realtime/`, no `control.rs` edit (#1711 landed in
+19a, so `automates` stays), no row class or table change (no SDK regeneration).
+
+- **Records (D3).** `level_records_between` takes the strip's own faders before and after and a
+  `FaderEventLanes` (`controls::fader_event_lanes` as `events`, `automated_fader_lanes` as `own`).
+  `fader_records` reads `events` as its automated lanes, so no `FaderDb` reaches an event lane. An
+  event lane gets one offsets write when its `S` moves or, on a lane whose own fader is not
+  automated, when its static own dB moves; that write carries `own_db = Some(own after)` (else
+  `None`) and the lane's fader length (`LevelRules::lengths`: `resolve(Fader, edit)` for a hand
+  move). Dense diff, local (fast-path) diff and the strip join all call it with the reach they hold.
+- **Clamp.** `level_differs` also compares the own static fader dB: at the effective clamp a hand
+  move leaves `fader_db` and `S` as they were but a composed lane hears it. On any other lane the
+  extra "moved" yields no record, so no non-VCA-automation answer changes.
+- **VCA hand offset (D5).** `LevelRules::vca_changed` (offset) also compares the driving entry's
+  hand offset (`vca_offset_moved`: `vca_offset_automation(current)` against
+  `ModelView::vca_automation(next)`), so members' writes take the VCA edit's length, not the
+  session's. `S` itself is V0's (`effective_strip`).
+- **VCA mute (D4, D5).** No new record: the effective mute (`terms`) change is the `Mute` record,
+  which V2's composed mute lane takes as `terms`.
+- **Reach rule.** No classifier change: V0's `rendered_automation_changed` gives step 3 `Automation`;
+  step 3's doc now names the VCA rows and the reach rule.
+- **Join (D6).** `join_level_records` releases lanes that stop being fader / mute event lanes
+  (`fader_event_lanes` / `mute_event_lanes` over `reach_before` and `reach`). The carry byte is V2's
+  widened `continued_*_lanes`, unchanged here.
+- **Slot.** V2 already gives every fader event lane its `PreparedFaderCell` and offsets cell
+  (`attach_offsets` over `cells.fader`); V3 only gates it.
+- **Route (D4).** `following_route_lanes` widens `lanes` to `mute_event_lanes` (reach read through
+  `vca_reach_of` only when an entry drives a VCA `mute` row and an own lane is not automated), so the
+  attach, #1653's records, the local route scan and `join_routes` read one predicate. The attach
+  checks `own cell || VCA cells` per lane against it, with the new
+  `follow_vca_mute_cells(vca_cells, model, source, program) -> Option<[Vec<u32>; 2]>`: per source
+  lane, `PreparedBuiltinsSession::vca_cells(vca)[1][lane]` of each reaching automated VCA mute, in
+  ascending VCA ID, `None` on a plan/model mismatch.
+
+**Departure / interim.** Until V4, a following send whose source lane only a VCA mute reaches has
+`automated[lane] = true` and no own cell, so `GraphFollowRouteSource::new` refuses it and preparation
+fails with `host.route_control.attach` (typed, no panic). V4 passes `follow_vca_mute_cells`' lists
+to the source (graph) and relaxes `new`'s `flags.automated == cells` check to `own || VCA`. A lane
+with its own mute cell and a VCA mute prepares, and until V4 its send follows only the own curve.
+
+**Gates** (`crates/host-core/tests/stored_vca_automation.rs`, renders on Simd8 under AVX2, Simd4 and
+the scalar oracle, live and between render calls, tail bits equal to a fresh plan, the edit heard,
+render allocations and frees 0): `every_fader_event_lane_has_an_offsets_cell` (test-support);
+under `control-provider`, full and fast path equal:
+`a_hand_move_on_a_member_only_a_vca_ride_reaches_writes_its_own_db`,
+`a_hand_move_on_an_automated_vca_offset_rewrites_every_reached_lanes_s`,
+`a_hand_mute_of_an_automated_vca_writes_each_reached_lanes_terms`,
+`a_reach_change_of_an_automated_vca_rebuilds_and_of_a_plain_vca_is_live`,
+`a_hand_move_hidden_by_the_static_clamp_still_writes_own_db`.
+
+Commands: `cargo fmt --all`; clippy `-D warnings --all-targets --all-features` and no-feature
+`cargo check --locked --all-targets` on host-core, control-plane, builtins-compiler; tests host-core
+`--features test-support` (477 passed) and `test-support,control-provider` (605), control-plane
+`--features test-support`, builtins-compiler, capi lib (218): all green. Realtime policy: 172
+regions in 35 files (unchanged).
+
+For V4: read `follow_vca_mute_cells` in the attach loop (`prepare.rs`, the `follow_cells` push) and
+pass its lists into `GraphFollowRouteSource`; jump row `VcaMute`. For V5: host parity, the cap
+gate (R19-6), gates 1-3 and 7-8 on both hosts.

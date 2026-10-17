@@ -2915,9 +2915,19 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             (None, Some((program, rows))) => (program, [None; 2], rows),
             _ => return Err(graph_failure("host.route_control.attach")),
         };
-        if cells.map(|cell| cell.is_some()) != automated.lanes
-            || rows.map(|cell| cell.is_some()) != automated.rows
-        {
+        // #1655 D4: a source lane's curve is its own mute cell, then the reaching automated VCA
+        // mute cells in ascending VCA ID; `automated.lanes` names the lanes that have one. The
+        // route op's VCA mute cursors read `vca_mutes` (V4); until then a lane that only a VCA
+        // mute reaches has no own cell, and the graph source refuses its flags.
+        let vca_mutes = follow_vca_mute_cells(
+            |vca| builtins.vca_cells(vca),
+            model,
+            route_source_id(route),
+            &program,
+        )
+        .ok_or_else(|| graph_failure("host.route_control.attach"))?;
+        let curves = [0, 1].map(|lane| cells[lane].is_some() || !vca_mutes[lane].is_empty());
+        if curves != automated.lanes || rows.map(|cell| cell.is_some()) != automated.rows {
             return Err(graph_failure("host.route_control.attach"));
         }
         let flags = follow_route_flags(route, effective.strips[source].mute, automated);
@@ -4406,6 +4416,49 @@ impl SendRecord {
 
 /// The flags word of a following route (#1652 D1, #1654 D2): the route's `mute` and
 /// `follows_mute`, the source lanes' `terms` and the plan's automated set (bits 4-11).
+/// The VCA mute curves of strip `source`'s lanes that a following route's op ORs into its follow
+/// term at `a(tap)` (#1655 D4, R19-2): per source lane `[left, right]`, the program cell index of
+/// each reaching VCA's automated `mute` lane (`PreparedBuiltinsSession::vca_cells`, row 1, the
+/// lane's own index), in ascending VCA ID (the order of [`SessionModel::vca_reach_of`]).
+/// `vca_cells` is the plan's `PreparedBuiltinsSession::vca_cells`. Empty lanes when no entry drives
+/// a VCA `mute` row. `None` when a reaching VCA's entry has no cell in `program`, the plan's one
+/// automation program: a plan that disagrees with its model. Control side; it allocates the two
+/// lists.
+pub(crate) fn follow_vca_mute_cells<P>(
+    vca_cells: impl Fn(&str) -> Option<(std::sync::Arc<P>, builtins_compiler::VcaCells)>,
+    model: &SessionModel,
+    source: &session::StableId,
+    program: &std::sync::Arc<P>,
+) -> Option<[Vec<u32>; 2]> {
+    let mut lanes = [Vec::new(), Vec::new()];
+    if !model
+        .automation
+        .iter()
+        .any(|entry| controls::vca_mute_row(&entry.target))
+    {
+        return Some(lanes);
+    }
+    for index in model.vca_reach_of(source) {
+        let vca = &model.vcas.get(index)?.id;
+        let driven = controls::vca_mute_automation(model, vca);
+        if driven.iter().all(Option::is_none) {
+            continue;
+        }
+        let (cells_program, cells) = vca_cells(vca.as_str())?;
+        if !std::sync::Arc::ptr_eq(&cells_program, program) {
+            return None;
+        }
+        for (lane, list) in lanes.iter_mut().enumerate() {
+            match (driven[lane], cells[1][lane]) {
+                (Some(_), Some(cell)) => list.push(cell),
+                (None, None) => {}
+                _ => return None,
+            }
+        }
+    }
+    Some(lanes)
+}
+
 pub(crate) fn follow_route_flags(
     route: &session::Route,
     terms: [bool; 2],
@@ -4554,9 +4607,10 @@ pub(crate) struct LevelLengths {
 /// the same value and the same length). A fader move on a lane that stays muted still gets its
 /// record, so the stage remembers the gain for a later unmute.
 ///
-/// A lane that `automated` names (the lanes the post-change model automates,
-/// [`controls::automated_fader_lanes`]) gets no `FaderDb` (#1648 D3): its cell renders the curve
-/// and the static value is only its fallback. That is no error, so a successor's join reads the
+/// A lane that `automated` names (the fader event lanes of the post-change model,
+/// [`FaderEventLanes::events`]) gets no `FaderDb` (#1648 D3, #1655 D3): its cell renders the curve
+/// (its own, or a reaching VCA's composed with the member's `own_db`, which the lane's offsets
+/// record carries) and the static value is only its fallback. That is no error, so a successor's join reads the
 /// strip as unchanged when nothing else moved, and its stage carries. Its `Mute` records are
 /// unchanged. `automated` is called only when a lane's gain bits change.
 ///
@@ -4626,13 +4680,45 @@ pub(crate) struct LevelRecords {
     pub(crate) offsets: [Option<FaderOffsetsRecord>; 2],
 }
 
+/// The fader lanes of one strip that a plan of the post-change model renders by events (#1655 D2,
+/// D3): `events`, the fader event lanes ([`controls::fader_event_lanes`]: an own fader entry, or
+/// an automated VCA `offset_db` lane that reaches the lane), and `own`, the lanes of `events` whose
+/// own fader is automated ([`controls::automated_fader_lanes`]). An event lane outside `own` hears
+/// the member's static fader dB (`own_db`) through its offsets cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FaderEventLanes {
+    pub(crate) events: [bool; 2],
+    pub(crate) own: [bool; 2],
+}
+
+impl FaderEventLanes {
+    /// The event lanes of strip `strip` in `model`, `reach` its VCA reach there (indices into
+    /// `model.vcas`, [`SessionModel::vca_reach`]).
+    pub(crate) fn of(model: &SessionModel, strip: &session::StableId, reach: &[usize]) -> Self {
+        Self {
+            events: controls::fader_event_lanes(model, strip, reach),
+            own: controls::automated_fader_lanes(model, strip),
+        }
+    }
+
+    /// Whether `lane` is an event lane whose own fader is not automated: its offsets cell holds
+    /// `own_db` (#1655 D3).
+    const fn static_own(self, lane: usize) -> bool {
+        self.events[lane] && !self.own[lane]
+    }
+}
+
 /// The level records that bring a strip from `before`'s effective values to `after`'s: its
-/// [`fader_records`], and for each lane that `automated` names (the lanes the post-change model
-/// automates) whose `S` ([`controls::EffectiveStrip::offsets_sum`]) differs in bits, one
-/// offsets-cell write of `after`'s `S` with the lane's fader length (#1649 D4, departure 1: the
-/// one length rule, so an automated and a plain member of one VCA edit ramp alike). A VCA ride, a
-/// membership change, a nested VCA, an added and a removed VCA each change only `S` on such a
-/// lane. `automated` is asked at most once.
+/// [`fader_records`] with the fader event lanes (`lanes().events`) as the automated lanes, so no
+/// `FaderDb` reaches a lane that renders by events (#1648 D3, #1655 D3), and one offsets-cell write
+/// per event lane whose `S` ([`controls::EffectiveStrip::offsets_sum`]) differs in bits, or, on an
+/// event lane whose own fader is not automated, whose static own fader dB differs in bits (`own`,
+/// the strip's own faders before and after). The write carries `after`'s `S` and the lane's fader
+/// length (#1649 D4, departure 1: the one length rule, so an automated and a plain member of one
+/// VCA edit ramp alike; a hand fader move takes the `Fader` row's length, `LevelRules::lengths`),
+/// and on such a lane `own_db = Some(after's own fader dB)` (#1655 D3), else `None`. A VCA ride, a
+/// membership change, a nested VCA, an added and a removed VCA each change only `S` on an event
+/// lane. `lanes` is asked at most once.
 ///
 /// # Errors
 ///
@@ -4640,28 +4726,34 @@ pub(crate) struct LevelRecords {
 pub(crate) fn level_records_between(
     before: &controls::EffectiveStrip,
     after: &controls::EffectiveStrip,
+    own: [&session::DualMonoFader; 2],
     lengths: LevelLengths,
-    automated: impl Fn() -> [bool; 2],
+    lanes: impl Fn() -> FaderEventLanes,
 ) -> Result<LevelRecords, OutOfDomain> {
-    let lanes = core::cell::OnceCell::new();
-    let automated = || *lanes.get_or_init(&automated);
+    let asked = core::cell::OnceCell::new();
+    let lanes = || *asked.get_or_init(&lanes);
     let fader = fader_records(
         &effective_fader(before),
         &effective_fader(after),
         lengths,
-        automated,
+        || lanes().events,
     )?;
     let mut offsets = [None; 2];
-    let moved =
+    let own_db =
+        |fader: &session::DualMonoFader, lane: usize| [fader.left_db, fader.right_db][lane];
+    let sum_moved =
         [0, 1].map(|lane| before.offsets_sum[lane].to_bits() != after.offsets_sum[lane].to_bits());
-    if moved.contains(&true) {
-        let automated = automated();
+    let own_moved =
+        [0, 1].map(|lane| own_db(own[0], lane).to_bits() != own_db(own[1], lane).to_bits());
+    if sum_moved.contains(&true) || own_moved.contains(&true) {
+        let lanes = lanes();
         for lane in 0..2 {
-            if moved[lane] && automated[lane] {
+            let static_own = lanes.static_own(lane);
+            if lanes.events[lane] && (sum_moved[lane] || (static_own && own_moved[lane])) {
                 offsets[lane] = Some(FaderOffsetsRecord {
                     offsets_sum: after.offsets_sum[lane],
                     smoothing_samples: lengths.fader[lane],
-                    own_db: None,
+                    own_db: static_own.then(|| own_db(own[1], lane)),
                 });
             }
         }
@@ -4669,18 +4761,24 @@ pub(crate) fn level_records_between(
     Ok(LevelRecords { fader, offsets })
 }
 
-/// Whether a strip's effective fader, mute or offset sum `S` differs, as bits: the one test of
-/// "this strip's level moved", for the dense diff and the local one. `S` moves alone when a VCA
-/// edit leaves the effective fader's bits (a clamp, a zero's sign), and an automated lane hears
-/// `S` (#1649).
+/// Whether a strip's effective fader, mute or offset sum `S`, or its own static fader dB (`own`,
+/// before and after), differs, as bits: the one test of "this strip's level moved", for the dense
+/// diff and the local one. `S` moves alone when a VCA edit leaves the effective fader's bits (a
+/// clamp, a zero's sign), and an automated lane hears `S` (#1649). The own fader moves alone at a
+/// clamp, and a fader event lane whose own fader is not automated hears it (`own_db`, #1655 D3)
+/// composed with the VCA curves, which can leave the clamp; on any other lane such a move gives
+/// no record ([`level_records_between`]).
 #[cfg(feature = "control-provider")]
 pub(crate) fn level_differs(
     before: &controls::EffectiveStrip,
     after: &controls::EffectiveStrip,
+    own: [&session::DualMonoFader; 2],
 ) -> bool {
+    let db = |fader: &session::DualMonoFader| [fader.left_db, fader.right_db].map(f32::to_bits);
     before.fader_db.map(f32::to_bits) != after.fader_db.map(f32::to_bits)
         || before.mute != after.mute
         || before.offsets_sum.map(f64::to_bits) != after.offsets_sum.map(f64::to_bits)
+        || db(own[0]) != db(own[1])
 }
 
 /// A strip's effective fader and mute as a [`session::DualMonoFader`], the shape its stage's
@@ -4842,7 +4940,22 @@ impl LevelRules<'_> {
         } else {
             [prior.fader.left_db, prior.fader.right_db][lane].to_bits()
                 != [vca.fader.left_db, vca.fader.right_db][lane].to_bits()
+                || self.vca_offset_moved(&vca.id, lane)
         }
+    }
+
+    /// Whether the hand offset of the entry that drives VCA `vca`'s `offset_db` on `lane` differs
+    /// between the models (#1655 D5): a hand move of an automated VCA offset writes it, so it is
+    /// the VCA's own offset edit there, and its members' records take the VCA's edit length.
+    fn vca_offset_moved(&self, vca: &session::StableId, lane: usize) -> bool {
+        if self.current.automation.is_empty() {
+            return false;
+        }
+        let offset = |entries: [Option<&session::Automation>; 2]| {
+            entries[lane].map(|entry| [entry.offset.left_db, entry.offset.right_db][lane].to_bits())
+        };
+        offset(controls::vca_offset_automation(self.current, vca))
+            != offset(self.next.vca_automation(vca))
     }
 
     /// The ramp length of a route record whose gate changed (#1558 D7): the route's own `mute` or
@@ -4951,9 +5064,15 @@ impl<'a> EffectiveDiff<'a> {
     }
 
     #[cfg(feature = "control-provider")]
-    /// Whether the strip's effective fader or mute differs, as bits, between the two models.
+    /// Whether the strip's effective fader or mute (or its own static fader, [`level_differs`])
+    /// differs, as bits, between the two models.
     pub(crate) fn level_changed(&self, before: usize, after: usize) -> bool {
-        level_differs(&self.before.strips[before], &self.after.strips[after])
+        let change = self.change(before, after);
+        level_differs(
+            &self.before.strips[before],
+            &self.after.strips[after],
+            [change.own_before, change.own_after],
+        )
     }
 
     /// The level records of one strip, its effective values in the two models with the lengths
@@ -4971,8 +5090,9 @@ impl<'a> EffectiveDiff<'a> {
         level_records_between(
             &self.before.strips[before],
             &self.after.strips[after],
+            [change.own_before, change.own_after],
             self.rules.lengths(&change),
-            || controls::automated_fader_lanes(self.rules.next.structure(), change.id),
+            || FaderEventLanes::of(self.rules.next.structure(), change.id, change.reach),
         )
     }
 
@@ -5010,16 +5130,16 @@ impl<'a> EffectiveDiff<'a> {
         let next = self.rules.next.structure();
         let lost =
             |lanes: [bool; 2], kept: [bool; 2]| [0, 1].map(|lane| lanes[lane] && !kept[lane]);
+        // #1655 D6: an event lane (an own curve, or a reaching automated VCA's) that the change
+        // makes a plain lane is released; a lane that stays an event lane keeps its composed
+        // stage, which the carry repositions.
         let fader_released = lost(
-            controls::automated_fader_lanes(self.rules.current, change.id),
-            controls::automated_fader_lanes(next, change.id),
+            controls::fader_event_lanes(self.rules.current, change.id, change.reach_before),
+            controls::fader_event_lanes(next, change.id, change.reach),
         );
-        let automates = |model: &SessionModel, strip: &session::StableId| {
-            controls::mute_automation(model, strip).map(|entry| entry.is_some())
-        };
         let mute_released = lost(
-            automates(self.rules.current, change.id),
-            automates(next, change.id),
+            controls::mute_event_lanes(self.rules.current, change.id, change.reach_before),
+            controls::mute_event_lanes(next, change.id, change.reach),
         );
         if fader_released == [false; 2] && mute_released == [false; 2] {
             return Ok(level);
@@ -5140,20 +5260,23 @@ fn route_source_id(route: &session::Route) -> &session::StableId {
 }
 
 /// Whether a plan of `model` gives `route` the seven-word cell of a following route (#1652 D1,
-/// #1654 D2): it goes into a submix and either its source strip automates the mute of a lane
-/// ([`controls::mute_automation`], the entries the builtins plan compiles mute cells from) or the
-/// route automates one of its own rows 1-6 ([`controls::route_automation`], the entries the
-/// builtins plan compiles route cells from). Every other route keeps the six-word cell. A route
-/// into the output never follows.
+/// #1654 D2, #1655 D4): it goes into a submix and either a lane of its source strip is a mute
+/// event lane ([`controls::mute_event_lanes`]: its own mute is automated, the entries the builtins
+/// plan compiles mute cells from, or an automated VCA `mute` lane reaches it) or the route
+/// automates one of its own rows 1-6 ([`controls::route_automation`], the entries the builtins
+/// plan compiles route cells from). Every other route keeps the six-word cell. A route into the
+/// output never follows.
 #[must_use]
 pub(crate) fn follows_automated_mute(model: &SessionModel, route: &session::Route) -> bool {
     following_route_lanes(model, route).is_some()
 }
 
-/// What a plan of `model` automates of `route` (flags bits 4-11: the source lanes whose mute has
-/// a cell and the route rows 1-6 that have one), when that plan gives `route` the seven-word cell
-/// of a following route ([`follows_automated_mute`]), else `None`: the automated set of the
-/// route's records (#1652 D1, #1653 D1, #1654 D2).
+/// What a plan of `model` automates of `route` (flags bits 4-11: the source lanes that have a mute
+/// curve, own or a reaching automated VCA's, and the route rows 1-6 that have a cell), when that
+/// plan gives `route` the seven-word cell of a following route ([`follows_automated_mute`]), else
+/// `None`: the automated set of the route's records (#1652 D1, #1653 D1, #1654 D2, #1655 D4). The
+/// source's VCA reach is read only when an entry drives a VCA `mute` row and an own mute lane is
+/// not automated.
 #[must_use]
 pub(crate) fn following_route_lanes(
     model: &SessionModel,
@@ -5166,9 +5289,20 @@ pub(crate) fn following_route_lanes(
     {
         return None;
     }
+    let source = route_source_id(route);
+    let own = controls::mute_automation(model, source).map(|entry| entry.is_some());
+    let lanes = if own == [true; 2]
+        || !model
+            .automation
+            .iter()
+            .any(|entry| controls::vca_mute_row(&entry.target))
+    {
+        own
+    } else {
+        controls::mute_event_lanes(model, source, &model.vca_reach_of(source))
+    };
     let set = graph::RouteAutomatedSet {
-        lanes: controls::mute_automation(model, route_source_id(route))
-            .map(|entry| entry.is_some()),
+        lanes,
         rows: controls::route_automation(model, &route.id).map(|entry| entry.is_some()),
     };
     (set.lanes.contains(&true) || set.rows.contains(&true)).then_some(set)

@@ -54,10 +54,10 @@ pub fn take_fast_classification_count() -> usize {
 // The ramp rule and the per-owner record derivation live with preparation, which needs them on
 // every build (a successor's carry-then-retarget, #1277 D5); the classifier calls them.
 use crate::prepare::{
-    EffectiveDiff, LevelRecords, LevelRules, OutOfDomain, RouteEditRamps, SendRecord, StripChange,
-    StripEditRamps, effect_instance_records, follow_route_record_between, following_route_lanes,
-    input_records, level_differs, level_records_between, matrix_record, route_gain_offset,
-    route_record_between, route_source_strip, same_params, strip_at,
+    EffectiveDiff, FaderEventLanes, LevelRecords, LevelRules, OutOfDomain, RouteEditRamps,
+    SendRecord, StripChange, StripEditRamps, effect_instance_records, follow_route_record_between,
+    following_route_lanes, input_records, level_differs, level_records_between, matrix_record,
+    route_gain_offset, route_record_between, route_source_strip, same_params, strip_at,
 };
 use crate::prepare::{GraphJumpLengths, LiveRampRow, LiveRamps, MonitorBase, session_jump_lengths};
 
@@ -69,9 +69,11 @@ pub struct LiveStripRecords<'a> {
     /// For the strip's fader/mute queue, in push order: `FaderDb` records first, then `Mute`
     /// records, each left before right; `None` after the last one.
     pub fader: [Option<TrackFaderRecord>; 4],
-    /// For the offsets cells of the strip's automated fader lanes (#1649 D4), `[left, right]`:
-    /// the lane's new `S` and the length of its jump, when `S` changes on a lane the post-commit
-    /// model automates. A host writes each to the lane's cell (`FaderCells::write_offsets`).
+    /// For the offsets cells of the strip's fader event lanes (#1649 D4, #1655 D3), `[left,
+    /// right]`: the lane's new `S` and the length of its jump, when `S` changes on a lane the
+    /// post-commit model renders by events, or, on such a lane whose own fader is not automated,
+    /// when its static fader moves (then `own_db` carries it, and no `FaderDb` is emitted). A host
+    /// writes each to the lane's cell (`FaderCells::write_offsets`).
     pub offsets: [Option<FaderOffsetsRecord>; 2],
     /// For the strip's matrix/pan queue: the new lowered target, when it changes.
     pub matrix: Option<TrackControlRecord>,
@@ -274,11 +276,17 @@ pub use crate::prepare::LiveRebuild;
 ///    `next`'s automations (decision 15 E1, #1335 D4, #1566 D6). An unchanged automation table
 ///    over unchanged activity and unchanged filter statics is never re-checked: it was prepared.
 /// 3. [`LiveRebuild::Automation`] if the entries of the rows that render differ
-///    ([`controls::rendered_automation_changed`], #1648 D1): an entry on such a row (today a
-///    strip's fader and mute, builtin rows 5 and 6, [`controls::automation_row_renders`], #1651)
-///    is added, removed, retargeted or given other segments. A plan compiles its cells from these
-///    entries, so only a rebuild can carry the change; the successor also seeds its jump-length
-///    cell from its own model (#1639 D4). An entry's hand offset (#1650) is not compared. An
+///    ([`controls::rendered_automation_changed`], #1648 D1): an entry on such a row (a strip's
+///    fader and mute, builtin rows 5 and 6, a route's rows 1-6 and a VCA's `offset_db` and `mute`,
+///    rows 1 and 2, [`controls::automation_row_renders`], #1651, #1654, #1655 D6) is added,
+///    removed, retargeted or given other segments, or the `(member strip, lane)` set an automated
+///    VCA lane reaches differs (a membership or nesting edit of an automated VCA, #1655 D5: each
+///    new pair needs new event state). A plan compiles its cells from these entries, so only a
+///    rebuild can carry the change; the successor also seeds its jump-length cell from its own
+///    model (#1639 D4). An entry's hand offset (#1650) is not compared: a hand move of an
+///    automated fader or VCA offset is a live offsets-cell write of each lane it reaches, and a
+///    hand fader move on a lane only a VCA curve reaches writes that lane's `own_db` (#1655 D3),
+///    never a `FaderDb`. A reach change of VCAs no rendered entry drives stays live (#1649). An
 ///    accepted change on a row that does not render yet stays live with no records, as #1260 D2
 ///    made it.
 /// 4. With the structure equal, the two models list the same controls in the same order. For each
@@ -1280,11 +1288,21 @@ impl<'a> LocalDiff<'a> {
         }
     }
 
+    /// Whether `strip`'s level moved ([`level_differs`]: its effective values or its own fader).
+    fn differs(&self, strip: &LocalStrip) -> bool {
+        let change = self.change(strip);
+        level_differs(
+            &strip.before,
+            &strip.after,
+            [change.own_before, change.own_after],
+        )
+    }
+
     /// The strips whose effective fader or mute differs between the models, ascending.
     fn level_changed_strips(&self) -> Vec<usize> {
         self.strips
             .iter()
-            .filter(|strip| level_differs(&strip.before, &strip.after))
+            .filter(|strip| self.differs(strip))
             .map(|strip| strip.index)
             .collect()
     }
@@ -1307,8 +1325,7 @@ impl<'a> LocalDiff<'a> {
 
 impl LevelDiff for LocalDiff<'_> {
     fn level_changed(&self, strip: usize) -> bool {
-        self.strip(strip)
-            .is_some_and(|strip| level_differs(&strip.before, &strip.after))
+        self.strip(strip).is_some_and(|strip| self.differs(strip))
     }
 
     fn level_records(&self, strip: usize) -> Result<LevelRecords, OutOfDomain> {
@@ -1317,8 +1334,9 @@ impl LevelDiff for LocalDiff<'_> {
         level_records_between(
             &strip.before,
             &strip.after,
+            [change.own_before, change.own_after],
             self.rules.lengths(&change),
-            || controls::automated_fader_lanes(self.rules.next.structure(), change.id),
+            || FaderEventLanes::of(self.rules.next.structure(), change.id, change.reach),
         )
     }
 
