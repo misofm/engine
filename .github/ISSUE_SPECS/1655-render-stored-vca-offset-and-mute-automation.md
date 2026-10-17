@@ -190,3 +190,184 @@ F19), clippy `-D warnings`, `cargo fmt --all -- --check`.
   carried rebuild. Decision 14, rule 3 entry, for automated VCAs only: the reach change needs new
   memory (an `own_db` cell word per newly reached lane and the member's curve tables), so it cannot
   be a live update. Non-automated VCAs keep D15-6's live set.
+
+## Amendment (controls coordinator, batch 19 spec check, 2026-10-17)
+
+Checked against `323433f6a`. #1646-#1653 have landed (batches 17 and 18). The filed text stays;
+where it disagrees, this section wins. Rulings R19-V1 and R19-V2 below are open; the rest are fixes.
+
+**Anchors now.**
+- VCA rows: `crates/controls/src/vca.rs:14` (`OFFSET_DB`), `ROWS` `:37-73`, `write` `:111`.
+  `automatable`: `crates/controls/src/descriptor.rs:154`. The classifier masks the table at
+  `crates/host-core/src/live_delta.rs:404`; step 3 is `:422-425`.
+- `controls` (`crates/controls/src/automation.rs`): `takes_offset` `:51`, `automation_row_renders`
+  `:400`, `mute_row` `:407`, `fader_row` `:419`, `automated_fader_lanes` `:502`,
+  `rendered_automation_changed` `:527`, `continued_fader_lanes` `:573`, `continued_mute_lanes`
+  `:586`. `effective_strip` `crates/controls/src/effective.rs:326-366` (`offsets_sum` `:207`). The
+  hand-offset write: `crates/controls/src/registry.rs:565` (`builtin_rows::write_fader_offset`),
+  `ModelView::fader_automation` `crates/controls/src/view.rs:111`,
+  `OwnerEdits::take_fader_automation` `crates/controls/src/owner_edits.rs:105`,
+  `mask_fader_offsets` `crates/controls/src/mask.rs:138`.
+- builtins-compiler (`crates/builtins-compiler/src/lib.rs`): `OFFSETS_CELL_WORDS` `:719`,
+  `OffsetsLane` `:727`, `AutomatedFaderCell` `:753`, `AutomatedMuteCell` `:839`,
+  `LaneFaderAutomation` `:858` (`adopt` `:956`, `mute_terms` `:1062`, `read_offsets` `:1128`),
+  `offsets_jump` `:1285`, `block_jumps` `:1404`, `FaderCellCursor` `:1458`, `FaderEventDriver`
+  `:1709` (`new` `:1755`), `settle_adoption` `:2146`, `prepare_fader_automation` `:2618`,
+  `fader_automation_sizes` `:2582`, `strip_mute_cells` `:5808`.
+- `automation::CellState` and `CellEvents`: `crates/automation/src/events.rs:91`, `:217`.
+- host-core (`crates/host-core/src/prepare.rs`): `MAXIMUM_VCA_REACH_PAIRS` `:144`, the following
+  route attach `:2873-2897`, `fader_records` `:4493`, `level_records_between` `:4567`,
+  `StripChange` `:4637`, `join_level_records` `:4928`, `following_route_lanes` `:5081`,
+  `join_strips` `:5638`, `join_routes` `:5829`.
+- graph: `RouteFollowFlags` `crates/graph/src/lib.rs:1146`; `LiveFollowRoute`
+  `crates/graph/src/runtime.rs:1287`, `FollowCursors` `:1442`, `follow_walk` `:1649`.
+- B17-R14's `automates`: `crates/control-plane/src/control.rs:2651`.
+
+**How the slice maps onto the landed code.**
+- **Event lanes.** A member lane is a fader event lane when its fader is automated or an automated
+  VCA `offset_db` lane reaches it, and a mute event lane when its mute is automated or an automated
+  VCA `mute` lane reaches it. Two new `controls` predicates give them (one rule for preparation,
+  the classifier, the join and the route attach). The own-entry readers of #1651 T2
+  (`fader_automation`, `model_fader_offsets`, `mask_fader_offsets`, the listing flags) stay
+  own-entry only: a member's own fader is not automated by a VCA ride.
+- **Program.** The VCA cells join the plan's one program after the mute cells, so a session
+  without VCA automation builds the same program. One cell per automated VCA lane, shared by
+  every member. `prepare_fader_automation`'s early return already reads `automation_row_renders`.
+- **Slot.** An event lane gets a `LaneFaderAutomation` slot and an offsets cell, also when its own
+  fader is not automated. Its channel's own source is the cell (own automation) or `own_db`.
+- **Driver.** The one `FaderEventDriver` (bank widths, fused pair fallback, scalar oracle: R17-4).
+  Same `a(n)` and span (R17-2, R17-3); no new node-time context. `block_jumps` also resolves
+  `LiveRamps::for_row(VcaOffset)` and `for_row(VcaMute)` (equal to the fader and mute lengths
+  today; resolved by row, not assumed).
+- **Mute.** `terms` is already `EffectiveStrip::mute` (static mute, every reaching VCA's static
+  mute, solo term). So D4 needs no new record and no classifier change: the `Mute` record is the
+  terms write, and `mute_terms` (the drain branch) composes it with the lane's composed curve.
+- **Route.** `following_route_lanes` (the one predicate of the attach and of #1653's record) widens
+  to mute event lanes. `RouteFollowFlags` keeps its six bits; `automated[lane]` now means "the
+  lane has a mute curve, own or VCA". No spare bit is used (#1654 keeps bits 6 and up). The route
+  op evaluates the reaching VCA mute cells at `τ_tap` with its own cursors (`FollowCursors`,
+  `follow_walk`). `route_mix_column_ramps_block` and the per-column ramps (R18-5) do not change.
+  #1653's pre-write checks hold: plan and record read the same predicate.
+- **FP (R17-7).** The `f64` sums of D2 run on render inside the render entry's `CanonicalFpEnv`;
+  the seed runs inside preparation's guard; the classifier's `S` inside the commit guard.
+- **Classifier.** VCA rows 1 and 2 join `automation_row_renders`, so a VCA entry change is
+  `Err(LiveRebuild::Automation)` at step 3. The reach rule (D5 last bullet, root's ruling) goes in
+  `controls::rendered_automation_changed`: it also returns `true` when the `(member strip, lane)`
+  set that an automated VCA lane reaches differs (membership, nesting, an added or removed VCA).
+  Step 3's call in `live_delta.rs` does not change (docs only). The fast path (`classify_rows`)
+  takes `SetControl` only, which cannot change a reach, so it needs no change.
+- **Hand edits (D5).** `takes_offset` gains VCA `offset_db`. As for the fader (#1650 D3, D4,
+  R18-2): `registry::write` sends a hand move on an automated VCA lane to the entry's offset;
+  `ModelView` and `OwnerEdits` read and take the VCA entry for the in-place edit (R17-1);
+  the VCA row's value is the offset and the list marks it `automated` (field 35); `mask_values`
+  copies the entry's offset and leaves the automated lane's static offset (its fallback) as
+  structure. Without these a write and a read of the same row disagree.
+- **`S` (D2).** `effective_strip` puts, on a fader event lane: the own hand offset, then the static
+  offsets of the reaching VCA lanes that are not automated, then the hand offsets of the automated
+  ones, each group in ascending VCA ID. With no automated VCA lane this is today's sum, bit for bit.
+- **Records (D3).** `level_records_between` and `fader_records` take the fader event lanes as
+  `automated` (no `FaderDb` there). The offsets record of an event lane carries `own_db` from
+  `StripChange::own_after` (no new `EffectiveStrip` field).
+
+**Fixes.**
+- **D3 and D7 bytes.** `LatestCell<N>` is const-generic. A slot of three words and a slot of four
+  words are both 32 bytes (two `AtomicU64` set the alignment), so a four-word cell costs nothing
+  more. Every offsets cell becomes four words (`OFFSETS_CELL_WORDS = 4`; the `own_db` word is
+  unread on a lane whose fader is automated). One cell shape, one reader. No edit under
+  `crates/engine/src/realtime/`. `offsets_cell_bytes` stays 120 (x86-64); the gate measures it.
+- **D7 terms.** D7 leaves out that an event lane with no own automation also takes a slot
+  (`lane_slot_bytes`) and an offsets cell. The per-pair term depends on R19-V1. All terms are
+  bank payload, charged by `fader_automation_sizes()` and checked as ceilings, never literals.
+- **D6 carry.** A carried channel continues verbatim when its own table and each reaching automated
+  VCA table (in ascending VCA ID) are the same set, bit for bit, and `a(n)` did not move; else it
+  repositions. This is `continued_cells` (bits 0-3) from the widened `continued_fader_lanes` and
+  `continued_mute_lanes`; graph passes the byte unchanged. No per-pair carry key is needed, because
+  a repositioned channel places each cursor again. A lost event lane is released by the join, as
+  today (`join_level_records`, widened to event lanes).
+- **Reposition and #1711 (R18-4 withdrawn).** A VCA offset table edit repositions every reached
+  member channel. Its landing can cut a live move in flight (a member's `own_db` move, a VCA hand
+  move), as a fader table edit does. So: land #1711 first and use its deferred jump for every
+  repositioned channel; a VCA case joins its G1 here (gate 7 below). If #1711 does not land, the
+  B17-R14 flag stays and `automates` (`control.rs:2651`) widens to VCA `offset_db` entries, so
+  a VCA-only session's table edit is flagged, never `EXACT` when wrong. A VCA mute table edit
+  lands only a `SetMute` (the stage keeps `fader_gain`, #1651 T4); U1 fold 1's rule must hold
+  for the composed mute: a terms record at the swap lands over its own ramp word (gate 8).
+
+**R19-V1 (ruling needed): how a member channel holds and walks its curves.** D1's per-pair state
+(one `CellState` per member and VCA lane) cannot hold a correct composition. Each `CellState` keeps
+its own ramp in flight and its own `held` rule, but the stage has one ramp. A member grid event
+inside a VCA jump retargets the stage over 64 samples, so the VCA step ends in 64 samples, not in
+`J` (and the reverse). Also the driver's arrays are fixed (`MAXIMUM_FADER_CELLS` on the render
+stack), and `m` has no compiled bound.
+- (a) D1 as filed: per-pair `CellState`, events merged by offset. Small. A VCA step is shortened
+  whenever the member's own ride moves. Not correct.
+- (b) One composite cell per member channel: one `CellState` over the composed curve
+  `vca_compose_db(own(t), S + c_1(t) + … + c_m(t))` (for mute: `own || v_1 || … || v_m`).
+  Events at the union of the curves' discontinuities and the shared node-time grid; target, held
+  and lagging rules on the composed value. A new K-curve event source in `crates/automation`
+  (`events.rs`, render code, not under `crates/engine/src/realtime/`): per pair one discontinuity
+  cursor and a cell index (8 bytes) in a boxed slice of the slot, allocated at preparation. With
+  `m = 0` the driver keeps today's `CellEvents` path, so no fader-only or mute-only bit moves. The
+  route op uses the same source per lane (OR). D8 holds (events at most the sum of the curves').
+  About 8 h more than (a).
+- (c) Split: this slice renders VCA `mute` (D4, the reach rule, D5's mute bullet, D6 for row 2);
+  VCA `offset_db` (D2, D3, D5's offset bullet) moves to a phase-2 successor with (b).
+- Recommendation: (b). Fall back to (c) if the offset tranche fails its second fix round.
+
+**R19-V2 (ruling needed): the reach-pair memory.** The host cap is 16,384 (strip, VCA) pairs
+(`MAXIMUM_VCA_REACH_PAIRS`), per lane and per row. Under (b) that is at most about 512 KiB of pair
+state per plan; under (a) about 3 MiB. Options: (i) charge it as bank payload under the existing
+caps (no new cap); (ii) add a host cap on automated pairs. Recommendation: (i) with (b).
+
+**Gates (fixes; both hosts and both bank widths).**
+- Gates 1-3: both hosts in one binary, `hosts/host-web/tests/control_parity.rs`, at quanta 128,
+  100 and 37. The same scripts in `crates/host-core/tests/stored_vca_automation.rs` (new) at
+  `Backend::Simd8` (`cfg(target_feature = "avx2")`) and `Backend::Simd4`, split and fused, live and
+  between render calls, and on the scalar oracle; bits equal. Gate 1 adds two VCAs on one member
+  (one automated, one static) and a member with its own ride. Gate 3 adds a member with no own
+  mute entry (its send becomes seven-word) and a nested VCA.
+- Gate 4 reads: a hand fader move on a member with no own automation gives `live`, one offsets
+  write carrying `own_db` and no `FaderDb`. Add: the VCA row lists the offset as its value and is
+  marked `automated`; a replace that changes only an automated VCA lane's static offset is
+  `rebuild`. In `crates/host-core/tests/live_delta.rs` (run with
+  `--features host-core/test-support,host-core/control-provider`) and both hosts.
+- Gate 5: `crates/control-plane/tests/vca_automation_realtime.rs` gains the curve, a hand VCA move,
+  a hand member move and a VCA mute, each block `allocations == 0 && frees == 0`.
+- Gate 7 (new, Reposition): a VCA ride table edit while a member's hand move (and a VCA hand move)
+  ramps, heard 1, 12 and 26 blocks: with #1711, every block after the swap equals the
+  uninterrupted engine and the watermark reports `EXACT`; without #1711, the flag. Both hosts,
+  both widths.
+- Gate 8 (new, carry): a VCA mute table edit with a hand VCA mute in the same transaction lands the
+  hand mute over its own ramp; added, removed and changed VCA entries each rebuild and carry the
+  member stage; the swap block allocates nothing. Bank widths (the oracle restarts at a swap,
+  #1651 T4 departure).
+- Gate 6 command: `audit capi` `pcm_digest` stays `bffc21e857b5e134`. Add `cargo test --locked -p
+  automation --all-features`; `cargo build --locked --release -p realtime-policy &&
+  ./target/release/realtime_policy` (the script is deleted).
+
+**Authorized paths after the check (this list replaces the filed one).** (R) marks render code.
+None is under `crates/engine/src/realtime/`, so no root notice is needed.
+- (R) `crates/automation/src/{events.rs,lib.rs}`, `crates/automation/tests/events.rs` (only under
+  R19-V1 (b); a path extension root approves with the ruling)
+- (R) `crates/builtins-compiler/src/lib.rs` (VCA cells, event lanes, slot, offsets cell shape,
+  driver, drain, adopt, export to host-core)
+- (R) `crates/graph/src/runtime.rs` (`FollowCursors`, `follow_walk`, the follow route's carry
+  only), `crates/graph/src/lib.rs` (`GraphFollowRouteSource`'s cells, docs)
+- `crates/controls/src/{automation.rs,vca.rs,effective.rs,registry.rs,view.rs,owner_edits.rs,mask.rs,lib.rs}`,
+  `crates/controls/tests/{automation.rs,mask_and_diff.rs}`
+- `crates/host-core/src/prepare.rs` (event-lane predicates, follow attach, level records, strip
+  and route joins), `crates/host-core/src/live_delta.rs` (docs only)
+- `crates/host-core/tests/{vca.rs,live_delta.rs,stored_vca_automation.rs,route_mute.rs}`
+- `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/tests/control_parity.rs`,
+  `crates/control-plane/tests/vca_automation_realtime.rs`
+- `crates/control-plane/src/control.rs` (only if #1711 does not land: `automates`)
+- `docs/SESSION_SCHEMA_V1.md` (`:339-340` the offset rows; the VCA rows render; D2's order),
+  `docs/REALTIME_MEMORY.md` (the pair term)
+- No SDK regeneration: no row class or table changes.
+
+**Edit order with the batch.** #1711 first (driver adoption, `events.rs`, `control.rs`), then #1654
+(`following_route_lanes`, the route op, `takes_offset` and its test), then this slice.
+Program cell order: fader cells, mute cells, #1654's route cells, then the VCA cells (VCA ID,
+row, lane), so each earlier session builds its program cell for cell. If #1654 generalizes
+`follow_walk` to a table of cursors, this slice adds the VCA mute cursors to that table and
+writes no second walk.

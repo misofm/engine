@@ -107,3 +107,175 @@ conservative fallback flag of B17-R14 with the exact behaviour and deletes that 
   power check, `scratchpad/c18t1/`). Prove the discharge observable and gate it, or prove it
   unobservable and delete it. This slice reworks the same owed and hold machinery at a Reposition,
   so the item belongs here, not in a phase-2 placeholder.
+
+## Amendment (controls coordinator, batch 19 spec check, 2026-10-17)
+
+Anchors are on `323433f6a`. #1648 is closed; batches 17 and 18 are merged. Every number below was
+measured with temporary probes in a detached worktree at `323433f6a` (removed after use).
+
+### A0. Diagnosis: the stage target does not move; the comparison reads the wrong field (a defect)
+
+- The stage's ramp target stays at the composed curve at the ramp's end: 0.301812 at every
+  `remaining` (3872, 2464, 928, 672, 160), VCA and hand moves, both tables.
+- `fader_gain` is not the ramp target. Inside a live move's ramp the cell's grid events are held
+  (`held: true`, `crates/automation/src/events.rs:391-409`). The driver gives them to the stage as
+  `RememberGain` (`crates/builtins-compiler/src/lib.rs:2026-2043`), and `RememberGain` writes
+  `fader_gain` with no retarget (`crates/builtins/src/lib.rs:3184`). So `fader_gain` follows the
+  ride (0.466 heard 1, 0.398 heard 12, 0.335 heard 24, 0.325 heard 26, 0.307 heard 30).
+- `bank_hold` puts `fader_gain` in `ChannelHold` (`lib.rs:4032-4041`, field `:1438`), and
+  `settle_adoption` compares the curve with it (`lib.rs:2196-2198`). On a moving ride it always
+  differs, so every heard move lands at the swap.
+- Fix F0 (smallest): for a free stage (`!held`), `ChannelHold` carries the stage's ramp target
+  (a new `BuiltinFaderBank` accessor over the kernel's `target_gain`, `builtins/src/lib.rs:3196`,
+  beside `fader_gain` at `:4639-4649`). A held stage keeps `fader_gain` (the gain an unmute lands
+  on; correct there). Measured with F0: all 40 cases of the gate setup (VCA and hand, both tables,
+  heard 1, 12, 24, 26, 30) are bit-equal to the uninterrupted engine over 44 blocks, adopted and
+  allocation-free. At HEAD: 4.6e-6 (heard 12), 4.8e-4, 3.1e-3, 2.1e-3 (heard 24, 26, 30).
+- Rows: the fader stage only. VCA and hand moves both (one offsets-jump path, R17-1), and any
+  free ramp the cell holds (its own `J` jump or grid ramp). Mute cells are not affected (no gain
+  comparison). #1655's VCA cells drive the same stage and inherit F0.
+- MINOR 4 (`at = end`): with F0, G1 is red if the curve is compared at the block's first sample
+  (measured: the same 4.8e-4, 3.1e-3, 2.1e-3). G2 as filed cannot be red: on the flat ride
+  `curve_toward` stops before the step, so `at = start` and `at = end` read the same value. G2 is
+  replaced (A3).
+
+### A1. The owed discharge: observable, so keep it and gate it (G4)
+
+- The line is now `crates/builtins-compiler/src/lib.rs:2104` (`HeldRampObligation::block`,
+  `:2080-2111`): a free stage at a block entry with no move due.
+- `owed` can be true there only when the stage held the gain through the previous block and a
+  live write freed it at this entry (an exact live unmute). Without the line, the stale `owed`
+  survives the free blocks and makes a later hold's end `E` land a move over `J`
+  (`lib.rs:2243`, `moving`) when nothing was remembered in that hold.
+- Measured on the C ABI (quantum 128): ride linear 0 to -6 dB over `[0, 1280)`, flat -6 dB to
+  2320, then linear. Hand mute (ramp 256) at block 4, exact hand unmute (ramp 0) at block 8, hand
+  mute (256) at block 12, hand unmute (200) at block 16, so `E` = 2248 with no grid event in the
+  second hold. Reference: the same rig with only the second hold. With the line, bit-equal from
+  block 9. Without it, the first difference is block 17 (2.7e-4).
+
+### A2. D1 against the code (amended)
+
+- F0 first. An unmoved target then takes no landing: the cell seeds its target and holds the ramp
+  again (`settle_adoption`, `lib.rs:2174-2202`, already does this when `!differs`).
+- A moved target on a free stage with a ramp in flight (and no step at the block's first sample):
+  no landing at the swap. The cell calls `CellState::defer_jump(at)` with `at` the ramp's first
+  free sample (`node_time_at(span, remaining)`). The existing deferred path
+  (`events.rs:456-490`) gives a `Jump` over the block's `J` there, change only.
+- One rule change in `crates/automation` (measured as needed): on a restartable cell
+  (`no_restart` false) grid events before a pending deferral are held. Without it the grid point
+  32 samples before the move's end retargets to the new curve (a grid ramp that completes after
+  the ramp in flight restarts, `events.rs:395-396`), the move is cut short, and change only then
+  drops the jump. A `no_restart` cell is unchanged.
+- The deferral is cleared by `reposition` and a seek landing (both already), and by a new
+  `CellState::clear_deferred_jump()` that the fader cell calls where the ramp it waits for is
+  replaced or ends early: the free path of `offsets_jump` (`lib.rs:1346-1352`, a newer live move
+  keeps its own length), the R17-10 release (`:1920-1926`) and the `release_hold_by` sites
+  (`:1576`, `:1592`). Reason for the last two: a held grid would freeze the lane after an early
+  unmute (the #1651 U1 MAJOR-1 defect).
+- Kept: the ramped landing at the block's first sample over `J` when no ramp is in flight, when
+  the stage is held, for D3 (a step at the block's first sample), and for the `Compare` backstop.
+- Deleted: `long_landing` and its one-sample landing arm (`lib.rs:1898-1919`, `:1966-2009`) and
+  `length = length.max(remaining)` (`:2191`). `settle_adoption` no longer returns a length.
+- Prototype measured (F0 + `defer_jump` + the held grid): G2's setup (A3) is bit-equal to its
+  reference at heard 12 (2464 left) and heard 30 (160 left), VCA and hand. At HEAD: 9.4e-3 and
+  1.5e-3 from the swap block. With the prototype on, the capi `automated` tests (24), host-core
+  `stored_fader_automation`, `stored_mute_automation`, `successor_swap`, `session_seek` and the
+  `automation` and `builtins-compiler` tests stay green.
+- No new state: `CellState::deferred` exists (`events.rs:102`, 32 B unchanged).
+
+### A3. Gates (amended)
+
+- G1 (unmoved target). The existing gate (`live_tests.rs:9059-9147`) becomes bit-equal (not 1e-3)
+  for Pending, SameTransaction and heard 1, 12, 24, 26, 30; both tables; VCA and hand. Add: two
+  table-only rebuilds 5 blocks apart while a 500-sample move ramps (the tranche-5 setup). Every
+  rebuild's watermark advance reports `OUTCOME_EXACT` and no transition fallback. Simd8 on the
+  C ABI. Simd4 and Simd8 in `crates/host-core/tests/stored_fader_automation.rs` through a carry
+  harness with live offsets writes (the pattern of `carry_run`,
+  `crates/host-core/tests/stored_mute_automation.rs:1129`). The scalar oracle has no plan swap
+  (`ChannelHold` there, `lib.rs:8234`). Both hosts: the parity test at
+  `hosts/host-web/tests/control_parity.rs:2933-3012` becomes "a hand move in flight reports
+  `EXACT` alike on both hosts, same bits".
+- G2 (moved target, replaces the flat-ride G2). Base ride flat at -3 dB (`flat()`); move -6 dB
+  over 4,000 samples from block 4; rebuild to a ride flat at -5 dB to 6,000, then -3 dB; heard 12
+  and 30; VCA and hand. Reference: a fresh plan whose table is -3 dB before the move's first free
+  sample (4,512 here; compute it from the rig), -5 dB to 6,000, then -3 dB, given the same move.
+  Every block is bit-equal to the reference, allocation-free, adopted, `OUTCOME_EXACT`. Red at
+  HEAD (above). Case (c): a second live move committed after the swap, before 4,512: bit-equal to
+  a fresh plan with the new table given both moves, from the second move's last sample on (red if
+  the deferral is not cleared). Simd8 and Simd4 in host-core as for G1; the C ABI leg; one
+  both-host parity case.
+- G3 as filed. Named: `a_step_at_a_reposition_swap_jumps_over_the_fader_length`
+  (`live_tests.rs:9186-9289`) and the #1648 carry gates in `automated_carry`. Also the G5
+  automation corpus digests (`crates/automation/src/corpus.rs:245`,
+  `tools/wasm-gates/tests/g5_native_corpus.rs`) do not move. Realtime policy count unchanged or
+  explained.
+- G4 (owed discharge, A1). The A1 setup in `stored_fader_automation.rs` with `acted` on every form
+  (`FORMS`, `:2092-2100`: Simd8, Simd4, the between-render forms and the scalar oracle), and on
+  both hosts in `control_parity.rs` (same bits). Test value: red if the discharge line is
+  deleted.
+
+### A4. D2 exact deletions
+
+- `crates/control-plane/src/control.rs`: the `level_moves` field (`:649-651`);
+  `LevelMoveWindow`, its `may_ramp`, `fold_level_move`, `rebuild_level_ramp`,
+  `rebuild_moves_a_level` (`:654-735`); the B17-R14 comment paragraph (`:2621-2629`, keep the
+  #1652 U2a paragraph); `automates`, `in_flight`, `level_fallback`, `moved`, `landing` and the
+  `rebuild_level` value (`:2640-2672`; the outcome becomes `follow_into_six_word` alone); the fold
+  after commit (`:2866-2870`); the live commit's `level_ramp` and its fold (`:3519-3539`,
+  `:3555-3557`). `crates/control-plane/src/compile.rs:1483` (`level_moves: None`).
+- Keep `reservation.set_outcome` (`control.rs:2840`) and `ObservedReservation::set_outcome`
+  (`crates/control-plane/src/plan.rs:199-206`): #1713's six-word fallback uses them. Fix the doc
+  at `plan.rs:199-200` to name #1713 only.
+- The B17-R14 clause: `crates/capi/src/abi.rs:96-97`, `crates/capi/include/miso_engine_v1.h:183-184`,
+  `docs/C_ABI_V1_QUALIFICATION.md:153-154`,
+  `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts:782-784` and its generated copy
+  `sdk/src/browser/shipped-host.d.ts:782-784` (`scripts/check-sdk-generated.sh`). Keep the #1713
+  clause. Doc mentions of the window: `crates/controls/src/automation.rs:397-398`, `:414-415`.
+- Tests deleted: `a_reposition_swap_while_a_level_move_ramps_reports_a_fallback`
+  (`live_tests.rs:9297-9368`), `a_second_reposition_inside_a_stretched_landing_reports_a_fallback`
+  (`:9370-9414`), and
+  `a_mute_curve_rebuild_while_a_level_move_ramps_completes_exactly_on_both_hosts`
+  (`control_parity.rs:3014-3114`, its window is gone). The `outcome` helper
+  (`live_tests.rs:9290-9295`) stays for G1.
+
+### A5. #1655 (same batch, same fader stage)
+
+- #1711 lands first. It removes the window that #1655 would otherwise have to extend for VCA
+  level moves.
+- #1711 assumes: (1) the adoption compares the stage's ramp target (F0), which does not depend
+  on how the gain is composed; (2) the curve side of the comparison is the lane's composed gain at
+  `at`. Today that is `FaderEventDriver::gain(value, S)` (`lib.rs:2196`). #1655 replaces it with
+  its one composition `checked_fader_gain(vca_compose_db(own(at), S + Σ c_k(at)))`; (3) one
+  deferral per lane channel, so one `Jump` fires at the free sample, composed with every cell at
+  that node time. #1655 names which cell holds it on an event lane with no own fader cell, and
+  gives its VCA cells the same grid-hold and clear rules.
+
+### A6. Mapping onto the batch 17-18 code
+
+- Fader cells and the one event driver: `FaderEventDriver::new` (`lib.rs:1755`), adoption at
+  `:1898-1919`. Offsets cells and hand moves (`takes_offset`, R17-1): one `offsets_jump` path
+  (`:1285`). Jump lengths: `BlockJumps` (`:1404`). Node time (R17-3): `take_block_time`
+  (`:1044`).
+- The scalar oracle (R17-4) shares the driver; no swap reaches it. It is in G4 only.
+- R17-7, the classifier rows and carry, `LatestCell<7>`, `route_mix_column_ramps_block`, the
+  #1653 commit write and mute `curve || terms`: not touched. Mute adoption stays
+  `AutomatedMuteCell::reposition`.
+- `controls::fader_row` and `automation_row_renders`: D2 deletes the only control-plane reader of
+  `fader_row` for the window (`control.rs:2651`).
+- The conservative TransitionFallback: B17-R14's is deleted (D2). #1713's stays.
+
+### A7. Authorized paths
+
+- Render (realtime policy regions): `crates/builtins-compiler/src/lib.rs`,
+  `crates/automation/src/events.rs`, `crates/builtins/src/lib.rs` (one accessor).
+- Control and docs: `crates/control-plane/src/control.rs`, `crates/control-plane/src/plan.rs`,
+  `crates/control-plane/src/compile.rs`, `crates/controls/src/automation.rs` (doc only),
+  `crates/capi/src/abi.rs`, `crates/capi/include/miso_engine_v1.h`,
+  `docs/C_ABI_V1_QUALIFICATION.md`, `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`,
+  `sdk/src/browser/shipped-host.d.ts`.
+- Tests: `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/tests/control_parity.rs`,
+  `crates/host-core/tests/stored_fader_automation.rs`,
+  `crates/host-core/tests/support/successor.rs` (only if the carry harness needs a live-write
+  hook).
+- This spec.
+- Nothing under `crates/engine/src/realtime/`.
