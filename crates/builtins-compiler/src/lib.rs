@@ -6586,6 +6586,27 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         self.graph.attach_route_controls(superseded)
     }
 
+    /// [`Self::attach_route_live_controls`] with following routes (#1652c): delegates to
+    /// [`PreparedGraphPlan::attach_route_controls_following`], which gives every route into a
+    /// submix that `following` names a seven-word lane, and the others a six-word lane when
+    /// `six_word` is set. Returns the six-word and the seven-word producers, each in canonical
+    /// route-ID order.
+    pub fn attach_route_live_controls_following(
+        &mut self,
+        superseded: &LiveValuesSuperseded,
+        six_word: bool,
+        following: impl FnMut(&graph::StableGraphId) -> Option<graph::GraphFollowRouteSource>,
+    ) -> Result<
+        (
+            Vec<graph::GraphRouteControlProducer>,
+            Vec<graph::GraphFollowRouteControlProducer>,
+        ),
+        graph::GraphRouteControlError,
+    > {
+        self.graph
+            .attach_route_controls_following(superseded, six_word, following)
+    }
+
     /// Ordinary external nodes required in addition to compiler-owned builtin processors.
     pub fn external_binding_nodes(&self) -> impl Iterator<Item = &GraphNodeId> {
         let builtin_nodes: BTreeSet<_> = self

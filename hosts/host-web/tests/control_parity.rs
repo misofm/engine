@@ -5209,3 +5209,107 @@ fn re_authoring_keeps_the_hand_offset_and_removal_ends_it_alike_on_both_hosts() 
         );
     }
 }
+
+/// #1652 gate 1's session on both hosts: the command session at 48 kHz with no console slot and
+/// no insert (so no strip state outlives a mute), whose `t1` sends `pre_fader` with
+/// `follows_mute` into bus `b`; `t1` gets a mute entry on `both` with steps 0, 1, 0 at 1,000 and
+/// 2,500 (`entry`), or is muted statically (`muted`). `control_smoothing` is explicit: the mute
+/// length is 480 samples.
+fn follow_model(entry: bool, muted: bool) -> SessionModel {
+    let mut model = model_at(48_000);
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    for track in &mut model.tracks {
+        track.console.clear();
+        track.inserts.effects.clear();
+    }
+    for submix in &mut model.submixes {
+        submix.console.clear();
+        submix.inserts.effects.clear();
+    }
+    model.control_smoothing = Some(session::ControlSmoothing {
+        mute_ms: 10.0,
+        fader_ms: 5.0,
+        pan_ms: 5.0,
+    });
+    let send = model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "t1-b")
+        .expect("the command session's following send");
+    assert!(send.follows_mute);
+    let t1 = model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == T1.id)
+        .expect("t1");
+    (t1.fader.left_mute, t1.fader.right_mute) = (muted, muted);
+    if entry {
+        let step = |start: u64, end: u64, from: f32, to: f32| session::AutomationSegment {
+            shape: session::AutomationShape::Step,
+            start_sample: start,
+            end_sample: end,
+            start_value: from,
+            end_value: to,
+            unit: session::ParameterUnit::Linear,
+        };
+        model.automation.push(session::Automation {
+            id: id("t1-mute"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                MUTE,
+                ParameterChannel::Both,
+            ),
+            segments: vec![step(0, 1_000, 0.0, 1.0), step(1_000, 2_500, 1.0, 0.0)],
+            offset: session::AutomationOffset::default(),
+        });
+    }
+    model
+}
+
+/// #1652 gate 1 on both hosts (the browser at its native width, as the C ABI). Both hosts render
+/// the same bits for the session with `t1`'s mute entry. From the first block boundary after the
+/// end of the mute ramp to the unmute, each host's output is bit for bit its plan with `t1`
+/// statically muted, fed the same PCM; from the first block boundary after the end of the unmute
+/// ramp, bit for bit its plan with no mute. Not vacuous: before the mute the curve's plan differs
+/// from the statically muted one.
+///
+/// Test value: red if either host's plan attaches no following lane for `t1-b` (its pre-fader
+/// audio leaks into `b` while `t1` is muted), or if the two hosts disagree.
+#[test]
+fn a_following_send_leaks_nothing_of_a_stored_mute_on_both_hosts() {
+    const BLOCKS: u64 = 32;
+    let quantum = u64::from(QUANTUM);
+    let run = |model: &SessionModel| {
+        let mut browser = Rig::new(model);
+        let mut c_abi = CAbi::new(model);
+        (0..BLOCKS)
+            .map(|block| {
+                let (b, c) = (browser.step(block), c_abi.step(block));
+                assert_eq!(b, c, "block {block}: the two hosts agree");
+                b
+            })
+            .collect::<Vec<_>>()
+    };
+    let curve = run(&follow_model(true, false));
+    let muted = run(&follow_model(false, true));
+    let open = run(&follow_model(false, false));
+    let first_after = |sample: u64| sample.div_ceil(quantum);
+    for block in first_after(1_000 + 480)..2_500 / quantum {
+        assert_eq!(
+            curve[block as usize], muted[block as usize],
+            "block {block}: the statically muted plan's bits while the curve mutes"
+        );
+    }
+    for block in first_after(2_500 + 480)..BLOCKS {
+        assert_eq!(
+            curve[block as usize], open[block as usize],
+            "block {block}: the open plan's bits after the unmute"
+        );
+    }
+    assert_ne!(
+        curve[2], muted[2],
+        "the strip and its send play before the mute"
+    );
+}

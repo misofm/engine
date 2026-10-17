@@ -533,3 +533,87 @@ later tranche (after #1653).
   (b) red; carried comparison as a step -> six->seven (b) red; six-word comparison missing ->
   seven->six red. Six -> six carry keeps today's code path; `host-core` `route_mute` (9) and
   `live_routes` (13) pass.
+
+## Decision record: #1652c (batch 18)
+
+Tranche R3: the host-core attach, the seven-word record builder and the swap join. No render code
+(`crates/graph/src/runtime.rs` untouched).
+
+- **Attach (`crates/host-core/src/prepare.rs`).** `follows_automated_mute(model, route)` is the
+  one predicate: a route into a submix whose source strip has a mute entry
+  (`controls::mute_automation`, the entries the builtins plan compiles mute cells from). Before
+  lowering, preparation reads `PreparedBuiltinsSession::strip_mute_cells` for each such route and
+  seeds its flags (route `mute`, `follows_mute`, `terms = controls::effective`'s source-lane mute
+  under the plan's overlay, `automated == cells`). After compile it builds
+  `GraphFollowRouteSource::new(program, cells, floored_input_arrival(input_arrivals, route node),
+  follow_mute_jump, flags)`. `follow_mute_jump` is a plain fn:
+  `LiveRamps::from_lengths(f, m, p).for_row(LiveRampRow::Mute)`, in its own realtime-policy
+  region. The attach gives a following lane on every plan, whatever the live options (six-word
+  lanes still only with live controls and `lanes.routes`), and leaves those routes out of
+  `route_controls`. A plan with no following route and no live lane calls no attach and binds what
+  it bound before. Every preparation runs inside #1709's `CanonicalFpEnv` (R17-7); no new guard.
+  A count mismatch between the predicate and the attached lanes is `host.route_control.attach`
+  (unreachable for a validated session).
+- **Graph (`crates/graph/src/lib.rs`, small).** `PreparedGraphPlan::attach_route_controls_following(
+  superseded, six_word, following)` returns both producer lists; `attach_route_controls` calls it
+  with `(true, |_| None)`, so six-word bits and bytes are unchanged. The dead-code expect on
+  `follow_route_control_pair` is gone. Mechanical wrapper in
+  `crates/builtins-compiler/src/lib.rs`: `attach_route_live_controls_following`.
+- **Handles.** `HostLiveControlHandles::follow_route_controls:
+  Vec<graph::GraphFollowRouteControlProducer>` (canonical route-ID order) and
+  `follow_route_producer_position` (re-exported). Charge: `route_control_resources(&six,
+  &following)`. Mechanical: two struct literals in `crates/host-core/tests/{live_routes,
+  effect_observation}.rs` gain the field. control-plane still drops the follow producers (`..`);
+  #1653 keeps them.
+- **Record builder.** `follow_route_record(route, terms, automated, length)` (open transform from
+  `graph_compiler::route_values`) and `follow_route_record_between(ramps, before, after, terms,
+  automated, gates, gate_length, edit)`, next to `route_record_between`. A record only when the
+  transform bits, `mute`, `follows_mute` or `terms` change; `automated` is the next plan's and is
+  never compared, so a change of kind alone writes nothing (coordinator obligation 1). Length:
+  `gate_length` when the effective gate changes, else `SendFollowsMute` when only `follows_mute`
+  changes, else the longest changed `SendGain`/`SendMatrix`, else `SendMute`. `SendRecord {
+  Folded, Following }` is the join's record kind.
+- **Join.** `join_routes` gives a successor following route the seven-word record (terms from
+  `EffectiveDiff::strip_mutes`), any other route today's. The carry loop writes `Folded` through
+  `route_controls` and `Following` through `follow_route_controls[...].write` under the carry's
+  one stamp (the revision the host publishes before the successor's first block).
+- **No `host.control.order` / internal fault for a following route.** Until #1653, the classifier
+  (`live_delta.rs`, `route_records`) answers `RebuildOnly(RuledLiveNotBuilt { issue: 1653 })` for
+  any route lowering of a following route (a send edit, or a strip mute that moves its gate), so no
+  commit writes a six-word record to a route with no six-word cell; the rebuild's join writes the
+  seven-word record. #1653 replaces this branch with its live record.
+- **Departure.** Gate 2 uses `L = 486` (the true-peak limiter at 48 kHz): no native effect declares
+  64. Gate 2 measures at the output (after PDC); "the send ramp starts `L` render samples before
+  the strip's" follows from the bus path's `L`-sample compensation, which the test does not probe
+  at the op.
+- **Gates (all pass unless marked).**
+  - Gate 1: `crates/host-core/tests/route_mute.rs`
+    `a_following_send_leaks_nothing_of_a_stored_mute` (Simd8 on AVX2, Simd4, Scalar; no live
+    control, live controls, between render calls; quanta 128 and 100; signed feed; windows from the
+    next block boundary after each ramp's end); `crates/capi/src/runtime/live_tests.rs`
+    `a_following_send_leaks_nothing_of_a_stored_mute`; `hosts/host-web/tests/control_parity.rs`
+    `a_following_send_leaks_nothing_of_a_stored_mute_on_both_hosts` (both hosts' bits equal per
+    block, and each against its static twins).
+  - Gate 2: `the_send_gates_on_the_timeline_sample_the_strip_mutes` (input and post_fader taps,
+    quanta 128 and 100, every width): mute and unmute start on the strip's output sample
+    (`step + L`), same length (480) for the input tap.
+  - Gate 4(a): `a_rebuild_that_adds_a_mute_entry_keeps_the_sends_ramp` (live predecessor
+    mid-ramp, six -> seven: bit for bit the never-swapped twin until the step, no join write, every
+    block after 0 allocation- and free-free by thread counters and the render audit).
+  - Gate 4(b): `a_rebuild_that_removes_the_mute_entry_reopens_the_send` (seven -> six: silent
+    before the swap, ramps in `[768, 768 + M)`, fresh-plan bits from the next boundary, quiet).
+  - Combined (obligation 3): `a_send_edit_and_a_mute_entry_in_one_rebuild_adopt_over_one_length`
+    is **red and `#[ignore]`d**: the send reaches `+0.0` at 1007 (768 + 239, the join record's
+    `SendGain` length, not `M`), which the graph fold (U2a) addresses; and the strip lane does not
+    mute at all at the swap (the carried strip lane does not adopt a new mute curve: #1651 T4).
+  - Charge (obligation 4): `the_following_route_charge_covers_its_attach_and_bind`: charged 922,
+    retained 683 bytes (x86-64), one route, a seven-word cell.
+  - Rebuild gate: `crates/capi/src/runtime/live_tests.rs` `an_edit_of_a_following_route_rebuilds`.
+  - Gate 5: `crates/control-plane/tests/follow_automation_realtime.rs`
+    `a_following_send_of_a_stored_mute_renders_allocation_free`.
+- **Red checks (temporary mutations, reverted).** No lane attached (predicate false): gates 1 (all
+  three hosts), 2, 4(a), 4(b), 5, the charge and the rebuild gate red. Events at the fader's
+  arrival (`a(tap).max(486)`): gate 2 red (send at 1972). Carry drops the ramp (no join for a
+  following route): 4(a) red. A record on a change of kind (prior with `automated = [false; 2]`):
+  4(a) red. Classifier gate removed: the rebuild gate red (result 255, internal fault).
+- **Realtime.** `realtime_policy`: 167 marked regions (166 before; `follow_mute_jump`).

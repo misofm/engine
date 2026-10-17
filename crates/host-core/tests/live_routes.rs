@@ -325,6 +325,7 @@ impl Live {
                 meters: Vec::new(),
                 effect_observations: Vec::new(),
                 route_controls: Vec::new(),
+                follow_route_controls: Vec::new(),
                 master_track: None,
                 live_values_superseded: host_core::LiveValuesSuperseded::default(),
                 jump_lengths: None,

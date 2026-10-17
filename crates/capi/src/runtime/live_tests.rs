@@ -10932,3 +10932,175 @@ fn a_removed_fader_ride_releases_to_the_static_fader() {
         );
     }
 }
+
+/// #1652 gate 1: track `eq0` sends `pre_fader` (its right lane, `rr` only) with `follows_mute`
+/// into bus `b`, and its direct route takes only its left lane to the output, so the output's
+/// left plane is the strip and its right plane the send. With `entry`, `eq0` has a mute entry on
+/// `both` with steps 0, 1, 0 at 1,000 and 2,500; with `muted`, `eq0` is muted statically.
+fn follow_document(entry: bool, muted: bool) -> String {
+    use session::{
+        Automation, AutomationOffset, AutomationSegment, AutomationShape, ChannelMatrix,
+        ControlAddress, Owner, ParameterChannel, ParameterUnit, Section, SendTap,
+    };
+    let id = |text: &str| StableId::parse(text).expect("stable ID");
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    model.sources[0].frames = SOURCE_FRAMES;
+    model.control_smoothing = Some(ControlSmoothing {
+        mute_ms: 10.0,
+        fader_ms: 5.0,
+        pan_ms: 5.0,
+    });
+    let track = model.tracks[0].id.clone();
+    (
+        model.tracks[0].fader.left_mute,
+        model.tracks[0].fader.right_mute,
+    ) = (muted, muted);
+    let matrix = |ll: f32, rr: f32| ChannelMatrix {
+        ll,
+        lr: 0.0,
+        rl: 0.0,
+        rr,
+    };
+    model.routes[0].channel_matrix = matrix(1.0, 0.0);
+    let mut send = model.routes[0].clone();
+    send.id = id("eq0-b");
+    send.source = RouteSource::Track {
+        track_id: track.clone(),
+        tap: SendTap::PreFader,
+    };
+    send.destination = RouteDestination::SubmixInput { submix_id: id("b") };
+    send.channel_matrix = matrix(0.0, 1.0);
+    send.follows_mute = true;
+    let mut out = model.routes[0].clone();
+    out.id = id("b-main");
+    out.source = RouteSource::Submix {
+        submix_id: id("b"),
+        tap: SendTap::PostPan,
+    };
+    out.channel_matrix = matrix(1.0, 1.0);
+    model.routes.push(send);
+    model.routes.push(out);
+    let console = model.console.clone();
+    model.submixes.push(Submix::unity(id("b"), &console));
+    if entry {
+        let step = |start: u64, end: u64, from: f32, to: f32| AutomationSegment {
+            shape: AutomationShape::Step,
+            start_sample: start,
+            end_sample: end,
+            start_value: from,
+            end_value: to,
+            unit: ParameterUnit::Linear,
+        };
+        model.automation.push(Automation {
+            id: id("eq0-mute"),
+            target: ControlAddress {
+                owner: Owner::Strip(track),
+                section: Section::Builtins,
+                control: 6,
+                lane: ParameterChannel::Both,
+            },
+            segments: vec![step(0, 1_000, 0.0, 1.0), step(1_000, 2_500, 1.0, 0.0)],
+            offset: AutomationOffset::default(),
+        });
+    }
+    session::canonical_session_json(&model).expect("canonical follow session")
+}
+
+/// #1652 gate 1 on the C ABI. From the first block boundary after the end of the mute ramp (1,000
+/// plus the 480-sample mute length) to the unmute at 2,500, the output is bit for bit the plan with
+/// `eq0` statically muted, fed the same PCM (the right lane is negative, so a signed zero shows);
+/// from the first block boundary after the end of the unmute ramp it is bit for bit the plan with
+/// no mute. Not vacuous: the send's plane differs from the static mute's before the mute.
+///
+/// Test value: red if the C ABI plan attaches no following lane for the send (its pre-fader audio
+/// leaks while the strip is muted), or the send does not reopen after the unmute.
+#[test]
+fn a_following_send_leaks_nothing_of_a_stored_mute() {
+    const BLOCKS: usize = 32;
+    let run = |document: &str| -> Vec<f32> {
+        let mut rig = Rig::new(document);
+        let mut planes = [Vec::new(), Vec::new()];
+        for _ in 0..BLOCKS {
+            let pcm = rig.step();
+            let quantum = rig.quantum;
+            planes[0].extend_from_slice(&pcm[..quantum]);
+            planes[1].extend_from_slice(&pcm[quantum..]);
+        }
+        let [left, right] = planes;
+        left.into_iter().chain(right).collect()
+    };
+    let quantum = 128_usize;
+    let frames = BLOCKS * quantum;
+    let curve = run(&follow_document(true, false));
+    let muted = run(&follow_document(false, true));
+    let open = run(&follow_document(false, false));
+    let muted_window = (1_000 + 480_usize).div_ceil(quantum) * quantum..2_500;
+    let open_window = (2_500 + 480_usize).div_ceil(quantum) * quantum..frames;
+    for plane in 0..2 {
+        let at = |range: &core::ops::Range<usize>| {
+            plane * frames + range.start..plane * frames + range.end
+        };
+        assert_eq!(
+            bits(&curve[at(&muted_window)]),
+            bits(&muted[at(&muted_window)]),
+            "plane {plane}: the statically muted plan's bits while the curve mutes"
+        );
+        assert_eq!(
+            bits(&curve[at(&open_window)]),
+            bits(&open[at(&open_window)]),
+            "plane {plane}: the open plan's bits after the unmute"
+        );
+    }
+    assert_ne!(
+        bits(&curve[frames..frames + 900]),
+        bits(&muted[frames..frames + 900]),
+        "the send carries audio before the mute"
+    );
+}
+
+/// #1652c: an edit that lowers a following route (a route into a submix whose source strip has a
+/// mute entry) is a rebuild until #1653 gives the live commit the seven-word record: a send gain
+/// edit on `eq0-b`, and a hand mute of `eq0` (which changes `eq0-b`'s follow gate). Each commits
+/// with `rebuild`, the successor is adopted, and from the adoption on the rig renders what the
+/// committed document renders fresh, seeked to the adoption sample.
+///
+/// Test value: red if the live commit writes a six-word record to a route that has no six-word
+/// cell (the commit refuses with an internal fault and the edit is lost), or if the rebuild's
+/// successor does not render the committed values.
+#[test]
+fn an_edit_of_a_following_route_rebuilds() {
+    use protocol::control_core::{Lane, Owner, Section, row_address};
+    let gain = SessionEdit::set_control(
+        row_address(
+            Owner::Route(StableId::parse("eq0-b").expect("route ID")),
+            Section::Own,
+            "gain_db",
+            Lane::Both,
+        )
+        .expect("the send gain row"),
+        -9.0,
+        None,
+    );
+    for edit in [gain, mute_edit("eq0", true)] {
+        let mut rig = Rig::new(&follow_document(true, false));
+        for _ in 0..4 {
+            rig.step();
+        }
+        let (adoption, live) = rebuild_and_adopt(&mut rig, std::slice::from_ref(&edit), 8);
+        let reference = seeked_reference(&rig.snapshot(), adoption, 8);
+        let settle = 4;
+        assert_eq!(
+            live[settle..]
+                .iter()
+                .map(|pcm| bits(pcm))
+                .collect::<Vec<_>>(),
+            reference[settle..]
+                .iter()
+                .map(|pcm| bits(pcm))
+                .collect::<Vec<_>>(),
+            "the successor renders the committed document once its ramps settle"
+        );
+    }
+}

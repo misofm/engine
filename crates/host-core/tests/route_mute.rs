@@ -1407,3 +1407,848 @@ fn a_fully_follow_muted_delayed_send_stays_active() {
     (follow.mute, follow.follows_mute) = (false, true);
     assert_delayed_route_stays_active(&delayed_session_checked(model));
 }
+
+// ---- #1652: a following send of a stored mute ---------------------------------------------
+
+/// #1652 (batch 18, #1652c): a send into a submix whose source strip automates its mute holds the
+/// seven-word cell on every plan and follows the curve in render at its tap's arrival.
+#[cfg(feature = "test-support")]
+#[path = "support/successor.rs"]
+mod successor;
+
+#[cfg(feature = "test-support")]
+mod follow {
+    use super::successor;
+    use super::{
+        ChannelMatrix, Effect, EffectIdentity, EffectQuality, LinkMode, RouteSource, SendTap,
+        SessionModel, SidechainDeclaration, Submix, add_track, bench_alloc, empty_session,
+        into_bus, route, sid, to_output,
+    };
+    use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+    use graph_compiler::Backend;
+    use host_core::{HostLiveControlRequest, PreparedHost, SourceSubmission};
+    use session::{
+        Automation, AutomationSegment, AutomationShape, ControlAddress, ControlSmoothing, Owner,
+        ParameterChannel, ParameterUnit, Section,
+    };
+
+    /// The session mute length: `mute_ms` 10 at 48 kHz.
+    pub(super) const M: u32 = 480;
+    /// The mute row (builtin parameter 6).
+    const MUTE: u32 = 6;
+    /// The true-peak limiter's prepared latency at 48 kHz: no native effect declares 64.
+    pub(super) const L: u64 = 486;
+
+    /// Every bank width of the target and the scalar oracle (R17-4).
+    pub(super) fn backends() -> Vec<Backend> {
+        vec![
+            #[cfg(target_feature = "avx2")]
+            Backend::Simd8,
+            Backend::Simd4,
+            Backend::Scalar,
+        ]
+    }
+
+    /// Track `t` (two-channel source `t`) and bus `b`. `t-main` feeds the output's left plane from
+    /// `t`'s left lane (`ll` only); the send `t-b` feeds bus `b`'s right plane from `t`'s right
+    /// lane at `tap` (`rr` only), and `follows_mute` when `follows`; `b-main` takes the bus to
+    /// the output. So the output's left plane is the strip and its right plane is the send. With
+    /// `latent`, `t` carries a true-peak limiter insert ([`L`] samples, before the fader).
+    pub(super) fn model(quantum: u32, tap: SendTap, latent: bool, follows: bool) -> SessionModel {
+        let (mut model, source, track) = empty_session();
+        model.quantum_frames = quantum;
+        model.control_smoothing = Some(ControlSmoothing {
+            mute_ms: 10.0,
+            fader_ms: 5.0,
+            pan_ms: 5.0,
+        });
+        let mut source = source;
+        source.frames = 1 << 16;
+        add_track(&mut model, &source, &track, "t");
+        if latent {
+            model.tracks[0].inserts.effects.push(Effect {
+                id: sid("ceiling"),
+                identity: EffectIdentity::Native {
+                    effect_id: sid("miso.true-peak-limiter"),
+                },
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::Maximum,
+                params: Vec::new(),
+                sidechain: SidechainDeclaration::None,
+            });
+        }
+        let mut direct = to_output(
+            "t-main",
+            RouteSource::Track {
+                track_id: sid("t"),
+                tap: SendTap::PostPan,
+            },
+        );
+        direct.channel_matrix = ChannelMatrix {
+            ll: 1.0,
+            lr: 0.0,
+            rl: 0.0,
+            rr: 0.0,
+        };
+        let mut send = route(
+            "t-b",
+            RouteSource::Track {
+                track_id: sid("t"),
+                tap,
+            },
+            into_bus("b"),
+        );
+        send.channel_matrix = ChannelMatrix {
+            ll: 0.0,
+            lr: 0.0,
+            rl: 0.0,
+            rr: 1.0,
+        };
+        send.follows_mute = follows;
+        model.routes.push(direct);
+        model.routes.push(send);
+        model.routes.push(to_output(
+            "b-main",
+            RouteSource::Submix {
+                submix_id: sid("b"),
+                tap: SendTap::PostPan,
+            },
+        ));
+        model.submixes.push(Submix::unity(sid("b"), &model.console));
+        assert_eq!(controls::LiveRamps::for_session(&model).mute_samples, M);
+        model
+    }
+
+    /// A mute entry on `both` lanes of track `t`, from `from`, with a step to each `(sample,
+    /// value)` of `steps`.
+    pub(super) fn mute_entry(from: f32, steps: &[(u64, f32)]) -> Automation {
+        mute_entry_on("t", from, steps)
+    }
+
+    /// [`mute_entry`] on strip `strip`.
+    pub(super) fn mute_entry_on(strip: &str, from: f32, steps: &[(u64, f32)]) -> Automation {
+        let mut at = (0_u64, from);
+        let mut segments: Vec<AutomationSegment> = steps
+            .iter()
+            .map(|&(sample, value)| {
+                let segment = AutomationSegment {
+                    shape: AutomationShape::Step,
+                    start_sample: at.0,
+                    end_sample: sample,
+                    start_value: at.1,
+                    end_value: value,
+                    unit: ParameterUnit::Linear,
+                };
+                at = (sample, value);
+                segment
+            })
+            .collect();
+        if segments.is_empty() {
+            segments.push(AutomationSegment {
+                shape: AutomationShape::Step,
+                start_sample: 0,
+                end_sample: 1,
+                start_value: from,
+                end_value: from,
+                unit: ParameterUnit::Linear,
+            });
+        }
+        Automation {
+            id: sid("mute-entry"),
+            target: ControlAddress {
+                owner: Owner::Strip(sid(strip)),
+                section: Section::Builtins,
+                control: MUTE,
+                lane: ParameterChannel::Both,
+            },
+            segments,
+            offset: session::AutomationOffset::default(),
+        }
+    }
+
+    /// `model` with `t`'s two lanes statically muted.
+    pub(super) fn statically_muted(mut model: SessionModel) -> SessionModel {
+        let fader = &mut model.tracks[0].fader;
+        (fader.left_mute, fader.right_mute) = (true, true);
+        model
+    }
+
+    /// A two-plane feed of `frames` samples: DC `value`, or with `value = None` a signed
+    /// pseudo-random signal that is never zero, half its samples negative (signed zeros show).
+    pub(super) fn feed(frames: usize, value: Option<f32>) -> [Vec<f32>; 2] {
+        let plane = |channel: u32| {
+            (0..frames as u32)
+                .map(|frame| {
+                    value.unwrap_or_else(|| {
+                        let step = frame
+                            .wrapping_mul(7_919)
+                            .wrapping_add(channel * 31)
+                            .wrapping_add(17)
+                            % 1_999;
+                        (step as f32 - 999.5) / 2_000.0
+                    })
+                })
+                .collect::<Vec<f32>>()
+        };
+        [plane(0), plane(1)]
+    }
+
+    /// How a plan is prepared: no live control, live controls, or live controls between render
+    /// calls (the browser's form).
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum Live {
+        None,
+        Controls,
+        Between,
+    }
+
+    pub(super) const LIVE_FORMS: [Live; 3] = [Live::None, Live::Controls, Live::Between];
+
+    /// `model` prepared on `backend` in form `live`.
+    pub(super) fn prepare(
+        model: &SessionModel,
+        backend: Backend,
+        live: Live,
+    ) -> (PreparedHost, Option<host_core::HostLiveControlHandles>) {
+        let document = super::document(model);
+        let caps = host_core::HostPrepareCaps {
+            source_ring_frames: 32 * model.quantum_frames,
+            ..super::caps()
+        };
+        let compiled = host_core::compile_host_session(&document, &caps)
+            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+        let request = HostLiveControlRequest::default();
+        let fail = |failure: host_core::PrepareDiagnostics| -> ! {
+            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+        };
+        match live {
+            Live::None => (
+                host_core::test_only_prepare_host_runtime_on(&compiled, &caps, backend)
+                    .unwrap_or_else(|failure| fail(failure)),
+                None,
+            ),
+            Live::Controls => {
+                let (prepared, handles) =
+                    host_core::test_only_prepare_host_runtime_with_live_controls_on(
+                        &compiled, &caps, &request, backend,
+                    )
+                    .unwrap_or_else(|failure| fail(failure));
+                (prepared, Some(handles))
+            }
+            Live::Between => {
+                let (prepared, handles) =
+                    host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
+                        &compiled, &caps, &request, backend,
+                    )
+                    .unwrap_or_else(|failure| fail(failure));
+                (prepared, Some(handles))
+            }
+        }
+    }
+
+    /// What one run rendered: the output planes and the render calls' allocator counts after the
+    /// first block, `(allocations, reallocations, deallocations)`.
+    pub(super) struct Run {
+        pub(super) out: [Vec<f32>; 2],
+        pub(super) allocations: (u64, u64, u64),
+        pub(super) follow_routes: usize,
+    }
+
+    /// `model` on `backend` in form `live`, fed `pcm` on source `t`, for `frames` samples.
+    pub(super) fn run(
+        model: &SessionModel,
+        backend: Backend,
+        live: Live,
+        pcm: &[Vec<f32>; 2],
+        frames: usize,
+    ) -> Run {
+        let quantum = model.quantum_frames as usize;
+        let (mut prepared, handles) = prepare(model, backend, live);
+        let follow_routes = handles
+            .as_ref()
+            .map_or(usize::MAX, |handles| handles.follow_route_controls.len());
+        let rate = prepared.report.sample_rate_hz;
+        let mut out = [Vec::new(), Vec::new()];
+        let mut allocations = (0, 0, 0);
+        bench_alloc::assert_installed();
+        let mut at = 0;
+        while at < frames {
+            prepared
+                .sources
+                .submit(
+                    b"t",
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: at as u64,
+                        sample_rate_hz: rate,
+                        planes: &[&pcm[0][at..at + quantum], &pcm[1][at..at + quantum]],
+                        frames: quantum as u32,
+                        end_of_region: false,
+                    },
+                )
+                .expect("source block");
+            let mut samples = vec![0.0_f32; quantum * 2];
+            let output =
+                PlanarBufferMut::try_new(&mut samples, 2, quantum, quantum).expect("output planes");
+            let mark = bench_alloc::current_thread_counters();
+            prepared
+                .plan
+                .render(
+                    RenderIo { output },
+                    RenderTime {
+                        absolute_sample: at as u64,
+                    },
+                )
+                .expect("render");
+            let delta = bench_alloc::current_thread_delta_since(mark);
+            if at > 0 {
+                allocations.0 += delta.allocations;
+                allocations.1 += delta.reallocations;
+                allocations.2 += delta.deallocations;
+            }
+            out[0].extend_from_slice(&samples[..quantum]);
+            out[1].extend_from_slice(&samples[quantum..]);
+            at += quantum;
+        }
+        drop(handles);
+        Run {
+            out: out.map(|mut plane| {
+                plane.truncate(frames);
+                plane
+            }),
+            allocations,
+            follow_routes,
+        }
+    }
+
+    /// The first index at or after `from` where `a` and `b` differ by bits.
+    pub(super) fn first_difference_from(a: &[f32], b: &[f32], from: usize) -> Option<usize> {
+        (from..a.len().min(b.len())).find(|&index| a[index].to_bits() != b[index].to_bits())
+    }
+
+    /// The first index at or after `from` where `plane` is exact `+0.0`.
+    pub(super) fn first_zero_from(plane: &[f32], from: usize) -> Option<usize> {
+        (from..plane.len()).find(|&index| plane[index].to_bits() == 0)
+    }
+
+    /// A predecessor of `a` with live controls rendered for [`successor::SWAP_BLOCK`] blocks (with
+    /// `edit` run before each block's render, writing through its handles and gate), then a
+    /// successor of `b` prepared from the predecessor's inventory and committed model
+    /// `committed`, swapped in and rendered to [`successor::BLOCKS`]; or, with `b = None`, the
+    /// predecessor alone for every block (the never-swapped twin). Fed `pcm` on source `t`.
+    pub(super) fn live_swap(
+        a: &SessionModel,
+        b: Option<(&SessionModel, &SessionModel)>,
+        backend: Backend,
+        pcm: &successor::Feed,
+        mut edit: impl FnMut(
+            usize,
+            &mut host_core::HostLiveControlHandles,
+            &mut engine::realtime::PlanRevisionGate,
+        ),
+    ) -> (
+        Vec<successor::Block>,
+        Option<host_core::HostLiveControlHandles>,
+    ) {
+        use successor::{BLOCKS, SWAP_BLOCK};
+        let request = HostLiveControlRequest::default();
+        let caps = successor::caps();
+        let session = successor::Session::compile(a.clone());
+        let (prepared, mut handles) =
+            host_core::test_only_prepare_host_runtime_with_live_controls_on(
+                &session.compiled,
+                &caps,
+                &request,
+                backend,
+            )
+            .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
+        let rate = prepared.report.sample_rate_hz;
+        let PreparedHost {
+            mut plan,
+            sources: mut a_sources,
+            inventory,
+            ..
+        } = prepared;
+        let mut gate = plan.take_revision_gate().expect("the plan's gate");
+        let (mut publisher, mut owner, _retirer) = successor::exchange(plan);
+        pcm.submit(&mut a_sources, rate, 0);
+        let mut blocks = Vec::with_capacity(BLOCKS);
+        let swap_at = if b.is_some() { SWAP_BLOCK } else { BLOCKS };
+        for block in 0..swap_at {
+            if block + 1 < BLOCKS {
+                pcm.submit(&mut a_sources, rate, block + 1);
+            }
+            edit(block, &mut handles, &mut gate);
+            blocks.push(successor::render(&mut owner));
+        }
+        let Some((b, committed)) = b else {
+            return (blocks, Some(handles));
+        };
+        let next = successor::Session::compile(b.clone());
+        let committed = successor::Session::compile(committed.clone()).model;
+        let revision = gate.last_published() + 1;
+        let (mut prepared, successor_handles) =
+            host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+                &next.compiled,
+                &caps,
+                &request,
+                host_core::SuccessorBase::new(&inventory, &committed, revision),
+                backend,
+            )
+            .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
+        prepared.sources.adopt_persisting(&mut a_sources);
+        let PreparedHost {
+            mut plan,
+            sources: mut b_sources,
+            ..
+        } = prepared;
+        plan.take_revision_gate()
+            .expect("the successor's gate")
+            .publish(revision);
+        publisher
+            .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
+            .unwrap_or_else(|_| panic!("reserve the successor"))
+            .commit();
+        for block in SWAP_BLOCK..BLOCKS {
+            if block + 1 < BLOCKS {
+                pcm.submit(&mut b_sources, rate, block + 1);
+            }
+            blocks.push(successor::render(&mut owner));
+        }
+        drop(handles);
+        (blocks, Some(successor_handles))
+    }
+
+    /// Plane `plane` of a run's blocks as samples.
+    pub(super) fn plane(blocks: &[successor::Block], plane: usize) -> Vec<f32> {
+        let quantum = successor::QUANTUM;
+        blocks
+            .iter()
+            .flat_map(|block| {
+                block.bits[plane * quantum..(plane + 1) * quantum]
+                    .iter()
+                    .map(|bits| f32::from_bits(*bits))
+            })
+            .collect()
+    }
+
+    /// Every render call after block 0 allocated and freed nothing, by the thread counters and
+    /// the render audit.
+    pub(super) fn assert_quiet(blocks: &[successor::Block], what: &str) {
+        for (index, block) in blocks.iter().enumerate().skip(1) {
+            assert_eq!(
+                (block.allocator, block.audit),
+                ((0, 0, 0), (0, 0)),
+                "{what}: block {index} allocated or freed"
+            );
+        }
+    }
+
+    /// `sample` rounded up to a block boundary of `quantum`.
+    pub(super) const fn next_boundary(sample: usize, quantum: usize) -> usize {
+        sample.div_ceil(quantum) * quantum
+    }
+}
+
+/// #1652 gate 1 (host-core form, both lanes, every bank width and the scalar oracle, every live
+/// form). Track `t` sends `pre_fader` with `follows_mute` into bus `b`; `t` has a mute entry on
+/// `both` with steps 0, 1, 0 at samples 1,000 and 2,500 (not grid samples), fed a signed signal.
+/// From the first block boundary after the end of the mute ramp to the unmute, the output is bit
+/// for bit a plan with `t` statically muted, and from the first block boundary after the end of
+/// the unmute ramp it is bit for bit a plan with no mute, at quanta 128 and 100 (the send has no
+/// compensation delay). Each plan has exactly one following route, and render allocates nothing.
+///
+/// Test value: red if a following send ignores the curve (its pre-fader audio leaks while the
+/// strip is muted), if a plan without live controls attaches no lane for it, or if the send does
+/// not reopen after the unmute.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_following_send_leaks_nothing_of_a_stored_mute() {
+    use follow::*;
+    const FRAMES: usize = 4_000;
+    const DOWN: usize = 1_000;
+    const UP: usize = 2_500;
+    let pcm = feed(FRAMES + 256, None);
+    for quantum in [128_usize, 100] {
+        let base = model(quantum as u32, SendTap::PreFader, false, true);
+        let mut automated = base.clone();
+        automated.automation = vec![mute_entry(0.0, &[(DOWN as u64, 1.0), (UP as u64, 0.0)])];
+        let muted = statically_muted(base.clone());
+        let mut leaking = automated.clone();
+        leaking.routes[1].follows_mute = false;
+        assert_eq!(leaking.routes[1].id.as_str(), "t-b");
+        for backend in follow::backends() {
+            for live in LIVE_FORMS {
+                let what = format!("q={quantum} {backend:?} {live:?}");
+                let curve = run(&automated, backend, live, &pcm, FRAMES);
+                if live != Live::None {
+                    assert_eq!(curve.follow_routes, 1, "{what}: one following route");
+                }
+                assert_eq!(curve.allocations, (0, 0, 0), "{what}: render allocates");
+                let fixed = run(&muted, backend, live, &pcm, FRAMES);
+                let open = run(&base, backend, live, &pcm, FRAMES);
+                let muted_window = next_boundary(DOWN + M as usize, quantum)..UP;
+                let open_window = next_boundary(UP + M as usize, quantum)..FRAMES;
+                for plane in 0..2 {
+                    assert_bits_equal(
+                        &curve.out[plane][muted_window.clone()],
+                        &fixed.out[plane][muted_window.clone()],
+                        &format!("{what}: plane {plane} while muted"),
+                    );
+                    assert_bits_equal(
+                        &curve.out[plane][open_window.clone()],
+                        &open.out[plane][open_window.clone()],
+                        &format!("{what}: plane {plane} after the unmute"),
+                    );
+                }
+                // Not vacuous: without the follow the pre-fader send leaks while muted.
+                let leak = run(&leaking, backend, live, &pcm, FRAMES);
+                assert!(
+                    first_difference_from(&leak.out[1], &fixed.out[1], muted_window.start)
+                        .is_some_and(|index| index < UP),
+                    "{what}: without the follow the send leaks"
+                );
+            }
+        }
+    }
+}
+
+/// #1652 gate 2 (every bank width and the scalar oracle, quanta 128 and 100). Track `t` carries a
+/// latent insert of `L` samples before its fader (a true-peak limiter, `L = 486` at 48 kHz: no
+/// native effect declares 64) and a mute entry on `both` with steps at 1,000 and 2,500, fed DC.
+/// The output's left plane is the strip, its right plane the send into bus `b`. With an `input`
+/// tap the send reads `t` `L` render samples before the strip's fader does, and PDC delays the
+/// bus path by `L` at the output; with a `post_fader` tap both read at the fader's arrival. In both
+/// cases the send's gate change and the strip's mute ramp start on the same output sample, the
+/// one where the strip's audio of timeline sample 1,000 arrives (and of 2,500 for the unmute), and
+/// with an `input` tap they reach exact `+0.0` after the same length.
+///
+/// Test value: red if the route op times its events at the fader's arrival (an `input` tap would
+/// gate `L` samples late at the output and leak) or at the route's own arrival, or if the send
+/// ramp and the strip ramp differ in length.
+#[cfg(feature = "test-support")]
+#[test]
+fn the_send_gates_on_the_timeline_sample_the_strip_mutes() {
+    use follow::*;
+    const FRAMES: usize = 4_000;
+    let pcm = feed(FRAMES + 256, Some(0.25));
+    for quantum in [128_usize, 100] {
+        for tap in [SendTap::Input, SendTap::PostFader] {
+            let with_curve = |follows: bool| {
+                let mut model = model(quantum as u32, tap, true, follows);
+                model.automation = vec![mute_entry(0.0, &[(1_000, 1.0), (2_500, 0.0)])];
+                model
+            };
+            let following = with_curve(true);
+            let still = with_curve(false);
+            let plain = model(quantum as u32, tap, true, true);
+            let muted = statically_muted(plain.clone());
+            for backend in follow::backends() {
+                let what = format!("q={quantum} {tap:?} {backend:?}");
+                let a = run(&following, backend, Live::None, &pcm, FRAMES);
+                let b = run(&still, backend, Live::None, &pcm, FRAMES);
+                let c = run(&plain, backend, Live::None, &pcm, FRAMES);
+                let d = run(&muted, backend, Live::None, &pcm, FRAMES);
+                // The mute against the open twins (the strip with no curve, the send with no
+                // follow); the unmute against the statically muted twin, strip and send.
+                for (from, event, strip_twin, send_twin) in
+                    [(0, "mute", &c, &b), (2_000, "unmute", &d, &d)]
+                {
+                    let strip = first_difference_from(&a.out[0], &strip_twin.out[0], from)
+                        .unwrap_or_else(|| panic!("{what}: the strip {event}s"));
+                    let send = first_difference_from(&a.out[1], &send_twin.out[1], from)
+                        .unwrap_or_else(|| panic!("{what}: the send {event}s"));
+                    assert_eq!(
+                        send, strip,
+                        "{what}: the send's {event} starts on the strip's output sample"
+                    );
+                    let step = if event == "mute" { 1_000 } else { 2_500 };
+                    assert!(
+                        (step + L as usize..step + L as usize + 2).contains(&strip),
+                        "{what}: the {event} lands where timeline {step} arrives, at {strip}"
+                    );
+                }
+                if tap == SendTap::Input {
+                    let strip = first_difference_from(&a.out[0], &c.out[0], 0).expect("mute");
+                    let send = first_difference_from(&a.out[1], &b.out[1], 0).expect("mute");
+                    let strip_end = first_zero_from(&a.out[0], strip).expect("the strip mutes");
+                    let send_end = first_zero_from(&a.out[1], send).expect("the send mutes");
+                    assert_eq!(
+                        send_end - send,
+                        strip_end - strip,
+                        "{what}: the two mute ramps have one length"
+                    );
+                    assert!(
+                        (M as usize - 1..=M as usize).contains(&(send_end - send)),
+                        "{what}: the length is the session's mute length, {}",
+                        send_end - send
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The send gain record a host's commit writes for `t-b` going to `gain_db` over `length`, its
+/// right-to-right matrix kept and the gate open.
+#[cfg(feature = "test-support")]
+fn send_gain(gain_db: f32, length: u32) -> host_core::RouteControlRecord {
+    host_core::route_record(gain_db, [0.0, 0.0, 0.0, 1.0], false, [false; 2], length)
+        .expect("an in-domain send record")
+}
+
+/// #1652 gate 4(a) (every bank width and the scalar oracle). A predecessor with live controls
+/// and no stored automation ramps its send `t-b` toward `-12` dB over 2,000 samples from block 4.
+/// A rebuild at block 6 adds a mute entry on `t` (held unmuted, then a step to muted at 1,000):
+/// the successor gives `t-b` the seven-word cell, so the route changes kind. It keeps the send's
+/// ramp by route ID: until the step, the swapped run is bit for bit the never-swapped
+/// predecessor. The join writes no seven-word record (no word the models hold changed), the swap
+/// block and every later block allocate and free nothing, and from the step the send follows.
+///
+/// Test value: red if gaining automation on the source re-points the send and drops its ramp
+/// (the successor starts at its prepared `-12` dB), if the join writes a record only because the
+/// kind changed, or if the swap allocates.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_rebuild_that_adds_a_mute_entry_keeps_the_sends_ramp() {
+    use follow::*;
+    use successor::{QUANTUM, SWAP_BLOCK};
+    let pcm = successor::Feed::new("t", 11);
+    let a = model(QUANTUM as u32, SendTap::PreFader, false, true);
+    let mut committed = a.clone();
+    committed.routes[1].gain_db = -12.0;
+    assert_eq!(committed.routes[1].id.as_str(), "t-b");
+    let mut b = committed.clone();
+    b.automation = vec![mute_entry(0.0, &[(1_000, 1.0)])];
+    let ramp = |block: usize,
+                handles: &mut host_core::HostLiveControlHandles,
+                gate: &mut engine::realtime::PlanRevisionGate| {
+        use builtins_compiler::TestOnlyWriteGate;
+        if block == 4 {
+            let position = host_core::route_producer_position(&handles.route_controls, "t-b")
+                .expect("t-b is a six-word route of the predecessor");
+            gate.write_published(|stamp| {
+                handles.route_controls[position].write(stamp, send_gain(-12.0, 2_000));
+            });
+        }
+    };
+    for backend in follow::backends() {
+        let what = format!("{backend:?}");
+        let (twin, _) = live_swap(&a, None, backend, &pcm, ramp);
+        let (swapped, handles) = live_swap(&a, Some((&b, &committed)), backend, &pcm, ramp);
+        let handles = handles.expect("the successor's handles");
+        assert_eq!(handles.follow_route_controls.len(), 1, "{what}");
+        assert!(
+            host_core::route_producer_position(&handles.route_controls, "t-b").is_none(),
+            "{what}: a following route has no six-word lane"
+        );
+        assert_eq!(
+            handles.follow_route_controls[0].test_only_write_count(),
+            0,
+            "{what}: the join writes no record for a change of kind"
+        );
+        assert_quiet(&swapped, &what);
+        let step = 1_000;
+        for index in 0..2 {
+            let (swapped, twin) = (plane(&swapped, index), plane(&twin, index));
+            assert_bits_equal(
+                &swapped[..step],
+                &twin[..step],
+                &format!("{what}: plane {index} before the step"),
+            );
+            // The ramp is still moving at the swap, so the comparison is not vacuous.
+            let at = SWAP_BLOCK * QUANTUM;
+            if index == 1 {
+                assert_ne!(
+                    swapped[at] / pcm.planes[1][at],
+                    swapped[step - 1] / pcm.planes[1][step - 1],
+                    "{what}: the send ramps through the swap"
+                );
+                assert!(
+                    swapped[step + M as usize..]
+                        .iter()
+                        .all(|sample| *sample == 0.0),
+                    "{what}: the send follows the successor's curve"
+                );
+            }
+        }
+    }
+}
+
+/// #1652 gate 4(b) (every bank width and the scalar oracle). A predecessor whose mute entry holds
+/// `t` muted (so its seven-word send `t-b` is follow-muted) is rebuilt at block 6 without the
+/// entry: the successor's `t-b` is a six-word route again, and nothing in the two models differs
+/// for it, so the join writes nothing. The send reopens over the session mute length from the
+/// swap block: silent before it, ramping inside `[768, 768 + M)`, and from the next block
+/// boundary the successor prepared fresh, bit for bit. The swap allocates and frees nothing.
+///
+/// Test value: red if the six-word successor keeps the adopted mute (the send stays silent), or
+/// steps open instead of ramping, or if the swap allocates.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_rebuild_that_removes_the_mute_entry_reopens_the_send() {
+    use follow::*;
+    use successor::{BLOCKS, QUANTUM, SWAP_BLOCK};
+    let pcm = successor::Feed::new("t", 13);
+    let b = model(QUANTUM as u32, SendTap::PreFader, false, true);
+    let mut a = b.clone();
+    a.automation = vec![mute_entry(1.0, &[])];
+    let quiet = |_: usize,
+                 _: &mut host_core::HostLiveControlHandles,
+                 _: &mut engine::realtime::PlanRevisionGate| {};
+    for backend in follow::backends() {
+        let what = format!("{backend:?}");
+        let (swapped, handles) = live_swap(&a, Some((&b, &a)), backend, &pcm, quiet);
+        let handles = handles.expect("the successor's handles");
+        assert!(handles.follow_route_controls.is_empty(), "{what}");
+        assert_quiet(&swapped, &what);
+        let send = plane(&swapped, 1);
+        let at = SWAP_BLOCK * QUANTUM;
+        assert!(
+            send[..at].iter().all(|sample| *sample == 0.0),
+            "{what}: the send is follow-muted before the swap"
+        );
+        let ramp = &send[at..at + M as usize];
+        assert!(
+            ramp.iter().any(|sample| *sample != 0.0),
+            "{what}: the send reopens from the swap block"
+        );
+        let open = next_boundary(at + M as usize, QUANTUM);
+        assert!(
+            ramp.iter()
+                .zip(&pcm.planes[1][at..])
+                .any(|(sample, source)| sample.to_bits() != source.to_bits()),
+            "{what}: the send ramps open, it does not step"
+        );
+        let fresh =
+            successor::reference_run(&successor::Session::compile(b.clone()), &[&pcm], backend);
+        let fresh = plane(&fresh, 1);
+        assert_bits_equal(
+            &send[open..BLOCKS * QUANTUM],
+            &fresh[open..BLOCKS * QUANTUM],
+            &format!("{what}: open after the ramp"),
+        );
+    }
+}
+
+/// #1652 gate 4, the combined transaction (coordinator obligation 3). One rebuild at block 6
+/// changes the send's gain and adds a mute entry that holds `t` muted from the start: the strip
+/// and the send both adopt the curve's mute at the swap, over the same session mute length, so the
+/// strip's lane and the send reach exact `+0.0` on the same output sample, `M` samples after the
+/// swap block starts.
+///
+/// Test value: red if the join's seven-word record (the gain edit's `SendGain` length) governs the
+/// send's mute instead of the curve's own jump over the mute length, or if the strip and the send
+/// adopt over different lengths.
+#[cfg(feature = "test-support")]
+#[test]
+#[ignore = "#1652 graph fold (U2a): the carried record is composed with the heard curve there"]
+fn a_send_edit_and_a_mute_entry_in_one_rebuild_adopt_over_one_length() {
+    use follow::*;
+    use successor::{QUANTUM, SWAP_BLOCK};
+    let pcm = successor::Feed::new("t", 17);
+    let a = model(QUANTUM as u32, SendTap::PreFader, false, true);
+    let mut b = a.clone();
+    b.routes[1].gain_db = -6.0;
+    b.automation = vec![mute_entry(1.0, &[])];
+    let quiet = |_: usize,
+                 _: &mut host_core::HostLiveControlHandles,
+                 _: &mut engine::realtime::PlanRevisionGate| {};
+    for backend in follow::backends() {
+        let what = format!("{backend:?}");
+        let (swapped, _) = live_swap(&a, Some((&b, &a)), backend, &pcm, quiet);
+        assert_quiet(&swapped, &what);
+        let at = SWAP_BLOCK * QUANTUM;
+        let strip = first_zero_from(&plane(&swapped, 0), at);
+        let send = first_zero_from(&plane(&swapped, 1), at);
+        eprintln!("{what}: strip zero at {strip:?}, send zero at {send:?}");
+        let (strip, send) = (
+            strip.expect("the strip mutes"),
+            send.expect("the send mutes"),
+        );
+        assert_eq!(send, strip, "{what}: one length for the strip and the send");
+        assert!(
+            (at + M as usize - 1..=at + M as usize).contains(&send),
+            "{what}: over the mute length, at {send}"
+        );
+    }
+}
+
+/// Coordinator obligation 4: the following route's charge covers what its attach and bind
+/// retain. Two tracks, `t` (which sends into bus `b`) and `u`, prepared with no live control, so
+/// no six-word lane is attached: a mute entry on `t` gives `t-b` its seven-word lane, the same
+/// entry on `u` gives no route a lane. The plans differ only in that lane (and the route-activity
+/// table its plan builds), and the bytes the first plan retains beyond the second are within the
+/// report's `route_control_resources`, whose one route is charged a seven-word cell.
+///
+/// Test value: red if the seven-word cell, its owner, its binding, its producer or the activity
+/// table it makes the plan build is left out of the charge a host admits against its caps.
+#[cfg(feature = "test-support")]
+#[test]
+fn the_following_route_charge_covers_its_attach_and_bind() {
+    use follow::*;
+    let mut base = model(128, SendTap::PreFader, false, true);
+    let (_, source, track) = empty_session();
+    let mut source = source;
+    source.frames = 1 << 16;
+    add_track(&mut base, &source, &track, "u");
+    base.routes.push(to_output(
+        "u-main",
+        RouteSource::Track {
+            track_id: sid("u"),
+            tap: SendTap::PostPan,
+        },
+    ));
+    let mut following = base.clone();
+    following.automation = vec![mute_entry_on("t", 1.0, &[(1_000, 0.0)])];
+    let mut elsewhere = base;
+    elsewhere.automation = vec![mute_entry_on("u", 1.0, &[(1_000, 0.0)])];
+    launch_native_effect_registry().expect("the launch registry builds");
+    bench_alloc::assert_installed();
+    let retained = |model: &SessionModel| {
+        let caps = caps();
+        let compiled = compile_host_session(&document(model), &caps).expect("compile");
+        // Warm the process statics a first preparation initialises.
+        drop(host_core::test_only_prepare_host_runtime_on(
+            &compiled,
+            &caps,
+            Backend::Simd4,
+        ));
+        let mark = bench_alloc::current_thread_counters();
+        let prepared =
+            host_core::test_only_prepare_host_runtime_on(&compiled, &caps, Backend::Simd4)
+                .unwrap_or_else(|failure| {
+                    panic!("{}", String::from_utf8_lossy(failure.as_bytes()))
+                });
+        let window = bench_alloc::current_thread_delta_since(mark);
+        let resources = prepared.report.route_control_resources;
+        drop(prepared);
+        let bytes = window
+            .requested_bytes
+            .checked_sub(window.released_bytes)
+            .expect("the window frees nothing it did not allocate");
+        (bytes, resources)
+    };
+    let (with, resources) = retained(&following);
+    let (without, none) = retained(&elsewhere);
+    assert_eq!(none, host_core::RouteControlResources::default());
+    assert_eq!(resources.routes, 1);
+    let follow_cell = (2 * core::mem::size_of::<usize>()
+        + core::mem::size_of::<engine::realtime::LatestCell<7>>()
+        + core::mem::size_of::<engine::realtime::DirtyWord>()) as u64;
+    assert_eq!(resources.cell_bytes, follow_cell, "a seven-word cell");
+    let added = with
+        .checked_sub(without)
+        .filter(|bytes| *bytes > 0)
+        .unwrap_or_else(|| panic!("the lane retains more: {with} against {without}"));
+    assert!(
+        resources.total_bytes >= added,
+        "the charge {} covers the {added} bytes the attach and bind retain",
+        resources.total_bytes
+    );
+    eprintln!(
+        "following route charge: charged {}, retained {added}",
+        resources.total_bytes
+    );
+}

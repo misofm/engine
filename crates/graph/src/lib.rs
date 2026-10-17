@@ -1484,7 +1484,6 @@ impl GraphFollowRouteControlProducer {
 /// One following route's binding and producer over one fresh seven-word cell (#1652 D1), reading
 /// `source` (#1652b). `activity_bytes` and `activity_largest` are the attach's route-activity charge, as for a
 /// six-word producer.
-#[cfg_attr(not(test), expect(dead_code, reason = "called by #1652c route attach"))]
 pub(crate) fn follow_route_control_pair(
     route_id: &StableGraphId,
     superseded: &engine::realtime::LiveValuesSuperseded,
@@ -2687,7 +2686,31 @@ impl PreparedGraphPlan {
         &mut self,
         superseded: &engine::realtime::LiveValuesSuperseded,
     ) -> Result<Vec<GraphRouteControlProducer>, GraphRouteControlError> {
-        if self.route_controls.is_some() {
+        self.attach_route_controls_following(superseded, true, |_| None)
+            .map(|(producers, _)| producers)
+    }
+
+    /// [`Self::attach_route_controls`] with following routes (#1652 D1, #1652c): every route into
+    /// a submix input for which `following` gives a source gets a seven-word lane reading it
+    /// ([`follow_route_control_pair`]) and no six-word lane; every other such route gets a
+    /// six-word lane when `six_word` is set and none otherwise. Both producer lists are in
+    /// canonical route-ID order. `following` is asked once per route into a submix, in that
+    /// order, so a route into an output never follows (decision 13 P11).
+    ///
+    /// Refused as [`Self::attach_route_controls`] is.
+    pub fn attach_route_controls_following(
+        &mut self,
+        superseded: &engine::realtime::LiveValuesSuperseded,
+        six_word: bool,
+        mut following: impl FnMut(&StableGraphId) -> Option<GraphFollowRouteSource>,
+    ) -> Result<
+        (
+            Vec<GraphRouteControlProducer>,
+            Vec<GraphFollowRouteControlProducer>,
+        ),
+        GraphRouteControlError,
+    > {
+        if self.route_controls.is_some() || !self.follow_route_controls.is_empty() {
             return Err(GraphRouteControlError::AlreadyAttached);
         }
         // D1: the route's destination edge lands on a submix input (a strip `Input` stage, which
@@ -2722,11 +2745,25 @@ impl PreparedGraphPlan {
         if live.iter().any(|node| required.contains(node)) {
             return Err(GraphRouteControlError::BoundRoute);
         }
+        // Which kind of lane each route gets: a following route its source, a six-word route
+        // nothing, a route with no lane is left out.
+        let mut kinds: Vec<(&StableGraphId, Option<GraphFollowRouteSource>)> =
+            Vec::with_capacity(live.len());
+        for node in live {
+            let GraphNodeId::Route { route_id } = node else {
+                continue;
+            };
+            match following(route_id) {
+                Some(source) => kinds.push((route_id, Some(source))),
+                None if six_word => kinds.push((route_id, None)),
+                None => {}
+            }
+        }
         // D8: bind builds the route-activity table for a plan with a live route. The compile-time
         // estimate charged it already when some prepared gate silences; otherwise it is this
         // attach's to state.
         let (activity_bytes, activity_largest) =
-            if live.is_empty() || self.routes.iter().any(|route| route.gate.silences()) {
+            if kinds.is_empty() || self.routes.iter().any(|route| route.gate.silences()) {
                 (0, 0)
             } else {
                 let routes = u64::try_from(self.routes.len()).unwrap_or(u64::MAX);
@@ -2736,15 +2773,29 @@ impl PreparedGraphPlan {
                     runtime::route_activity_largest_bytes(routes, nodes).unwrap_or(u64::MAX),
                 )
             };
-        let mut bindings = Vec::with_capacity(live.len());
-        let mut producers = Vec::with_capacity(live.len());
-        for node in live {
-            let GraphNodeId::Route { route_id } = node else {
+        let follow_count = kinds.iter().filter(|(_, source)| source.is_some()).count();
+        let mut bindings = Vec::with_capacity(kinds.len() - follow_count);
+        let mut producers = Vec::with_capacity(kinds.len() - follow_count);
+        let mut follow_bindings = Vec::with_capacity(follow_count);
+        let mut follow_producers = Vec::with_capacity(follow_count);
+        for (route_id, source) in kinds {
+            if let Some(source) = source {
+                let (binding, producer) = follow_route_control_pair(
+                    route_id,
+                    superseded,
+                    source,
+                    activity_bytes,
+                    activity_largest,
+                );
+                follow_bindings.push(binding);
+                follow_producers.push(producer);
                 continue;
-            };
+            }
             let lane = std::sync::Arc::new(RouteLane::new());
             bindings.push(GraphRouteControlBinding {
-                node: node.clone(),
+                node: GraphNodeId::Route {
+                    route_id: route_id.clone(),
+                },
                 control: Box::new(RouteControlLane {
                     lane: std::sync::Arc::clone(&lane),
                     reader: engine::realtime::CellReader::new(),
@@ -2761,7 +2812,8 @@ impl PreparedGraphPlan {
             });
         }
         self.route_controls = Some(bindings);
-        Ok(producers)
+        self.follow_route_controls = follow_bindings;
+        Ok((producers, follow_producers))
     }
     /// The lowered executable program, or `None` when the plan's schedule, levels and spec
     /// disagree (which bind-time structural validation rejects).
