@@ -461,7 +461,8 @@ measured with temporary probes in a detached worktree at `323433f6a` (removed af
   column-jump deferral drops that cursor's deferral only when the jump emits (it then replaces the
   ramp: its grid moves again after its own jump, held by its own ramp by the cell rule); a jump
   that emits nothing keeps the deferral, which holds the grid to the column ramp's end and lands
-  there. The other cursors keep their deferrals. K = 1 still equals `CellEvents` (one rule); the K1 tests and the allocation test are
+  there. The other cursors keep their deferrals. K = 1 still equals `CellEvents` (one rule); the
+  K1 tests and the allocation test are
   green unchanged.
 - **MAJOR-1 gate (host-core, Simd8 and Simd4).**
   `a_table_step_inside_a_deferred_moves_ramp_drops_the_deferral`
@@ -538,11 +539,12 @@ measured with temporary probes in a detached worktree at `323433f6a` (removed af
   the curve at `d - 1`, which differs, so `held` is set and the jump at `d` emits. That holds
   whenever a grid point lies in `[swap, d)`: always when the swap block's first node time is on
   the 64-sample grid, as in every host-core harness (quantum 128, no latency). The case is
-  reachable in principle only at a swap block whose first node time is off the grid (a quantum
+  reachable at a swap block whose first node time is off the grid (a quantum
   not a multiple of 64, or upstream latency, such as the 31 samples above) with `d` before the
   first grid point; there the fold-2 rule is the D1 behaviour (the deferral is kept, so the grid
-  does not cut the live move short). No gate here: the host-core moved-target harness swaps only at
-  multiples of 128; phase-2 line in the report.
+  does not cut the live move short). The U1 fold 2 verifier reached it in the host-web parity session
+  (quantum 128 with the 31-sample soft-clip latency): bit-equal to a fresh plan at the four rates,
+  `OUTCOME_EXACT`. No separate gate: the K1 gate goes red on any regression of the shared rule.
 - **MINOR-B fixed.** `a_moved_target_defers_its_jump_alike_on_both_hosts`
   (`hosts/host-web/tests/control_parity.rs`) now compares every block with a fresh pair whose
   table steps at `FREE` in the fader's node time (4 * 128 + 4,000 - `T1_FADER_LATENCY`), given the
