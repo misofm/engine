@@ -843,6 +843,12 @@ struct AutomatedMuteCell {
     state: automation::CellState,
     /// The mute terms the session does not automate.
     terms: bool,
+    /// The cell's first block after a plan swap that carried its lane repositions it (#1651 T4,
+    /// [`LaneFaderAutomation::adopt`]): its table is not the one its state was built on (a
+    /// changed or gained curve, or a moved `a(n)`). That block composes `curve || terms` at its
+    /// node time and lands a `SetMute` over the block's mute length when it differs from the
+    /// stage's mute ([`FaderEventDriver::new`]). Taken by the lane's next block with node time.
+    reposition: bool,
 }
 
 /// One strip lane's stored fader and mute automation (#1646 D1, #1651 D1): the plan's program and
@@ -889,6 +895,7 @@ impl LaneFaderAutomation {
                         cell: cell.cell,
                         state,
                         terms: cell.terms,
+                        reposition: false,
                     }
                 })
             }),
@@ -934,10 +941,43 @@ impl LaneFaderAutomation {
     /// cell) keeps its prepared state and `S` and repositions. The lane is not fresh: its stage
     /// holds the carried gain, so no `Set` lands (#1647 D2 is for a lane that starts at its
     /// prepared value). A channel the successor does not automate is released by the join's
-    /// retarget record, not here. Allocation-free: plain copies.
+    /// retarget record, not here.
+    ///
+    /// #1651 T4: each automated mute channel takes the carried cell's event state and `terms`
+    /// (the mute terms its stage heard) by the same address (the strip, row 6 and the channel,
+    /// `continued_cells` bits 2 and 3); the successor's own `Mute` records (the join's, a later
+    /// live write) move `terms` from there, as they move a fader channel's `S`. It owes its first
+    /// block a reposition when its table does not continue bit for bit or `a(n)` moved (or the
+    /// carried cell still owed one); a gained channel keeps its prepared state and `terms` and
+    /// repositions. A repositioned channel composes `curve || terms` at the block's node time and
+    /// lands a `SetMute` over the mute length only when that differs from the stage's mute; a
+    /// continued one emits only its own events. A mute channel the successor does not automate is
+    /// released by the join's `Mute` record. Allocation-free: plain copies.
     fn adopt(&mut self, predecessor: Option<&Self>, continued_cells: u8) {
         self.fresh = false;
         let arrival = self.arrival;
+        for (channel, cell) in self.mute.iter_mut().enumerate() {
+            let Some(cell) = cell else {
+                continue;
+            };
+            let carried = predecessor.and_then(|predecessor| {
+                predecessor
+                    .mute
+                    .get(channel)?
+                    .as_ref()
+                    .map(|carried| (carried, predecessor.arrival))
+            });
+            cell.reposition = match carried {
+                Some((carried, carried_arrival)) => {
+                    cell.state = carried.state;
+                    cell.terms = carried.terms;
+                    continued_cells & (1 << (MUTE_CONTINUED_SHIFT + channel)) == 0
+                        || carried_arrival != arrival
+                        || carried.reposition
+                }
+                None => true,
+            };
+        }
         for (channel, cell) in self.channels.iter_mut().enumerate() {
             let Some(cell) = cell else {
                 continue;
@@ -1027,6 +1067,13 @@ impl LaneFaderAutomation {
             return;
         };
         cell.terms = terms;
+        // #1651 T4: a repositioned cell's target is not yet the curve at this block's node time
+        // (the driver repositions it below), so this block's driver composes the new `terms` with
+        // the curve there and lands the one `SetMute` the two changes owe. A lane with no node
+        // time this block renders no curve and keeps the cell owed, so the record applies here.
+        if cell.reposition && self.span.is_some() && self.mute_jump.is_some() {
+            return;
+        }
         let muted = cell.state.target().is_some_and(curve_mutes) || terms;
         if stage.muted(channel) != muted {
             let applied = stage.apply(
@@ -1350,6 +1397,10 @@ fn block_jumps(time: &GraphBlockTime<'_>) -> Option<BlockJumps> {
         }
     })
 }
+
+/// The bit of `GraphStripMove::continued_cells` that holds a fader stage's left mute channel; the
+/// right one is the next bit (#1651 T4). Bits 0 and 1 are the fader channels (#1648 D2).
+const MUTE_CONTINUED_SHIFT: usize = 2;
 
 /// The most cells one fader owner drives in a block: two channels on each of a bank's lanes.
 const MAXIMUM_FADER_CELLS: usize = 2 * MAXIMUM_BANK_LANES;
@@ -1701,7 +1752,13 @@ impl<'a> FaderEventDriver<'a> {
             // (D2, departure 4).
             let lane_mutes = mutes_used;
             for (channel, cell) in mute.iter_mut().enumerate() {
-                let Some(AutomatedMuteCell { cell, state, terms }) = cell.as_mut() else {
+                let Some(AutomatedMuteCell {
+                    cell,
+                    state,
+                    terms,
+                    reposition,
+                }) = cell.as_mut()
+                else {
                     continue;
                 };
                 let refused =
@@ -1712,10 +1769,24 @@ impl<'a> FaderEventDriver<'a> {
                     refused();
                     continue;
                 };
+                // #1651 T4: a repositioned cell (a carried lane whose table changed or was
+                // gained) is placed at the block's node time in its own table, and the block
+                // opens with a ramped landing over the mute length, which pushes `SetMute` only
+                // when `curve || terms` differs from the stage's mute. A seek step in the block
+                // lands instead (the seek sets the lane exactly where it applies).
+                let adopted = core::mem::replace(reposition, false);
+                if adopted {
+                    state.reposition(&cell_program, span.start);
+                }
+                let mut mode = controls::MUTE_CELL_RULE.seek;
                 let step = span
                     .step
                     .map(|step| (step.offset, step.timeline))
                     .or_else(|| {
+                        if adopted {
+                            mode = automation::SeekMode::Ramp;
+                            return Some((0, span.start));
+                        }
                         let value = automation::value_at(cell_program.segments(), span.start);
                         (first_block && state.target().map(f32::to_bits) != Some(value.to_bits()))
                             .then_some((0, span.start))
@@ -1736,13 +1807,7 @@ impl<'a> FaderEventDriver<'a> {
                     channel,
                     terms: *terms,
                     muted,
-                    events: automation::CellEvents::new(
-                        cell_program,
-                        state,
-                        node,
-                        controls::MUTE_CELL_RULE.seek,
-                        mute_jump,
-                    ),
+                    events: automation::CellEvents::new(cell_program, state, node, mode, mute_jump),
                     next: None,
                     pushed: None,
                 };

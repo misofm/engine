@@ -4174,10 +4174,11 @@ pub struct GraphStripMove {
     pub successor: GraphLaneLocation,
     /// The lane in the plan the successor displaces.
     pub predecessor: GraphLaneLocation,
-    /// The fader stage's automated cells (bit 0 left, bit 1 right) whose stored automation table
-    /// the successor's model keeps bit for bit from the predecessor's (#1648 D2): such a cell's
-    /// carried event state continues verbatim, and every other carried cell is repositioned in its
-    /// own table at adoption. `0` for a matrix move.
+    /// The fader stage's automated cells whose stored automation table the successor's model
+    /// keeps bit for bit from the predecessor's (#1648 D2): the fader cells (bit 0 left, bit 1
+    /// right) and the mute cells (#1651 T4: bit 2 left, bit 3 right). Such a cell's carried event
+    /// state continues verbatim, and every other carried cell is repositioned in its own table at
+    /// adoption. Graph passes the byte to the stage unchanged. `0` for a matrix move.
     pub continued_cells: u8,
 }
 

@@ -1032,3 +1032,488 @@ fn a_hold_that_starts_and_ends_inside_a_block_moves_at_its_end() {
         "the dropped cut lands no move; the last unmute's does"
     );
 }
+
+// #1651 T4, gate 8: the strip carry of mute automation.
+
+/// The block a carry case's successor is swapped in at.
+const SWAP_BLOCK: usize = 8;
+
+/// Gate 8's quanta.
+const CARRY_QUANTA: [u32; 2] = [128, 100];
+
+/// How a carry case's plans are prepared: no live control (the join cannot write a record, so a
+/// strip whose effective mute moves restarts), or live controls (the C ABI's form).
+#[derive(Clone, Copy, Debug)]
+struct CarryForm {
+    backend: graph_compiler::Backend,
+    live: bool,
+}
+
+/// Every bank width of the target and the scalar oracle (R17-4), each with and without live
+/// controls. The scalar oracle binds the fader as a graph node, which no plan swap carries: its
+/// strip restarts at the swap and its leg holds the post-ramp claim only.
+fn carry_forms() -> Vec<CarryForm> {
+    let backends = [
+        #[cfg(target_feature = "avx2")]
+        graph_compiler::Backend::Simd8,
+        graph_compiler::Backend::Simd4,
+        graph_compiler::Backend::Scalar,
+    ];
+    backends
+        .into_iter()
+        .flat_map(|backend| [false, true].map(|live| CarryForm { backend, live }))
+        .collect()
+}
+
+/// A signed two-plane source that is never zero (a zero's sign and a gain's bits both show).
+fn carry_pcm(frames: usize) -> [Vec<f32>; 2] {
+    let plane = |channel: u32| {
+        (0..frames as u32)
+            .map(|frame| {
+                let step = frame
+                    .wrapping_mul(7_919)
+                    .wrapping_add(channel * 31)
+                    .wrapping_add(17)
+                    % 1_999;
+                (step as f32 - 999.5) / 2_000.0
+            })
+            .collect::<Vec<f32>>()
+    };
+    [plane(0), plane(1)]
+}
+
+/// What a carry run rendered.
+struct CarryRun {
+    out: [Vec<f32>; 2],
+    /// The swap block's `(allocations, reallocations, frees)` on the render thread.
+    swap_allocations: (u64, u64, u64),
+    /// The successor's `restarted_strips()`.
+    restarted: Vec<Box<str>>,
+}
+
+/// `model` compiled with this file's caps.
+fn compiled(model: &SessionModel) -> host_core::CompiledSession {
+    let document = canonical_session_json(model).expect("canonical");
+    host_core::compile_host_session(&document, &caps(model))
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())))
+}
+
+/// `a` prepared in `form` and rendered for [`SWAP_BLOCK`] blocks (`edit` runs before each block,
+/// writing through its live handles and gate), then, with `b = Some((next, committed))`, `next`
+/// prepared as its successor on the committed model `committed`, swapped in and rendered to
+/// `frames`; with `b = None`, `a` alone for every block. Fed `pcm` from frame 0.
+fn carry_run(
+    a: &SessionModel,
+    b: Option<(&SessionModel, &SessionModel)>,
+    form: CarryForm,
+    pcm: &[Vec<f32>; 2],
+    frames: usize,
+    mut edit: impl FnMut(
+        usize,
+        &mut host_core::HostLiveControlHandles,
+        &mut engine::realtime::PlanRevisionGate,
+    ),
+) -> CarryRun {
+    use engine::realtime::{PlanExchangeConfig, SwapOutcome, plan_exchange};
+    let quantum = a.quantum_frames as usize;
+    let caps = caps(a);
+    let request = host_core::HostLiveControlRequest::default();
+    let fail = |failure: host_core::PrepareDiagnostics| -> ! {
+        panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+    };
+    let first = compiled(a);
+    let (prepared, mut handles) = if form.live {
+        let (prepared, handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
+            &first,
+            &caps,
+            &request,
+            form.backend,
+        )
+        .unwrap_or_else(|failure| fail(failure));
+        (prepared, Some(handles))
+    } else {
+        (
+            host_core::test_only_prepare_host_runtime_on(&first, &caps, form.backend)
+                .unwrap_or_else(|failure| fail(failure)),
+            None,
+        )
+    };
+    let PreparedHost {
+        mut plan,
+        mut sources,
+        inventory,
+        ..
+    } = prepared;
+    let mut gate = plan.take_revision_gate();
+    let (mut publisher, mut owner, _retirer) = plan_exchange(
+        plan,
+        PlanExchangeConfig {
+            retirement_capacity: core::num::NonZeroUsize::MIN,
+        },
+    )
+    .unwrap_or_else(|_| panic!("plan exchange"));
+    bench_support::alloc::assert_installed();
+    let submit = |sources: &mut host_core::SourceControlSet, at: usize| {
+        sources
+            .submit(
+                NINE_SOURCE,
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: at as u64,
+                    sample_rate_hz: RATE,
+                    planes: &[&pcm[0][at..at + quantum], &pcm[1][at..at + quantum]],
+                    frames: quantum as u32,
+                    end_of_region: false,
+                },
+            )
+            .expect("source block");
+    };
+    let mut out = [Vec::new(), Vec::new()];
+    let mut swap_allocations = (0, 0, 0);
+    let mut restarted = Vec::new();
+    let mut successor_sources = None;
+    let mut block = 0;
+    while block * quantum < frames {
+        if block == SWAP_BLOCK
+            && let Some((next, committed)) = b
+        {
+            let next = compiled(next);
+            let committed = compiled(committed).normalized_model().clone();
+            let revision = gate.as_ref().map_or(1, |gate| gate.last_published()) + 1;
+            let base = host_core::SuccessorBase::new(&inventory, &committed, revision);
+            let mut prepared = if form.live {
+                host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+                    &next,
+                    &caps,
+                    &request,
+                    base,
+                    form.backend,
+                )
+                .map(|(prepared, _)| prepared)
+            } else {
+                host_core::test_only_prepare_host_runtime_successor_on(
+                    &next,
+                    &caps,
+                    base,
+                    form.backend,
+                )
+            }
+            .unwrap_or_else(|failure| fail(failure));
+            prepared.sources.adopt_persisting(&mut sources);
+            restarted = prepared.restarted_strips().to_vec();
+            let PreparedHost {
+                mut plan,
+                sources: next_sources,
+                ..
+            } = prepared;
+            plan.take_revision_gate()
+                .expect("the successor's gate")
+                .publish(revision);
+            publisher
+                .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
+                .unwrap_or_else(|_| panic!("reserve the successor"))
+                .commit();
+            successor_sources = Some(next_sources);
+        }
+        let at = block * quantum;
+        submit(successor_sources.as_mut().unwrap_or(&mut sources), at);
+        if let (Some(handles), Some(gate)) = (handles.as_mut(), gate.as_mut())
+            && successor_sources.is_none()
+        {
+            edit(block, handles, gate);
+        }
+        let mut samples = vec![0.0_f32; quantum * 2];
+        let output =
+            PlanarBufferMut::try_new(&mut samples, 2, quantum, quantum).expect("output planes");
+        let mark = bench_support::alloc::current_thread_counters();
+        let report = owner
+            .render_contiguous(RenderIo { output }, at as u64)
+            .unwrap_or_else(|error| panic!("render: {error:?}"));
+        let delta = bench_support::alloc::current_thread_delta_since(mark);
+        let swapped = report.swap == SwapOutcome::Applied;
+        assert_eq!(
+            swapped,
+            b.is_some() && block == SWAP_BLOCK,
+            "the successor is adopted at the swap block"
+        );
+        if swapped {
+            swap_allocations = (delta.allocations, delta.reallocations, delta.deallocations);
+        }
+        out[0].extend_from_slice(&samples[..quantum]);
+        out[1].extend_from_slice(&samples[quantum..]);
+        block += 1;
+    }
+    drop(handles);
+    CarryRun {
+        out: out.map(|mut plane| {
+            plane.truncate(frames);
+            plane
+        }),
+        swap_allocations,
+        restarted,
+    }
+}
+
+/// `model` prepared fresh in `form` and fed `pcm` from frame 0: the reference.
+fn fresh_run(
+    model: &SessionModel,
+    form: CarryForm,
+    pcm: &[Vec<f32>; 2],
+    frames: usize,
+) -> [Vec<f32>; 2] {
+    carry_run(model, None, form, pcm, frames, |_, _, _| {}).out
+}
+
+/// Gate 8 on one case: `a` rendered, `b` swapped in at [`SWAP_BLOCK`] on `a`'s committed model,
+/// on every carry form and at both quanta. From the first block boundary at or after the
+/// adoption ramp's end (`M` samples from the swap) each plane equals a fresh plan of `b` fed the
+/// same PCM, bit for bit; before the swap it equals `a`'s; the swap block allocates and frees
+/// nothing; a bank's strip carries. `ramps` asserts that the swap ramps (a bank's carried lane
+/// differs from the fresh plan inside the ramp). Returns the mute events the bank legs' successors
+/// pushed at the swap sample, per quantum: `(channel, sample, muted, ramp)`.
+fn carry_case(
+    label: &str,
+    a: &SessionModel,
+    b: &SessionModel,
+    ramps: bool,
+) -> Vec<Vec<(usize, u64, bool, u32)>> {
+    let mut swap_events = Vec::new();
+    for quantum in CARRY_QUANTA {
+        let (mut a, mut b) = (a.clone(), b.clone());
+        a.quantum_frames = quantum;
+        b.quantum_frames = quantum;
+        let q = quantum as usize;
+        let frames = 4_096_usize.div_ceil(q) * q;
+        let pcm = carry_pcm(frames);
+        let at = SWAP_BLOCK * q;
+        let settled = (at + M as usize).div_ceil(q) * q;
+        for form in carry_forms() {
+            let what = format!("{label}, {form:?}, quantum {quantum}");
+            let bank = form.backend != graph_compiler::Backend::Scalar;
+            let fresh = fresh_run(&b, form, &pcm, frames);
+            let before = fresh_run(&a, form, &pcm, frames);
+            let _ = mute_events();
+            let swapped = carry_run(&a, Some((&b, &a)), form, &pcm, frames, |_, _, _| {});
+            let events = mute_events();
+            assert_eq!(
+                swapped.swap_allocations,
+                (0, 0, 0),
+                "{what}: the swap block"
+            );
+            if bank && form.live {
+                assert!(swapped.restarted.is_empty(), "{what}: the strip carries");
+            }
+            for plane in 0..2 {
+                assert_eq!(
+                    first_difference(&swapped.out[plane][..at], &before[plane][..at]),
+                    None,
+                    "{what}: plane {plane} before the swap"
+                );
+                assert_eq!(
+                    first_difference(&swapped.out[plane][settled..], &fresh[plane][settled..])
+                        .map(|index| index + settled),
+                    None,
+                    "{what}: plane {plane} from the first block boundary after the ramp"
+                );
+                if ramps && bank && swapped.restarted.is_empty() {
+                    assert!(
+                        first_difference(
+                            &swapped.out[plane][at..settled],
+                            &fresh[plane][at..settled]
+                        )
+                        .is_some(),
+                        "{what}: plane {plane} ramps at the swap, it is not set"
+                    );
+                }
+            }
+            if bank && form.live {
+                swap_events.push(
+                    events
+                        .into_iter()
+                        .filter(|event| event.1 == at as u64)
+                        .collect(),
+                );
+            }
+        }
+    }
+    swap_events
+}
+
+/// A two-track [`plain`] model (two bank lanes) with track 0's mute curve `entry`, if any.
+fn with_mute(quantum: u32, entry: Option<(f32, &[(u64, f32)])>) -> SessionModel {
+    let mut model = plain(2, quantum);
+    if let Some((from, steps)) = entry {
+        model.automation = vec![mute_entry(&model, 0, ParameterChannel::Both, from, steps)];
+    }
+    model
+}
+
+/// Every swap-sample mute event of a bank leg is one `SetMute` per channel to `muted` over `M`.
+fn assert_adoption_jumps(events: &[Vec<(usize, u64, bool, u32)>], muted: bool, label: &str) {
+    assert!(!events.is_empty());
+    for events in events {
+        let mut channels: Vec<usize> = events.iter().map(|event| event.0).collect();
+        channels.sort_unstable();
+        assert_eq!(channels, [0, 1], "{label}: one adoption jump per channel");
+        assert!(
+            events.iter().all(|event| event.2 == muted && event.3 == M),
+            "{label}: to {muted} over the mute length: {events:?}"
+        );
+    }
+}
+
+/// #1651 gate 8, a gained mute cell: a rebuild at block 8 adds a mute entry on track 0 (both
+/// lanes) that holds the lane muted until timeline 2,600. The carried lane composes `curve ||
+/// terms` at the swap block's node time and mutes over `M` from the swap (one `SetMute` per
+/// channel), then follows the curve's own unmute at 2,600: from the first block boundary after
+/// the ramp the output equals a fresh plan of the new model.
+///
+/// Test value: red if a carried strip lane does not take on a gained mute curve (it stays open
+/// until the curve's next event), sets it exactly instead of ramping, ramps over another length,
+/// or misplaces the gained cell's cursor (its unmute at 2,600 is missed or repeated); and red if
+/// a `terms` record at the swap block composes with the gained cell's prepared seed instead of
+/// the curve at the swap (the drain unmutes and the driver mutes again: a jump the stage did not
+/// owe).
+#[test]
+fn a_rebuild_that_adds_a_mute_entry_mutes_from_the_swap_over_the_mute_length() {
+    let a = with_mute(128, None);
+    let b = with_mute(128, Some((1.0, &[(2_600, 0.0)])));
+    let events = carry_case("added", &a, &b, true);
+    assert_adoption_jumps(&events, true, "added");
+    // The same rebuild also opens the lane's static mute: the join's `Mute` record (the new
+    // `terms`) reaches the gained cell at the swap block's drain, before the driver repositions
+    // it. The curve is muted at the swap (300 to 2,600), so `curve || terms` equals the stage's
+    // (statically muted) mute and the swap lands nothing.
+    let mut a = with_mute(128, None);
+    (a.tracks[0].fader.left_mute, a.tracks[0].fader.right_mute) = (true, true);
+    let b = with_mute(128, Some((0.0, &[(300, 1.0), (2_600, 0.0)])));
+    let events = carry_case("added, terms open", &a, &b, false);
+    assert!(
+        events.iter().all(Vec::is_empty),
+        "added, terms open: no jump at the swap: {events:?}"
+    );
+}
+
+/// #1651 gate 8, a lost mute cell: the predecessor's curve holds track 0 muted until timeline
+/// 3,600, and a rebuild at block 8 removes the entry. The join sends the lane a `Mute` record of
+/// its effective (static) mute, open, so the carried lane unmutes over `M` from the swap and
+/// equals a fresh plan of the new model from the first block boundary after the ramp.
+///
+/// Test value: red if a lost mute cell keeps the curve's state (the lane stays muted until the
+/// next live mute record), or if the release ramps over another length.
+#[test]
+fn a_rebuild_that_removes_a_mute_entry_holds_the_static_mute() {
+    let a = with_mute(128, Some((1.0, &[(3_600, 0.0)])));
+    let b = with_mute(128, None);
+    carry_case("removed", &a, &b, true);
+}
+
+/// #1651 gate 8, a changed curve: (a) the predecessor's curve mutes at 3,000 and the new one is
+/// muted from 500 to 2,600, so at the swap the repositioned cell composes muted and jumps over
+/// `M`, then unmutes at 2,600; (b) the new curve differs only after the swap (a mute from 2,000
+/// to 3,200 instead of from 3,000), so the swap lands no jump and the lane follows the new
+/// table's steps. Each equals a fresh plan of the new model from the first block boundary after
+/// the ramp.
+///
+/// Test value: red if a changed table continues its carried cursor (the old table's position in
+/// the new one misses or repeats a step), if the adoption jump is missing, repeated, or lands
+/// when the composed mute equals the stage's.
+#[test]
+fn a_rebuild_that_changes_a_mute_curve_jumps_only_when_the_composed_mute_changes() {
+    let a = with_mute(128, Some((0.0, &[(3_000, 1.0)])));
+    let b = with_mute(128, Some((0.0, &[(500, 1.0), (2_600, 0.0)])));
+    let events = carry_case("changed, muted now", &a, &b, true);
+    assert_adoption_jumps(&events, true, "changed, muted now");
+    let b = with_mute(128, Some((0.0, &[(2_000, 1.0), (3_200, 0.0)])));
+    let events = carry_case("changed later", &a, &b, false);
+    assert!(
+        events.iter().all(Vec::is_empty),
+        "changed later: no jump at the swap: {events:?}"
+    );
+}
+
+/// #1651 T4, R18-4: a live fader move in flight on track 0 across a rebuild that adds a curve
+/// mute which is on at the swap. A `FaderDb` of -12 dB over 2,000 samples is written before block
+/// 5 and is still ramping at the swap (block 8); the successor's committed model holds the -12
+/// dB and a mute curve muted until timeline 2,600. The adoption mutes the lane over `M` (dual-mono
+/// lanes have separate stages, so the mute retargets only the lane's gain to `0`), and the stage
+/// remembers the fader gain the move aimed for (#1638 D2, D1.6). After the curve's unmute at
+/// 2,600 and its ramp the lane equals the uninterrupted plan (the move completed, never muted),
+/// bit for bit.
+///
+/// Test value: red if the mute adoption stretches or cuts the live fader move (the lane comes
+/// back at the gain the move had reached at the swap, or ramps on from it), or if the stage
+/// remembers a gain other than the move's target.
+#[test]
+fn a_mute_adoption_keeps_the_fader_move_in_flight_for_the_unmute() {
+    const DB: f32 = -12.0;
+    const MOVE: u32 = 2_000;
+    let write = |block: usize,
+                 handles: &mut host_core::HostLiveControlHandles,
+                 gate: &mut engine::realtime::PlanRevisionGate| {
+        use builtins_compiler::TestOnlyWriteGate;
+        if block == 5 {
+            gate.write_published(|stamp| {
+                handles.strip_controls[0].fader.write(
+                    stamp,
+                    builtins_compiler::TrackFaderRecord::FaderDb {
+                        lanes: builtins::BuiltinLaneSelector::Both,
+                        db: DB,
+                        smoothing_samples: MOVE,
+                    },
+                );
+            });
+        }
+    };
+    for quantum in CARRY_QUANTA {
+        // One track, so the output is track 0's lane.
+        let a = plain(1, quantum);
+        let mut committed = a.clone();
+        committed.tracks[0].fader.left_db = DB;
+        committed.tracks[0].fader.right_db = DB;
+        let mut b = committed.clone();
+        b.automation = vec![mute_entry(
+            &b,
+            0,
+            ParameterChannel::Both,
+            1.0,
+            &[(2_600, 0.0)],
+        )];
+        let q = quantum as usize;
+        let frames = 4_096_usize.div_ceil(q) * q;
+        assert!(
+            5 * q + MOVE as usize > SWAP_BLOCK * q,
+            "the move is in flight at the swap"
+        );
+        let pcm = carry_pcm(frames);
+        let open = (2_600 + M as usize).div_ceil(q) * q;
+        for form in carry_forms().into_iter().filter(|form| form.live) {
+            let what = format!("{form:?}, quantum {quantum}");
+            let uninterrupted = carry_run(&a, None, form, &pcm, frames, write).out;
+            let swapped = carry_run(&a, Some((&b, &committed)), form, &pcm, frames, write);
+            assert_eq!(
+                swapped.swap_allocations,
+                (0, 0, 0),
+                "{what}: the swap block"
+            );
+            if form.backend != graph_compiler::Backend::Scalar {
+                assert!(swapped.restarted.is_empty(), "{what}: the strip carries");
+            }
+            for (plane, (out, uninterrupted)) in swapped.out.iter().zip(&uninterrupted).enumerate()
+            {
+                let muted = &out[(SWAP_BLOCK * q + M as usize)..2_600];
+                assert_eq!(
+                    muted.iter().position(|sample| sample.to_bits() != 0),
+                    None,
+                    "{what}: plane {plane} is muted after the adoption ramp"
+                );
+                assert_eq!(
+                    first_difference(&out[open..], &uninterrupted[open..])
+                        .map(|index| index + open),
+                    None,
+                    "{what}: plane {plane} after the unmute equals the uninterrupted move"
+                );
+            }
+        }
+    }
+}

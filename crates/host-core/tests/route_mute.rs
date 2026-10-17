@@ -2138,12 +2138,16 @@ fn a_rebuild_that_removes_the_mute_entry_reopens_the_send() {
 /// strip's lane and the send reach exact `+0.0` on the same output sample, `M` samples after the
 /// swap block starts.
 ///
+/// The bank widths only: the scalar oracle binds the strip's fader as a graph node, which no
+/// plan swap carries, so its strip restarts at the swap (muted exactly, as a fresh plan) while the
+/// send carries.
+///
 /// Test value: red if the join's seven-word record (the gain edit's `SendGain` length) governs the
 /// send's mute instead of the curve's own jump over the mute length, or if the strip and the send
-/// adopt over different lengths.
+/// adopt over different lengths (#1651 T4: red when a carried strip lane does not take on a
+/// gained mute curve).
 #[cfg(feature = "test-support")]
 #[test]
-#[ignore = "#1652 graph fold (U2a): the carried record is composed with the heard curve there"]
 fn a_send_edit_and_a_mute_entry_in_one_rebuild_adopt_over_one_length() {
     use follow::*;
     use successor::{QUANTUM, SWAP_BLOCK};
@@ -2155,7 +2159,10 @@ fn a_send_edit_and_a_mute_entry_in_one_rebuild_adopt_over_one_length() {
     let quiet = |_: usize,
                  _: &mut host_core::HostLiveControlHandles,
                  _: &mut engine::realtime::PlanRevisionGate| {};
-    for backend in follow::backends() {
+    for backend in follow::backends()
+        .into_iter()
+        .filter(|backend| *backend != Backend::Scalar)
+    {
         let what = format!("{backend:?}");
         let (swapped, _) = live_swap(&a, Some((&b, &a)), backend, &pcm, quiet);
         assert_quiet(&swapped, &what);
