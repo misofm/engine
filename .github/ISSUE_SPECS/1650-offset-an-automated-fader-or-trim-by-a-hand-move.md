@@ -560,7 +560,7 @@ Fader only (R17-6); R17-1 = A.
   arm), `crates/session/tests/in_place.rs` (slot literal), `crates/host-core/tests/stored_fader_automation.rs`
   (the retained-heap charge now subtracts the catalog's own delta: the automated left row is a
   descriptor of its own, 235 bytes there, charged by the catalog's resources), `crates/protocol/src/{controller,message_wire}/tests.rs`
-  (row literals; one new invalid case), the re-pin mirrors, `hosts/host-web/src/tests.rs` (TBD48),
+  (row literals; one new invalid case), the re-pin mirrors, `hosts/host-web/src/tests.rs` (#1709),
   and the docs that described an automated fader (`docs/SESSION_SCHEMA_V1.md` offset paragraph
   now says it is heard and records departure 2; `docs/CONTROL_PROTOCOL_SEMANTICS.md`,
   `docs/C_ABI_V1_QUALIFICATION.md`, the C header's live-edits comment; `check-capi-abi.sh` ok).
@@ -601,7 +601,7 @@ live `ratio` row is automated; 46 frames still. Mirrors: `scripts/check-protocol
   `message_wire/tests.rs` ("automated row that is not automatable").
 - Gate 6: `a_hand_move_on_an_automated_fader_renders_allocation_free`
   (`crates/control-plane/tests/vca_automation_realtime.rs`).
-- TBD48: both `canonical_live` modules gain "a hand move on an automated lane".
+- #1709: both `canonical_live` modules gain "a hand move on an automated lane".
 
 **Checks run.** `cargo test --locked -p session -p protocol -p controls -p control-plane -p conformance`
 and `-p host-core --all-features` (953 passed); `-p capi` (206); `-p host-web --features

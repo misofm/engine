@@ -10230,7 +10230,7 @@ fn a_flat_fader_automation_renders_the_static_fader_bits_in_the_browser() {
     }
 }
 
-/// TBD48 D2 (browser): a live level move made while the control thread runs FTZ, DAZ and round
+/// #1709 D2 (browser): a live level move made while the control thread runs FTZ, DAZ and round
 /// toward zero. The browser host's own tests run natively, so the caller's word can be set.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod canonical_live {
@@ -10384,7 +10384,7 @@ mod canonical_live {
         }
     }
 
-    /// TBD48 D2 (browser): a live fader move on a VCA member, a live VCA offset move over it,
+    /// #1709 D2 (browser): a live fader move on a VCA member, a live VCA offset move over it,
     /// (#1649) a VCA move over a member whose fader is automated, and (#1650b) a hand move on
     /// that automated fader, each made through the browser's control entry while the caller's
     /// thread runs FTZ, DAZ and round toward zero, render from the end of their ramp the bits of

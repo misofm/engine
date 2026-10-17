@@ -2156,7 +2156,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     ),
     PrepareDiagnostics,
 > {
-    // TBD48 D1: the whole preparation runs in the canonical floating-point environment, so a
+    // #1709 D1: the whole preparation runs in the canonical floating-point environment, so a
     // route or send gain (`compile_graph`'s `db_to_gain_f32`), a native effect's coefficients and
     // every value composed below are what a canonical thread prepares, whatever the caller has
     // set. The inner guards (builtins body, lowerings, `controls::effective`, the catalog) nest:

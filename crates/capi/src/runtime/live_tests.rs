@@ -8069,9 +8069,9 @@ mod set_control {
         assert_eq!(rig.summary().3, 0, "still live");
     }
 
-    // TBD48: live level values are composed in the canonical floating-point environment.
+    // #1709: live level values are composed in the canonical floating-point environment.
 
-    /// TBD48 D2 on the C ABI: a live move made while the host's control thread runs FTZ, DAZ and
+    /// #1709 D2 on the C ABI: a live move made while the host's control thread runs FTZ, DAZ and
     /// round toward zero.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     mod canonical_live {
@@ -8285,7 +8285,7 @@ mod set_control {
             }
         }
 
-        /// TBD48 D2 (C ABI): a live fader move on a VCA member, a live VCA offset move over it,
+        /// #1709 D2 (C ABI): a live fader move on a VCA member, a live VCA offset move over it,
         /// (#1649) a VCA move over a member whose fader is automated, which writes its offsets
         /// cell, and (#1650b) a hand move on that automated fader, which writes it too, each made
         /// while the caller's thread runs FTZ, DAZ and round toward zero, render from the end of
@@ -8331,7 +8331,7 @@ mod set_control {
             );
         }
 
-        /// TBD48 D1 (C ABI): a session compiled and booted from its JSON while the caller's
+        /// #1709 D1 (C ABI): a session compiled and booted from its JSON while the caller's
         /// thread runs FTZ, DAZ and round toward zero is the session a canonical boot gives: the
         /// same committed snapshot and the same rendered bits. The session's JSON parse reads
         /// `0.1` as another `f32` under that word (asserted), so the gate is not vacuous.
@@ -9282,7 +9282,7 @@ mod set_control {
             (watermark.outcome_flags, watermark.transition_fallback_count)
         }
 
-        /// B17-R14 (#1648 split, TBD50). A table-only rebuild of the riding fader while a live
+        /// B17-R14 (#1648 split, #1711). A table-only rebuild of the riding fader while a live
         /// level move may still ramp completes as the transition fallback: a VCA move with its
         /// own 4,000 samples heard 24, 26 and 30 blocks (928, 672 and 160 samples left, landed
         /// over `J` = 960), and a VCA move committed inside a rebuild, heard 12 blocks, then a

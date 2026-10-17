@@ -2803,7 +2803,7 @@ mod canonical_preparation {
     /// Static faders of distinct dB on every lane, input trims and filters, no effect (an effect's
     /// own preparation is outside this gate), a flat automated lane on track 2 and a moving
     /// automated pair on track 5. One VCA reaches tracks 1, 2 and 5; track 1's left lane is
-    /// [`VCA_MEMBER_DB`]. Every route carries its own non-0 dB gain (TBD48: `compile_graph`
+    /// [`VCA_MEMBER_DB`]. Every route carries its own non-0 dB gain (#1709: `compile_graph`
     /// converts it), returned third.
     fn fixture() -> (SessionModel, Vec<f32>, Vec<f32>) {
         let mut model = bank_model();
@@ -2858,7 +2858,7 @@ mod canonical_preparation {
     /// `controls::effective`, in the builtins preparation body or in
     /// `into_graph_artifact_with_banks`), so a flat automated lane and a static fader would take
     /// the caller's rounding; or if a route gain is converted outside it (remove the guard at the
-    /// entry of host-core's `prepare_host_runtime_with_live_controls_policy_and_spectrum`, TBD48).
+    /// entry of host-core's `prepare_host_runtime_with_live_controls_policy_and_spectrum`, #1709).
     #[test]
     fn a_hostile_caller_environment_prepares_the_canonical_faders() {
         let (model, decibels, route_decibels) = fixture();
@@ -2887,7 +2887,7 @@ mod canonical_preparation {
             moved > 0,
             "the gate is vacuous: no fixture fader converts differently under the hostile word"
         );
-        // TBD48: a route gain the hostile word converts differently, so the guard at the entry
+        // #1709: a route gain the hostile word converts differently, so the guard at the entry
         // of host-core's preparation (around `compile_graph`) is discriminated too.
         let routes_moved = under_hostile_fp_env(|| {
             route_decibels

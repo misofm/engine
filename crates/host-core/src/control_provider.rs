@@ -1193,7 +1193,7 @@ impl ControlCatalog {
         overlay: &MonitorOverlay,
         sample_rate: u32,
     ) -> Result<Self, SessionControlProviderError> {
-        // TBD48 D1: the derived rows are composed as preparation composes them, in the
+        // #1709 D1: the derived rows are composed as preparation composes them, in the
         // canonical floating-point environment, so a row shows the value render applies.
         let _canonical = lane::CanonicalFpEnv::enter();
         // The list is walked one owner at a time through one reused buffer, twice: once to size
@@ -1506,7 +1506,7 @@ impl ControlCatalog {
         sample_rate: u32,
         delta: &crate::LiveDelta<'_>,
     ) -> Result<StagedCatalog, SessionControlProviderError> {
-        // TBD48 D1: the staged derived rows are composed in the canonical environment, as
+        // #1709 D1: the staged derived rows are composed in the canonical environment, as
         // `Self::build` composes them.
         let _canonical = lane::CanonicalFpEnv::enter();
         #[cfg(any(test, feature = "test-support"))]

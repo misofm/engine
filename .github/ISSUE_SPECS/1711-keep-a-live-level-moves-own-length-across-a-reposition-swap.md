@@ -1,6 +1,6 @@
 # Keep a live level move's own length across a Reposition swap
 
-Placeholder from batch 17 (#1648's split, root ruling B17-R13; controls coordinator, 2026-10-16).
+Filed by root from batch 17 (#1648's split, root ruling B17-R13; controls coordinator, 2026-10-16).
 It follows the "split a blocking gate early" practice: #1648 closes on its passing gates, and the
 in-flight length case moves here.
 

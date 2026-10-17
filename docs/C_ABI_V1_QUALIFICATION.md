@@ -151,7 +151,7 @@ inside render's publication (bounded at 64 attempts) is `RESULT_BACKPRESSURE` wi
 untouched, and the host retries. In this slice every revision completes as `exact`; the
 `superseded` and `transition_fallback` producers are #1310, #1397 and #1358. `transition_fallback`
 also reports a Reposition swap while a live level move may still ramp (conservative: it can be set
-when the move was not stretched; #TBD50 removes it; root ruling B17-R14). The frozen exported
+when the move was not stretched; #1711 removes it; root ruling B17-R14). The frozen exported
 set is now 16 `miso_engine_v1_*` definitions;
 `abi_smoke.c` checks the bit against the queried mask and queries a compiled plan with a valid
 and a wrong-size struct, `header_smoke.cpp` pins the size and every field offset, and

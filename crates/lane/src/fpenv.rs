@@ -399,7 +399,7 @@ pub fn canonical_fp_control_word() -> FpControlWord {
     {}
 }
 
-/// The hostile caller word of the environment gates (#1646 D2, TBD48 D2): `saved` with
+/// The hostile caller word of the environment gates (#1646 D2, #1709 D2): `saved` with
 /// flush-to-zero, denormals-are-zero and round toward zero set (MXCSR `FTZ`, `DAZ`, `RC = 11`), or
 /// on AArch64 `FPCR.FZ` and `RMode = 11` (AArch64 has no separate DAZ bit).
 #[cfg(all(feature = "test-support", target_arch = "x86_64"))]

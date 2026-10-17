@@ -1,7 +1,7 @@
 # Compose live level values inside the canonical floating-point environment
 
-Placeholder from the batch 17 U1 fold (controls coordinator, 2026-10-16). Root files it and gives
-it a number.
+Filed by root from the batch 17 U1 fold (controls coordinator, 2026-10-16). Root ruling R17-7:
+it closes in batch 17.
 
 ## Product outcome
 
@@ -54,7 +54,7 @@ effect coefficients).
 - #1646 (U1 fold: the preparation guard and its test pattern), #1649, #1650b (their live writes
   join the gate).
 
-## Decision record: TBD48 (batch 17)
+## Decision record: #1709 (batch 17)
 
 Root ruling R17-7: inside batch 17, closes in this PR.
 

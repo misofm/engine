@@ -640,7 +640,7 @@ pub struct SessionState<A: ControlAdapter> {
     /// superseded nothing.
     pub(crate) observation_forwarded: Vec<ObservationForward>,
     /// The level moves that may still ramp, as one conservative window (root ruling B17-R14,
-    /// #1648 split; TBD50 deletes it): `None` when none may.
+    /// #1648 split; #1711 deletes it): `None` when none may.
     pub(crate) level_moves: Option<LevelMoveWindow>,
 }
 
@@ -2050,7 +2050,7 @@ where
     /// scratch ([`Self::command_response`]); a structural command either rides the newest plan's
     /// live lanes or prepares, admits and publishes a replacement plan.
     ///
-    /// **Floating-point environment (TBD48 D1).** The whole command runs in
+    /// **Floating-point environment (#1709 D1).** The whole command runs in
     /// `lane::CanonicalFpEnv`: the live classification composes each strip's effective fader
     /// (`controls::effective`, the VCA sum), the catalog stages its derived rows, and a rebuild
     /// prepares, all as a fresh preparation of the committed value does, whatever the host's
@@ -2267,7 +2267,7 @@ where
     /// [`Self::declare_discontinuity`] after its service step: the one core path of a declaration,
     /// which a plain session seek also runs (B16-R9).
     fn declare_discontinuity_serviced(&mut self) -> Result<(), CommandError> {
-        // TBD48 D1: the successor's carried level values are composed as `Self::command`'s are.
+        // #1709 D1: the successor's carried level values are composed as `Self::command`'s are.
         let _canonical = lane::CanonicalFpEnv::enter();
         if !self
             .newest_providers()
@@ -2596,7 +2596,7 @@ where
         };
         #[cfg(not(feature = "test-support"))]
         let adoption = PlanAdoption::Next;
-        // B17-R14 (#1648 split; TBD50 deletes this): a successor that automates a fader lane may
+        // B17-R14 (#1648 split; #1711 deletes this): a successor that automates a fader lane may
         // Reposition it (a changed table, or a moved input arrival), and a level move still
         // ramping there is landed over `J` when less than `J` is left. Control cannot tell which
         // lanes reposition or how much is left, so the candidate completes as the transition

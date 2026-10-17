@@ -1,7 +1,7 @@
 # Index the automation entries per strip once per build
 
-Placeholder from batch 17 (#1650b's successor note; controls coordinator, 2026-10-16). Root files
-it for the weekly performance pass. It is control-thread cost only; render is not touched.
+Filed by root from batch 17 (#1650b's successor note; controls coordinator, 2026-10-16), for the
+weekly performance pass. It is control-thread cost only; render is not touched.
 
 ## Product outcome
 

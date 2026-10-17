@@ -181,7 +181,7 @@ extern "C" {
  * MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK and MISO_ENGINE_V1_OUTCOME_SUPERSEDED.
  * MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK reports a warm successor's fallback to its
  * transition, or a Reposition swap while a live level move may still ramp (conservative: it can be
- * set when the move was not stretched; #TBD50 removes it). The host
+ * set when the move was not stretched; #1711 removes it). The host
  * polls the watermark to learn that an edit is audible, never the event lane. The caller zeroes
  * reserved0 and reserved[] and sets struct_size, or the call returns
  * MISO_ENGINE_V1_INVALID_ARGUMENT; a copy that keeps landing inside render's publication

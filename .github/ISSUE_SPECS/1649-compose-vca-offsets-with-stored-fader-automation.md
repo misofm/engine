@@ -359,7 +359,7 @@ ramp)`, never past the next discontinuity, as `CellEvents` aims a ramp); gain
 4. **Paths outside the list (mechanical / test):** `crates/host-core/src/lib.rs` (re-export
    `FaderOffsetsRecord`); `crates/host-core/tests/stored_fader_automation.rs` (the R17-4 oracle
    parity test now also writes offsets cells, one under a held unmute ramp); `hosts/host-web/src/tests.rs`
-   (TBD48 `canonical_live`, as TBD48's record asks); `control.rs` test snapshot gains
+   (#1709 `canonical_live`, as #1709's record asks); `control.rs` test snapshot gains
    `strip_offsets_cells` and `FaderCells::test_only_offsets_write_counts` (test-support).
 5. **Superseded test.** #1648a's `an_automated_fader_lane_takes_no_fader_record` is replaced by
    gate 5's test, which keeps its D3 assertions (no `FaderDb` on an automated lane, the other
@@ -390,7 +390,7 @@ ramp)`, never past the next discontinuity, as `CellEvents` aims a ramp); gain
   block, each asserted `live`; 0 allocations and frees per render call after warm-up).
 - Oracle (R17-4): `the_scalar_oracle_renders_the_banks_fader_events` with offsets writes; red with
   the oracle's `read_offsets` removed (plane 0 at sample 1920), checked once.
-- TBD48: both `canonical_live` modules gain "a live VCA move on an automated lane".
+- #1709: both `canonical_live` modules gain "a live VCA move on an automated lane".
 - Commands: `cargo test --locked -p controls -p control-plane` (and `--features test-support`),
   `-p host-core --all-features`, `-p builtins-compiler --features test-support`, `-p capi`,
   `-p host-web --features host-web/test-support --lib --test control_parity`: pass.
@@ -447,4 +447,4 @@ Fold of the U3 review, part U3a, on `codex/controls-batch-17k` over `86271e096`,
 - U3 MINOR 2: the #1649 row of both `canonical_live` modules (C ABI and browser) was vacuous (an
   exact `f64` `S`). It now moves the VCA to `20` dB over a lane whose stored hand offset is
   `-1e-30` dB, so `S` rounds differently under the hostile word and reaches another gain; red with
-  the `SessionState::command` guard removed. Details in the TBD48 spec's "U3 fold (batch 17)".
+  the `SessionState::command` guard removed. Details in the #1709 spec's "U3 fold (batch 17)".

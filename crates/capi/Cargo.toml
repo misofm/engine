@@ -28,7 +28,7 @@ builtins = { workspace = true, features = ["test-support"] }
 # #1309 D8: the control plane's observers and fault hooks, for capi's tests only. A dev-dependency
 # feature never reaches the release `capi` build (`scripts/check-capi-abi.sh` builds `-p capi`).
 control-plane = { workspace = true, features = ["test-support"] }
-# TBD48: `lane::fpenv::under_hostile_fp_env`, the hostile caller environment of the live gate.
+# #1709: `lane::fpenv::under_hostile_fp_env`, the hostile caller environment of the live gate.
 lane = { workspace = true, features = ["test-support"] }
 # B16-R8: `RealtimePlanOwner::active_plan_mut`, so the #1642 gates read the active plan's
 # timeline. A dev-dependency feature never reaches the release `capi` build.

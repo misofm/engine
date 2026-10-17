@@ -2884,7 +2884,7 @@ fn a_fader_automation_edit_rebuilds_alike_on_both_hosts() {
     }
 }
 
-/// B17-R14 (#1648 split, TBD50): a table-only rebuild of a riding fader while a hand move with
+/// B17-R14 (#1648 split, #1711): a table-only rebuild of a riding fader while a hand move with
 /// its own 4,000 samples may still ramp completes as the transition fallback on both hosts, and
 /// the same rebuild with no move in flight completes exactly. Both hosts take the one decision in
 /// the shared control plane: the browser's status words carry the C ABI's watermark, flags

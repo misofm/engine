@@ -725,14 +725,14 @@ elsewhere. `scripts/check-cross-targets.sh` passes.
 ## Split (root ruling B17-R13, batch 17)
 
 - #1648 closes on its passing gates. The in-flight Reposition length case moves to
-  `TBD50-keep-a-live-level-moves-own-length-across-a-reposition-swap.md`, following the "split a
+  `1711-keep-a-live-level-moves-own-length-across-a-reposition-swap.md`, following the "split a
   blocking gate early" practice (a gate that holds a passed batch goes to a successor after one
   fix round).
 - Current difference (verifier, at 0fac00ee9): a live level move still ramping with
   `remaining < J` at a Reposition swap is stretched to `J` by the landing `max(J, remaining)`.
   Gate setup: heard 24, 26 and 30 blocks (928, 672 and 160 samples left; `J` = 960). The rebuilt
   rig differs from the uninterrupted engine by 4.8e-4, 3.1e-3 and 2.1e-3. The watermark marks it
-  as a fallback under root ruling B17-R14 (control-time, conservative; see the next point). TBD50
+  as a fallback under root ruling B17-R14 (control-time, conservative; see the next point). #1711
   replaces that flag with the exact behaviour and deletes this path.
 - The step guard (regression fix, `settle_adoption` in `crates/builtins-compiler/src/lib.rs`):
   when the cell's program has a discontinuity exactly at the block's first sample
@@ -747,7 +747,7 @@ elsewhere. `scripts/check-cross-targets.sh` passes.
   5.2e-4 heard 12), allocation-free, adopted. Red without the guard (8.6e-2, step at the swap).
   Red when the long landing runs over the whole block (verifier's mutation m5: 8.6e-2, step one
   sample after the swap; this is MINOR 3). Each was checked once.
-- MINOR 4 (`at = end` has no gate) moves to TBD50. Probe finding: for every heard move on the
+- MINOR 4 (`at = end` has no gate) moves to #1711. Probe finding: for every heard move on the
   moving ride, the stage's `fader_gain` at the swap is not the composed curve at the ramp's end
   (0.398 at 12 blocks heard, 0.335 at 24, against 0.3018). The comparison therefore differs at
   either point, and `at` cannot be seen by the current tables.

@@ -107,14 +107,14 @@ mod x86 {
         );
     }
 
-    /// TBD48 (U3 fold, batch 17): the test helper `under_hostile_fp_env` installs the hostile
+    /// #1709 (U3 fold, batch 17): the test helper `under_hostile_fp_env` installs the hostile
     /// word inside its body and writes the caller's exact word back after it, also when the body
     /// panics. The caller's word is itself non-canonical (round up, a sticky flag), so a helper
     /// that wrote the canonical word back would be seen.
     ///
     /// Test value: red if the helper leaves the hostile word on the caller's thread (on return or
     /// while unwinding), restores another word than the caller's, or does not install the hostile
-    /// word, so every TBD48 gate built on it would run in the wrong environment.
+    /// word, so every #1709 gate built on it would run in the wrong environment.
     #[cfg(feature = "test-support")]
     #[test]
     fn under_hostile_fp_env_restores_the_callers_word() {
@@ -293,7 +293,7 @@ mod aarch64 {
         (base & !(0b11 << 22)) | FPCR_FZ | FPCR_DN | FPCR_RMODE_UP
     }
 
-    /// TBD48 (U3 fold, batch 17): as the `x86_64` test of the same name.
+    /// #1709 (U3 fold, batch 17): as the `x86_64` test of the same name.
     ///
     /// Test value: red if the helper leaves the hostile word on the caller's thread (on return or
     /// while unwinding), restores another word than the caller's, or does not install it.
