@@ -479,3 +479,68 @@ Sizes (x86-64, measured): `RouteFollowFlags` 6 -> 12 bytes, `FollowRouteControlR
 the bind charge) 352 -> 360. Charges read `size_of`, so no pinned number moved. Realtime policy: 170
 marked regions in 34 files (168 before: `GraphRouteJumpLengths::for_row` and `route_gain_law` added;
 host-core's jump-rule region replaced in place).
+
+## Decision record: K1 (batch 19)
+
+`crates/automation` only (R19-2 = (b), K1). No render consumer yet: T3 (the route op) and #1655
+(batch 19b) bind it.
+
+- **Shipped.** New `crates/automation/src/compose.rs`: `Composed<T>` (one output), `ComposeCursor`
+  (one curve: its cell, `CursorKind::{Value, Gate}`, its own `CellState`, its block jump length,
+  its heard value), `Heard` (the values a composition reads), `ComposedEvent<T>`, `Composable`
+  (`same_bits`; `f32`, `bool`, arrays, pairs) and `ComposeError`. The cursor table is a boxed
+  slice allocated at bind (`Composed::new`, `try_reserve_exact`, `Composed::bytes(K) = K * 104` on
+  x86-64); no fixed array, no cap on `K`. The walk is one realtime-policy region: no index or
+  unwrap paths, bounded by `Composed::max_events` (the sum of the cursors' bounds; each step merges
+  at least one cursor event).
+- **How the walk works.** Each cursor's events are `CellEvents`, unchanged, pulled one at a time
+  over a window of the block (`NodeSpan::window`, new `pub(crate)`) from the offset after its last
+  event; with the state as its only memory this is the cell's uninterrupted stream (gate 1 holds
+  it). At each offset the composition (a caller callback over the heard values) gives `T`, and
+  the output's own `CellState` decides with the cell's rules, now `pub(crate)` in `events.rs` and
+  called by `CellEvents` itself (`unchanged_with`, `lagging`, `hold_event`, `commit_ramp`,
+  `clear_for_landing`, `free_after`, `target_toward`): change only on the target's bits, a jump
+  also when the ramp in flight lags, a held-only offset emits a held event by the held-event rule,
+  a seek landing always emits. The G5 corpus digests are unchanged (`wasm-gates`
+  `g5_native_corpus`: 7 passed).
+- **R19-4.** One offset's events are one retarget over the longest ramp among them (Set > Jump >
+  Grid for the kind).
+- **R19-3, and the owed landing: K1 owns it, through the cursors' own `CellState` deferral; the
+  fader's `HeldRampObligation` is not copied and stays the fader's.** A gate cursor's jump that
+  retargets the output, and a caller column jump (`Composed::retarget(target, start, n)`: a
+  record's ramp, a gate change of the cell), defer every value cursor's jump to the column ramp's
+  first free sample (`CellState::defer_jump`, #1711 D1). While it is pending, the value cursor's
+  grid is held (#1711's rule): the heard value and the output do not move. At the free sample each
+  value cursor whose curve moved fires the deferred jump over its own jump length to the curve at
+  the jump's completion (change only, or always with a held event outstanding), and coincident
+  landings take the longest (R19-4): "the value row's own J, the longer one if both are owed". The
+  owed bit is the cursor's held flag. A gate jump is never held; a value cursor's own jumps hold
+  its own grid by the cell's rule (a late grid restarts it, as one cell's does); a seek landing is
+  not a column jump. A cursor that pulled past the offset of a column jump is returned to the
+  state its pull started from and replayed up to that offset (it gave no event there), then
+  deferred and pulled again, so the deferral acts exactly at the offset.
+- **Departure: value jumps are not column jumps.** R19-3 lists a gate change, a record ramp and a
+  Set. A gain or matrix jump (a discontinuity, a landing) does not hold the other value cursors: a
+  landing that held the others would make two riding curves land in turn, each over its own `J`,
+  for ever. During a value jump the column is free (R19-3: "a free column retargets at once").
+- **Departure: no caller `hold_until` on the output.** R19-3 makes every caller ramp a column jump
+  (`retarget`). The one-cell hold semantics is used only by gate 1's corpus case (the test sets the
+  output's and the cursor's states directly).
+- **API for T3 and #1655.** `seed`/`seed_target`, `compose_heard`, `compose_toward(program, start,
+  n)` (each curve toward a ramp's completion: a record's target, #1649 D3), `retarget`,
+  `defer_jump(at)`/`clear_deferred_jump()` (value cursors, R19-5 at a Reposition),
+  `cursor_mut`/`cursors_mut` (`set_jump` per block, `state_mut` for a verbatim carry or a
+  reposition, `set_heard`), `copy_from` (a preallocated probe twin), `max_events`.
+
+Gates (`cargo test --locked -p automation`, all green):
+`compose::tests::one_cursor_gives_its_cells_events_over_the_corpus` (K = 1 equals `CellEvents`
+over the six G5 cases, holds and both seek modes),
+`one_cursor_gives_its_cells_events_over_random_tables` (400 seeded draws: all shapes, gaps, both
+completions, `no_restart`, fixed and block jumps, seeks, reported ramps, deferrals),
+`flat_curves_leave_the_moving_curves_events` (K = 3, two flat, 150 draws, every place and kind),
+`a_grid_event_inside_a_gate_jump_is_held_and_lands_at_its_end` (unmute J 480 at 1,000: no
+retarget in between, landing at 1,480 over 256 to the curve at 1,735, grid again from 1,728),
+`coincident_jumps_take_the_longest` (480/960 both ways: one Jump over 960),
+`a_deferral_holds_the_grid_until_it_fires`, `a_caller_retarget_holds_the_value_grid_until_its_end`,
+and `tests/allocation.rs::the_merged_walk_allocates_nothing` (10,000 blocks, seeks, retargets,
+deferrals: 0 allocations, 0 frees). Realtime policy: 171 marked regions in 35 files (170 before).
