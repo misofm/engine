@@ -11,6 +11,10 @@
 //!
 //! #1650b gate 6 runs the same rig with hand moves of `eq0`'s automated fader (`SET_CONTROL
 //! fader_db`, which writes the ride's offset and the lane's offsets cell) in place of the VCA moves.
+//!
+//! #1655 gate 5 runs it with `v` automated itself (an `offset_db` ride and `mute` steps): the
+//! composed curves' events, a hand move of the automated VCA offset, a hand move of the member
+//! with no own automation (an `own_db` write) and hand VCA mutes, each block allocation-free.
 
 use control_plane::{
     CompiledChildren, ControlAdapter, ControlLimits, EventLane, PlanResources, PlanState,
@@ -100,8 +104,9 @@ fn id(text: &str) -> StableId {
 }
 
 /// The fixture with `eq0` riding its fader on both lanes (linear, -0 to -12 dB over the source)
-/// and VCA `v` holding `eq0` and `eq1`.
-fn document() -> (String, u64) {
+/// and VCA `v` holding `eq0` and `eq1`; with `vca_automation`, `v` also rides its `offset_db` (linear, 0 to -9 dB over
+/// the source) and steps its `mute` (on at 1,000, off at 2,600, on at 5,000, off at 6,000).
+fn document_with(vca_automation: bool) -> (String, u64) {
     let mut model = session::parse_session_json(SESSION).expect("fixture");
     let frames = model.sources[0].frames;
     model.automation.push(Automation {
@@ -132,6 +137,48 @@ fn document() -> (String, u64) {
         },
         members: vec![id("eq0"), id("eq1")],
     });
+    if vca_automation {
+        let vca_row = |control| ControlAddress {
+            owner: Owner::Vca(id("v")),
+            section: Section::Own,
+            control,
+            lane: ParameterChannel::Both,
+        };
+        let step = |start, end, from, to| AutomationSegment {
+            shape: AutomationShape::Step,
+            start_sample: start,
+            end_sample: end,
+            start_value: from,
+            end_value: to,
+            unit: ParameterUnit::Linear,
+        };
+        model.automation.extend([
+            Automation {
+                id: id("v-ride"),
+                target: vca_row(1),
+                segments: vec![AutomationSegment {
+                    shape: AutomationShape::Linear,
+                    start_sample: 0,
+                    end_sample: frames,
+                    start_value: 0.0,
+                    end_value: -9.0,
+                    unit: ParameterUnit::Db,
+                }],
+                offset: AutomationOffset::default(),
+            },
+            Automation {
+                id: id("v-mute"),
+                target: vca_row(2),
+                segments: vec![
+                    step(0, 1_000, 0.0, 1.0),
+                    step(1_000, 2_600, 1.0, 0.0),
+                    step(2_600, 5_000, 0.0, 1.0),
+                    step(5_000, 6_000, 1.0, 0.0),
+                ],
+                offset: AutomationOffset::default(),
+            },
+        ]);
+    }
     (
         session::canonical_session_json(&model).expect("canonical"),
         model.revision,
@@ -149,9 +196,14 @@ struct Rig {
 }
 
 impl Rig {
-    /// A rig on [`document`], booted.
+    /// A rig on [`document_with`]`(false)`, booted.
     fn new() -> Self {
-        let (document, revision) = document();
+        Self::with(false)
+    }
+
+    /// A rig on [`document_with`], booted.
+    fn with(vca_automation: bool) -> Self {
+        let (document, revision) = document_with(vca_automation);
         let CompiledChildren { session, plan } =
             compile_children::<Adapter>(&document, limits(), Box::new(Preparer))
                 .expect("boot compile");
@@ -264,9 +316,13 @@ impl Rig {
     }
 }
 
-/// A rig on [`document`], warmed: the process statics and the first blocks' one-time work.
+/// A rig on [`document_with`]`(false)`, warmed: the process statics and the first blocks' one-time work.
 fn warm_rig() -> Rig {
-    let mut rig = Rig::new();
+    warm(Rig::new())
+}
+
+/// `rig` warmed: four blocks.
+fn warm(mut rig: Rig) -> Rig {
     for _ in 0..4 {
         rig.block();
     }
@@ -361,4 +417,56 @@ fn a_hand_move_on_an_automated_fader_renders_allocation_free() {
             );
         }
     }
+}
+
+/// #1655 gate 5. With `v` automated (its ride and mute steps compose into both members' lanes),
+/// every render block after the warm-up allocates and frees nothing: blocks that only play the
+/// composed curves (grid events of the ride, the mute steps), a hand move of the automated VCA
+/// offset (it writes the ride's offset and `S` of both members), a hand move of `eq1`'s fader
+/// (no own automation: an `own_db` write through its offsets cell), and a hand mute and unmute of
+/// `v` (the members' `terms`, ORed with the curve). Each edit commits live. Not vacuous: the
+/// composed curves are heard (the output differs from the rig without VCA automation).
+///
+/// Test value: red if the composed walk, the VCA mute cursors, the `own_db` read or a terms write
+/// on a composed lane allocates or frees on render.
+#[test]
+fn a_vca_curve_and_hand_edits_over_it_render_allocation_free() {
+    bench_support::alloc::assert_installed();
+    let mut rig = warm(Rig::with(true));
+    let mut plain = warm_rig();
+    let row = |owner: Owner, section: Section, control: u32| ControlAddress {
+        owner,
+        section,
+        control,
+        lane: ParameterChannel::Both,
+    };
+    let offset = row(Owner::Vca(id("v")), Section::Own, 1);
+    let mute = row(Owner::Vca(id("v")), Section::Own, 2);
+    let member = row(Owner::Strip(id("eq1")), Section::Builtins, 5);
+    let script: [&[(&ControlAddress, f32, Option<u32>)]; 6] = [
+        &[],
+        &[(&offset, 3.0, None)],
+        &[(&member, -6.0, Some(256))],
+        &[(&mute, 1.0, None)],
+        &[(&mute, 0.0, Some(256))],
+        &[(&offset, -1.5, Some(256)), (&member, 0.0, None)],
+    ];
+    let mut heard = false;
+    for moves in script {
+        for &(address, value, ramp) in moves {
+            rig.move_row(address.clone(), value, ramp);
+        }
+        for _ in 0..12 {
+            let block = rig.block;
+            let used = rig.block();
+            plain.block();
+            heard |= rig.last != plain.last;
+            assert_eq!(
+                (used.allocations, used.deallocations),
+                (0, 0),
+                "block {block} allocated or freed"
+            );
+        }
+    }
+    assert!(heard, "the composed curves are heard");
 }

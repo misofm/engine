@@ -661,3 +661,72 @@ test-support --test control_parity` (44): all green. Realtime policy: 172 region
 For V5: host gates for gate 3 (a following send of a member closes at its tap under a VCA mute,
 both hosts, latent tap), a member with no own mute entry, a nested VCA, the carry (continued and
 moved VCA mute tables) and the reach-pair cap gate (R19-6).
+
+## Decision record: V5 (batch 19)
+
+The objective gates and the doc. Tests and `docs/SESSION_SCHEMA_V1.md` only: no product code, no
+edit under `crates/engine/src/realtime/`, no row class or table change (no SDK regeneration). The
+gates found no defect.
+
+- **Hosts.** Every both-host gate is in `hosts/host-web/tests/control_parity.rs`, which drives the
+  C ABI's exported `miso_engine_v1_*` entries and the browser host in one binary (the amendment's
+  "both hosts in one binary"); `crates/capi/src/runtime/live_tests.rs` gains nothing (departure
+  from the brief's file list, not from the gates). Parity runs at quantum 128 and the native width;
+  widths and quanta are host-core's.
+- **Widths.** `crates/host-core/tests/stored_vca_automation.rs` runs Simd8 (when `avx2`), Simd4 and
+  the scalar oracle (`backends()`), live and between render calls; the carry gates (8) run the bank
+  widths only (the oracle restarts at a swap, #1651 T4).
+
+Gates (test names; all green):
+1. Flat equals static: host-core `a_flat_vca_ride_and_mute_render_the_static_vca_bits` (quanta 128,
+   100, 37; a member with its own ride, one with none and in a second static VCA; fallback +3
+   unused); both hosts `a_flat_vca_ride_and_mute_render_the_static_vca_bits_on_both_hosts`.
+2. Member node time: host-core `a_vca_ride_reaches_each_member_in_its_own_node_time` (each grid
+   event's gain equals `checked_fader_gain(vca_compose_db(own, S + c(τ)))` computed on the test
+   thread; the latent member's events `L` later); both hosts
+   `a_linear_vca_ride_renders_alike_on_both_hosts` (alike and heard).
+3. Mute: host-core `a_vca_mute_step_mutes_each_member_at_its_node_time` (off-grid step at 1,000;
+   `SetMute` at `1,000` and `1,000 + L` over `VcaMute`; a member with no own mute entry, one with,
+   a nested VCA; static-mute and open plans after the ramps); both hosts
+   `a_vca_mute_curve_closes_a_following_send_at_its_latent_tap_on_both_hosts` (also the V4 note: the
+   send follows a lane only a VCA mute reaches, through a nested VCA, behind a latent tap).
+4. Hand edits: both hosts `hand_edits_of_an_automated_vca_commit_as_d5_says_on_both_hosts` (offset
+   +3 live and heard; hand mute over an open curve heard, over a closed one no bit moves; a hand
+   move of a member only the ride reaches live and heard; membership edit of the automated VCA
+   `rebuild` and `EXACT`, no fallback; of a plain VCA `live`) and
+   `a_hand_move_on_an_automated_vca_offset_is_in_place_as_the_full_path_on_both_hosts` (R17-1; the
+   document stores the offset). The `own_db` record and "no `FaderDb`" stay V3's classifier gates.
+5. Realtime: `crates/control-plane/tests/vca_automation_realtime.rs`
+   `a_vca_curve_and_hand_edits_over_it_render_allocation_free` (curve, hand VCA move, hand member
+   move, hand VCA mute and unmute; every block `allocations == 0 && frees == 0`).
+6. No bit moves: `./target/release/audit capi` `pcm_digest` = `bffc21e857b5e134`.
+7. Reposition: both hosts
+   `a_vca_ride_table_edit_while_a_level_move_ramps_completes_exactly_on_both_hosts` (a member's
+   `own_db` move and a VCA hand move of 4,000 samples, heard 1, 12, 26 blocks; a table change after
+   1,000,000 repositions every member; each host equals its own twin without the rebuild; `EXACT`).
+8. Carry: host-core `a_hand_vca_mute_in_a_vca_mute_curve_rebuild_lands_over_its_own_ramp` (ramp
+   `M`, 0, 2,000) and `added_removed_and_changed_vca_mute_entries_carry_the_member_stage` (swap
+   block allocation-free, strip carried); both hosts
+   `a_hand_vca_mute_in_a_vca_mute_curve_rebuild_lands_over_its_own_ramp_on_both_hosts`.
+- R19-4: host-core `coincident_member_and_vca_events_take_one_longest_jump` (one fader jump over
+  `J`, one `SetMute` over `M`; bits of one curve making the sum). At host level the `VcaOffset` and
+  `VcaMute` lengths equal the fader and mute lengths, so "longest" is V2's
+  `coincident_member_and_vca_events_take_the_longest_jump` (480/960) at the stage.
+- R19-6: both hosts `the_reach_pair_cap_bounds_vca_automation_alike_on_both_hosts` (256 nested VCAs,
+  the outermost automated: 64 tracks, 16,384 pairs, boot; 65 tracks refused
+  `host.resource.vca_reach_pairs` alike, no panic).
+
+Red without the feature (once each, reverted): gates 1-3 with the VCA reach dropped from
+`controls::event_lanes` (VCA curves reach no member): host-core gates 1, 2, 3 red (and gate 8's
+carry case); gate 1 and 3 parity red; gate 4 red with the same knockout (a hand VCA move is not
+heard: `automated_vca_alike`'s heard assert); gate 7 red with `settle_adoption`'s stage hold
+ignored (the move is cut at the swap: the browser twin comparison). Knocking out
+`automation_row_renders` for VCA rows alone leaves gates 1-3 green: render reads the event-lane
+predicates, the classifier the rows.
+
+Commands: `cargo fmt --all`; clippy `-D warnings --all-targets --all-features` on host-core,
+control-plane, host-web; `cargo check --locked --all-targets` (workspace, no features); tests
+automation (44), builtins-compiler `--features test-support` (94), graph `--features test-support`
+(159), host-core `--features test-support` (485) and `test-support,control-provider` (613),
+control-plane `--features test-support` (30), capi lib (220), host-web `--features test-support
+--test control_parity` (52): all green. Realtime policy: 172 regions in 35 files (unchanged).

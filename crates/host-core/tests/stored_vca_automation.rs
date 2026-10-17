@@ -341,6 +341,812 @@ fn every_fader_event_lane_has_an_offsets_cell() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// #1655 V5: the objective gates on every bank width and the scalar oracle
+// ---------------------------------------------------------------------------------------------
+
+/// The session mute length here (`mute_ms` 10 at 48 kHz): the `VcaMute` row's length.
+const M: u32 = 480;
+/// The session fader length here (`fader_ms` 5 at 48 kHz): the `VcaOffset` row's length.
+const J: u32 = 240;
+
+/// One segment of `shape` over `[start, end)` from `from` to `to` in `unit`.
+fn piece(
+    shape: AutomationShape,
+    (start, end): (u64, u64),
+    (from, to): (f32, f32),
+    unit: ParameterUnit,
+) -> AutomationSegment {
+    AutomationSegment {
+        shape,
+        start_sample: start,
+        end_sample: end,
+        start_value: from,
+        end_value: to,
+        unit,
+    }
+}
+
+/// Steps from `from` at sample 0 to each `(sample, value)` of `steps` in `unit`, held after.
+fn steps_of(from: f32, steps: &[(u64, f32)], unit: ParameterUnit) -> Vec<AutomationSegment> {
+    let mut at = (0_u64, from);
+    steps
+        .iter()
+        .map(|&(sample, value)| {
+            let step = piece(AutomationShape::Step, (at.0, sample), (at.1, value), unit);
+            at = (sample, value);
+            step
+        })
+        .collect()
+}
+
+/// An entry `name` on `owner`'s row `control` in `section` on both lanes, with `segments`.
+fn entry_of(
+    name: &str,
+    owner: Owner,
+    section: Section,
+    control: u32,
+    segments: Vec<AutomationSegment>,
+) -> Automation {
+    Automation {
+        id: id(name),
+        target: ControlAddress {
+            owner,
+            section,
+            control,
+            lane: ParameterChannel::Both,
+        },
+        segments,
+        offset: session::AutomationOffset::default(),
+    }
+}
+
+/// VCA `name`'s `mute` entry stepping from `from` at each `(sample, value)` of `steps`.
+fn vca_mute_steps(name: &str, from: f32, steps: &[(u64, f32)]) -> Automation {
+    entry_of(
+        &format!("{name}-mute"),
+        Owner::Vca(id(name)),
+        Section::Own,
+        VCA_MUTE,
+        steps_of(from, steps, ParameterUnit::Linear),
+    )
+}
+
+/// `model` with a true-peak limiter (5 ms lookahead) on track `track`: a latent node before its
+/// fader.
+fn with_limiter(mut model: SessionModel, track: usize) -> SessionModel {
+    use session::{
+        Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode, SidechainDeclaration,
+    };
+    let param = |parameter_id, unit, value| EffectParam {
+        parameter_id,
+        channel: ParameterChannel::Both,
+        unit,
+        value,
+    };
+    model.tracks[track].inserts.effects.push(Effect {
+        id: id(&format!("limiter-{track}")),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.true-peak-limiter"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::Maximum,
+        params: vec![
+            param(1, ParameterUnit::Db, -8.0),
+            param(2, ParameterUnit::Milliseconds, 60.0),
+            param(3, ParameterUnit::Milliseconds, 5.0),
+        ],
+        sidechain: SidechainDeclaration::None,
+    });
+    normalized(&model)
+}
+
+/// The floored input arrival `a(n)` of track `track`'s fader node in `prepared`'s plan.
+fn fader_arrival(prepared: &PreparedHost, model: &SessionModel, track: usize) -> u64 {
+    let track_id = model.tracks[track].id.as_str();
+    prepared
+        .inventory
+        .input_floors()
+        .iter()
+        .find(|(node, _)| {
+            matches!(
+                node,
+                graph::GraphNodeId::TrackStage {
+                    track_id: id,
+                    stage: graph::TrackStage::PostFader,
+                } if id.as_str() == track_id
+            )
+        })
+        .map_or(0, |(_, arrival)| *arrival)
+}
+
+/// The probe's fader and mute events of `blocks` more blocks of `rig`, taken block by block.
+fn probed(rig: &mut Rig, blocks: usize) -> Vec<builtins_compiler::TestOnlyFaderEvent> {
+    let _ = builtins_compiler::test_only_take_fader_events();
+    let mut all = Vec::new();
+    for _ in 0..blocks {
+        rig.block();
+        let (events, overflow) = builtins_compiler::test_only_take_fader_events();
+        assert!(!overflow, "the probe holds a block's events");
+        all.extend(events);
+    }
+    all
+}
+
+fn same_bits(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
+}
+
+/// Gate 1 (#1655, amended): a flat VCA `offset_db` ride at -6 dB (its static fallback +3 dB
+/// unused) and a flat VCA `mute` at 0 on `va` render, bit for bit, the session whose `va` holds
+/// -6 dB statically: `t0` is in `va` and in the static `vb` (-2 dB; two VCAs on one member, one
+/// automated) and has no ride of its own, `t1` rides its own fader (flat -3 dB), `t2` is in no
+/// VCA. On every backend, live and between render calls, at quanta 128, 100 and 37, render
+/// allocation-free. Not vacuous: a ride at -5 dB is heard.
+///
+/// Test value: red if the composed lane adds the VCA curve to `S` with other arithmetic or in
+/// another order than the static composition (D2's class B order: static `vb` first, then the
+/// curve), if the fallback leaks into `S`, or if a flat mute curve moves a bit.
+#[test]
+fn a_flat_vca_ride_and_mute_render_the_static_vca_bits() {
+    for quantum in [128, 100, 37] {
+        let session = |ride: Option<f32>| {
+            let mut model = plain(3, quantum);
+            let t: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+            let mut va = vca("va", vec![t[0].clone(), t[1].clone()]);
+            let mut vb = vca("vb", vec![t[0].clone()]);
+            (vb.fader.left_db, vb.fader.right_db) = (-2.0, -2.0);
+            if let Some(db) = ride {
+                (va.fader.left_db, va.fader.right_db) = (3.0, 3.0);
+                model.automation.extend([
+                    vca_ride("va", ParameterChannel::Both, db),
+                    vca_mute_entry("va"),
+                ]);
+            } else {
+                (va.fader.left_db, va.fader.right_db) = (-6.0, -6.0);
+            }
+            model.vcas = vec![va, vb];
+            let own = own_ride(&model, 1, -3.0);
+            model.automation.push(own);
+            normalized(&model)
+        };
+        let (flat, fixed, other) = (session(Some(-6.0)), session(None), session(Some(-5.0)));
+        for backend in backends() {
+            for between in [false, true] {
+                let what = format!("{backend:?} between {between}, quantum {quantum}");
+                let run = |model: &SessionModel| {
+                    let mut rig = Rig::new(model, backend, between);
+                    rig.blocks(40);
+                    assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
+                    rig.out
+                };
+                let (flat, fixed, other) = (run(&flat), run(&fixed), run(&other));
+                for lane in 0..2 {
+                    assert!(
+                        same_bits(&flat[lane], &fixed[lane]),
+                        "{what}: lane {lane} renders the static VCA's bits"
+                    );
+                    assert!(
+                        !same_bits(&other[lane], &fixed[lane]),
+                        "{what}: lane {lane}, a ride at -5 dB is heard"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Gate 2 (#1655): a linear VCA `offset_db` ride (-12 to 0 dB over 8,192 samples) reaches two
+/// members, `t0` behind a true-peak limiter (latency `L`, its own fader static at -1 dB) and `t1`
+/// (its own fader riding -6.5 to -2 dB over 4,096). Every grid event the driver gives either
+/// member's stage carries the fader dB `vca_compose_db(own, S + c(τ))` computed here, `τ` the
+/// event's completion sample in that member's node time (render sample less `a(n)`, plus 63), so
+/// its gain is `checked_fader_gain` of it; the latent member's events fall on the render samples
+/// `L` after the other's. On every backend, live and between render calls.
+///
+/// Test value: red if VCA events run on the render clock or another member's arrival (the latent
+/// member's grid would fall on the plain member's samples and carry another time's value), or if
+/// the composition differs from `vca_compose_db(own, S + c)`.
+#[test]
+fn a_vca_ride_reaches_each_member_in_its_own_node_time() {
+    let mut model = plain(2, 128);
+    let t: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+    (
+        model.tracks[0].fader.left_db,
+        model.tracks[0].fader.right_db,
+    ) = (-1.0, -1.0);
+    model.vcas = vec![vca("va", t.clone())];
+    let vca_curve = vec![piece(
+        AutomationShape::Linear,
+        (0, 8_192),
+        (-12.0, 0.0),
+        ParameterUnit::Db,
+    )];
+    let own_curve = vec![piece(
+        AutomationShape::Linear,
+        (0, 4_096),
+        (-6.5, -2.0),
+        ParameterUnit::Db,
+    )];
+    model.automation = vec![
+        entry_of(
+            "va-ride",
+            Owner::Vca(id("va")),
+            Section::Own,
+            VCA_OFFSET,
+            vca_curve,
+        ),
+        entry_of(
+            "t1-ride",
+            Owner::Strip(t[1].clone()),
+            Section::Builtins,
+            FADER_DB,
+            own_curve,
+        ),
+    ];
+    let model = with_limiter(model, 0);
+    let entries = model.automation.clone();
+    let curve = |name: &str, at: i64| {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.id.as_str() == name)
+            .expect("an entry");
+        automation::value_at(&controls::stored_segments(entry), at)
+    };
+    for backend in backends() {
+        for between in [false, true] {
+            let what = format!("{backend:?} between {between}");
+            let mut rig = Rig::new(&model, backend, between);
+            let latent = fader_arrival(&rig.prepared, &model, 0);
+            assert_eq!(fader_arrival(&rig.prepared, &model, 1), 0, "{what}");
+            assert!(
+                !latent.is_multiple_of(64),
+                "{what}: L = {latent} is off the grid"
+            );
+            let events = probed(&mut rig, 30);
+            let mut samples = [Vec::new(), Vec::new()];
+            for event in events.iter().filter(|event| {
+                !event.mute && !event.held && event.kind == automation::EventKind::Grid
+            }) {
+                // The member by its grid: `t1`'s node time is render time, `t0`'s is `L` behind.
+                let member = usize::from(!event.sample.is_multiple_of(64));
+                let arrival = [0, latent][member];
+                assert_eq!(
+                    (event.sample - arrival) % 64,
+                    0,
+                    "{what}: {event:?} on a member's grid"
+                );
+                samples[member].push(event.sample);
+                let at = (event.sample - arrival) as i64 + 63;
+                if at >= 4_096 {
+                    continue;
+                }
+                let own = if member == 0 {
+                    curve("t1-ride", at)
+                } else {
+                    -1.0
+                };
+                let expected = session::vca_compose_db(own, 0.0 + f64::from(curve("va-ride", at)));
+                assert_eq!(
+                    builtins::checked_fader_gain(event.value)
+                        .expect("fader domain")
+                        .to_bits(),
+                    builtins::checked_fader_gain(expected)
+                        .expect("fader domain")
+                        .to_bits(),
+                    "{what}: {event:?} at node time {at}"
+                );
+            }
+            for list in &mut samples {
+                list.sort_unstable();
+                list.dedup();
+            }
+            assert!(
+                samples.iter().all(|list| list.len() >= 40),
+                "{what}: both members move on their grids: {samples:?}"
+            );
+            let shifted: Vec<u64> = samples[0]
+                .iter()
+                .map(|sample| sample + latent)
+                .filter(|sample| (latent + 64..3_840).contains(sample))
+                .collect();
+            let latent_grid: Vec<u64> = samples[1]
+                .iter()
+                .copied()
+                .filter(|sample| (latent + 64..3_840).contains(sample))
+                .collect();
+            assert_eq!(
+                shifted, latent_grid,
+                "{what}: the latent member's events fall L later"
+            );
+            assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
+        }
+    }
+}
+
+/// Gate 3 (#1655, amended): a VCA `mute` curve on `va` closes at timeline 1,000 (not a grid
+/// sample) and opens at 2,500. `va` holds `t0` (behind a true-peak limiter, no mute entry of its
+/// own), `t1` (a flat open mute entry of its own) and the nested VCA `vn`, which holds `t2`; `t3`
+/// is in no VCA. Each member mutes at its own node time over the `VcaMute` length: the driver's
+/// `SetMute` events fall on render samples `1,000` (`t1`, `t2`) and `1,000 + L` (`t0`) and back at
+/// `2,500` and `2,500 + L`, each over `M`. From the first block boundary after the mute ramp's end
+/// in the output until the unmute, the output equals the plan with `va` muted statically; from
+/// the first boundary after the unmute ramp, the plan with no VCA mute. On every backend, live
+/// and between render calls.
+///
+/// Test value: red if a member's mute follows the render clock (the latent member closes `L`
+/// early), if a nested member or one with no own mute entry misses the VCA curve, or if the
+/// composed mute ramps over another length.
+#[test]
+fn a_vca_mute_step_mutes_each_member_at_its_node_time() {
+    let session = |curve: bool, muted: bool| {
+        let mut model = plain(4, 128);
+        let t: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+        let mut va = vca("va", vec![t[0].clone(), t[1].clone(), id("vn")]);
+        (va.fader.left_mute, va.fader.right_mute) = (muted, muted);
+        model.vcas = vec![va, vca("vn", vec![t[2].clone()])];
+        model.automation.push(entry_of(
+            "t1-mute",
+            Owner::Strip(t[1].clone()),
+            Section::Builtins,
+            6,
+            steps_of(0.0, &[(4_096, 0.0)], ParameterUnit::Linear),
+        ));
+        if curve {
+            model
+                .automation
+                .push(vca_mute_steps("va", 0.0, &[(1_000, 1.0), (2_500, 0.0)]));
+        }
+        with_limiter(model, 0)
+    };
+    let (curve, muted, open) = (
+        session(true, false),
+        session(false, true),
+        session(false, false),
+    );
+    const BLOCKS: usize = 40;
+    for backend in backends() {
+        for between in [false, true] {
+            let what = format!("{backend:?} between {between}");
+            let mut rig = Rig::new(&curve, backend, between);
+            let latent = fader_arrival(&rig.prepared, &curve, 0);
+            assert!(latent > 0, "{what}: the limiter delays t0's fader");
+            let events = probed(&mut rig, BLOCKS);
+            let mut mutes: Vec<(u64, bool, u32)> = events
+                .iter()
+                .filter(|event| event.mute)
+                .map(|event| (event.sample, event.value != 0.0, event.ramp))
+                .collect();
+            mutes.sort_unstable();
+            mutes.dedup();
+            assert_eq!(
+                mutes,
+                [
+                    (1_000, true, M),
+                    (1_000 + latent, true, M),
+                    (2_500, false, M),
+                    (2_500 + latent, false, M),
+                ],
+                "{what}: each member's mute at its node time over VcaMute"
+            );
+            let mut fixed = Rig::new(&muted, backend, between);
+            fixed.blocks(BLOCKS);
+            let mut plain = Rig::new(&open, backend, between);
+            plain.blocks(BLOCKS);
+            let q = rig.quantum as u64;
+            let closed = ((1_000 + latent + u64::from(M)).div_ceil(q) * q) as usize;
+            let opened = ((2_500 + latent + u64::from(M)).div_ceil(q) * q) as usize;
+            let end = BLOCKS * rig.quantum;
+            for lane in 0..2 {
+                assert!(
+                    same_bits(
+                        &rig.out[lane][closed..2_500],
+                        &fixed.out[lane][closed..2_500]
+                    ),
+                    "{what}: lane {lane} equals the static VCA mute while the curve mutes"
+                );
+                assert!(
+                    same_bits(&rig.out[lane][opened..end], &plain.out[lane][opened..end]),
+                    "{what}: lane {lane} equals the open plan after the unmute"
+                );
+                assert!(
+                    !same_bits(&fixed.out[lane][..900], &rig.out[lane][..900]),
+                    "{what}: lane {lane} plays before the mute"
+                );
+            }
+            assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
+        }
+    }
+}
+
+/// R19-4 at host level (#1655): `t0`'s own fader steps from -3 to -9 dB at timeline 1,000 and
+/// VCA `va`'s ride steps from 0 to -6 dB at the same sample; `t0`'s own mute and `va`'s mute
+/// curve each step on at 3,000. The driver gives each channel one fader event at 1,000 over the
+/// longest of the two jumps (the fader and `VcaOffset` rows' lengths, both `J` here) and one
+/// `SetMute` at 3,000 over `M`, and the output equals, bit for bit, a session whose own curves
+/// alone make the composed moves (-3 to -15 dB, one mute step) under a static `va` at 0 dB. On
+/// every backend, live and between render calls.
+///
+/// Test value: red if coincident curve events land as two jumps (the second retargets inside the
+/// first), as a shorter jump, or compose another value than one curve making the sum would.
+#[test]
+fn coincident_member_and_vca_events_take_one_longest_jump() {
+    let session = |vca_curves: bool| {
+        let mut model = plain(1, 128);
+        let t0 = model.tracks[0].id.clone();
+        model.vcas = vec![vca("va", vec![t0.clone()])];
+        let to = if vca_curves { -9.0 } else { -15.0 };
+        model.automation = vec![
+            entry_of(
+                "t0-ride",
+                Owner::Strip(t0.clone()),
+                Section::Builtins,
+                FADER_DB,
+                steps_of(-3.0, &[(1_000, to)], ParameterUnit::Db),
+            ),
+            entry_of(
+                "t0-mute",
+                Owner::Strip(t0.clone()),
+                Section::Builtins,
+                6,
+                steps_of(0.0, &[(3_000, 1.0)], ParameterUnit::Linear),
+            ),
+        ];
+        if vca_curves {
+            model.automation.extend([
+                entry_of(
+                    "va-ride",
+                    Owner::Vca(id("va")),
+                    Section::Own,
+                    VCA_OFFSET,
+                    steps_of(0.0, &[(1_000, -6.0)], ParameterUnit::Db),
+                ),
+                vca_mute_steps("va", 0.0, &[(3_000, 1.0)]),
+            ]);
+        }
+        normalized(&model)
+    };
+    let (composed, single) = (session(true), session(false));
+    for backend in backends() {
+        for between in [false, true] {
+            let what = format!("{backend:?} between {between}");
+            let mut rig = Rig::new(&composed, backend, between);
+            let events = probed(&mut rig, 32);
+            let at = |sample: u64, mute: bool| {
+                let mut found: Vec<(usize, u32)> = events
+                    .iter()
+                    .filter(|event| event.sample == sample && event.mute == mute && !event.held)
+                    .map(|event| (event.channel, event.ramp))
+                    .collect();
+                found.sort_unstable();
+                found
+            };
+            assert_eq!(at(1_000, false), [(0, J), (1, J)], "{what}: one fader jump");
+            assert_eq!(at(3_000, true), [(0, M), (1, M)], "{what}: one mute step");
+            let mut twin = Rig::new(&single, backend, between);
+            twin.blocks(32);
+            for lane in 0..2 {
+                assert!(
+                    same_bits(&rig.out[lane], &twin.out[lane]),
+                    "{what}: lane {lane} equals one curve making the sum"
+                );
+            }
+        }
+    }
+}
+
+// Gate 8 (#1655 amendment): the strip carry of VCA mute automation across a plan swap.
+
+/// The block a carry case's successor is swapped in at.
+const SWAP_BLOCK: usize = 8;
+
+/// A signed two-plane source that is never zero.
+fn carry_pcm(frames: usize) -> [Vec<f32>; 2] {
+    let plane = |channel: u32| {
+        (0..frames as u32)
+            .map(|frame| {
+                let step = frame
+                    .wrapping_mul(7_919)
+                    .wrapping_add(channel * 31)
+                    .wrapping_add(17)
+                    % 1_999;
+                (step as f32 - 999.5) / 2_000.0
+            })
+            .collect::<Vec<f32>>()
+    };
+    [plane(0), plane(1)]
+}
+
+/// What a carry run rendered: the planes, the swap block's `(allocations, frees)` and the
+/// successor's restarted strips.
+struct CarryRun {
+    out: [Vec<f32>; 2],
+    swap_allocations: (u64, u64),
+    restarted: Vec<Box<str>>,
+}
+
+/// A strip record write of a carry run: before block `block` renders, through the live handles
+/// and gate of the plan that renders it.
+type CarryEdit<'a> = &'a dyn Fn(
+    usize,
+    &mut host_core::HostLiveControlHandles,
+    &mut engine::realtime::PlanRevisionGate,
+);
+
+/// `a` prepared with live controls on `backend` and rendered for [`SWAP_BLOCK`] blocks, then, with
+/// `b = Some((next, committed))`, `next` prepared as its successor on the committed model
+/// `committed`, swapped in and rendered to `frames`; with `None`, `a` alone. `edit` runs before
+/// every block on the plan that renders it. Fed `pcm` from frame 0.
+fn carry_run(
+    a: &SessionModel,
+    b: Option<(&SessionModel, &SessionModel)>,
+    backend: graph_compiler::Backend,
+    pcm: &[Vec<f32>; 2],
+    frames: usize,
+    edit: CarryEdit<'_>,
+) -> CarryRun {
+    use engine::realtime::{PlanExchangeConfig, SwapOutcome, plan_exchange};
+    let quantum = a.quantum_frames as usize;
+    let caps = caps(a);
+    let request = host_core::HostLiveControlRequest::default();
+    let fail = |failure: host_core::PrepareDiagnostics| -> ! {
+        panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+    };
+    let (prepared, mut handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
+        &compiled(a),
+        &caps,
+        &request,
+        backend,
+    )
+    .unwrap_or_else(|failure| fail(failure));
+    let PreparedHost {
+        mut plan,
+        mut sources,
+        inventory,
+        ..
+    } = prepared;
+    let mut gate = plan.take_revision_gate().expect("the plan's gate");
+    let (mut publisher, mut owner, _retirer) = plan_exchange(
+        plan,
+        PlanExchangeConfig {
+            retirement_capacity: core::num::NonZeroUsize::MIN,
+        },
+    )
+    .unwrap_or_else(|_| panic!("plan exchange"));
+    bench_support::alloc::assert_installed();
+    let mut out = [Vec::new(), Vec::new()];
+    let mut swap_allocations = (0, 0);
+    let mut restarted = Vec::new();
+    let mut successor: Option<(
+        host_core::SourceControlSet,
+        host_core::HostLiveControlHandles,
+        engine::realtime::PlanRevisionGate,
+    )> = None;
+    let mut block = 0;
+    while block * quantum < frames {
+        if block == SWAP_BLOCK
+            && let Some((next, committed)) = b
+        {
+            let committed = compiled(committed).normalized_model().clone();
+            let revision = gate.last_published() + 1;
+            let base = host_core::SuccessorBase::new(&inventory, &committed, revision);
+            let (mut prepared, next_handles) =
+                host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+                    &compiled(next),
+                    &caps,
+                    &request,
+                    base,
+                    backend,
+                )
+                .unwrap_or_else(|failure| fail(failure));
+            prepared.sources.adopt_persisting(&mut sources);
+            restarted = prepared.restarted_strips().to_vec();
+            let PreparedHost {
+                mut plan,
+                sources: next_sources,
+                ..
+            } = prepared;
+            let mut next_gate = plan.take_revision_gate().expect("the successor's gate");
+            next_gate.publish(revision);
+            publisher
+                .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
+                .unwrap_or_else(|_| panic!("reserve the successor"))
+                .commit();
+            successor = Some((next_sources, next_handles, next_gate));
+        }
+        let at = block * quantum;
+        let (feed, live, live_gate) = match successor.as_mut() {
+            Some((sources, handles, gate)) => (sources, handles, gate),
+            None => (&mut sources, &mut handles, &mut gate),
+        };
+        feed.submit(
+            NINE_SOURCE,
+            SourceSubmission {
+                generation: 1,
+                start_frame: at as u64,
+                sample_rate_hz: RATE,
+                planes: &[&pcm[0][at..at + quantum], &pcm[1][at..at + quantum]],
+                frames: quantum as u32,
+                end_of_region: false,
+            },
+        )
+        .expect("source block");
+        edit(block, live, live_gate);
+        let mut samples = vec![0.0_f32; quantum * 2];
+        let output =
+            PlanarBufferMut::try_new(&mut samples, 2, quantum, quantum).expect("output planes");
+        let mark = bench_support::alloc::current_thread_counters();
+        let report = owner
+            .render_contiguous(RenderIo { output }, at as u64)
+            .unwrap_or_else(|error| panic!("render: {error:?}"));
+        let delta = bench_support::alloc::current_thread_delta_since(mark);
+        let swapped = report.swap == SwapOutcome::Applied;
+        assert_eq!(
+            swapped,
+            b.is_some() && block == SWAP_BLOCK,
+            "the successor is adopted at the swap block"
+        );
+        if swapped {
+            swap_allocations = (delta.allocations + delta.reallocations, delta.deallocations);
+        }
+        out[0].extend_from_slice(&samples[..quantum]);
+        out[1].extend_from_slice(&samples[quantum..]);
+        block += 1;
+    }
+    drop(handles);
+    drop(successor);
+    CarryRun {
+        out: out.map(|mut plane| {
+            plane.truncate(frames);
+            plane
+        }),
+        swap_allocations,
+        restarted,
+    }
+}
+
+/// The bank backends of the target (the scalar oracle binds the fader as a graph node, which a
+/// swap restarts: it has no carry to hold, #1651 T4).
+fn bank_backends() -> Vec<graph_compiler::Backend> {
+    backends()
+        .into_iter()
+        .filter(|backend| *backend != graph_compiler::Backend::Scalar)
+        .collect()
+}
+
+/// A VCA mute curve: its value at sample 0 and its steps.
+type MuteCurve = Option<(f32, &'static [(u64, f32)])>;
+
+/// Two tracks at `quantum`, `t0` in VCA `va` with `va`'s mute curve `curve`, if any, and `va`
+/// muted statically when `muted`.
+fn vca_mute_session(quantum: u32, curve: MuteCurve, muted: bool) -> SessionModel {
+    let mut model = plain(2, quantum);
+    let mut va = vca("va", vec![model.tracks[0].id.clone()]);
+    (va.fader.left_mute, va.fader.right_mute) = (muted, muted);
+    model.vcas = vec![va];
+    if let Some((from, steps)) = curve {
+        model.automation = vec![vca_mute_steps("va", from, steps)];
+    }
+    normalized(&model)
+}
+
+/// Gate 8 (#1655 amendment, U1 fold 1 of #1651 for the composed mute): a hand mute of `va`
+/// committed in the same transaction as a change of `va`'s mute curve lands over its own ramp.
+/// The curve closes `t0` at 1,500 and opens it at 2,500; at block 8 (the curve open) a rebuild
+/// moves the close to 1,600 and the committed model holds `va` muted, whose `Mute` record on `t0`
+/// (the shared commit's terms write, over the edit's ramp word: `M`, `0` or `2,000`) reaches the
+/// successor's first block. A twin that never swaps takes the same record at the same block. The
+/// curve's change lies inside the span the hand mute holds, so the swapped run equals the twin on
+/// every sample, at both bank widths and quanta 128 and 100; the swap block allocates nothing and
+/// the strip carries.
+///
+/// Test value: red if the swap block's adoption of the repositioned VCA mute cursor drops the
+/// record's ramp word and lands the hand mute over the mute length (a `0` step becomes a
+/// 480-sample ramp, a 2,000-sample fade becomes 480), or lands it twice.
+#[test]
+fn a_hand_vca_mute_in_a_vca_mute_curve_rebuild_lands_over_its_own_ramp() {
+    for ramp in [M, 0, 2_000] {
+        let mute = move |block: usize,
+                         handles: &mut host_core::HostLiveControlHandles,
+                         gate: &mut engine::realtime::PlanRevisionGate| {
+            use builtins_compiler::TestOnlyWriteGate;
+            if block == SWAP_BLOCK {
+                gate.write_published(|stamp| {
+                    handles.strip_controls[0].fader.write(
+                        stamp,
+                        builtins_compiler::TrackFaderRecord::Mute {
+                            lanes: builtins::BuiltinLaneSelector::Both,
+                            muted: true,
+                            smoothing_samples: ramp,
+                        },
+                    );
+                });
+            }
+        };
+        for quantum in [128, 100] {
+            let a = vca_mute_session(quantum, Some((0.0, &[(1_500, 1.0), (2_500, 0.0)])), false);
+            let b = vca_mute_session(quantum, Some((0.0, &[(1_600, 1.0), (2_500, 0.0)])), true);
+            let q = quantum as usize;
+            let frames = 4_096_usize.div_ceil(q) * q;
+            let pcm = carry_pcm(frames);
+            for backend in bank_backends() {
+                let what = format!("ramp {ramp}, {backend:?}, quantum {quantum}");
+                let twin = carry_run(&a, None, backend, &pcm, frames, &mute).out;
+                let swapped = carry_run(&a, Some((&b, &a)), backend, &pcm, frames, &mute);
+                assert_eq!(swapped.swap_allocations, (0, 0), "{what}: the swap block");
+                assert!(swapped.restarted.is_empty(), "{what}: the strip carries");
+                for (plane, (out, twin)) in swapped.out.iter().zip(&twin).enumerate() {
+                    assert!(
+                        same_bits(out, twin),
+                        "{what}: plane {plane} equals the hand mute alone"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Gate 8 (#1655 amendment): an added, a removed and a changed VCA `mute` entry each rebuild and
+/// carry the member's stage. (a) Added: `va`'s new curve holds `t0` muted until 2,600; (b)
+/// removed: the old curve held it muted until 3,600; (c) changed: the old curve closes at 3,000,
+/// the new one is closed from 500 to 2,600. Swapped in at block 8, the strip carries, the swap
+/// block allocates nothing, the output equals the predecessor's before the swap and a fresh plan
+/// of the new model from the first block boundary after the `VcaMute` ramp (at both bank widths,
+/// quanta 128 and 100), and it ramps there (it is not set).
+///
+/// Test value: red if a carried member lane does not take on a gained VCA mute curve (it stays
+/// open), keeps a lost one's state (it stays muted), continues a changed table's cursor (the
+/// unmute at 2,600 is missed), restarts the strip, or allocates at the swap.
+#[test]
+fn added_removed_and_changed_vca_mute_entries_carry_the_member_stage() {
+    let cases: [(&str, MuteCurve, MuteCurve); 3] = [
+        ("added", None, Some((1.0, &[(2_600, 0.0)]))),
+        ("removed", Some((1.0, &[(3_600, 0.0)])), None),
+        (
+            "changed",
+            Some((0.0, &[(3_000, 1.0)])),
+            Some((0.0, &[(500, 1.0), (2_600, 0.0)])),
+        ),
+    ];
+    for (label, before, after) in cases {
+        for quantum in [128, 100] {
+            let a = vca_mute_session(quantum, before, false);
+            let b = vca_mute_session(quantum, after, false);
+            let q = quantum as usize;
+            let frames = 4_096_usize.div_ceil(q) * q;
+            let pcm = carry_pcm(frames);
+            let at = SWAP_BLOCK * q;
+            let settled = (at + M as usize).div_ceil(q) * q;
+            let none = |_: usize,
+                        _: &mut host_core::HostLiveControlHandles,
+                        _: &mut engine::realtime::PlanRevisionGate| {};
+            for backend in bank_backends() {
+                let what = format!("{label}, {backend:?}, quantum {quantum}");
+                let fresh = carry_run(&b, None, backend, &pcm, frames, &none).out;
+                let old = carry_run(&a, None, backend, &pcm, frames, &none).out;
+                let swapped = carry_run(&a, Some((&b, &a)), backend, &pcm, frames, &none);
+                assert_eq!(swapped.swap_allocations, (0, 0), "{what}: the swap block");
+                assert!(swapped.restarted.is_empty(), "{what}: the strip carries");
+                for plane in 0..2 {
+                    assert!(
+                        same_bits(&swapped.out[plane][..at], &old[plane][..at]),
+                        "{what}: plane {plane} before the swap"
+                    );
+                    assert!(
+                        same_bits(&swapped.out[plane][settled..], &fresh[plane][settled..]),
+                        "{what}: plane {plane} from the first block boundary after the ramp"
+                    );
+                    assert!(
+                        !same_bits(&swapped.out[plane][at..settled], &fresh[plane][at..settled]),
+                        "{what}: plane {plane} ramps at the swap"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[cfg(feature = "control-provider")]
 mod classifier {
     use super::*;

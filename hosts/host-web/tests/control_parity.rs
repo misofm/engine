@@ -7003,3 +7003,683 @@ fn removing_a_send_row_or_its_source_mute_curve_lands_alike_on_both_hosts() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// #1655 V5: stored VCA offset and mute automation on both hosts
+// ---------------------------------------------------------------------------------------------
+
+/// #1655: one segment of `shape` over `[start, end)` from `from` to `to` in `unit`.
+fn vca_piece(
+    shape: session::AutomationShape,
+    (start, end): (u64, u64),
+    (from, to): (f32, f32),
+    unit: session::ParameterUnit,
+) -> session::AutomationSegment {
+    session::AutomationSegment {
+        shape,
+        start_sample: start,
+        end_sample: end,
+        start_value: from,
+        end_value: to,
+        unit,
+    }
+}
+
+/// #1655: an entry on VCA `vca`'s row `control` (1 `offset_db`, 2 `mute`) on both lanes, named
+/// `{vca}-ride` or `{vca}-mute`.
+fn vca_entry(
+    vca: &str,
+    control: u32,
+    segments: Vec<session::AutomationSegment>,
+) -> session::Automation {
+    let suffix = if control == VCA_OFFSET_DB {
+        "ride"
+    } else {
+        "mute"
+    };
+    session::Automation {
+        id: id(&format!("{vca}-{suffix}")),
+        target: address(
+            Owner::Vca(id(vca)),
+            Section::Own,
+            control,
+            ParameterChannel::Both,
+        ),
+        segments,
+        offset: session::AutomationOffset::default(),
+    }
+}
+
+/// #1655: a flat `offset_db` ride of `vca` at `db` over the run.
+fn vca_flat_ride(vca: &str, db: f32) -> session::Automation {
+    let end = u64::from(QUANTUM) * BLOCKS;
+    vca_entry(
+        vca,
+        VCA_OFFSET_DB,
+        vec![vca_piece(
+            session::AutomationShape::Linear,
+            (0, end),
+            (db, db),
+            session::ParameterUnit::Db,
+        )],
+    )
+}
+
+/// #1655: a `mute` entry of `vca` stepping from `from` at each `(sample, value)` of `steps`.
+fn vca_mute_steps(vca: &str, from: f32, steps: &[(u64, f32)]) -> session::Automation {
+    let mut at = (0_u64, from);
+    let segments = steps
+        .iter()
+        .map(|&(sample, value)| {
+            let piece = vca_piece(
+                session::AutomationShape::Step,
+                (at.0, sample),
+                (at.1, value),
+                session::ParameterUnit::Linear,
+            );
+            at = (sample, value);
+            piece
+        })
+        .collect();
+    vca_entry(vca, VCA_MUTE, segments)
+}
+
+/// #1655 gate 1 on both hosts. On [`automated_vca_model`] (`v` holds `t2`, which rides its own
+/// fader, and `t3`, which has none and sits behind the true-peak limiter) with VCA `w` at -2 dB
+/// also holding `t3` (two VCAs on one member, one automated): a flat `offset_db` ride of `v` at -6
+/// dB (its static fallback +3 dB unused) and a flat `mute` entry at 0 render, on each host and
+/// alike, the bits of the session whose `v` holds -6 dB statically. Not vacuous: a ride at -5 dB
+/// is heard.
+///
+/// Test value: red if either host composes the VCA curve into a member's fader with other
+/// arithmetic or order than the static path, if the fallback leaks into `S`, if a flat mute
+/// curve moves a bit, or if the hosts disagree.
+#[test]
+fn a_flat_vca_ride_and_mute_render_the_static_vca_bits_on_both_hosts() {
+    const RUN: u64 = 24;
+    let session = |ride: Option<f32>| {
+        automated_vca_model(48_000, |model| {
+            let static_db = if ride.is_some() { 3.0 } else { -6.0 };
+            model.vcas = vec![
+                vca_at(VCA.id, static_db, &[T2.id, T3.id]),
+                vca_at("w", -2.0, &[T3.id]),
+            ];
+            if let Some(db) = ride {
+                model.automation.extend([
+                    vca_flat_ride(VCA.id, db),
+                    vca_mute_steps(VCA.id, 0.0, &[(u64::from(QUANTUM) * BLOCKS, 0.0)]),
+                ]);
+            }
+        })
+    };
+    let fixed = both_run(&session(None), RUN, &[]);
+    assert_eq!(
+        both_run(&session(Some(-6.0)), RUN, &[]),
+        fixed,
+        "the static VCA's bits"
+    );
+    assert_ne!(
+        both_run(&session(Some(-5.0)), RUN, &[]),
+        fixed,
+        "a ride at -5 dB is heard"
+    );
+}
+
+/// #1655 gate 2 on both hosts. A linear `offset_db` ride of `v` (0 to -12 dB over the run) over
+/// `t2` (own ride) and `t3` (behind the true-peak limiter) renders the same bits on both hosts in
+/// every block, and is heard (a static `v` at 0 dB renders otherwise). Each member's exact gain at
+/// its own node time is host-core's gate (`stored_vca_automation`,
+/// `a_vca_ride_reaches_each_member_in_its_own_node_time`), which both hosts run.
+///
+/// Test value: red if either host prepares the VCA ride otherwise than the shared preparation
+/// (another member arrival, another composition), or does not render it at all.
+#[test]
+fn a_linear_vca_ride_renders_alike_on_both_hosts() {
+    const RUN: u64 = 32;
+    let end = u64::from(QUANTUM) * BLOCKS;
+    let riding = automated_vca_model(48_000, |model| {
+        model.automation.push(vca_entry(
+            VCA.id,
+            VCA_OFFSET_DB,
+            vec![vca_piece(
+                session::AutomationShape::Linear,
+                (0, end),
+                (0.0, -12.0),
+                session::ParameterUnit::Db,
+            )],
+        ));
+    });
+    let ridden = both_run(&riding, RUN, &[]);
+    let still = both_run(&automated_vca_model(48_000, |_| {}), RUN, &[]);
+    assert!(
+        (8..RUN as usize).all(|block| ridden[block] != still[block]),
+        "the ride is heard"
+    );
+}
+
+/// #1655 gate 3's session on both hosts: [`follow_model`]`(false, false)` with a true-peak limiter
+/// on `t1` (so `t1-b`'s `pre_fader` tap and `t1`'s fader sit `L` behind render time), `t1` in VCA
+/// `n` (no own mute entry), `n` nested in `v`, which also holds `t2`. With `curve`, `v`'s mute
+/// closes at 1,000 and opens at 2,500; with `muted`, `v` is muted statically.
+fn vca_follow_model(curve: bool, muted: bool) -> SessionModel {
+    let limiter = model_at(48_000).tracks[2].inserts.effects[LIMITER.position as usize].clone();
+    let mut model = follow_model(false, false);
+    model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == T1.id)
+        .expect("t1")
+        .inserts
+        .effects
+        .push(limiter);
+    let mut v = vca_at(VCA.id, 0.0, &[T2.id, "n"]);
+    (v.fader.left_mute, v.fader.right_mute) = (muted, muted);
+    model.vcas = vec![vca_at("n", 0.0, &[T1.id]), v];
+    if curve {
+        model
+            .automation
+            .push(vca_mute_steps(VCA.id, 0.0, &[(1_000, 1.0), (2_500, 0.0)]));
+    }
+    model
+}
+
+/// #1655 gate 3 and the V4 note on both hosts. `v`'s mute curve reaches `t1` through the nested
+/// VCA `n`; `t1` has no mute entry of its own, so its following send `t1-b` follows a lane that
+/// only a VCA mute reaches (it prepares the seven-word cell and renders), and its tap sits behind
+/// the limiter. Both hosts render the same bits. From the first block boundary after the mute
+/// ramp's end in the output (1,000 plus the plan latency plus the 480-sample `VcaMute` ramp) to
+/// the unmute, each host's output equals the plan with `v` muted statically; from the first
+/// boundary after the unmute ramp, the plan with no VCA mute. Not vacuous: before the mute the
+/// curve's plan differs from the statically muted one.
+///
+/// Test value: red if a following send of a member keeps passing its pre-fader audio into `b`
+/// under an automated VCA mute (the send ignores the VCA curve, or follows it on the render clock
+/// instead of its tap's node time), if a nested member misses the curve, if a VCA-only-lane send
+/// is refused, or if the hosts disagree.
+#[test]
+fn a_vca_mute_curve_closes_a_following_send_at_its_latent_tap_on_both_hosts() {
+    const BLOCKS: u64 = 40;
+    let quantum = u64::from(QUANTUM);
+    let curve_model = vca_follow_model(true, false);
+    let latency = browser_plan_latency(&mut Rig::new(&curve_model)).0;
+    assert!(latency > 0, "the limiter delays the output");
+    let curve = both_run(&curve_model, BLOCKS, &[]);
+    let muted = both_run(&vca_follow_model(false, true), BLOCKS, &[]);
+    let open = both_run(&vca_follow_model(false, false), BLOCKS, &[]);
+    let first_after = |sample: u64| sample.div_ceil(quantum);
+    let closed = first_after(1_000 + latency + 480)..2_500 / quantum;
+    assert!(!closed.is_empty());
+    for block in closed {
+        assert_eq!(
+            curve[block as usize], muted[block as usize],
+            "block {block}: the statically muted plan's bits while the VCA curve mutes"
+        );
+    }
+    for block in first_after(2_500 + latency + 480)..BLOCKS {
+        assert_eq!(
+            curve[block as usize], open[block as usize],
+            "block {block}: the open plan's bits after the unmute"
+        );
+    }
+    assert_ne!(
+        curve[4], muted[4],
+        "the members and the send play before the mute"
+    );
+}
+
+/// #1655 gate 4's session: [`automated_vca_model`] with `v` riding its `offset_db` (0 to -12 dB
+/// over the run) and a flat `mute` entry at `mute` (0 open, 1 closed).
+fn vca_hand_model(mute: f32) -> SessionModel {
+    let end = u64::from(QUANTUM) * BLOCKS;
+    automated_vca_model(48_000, |model| {
+        model.automation.extend([
+            vca_entry(
+                VCA.id,
+                VCA_OFFSET_DB,
+                vec![vca_piece(
+                    session::AutomationShape::Linear,
+                    (0, end),
+                    (0.0, -12.0),
+                    session::ParameterUnit::Db,
+                )],
+            ),
+            vca_mute_steps(VCA.id, mute, &[(end, mute)]),
+        ]);
+    })
+}
+
+/// #1655 gate 4 on both hosts (D5 and root's ruling). On [`vca_hand_model`], each edit commits
+/// with the same verdict and reply on both hosts, both render the same bits, and from the end of
+/// its jump each renders the committed session's boot:
+/// - `SET_CONTROL offset_db = +3` on the automated `v` is `live` and heard (the stored offset);
+/// - a hand mute of `v` is `live`: over an open curve it closes the members (heard), over a closed
+///   curve nothing moves (the OR);
+/// - a hand fader move of `t3`, which only `v`'s ride reaches, is `live` and heard (its `own_db`);
+/// - adding `t1` to the automated `v` rebuilds and completes `EXACT` with no transition fallback
+///   on both hosts; the same edit of a `v` no entry drives is `live` and heard.
+///
+/// Test value: red if a hand move of an automated VCA writes the fallback (or commits
+/// `model_only`), if a hand VCA mute replaces the curve instead of ORing with it, if a plain
+/// member's hand move is lost under the VCA curve, if an automated VCA's reach change commits live
+/// (no event state for the new pair) or completes otherwise than `EXACT`, or if the hosts disagree.
+#[test]
+fn hand_edits_of_an_automated_vca_commit_as_d5_says_on_both_hosts() {
+    let open = vca_hand_model(0.0);
+    let closed = vca_hand_model(1.0);
+    let lengths = open.control_smoothing_samples();
+    let vca_mute = own_edit(Owner::Vca(id(VCA.id)), VCA_MUTE, 1.0);
+    let t3_fader = SessionEdit::set_control(
+        address(
+            Owner::Strip(id(T3.id)),
+            Section::Builtins,
+            FADER_DB,
+            Lane::Both,
+        ),
+        -6.0,
+        None,
+    );
+    let cases: [(&str, &SessionModel, SessionEdit, u32, bool); 4] = [
+        (
+            "offset_db = +3",
+            &open,
+            vca_offset(VCA.id, 3.0, None),
+            lengths.fader,
+            true,
+        ),
+        (
+            "a hand mute over an open curve",
+            &open,
+            vca_mute.clone(),
+            lengths.mute,
+            true,
+        ),
+        (
+            "a hand mute over a closed curve",
+            &closed,
+            vca_mute,
+            lengths.mute,
+            false,
+        ),
+        ("a hand move of t3", &open, t3_fader, lengths.fader, true),
+    ];
+    for (label, model, edit, jump, heard) in cases {
+        automated_vca_alike(label, model, &[edit], EditPath::Live, jump, heard);
+    }
+    let reach = SessionEdit::UpsertVca {
+        vca: vca_at(VCA.id, 0.0, &[T1.id, T2.id, T3.id]),
+    };
+    // The same edit of a `v` at -3 dB that no entry drives: `t1` hears it.
+    automated_vca_alike(
+        "a membership edit of a VCA no entry drives",
+        &automated_vca_model(48_000, |model| {
+            model.vcas = vec![vca_at(VCA.id, -3.0, &[T2.id, T3.id])];
+        }),
+        &[SessionEdit::UpsertVca {
+            vca: vca_at(VCA.id, -3.0, &[T1.id, T2.id, T3.id]),
+        }],
+        EditPath::Live,
+        lengths.fader,
+        true,
+    );
+    let label = "a membership edit of the automated VCA";
+    let mut browser = Rig::new(&open);
+    let mut c_abi = CAbi::new(&open);
+    same_blocks(&mut browser, &mut c_abi, 0..4, label);
+    both_commit(
+        &mut browser,
+        &mut c_abi,
+        std::slice::from_ref(&reach),
+        EditPath::Rebuild,
+        label,
+    );
+    same_blocks(&mut browser, &mut c_abi, 4..12, label);
+    let watermark = c_abi.watermark();
+    assert_eq!(
+        status_watermark(&browser),
+        watermark,
+        "{label}: one watermark"
+    );
+    assert_eq!(
+        (watermark.0, watermark.2),
+        (open.revision + 1, capi::OUTCOME_EXACT),
+        "{label}: the rebuild completes exactly"
+    );
+    assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+    assert_eq!(
+        (
+            browser.host.watermark().transition_fallback_count,
+            c_abi.transition_fallback_count()
+        ),
+        (0, 0),
+        "{label}: no transition fallback on either host"
+    );
+}
+
+/// #1655 gate 4 (R17-1) on both hosts: `SET_CONTROL offset_db = +3` on the automated `v` of
+/// [`vca_hand_model`] commits in place on both hosts, and the committed document stores `+3` as
+/// the ride's offset on both fields with `v`'s static offset kept. The same transaction by the full
+/// path (`control_plane::test_force_full_preparation`) gives the same reply, document and bits of
+/// every block, alike on both hosts.
+///
+/// Test value: red if the in-place path answers or renders otherwise than the full path for an
+/// automated VCA offset (an owners model without the VCA entry writes the static offset or commits
+/// `model_only`), or if the two hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_hand_move_on_an_automated_vca_offset_is_in_place_as_the_full_path_on_both_hosts() {
+    const EDIT: u64 = 4;
+    const END: u64 = 20;
+    let model = vca_hand_model(0.0);
+    let mut expected = model.clone();
+    expected.revision = model.revision + 1;
+    expected
+        .automation
+        .iter_mut()
+        .find(|entry| entry.id.as_str() == "v-ride")
+        .expect("the ride")
+        .offset = session::AutomationOffset {
+        left_db: 3.0,
+        right_db: 3.0,
+    };
+    let edits = [vca_offset(VCA.id, 3.0, None)];
+    let leg = |label: &str| {
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..EDIT, label);
+        let (b, reply) = browser.transaction_reply(&edits);
+        let (c, c_reply) = c_abi.transaction(&edits);
+        assert_eq!(b, c, "{label}: one verdict");
+        assert_eq!(reply, c_reply, "{label}: one reply");
+        assert_eq!(
+            b,
+            Verdict::Applied {
+                path: EditPath::Live,
+                revision: model.revision + 1
+            },
+            "{label}: a hand move is live"
+        );
+        let committed = snapshot_bytes(|payload, expected| browser.command(payload, expected));
+        let blocks: Vec<Vec<u32>> = (EDIT..END)
+            .map(|block| {
+                let (b, c) = (browser.step(block), c_abi.step(block));
+                assert_eq!(b, c, "{label}: block {block} alike on both hosts");
+                b
+            })
+            .collect();
+        (reply, committed, blocks)
+    };
+    control_plane::test_take_in_place_counts();
+    let in_place = leg("in place");
+    assert_eq!(
+        control_plane::test_take_in_place_counts(),
+        (2, 0),
+        "both hosts commit the hand move in place"
+    );
+    assert_eq!(
+        in_place.1,
+        canonical_session_json(&expected)
+            .expect("canonical")
+            .as_bytes(),
+        "the ride stores +3 on both fields and the static offset stays"
+    );
+    control_plane::test_force_full_preparation(true);
+    let full = leg("full path");
+    control_plane::test_force_full_preparation(false);
+    assert_eq!(
+        control_plane::test_take_in_place_counts().0,
+        0,
+        "the full leg commits nothing in place"
+    );
+    assert_eq!(full.0, in_place.0, "one reply on both paths");
+    assert_eq!(full.1, in_place.1, "one document");
+    assert_eq!(full.2, in_place.2, "the same bits on both paths");
+}
+
+/// #1655 gate 7 on both hosts (#1711's deferred jump on the composed state). [`model_at`] with
+/// `v` holding `t2` and `t3` (neither automated on its own) and riding its `offset_db` linearly
+/// from 0 to -12 dB up to 1,000,000. A live level move with its own 4,000 samples (a hand move of
+/// `t3`'s fader, its `own_db`; a hand move of `v`'s offset, the ride's offset), heard 1, 12 and 26
+/// blocks, then a rebuild whose only change is the ride's table (a segment appended after
+/// 1,000,000: every reached member channel repositions, and no heard value moves). Both hosts
+/// give one verdict and reply per edit and render the same bits; every block after the rebuild
+/// equals, on each host, the same host's twin that took the move and no rebuild (the move keeps
+/// its length); the rebuild completes `EXACT` with no transition fallback.
+///
+/// Test value: red if a repositioned composed channel cuts the move in flight at the swap (the
+/// landing jumps to the curve over the fader length instead of deferring to the move's first
+/// free sample), if either host carries the composed state differently, or if the rebuild is
+/// flagged or reported otherwise than `EXACT`.
+#[test]
+fn a_vca_ride_table_edit_while_a_level_move_ramps_completes_exactly_on_both_hosts() {
+    let ride = |appended: bool| {
+        let mut segments = vec![vca_piece(
+            session::AutomationShape::Linear,
+            (0, 1_000_000),
+            (0.0, -12.0),
+            session::ParameterUnit::Db,
+        )];
+        if appended {
+            segments.push(vca_piece(
+                session::AutomationShape::Linear,
+                (1_000_000, 2_000_000),
+                (-12.0, -6.0),
+                session::ParameterUnit::Db,
+            ));
+        }
+        vca_entry(VCA.id, VCA_OFFSET_DB, segments)
+    };
+    let mut model = model_at(48_000);
+    model.vcas = vec![vca_at(VCA.id, 0.0, &[T2.id, T3.id])];
+    model.automation.push(ride(false));
+    let t3_move = CAbi::edits(
+        Edit::Fader {
+            strip: T3,
+            lanes: Lanes::Both,
+            db: -6.0,
+        },
+        Some(4_000),
+    );
+    let moves = [
+        ("a hand move of t3", t3_move),
+        (
+            "a hand move of v",
+            vec![vca_offset(VCA.id, -6.0, Some(4_000))],
+        ),
+    ];
+    for (what, edits) in &moves {
+        for heard in [1_u64, 12, 26] {
+            let label = &format!("{what}, heard {heard}");
+            let mut browser = Rig::new(&model);
+            let mut c_abi = CAbi::new(&model);
+            let mut twin = Rig::new(&model);
+            let mut c_twin = CAbi::new(&model);
+            for block in 0..4 {
+                let b = browser.step(block);
+                assert_eq!(b, c_abi.step(block), "{label}: block {block}");
+                assert_eq!(b, twin.step(block), "{label}: block {block}");
+                c_twin.step(block);
+            }
+            both_commit(&mut browser, &mut c_abi, edits, EditPath::Live, label);
+            both_commit(&mut twin, &mut c_twin, edits, EditPath::Live, label);
+            let mut block = 4;
+            let mut lockstep = |browser: &mut Rig,
+                                c_abi: &mut CAbi,
+                                twin: &mut Rig,
+                                c_twin: &mut CAbi,
+                                blocks: u64| {
+                for _ in 0..blocks {
+                    let (b, c) = (browser.step(block), c_abi.step(block));
+                    assert_eq!(b, c, "{label}: block {block} alike on both hosts");
+                    assert_eq!(
+                        b,
+                        twin.step(block),
+                        "{label}: block {block}, the browser twin"
+                    );
+                    assert_eq!(
+                        c,
+                        c_twin.step(block),
+                        "{label}: block {block}, the C ABI twin"
+                    );
+                    block += 1;
+                }
+            };
+            lockstep(&mut browser, &mut c_abi, &mut twin, &mut c_twin, heard);
+            let rebuild = [SessionEdit::UpsertAutomation {
+                automation: {
+                    let mut automation = ride(true);
+                    if *what == "a hand move of v" {
+                        automation.offset = session::AutomationOffset {
+                            left_db: -6.0,
+                            right_db: -6.0,
+                        };
+                    }
+                    automation
+                },
+            }];
+            both_commit(&mut browser, &mut c_abi, &rebuild, EditPath::Rebuild, label);
+            lockstep(&mut browser, &mut c_abi, &mut twin, &mut c_twin, 8);
+            let watermark = c_abi.watermark();
+            assert_eq!(
+                status_watermark(&browser),
+                watermark,
+                "{label}: one watermark"
+            );
+            assert_eq!(
+                watermark.2,
+                capi::OUTCOME_EXACT,
+                "{label}: the outcome flags"
+            );
+            assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+            assert_eq!(
+                (
+                    browser.host.watermark().transition_fallback_count,
+                    c_abi.transition_fallback_count()
+                ),
+                (0, 0),
+                "{label}: no transition fallback on either host"
+            );
+        }
+    }
+}
+
+/// #1655 gate 8 on both hosts (#1651 U1 fold 1 for the composed mute). On [`follow_model`]`(false,
+/// false)` with `v` holding `t2` and a mute curve closing at 1,500 and opening at 2,500, before
+/// block 8 (the curve open) one transaction moves the close to 1,600 (a rebuild) and mutes `v` by
+/// hand over `ramp` (none: the session's length; 0; 2,000). On each host every block equals a twin
+/// that took only the hand mute (`live`) at the same block: the curve's change lies inside the
+/// span the hand mute holds, so the hand mute lands over its own ramp across the swap. Both hosts
+/// render the same bits.
+///
+/// Test value: red if the swap's adoption of the repositioned VCA mute cursor drops the terms
+/// record's ramp word (the hand mute lands over the mute length, or twice), or if the hosts
+/// disagree.
+#[test]
+fn a_hand_vca_mute_in_a_vca_mute_curve_rebuild_lands_over_its_own_ramp_on_both_hosts() {
+    let session = |close: u64| {
+        let mut model = follow_model(false, false);
+        model.vcas = vec![vca_at(VCA.id, 0.0, &[T2.id])];
+        model
+            .automation
+            .push(vca_mute_steps(VCA.id, 0.0, &[(close, 1.0), (2_500, 0.0)]));
+        model
+    };
+    let model = session(1_500);
+    let moved = session(1_600)
+        .automation
+        .into_iter()
+        .next()
+        .expect("the curve");
+    for ramp in [None, Some(0), Some(2_000)] {
+        let label = &format!("ramp {ramp:?}");
+        let hand = SessionEdit::set_control(
+            address(Owner::Vca(id(VCA.id)), Section::Own, VCA_MUTE, Lane::Both),
+            1.0,
+            ramp,
+        );
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let mut twin = Rig::new(&model);
+        let mut c_twin = CAbi::new(&model);
+        for block in 0..32 {
+            if block == 8 {
+                both_commit(
+                    &mut browser,
+                    &mut c_abi,
+                    &[
+                        SessionEdit::UpsertAutomation {
+                            automation: moved.clone(),
+                        },
+                        hand.clone(),
+                    ],
+                    EditPath::Rebuild,
+                    label,
+                );
+                both_commit(
+                    &mut twin,
+                    &mut c_twin,
+                    std::slice::from_ref(&hand),
+                    EditPath::Live,
+                    label,
+                );
+            }
+            let (b, c) = (browser.step(block), c_abi.step(block));
+            assert_eq!(b, c, "{label}: block {block} alike on both hosts");
+            assert_eq!(
+                b,
+                twin.step(block),
+                "{label}: block {block}, the browser twin"
+            );
+            assert_eq!(
+                c,
+                c_twin.step(block),
+                "{label}: block {block}, the C ABI twin"
+            );
+        }
+    }
+}
+
+/// R19-6 on both hosts: VCA automation adds no host cap of its own; its pair memory is bank
+/// payload under the existing caps, and the reach-pair cap still bounds it. [`bound_model`] with
+/// the outermost of 256 nested VCAs riding its `offset_db` and stepping its `mute` (so every
+/// track is a fader and mute event lane, reached by every VCA): at 64 tracks (16,384 reach pairs)
+/// both hosts boot; at 65 tracks (one track, 256 pairs, over) both refuse with the core's typed
+/// diagnostic `host.resource.vca_reach_pairs`, alike, not a panic.
+///
+/// Test value: red if VCA automation slips past the reach-pair cap on either host, panics when
+/// one pair set is over it, or refuses a session at the cap that the existing caps admit.
+#[test]
+fn the_reach_pair_cap_bounds_vca_automation_alike_on_both_hosts() {
+    let automated = |tracks: usize| {
+        let mut model = bound_model(tracks, 256);
+        model.automation.extend([
+            vca_flat_ride("v255", -6.0),
+            vca_mute_steps("v255", 0.0, &[(1_000, 1.0)]),
+        ]);
+        model
+    };
+    let at_the_cap = automated(64);
+    assert_eq!(
+        at_the_cap.vca_reach_pairs(u64::MAX),
+        host_core::MAXIMUM_VCA_REACH_PAIRS
+    );
+    let (code, diagnostics) = c_abi_compile(&at_the_cap);
+    assert_eq!(
+        code,
+        C_RESULT_OK,
+        "{}",
+        String::from_utf8_lossy(&diagnostics)
+    );
+    assert_eq!(browser_boot_refusal(&at_the_cap), None);
+    let over = automated(65);
+    let (code, c_diagnostics) = c_abi_compile(&over);
+    assert_ne!(code, C_RESULT_OK);
+    assert_eq!(
+        browser_boot_refusal(&over).expect("the browser refuses"),
+        c_diagnostics,
+        "one refusal"
+    );
+    assert_eq!(
+        c_diagnostics,
+        b"host.resource.vca_reach_pairs\t$\n".to_vec()
+    );
+}
