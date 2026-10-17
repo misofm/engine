@@ -4651,6 +4651,7 @@ pub(crate) fn level_records_between(
                 offsets[lane] = Some(FaderOffsetsRecord {
                     offsets_sum: after.offsets_sum[lane],
                     smoothing_samples: lengths.fader[lane],
+                    own_db: None,
                 });
             }
         }

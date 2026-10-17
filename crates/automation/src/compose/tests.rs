@@ -543,3 +543,64 @@ fn a_caller_retarget_holds_the_value_grid_until_its_end() {
         assert_eq!(events.first(), Some(&first), "record length {length}");
     }
 }
+
+fn summed(heard: Heard<'_>) -> f32 {
+    heard.value(0) + heard.value(1)
+}
+
+/// #1655 V2 (R19-2), `with_held_grid`: a step of one value curve keeps its jump length while
+/// another rides, both ways round. The step at 1,000 jumps over 480; the riding curve's grid
+/// points whose ramps would end inside that jump (1,024 to 1,408) are held, and the first one
+/// whose ramp ends after it (1,472) retargets again, by the one-cell rule. Without the rule (a
+/// route column, R19-3) the riding curve's grid point at 1,024 cuts the jump short.
+///
+/// Red if a grid event inside another curve's jump retargets a held-grid output, or if the hold
+/// outlasts the jump.
+#[test]
+fn a_step_keeps_its_jump_length_while_another_curve_rides_on_a_held_grid_output() {
+    let ride = [seg(0, 8_000, 0.0, -24.0, Shape::Linear)];
+    let step = [
+        seg(0, 1_000, -6.0, -6.0, Shape::Step),
+        seg(1_000, 9_000, -12.0, -12.0, Shape::Step),
+    ];
+    for order in [[&ride[..], &step[..]], [&step[..], &ride[..]]] {
+        let program =
+            ProgramBuilder::build(&[fader_cell(order[0]), fader_cell(order[1])]).expect("program");
+        let bind = |held: bool| {
+            let composed = Composed::<f32>::new(
+                &program,
+                &[(0, CursorKind::Value), (1, CursorKind::Value)],
+                Completion::End,
+            )
+            .expect("bind");
+            let mut composed = if held {
+                composed.with_held_grid()
+            } else {
+                composed
+            };
+            composed.seed(summed);
+            for cursor in composed.cursors_mut() {
+                cursor.set_jump(480);
+            }
+            composed
+        };
+        let after_step = |events: &[(u32, EventKind, u32)]| {
+            events
+                .iter()
+                .copied()
+                .filter(|&(offset, _, _)| offset >= 1_000)
+                .take(2)
+                .collect::<Vec<_>>()
+        };
+        let (held, _) = retargets(&program, &mut bind(true), summed, 1_000);
+        assert_eq!(
+            after_step(&held),
+            [(1_000, EventKind::Jump, 480), (1_472, EventKind::Grid, 64)]
+        );
+        let (free, _) = retargets(&program, &mut bind(false), summed, 1_000);
+        assert_eq!(
+            after_step(&free),
+            [(1_000, EventKind::Jump, 480), (1_024, EventKind::Grid, 64)]
+        );
+    }
+}

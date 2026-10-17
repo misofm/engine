@@ -1588,3 +1588,61 @@ fn the_offset_sum_puts_the_static_vca_offsets_first() {
         .for_each(|value| sum.add(value));
     assert_eq!(strip.offsets_sum[0].to_bits(), sum.sum().unwrap().to_bits());
 }
+
+/// #1655 D6 (V2): a member lane's carried curve continues verbatim only while its own table and
+/// every reaching automated VCA table are the same set, bit for bit: a lane with no own entry
+/// that a VCA ride reaches continues; a changed VCA table, a VCA ride added on the lane (a nested
+/// VCA) and a member that leaves the VCA each reposition; the mute row takes the VCA mute tables.
+///
+/// Red if the carry predicates read only the own entry (a VCA table edit would continue a stale
+/// cursor, or an event lane with no own entry would never continue).
+#[test]
+fn a_member_lane_continues_only_while_its_reaching_vca_tables_do() {
+    use controls::{continued_fader_lanes, continued_mute_lanes};
+    let current = ridden_vca();
+    let vocal = id("vocal");
+    let both = |next: &SessionModel| {
+        (
+            continued_fader_lanes(&current, next, &vocal),
+            continued_mute_lanes(&current, next, &vocal),
+        )
+    };
+    assert_eq!(both(&current.clone()), ([true, false], [true, true]));
+    let mut moved = current.clone();
+    moved.automation[0].segments[0].end_value = -9.0;
+    assert_eq!(both(&moved), ([false, false], [true, true]));
+    let mut nested = current.clone();
+    nested.vcas.push(vca("outer", [0.0, 0.0], &["riders"]));
+    nested.automation.push(one(
+        "outer-ride",
+        vca_own("outer", VCA_OFFSET_DB, Lane::Left),
+        ParameterUnit::Db,
+        -3.0,
+    ));
+    assert_eq!(both(&nested), ([false, false], [true, true]));
+    let mut left = current.clone();
+    left.vcas[0].members.clear();
+    assert_eq!(both(&left), ([false, false], [false, false]));
+    // An own fader entry on the lane: the own table and the VCA table must both continue.
+    let mut own = current.clone();
+    own.automation.push(one(
+        "own",
+        strip_builtin("vocal", 5, Lane::Left),
+        ParameterUnit::Db,
+        -2.0,
+    ));
+    let mut own_moved = own.clone();
+    own_moved.automation[2].segments[0].end_value = -4.0;
+    assert_eq!(
+        continued_fader_lanes(&own, &own.clone(), &vocal),
+        [true, false]
+    );
+    assert_eq!(
+        continued_fader_lanes(&own, &own_moved, &vocal),
+        [false, false]
+    );
+    assert_eq!(
+        continued_fader_lanes(&current, &own, &vocal),
+        [false, false]
+    );
+}

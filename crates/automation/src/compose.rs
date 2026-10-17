@@ -216,6 +216,9 @@ pub struct Composed<T> {
     completion: Completion,
     /// The block begun by [`Self::start`] and its seek mode, until its events end.
     block: Option<(NodeSpan, SeekMode)>,
+    /// [`Self::with_held_grid`]: every output retarget holds each value cursor's grid inside the
+    /// retarget's ramp, as one cell holds its grid inside its own ramp (#1655 V2, R19-2).
+    held_grid: bool,
 }
 
 impl<T: Composable> Composed<T> {
@@ -273,7 +276,24 @@ impl<T: Composable> Composed<T> {
             target: None,
             completion,
             block: None,
+            held_grid: false,
         })
+    }
+
+    /// The output with the one-cell hold rule on its composed value (#1655 V2, R19-2: a member
+    /// fader channel over its own curve and the reaching VCA curves): every retarget of the output
+    /// (a grid or jump event, a ramped landing) reports its ramp to each value cursor whose own
+    /// ramp in flight completes earlier ([`CellState::hold_until`]), so a cursor's grid event
+    /// whose ramp would complete inside it is held and one that completes later restarts it, by
+    /// the cell's own grid rule. A step of one curve then keeps its jump length while another
+    /// curve rides (and the reverse); coincident events already take the longest ramp (R19-4).
+    /// Without it (a route column, R19-3) a value jump leaves the other value cursors free. With
+    /// one cursor the hold is the cursor's own ramp, so the output's events are still the cell's
+    /// [`CellEvents`]. Control side.
+    #[must_use]
+    pub fn with_held_grid(mut self) -> Self {
+        self.held_grid = true;
+        self
     }
 }
 
@@ -347,6 +367,26 @@ impl<T: Composable> Composed<T> {
         // The output's state holds no target bits of its own (`target` is `T`); the seed clears
         // an outstanding held event and keeps the ramp in flight, as a cell's seed does.
         self.state.seed_target(0.0);
+    }
+
+    /// Forgets the output's target: its next grid or jump event retargets whatever its value (the
+    /// one-cell rule of a fresh state, for a stage that only remembered a gain, #1638 D2). The
+    /// ramp in flight is kept.
+    pub fn clear_target(&mut self) {
+        self.target = None;
+    }
+
+    /// The output's own event state (its ramp in flight and held flag), for a carry.
+    #[must_use]
+    pub const fn output_state(&self) -> &CellState {
+        &self.state
+    }
+
+    /// Sets the output's own event state and target (a carry of a predecessor's output, or of a
+    /// single cell's state with no target); the cursors are untouched.
+    pub fn set_output(&mut self, state: CellState, target: Option<T>) {
+        self.state = state;
+        self.target = target;
     }
 
     /// Seeds the output's target with the composition of the heard values (preparation).
@@ -432,6 +472,7 @@ impl<T: Composable> Composed<T> {
         self.target = other.target;
         self.completion = other.completion;
         self.block = other.block;
+        self.held_grid = other.held_grid;
         true
     }
 
@@ -511,6 +552,15 @@ impl<T: Composable> Composed<T> {
             } else {
                 None
             };
+            // `with_held_grid`: the completion of the ramp this offset retargets the output over
+            // (a landing too), which every value cursor holds its grid inside.
+            let hold = event
+                .filter(|event| self.held_grid && !event.held && event.ramp > 0)
+                .map(|event| crate::completion_of(self.completion, time, event.ramp));
+            let completion = self.completion;
+            let short = |state: &CellState, hold: i64| {
+                state.free_after(completion).is_none_or(|free| free <= hold)
+            };
             let next = offset.saturating_add(1);
             for cursor in self.cursors.iter_mut() {
                 cursor.shown = cursor.heard;
@@ -530,14 +580,34 @@ impl<T: Composable> Composed<T> {
                         && pending.is_some_and(|at| at > time && at < free)
                 });
                 let defer = if column_jump { free } else { extend };
-                if let (Some(free), true) = (defer, value) {
+                // The hold reaches a cursor whose own ramp in flight completes earlier: for one
+                // that pulled ahead, the state its pull started from.
+                let held = hold.filter(|&hold| {
+                    value
+                        && short(
+                            if cursor.consumed {
+                                &cursor.state
+                            } else {
+                                &cursor.before
+                            },
+                            hold,
+                        )
+                });
+                if value && (defer.is_some() || held.is_some()) {
                     if !cursor.consumed {
                         // The cursor pulled past this offset before the column ramp changed:
-                        // replay its pull up to here (it gave no event there), then defer and
-                        // pull again.
+                        // replay its pull up to here (it gave no event there), then defer (or
+                        // hold) and pull again.
                         replay(cursor, program, &span, mode, next);
                     }
-                    cursor.state.defer_jump(free);
+                    if let Some(hold) = held
+                        && short(&cursor.state, hold)
+                    {
+                        cursor.state.hold_until(hold);
+                    }
+                    if let Some(free) = defer {
+                        cursor.state.defer_jump(free);
+                    }
                     pull(cursor, program, &span, mode, next, frames);
                 } else if cursor.consumed {
                     pull(cursor, program, &span, mode, next, frames);

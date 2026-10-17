@@ -451,3 +451,90 @@ For V1: a VCA automation edit and an automated VCA's reach change are now step 3
 VCA offset diffs as a VCA row 1 change whose value is the offset and moves `S` of each reached
 lane, which host-core lowers only on lanes that have an offsets cell until V1 gives every event
 lane one.
+
+## Decision record: V2 (batch 19)
+
+The fader stage (`crates/builtins-compiler/src/lib.rs`), one additive rule in K1
+(`crates/automation/src/compose.rs`), the carry predicates (`crates/controls/src/automation.rs`).
+No edit under `crates/engine/src/realtime/`; no row class or table change (no SDK regeneration).
+
+- **Program (D1).** The VCA cells follow every route cell, in ascending VCA ID, then row
+  (`offset_db` with `FADER_CELL_RULE`, `mute` with `MUTE_CELL_RULE`), then lane; one cell per
+  automated VCA lane, shared by its members (refusal code `host.automation.vca`). The reach is read
+  only when an entry drives a VCA row, so a session without VCA automation builds its program cell
+  for cell. Export for V3/V4: `PreparedBuiltinsSession::vca_cells(vca_id) -> Option<(Arc<Program>,
+  VcaCells)>` (`[row][lane]`). `strip_mute_cells` stays own-entry cells (a lane only a VCA mute
+  reaches reads `None` there).
+- **Event lanes (D2, D4, R19-2 = (b)).** Preparation reads `controls::fader_event_lanes` and
+  `mute_event_lanes`. A lane no automated VCA curve reaches keeps `FaderCurve::Cell` /
+  `MuteCurve::Cell`: the same `CellEvents` path and bits as before. A reached lane is
+  `FaderCurve::Composed` (one `automation::Composed<f32>` over its own cell, when automated, then
+  the VCA cells in ascending VCA ID) or `MuteCurve::Composed` (`Composed<bool>`, gate cursors, value
+  `own || v_1 || ... || v_m`; the stage mute is that `|| terms`). The composed value is the fader dB
+  `vca_compose_db(own, S + c_1 + ... + c_m)` (`composed_db`: `f64` fold, `S` first, inside the
+  render entry's `CanonicalFpEnv`; the prepared value inside preparation's), `own` the own curve or
+  `own_db`; the stage gain is `checked_fader_gain` of it.
+- **One driver (R17-4).** `FaderEventDriver` (bank, fused pair fallback, scalar oracle) holds a
+  `ChannelEvents::{Cell, Composed}` per channel: each piece begins the walk (`Composed::start`), the
+  cut at `E` is a one-sample `Ramp` landing on every cursor (longest jump, R19-4), and the held-ramp
+  obligation, the R17-10 release, the T3b re-hold release, the held-stage offsets jump and the free
+  offsets jump act on every cursor (`FaderComposite::each_state`). `settle_adoption` is generic over
+  `AdoptedCurve` (`CellAdoption`, `ComposedAdoption`): one adoption rule (F0 ramp target, the
+  deferred jump at the ramp's first free sample, grid hold, clears) for both shapes.
+  `block_jumps` resolves `LiveRamps::for_row(VcaOffset)` and `for_row(VcaMute)` (slot field
+  `vca_jumps`); a VCA cursor takes its row's length, the own cursor the fader or mute length.
+- **D3.** `OFFSETS_CELL_WORDS = 4`. `FaderOffsetsRecord` gains `own_db: Option<f32>` (word 3, a
+  quiet NaN for `None`); a composed lane whose own fader is not automated takes `Some(own_db)` and
+  jumps at the block entry only when the gain bits change; `None` keeps it.
+- **Carry (D6).** `continued_fader_lanes` / `continued_mute_lanes` now continue a lane only when its
+  own table (absent in both, or the same) and each reaching automated VCA table (same VCAs, ascending
+  ID, same segments) continue; with no VCA row automated the rule is the old one. `FaderCurve::carry`
+  / `MuteCurve::carry`: same shape copies the cell state, or the composed output's state and target
+  and, with one layout, the cursors; a changed shape takes the cell's ramp or starts fresh (always a
+  reposition). A composed reposition places every cursor afresh (no target, hears its curve at the
+  block start), so a deferred jump or a landing reaches every curve. `own_db` is carried like `S`
+  (`adopted_own_db`, the `Compare` backstop).
+- **Memory (R19-6).** Each composed channel charges its boxed curve (`fader_composite_bytes` 128,
+  `mute_composite_bytes` 112) and its cursor table (`cursor_bytes` 104 per pair) as bank payload and
+  in the scalar owner row (`FaderAutomationPlan::composed_bytes`), under the existing caps; the
+  offsets-writer charge widens to fader event lanes. The cap gate is V5's.
+
+**Departures.**
+1. K1 additive rule `Composed::with_held_grid` (opt-in; the route keeps R19-3). Without it a grid
+   event of one curve retargets the composed lane inside another curve's jump (the R19-V1 (a)
+   defect: the step ends at the next grid point, not at `J`). With it each retarget reports its ramp
+   to every value cursor whose own ramp ends earlier, and the cell's own grid rule holds or restarts
+   it. Also `clear_target`, `output_state`, `set_output` (carry). Test
+   `compose::tests::a_step_keeps_its_jump_length_while_another_curve_rides_on_a_held_grid_output`.
+2. An offsets record on a composed lane takes the single cell's rule (seed, clear the deferral,
+   every cursor holds to the jump's completion), not `Composed::retarget` (deferral then each
+   cursor's own `J`), so a composed lane moves as one cell does.
+3. `own_db` is `Option<f32>`: today's host-core record sites write `None` (mechanical, correct for
+   every lane that has a cell today); V3 writes `Some` on static-own event lanes.
+4. `LaneFaderAutomation::new` returns `Result` (the cursor table allocates); bind
+   (`bound_lane_automation`) panics only on an allocation failure, as a `Box::new` there does.
+
+**Gates** (`cargo test --locked -p builtins-compiler --all-features`, Simd8 under AVX2 and Simd4):
+`a_flat_vca_ride_renders_the_static_vca_offset_bits` (flat ride `-6` dB and flat mute `0` equal the
+static VCA bits over 40 blocks, a member with and without its own ride, fallback `+3` unused),
+`a_vca_ride_composes_with_each_members_own_value_at_every_grid_event`,
+`a_step_inside_another_curves_ride_keeps_its_jump_length` (both ways; red without `with_held_grid`:
+`(1024, Grid)` after the step), `coincident_member_and_vca_events_take_the_longest_jump` (fader and
+mute, 480/960 both ways), `a_session_without_vca_offset_automation_keeps_its_lone_fader_cells`,
+`a_carried_composed_lane_renders_the_uninterrupted_bits` (continued and repositioned, swap inside a
+grid ramp and inside a VCA step's jump; red without the cursor carry). `controls`:
+`a_member_lane_continues_only_while_its_reaching_vca_tables_do`.
+
+Commands: `cargo fmt --all`; clippy `-D warnings --all-targets --all-features` and no-feature
+`cargo check --locked --all-targets` on automation, builtins, builtins-compiler, host-core, controls;
+tests automation (all features), builtins (all features), builtins-compiler (all features, 76 lib),
+controls, host-core `--features test-support` `stored_fader_automation` (36), `stored_mute_automation`
+(13), `successor_swap` (140): all green. Realtime policy: 172 regions in 35 files (171 before: the
+composed-curve impls). Sizes (x86-64, measured): `Option<LaneFaderAutomation>` 392 -> 416 B
+(`vca_jumps`), `offsets_cell_bytes` 120 (unchanged), `ComposeCursor` 104.
+
+For V3: write `own_db = Some(static fader dB)` on fader event lanes with no own automation; take the
+fader event lanes as `automated` in `level_records_between` / `fader_records` (no `FaderDb` must reach
+a composed lane: the drain still applies a `FaderDb` to the stage); `has_offsets` is true on every
+fader event lane. For V4: a source lane's VCA mute cells are its reach (ascending VCA ID) mapped
+through `vca_cells(..)[1][lane]`, jump row `VcaMute`.

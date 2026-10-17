@@ -803,14 +803,22 @@ fn same_segments(before: &Automation, after: &Automation) -> bool {
 /// table (#1648 D2): the entry that drives the lane in `current` and the one that drives it in
 /// `next` ([`fader_automation`]) have the same segments, `f32` values by bits. A successor's strip
 /// join reads it: such a lane's cell continues its carried event state verbatim, and every other
-/// carried cell is repositioned in its own table at adoption.
+/// carried cell is repositioned in its own table at adoption. #1655 D6: a fader event lane
+/// continues when its own table and each reaching automated VCA `offset_db` table (in ascending
+/// VCA ID) are the same set, bit for bit (a lane with no own entry in either model included).
 #[must_use]
 pub fn continued_fader_lanes(
     current: &SessionModel,
     next: &SessionModel,
     strip: &StableId,
 ) -> [bool; 2] {
-    continued_lanes(current, next, strip, fader_automation)
+    continued_lanes(
+        current,
+        next,
+        strip,
+        fader_automation,
+        vca_offset_automation,
+    )
 }
 
 /// The lanes of strip `strip`'s mute (`[left, right]`) that both models automate with the same
@@ -823,23 +831,64 @@ pub fn continued_mute_lanes(
     next: &SessionModel,
     strip: &StableId,
 ) -> [bool; 2] {
-    continued_lanes(current, next, strip, mute_automation)
+    continued_lanes(current, next, strip, mute_automation, vca_mute_automation)
 }
 
-/// The lanes that `entries` gives an entry in both models with the same segments.
+/// The curves of one event lane in one model: its own entry, and each reaching VCA's entry on the
+/// matching VCA row (`vca_entries`) with the VCA's ID, in ascending VCA ID (#1655 D6).
+type LaneCurves<'a> = (Option<&'a Automation>, Vec<(&'a str, &'a Automation)>);
+
+/// The lanes of strip `strip` whose curves both models render with the same tables (#1648 D2,
+/// #1655 D6): the own entry (`entries`) is absent in both or has the same segments, and the
+/// reaching VCAs with an entry on the lane (`vca_entries`, by the rule of [`fader_event_lanes`])
+/// are the same VCAs, in ascending VCA ID, each with the same segments, and the lane has a curve.
+/// With no VCA row automated in either model this is the own-entry rule alone, as before #1655.
 fn continued_lanes<'a>(
     current: &'a SessionModel,
     next: &'a SessionModel,
     strip: &StableId,
     entries: fn(&'a SessionModel, &StableId) -> [Option<&'a Automation>; 2],
+    vca_entries: fn(&'a SessionModel, &StableId) -> [Option<&'a Automation>; 2],
 ) -> [bool; 2] {
     if current.automation.is_empty() || next.automation.is_empty() {
         return [false; 2];
     }
-    let (before, after) = (entries(current, strip), entries(next, strip));
+    let curves = |model: &'a SessionModel| -> [LaneCurves<'a>; 2] {
+        let own = entries(model, strip);
+        let mut vcas = [Vec::new(), Vec::new()];
+        if model.automation.iter().any(|entry| vca_row(&entry.target)) {
+            for vca in model
+                .vca_reach_of(strip)
+                .into_iter()
+                .filter_map(|index| model.vcas.get(index))
+            {
+                let driven = vca_entries(model, &vca.id);
+                for (lane, curves) in vcas.iter_mut().enumerate() {
+                    if let Some(entry) = driven[lane] {
+                        curves.push((vca.id.as_str(), entry));
+                    }
+                }
+            }
+        }
+        let [left, right] = vcas;
+        [(own[0], left), (own[1], right)]
+    };
+    let (before, after) = (curves(current), curves(next));
     [0, 1].map(|lane| {
-        matches!((before[lane], after[lane]), (Some(before), Some(after))
-            if same_segments(before, after))
+        let ((own_before, vcas_before), (own_after, vcas_after)) = (&before[lane], &after[lane]);
+        let own = match (own_before, own_after) {
+            (Some(before), Some(after)) => same_segments(before, after),
+            (None, None) => true,
+            _ => false,
+        };
+        own && (own_before.is_some() || !vcas_before.is_empty())
+            && vcas_before.len() == vcas_after.len()
+            && vcas_before
+                .iter()
+                .zip(vcas_after)
+                .all(|((id_before, before), (id_after, after))| {
+                    id_before == id_after && same_segments(before, after)
+                })
     })
 }
 

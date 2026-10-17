@@ -1203,6 +1203,7 @@ fn render_parity(mut rig: Rig, blocks: usize, offsets: bool) -> [Vec<f32>; 2] {
                         builtins_compiler::FaderOffsetsRecord {
                             offsets_sum: -3.0,
                             smoothing_samples: 200,
+                            own_db: None,
                         },
                     );
                 }
@@ -1220,6 +1221,7 @@ fn render_parity(mut rig: Rig, blocks: usize, offsets: bool) -> [Vec<f32>; 2] {
                         builtins_compiler::FaderOffsetsRecord {
                             offsets_sum: -6.0,
                             smoothing_samples: 480,
+                            own_db: None,
                         },
                     );
                 }
@@ -1888,6 +1890,7 @@ fn live_offsets(rig: &mut Rig, offsets_sum: f64, window: u32) {
                     builtins_compiler::FaderOffsetsRecord {
                         offsets_sum,
                         smoothing_samples: window,
+                        own_db: None,
                     },
                 );
             }
@@ -2214,6 +2217,7 @@ fn acted(
                                     builtins_compiler::FaderOffsetsRecord {
                                         offsets_sum,
                                         smoothing_samples,
+                                        own_db: None,
                                     },
                                 );
                             }
@@ -3095,6 +3099,7 @@ fn level_move_run_muted(
                         builtins_compiler::FaderOffsetsRecord {
                             offsets_sum,
                             smoothing_samples,
+                            own_db: None,
                         },
                     );
                 }
