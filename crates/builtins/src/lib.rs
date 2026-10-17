@@ -4618,6 +4618,28 @@ impl BuiltinFaderBank {
         Some(per_width!(FaderStageKernel(stage) in &self.stage => stage.gain_held(lane, channel)))
     }
 
+    /// Whether a member lane is muted on `channel` (`0` left, `1` right): settled muted or in a
+    /// ramp toward `0.0`. `None` for a padding lane or a channel above `1`.
+    #[must_use]
+    pub fn is_muted(&self, lane: usize, channel: usize) -> Option<bool> {
+        if lane >= self.members || channel > 1 {
+            return None;
+        }
+        Some(per_width!(FaderStageKernel(stage) in &self.stage => stage.is_muted(lane, channel)))
+    }
+
+    /// The fader gain a member lane aims for on `channel` (`0` left, `1` right), whatever its
+    /// mute: the gain an unmute retargets back to, and the one a gain operation last set or
+    /// remembered (#1648 D2 compares a carried lane's with its adopted curve). `None` for a
+    /// padding lane or a channel above `1`.
+    #[must_use]
+    pub fn fader_gain(&self, lane: usize, channel: usize) -> Option<f32> {
+        if lane >= self.members || channel > 1 {
+            return None;
+        }
+        Some(per_width!(FaderStageKernel(stage) in &self.stage => stage.fader_gain[channel][lane]))
+    }
+
     /// Frames left in a member lane's ramp on `channel`; `0` when settled. `None` for a padding
     /// lane or a channel above `1`.
     #[must_use]

@@ -39,6 +39,10 @@ session.workspace = true
 source.workspace = true
 
 [dev-dependencies]
+# #1646 D2 and #1709: `lane::fpenv::under_hostile_fp_env`, the hostile caller environment.
+lane = { workspace = true, features = ["test-support"] }
+# #1646 gate 2: the program builder's byte report is the charge a fader automation adds.
+automation.workspace = true
 bench-support.workspace = true
 builtins.workspace = true
 builtins-compiler = { workspace = true, features = ["test-support"] }

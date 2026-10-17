@@ -12,9 +12,10 @@ use builtins::{
     PreparedInputFilterTarget, checked_fader_gain, checked_trim_gain, validate_input_filter_pair,
 };
 use builtins_compiler::{
-    BuiltinCompileCaps, LiveValuesSuperseded, MeterConsumer, MeterRequest, SelectedMeterRequest,
-    TrackControlProducer, TrackControlRecord, TrackControlRequest, TrackFaderRecord,
-    TrackInputRecord, lower_matrix_or_pan, prepare_selected_session_builtins_between_render_calls,
+    BuiltinCompileCaps, FaderOffsetsRecord, LiveValuesSuperseded, MeterConsumer, MeterRequest,
+    SelectedMeterRequest, TrackControlProducer, TrackControlRecord, TrackControlRequest,
+    TrackFaderRecord, TrackInputRecord, lower_matrix_or_pan,
+    prepare_selected_session_builtins_between_render_calls,
     prepare_selected_session_builtins_with_live_controls,
     prepare_session_builtins_between_render_calls, prepare_session_builtins_with_live_controls,
     session_structural_symmetry,
@@ -2155,6 +2156,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     ),
     PrepareDiagnostics,
 > {
+    // #1709 D1: the whole preparation runs in the canonical floating-point environment, so a
+    // route or send gain (`compile_graph`'s `db_to_gain_f32`), a native effect's coefficients and
+    // every value composed below are what a canonical thread prepares, whatever the caller has
+    // set. The inner guards (builtins body, lowerings, `controls::effective`, the catalog) nest:
+    // each restores the canonical word this one installed, and this one restores the caller's.
+    let _canonical = lane::CanonicalFpEnv::enter();
     // `None` is the plain entry: no live controls, and a request of defaults for the meter and
     // observation fields below. Every `Some` attaches live controls.
     let default_request = HostLiveControlRequest::default();
@@ -2753,7 +2760,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     };
     // Decision 17, C7: every effective value is computed once per preparation, here, under the
     // overlay the successor renders with (#1559 D9); a first plan has no solo.
-    let effective = controls::effective(compiled.normalized_model(), overlay);
+    // #1646 D2: composed in the canonical floating-point environment, as the builtins
+    // preparation composes an automated lane, so a flat automated lane and a static fader round
+    // alike whatever the caller's thread has set.
+    let effective = {
+        let _canonical = lane::CanonicalFpEnv::enter();
+        controls::effective(compiled.normalized_model(), overlay)
+    };
     let builtins = if selected_meters.is_some() {
         // #1401 D2: a selected-meter request follows the caller's delivery contract, like every
         // other request. The serialized form keeps its fused fader and matrix banks.
@@ -3652,6 +3665,17 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             for record in retarget.fader.iter().map_while(|record| *record) {
                 producer.fader.write(stamp, record);
             }
+            // #1648 D2 (U3 fold): an automated lane's new `S`, with the edit's length, through
+            // the successor's own offsets cell, as the live path writes it. The record exists only
+            // for a lane the successor automates, whose cell a plan with live cells attaches.
+            for (channel, record) in retarget.offsets.iter().enumerate() {
+                if let Some(record) = *record {
+                    if !producer.fader.has_offsets(channel) {
+                        return Err(graph_failure("host.control.order"));
+                    }
+                    producer.fader.write_offsets(stamp, channel, record);
+                }
+            }
             if let Some(record) = retarget.matrix {
                 producer.producer.write(stamp, record);
             }
@@ -4196,6 +4220,12 @@ pub(crate) struct LevelLengths {
 /// the same value and the same length). A fader move on a lane that stays muted still gets its
 /// record, so the stage remembers the gain for a later unmute.
 ///
+/// A lane that `automated` names (the lanes the post-change model automates,
+/// [`controls::automated_fader_lanes`]) gets no `FaderDb` (#1648 D3): its cell renders the curve
+/// and the static value is only its fallback. That is no error, so a successor's join reads the
+/// strip as unchanged when nothing else moved, and its stage carries. Its `Mute` records are
+/// unchanged. `automated` is called only when a lane's gain bits change.
+///
 /// # Errors
 ///
 /// [`OutOfDomain`] when either fader is outside the domain [`checked_fader_gain`] accepts.
@@ -4203,6 +4233,7 @@ pub(crate) fn fader_records(
     before: &session::DualMonoFader,
     after: &session::DualMonoFader,
     lengths: LevelLengths,
+    automated: impl FnOnce() -> [bool; 2],
 ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
     let gain = |db| {
         checked_fader_gain(db)
@@ -4220,7 +4251,15 @@ pub(crate) fn fader_records(
         used += 1;
     };
     let db_after = [after.left_db, after.right_db];
-    let gain_changed = [0, 1].map(|lane| gains_before[lane] != gains_after[lane]);
+    let mut gain_changed = [0, 1].map(|lane| gains_before[lane] != gains_after[lane]);
+    // #1648 D3: an automated lane renders its curve; its static value is the fallback, so a change
+    // of it is no record. Asked only when a gain changed.
+    if gain_changed.contains(&true) {
+        let automated = automated();
+        for lane in 0..2 {
+            gain_changed[lane] &= !automated[lane];
+        }
+    }
     for (lanes, lane) in lane_records(
         gain_changed,
         db_after[0].to_bits() == db_after[1].to_bits() && lengths.fader[0] == lengths.fader[1],
@@ -4245,10 +4284,60 @@ pub(crate) fn fader_records(
     Ok(fader)
 }
 
-/// A strip's effective fader and mute as a [`session::DualMonoFader`], the shape its stage's
-/// records are derived from.
-/// Whether a strip's effective fader or mute differs, as bits: the one test of "this strip's level
-/// moved", for the dense diff and the local one.
+/// The level records of one strip: the [`fader_records`] of its fader/mute stage and the
+/// offsets-cell writes of its automated fader lanes (#1649 D4), `[left, right]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct LevelRecords {
+    pub(crate) fader: [Option<TrackFaderRecord>; 4],
+    pub(crate) offsets: [Option<FaderOffsetsRecord>; 2],
+}
+
+/// The level records that bring a strip from `before`'s effective values to `after`'s: its
+/// [`fader_records`], and for each lane that `automated` names (the lanes the post-change model
+/// automates) whose `S` ([`controls::EffectiveStrip::offsets_sum`]) differs in bits, one
+/// offsets-cell write of `after`'s `S` with the lane's fader length (#1649 D4, departure 1: the
+/// one length rule, so an automated and a plain member of one VCA edit ramp alike). A VCA ride, a
+/// membership change, a nested VCA, an added and a removed VCA each change only `S` on such a
+/// lane. `automated` is asked at most once.
+///
+/// # Errors
+///
+/// [`OutOfDomain`] as [`fader_records`].
+pub(crate) fn level_records_between(
+    before: &controls::EffectiveStrip,
+    after: &controls::EffectiveStrip,
+    lengths: LevelLengths,
+    automated: impl Fn() -> [bool; 2],
+) -> Result<LevelRecords, OutOfDomain> {
+    let lanes = core::cell::OnceCell::new();
+    let automated = || *lanes.get_or_init(&automated);
+    let fader = fader_records(
+        &effective_fader(before),
+        &effective_fader(after),
+        lengths,
+        automated,
+    )?;
+    let mut offsets = [None; 2];
+    let moved =
+        [0, 1].map(|lane| before.offsets_sum[lane].to_bits() != after.offsets_sum[lane].to_bits());
+    if moved.contains(&true) {
+        let automated = automated();
+        for lane in 0..2 {
+            if moved[lane] && automated[lane] {
+                offsets[lane] = Some(FaderOffsetsRecord {
+                    offsets_sum: after.offsets_sum[lane],
+                    smoothing_samples: lengths.fader[lane],
+                });
+            }
+        }
+    }
+    Ok(LevelRecords { fader, offsets })
+}
+
+/// Whether a strip's effective fader, mute or offset sum `S` differs, as bits: the one test of
+/// "this strip's level moved", for the dense diff and the local one. `S` moves alone when a VCA
+/// edit leaves the effective fader's bits (a clamp, a zero's sign), and an automated lane hears
+/// `S` (#1649).
 #[cfg(feature = "control-provider")]
 pub(crate) fn level_differs(
     before: &controls::EffectiveStrip,
@@ -4256,8 +4345,11 @@ pub(crate) fn level_differs(
 ) -> bool {
     before.fader_db.map(f32::to_bits) != after.fader_db.map(f32::to_bits)
         || before.mute != after.mute
+        || before.offsets_sum.map(f64::to_bits) != after.offsets_sum.map(f64::to_bits)
 }
 
+/// A strip's effective fader and mute as a [`session::DualMonoFader`], the shape its stage's
+/// records are derived from.
 pub(crate) fn effective_fader(effective: &controls::EffectiveStrip) -> session::DualMonoFader {
     session::DualMonoFader {
         left_db: effective.fader_db[0],
@@ -4284,6 +4376,11 @@ pub(crate) fn strip_at(model: &SessionModel, index: usize) -> StripRef<'_> {
 pub(crate) struct StripChange<'s> {
     pub(crate) own_before: &'s session::DualMonoFader,
     pub(crate) own_after: &'s session::DualMonoFader,
+    /// The hand-move offset of each automated fader lane in each model
+    /// ([`controls::EffectiveStrip::fader_offset`], #1650): a hand move on an automated fader
+    /// writes it, so it is the strip's own fader edit there.
+    pub(crate) offset_before: [Option<f32>; 2],
+    pub(crate) offset_after: [Option<f32>; 2],
     pub(crate) id: &'s session::StableId,
     /// [`SessionModel::vca_reach`] of the strip in `current`, then in `next`.
     pub(crate) reach_before: &'s [usize],
@@ -4312,7 +4409,8 @@ impl LevelRules<'_> {
     /// The ramp length of each lane's `FaderDb` and `Mute` record of one strip (#1558 D7).
     ///
     /// A lane's fader length is that of the strip's own `fader_db` edit when the strip's own value
-    /// on the lane changed (row `Fader`, the edit's length); else that of the first reaching VCA,
+    /// on the lane changed, or its hand-move offset did on an automated lane (#1650 D5) (row
+    /// `Fader`, the edit's length); else that of the first reaching VCA,
     /// in ascending VCA-ID order, whose offset on the lane changed (row `VcaOffset`, the VCA's
     /// edit's length); else row `VcaOffset` with no edit length (a membership change, or a VCA
     /// added or removed). The mute is the same with rows `Mute` and `VcaMute`.
@@ -4342,7 +4440,11 @@ impl LevelRules<'_> {
         };
         let fader = [0, 1].map(|lane| {
             let db = |fader: &session::DualMonoFader| [fader.left_db, fader.right_db][lane];
-            if db(own_before).to_bits() != db(own_after).to_bits() {
+            // A hand move on an automated lane (#1650 D5) is the strip's own fader edit.
+            let offset = |offsets: [Option<f32>; 2]| offsets[lane].map(f32::to_bits);
+            if db(own_before).to_bits() != db(own_after).to_bits()
+                || offset(strip.offset_before) != offset(strip.offset_after)
+            {
                 self.ramps.resolve(LiveRampRow::Fader, edit.fader)
             } else {
                 self.ramps
@@ -4503,6 +4605,8 @@ impl<'a> EffectiveDiff<'a> {
         StripChange {
             own_before: strip_at(self.rules.current, before).fader,
             own_after: after_strip.fader,
+            offset_before: self.before.strips[before].fader_offset,
+            offset_after: self.after.strips[after].fader_offset,
             id: after_strip.id,
             reach_before: &self.reach_before[before],
             reach: &self.reach[after],
@@ -4517,22 +4621,90 @@ impl<'a> EffectiveDiff<'a> {
         level_differs(&self.before.strips[before], &self.after.strips[after])
     }
 
-    /// The level records of one strip: its effective values in the two models, with the lengths
-    /// the ramp rules give.
+    /// The level records of one strip, its effective values in the two models with the lengths
+    /// the ramp rules give, and its offsets-cell writes (#1649 D4).
     ///
     /// # Errors
     ///
     /// [`OutOfDomain`] as [`fader_records`].
-    pub(crate) fn level_records(
+    pub(crate) fn strip_level_records(
         &self,
         before: usize,
         after: usize,
-    ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
-        fader_records(
-            &effective_fader(&self.before.strips[before]),
-            &effective_fader(&self.after.strips[after]),
-            self.rules.lengths(&self.change(before, after)),
+    ) -> Result<LevelRecords, OutOfDomain> {
+        let change = self.change(before, after);
+        level_records_between(
+            &self.before.strips[before],
+            &self.after.strips[after],
+            self.rules.lengths(&change),
+            || controls::automated_fader_lanes(self.rules.next.structure(), change.id),
         )
+    }
+
+    /// The carry retargets of one strip's fader/mute stage at a successor's strip join (#1277 D5):
+    /// its [`Self::strip_level_records`], the offsets-cell writes with them (#1648 D2, U3 fold:
+    /// an `S` the transaction moves reaches a carried automated lane as the live path's record,
+    /// with the edit's length), plus the release of each lane whose stored fader automation
+    /// the change removes (#1648 D2, "a cell lost"). Such a lane's carried stage holds the curve's
+    /// last target, which no model holds, so the static values of the two models cannot show the
+    /// difference; a `FaderDb` of the lane's effective value in `next` moves it there over the
+    /// lane's fader length, as a live write does (the stage's live-write rule then holds the
+    /// batch 13b obligation: inside an unmute ramp the write retargets, while muted the stage
+    /// remembers it for the unmute). A released lane whose static value changed already has its
+    /// record. The live classifier never reaches a removal (#1648 D1 rebuilds it), so this is the
+    /// join's alone.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfDomain`] as [`fader_records`].
+    pub(crate) fn join_level_records(
+        &self,
+        before: usize,
+        after: usize,
+    ) -> Result<LevelRecords, OutOfDomain> {
+        let mut level = self.strip_level_records(before, after)?;
+        let records = &mut level.fader;
+        let change = self.change(before, after);
+        let automated_before = controls::automated_fader_lanes(self.rules.current, change.id);
+        if automated_before == [false; 2] {
+            return Ok(level);
+        }
+        let automated_after =
+            controls::automated_fader_lanes(self.rules.next.structure(), change.id);
+        let mut released = [0, 1].map(|lane| automated_before[lane] && !automated_after[lane]);
+        for record in records.iter().flatten() {
+            if let TrackFaderRecord::FaderDb { lanes, .. } = record {
+                let covered = match lanes {
+                    BuiltinLaneSelector::Left => [true, false],
+                    BuiltinLaneSelector::Right => [false, true],
+                    BuiltinLaneSelector::Both => [true, true],
+                };
+                for (released, covered) in released.iter_mut().zip(covered) {
+                    *released &= !covered;
+                }
+            }
+        }
+        if released == [false; 2] {
+            return Ok(level);
+        }
+        let lengths = self.rules.lengths(&change);
+        let db = self.after.strips[after].fader_db;
+        // The array holds at most one `FaderDb` and one `Mute` per lane, and a released lane has
+        // no `FaderDb` yet, so a free slot is always there.
+        let mut free = records.iter_mut().filter(|record| record.is_none());
+        for (lanes, lane) in lane_records(
+            released,
+            db[0].to_bits() == db[1].to_bits() && lengths.fader[0] == lengths.fader[1],
+        ) {
+            if let Some(slot) = free.next() {
+                *slot = Some(TrackFaderRecord::FaderDb {
+                    lanes,
+                    db: db[lane],
+                    smoothing_samples: lengths.fader[lane],
+                });
+            }
+        }
+        Ok(level)
     }
 
     #[cfg(feature = "control-provider")]
@@ -4835,6 +5007,12 @@ pub enum LiveRebuild {
     /// rebuild's preparation refuses it with the row's code; the classifier only routes, so the
     /// refusal has one author and no live commit can ack it first.
     AutomationTarget,
+    /// The stored automation of a row that renders ([`controls::automation_row_renders`]) changes:
+    /// an entry is added, removed, retargeted or given other segments (#1648 D1,
+    /// [`controls::rendered_automation_changed`]). A plan compiles its cells from the entries at
+    /// preparation, so only a successor plan holds the new curve. An entry's hand offset (#1650) is
+    /// not part of this comparison.
+    Automation,
 }
 
 /// The one per-instance function that decides whether a difference between two lowered instances
@@ -5030,8 +5208,12 @@ impl<T> FamilyJoin<T> {
 /// One strip present in both models, with how its fader/mute and matrix families differ.
 struct StripJoin<'a> {
     id: &'a str,
-    fader: FamilyJoin<[Option<TrackFaderRecord>; 4]>,
+    fader: FamilyJoin<LevelRecords>,
     matrix: FamilyJoin<TrackControlRecord>,
+    /// The fader lanes whose stored automation table both models hold bit for bit (#1648 D2,
+    /// [`controls::continued_fader_lanes`]), bit 0 left and bit 1 right: the fader move's
+    /// [`graph::GraphStripMove::continued_cells`].
+    continued_cells: u8,
 }
 
 impl StripJoin<'_> {
@@ -5118,6 +5300,7 @@ fn join_strips<'a>(
                     id,
                     fader: FamilyJoin::Prepared,
                     matrix: FamilyJoin::Prepared,
+                    continued_cells: 0,
                 });
             }
             continue;
@@ -5128,13 +5311,21 @@ fn join_strips<'a>(
         // A retarget is the record of the same edit, so it carries the length that edit gave its
         // row (#1394 D6), else the session's.
         let edit = StripEditRamps::of(edit_ramps, strip.id);
-        let fader_records = diff.level_records(position, index);
+        let fader_records = diff.join_level_records(position, index);
         let matrix_record = matrix_record(before_matrix, strip.matrix_or_pan, ramps, edit);
         let fader_live = live && fader_records.is_ok();
         let matrix_live = live && matrix_record.is_ok();
+        // An offsets-cell write alone (an `S` the transaction moves on an automated lane) is a
+        // live difference only where the successor has cells to take it; on a plan with no live
+        // cells the carried lane takes the change by the adoption rule (#1648 D2), so the stage
+        // still carries as `Same`.
         let fader = match fader_records {
             Err(_) => FamilyJoin::Prepared,
-            Ok(records) if records[0].is_none() => FamilyJoin::Same,
+            Ok(records)
+                if records.fader[0].is_none() && (!fader_live || records.offsets == [None; 2]) =>
+            {
+                FamilyJoin::Same
+            }
             Ok(_) if !fader_live => FamilyJoin::Prepared,
             Ok(records) => FamilyJoin::Live(records),
         };
@@ -5144,7 +5335,14 @@ fn join_strips<'a>(
             Ok(Some(_)) if !matrix_live => FamilyJoin::Prepared,
             Ok(Some(record)) => FamilyJoin::Live(record),
         };
-        joins.push(StripJoin { id, fader, matrix });
+        let continued = controls::continued_fader_lanes(committed, model, strip.id);
+        let continued_cells = u8::from(continued[0]) | (u8::from(continued[1]) << 1);
+        joins.push(StripJoin {
+            id,
+            fader,
+            matrix,
+            continued_cells,
+        });
     }
     joins
 }
@@ -5366,6 +5564,8 @@ fn resolve_route_carry<'a>(
 struct StripRetarget<'a> {
     id: &'a str,
     fader: [Option<TrackFaderRecord>; 4],
+    /// The automated lanes' offsets-cell writes, `[left, right]` (#1648 D2, U3 fold).
+    offsets: [Option<FaderOffsetsRecord>; 2],
     matrix: Option<TrackControlRecord>,
 }
 
@@ -5414,24 +5614,30 @@ fn resolve_strip_carry<'a>(
                     owner,
                     successor: own.location,
                     predecessor: before.location,
+                    continued_cells: if owner == Fader {
+                        join.continued_cells
+                    } else {
+                        0
+                    },
                 });
             }
         }
         if !(carries[0] && carries[1]) {
             carry.restarted.push(join.id.into());
         }
-        let fader = match join.fader {
+        let LevelRecords { fader, offsets } = match join.fader {
             FamilyJoin::Live(records) if carries[0] => records,
-            _ => [None; 4],
+            _ => LevelRecords::default(),
         };
         let matrix = match join.matrix {
             FamilyJoin::Live(record) if carries[1] => Some(record),
             _ => None,
         };
-        if fader[0].is_some() || matrix.is_some() {
+        if fader[0].is_some() || offsets != [None; 2] || matrix.is_some() {
             carry.retargets.push(StripRetarget {
                 id: join.id,
                 fader,
+                offsets,
                 matrix,
             });
         }

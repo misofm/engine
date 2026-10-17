@@ -2760,6 +2760,211 @@ fn both_hosts_refuse_a_source_of_more_than_two_channels_alike() {
     }
 }
 
+/// #1648a (D1): adding stored fader automation (builtin row 5, a row that renders) is a rebuild
+/// on both hosts, with the same reply bytes, and both hosts render the same bits across the swap;
+/// an entry on a row that does not render yet (the mute, row 6) commits `model_only` on both.
+/// Both hosts call the one shared classifier, so neither has its own rule for automation edits.
+///
+/// A changed ride and its removal then rebuild alike too, and both hosts render the same bits
+/// through the carried cell's adoption jump and the release (#1648b).
+///
+/// Test value: red if either host acks a fader automation edit as `model_only` (an edit that is
+/// never heard), if the two hosts answer it differently, or if the browser's rebuild renders other
+/// bits than the C ABI's.
+#[test]
+fn a_fader_automation_edit_rebuilds_alike_on_both_hosts() {
+    let entry = |name: &str, control: u32, segment: session::AutomationSegment| {
+        SessionEdit::UpsertAutomation {
+            automation: session::Automation {
+                id: id(name),
+                target: address(
+                    Owner::Strip(id(T1.id)),
+                    Section::Builtins,
+                    control,
+                    ParameterChannel::Both,
+                ),
+                segments: vec![segment],
+                offset: session::AutomationOffset::default(),
+            },
+        }
+    };
+    let fader = entry(
+        "t1-fader-ride",
+        5,
+        session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: 960,
+            start_value: 0.0,
+            end_value: -6.0,
+            unit: session::ParameterUnit::Db,
+        },
+    );
+    let changed = entry(
+        "t1-fader-ride",
+        5,
+        session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: 9_600,
+            start_value: 0.0,
+            end_value: -18.0,
+            unit: session::ParameterUnit::Db,
+        },
+    );
+    let mute = entry(
+        "t1-mute-ride",
+        6,
+        session::AutomationSegment {
+            shape: session::AutomationShape::Step,
+            start_sample: 0,
+            end_sample: 960,
+            start_value: 0.0,
+            end_value: 0.0,
+            unit: session::ParameterUnit::Linear,
+        },
+    );
+    for rate in RATES {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..3, "before the edit");
+        let (b, b_reply) = browser.transaction_reply(std::slice::from_ref(&fader));
+        let (c, c_reply) = c_abi.transaction(std::slice::from_ref(&fader));
+        assert_eq!(b, c, "{rate} Hz: one verdict for the fader entry");
+        assert_eq!(b_reply, c_reply, "{rate} Hz: one reply");
+        assert_eq!(
+            b,
+            Verdict::Applied {
+                path: EditPath::Rebuild,
+                revision: model.revision + 1
+            },
+            "{rate} Hz: a fader entry rebuilds"
+        );
+        same_blocks(&mut browser, &mut c_abi, 3..8, "across the swap");
+        let (b, b_reply) = browser.transaction_reply(std::slice::from_ref(&mute));
+        let (c, c_reply) = c_abi.transaction(std::slice::from_ref(&mute));
+        assert_eq!(b, c, "{rate} Hz: one verdict for the mute entry");
+        assert_eq!(b_reply, c_reply, "{rate} Hz: one reply");
+        assert_eq!(
+            b,
+            Verdict::Applied {
+                path: EditPath::ModelOnly,
+                revision: model.revision + 2
+            },
+            "{rate} Hz: a mute entry is model-only"
+        );
+        same_blocks(&mut browser, &mut c_abi, 8..10, "after the mute entry");
+        // #1648b (gate 2's browser leg): a changed ride and a removed ride rebuild alike, and the
+        // carried cell's adoption jump and the release render the same bits on both hosts.
+        for (step, edit, blocks) in [
+            (3, changed.clone(), 10..18),
+            (
+                4,
+                SessionEdit::RemoveAutomation {
+                    automation_id: id("t1-fader-ride"),
+                },
+                18..26,
+            ),
+        ] {
+            let (b, b_reply) = browser.transaction_reply(std::slice::from_ref(&edit));
+            let (c, c_reply) = c_abi.transaction(std::slice::from_ref(&edit));
+            assert_eq!(b, c, "{rate} Hz: one verdict for edit {step}");
+            assert_eq!(b_reply, c_reply, "{rate} Hz: one reply for edit {step}");
+            assert_eq!(
+                b,
+                Verdict::Applied {
+                    path: EditPath::Rebuild,
+                    revision: model.revision + step
+                },
+                "{rate} Hz: edit {step} rebuilds"
+            );
+            same_blocks(&mut browser, &mut c_abi, blocks, "across the carried swap");
+        }
+    }
+}
+
+/// B17-R14 (#1648 split, #1711): a table-only rebuild of a riding fader while a hand move with
+/// its own 4,000 samples may still ramp completes as the transition fallback on both hosts, and
+/// the same rebuild with no move in flight completes exactly. Both hosts take the one decision in
+/// the shared control plane: the browser's status words carry the C ABI's watermark, flags
+/// included, and both hosts render the same bits.
+///
+/// Test value: red if either host marks the rebuild differently (an adapter-local rule), or if
+/// the shared decision is not reached through the browser's control path.
+#[test]
+fn a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both_hosts() {
+    let ride = |end_db: f32| SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-fader-ride"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                5,
+                ParameterChannel::Both,
+            ),
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 1_000_000,
+                start_value: 0.0,
+                end_value: end_db,
+                unit: session::ParameterUnit::Db,
+            }],
+            offset: session::AutomationOffset::default(),
+        },
+    };
+    let hand = CAbi::edits(
+        Edit::Fader {
+            strip: T1,
+            lanes: Lanes::Both,
+            db: -6.0,
+        },
+        Some(4_000),
+    );
+    for rate in RATES {
+        for (label, moved, expected) in [
+            ("no move", false, capi::OUTCOME_EXACT),
+            (
+                "a hand move in flight",
+                true,
+                capi::OUTCOME_TRANSITION_FALLBACK,
+            ),
+        ] {
+            let model = model_at(rate);
+            let mut browser = Rig::new(&model);
+            let mut c_abi = CAbi::new(&model);
+            let mut block = 0;
+            let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi| {
+                let (b, b_reply) = browser.transaction_reply(edits);
+                let (c, c_reply) = c_abi.transaction(edits);
+                assert_eq!(b, c, "{rate} Hz, {label}: one verdict");
+                assert_eq!(b_reply, c_reply, "{rate} Hz, {label}: one reply");
+            };
+            both(&[ride(-12.0)], &mut browser, &mut c_abi);
+            same_blocks(&mut browser, &mut c_abi, block..block + 4, label);
+            block += 4;
+            if moved {
+                both(&hand, &mut browser, &mut c_abi);
+                same_blocks(&mut browser, &mut c_abi, block..block + 3, label);
+                block += 3;
+            }
+            both(&[ride(-6.0)], &mut browser, &mut c_abi);
+            same_blocks(&mut browser, &mut c_abi, block..block + 3, label);
+            let watermark = c_abi.watermark();
+            assert_eq!(
+                status_watermark(&browser),
+                watermark,
+                "{rate} Hz, {label}: the browser status carries the C ABI's watermark"
+            );
+            assert_eq!(
+                watermark.2, expected,
+                "{rate} Hz, {label}: the rebuild's outcome flags"
+            );
+        }
+    }
+}
+
 /// #1631. A `matrix_mode` switch under a stored pan entry is refused alike by both hosts: the same
 /// refusal and the same diagnostic (`control.inactive` at the entry's path, the row rule's
 /// own, through the rebuild route), and nothing commits -- the same expected revision still
@@ -2787,6 +2992,7 @@ fn a_mode_switch_under_a_stored_pan_entry_is_refused_alike_on_both_hosts() {
                 end_value: 0.5,
                 unit: session::ParameterUnit::Linear,
             }],
+            offset: session::AutomationOffset::default(),
         });
         let mut browser = Rig::new(&model);
         let mut c_abi = CAbi::new(&model);
@@ -4286,6 +4492,720 @@ fn a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_host
         assert!(
             latencies(&mut browser, &c_abi, "plain") < floored,
             "{label}: a plain session seek resets the floors ({floored})"
+        );
+    }
+}
+
+/// #1649: [`model_at`] with `t2` riding its fader on both lanes (linear from -3 dB at sample 0 to
+/// -15 dB at the run's end, so every grid point moves the lane), VCA `v` holding `t2` and `t3`
+/// (`t3` has no automation), and `change` applied.
+fn automated_vca_model(rate: u32, change: impl FnOnce(&mut SessionModel)) -> SessionModel {
+    let mut model = model_at(rate);
+    model.automation.push(session::Automation {
+        id: id("t2-fader-ride"),
+        target: address(
+            Owner::Strip(id(T2.id)),
+            Section::Builtins,
+            FADER_DB,
+            ParameterChannel::Both,
+        ),
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: u64::from(QUANTUM) * BLOCKS,
+            start_value: -3.0,
+            end_value: -15.0,
+            unit: session::ParameterUnit::Db,
+        }],
+        offset: session::AutomationOffset::default(),
+    });
+    model.vcas[0].members = vec![id(T2.id), id(T3.id)];
+    change(&mut model);
+    model
+}
+
+/// A VCA `name` at `db` on both lanes holding `members`.
+fn vca_at(name: &str, db: f32, members: &[&str]) -> Vca {
+    Vca {
+        id: id(name),
+        fader: DualMonoFader {
+            left_db: db,
+            right_db: db,
+            left_mute: false,
+            right_mute: false,
+        },
+        members: members.iter().map(|member| id(member)).collect(),
+    }
+}
+
+/// `SET_CONTROL` of VCA `vca`'s offset on both lanes.
+fn vca_offset(vca: &str, db: f32, ramp: Option<u32>) -> SessionEdit {
+    SessionEdit::SetControl {
+        expected_effect: None,
+        address: address(
+            Owner::Vca(id(vca)),
+            Section::Own,
+            VCA_OFFSET_DB,
+            ParameterChannel::Both,
+        ),
+        value: db,
+        ramp_samples: ramp,
+    }
+}
+
+/// The blocks a jump of `jump` samples, the first grid ramp after it (two grid periods of 64) and
+/// the plan's latency may still be settling after the edit's block.
+fn settle_blocks(browser: &mut Rig, jump: u32) -> u64 {
+    let latency = browser_plan_latency(browser).0;
+    (latency + u64::from(jump) + 128).div_ceil(u64::from(QUANTUM)) + 1
+}
+
+/// One #1649 case on both hosts: `model` plays four blocks, then `edits` commit as one transaction
+/// on each host with the same verdict (`path`, one revision) and the same reply bytes. Every block
+/// is equal on the two hosts, and from `settle_blocks` after the edit the browser renders the bits
+/// of a browser booted on the committed session and fed the same PCM from block 0; when `heard`,
+/// that session renders otherwise than `model` there.
+fn automated_vca_alike(
+    label: &str,
+    model: &SessionModel,
+    edits: &[SessionEdit],
+    path: EditPath,
+    jump: u32,
+    heard: bool,
+) {
+    const EDIT: u64 = 4;
+    let mut browser = Rig::new(model);
+    let mut c_abi = CAbi::new(model);
+    same_blocks(&mut browser, &mut c_abi, 0..EDIT, label);
+    let (b, b_reply) = browser.transaction_reply(edits);
+    let (c, c_reply) = c_abi.transaction(edits);
+    assert_eq!(b, c, "{label}: one verdict");
+    assert_eq!(b_reply, c_reply, "{label}: one reply");
+    assert_eq!(
+        b,
+        Verdict::Applied {
+            path,
+            revision: model.revision + 1
+        },
+        "{label}: the path"
+    );
+    let committed = snapshot_bytes(|payload, expected| browser.command(payload, expected));
+    let mut twin = Rig::boot(&committed, model.sample_rate_hz);
+    let mut unedited = Rig::new(model);
+    let settle = EDIT + settle_blocks(&mut browser, jump);
+    let end = settle + 4;
+    assert!(end <= BLOCKS, "{label}: the run fits the sources");
+    let mut moved = false;
+    for block in 0..end {
+        let (t, u) = (twin.step(block), unedited.step(block));
+        if block < EDIT {
+            continue;
+        }
+        let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(b, c, "{label}: block {block} alike on both hosts");
+        if block >= settle {
+            assert_eq!(
+                b, t,
+                "{label}: block {block} renders the committed session's boot"
+            );
+            moved |= t != u;
+        }
+    }
+    assert_eq!(moved, heard, "{label}: heard exactly when a value moves");
+}
+
+/// #1649 gates 1 and 3 (both hosts). A -6 dB move of `v` over the automated member `t2` (and the
+/// plain member `t3`) is `live` on both hosts with the same reply, renders the same bits on both,
+/// and from the end of the jump and the first grid ramp after it renders the committed session's
+/// boot: with the session's length, and with the edit's own 256 samples (a longer ramp on either
+/// member would still differ in that shorter window). A move of `v` to its current value is
+/// `model_only` and moves no bit.
+///
+/// Test value: red if the browser's VCA move does not reach the automated lane's offsets cell
+/// (the ride keeps the old composition), if the two hosts differ, or if an unchanged offset
+/// retargets the lane.
+#[test]
+fn a_vca_move_over_an_automated_member_is_live_alike_on_both_hosts() {
+    for rate in RATES {
+        let model = automated_vca_model(rate, |_| {});
+        let fader = model.control_smoothing_samples().fader;
+        automated_vca_alike(
+            &format!("{rate} Hz, the session's length"),
+            &model,
+            &[vca_offset(VCA.id, -6.0, None)],
+            EditPath::Live,
+            fader,
+            true,
+        );
+        automated_vca_alike(
+            &format!("{rate} Hz, 256 samples"),
+            &model,
+            &[vca_offset(VCA.id, -6.0, Some(256))],
+            EditPath::Live,
+            256,
+            true,
+        );
+        automated_vca_alike(
+            &format!("{rate} Hz, the current value"),
+            &model,
+            &[vca_offset(VCA.id, 0.0, None)],
+            EditPath::ModelOnly,
+            fader,
+            false,
+        );
+    }
+}
+
+/// #1649 gate 2 (both hosts). Ten live moves of `v` before one render give the bits of a twin that
+/// made only the last, on both hosts (render reads the newest slot of the offsets cell, whole);
+/// after 28 blocks a second burst of ten (ending at -2 dB) again gives the twin's bits when the
+/// twin makes only its last, and after each burst's jump the output equals the committed
+/// session's boot.
+/// Three nested VCAs reach `t2`, declared and nested out of ID order, at 24, -24 and 2e-30 dB in
+/// ascending ID order: a move of the third to 1e-30 is `live` and renders the committed session's
+/// boot (the `S` bits it writes are the classifier gate's,
+/// `a_vca_move_writes_the_automated_lanes_offsets_cell`).
+///
+/// Test value: red if render applies an older slot than the newest committed one, if render hears
+/// only the first write of a cell (the second burst would not be heard), or if a nested reach is
+/// composed otherwise than preparation.
+#[test]
+fn many_vca_moves_before_one_render_are_the_last_alike_on_both_hosts() {
+    const EDIT: u64 = 4;
+    // Each burst's run: its jump settles inside it at every rate, and two fit the sources.
+    const SPAN: u64 = 28;
+    for rate in RATES {
+        let model = automated_vca_model(rate, |_| {});
+        let mut many = Rig::new(&model);
+        let mut one = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut many, &mut c_abi, 0..EDIT, "before the moves");
+        for block in 0..EDIT {
+            one.step(block);
+        }
+        for (burst, last) in [(0_u64, -6.0_f32), (1, -2.0)] {
+            for step in 1..=10 {
+                let db = if step == 10 {
+                    last
+                } else {
+                    -(step as f32) - 0.5 * burst as f32
+                };
+                let edit = [vca_offset(VCA.id, db, None)];
+                assert_eq!(many.transaction(&edit), c_abi.transaction(&edit).0);
+            }
+            one.transaction(&[vca_offset(VCA.id, last, None)]);
+            // The committed session's boot: a twin that also missed every write after the first
+            // would still equal `many`, so each burst is held to the boot after its jump too.
+            let committed = snapshot_bytes(|payload, expected| many.command(payload, expected));
+            let mut boot = Rig::boot(&committed, rate);
+            let first = EDIT + SPAN * burst;
+            let settled = first + settle_blocks(&mut many, model.control_smoothing_samples().fader);
+            assert!(
+                settled < first + SPAN,
+                "{rate} Hz: the jump settles inside the burst's run"
+            );
+            for block in 0..first {
+                boot.step(block);
+            }
+            for block in first..first + SPAN {
+                let (m, c, o) = (many.step(block), c_abi.step(block), one.step(block));
+                let b = boot.step(block);
+                assert_eq!(m, c, "{rate} Hz: block {block} alike on both hosts");
+                assert_eq!(m, o, "{rate} Hz: block {block} is the last move's");
+                if block >= settled {
+                    assert_eq!(m, b, "{rate} Hz: block {block} renders the committed boot");
+                }
+            }
+        }
+
+        let nested = automated_vca_model(rate, |model| {
+            model.vcas = vec![
+                vca_at("vca-c", 2e-30, &[T2.id]),
+                vca_at("vca-b", -24.0, &["vca-a"]),
+                vca_at("vca-a", 24.0, &["vca-c"]),
+            ];
+        });
+        automated_vca_alike(
+            &format!("{rate} Hz, nested"),
+            &nested,
+            &[vca_offset("vca-c", 1e-30, None)],
+            EditPath::Live,
+            nested.control_smoothing_samples().fader,
+            false,
+        );
+    }
+}
+
+/// #1649 gate 4 (both hosts). Each edit that changes which VCAs reach the automated member `t2`, or
+/// how many VCAs the session has, is `live` alike on both hosts and from the end of the jump
+/// renders the committed session's boot: `t2` added to a second VCA; that VCA (holding `t2`) made
+/// a member of `v`; a new VCA that reaches `t2`; the first VCA of a session that had none; a VCA
+/// that reaches `t2` removed.
+///
+/// Test value: red if any of these rebuilds or differs between the hosts, if a lane no VCA reached
+/// had no cell to write when a VCA is added, or if a removed VCA leaves its offset in `S`.
+#[test]
+fn vca_reach_and_count_changes_over_an_automated_member_are_live_alike_on_both_hosts() {
+    let upsert = |vca: Vca| SessionEdit::UpsertVca { vca };
+    for rate in RATES {
+        let base = automated_vca_model(rate, |model| {
+            model.vcas = vec![
+                vca_at(VCA.id, -3.0, &[T2.id, T3.id]),
+                vca_at("w", -4.0, &[T1.id]),
+            ];
+        });
+        let nested = automated_vca_model(rate, |model| {
+            model.vcas = vec![vca_at(VCA.id, -3.0, &[T3.id]), vca_at("w", -4.0, &[T2.id])];
+        });
+        let bare = automated_vca_model(rate, |model| model.vcas.clear());
+        let fader = base.control_smoothing_samples().fader;
+        let cases: [(&str, &SessionModel, SessionEdit); 5] = [
+            (
+                "t2 added to a second VCA",
+                &base,
+                upsert(vca_at("w", -4.0, &[T1.id, T2.id])),
+            ),
+            (
+                "the VCA holding t2 nested in v",
+                &nested,
+                upsert(vca_at(VCA.id, -3.0, &[T3.id, "w"])),
+            ),
+            (
+                "a new VCA that reaches t2",
+                &base,
+                upsert(vca_at("x", -2.0, &[T2.id])),
+            ),
+            (
+                "the first VCA of the session",
+                &bare,
+                upsert(vca_at(VCA.id, -6.0, &[T2.id, T3.id])),
+            ),
+            (
+                "a VCA that reaches t2 removed",
+                &base,
+                SessionEdit::RemoveVca { vca_id: id(VCA.id) },
+            ),
+        ];
+        for (label, model, edit) in cases {
+            automated_vca_alike(
+                &format!("{rate} Hz, {label}"),
+                model,
+                &[edit],
+                EditPath::Live,
+                fader,
+                true,
+            );
+        }
+    }
+}
+
+/// #1650b: `SET_CONTROL` of `t2`'s `fader_db` on `lane` (a hand move on its fader).
+#[cfg(feature = "test-support")]
+fn t2_fader(lane: ParameterChannel, db: f32) -> SessionEdit {
+    SessionEdit::SetControl {
+        expected_effect: None,
+        address: address(Owner::Strip(id(T2.id)), Section::Builtins, FADER_DB, lane),
+        value: db,
+        ramp_samples: None,
+    }
+}
+
+/// One `fader_db` row of `t2` as the control list gives it (#1650 D4): its lane, the bits of its
+/// value and its `automated` flag.
+type FaderRow = (Option<protocol::ParameterChannel>, u32, bool);
+
+/// The control list's structure epoch and `t2`'s two `fader_db` rows, paged over one host's command
+/// entry.
+fn t2_fader_rows(
+    mut send: impl FnMut(CommandPayload<'_>, ExpectedRevision) -> Vec<u8>,
+) -> (u64, Vec<FaderRow>) {
+    let mut rows = Vec::new();
+    let (mut epoch, mut after) = (0, 0);
+    loop {
+        let request = ControlListRequest {
+            structure_epoch: epoch,
+            after_handle: after,
+            limit: 256,
+            owner: None,
+        };
+        let bytes = send(
+            CommandPayload::ControlListGet(&request),
+            ExpectedRevision::Any,
+        );
+        let mut fields = [0_u16; 4096];
+        let DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::ControlListPage(page),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_response(&bytes, &mut DecodeScratch::new(&mut fields))
+            .expect("a control page")
+        else {
+            panic!("expected a control list page")
+        };
+        rows.extend(page.entries.iter().filter_map(|entry| match &entry.body {
+            protocol::ControlBody::Control(row)
+                if row.name == "fader_db" && entry.address.owner_id.as_deref() == Some(T2.id) =>
+            {
+                Some((entry.address.lane, row.value.to_bits(), row.automated))
+            }
+            _ => None,
+        }));
+        if page.eof {
+            return (page.structure_epoch, rows);
+        }
+        epoch = page.structure_epoch;
+        after = page.last_handle;
+    }
+}
+
+/// The diagnostic codes of a control list request at `epoch`, or `None` when the host answers it
+/// with a page.
+fn list_refusal(
+    mut send: impl FnMut(CommandPayload<'_>, ExpectedRevision) -> Vec<u8>,
+    epoch: u64,
+) -> Option<Vec<String>> {
+    let request = ControlListRequest {
+        structure_epoch: epoch,
+        after_handle: 0,
+        limit: 1,
+        owner: None,
+    };
+    let bytes = send(
+        CommandPayload::ControlListGet(&request),
+        ExpectedRevision::Any,
+    );
+    let mut fields = [0_u16; 4096];
+    match ProtocolCodec::default()
+        .decode_typed_response(&bytes, &mut DecodeScratch::new(&mut fields))
+        .expect("a response")
+    {
+        DecodedTypedResponseFrame::Success { .. } => None,
+        DecodedTypedResponseFrame::NonOk { payload, .. } => Some(
+            payload
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.clone())
+                .collect(),
+        ),
+    }
+}
+
+/// What one host pair gives for one #1650b hand move: the one reply, the committed document, the
+/// list after the move and every block from the edit on (equal on both hosts).
+#[cfg(feature = "test-support")]
+struct HandMove {
+    reply: Vec<u8>,
+    committed: Vec<u8>,
+    rows: (u64, Vec<FaderRow>),
+    blocks: Vec<Vec<u32>>,
+}
+
+/// `edits` on `model`, after four blocks, as one transaction on both hosts: the same verdict
+/// (`live`, one revision) and reply on both, and the same bits of every block up to `end`.
+#[cfg(feature = "test-support")]
+fn hand_move_alike(label: &str, model: &SessionModel, edits: &[SessionEdit], end: u64) -> HandMove {
+    const EDIT: u64 = 4;
+    let mut browser = Rig::new(model);
+    let mut c_abi = CAbi::new(model);
+    same_blocks(&mut browser, &mut c_abi, 0..EDIT, label);
+    let (b, reply) = browser.transaction_reply(edits);
+    let (c, c_reply) = c_abi.transaction(edits);
+    assert_eq!(b, c, "{label}: one verdict");
+    assert_eq!(reply, c_reply, "{label}: one reply");
+    assert_eq!(
+        b,
+        Verdict::Applied {
+            path: EditPath::Live,
+            revision: model.revision + 1
+        },
+        "{label}: a hand move is live"
+    );
+    let rows = t2_fader_rows(|payload, expected| browser.command(payload, expected));
+    assert_eq!(
+        rows,
+        t2_fader_rows(|payload, expected| c_abi.send(payload, expected)),
+        "{label}: one list"
+    );
+    let committed = snapshot_bytes(|payload, expected| browser.command(payload, expected));
+    let mut blocks = Vec::new();
+    for block in EDIT..end {
+        let (b, c) = (browser.step(block), c_abi.step(block));
+        assert_eq!(b, c, "{label}: block {block} alike on both hosts");
+        blocks.push(b);
+    }
+    HandMove {
+        reply,
+        committed,
+        rows,
+        blocks,
+    }
+}
+
+/// #1650b gates 2 and 5 (both hosts) and root's ruling R17-1. `t2` rides its fader on both lanes
+/// (and VCA `v` reaches it). A hand move of `+3` dB on its left lane is `live` alike on both hosts,
+/// one revision on the same plan: the committed document stores `+3` as the ride's left offset and
+/// keeps the static fader; from the end of the jump the output is, bit for bit, a boot of that
+/// document; the list shows both of `t2`'s fader rows `automated`, the left one at `+3` and the
+/// right one at `0`, at the same structure epoch. The same transaction prepared by the full path
+/// (`control_plane::test_force_full_preparation`) gives the same reply and the same bits of every
+/// block, and the in-place leg commits in place on both hosts.
+///
+/// Test value: red if a hand move on an automated lane writes the static fallback (the curve then
+/// overrides it, so the window differs from the boot), rebuilds, reaches the other lane, or if the
+/// in-place path (which holds no automation entry unless the entry is an owner of the edit, R17-1)
+/// answers or renders otherwise than the full path.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_hand_move_on_an_automated_fader_is_an_offset_alike_on_both_hosts() {
+    for rate in RATES {
+        let model = automated_vca_model(rate, |_| {});
+        let mut expected = automated_vca_model(rate, |model| {
+            model.automation[0].offset.left_db = 3.0;
+        });
+        expected.revision = model.revision + 1;
+        let edits = [t2_fader(ParameterChannel::Left, 3.0)];
+        let label = format!("{rate} Hz");
+        let before = t2_fader_rows(|payload, expected| Rig::new(&model).command(payload, expected));
+        assert_eq!(
+            before.1,
+            vec![
+                (
+                    Some(protocol::ParameterChannel::Left),
+                    0.0_f32.to_bits(),
+                    true
+                ),
+                (
+                    Some(protocol::ParameterChannel::Right),
+                    0.0_f32.to_bits(),
+                    true
+                ),
+            ],
+            "{label}: an automated lane lists its offset, 0"
+        );
+        let mut probe = Rig::new(&model);
+        let settle = 4 + settle_blocks(&mut probe, model.control_smoothing_samples().fader);
+        let end = settle + 4;
+        assert!(end <= BLOCKS, "{label}: the run fits the sources");
+
+        control_plane::test_take_in_place_counts();
+        let in_place = hand_move_alike(&format!("{label}, in place"), &model, &edits, end);
+        assert_eq!(
+            control_plane::test_take_in_place_counts(),
+            (2, 0),
+            "{label}: both hosts commit the hand move in place"
+        );
+        assert_eq!(
+            in_place.committed,
+            canonical_session_json(&expected)
+                .expect("canonical")
+                .as_bytes(),
+            "{label}: the ride stores +3 on its left lane and the static fader stays"
+        );
+        assert_eq!(
+            in_place.rows,
+            (
+                before.0,
+                vec![
+                    (
+                        Some(protocol::ParameterChannel::Left),
+                        3.0_f32.to_bits(),
+                        true
+                    ),
+                    (
+                        Some(protocol::ParameterChannel::Right),
+                        0.0_f32.to_bits(),
+                        true
+                    ),
+                ]
+            ),
+            "{label}: the list reads the offset back, at the same epoch"
+        );
+        let mut twin = Rig::new(&expected);
+        let mut unedited = Rig::new(&model);
+        let mut moved = false;
+        for block in 0..end {
+            let (t, u) = (twin.step(block), unedited.step(block));
+            if block >= settle {
+                let at = (block - 4) as usize;
+                assert_eq!(
+                    in_place.blocks[at], t,
+                    "{label}: block {block} renders the boot of the stored offset"
+                );
+                moved |= t != u;
+            }
+        }
+        assert!(moved, "{label}: the offset is heard");
+
+        control_plane::test_force_full_preparation(true);
+        let full = hand_move_alike(&format!("{label}, full path"), &model, &edits, end);
+        control_plane::test_force_full_preparation(false);
+        assert_eq!(
+            control_plane::test_take_in_place_counts().0,
+            0,
+            "{label}: the full leg commits nothing in place"
+        );
+        assert_eq!(
+            full.reply, in_place.reply,
+            "{label}: one reply on both paths"
+        );
+        assert_eq!(full.committed, in_place.committed, "{label}: one document");
+        assert_eq!(full.rows, in_place.rows, "{label}: one list");
+        assert_eq!(
+            full.blocks, in_place.blocks,
+            "{label}: the same bits on both paths"
+        );
+    }
+}
+
+/// #1650b gates 4 and 5 (both hosts). On a ride that stores a `+3` dB left offset,
+/// `SetAutomationSegments` (a new curve) rebuilds and keeps the offset: the list still reads `+3`,
+/// `automated`, and the document keeps it. `RemoveAutomation` rebuilds and removes it with the
+/// entry: the lanes return to their static fader, which the list then reads, no longer
+/// `automated`, under a new structure epoch, so a list request at the epoch the client held is
+/// refused `control.list.stale`. Both hosts answer every step alike and render the same bits.
+///
+/// Test value: red if a curve edit drops the hand offset (the product reason for owner answer C),
+/// if a removed entry leaves its offset or its `automated` flag, or if a client can keep paging a
+/// list whose rows changed from offset to static.
+#[test]
+fn re_authoring_keeps_the_hand_offset_and_removal_ends_it_alike_on_both_hosts() {
+    for rate in RATES {
+        let model = automated_vca_model(rate, |model| {
+            model.automation[0].offset.left_db = 3.0;
+        });
+        let label = format!("{rate} Hz");
+        let ride = model.automation[0].id.clone();
+        let static_db = [
+            model.tracks[1].fader.left_db,
+            model.tracks[1].fader.right_db,
+        ];
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..3, &label);
+        let (epoch, rows) = t2_fader_rows(|payload, expected| browser.command(payload, expected));
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    Some(protocol::ParameterChannel::Left),
+                    3.0_f32.to_bits(),
+                    true
+                ),
+                (
+                    Some(protocol::ParameterChannel::Right),
+                    0.0_f32.to_bits(),
+                    true
+                ),
+            ],
+            "{label}: the stored offset is the row's value"
+        );
+
+        let segments = vec![session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: u64::from(QUANTUM) * BLOCKS,
+            start_value: -9.0,
+            end_value: -1.0,
+            unit: session::ParameterUnit::Db,
+        }];
+        let reauthor = [SessionEdit::SetAutomationSegments {
+            automation_id: ride.clone(),
+            segments,
+        }];
+        let (b, b_reply) = browser.transaction_reply(&reauthor);
+        let (c, c_reply) = c_abi.transaction(&reauthor);
+        assert_eq!(b, c, "{label}: one verdict");
+        assert_eq!(
+            without_request_id(b_reply),
+            without_request_id(c_reply),
+            "{label}: one reply"
+        );
+        assert_eq!(
+            b,
+            Verdict::Applied {
+                path: EditPath::Rebuild,
+                revision: model.revision + 1
+            },
+            "{label}: a curve edit rebuilds"
+        );
+        same_blocks(
+            &mut browser,
+            &mut c_abi,
+            3..8,
+            &format!("{label}: across the swap"),
+        );
+        let kept = t2_fader_rows(|payload, expected| browser.command(payload, expected));
+        assert_eq!(
+            kept,
+            (epoch, rows.clone()),
+            "{label}: the curve edit keeps the offset"
+        );
+        let document = snapshot_bytes(|payload, expected| browser.command(payload, expected));
+        let document = session::parse_session_json(&String::from_utf8(document).expect("utf-8"))
+            .expect("the committed document");
+        assert_eq!(
+            document.automation[0].offset.left_db.to_bits(),
+            3.0_f32.to_bits(),
+            "{label}: the document keeps the offset"
+        );
+
+        let remove = [SessionEdit::RemoveAutomation {
+            automation_id: ride,
+        }];
+        let (b, b_reply) = browser.transaction_reply(&remove);
+        let (c, c_reply) = c_abi.transaction(&remove);
+        assert_eq!(b, c, "{label}: one verdict");
+        assert_eq!(
+            without_request_id(b_reply),
+            without_request_id(c_reply),
+            "{label}: one reply"
+        );
+        assert_eq!(
+            b,
+            Verdict::Applied {
+                path: EditPath::Rebuild,
+                revision: model.revision + 2
+            },
+            "{label}: a removal rebuilds"
+        );
+        same_blocks(
+            &mut browser,
+            &mut c_abi,
+            8..14,
+            &format!("{label}: after the removal"),
+        );
+        let (fresh, removed) =
+            t2_fader_rows(|payload, expected| browser.command(payload, expected));
+        assert_eq!(
+            removed,
+            vec![
+                (
+                    Some(protocol::ParameterChannel::Left),
+                    static_db[0].to_bits(),
+                    false
+                ),
+                (
+                    Some(protocol::ParameterChannel::Right),
+                    static_db[1].to_bits(),
+                    false
+                ),
+            ],
+            "{label}: the lanes read their static fader again"
+        );
+        assert!(fresh > epoch, "{label}: the structure epoch advanced");
+        let stale = Some(vec!["control.list.stale".to_owned()]);
+        assert_eq!(
+            list_refusal(
+                |payload, expected| browser.command(payload, expected),
+                epoch
+            ),
+            stale,
+            "{label}: the browser refuses the old epoch"
+        );
+        assert_eq!(
+            list_refusal(|payload, expected| c_abi.send(payload, expected), epoch),
+            stale,
+            "{label}: the C ABI refuses the old epoch"
         );
     }
 }

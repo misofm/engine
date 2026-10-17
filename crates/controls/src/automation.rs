@@ -1,7 +1,7 @@
 //! The row rule of a stored automation (decision 17, C10; #1566 D6): one function that holds every
 //! stored automation of a session to the control it names.
 
-use automation::{Segment, Shape, value_at};
+use automation::{CellDescription, Completion, JumpLength, SeekMode, Segment, Shape, value_at};
 use effect_contract::ParameterUnit;
 use session::{
     Automation, AutomationSegment, AutomationShape, ControlAddress, Owner, Section, SessionModel,
@@ -9,7 +9,7 @@ use session::{
 };
 
 use crate::ControlKind;
-use crate::builtin_rows::{HPF_HZ, LPF_HZ};
+use crate::builtin_rows::{FADER_DB, HPF_HZ, LPF_HZ};
 use crate::descriptor::{ControlDescriptor, Lanes, check};
 use crate::effect_rows::{has_rows, session_unit};
 use crate::error::ControlError;
@@ -45,12 +45,52 @@ fn effect_has_no_rows(model: &SessionModel, target: &ControlAddress) -> bool {
     identity.is_some_and(|identity| !has_rows(identity))
 }
 
+/// Whether the row at `target` takes a stored hand-move offset (#1650 D2, root's ruling R17-6):
+/// only a strip's builtin `fader_db`. The slices that render the input trim (#1658) and the send
+/// gain (#1654) add their rows here.
+pub(crate) fn takes_offset(target: &ControlAddress) -> bool {
+    matches!(target.owner, Owner::Strip(_))
+        && target.section == Section::Builtins
+        && target.control == FADER_DB
+}
+
+/// The offset rule of one entry whose target is accepted (#1650 D2), per lane, left then right:
+/// on a lane that takes no offset (the entry does not drive it, or its row takes none) the
+/// offset is exactly `+0.0`, else `control.automation.offset`; on a driven lane of a row that
+/// takes one, the offset lies in the row's own domain (`fader_db`: `[-144, 24]` dB, the VCA
+/// offset domain), else `control.domain`. `-0.0` is a valid zero only on a lane that takes an
+/// offset, so a lane without one has one spelling.
+fn offset_faults(
+    automation: &Automation,
+    descriptor: &ControlDescriptor,
+) -> impl Iterator<Item = (ControlError, &'static str)> {
+    let target = &automation.target;
+    let takes = takes_offset(target);
+    [
+        (Lane::Left, automation.offset.left_db, ".offset.left_db"),
+        (Lane::Right, automation.offset.right_db, ".offset.right_db"),
+    ]
+    .into_iter()
+    .filter_map(move |(lane, value, suffix)| {
+        let driven = target.lane == lane || target.lane == Lane::Both;
+        let fault = if !(takes && driven) {
+            (value.to_bits() != 0.0_f32.to_bits()).then_some(ControlError::AutomationOffset)
+        } else {
+            check(descriptor, lane, value, None)
+                .err()
+                .map(|_| ControlError::Domain)
+        };
+        fault.map(|error| (error, suffix))
+    })
+}
+
 /// One refusal of a stored automation: a stable code and the session path it belongs to.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlDiagnostic {
     /// The stable machine code (a [`ControlError`] code).
     pub code: &'static str,
-    /// `$.automation[id=<id>].target`, or `$.automation[id=<id>].segments[<i>]`.
+    /// `$.automation[id=<id>].target`, `$.automation[id=<id>].segments[<i>]`, or
+    /// `$.automation[id=<id>].offset.left_db` / `.right_db`.
     pub path: String,
 }
 
@@ -74,7 +114,11 @@ pub struct ControlDiagnostic {
 /// - `control.automation.order`: on a strip lane where the HPF or the LPF is automated, the two
 ///   curves can come to an HPF at or above an enabled LPF (#1645 D2; see
 ///   `input_filter_order`). It is reported once per lane, at the LPF entry's segment when the LPF
-///   is automated, else at the HPF entry's.
+///   is automated, else at the HPF entry's;
+/// - `control.automation.offset`: a hand-move offset (#1650 D2) that is not `+0.0` on a lane the
+///   entry does not drive, or on any lane of a row that takes no offset (only `fader_db` takes
+///   one); `control.domain` for an offset outside the fader row's domain. Each is reported at
+///   `.offset.left_db` or `.offset.right_db`, after the entry's segments.
 ///
 /// A target is reported once, at `.target`; its segments are judged only when the target is
 /// accepted. A segment is reported once, at `.segments[<i>]`: a domain fault first, else a shape
@@ -143,6 +187,9 @@ pub fn automation_diagnostics(model: &SessionModel, sample_rate: u32) -> Vec<Con
             if let Some(error) = fault {
                 diagnostics.push(refuse(error, at(&format!(".segments[{position}]"))));
             }
+        }
+        for (error, suffix) in offset_faults(automation, &descriptor) {
+            diagnostics.push(refuse(error, at(suffix)));
         }
         faulted[index] = diagnostics.len() > before;
     }
@@ -279,6 +326,220 @@ impl Piece {
     }
 }
 
+/// How the cells of one row's stored automation move in render (#1637): the parameters of every
+/// cell compiled from an entry on the row. Each rendering row has one, written here and nowhere
+/// else, so a stage never spells a row's grid or ramp rule (#1646 departure 6).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CellRule {
+    /// `L`, the grid ramp in samples; the grid period is the larger of 64 and `L`.
+    pub grid_ramp: u32,
+    /// Where a jump's ramp length comes from.
+    pub jump: JumpLength,
+    /// Where a ramp started at `τ` completes.
+    pub completion: Completion,
+    /// A target whose ramp cannot restart while one runs.
+    pub no_restart: bool,
+    /// How a seek lands on the cell.
+    pub seek: SeekMode,
+}
+
+impl CellRule {
+    /// The cell description of `segments` under this rule, the input of
+    /// [`automation::ProgramBuilder`].
+    #[must_use]
+    pub const fn describe(self, segments: &[Segment]) -> CellDescription<'_> {
+        CellDescription {
+            segments,
+            grid_ramp: self.grid_ramp,
+            grid: if self.grid_ramp > 64 {
+                self.grid_ramp
+            } else {
+                64
+            },
+            jump: self.jump,
+            completion: self.completion,
+            no_restart: self.no_restart,
+        }
+    }
+}
+
+/// The fader row's cell rule (#1646 D1): grid period and grid ramp 64, completion `End` (the
+/// fader ramp assigns its target on its last frame), the jump length of the block
+/// (`controls::LiveRamps::for_row(LiveRampRow::Fader)`, resolved by the caller), restartable, and
+/// an exact seek landing (a builtin cell).
+pub const FADER_CELL_RULE: CellRule = CellRule {
+    grid_ramp: 64,
+    jump: JumpLength::Block,
+    completion: Completion::End,
+    no_restart: false,
+    seek: SeekMode::Exact,
+};
+
+/// Whether a stored automation of `target` renders (#1646, #1647): today the fader row of a strip
+/// (builtin row 5). An entry on any other row is validated and kept in the session but compiles
+/// to no cell. Every rendering slice adds its row here, so preparation and the live classifier
+/// (#1648) read one list.
+#[must_use]
+pub fn automation_row_renders(target: &ControlAddress) -> bool {
+    matches!(target.owner, Owner::Strip(_))
+        && target.section == Section::Builtins
+        && target.control == FADER_DB
+}
+
+/// The stored automation entries that drive strip `strip`'s fader, per lane (`[left, right]`): a
+/// `both` entry drives both lanes, a `left` or `right` entry its own. The session validator allows
+/// at most one entry per lane (#1626), so each lane has at most one.
+#[must_use]
+pub fn fader_automation<'a>(
+    model: &'a SessionModel,
+    strip: &StableId,
+) -> [Option<&'a Automation>; 2] {
+    let mut lanes = [None, None];
+    for automation in &model.automation {
+        let target = &automation.target;
+        if !automation_row_renders(target)
+            || !matches!(&target.owner, Owner::Strip(owner) if owner == strip)
+        {
+            continue;
+        }
+        for (index, lane) in [Lane::Left, Lane::Right].into_iter().enumerate() {
+            if drives(target.lane, lane) && lanes[index].is_none() {
+                lanes[index] = Some(automation);
+            }
+        }
+    }
+    lanes
+}
+
+/// Whether an entry on lane `entry` drives lane `lane` (`Left` or `Right`): a `both` entry drives
+/// both lanes, a `left` or `right` entry its own.
+fn drives(entry: Lane, lane: Lane) -> bool {
+    entry == lane || entry == Lane::Both
+}
+
+/// Whether `model` holds a stored automation that renders ([`automation_row_renders`]) and drives
+/// the cell at `address` (#1648 D3): an entry on the same owner, section and row whose lane drives
+/// the address's lane. A `left` or `right` address names one cell; a `both` address names two,
+/// and is automated when either lane is. This is the enumeration preparation compiles cells from
+/// ([`fader_automation`] for the fader row): a cell exists exactly where this holds.
+///
+/// A static value of an automated cell is the lane's fallback, not what the stage renders, so a
+/// static edit of it gives no live record (#1648 D3).
+#[must_use]
+pub fn automated_cell(model: &SessionModel, address: &ControlAddress) -> bool {
+    model.automation.iter().any(|automation| {
+        let target = &automation.target;
+        automation_row_renders(target)
+            && target.owner == address.owner
+            && target.section == address.section
+            && target.control == address.control
+            && match address.lane {
+                Lane::Both => true,
+                lane => drives(target.lane, lane),
+            }
+    })
+}
+
+/// Whether `model` automates strip `strip`'s fader, per lane (`[left, right]`): [`automated_cell`]
+/// at the strip's builtin `fader_db` row (#1648 D3). The live classifier and a successor's strip
+/// join read it to give no `FaderDb` record to an automated lane.
+#[must_use]
+pub fn automated_fader_lanes(model: &SessionModel, strip: &StableId) -> [bool; 2] {
+    if model.automation.is_empty() {
+        return [false; 2];
+    }
+    let mut address = ControlAddress {
+        owner: Owner::Strip(strip.clone()),
+        section: Section::Builtins,
+        control: FADER_DB,
+        lane: Lane::Left,
+    };
+    let left = automated_cell(model, &address);
+    address.lane = Lane::Right;
+    [left, automated_cell(model, &address)]
+}
+
+/// Whether the stored automation of the rows that render ([`automation_row_renders`]) differs
+/// between `current` and `next` (#1648 D1): the rendered entries of each model, in table order,
+/// compared by `id`, `target` and `segments`, every `f32` by bits (the canonical spelling keeps a
+/// zero's sign, so this is the canonical-bytes comparison of those fields). An entry's hand offset
+/// (#1650) is not compared: an offset-only change is a live write of its own (#1650 D5). An entry
+/// whose target leaves or joins a rendered row is a difference.
+///
+/// A difference needs a plan rebuild: a plan's cells are compiled from these entries at
+/// preparation, so no live record can carry a changed curve.
+#[must_use]
+pub fn rendered_automation_changed(current: &SessionModel, next: &SessionModel) -> bool {
+    fn rendered(model: &SessionModel) -> impl Iterator<Item = &Automation> {
+        model
+            .automation
+            .iter()
+            .filter(|automation| automation_row_renders(&automation.target))
+    }
+    let (mut before, mut after) = (rendered(current), rendered(next));
+    loop {
+        match (before.next(), after.next()) {
+            (None, None) => return false,
+            (Some(before), Some(after)) if same_curve(before, after) => {}
+            _ => return true,
+        }
+    }
+}
+
+/// Whether two entries have the same `id`, `target` and `segments`, `f32` values by bits.
+fn same_curve(before: &Automation, after: &Automation) -> bool {
+    before.id == after.id && before.target == after.target && same_segments(before, after)
+}
+
+/// Whether two entries have the same `segments`, `f32` values by bits: the same table, whatever
+/// their `id`, `target` or offset.
+fn same_segments(before: &Automation, after: &Automation) -> bool {
+    before.segments.len() == after.segments.len()
+        && before
+            .segments
+            .iter()
+            .zip(&after.segments)
+            .all(|(before, after)| {
+                before.shape == after.shape
+                    && before.start_sample == after.start_sample
+                    && before.end_sample == after.end_sample
+                    && before.start_value.to_bits() == after.start_value.to_bits()
+                    && before.end_value.to_bits() == after.end_value.to_bits()
+                    && before.unit == after.unit
+            })
+}
+
+/// The lanes of strip `strip`'s fader (`[left, right]`) that both models automate with the same
+/// table (#1648 D2): the entry that drives the lane in `current` and the one that drives it in
+/// `next` ([`fader_automation`]) have the same segments, `f32` values by bits. A successor's strip
+/// join reads it: such a lane's cell continues its carried event state verbatim, and every other
+/// carried cell is repositioned in its own table at adoption.
+#[must_use]
+pub fn continued_fader_lanes(
+    current: &SessionModel,
+    next: &SessionModel,
+    strip: &StableId,
+) -> [bool; 2] {
+    if current.automation.is_empty() || next.automation.is_empty() {
+        return [false; 2];
+    }
+    let (before, after) = (
+        fader_automation(current, strip),
+        fader_automation(next, strip),
+    );
+    [0, 1].map(|lane| {
+        matches!((before[lane], after[lane]), (Some(before), Some(after))
+            if same_segments(before, after))
+    })
+}
+
+/// An entry's segments in the evaluator's type, in table order: the one conversion of a stored
+/// segment, which preparation and the order rule read.
+#[must_use]
+pub fn stored_segments(entry: &Automation) -> Vec<Segment> {
+    entry.segments.iter().map(stored_segment).collect()
+}
+
 fn stored_segment(segment: &AutomationSegment) -> Segment {
     Segment {
         start: segment.start_sample,
@@ -303,7 +564,7 @@ impl<'a> Curve<'a> {
         match entry {
             Some(entry) => Self::Automated {
                 entry,
-                segments: entry.segments.iter().map(stored_segment).collect(),
+                segments: stored_segments(entry),
             },
             None => Self::Static(value),
         }

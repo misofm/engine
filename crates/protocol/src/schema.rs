@@ -443,6 +443,8 @@ pub(crate) mod control_entry {
     pub(crate) const FAMILY: FieldSpec = FieldSpec::opt(32, Wire::U8);
     pub(crate) const ACTIVE: FieldSpec = FieldSpec::opt(33, Wire::Bool);
     pub(crate) const VALUE: FieldSpec = FieldSpec::opt(34, Wire::F32);
+    // #1650 D4: a rendered stored automation drives the row's lane.
+    pub(crate) const AUTOMATED: FieldSpec = FieldSpec::opt(35, Wire::Bool);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "ControlEntry",
         fields: &[
@@ -480,6 +482,7 @@ pub(crate) mod control_entry {
             FAMILY,
             ACTIVE,
             VALUE,
+            AUTOMATED,
         ],
     };
 }
@@ -1318,6 +1321,15 @@ pub(crate) mod session {
             ],
         };
     }
+    pub(crate) mod automation_offset {
+        use super::*;
+        pub(crate) const LEFT_DB: FieldSpec = FieldSpec::req(1, Wire::F32);
+        pub(crate) const RIGHT_DB: FieldSpec = FieldSpec::req(2, Wire::F32);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "AutomationOffset",
+            fields: &[LEFT_DB, RIGHT_DB],
+        };
+    }
     pub(crate) mod automation {
         use super::*;
         pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
@@ -1326,9 +1338,12 @@ pub(crate) mod session {
             FieldSpec::msg(2, true, false, &crate::schema::control_address::SPEC);
         pub(crate) const SEGMENT: FieldSpec =
             FieldSpec::msg(3, true, true, &automation_segment::SPEC);
+        // The stored hand-move offset (#1650 D1): required, appended after the segments.
+        pub(crate) const OFFSET: FieldSpec =
+            FieldSpec::msg(4, true, false, &automation_offset::SPEC);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "Automation",
-            fields: &[ID, TARGET, SEGMENT],
+            fields: &[ID, TARGET, SEGMENT, OFFSET],
         };
     }
 
@@ -1761,17 +1776,17 @@ mod tests {
         use std::collections::BTreeSet;
 
         use super::session::{
-            automation, automation_segment, builtins, channel_builtins, channel_matrix, console,
-            console_entry, console_slot, effect, effect_identity, fader, matrix_or_pan, output,
-            output_profile, param, rack, render_profile, route, route_destination, route_source,
-            sidechain, source, submix, track, vca,
+            automation, automation_offset, automation_segment, builtins, channel_builtins,
+            channel_matrix, console, console_entry, console_slot, effect, effect_identity, fader,
+            matrix_or_pan, output, output_profile, param, rack, render_profile, route,
+            route_destination, route_source, sidechain, source, submix, track, vca,
         };
 
         // (keys module, its wire message, IDs the wire carries with no key). `None` is a keys
         // module with no wire message of its own: `control_smoothing` is written only by the
         // `SET_CONTROL` row of the session control table and never framed as a session record.
         // The `matrix_or_pan` tag (field 1) is wire-only: the walk emits it as `wire_tag`.
-        let table: [(&str, Option<&MessageSpec>, &[u16]); 27] = [
+        let table: [(&str, Option<&MessageSpec>, &[u16]); 28] = [
             ("console", Some(&console::SPEC), &[]),
             ("console_slot", Some(&console_slot::SPEC), &[]),
             ("console_entry", Some(&console_entry::SPEC), &[]),
@@ -1797,6 +1812,7 @@ mod tests {
             ("route_destination", Some(&route_destination::SPEC), &[]),
             ("channel_matrix", Some(&channel_matrix::SPEC), &[]),
             ("automation", Some(&automation::SPEC), &[]),
+            ("automation_offset", Some(&automation_offset::SPEC), &[]),
             // An automation target is a control address (#1566): the keys are its field IDs.
             ("target", Some(&control_address::SPEC), &[]),
             ("segment", Some(&automation_segment::SPEC), &[]),

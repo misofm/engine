@@ -1,7 +1,7 @@
 //! Explicit typed walk over a strict, spanned JSON value tree.
 use crate::{
-    Automation, AutomationSegment, CONTROL_SMOOTHING_MS_MAXIMUM, ChannelBuiltins, ChannelMatrix,
-    ControlAddress, ControlSmoothing, Diagnostic, DiagnosticCode,
+    Automation, AutomationOffset, AutomationSegment, CONTROL_SMOOTHING_MS_MAXIMUM, ChannelBuiltins,
+    ChannelMatrix, ControlAddress, ControlSmoothing, Diagnostic, DiagnosticCode,
     DiagnosticPath as OwnedDiagnosticPath, DiagnosticSet, DualMonoBuiltins, DualMonoFader, Effect,
     EffectIdentity, EffectParam, MatrixOrPan, Output, OutputProfile, Owner, Rack, RenderProfile,
     Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, Section, SessionModel,
@@ -1571,14 +1571,32 @@ fn parse_automation(
     table: TableRef<'_>,
     path: DiagnosticPath,
 ) -> Option<Automation> {
-    parser.keys(table, &["id", "target", "segments"], &path);
+    parser.keys(table, &["id", "target", "segments", "offset"], &path);
     let id = parser.id(table, "id", &path);
     let target = parse_record(parser, table, "target", &path, parse_target);
     let segments = parse_list(parser, table, "segments", &path, parse_segment);
+    let offset = parse_record(parser, table, "offset", &path, parse_automation_offset);
     Some(Automation {
         id: id?,
         target: target?,
         segments: segments?,
+        offset: offset?,
+    })
+}
+
+/// The stored hand-move offset (#1650 D1): two required finite `f32` dB values. Its domain and
+/// lane rule need the row, so `controls::automation_diagnostics` checks them, not the grammar.
+fn parse_automation_offset(
+    parser: &mut Parser,
+    table: TableRef<'_>,
+    path: DiagnosticPath,
+) -> Option<AutomationOffset> {
+    parser.keys(table, &["left_db", "right_db"], &path);
+    let left_db = parser.f32(table, "left_db", &path);
+    let right_db = parser.f32(table, "right_db", &path);
+    Some(AutomationOffset {
+        left_db: left_db?,
+        right_db: right_db?,
     })
 }
 

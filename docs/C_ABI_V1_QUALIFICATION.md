@@ -149,7 +149,9 @@ before it pushes a record, so the watermark never reads a revision the gate cann
 `struct_size` or a nonzero reserved word is `RESULT_INVALID_ARGUMENT`; a copy that keeps landing
 inside render's publication (bounded at 64 attempts) is `RESULT_BACKPRESSURE` with `out`
 untouched, and the host retries. In this slice every revision completes as `exact`; the
-`superseded` and `transition_fallback` producers are #1310, #1397 and #1358. The frozen exported
+`superseded` and `transition_fallback` producers are #1310, #1397 and #1358. `transition_fallback`
+also reports a Reposition swap while a live level move may still ramp (conservative: it can be set
+when the move was not stretched; #1711 removes it; root ruling B17-R14). The frozen exported
 set is now 16 `miso_engine_v1_*` definitions;
 `abi_smoke.c` checks the bit against the queried mask and queries a compiled plan with a valid
 and a wrong-size struct, `header_smoke.cpp` pins the size and every field offset, and
@@ -620,14 +622,28 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   retargets its fader, mute and matrix over the same ones (#1277 D5, #1394 D6).
   Editing `control_smoothing` itself is a model-only delta (#1365): see the next item.
 - **Model-only (#1260, #1365).** A delta that changes only fields no prepared plan reads -- the
-  session ID, the render profile's `id`, the output profile's `id`, the stored `automation` table
-  and `control_smoothing` (`SET_CONTROL` of the session rows `fader_ms`, `mute_ms` and `pan_ms`;
+  session ID, the render profile's `id`, the output profile's `id`, the stored `automation`
+  entries of rows that do not render yet, and `control_smoothing` (`SET_CONTROL` of the session rows `fader_ms`, `mute_ms` and `pan_ms`;
   only a document replace writes the default table back, #1561) -- is live with no records: it commits through the same admission and
   protocol predicates, emits the same response and `SESSION_COMMITTED`, and the running plan, its
   source rings and its effect state continue untouched. It may ride with fader, mute and pan
   edits, and the records of the same transaction ramp over the new `control_smoothing` lengths; a
-  ramp already in flight keeps the length it started with. The automation term holds only while no
-  host renders stored automation (#1058); every other profile field stays structural.
+  ramp already in flight keeps the length it started with. Every other profile field stays
+  structural.
+- **Stored fader automation (#1648).** An edit of a stored automation entry on a row that renders
+  (today a strip's `fader_db`, `controls::automation_row_renders`) -- an entry added, removed,
+  retargeted or given other segments -- rebuilds the plan (`LiveRebuild::Automation`, reported
+  `rebuild`), and the successor carries every owner and seeds its jump-length cell from its own
+  model. An entry's hand offset (#1650) is not part of that comparison. A static fader value of a
+  lane the session automates is that lane's fallback: it gives no `FaderDb` record, whether an own
+  edit or a VCA move reaches it, and its mute records are unchanged. Every other row stays
+  model-only until its rendering slice adds it.
+- **A hand move on an automated fader (#1650b).** On a lane a rendered `fader_db` entry drives,
+  `SET_CONTROL fader_db` writes the entry's hand offset, not the static fader: it is live (in place
+  when it is the transaction's only kind of edit), writes the lane's offsets cell with
+  `S = offset + the reaching VCA offsets` over the `Fader` row's length, and the list reports the
+  offset as the row's value with `automated` (field 35). An offset-only `UpsertAutomation` is the
+  same live write. A change of an automated lane's static fader is structure (a rebuild).
 - **Live effect parameters (#1264, #1265).** A track's console-slot entry or insert whose
   `params` change only in live parameters, parametric EQ values included, is live too; see
   "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a

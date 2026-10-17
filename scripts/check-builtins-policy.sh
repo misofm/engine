@@ -14,7 +14,7 @@ expected_builtins=$'effect-contract\nengine\nlane\nmath'
     printf 'builtins policy failure: builtins dependency boundary changed\n' >&2; exit 1;
 }
 # #84 phase A: the compiler names lane::Backend instead of the deleted core enums.
-expected_compiler=$'builtins\ncontrols\neffect-contract\nengine\ngraph\nlane\nrack\nrack-compiler\nsession\nsha2'
+expected_compiler=$'automation\nbuiltins\ncontrols\neffect-contract\nengine\ngraph\nlane\nrack\nrack-compiler\nsession\nsha2'
 [[ "$(dependencies crates/builtins-compiler/Cargo.toml)" == "$expected_compiler" ]] || {
     printf 'builtins policy failure: builtins compiler dependency boundary changed\n' >&2; exit 1;
 }

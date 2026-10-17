@@ -198,6 +198,16 @@ pub struct EffectiveStrip {
     pub mute: [bool; 2],
     /// Whether any reaching VCA mutes the lane.
     pub vca_mute: [bool; 2],
+    /// `S`, the lane's offset sum (#1646 D1, D6; #1650 D6): the `f64` sum of the lane's own
+    /// hand-move offset ([`Self::fader_offset`], when an entry drives the lane) first, then the
+    /// reaching VCAs' offsets in ascending VCA-ID order ([`session::vca_offsets_sum`]'s order), and
+    /// `+0.0` when there is neither. A stored fader automation value `v` renders as
+    /// `session::vca_compose_db(v, S)`. The static path composes the member with the VCA offsets
+    /// alone (`fader_db`): a lane with no driving entry has no hand offset, so the two agree there.
+    pub offsets_sum: [f64; 2],
+    /// The hand-move offset of the rendered stored automation entry that drives each lane (#1650
+    /// D3), or `None` for a lane no rendered entry drives.
+    pub fader_offset: [Option<f32>; 2],
 }
 
 /// One route's effective values.
@@ -282,6 +292,9 @@ pub trait EffectiveInputs {
     fn reach(&self, strip: usize) -> &[usize];
     /// A VCA's offset (`[left, right]` dB) and mute.
     fn vca(&self, vca: usize) -> ([f32; 2], [bool; 2]);
+    /// The hand-move offset (dB) of the rendered stored automation entry that drives each of the
+    /// strip's fader lanes, or `None` for a lane no rendered entry drives (#1650 D3, D6).
+    fn fader_offset(&self, strip: usize) -> [Option<f32>; 2];
     /// The number of routes.
     fn route_count(&self) -> usize;
     /// One route's inputs.
@@ -305,7 +318,9 @@ pub fn solo_term(inputs: &impl EffectiveInputs, strip: usize, any_solo: bool) ->
 /// One strip's effective values. `any_solo` is [`any_solo`]'s result for the same inputs.
 ///
 /// Per lane: `fader_db = vca_effective_db(own, the reaching VCAs' offsets in ascending VCA-ID
-/// order)`; `vca_mute` = any reaching VCA mutes; `mute = own || vca_mute || solo_term` with
+/// order)`; `offsets_sum` = the `f64` sum of the lane's hand-move offset (when a rendered entry
+/// drives the lane) and then those VCA offsets, or `+0.0` with none (#1650 D6); `vca_mute` =
+/// any reaching VCA mutes; `mute = own || vca_mute || solo_term` with
 /// `solo_term = any_solo && !solo_safe && !soloed`.
 #[must_use]
 pub fn effective_strip(
@@ -316,18 +331,31 @@ pub fn effective_strip(
     let (own_db, own_mute) = inputs.own_fader(strip);
     let reach = inputs.reach(strip);
     let solo_term = solo_term(inputs, strip, any_solo);
-    let mut out = EffectiveStrip::default();
-    // One read of each reaching VCA feeds both lanes; the sum is `vca_effective_db`'s.
-    let mut sums = [VcaSum::new(own_db[0]), VcaSum::new(own_db[1])];
+    let mut out = EffectiveStrip {
+        fader_offset: inputs.fader_offset(strip),
+        ..EffectiveStrip::default()
+    };
+    // One read of each reaching VCA feeds both lanes; the sum is `vca_effective_db`'s: the
+    // offsets first, then the member. `S` is the lane's hand offset first, then the same offsets
+    // in the same order (#1650 D6).
+    let mut sums = [VcaSum::new(); 2];
+    let mut offsets = [VcaSum::new(); 2];
+    for (sum, hand) in offsets.iter_mut().zip(out.fader_offset) {
+        if let Some(hand) = hand {
+            sum.add(hand);
+        }
+    }
     for &vca in reach {
         let (offset_db, muted) = inputs.vca(vca);
         for lane in 0..2 {
             sums[lane].add(offset_db[lane]);
+            offsets[lane].add(offset_db[lane]);
             out.vca_mute[lane] |= muted[lane];
         }
     }
     for lane in 0..2 {
-        out.fader_db[lane] = sums[lane].finish();
+        out.fader_db[lane] = sums[lane].compose(own_db[lane]);
+        out.offsets_sum[lane] = offsets[lane].sum().unwrap_or(0.0);
         out.mute[lane] = own_mute[lane] || out.vca_mute[lane] || solo_term;
     }
     out
@@ -414,6 +442,9 @@ pub struct ModelInputs<'a> {
     reach: Vec<Vec<usize>>,
     /// The strip index of each route's source, or the strip count when it names none.
     sources: Vec<usize>,
+    /// The hand-move offsets of each strip's automated fader lanes (#1650), indexed by strip;
+    /// empty when the model stores no rendered fader automation.
+    fader_offsets: Vec<[Option<f32>; 2]>,
 }
 
 impl<'a> ModelInputs<'a> {
@@ -437,6 +468,7 @@ impl<'a> ModelInputs<'a> {
             overlay,
             reach: model.vca_reach(),
             sources,
+            fader_offsets: model_fader_offsets(model),
         }
     }
 
@@ -448,6 +480,47 @@ impl<'a> ModelInputs<'a> {
             self.model.submixes.get(strip - tracks).map(|s| &s.id)
         }
     }
+}
+
+/// The [`EffectiveInputs::fader_offset`] of every strip of `model`, by strip index: one pass over
+/// the automation table ([`crate::fader_automation`]'s rule: the first rendered entry that drives a
+/// lane), or an empty table when no entry renders.
+pub(crate) fn model_fader_offsets(model: &SessionModel) -> Vec<[Option<f32>; 2]> {
+    let mut offsets = Vec::new();
+    for entry in &model.automation {
+        let target = &entry.target;
+        let session::Owner::Strip(id) = &target.owner else {
+            continue;
+        };
+        if !crate::automation_row_renders(target) {
+            continue;
+        }
+        let Some(index) = crate::registry::strip_index(model, id) else {
+            continue;
+        };
+        if offsets.is_empty() {
+            offsets = vec![[None; 2]; model.tracks.len() + model.submixes.len()];
+        }
+        let lanes: &mut [Option<f32>; 2] = &mut offsets[index];
+        for (lane, (drives, offset)) in [
+            (
+                matches!(target.lane, session::Lane::Left | session::Lane::Both),
+                entry.offset.left_db,
+            ),
+            (
+                matches!(target.lane, session::Lane::Right | session::Lane::Both),
+                entry.offset.right_db,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if drives && lanes[lane].is_none() {
+                lanes[lane] = Some(offset);
+            }
+        }
+    }
+    offsets
 }
 
 fn source_id(route: &Route) -> &StableId {
@@ -494,6 +567,10 @@ impl EffectiveInputs for ModelInputs<'_> {
             [fader.left_db, fader.right_db],
             [fader.left_mute, fader.right_mute],
         )
+    }
+
+    fn fader_offset(&self, strip: usize) -> [Option<f32>; 2] {
+        self.fader_offsets.get(strip).copied().unwrap_or([None; 2])
     }
 
     fn route_count(&self) -> usize {
@@ -632,6 +709,12 @@ impl EffectiveInputs for LocalInputs<'_> {
             [fader.left_db, fader.right_db],
             [fader.left_mute, fader.right_mute],
         )
+    }
+
+    fn fader_offset(&self, strip: usize) -> [Option<f32>; 2] {
+        strip_id_at(self.view.structure(), strip).map_or([None; 2], |id| {
+            crate::builtin_rows::fader_offsets(self.view.fader_automation(id))
+        })
     }
 
     fn route_count(&self) -> usize {

@@ -735,6 +735,7 @@ fn control_row(name: &str) -> ControlRow {
         family: ControlFamily::Effect,
         active: true,
         value: 4.0,
+        automated: false,
     }
 }
 
@@ -1324,6 +1325,9 @@ fn control_entry_rules_refuse_on_encode_and_decode_alike() {
         ("owner header with a value", None, |f| {
             insert(entry(f, 0), leaf(34, 6, &f32_bytes(1.0)))
         }),
+        ("section header with an automated flag", None, |f| {
+            insert(entry(f, 2), leaf(35, 8, &[0]))
+        }),
         ("section header with a name of a control", None, |f| {
             insert(entry(f, 3), leaf(10, 9, b"ratio"))
         }),
@@ -1367,6 +1371,11 @@ fn control_entry_rules_refuse_on_encode_and_decode_alike() {
             "automatable row that is not live",
             Some(|p| row(p, 6).automatable = true),
             |f| set(entry(f, 6), 31, &[1]),
+        ),
+        (
+            "automated row that is not automatable",
+            Some(|p| row(p, 6).automated = true),
+            |f| set(entry(f, 6), 35, &[1]),
         ),
         (
             "automatable row in the monitor scope",
@@ -1459,7 +1468,7 @@ fn control_entry_rules_refuse_on_encode_and_decode_alike() {
 
     // A control row that lacks any one of its required fields is refused.
     for id in [
-        10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 25, 26, 30, 31, 32, 33, 34,
+        10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 25, 26, 30, 31, 32, 33, 34, 35,
     ] {
         let (patched, count) = edited(&bytes, |f| remove(entry(f, 4), id));
         assert_eq!(

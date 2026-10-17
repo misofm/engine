@@ -56,27 +56,32 @@ fn model_case(
 #[test]
 fn u64_model_fields_accept_the_full_unsigned_domain() {
     // `revision` is not a full-domain leaf: it is bounded at `MAX_SESSION_REVISION` (#1503) and
-    // its refusal is pinned in `diagnostic_parity.rs`.
+    // its refusal is pinned in `diagnostic_parity.rs`. Nor is an automation segment sample: it is
+    // bounded below `automation::TIME_LIMIT`, `2^53` (pinned there too); its largest value is
+    // checked here.
     type Mutation = fn(&mut SessionModel);
-    let cases: &[(Mutation, &str)] = &[
+    let largest_sample = automation::TIME_LIMIT - 1;
+    let cases: &[(Mutation, &str, u64)] = &[
         (
             |session| session.sources[0].frames = u64::MAX,
             "$.sources[0].frames",
+            u64::MAX,
         ),
         (
             |session| {
-                session.automation[0].segments[0].start_sample = u64::MAX - 1;
-                session.automation[0].segments[0].end_sample = u64::MAX;
+                session.automation[0].segments[0].start_sample = automation::TIME_LIMIT - 2;
+                session.automation[0].segments[0].end_sample = automation::TIME_LIMIT - 1;
             },
             "$.automation[0].segments[0].end_sample",
+            largest_sample,
         ),
     ];
 
-    for (mutate, path) in cases {
+    for (mutate, path, largest) in cases {
         let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
         mutate(&mut session);
-        let canonical = canonical_session_json(&session).expect("full u64 domain canonicalizes");
-        assert!(canonical.contains(&format!("\"{}\"", u64::MAX)), "{path}");
+        let canonical = canonical_session_json(&session).expect("full domain canonicalizes");
+        assert!(canonical.contains(&format!("\"{largest}\"")), "{path}");
     }
 }
 
@@ -1111,6 +1116,78 @@ fn automation_category_has_20_distinct_cases() {
         "$.automation[0].segments[0].unit",
     );
     assert_eq!(count, 20);
+}
+
+/// Issue #1650 D1: every automation entry carries a required `offset` record of two required
+/// `f32` dB lanes, written after `segments`. The grammar refuses a missing record, a missing lane
+/// and an unknown key at their paths; the row rule (domain, lane, `takes_offset`) is
+/// `controls::automation_diagnostics`'s and is tested there.
+///
+/// Red if the key becomes optional, if the record accepts a third key, or if the canonical writer
+/// drops an offset or the sign of a `-0.0` lane.
+#[test]
+fn automation_offset_is_a_required_two_lane_record() {
+    const ZERO: &str = r#","offset":{"left_db":0.0,"right_db":0.0}"#;
+    let compact = compact_json(EXAMPLE);
+    assert_eq!(
+        compact.matches(ZERO).count(),
+        1,
+        "the fixture carries one zero offset"
+    );
+    let mut count = 0;
+    parse_case(
+        &mut count,
+        &compact.replacen(ZERO, "", 1),
+        DiagnosticCode::MissingField,
+        "$.automation[0].offset",
+    );
+    parse_case(
+        &mut count,
+        &compact.replacen(ZERO, r#","offset":{"left_db":0.0}"#, 1),
+        DiagnosticCode::MissingField,
+        "$.automation[0].offset.right_db",
+    );
+    parse_case(
+        &mut count,
+        &compact.replacen(
+            ZERO,
+            r#","offset":{"left_db":0.0,"right_db":0.0,"center_db":0.0}"#,
+            1,
+        ),
+        DiagnosticCode::UnknownField,
+        "$.automation[0].offset.center_db",
+    );
+    parse_case(
+        &mut count,
+        &compact.replacen(ZERO, r#","offset":{"left_db":"3","right_db":0.0}"#, 1),
+        DiagnosticCode::WrongType,
+        "$.automation[0].offset.left_db",
+    );
+    assert_eq!(count, 4);
+
+    let moved = parse_session_json(&compact.replacen(
+        ZERO,
+        r#","offset":{"left_db":3.5,"right_db":-0.0}"#,
+        1,
+    ))
+    .expect("a stored offset parses");
+    assert_eq!(moved.automation[0].offset.left_db, 3.5);
+    assert_eq!(
+        moved.automation[0].offset.right_db.to_bits(),
+        (-0.0f32).to_bits()
+    );
+    let canonical = canonical_session_json(&moved).expect("a stored offset canonicalizes");
+    assert!(
+        canonical.contains(
+            "\"offset\": {\n        \"left_db\": 3.5,\n        \"right_db\": -0.0\n      }"
+        )
+    );
+    let reparsed = parse_session_json(&canonical).expect("canonical reparses");
+    assert_eq!(reparsed, moved);
+    assert_eq!(
+        reparsed.automation[0].offset.right_db.to_bits(),
+        (-0.0f32).to_bits()
+    );
 }
 
 #[test]

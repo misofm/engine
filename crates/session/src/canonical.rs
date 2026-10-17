@@ -279,11 +279,12 @@ mod tests {
     use super::{ByteCount, Sink, write_quoted};
     use crate::value::write_f32;
     use crate::{
-        Automation, AutomationSegment, AutomationShape, ChannelBuiltins, ChannelMatrix, Console,
-        ConsoleEntry, ConsoleSlot, ControlAddress, DualMonoBuiltins, DualMonoFader, Effect,
-        EffectIdentity, EffectParam, EffectQuality, LinkMode, MatrixOrPan, Owner, ParameterChannel,
-        ParameterUnit, Rack, Route, RouteDestination, RouteSource, Section, SendTap, Sidechain,
-        SidechainDeclaration, StableId, canonical_session_json, parse_session_json,
+        Automation, AutomationOffset, AutomationSegment, AutomationShape, ChannelBuiltins,
+        ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, ControlAddress, DualMonoBuiltins,
+        DualMonoFader, Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode, MatrixOrPan,
+        Owner, ParameterChannel, ParameterUnit, Rack, Route, RouteDestination, RouteSource,
+        Section, SendTap, Sidechain, SidechainDeclaration, StableId, canonical_session_json,
+        parse_session_json,
     };
     #[test]
     fn canonical_string_escaping_is_frozen() {
@@ -566,6 +567,7 @@ mod tests {
                 end_value: -3.0,
                 unit: ParameterUnit::Db,
             }],
+            offset: AutomationOffset::default(),
         };
         model.automation.insert(
             0,
@@ -588,15 +590,22 @@ mod tests {
                 lane: ParameterChannel::Both,
             },
         ));
-        model.automation.push(ride(
-            "fader-ride",
-            ControlAddress {
-                owner: Owner::Strip(id("vocal")),
-                section: Section::Builtins,
-                control: 5,
-                lane: ParameterChannel::Left,
+        // A hand move stored on the left fader ride (#1650 D1): the corpus walks a non-zero offset.
+        model.automation.push(Automation {
+            offset: AutomationOffset {
+                left_db: 3.0,
+                right_db: 0.0,
             },
-        ));
+            ..ride(
+                "fader-ride",
+                ControlAddress {
+                    owner: Owner::Strip(id("vocal")),
+                    section: Section::Builtins,
+                    control: 5,
+                    lane: ParameterChannel::Left,
+                },
+            )
+        });
         model.automation.push(ride(
             "desk-gain",
             ControlAddress {

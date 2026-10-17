@@ -265,17 +265,18 @@ fn reference_reach(vcas: &[Vca], strip: &str) -> Vec<usize> {
     reach
 }
 
-/// Decision 13 (a) as the test states it: `own + offsets` in `f64`, the offsets in ascending VCA
-/// ID order, clamped to `[-144, 24]` in `f64`, rounded once; the own value exactly when unreached.
+/// Decision 13 (a) in the order of #1646 D6, as the test states it: the offsets summed first in
+/// `f64` (ascending VCA ID order, from the first offset), then `own` added to that sum, clamped to
+/// `[-144, 24]` in `f64`, rounded once; the own value exactly when unreached.
 fn reference_db(own: f32, offsets: &[f32]) -> f32 {
-    if offsets.is_empty() {
+    let Some((first, rest)) = offsets.split_first() else {
         return own;
-    }
-    let mut sum = f64::from(own);
-    for offset in offsets {
+    };
+    let mut sum = f64::from(*first);
+    for offset in rest {
         sum += f64::from(*offset);
     }
-    sum.clamp(-144.0, 24.0) as f32
+    (f64::from(own) + sum).clamp(-144.0, 24.0) as f32
 }
 
 /// A random forest of up to eight VCAs over `strips`, at most four levels deep: a VCA's members

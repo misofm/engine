@@ -121,8 +121,15 @@ validator checks only that the owner, slot or insert exists; whether the row is 
 rebuild-only like `delay_samples` 11 or an EQ band's `enabled`, not derived, not a monitor or
 setting row, and not a send's `follows_mute` (route row 7) or a strip's `matrix_mode` (own row 1): live controls that a ruling keeps out of automation, #1632), takes the lane, unit and values is `control.address.unknown`,
 `control.automation.target`, `control.inactive`, `control.lane` or `control.domain` at prepare-effects. A
-parameter does not have to be declared on the strip. Stored automation is inert today: it authors
-and round-trips, and renders nothing.
+parameter does not have to be declared on the strip. Stored automation renders on the fader row
+(builtins 5) today, on every host (#1647); an entry on any other row authors and round-trips and
+renders nothing yet.
+
+Every automation entry ends with a required `offset` record after `segments`:
+`"offset": {"left_db": 0.0, "right_db": 0.0}`. It is the dB a hand move adds to the curve of each
+lane (#1650). Write `0.0` on both lanes unless you store a hand move on a `fader_db` entry (builtins
+5), and then only on a lane the entry drives, inside `[-144, 24]`. Every other lane holds exactly
+`0.0` (not `-0.0`).
 
 ## VCA groups
 
@@ -159,10 +166,13 @@ is `schema.unknown_field`; out of range is `numeric.out_of_schema_range` at
 | A second entry on a lane an entry with a lesser `id` drives (`both` overlaps `left` and `right`), at `$.automation[<i>].target.lane` | `automation.duplicate_lane` | typed-model |
 | Two discontinuities of one entry less than 64 samples apart, at the later one's `start_sample` or `end_sample` | `automation.discontinuity_spacing` | typed-model |
 | A repeated entry `id` | `id.duplicate` | typed-model |
+| An automation segment `start_sample` or `end_sample` at or past 2^53 (`automation::TIME_LIMIT`, the stored-automation program's time bound), on any row, at that sample's path | `numeric.out_of_schema_range` | typed-model |
 | Segments out of order, overlapping or empty | `automation.out_of_order`, `automation.segment_overlap`, `automation.invalid_range` | typed-model |
 | A segment whose unit is not the row's, or a value the row refuses (a fader above 24 dB, a filter above the rate's maximum), at `$.automation[id=<id>].segments[<k>]` | `control.domain` | prepare-effects |
 | A `linear` or `exponential` segment on a toggle (polarity, mute) or enumeration row; `exponential` on a dB row or a row whose minimum is not above 0; a `linear` or `exponential` filter segment from or to `0` ("off" is reached only by a `step`) | `control.automation.shape` | prepare-effects |
 | An HPF that can reach or pass an enabled LPF on a lane, at any time, with stored automation on either filter, at the LPF entry's (else the HPF entry's) segment | `control.automation.order` | prepare-effects |
+| A non-zero (or `-0.0`) `offset` lane on a lane the entry does not drive, or on any row but `fader_db`, at `$.automation[id=<id>].offset.left_db` or `.right_db` | `control.automation.offset` | prepare-effects |
+| A `fader_db` entry's offset outside `[-144, 24]` dB on a lane it drives, at the same path | `control.domain` | prepare-effects |
 
 ## Buses: submix strips and their taps
 

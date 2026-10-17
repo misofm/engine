@@ -1301,6 +1301,10 @@ pub fn compile_children<A: ControlAdapter>(
 where
     A::Row: Send + 'static,
 {
+    // #1709 D1: the boot preparation, the catalog and every effective value composed here run in
+    // the canonical floating-point environment, whatever the host's control thread has set. The
+    // guard restores the caller's word on every return.
+    let _canonical = lane::CanonicalFpEnv::enter();
     // The C ABI needs the transactional `SessionStore` for the control protocol, so it parses and
     // caps through the facade and builds the store itself; the facade never sees the protocol.
     let model = parse_host_session(document).map_err(prepare_failure)?;
@@ -1473,6 +1477,7 @@ where
         observation_armed_bytes: 0,
         observation_slots_high_water: 0,
         observation_forwarded: Vec::new(),
+        level_moves: None,
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,

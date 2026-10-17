@@ -34,6 +34,11 @@ pub enum ControlError {
     /// value) can bring the HPF to or above an enabled LPF (#1645 D2). Raised by
     /// [`automation_diagnostics`](crate::automation_diagnostics) only.
     AutomationOrder,
+    /// `control.automation.offset`: a stored automation's hand-move offset (#1650 D2) that is not
+    /// `+0.0` on a lane where no offset is taken: a lane the entry does not drive, or any lane of
+    /// an entry whose row takes no offset (only `fader_db` takes one). Raised by
+    /// [`automation_diagnostics`](crate::automation_diagnostics) only.
+    AutomationOffset,
     /// `control.ramp.fixed`: an explicit ramp length on a row whose ramp is fixed (an
     /// acknowledgement must not hide an ignored field).
     RampFixed,
@@ -66,6 +71,7 @@ impl ControlError {
             Self::AutomationTarget => "control.automation.target",
             Self::AutomationShape => "control.automation.shape",
             Self::AutomationOrder => "control.automation.order",
+            Self::AutomationOffset => "control.automation.offset",
             Self::RampFixed => "control.ramp.fixed",
             Self::Monitor => "control.monitor",
             Self::RampConflict => "control.ramp.conflict",

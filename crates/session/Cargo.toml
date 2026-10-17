@@ -13,6 +13,8 @@ name = "session"
 default = []
 
 [dependencies]
+# The segment time bound: one constant, `automation::TIME_LIMIT`, for the validator and the builder.
+automation.workspace = true
 engine.workspace = true
 json-syntax = { version = "=0.12.5", default-features = false }
 

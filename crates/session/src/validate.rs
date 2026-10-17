@@ -1003,6 +1003,22 @@ fn validate_automation(
                     "end_sample must be greater than start_sample",
                 );
             }
+            // The program builder refuses a segment whose start or end is at or past `2^53` (times
+            // are exact in `f64` below it), so the validator refuses the same set, each sample at
+            // its own path.
+            for (field, sample) in [
+                ("start_sample", segment.start_sample),
+                ("end_sample", segment.end_sample),
+            ] {
+                if sample >= automation::TIME_LIMIT {
+                    error(
+                        diagnostics,
+                        DiagnosticCode::NumericOutOfSchemaRange,
+                        &segment_path.key(field),
+                        "a segment sample must be below 2^53 (9007199254740992)",
+                    );
+                }
+            }
             if previous_start.is_some_and(|start| segment.start_sample < start) {
                 ordered = false;
                 error(
@@ -1299,6 +1315,11 @@ pub(crate) fn owner_values_valid(owner: crate::OwnerRef<'_>) -> bool {
         ),
         crate::OwnerRef::Vca(vca) => validate_vca_values(&mut diagnostics, &root, vca),
         crate::OwnerRef::Route(route) => validate_route_values(&mut diagnostics, &root, route),
+        // A hand move writes an entry's offset (#1650); the row's domain (`controls`) has checked
+        // it, and the session holds every number finite.
+        crate::OwnerRef::Automation(automation) => {
+            return automation.offset.left_db.is_finite() && automation.offset.right_db.is_finite();
+        }
     }
     diagnostics.is_empty()
 }

@@ -145,6 +145,19 @@ impl CellState {
         self.ramp_done = completion;
     }
 
+    /// Sets the current target to `value`, as if a retarget to it had completed: the next grid or
+    /// jump event to the same bits emits nothing (change only). It clears an outstanding held
+    /// event and keeps the cursor, the ramp in flight and a deferred jump.
+    ///
+    /// A stage that starts a lane at a value it already holds seeds the cell with it: preparation
+    /// with the lane's prepared curve value (#1646 D2), a plan swap with the carried stage target
+    /// (#1648 D2). Control side; it allocates nothing.
+    pub const fn seed_target(&mut self, value: f32) {
+        self.target = value.to_bits();
+        self.has_target = true;
+        self.held = false;
+    }
+
     /// The bits of the current target, if the cell has one.
     #[must_use]
     pub const fn target(&self) -> Option<f32> {
@@ -242,6 +255,15 @@ impl<'a, 's> CellEvents<'a, 's> {
             run_time: span.start,
             position: 0,
         }
+    }
+
+    /// Ends the block's events early and returns the cell's state, so the caller can report a ramp
+    /// with [`CellState::hold_until`] and continue the block with a second span (#1647 D1.6: a
+    /// span cut at a held ramp's end). Consume the events up to the cut first: the state has
+    /// advanced only through the events already pulled.
+    #[must_use]
+    pub fn into_state(self) -> &'s mut CellState {
+        self.state
     }
 
     fn jump_length(&self) -> u32 {
@@ -496,3 +518,76 @@ impl Iterator for CellEvents<'_, '_> {
     }
 }
 // REALTIME_POLICY_END
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use crate::{
+        CellDescription, CellEvents, CellState, Completion, EventKind, JumpLength, NodeSpan,
+        ProgramBuilder, SeekMode, Segment, Shape,
+    };
+
+    fn flat(value: f32) -> crate::Program {
+        let segments = [Segment {
+            start: 0,
+            end: 4_096,
+            start_value: value,
+            end_value: value,
+            shape: Shape::Linear,
+        }];
+        ProgramBuilder::build(&[CellDescription {
+            segments: &segments,
+            grid_ramp: 64,
+            grid: 64,
+            jump: JumpLength::Block,
+            completion: Completion::End,
+            no_restart: false,
+        }])
+        .expect("valid cell")
+    }
+
+    fn first_block(program: &crate::Program, state: &mut CellState) -> Vec<(u32, EventKind)> {
+        let span = NodeSpan::new(0, None, 256).expect("span");
+        CellEvents::new(
+            program.cell(0).expect("cell"),
+            state,
+            span,
+            SeekMode::Exact,
+            480,
+        )
+        .map(|event| (event.offset, event.kind))
+        .collect()
+    }
+
+    /// #1646 D2: a cell seeded with its prepared value emits nothing on a flat curve at that
+    /// value, while a fresh cell retargets at its first grid point; a seed at another value still
+    /// retargets.
+    ///
+    /// Red if `seed_target` does not set the target: the first grid event of every prepared lane
+    /// would then retarget the lane to the value it already holds.
+    #[test]
+    fn a_seeded_target_suppresses_the_first_retarget_to_the_same_bits() {
+        let program = flat(-7.25);
+        assert_eq!(
+            first_block(&program, &mut CellState::new()),
+            [(0, EventKind::Grid)]
+        );
+
+        let mut seeded = CellState::new();
+        seeded.seed_target(-7.25);
+        assert_eq!(
+            seeded.target().map(f32::to_bits),
+            Some((-7.25_f32).to_bits())
+        );
+        assert_eq!(first_block(&program, &mut seeded), []);
+
+        let mut other = CellState::new();
+        other.seed_target(-7.0);
+        assert_eq!(first_block(&program, &mut other), [(0, EventKind::Grid)]);
+        assert_eq!(
+            other.target().map(f32::to_bits),
+            Some((-7.25_f32).to_bits())
+        );
+    }
+}

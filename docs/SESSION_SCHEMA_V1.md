@@ -26,7 +26,11 @@ Solidus and all other Unicode scalars, including U+2028, U+2029 and non-BMP scal
 Booleans and `u8`/`u32` fields are JSON booleans/numbers. Integer-number fields reject fractions,
 exponents and any leading minus, including `-0`. Every typed `u64` leaf (source `frames`, and
 automation `start_sample`/`end_sample`) is a canonical unsigned decimal JSON string matching
-`^(0|[1-9][0-9]*)$`, bounded through `18446744073709551615`. `revision` is the same canonical
+`^(0|[1-9][0-9]*)$`, bounded through `18446744073709551615`; an automation segment's
+`start_sample` and `end_sample` are further bounded below `2^53` (`9007199254740992`,
+`automation::TIME_LIMIT`: node times are exact in `f64` below it, and the stored-automation program
+builder refuses a segment at or past it), so the validator refuses a larger one with
+`numeric.out_of_schema_range` at that sample's path. `revision` is the same canonical
 decimal string, bounded through `9223372036854775807` (2^63 - 1, `session::MAX_SESSION_REVISION`):
 a plan's revision gate cannot hold a larger revision, so the validator refuses one with
 `numeric.out_of_schema_range` at `$.revision`. Finite `f32` fields accept
@@ -80,8 +84,8 @@ while a diamond (one VCA reachable along two paths) is legal. Canonically `vcas`
 own fader, never an effective value. VCAs apply at preparation on every host (#1242): a strip's
 reach is the set of VCAs it is reachable from through membership, directly or through nested
 VCAs, each once even along several paths; its effective lane gain is
-`clamp(own_db + sum(offsets), -144, 24)`, summed in `f64` (its own value first, then the reaching
-VCAs' offsets in ascending VCA ID), clamped in `f64` and rounded once to `f32`, and exactly its own
+`clamp(own_db + sum(offsets), -144, 24)`, summed in `f64` (the reaching VCAs' offsets first, in
+ascending VCA ID, then its own value added to that sum), clamped in `f64` and rounded once to `f32`, and exactly its own
 value with an empty reach; its effective lane mute is its own mute or any reaching VCA's mute. The
 prepared fader section bakes the effective values, so post-fader and post-pan sends follow a VCA,
 and a `follows_mute` route reads its source's effective mute. A member's own fader is still checked
@@ -279,15 +283,25 @@ beside the effect diagnostics: `control.address.unknown` (no row), `control.auto
 (the row is rebuild-only, derived, a monitor row, a setting, or one of the two live rows that a ruling keeps out of automation: a send's `follows_mute`, a routing setting, and a strip's `matrix_mode`, a mode; #1632), `control.inactive` (the owner's shape
 does not use the row), `control.lane` (`left` or `right` on a shared row), `control.domain` (a
 segment whose unit is not the row's, or a value the row refuses), `control.automation.shape` and
-`control.automation.order` (#1645, below). A console target on a submix
+`control.automation.order` (#1645, below), and `control.automation.offset` (#1650, below). A console target on a submix
 addresses that submix's entry for the slot (#1202). A session does not have to state a parameter
 value for the row it automates: the row exists whether or not the session states it.
 
-**The automation table is consumed by nothing today.** No lowering reads it, for the strip, a
-console slot or an insert: a valid target is valid-and-inert syntax that authors, round-trips
-and renders nothing. Extending the vocabulary unblocks authoring and the SDK's builder. Rendering
-the stored automation table, builtin targets included, identically on every platform is owned by
-issue #1058 (research first); #140, which once gated it, was descoped
+**The fader row renders; every other row is inert today.** An entry on a strip's fader
+(`builtins` row 5) is compiled into the plan as a table (#1646) and rendered on the C ABI and in
+the browser alike (#1647): the lane follows its curve in node time, reaching the curve's value at
+the end of each 64-sample retarget on a fixed grid, taking each discontinuity at its exact sample
+over the session's fader ramp length (`control_smoothing.fader_ms`), lined up with the audio it
+acts on through every latent insert, and set exactly, with no ramp, where a session seek reaches
+the fader. One exception: while a mute or unmute ramp holds the lane's gain, the lane only
+remembers each value it is given, a seek's included, and where the hold ends with the gain free it
+ramps over the fader ramp length to the curve at that ramp's end (a seek that reaches the fader
+exactly where the hold ends still sets it exactly). The output does not depend on the render
+quantum or on where a seek landed. Stored
+automation has no queue: render generates its events from the plan. An entry on any other row,
+for the strip, a console slot or an insert, is valid and inert: it authors and round-trips and
+renders nothing until its row's slice lands. Rendering the whole table identically on every
+platform is owned by issue #1058; #140, which once gated it, was descoped
 (`rulings/engine-footprint-2026-09-28.md`).
 
 **What the table means: the hold rule (#1626, #1058 A3).** One entry is one curve of one lane over
@@ -305,6 +319,38 @@ The shape rule is one rule for every row: a toggle row (polarity, mute) or an en
 (of the builtins, only HPF and LPF; never a fader, trim, pan or matrix row); and on a row with a
 disabled value (a filter's `0`, "off") a `linear` or `exponential` segment has neither value equal
 to it, so "off" is entered and left only by a `step`.
+
+**The hand-move offset (#1650).** Every automation entry carries a required `offset` record, key
+4 after `segments` (`id` 1, `target` 2, `segments` 3), with two required finite `f32` keys,
+`left_db` 1 and `right_db` 2: the dB offset a hand move adds to the curve of each lane. On the wire
+it is field 4 of `Automation`, a required nested `AutomationOffset` message with two required `F32`
+fields 1 and 2. A missing record or lane is `schema.missing_field` and a third key
+`schema.unknown_field`, at their paths. The row rule (`controls::automation_diagnostics`) judges
+each lane at `$.automation[id=<id>].offset.left_db` or `.right_db`, after the segments:
+
+- Only `fader_db` (builtins control 5 of a strip) takes an offset (`takes_offset`). The input trim
+  and the send gain do not yet: the slices that render them (#1658, #1654) add them.
+- A lane that takes no offset holds exactly `+0.0`, else `control.automation.offset`. That is a
+  lane the entry does not drive (`right_db` of a `left` entry, `left_db` of a `right` entry) and
+  every lane of an entry whose row takes no offset. `-0.0` is refused there too, so "no offset"
+  has one spelling.
+- A lane a `fader_db` entry drives holds an offset in the fader's own domain, `[-144, 24]` dB (the
+  VCA offset domain), else `control.domain`. `-0.0` is a valid zero there.
+
+The offset of a lane belongs to the entry that drives the lane, so a lane-granular hand move on a
+`both` entry needs no entry split. `RemoveAutomation` removes the offset with the entry;
+`SetAutomationSegments` and `SetAutomationTarget` keep it, and the row rule judges it against the
+new target. The offset is stored, checked, round-tripped (canonical JSON, wire, SDK) and heard
+(#1650b): render composes each fader event of the lane as `vca_compose_db(curve, S)`, where `S`
+is the `f64` sum of the lane's own offset first and then the reaching VCA offsets in ascending VCA
+ID. On a lane a rendered `fader_db` entry drives, the `fader_db` row reads and writes the offset:
+`SET_CONTROL fader_db` sets it (live, one offsets-cell write; a `both` write sets both lanes),
+`CONTROL_STATE_GET` and the control list report it as the row's value, and the list marks the row
+`automated` (`ControlEntry` field 35). The static fader value of an automated lane is its fallback,
+not a control value: the static fallback changes only through a rebuild (remove the automation,
+set the fader, upsert the automation, in one transaction) or a document replacement, and any edit
+that changes it on an automated lane is a change of structure. An `UpsertAutomation` that changes
+only an entry's offset is live, as a hand move is.
 
 **The input filter order, on curves (#1645).** On each strip lane where HPF (3) or LPF (4) is
 automated (a `both` entry drives both lanes), each side is its entry under the hold rule, or the

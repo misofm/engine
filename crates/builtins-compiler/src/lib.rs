@@ -41,10 +41,11 @@ use engine::realtime::{
 };
 use graph::{
     BuiltinControlDelivery, BuiltinPairFactory, BuiltinProcessor, BuiltinStripOwner,
-    BuiltinStripStage, DependencyLevel, GraphBuiltinBankResourceEstimate, GraphNodeId,
-    GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
+    BuiltinStripStage, DependencyLevel, GraphBlockTime, GraphBuiltinBankResourceEstimate,
+    GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
     GraphPreparedBuiltinBankInfo, GraphPreparedBuiltinBankProcessor, GraphPreparedSourceSet,
-    GraphRuntimeBindings, GraphRuntimeObserver, PreparedGraphPlan, StableGraphId, TrackStage,
+    GraphRuntimeBindings, GraphRuntimeObserver, PreparedGraphPlan, StableGraphId, TimelineSpan,
+    TrackStage,
 };
 use lane::Backend;
 use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
@@ -298,9 +299,95 @@ impl MatrixLane {
 pub struct FaderCells {
     lane: Arc<FaderLane>,
     writers: [CellWriter<FADER_CELL_WORDS>; FADER_CELLS],
+    /// The offsets cells' write ends of the strip's automated fader channels (#1649 D4),
+    /// `[left, right]`; `None` (no allocation) on a strip with no stored fader automation.
+    offsets: Option<Box<[Option<OffsetsWriter>; 2]>>,
+}
+
+/// Control's write end of one automated fader channel's offsets cell (#1649 D4).
+struct OffsetsWriter {
+    lane: Arc<OffsetsLane>,
+    writer: CellWriter<OFFSETS_CELL_WORDS>,
+}
+
+/// One automated fader channel's offsets-cell value (#1649 D4): the lane's offset sum `S`
+/// (`controls::EffectiveStrip::offsets_sum`) and the length of the jump a change of it asks for
+/// (the lane's fader length of the edit, `LevelRules::lengths`). A write stores both in one slot,
+/// so render never reads the halves of two sums.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaderOffsetsRecord {
+    /// `S`.
+    pub offsets_sum: f64,
+    /// The jump's length in samples; `0` is an exact set.
+    pub smoothing_samples: u32,
+}
+
+impl FaderOffsetsRecord {
+    /// The cell's words: `S`'s `f64` bits, low word first, then the ramp word.
+    const fn words(self) -> [u32; OFFSETS_CELL_WORDS] {
+        let bits = self.offsets_sum.to_bits();
+        [bits as u32, (bits >> 32) as u32, self.smoothing_samples]
+    }
+
+    /// The record a slot's words hold.
+    const fn from_words(words: [u32; OFFSETS_CELL_WORDS]) -> Self {
+        Self {
+            offsets_sum: f64::from_bits((words[0] as u64) | ((words[1] as u64) << 32)),
+            smoothing_samples: words[2],
+        }
+    }
 }
 
 impl FaderCells {
+    /// Whether the strip's fader channel `channel` (`0` left, `1` right) has an offsets cell: its
+    /// fader is automated in the plan these cells belong to (#1649). A host checks every
+    /// [`Self::write_offsets`] of a transaction with it before its first write.
+    #[must_use]
+    pub fn has_offsets(&self, channel: usize) -> bool {
+        self.offsets
+            .as_deref()
+            .and_then(|writers| writers.get(channel))
+            .is_some_and(Option::is_some)
+    }
+
+    /// Write `record` as the newest value of channel `channel`'s offsets cell, the whole slot at
+    /// once (#1312 D1, #1649 D4), stamped with the revision of the transaction that commits it. A
+    /// write cannot fail; a channel with no offsets cell ([`Self::has_offsets`] is `false`) is a
+    /// caller fault the caller checked before its first write, and writes nothing.
+    pub fn write_offsets(
+        &mut self,
+        stamp: LiveStamp<'_>,
+        channel: usize,
+        record: FaderOffsetsRecord,
+    ) {
+        let writer = self
+            .offsets
+            .as_deref_mut()
+            .and_then(|writers| writers.get_mut(channel))
+            .and_then(Option::as_mut);
+        debug_assert!(
+            writer.is_some(),
+            "an offsets write to a channel with no cell"
+        );
+        if let Some(OffsetsWriter { lane, writer }) = writer {
+            writer.write(&lane.cell, &lane.dirty, 0, stamp, record.words());
+        }
+    }
+
+    /// Give these cells the write ends of the strip's offsets cells (#1649 D4), `[left, right]`;
+    /// nothing when no channel is automated. Control side: it allocates one box.
+    fn attach_offsets(&mut self, cells: &[Option<PreparedFaderCell>; 2]) {
+        if cells.iter().all(Option::is_none) {
+            return;
+        }
+        self.offsets = Some(Box::new(core::array::from_fn(|channel| {
+            cells[channel].as_ref().map(|cell| OffsetsWriter {
+                lane: Arc::clone(&cell.offsets),
+                writer: CellWriter::new(),
+            })
+        })));
+    }
+
     /// Write `record` as the newest value of the cell(s) it addresses, stamped with the revision
     /// of the transaction that commits it. A `Both` record writes the left and the right cell.
     ///
@@ -348,6 +435,21 @@ impl FaderCells {
             CellReader::new()
                 .peek_unread(&self.lane.cells[index])
                 .map_or(0, |(_, sequence)| sequence)
+        })
+    }
+
+    /// Test-only: how many writes each offsets cell has taken (#1649), `[left, right]`; `None`
+    /// for a channel with no cell. Valid while no write is in flight.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_offsets_write_counts(&self) -> [Option<u64>; 2] {
+        core::array::from_fn(|channel| {
+            let writer = self.offsets.as_deref()?.get(channel)?.as_ref()?;
+            Some(
+                CellReader::new()
+                    .peek_unread(&writer.lane.cell)
+                    .map_or(0, |(_, sequence)| sequence),
+            )
         })
     }
 }
@@ -581,6 +683,7 @@ fn fader_lane(superseded: &LiveValuesSuperseded) -> (FaderCells, FaderReader) {
         FaderCells {
             lane: Arc::clone(&lane),
             writers: core::array::from_fn(|_| CellWriter::new()),
+            offsets: None,
         },
         FaderReader {
             lane,
@@ -608,6 +711,1463 @@ fn matrix_lane(superseded: &LiveValuesSuperseded) -> (MatrixCells, MatrixReader)
             marks: CarryMarks::default(),
         },
     )
+}
+
+/// Words of an automated fader lane's offsets cell (#1646 D1, written by #1649): the lane's offset
+/// sum `S` as the low and high words of its `f64` bits, then the ramp word (the jump length a VCA
+/// edit asks for).
+const OFFSETS_CELL_WORDS: usize = 3;
+
+/// What one automated fader channel's offsets cell shares between its writer (control,
+/// [`FaderCells::write_offsets`]) and its reader (render, [`LaneFaderAutomation::read_offsets`]):
+/// one #1312 latest-target cell and its dirty word (#1649).
+///
+/// The cell is created unwritten at preparation; its reader holds the prepared words until its
+/// first applied write (#1646 departure 5, as #1639's jump-length cell does).
+struct OffsetsLane {
+    cell: LatestCell<OFFSETS_CELL_WORDS>,
+    dirty: DirtyWord,
+}
+
+impl OffsetsLane {
+    fn new() -> Self {
+        Self {
+            cell: LatestCell::new(),
+            dirty: DirtyWord::new(),
+        }
+    }
+}
+
+impl core::fmt::Debug for OffsetsLane {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OffsetsLane").finish_non_exhaustive()
+    }
+}
+
+/// One automated fader channel as a fader owner holds it (#1646 D1): its cell in the plan's
+/// program, its event state and its offsets cell with the words render holds until the first
+/// write.
+///
+/// The event state lives here, beside the lane's ramp state, so the stage's carry moves it with
+/// the lane (#1648 extends [`FaderBankProcessor::adopt_lane`]).
+struct AutomatedFaderCell {
+    /// The cell's index in the plan's [`automation::Program`].
+    cell: u32,
+    /// Seeded with the prepared curve value, so the first grid event on a flat curve emits nothing.
+    state: automation::CellState,
+    /// The offsets cell (#1649), shared with the strip's [`FaderCells`] when the strip has a live
+    /// control lane.
+    offsets: Arc<OffsetsLane>,
+    /// Render's read end of the offsets cell and its dirty word.
+    offsets_reader: CellReader,
+    offsets_dirty: DirtyReader,
+    /// `S`: the prepared one until the offsets cell's first applied write, then the newest one
+    /// render read; every event's gain is composed with it (#1646 D1, #1647 D1.4).
+    offsets_sum: f64,
+    /// The ramp word of the newest value read: the length of the jump the last change of `S`
+    /// took (#1649 D3). Prepared as the session's fader length (`LiveRampRow::VcaOffset`, #1054).
+    offsets_ramp: u32,
+    /// The held-ramp obligation (#1647 D1.6, batch 13b amendment).
+    obligation: HeldRampObligation,
+    /// What the cell's first block after a plan swap that carried its lane owes (#1648 D2).
+    adoption: Adoption,
+    /// The newest offsets record the plan-swap carry drain read from this cell and no block has
+    /// applied yet (#1648 D2, U3 fold): the successor's adopting cell takes it, and its first
+    /// block applies it through [`Self::offsets_jump`] as the uninterrupted block would.
+    carried_record: Option<FaderOffsetsRecord>,
+    /// At an adopted cell until its first block's offsets reads: the `S` this plan was prepared
+    /// with. The adopted cell holds the carried `S` (the one its stage heard), and the carried and
+    /// the successor's own records move it. With no record of the cell's own (which is newer than
+    /// the preparation), an `S` left unequal to this one takes the adoption rule
+    /// ([`Adoption::Compare`]).
+    adopted_sum: Option<f64>,
+}
+
+/// What an automated channel's first block after a plan swap owes (#1648 D2). Set by
+/// [`LaneFaderAutomation::adopt`] at the swap block (and raised to `Compare` by the first block's
+/// offsets reads), taken by the lane's next block, which knows the node time. Ordered by strength:
+/// two adoptions owed at once keep the stronger one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+enum Adoption {
+    /// Nothing: the cell has rendered a block since it was prepared or adopted, or it continues
+    /// its carried state verbatim (the same table, `a(n)` and `S`: the uninterrupted events).
+    None,
+    /// The cell continues its carried table and cursor, but after the first block's offsets
+    /// records (the carried one and the successor's own) its `S` still differs from the one this
+    /// plan was prepared with: the adoption rule alone (the jump when the composed gain differs
+    /// from the stage's). Reached when no record could bring the change: a plan with no live
+    /// cells, whose join cannot write one.
+    Compare,
+    /// The cell's table is not the one its state was built on (a changed or gained curve, or a
+    /// moved `a(n)`): it repositions its cursor in its own table, takes the stage's held ramp
+    /// again, then applies the adoption rule.
+    Reposition,
+}
+
+/// One automated channel's obligation to move to its curve where a held ramp ends with the gain
+/// free (#1647 D1.6, batch 13b amendment, R17-9): while the stage holds the lane's gain (muted,
+/// or in a mute or unmute ramp, #1638 D2) a gain event is only remembered, and on a curve flat
+/// afterwards the cell emits nothing more, so without the move the lane would stay at the gain
+/// the unmute ramp aimed for.
+#[derive(Clone, Copy, Debug, Default)]
+struct HeldRampObligation {
+    /// A gain event the stage only remembered is outstanding. Kept through a ramp that ends
+    /// muted (constraint 4); cleared by the move, by a seek `Set` exactly at the hold's end
+    /// (R17-8), or when a live write freed the gain at a block entry (it discharges the
+    /// obligation there, R17-10).
+    owed: bool,
+    /// The held ramp ends on the last sample of the block just rendered: the move is due at the
+    /// next block's first sample, which is the first sample the stage reports the gain free.
+    due_at_entry: bool,
+    /// The stage held the gain through the last sample of the block just rendered. A next block
+    /// that finds the gain free with no move due had its hold cleared by a live write at its
+    /// entry, so the cell's hold of the ramp that write ended is released there, owed or not
+    /// (R17-10). An offsets jump applied on the free lane at that entry clears it: the jump's own
+    /// hold is newer than the ramp the write ended (U2 fold 3, F1).
+    held_through: bool,
+}
+
+/// One strip lane's stored fader automation (#1646 D1): the plan's program and the lane's
+/// automated channels. The one event driver both fader owners hold, the fader bank per lane and
+/// the test-only scalar oracle per strip (R17-4), so neither has a second copy of the rule.
+struct LaneFaderAutomation {
+    program: Arc<automation::Program>,
+    /// `[left, right]`; `None` for a channel no entry drives.
+    channels: [Option<AutomatedFaderCell>; 2],
+    /// The lane's floored input arrival `a(n)` (#1647a, R17-2): the graph compiler's, given to a
+    /// bank lane at the end of `compile_with_builtins`; `0` until then.
+    arrival: u64,
+    /// The node-time mapping of the block the graph last set (#1647a, R17-3):
+    /// `timeline_block(r + ΣP - a(n))`, `None` in a plan with no timeline. The event driver builds
+    /// the lane's `NodeSpan` from it.
+    span: Option<TimelineSpan>,
+    /// The fader row's jump length of that block, from the three lengths the graph holds (#1639
+    /// D2); `None` in a plan with no jump-length cell. The event driver passes it to
+    /// `CellEvents::new`.
+    fader_jump: Option<u32>,
+    /// The lane has rendered no block yet (#1647 D2): its first block takes a `Set` when the
+    /// curve at that block's node time differs from the value it was seeded with.
+    fresh: bool,
+}
+
+impl LaneFaderAutomation {
+    /// The lane's automation, from its prepared cells, sharing each channel's offsets cell.
+    /// Control side.
+    fn new(program: &Arc<automation::Program>, cells: &[Option<PreparedFaderCell>; 2]) -> Self {
+        Self {
+            program: Arc::clone(program),
+            channels: core::array::from_fn(|channel| {
+                cells[channel].as_ref().map(|cell| {
+                    let mut state = automation::CellState::new();
+                    state.seed_target(cell.value);
+                    AutomatedFaderCell {
+                        cell: cell.cell,
+                        state,
+                        offsets: Arc::clone(&cell.offsets),
+                        offsets_reader: CellReader::new(),
+                        offsets_dirty: DirtyReader::new(),
+                        offsets_sum: cell.offsets_sum,
+                        offsets_ramp: cell.offsets_ramp,
+                        obligation: HeldRampObligation::default(),
+                        adoption: Adoption::None,
+                        carried_record: None,
+                        adopted_sum: None,
+                    }
+                })
+            }),
+            arrival: 0,
+            span: None,
+            fader_jump: None,
+            fresh: true,
+        }
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// #1648 D2: this lane's stage was carried from `predecessor`'s lane at the swap block (the
+    /// predecessor lane's automation, `None` when it had none). Each automated channel takes the
+    /// carried cell's event state, held-ramp obligation, heard `S` with its ramp word, and the
+    /// offsets record the carry drain read and no block applied, by its stable address (the
+    /// strip, row 5 and the channel; the strip move paired the strip). Its first block applies
+    /// that record and the successor's own (the join's retarget, a later live write) from the
+    /// heard `S`, as the uninterrupted block would, and then compares the `S` it holds with this
+    /// plan's ([`AutomatedFaderCell::adopted_sum`]). It owes that block a reposition when its
+    /// table does not continue bit for bit (`continued_cells`, from the join) or `a(n)` moved,
+    /// else nothing; an adoption the carried cell still owed (two swaps with no block between)
+    /// is kept when it is the stronger. A channel the predecessor did not automate (a gained
+    /// cell) keeps its prepared state and `S` and repositions. The lane is not fresh: its stage
+    /// holds the carried gain, so no `Set` lands (#1647 D2 is for a lane that starts at its
+    /// prepared value). A channel the successor does not automate is released by the join's
+    /// retarget record, not here. Allocation-free: plain copies.
+    fn adopt(&mut self, predecessor: Option<&Self>, continued_cells: u8) {
+        self.fresh = false;
+        let arrival = self.arrival;
+        for (channel, cell) in self.channels.iter_mut().enumerate() {
+            let Some(cell) = cell else {
+                continue;
+            };
+            let carried = predecessor.and_then(|predecessor| {
+                predecessor
+                    .channels
+                    .get(channel)?
+                    .as_ref()
+                    .map(|carried| (carried, predecessor.arrival))
+            });
+            cell.adoption = match carried {
+                Some((carried, carried_arrival)) => {
+                    cell.state = carried.state;
+                    cell.obligation = carried.obligation;
+                    cell.adopted_sum = Some(cell.offsets_sum);
+                    cell.offsets_sum = carried.offsets_sum;
+                    cell.offsets_ramp = carried.offsets_ramp;
+                    cell.carried_record = carried.carried_record;
+                    let own = if continued_cells & (1 << channel) == 0 || carried_arrival != arrival
+                    {
+                        Adoption::Reposition
+                    } else {
+                        Adoption::None
+                    };
+                    own.max(carried.adoption)
+                }
+                None => Adoption::Reposition,
+            };
+        }
+    }
+
+    /// #1648 D2 (U3 fold), the plan-swap carry drain: each automated channel whose offsets cell
+    /// holds a write takes the newest with every revision ([`LiveSnapshot::ALL`]), as the block
+    /// drain would at the next block, and keeps it for the successor's first block
+    /// ([`AutomatedFaderCell::carried_record`]); the stage is not moved here, because the jump's
+    /// target is the curve at the node time of that block. The read adds the writes it replaced
+    /// to `superseded`, and a kept record it replaces unheard (two carries with no block between)
+    /// adds one. Allocation-, lock- and syscall-free; one read per automated channel.
+    fn carry_offsets(&mut self, superseded: &LiveValuesSuperseded) {
+        for cell in self.channels.iter_mut().flatten() {
+            if cell.offsets_dirty.pending(&cell.offsets.dirty) == 0 {
+                continue;
+            }
+            if let CellRead::Applied { words, .. } = cell.offsets_reader.read_counted(
+                &cell.offsets.cell,
+                LiveSnapshot::ALL,
+                &mut cell.offsets_dirty,
+                0,
+                superseded,
+            ) && cell
+                .carried_record
+                .replace(FaderOffsetsRecord::from_words(words))
+                .is_some()
+            {
+                superseded.add_carried(1);
+            }
+        }
+    }
+
+    /// Take the block's node-time mapping and the fader row's jump length (#1647a, R17-3): the
+    /// one path of both fader owners, the bank per lane and the scalar oracle per strip.
+    fn take_block_time(&mut self, time: &GraphBlockTime<'_>, fader_jump: Option<u32>) {
+        self.span = time.node_span(self.arrival);
+        self.fader_jump = fader_jump;
+    }
+
+    /// #1649 D3, at block entry under the block's `snapshot`: each automated channel whose
+    /// offsets cell holds a newer write takes its `S` and ramp word, and the lane jumps to the
+    /// composed gain at the jump's completion when that gain differs in bits from the lane's
+    /// current gain target ([`AutomatedFaderCell::offsets_jump`]). An applied read adds the
+    /// writes it replaced to `superseded`; `superseded` is `None` on a lane with no control lane,
+    /// whose cells have no writer and are not read.
+    ///
+    /// #1648 D2 (U3 fold), at an adopted cell's first block: the record the carry drain kept is
+    /// applied the same way, from the carried `S` the stage heard, unless the cell's own read
+    /// applied a newer one, which replaces it unheard (one superseded value, as two writes before
+    /// one uninterrupted block). With no record of its own, an `S` still unequal to the one this
+    /// plan was prepared with takes it and owes the adoption rule ([`Adoption::Compare`]); a
+    /// record of its own is newer than the preparation and is the committed `S`. Allocation-, lock- and
+    /// syscall-free; at most one read per automated channel.
+    fn read_offsets(
+        &mut self,
+        snapshot: LiveSnapshot,
+        superseded: Option<&LiveValuesSuperseded>,
+        stage: &mut impl FaderJumpStage,
+    ) {
+        let Self {
+            program,
+            channels,
+            span,
+            ..
+        } = self;
+        for (channel, cell) in channels.iter_mut().enumerate() {
+            let Some(cell) = cell.as_mut() else {
+                continue;
+            };
+            let carried = cell.carried_record.take();
+            let own = superseded.and_then(|superseded| {
+                if cell.offsets_dirty.pending(&cell.offsets.dirty) == 0 {
+                    return None;
+                }
+                let CellRead::Applied { words, .. } = cell.offsets_reader.read_counted(
+                    &cell.offsets.cell,
+                    snapshot,
+                    &mut cell.offsets_dirty,
+                    0,
+                    superseded,
+                ) else {
+                    return None;
+                };
+                if carried.is_some() {
+                    superseded.add_carried(1);
+                }
+                Some(FaderOffsetsRecord::from_words(words))
+            });
+            let adopted_sum = cell.adopted_sum.take();
+            if let Some(record) = own.or(carried) {
+                let jumped = cell.offsets_jump(program, *span, channel, record, stage);
+                // Unreachable refusal: the cell index is the program's own (prepared from it),
+                // the curve is in the fader domain and `vca_compose_db` clamps (a NaN `S`, which
+                // a validated record never carries, fails `checked_fader_gain`, so no NaN reaches
+                // the stage), and the lane is a populated member. In release a refusal leaves the
+                // stage's gain as it was: a hold, no panic.
+                debug_assert!(jumped, "an offsets jump is refused at render");
+            }
+            // A record of the cell's own is newer than this plan's preparation (the join's
+            // retarget, or a live write committed after it), so its `S` is the committed one; a
+            // carried record is older than the preparation, whose `S` it must then match.
+            if own.is_none()
+                && let Some(sum) = adopted_sum
+                && sum.to_bits() != cell.offsets_sum.to_bits()
+            {
+                // Unreachable on a lane with live cells (B17-R12): the join writes an offsets
+                // record to the successor's cell whenever its `S` differs from the committed one
+                // (`join_level_records`), and every C ABI and browser plan attaches live cells to
+                // every strip, so only a plan prepared with no live controls (a host-core entry no
+                // shipped host calls) takes this backstop. In release it ramps over `J`.
+                debug_assert!(
+                    superseded.is_none(),
+                    "the adoption rule stands in for a live offsets record"
+                );
+                cell.offsets_sum = sum;
+                cell.adoption = cell.adoption.max(Adoption::Compare);
+            }
+        }
+    }
+    // REALTIME_POLICY_END
+}
+
+/// The fader stage of one automated lane, as an offsets jump drives it (#1649 D3): a fader bank's
+/// lane or the scalar oracle's fader.
+trait FaderJumpStage {
+    /// Whether `channel`'s gain is held (muted, or in a mute or unmute ramp): a gain operation
+    /// then only remembers the gain (#1638 D2).
+    fn gain_held(&self, channel: usize) -> bool;
+    /// Frames left in `channel`'s ramp; `0` when settled.
+    fn ramp_remaining(&self, channel: usize) -> u32;
+    /// Apply `operation` to `channel` now, at the block boundary; `false` when the stage refuses.
+    fn apply(&mut self, channel: usize, operation: builtins::FaderOperation) -> bool;
+}
+
+/// One lane of a fader bank, as a [`FaderJumpStage`].
+struct BankLaneStage<'a> {
+    bank: &'a mut BuiltinFaderBank,
+    lane: usize,
+}
+
+// REALTIME_POLICY_BEGIN
+impl FaderJumpStage for BankLaneStage<'_> {
+    fn gain_held(&self, channel: usize) -> bool {
+        self.bank.gain_held(self.lane, channel) == Some(true)
+    }
+    fn ramp_remaining(&self, channel: usize) -> u32 {
+        self.bank.ramp_remaining(self.lane, channel).unwrap_or(0)
+    }
+    fn apply(&mut self, channel: usize, operation: builtins::FaderOperation) -> bool {
+        self.bank
+            .apply_fader_operation(self.lane, channel_selector(channel), operation)
+            .is_ok()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FaderJumpStage for FaderMuteRampBuiltins {
+    fn gain_held(&self, channel: usize) -> bool {
+        Self::gain_held(self, channel) == Some(true)
+    }
+    fn ramp_remaining(&self, channel: usize) -> u32 {
+        Self::ramp_remaining(self, channel).unwrap_or(0)
+    }
+    fn apply(&mut self, channel: usize, operation: builtins::FaderOperation) -> bool {
+        self.apply_fader_operation(channel_selector(channel), operation)
+            .is_ok()
+    }
+}
+
+/// The selector of one channel (`0` left, anything else right).
+const fn channel_selector(channel: usize) -> BuiltinLaneSelector {
+    if channel == 0 {
+        BuiltinLaneSelector::Left
+    } else {
+        BuiltinLaneSelector::Right
+    }
+}
+
+impl AutomatedFaderCell {
+    /// #1649 D3: take `record` (a new `S` and its ramp word) and jump the lane to it.
+    ///
+    /// The jump's target is the curve at the node time of the jump's completion (`End` of a ramp
+    /// of the ramp word started at the block's first sample, never past the next discontinuity,
+    /// which jumps of its own), composed with the new `S`: `checked_fader_gain(vca_compose_db(v,
+    /// S))`, as every event's gain is (#1646 D1). The lane's current gain target is the cell's
+    /// target composed with the `S` the lane heard before. Equal gain bits take no jump (a `+0.0`
+    /// `S` that turns a `-0.0` value into `+0.0` moves nothing). Otherwise the lane retargets over
+    /// the ramp word (an exact set for `0`) at the block's first sample, and the cell commits the
+    /// target and holds until the completion, so grid events inside the jump are held (README
+    /// "Held events").
+    ///
+    /// On a lane whose gain is held (muted, or in a mute or unmute ramp) the stage only remembers
+    /// the gain (#1638 D2), so the target its ramp aims for is no longer one the cell knows: the
+    /// cell forgets its target (a fresh state, whose next free grid event always retargets) and
+    /// holds until the held ramp's last sample (released at the entry of a block whose live write
+    /// frees the gain early, R17-10). On a free lane the jump's own hold is never released by
+    /// that rule: a live write that frees the gain at the same entry ended an older ramp. With no
+    /// node time (a plan with no timeline) the cell's own target is the jump's value.
+    ///
+    /// `false` when the composed value has no fader gain, the program has no such cell, or the
+    /// stage refuses the operation (unreachable: the curve is in the fader domain,
+    /// `vca_compose_db` clamps, and the lane is a member).
+    fn offsets_jump(
+        &mut self,
+        program: &automation::Program,
+        span: Option<TimelineSpan>,
+        channel: usize,
+        record: FaderOffsetsRecord,
+        stage: &mut impl FaderJumpStage,
+    ) -> bool {
+        let heard = core::mem::replace(&mut self.offsets_sum, record.offsets_sum);
+        let ramp = record.smoothing_samples;
+        self.offsets_ramp = ramp;
+        let completion = controls::FADER_CELL_RULE.completion;
+        let start = span.and_then(|span| node_time_at(span, 0));
+        let value = match (start, program.cell(self.cell as usize)) {
+            (Some(start), Some(cell)) => curve_toward(
+                &cell,
+                start,
+                automation::completion_of(completion, start, ramp),
+            ),
+            (Some(_), None) => return false,
+            (None, _) => match self.state.target() {
+                Some(value) => value,
+                None => return true,
+            },
+        };
+        let compose =
+            |value, sum| builtins::checked_fader_gain(session::vca_compose_db(value, sum)).ok();
+        let Some(gain) = compose(value, self.offsets_sum) else {
+            return false;
+        };
+        let current = self
+            .state
+            .target()
+            .and_then(|target| compose(target, heard));
+        if current.map(f32::to_bits) == Some(gain.to_bits()) {
+            return true;
+        }
+        let operation = if ramp == 0 {
+            builtins::FaderOperation::SetGain { gain }
+        } else {
+            builtins::FaderOperation::RetargetGain {
+                gain,
+                samples: ramp,
+            }
+        };
+        if stage.gain_held(channel) {
+            let remaining = stage.ramp_remaining(channel);
+            let applied = stage.apply(channel, operation);
+            self.state = automation::CellState::new();
+            if let (Some(last), Some(span)) = (remaining.checked_sub(1), span)
+                && let Some(end) = node_time_at(span, u64::from(last))
+            {
+                self.state.hold_until(end);
+            }
+            return applied;
+        }
+        if !stage.apply(channel, operation) {
+            return false;
+        }
+        // This jump's hold is newer than the held ramp a live write ended at this entry, so the
+        // block's R17-10 release must not cut it (#1647 U2 fold 3, F1). A successor's carried
+        // record takes this same path at its first block, with the carried obligation.
+        self.obligation.held_through = false;
+        self.state.seed_target(value);
+        if let Some(start) = start {
+            self.state
+                .hold_until(automation::completion_of(completion, start, ramp));
+        }
+        true
+    }
+}
+// REALTIME_POLICY_END
+
+// REALTIME_POLICY_BEGIN
+/// The value a ramp started at node time `start` and completing at `at` aims for: the curve at
+/// `at`, but never past the next discontinuity after `start`, which jumps of its own (the rule of
+/// the cell's own `target_at`).
+fn curve_toward(cell: &automation::CellProgram<'_>, start: i64, at: i64) -> f32 {
+    let ahead = cell.discontinuities();
+    let at = match ahead.get(ahead.partition_point(|&time| time <= start)) {
+        Some(&next) if next <= at => next - 1,
+        _ => at,
+    };
+    automation::value_at(cell.segments(), at)
+}
+
+/// The node time of sample `offset` of a node block mapped by `span` (`offset` may lie past the
+/// block: the mapping extends forward), or `None` past the `i64` range. Checked: a span saturated
+/// at the `i64` edges (R17-5) never wraps here.
+fn node_time_at(span: TimelineSpan, offset: u64) -> Option<i64> {
+    span_time(
+        span.start,
+        span.step.map(|step| (step.offset, step.timeline)),
+        offset,
+    )
+}
+
+/// [`node_time_at`] for a block whose offset 0 is node time `start`, with an optional step
+/// `(offset, node time)`.
+fn span_time(start: i64, step: Option<(u32, i64)>, offset: u64) -> Option<i64> {
+    let (base, from) = match step {
+        Some((at, timeline)) if offset >= u64::from(at) => (timeline, u64::from(at)),
+        _ => (start, 0),
+    };
+    base.checked_add(i64::try_from(offset - from).ok()?)
+}
+
+/// The fader row's jump length of a block (#1639 D2, #1647a departure 7), resolved once from the
+/// three lengths the graph holds through `LiveRamps`, which owns the row rule; `None` in a plan
+/// with no jump-length cell.
+fn block_fader_jump(time: &GraphBlockTime<'_>) -> Option<u32> {
+    time.jump_lengths().map(|lengths| {
+        controls::LiveRamps::from_lengths(
+            lengths.fader_samples,
+            lengths.mute_samples,
+            lengths.pan_samples,
+        )
+        .for_row(effect_contract::control::LiveRampRow::Fader)
+    })
+}
+
+/// The most cells one fader owner drives in a block: two channels on each of a bank's lanes.
+const MAXIMUM_FADER_CELLS: usize = 2 * MAXIMUM_BANK_LANES;
+
+/// One automated channel's stage state at a block's first sample, after the live drain (#1647
+/// D1.6): what decides where the stage's hold of its gain ends in the block.
+#[derive(Clone, Copy, Debug)]
+struct ChannelHold {
+    /// The stage holds the gain: muted, or in a mute or unmute ramp (#1638 D2).
+    held: bool,
+    /// The channel is muted: settled, or in a ramp toward `0.0`.
+    muted: bool,
+    /// Frames left in the channel's ramp.
+    remaining: u32,
+    /// The fader gain the stage aims for, whatever its mute (#1648 D2: an adopted cell compares
+    /// its curve with it). `None` on the scalar oracle, which no plan swap carries (its fader
+    /// owners are bound nodes, not bank lanes).
+    fader_gain: Option<f32>,
+}
+
+/// One channel's block cut at the end `E` of a held ramp (#1647 D1.6, constraint 2): the first
+/// piece's span ends at `E`, and the second starts at `E + 1`.
+#[derive(Clone, Copy, Debug)]
+struct HoldEnd {
+    /// `E`: the first offset at which the stage reports the gain free (constraint 7).
+    at: u32,
+    /// The node time of `E`.
+    node: i64,
+    /// The span of `[E + 1, frames)`; `None` when `E` is the block's last sample.
+    rest: Option<automation::NodeSpan>,
+}
+
+/// One automated channel's events of one block, with the next one pulled (#1647 D1.3).
+struct FaderCellCursor<'a> {
+    /// The owner's lane (the bank lane; `0` on the scalar oracle).
+    lane: usize,
+    /// `0` left, `1` right.
+    channel: usize,
+    /// `S`, the offset sum every event's value is composed with (#1646 D1).
+    offsets_sum: f64,
+    /// The cell's program and the block's jump length, to build the second piece.
+    program: automation::CellProgram<'a>,
+    jump: u32,
+    /// The current piece's events; `None` once the block is spent.
+    events: Option<automation::CellEvents<'a, 'a>>,
+    /// The block offset of the current piece's first sample.
+    base: u32,
+    /// The next event, its offset in the block.
+    next: Option<automation::Event>,
+    /// The channel's held-ramp obligation (D1.6).
+    obligation: &'a mut HeldRampObligation,
+    /// The first offset at which the stage's gain is free in this block: an event pushed below it
+    /// is only remembered (`0`: free all block; the block length: held all block).
+    free_from: u32,
+    /// The cut at the held ramp's end, while it is ahead.
+    end: Option<HoldEnd>,
+}
+
+impl FaderCellCursor<'_> {
+    /// Pull the current piece's next event, rebased to the block.
+    fn pull(&mut self) {
+        let base = self.base;
+        self.next = self
+            .events
+            .as_mut()
+            .and_then(Iterator::next)
+            .map(|event| automation::Event {
+                offset: event.offset.saturating_add(base),
+                ..event
+            });
+    }
+
+    /// The offset of the cursor's next operation: its next event, or the cut at `E` once the
+    /// first piece is spent (the first piece ends at `E`, so no event lies past it).
+    fn next_offset(&self) -> Option<u32> {
+        self.next
+            .map(|event| event.offset)
+            .or_else(|| self.end.map(|end| end.at))
+    }
+
+    /// End the first piece at the cut and start the second. With `moving`, the cell first lands
+    /// at `E` as a seek in [`automation::SeekMode::Ramp`] does (R17-9): one `Jump` over the
+    /// block's jump length `J`, aimed at the curve at the ramp's completion `E + J - 1` (never
+    /// past the next discontinuity), which commits that target and holds the grid for the move's
+    /// own ramp (constraint 3), as after the cell's own `Jump`. Returns that landing. Bounded: one
+    /// event of a one-sample span, a binary search of the discontinuities and one curve read.
+    fn cut(&mut self, end: HoldEnd, moving: bool) -> Option<automation::Event> {
+        self.end = None;
+        let mut state = self.events.take()?.into_state();
+        let mut landing = None;
+        if moving {
+            match automation::NodeSpan::new(end.node, Some((0, end.node)), 1) {
+                Ok(span) => {
+                    let mut events = automation::CellEvents::new(
+                        self.program,
+                        state,
+                        span,
+                        automation::SeekMode::Ramp,
+                        self.jump,
+                    );
+                    landing = events.next();
+                    state = events.into_state();
+                }
+                // Unreachable: `NodeSpan::new` errs only for a step offset at or past the span's
+                // length, and 0 < 1. In release the cut lands nothing (the move is skipped and
+                // the lane holds its gain), no panic.
+                Err(_) => debug_assert!(false, "a one-sample span with its step at 0 is valid"),
+            }
+        }
+        if let Some(rest) = end.rest {
+            self.base = end.at.saturating_add(1);
+            self.events = Some(automation::CellEvents::new(
+                self.program,
+                state,
+                rest,
+                controls::FADER_CELL_RULE.seek,
+                self.jump,
+            ));
+            self.pull();
+        }
+        landing
+    }
+}
+
+/// The one event driver of stored fader automation (#1647 D1.3-D1.6, R17-4): both fader owners,
+/// the fader bank and the test-only scalar oracle, render a block's events through it.
+///
+/// It pulls each automated channel's events (#1637, [`automation::SeekMode::Exact`]) and merges
+/// them by offset with one fixed cursor per channel, with no buffer: the stage asks for the
+/// lowest pending offset and takes every channel's event at it ([`builtins::FaderOperationSource`]).
+/// Each event's value is composed with the channel's `S` and converted to a fader gain as the
+/// static path does (`checked_fader_gain(vca_compose_db(value, S))`, #1646 D1); a grid or jump
+/// event becomes a `RetargetGain` over its ramp, a held event a `RememberGain` and a seek or
+/// restart landing a `SetGain` (#1638 D1).
+///
+/// D1.6 (batch 13b amendment): a gain event pushed while the stage holds the channel's gain is
+/// only remembered, so the channel owes a move. At the first sample `E` at which the stage
+/// reports the gain free, the driver moves the channel with a ramped landing of its cell at `E`
+/// (R17-9: aimed at the curve at `E + J - 1`, over the block's jump length `J`), in place of any
+/// event the cell gives at `E`; a seek `Set` exactly at `E` is pushed instead and discharges the
+/// obligation (R17-8). The channel's span is cut there, so no event past `E` is pulled before the
+/// move. A live write that frees a gain the stage held through the previous block discharges the
+/// obligation and releases the cell's hold there, owed or not (R17-10). An event render refuses (unreachable: the curve is in the fader
+/// domain, `vca_compose_db` clamps and the lane is a member) keeps the stage's target and fails a
+/// `debug_assert`. Fixed size, on the render stack; allocation-, lock- and syscall-free.
+struct FaderEventDriver<'a> {
+    cursors: [Option<FaderCellCursor<'a>>; MAXIMUM_FADER_CELLS],
+    #[cfg(any(test, feature = "test-support"))]
+    first_sample: u64,
+}
+
+impl<'a> FaderEventDriver<'a> {
+    /// The block of `frames` samples of every automated lane in `lanes`, `(owner lane, lane's
+    /// automation)`; `hold(lane, channel)` is the stage's state of that channel after the block's
+    /// live drain. A lane with no node time this block (no timeline, no jump length, or a span
+    /// saturated at the `i64` edge) holds its value and emits nothing.
+    ///
+    /// D2, departure 4: a lane's first block, with no seek reaching it, lands a `Set` at offset
+    /// 0 when the curve at the block's node time differs from the value the lane was seeded
+    /// with, so a fresh plan (seeded with the curve at `-a(n)`) emits none and a successor's
+    /// restarted lane is set to its curve. A seek step in that first block lands instead: the
+    /// samples before it precede the seek on the node.
+    fn new(
+        lanes: impl Iterator<Item = (usize, &'a mut LaneFaderAutomation)>,
+        frames: u32,
+        first_sample: u64,
+        hold: impl Fn(usize, usize) -> Option<ChannelHold>,
+    ) -> Self {
+        let _ = first_sample;
+        let mut driver = Self {
+            cursors: core::array::from_fn(|_| None),
+            #[cfg(any(test, feature = "test-support"))]
+            first_sample,
+        };
+        if frames == 0 {
+            return driver;
+        }
+        let mut used = 0_usize;
+        for (lane, automation) in lanes {
+            let LaneFaderAutomation {
+                program,
+                channels,
+                span,
+                fader_jump,
+                fresh,
+                ..
+            } = automation;
+            let first_block = core::mem::replace(fresh, false);
+            let (Some(span), Some(jump)) = (*span, *fader_jump) else {
+                continue;
+            };
+            let length = i64::from(frames);
+            if span.start.checked_add(length).is_none()
+                || span
+                    .step
+                    .is_some_and(|step| step.timeline.checked_add(length).is_none())
+            {
+                continue;
+            }
+            let program: &'a automation::Program = program;
+            for (channel, cell) in channels.iter_mut().enumerate() {
+                let Some(AutomatedFaderCell {
+                    cell,
+                    state,
+                    offsets_sum,
+                    obligation,
+                    adoption,
+                    ..
+                }) = cell.as_mut()
+                else {
+                    continue;
+                };
+                let refused =
+                    || debug_assert!(false, "an automated fader cell is refused at render");
+                // Unreachable: the cell index was prepared from this same program. In release the
+                // channel is skipped: it emits nothing and the lane holds its gain, no panic.
+                let Some(cell_program) = program.cell(*cell as usize) else {
+                    refused();
+                    continue;
+                };
+                let mut step = span
+                    .step
+                    .map(|step| (step.offset, step.timeline))
+                    .or_else(|| {
+                        let value = automation::value_at(cell_program.segments(), span.start);
+                        (first_block && state.target().map(f32::to_bits) != Some(value.to_bits()))
+                            .then_some((0, span.start))
+                    });
+                let hold_now = hold(lane, channel);
+                let mut mode = controls::FADER_CELL_RULE.seek;
+                // A landing longer than `J`: the remainder of the free stage's own ramp (U3 fold
+                // 2), landed alone at the block's first sample so the block's discontinuities
+                // still jump over `J`.
+                let mut long_landing = None;
+                if let Some(length) = settle_adoption(
+                    core::mem::replace(adoption, Adoption::None),
+                    AdoptionBlock {
+                        program: &cell_program,
+                        span,
+                        offsets_sum: *offsets_sum,
+                        hold: hold_now,
+                        jump,
+                    },
+                    state,
+                ) && step.is_none()
+                {
+                    // The adoption jump (#1648 D2): a ramped landing at the block's first sample
+                    // over the block's jump length, to the curve at the jump's completion.
+                    step = Some((0, span.start));
+                    mode = automation::SeekMode::Ramp;
+                    long_landing = (length > jump).then_some(length);
+                }
+                let (free_from, at, release) = obligation.block(hold_now, frames);
+                if release && let Some(first) = span_time(span.start, step, 0) {
+                    // R17-10: a live write freed the gain the stage held through the previous
+                    // block, so the cell's hold of the ramp it ended is released here, owed or
+                    // not: its grid moves the lane from this block's first sample on.
+                    state.hold_until(first.saturating_sub(1));
+                }
+                let end = at.map(|at| hold_end(span.start, step, at, frames));
+                let first = match end {
+                    Some(Some(end)) => automation::NodeSpan::new(
+                        span.start,
+                        step.filter(|&(offset, _)| offset <= end.at),
+                        end.at + 1,
+                    ),
+                    _ => automation::NodeSpan::new(span.start, step, frames),
+                };
+                // Unreachable refusal: the span is valid (a step kept only at or before `E` lies
+                // inside `E + 1` samples, and the graph's step lies inside the block); at most
+                // `MAXIMUM_FADER_CELLS` cursors are used (two channels per lane, and the const
+                // assert bounds every bank width by `MAXIMUM_BANK_LANES`); and `hold_end` is
+                // `Some` because the block's node times were checked against the `i64` edge above.
+                // In release the channel is skipped: it emits nothing and the lane holds its gain.
+                let (Ok(node), Some(slot), false) = (
+                    first,
+                    driver.cursors.get_mut(used),
+                    matches!(end, Some(None)),
+                ) else {
+                    refused();
+                    continue;
+                };
+                let end = end.flatten();
+                let (events, landing, base) = match long_landing {
+                    // U3 fold 2: the landing alone, a one-sample piece over its own length (it
+                    // commits the target and holds the grid until its end, as the cell's own
+                    // `Jump` does), then the rest of the block from its second sample. A free
+                    // stage has no cut (`end` is `None`); a cut at the first sample (a move due
+                    // there) takes the landing over `J` below instead.
+                    Some(length) if end.is_none() => {
+                        let one = automation::NodeSpan::new(span.start, Some((0, span.start)), 1);
+                        let rest = automation::NodeSpan::new(span.start + 1, None, frames - 1);
+                        // Unreachable: a step at 0 lies inside one sample, and the block's node
+                        // times were checked against the `i64` edge above. In release the channel
+                        // is skipped: it emits nothing and the lane holds its gain.
+                        let (Ok(one), Ok(rest)) = (one, rest) else {
+                            refused();
+                            continue;
+                        };
+                        let mut landing_events = automation::CellEvents::new(
+                            cell_program,
+                            state,
+                            one,
+                            automation::SeekMode::Ramp,
+                            length,
+                        );
+                        let landing = landing_events.next();
+                        let state = landing_events.into_state();
+                        let events = (frames > 1).then(|| {
+                            automation::CellEvents::new(
+                                cell_program,
+                                state,
+                                rest,
+                                controls::FADER_CELL_RULE.seek,
+                                jump,
+                            )
+                        });
+                        (events, landing, 1)
+                    }
+                    _ => (
+                        Some(automation::CellEvents::new(
+                            cell_program,
+                            state,
+                            node,
+                            mode,
+                            jump,
+                        )),
+                        None,
+                        0,
+                    ),
+                };
+                let mut cursor = FaderCellCursor {
+                    lane,
+                    channel,
+                    offsets_sum: *offsets_sum,
+                    program: cell_program,
+                    jump,
+                    events,
+                    base,
+                    next: None,
+                    obligation,
+                    free_from,
+                    end,
+                };
+                if landing.is_some() {
+                    cursor.next = landing;
+                } else {
+                    cursor.pull();
+                }
+                *slot = Some(cursor);
+                used += 1;
+            }
+        }
+        driver
+    }
+
+    /// The fader gain of curve value `value` on a channel whose offset sum is `offsets_sum`, or
+    /// `None` when the composed value has no fader gain (unreachable: #1645 bounds the curve to
+    /// the fader domain and `vca_compose_db` clamps, #1646 D6).
+    fn gain(value: f32, offsets_sum: f64) -> Option<f32> {
+        builtins::checked_fader_gain(session::vca_compose_db(value, offsets_sum)).ok()
+    }
+
+    /// The fader operation of `event` on a channel whose offset sum is `offsets_sum`, or `None`
+    /// when the composed value has no fader gain.
+    fn operation(event: automation::Event, offsets_sum: f64) -> Option<builtins::FaderOperation> {
+        let gain = Self::gain(event.value, offsets_sum)?;
+        Some(if event.held {
+            builtins::FaderOperation::RememberGain { gain }
+        } else {
+            match event.kind {
+                automation::EventKind::Set => builtins::FaderOperation::SetGain { gain },
+                automation::EventKind::Grid | automation::EventKind::Jump => {
+                    builtins::FaderOperation::RetargetGain {
+                        gain,
+                        samples: event.ramp,
+                    }
+                }
+            }
+        })
+    }
+
+    /// Consume every event the stage did not pull (none, unless a stage stopped pulling, which
+    /// fails its own `debug_assert`: the cell's state must still advance through its block). A
+    /// cut the stage did not reach starts its second piece with no move.
+    fn finish(mut self) {
+        for cursor in self.cursors.iter_mut().flatten() {
+            while cursor.next.is_some() {
+                cursor.pull();
+            }
+            if let Some(end) = cursor.end {
+                let _ = cursor.cut(end, false);
+                while cursor.next.is_some() {
+                    cursor.pull();
+                }
+            }
+        }
+    }
+}
+
+impl HeldRampObligation {
+    /// The block's hold of one channel from its stage state `hold` after the live drain: the
+    /// first offset at which the gain is free, `E` when the hold ends with the gain free in this
+    /// block (a ramp that ends exactly at the block's end makes `E` the next block's first sample,
+    /// when a move is owed), and whether the caller releases the cell's hold at the block's first
+    /// sample (R17-10). A channel the stage held through the end of the previous block and that
+    /// is free at this block's entry with no move due had its hold cleared by a live write there:
+    /// the write discharges an owed obligation (constraint 4), and the cell's hold of the ramp it
+    /// ended is released whether or not a move was owed. A hold that ended by itself (a ramp that
+    /// ended inside the previous block, or on its last sample) needs no release: the cell's hold
+    /// of it ended at the same sample.
+    fn block(&mut self, hold: Option<ChannelHold>, frames: u32) -> (u32, Option<u32>, bool) {
+        let due = core::mem::take(&mut self.due_at_entry);
+        let held_through = core::mem::take(&mut self.held_through);
+        match hold {
+            Some(ChannelHold {
+                held: true,
+                muted: false,
+                remaining,
+                ..
+            }) if remaining > 0 => {
+                if remaining < frames {
+                    (remaining, Some(remaining), false)
+                } else {
+                    self.due_at_entry = remaining == frames;
+                    self.held_through = true;
+                    (frames, None, false)
+                }
+            }
+            Some(ChannelHold { held: true, .. }) => {
+                self.held_through = true;
+                (frames, None, false)
+            }
+            Some(_) if due && self.owed => (0, Some(0), false),
+            Some(_) => {
+                self.owed = false;
+                (0, None, held_through && !due)
+            }
+            None => (0, None, false),
+        }
+    }
+}
+
+/// What the adoption rule of one automated channel reads at its first block after a plan swap.
+struct AdoptionBlock<'p, 'a> {
+    program: &'p automation::CellProgram<'a>,
+    span: TimelineSpan,
+    offsets_sum: f64,
+    hold: Option<ChannelHold>,
+    /// The block's jump length `J`.
+    jump: u32,
+}
+
+/// #1648 D2, at an adopted channel's first block: settle what [`LaneFaderAutomation::adopt`] left
+/// owed, and whether the block must open with the adoption jump, and over how many samples.
+///
+/// A [`Adoption::Reposition`] places the cursor at the block's node time in the cell's own table
+/// (#1637 D4) and reports the stage's held ramp again (batch 13b: `reposition` drops the one the
+/// carried state held). That report changes no sample: a held stage only remembers a gain
+/// operation of either kind, and the obligation is decided by where the gain is free, not by the
+/// event's flag. It keeps the repositioned cell's events what the cell gives under a hold (held
+/// events as `RememberGain`, as the test-only event probe reports them); batch 17 U3 fold,
+/// MINOR 8: kept as bookkeeping, with no audible gate. On a free stage still in a ramp (a live
+/// level edit over its own length, applied at this block's entry or heard before the swap, or a
+/// jump) the repositioned cell holds that ramp again, and the adoption rule compares the curve
+/// where the ramp ends, where the stage's target was taken (U3 fold 2, D15-7): an unmoved target
+/// keeps the edit's own length, and only a moved one lands over the jump length.
+/// Then, for a reposition or [`Adoption::Compare`], the adoption rule: when
+/// the curve at the block's first sample (or that ramp's end), composed with this plan's `S`
+/// (`checked_fader_gain(vca_compose_db(curve, S))`, #1648 departure 4), differs in bits from the
+/// gain the stage aims for, the block opens with a jump (returns its length: `J`, or the frames
+/// the free stage's own ramp has left when that is longer, so a running edit still ends when it
+/// was due, on this table's curve; never shorter than `J`, so a moved target never lands faster
+/// than a table change does). Otherwise a repositioned
+/// cell takes the curve's value as its current target (`seed_target`: the stage already holds its
+/// gain), and a continued one keeps its carried state. A block with a seek step lands the seek
+/// instead (the caller's step wins): the seek sets the lane exactly where it applies.
+fn settle_adoption(
+    adoption: Adoption,
+    block: AdoptionBlock<'_, '_>,
+    state: &mut automation::CellState,
+) -> Option<u32> {
+    let AdoptionBlock {
+        program,
+        span,
+        offsets_sum,
+        hold,
+        jump,
+    } = block;
+    if adoption == Adoption::None {
+        return None;
+    }
+    // The landing's length: `J`, or the frames the free stage's own ramp has left when longer.
+    let mut length = jump;
+    // The node time at which the curve is compared: the block's first sample, or the end of a
+    // ramp the free stage still runs (U3 fold 2).
+    let mut at = span.start;
+    if adoption == Adoption::Reposition {
+        state.reposition(program, span.start);
+        if let Some(ChannelHold {
+            held, remaining, ..
+        }) = hold
+            && let Some(last) = remaining.checked_sub(1)
+            && let Some(end) = node_time_at(span, u64::from(last))
+        {
+            // A held stage: the held ramp again (batch 13b). A free stage: the ramp it runs is the
+            // cell's own (a live level edit over its own length, or a jump) and `reposition`
+            // dropped its hold, so the cell holds it again and compares the curve where it ends
+            // (U3 fold 2, D15-7): the edit keeps its own length unless the new table moved its
+            // target.
+            state.hold_until(end);
+            // A step of the cell's own at the block's first sample jumps over `J` there, as the
+            // cell does at any discontinuity (and as a plan prepared with this table does), so
+            // the curve is compared at the block's first sample and the landing is `J`
+            // (B17-R13): `curve_toward` looks only past `start` and would skip it.
+            if !held
+                && program
+                    .discontinuities()
+                    .binary_search(&span.start)
+                    .is_err()
+            {
+                at = end;
+                length = length.max(remaining);
+            }
+        }
+    }
+    let value = curve_toward(program, span.start, at);
+    let differs = FaderEventDriver::gain(value, offsets_sum)
+        .zip(hold.and_then(|hold| hold.fader_gain))
+        .is_some_and(|(gain, stage)| gain.to_bits() != stage.to_bits());
+    if !differs && adoption == Adoption::Reposition {
+        state.seed_target(value);
+    }
+    differs.then_some(length)
+}
+
+/// The cut of a block of `frames` samples whose offset 0 is node time `start`, with seek step
+/// `step`, at offset `at`; `None` past the `i64` range (unreachable: the caller checked the
+/// block's span).
+fn hold_end(start: i64, step: Option<(u32, i64)>, at: u32, frames: u32) -> Option<HoldEnd> {
+    let node = span_time(start, step, u64::from(at))?;
+    let next = at + 1;
+    let rest = if next < frames {
+        let rest_start = span_time(start, step, u64::from(next))?;
+        let rest_step = step
+            .filter(|&(offset, _)| offset > at)
+            .map(|(offset, timeline)| (offset - next, timeline));
+        Some(automation::NodeSpan::new(rest_start, rest_step, frames - next).ok()?)
+    } else {
+        None
+    };
+    Some(HoldEnd { at, node, rest })
+}
+
+impl builtins::FaderOperationSource for FaderEventDriver<'_> {
+    fn next_offset(&mut self) -> Option<u32> {
+        self.cursors
+            .iter()
+            .flatten()
+            .filter_map(FaderCellCursor::next_offset)
+            .min()
+    }
+
+    fn apply(&mut self, offset: u32, sink: &mut builtins::FaderOperationSink) {
+        #[cfg(any(test, feature = "test-support"))]
+        let first_sample = self.first_sample;
+        for cursor in self.cursors.iter_mut().flatten() {
+            let event = cursor.next.filter(|event| event.offset == offset);
+            let end = cursor.end.filter(|end| end.at == offset);
+            if event.is_none() && end.is_none() {
+                continue;
+            }
+            let selector = channel_selector(cursor.channel);
+            // R17-8: a seek `Set` that lands exactly at `E` sets the lane there (the gain is
+            // free from `E`) and discharges the obligation (D3 wins over constraint 7).
+            let set_at_end = end.is_some()
+                && event.is_some_and(|event| event.kind == automation::EventKind::Set);
+            // Constraint 7: otherwise the move at `E` replaces any gain operation the cell gives
+            // at `E`.
+            let moving = end.is_some() && cursor.obligation.owed && !set_at_end;
+            let mut push = |cursor: &FaderCellCursor<'_>, event: automation::Event| {
+                let pushed = Self::operation(event, cursor.offsets_sum)
+                    .is_some_and(|operation| sink.push(cursor.lane, selector, operation).is_ok());
+                // Unreachable refusal: one cursor per lane and channel, and constraint 7 with
+                // R17-8 push one gain operation per cursor and offset (no `Duplicate`); the lane
+                // is a populated member; `vca_compose_db` clamps to the fader domain, so the
+                // conversion gives a finite gain. In release the event is dropped: the stage
+                // keeps its gain target (a hold, no NaN), no panic.
+                debug_assert!(pushed, "a stored fader event is refused at render");
+                #[cfg(any(test, feature = "test-support"))]
+                test_only_record_fader_event(TestOnlyFaderEvent {
+                    lane: cursor.lane,
+                    channel: cursor.channel,
+                    sample: first_sample.saturating_add(u64::from(offset)),
+                    kind: event.kind,
+                    held: event.held,
+                    value: event.value,
+                    ramp: event.ramp,
+                });
+            };
+            if let Some(event) = event {
+                if !moving {
+                    push(cursor, event);
+                    // The stage only remembers a gain while it holds the lane.
+                    if offset < cursor.free_from {
+                        cursor.obligation.owed = true;
+                    }
+                }
+                cursor.pull();
+            }
+            let Some(end) = end else {
+                continue;
+            };
+            if set_at_end {
+                cursor.obligation.owed = false;
+            }
+            let landing = cursor.cut(end, moving);
+            if moving {
+                cursor.obligation.owed = false;
+                match landing {
+                    Some(landing) => push(cursor, landing),
+                    // Unreachable: a cursor's events are `Some` until its one cut (the cut clears
+                    // `end`), the one-sample span is valid, and a `Ramp` seek step always lands
+                    // (`land` returns an event). In release no move is pushed and the lane holds
+                    // the gain the held ramp aimed for, no panic.
+                    None => debug_assert!(false, "a moving cut lands its cell"),
+                }
+            }
+        }
+    }
+}
+// REALTIME_POLICY_END
+
+/// Test-only: one stored fader event the driver gave the stage (#1647b, gate 3's event probe).
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[doc(hidden)]
+pub struct TestOnlyFaderEvent {
+    /// The owner lane: the bank lane, `0` on the scalar oracle.
+    pub lane: usize,
+    /// `0` left, `1` right.
+    pub channel: usize,
+    /// The render sample the event applies at: the block's first sample plus its offset.
+    pub sample: u64,
+    /// What produced it.
+    pub kind: automation::EventKind,
+    /// A held grid event (a `RememberGain`).
+    pub held: bool,
+    /// The curve value, before `S`.
+    pub value: f32,
+    /// The ramp length.
+    pub ramp: u32,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+const FADER_EVENT_CAPACITY: usize = 64;
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy)]
+struct TestOnlyFaderEvents {
+    len: usize,
+    overflow: bool,
+    entries: [TestOnlyFaderEvent; FADER_EVENT_CAPACITY],
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static FADER_EVENTS: core::cell::Cell<TestOnlyFaderEvents> = const {
+        core::cell::Cell::new(TestOnlyFaderEvents {
+            len: 0,
+            overflow: false,
+            entries: [TestOnlyFaderEvent {
+                lane: 0,
+                channel: 0,
+                sample: 0,
+                kind: automation::EventKind::Grid,
+                held: false,
+                value: 0.0,
+                ramp: 0,
+            }; FADER_EVENT_CAPACITY],
+        })
+    };
+}
+
+/// Append one event to this thread's probe. Allocation-free: a copy in and out of a fixed array.
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_record_fader_event(event: TestOnlyFaderEvent) {
+    FADER_EVENTS.with(|cell| {
+        let mut events = cell.get();
+        match events.entries.get_mut(events.len) {
+            Some(free) => {
+                *free = event;
+                events.len += 1;
+            }
+            None => events.overflow = true,
+        }
+        cell.set(events);
+    });
+}
+
+/// Test-only (#1647b): take the stored fader events this thread's fader owners gave their stages
+/// since the last take, in order, and whether the probe's capacity overflowed.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_take_fader_events() -> (Vec<TestOnlyFaderEvent>, bool) {
+    FADER_EVENTS.with(|cell| {
+        let events = cell.get();
+        cell.set(TestOnlyFaderEvents {
+            len: 0,
+            overflow: false,
+            ..events
+        });
+        (events.entries[..events.len].to_vec(), events.overflow)
+    })
+}
+
+/// One automated fader channel as preparation computed it (#1646 D1, D2), with its offsets cell
+/// (#1649), which the strip's [`FaderCells`] and its fader owner share.
+#[derive(Clone, Debug)]
+struct PreparedFaderCell {
+    /// The cell's index in the program.
+    cell: u32,
+    /// The prepared curve value: the entry's first `start_value`, the curve at node time `-a(n)`
+    /// for every `a(n)` (D2, the hold rule).
+    value: f32,
+    /// The lane's prepared fader dB, `vca_compose_db(value, S)`, composed once inside
+    /// [`lane::fpenv::CanonicalFpEnv`] (D2). It is the lane's prepared fader parameter, so the
+    /// lowering bakes it through the same `checked_fader_gain` path a static fader takes.
+    fader_db: f32,
+    /// `S` (`controls::EffectiveStrip::offsets_sum`).
+    offsets_sum: f64,
+    /// The offsets cell's ramp word.
+    offsets_ramp: u32,
+    /// The offsets cell, created unwritten (#1646 departure 5).
+    offsets: Arc<OffsetsLane>,
+}
+
+/// The stored fader automation of one preparation (#1646): the program every automated lane
+/// reads, its byte report, and each automated strip's channels.
+struct FaderAutomationPlan {
+    program: Arc<automation::Program>,
+    /// [`automation::ProgramBuilder::bytes`] of the program.
+    program_bytes: u64,
+    /// Each strip that has an automated fader lane, by track ID.
+    strips: BTreeMap<Box<str>, [Option<PreparedFaderCell>; 2]>,
+}
+
+impl FaderAutomationPlan {
+    /// The prepared cells of strip `track`, if any channel is automated.
+    fn strip(&self, track: &str) -> Option<&[Option<PreparedFaderCell>; 2]> {
+        self.strips.get(track)
+    }
+
+    /// The prepared dB of each lane of strip `track`: the cell's composed `fader_db` on an
+    /// automated lane (D2), `effective` elsewhere.
+    fn fader_db(&self, track: &str, effective: [f32; 2]) -> [f32; 2] {
+        let Some(cells) = self.strip(track) else {
+            return effective;
+        };
+        [0, 1].map(|lane| {
+            cells[lane]
+                .as_ref()
+                .map_or(effective[lane], |cell| cell.fader_db)
+        })
+    }
+
+    /// The bytes the program retains: its shared allocation and the builder's report.
+    fn retained_program_bytes(&self) -> Option<u64> {
+        fader_automation_sizes()
+            .program_overhead_bytes
+            .checked_add(self.program_bytes)
+    }
+
+    /// The automated channels among `members`.
+    fn automated_channels<'a>(&self, members: impl Iterator<Item = &'a str>) -> Option<u64> {
+        members
+            .filter_map(|track| self.strip(track))
+            .map(|cells| cells.iter().filter(|cell| cell.is_some()).count())
+            .try_fold(0_u64, |total, count| {
+                total.checked_add(u64::try_from(count).ok()?)
+            })
+    }
+}
+
+/// The fixed retained sizes of stored fader automation (#1646 D4), measured on the build that
+/// runs, never written as literals.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FaderAutomationSizes {
+    /// The shared allocation that holds a plan's program, beyond the builder's byte report
+    /// ([`automation::ProgramBuilder::bytes`]), which is charged with it once per plan.
+    pub program_overhead_bytes: u64,
+    /// One automated channel's offsets cell: its shared allocation (the three-word
+    /// `LatestCell<3>` and its dirty word).
+    pub offsets_cell_bytes: u64,
+    /// One lane's automation slot on a fader owner (the event state, `S`, the ramp word and the
+    /// program handle of both channels). A fader bank with an automated member holds one per bank
+    /// lane.
+    pub lane_slot_bytes: u64,
+}
+
+/// The retained sizes stored fader automation charges (#1646 D4): a plan with automation charges
+/// its program once, each fader bank with an automated member one slot per bank lane, and each
+/// automated channel one offsets cell, as builtin bank payload.
+#[must_use]
+pub fn fader_automation_sizes() -> FaderAutomationSizes {
+    let bytes = |size: usize| u64::try_from(size).unwrap_or(u64::MAX);
+    FaderAutomationSizes {
+        program_overhead_bytes: bytes(core::mem::size_of::<SharedAllocation<automation::Program>>()),
+        offsets_cell_bytes: bytes(core::mem::size_of::<SharedAllocation<OffsetsLane>>()),
+        lane_slot_bytes: bytes(core::mem::size_of::<Option<LaneFaderAutomation>>()),
+    }
+}
+
+/// Compile the session's stored fader automation (#1646 D1, D2): one cell per automated fader
+/// lane (a `both` entry gives two), in strip order and then channel order, built once with the
+/// fader row's cell rule (`controls::FADER_CELL_RULE`). `None` when no fader lane is automated, so
+/// a session without fader automation prepares exactly as before.
+///
+/// Each lane's prepared value is its entry's first `start_value` and its `S` the strip's
+/// [`controls::EffectiveStrip::offsets_sum`]; the composition `vca_compose_db(value, S)` runs
+/// here, and its gain is baked by the lowering, both inside the [`lane::fpenv::CanonicalFpEnv`]
+/// the caller holds, as render's are (D2).
+///
+/// # Errors
+///
+/// `host.automation.fader` at the entry when the entry has no segment, a lane's composed value
+/// has no fader gain or the program builder refuses its cell, and at `$.automation` when the
+/// program does not fit or cannot be allocated. The refusals at an entry are defensive: the
+/// session validator refuses an empty segment list, a `start_value` outside the fader domain
+/// (`vca_compose_db` then clamps), and every segment the builder would refuse (a time at or past
+/// `2^53` samples, an order or spacing fault) before preparation, so a validated session reaches
+/// none of them. They stay typed refusals so a broken invariant never panics in preparation.
+fn prepare_fader_automation(
+    session: &CompiledSession,
+    effective: &controls::Effective,
+) -> Result<Option<FaderAutomationPlan>, BuiltinDiagnostic> {
+    let model = session.normalized_model();
+    if !model
+        .automation
+        .iter()
+        .any(|entry| controls::automation_row_renders(&entry.target))
+    {
+        return Ok(None);
+    }
+    let ramp = controls::LiveRamps::for_session(model).for_row(controls::LiveRampRow::VcaOffset);
+    let refuse = |entry: &session::Automation| {
+        diag(
+            "host.automation.fader",
+            &format!("$.automation[id={}]", entry.id.as_str()),
+        )
+    };
+    // One segment table per cell, in program order, with its entry; transient.
+    let mut tables: Vec<(&session::Automation, Vec<automation::Segment>)> = Vec::new();
+    let mut strips = BTreeMap::new();
+    for (strip, values) in model.strips().zip(effective.strips.iter()) {
+        let entries = controls::fader_automation(model, strip.id);
+        if entries.iter().all(Option::is_none) {
+            continue;
+        }
+        let mut cells = [None, None];
+        for (lane, entry) in entries.into_iter().enumerate() {
+            let Some(entry) = entry else { continue };
+            let segments = controls::stored_segments(entry);
+            // Defensive: the session validator refuses an entry with no segment.
+            let value = segments.first().ok_or_else(|| refuse(entry))?.start_value;
+            let offsets_sum = values.offsets_sum[lane];
+            // The caller's body holds `CanonicalFpEnv` across this composition and the lowering
+            // that bakes its gain (D2).
+            let fader_db = session::vca_compose_db(value, offsets_sum);
+            // Defensive: the session validator bounds every `start_value` to the fader domain
+            // (#1645) and `vca_compose_db` clamps to it, so a validated session never fails this
+            // domain check. It refuses with a typed diagnostic rather than reach the lowering's
+            // `expect("preflighted parameters")`.
+            builtins::checked_fader_gain(fader_db).map_err(|_| refuse(entry))?;
+            let cell = u32::try_from(tables.len())
+                .map_err(|_| diag("host.automation.fader", "$.automation"))?;
+            cells[lane] = Some(PreparedFaderCell {
+                cell,
+                value,
+                fader_db,
+                offsets_sum,
+                offsets_ramp: ramp,
+                offsets: Arc::new(OffsetsLane::new()),
+            });
+            tables.push((entry, segments));
+        }
+        strips.insert(Box::<str>::from(strip.id.as_str()), cells);
+    }
+    let descriptions: Vec<automation::CellDescription<'_>> = tables
+        .iter()
+        .map(|(_, segments)| controls::FADER_CELL_RULE.describe(segments))
+        .collect();
+    let program_bytes = automation::ProgramBuilder::bytes(&descriptions);
+    // A refusal at a cell is defensive: the session validator refuses every segment the builder
+    // refuses (#1646b departure 2, batch 17 follow-up), so only `TooLarge` and `Allocation`, the
+    // program's own size and memory, can reach a validated session.
+    let program = automation::ProgramBuilder::build(&descriptions).map_err(|error| {
+        let cell = match error {
+            automation::BuildError::NoSegments { cell }
+            | automation::BuildError::Segment { cell, .. }
+            | automation::BuildError::Order { cell, .. }
+            | automation::BuildError::NonPositiveExponential { cell, .. }
+            | automation::BuildError::Grid { cell }
+            | automation::BuildError::Spacing { cell, .. } => Some(cell),
+            automation::BuildError::TooLarge | automation::BuildError::Allocation => None,
+        };
+        cell.and_then(|cell| tables.get(cell)).map_or_else(
+            || diag("host.automation.fader", "$.automation"),
+            |(entry, _)| refuse(entry),
+        )
+    })?;
+    Ok(Some(FaderAutomationPlan {
+        program: Arc::new(program),
+        program_bytes,
+        strips,
+    }))
 }
 
 /// Words of one input trim cell: the `trim_db` bits and the ramp window.
@@ -1124,6 +2684,10 @@ pub struct PreparedBuiltinsSession {
     tails: Vec<(Box<str>, NodeTailBound)>,
     requests: Vec<MeterRequestSeal>,
     resources: BuiltinResourceEstimate,
+    /// The session's stored fader automation (#1646), installed on each automated lane's fader
+    /// owner at lowering; `None` when no fader lane is automated. Its program and every slot and
+    /// cell lowering builds for it are charged as builtin bank payload (D4).
+    fader_automation: Option<FaderAutomationPlan>,
     /// Every route's effective follow gate per source lane, in `model.routes` order, as the
     /// preparation was given it (decision 17, C7; `controls::Effective::routes`). Control-side data
     /// like `tails`: graph lowering reads it for the routes' follow gates, so the gate is composed
@@ -1192,6 +2756,16 @@ struct BuiltinBankProcessor {
 
 /// Widest bank any backend selects (`BankWidth::Eight`), as a plain array bound.
 const MAXIMUM_BANK_LANES: usize = 8;
+
+// Every bank width this build has fits the arrays bound by `MAXIMUM_BANK_LANES` (the live
+// witnesses, the lane masks and `MAXIMUM_FADER_CELLS`' cursors): a wider width fails the build.
+const _: () = {
+    let mut index = 0;
+    while index < BankWidth::ALL.len() {
+        assert!(BankWidth::ALL[index].lanes() as usize <= MAXIMUM_BANK_LANES);
+        index += 1;
+    }
+};
 
 /// The lane mask of a drain that visits every lane of a bank: the block drain's.
 const EVERY_LANE: u8 = u8::MAX;
@@ -1521,16 +3095,118 @@ struct FaderBankProcessor {
     /// One channel per bank lane; `None` for a lane no live control addresses. Always `lanes` long,
     /// so the lane index is the array index and no lane map is stored.
     controls: Box<[Option<FaderReader>]>,
+    /// The stored fader automation of the bank's lanes (#1646 D1): one slot per bank lane when a
+    /// member's fader is automated, `None` on a lane that is not; empty (no allocation) when no
+    /// member is.
+    automation: Box<[Option<LaneFaderAutomation>]>,
     process_calls: u64,
     frames_processed: u64,
     control_delivery: BuiltinControlDelivery,
 }
 
+/// Test-only: one automated fader lane's node time for one block, as the bank took it (#1647a).
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct TestOnlyFaderLaneTime {
+    /// The bank lane.
+    pub lane: usize,
+    /// The lane's `a(n)`.
+    pub arrival: u64,
+    /// The block's node-time mapping, `None` with no timeline.
+    pub span: Option<TimelineSpan>,
+    /// The fader row's jump length, `None` with no jump-length cell.
+    pub fader_jump: Option<u32>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+const FADER_LANE_TIME_CAPACITY: usize = 16;
+
+/// Test-only: the automated fader lanes' node times the banks took since the last take, in the
+/// order they took them, and whether more than the capacity arrived.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy)]
+struct TestOnlyFaderLaneTimes {
+    len: usize,
+    overflow: bool,
+    entries: [TestOnlyFaderLaneTime; FADER_LANE_TIME_CAPACITY],
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static FADER_LANE_TIMES: core::cell::Cell<TestOnlyFaderLaneTimes> =
+        const {
+            core::cell::Cell::new(TestOnlyFaderLaneTimes {
+                len: 0,
+                overflow: false,
+                entries: [TestOnlyFaderLaneTime {
+                    lane: 0,
+                    arrival: 0,
+                    span: None,
+                    fader_jump: None,
+                }; FADER_LANE_TIME_CAPACITY],
+            })
+        };
+}
+
+/// Append each automated lane's node time to this thread's probe. Allocation-free: a copy in and
+/// out of a fixed array.
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_record_fader_lane_times(automation: &[Option<LaneFaderAutomation>]) {
+    FADER_LANE_TIMES.with(|cell| {
+        let mut times = cell.get();
+        for (lane, slot) in automation.iter().enumerate() {
+            let Some(slot) = slot else {
+                continue;
+            };
+            let entry = TestOnlyFaderLaneTime {
+                lane,
+                arrival: slot.arrival,
+                span: slot.span,
+                fader_jump: slot.fader_jump,
+            };
+            match times.entries.get_mut(times.len) {
+                Some(free) => {
+                    *free = entry;
+                    times.len += 1;
+                }
+                None => times.overflow = true,
+            }
+        }
+        cell.set(times);
+    });
+}
+
+/// Test-only (#1647a): take the automated fader lanes' node times this thread's banks took since
+/// the last take, in order, and whether the probe's capacity overflowed. Each block's
+/// `set_block_time` adds one entry per automated lane of every fader bank.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_take_fader_lane_times() -> (Vec<TestOnlyFaderLaneTime>, bool) {
+    FADER_LANE_TIMES.with(|cell| {
+        let times = cell.get();
+        cell.set(TestOnlyFaderLaneTimes {
+            len: 0,
+            overflow: false,
+            ..times
+        });
+        (times.entries[..times.len].to_vec(), times.overflow)
+    })
+}
+
 impl FaderBankProcessor {
     /// The block drain under `snapshot`: the body of `begin_block`.
     fn drain(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
-        let Self { bank, controls, .. } = self;
-        drain_fader_controls(bank, controls, snapshot, EVERY_LANE)
+        let Self {
+            bank,
+            controls,
+            automation,
+            ..
+        } = self;
+        let result = drain_fader_controls(bank, controls, snapshot, EVERY_LANE);
+        read_fader_offsets(bank, controls, automation, snapshot);
+        result
     }
 
     /// Apply every pending value of the cells of the lanes in `lanes`, whatever its revision: the
@@ -1538,9 +3214,27 @@ impl FaderBankProcessor {
     /// it on a quiescent predecessor, for the lanes it exports (#1277); no production render path
     /// takes `ALL`.
     // REALTIME_POLICY_BEGIN
+    ///
+    /// Each carried automated lane's offsets cells are read the same way (#1648 D2, U3 fold):
+    /// the newest record is kept for the successor's first block, which applies it
+    /// ([`LaneFaderAutomation::carry_offsets`]).
     fn apply_pending(&mut self, lanes: u8) -> Result<(), RenderError> {
-        let Self { bank, controls, .. } = self;
-        drain_fader_controls(bank, controls, LiveSnapshot::ALL, lanes)
+        let Self {
+            bank,
+            controls,
+            automation,
+            ..
+        } = self;
+        let result = drain_fader_controls(bank, controls, LiveSnapshot::ALL, lanes);
+        for (lane, slot) in automated_lanes(automation) {
+            if !lane_selected(lanes, lane) {
+                continue;
+            }
+            if let Some(Some(reader)) = controls.get(lane) {
+                slot.carry_offsets(&reader.superseded);
+            }
+        }
+        result
     }
 
     /// Whether `predecessor` is a fader bank of this bank's width with lane `predecessor_lane`
@@ -1553,8 +3247,15 @@ impl FaderBankProcessor {
 
     /// Copy `predecessor`'s lane `predecessor_lane` into lane `lane` (#1277 D7, D8). The cell
     /// reader stays: the successor's own cells take every later value, and it takes the carry
-    /// marks of the values the carry drain applied (#1630 f).
-    fn adopt_lane(&mut self, lane: usize, predecessor: &Self, predecessor_lane: usize) -> bool {
+    /// marks of the values the carry drain applied (#1630 f). The lane's stored automation takes
+    /// the predecessor lane's event state (#1648 D2, [`LaneFaderAutomation::adopt`]).
+    fn adopt_lane(
+        &mut self,
+        lane: usize,
+        predecessor: &Self,
+        predecessor_lane: usize,
+        continued_cells: u8,
+    ) -> bool {
         let adopted = predecessor
             .bank
             .export_lane(predecessor_lane)
@@ -1566,6 +3267,15 @@ impl FaderBankProcessor {
                 |reader| &mut reader.marks,
                 |reader| &reader.marks,
             );
+            if let Some(Some(automation)) = self.automation.get_mut(lane) {
+                automation.adopt(
+                    predecessor
+                        .automation
+                        .get(predecessor_lane)
+                        .and_then(Option::as_ref),
+                    continued_cells,
+                );
+            }
         }
         adopted
     }
@@ -1588,6 +3298,32 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     fn control_delivery(&self) -> BuiltinControlDelivery {
         self.control_delivery
     }
+    /// #1647a (R17-2): each automated lane keeps its member's `a(n)`.
+    fn set_input_arrivals(&mut self, arrivals: &[u64]) {
+        for (slot, &arrival) in self.automation.iter_mut().zip(arrivals) {
+            if let Some(slot) = slot {
+                slot.arrival = arrival;
+            }
+        }
+    }
+    // REALTIME_POLICY_BEGIN
+    /// #1647a (R17-3): each automated lane takes the block's node-time mapping
+    /// `timeline_block(r + ΣP - a(n))` and the fader row's jump length, resolved once from the
+    /// three lengths the graph holds through `LiveRamps`, which owns the row rule. A bank with no
+    /// automated lane keeps nothing and reads no timeline. Allocation-free; one timeline read per
+    /// automated lane.
+    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
+        if self.automation.is_empty() {
+            return;
+        }
+        let fader_jump = block_fader_jump(time);
+        for slot in self.automation.iter_mut().flatten() {
+            slot.take_block_time(time, fader_jump);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        test_only_record_fader_lane_times(&self.automation);
+    }
+    // REALTIME_POLICY_END
     // REALTIME_POLICY_BEGIN
     fn carried_strip_lanes(&self) -> Option<(BuiltinStripStage, usize)> {
         Some((BuiltinStripStage::Fader, self.bank.active_lanes()))
@@ -1616,12 +3352,15 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
         lane: usize,
         predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
         predecessor_lane: usize,
+        continued_cells: u8,
     ) -> bool {
         owner == BuiltinStripOwner::Fader
             && predecessor
                 .as_any_mut()
                 .and_then(|any| any.downcast_mut::<Self>())
-                .is_some_and(|predecessor| self.adopt_lane(lane, predecessor, predecessor_lane))
+                .is_some_and(|predecessor| {
+                    self.adopt_lane(lane, predecessor, predecessor_lane, continued_cells)
+                })
     }
 
     /// Issue #1277 D8: apply every pending cell value of the carried lanes with every revision,
@@ -1650,9 +3389,27 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
         frames: u32,
         first_sample: u64,
     ) -> Result<(), RenderError> {
-        let _ = first_sample;
-        let Self { bank, .. } = self;
-        bank.process(left, right, frames);
+        let Self {
+            bank, automation, ..
+        } = self;
+        if automation.is_empty() {
+            bank.process(left, right, frames);
+        } else {
+            // #1647 D1.3-D1.5: the automated lanes' events, through the stage's timed path.
+            let mut driver = FaderEventDriver::new(
+                automated_lanes(automation),
+                frames,
+                first_sample,
+                bank_hold(bank),
+            );
+            // A stop is unreachable: after `apply(offset)` every cursor has consumed its event and
+            // cut at `offset`, a piece's events rise strictly and a second piece starts at
+            // `E + 1`, so the next offset is above it. A stop (a broken source contract) fails the
+            // stage's own `debug_assert`; in release the block's rest renders with the gains held
+            // and `finish` advances every cell through the block, no panic.
+            let _ = bank.process_with(left, right, frames, &mut driver);
+            driver.finish();
+        }
         self.process_calls = self.process_calls.saturating_add(1);
         self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
         Ok(())
@@ -1677,6 +3434,56 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
         SeamSide::SeamSide
     }
 }
+
+// REALTIME_POLICY_BEGIN
+/// A fader bank's automated lanes, `(bank lane, automation)`, for [`FaderEventDriver::new`].
+fn automated_lanes(
+    automation: &mut [Option<LaneFaderAutomation>],
+) -> impl Iterator<Item = (usize, &mut LaneFaderAutomation)> {
+    automation
+        .iter_mut()
+        .enumerate()
+        .filter_map(|(lane, slot)| slot.as_mut().map(|slot| (lane, slot)))
+}
+
+/// The stage state of a fader bank's lane and channel after the block's live drain, for
+/// [`FaderEventDriver::new`] (#1647 D1.6).
+fn bank_hold(bank: &BuiltinFaderBank) -> impl Fn(usize, usize) -> Option<ChannelHold> + '_ {
+    |lane, channel| {
+        Some(ChannelHold {
+            held: bank.gain_held(lane, channel)?,
+            muted: bank.is_muted(lane, channel)?,
+            remaining: bank.ramp_remaining(lane, channel)?,
+            fader_gain: bank.fader_gain(lane, channel),
+        })
+    }
+}
+
+/// #1649 D3: each automated lane reads its offsets cells under the block's `snapshot` and jumps
+/// ([`LaneFaderAutomation::read_offsets`]). A lane with no control lane has no writer, so its
+/// cells stay as prepared; an adopted lane still settles its carried `S` (#1648 D2).
+fn read_fader_offsets(
+    bank: &mut BuiltinFaderBank,
+    controls: &[Option<FaderReader>],
+    automation: &mut [Option<LaneFaderAutomation>],
+    snapshot: LiveSnapshot,
+) {
+    for (lane, slot) in automated_lanes(automation) {
+        let superseded = controls
+            .get(lane)
+            .and_then(Option::as_ref)
+            .map(|reader| &reader.superseded);
+        slot.read_offsets(
+            snapshot,
+            superseded,
+            &mut BankLaneStage {
+                bank: &mut *bank,
+                lane,
+            },
+        );
+    }
+}
+// REALTIME_POLICY_END
 
 /// One strip matrix/pan bank and the live-control channels of its member lanes (issue #212).
 ///
@@ -1770,7 +3577,9 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
         lane: usize,
         predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
         predecessor_lane: usize,
+        continued_cells: u8,
     ) -> bool {
+        let _ = continued_cells;
         owner == BuiltinStripOwner::Matrix
             && predecessor
                 .as_any_mut()
@@ -2251,7 +4060,14 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
     fn control_delivery(&self) -> BuiltinControlDelivery {
         BuiltinControlDelivery::BetweenRenderCalls
     }
+    fn set_input_arrivals(&mut self, arrivals: &[u64]) {
+        self.fader.set_input_arrivals(arrivals);
+    }
     // REALTIME_POLICY_BEGIN
+    /// The fader stage's context (#1647a); the matrix stage takes none.
+    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
+        self.fader.set_block_time(time);
+    }
     fn carried_strip_lanes(&self) -> Option<(BuiltinStripStage, usize)> {
         Some((
             BuiltinStripStage::FaderMatrix,
@@ -2289,15 +4105,18 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
         lane: usize,
         predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
         predecessor_lane: usize,
+        continued_cells: u8,
     ) -> bool {
         predecessor
             .as_any_mut()
             .and_then(|any| any.downcast_mut::<Self>())
             .is_some_and(|predecessor| match owner {
-                BuiltinStripOwner::Fader => {
-                    self.fader
-                        .adopt_lane(lane, &predecessor.fader, predecessor_lane)
-                }
+                BuiltinStripOwner::Fader => self.fader.adopt_lane(
+                    lane,
+                    &predecessor.fader,
+                    predecessor_lane,
+                    continued_cells,
+                ),
                 BuiltinStripOwner::Matrix => {
                     self.matrix
                         .adopt_lane(lane, &predecessor.matrix, predecessor_lane)
@@ -2348,10 +4167,31 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
             value.set(counters);
         });
         let Self { fader, matrix } = self;
-        if !fader
-            .bank
-            .try_process_settled_with_matrix(&mut matrix.bank, left, right, frames)
-        {
+        let FaderBankProcessor {
+            bank, automation, ..
+        } = &mut **fader;
+        // #1647 D1.5: with stored automation the pair fuses only when no fader lane has an event
+        // in the block (the matrix half declines a ramping matrix itself); its fallback renders
+        // the events through the stage's timed path.
+        let mut driver = (!automation.is_empty()).then(|| {
+            FaderEventDriver::new(
+                automated_lanes(automation),
+                frames,
+                first_sample,
+                bank_hold(bank),
+            )
+        });
+        let fused = match driver.as_mut() {
+            None => bank.try_process_settled_with_matrix(&mut matrix.bank, left, right, frames),
+            Some(driver) => bank.try_process_settled_with_matrix_and_operations(
+                &mut matrix.bank,
+                left,
+                right,
+                frames,
+                driver,
+            ),
+        };
+        if !fused {
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_FALLBACK_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             #[cfg(any(test, feature = "test-support"))]
@@ -2360,8 +4200,19 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
                 counters[2] = counters[2].saturating_add(1);
                 value.set(counters);
             });
-            fader.bank.process(left, right, frames);
+            match driver.as_mut() {
+                None => {
+                    bank.process(left, right, frames);
+                }
+                Some(driver) => {
+                    // A stop is unreachable, and safe in release (see `FaderBankProcessor`).
+                    let _ = bank.process_with(left, right, frames, driver);
+                }
+            }
             matrix.bank.process(left, right, frames);
+            if let Some(driver) = driver.take() {
+                driver.finish();
+            }
         } else {
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_FUSED_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -2371,6 +4222,9 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
                 counters[1] = counters[1].saturating_add(1);
                 value.set(counters);
             });
+            if let Some(driver) = driver.take() {
+                driver.finish();
+            }
         }
         fader.process_calls = fader.process_calls.saturating_add(1);
         fader.frames_processed = fader.frames_processed.saturating_add(u64::from(frames));
@@ -2383,7 +4237,6 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
                 right.first().copied().unwrap_or(0.0).to_bits(),
             ]);
         });
-        let _ = first_sample;
         Ok(())
     }
     fn qualification_counters(&self) -> [u64; 2] {
@@ -2420,6 +4273,7 @@ impl TestOnlyFaderMatrixPair {
         let mut fader = FaderBankProcessor {
             bank: BuiltinFaderBank::new(Backend::Simd4, width, parameters).expect("fixture"),
             controls: (0..4).map(|_| None).collect(),
+            automation: Box::default(),
             process_calls: 0,
             frames_processed: 0,
             control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
@@ -3458,6 +5312,9 @@ impl PreparedBuiltinsSession {
         graph: PreparedGraphPlan,
         report: R,
     ) -> PreparedBuiltinsGraphArtifact<R> {
+        // #1646 D2: the scalar oracle rebuilds the ramped fader from the prepared parameters here.
+        // Defensive for direct oracle callers; `into_graph_artifact_with_banks` already holds it.
+        let _canonical = lane::CanonicalFpEnv::enter();
         let mut processors = core::mem::take(&mut self.processors);
         processors.append(&mut self.strip_bindings());
         PreparedBuiltinsGraphArtifact {
@@ -3488,7 +5345,13 @@ impl PreparedBuiltinsSession {
     fn strip_bindings(&mut self) -> Vec<graph::GraphNodeBinding> {
         let mut bindings = Vec::with_capacity(self.strips.len() * 3);
         let control_delivery = self.control_delivery;
+        let fader_automation = self.fader_automation.take();
         for strip in core::mem::take(&mut self.strips) {
+            // #1646 R17-4: the oracle installs the same lane automation as a fader bank lane.
+            let automation = fader_automation.as_ref().and_then(|plan| {
+                plan.strip(&strip.track_id)
+                    .map(|cells| Box::new(LaneFaderAutomation::new(&plan.program, cells)))
+            });
             let StripPreparation {
                 graph_id,
                 parameters,
@@ -3511,7 +5374,16 @@ impl PreparedBuiltinsSession {
             ) = match control {
                 None => (
                     Box::new(InputProcessor(input)),
-                    Box::new(FaderProcessor(fader)),
+                    match automation {
+                        // #1647b (R17-4): an automated strip binds the ramped fader, which takes
+                        // the events' timed operations.
+                        Some(automation) => Box::new(AutomatedFaderProcessor {
+                            fader: FaderMuteRampBuiltins::new(parameters)
+                                .expect("preparation validated the ramped fader's gain domain"),
+                            automation,
+                        }),
+                        None => Box::new(FaderProcessor(fader)),
+                    },
                     Box::new(MatrixProcessor(matrix)),
                 ),
                 Some(control) => {
@@ -3537,6 +5409,7 @@ impl PreparedBuiltinsSession {
                                 .fader
                                 .expect("a strip is banked on all three stages or on none"),
                             control_delivery,
+                            automation,
                             #[cfg(any(test, feature = "test-support"))]
                             test_only_owner,
                         }),
@@ -3599,13 +5472,81 @@ impl PreparedBuiltinsSession {
         let Some(width) = BankWidth::for_backend(dispatch) else {
             return Some(GraphBuiltinBankResourceEstimate::default());
         };
+        let plan = planned_strip_banks(&self.seal.tracks, dispatch, levels, classes);
+        self.strip_bank_resource(&plan, width)
+    }
+
+    /// The retained bytes of the strip banks of `plan` at `width`: each bank kind's processors,
+    /// members and scratch, and the stored fader automation lowering installs on the fader banks
+    /// (#1646 D4). The one sum the preflight and the lowering both take.
+    fn strip_bank_resource(
+        &self,
+        plan: &[(TrackStage, Vec<Box<[GraphNodeId]>>); 3],
+        width: BankWidth,
+    ) -> Option<GraphBuiltinBankResourceEstimate> {
         let mut total = GraphBuiltinBankResourceEstimate::default();
-        for (stage, groups) in planned_strip_banks(&self.seal.tracks, dispatch, levels, classes) {
-            let processor_bytes = strip_processor_bytes(stage, width)?;
-            let kind = builtin_bank_resource(&groups, width, self.seal.quantum, processor_bytes)?;
+        for (stage, groups) in plan {
+            let processor_bytes = strip_processor_bytes(*stage, width)?;
+            let kind = builtin_bank_resource(groups, width, self.seal.quantum, processor_bytes)?;
             total = add_bank_resource(total, kind)?;
         }
-        Some(total)
+        let fader_groups = plan
+            .iter()
+            .find(|(stage, _)| *stage == TrackStage::PostFader)
+            .map_or(&[][..], |(_, groups)| groups.as_slice());
+        add_bank_resource(
+            total,
+            self.fader_automation_bank_resource(fader_groups, width)?,
+        )
+    }
+
+    /// The stored fader automation the fader banks of `groups` retain (#1646 D4), as bank payload:
+    /// the program once (its shared allocation and the builder's report), one lane slot per bank
+    /// lane of each bank with an automated member, and one offsets cell per automated channel.
+    /// Nothing when no member is automated.
+    fn fader_automation_bank_resource(
+        &self,
+        groups: &[Box<[GraphNodeId]>],
+        width: BankWidth,
+    ) -> Option<GraphBuiltinBankResourceEstimate> {
+        let none = GraphBuiltinBankResourceEstimate::default();
+        let Some(automation) = &self.fader_automation else {
+            return Some(none);
+        };
+        let sizes = fader_automation_sizes();
+        let slots_per_bank = sizes
+            .lane_slot_bytes
+            .checked_mul(u64::from(width.lanes()))?;
+        let mut payload_bytes = 0_u64;
+        for members in groups {
+            let channels =
+                automation.automated_channels(members.iter().filter_map(
+                    |member| match member {
+                        GraphNodeId::TrackStage { track_id, .. } => Some(track_id.as_str()),
+                        _ => None,
+                    },
+                ))?;
+            if channels == 0 {
+                continue;
+            }
+            payload_bytes = payload_bytes
+                .checked_add(slots_per_bank)?
+                .checked_add(sizes.offsets_cell_bytes.checked_mul(channels)?)?;
+        }
+        if payload_bytes == 0 {
+            return Some(none);
+        }
+        let program_bytes = automation.retained_program_bytes()?;
+        Some(GraphBuiltinBankResourceEstimate {
+            payload_bytes: payload_bytes.checked_add(program_bytes)?,
+            // A ceiling on the largest single allocation: the program's arrays are each within its
+            // report.
+            largest_allocation_bytes: slots_per_bank
+                .max(sizes.offsets_cell_bytes)
+                .max(sizes.program_overhead_bytes)
+                .max(automation.program_bytes),
+            ..none
+        })
     }
 
     /// Exact pre-bind charge for live scalar owners. Vector backends consume every strip into
@@ -3665,20 +5606,56 @@ impl PreparedBuiltinsSession {
         } else {
             graph::GraphScalarSplitRuntimeResourceEstimate::default()
         };
+        // #1646 D4 (R17-4): the stored fader automation an unbanked strip's fader owner holds,
+        // boxed, with its offsets cells, and the program once.
+        let (automation_bytes, automation_largest) = match &self.fader_automation {
+            None => (0, 0),
+            Some(plan) => {
+                let sizes = fader_automation_sizes();
+                let lane = u64::try_from(core::mem::size_of::<LaneFaderAutomation>()).ok()?;
+                let unbanked = self
+                    .strips
+                    .iter()
+                    .filter(|strip| !banked.contains(&strip.track_id))
+                    .map(|strip| strip.track_id.as_ref());
+                let strips = u64::try_from(
+                    unbanked
+                        .clone()
+                        .filter(|track| plan.strip(track).is_some())
+                        .count(),
+                )
+                .ok()?;
+                let channels = plan.automated_channels(unbanked)?;
+                if strips == 0 {
+                    (0, 0)
+                } else {
+                    (
+                        lane.checked_mul(strips)?
+                            .checked_add(sizes.offsets_cell_bytes.checked_mul(channels)?)?
+                            .checked_add(plan.retained_program_bytes()?)?,
+                        lane.max(sizes.offsets_cell_bytes)
+                            .max(sizes.program_overhead_bytes)
+                            .max(plan.program_bytes),
+                    )
+                }
+            }
+        };
         // This owner term adds only the distinct boxed split table. The containing runtime owner
         // and the per-op split-slot layout are admitted once by the graph compiler.
         let total_bytes = owners
             .checked_add(outer_total)?
-            .checked_add(split_runtime.split_pair_table_bytes)?;
+            .checked_add(split_runtime.split_pair_table_bytes)?
+            .checked_add(automation_bytes)?;
         Some(graph::GraphScalarOwnerResourceEstimate {
             total_bytes,
             largest_allocation_bytes: if count == 0 {
-                0
+                automation_largest
             } else {
                 fader
                     .max(matrix)
                     .max(if outer_total == 0 { 0 } else { outer })
                     .max(split_runtime.split_pair_table_bytes)
+                    .max(automation_largest)
             },
             split_pair_table_bytes: split_runtime.split_pair_table_bytes,
         })
@@ -3740,6 +5717,9 @@ impl PreparedBuiltinsSession {
         levels: &[DependencyLevel],
         classes: &SessionPoolClasses,
     ) -> PreparedBuiltinsGraphArtifact<R> {
+        // #1646 D2: the banks bake each lane's prepared fader gain and input coefficients here, so
+        // lowering runs in the canonical floating-point environment, as preparation does.
+        let _canonical = lane::CanonicalFpEnv::enter();
         let Some(width) = BankWidth::for_backend(dispatch) else {
             #[cfg(any(test, feature = "test-support"))]
             return self.into_graph_artifact(graph, report);
@@ -3762,18 +5742,11 @@ impl PreparedBuiltinsSession {
                 meter_consumers: self.meter_consumers,
             };
         }
-        let mut resource = GraphBuiltinBankResourceEstimate::default();
-        for (stage, groups) in &plan {
-            let kind = builtin_bank_resource(
-                groups,
-                width,
-                self.seal.quantum,
-                strip_processor_bytes(*stage, width).expect("bankable stage"),
-            )
+        let resource = self
+            .strip_bank_resource(&plan, width)
             .expect("preflighted builtin-bank resource");
-            resource =
-                add_bank_resource(resource, kind).expect("preflighted builtin-bank resource");
-        }
+        // Borrowed: a strip no bank claims keeps its automation for the scalar oracle's bindings.
+        let fader_automation = &self.fader_automation;
 
         let mut bank_inputs: BTreeMap<Box<str>, InputBuiltins> =
             core::mem::take(&mut self.bank_inputs).into_iter().collect();
@@ -3842,10 +5815,30 @@ impl PreparedBuiltinsSession {
                                 .and_then(|control| control.fader.take());
                             claimed_fader.insert(strip.track_id.clone());
                         }
+                        // #1646 D1: one slot per bank lane when a member's fader is automated,
+                        // charged by `fader_automation_bank_resource`.
+                        let automation: Box<[Option<LaneFaderAutomation>]> =
+                            match fader_automation.as_ref() {
+                                Some(plan)
+                                    if members
+                                        .iter()
+                                        .any(|member| plan.strip(track_of(member)).is_some()) =>
+                                {
+                                    (0..lanes)
+                                        .map(|lane| {
+                                            let track = members.get(lane).map(track_of)?;
+                                            let cells = plan.strip(track)?;
+                                            Some(LaneFaderAutomation::new(&plan.program, cells))
+                                        })
+                                        .collect()
+                                }
+                                _ => Box::default(),
+                            };
                         Box::new(FaderBankProcessor {
                             bank: BuiltinFaderBank::new(dispatch, width, parameters)
                                 .expect("planner emits 1..=W members at the selected width"),
                             controls: controls.into_boxed_slice(),
+                            automation,
                             process_calls: 0,
                             frames_processed: 0,
                             control_delivery: self.control_delivery,
@@ -4114,6 +6107,23 @@ fn restore_graph_bind_failure<R>(
 }
 
 impl<R> PreparedBuiltinsGraphArtifact<R> {
+    /// Give each builtin bank its members' floored input arrivals `a(n)` (#1647a, R17-2), from
+    /// `GraphCompileReport::input_arrivals`. The graph compiler's one call at the end of
+    /// `compile_with_builtins`; it changes nothing but what the banks hold of `a(n)`. Off the
+    /// render thread.
+    #[doc(hidden)]
+    pub fn install_builtin_input_arrivals(
+        &mut self,
+        arrivals: &[(GraphNodeId, effect_contract::LatencySamples)],
+    ) {
+        self.graph.install_builtin_input_arrivals(arrivals);
+        // #1647b (R17-4): the scalar oracle's bound fader owners take their node's `a(n)` by the
+        // same lookup.
+        for binding in &mut self.builtin_processors {
+            let arrival = graph::floored_input_arrival(arrivals, &binding.node);
+            binding.set_input_arrival(arrival);
+        }
+    }
     /// Immutable caller-owned graph report.
     #[must_use]
     /// The sealed graph, by shared reference.
@@ -4507,10 +6517,14 @@ pub fn prepare_session_builtins(
     requests: &[MeterRequest],
     caps: BuiltinCompileCaps,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
-    let effective = controls::effective(
-        session.normalized_model(),
-        &controls::MonitorOverlay::default(),
-    );
+    // #1646 D2: the effective values are composed in the canonical floating-point environment.
+    let effective = {
+        let _canonical = lane::CanonicalFpEnv::enter();
+        controls::effective(
+            session.normalized_model(),
+            &controls::MonitorOverlay::default(),
+        )
+    };
     prepare_session_builtins_with_live_controls(session, &effective, requests, &[], caps)
 }
 
@@ -4637,6 +6651,13 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     caps: BuiltinCompileCaps,
     control_delivery: BuiltinControlDelivery,
 ) -> Result<PreparedBuiltinsSession, BuiltinDiagnosticSet> {
+    // #1646 D2: every curve evaluation and conversion of preparation runs in the canonical
+    // floating-point environment, as render's do. The whole body is held so a strip's prepared
+    // fader (automated or static) and its input coefficients are computed under one environment,
+    // whatever the caller's thread has set: a flat automated lane bakes the bits a static fader
+    // bakes by construction. The lowerings hold their own (`into_graph_artifact_with_banks`,
+    // `into_graph_artifact`).
+    let _canonical = lane::CanonicalFpEnv::enter();
     let mut diagnostics = Vec::new();
     if [
         caps.maximum_total_state_bytes,
@@ -4747,6 +6768,18 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     if !diagnostics.is_empty() {
         return Err(BuiltinDiagnosticSet::sorted(diagnostics));
     }
+    // #1646 D1, D2: every form compiles the stored fader automation here, before phase two (its
+    // program and cells are graph plan payload, charged by the bank estimate, D4).
+    let fader_automation = prepare_fader_automation(session, effective)
+        .map_err(|diagnostic| BuiltinDiagnosticSet::sorted(vec![diagnostic]))?;
+    // The fader each strip prepares: its effective fader, and on an automated lane the lane's
+    // prepared value composed with its `S` (D2).
+    let prepared_fader = |strip: &StripRef<'_>, fader: &controls::EffectiveStrip| {
+        let fader_db = fader_automation.as_ref().map_or(fader.fader_db, |plan| {
+            plan.fader_db(strip.id.as_str(), fader.fader_db)
+        });
+        (fader_db, fader.mute)
+    };
     let resources = resource_plan.expect("validated resource plan").report;
     // #1242 D2, decision 17 C7: lowering bakes each strip's effective fader and mute, which the
     // caller computed (strip `i` is entry `i`).
@@ -4786,7 +6819,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
             .map(|(strip, fader)| {
                 strip_parameters(
                     &strip,
-                    (fader.fader_db, fader.mute),
+                    prepared_fader(&strip, fader),
                     caps.maximum_smoothing_samples,
                 )
                 .expect("preflighted parameters")
@@ -4813,9 +6846,11 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     let mut track_controls = Vec::with_capacity(controls.len());
     let mut control_seal: Vec<(Box<str>, bool)> = Vec::with_capacity(controls.len());
     for (strip, fader) in session.normalized_model().strips().zip(effective_faders) {
+        // An automated lane's prepared value is in the fader domain: `vca_compose_db` clamps and
+        // `prepare_fader_automation` checked its gain.
         let parameters = strip_parameters(
             &strip,
-            (fader.fader_db, fader.mute),
+            prepared_fader(&strip, fader),
             caps.maximum_smoothing_samples,
         )
         .expect("preflighted parameters");
@@ -4844,7 +6879,14 @@ fn prepare_session_builtins_with_live_controls_and_policy(
             None => None,
             Some(&(input_lane, superseded)) => {
                 let (producer, control) = matrix_lane(superseded);
-                let (fader_producer, fader_control) = fader_lane(superseded);
+                let (mut fader_producer, fader_control) = fader_lane(superseded);
+                // #1649 D4: the strip's offsets cells' write ends, charged by `resource_plan`.
+                if let Some(cells) = fader_automation
+                    .as_ref()
+                    .and_then(|plan| plan.strip(strip.id.as_str()))
+                {
+                    fader_producer.attach_offsets(cells);
+                }
                 let (input_producer, input_control) = if input_lane {
                     let (cells, reader) = input_lane_cells(superseded);
                     (Some(cells), Some(reader))
@@ -4962,6 +7004,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         requests: request_seals,
         resources,
         route_follow: effective.routes.iter().map(|route| route.follow).collect(),
+        fader_automation,
     })
 }
 
@@ -5027,11 +7070,32 @@ fn resource_plan(
     // its seal, and one bounded ring per requested track.
     add_vector_layout::<TrackControlProducer>(&mut processor, controls.len())?;
     add_vector_layout::<(Box<str>, bool)>(&mut processor, controls.len())?;
+    // #1649 D4: the strips whose fader automation gives their producer offsets-cell writers (the
+    // rule `prepare_fader_automation` and `FaderCells::attach_offsets` follow). Transient.
+    let model = session.normalized_model();
+    let automated: BTreeSet<&str> = if model.automation.is_empty() {
+        BTreeSet::new()
+    } else {
+        model
+            .strips()
+            .filter(|strip| {
+                controls::fader_automation(model, strip.id)
+                    .iter()
+                    .any(Option::is_some)
+            })
+            .map(|strip| strip.id.as_str())
+            .collect()
+    };
     for control in controls {
         // #1312 D5, #1346 D6: every lane is a latest-target cell set, one `Arc` allocation each,
         // charged by the allocation's own layout. The input lane's is charged when requested
-        // (#1254 D1).
+        // (#1254 D1). A strip with stored fader automation also holds its offsets cells' write
+        // ends, one box (#1649 D4); the cells themselves are bank payload (#1646 D4).
         for (present, layout) in [
+            (
+                automated.contains(control.track_id.as_str()),
+                core::alloc::Layout::new::<[Option<OffsetsWriter>; 2]>(),
+            ),
             (
                 true,
                 core::alloc::Layout::new::<SharedAllocation<MatrixLane>>(),
@@ -5424,6 +7488,80 @@ impl GraphRuntimeProcessor for FaderProcessor {
         SEAM_SIDE_WITNESS
     }
 }
+
+/// The scalar oracle's fader of a strip with stored fader automation and no live control
+/// (#1647b, R17-4, #1646b departure 5): the ramped fader, which takes timed operations, driven by
+/// the one event driver the fader bank uses. [`FaderProcessor`] wraps the unramped fader, which
+/// takes none, so an automated strip binds this instead.
+#[cfg(any(test, feature = "test-support"))]
+struct AutomatedFaderProcessor {
+    fader: FaderMuteRampBuiltins,
+    /// The strip's stored fader automation (#1646 D1), boxed as on the live-control owner.
+    automation: Box<LaneFaderAutomation>,
+}
+#[cfg(any(test, feature = "test-support"))]
+impl GraphRuntimeProcessor for AutomatedFaderProcessor {
+    fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        render_oracle_fader(
+            &mut self.fader,
+            Some(&mut self.automation),
+            block.left,
+            block.right,
+            block.first_sample,
+        )
+    }
+    fn set_input_arrival(&mut self, arrival: u64) {
+        self.automation.arrival = arrival;
+    }
+    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
+        self.automation
+            .take_block_time(time, block_fader_jump(time));
+    }
+    fn channel_symmetry(&self) -> ChannelSymmetryWitness {
+        SEAM_SIDE_WITNESS
+    }
+}
+
+// REALTIME_POLICY_BEGIN
+/// The scalar oracle's fader render (#1647b, R17-4): with stored automation, the block's events
+/// through the one event driver into the ramped fader's timed path, exactly as a fader bank lane
+/// renders them; without, the plain block.
+#[cfg(any(test, feature = "test-support"))]
+fn render_oracle_fader(
+    fader: &mut FaderMuteRampBuiltins,
+    automation: Option<&mut LaneFaderAutomation>,
+    left: &mut [f32],
+    right: &mut [f32],
+    first_sample: u64,
+) -> Result<(), RenderError> {
+    let frames = u32::try_from(left.len()).unwrap_or(u32::MAX);
+    let block = DualMonoBlock::new(left, right, first_sample).map_err(render_error)?;
+    match automation {
+        None => {
+            fader.process(block);
+        }
+        Some(automation) => {
+            let mut driver = FaderEventDriver::new(
+                core::iter::once((0, &mut *automation)),
+                frames,
+                first_sample,
+                |_, channel| {
+                    Some(ChannelHold {
+                        held: fader.gain_held(channel)?,
+                        muted: fader.is_muted(channel),
+                        remaining: fader.ramp_remaining(channel)?,
+                        fader_gain: None,
+                    })
+                },
+            );
+            // A stop is unreachable, and safe in release (see `FaderBankProcessor`).
+            let _ = fader.process_with(block, &mut driver);
+            driver.finish();
+        }
+    }
+    Ok(())
+}
+// REALTIME_POLICY_END
 #[cfg(any(test, feature = "test-support"))]
 struct MatrixProcessor(MatrixBuiltins);
 #[cfg(any(test, feature = "test-support"))]
@@ -5598,6 +7736,8 @@ struct LiveControlFaderProcessor {
     fader: FaderMuteRampBuiltins,
     control: FaderReader,
     control_delivery: BuiltinControlDelivery,
+    /// The strip's stored fader automation (#1646 D1, R17-4): the bank's event driver, per strip.
+    automation: Option<Box<LaneFaderAutomation>>,
     #[cfg(any(test, feature = "test-support"))]
     test_only_owner: u16,
 }
@@ -5618,12 +7758,26 @@ impl GraphRuntimeProcessor for LiveControlFaderProcessor {
             #[cfg(any(test, feature = "test-support"))]
             record_scalar_fader_state(self.test_only_owner, &self.fader);
         })?;
-        let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
-            .map_err(render_error)?;
-        self.fader.process(block);
+        render_oracle_fader(
+            &mut self.fader,
+            self.automation.as_deref_mut(),
+            block.left,
+            block.right,
+            block.first_sample,
+        )?;
         #[cfg(any(test, feature = "test-support"))]
         record_scalar_fader_state(self.test_only_owner, &self.fader);
         Ok(())
+    }
+    fn set_input_arrival(&mut self, arrival: u64) {
+        if let Some(automation) = self.automation.as_deref_mut() {
+            automation.arrival = arrival;
+        }
+    }
+    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
+        if let Some(automation) = self.automation.as_deref_mut() {
+            automation.take_block_time(time, block_fader_jump(time));
+        }
     }
     fn scalar_pair_factory(&self) -> Option<graph::ScalarPairFactory> {
         (self.control_delivery == BuiltinControlDelivery::BetweenRenderCalls)
@@ -5640,7 +7794,8 @@ impl LiveControlFaderProcessor {
     /// The fader and mute cells' drain under the block's `snapshot` (#1312 D12).
     fn drain_controls(&mut self, snapshot: LiveSnapshot) -> Result<(), RenderError> {
         let fader = &mut self.fader;
-        self.control
+        let result = self
+            .control
             .apply_latest(snapshot, |kind, lanes, words| {
                 #[cfg(any(test, feature = "test-support"))]
                 FADER_MATRIX_LIVE_WITNESS.with(|value| {
@@ -5658,7 +7813,12 @@ impl LiveControlFaderProcessor {
                     }
                 }
             })
-            .map_err(render_error)
+            .map_err(render_error);
+        if let Some(automation) = self.automation.as_deref_mut() {
+            // #1649 D3: the offsets cells, after the drain, as the fader bank reads them.
+            automation.read_offsets(snapshot, Some(&self.control.superseded), &mut self.fader);
+        }
+        result
     }
 
     /// Apply every pending value, whatever its revision (#1312 D6): the block drain with
@@ -5695,6 +7855,12 @@ impl Drop for ScalarPairProcessor {
 
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for ScalarPairProcessor {
+    fn set_input_arrival(&mut self, arrival: u64) {
+        self.fader.set_input_arrival(arrival);
+    }
+    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
+        self.fader.set_block_time(time);
+    }
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         #[cfg(any(test, feature = "test-support"))]
         FADER_MATRIX_LIVE_WITNESS.with(|value| {
@@ -5719,6 +7885,7 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
         })?;
         // Preserve the original fader boundary: its queue is drained before the envelope is
         // checked, and an invalid envelope stops before the later matrix owner consumes anything.
+        let automated = self.fader.automation.is_some();
         let fused = {
             let mut fused_block =
                 DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?;
@@ -5726,7 +7893,17 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
             if let Some(error) = matrix_error {
                 // Preserve the original failure order: the fader arithmetic completes even when
                 // a later matrix command is invalid.
-                self.fader.fader.process(fused_block);
+                if automated {
+                    render_oracle_fader(
+                        &mut self.fader.fader,
+                        self.fader.automation.as_deref_mut(),
+                        &mut *left,
+                        &mut *right,
+                        first_sample,
+                    )?;
+                } else {
+                    self.fader.fader.process(fused_block);
+                }
                 #[cfg(any(test, feature = "test-support"))]
                 record_scalar_state(
                     self.fader.test_only_owner,
@@ -5735,9 +7912,12 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
                 );
                 return Err(error);
             }
-            self.fader
-                .fader
-                .process_fader_matrix(&mut self.matrix.matrix, &mut fused_block)
+            // #1647 D1.5: an automated fader renders its events on the two-stage path.
+            !automated
+                && self
+                    .fader
+                    .fader
+                    .process_fader_matrix(&mut self.matrix.matrix, &mut fused_block)
         };
         if fused {
             #[cfg(any(test, feature = "test-support"))]
@@ -5767,9 +7947,13 @@ impl GraphRuntimeProcessor for ScalarPairProcessor {
             counters[2] = counters[2].saturating_add(1);
             value.set(counters);
         });
-        self.fader.fader.process(
-            DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?,
-        );
+        render_oracle_fader(
+            &mut self.fader.fader,
+            self.fader.automation.as_deref_mut(),
+            &mut *left,
+            &mut *right,
+            first_sample,
+        )?;
         self.matrix.matrix.process(
             DualMonoBlock::new(&mut *left, &mut *right, first_sample).map_err(render_error)?,
         );
@@ -5824,6 +8008,9 @@ impl Drop for ScalarSplitPairProcessor {
 
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeSplitPairProcessor for ScalarSplitPairProcessor {
+    fn set_block_time(&mut self, time: &GraphBlockTime<'_>) {
+        self.fader.set_block_time(time);
+    }
     fn begin_fader(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         #[cfg(any(test, feature = "test-support"))]
         FADER_MATRIX_PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -5853,18 +8040,29 @@ impl GraphRuntimeSplitPairProcessor for ScalarSplitPairProcessor {
         // Validate the envelope before recording deferred state. A malformed fader block must
         // leave the later matrix consumer untouched and cannot leave a completion to run after
         // the graph has already returned the original error.
-        let block = DualMonoBlock::new(left, right, first_sample).map_err(render_error)?;
-        if self.fader.fader.is_settled() {
-            self.pending_fader = true;
-            #[cfg(any(test, feature = "test-support"))]
-            record_scalar_state(
-                self.fader.test_only_owner,
-                &self.fader.fader,
-                &self.matrix.matrix,
-            );
-            return Ok(());
+        if self.fader.automation.is_some() {
+            // #1647 D1.5: an automated fader never defers; its events render now.
+            render_oracle_fader(
+                &mut self.fader.fader,
+                self.fader.automation.as_deref_mut(),
+                left,
+                right,
+                first_sample,
+            )?;
+        } else {
+            let block = DualMonoBlock::new(left, right, first_sample).map_err(render_error)?;
+            if self.fader.fader.is_settled() {
+                self.pending_fader = true;
+                #[cfg(any(test, feature = "test-support"))]
+                record_scalar_state(
+                    self.fader.test_only_owner,
+                    &self.fader.fader,
+                    &self.matrix.matrix,
+                );
+                return Ok(());
+            }
+            self.fader.fader.process(block);
         }
-        self.fader.fader.process(block);
         self.pending_fader = false;
         #[cfg(any(test, feature = "test-support"))]
         record_scalar_state(
@@ -11244,6 +13442,7 @@ mod tests {
                     controls: core::iter::once(Some(fader_rx))
                         .chain((1..width.lanes()).map(|_| None))
                         .collect(),
+                    automation: Box::default(),
                     process_calls: 0,
                     frames_processed: 0,
                     control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
@@ -11698,6 +13897,7 @@ mod tests {
                 controls: core::iter::once(Some(reader))
                     .chain((1..4).map(|_| None))
                     .collect(),
+                automation: Box::default(),
                 process_calls: 0,
                 frames_processed: 0,
                 control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
@@ -11754,6 +13954,7 @@ mod tests {
             controls: core::iter::once(Some(reader))
                 .chain((1..width.lanes()).map(|_| None))
                 .collect(),
+            automation: Box::default(),
             process_calls: 0,
             frames_processed: 0,
             control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
@@ -11931,6 +14132,7 @@ mod tests {
                 fader: FaderMuteRampBuiltins::new(parameters).expect("fader"),
                 control: fader_rx,
                 control_delivery: fader_delivery,
+                automation: None,
                 #[cfg(any(test, feature = "test-support"))]
                 test_only_owner: u16::MAX,
             }),
@@ -13038,7 +15240,8 @@ mod tests {
         );
         let fader_fields = core::mem::size_of::<FaderMuteRampBuiltins>()
             + core::mem::size_of::<FaderReader>()
-            + core::mem::size_of::<BuiltinControlDelivery>();
+            + core::mem::size_of::<BuiltinControlDelivery>()
+            + core::mem::size_of::<Option<Box<LaneFaderAutomation>>>();
         let matrix_fields = core::mem::size_of::<MatrixBuiltins>()
             + core::mem::size_of::<MatrixReader>()
             + core::mem::size_of::<BuiltinControlDelivery>();
@@ -13112,6 +15315,91 @@ mod tests {
             graph::GraphScalarOwnerResourceEstimate::default(),
             "planned banks consume both controlled post-fader and post-matrix owners"
         );
+    }
+
+    /// #1646 D4 (R17-4): the scalar oracle's owner row charges one automated fader lane exactly:
+    /// the boxed `LaneFaderAutomation` its strip's fader owner holds, one offsets cell, and the
+    /// program once (its shared allocation and the builder's byte report).
+    ///
+    /// Test value: red if the scalar owner row drops or double-counts any term of the stored
+    /// fader automation (the boxed slot, the offsets cell or the program), which no vector-bank
+    /// test sees because a vector dispatch leaves no scalar owner.
+    #[test]
+    fn the_scalar_owner_row_charges_one_automated_fader_lane() {
+        let plain = n_track_session(3);
+        let mut model = plain.normalized_model().clone();
+        let entry = session::Automation {
+            id: session::StableId::parse("fader-t01").expect("id"),
+            target: session::ControlAddress {
+                owner: session::Owner::Strip(
+                    session::StableId::parse(&track_name(1)).expect("track"),
+                ),
+                section: session::Section::Builtins,
+                control: 5,
+                lane: session::ParameterChannel::Left,
+            },
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 4_096,
+                start_value: -6.5,
+                end_value: -2.0,
+                unit: session::ParameterUnit::Db,
+            }],
+            offset: session::AutomationOffset::default(),
+        };
+        let segments = controls::stored_segments(&entry);
+        model.automation = vec![entry];
+        let automated = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("the automated session compiles");
+        let controls = (0..3)
+            .map(|index| TrackControlRequest {
+                track_id: track_name(index),
+                superseded: LiveValuesSuperseded::default(),
+                input_lane: false,
+            })
+            .collect::<Vec<_>>();
+        let (_, levels) = track_graph(3);
+        let scalar = |compiled: &CompiledSession| {
+            let classes = SessionPoolClasses::from_session(compiled);
+            prepare_session_builtins_between_render_calls(
+                compiled,
+                &effective_of(compiled),
+                &[],
+                &controls,
+                caps(),
+            )
+            .expect("scalar owners")
+            .graph_scalar_owner_resource(Backend::Scalar, &levels, &classes)
+            .expect("checked scalar estimate")
+        };
+        let without = scalar(&plain);
+        let with = scalar(&automated);
+        let sizes = fader_automation_sizes();
+        let program =
+            automation::ProgramBuilder::bytes(&[controls::FADER_CELL_RULE.describe(&segments)]);
+        assert!(program > 0, "the program holds the segment");
+        let slot = core::mem::size_of::<LaneFaderAutomation>() as u64;
+        assert_eq!(
+            with.total_bytes - without.total_bytes,
+            slot + sizes.offsets_cell_bytes + sizes.program_overhead_bytes + program,
+            "one boxed slot, one offsets cell and the program, once"
+        );
+        assert_eq!(
+            with.split_pair_table_bytes, without.split_pair_table_bytes,
+            "the automation adds no split table entry"
+        );
+        assert!(with.largest_allocation_bytes >= slot.max(sizes.offsets_cell_bytes).max(program));
     }
 
     struct HarnessSink;
@@ -15016,6 +17304,7 @@ mod tests {
                 bank: BuiltinFaderBank::new(backend, width, parameters.clone())
                     .expect("fader bank"),
                 controls,
+                automation: Box::default(),
                 process_calls: 0,
                 frames_processed: 0,
                 control_delivery: BuiltinControlDelivery::BetweenRenderCalls,

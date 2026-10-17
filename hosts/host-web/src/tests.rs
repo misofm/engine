@@ -152,7 +152,7 @@ fn maximum_document_with_dense_invalid_automation() -> DenseInvalidAutomationDoc
     const EMPTY_AUTOMATION: &str = "\"automation\": []";
     const HEADER: &str = r#""automation": [{"id":"dense-invalid","target":{"owner":"strip","owner_id":"track","section":"builtins","control":5,"lane":"both"},"segments":["#;
     const INVALID_SEGMENT: &str = "{\"shape\":\"step\",\"start_sample\":\"0\",\"end_sample\":\"0\",\"start_value\":0.0,\"end_value\":0.0,\"unit\":\"db\"}";
-    const FOOTER: &str = "]}]";
+    const FOOTER: &str = r#"],"offset":{"left_db":0.0,"right_db":0.0}}]"#;
 
     let (before, after) = BASE
         .split_once(EMPTY_AUTOMATION)
@@ -9966,5 +9966,530 @@ mod session_seek {
         assert_eq!(rig.landed(LONG), (2, swap, 3_000));
         assert_eq!(rig.landed(ADDED), (2, swap, 3_000));
         assert_eq!(rig.timeline(swap), 3_000);
+    }
+
+    /// `one_source()` with track `0`'s fader on a ride (`automated`): `0` dB before timeline
+    /// 2,000 and `-9` dB from it on; or, as the reference, its static fader at `-9` dB.
+    fn seek_ride(automated: bool) -> SessionModel {
+        let mut model = one_source();
+        if automated {
+            model.automation = vec![session::Automation {
+                id: StableId::parse("ride").expect("automation ID"),
+                target: session::ControlAddress {
+                    owner: session::Owner::Strip(model.tracks[0].id.clone()),
+                    section: session::Section::Builtins,
+                    control: 5,
+                    lane: session::ParameterChannel::Both,
+                },
+                segments: vec![session::AutomationSegment {
+                    shape: session::AutomationShape::Step,
+                    start_sample: 0,
+                    end_sample: 2_000,
+                    start_value: 0.0,
+                    end_value: -9.0,
+                    unit: session::ParameterUnit::Db,
+                }],
+                offset: session::AutomationOffset::default(),
+            }];
+        } else {
+            let fader = &mut model.tracks[0].fader;
+            (fader.left_db, fader.right_db) = (-9.0, -9.0);
+        }
+        model
+    }
+
+    /// Boot the ride, seek to timeline 6,000 through `miso_engine_web_v1_session_seek` after the
+    /// four primed blocks, and render six blocks of generation 2: the blocks before and from the
+    /// seek, and the render sample the seek applied at.
+    fn seek_ride_blocks(automated: bool) -> (Vec<Vec<u32>>, u64) {
+        let mut rig = Rig::boot(&seek_ride(automated), &[LONG]);
+        rig.feed(1, rig.next());
+        let mut blocks = vec![rig.render()];
+        assert_eq!(
+            miso_engine_web_v1_session_seek(rig.handle, 2, 6_000),
+            RESULT_OK
+        );
+        for step in 0..6 {
+            rig.feed(2, 6_000 + step * Q);
+            blocks.push(rig.render());
+        }
+        let (generation, first, frame) = rig.landed(LONG);
+        assert_eq!((generation, frame), (2, 6_000));
+        (blocks, first)
+    }
+
+    /// #1647 gate 4, the browser leg (decision 17 C1): after `miso_engine_web_v1_session_seek` to
+    /// a timeline where the ride is flat at `-9` dB, the automated fader renders the static `-9`
+    /// dB fader's bits from the block the seek applied at, with no ramp, and the `0` dB of the
+    /// ride's start before it: the same core seek as `miso_engine_v1_session_seek`.
+    ///
+    /// Test value: red if the browser's seek ramps an automated lane, lands it at another block,
+    /// or reaches the fader without moving it.
+    #[test]
+    fn a_session_seek_sets_an_automated_fader_exactly_in_the_browser() {
+        let (automated, r) = seek_ride_blocks(true);
+        let (reference, reference_r) = seek_ride_blocks(false);
+        assert_eq!(r, reference_r);
+        assert_eq!(r, 5 * Q, "the seek applies at the block after it");
+        assert_ne!(automated[0], reference[0], "the ride starts at 0 dB");
+        assert_eq!(
+            automated[1..],
+            reference[1..],
+            "the static fader's bits from r"
+        );
+    }
+}
+
+/// #1646 gate 1 (browser): the parity fixture's first three tracks, with empty console sections,
+/// no inserts and the input filters off, so the static fader is the one value a case moves.
+fn flat_fader_base() -> session::SessionModel {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+    ))
+    .expect("accepted nine-track fixture");
+    model.tracks.truncate(3);
+    model.routes.truncate(3);
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    for track in &mut model.tracks {
+        track.console.clear();
+        track.inserts.effects.clear();
+        for builtins in [&mut track.builtins.left, &mut track.builtins.right] {
+            builtins.hpf_hz = 0.0;
+            builtins.lpf_hz = 0.0;
+        }
+    }
+    model
+}
+
+/// A VCA `id` at `offset` dB on both lanes, holding the tracks `members`.
+fn flat_fader_vca(
+    model: &session::SessionModel,
+    id: &str,
+    offset: f32,
+    members: &[usize],
+) -> session::Vca {
+    session::Vca {
+        id: session::StableId::parse(id).expect("VCA ID"),
+        fader: session::DualMonoFader {
+            left_db: offset,
+            right_db: offset,
+            left_mute: false,
+            right_mute: false,
+        },
+        members: members
+            .iter()
+            .map(|track| model.tracks[*track].id.clone())
+            .collect(),
+    }
+}
+
+/// One VCA of a gate 1 case: its ID, its offset in dB and the tracks it holds.
+type FlatFaderVca<'a> = (&'a str, f32, &'a [usize]);
+
+/// `(label, automated, reference)`: the automated session holds a `both` flat fader automation
+/// at `value` on `track`, whose static fader is `static_db`; the reference holds the static fader
+/// at `value` and no automation. The four cases are the C ABI's gate 1 cases
+/// (`crates/capi/src/runtime/tests.rs`, `flat_fader_cases`).
+fn flat_fader_sessions() -> Vec<(&'static str, session::SessionModel, session::SessionModel)> {
+    let crafted_offsets = [0xc1af_fc6c, 24.0_f32.to_bits(), 0x2624_8cd2].map(f32::from_bits);
+    let crafted = f32::from_bits(0x405a_f905);
+    let cases: [(&str, usize, f32, f32, &[FlatFaderVca]); 4] = [
+        ("no VCA", 0, -7.25, 0.0, &[]),
+        ("one +3 dB VCA", 1, -7.25, 0.0, &[("v-plus", 3.0, &[1])]),
+        (
+            "three VCAs, crafted",
+            1,
+            crafted,
+            0.0,
+            &[
+                ("va", crafted_offsets[0], &[1]),
+                ("vb", crafted_offsets[1], &[1]),
+                ("vc", crafted_offsets[2], &[1]),
+            ],
+        ),
+        (
+            "-0.0 dB, two VCAs elsewhere",
+            2,
+            -0.0,
+            -3.0,
+            &[("va", -1.0, &[0]), ("vb", 2.0, &[0, 1])],
+        ),
+    ];
+    // The crafted case: the two composition orders give different gain bits, so a render that
+    // kept the member-first order could not equal the static path (#1646 D6).
+    let member_first = crafted_offsets
+        .iter()
+        .fold(f64::from(crafted), |sum, offset| sum + f64::from(*offset))
+        as f32;
+    let offsets_first = session::vca_compose_db(
+        crafted,
+        session::vca_offsets_sum(crafted_offsets).expect("three offsets"),
+    );
+    let gain = |db: f32| {
+        builtins::checked_fader_gain(db)
+            .expect("in domain")
+            .to_bits()
+    };
+    assert_ne!(gain(member_first), gain(offsets_first));
+
+    let base = flat_fader_base();
+    cases
+        .into_iter()
+        .map(|(label, track, value, static_db, vcas)| {
+            let mut reference = base.clone();
+            reference.vcas = vcas
+                .iter()
+                .map(|(id, offset, members)| flat_fader_vca(&reference, id, *offset, members))
+                .collect();
+            let fader = &mut reference.tracks[track].fader;
+            (fader.left_db, fader.right_db) = (value, value);
+            let mut automated = reference.clone();
+            let fader = &mut automated.tracks[track].fader;
+            (fader.left_db, fader.right_db) = (static_db, static_db);
+            automated.automation = vec![session::Automation {
+                id: session::StableId::parse("fader-ride").expect("automation ID"),
+                target: session::ControlAddress {
+                    owner: session::Owner::Strip(automated.tracks[track].id.clone()),
+                    section: session::Section::Builtins,
+                    control: 5,
+                    lane: session::ParameterChannel::Both,
+                },
+                segments: vec![session::AutomationSegment {
+                    shape: session::AutomationShape::Linear,
+                    start_sample: 0,
+                    end_sample: 1 << 20,
+                    start_value: value,
+                    end_value: value,
+                    unit: session::ParameterUnit::Db,
+                }],
+                offset: session::AutomationOffset::default(),
+            }];
+            (label, automated, reference)
+        })
+        .collect()
+}
+
+/// Boots `model` on a live-controlled browser host and renders `blocks` blocks of
+/// [`strip_planes`], returning each block's output bits.
+fn render_flat_fader_web(model: &session::SessionModel, blocks: u64) -> Vec<Vec<u32>> {
+    let document = canonical_session_json(model).expect("canonical");
+    let mut host = strip_boot(
+        &document,
+        WebBootOptions {
+            require_sample_rate_hz: 48_000,
+            require_quantum_frames: STRIP_QUANTUM,
+            source_ring_frames: STRIP_QUANTUM * 4,
+            ..WebBootOptions::live_control_defaults()
+        },
+    );
+    (0..blocks)
+        .map(|block| {
+            submit_strip_source(&mut host, "fixture-source", block, &strip_planes(0, block));
+            assert_eq!(host.render_next(), RESULT_OK, "block {block}");
+            host.output_pcm()
+                .expect("output")
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect()
+        })
+        .collect()
+}
+
+/// #1646 gate 1 (browser): a flat stored fader automation renders, bit for bit, the static fader
+/// at its value for 64 blocks on a live-controlled browser host, in the C ABI's four cases (no
+/// VCA, one `+3` dB VCA, the crafted three-VCA offsets, `-0.0` dB on a lane no VCA reaches), and
+/// each automated session renders differently without its automation.
+///
+/// Test value: red if the browser's preparation composes the offsets in another order than the
+/// static path, if the `+0.0` of a lane no VCA reaches changes the gain bits, if the prepared value
+/// is not the curve's, or if the browser converts dB differently from the static fader.
+#[test]
+fn a_flat_fader_automation_renders_the_static_fader_bits_in_the_browser() {
+    const BLOCKS: u64 = 64;
+    for (label, automated, reference) in flat_fader_sessions() {
+        let rendered = render_flat_fader_web(&automated, BLOCKS);
+        let expected = render_flat_fader_web(&reference, BLOCKS);
+        let mut unautomated = automated.clone();
+        unautomated.automation.clear();
+        let without = render_flat_fader_web(&unautomated, BLOCKS);
+        assert!(
+            expected
+                .iter()
+                .flatten()
+                .any(|bits| f32::from_bits(*bits) != 0.0),
+            "{label}: the reference plays"
+        );
+        assert_ne!(without, expected, "{label}: the automation is heard");
+        for (block, (rendered, expected)) in rendered.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                rendered, expected,
+                "{label}: block {block} renders the static fader's bits"
+            );
+        }
+    }
+}
+
+/// #1709 D2 (browser): a live level move made while the control thread runs FTZ, DAZ and round
+/// toward zero. The browser host's own tests run natively, so the caller's word can be set.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod canonical_live {
+    use super::*;
+    use lane::fpenv::under_hostile_fp_env;
+    use protocol::control_core::{ControlAddress, Lane, Owner, Section};
+    use protocol::{
+        CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
+        EditPath, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionRevision,
+        TypedCommandFrame,
+    };
+    use session::StableId;
+
+    /// The member dB and VCA offset of #1646's environment gate (asserted below to round apart).
+    const MEMBER_DB: f32 = -0.01384;
+    const OFFSET_DB: f32 = 1.0 / 3.0;
+    /// The track the VCA holds.
+    const MEMBER: usize = 1;
+    /// The automated rows' flat curve, VCA offset, hand offset and prior hand offset: the C ABI
+    /// `canonical_live` module's, where the choice is explained. `S = HAND_DB + VCA_DB` sums to
+    /// `20` under round to nearest and to the `f64` below it under round toward zero, and render's
+    /// composition of the curve with the two reaches different gains (asserted below).
+    const CURVE_DB: f32 = 3.0 / 1_048_576.0;
+    const VCA_DB: f32 = 20.0;
+    const HAND_DB: f32 = -1e-30;
+    const PRIOR_HAND_DB: f32 = 1.0;
+
+    /// [`flat_fader_base`] with VCA `v` over track 1: the track's left fader at `member`, the
+    /// VCA's left offset at `offset`.
+    fn model(member: f32, offset: f32) -> session::SessionModel {
+        let mut model = flat_fader_base();
+        model.vcas = vec![flat_fader_vca(&model, "v", 0.0, &[MEMBER])];
+        model.vcas[0].fader.left_db = offset;
+        model.tracks[MEMBER].fader.left_db = member;
+        model
+    }
+
+    fn set(owner: Owner, section: Section, control: u32, value: f32) -> SessionEdit {
+        SessionEdit::SetControl {
+            expected_effect: None,
+            address: ControlAddress {
+                owner,
+                section,
+                control,
+                lane: Lane::Left,
+            },
+            value,
+            ramp_samples: None,
+        }
+    }
+
+    /// The transaction frame of `edit` at `revision`.
+    fn frame(edit: &SessionEdit, revision: u64) -> Vec<u8> {
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(7).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                    payload: CommandPayload::SessionTransactionApply(std::slice::from_ref(edit)),
+                },
+                &mut bytes,
+            )
+            .expect("a transaction frame");
+        bytes.truncate(length);
+        bytes
+    }
+
+    /// The path and revision of an applied transaction's response.
+    fn applied(response: &[u8]) -> (EditPath, u64) {
+        let mut fields = [0_u16; 64];
+        match ProtocolCodec::default()
+            .decode_typed_response(response, &mut DecodeScratch::new(&mut fields))
+            .expect("a transaction response")
+        {
+            DecodedTypedResponseFrame::Success {
+                header,
+                payload: DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+            } => (applied.edit_path, header.revision.0),
+            _ => panic!("the transaction applies"),
+        }
+    }
+
+    /// A browser host booted on `before` takes `edit` under the hostile word, live, and from the
+    /// block its ramp leaves behind renders the bits of a canonical boot of the committed model.
+    fn live_move_under_hostile_word(
+        label: &str,
+        before: &session::SessionModel,
+        edit: &SessionEdit,
+        after: &session::SessionModel,
+    ) {
+        const BLOCKS: u64 = 4;
+        let document = canonical_session_json(before).expect("canonical");
+        let mut host = strip_boot(
+            &document,
+            WebBootOptions {
+                require_sample_rate_hz: 48_000,
+                require_quantum_frames: STRIP_QUANTUM,
+                source_ring_frames: STRIP_QUANTUM * 4,
+                ..WebBootOptions::live_control_defaults()
+            },
+        );
+        let mut rendered = Vec::new();
+        let mut render = |host: &mut AudioWorkletEngineHost, block: u64| {
+            submit_strip_source(host, "fixture-source", block, &strip_planes(0, block));
+            assert_eq!(host.render_next(), RESULT_OK, "{label}: block {block}");
+            rendered.push(
+                host.output_pcm()
+                    .expect("output")
+                    .iter()
+                    .map(|sample| sample.to_bits())
+                    .collect::<Vec<u32>>(),
+            );
+        };
+        for block in 0..BLOCKS {
+            render(&mut host, block);
+        }
+        let bytes = frame(edit, before.revision);
+        let staging = host
+            .control_request_mut(bytes.len() as u32)
+            .expect("the control staging");
+        staging[..bytes.len()].copy_from_slice(&bytes);
+        let result = under_hostile_fp_env(|| host.control_command(bytes.len() as u32, None));
+        assert_eq!(result, RESULT_OK, "{label}");
+        assert_eq!(
+            applied(host.control_response()),
+            (EditPath::Live, before.revision + 1),
+            "{label}: the move is live"
+        );
+        let mut committed = after.clone();
+        committed.revision = before.revision + 1;
+        let ramp = u64::from(committed.control_smoothing_samples().fader);
+        let settled = BLOCKS + ramp.div_ceil(u64::from(STRIP_QUANTUM)) + 1;
+        for block in BLOCKS..settled + 4 {
+            render(&mut host, block);
+        }
+        let reference = render_flat_fader_web(&committed, settled + 4);
+        for block in settled..settled + 4 {
+            let block = block as usize;
+            assert!(
+                reference[block]
+                    .iter()
+                    .any(|bits| f32::from_bits(*bits) != 0.0),
+                "{label}: the reference plays"
+            );
+            assert_eq!(
+                rendered[block], reference[block],
+                "{label}: block {block} renders the canonical boot's bits"
+            );
+        }
+    }
+
+    /// #1709 D2 (browser): a live fader move on a VCA member, a live VCA offset move over it,
+    /// (#1649) a VCA move over a member whose fader is automated, and (#1650b) a hand move on
+    /// that automated fader, each made through the browser's control entry while the caller's
+    /// thread runs FTZ, DAZ and round toward zero, render from the end of their ramp the bits of
+    /// the committed model booted on a canonical thread. The static pair's composition rounds to
+    /// another `f32`, and another gain, under that word, and the automated rows' `S` sums to
+    /// another `f64`, which render composes to another gain (both asserted), so no row is
+    /// vacuous.
+    ///
+    /// Test value: red if the browser's live transaction composes a member's effective fader, or
+    /// an automated lane's offsets-cell `S`, in the caller's environment: remove the guard in the
+    /// core's `SessionState::command`.
+    #[test]
+    fn a_live_fader_and_vca_move_under_a_hostile_caller_word_render_the_canonical_bits() {
+        // `black_box` on the inputs and outputs: under `--release` LLVM otherwise folds the
+        // composition at compile time, whatever the thread's word.
+        let compose = || {
+            core::hint::black_box(session::vca_effective_db(
+                core::hint::black_box(MEMBER_DB),
+                [core::hint::black_box(OFFSET_DB)],
+            ))
+        };
+        let rounded = under_hostile_fp_env(compose);
+        assert_ne!(
+            builtins::checked_fader_gain(compose()).map(f32::to_bits),
+            builtins::checked_fader_gain(rounded).map(f32::to_bits),
+            "the gate is vacuous: the hostile word's composition converts to the same gain"
+        );
+        let sum = || session::vca_offsets_sum([HAND_DB, VCA_DB]).expect("two offsets");
+        let rounded = under_hostile_fp_env(sum);
+        assert_ne!(
+            builtins::checked_fader_gain(session::vca_compose_db(CURVE_DB, sum()))
+                .map(f32::to_bits),
+            builtins::checked_fader_gain(session::vca_compose_db(CURVE_DB, rounded))
+                .map(f32::to_bits),
+            "the gate is vacuous: the hostile word's S converts to the same gain"
+        );
+        let member = model(0.0, OFFSET_DB).tracks[MEMBER].id.clone();
+        let vca_move = |offset| {
+            set(
+                Owner::Vca(StableId::parse("v").expect("VCA ID")),
+                Section::Own,
+                1,
+                offset,
+            )
+        };
+        live_move_under_hostile_word(
+            "a live fader move",
+            &model(0.0, OFFSET_DB),
+            &set(Owner::Strip(member), Section::Builtins, 5, MEMBER_DB),
+            &model(MEMBER_DB, OFFSET_DB),
+        );
+        live_move_under_hostile_word(
+            "a live VCA move",
+            &model(MEMBER_DB, 0.0),
+            &vca_move(OFFSET_DB),
+            &model(MEMBER_DB, OFFSET_DB),
+        );
+        // #1649: a VCA move over a member whose left fader is automated, flat at the curve's dB,
+        // writes the lane's offsets cell; render composes the curve with it.
+        live_move_under_hostile_word(
+            "a live VCA move on an automated lane",
+            &automated(model(CURVE_DB, 0.0), HAND_DB),
+            &vca_move(VCA_DB),
+            &automated(model(CURVE_DB, VCA_DB), HAND_DB),
+        );
+        // #1650b: a hand move on that automated fader writes the ride's left offset, and the
+        // lane's offsets cell with `S` = the offset and the VCA's; the static fader stays.
+        live_move_under_hostile_word(
+            "a hand move on an automated lane",
+            &automated(model(CURVE_DB, VCA_DB), PRIOR_HAND_DB),
+            &set(
+                Owner::Strip(model(0.0, 0.0).tracks[MEMBER].id.clone()),
+                Section::Builtins,
+                5,
+                HAND_DB,
+            ),
+            &automated(model(CURVE_DB, VCA_DB), HAND_DB),
+        );
+    }
+
+    /// `model` with track [`MEMBER`]'s left fader automated, flat at [`CURVE_DB`], with the stored
+    /// left hand offset `hand` (#1649, #1650).
+    fn automated(mut model: session::SessionModel, hand: f32) -> session::SessionModel {
+        let owner = session::Owner::Strip(model.tracks[MEMBER].id.clone());
+        model.automation.push(session::Automation {
+            id: StableId::parse("member-flat").expect("automation ID"),
+            target: session::ControlAddress {
+                owner,
+                section: session::Section::Builtins,
+                control: 5,
+                lane: session::ParameterChannel::Left,
+            },
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Step,
+                start_sample: 0,
+                end_sample: 1 << 20,
+                start_value: CURVE_DB,
+                end_value: CURVE_DB,
+                unit: session::ParameterUnit::Db,
+            }],
+            offset: session::AutomationOffset {
+                left_db: hand,
+                right_db: 0.0,
+            },
+        });
+        model
     }
 }

@@ -816,6 +816,26 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
                 p.end_value = 2.5
             }
         ),
+        case!(
+            "automation-end-at-time-limit",
+            NumericOutOfSchemaRange,
+            "$.automation[0].segments[0].end_sample",
+            |s| {
+                let p = &mut s.automation[0].segments[0];
+                p.start_sample = 0;
+                p.end_sample = automation::TIME_LIMIT
+            }
+        ),
+        case!(
+            "automation-start-at-time-limit",
+            NumericOutOfSchemaRange,
+            "$.automation[0].segments[0].start_sample",
+            |s| {
+                let p = &mut s.automation[0].segments[0];
+                p.start_sample = automation::TIME_LIMIT;
+                p.end_sample = automation::TIME_LIMIT + 1
+            }
+        ),
     ];
     assert!(
         cases.len() >= 70,
@@ -906,5 +926,56 @@ fn revision_above_the_plan_gate_ceiling_is_refused_by_every_entry_point() {
             &source[span.byte_start..span.byte_end],
             format!("\"{revision}\"")
         );
+    }
+}
+
+/// The session validator and `automation::ProgramBuilder` agree on which segment samples are
+/// allowed (#1646b departure 2): a segment the validator accepts never reaches
+/// `BuildError::Segment` at preparation, and one the builder refuses for its time is refused by
+/// the validator. Red if either side moves its bound (`2^53`) alone.
+#[test]
+fn the_validator_and_the_program_builder_agree_on_the_segment_time_bound() {
+    use automation::{
+        BuildError, CellDescription, Completion, JumpLength, ProgramBuilder, Segment, Shape,
+        TIME_LIMIT,
+    };
+    assert_eq!(TIME_LIMIT, 1 << 53, "the bound is exact in f64");
+    let edges = [
+        (0, 1, true),
+        (TIME_LIMIT - 2, TIME_LIMIT - 1, true),
+        (0, TIME_LIMIT - 1, true),
+        (0, TIME_LIMIT, false),
+        (TIME_LIMIT - 1, TIME_LIMIT, false),
+        (TIME_LIMIT, TIME_LIMIT + 1, false),
+        (0, u64::MAX, false),
+        (u64::MAX - 1, u64::MAX, false),
+    ];
+    for (start, end, accepted) in edges {
+        let mut model = parse_session_json(CANONICAL).expect("fixture parses");
+        let segment = &mut model.automation[0].segments[0];
+        segment.shape = AutomationShape::Step;
+        segment.start_sample = start;
+        segment.end_sample = end;
+        let validator_accepts = canonical_session_json(&model).is_ok();
+        let segments = [Segment {
+            start,
+            end,
+            start_value: 0.0,
+            end_value: 0.0,
+            shape: Shape::Step,
+        }];
+        let builder_accepts = !matches!(
+            ProgramBuilder::build(&[CellDescription {
+                segments: &segments,
+                grid_ramp: 64,
+                grid: 64,
+                jump: JumpLength::Block,
+                completion: Completion::End,
+                no_restart: false,
+            }]),
+            Err(BuildError::Segment { .. })
+        );
+        assert_eq!(validator_accepts, accepted, "validator at {start}..{end}");
+        assert_eq!(builder_accepts, accepted, "builder at {start}..{end}");
     }
 }

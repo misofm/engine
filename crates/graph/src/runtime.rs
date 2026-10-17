@@ -3185,6 +3185,9 @@ impl Runtime {
     /// with no source set. One read uses it: a bank's gather, only on a lane its unit marks
     /// (`UnitIdentity::source_lanes`) for a buffer [`Self::source_plane_of_buffer`] names. Every
     /// other read of the arena is unchanged.
+    ///
+    /// `block_time` is the block's node-time context (#1647a, R17-3): a bank unit sets it on each
+    /// of its builtin slots before its chain runs. Other units ignore it.
     pub(crate) fn execute(
         &mut self,
         index: usize,
@@ -3192,6 +3195,7 @@ impl Runtime {
         snapshot: LiveSnapshot,
         host: HostMaster<'_>,
         sources: Option<&dyn crate::GraphSourcePlanes>,
+        block_time: &crate::GraphBlockTime<'_>,
     ) -> Result<(), RenderError> {
         let Self {
             arena,
@@ -3238,6 +3242,7 @@ impl Runtime {
                     route_activity
                         .as_deref_mut()
                         .map(|activity| (activity, index)),
+                    block_time,
                 )
             }
             RuntimeUnit::Bank {
@@ -3275,6 +3280,7 @@ impl Runtime {
                             snapshot,
                             None,
                             None,
+                            block_time,
                         )?;
                         bank_inputs[lane] = member.output;
                     }
@@ -3301,6 +3307,7 @@ impl Runtime {
                     },
                 };
                 let frames = u32::try_from(frames).unwrap_or(u32::MAX);
+                set_block_time(chain, block_time);
                 if let Some(predecessor) = predecessor {
                     #[cfg(any(test, feature = "test-support"))]
                     TEST_ONLY_RESIDENT_COUNTS.with(|count| {
@@ -3649,6 +3656,7 @@ fn execute_op(
     snapshot: LiveSnapshot,
     mut host: Option<HostMaster<'_>>,
     routes: Option<(&mut RouteActivity, usize)>,
+    block_time: &crate::GraphBlockTime<'_>,
 ) -> Result<(), RenderError> {
     let output = op.output;
     if let NodeKind::TrackDelay { line, .. } = op.kind {
@@ -3763,7 +3771,11 @@ fn execute_op(
                     live_snapshot: snapshot,
                 };
                 return match slot.role {
-                    SplitPairRole::Fader => split_pairs[slot.pair].begin_fader(block),
+                    SplitPairRole::Fader => {
+                        // #1647b: the pair's fader half takes the block's node time first.
+                        split_pairs[slot.pair].set_block_time(block_time);
+                        split_pairs[slot.pair].begin_fader(block)
+                    }
                     SplitPairRole::Matrix => split_pairs[slot.pair].finish_matrix(block),
                 };
             }
@@ -3784,6 +3796,8 @@ fn execute_op(
         }
         NodeKind::Bound(processor) => {
             let (out_left, out_right) = output_planes(arena, &mut host, output);
+            // #1647b (R17-4): a bound node takes the block's node time before it processes.
+            processor.set_block_time(block_time);
             processor.process(GraphBindingBlock {
                 left: out_left,
                 right: out_right,
@@ -4395,6 +4409,18 @@ fn builtin_processor_mut(
         .as_any_mut()?
         .downcast_mut::<BuiltinStage>()?;
     Some(stage.0.as_mut())
+}
+
+/// Set the block's node-time context on every builtin slot of `chain` (#1647a, R17-3), before
+/// the chain runs. Allocation-free and O(slots): a slot borrow, two downcasts and one call each.
+fn set_block_time(chain: &mut BankChain, time: &crate::GraphBlockTime<'_>) {
+    let mut slot = 0;
+    while chain.slot_stage_mut(slot).is_some() {
+        if let Some(processor) = builtin_processor_mut(chain, slot) {
+            processor.set_block_time(time);
+        }
+        slot += 1;
+    }
 }
 
 /// Bit `lane` of a carry mask. A bank has at most eight lanes, the width of the `u8` mask: debug
@@ -5124,7 +5150,13 @@ impl crate::runtime::Runtime {
             let Some(into) = builtin_processor_mut(chain, slot) else {
                 continue;
             };
-            let adopted = into.adopt_strip_lane(step.owner, lane, from, predecessor_lane);
+            let adopted = into.adopt_strip_lane(
+                step.owner,
+                lane,
+                from,
+                predecessor_lane,
+                step.continued_cells,
+            );
             debug_assert!(adopted, "a checked strip move is adopted");
         }
     }
@@ -10127,6 +10159,7 @@ mod tests {
             LiveSnapshot::ALL,
             None,
             None,
+            &crate::GraphBlockTime::new(None, 0, None, None),
         )
         .expect("earlier fader");
         assert_eq!(
@@ -10139,7 +10172,8 @@ mod tests {
                 0,
                 LiveSnapshot::ALL,
                 None,
-                None
+                None,
+                &crate::GraphBlockTime::new(None, 0, None, None),
             ),
             Err(RenderError::InvalidEnvelope)
         );
@@ -12001,6 +12035,7 @@ mod tests {
                 LiveSnapshot::ALL,
                 None,
                 None,
+                &crate::GraphBlockTime::new(None, 0, None, None),
             )
             .expect("op");
             let (left, right) = arena.read_stereo(ARENA_BASE);
@@ -13878,7 +13913,19 @@ mod tests {
                 before_master = Some(stereo_bits(runtime.buffer(slot)));
             }
             runtime
-                .execute(unit, first_sample, LiveSnapshot::ALL, host.reborrow(), None)
+                .execute(
+                    unit,
+                    first_sample,
+                    LiveSnapshot::ALL,
+                    host.reborrow(),
+                    None,
+                    &crate::GraphBlockTime::new(
+                        Some(first_sample),
+                        u32::try_from(frames).expect("oracle frames"),
+                        None,
+                        None,
+                    ),
+                )
                 .expect("oracle unit");
             runtime
                 .observe_unit(unit, first_sample, validity, &host)

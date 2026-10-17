@@ -113,6 +113,7 @@ fn classify_automation_change(current: &SessionModel) {
             end_value: 1.0,
             unit: ParameterUnit::Db,
         }],
+        offset: session::AutomationOffset::default(),
     });
     let delta = classify_live_delta(current, &next, STEP, &EditRamps::new())
         .expect("a block-rate EQ ride is live");

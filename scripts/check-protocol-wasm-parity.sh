@@ -169,8 +169,8 @@ PY
     )
     local -a files=("$PIN_FILE" "$PIN_FILE" "$GUEST_FILE")
     local -a searches=(
-        'COMPLETE_SCHEMA_HASH: u64 = 0x0c71_96f8_6abe_6d57;'
-        'COMPLETE_SCHEMA_HASH: u64 = 0x0c71_96f8_6abe_6d57;'
+        'COMPLETE_SCHEMA_HASH: u64 = 0x5cab_2cf3_b4e4_767f;'
+        'COMPLETE_SCHEMA_HASH: u64 = 0x5cab_2cf3_b4e4_767f;'
         'assert_eq!(corpus.len(), 46);'
     )
     local -a replacements=(

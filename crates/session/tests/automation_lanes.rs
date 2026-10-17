@@ -255,3 +255,33 @@ fn spacing_never_reports_on_a_malformed_sequence() {
         )]
     );
 }
+
+/// The segment time bound (`automation::TIME_LIMIT`, `2^53`) is the validator's whatever the row:
+/// an insert row (not rendered today) and the fader row (rendered, #1646) are refused the same way
+/// at the same path, and `2^53 - 1` is accepted on both. Red if the bound is made to depend on the
+/// row, which would let a validated fader session reach the program builder's refusal.
+#[test]
+fn the_segment_time_bound_does_not_depend_on_the_row() {
+    let limit = automation::TIME_LIMIT;
+    let end_path = "$.automation[0].segments[0].end_sample".to_owned();
+    let models: [fn(Vec<AutomationSegment>) -> SessionModel; 2] = [with_segments, |segments| {
+        let mut model = fader_rides(&[("ride", ParameterChannel::Both)]);
+        model.automation[0].segments = segments;
+        model
+    }];
+    for build in models {
+        let accepted = build(vec![segment(
+            AutomationShape::Step,
+            limit - 2,
+            limit - 1,
+            0.0,
+            0.0,
+        )]);
+        assert_eq!(refusals(&accepted), Vec::new());
+        let refused = build(vec![segment(AutomationShape::Step, 0, limit, 0.0, 0.0)]);
+        assert_eq!(
+            refusals(&refused),
+            vec![(DiagnosticCode::NumericOutOfSchemaRange, end_path.clone())]
+        );
+    }
+}

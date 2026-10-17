@@ -10993,3 +10993,109 @@ mod spectrum_carry {
         );
     }
 }
+
+// Issue #1648b: a fader stage's stored automation event state carries across a swap (D2).
+mod fader_automation_carry {
+    use super::*;
+    use session::{
+        Automation, AutomationOffset, AutomationSegment, AutomationShape, ControlAddress, Owner,
+        ParameterChannel, ParameterUnit, Section,
+    };
+
+    /// `model` with a linear fader ride on `track`'s `lane`, `0` dB at timeline 0 to `end_db` at
+    /// 3,000: it moves across [`SWAP_BLOCK`].
+    fn ride(model: &mut SessionModel, track: &str, lane: ParameterChannel, end_db: f32) {
+        model.automation.push(Automation {
+            id: id(&format!("{track}-ride")),
+            target: ControlAddress {
+                owner: Owner::Strip(id(track)),
+                section: Section::Builtins,
+                control: 5,
+                lane,
+            },
+            segments: vec![AutomationSegment {
+                shape: AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 3_000,
+                start_value: 0.0,
+                end_value: end_db,
+                unit: ParameterUnit::Db,
+            }],
+            offset: AutomationOffset::default(),
+        });
+        model.automation.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+
+    /// Gate 6. A live-controlled swap that carries a changed ride on `eq0`, a cell `eq1` gains
+    /// on its left lane and a cell `eq1` loses on its right lane (the release record) makes no
+    /// allocator call over the hand-over and the successor's first block, at every width. The
+    /// same swap with the ride kept and a muted track added renders every block bit-identical to
+    /// the uninterrupted predecessor.
+    ///
+    /// Test value: red if the carry of cell event state, the adoption jump or the release
+    /// allocates or frees on the render thread, or if a carried cell with an unchanged table does
+    /// not continue its events (the lane would restart or jump).
+    #[test]
+    fn carrying_fader_automation_allocates_and_frees_nothing() {
+        use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+        struct RestoreMode(Mode);
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                set_mode(self.0);
+            }
+        }
+        assert_installed();
+        let _restore = RestoreMode(mode());
+        set_mode(Mode::Count);
+        engine::realtime::audit::warm_up();
+        let mut a_model = session_a();
+        ride(&mut a_model, "eq0", ParameterChannel::Both, -12.0);
+        ride(&mut a_model, "eq1", ParameterChannel::Right, -6.0);
+        let mut changed = session_a();
+        ride(&mut changed, "eq0", ParameterChannel::Both, -24.0);
+        ride(&mut changed, "eq1", ParameterChannel::Left, -9.0);
+        let mut kept = a_model.clone();
+        add_track(&mut kept, "eq0", MUTED_TRACK, SOURCE, true);
+        let a = Session::compile(a_model);
+        let (changed, kept) = (Session::compile(changed), Session::compile(kept));
+        let feed = Feed::new(SOURCE, 1);
+        for backend in backends() {
+            let run = direct_run(
+                &a,
+                Some((&changed, &a.model)),
+                &feed,
+                QUANTUM,
+                &[],
+                backend,
+                false,
+            );
+            assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+            assert_eq!(
+                run.swap_allocator,
+                ((0, 0, 0), (0, 0)),
+                "{backend:?}: the hand-over and the successor's first block"
+            );
+            let uninterrupted = direct_run(&a, None, &feed, QUANTUM, &[], backend, false);
+            assert_ne!(
+                run.blocks[SWAP_BLOCK..],
+                uninterrupted.blocks[SWAP_BLOCK..],
+                "{backend:?}: the changed rides are heard"
+            );
+            let run = direct_run(
+                &a,
+                Some((&kept, &a.model)),
+                &feed,
+                QUANTUM,
+                &[],
+                backend,
+                false,
+            );
+            assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+            assert_eq!(
+                first_direct_difference(&run, &uninterrupted),
+                None,
+                "{backend:?}: a kept ride continues"
+            );
+        }
+    }
+}

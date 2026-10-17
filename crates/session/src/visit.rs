@@ -140,7 +140,9 @@ pub mod keys {
  (route_source,"Route-source fields.";KIND="kind":1,TRACK_ID="track_id":2,SUBMIX_ID="submix_id":2,TAP="tap":3)
  (route_destination,"Route-destination fields.";KIND="kind":1,SUBMIX_ID="submix_id":2,OUTPUT_ID="output_id":2)
  (channel_matrix,"Channel-matrix fields.";LL="ll":1,LR="lr":2,RL="rl":3,RR="rr":4)
- (automation,"Automation fields.";ID="id":1,TARGET="target":2,SEGMENTS="segments":3)
+ // `offset` is appended as 4 (#1650 D1).
+ (automation,"Automation fields.";ID="id":1,TARGET="target":2,SEGMENTS="segments":3,OFFSET="offset":4)
+ (automation_offset,"Automation-offset fields (#1650).";LEFT_DB="left_db":1,RIGHT_DB="right_db":2)
  // An automation target is a control address (#1566): the ids are `control_address`'s wire field ids. `slot_id` is present in the `console` and `inserts` arms only.
  (target,"Automation-target fields (a control address).";OWNER="owner":1,OWNER_ID="owner_id":2,SECTION="section":3,SLOT_ID="slot_id":4,CONTROL="control":5,LANE="lane":6)
  (segment,"Automation-segment fields.";SHAPE="shape":1,START_SAMPLE="start_sample":2,END_SAMPLE="end_sample":3,START_VALUE="start_value":4,END_VALUE="end_value":5,UNIT="unit":6)
@@ -296,7 +298,8 @@ mod walk {
         Route=>route |s,v,o,f| [7] {
           v.id(f::ID,&s.id),s.source.record(Some(f::SOURCE),o,v),s.destination.record(Some(f::DESTINATION),o,v),s.channel_matrix.record(Some(f::CHANNEL_MATRIX),o,v),v.f32(f::GAIN_DB,s.gain_db),v.bool(f::MUTE,s.mute),v.bool(f::FOLLOWS_MUTE,s.follows_mute)
         }
-        Automation=>automation |s,v,o,f| [2+s.segments.len() as u32] {v.id(f::ID,&s.id),s.target.record(Some(f::TARGET),o,v),array(f::SEGMENTS,&s.segments,o,v)}
+        Automation=>automation |s,v,o,f| [3+s.segments.len() as u32] {v.id(f::ID,&s.id),s.target.record(Some(f::TARGET),o,v),array(f::SEGMENTS,&s.segments,o,v),s.offset.record(Some(f::OFFSET),o,v)}
+        AutomationOffset=>automation_offset |s,v,_o,f| [2] {v.f32(f::LEFT_DB,s.left_db),v.f32(f::RIGHT_DB,s.right_db)}
         AutomationSegment=>segment |s,v,_o,f| [6] {
           v.token(f::SHAPE,token(s.shape.token(),s.shape.wire())),v.u64(f::START_SAMPLE,s.start_sample),v.u64(f::END_SAMPLE,s.end_sample),
           v.f32(f::START_VALUE,s.start_value),v.f32(f::END_VALUE,s.end_value),v.token(f::UNIT,token(s.unit.token(),s.unit.wire()))

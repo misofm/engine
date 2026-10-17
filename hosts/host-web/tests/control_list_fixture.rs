@@ -1,7 +1,8 @@
 //! Issue #1564 (decision 17, C4/C5), gate 1: the byte-for-byte reference the SDK's
 //! `engine.controls()` is held to.
 //!
-//! The control core (`controls::list`) walks the #1560 parity session (`common::model_at`) and this
+//! The control core (`controls::list`) walks the #1560 parity session (`common::model_at`, with one
+//! stored fader ride added so that a row is `automated`: [`fixture_session`]) and this
 //! test writes each row it yields -- address, class, descriptor facts and committed value, in list
 //! order -- beside the canonical session document, as `fixtures/control-list.json`. The SDK eval
 //! (`sdk/test/control-list-evals.mjs`) boots the headless engine on that document and compares what
@@ -115,7 +116,7 @@ fn row_json(row: &ControlRow) -> String {
          \"class\": \"{}\", \"kind\": \"{}\", \"unit\": \"{}\", \"scope\": \"{}\", \
          \"family\": \"{}\", \"active\": {}, \"automatable\": {}, \"minimumBits\": \"{:08x}\", \
          \"maximumBits\": \"{:08x}\", \"defaultBits\": \"{:08x}\", \"valueBits\": \"{:08x}\", \
-         \"choices\": {} }}",
+         \"choices\": {}, \"automated\": {} }}",
         owner_json(&address.owner),
         section_json(&address.section),
         address.control,
@@ -133,12 +134,42 @@ fn row_json(row: &ControlRow) -> String {
         descriptor.default.to_bits(),
         row.value.to_bits(),
         descriptor.choices.len(),
+        row.automated,
     )
+}
+
+/// The parity session with the submix `b`'s right fader lane ridden by a flat stored automation
+/// whose hand offset is `+1.5` dB (#1650 D4): its `fader_db` right row is `automated` and reports
+/// the offset, and its left row is a plain fader row beside it.
+fn fixture_session() -> session::SessionModel {
+    let mut model = model_at(RATE);
+    model.automation.push(session::Automation {
+        id: session::StableId::parse("b-fader-ride").expect("automation ID"),
+        target: controls::ControlAddress {
+            owner: Owner::Strip(session::StableId::parse("b").expect("submix ID")),
+            section: Section::Builtins,
+            control: 5,
+            lane: ParameterChannel::Right,
+        },
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Step,
+            start_sample: 0,
+            end_sample: u64::from(RATE),
+            start_value: -4.0,
+            end_value: -4.0,
+            unit: session::ParameterUnit::Db,
+        }],
+        offset: session::AutomationOffset {
+            left_db: 0.0,
+            right_db: 1.5,
+        },
+    });
+    model
 }
 
 /// The fixture text: the canonical session document and the native list of it.
 fn render() -> String {
-    let document = canonical_session_json(&model_at(RATE)).expect("canonical parity session");
+    let document = canonical_session_json(&fixture_session()).expect("canonical parity session");
     // The model the host boots is the parse of that document, whose routes are in ID order: the
     // order of the fixture's rows is the booted model's, not the builder's.
     let model = parse_session_json(&document).expect("the canonical document parses");

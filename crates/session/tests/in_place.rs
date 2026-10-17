@@ -87,6 +87,7 @@ fn slots(model: &SessionModel, edited: &SessionModel) -> (OwnerSlots, SessionMod
         submixes: vec![(0, 0)],
         vcas: vec![(0, 0)],
         routes: vec![(0, 0), (1, 1)],
+        automation: Vec::new(),
     };
     (slots, owners)
 }

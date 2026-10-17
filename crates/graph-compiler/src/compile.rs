@@ -112,7 +112,9 @@ impl GraphCompiler {
                 }
             };
         let levels = compiled.graph.dependency_levels.clone();
-        Ok(builtins.into_graph_artifact_with_banks(
+        // #1647a (R17-2): each builtin bank takes its members' floored input arrivals `a(n)`.
+        let arrivals = compiled.report.input_arrivals.clone();
+        let mut artifact = builtins.into_graph_artifact_with_banks(
             compiled.graph,
             compiled.report,
             dispatch,
@@ -122,7 +124,9 @@ impl GraphCompiler {
             // is one derivation and both planners read it, so they cannot form different
             // opinions about a track and silently decline the strip's chain merges.
             &compiled.pool_classes,
-        ))
+        );
+        artifact.install_builtin_input_arrivals(&arrivals);
+        Ok(artifact)
     }
 
     /// The graph pipeline, run against builtins `compile_with_builtins` has already validated

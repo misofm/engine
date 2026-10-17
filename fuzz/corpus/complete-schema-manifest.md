@@ -7,7 +7,7 @@ schemas. Optional/boundary values are represented by the transaction's nested fi
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`0c7196f86abe6d57`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`5cab2cf3b4e4767f`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -80,6 +80,9 @@ and never reallocated (the frame count stays 46); `command.transport_set` carrie
 `retired_code_rows()` gains the `TRANSPORT_SET` field 2 rows, one per flag form.
 Batch 13b carries #1678 and #1635 together and re-pins it once from `cc9a7bcc502c4936` (each
 alone gave `63ff2e60976e0e21` and `331654b324d076e8`).
+Issue #1650 re-pinned it from `0c7196f86abe6d57`: the `Automation` message gains a required field 4,
+the nested `AutomationOffset` (`left_db` 1, `right_db` 2), which the transaction's `UpsertAutomation`
+carries (the frame count stays 46).
 
 The value stood at `88a8ee6a6d9e4acc` here until #274. It was correct until `b454b230`, and the
 two re-pins that followed (`b454b230`, then #241's `04d291dd`) did not reach this file or the

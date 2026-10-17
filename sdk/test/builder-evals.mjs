@@ -852,6 +852,26 @@ describe("validation refusals name the offending path", () => {
 
     // What the session document checks, the builder checks at the verb, by path.
     const refused = (target) => code(() => base.automation(ride("x", target, 0, 1)));
+    // A segment sample is below 2^53, the program builder's bound (the session validator refuses
+    // the same set): 2^53 - 1 builds, 2^53 is refused when the document is built, under the
+    // engine's range code, and the engine refuses it the same way.
+    const limit = 2n ** 53n;
+    const rideAt = (startSample, endSample) => base.automation({
+      id: "far",
+      target: builtinRow("fader_db", "both"),
+      segments: [{ shape: "linear", startSample, endSample, startValue: -2, endValue: 0 }],
+    });
+    assert.equal(rideAt(limit - 2n, limit - 1n).toJSON().automation[0].segments[0].end_sample, String(limit - 1n));
+    assert.equal(code(() => rideAt(0n, limit).toJSON()).code, "numeric.out_of_schema_range");
+    assert.equal(code(() => rideAt(limit, limit + 1n).toJSON()).code, "numeric.out_of_schema_range");
+    if (asset !== undefined) {
+      const model = mutableModel(rideAt(limit - 2n, limit - 1n).toJSON());
+      assert.equal((await validate(JSON.stringify(model), { asset })).ok, true);
+      model.automation[0].segments[0].end_sample = limit.toString();
+      const outcome = await validate(JSON.stringify(model), { asset });
+      assert.equal(outcome.ok, false, "the engine must refuse a segment end at 2^53");
+      assert.equal(outcome.diagnostics[0]?.code, "numeric.out_of_schema_range");
+    }
     assert.equal(refused({ ...builtinRow("fader_db", "both"), owner: { kind: "strip", id: "ghost" } }).code, "reference.missing_entity");
     assert.equal(refused({ ...builtinRow("fader_db", "both"), owner: { kind: "route", id: "ghost" } }).code, "reference.missing_entity");
     assert.equal(refused({ ...builtinRow("fader_db", "both"), owner: { kind: "vca", id: "ghost" } }).code, "reference.missing_entity");
@@ -1129,13 +1149,14 @@ describe("canonical float spellings", () => {
           control: "fader_db",
           lane: "both",
         },
-        segments: [{ shape: "step", startSample: 0, endSample: maximum, startValue: 0, endValue: 0 }],
+        // A segment sample is below 2^53, not u64::MAX: the program builder's bound.
+        segments: [{ shape: "step", startSample: 0, endSample: 2n ** 53n - 1n, startValue: 0, endValue: 0 }],
       });
     const model = built.toJSON();
     assert.equal(model.revision, REVISION_MAX.toString());
     assert.equal(model.sources[0].frames, maximum.toString());
     assert.equal(model.automation[0].segments[0].start_sample, "0");
-    assert.equal(model.automation[0].segments[0].end_sample, maximum.toString());
+    assert.equal(model.automation[0].segments[0].end_sample, String(2n ** 53n - 1n));
     assert.match(built.toJson(), /"revision": "9223372036854775807"/);
     assert.throws(() => session({ id: "overflow", sampleRateHz: 48_000, revision: maximum + 1n }), /u64::MAX/);
     assert.throws(() => session({ id: "unsafe", sampleRateHz: 48_000, revision: Number.MAX_SAFE_INTEGER + 1 }), /safe integer/);
@@ -1572,6 +1593,107 @@ describe("issue 1364 -- the builder authors controlSmoothing", () => {
     assert.throws(
       () => sessionBuilderFromRequest({ ...base, controlSmoothing: { ...lengths, panMs: "25" } }),
       (error) => error.message === "$.controlSmoothing.panMs: expected a number",
+    );
+  });
+});
+
+describe("issue #1650 -- the builder authors an automation entry's offset", () => {
+  const base = () => session({ id: "offset.eval", sampleRateHz: 48_000, revision: 1 })
+    .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
+    .track("t", { source: "stem" })
+    .output("out")
+    .route({
+      id: "main",
+      source: { kind: "track", trackId: "t", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "out" },
+    });
+  const fader = (lane) => ({
+    owner: { kind: "strip", id: "t" },
+    section: { kind: "builtins" },
+    control: "fader_db",
+    lane,
+  });
+  const ride = (id, lane, offset) => ({
+    id,
+    target: fader(lane),
+    segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue: -6, endValue: 0 }],
+    ...(offset === undefined ? {} : { offset }),
+  });
+
+  test("the offset is written after the segments, 0 per lane when omitted", () => {
+    // Red if the builder leaves the required key out, writes it in another place, or loses a
+    // lane or the sign of a -0.
+    const omitted = base().automation(ride("ride", "left")).toJSON();
+    assert.deepEqual(omitted.automation[0].offset, { left_db: 0, right_db: 0 });
+    assert.deepEqual(Object.keys(omitted.automation[0]), ["id", "target", "segments", "offset"]);
+    const json = base().automation(ride("ride", "both", { leftDb: 3, rightDb: -0 })).toJson();
+    assert.match(json, /"segments": \[[\s\S]*\],\n {6}"offset": \{\n {8}"left_db": 3\.0,\n {8}"right_db": -0\.0\n {6}\}\n {4}\}/);
+    assert.throws(
+      () => base().automation(ride("ride", "left", { leftDb: Number.NaN })),
+      /automation\("ride"\)\.offset\.leftDb: expected a finite number/,
+    );
+  });
+
+  test("a strict request with an offset builds the session the builder builds", () => {
+    // Red if the request decoder drops the offset or lets a misspelled key through.
+    const request = (offset) => ({
+      schemaVersion: 1,
+      session: { id: "offset.eval", sampleRateHz: 48_000, revision: 1 },
+      sources: [{ id: "stem", spec: { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A } }],
+      tracks: [{ id: "t", spec: { source: "stem" } }],
+      outputs: ["out"],
+      routes: [{
+        id: "main",
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      }],
+      automation: [{
+        id: "ride",
+        target: { owner: { kind: "strip", id: "t" }, section: { kind: "builtins" }, control: "fader_db", lane: "left" },
+        segments: [{ shape: "linear", startSample: 0, endSample: 480, startValue: -6, endValue: 0 }],
+        ...(offset === undefined ? {} : { offset }),
+      }],
+    });
+    assert.equal(
+      sessionBuilderFromRequest(request({ leftDb: 3 })).toJson(),
+      base().automation(ride("ride", "left", { leftDb: 3 })).toJson(),
+    );
+    assert.equal(
+      sessionBuilderFromRequest(request(undefined)).toJson(),
+      base().automation(ride("ride", "left")).toJson(),
+    );
+    assert.throws(
+      () => sessionBuilderFromRequest(request({ leftDB: 3 })),
+      (error) => error.message === "$.automation[0].offset.leftDB: unknown key",
+    );
+  });
+
+  test("which row and lane take an offset is the engine's rule", async () => {
+    // #1650 D2: only a lane a `fader_db` entry drives takes an offset, inside [-144, 24] dB.
+    // Red if the builder starts judging the row (the engine's code is never observed) or the
+    // engine accepts an offset on a lane no one reads.
+    const outcome = async (builder) => {
+      const result = await validate(builder, { asset });
+      return result.ok ? "ok" : [result.diagnostics[0]?.code, result.diagnostics[0]?.path];
+    };
+    assert.equal(await outcome(base().automation(ride("ride", "left", { leftDb: 3 }))), "ok");
+    assert.deepEqual(
+      await outcome(base().automation(ride("ride", "left", { rightDb: 3 }))),
+      ["control.automation.offset", "$.automation[id=ride].offset.right_db"],
+    );
+    assert.deepEqual(
+      await outcome(base().automation(ride("ride", "both", { leftDb: 30 }))),
+      ["control.domain", "$.automation[id=ride].offset.left_db"],
+    );
+    const trim = {
+      id: "trim",
+      target: { ...fader("left"), control: "trim_db" },
+      segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue: -6, endValue: 0 }],
+      offset: { leftDb: 1 },
+    };
+    assert.deepEqual(
+      await outcome(base().automation(trim)),
+      ["control.automation.offset", "$.automation[id=trim].offset.left_db"],
     );
   });
 });

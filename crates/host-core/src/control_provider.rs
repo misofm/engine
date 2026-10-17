@@ -1193,6 +1193,9 @@ impl ControlCatalog {
         overlay: &MonitorOverlay,
         sample_rate: u32,
     ) -> Result<Self, SessionControlProviderError> {
+        // #1709 D1: the derived rows are composed as preparation composes them, in the
+        // canonical floating-point environment, so a row shows the value render applies.
+        let _canonical = lane::CanonicalFpEnv::enter();
         // The list is walked one owner at a time through one reused buffer, twice: once to size
         // every table, once to fill them. No pass holds the whole list, so the transient is one
         // owner's rows, not every control of the session's rows at full size (#1400b).
@@ -1503,6 +1506,9 @@ impl ControlCatalog {
         sample_rate: u32,
         delta: &crate::LiveDelta<'_>,
     ) -> Result<StagedCatalog, SessionControlProviderError> {
+        // #1709 D1: the staged derived rows are composed in the canonical environment, as
+        // `Self::build` composes them.
+        let _canonical = lane::CanonicalFpEnv::enter();
         #[cfg(any(test, feature = "test-support"))]
         if STAGE_FAILURES.with(|count| {
             let pending = count.get();
@@ -1969,6 +1975,8 @@ struct Shape {
     automatable: bool,
     family: ControlFamily,
     active: bool,
+    /// #1650 D4: a rendered stored automation drives the row's lane.
+    automated: bool,
 }
 
 impl Eq for Shape {}
@@ -2079,6 +2087,7 @@ impl Shape {
                 controls::Family::Setting => ControlFamily::Setting,
             },
             active: descriptor.active,
+            automated: row.automated,
         }
     }
 
@@ -2132,6 +2141,7 @@ impl Shape {
             family: self.family,
             active: self.active,
             value: 0.0,
+            automated: self.automated,
         })
     }
 }
@@ -3068,6 +3078,115 @@ mod tests {
                 .map(|entry| (entry.handle, control_value(entry).to_bits()))
                 .collect::<Vec<_>>()
         );
+        assert_eq!(
+            provider
+                .control_list(&ControlListRequest {
+                    structure_epoch: 2,
+                    after_handle: 0,
+                    limit: 1,
+                    owner: None,
+                })
+                .err(),
+            Some(ParameterProviderError::Stale)
+        );
+    }
+
+    /// #1650b gate 5 (the catalog). A left-lane fader entry on `eq0` with a `+2.5` dB hand
+    /// offset lists `eq0`'s left `fader_db` row `automated` with the offset as its value, and the
+    /// right row (no entry drives it) not `automated`, at its static value. A hand move (the offset
+    /// moved) keeps the epoch; adding the entry and removing it each advance it, and a client's
+    /// old epoch is then stale.
+    ///
+    /// Test value: red if a client cannot tell that its write on an automated lane is an offset
+    /// (no flag, or the static value listed), or if the flag can change under a held epoch.
+    #[test]
+    fn an_automated_fader_lane_lists_its_offset_and_the_flag_is_a_descriptor() {
+        let plain = nine_track();
+        let (mut provider, _clock) = provider_of(&plain);
+        let left = fader_address(&plain, "eq0");
+        let mut automated = plain.clone();
+        automated.automation.push(session::Automation {
+            id: session::StableId::parse("eq0-ride").expect("ID"),
+            target: left.clone(),
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 4_800,
+                start_value: 0.0,
+                end_value: -6.0,
+                unit: session::ParameterUnit::Db,
+            }],
+            offset: session::AutomationOffset {
+                left_db: 2.5,
+                right_db: 0.0,
+            },
+        });
+        let rows = |provider: &mut SessionControlProvider| {
+            whole_list(provider, 256)
+                .into_iter()
+                .filter(|entry| {
+                    entry.address.owner_id.as_deref() == Some("eq0")
+                        && entry.address.section == ControlSection::Builtins
+                        && entry.address.control == Some(left.control)
+                })
+                .map(|entry| match entry.body {
+                    ControlBody::Control(row) => (entry.address.lane, row.value, row.automated),
+                    _ => unreachable!("a control row"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let static_db = [
+            plain.tracks[0].fader.left_db,
+            plain.tracks[0].fader.right_db,
+        ];
+        assert_eq!(
+            rows(&mut provider),
+            vec![
+                (Some(ParameterChannel::Left), static_db[0], false),
+                (Some(ParameterChannel::Right), static_db[1], false),
+            ]
+        );
+        provider.replace_session_catalog(
+            ControlCatalog::build(&automated, &MonitorOverlay::default(), RATE).expect("catalog"),
+            2,
+        );
+        assert_eq!(
+            provider.structure_epoch(),
+            2,
+            "the flag is a descriptor field"
+        );
+        assert_eq!(
+            rows(&mut provider),
+            vec![
+                (Some(ParameterChannel::Left), 2.5, true),
+                (Some(ParameterChannel::Right), static_db[1], false),
+            ]
+        );
+        // A hand move writes the offset, a value: the epoch holds.
+        controls::set(&mut automated, &left, -1.5, None, RATE).expect("a hand move");
+        assert_eq!(
+            automated.automation[0].offset.left_db.to_bits(),
+            (-1.5_f32).to_bits()
+        );
+        assert_eq!(
+            automated.tracks[0].fader.left_db.to_bits(),
+            static_db[0].to_bits(),
+            "the static fader is the lane's fallback"
+        );
+        provider.replace_session_catalog(
+            ControlCatalog::build(&automated, &MonitorOverlay::default(), RATE).expect("catalog"),
+            3,
+        );
+        assert_eq!(provider.structure_epoch(), 2, "a hand move is a value");
+        assert_eq!(
+            rows(&mut provider)[0],
+            (Some(ParameterChannel::Left), -1.5, true)
+        );
+        provider.replace_session_catalog(
+            ControlCatalog::build(&plain, &MonitorOverlay::default(), RATE).expect("catalog"),
+            4,
+        );
+        assert_eq!(provider.structure_epoch(), 3, "the entry removed");
         assert_eq!(
             provider
                 .control_list(&ControlListRequest {

@@ -5,7 +5,8 @@
 //! lane gain is `clamp(own_db + sum(offsets), -144, 24)` over the **set** of VCAs that reach it,
 //! and its effective lane mute is its own mute ORed with every reaching VCA's mute. The composition
 //! itself (the fader, the mute, the solo term and the route gate) is `controls::effective` (decision
-//! 17, C7); this module keeps the arithmetic ([`vca_effective_db`]) and the reach
+//! 17, C7); this module keeps the arithmetic ([`vca_effective_db`]: the offsets first, then the
+//! member, #1646 D6) and the reach
 //! ([`SessionModel::vca_reach`]) that it calls, so there is one sum and one reach.
 
 use std::cell::OnceCell;
@@ -19,52 +20,76 @@ pub const FADER_MINIMUM_DB: f64 = -144.0;
 /// The upper edge of the fader domain, in dB.
 pub const FADER_MAXIMUM_DB: f64 = 24.0;
 
-/// Decision 13 (a): `clamp(member_db + sum(offsets), -144, 24)`, summed in `f64` in the order
-/// given (the member's own value first, then each offset), clamped in `f64`, rounded once to
-/// `f32`. With no offset it returns `member_db` bit for bit, unclamped.
+/// The `f64` sum of the reaching VCAs' offsets, in the order given, starting from the first
+/// offset (no `+0.0` seed, so a lone `-0.0` stays `-0.0`); `None` for no offset (#1646 D6). The
+/// one sum a stored lane's cell holds and the static path adds the member to.
 #[must_use]
-pub fn vca_effective_db(member_db: f32, offsets_db: impl IntoIterator<Item = f32>) -> f32 {
-    let mut sum = VcaSum::new(member_db);
+pub fn vca_offsets_sum(offsets_db: impl IntoIterator<Item = f32>) -> Option<f64> {
+    let mut sum = VcaSum::new();
     for offset in offsets_db {
         sum.add(offset);
     }
-    sum.finish()
+    sum.sum()
 }
 
-/// [`vca_effective_db`] as an accumulator, for a caller that reads each reaching VCA once and
-/// feeds both lanes (batch 7 review M1): `add` the offsets in order, then `finish`. The one sum.
-#[derive(Clone, Copy, Debug)]
+/// Adds the member to the offsets' sum and clamps once (#1646 D6):
+/// `clamp(f64(member_db) + offsets_sum, -144, 24)` in `f64`, rounded once to `f32`.
+#[must_use]
+pub fn vca_compose_db(member_db: f32, offsets_sum: f64) -> f32 {
+    // `f64::clamp` keeps a NaN, which a validated model never carries.
+    (f64::from(member_db) + offsets_sum).clamp(FADER_MINIMUM_DB, FADER_MAXIMUM_DB) as f32
+}
+
+/// Decision 13 (a), in the order of #1646 D6: `clamp(member_db + S, -144, 24)` where `S` is
+/// [`vca_offsets_sum`] of the offsets (summed first, in the order given), then the member added in
+/// `f64`, clamped in `f64`, rounded once to `f32`. With no offset it returns `member_db` bit for
+/// bit, unclamped.
+#[must_use]
+pub fn vca_effective_db(member_db: f32, offsets_db: impl IntoIterator<Item = f32>) -> f32 {
+    match vca_offsets_sum(offsets_db) {
+        None => member_db,
+        Some(sum) => vca_compose_db(member_db, sum),
+    }
+}
+
+/// [`vca_offsets_sum`] as an accumulator, for a caller that reads each reaching VCA once and
+/// feeds both lanes (batch 7 review M1): `add` the offsets in order, then read [`Self::sum`] or
+/// [`Self::compose`]. The one sum.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct VcaSum {
-    member_db: f32,
-    sum: f64,
-    any: bool,
+    sum: Option<f64>,
 }
 
 impl VcaSum {
-    /// A sum that starts at the member's own value.
+    /// An empty sum: no offset has come.
     #[must_use]
-    pub fn new(member_db: f32) -> Self {
-        Self {
-            member_db,
-            sum: f64::from(member_db),
-            any: false,
-        }
+    pub fn new() -> Self {
+        Self { sum: None }
     }
 
-    /// Adds the next reaching VCA's offset.
+    /// Adds the next reaching VCA's offset; the first one starts the sum.
     pub fn add(&mut self, offset_db: f32) {
-        self.sum += f64::from(offset_db);
-        self.any = true;
+        let offset = f64::from(offset_db);
+        self.sum = Some(match self.sum {
+            None => offset,
+            Some(sum) => sum + offset,
+        });
     }
 
-    /// The clamped, once-rounded result; the member's own value, bit for bit, when no offset came.
+    /// The offsets' sum; `None` when no offset came.
     #[must_use]
-    pub fn finish(self) -> f32 {
-        if !self.any {
-            return self.member_db;
+    pub fn sum(self) -> Option<f64> {
+        self.sum
+    }
+
+    /// The clamped, once-rounded result for a member; the member's own value, bit for bit, when no
+    /// offset came.
+    #[must_use]
+    pub fn compose(self, member_db: f32) -> f32 {
+        match self.sum {
+            None => member_db,
+            Some(sum) => vca_compose_db(member_db, sum),
         }
-        // `f64::clamp` keeps a NaN, which a validated model never carries.
-        self.sum.clamp(FADER_MINIMUM_DB, FADER_MAXIMUM_DB) as f32
     }
 }
 

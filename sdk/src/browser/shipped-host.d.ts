@@ -779,7 +779,9 @@ export interface MisoStatus {
   /// @internal
   readonly appliedSample: bigint;
   /// The watermark's outcome flags, the C ABI's bits: `EXACT` 1, `TRANSITION_FALLBACK` 2,
-  /// `SUPERSEDED` 4.
+  /// `SUPERSEDED` 4. `TRANSITION_FALLBACK` also reports a Reposition swap while a live level move
+  /// may still ramp (conservative: it can be set when the move was not stretched; #1711 removes
+  /// it).
   /// @internal
   readonly appliedOutcome: bigint;
   /// The module's memory size now: at least the boot size (`MisoAudioWorkletHost.memoryBytes`),

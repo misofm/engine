@@ -2588,24 +2588,9 @@ struct TimelineEntry {
     timeline: u64,
 }
 
-/// The node-time mapping of one node block (#1640 D3).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TimelineSpan {
-    /// The timeline value at the node block's first sample.
-    pub start: i64,
-    /// The seek that reaches the node block, if any.
-    pub step: Option<TimelineStep>,
-}
-
-/// A seek inside a node block: from sample `offset` of the block on, the timeline reads
-/// `timeline + (i - offset)`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TimelineStep {
-    /// The node block's sample the seek takes effect at, from `0` to the block length minus one.
-    pub offset: u32,
-    /// The timeline value at that sample.
-    pub timeline: i64,
-}
+/// The node-time mapping of one node block (#1640 D3) and a seek inside it: the graph's types,
+/// so the source driver's `timeline_block` (#1647a) hands render the reader's own value.
+pub use graph::{TimelineSpan, TimelineStep};
 
 /// The session's playhead (#1640 D2): a source consumer with no PCM, no data queue and no
 /// recycle queue. It starts at generation 1, timeline sample 0, takes plain and anchored seeks
@@ -2774,7 +2759,7 @@ impl TimelineConsumer {
     /// position stands at source-read sample 0. Exact; saturates at the `i64` range.
     #[must_use]
     pub fn timeline_at(&self, source_read_sample: u64) -> i64 {
-        self.resolve(source_read_sample).1
+        self.resolve(i128::from(source_read_sample)).1
     }
 
     /// The node-time mapping of the node block of `frames` samples from
@@ -2787,9 +2772,15 @@ impl TimelineConsumer {
     /// a host renders without a step-back inside it, agrees with `timeline_at` on every sample;
     /// of several, the first is reported. Read-only and allocation-free, with at most
     /// `6K² + 10K + 1` entry reads.
+    ///
+    /// The first sample is signed (#1647a, R17-5): a node of input arrival `a(n)` reads the block
+    /// from `r + ΣP - a(n)`, which is negative while `r + ΣP < a(n)`; such a sample extrapolates
+    /// back from the oldest entry, so a fresh plan's node reads `-a(n)` at render sample 0. Every
+    /// `i128` value is taken: the arithmetic is exact (a `u64` entry against an `i128` sample),
+    /// a value past the `i64` range saturates to it, and nothing wraps or panics.
     #[must_use]
-    pub fn timeline_block(&self, first_source_read_sample: u64, frames: u32) -> TimelineSpan {
-        let start = self.timeline_at(first_source_read_sample);
+    pub fn timeline_block(&self, first_source_read_sample: i128, frames: u32) -> TimelineSpan {
+        let start = self.resolve(first_source_read_sample).1;
         let quantum = u64::from(self.quantum_frames);
         let mut step: Option<TimelineStep> = None;
         for age in 0..self.len {
@@ -2800,7 +2791,7 @@ impl TimelineConsumer {
                 entry.source_read_sample,
                 entry.source_read_sample.saturating_add(quantum),
             ] {
-                let Some(offset) = sample
+                let Some(offset) = i128::from(sample)
                     .checked_sub(first_source_read_sample)
                     .and_then(|offset| u32::try_from(offset).ok())
                     .filter(|&offset| offset < frames)
@@ -2824,10 +2815,10 @@ impl TimelineConsumer {
     /// `sample` is also a step when it is a seek, read against `oldest_expected_timeline` for the
     /// oldest entry: the history no longer holds the block it stepped from.
     fn step_at(&self, sample: u64) -> Option<i64> {
-        let (resolving, timeline) = self.resolve(sample);
+        let (resolving, timeline) = self.resolve(i128::from(sample));
         let stepped = match sample.checked_sub(1) {
             Some(previous) => {
-                self.resolve(previous).1.checked_add(1) != Some(timeline)
+                self.resolve(i128::from(previous)).1.checked_add(1) != Some(timeline)
                     || (!self.starts_at_or_before(previous)
                         && resolving.is_some_and(|age| self.is_seek_entry(age)))
             }
@@ -2906,14 +2897,17 @@ impl TimelineConsumer {
 
     /// The age of the entry whose block contains `sample` (`None` when the value is
     /// extrapolated), and the timeline value at `sample`.
-    fn resolve(&self, sample: u64) -> (Option<usize>, i64) {
-        let quantum = u64::from(self.quantum_frames);
+    fn resolve(&self, sample: i128) -> (Option<usize>, i64) {
+        let quantum = i128::from(self.quantum_frames);
         let mut before = None;
         for age in 0..self.len {
             let Some(entry) = self.entry(age) else {
                 break;
             };
-            if let Some(offset) = sample.checked_sub(entry.source_read_sample) {
+            if let Some(offset) = sample
+                .checked_sub(i128::from(entry.source_read_sample))
+                .filter(|&offset| offset >= 0)
+            {
                 if offset < quantum {
                     return (Some(age), offset_timeline(entry, sample));
                 }
@@ -2937,9 +2931,12 @@ impl TimelineConsumer {
 }
 
 /// `entry.timeline + (sample - entry.source_read_sample)`, exact, saturated to the `i64` range.
-fn offset_timeline(entry: TimelineEntry, sample: u64) -> i64 {
-    let value =
-        i128::from(entry.timeline) + i128::from(sample) - i128::from(entry.source_read_sample);
+/// `sample` is signed (#1647a): it may lie before source-read sample 0. The `i128` sum saturates
+/// at the `i128` range first, which lies far outside the `i64` one, so no input wraps.
+fn offset_timeline(entry: TimelineEntry, sample: i128) -> i64 {
+    let value = i128::from(entry.timeline)
+        .saturating_add(sample)
+        .saturating_sub(i128::from(entry.source_read_sample));
     i64::try_from(value).unwrap_or(if value < 0 { i64::MIN } else { i64::MAX })
 }
 // REALTIME_POLICY_END
@@ -3360,6 +3357,15 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
     /// The timeline sample at `source_read_sample` (#1641 D8), from the timeline's history.
     fn timeline_at(&self, source_read_sample: u64) -> Option<i64> {
         Some(self.timeline.timeline_at(source_read_sample))
+    }
+
+    /// The node-time mapping of the node block of `frames` samples from the signed
+    /// `first_source_read_sample` (#1647a), from the timeline's history: render's per-block read.
+    fn timeline_block(&self, first_source_read_sample: i128, frames: u32) -> Option<TimelineSpan> {
+        Some(
+            self.timeline
+                .timeline_block(first_source_read_sample, frames),
+        )
     }
     // REALTIME_POLICY_END
 
@@ -6875,6 +6881,58 @@ mod tests {
             }
         }
 
+        /// #1647a (R17-5): the signed reader at the limits. A node block may start before
+        /// source-read sample 0 (`r + ΣP < a(n)`) and is read back from the oldest entry, so a
+        /// fresh plan's node of arrival 300 reads `-300` at render sample 0, and a block that
+        /// crosses sample 0 has no step. First samples below `i64::MIN`, at `i64::MIN`, at 0, at
+        /// `i64::MAX`, above it (up to `i128::MAX`), and blocks that cross each of these and the
+        /// `u64` end of the source-read clock, give saturated `i64` values and no panic.
+        ///
+        /// Test value: red if the signed first sample wraps, panics or saturates a value inside
+        /// the `i64` range, or if a block that crosses sample 0 reports a step.
+        #[test]
+        fn the_signed_reader_extrapolates_back_and_saturates_at_the_limits() {
+            let (_producer, mut consumer) = timeline(4);
+            blocks_at(&mut consumer, &[0]);
+            let plain = |start| TimelineSpan { start, step: None };
+            assert_eq!(consumer.timeline_block(-300, Q), plain(-300));
+            assert_eq!(consumer.timeline_block(-40, Q), plain(-40));
+            assert_eq!(consumer.timeline_block(0, Q), plain(0));
+            let span = consumer.timeline_block(-40, Q);
+            for i in 0..Q {
+                let sample = -40 + i64::from(i);
+                assert_eq!(span_value(span, i), sample, "sample {i} across 0");
+            }
+            let min = i128::from(i64::MIN);
+            let max = i128::from(i64::MAX);
+            for (first, start) in [
+                (i128::MIN, i64::MIN),
+                (min - 1, i64::MIN),
+                (min, i64::MIN),
+                (min + 40, i64::MIN + 40),
+                (max - 40, i64::MAX - 40),
+                (max, i64::MAX),
+                (max + 1, i64::MAX),
+                (i128::from(u64::MAX), i64::MAX),
+                (i128::MAX - 40, i64::MAX),
+                (i128::MAX, i64::MAX),
+            ] {
+                assert_eq!(consumer.timeline_block(first, Q), plain(start), "{first}");
+            }
+            // A history at the `u64` end of the source-read clock: an entry whose block ends
+            // past `u64::MAX` and node blocks that cross that end.
+            let (_producer, mut end) = timeline(4);
+            blocks_at(&mut end, &[u64::MAX - 100]);
+            assert_eq!(end.timeline_at(u64::MAX), 100);
+            assert_eq!(end.timeline_block(i128::from(u64::MAX) - 40, Q), plain(60));
+            assert_eq!(end.timeline_block(i128::from(u64::MAX), Q), plain(100));
+            assert_eq!(end.timeline_block(i128::from(u64::MAX) + 1, Q), plain(101));
+            assert_eq!(end.timeline_block(i128::MAX, Q), plain(i64::MAX));
+            assert_eq!(end.timeline_block(i128::MIN, Q), plain(i64::MIN));
+            // Sample -1 lies `u64::MAX - 99` before the entry: past the `i64` range, saturated.
+            assert_eq!(end.timeline_block(-1, Q), plain(i64::MIN));
+        }
+
         /// Batch 16a fold M1: a source-read clock step-back (#1641 D4) overlaps a newer entry on
         /// an older one, so the timeline steps where the newer entry starts and again where it
         /// ends, with no seek entry in sight.
@@ -6910,7 +6968,7 @@ mod tests {
             );
             // Every node block with one step at most agrees with `timeline_at` sample by sample.
             for first in (0..5 * QU).step_by(8) {
-                let span = consumer.timeline_block(first, Q);
+                let span = consumer.timeline_block(i128::from(first), Q);
                 for i in 0..Q {
                     assert_eq!(
                         span_value(span, i),
@@ -6988,7 +7046,7 @@ mod tests {
                         if steps > 1 {
                             continue;
                         }
-                        let span = consumer.timeline_block(first, Q);
+                        let span = consumer.timeline_block(i128::from(first), Q);
                         for i in 0..Q {
                             assert_eq!(
                                 span_value(span, i),
@@ -7048,8 +7106,8 @@ mod tests {
             // Evictions keep the oldest entry's expectation: a plain oldest entry is no step.
             let (_producer, mut plain) = timeline(3);
             run(&mut plain, 0, 6);
-            assert_eq!(plain.timeline_block(3 * QU, Q).step, None);
-            assert_eq!(plain.timeline_block(3 * QU - 40, Q).step, None);
+            assert_eq!(plain.timeline_block(i128::from(3 * QU), Q).step, None);
+            assert_eq!(plain.timeline_block(i128::from(3 * QU - 40), Q).step, None);
         }
 
         /// Batch 16a fold MINOR 3: a vacant timeline that no carry fills (#1641 D3).
@@ -7203,7 +7261,7 @@ mod tests {
             run(&mut consumer, 3, 5);
             // Straddling: the node block starts 40 samples before the seek's block.
             assert_eq!(
-                consumer.timeline_block(3 * QU - 40, Q),
+                consumer.timeline_block(i128::from(3 * QU - 40), Q),
                 TimelineSpan {
                     start: 3 * 128 - 40,
                     step: Some(TimelineStep {
@@ -7214,7 +7272,7 @@ mod tests {
             );
             // Exactly at the seek's block: the step is at offset 0.
             assert_eq!(
-                consumer.timeline_block(3 * QU, Q),
+                consumer.timeline_block(i128::from(3 * QU), Q),
                 TimelineSpan {
                     start: 10_000,
                     step: Some(TimelineStep {
@@ -7225,13 +7283,13 @@ mod tests {
             );
             // A plain advance is no step, inside or at the first sample.
             assert_eq!(
-                consumer.timeline_block(4 * QU - 40, Q),
+                consumer.timeline_block(i128::from(4 * QU - 40), Q),
                 TimelineSpan {
                     start: 10_088,
                     step: None,
                 }
             );
-            assert_eq!(consumer.timeline_block(2 * QU, Q).step, None);
+            assert_eq!(consumer.timeline_block(i128::from(2 * QU), Q).step, None);
         }
 
         #[test]
@@ -7242,13 +7300,13 @@ mod tests {
             // Block 2 seeks; block 3 evicts block 1, so block 2 becomes the oldest entry.
             run(&mut consumer, 2, 4);
             assert_eq!(
-                consumer.timeline_block(2 * QU, Q).step,
+                consumer.timeline_block(i128::from(2 * QU), Q).step,
                 Some(TimelineStep {
                     offset: 0,
                     timeline: 9_000,
                 })
             );
-            assert_eq!(consumer.timeline_block(3 * QU, Q).step, None);
+            assert_eq!(consumer.timeline_block(i128::from(3 * QU), Q).step, None);
         }
 
         #[test]
@@ -7273,7 +7331,7 @@ mod tests {
                 vec![(5 * QU, 10_128), (6 * QU, 10_256), (7 * QU, 10_384)]
             );
             assert_eq!(small.timeline_at(5 * QU - 1), 10_127);
-            assert_eq!(small.timeline_block(5 * QU, Q).step, None);
+            assert_eq!(small.timeline_block(i128::from(5 * QU), Q).step, None);
             // From a smaller K: all three, in order, then the copy keeps recording after them.
             let (_p, mut larger) = timeline(5);
             larger.copy_history_from(&small);
@@ -7290,7 +7348,7 @@ mod tests {
             four.copy_history_from(&large);
             assert_eq!(snapshot(&four).first(), Some(&(4 * QU, 10_000)));
             assert_eq!(
-                four.timeline_block(4 * QU, Q).step,
+                four.timeline_block(i128::from(4 * QU), Q).step,
                 Some(TimelineStep {
                     offset: 0,
                     timeline: 10_000,

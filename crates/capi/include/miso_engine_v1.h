@@ -43,8 +43,14 @@ extern "C" {
  * whose automation rate is Block, on a console-slot entry or an insert, the parametric EQ's live
  * parameters included (applied through prepared targets); and a track effect's bypass, except the
  * delay's and the multiband compressor's, which rebuild. A transaction that changes only the
- * session ID, a profile's id or the stored automation table commits with no replacement and no
- * live value. Any other change takes the replacement path exactly as before: every submix strip
+ * session ID, a profile's id or a stored automation entry on a row that does not render yet
+ * commits with no replacement and no live value. A stored fader automation edit (an entry on a
+ * strip's fader_db added, removed, retargeted or given other segments) rebuilds the plan, and
+ * the successor carries every owner; a static fader value of a lane the session automates is that
+ * lane's fallback and gives no live value, and a SET_CONTROL of that lane's fader_db writes the
+ * entry's hand offset instead, a live value heard on top of the curve (#1650); the other rows stay
+ * model-only until they render.
+ * Any other change takes the replacement path exactly as before: every submix strip
  * value (its fader, its effects), any edit while the session declares a VCA, the mute of a track
  * that a follows_mute send reads, a fader outside its domain or effect parameters that
  * preparation refuses (refused as MISO_ENGINE_V1_COMPILE_REJECTED with the same diagnostic as
@@ -172,7 +178,10 @@ extern "C" {
  * late still reads the newest revision, and the counters still count every revision.
  * outcome_flags is the OR
  * over the revisions the last advance covered of MISO_ENGINE_V1_OUTCOME_EXACT,
- * MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK and MISO_ENGINE_V1_OUTCOME_SUPERSEDED. The host
+ * MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK and MISO_ENGINE_V1_OUTCOME_SUPERSEDED.
+ * MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK reports a warm successor's fallback to its
+ * transition, or a Reposition swap while a live level move may still ramp (conservative: it can be
+ * set when the move was not stretched; #1711 removes it). The host
  * polls the watermark to learn that an edit is audible, never the event lane. The caller zeroes
  * reserved0 and reserved[] and sets struct_size, or the call returns
  * MISO_ENGINE_V1_INVALID_ARGUMENT; a copy that keeps landing inside render's publication
