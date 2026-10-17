@@ -920,6 +920,11 @@ fn id(text: &str) -> StableId {
 
 impl CAbi {
     fn new(model: &SessionModel) -> Self {
+        Self::with_limits(model, &limits())
+    }
+
+    /// [`Self::new`] under `limits`.
+    fn with_limits(model: &SessionModel, limits: &CompileLimits) -> Self {
         let document = canonical_session_json(model).expect("canonical session");
         let config = EngineConfig {
             struct_size: ENGINE_CONFIG_SIZE,
@@ -949,7 +954,7 @@ impl CAbi {
                     engine,
                     document.as_ptr(),
                     document.len() as u64,
-                    &limits(),
+                    limits,
                     &mut diagnostics,
                     &mut session,
                     &mut plan,
@@ -1369,6 +1374,26 @@ impl CAbi {
         (out.revision, out.first_sample, out.outcome_flags)
     }
 
+    /// The plan's saturating count of revisions completed as a transition fallback, through
+    /// `miso_engine_v1_plan_watermark`.
+    fn transition_fallback_count(&self) -> u64 {
+        let mut out = capi::Watermark {
+            struct_size: capi::WATERMARK_SIZE,
+            reserved0: 0,
+            revision: 0,
+            first_sample: 0,
+            outcome_flags: 0,
+            exact_count: 0,
+            transition_fallback_count: 0,
+            superseded_count: 0,
+            reserved: [0; 5],
+        };
+        // SAFETY: The plan is live; the query is pure and `out` is owned storage of the exact size.
+        let code = unsafe { capi::miso_engine_v1_plan_watermark(self.plan, &mut out) };
+        assert_eq!(code, C_RESULT_OK, "C ABI watermark");
+        out.transition_fallback_count
+    }
+
     /// The active plan's `(latency_samples, tail_kind, tail_samples)` through
     /// `miso_engine_v1_plan_resources`.
     fn plan_latency(&self) -> (u64, u64, u64) {
@@ -1431,15 +1456,33 @@ impl CAbi {
         generation: u64,
     ) {
         let [left, right] = planes(feed, block);
-        let pointers = [left.as_ptr(), right.as_ptr()];
+        self.submit_planes(
+            name,
+            generation,
+            start_block * u64::from(QUANTUM),
+            [&left, &right],
+        );
+    }
+
+    /// Submit the planes `[left, right]` of `generation` to the source `name` at its frame
+    /// `start_frame`; every frame must be accepted.
+    fn submit_planes(
+        &mut self,
+        name: &str,
+        generation: u64,
+        start_frame: u64,
+        planes: [&[f32]; 2],
+    ) {
+        let frames = u32::try_from(planes[0].len()).expect("a chunk's frames");
+        let pointers = [planes[0].as_ptr(), planes[1].as_ptr()];
         let chunk = SourceChunk {
             struct_size: SOURCE_CHUNK_SIZE,
             sample_rate_hz: self.rate,
             generation,
-            start_frame: start_block * u64::from(QUANTUM),
+            start_frame,
             planes: pointers.as_ptr(),
             plane_count: 2,
-            frames: QUANTUM,
+            frames,
             end_of_region: 0,
             reserved0: 0,
         };
@@ -1462,25 +1505,28 @@ impl CAbi {
             )
         };
         assert_eq!(code, C_RESULT_OK, "C ABI source {name}");
-        assert_eq!(report.accepted_frames, u64::from(QUANTUM));
+        assert_eq!(report.accepted_frames, u64::from(frames));
     }
 
     /// Render block `block` and return the output's bits.
     fn render(&mut self, block: u64) -> Vec<u32> {
-        let mut pcm = vec![f32::NAN; QUANTUM as usize * 2];
+        self.render_frames(block * u64::from(QUANTUM), QUANTUM)
+    }
+
+    /// Render the `frames` samples from render sample `at` and return the output's bits.
+    fn render_frames(&mut self, at: u64, frames: u32) -> Vec<u32> {
+        let mut pcm = vec![f32::NAN; frames as usize * 2];
         let output = PlanarOutput {
             struct_size: PLANAR_OUTPUT_SIZE,
             channels: 2,
             samples: pcm.as_mut_ptr(),
             sample_capacity: pcm.len() as u64,
-            frames: QUANTUM,
-            plane_stride_samples: QUANTUM,
+            frames,
+            plane_stride_samples: frames,
             reserved: [0; 2],
         };
         // SAFETY: This thread is the plan's only renderer; `output` is owned storage.
-        let code = unsafe {
-            capi::miso_engine_v1_render_f32_planar(self.plan, block * u64::from(QUANTUM), &output)
-        };
+        let code = unsafe { capi::miso_engine_v1_render_f32_planar(self.plan, at, &output) };
         assert_eq!(code, C_RESULT_OK, "C ABI render");
         bits(&pcm)
     }
@@ -2961,6 +3007,314 @@ fn a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both
                 watermark.2, expected,
                 "{rate} Hz, {label}: the rebuild's outcome flags"
             );
+        }
+    }
+}
+
+/// #1651 gate 8 (U1 fold 1, MINOR-3): in a mute-only session (a stored mute curve on `t1`, no
+/// fader entry), a rebuild that changes the mute curve while a hand fader move with its own 4,000
+/// samples still ramps completes exactly on both hosts: B17-R14's transition-fallback window is
+/// the fader row's alone, because a mute cell's adoption lands a `SetMute`, never a level move
+/// over `J`. Both hosts report the same watermark, `EXACT`, and no transition fallback, and render
+/// the same bits.
+///
+/// Test value: red if the shared control plane opens the fallback window for a successor that
+/// automates only a mute row (the candidate is flagged `TRANSITION_FALLBACK`), or if either host
+/// marks the rebuild differently.
+#[test]
+fn a_mute_curve_rebuild_while_a_level_move_ramps_completes_exactly_on_both_hosts() {
+    let curve = |close: u64| SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-mute-curve"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                6,
+                ParameterChannel::Both,
+            ),
+            segments: vec![
+                session::AutomationSegment {
+                    shape: session::AutomationShape::Step,
+                    start_sample: 0,
+                    end_sample: close,
+                    start_value: 0.0,
+                    end_value: 0.0,
+                    unit: session::ParameterUnit::Linear,
+                },
+                session::AutomationSegment {
+                    shape: session::AutomationShape::Step,
+                    start_sample: close,
+                    end_sample: 1_000_000,
+                    start_value: 1.0,
+                    end_value: 1.0,
+                    unit: session::ParameterUnit::Linear,
+                },
+            ],
+            offset: session::AutomationOffset::default(),
+        },
+    };
+    let hand = CAbi::edits(
+        Edit::Fader {
+            strip: T1,
+            lanes: Lanes::Both,
+            db: -6.0,
+        },
+        Some(4_000),
+    );
+    for rate in RATES {
+        let model = model_at(rate);
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi| {
+            let (b, b_reply) = browser.transaction_reply(edits);
+            let (c, c_reply) = c_abi.transaction(edits);
+            assert_eq!(b, c, "{rate} Hz: one verdict");
+            assert_eq!(b_reply, c_reply, "{rate} Hz: one reply");
+            b
+        };
+        let rebuilt = |verdict: Verdict| {
+            assert!(
+                matches!(
+                    verdict,
+                    Verdict::Applied {
+                        path: EditPath::Rebuild,
+                        ..
+                    }
+                ),
+                "{rate} Hz: a mute curve edit rebuilds: {verdict:?}"
+            );
+        };
+        rebuilt(both(&[curve(20_000)], &mut browser, &mut c_abi));
+        same_blocks(&mut browser, &mut c_abi, 0..4, "the mute-only session");
+        both(&hand, &mut browser, &mut c_abi);
+        same_blocks(&mut browser, &mut c_abi, 4..7, "the hand move");
+        rebuilt(both(&[curve(30_000)], &mut browser, &mut c_abi));
+        same_blocks(&mut browser, &mut c_abi, 7..10, "the mute curve rebuild");
+        let watermark = c_abi.watermark();
+        assert_eq!(
+            status_watermark(&browser),
+            watermark,
+            "{rate} Hz: the browser status carries the C ABI's watermark"
+        );
+        assert_eq!(
+            watermark.2,
+            capi::OUTCOME_EXACT,
+            "{rate} Hz: the mute-only rebuild completes exactly"
+        );
+        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+        assert_eq!(
+            (
+                browser.host.watermark().transition_fallback_count,
+                c_abi.transition_fallback_count()
+            ),
+            (0, 0),
+            "{rate} Hz: no transition fallback on either host"
+        );
+    }
+}
+
+/// #1651 gates 1 and 3 across hosts (U1 fold 1, MINOR-4): the strip's stored mute under
+/// composition renders the same bits on the browser and the C ABI. `t1`'s mute curve closes at
+/// 2,000 and opens at 3,500 on both lanes, and VCA `m` holds `t1`. Each of solo on `t2`, a VCA
+/// mute of `t1` and a hand mute of `t1` is set at block 2 (the curve open), then released while
+/// the curve is closed, released while it is open, or kept; after the curve's opening a plain
+/// session seek to timeline 2,600 lands inside the muted span and the curve opens again 900
+/// samples later. Every transaction gets the same verdict and reply bytes on both hosts and
+/// every block the same bits, at quanta 128 and 37 (a quantum that puts the steps, the terms and
+/// the seek off every grid and block boundary). The curve is heard: `t1`'s muted span differs from
+/// a twin with no curve.
+///
+/// Test value: red if either host composes `curve || terms` differently (the browser's solo
+/// overlay or the C ABI's VCA term), lands a step, a term or the seek's exact set at another
+/// sample or over another ramp, or answers a term edit differently.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_composed_stored_mute_renders_alike_on_both_hosts() {
+    let curve = || session::Automation {
+        id: id("t1-mute-curve"),
+        target: address(
+            Owner::Strip(id(T1.id)),
+            Section::Builtins,
+            MUTE,
+            ParameterChannel::Both,
+        ),
+        segments: [
+            (0, 2_000, 0.0),
+            (2_000, 3_500, 1.0),
+            (3_500, 1_000_000, 0.0),
+        ]
+        .map(
+            |(start_sample, end_sample, value)| session::AutomationSegment {
+                shape: session::AutomationShape::Step,
+                start_sample,
+                end_sample,
+                start_value: value,
+                end_value: value,
+                unit: session::ParameterUnit::Linear,
+            },
+        )
+        .to_vec(),
+        offset: session::AutomationOffset::default(),
+    };
+    const VCA_M: VcaRef = VcaRef { id: "m" };
+    let rate = 48_000;
+    for quantum in [128_u32, 37] {
+        let q = u64::from(quantum);
+        let mut model = model_at(rate);
+        model.quantum_frames = quantum;
+        model.vcas.push(Vca {
+            id: id(VCA_M.id),
+            fader: DualMonoFader {
+                left_db: 0.0,
+                right_db: 0.0,
+                left_mute: false,
+                right_mute: false,
+            },
+            members: vec![id(T1.id)],
+        });
+        // The send does not follow `t1`'s mute: a strip mute that moves a following route's
+        // gate is a rebuild until #1653, which a solo (monitor) write cannot take.
+        for route in &mut model.routes {
+            route.follows_mute = false;
+        }
+        let plain = model.clone();
+        model.automation.push(curve());
+        // The block that holds a sample, and the blocks of the script.
+        let block_of = |sample: u64| sample.div_ceil(q);
+        let (set_at, seek_at) = (2, block_of(4_200));
+        let blocks = seek_at + block_of(1_900);
+        let terms = [
+            (
+                "solo",
+                Edit::Solo {
+                    strip: T2,
+                    on: true,
+                },
+                Edit::Solo {
+                    strip: T2,
+                    on: false,
+                },
+            ),
+            (
+                "vca",
+                Edit::VcaMute {
+                    vca: VCA_M,
+                    lanes: Lanes::Both,
+                    muted: true,
+                },
+                Edit::VcaMute {
+                    vca: VCA_M,
+                    lanes: Lanes::Both,
+                    muted: false,
+                },
+            ),
+            (
+                "hand",
+                Edit::Mute {
+                    strip: T1,
+                    lanes: Lanes::Both,
+                    muted: true,
+                },
+                Edit::Mute {
+                    strip: T1,
+                    lanes: Lanes::Both,
+                    muted: false,
+                },
+            ),
+        ];
+        for (term, on, off) in terms {
+            for release in [Some(block_of(2_600)), Some(block_of(1_000)), None] {
+                let label = format!("quantum {quantum}, {term}, released at block {release:?}");
+                let document = canonical_session_json(&model).expect("canonical session");
+                let mut browser = Rig::boot_at(document.as_bytes(), rate, quantum);
+                let mut c_abi = CAbi::with_limits(
+                    &model,
+                    &CompileLimits {
+                        source_ring_frames: quantum * 2,
+                        ..limits()
+                    },
+                );
+                let plain_document = canonical_session_json(&plain).expect("canonical session");
+                let mut twin = Rig::boot_at(plain_document.as_bytes(), rate, quantum);
+                let (mut generation, mut timeline) = (1, 0);
+                let mut heard = false;
+                for block in 0..blocks {
+                    let edit = if block == set_at {
+                        Some(on)
+                    } else if Some(block) == release {
+                        Some(off)
+                    } else {
+                        None
+                    };
+                    if let Some(edit) = edit {
+                        let edits = CAbi::edits(edit, None);
+                        let (b, b_reply) = browser.transaction_reply(&edits);
+                        let (c, c_reply) = c_abi.transaction(&edits);
+                        assert_eq!(b, c, "{label}: one verdict at block {block}");
+                        assert_eq!(b_reply, c_reply, "{label}: one reply at block {block}");
+                        assert!(
+                            matches!(b, Verdict::Applied { .. }),
+                            "{label}: the term at block {block} commits: {b:?}"
+                        );
+                    }
+                    if block == seek_at {
+                        generation += 1;
+                        timeline = 2_600;
+                        assert_eq!(
+                            browser.host.session_seek(None, generation, timeline, None),
+                            host_web::RESULT_OK
+                        );
+                        assert_eq!(
+                            twin.host.session_seek(None, generation, timeline, None),
+                            host_web::RESULT_OK
+                        );
+                        c_abi.session_seek(generation, timeline, None);
+                    }
+                    let mut outputs = Vec::new();
+                    for leg in [&mut browser, &mut twin] {
+                        for (feed, strip) in [T1, T2, T3].into_iter().enumerate() {
+                            let [left, right] = [0, 1].map(|lane| {
+                                (timeline..timeline + q)
+                                    .map(|frame| sample(feed as u64, lane, frame))
+                                    .collect::<Vec<f32>>()
+                            });
+                            assert_eq!(
+                                leg.host.submit_source(
+                                    format!("src-{}", strip.id).as_bytes(),
+                                    generation,
+                                    timeline,
+                                    rate,
+                                    &[&left, &right],
+                                    quantum,
+                                    false,
+                                ),
+                                host_web::RESULT_OK,
+                                "{label}: browser source {}",
+                                strip.id
+                            );
+                            if outputs.is_empty() {
+                                c_abi.submit_planes(
+                                    &format!("src-{}", strip.id),
+                                    generation,
+                                    timeline,
+                                    [&left, &right],
+                                );
+                            }
+                        }
+                        assert_eq!(leg.host.render_next(), host_web::RESULT_OK);
+                        outputs.push(bits(leg.host.output_pcm().expect("browser output")));
+                    }
+                    let c = c_abi.render_frames(block * q, quantum);
+                    assert_eq!(outputs[0], c, "{label}: block {block} bits");
+                    // Inside the curve's muted span, after its ramp: `t1` is muted there,
+                    // unlike in the twin with no curve and no term.
+                    if (2_600..3_400).contains(&timeline) && outputs[0] != outputs[1] {
+                        heard = true;
+                    }
+                    timeline += q;
+                }
+                assert!(heard, "{label}: the curve's muted span is heard");
+            }
         }
     }
 }

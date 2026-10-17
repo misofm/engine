@@ -2602,8 +2602,10 @@ where
         // lanes reposition or how much is left, so the candidate completes as the transition
         // fallback whenever any level move may still ramp. The rebuild's own level changes join
         // the window with the commit. A declared discontinuity carries nothing. The test is the
-        // fader row alone (#1651 T2, root ruling R18-4): a mute cell's adoption never stretches a
-        // live move, so a successor that automates only a mute row completes `Exact`.
+        // fader row alone (#1651 T2; U1 fold 1, R18-4 withdrawn): a mute cell's adoption lands
+        // only a `SetMute` (the curve's change over the mute length, a terms record committed in
+        // the same transaction over its own ramp), never a level move over `J`, so a successor
+        // that automates only a mute row completes `Exact`.
         let (outcome, rebuild_level) = match &kind {
             Rebuild::Transaction(prepared) => {
                 let session = prepared.get().prospective_session();

@@ -131,6 +131,49 @@ fn held_inside_a_reported_ramp_and_the_grid_resumes() {
     assert_eq!(Some(last.value), state.target());
 }
 
+/// #1651 U1 fold 1 (MAJOR-1): `release_hold_by` shortens a reported hold and never lengthens or
+/// starts one. A hold to 1,000 released by 127 holds only the grid ramp that completes before 127
+/// (the one at 0), as a hold reported to 127 would; a release by 500 of a hold to 200 keeps 200
+/// (the ramps at 0, 64 and 128); a release of a state with no ramp in flight starts none.
+///
+/// Red if the release is ignored (the grid stays held to 1,000), if it lengthens a shorter hold
+/// (`hold_until` in its place: the grid stays held to 500), or if it starts a hold on a free cell.
+#[test]
+fn a_released_hold_ends_early_and_is_never_lengthened() {
+    let program = fader(&[seg(0, 100_000, 0.0, 100_000.0, Shape::Linear)]);
+    let held = |prepare: &dyn Fn(&mut CellState)| {
+        let mut state = CellState::new();
+        prepare(&mut state);
+        run(&program, &mut state, 0, 640, 1, SeekMode::Exact, 480)
+            .iter()
+            .map(|(t, e)| (*t, e.held))
+            .filter(|&(_, held)| held)
+            .map(|(t, _)| t)
+            .collect::<Vec<i64>>()
+    };
+    assert_eq!(
+        held(&|state| {
+            state.hold_until(1_000);
+            state.release_hold_by(127);
+        }),
+        [0],
+        "a hold to 1,000 released by 127"
+    );
+    assert_eq!(
+        held(&|state| {
+            state.hold_until(200);
+            state.release_hold_by(500);
+        }),
+        [0, 64, 128],
+        "a hold to 200 released by 500 keeps 200"
+    );
+    assert_eq!(
+        held(&|state| state.release_hold_by(500)),
+        Vec::<i64>::new(),
+        "no hold in flight: none starts"
+    );
+}
+
 /// Red if a held event inside a ramp is dropped as unchanged while the stage still remembers an
 /// older held value.
 #[test]

@@ -97,11 +97,9 @@ fn id(text: &str) -> StableId {
     StableId::parse(text).expect("stable ID")
 }
 
-/// The fixture with VCA `v` holding `eq0` and, with `curve`, `eq0`'s mute driven by a step curve
-/// on both lanes, closed over `1_000..2_500`.
-fn document(curve: bool) -> (String, u64) {
-    let mut model = session::parse_session_json(SESSION).expect("fixture");
-    let frames = model.sources[0].frames;
+/// `eq0`'s mute driven by a step curve on both lanes, closed over `close..2_500` of a source of
+/// `frames` frames.
+fn curve(close: u64, frames: u64) -> Automation {
     let step = |start_sample, end_sample, value| AutomationSegment {
         shape: AutomationShape::Step,
         start_sample,
@@ -110,7 +108,7 @@ fn document(curve: bool) -> (String, u64) {
         end_value: value,
         unit: ParameterUnit::Linear,
     };
-    model.automation.extend(curve.then(|| Automation {
+    Automation {
         id: id("eq0-mute-curve"),
         target: ControlAddress {
             owner: Owner::Strip(id("eq0")),
@@ -119,12 +117,22 @@ fn document(curve: bool) -> (String, u64) {
             lane: ParameterChannel::Both,
         },
         segments: vec![
-            step(0, 1_000, 0.0),
-            step(1_000, 2_500, 1.0),
+            step(0, close, 0.0),
+            step(close, 2_500, 1.0),
             step(2_500, frames, 0.0),
         ],
         offset: AutomationOffset::default(),
-    }));
+    }
+}
+
+/// The fixture with VCA `v` holding `eq0` and, with `curve`, `eq0`'s mute driven by a step curve
+/// on both lanes, closed over `1_000..2_500`.
+fn document(with_curve: bool) -> (String, u64) {
+    let mut model = session::parse_session_json(SESSION).expect("fixture");
+    let frames = model.sources[0].frames;
+    model
+        .automation
+        .extend(with_curve.then(|| curve(1_000, frames)));
     model.vcas.push(Vca {
         id: id("v"),
         fader: DualMonoFader {
@@ -214,13 +222,19 @@ impl Rig {
 
     /// Commit `value` at `address` live (the session's ramp).
     fn set(&mut self, address: ControlAddress, value: f32) {
-        self.request += 1;
         let edits = [SessionEdit::SetControl {
             expected_effect: None,
             address,
             value,
             ramp_samples: None,
         }];
+        let path = self.transact(&edits);
+        assert_eq!(path, EditPath::Live, "a mute term is live");
+    }
+
+    /// Commit `edits` as one transaction; its edit path.
+    fn transact(&mut self, edits: &[SessionEdit]) -> EditPath {
+        self.request += 1;
         let codec = ProtocolCodec::default();
         let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
         let length = codec
@@ -228,7 +242,7 @@ impl Rig {
                 &TypedCommandFrame {
                     request_id: RequestId::new(self.request).expect("nonzero request"),
                     expected_revision: ExpectedRevision::Exact(SessionRevision(self.revision)),
-                    payload: CommandPayload::SessionTransactionApply(&edits),
+                    payload: CommandPayload::SessionTransactionApply(edits),
                 },
                 &mut bytes,
             )
@@ -255,9 +269,9 @@ impl Rig {
             }
             DecodedTypedResponseFrame::Success { .. } => panic!("another success payload"),
         };
-        assert_eq!(path, EditPath::Live, "a mute term is live");
         self.revision += 1;
         self.drain();
+        path
     }
 
     /// The commit's reliable events, read as a host reads them.
@@ -338,6 +352,60 @@ fn stored_mute_automation_renders_allocation_free() {
             // Open again, with no term: the session without the curve.
             47 => assert_eq!(rig.last, plain.last, "block {block} is open"),
             _ => {}
+        }
+    }
+}
+
+/// #1651 U1 fold 1 (MAJOR-2): a hand mute committed in the same transaction as a mute curve edit
+/// lands as committed. At block 4 one transaction moves `eq0`'s closing step from 1,000 to 1,100
+/// (a carried rebuild: the curve's table changes, so the adopted cell repositions) and sets `eq0`'s
+/// hand mute with `ramp_samples` absent (the session's mute length), `0` and `2,000`. A twin with
+/// the old curve takes the hand mute alone, live, with the same ramp: the curve's change lies
+/// inside the muted span the hand mute holds, so every block of the rebuilt run equals the twin's,
+/// bit for bit, through the ramp and after the curve's opening (still held by the hand mute).
+///
+/// Test value: red if the swap block's adoption drops the record's ramp word and lands the hand
+/// mute over the mute length instead (a `0` step becomes a 480-sample ramp, a 2,000-sample fade
+/// becomes 480), or lands it twice.
+#[test]
+fn a_hand_mute_committed_with_a_mute_curve_edit_lands_as_committed() {
+    let frames = session::parse_session_json(SESSION)
+        .expect("fixture")
+        .sources[0]
+        .frames;
+    let hand = ControlAddress {
+        owner: Owner::Strip(id("eq0")),
+        section: Section::Builtins,
+        control: 6,
+        lane: ParameterChannel::Both,
+    };
+    for ramp_samples in [None, Some(0), Some(2_000)] {
+        let mut rig = Rig::new(true);
+        let mut twin = Rig::new(true);
+        let mute = SessionEdit::SetControl {
+            expected_effect: None,
+            address: hand.clone(),
+            value: 1.0,
+            ramp_samples,
+        };
+        for block in 0..40_u64 {
+            if block == 4 {
+                let path = rig.transact(&[
+                    SessionEdit::UpsertAutomation {
+                        automation: curve(1_100, frames),
+                    },
+                    mute.clone(),
+                ]);
+                assert_eq!(path, EditPath::Rebuild, "{ramp_samples:?}: the curve edit");
+                let path = twin.transact(std::slice::from_ref(&mute));
+                assert_eq!(path, EditPath::Live, "{ramp_samples:?}: the hand mute");
+            }
+            rig.block();
+            twin.block();
+            assert_eq!(
+                rig.last, twin.last,
+                "{ramp_samples:?}: block {block} equals the hand mute alone"
+            );
         }
     }
 }
