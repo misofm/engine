@@ -976,6 +976,129 @@ fn at_one_offset_the_gain_applies_before_the_mute() {
     }
 }
 
+/// Gate 2, batch 13b case: a `SetMute` whose `muted` equals the lane's mute state leaves the stage
+/// as it was -- no retarget, no mute ramp, the ramp in flight unchanged. Each block is bit for bit a
+/// twin's that never received the repeated `SetMute`.
+///
+/// (a) An unmuted lane with a fader `RetargetGain` in flight takes `SetMute { false, 240 }` inside
+/// the ramp, then a `RetargetGain` 10 samples later: red if the repeat restarts the fader ramp over
+/// 240 samples or sets the mute ramp, which would hold the later gain move and the held flag.
+/// (b) A lane in a mute ramp toward `0.0` takes `SetMute { true, 240 }` inside it: red if the repeat
+/// restarts the ramp over 240 samples. (c) The live setter repeats on the same lanes, between blocks.
+#[test]
+fn a_repeated_mute_leaves_the_stage_as_it_was() {
+    let ride = (
+        0,
+        0,
+        FaderOperation::RetargetGain {
+            gain: 0.3,
+            samples: 300,
+        },
+    );
+    let after = (
+        30,
+        0,
+        FaderOperation::RetargetGain {
+            gain: 0.8,
+            samples: 100,
+        },
+    );
+    let repeat_unmute = (
+        20,
+        0,
+        FaderOperation::SetMute {
+            muted: false,
+            samples: 240,
+        },
+    );
+    let repeat_mute = (
+        20,
+        0,
+        FaderOperation::SetMute {
+            muted: true,
+            samples: 240,
+        },
+    );
+    for (name, build) in Subject::subjects() {
+        for (case, mute_first, with, without) in [
+            (
+                "a: unmuted, fader ramp in flight",
+                false,
+                vec![ride, repeat_unmute, after],
+                vec![ride, after],
+            ),
+            (
+                "b: mute ramp in flight",
+                true,
+                vec![repeat_mute],
+                Vec::<Timed>::new(),
+            ),
+        ] {
+            for quantum in [128_usize, 100] {
+                let (mut subject, mut twin) = (build(), build());
+                if mute_first {
+                    for lane in [&mut subject, &mut twin] {
+                        lane.live_mute(0, true, 300);
+                    }
+                }
+                let width = subject.width();
+                for block in 0..4 {
+                    let start = (block * quantum) as u64;
+                    let (mut left, mut right) = signal(quantum, width, block);
+                    let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
+                    let (ops, twin_ops): (&[Timed], &[Timed]) = if block == 0 {
+                        (&with, &without)
+                    } else {
+                        (&[], &[])
+                    };
+                    subject.process_with(&mut left, &mut right, start, ops);
+                    twin.process_with(&mut twin_left, &mut twin_right, start, twin_ops);
+                    let context = format!("{name} {case} q={quantum} block={block}");
+                    assert_eq!(bits(&left), bits(&twin_left), "left: {context}");
+                    assert_eq!(bits(&right), bits(&twin_right), "right: {context}");
+                    assert_eq!(
+                        subject.held(0),
+                        twin.held(0),
+                        "the held flag agrees: {context}"
+                    );
+                    if !mute_first && block == 0 {
+                        assert!(!subject.held(0), "gain_held stays false: {context}");
+                    }
+                }
+            }
+        }
+
+        // (c) The live setter repeating the lane's state, in flight, between blocks.
+        for (case, mute_first) in [("unmuted", false), ("muting", true)] {
+            let (mut subject, mut twin) = (build(), build());
+            for lane in [&mut subject, &mut twin] {
+                if mute_first {
+                    lane.live_mute(0, true, 300);
+                } else {
+                    lane.live_gain(0, -14.0, 300);
+                }
+            }
+            let width = subject.width();
+            for block in 0..4 {
+                if block == 1 {
+                    subject.live_mute(0, mute_first, 240);
+                    if !mute_first {
+                        assert!(!subject.held(0), "{name} {case}: gain_held stays false");
+                    }
+                }
+                let start = (block * 128) as u64;
+                let (mut left, mut right) = signal(128, width, block);
+                let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
+                subject.process(&mut left, &mut right, start);
+                twin.process(&mut twin_left, &mut twin_right, start);
+                let context = format!("{name} live {case} block={block}");
+                assert_eq!(bits(&left), bits(&twin_left), "left: {context}");
+                assert_eq!(bits(&right), bits(&twin_right), "right: {context}");
+            }
+        }
+    }
+}
+
 /// D2: the held flag follows the mute ramp. It is set by a windowed mute change, cleared the
 /// frame the countdown ends, cleared by a live retarget during an unmute ramp, and carried
 /// across a plan swap's lane export and import.
@@ -990,6 +1113,9 @@ fn the_held_flag_follows_the_mute_ramp() {
         let mut right = left.clone();
         bank.process(&mut left, &mut right, frames);
     };
+    // A mute that repeats the lane's state starts no ramp (batch 13b), so mute it first.
+    bank.set_mute(0, BuiltinLaneSelector::Left, true, 0)
+        .expect("lane");
     bank.set_mute(0, BuiltinLaneSelector::Left, false, 40)
         .expect("lane");
     assert_eq!(
@@ -1022,6 +1148,8 @@ fn the_held_flag_follows_the_mute_ramp() {
         "cleared as the countdown ends"
     );
 
+    bank.set_mute(0, BuiltinLaneSelector::Left, true, 0)
+        .expect("lane");
     bank.set_mute(0, BuiltinLaneSelector::Left, false, 40)
         .expect("lane");
     bank.set_fader_db(0, BuiltinLaneSelector::Left, -6.0, 8)

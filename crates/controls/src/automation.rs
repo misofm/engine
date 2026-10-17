@@ -9,7 +9,7 @@ use session::{
 };
 
 use crate::ControlKind;
-use crate::builtin_rows::{FADER_DB, HPF_HZ, LPF_HZ};
+use crate::builtin_rows::{FADER_DB, HPF_HZ, LPF_HZ, MUTE};
 use crate::descriptor::{ControlDescriptor, Lanes, check};
 use crate::effect_rows::{has_rows, session_unit};
 use crate::error::ControlError;
@@ -375,12 +375,48 @@ pub const FADER_CELL_RULE: CellRule = CellRule {
     seek: SeekMode::Exact,
 };
 
-/// Whether a stored automation of `target` renders (#1646, #1647): today the fader row of a strip
-/// (builtin row 5). An entry on any other row is validated and kept in the session but compiles
-/// to no cell. Every rendering slice adds its row here, so preparation and the live classifier
-/// (#1648) read one list.
+/// The mute row's cell rule (#1651 D1, batch 18 amendment): the fader row's rule. A mute curve is
+/// `step` only with values 0 and 1 (#1645 D1), so it is constant between its discontinuities and
+/// its cell gives no grid event, only jumps and seek landings: completion `End` (a mute ramp
+/// assigns its target on its last frame, as the fader ramp does), the jump length of the block
+/// (`controls::LiveRamps::for_row(LiveRampRow::Mute)`, resolved by the caller), restartable, and an
+/// exact seek landing (a builtin cell).
+pub const MUTE_CELL_RULE: CellRule = CellRule {
+    grid_ramp: 64,
+    jump: JumpLength::Block,
+    completion: Completion::End,
+    no_restart: false,
+    seek: SeekMode::Exact,
+};
+
+/// Whether a stored automation of `target` renders (#1646, #1647, #1651): the fader row of a
+/// strip (builtin row 5, [`fader_row`]) and its mute row (builtin row 6, [`mute_row`]). An entry
+/// on any other row is validated and kept in the session but compiles to no cell. Every rendering
+/// slice adds its row here, so preparation and the live classifier (#1648) read one list.
+///
+/// A reader that means "the fader" tests [`fader_row`] instead (#1651 T2): the mute row gives no
+/// lane a fader cell, a hand-move offset or B17-R14's window.
 #[must_use]
 pub fn automation_row_renders(target: &ControlAddress) -> bool {
+    fader_row(target) || mute_row(target)
+}
+
+/// Whether `target` is a strip's builtin `mute` row (row 6): the rendered row whose entry gives a
+/// lane its mute cell ([`mute_automation`], #1651).
+#[must_use]
+pub fn mute_row(target: &ControlAddress) -> bool {
+    matches!(target.owner, Owner::Strip(_))
+        && target.section == Section::Builtins
+        && target.control == MUTE
+}
+
+/// Whether `target` is a strip's builtin `fader_db` row (row 5): the one rendered row whose entry
+/// gives a lane its fader cell ([`fader_automation`]), its hand-move offset (#1650) and the
+/// B17-R14 transition window. The readers of those test this predicate, not
+/// [`automation_row_renders`], so an entry on another rendered row reaches none of them (#1651
+/// T2).
+#[must_use]
+pub fn fader_row(target: &ControlAddress) -> bool {
     matches!(target.owner, Owner::Strip(_))
         && target.section == Section::Builtins
         && target.control == FADER_DB
@@ -394,12 +430,30 @@ pub fn fader_automation<'a>(
     model: &'a SessionModel,
     strip: &StableId,
 ) -> [Option<&'a Automation>; 2] {
+    row_automation(model, strip, fader_row)
+}
+
+/// The stored automation entries that drive strip `strip`'s mute, per lane (`[left, right]`), by
+/// the rule of [`fader_automation`] on the mute row ([`mute_row`], #1651).
+#[must_use]
+pub fn mute_automation<'a>(
+    model: &'a SessionModel,
+    strip: &StableId,
+) -> [Option<&'a Automation>; 2] {
+    row_automation(model, strip, mute_row)
+}
+
+/// The entries on the row `row` accepts that drive strip `strip`, per lane; the first entry per
+/// lane in table order.
+fn row_automation<'a>(
+    model: &'a SessionModel,
+    strip: &StableId,
+    row: fn(&ControlAddress) -> bool,
+) -> [Option<&'a Automation>; 2] {
     let mut lanes = [None, None];
     for automation in &model.automation {
         let target = &automation.target;
-        if !automation_row_renders(target)
-            || !matches!(&target.owner, Owner::Strip(owner) if owner == strip)
-        {
+        if !row(target) || !matches!(&target.owner, Owner::Strip(owner) if owner == strip) {
             continue;
         }
         for (index, lane) in [Lane::Left, Lane::Right].into_iter().enumerate() {
@@ -421,7 +475,8 @@ fn drives(entry: Lane, lane: Lane) -> bool {
 /// the cell at `address` (#1648 D3): an entry on the same owner, section and row whose lane drives
 /// the address's lane. A `left` or `right` address names one cell; a `both` address names two,
 /// and is automated when either lane is. This is the enumeration preparation compiles cells from
-/// ([`fader_automation`] for the fader row): a cell exists exactly where this holds.
+/// ([`fader_automation`] for the fader row, [`mute_automation`] for the mute row): a cell exists
+/// exactly where this holds.
 ///
 /// A static value of an automated cell is the lane's fallback, not what the stage renders, so a
 /// static edit of it gives no live record (#1648 D3).

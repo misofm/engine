@@ -1361,14 +1361,14 @@ fn left_fader_ride(model: &SessionModel) -> Automation {
 
 /// #1648 gate 1 (as amended by the batch 17 spec check, departure 5). A fader entry (builtin row
 /// 5, a row that renders) added, removed, given other segments, retargeted or renamed is
-/// `Automation`; a change of its hand offset alone is not (departure 3). A mute entry (row 6, not
-/// rendered yet) is live with no records. A static change together with an automation change is a
-/// rebuild. A fader entry in unit `linear` keeps `AutomationTarget` (#1645 D5), so the row rule
-/// runs before D1's check.
+/// `Automation`; a change of its hand offset alone is not (departure 3). A mute entry (row 6,
+/// which renders since #1651 T3a) added, changed or removed is `Automation` too. A static change
+/// together with an automation change is a rebuild. A fader entry in unit `linear` keeps
+/// `AutomationTarget` (#1645 D5), so the row rule runs before D1's check.
 ///
-/// Test value: red if the mask still hides fader entries (an edit is acked and never heard), if it
-/// hides nothing (a mute entry rebuilds), if the comparison reads the offset (a hand move would
-/// rebuild), or if D1's check runs before the refusal route.
+/// Test value: red if the mask still hides fader or mute entries (an edit is acked and never
+/// heard), if the comparison reads the offset (a hand move would rebuild), or if D1's check runs
+/// before the refusal route.
 #[test]
 fn a_fader_automation_edit_is_a_rebuild() {
     let current = two_tracks();
@@ -1410,8 +1410,7 @@ fn a_fader_automation_edit_is_a_rebuild() {
         .is_ok(),
         "an offset-only change is not a rebuild"
     );
-    // A mute entry's row does not render yet: added, changed and removed, it is live with no
-    // records.
+    // The mute row renders too (#1651 T3a): a mute entry added, changed and removed is a rebuild.
     let mute_ride = |model: &SessionModel| {
         let mut ride = fader_ride(model);
         ride.id = id("mute-ride");
@@ -1435,18 +1434,18 @@ fn a_fader_automation_edit_is_a_rebuild() {
             let ride = mute_ride(next);
             next.automation.push(ride);
         }),
-        Ok(Vec::new()),
+        Err(LiveRebuild::Automation),
         "a mute entry added"
     );
     assert_eq!(
         classify(&muted, |next| next.automation[0].segments[0].end_sample =
             1_920),
-        Ok(Vec::new()),
+        Err(LiveRebuild::Automation),
         "a mute entry changed"
     );
     assert_eq!(
         classify(&muted, |next| next.automation.clear()),
-        Ok(Vec::new()),
+        Err(LiveRebuild::Automation),
         "a mute entry removed"
     );
     // A static change in the same transaction as an automation change is a rebuild.

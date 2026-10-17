@@ -47,10 +47,10 @@ struct Target<'a> {
 /// single supported link mode's `link_mode`), so that a change to it stays a difference of
 /// structure and a rebuild reports it.
 ///
-/// A fader lane that a rendered stored automation of `into` drives (#1650 D3, departure 2) has
-/// the driving entry's hand-move offset as its `fader_db` value: the offset is copied (from the
-/// entry of `from` with the same ID and target), and the strip's static fader dB of that lane is
-/// left as `into` holds it. It is the lane's fallback, not a control value, so a change of it stays
+/// A fader lane that a fader-row stored automation ([`crate::fader_row`]) of `into` drives (#1650
+/// D3, departure 2) has the driving entry's hand-move offset as its `fader_db` value: the offset is
+/// copied (from the entry of `from` with the same ID and target), and the strip's static fader dB
+/// of that lane is left as `into` holds it. It is the lane's fallback, not a control value, so a change of it stays
 /// a difference of structure.
 ///
 /// After this call, `into` and `from` differ only in what is not a control value, and in the
@@ -58,7 +58,7 @@ struct Target<'a> {
 pub fn mask_values(into: &mut SessionModel, from: &SessionModel) {
     into.control_smoothing = from.control_smoothing;
     mask_fader_offsets(into, from);
-    // One pass over the table: the lanes each strip's rendered entries drive, by strip index.
+    // One pass over the table: the lanes each strip's fader-row entries drive, by strip index.
     let driven = crate::effective::model_fader_offsets(into);
     let automated = |index: usize| {
         driven
@@ -131,12 +131,13 @@ fn pair<T>(items: &[T], index: usize, matches: impl Fn(&T) -> bool) -> Option<&T
         .or_else(|| items.iter().find(|item| matches(item)))
 }
 
-/// Copy the hand-move offset of every rendered entry of `into` from the entry of `from` with the
-/// same ID and target (#1650 D5): an offset is a control value, the value of the `fader_db` row of
-/// the lanes the entry drives.
+/// Copy the hand-move offset of every fader-row entry ([`crate::fader_row`]) of `into` from the
+/// entry of `from` with the same ID and target (#1650 D5): an offset is a control value, the value
+/// of the `fader_db` row of the lanes the entry drives. An entry on another rendered row (the mute
+/// row, #1651) carries no offset, so it is not masked.
 fn mask_fader_offsets(into: &mut SessionModel, from: &SessionModel) {
     for (index, entry) in into.automation.iter_mut().enumerate() {
-        if !crate::automation_row_renders(&entry.target) {
+        if !crate::fader_row(&entry.target) {
             continue;
         }
         if let Some(prior) = pair(&from.automation, index, |candidate| {

@@ -205,8 +205,8 @@ pub struct EffectiveStrip {
     /// `session::vca_compose_db(v, S)`. The static path composes the member with the VCA offsets
     /// alone (`fader_db`): a lane with no driving entry has no hand offset, so the two agree there.
     pub offsets_sum: [f64; 2],
-    /// The hand-move offset of the rendered stored automation entry that drives each lane (#1650
-    /// D3), or `None` for a lane no rendered entry drives.
+    /// The hand-move offset of the fader-row stored automation entry ([`crate::fader_row`]) that
+    /// drives each lane (#1650 D3), or `None` for a lane no fader-row entry drives.
     pub fader_offset: [Option<f32>; 2],
 }
 
@@ -483,8 +483,9 @@ impl<'a> ModelInputs<'a> {
 }
 
 /// The [`EffectiveInputs::fader_offset`] of every strip of `model`, by strip index: one pass over
-/// the automation table ([`crate::fader_automation`]'s rule: the first rendered entry that drives a
-/// lane), or an empty table when no entry renders.
+/// the automation table ([`crate::fader_automation`]'s rule: the first fader-row entry,
+/// [`crate::fader_row`], that drives a lane), or an empty table when no entry is on a fader row.
+/// An entry on another rendered row (the mute row, #1651) gives no lane an offset.
 pub(crate) fn model_fader_offsets(model: &SessionModel) -> Vec<[Option<f32>; 2]> {
     let mut offsets = Vec::new();
     for entry in &model.automation {
@@ -492,7 +493,7 @@ pub(crate) fn model_fader_offsets(model: &SessionModel) -> Vec<[Option<f32>; 2]>
         let session::Owner::Strip(id) = &target.owner else {
             continue;
         };
-        if !crate::automation_row_renders(target) {
+        if !crate::fader_row(target) {
             continue;
         }
         let Some(index) = crate::registry::strip_index(model, id) else {

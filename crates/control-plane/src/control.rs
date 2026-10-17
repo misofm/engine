@@ -2601,7 +2601,9 @@ where
         // ramping there is landed over `J` when less than `J` is left. Control cannot tell which
         // lanes reposition or how much is left, so the candidate completes as the transition
         // fallback whenever any level move may still ramp. The rebuild's own level changes join
-        // the window with the commit. A declared discontinuity carries nothing.
+        // the window with the commit. A declared discontinuity carries nothing. The test is the
+        // fader row alone (#1651 T2, root ruling R18-4): a mute cell's adoption never stretches a
+        // live move, so a successor that automates only a mute row completes `Exact`.
         let (outcome, rebuild_level) = match &kind {
             Rebuild::Transaction(prepared) => {
                 let session = prepared.get().prospective_session();
@@ -2613,7 +2615,7 @@ where
                 let automates = next
                     .automation
                     .iter()
-                    .any(|entry| controls::automation_row_renders(&entry.target));
+                    .any(|entry| controls::fader_row(&entry.target));
                 let in_flight = self.level_moves.is_some_and(|window| {
                     window.may_ramp(
                         self.shared.watermark.read().ok(),

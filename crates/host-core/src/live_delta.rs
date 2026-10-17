@@ -272,11 +272,12 @@ pub use crate::prepare::LiveRebuild;
 ///    over unchanged activity and unchanged filter statics is never re-checked: it was prepared.
 /// 3. [`LiveRebuild::Automation`] if the entries of the rows that render differ
 ///    ([`controls::rendered_automation_changed`], #1648 D1): an entry on such a row (today a
-///    strip's fader, builtin row 5, [`controls::automation_row_renders`]) is added, removed,
-///    retargeted or given other segments. A plan compiles its cells from these entries, so only a
-///    rebuild can carry the change; the successor also seeds its jump-length cell from its own
-///    model (#1639 D4). An entry's hand offset (#1650) is not compared. An accepted change on a
-///    row that does not render yet stays live with no records, as #1260 D2 made it.
+///    strip's fader and mute, builtin rows 5 and 6, [`controls::automation_row_renders`], #1651)
+///    is added, removed, retargeted or given other segments. A plan compiles its cells from these
+///    entries, so only a rebuild can carry the change; the successor also seeds its jump-length
+///    cell from its own model (#1639 D4). An entry's hand offset (#1650) is not compared. An
+///    accepted change on a row that does not render yet stays live with no records, as #1260 D2
+///    made it.
 /// 4. With the structure equal, the two models list the same controls in the same order. For each
 ///    control whose value bits differ ([`controls::changed_controls`]): a row that is
 ///    rebuild-only is [`LiveRebuild::RebuildOnly`] with the row's reason; a row of family
@@ -317,7 +318,10 @@ pub use crate::prepare::LiveRebuild;
 /// A static fader value of a lane that `next` automates ([`controls::automated_cell`]) gives no
 /// `FaderDb` record (#1648 D3): the lane's cell renders the curve, and the static value is its
 /// fallback. Since the record comes from the effective value, the rule covers a VCA move that
-/// reaches the lane too. The lane's `Mute` records are unchanged.
+/// reaches the lane too. The lane's `Mute` records are unchanged: on a lane whose mute `next`
+/// automates (#1651 D1, OQ1 = C) the record still carries the effective mute
+/// ([`controls::EffectiveStrip::mute`]: the strip's own static mute, any reaching VCA's, or the
+/// solo term), which is the lane's `terms`, and render composes the stage mute `curve || terms`.
 ///
 /// A record is emitted only when the value the render plane holds changes (`solo.rs`: never a
 /// redundant record): a `FaderDb` per lane whose effective gain bits change (one `Both` when both change to
