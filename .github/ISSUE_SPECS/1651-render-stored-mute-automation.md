@@ -568,3 +568,69 @@ PR #1712).
   shortened when a curve unmute inside that block ends the hold earlier; grid events between the
   new `E` and the old ramp end are pushed as held (`RememberGain` on a free stage) until the cell's
   next free event. Needs a VCA write during a mute ramp and a curve unmute inside it.
+
+## Decision record: T5 (batch 18)
+
+- **Shipped (root ruling R18-2).** The control list marks a strip's builtin `mute` row
+  `automated` (`ControlEntry` field 35) on each lane a mute entry drives, on both hosts; the row's
+  value stays the lane's static (hand) mute. `controls::owner_rows_in` reads the driving entries
+  from the committed table (`controls::mute_automation`, as the fader reads its own) and passes
+  them with the fader offsets to `strip::push_rows` as one `strip::Driven`. No row class or table
+  changes, so the SDK is not regenerated. Docs: `docs/SESSION_SCHEMA_V1.md` (the mute row
+  paragraph) and `docs/CONTROL_PROTOCOL_REGISTRY.md` (field 35, outside the listed paths: one
+  clause, mechanical to the ruling). `docs/REALTIME_MEMORY.md` and `host-core/src/live_delta.rs`
+  were not stale (T3a). One stale doc line in `crates/host-core/tests/live_delta.rs`
+  (`fader_ride`: "which nothing renders") is fixed.
+- **Gates (all pass).**
+  - Gates 1 and 3 and R18-2, both hosts: one script in two copies (kept equal; a diff of the two
+    script halves is empty), `crates/capi/src/runtime/mute_automation_tests.rs` (new, one `mod`
+    line in `runtime/mod.rs`) and `hosts/host-web/tests/stored_mute_automation.rs` (new). Each
+    host compares its own output with plans of the same host prepared with `t` statically
+    unmuted and muted, fed the same PCM (both of `t`'s lanes negative in every fourth stretch of
+    300 frames, `u` at `-0.0` in others).
+    - Gate 1: `a_mute_curve_mutes_at_its_exact_samples` (steps at 1,000 and 2,500; every sample
+      before a step equals the static plan it leaves, the step sample and `step + M - 2` differ,
+      every sample from the first block boundary at or after `step + M` to the next step equals
+      the new state's static plan; quanta 128, 100, 37) and
+      `a_seek_into_a_muted_span_mutes_exactly_from_the_seek` (a plain session seek to 1,600 at the
+      fifth block: muted exactly from that block, the opening ramps 900 samples later; quanta 128,
+      100, 37).
+    - Gate 3 (and gate 4's browser case): `solo_vca_and_hand_mutes_compose_with_the_curve` (solo
+      on `u`, a VCA mute and a hand mute of `t`, each set while the curve is open and released
+      while closed, released while open, or kept; solo replies `monitor`, the VCA and the hand
+      mute `live`, so a hand mute through the Worker's apply is `live` and the output follows
+      `curve || terms`).
+    - R18-2: `the_list_marks_a_mute_row_an_entry_drives_automated` (a `left` and a `both` entry;
+      `t`'s fader rows and `u`'s mute rows unmarked; a hand mute moves the row's value only).
+  - Gate 4: `crates/host-core/tests/live_delta.rs::a_mute_curve_takes_its_terms_as_mute_records`
+    (a `both` and a `left` curve: an entry change is `Err(LiveRebuild::Automation)`; a hand mute
+    on either lane, a VCA mute of one lane and of both are each one `Mute` record; a VCA fader
+    move and a static `fader_db` change give `FaderDb` records and no offsets write).
+  - Gate 5: `crates/control-plane/tests/mute_automation_realtime.rs::stored_mute_automation_renders_allocation_free`
+    (`eq0` of the nine-track fixture with the curve, through `SessionState::command` and
+    `PlanState::render`: both steps, a hand mute and a VCA mute set and released live, a plain
+    session seek to 1,600 (a declared successor) and the opening after it; 44 blocks, each
+    `allocations == 0 && frees == 0`; a twin without the curve differs inside each mute and equals
+    at the end).
+- **Red checks (temporary mutations, each reverted; red on both hosts).** Terms overwrite the
+  curve in `LaneFaderAutomation::mute_terms` (gate 3, "released at 2560"); a curve event
+  overwrites the terms in the driver (gate 3, "kept", at 3,500); a seek `Set` ramps over 480
+  (seek gate, at the seek block); the jump ramps over half the mute length (gate 1 and the seek
+  gate, at `step + M - 2`); the listing flag fader-only (R18-2 gate). An allocation in
+  `mute_terms` aborts gate 5's binary (the render-locked allocator). Gate 4 was not mutated: its
+  mutation lives in `crates/host-core/src/prepare.rs` (`fader_records`), which this tranche must
+  not touch.
+- **Departures.**
+  - Gates 1 and 3 are not one binary that compares the two hosts bit for bit (the batch 18
+    amendment's `control_parity.rs` form): a new host-web test file may not call the C ABI's
+    `unsafe` exports (`realtime_policy`'s unsafe allowlist), and the shared files were kept free
+    of this tranche. Each host instead holds the same claims against its own static plans, as
+    the filed gate text has it.
+  - Gate 1's widths are not repeated here: the host tests run the native backend; Simd8, Simd4
+    and the scalar oracle are T3a's `crates/host-core/tests/stored_mute_automation.rs`.
+- **Ran.** `cargo test --locked` on `-p controls --all-features` (72), `-p host-core --features
+  host-core/test-support,host-core/control-provider` (569), `-p capi` (229), `-p host-web
+  --features host-web/test-support` (211), `-p control-plane --features test-support` (26): all
+  pass. `check-host-core-policy.sh`, `check-workspace-policy.sh`, `realtime_policy` (161 marked
+  regions, unchanged), fmt, clippy (the five crates, all targets and features, `-D warnings`)
+  and the no-feature `cargo check --all-targets`: ok.

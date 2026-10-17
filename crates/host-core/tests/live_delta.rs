@@ -1099,7 +1099,7 @@ fn structural_edits_need_a_rebuild() {
     }
 }
 
-/// A fader ride on the first track's builtin strip: stored automation, which nothing renders.
+/// A fader ride on the first track's builtin strip (row 5, a rendered row since #1647).
 fn fader_ride(model: &SessionModel) -> Automation {
     Automation {
         id: id("fader-ride"),
@@ -5020,4 +5020,138 @@ fn the_rows_that_read_a_jump_length_are_the_ramped_rows() {
         })
         .collect();
     assert_eq!(vca, [LiveRampRow::VcaOffset, LiveRampRow::VcaMute]);
+}
+
+/// A mute curve on the first track (builtin row 6) on `lane`: unmuted, then muted from 1,000 to
+/// 2,500, then unmuted (#1651).
+fn mute_curve(model: &SessionModel, lane: ParameterChannel) -> Automation {
+    let step = |start_sample, end_sample, value| AutomationSegment {
+        shape: AutomationShape::Step,
+        start_sample,
+        end_sample,
+        start_value: value,
+        end_value: value,
+        unit: ParameterUnit::Linear,
+    };
+    Automation {
+        id: id("mute-curve"),
+        target: ControlAddress {
+            owner: Owner::Strip(model.tracks[0].id.clone()),
+            section: Section::Builtins,
+            control: 6,
+            lane,
+        },
+        segments: vec![
+            step(0, 1_000, 0.0),
+            step(1_000, 2_500, 1.0),
+            step(2_500, 4_000, 0.0),
+        ],
+        offset: session::AutomationOffset::default(),
+    }
+}
+
+/// #1651 gate 4 (as amended for OQ1 = C and the batch 18 spec check). The first track's mute is
+/// driven by a curve on `lane`; the track is a member of `vca`.
+///
+/// - A mute entry change rebuilds (`Err(LiveRebuild::Automation)`).
+/// - A hand mute on an automated lane is a live `terms` write: the lane's `Mute` record, which
+///   render ORs with the curve. A hand mute on the other, non-automated lane is its `Mute` record.
+/// - A VCA mute of the track gives one `Mute` record (the terms write).
+/// - The mute entry reaches no fader-only reader: a VCA fader move and a static `fader_db` change
+///   on the track give `FaderDb` records and no offsets write (no hand offset, no `S`).
+///
+/// Test value: red if the mute row stays masked (a curve edit acked and never heard), if a hand
+/// mute or a VCA mute on an automated lane is dropped or turned `model_only` (it would no longer
+/// close an open curve), or if a fader-only reader sees the mute entry (the fader would take an
+/// offsets write instead of its record).
+#[test]
+fn a_mute_curve_takes_its_terms_as_mute_records() {
+    use BuiltinLaneSelector::{Both, Left, Right};
+    let session_ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 300,
+        pan_samples: 200,
+        link_samples: 0,
+    };
+    for (lane, label) in [
+        (ParameterChannel::Both, "a curve on both lanes"),
+        (ParameterChannel::Left, "a curve on the left lane"),
+    ] {
+        let current = normalized(&edited(&with_vca(0.0, 0.0, [false; 2]), |model| {
+            let curve = mute_curve(model, lane);
+            model.automation.push(curve);
+        }));
+        let first = track_id(&current, 0);
+        let run = |edit: &dyn Fn(&mut SessionModel)| {
+            let next = edited(&current, edit);
+            classify_live_delta(&current, &next, session_ramps, &EditRamps::new())
+                .map(|delta| level(&delta))
+        };
+        assert_eq!(
+            run(&|next| next.automation[0].segments[1].start_sample = 1_100),
+            Err(LiveRebuild::Automation),
+            "{label}: a mute entry change rebuilds"
+        );
+        assert_eq!(
+            run(&|next| next.tracks[0].fader.left_mute = true),
+            Ok(vec![(
+                first.clone(),
+                vec![mute(Left, true, 300)],
+                [None; 2]
+            )]),
+            "{label}: a hand mute on the automated left lane is its Mute record (the terms write)"
+        );
+        assert_eq!(
+            run(&|next| next.tracks[0].fader.right_mute = true),
+            Ok(vec![(
+                first.clone(),
+                vec![mute(Right, true, 300)],
+                [None; 2]
+            )]),
+            "{label}: a hand mute on the right lane is its Mute record"
+        );
+        assert_eq!(
+            run(&|next| next.vcas[0].fader.left_mute = true),
+            Ok(vec![(
+                first.clone(),
+                vec![mute(Left, true, 300)],
+                [None; 2]
+            )]),
+            "{label}: a VCA mute of the track is one Mute record"
+        );
+        assert_eq!(
+            run(&|next| {
+                next.vcas[0].fader.left_mute = true;
+                next.vcas[0].fader.right_mute = true;
+            }),
+            Ok(vec![(
+                first.clone(),
+                vec![mute(Both, true, 300)],
+                [None; 2]
+            )]),
+            "{label}: a VCA mute of both lanes is one Mute record"
+        );
+        // The mute entry reaches no fader-only reader (#1651 T2).
+        assert_eq!(
+            run(&|next| {
+                next.vcas[0].fader.left_db = -6.0;
+                next.vcas[0].fader.right_db = -6.0;
+            }),
+            Ok(vec![(
+                first.clone(),
+                vec![fader_db(Both, -6.0, 100)],
+                [None; 2]
+            )]),
+            "{label}: a VCA fader move is the member's FaderDb record, not an offsets write"
+        );
+        assert_eq!(
+            run(&|next| next.tracks[0].fader.left_db = -6.0),
+            Ok(vec![(
+                first.clone(),
+                vec![fader_db(Left, -6.0, 100)],
+                [None; 2]
+            )]),
+            "{label}: a static fader change is its FaderDb record, not an offsets write"
+        );
+    }
 }

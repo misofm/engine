@@ -283,17 +283,29 @@ pub(crate) fn strip_mut<'a>(model: &'a mut SessionModel, id: &StableId) -> Optio
     })
 }
 
+/// The builtin lanes of one strip that a rendered stored automation drives, as the listing marks
+/// them `automated` (#1650 D4).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Driven {
+    /// The strip's [`builtin_rows::FaderOffsets`]: an automated fader lane lists its entry's
+    /// hand-move offset as the `fader_db` value (#1650 D3).
+    pub(crate) offsets: builtin_rows::FaderOffsets,
+    /// Per lane (`[left, right]`), whether a mute entry drives the lane: its `mute` row keeps the
+    /// static (hand) mute as its value, which render ORs with the curve (#1651, root ruling
+    /// R18-2).
+    pub(crate) muted: [bool; 2],
+}
+
 /// Append every control row of one strip, in listing order: own, then builtins, then the effect
 /// rows in chain order (decision 17, C4): the pre-insert console slots, the inserts, then the
 /// post-insert console slots.
 ///
-/// `offsets` are the strip's [`builtin_rows::FaderOffsets`]: an automated fader lane lists its
-/// entry's hand-move offset as the `fader_db` value and is marked `automated` (#1650 D3, D4).
+/// `driven` names the lanes the strip's rendered stored automation drives ([`Driven`]).
 pub(crate) fn push_rows(
     out: &mut Vec<ControlRow>,
     console: &Console,
     strip: &StripRef<'_>,
-    offsets: builtin_rows::FaderOffsets,
+    driven: Driven,
     effective: &EffectiveStrip,
     overlay: &MonitorOverlay,
     sample_rate: u32,
@@ -308,8 +320,12 @@ pub(crate) fn push_rows(
             &Section::Builtins,
             row.id,
             &descriptor,
-            |side| builtin_rows::read(strip, row, side, offsets),
-            |side| row.id == builtin_rows::FADER_DB && side.pick(offsets[0], offsets[1]).is_some(),
+            |side| builtin_rows::read(strip, row, side, driven.offsets),
+            |side| match row.id {
+                builtin_rows::FADER_DB => side.pick(driven.offsets[0], driven.offsets[1]).is_some(),
+                builtin_rows::MUTE => side.pick(driven.muted[0], driven.muted[1]),
+                _ => false,
+            },
         );
     }
     // Chain order: the pre-insert slots, the inserts, then the post-insert slots, each in declared

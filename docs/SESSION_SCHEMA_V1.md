@@ -302,7 +302,9 @@ values `0` and `1`) is compiled into the same table after every fader entry (#16
 and unmutes at each step's exact sample over the session's mute ramp length
 (`control_smoothing.mute_ms`), and the mute the stage renders is the curve's OR the lane's other
 mute terms (its own static mute, any reaching VCA's mute, and solo), so a hand mute closes an open
-curve and a hand unmute leaves a closed curve closed. Only a change of that OR moves the lane. A
+curve and a hand unmute leaves a closed curve closed. Only a change of that OR moves the lane. The
+control list marks a lane's `mute` row `automated` (`ControlEntry` field 35) while a mute entry
+drives the lane (#1651, root ruling R18-2); the row's value stays the lane's static (hand) mute. A
 session seek sets it exactly where the seek changes it, and a ramp toward a state the seek leaves
 unchanged finishes. Stored automation has no queue: render generates its events from the plan. An entry on any other row,
 for the strip, a console slot or an insert, is valid and inert: it authors and round-trips and
