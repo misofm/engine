@@ -237,3 +237,140 @@ The rule is the one of #1650, for route row 1 `gain_db` on a route into a submix
   route row 1 binding and its owner), `crates/controls/tests/**`, and the fields #1650 introduces.
   `docs/SESSION_SCHEMA_V1.md` names the send gain as taking the offset. The batch R2 order stands:
   this issue follows #1650 and #1651 to #1653.
+
+## Amendment (controls coordinator, batch 19 spec check, 2026-10-17)
+
+Checked against `323433f6a`. The filed text and the amendments above stay; where they disagree,
+this section wins. #1651, #1652 and #1653 are closed; read their decision records by number.
+
+**Anchors now.**
+- Rows: `crates/controls/src/route.rs:22-28` (IDs), `:31` (`OUTPUT_FOLD`), `:101-218` (`ROWS`).
+  Row 7 `follows_mute` is `AutomationRule::Excluded` (#1632 landed), so D7 holds as amended.
+  `automatable`: `crates/controls/src/descriptor.rs:154`.
+- Rendered rows and offsets: `takes_offset` `crates/controls/src/automation.rs:51`,
+  `offset_faults` `:62`, `automation_row_renders` `:400`, `mute_row` `:407`, `fader_row` `:419`,
+  `automated_cell` `:484`, `rendered_automation_changed` `:527`, `continued_fader_lanes` /
+  `continued_mute_lanes` `:573`/`:586`. Code `control.automation.offset`:
+  `crates/controls/src/error.rs:37,74`. Docs: `docs/SESSION_SCHEMA_V1.md:337-341`.
+- Owner edits (R17-1): `OwnerEdits::set` `crates/controls/src/owner_edits.rs:84` (fader branch
+  `:92-97`), `take_fader_automation` `:105`; row read `crates/controls/src/registry.rs:224`, write
+  `:565-567`; `ModelView::fader_automation` `crates/controls/src/view.rs:111`;
+  `write_fader_offset` `crates/controls/src/builtin_rows.rs:155`; `mask_fader_offsets`
+  `crates/controls/src/mask.rs:138`.
+- The classifier no longer masks at `live_delta.rs:359`. Step 3 (`rendered_automation_changed`) is
+  `crates/host-core/src/live_delta.rs:423`, `lower_routes` `:995`, `route_records` `:1517`.
+- Records: `route_record_between` `crates/host-core/src/prepare.rs:4288`, `follow_route_record`
+  `:4371`, `follow_route_record_between` `:4410`; predicate `following_route_lanes` `:5081`;
+  attach `:2873-2897`; join `join_routes` `:5829`, `resolve_route_carry` `:5919`.
+- One program: `prepare_fader_automation`, `crates/builtins-compiler/src/lib.rs:2618-2752`
+  (fader cells, then mute cells); `strip_mute_cells` `:5808`.
+- Graph: `ROUTE_CELL_WORDS` `crates/graph/src/lib.rs:1010`; `FOLLOW_ROUTE_CELL_WORDS` `:1136`;
+  `RouteFollowFlags` `:1146` (bits 0-5 used, bits 6-31 spare and refused by `from_word`);
+  `FollowRouteControlRecord` `:1221`; `GraphFollowRouteSource::new` `:1390` (refuses a route with
+  no automated source lane). Render: `crates/graph/src/runtime.rs` `LiveFollowRoute` `:1287`,
+  `ColumnRamps` `:1318` (`retarget` `:1374`, `one_ramp` `:1413`), `FollowCursors` `:1442`
+  (`block` `:1568`), `follow_target`, `follow_walk`, `apply_cell` `:1698`, `begin_block` `:1745`,
+  `mix` `:1815`, `finish_six_word_carry` `:5733`. Kernel `route_mix_column_ramps_block`
+  `crates/lane/src/kernels.rs:1820`.
+- dB law: `route_transform` `crates/graph-compiler/src/ids.rs:293` (`math::db_to_gain_f32`),
+  `route_values` `:330`. Ramp rows: `crates/effect-contract/src/control.rs:76,89,101`.
+- Commit: pre-write check `crates/control-plane/src/control.rs:3260-3290` (compares the record's
+  `automated` with `GraphFollowRouteControlProducer::automated()`); #1713 flag `:2540`, `:2659`;
+  B17-R14 term `automates = fader_row` `:2648-2651`.
+
+**How the slice maps onto the landed code.**
+- **Rows (D3, R17-6).** `automation_row_renders` gains route rows 1-6 on an `Owner::Route`,
+  `Section::Own` target (an output route's entry is refused at `.target` first, D8). `fader_row`
+  stays the fader's only predicate, so no route entry reaches the fader cell, the fader offset or
+  B17-R14's window. `takes_offset` gains route row 1. `offset_faults` also refuses a route row 1
+  entry whose `left_db` and `right_db` bits differ (`control.automation.offset`, at
+  `.offset.right_db`). New `route_automation(model, route) -> [Option<&Automation>; 6]` (rows 1-6)
+  is the one enumeration that preparation, the classifier and owner edits read.
+- **Offset (R17-6).** Mirror the fader: `OwnerEdits::set` takes the route's row 1 entry with the
+  route; `registry` reads and writes the offset of an automated row 1 (both fields, one value);
+  `mask_values` copies route row 1 offsets as it copies fader offsets; the list sets `automated`
+  on rows 1-6 that an entry drives.
+- **Program.** The route cells join the plan's one program in `prepare_fader_automation`, after
+  the mute cells, in `model.routes` order: rows 1 and 3-6 with `FADER_CELL_RULE` (grid 64, `End`),
+  row 2 with `MUTE_CELL_RULE` (step). New accessor `route_cells(route_id)`. The function now also
+  runs for a session whose only rendered entries are route entries.
+- **Seven-word predicate (D2).** `following_route_lanes` becomes the predicate of "the plan gives
+  this route the seven-word cell": source mute automated, or any route row 1-6 automated. It returns
+  the plan's full automated set. `GraphFollowRouteSource::new` accepts a route with no source mute
+  cell when it has a route cell.
+- **Flags word.** Bits 0-5 keep their meaning. New bits, fixed by the plan like bits 4-5:
+  bit 6 `automated_gain`, bit 7 `automated_mute` (the route's own row 2), bits 8-11
+  `automated_matrix[ll, lr, rl, rr]`. `DEFINED` becomes `(1 << 12) - 1`. When bit 6 is set, word 0
+  holds the hand offset in dB (`f32` bits), not a linear gain. `FollowRouteControlRecord::new`
+  still checks only finiteness, so the offset word fits. #1653's pre-write check compares the whole
+  automated set (bits 4-11) with the producer's, before any write; it stays D9's defence.
+- **Records.** `follow_route_record` takes the route's row 1 offset when bit 6 is set. A
+  word of an automated matrix row is the static fallback and render ignores it, so a change of
+  only such words gives no record and commits `model_only` (D4). A change of the offset is a
+  record over `SendGain` (`live`).
+- **The dB law.** Graph does not link `math` (pinned by `scripts/check-graph-policy.sh:21`).
+  Host-core hands the route op `GraphRouteGainLaw = fn(curve_db: f32, offset_db: f32) -> f32`
+  (`db_to_gain_f32(clamp(f64(curve) + f64(offset), -144, 24) as f32)`), defined in graph-compiler
+  next to `route_transform`, which calls it for the static gain. One derivation, no policy change,
+  in its own realtime-policy region (the `follow_mute_jump` pattern).
+- **Route op (D2).** `FollowCursors` becomes one table of up to eight cursors: source mute L/R,
+  route gain, route mute, matrix ll/lr/rl/rr, each with its row's jump length (mute rule for the
+  mute cells, `SendGain` for gain, `SendMatrix` for the matrix; the jump-length rule returns all
+  three). `follow_walk` walks the table in offset order; the values it carries are `f32` (a mute
+  value is `!= 0`). The composition at each offset: open transform with
+  `gain = law(curve_gain, offset)` if bit 6, else word 0, each automated matrix entry from its
+  curve, others from the cell; gate `mute = static_mute || curve_mute` (D5), follow terms as
+  #1652. One `follow_target`; no second evaluator. A held event changes no value. The
+  retarget length of a column is the event's own `ramp` (`0` for a `Set`), see ruling R19-A for a
+  column with a move in flight. `ColumnRamps::retarget` takes one length per column.
+- **Record jump (batch 10 amendment, #1649 D3 on the route).** At a record that changes the
+  offset or a value word, the target takes each automated value from its curve at
+  `completion_of(End, start, R)` (the `curve_toward` rule), and the route's value cells
+  `hold_until` that completion, so grid events inside the jump are held. A record that changes
+  only gate words keeps today's #1652 rule.
+- **Carry (D3).** Today the follow cursors do not carry: a carried route places them at
+  `τ_tap` and compares over the mute `J`. For a gain or matrix cell that re-times a running
+  ride. Fix, as #1648 D2 / #1651 T4: a route cell whose table both plans hold with the same
+  segments (`continued_route_rows`) carries its `CellState` and heard value verbatim, by
+  `(route ID, row)`; another one is repositioned and jumps over its own row's `J` (specified
+  behaviour, B17-R14 note 1). Source mute cells keep today's placement (a step: exact). A live move
+  in flight at a Reposition is ruling R19-B.
+- **#1713 flag.** `resolve_route_carry` reads the plan's `GraphLiveRoute::following`, so the
+  widened predicate flags every seven -> six carry, including the removal of a send's last route
+  entry. Conservative, no new code; #1713's exact form must cover route-row-only routes too.
+- **Node time (R17-3), oracle (R17-4), FP (R17-7).** The route op takes `node_span(a(tap))` as
+  today; it mixes at `FrameLane` on every backend, so the scalar oracle and both bank widths run
+  the same op. Seeds and records compose on the control thread inside the existing
+  `CanonicalFpEnv` guards (prepare entry, commit entry); no new guard.
+
+**Gates (additions).** Gate 1 adds a flat route mute curve at `0` and a flat matrix entry, and
+runs in host-core at `Simd8` (avx2), `Simd4` and the scalar oracle, and on both hosts. New gate 7:
+a running gain ride across an unrelated rebuild (continued table) is bit for bit the
+never-swapped twin (host-core, three widths). New gate 8: an entry on route row 1 with
+`left_db != right_db` is refused `control.automation.offset`; a non-zero offset on rows 2-6 is
+refused. Gate 3's `+3` move runs through the in-place and the full path with equal reply and
+bits on both hosts (R17-6). Gates whose result depends on R19-A or R19-B are written after root
+rules.
+
+**Rulings needed.** R19-A (a value move and a gate move on one folded column ramp) and R19-B (a
+live send move in flight at a Reposition, once #1711 deletes B17-R14's window). See the batch 19
+report.
+
+**Authorized paths after the check.**
+- `crates/controls/src/{automation.rs,route.rs,registry.rs,view.rs,owner_edits.rs,mask.rs,
+  builtin_rows.rs,lib.rs}`, `crates/controls/tests/**`.
+- `crates/builtins-compiler/src/lib.rs` (route cells in the one program, `route_cells`; shared
+  with #1711 and #1655).
+- `crates/graph-compiler/src/{ids.rs,lib.rs}` (the gain law and its re-export).
+- `crates/graph/src/lib.rs` (flags, source, record, law and jump-rule types),
+  `crates/graph/src/runtime.rs` (the route op, its cursors and the route carry only). Render code.
+- `crates/host-core/src/{prepare.rs,live_delta.rs,route_controls.rs,lib.rs}`,
+  `crates/host-core/tests/{live_delta.rs,live_routes.rs,route_mute.rs,in_place_commit.rs,
+  support/edit_sessions.rs}`.
+- `crates/control-plane/src/control.rs` (the pre-write check width; the R19-B term if ruled),
+  `crates/control-plane/tests/send_automation_realtime.rs` (new).
+- `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/tests/control_parity.rs`,
+  `hosts/host-web/src/tests.rs`.
+- `docs/SESSION_SCHEMA_V1.md`.
+- Nothing under `crates/engine/src/realtime/`. No `crates/lane` kernel change unless R19-A picks
+  option (b).
