@@ -2113,9 +2113,10 @@ impl LiveFollowRoute {
     /// the curves that close the column, for an open among all of them: the mute length for the
     /// own mute, `VcaMute` for a VCA mute, R19-4). A column that no longer hears a follow curve of
     /// its predecessor (U2 fold 1, MAJOR-3) lands at once over the removed curve's own length (the
-    /// longer one with a coincident gate move, R19-4), also with a column ramp in flight, which
-    /// it cuts (B19-R7: the control plane marks such a rebuild `TransitionFallback` while a live
-    /// send move may still ramp; TBD54 lands it exactly). Any other move lands at once over the
+    /// longer one with a coincident gate move, R19-4), also with a column ramp in flight
+    /// (B19-R7). With send rows off this is the column jump an uninterrupted gate change makes;
+    /// the control plane still marks such a rebuild `TransitionFallback` while a live send move
+    /// may ramp, a conservative over-report (TBD54). Any other move lands at once over the
     /// mute length. No landing state survives the carry. A column with no curve compares its
     /// cell's target the same way.
     fn place_carried(&mut self, at: i64) {
@@ -2216,7 +2217,8 @@ impl LiveFollowRoute {
             } else {
                 // A gate move coincident with a removed curve's landing takes the longer length
                 // (R19-4); a move with no gate move lands over the removed curve's length (or the
-                // mute length), cutting a move in flight (B19-R7, flagged by the control plane).
+                // mute length), as an uninterrupted gate change does (B19-R7; the control
+                // plane's flag over-reports it).
                 let length = gate_length.map_or(landing, |length| core::cmp::max(length, dropped));
                 ramps.retarget_column(
                     column,
@@ -19871,8 +19873,8 @@ mod follow_curve_tests {
     /// B19-R7 (a removed curve with a live move in flight): the left lane's own mute curve, which
     /// holds the left column shut, is removed at a swap (1,280) while a live send move (gain 1.0
     /// -> 0.5 over 2,000 from 1,152) runs on the right column. Column 0 lands at once on the moved
-    /// cell's words over the mute length (200), a column jump that would cut a move in flight
-    /// there (the control plane flags such a rebuild `TransitionFallback`); column 1, which lost
+    /// cell's words over the mute length (200), the column jump an uninterrupted gate change
+    /// makes (the control plane flags such a rebuild `TransitionFallback`); column 1, which lost
     /// nothing, keeps its move. An open curve's removal composes the adopted target and moves
     /// nothing.
     ///

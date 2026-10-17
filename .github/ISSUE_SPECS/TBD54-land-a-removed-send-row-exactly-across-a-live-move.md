@@ -37,8 +37,12 @@ keeps its own length, whatever else the rebuild changes.
 - Root ruling B19-R10 (batch 19b): send-row rendering (route rows 1-6, the send-gain offset) is
   not shipped; #1654 stays open in phase 2 behind this issue and turns send rows on after it. The
   route-op machinery (the merged walk, the carry, the conservative flag) shipped with batch 19b
-  for its production callers, source-mute and VCA-mute following routes, so the cut and the flag
-  above are reached by those routes today.
+  for its production callers, source-mute and VCA-mute following routes. Those routes reach the
+  flag only as an over-report: the B19-R10 check found that every gate change at a carry is
+  bit-equal to the same gate change on one uninterrupted plan, so no mute-only or VCA-mute carry
+  cuts a live send move (W1 and W2 below need send-row value cursors). Under W1 a removed muting
+  curve opens the column over the live move's own ramp rather than the curve's own length, as a
+  live record inside a landing does on one plan (recorded, not a cut).
 - The last check of the whole send flag term (B19-R9, batch 19) found two more MAJORs, both of
   the B19-R7/R8/R9 window:
   - MAJOR-W1: a live send move committed while a rebuild is pending (submitted, not yet adopted)
