@@ -9064,7 +9064,8 @@ mod set_control {
         /// left, the last three shorter than the fader length `J` = 960). Every block of the
         /// rebuilt rig is bit-equal to the uninterrupted engine's over 44 blocks, allocation-free,
         /// the successor is adopted, and the rebuild's watermark advance reports `OUTCOME_EXACT`
-        /// with no transition fallback (#1711 D2: the B17-R14 flag is deleted).
+        /// with no transition fallback (#1711 D2: the B17-R14 flag is deleted). A table-only
+        /// rebuild with no live move reports `OUTCOME_EXACT` too (outcome only).
         ///
         /// Test value: red if the adoption rule compares the curve with the stage's fader gain
         /// rather than its ramp's target (#1711 F0: the held grid events only remember a gain, so
@@ -9088,6 +9089,24 @@ mod set_control {
                     (SOURCE_FRAMES - 2_000, -6.0),
                 ),
             ];
+            // A table-only rebuild with no live move completes exactly too (bits are not
+            // compared: the split table's values differ from the ride's in `f32` rounding).
+            let mut still = Rig::new(&document);
+            for _ in 0..4 {
+                still.step();
+            }
+            let offset = still.model().automation[0].offset;
+            send(
+                &mut still,
+                &[split_ride(&track, changes[0].1, offset)],
+                protocol::EditPath::Rebuild,
+                "no move",
+            );
+            for _ in 0..4 {
+                still.step();
+            }
+            assert_eq!(still.summary().3, 0, "no move: the successor is adopted");
+            assert_exact(&still, "no move");
             let timings = [
                 MoveTiming::Pending,
                 MoveTiming::SameTransaction,
@@ -9274,25 +9293,6 @@ mod set_control {
             }
         }
 
-        /// A step ride of track `track` through `(start, end, dB)` pieces, with the stored
-        /// `offset`.
-        fn steps_ride(
-            track: &str,
-            pieces: &[(u64, u64, f32)],
-            offset: session::AutomationOffset,
-        ) -> session::Automation {
-            let step = session::AutomationShape::Step;
-            let mut automation = entry(
-                track,
-                pieces
-                    .iter()
-                    .map(|&(start, end, db)| segment(step, (start, end), (db, db)))
-                    .collect(),
-            );
-            automation.offset = offset;
-            automation
-        }
-
         /// One moved-target case of #1711 G2 and R19-1 on the C ABI: on [`flat`]'s ride (-3 dB),
         /// a live level move to -6 dB over its own 4,000 samples from block 4 (a VCA move or a
         /// hand move), heard `heard` blocks, then a table-only rebuild to -5 dB up to 6,000, then
@@ -9304,11 +9304,47 @@ mod set_control {
         /// allocation-free, the successor is adopted, and every revision completed exactly (the
         /// rebuild's and the later moves': `OUTCOME_EXACT`, no transition fallback).
         fn moved_target_case(hand: bool, heard: usize, later: &[(u64, f32, u32)], from: u64) {
+            let free = 4 * 128 + 4_000;
+            let pieces = |pieces: &[(u64, u64, f32)]| {
+                let step = session::AutomationShape::Step;
+                pieces
+                    .iter()
+                    .map(|&(start, end, db)| segment(step, (start, end), (db, db)))
+                    .collect::<Vec<_>>()
+            };
+            let table = pieces(&[(0, 6_000, -5.0), (6_000, SOURCE_FRAMES, -3.0)]);
+            let fresh_table = pieces(&[
+                (0, free, -3.0),
+                (free, 6_000, -5.0),
+                (6_000, SOURCE_FRAMES, -3.0),
+            ]);
+            let reference = if later.is_empty() {
+                fresh_table
+            } else {
+                table.clone()
+            };
+            rebuilt_table_case(hand, heard, (&table, &reference), later, from);
+        }
+
+        /// [`moved_target_case`] with the rebuild's `table` and the fresh plan's `reference`
+        /// table (both track 0's ride segments) on [`flat`]'s ride.
+        fn rebuilt_table_case(
+            hand: bool,
+            heard: usize,
+            (table, reference): (&[session::AutomationSegment], &[session::AutomationSegment]),
+            later: &[(u64, f32, u32)],
+            from: u64,
+        ) {
             const MOVE: u32 = 4_000;
             bench_support::alloc::assert_installed();
             let document = flat();
             let track = first_track(&document);
             let label = &format!("hand {hand}, heard {heard}, {} later moves", later.len());
+            let ride = |segments: &[session::AutomationSegment], offset| {
+                let mut automation = entry(&track, segments.to_vec());
+                automation.offset = offset;
+                automation
+            };
             let move_of = |document: &str, db: f32, ramp: u32| {
                 if hand {
                     hand_move(document, db, Some(ramp))
@@ -9317,23 +9353,8 @@ mod set_control {
                 }
             };
             let mut a = Rig::new(&document);
-            let free = 4 * a.quantum as u64 + u64::from(MOVE);
-            let table = [(0, 6_000, -5.0), (6_000, SOURCE_FRAMES, -3.0)];
-            let fresh_table = [
-                (0, free, -3.0),
-                (free, 6_000, -5.0),
-                (6_000, SOURCE_FRAMES, -3.0),
-            ];
             let mut model = parse_session_json(&document).expect("model");
-            model.automation[0] = steps_ride(
-                &track,
-                if later.is_empty() {
-                    &fresh_table
-                } else {
-                    &table
-                },
-                session::AutomationOffset::default(),
-            );
+            model.automation[0] = ride(reference, session::AutomationOffset::default());
             let fresh = session::canonical_session_json(&model).expect("canonical");
             let mut r = Rig::new(&fresh);
             for rig in [&mut a, &mut r] {
@@ -9362,7 +9383,7 @@ mod set_control {
             send(
                 &mut a,
                 &[SessionEdit::UpsertAutomation {
-                    automation: steps_ride(&track, &table, offset),
+                    automation: ride(table, offset),
                 }],
                 protocol::EditPath::Rebuild,
                 label,
@@ -9445,6 +9466,36 @@ mod set_control {
             }
         }
 
+        /// #1711 U1 fold 1 (MAJOR-1) on the C ABI. A VCA or hand move heard 1 and 4 blocks on
+        /// the ride flat at -3 dB, then a table-only rebuild to -5 dB up to 2,000, a linear -8 to
+        /// -14 dB over 2,000 to 8,000, then -14 dB: the move's target moves, so its jump is
+        /// deferred to the move's first free sample (4,512), and the table's step at 2,000, inside
+        /// the move's remaining ramp, replaces the ramp the deferral waits for. Every sample is
+        /// bit-equal to a fresh plan whose table is -3 dB before 2,000 (the same after it), given
+        /// the same move; every revision completes as `OUTCOME_EXACT`.
+        ///
+        /// Test value: red if a discontinuity jump on a restartable cell leaves the pending
+        /// deferral in place (its grid hold freezes the lane on the step's target until 4,512).
+        #[test]
+        fn a_table_step_inside_a_deferred_moves_ramp_drops_the_deferral() {
+            let stepped = |first: f32| {
+                let (step, lin) = (
+                    session::AutomationShape::Step,
+                    session::AutomationShape::Linear,
+                );
+                vec![
+                    segment(step, (0, 2_000), (first, first)),
+                    segment(lin, (2_000, 8_000), (-8.0, -14.0)),
+                    segment(step, (8_000, SOURCE_FRAMES), (-14.0, -14.0)),
+                ]
+            };
+            for hand in [false, true] {
+                for heard in [1, 4] {
+                    rebuilt_table_case(hand, heard, (&stepped(-5.0), &stepped(-3.0)), &[], 0);
+                }
+            }
+        }
+
         /// The outcome flags and the transition-fallback count of `rig`'s watermark.
         fn outcome(rig: &Rig) -> (u64, u64) {
             let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
@@ -9467,62 +9518,6 @@ mod set_control {
                 (crate::abi::OUTCOME_EXACT, 0),
                 "{label}: the outcome flags and the transition-fallback count"
             );
-        }
-
-        /// #1711 A3 (D2). A table-only rebuild of the riding fader with no live move, and two
-        /// table-only rebuilds 5 blocks apart while a live VCA move of 500 samples ramps (heard 2
-        /// blocks before the first; the second comes after the move's own ramp has ended): each
-        /// rebuild's watermark advance reports `OUTCOME_EXACT` with no transition fallback, every
-        /// block is allocation-free, and each successor is adopted. Bits are not compared: the
-        /// split tables' values differ from the ride's in `f32` rounding, so the adopting cell
-        /// jumps over `J` where a fresh plan does not (the F2 decision record).
-        ///
-        /// Test value: red if a Reposition rebuild with a level move in flight, or one with no
-        /// move, completes as the transition fallback (the B17-R14 flag, or any successor).
-        #[test]
-        fn table_only_rebuilds_around_a_level_move_complete_exactly() {
-            bench_support::alloc::assert_installed();
-            let document = riding();
-            let track = first_track(&document);
-            let offset = session::AutomationOffset::default();
-            for moving in [false, true] {
-                let label = &format!("a move {moving}");
-                let mut a = Rig::new(&document);
-                for _ in 0..4 {
-                    a.step();
-                }
-                if moving {
-                    send(
-                        &mut a,
-                        &[vca_move(-6.0, Some(500))],
-                        protocol::EditPath::Live,
-                        label,
-                    );
-                    for _ in 0..2 {
-                        a.step();
-                    }
-                }
-                for (rebuild, end_db) in [("R1", -6.0), ("R2", -9.0)] {
-                    let label = &format!("{label}, {rebuild}");
-                    send(
-                        &mut a,
-                        &[split_ride(&track, (10_000, end_db), offset)],
-                        protocol::EditPath::Rebuild,
-                        label,
-                    );
-                    for _ in 0..5 {
-                        let block = a.block;
-                        let (_, used) = a.step_counted();
-                        assert_eq!(
-                            (used.allocations, used.deallocations),
-                            (0, 0),
-                            "{label}: block {block} allocated or freed"
-                        );
-                    }
-                    assert_eq!(a.summary().3, 0, "{label}: the successor is adopted");
-                    assert_exact(&a, label);
-                }
-            }
         }
 
         /// U3 fold 2, MINOR (#1648 D2, D15-2). Two live VCA moves around a rebuild, with no block

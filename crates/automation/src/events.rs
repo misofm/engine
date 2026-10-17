@@ -217,8 +217,9 @@ impl CellState {
     /// own length. Until the deferral fires, every grid event of a restartable cell is held (the
     /// stage remembers it and does not retarget), so no grid ramp cuts the running ramp short; a
     /// `no_restart` cell holds them inside the ramp in flight as it always does. Cleared by
-    /// [`Self::clear_deferred_jump`], [`Self::reposition`] and a seek landing. Control-free and
-    /// allocation-free.
+    /// [`Self::clear_deferred_jump`], [`Self::reposition`], a seek landing and, on a restartable
+    /// cell, a discontinuity jump (it compares the curve and replaces the ramp the deferral waits
+    /// for). Control-free and allocation-free.
     pub const fn defer_jump(&mut self, at: i64) {
         self.deferred = at;
     }
@@ -631,7 +632,11 @@ impl<'a, 's> CellEvents<'a, 's> {
             if is_boundary {
                 self.state.cursor += 1;
             }
-            if is_deferred {
+            // A discontinuity jump on a restartable cell drops a pending deferral (#1711 U1 fold
+            // 1): the jump compares the curve with the current target here and replaces the ramp
+            // the deferral waits for, so the deferral and its grid hold are stale (they would
+            // freeze the lane on the jump's target until the deferral's time).
+            if is_deferred || (is_boundary && !self.program.no_restart) {
                 self.state.deferred = IDLE;
             }
             self.position = offset + 1;
