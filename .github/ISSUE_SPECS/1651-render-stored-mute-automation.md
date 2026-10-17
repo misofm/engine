@@ -339,3 +339,33 @@ PR #1712).
     (`:13`)
   - Removed: `crates/host-core/src/solo.rs` (deleted), `crates/control-plane/Cargo.toml`,
     `Cargo.lock` (no new dependency).
+
+## Decision record: T1 (batch 18)
+
+- **Shipped.** The batch 13b rule: `FaderRampStage::mute_channel` (`crates/builtins/src/lib.rs`)
+  returns at once when `muted` equals the channel's current mute state. No retarget, and
+  `mute_ramp` and the ramp's remaining frames stay as they were. One compare on a `bool` array
+  element; no allocation, no new panic path. Every route reaches it: `apply_operation`'s `SetMute`
+  and the live `set_mute`, on the Simd8 and Simd4 banks and the scalar track.
+- **Gate (13b Gate 2, new case).** `crates/builtins/tests/fader_ramp.rs`,
+  `a_repeated_mute_leaves_the_stage_as_it_was`, on every subject (Simd4, Simd8 with `avx2`,
+  scalar), at quanta 128 and 100: (a) an unmuted lane with `RetargetGain` in flight takes
+  `SetMute { false, 240 }` at offset 20 and a `RetargetGain` at offset 30; (b) a lane in a 300-sample
+  mute ramp takes `SetMute { true, 240 }` at offset 20; (c) the live `set_mute` repeats the state
+  between blocks. Each block, both planes, is bit-identical to a twin without the repeat; the held
+  flag agrees, and in (a) `gain_held` stays false. Red on the base `mute_channel` (case (a), Simd4,
+  q=128, block 0: the repeat restarts the fader ramp over 240 samples); green with the change.
+- **Superseded tests, rewritten in place** (each used a repeated zero-window unmute to end an
+  unmute ramp, the behaviour this rule removes):
+  - `crates/builtins/tests/fader_ramp.rs::the_held_flag_follows_the_mute_ramp`: mutes the lane
+    first, then unmutes over 40, so the unmute is a real change.
+  - `crates/host-core/tests/stored_fader_automation.rs`:
+    `a_live_write_that_frees_a_held_lane_releases_its_hold`,
+    `a_live_write_that_frees_a_lane_with_nothing_owed_releases_its_hold` and
+    `an_offsets_jump_at_the_entry_that_frees_the_lane_keeps_its_ramp` (ramping form) free the lane
+    with a live `FaderDb` write (`live_fader`, `Act::fader`) instead. The R17-10 release depends on
+    the stage's held state at the block entry, not on the record kind, so the gates keep their
+    claims. This edit is outside the spec's authorized list (a test file of batch 17's slice); it is
+    mechanical to the new rule.
+- **Measured.** `audit capi` `pcm_digest` `bffc21e857b5e134` (base: the same), `allocations` 0.
+- **Departures.** None from the rule's text.
