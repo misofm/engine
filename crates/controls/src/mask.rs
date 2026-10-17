@@ -51,7 +51,11 @@ struct Target<'a> {
 /// D3, departure 2) has the driving entry's hand-move offset as its `fader_db` value: the offset is
 /// copied (from the entry of `from` with the same ID and target), and the strip's static fader dB
 /// of that lane is left as `into` holds it. It is the lane's fallback, not a control value, so a change of it stays
-/// a difference of structure.
+/// a difference of structure. A send whose `gain_db` a route-gain entry ([`crate::route_gain_row`])
+/// of `into` drives is masked the same way (R17-6): the entry's offset is copied and the route's
+/// static `gain_db` is left as `into` holds it. A send's automated `mute` and matrix rows keep their
+/// static values as control values (a hand mute ORs with the curve; a matrix fallback is stored by
+/// a hand edit), so they are copied.
 ///
 /// After this call, `into` and `from` differ only in what is not a control value, and in the
 /// owners they do not share.
@@ -111,9 +115,21 @@ pub fn mask_values(into: &mut SessionModel, from: &SessionModel) {
             );
         }
     }
+    // The routes whose `gain_db` a route-gain entry of `into` drives (R17-6): their static gain is
+    // the fallback, not a control value, and stays as `into` holds it.
+    let gain_driven: Vec<bool> = if into.automation.is_empty() {
+        Vec::new()
+    } else {
+        into.routes
+            .iter()
+            .map(|route| crate::automation::route_automation(into, &route.id)[0].is_some())
+            .collect()
+    };
     for (index, route) in into.routes.iter_mut().enumerate() {
         if let Some(source) = pair(&from.routes, index, |candidate| candidate.id == route.id) {
-            route.gain_db = source.gain_db;
+            if !gain_driven.get(index).copied().unwrap_or(false) {
+                route.gain_db = source.gain_db;
+            }
             route.mute = source.mute;
             route.channel_matrix = source.channel_matrix.clone();
             route.follows_mute = source.follows_mute;
@@ -131,13 +147,14 @@ fn pair<T>(items: &[T], index: usize, matches: impl Fn(&T) -> bool) -> Option<&T
         .or_else(|| items.iter().find(|item| matches(item)))
 }
 
-/// Copy the hand-move offset of every fader-row entry ([`crate::fader_row`]) of `into` from the
-/// entry of `from` with the same ID and target (#1650 D5): an offset is a control value, the value
-/// of the `fader_db` row of the lanes the entry drives. An entry on another rendered row (the mute
-/// row, #1651) carries no offset, so it is not masked.
+/// Copy the hand-move offset of every entry on a row that takes one (a fader-row entry,
+/// [`crate::fader_row`], and a send-gain entry, [`crate::route_gain_row`], R17-6) of `into` from
+/// the entry of `from` with the same ID and target (#1650 D5): an offset is a control value, the
+/// value of the `fader_db` row of the lanes the entry drives, or of the send's `gain_db`. An entry
+/// on another rendered row (a mute row, a send matrix row) carries no offset, so it is not masked.
 fn mask_fader_offsets(into: &mut SessionModel, from: &SessionModel) {
     for (index, entry) in into.automation.iter_mut().enumerate() {
-        if !crate::fader_row(&entry.target) {
+        if !crate::automation::takes_offset(&entry.target) {
             continue;
         }
         if let Some(prior) = pair(&from.automation, index, |candidate| {

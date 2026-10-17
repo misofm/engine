@@ -395,3 +395,43 @@ These override the batch 19 spec-check amendment where they differ.
   (built after #1711, before T3). The composition (law, matrix, gate) stays in the route op. The cursor
   table is a boxed slice sized at bind and charged by `size_of`, not a fixed array.
 - **Two PRs.** This issue ships in batch 19a with #1711 and K1.
+
+## Decision record: T1 (batch 19)
+
+`crates/controls` only. What shipped:
+
+- **Rows (D3).** `automation_row_renders` admits route rows 1-6 through the new `route_row`
+  (`Owner::Route`, `Section::Own`, `ROUTE_AUTOMATED_ROWS`); row 7 `follows_mute` stays out (still
+  `AutomationRule::Excluded`). The predicate reads no model: an output route's entry is refused at
+  `.target` first (D8). `fader_row` is unchanged, so no route entry reaches a fader reader.
+- **Offset (R17-6).** `takes_offset` = `fader_row || route_gain_row`. `offset_faults` judges a
+  shared row's `left_db` against the domain (at lane `both`) and refuses a `right_db` whose bits
+  differ from `left_db`'s at `.offset.right_db` (`+0.0` with `-0.0` is refused). A non-zero offset
+  on route rows 2-6 stays `control.automation.offset`.
+- **Accessors.** `route_automation(model, route) -> [Option<&Automation>; 6]` (rows 1-6, first entry
+  per row in table order), `ModelView::route_automation` (edited entry where the view holds one),
+  `route_gain_row`, `route_row`, and `continued_route_rows` (the Carry paragraph's predicate, by
+  the rule of `continued_fader_lanes`; added here for the render tranche, not yet read).
+- **Owner rule (R17-1).** `OwnerEdits::set` on route row 1 clones the row 1 entry with the route.
+  `route::resolve` reads an automated row 1 as the entry's `offset.left_db`; `registry::write` on
+  route row 1 writes both offset fields through `route::write_gain_offset` when an entry drives it,
+  else the static gain. The list sets `automated` on each of rows 1-6 an entry drives; row 1 lists
+  the offset, rows 2-6 their static values (hand mute; matrix fallback, automation wins).
+- **Mask.** `mask_fader_offsets` copies the offset of every entry on a row that takes one (fader and
+  send gain). The static `gain_db` of a send whose row 1 is driven stays as `into` holds it
+  (fallback = structure, as the fader's #1650 departure 2); mute and matrix stay masked values.
+- No row class or table changed: no SDK regeneration.
+
+Gates (`crates/controls/tests/automation.rs`): `the_send_gain_takes_one_shared_offset` (gate 8),
+`send_rows_render_and_enumerate_in_row_order`, `a_hand_move_on_an_automated_send_gain_writes_its_offset`
+(R17-6 write, list flag, in-place path equal to the whole `set`), and
+`the_mask_copies_a_send_offset_and_keeps_its_fallback`. `cargo test --locked -p controls`,
+`-p host-core --features test-support`, `-p control-plane --features test-support` and
+`-p builtins-compiler`: all green.
+
+For T2: with this change a session whose only rendered entries are route entries enters
+`prepare_fader_automation` (it builds an empty program today, tests green); a send automation edit
+is now step 3 `Automation` (rebuild) in the classifier; a hand move on an automated send gain now
+diffs as a route row 1 change whose value is the offset, and an automated matrix row's hand edit is a
+static-value change the classifier does not yet commit `model_only` (not checked here): the route lowering (offset record, matrix `model_only`) is
+host-core's work.

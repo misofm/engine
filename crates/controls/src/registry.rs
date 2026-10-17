@@ -23,10 +23,12 @@ pub struct ControlRow {
     /// The committed value. A derived row reports its computed value, a monitor row (solo) the
     /// overlay's, and a row that the owner's shape does not use the descriptor's default.
     pub value: f32,
-    /// Whether a rendered stored automation drives the row's lane (#1650 D4): the `fader_db` row
-    /// and, since #1651 (root ruling R18-2), the `mute` row. On such a lane the `fader_db` row's
-    /// value is the driving entry's hand-move offset, not the static fader; the `mute` row's value
-    /// stays the lane's static (hand) mute, which render ORs with the curve (OQ1 = C).
+    /// Whether a rendered stored automation drives the row's lane (#1650 D4): the `fader_db` row,
+    /// since #1651 (root ruling R18-2) the `mute` row, and since #1654 a send's rows 1-6. On such
+    /// a lane the `fader_db` row's value is the driving entry's hand-move offset, not the static
+    /// fader, and so is a send's `gain_db` (R17-6); the `mute` rows' values stay the static (hand)
+    /// mute, which render ORs with the curve (OQ1 = C), and a send matrix row's value is its
+    /// static fallback (automation wins).
     pub automated: bool,
 }
 
@@ -239,7 +241,13 @@ pub fn owner_rows_in(
             );
         }
         OwnerSlot::Route(index) => {
-            route::push_rows(out, view.route(index), effective.route_gate(index));
+            let route = view.route(index);
+            route::push_rows(
+                out,
+                route,
+                view.route_automation(&route.id),
+                effective.route_gate(index),
+            );
         }
         OwnerSlot::Vca(index) => vca::push_rows(out, view.vca(index)),
         OwnerSlot::Session => session_rows::push_rows(out, model),
@@ -578,6 +586,10 @@ fn write(
             effect_rows::write(model, address, value)
         }
         (Owner::Route(id), Section::Own) => {
+            // An automated send gain's value is its entry's hand-move offset (R17-6).
+            if control == route::ROUTE_GAIN_DB && route::write_gain_offset(model, id, value) {
+                return Ok(());
+            }
             let target = model
                 .routes
                 .iter_mut()

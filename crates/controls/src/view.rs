@@ -120,6 +120,27 @@ impl<'a> ModelView<'a> {
         })
     }
 
+    /// The rendered stored automation entries that drive route `route`'s rows 1-6, in row order
+    /// ([`crate::route_automation`]), each the edited entry when the view holds one (R17-6, R17-1):
+    /// a hand move on an automated send gain writes the driving entry's offset, so the binding of
+    /// the route's `gain_db` row reads the entry here. Which entry drives a row is read from the
+    /// committed table, and only its offset from the edit, as for [`Self::fader_automation`].
+    #[must_use]
+    pub fn route_automation(&self, route: &StableId) -> [Option<&'a Automation>; 6] {
+        if self.structure.automation.is_empty() {
+            return [None; 6];
+        }
+        let rows = crate::automation::route_automation(self.structure, route);
+        if self.is_whole() {
+            return rows;
+        }
+        rows.map(|entry| {
+            entry.map(|entry| {
+                find(&self.owners.automation, &entry.id, |held| &held.id).unwrap_or(entry)
+            })
+        })
+    }
+
     /// The dense model the view stands for: a clone of the committed model with the edited owners
     /// in place. Linear in the session; for tests and for a caller that has no view-shaped code.
     #[must_use]

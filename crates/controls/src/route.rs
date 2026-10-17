@@ -6,8 +6,8 @@
 
 use effect_contract::{ParameterLattice, ParameterUnit};
 use session::{
-    ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM, ROUTE_GAIN_DB_MAXIMUM, ROUTE_GAIN_DB_MINIMUM, Route,
-    RouteDestination, SessionModel, StableId,
+    Automation, ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM, ROUTE_GAIN_DB_MAXIMUM, ROUTE_GAIN_DB_MINIMUM,
+    Route, RouteDestination, SessionModel, StableId,
 };
 
 use crate::descriptor::{
@@ -15,7 +15,7 @@ use crate::descriptor::{
 };
 use crate::error::ControlError;
 use crate::lane::{Side, toggle};
-use crate::registry::{ControlRow, Resolved, Source, push_control};
+use crate::registry::{ControlRow, Resolved, Source, push_control_automated};
 use crate::{ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper};
 use session::{Owner, Section};
 
@@ -26,6 +26,12 @@ const MATRIX_LR: u32 = 4;
 const MATRIX_RL: u32 = 5;
 const MATRIX_RR: u32 = 6;
 const FOLLOWS_MUTE: u32 = 7;
+/// The ID of the route's `gain_db` row, the one route row that takes a hand-move offset (R17-6).
+pub(crate) const ROUTE_GAIN_DB: u32 = GAIN_DB;
+/// The route rows a stored automation renders on a send, in their cell order (#1654 D3): rows 1-6.
+/// Row 7 `follows_mute` is not automatable (#1632).
+pub(crate) const ROUTE_AUTOMATED_ROWS: [u32; 6] =
+    [GAIN_DB, MUTE, MATRIX_LL, MATRIX_LR, MATRIX_RL, MATRIX_RR];
 /// The own-row ID of `effective_gate`.
 const EFFECTIVE_GATE: u32 = 64;
 
@@ -230,33 +236,72 @@ fn descriptor(row: &RouteRow, route: &Route) -> ControlDescriptor {
     }
 }
 
-/// Append every control row of one route. `gate` is the route's effective gate, per source lane.
-pub(crate) fn push_rows(out: &mut Vec<ControlRow>, route: &Route, gate: [bool; 2]) {
-    push_route_rows(out, route, gate, false);
+/// The stored automation entries that drive a route's rendered rows
+/// ([`crate::route_automation`], or [`crate::ModelView::route_automation`]), in row order.
+pub(crate) type RouteEntries<'a> = [Option<&'a Automation>; 6];
+
+/// Where the rendered row `control` sits in [`RouteEntries`], or `None` for a row no entry renders.
+fn automated_index(control: u32) -> Option<usize> {
+    ROUTE_AUTOMATED_ROWS.iter().position(|&row| row == control)
+}
+
+/// The committed value of a stored row: the row's model field, except that an automated `gain_db`
+/// reads its entry's hand-move offset (R17-6; the static gain is the fallback, not heard).
+fn stored_value(
+    read: fn(&Route) -> f32,
+    route: &Route,
+    control: u32,
+    entries: RouteEntries,
+) -> f32 {
+    match entries[0] {
+        Some(entry) if control == GAIN_DB => entry.offset.left_db,
+        _ => read(route),
+    }
+}
+
+/// Append every control row of one route. `entries` are the route's driving entries, `gate` its
+/// effective gate per source lane. A row an entry drives lists `automated = true` (#1650 D4 on the
+/// send); an automated `gain_db` lists its entry's offset as its value, an automated `mute` or
+/// matrix row its static (hand or fallback) value.
+pub(crate) fn push_rows(
+    out: &mut Vec<ControlRow>,
+    route: &Route,
+    entries: RouteEntries,
+    gate: [bool; 2],
+) {
+    push_route_rows(out, route, entries, gate, false);
 }
 
 /// Append only a route's derived rows (its effective gate), in listing order.
 pub(crate) fn push_derived_rows(out: &mut Vec<ControlRow>, route: &Route, gate: [bool; 2]) {
-    push_route_rows(out, route, gate, true);
+    push_route_rows(out, route, [None; 6], gate, true);
 }
 
-fn push_route_rows(out: &mut Vec<ControlRow>, route: &Route, gate: [bool; 2], derived_only: bool) {
+fn push_route_rows(
+    out: &mut Vec<ControlRow>,
+    route: &Route,
+    entries: RouteEntries,
+    gate: [bool; 2],
+    derived_only: bool,
+) {
     let owner = Owner::Route(route.id.clone());
     for row in &ROWS {
         let descriptor = descriptor(row, route);
         if derived_only && descriptor.class != ControlClass::Derived {
             continue;
         }
-        push_control(
+        let automated = automated_index(row.id).is_some_and(|index| entries[index].is_some());
+        push_control_automated(
             out,
             &owner,
             &Section::Own,
             row.id,
             &descriptor,
             |side| match &row.value {
-                RouteValue::Stored { read, .. } => read(route),
+                RouteValue::Stored { read, .. } => stored_value(*read, route, row.id, entries),
                 RouteValue::Derived { read } => read(gate, side),
             },
+            |_| automated,
         );
     }
 }
@@ -277,13 +322,40 @@ pub(crate) fn resolve(
         .find(|row| row.id == control)
         .ok_or(ControlError::AddressUnknown)?;
     let descriptor = descriptor(row, route);
+    let entries = if control == GAIN_DB {
+        crate::automation::route_automation(model, id)
+    } else {
+        [None; 6]
+    };
     Ok(match &row.value {
-        RouteValue::Stored { read, .. } => Resolved::stored(descriptor, |_| read(route)),
+        RouteValue::Stored { read, .. } => {
+            Resolved::stored(descriptor, |_| stored_value(*read, route, control, entries))
+        }
         RouteValue::Derived { read } => Resolved {
             descriptor,
             source: Source::RouteDerived(*read),
         },
     })
+}
+
+/// Write `value` as the hand-move offset (both fields, one value) of the entry of `model` that
+/// drives route `route`'s `gain_db` (R17-6), and return whether one does; when none does, the
+/// caller writes the static gain. The caller has run [`crate::check`] with the row's own domain,
+/// `[-144, 24]` dB, which is the offset domain.
+pub(crate) fn write_gain_offset(model: &mut SessionModel, route: &StableId, value: f32) -> bool {
+    if model.automation.is_empty() {
+        return false;
+    }
+    let Some(id) =
+        crate::automation::route_automation(model, route)[0].map(|entry| entry.id.clone())
+    else {
+        return false;
+    };
+    if let Some(entry) = model.automation.iter_mut().find(|entry| entry.id == id) {
+        entry.offset.left_db = value;
+        entry.offset.right_db = value;
+    }
+    true
 }
 
 /// Write one of a route's rows.
