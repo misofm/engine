@@ -511,3 +511,60 @@ PR #1712).
   release-only-when-nothing-owed, and green on the code.
 - No test catches a free write that keeps the owed flag (deleting `self.owed = false` stays green).
   Root moved that gap to #1711 (batch 19).
+
+## Decision record: T3b (batch 18)
+
+- **Shipped (the in-block fader cut at mute events).** In the one `FaderEventDriver`
+  (`crates/builtins-compiler/src/lib.rs`), so the Simd8 and Simd4 banks, the fused fader-matrix
+  pair's fallback and the scalar oracle share it (R17-4). A fader channel's block is rendered in
+  pieces: each piece ends at the D1.6 cut `E`, at the offset of the same lane and channel's next
+  mute event, or at the block's last sample (`FaderCellCursor::piece_last`), and the next piece
+  starts at `+ 1` (`open`, `piece_span`). A piece is consumed to its end before the next starts,
+  so the cell's state advances only through events the stage was given (#1647 constraint 2). At
+  each offset: the fader cursors push first (a gain operation at `o` keeps the old hold, gain
+  before mute), then the mute cursors, then each fader channel whose piece ended at its mute
+  event takes the hold the pushed `SetMute` gives (`rehold`) and opens its next piece: muted ->
+  held to the block's end (`held_through`); unmuted over `M` -> `E = o + M`: inside the block a
+  cut (owed events below `E` move there through D1.6), at the block's end `due_at_entry`, past it
+  the next block finds the hold from the stage; unmuted exactly (`M = 0`) -> free, nothing owed
+  (the stage takes the remembered gain, the cell's committed target). A mute event that changes
+  nothing (not pushed) keeps the old hold. An older cut ahead is dropped by any pushed `SetMute`.
+  Mute cursors are now built before a lane's fader cursors, so each fader channel's first piece is
+  cut at its first mute event. `HoldEnd` loses its `rest` span (the next piece is built at the cut).
+- **Departure from the handoff's text.** "Start the next piece at `o + 1`" is applied at every
+  mute event of the channel, pushed or not: the piece must end there because the driver pulls one
+  event ahead, and the hold is known only after the mute cursor composes `curve || terms`. A
+  non-pushed event splits the piece with the hold unchanged, which moves no event (the same split
+  the D1.6 cut makes).
+- **Gates (all pass).** `crates/host-core/tests/stored_mute_automation.rs`, every form (Simd8 on
+  AVX2, Simd4, scalar oracle; no live control, live controls, between render calls), quanta 128,
+  100, 64 and 37; the driver's pushed fader events and both planes are compared with a model of
+  the rule written apart from the driver (`compose_model`: the fader-only plan's events, each
+  remembered by the stage while held, the owed move at `E` over `J` to the curve at `E + J - 1`),
+  driven into the stage directly with #1638's operations.
+  - Gate 2: `a_fader_ride_under_a_curve_mute_is_remembered_and_moves_at_the_unmute_end` (grid
+    events inside a curve mute and inside its unmute ramp, the move at `E = 2,480`). Red if the
+    move at `E` is missing (mutation `moving = false`: first difference at 2,480). Green on the base driver: its `E` lies in a later block, which batch 17's block-entry rule already handles.
+  - Block boundaries, `M = 48` (and 96): `a_hold_that_starts_and_ends_inside_a_block_moves_at_its_end`:
+    `E` inside the unmute's block, `E` exactly at a block end, `E` in the next block, an unmute and
+    a re-mute in the same block (after `E`: two moves; inside the unmute ramp: the first `E`
+    dropped, the owed move kept through the mute), a mute at offset 0 with an unmute at `q - 1`,
+    a mute at `q - 1` with an unmute at 0, and fader steps exactly at the mute and the unmute
+    samples. Red checks (each a temporary mutation, then reverted): no rehold at the mute event
+    (base behaviour, first difference at 1,348); `E` off by one either way (bits differ at 1,348;
+    events at 1,349 / 1,347); owed events below `E` dropped (`free_from = o`: bits at 1,348);
+    `due_at_entry` not set at an `E` on the block's end (bits at 1,408); a re-mute that keeps the
+    old cut (the pushed events: a move at 1,396 under the mute). The base driver (`ce32c1b1f`) is
+    red at 1,348.
+  - Batch 17's gates stay green: `stored_fader_automation.rs` (30), `stored_mute_automation.rs`'s
+    T3a tests, capi `live_tests`, host-web parity.
+- **Measured.** One-time PR evidence (not committed): a fader-only probe (three tracks: a fade, a
+  step and fade, two steps; live mutes with ramps and with `0`; a seek; every form; quanta 128, 100
+  and 37) renders the same bits at base `ce32c1b1f` and head (FNV `7caf69e2bae5afcd` both).
+  `audit capi` `pcm_digest` `bffc21e857b5e134`, allocations 0. `realtime_policy`: ok, 161 marked regions (unchanged). `lane_slot_bytes` 392 unchanged (the slot is not
+  touched; the new fields live in the driver on the render stack).
+- **Phase-2 placeholder.** A cell hold set by an offsets jump on a lane held by a mute ramp
+  (`AutomatedFaderCell::offsets_jump`: until the stage's ramp end at the block entry) is not
+  shortened when a curve unmute inside that block ends the hold earlier; grid events between the
+  new `E` and the old ramp end are pushed as held (`RememberGain` on a free stage) until the cell's
+  next free event. Needs a VCA write during a mute ramp and a curve unmute inside it.

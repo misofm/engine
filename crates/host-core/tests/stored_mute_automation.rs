@@ -2,7 +2,10 @@
 //! stage at their exact samples over the session mute length, through the one event driver, on
 //! every bank width and on the scalar oracle (R17-4); a seek that leaves the stage mute unchanged
 //! lets a ramp toward that state finish (root ruling R18-1); and a mute value the strip's live cell
-//! carries is the lane's `terms`, which render ORs with the curve (OQ1 = C).
+//! carries is the lane's `terms`, which render ORs with the curve (OQ1 = C). On a lane with fader
+//! and mute automation, each mute event changes where the stage holds the gain, inside the block
+//! (T3b): fader events inside the hold are only remembered, and the move the hold owes lands at
+//! the unmute ramp's end `E` (#1647 D1.6).
 //!
 //! Every test prepares on a chosen backend, a `test-support` entry of host-core.
 #![cfg(feature = "test-support")]
@@ -58,6 +61,13 @@ fn caps(model: &SessionModel) -> HostPrepareCaps {
 /// insert, no input filter, an identity matrix, each routed to the output, `control_smoothing`
 /// explicit (fader 5 ms, mute 10 ms). On a DC source of `1.0` a track's output is its fader gain.
 fn plain(tracks: usize, quantum: u32) -> SessionModel {
+    let model = plain_with(tracks, quantum, 10.0);
+    assert_eq!(controls::LiveRamps::for_session(&model).mute_samples, M);
+    model
+}
+
+/// [`plain`] with the session mute length `mute_ms`.
+fn plain_with(tracks: usize, quantum: u32, mute_ms: f32) -> SessionModel {
     let mut model = parse_session_json(NINE).expect("fixture parses");
     model.automation.clear();
     model.console.pre_insert.clear();
@@ -86,11 +96,10 @@ fn plain(tracks: usize, quantum: u32) -> SessionModel {
     model.sources[0].frames = 1 << 20;
     model.quantum_frames = quantum;
     model.control_smoothing = Some(ControlSmoothing {
-        mute_ms: 10.0,
+        mute_ms,
         fader_ms: 5.0,
         pan_ms: 5.0,
     });
-    assert_eq!(controls::LiveRamps::for_session(&model).mute_samples, M);
     model
 }
 
@@ -690,4 +699,336 @@ fn a_mute_entry_leaves_a_fader_ride_as_it_was() {
             "{form:?}: the right lane's own mute"
         );
     }
+}
+
+/// The fader jump length `J` of every test here: `fader_ms` 5 at 48 kHz.
+const J: u32 = 240;
+
+/// The fader gain of `db` with no VCA (`S = +0.0`, #1646 D1).
+fn gain(db: f32) -> f32 {
+    builtins::checked_fader_gain(session::vca_compose_db(db, 0.0)).expect("fader domain")
+}
+
+/// A fader entry on both lanes of track `track`, from its `(shape, start, end, from dB, to dB)`
+/// segments.
+fn fader_entry(
+    model: &SessionModel,
+    track: usize,
+    segments: &[(AutomationShape, u64, u64, f32, f32)],
+) -> Automation {
+    Automation {
+        id: id(&format!("fader-{track}")),
+        target: ControlAddress {
+            owner: Owner::Strip(model.tracks[track].id.clone()),
+            section: Section::Builtins,
+            control: FADER_DB,
+            lane: ParameterChannel::Both,
+        },
+        segments: segments
+            .iter()
+            .map(
+                |&(shape, start_sample, end_sample, start_value, end_value)| AutomationSegment {
+                    shape,
+                    start_sample,
+                    end_sample,
+                    start_value,
+                    end_value,
+                    unit: ParameterUnit::Db,
+                },
+            )
+            .collect(),
+        offset: session::AutomationOffset::default(),
+    }
+}
+
+/// Fader steps at each `(sample, dB)` of `steps`, from `from` dB.
+fn fader_steps(from: f32, steps: &[(u64, f32)]) -> Vec<(AutomationShape, u64, u64, f32, f32)> {
+    let mut at = (0_u64, from);
+    steps
+        .iter()
+        .map(|&(sample, value)| {
+            let segment = (AutomationShape::Step, at.0, sample, at.1, value);
+            at = (sample, value);
+            segment
+        })
+        .collect()
+}
+
+/// One left-lane fader event the driver pushed: `(sample, kind, held, value, ramp)`.
+type FaderEvent = (u64, automation::EventKind, bool, f32, u32);
+
+/// The left-lane fader events the driver pushed since the last take.
+fn fader_events() -> Vec<FaderEvent> {
+    let (events, overflow) = builtins_compiler::test_only_take_fader_events();
+    assert!(!overflow);
+    events
+        .iter()
+        .filter(|event| !event.mute && event.channel == 0)
+        .map(|event| {
+            (
+                event.sample,
+                event.kind,
+                event.held,
+                event.value,
+                event.ramp,
+            )
+        })
+        .collect()
+}
+
+/// The stage operation of one pushed fader event (#1638 D1).
+fn operation(event: &FaderEvent) -> builtins::FaderOperation {
+    let &(_, kind, held, value, ramp) = event;
+    let gain = gain(value);
+    if held {
+        builtins::FaderOperation::RememberGain { gain }
+    } else if kind == automation::EventKind::Set {
+        builtins::FaderOperation::SetGain { gain }
+    } else {
+        builtins::FaderOperation::RetargetGain {
+            gain,
+            samples: ramp,
+        }
+    }
+}
+
+/// The stage driven directly from `start` dB with `operations` (in order at each sample).
+fn reference_from(
+    start: f32,
+    operations: &[(u64, builtins::FaderOperation)],
+    frames: u64,
+) -> Vec<f32> {
+    let mut all = vec![(0, builtins::FaderOperation::SetGain { gain: gain(start) })];
+    all.extend_from_slice(operations);
+    reference(&all, frames)
+}
+
+/// The spec's model of a lane with a fader ride and curve mute steps (#1647 D1.6, #1651 T3b),
+/// written apart from the driver: the ride's own events `ride` (the events a fader-only plan of
+/// the same curve pushes) and each mute step `(sample, muted)` over `mute` samples. At each sample
+/// the gain operation comes first, under the hold before the sample's mute step. An event while
+/// the gain is held (muted, or inside an unmute ramp `[u, u + M)`) is only remembered by the
+/// stage and owes a move; at `E = u + M` an owed move lands in place of the ride's event there:
+/// a `Jump` over `J` to the curve at `E + J - 1` (`curve`, flat there in every case). Returns the
+/// events the driver must push, the stage operations of the whole lane and the number of moves.
+fn compose_model(
+    ride: &[FaderEvent],
+    steps: &[(u64, bool)],
+    mute: u32,
+    curve: impl Fn(i64) -> f32,
+) -> (Vec<FaderEvent>, Vec<(u64, builtins::FaderOperation)>, usize) {
+    let mut times: Vec<u64> = ride
+        .iter()
+        .map(|event| event.0)
+        .chain(steps.iter().map(|step| step.0))
+        .chain(steps.iter().map(|step| step.0 + u64::from(mute)))
+        .collect();
+    times.sort_unstable();
+    times.dedup();
+    let mut events = Vec::new();
+    let mut operations = Vec::new();
+    let mut free_from = 0_u64;
+    let mut end: Option<u64> = None;
+    let mut owed = false;
+    let mut moves = 0;
+    for t in times {
+        let own = ride.iter().find(|event| event.0 == t);
+        if end == Some(t) && owed {
+            let value = curve(t as i64 + i64::from(J) - 1);
+            let landing = (t, automation::EventKind::Jump, false, value, J);
+            operations.push((t, operation(&landing)));
+            events.push(landing);
+            owed = false;
+            moves += 1;
+        } else if let Some(event) = own {
+            // A move changes no later discontinuity jump of the ride; its grid is flat there.
+            assert!(
+                moves == 0 || event.1 == automation::EventKind::Jump,
+                "the ride is flat after the move, at {t}"
+            );
+            operations.push((t, operation(event)));
+            events.push(*event);
+            if t < free_from {
+                owed = true;
+            }
+        }
+        if end == Some(t) {
+            end = None;
+        }
+        if let Some(&(_, muted)) = steps.iter().find(|step| step.0 == t) {
+            operations.push((t, set_mute(muted, mute)));
+            if muted {
+                free_from = u64::MAX;
+                end = None;
+            } else {
+                free_from = t + u64::from(mute);
+                end = Some(free_from);
+            }
+        }
+    }
+    (events, operations, moves)
+}
+
+/// Run one fader-and-mute case (#1651 gate 2, T3b) on every form at quanta 128, 100, 64 and 37:
+/// track 0 has the fader entry `fader` and a mute entry with steps `steps` (alternating from
+/// unmuted) under a session mute length of `mute_ms`. The driver pushes exactly the events of
+/// [`compose_model`] (the fader-only plan's events, with the owed move at `E`), and both planes are
+/// bit for bit the stage driven directly with that model's operations. Returns how many moves
+/// the model lands, so a case can say it reaches the move.
+fn compose_case(
+    label: &str,
+    fader: &[(AutomationShape, u64, u64, f32, f32)],
+    steps: &[u64],
+    mute_ms: f32,
+    frames: u64,
+) -> usize {
+    let mut moves = 0;
+    for quantum in [128, 100, 64, 37] {
+        let mut ride_only = plain_with(1, quantum, mute_ms);
+        let mute = controls::LiveRamps::for_session(&ride_only).mute_samples;
+        let entry = fader_entry(&ride_only, 0, fader);
+        let segments = controls::stored_segments(&entry);
+        let start = automation::value_at(&segments, 0);
+        ride_only.automation = vec![entry];
+        let mut model = ride_only.clone();
+        let mute_steps: Vec<(u64, f32)> = steps
+            .iter()
+            .enumerate()
+            .map(|(index, &sample)| (sample, if index % 2 == 0 { 1.0 } else { 0.0 }))
+            .collect();
+        model.automation.push(mute_entry(
+            &model,
+            0,
+            ParameterChannel::Both,
+            0.0,
+            &mute_steps,
+        ));
+        let model_steps: Vec<(u64, bool)> = mute_steps
+            .iter()
+            .map(|&(sample, value)| (sample, value != 0.0))
+            .collect();
+        for form in forms() {
+            let tag = format!("{label} q={quantum} {form:?}");
+            let _ = builtins_compiler::test_only_take_fader_events();
+            let _ = Rig::new(&ride_only, form).run(frames);
+            let ride = fader_events();
+            let (events, operations, landed) = compose_model(&ride, &model_steps, mute, |t| {
+                automation::value_at(&segments, t)
+            });
+            let expected = reference_from(start, &operations, frames);
+            let (out, _) = Rig::new(&model, form).run(frames);
+            let pushed = fader_events();
+            for plane in &out {
+                assert_eq!(first_difference(plane, &expected), None, "{tag}");
+            }
+            assert_eq!(pushed, events, "{tag}: the pushed fader events");
+            moves = landed;
+        }
+    }
+    moves
+}
+
+/// #1651 gate 2 (T3b): a fader ride and curve mute steps on one lane. The ride moves while the
+/// curve holds the lane muted ([1,000, 2,000): grid events on [1,200, 1,600)) and while its unmute
+/// ramp runs ([2,000, 2,480): grid events on [2,100, 2,300)), then rests at `-6` dB. The events
+/// inside the mute and the unmute ramp are only remembered; the move lands at `E = 2,480` over
+/// `J` to `-6` dB; every sample is the stage driven directly with those operations, on every form
+/// at quanta 128, 100, 64 and 37.
+///
+/// Test value: red if a fader event restarts or cuts the mute ramp, if the move at `E` is missing
+/// or late (the lane would rest at the `-10` dB the unmute ramp aimed for), or if the ride's
+/// events change under the mute (the cursor must push the fader-only plan's events).
+#[test]
+fn a_fader_ride_under_a_curve_mute_is_remembered_and_moves_at_the_unmute_end() {
+    let moves = compose_case(
+        "ride",
+        &[
+            (AutomationShape::Linear, 0, 1_200, -20.0, -20.0),
+            (AutomationShape::Linear, 1_200, 1_600, -20.0, -10.0),
+            (AutomationShape::Linear, 1_600, 2_100, -10.0, -10.0),
+            (AutomationShape::Linear, 2_100, 2_300, -10.0, -6.0),
+        ],
+        &[1_000, 2_000],
+        10.0,
+        3_200,
+    );
+    assert_eq!(moves, 1, "the case reaches the move at E");
+}
+
+/// #1651 T3b, holds that start and end inside a block: a session mute length of 1 ms (`M = 48`)
+/// so the unmute ramp's end `E` falls inside blocks. Each case puts a fader step inside the
+/// unmute ramp, which owes the move at `E`; the cases are placed against the 128-sample block
+/// grid (and run at quanta 128, 100, 64 and 37 on every form):
+/// - `E` inside the unmute's block (unmute 1,300, `E` 1,348, fader step 1,320);
+/// - `E` exactly at a block's end (unmute 1,360, `E` 1,408 = the next block's first sample);
+/// - `E` in the next block (unmute 1,390, `E` 1,438, step 1,400);
+/// - an unmute and a re-mute in the same block, after `E` (unmute 1,290, `E` 1,338, re-mute
+///   1,354, last unmute 1,600, steps 1,310 and 1,620: two moves), and, with `M = 96`, inside the
+///   unmute ramp (unmute 1,300, re-mute 1,364, last unmute 1,600, steps 1,320 and 1,650): the
+///   first `E` (1,396) is dropped, the owed move is kept through the mute (constraint 4) and
+///   lands at 1,696;
+/// - a mute at a block's offset 0 (1,280) and an unmute at offset `q - 1` (1,535);
+/// - a mute at offset `q - 1` (1,407) and an unmute at offset 0 (1,664);
+/// - fader steps exactly at the mute (1,000: a free retarget, then the mute) and at the unmute
+///   (1,300: remembered under the old hold, gain before mute, so it owes the move at 1,348).
+///
+/// Test value: red if the fader piece is not cut at the mute event (events after an in-block mute
+/// would not owe the move, or an in-block unmute's `E` would get no cut), if `E` is off by one
+/// (the move would land on a held stage and be only remembered, or a sample late), if an owed
+/// event below `E` is dropped, if a re-mute keeps the old cut, or if the hold at a block's end
+/// does not carry into the next block (`due_at_entry`, `held_through`).
+#[test]
+fn a_hold_that_starts_and_ends_inside_a_block_moves_at_its_end() {
+    const MS: f32 = 1.0;
+    assert_eq!(
+        controls::LiveRamps::for_session(&plain_with(1, 128, MS)).mute_samples,
+        48
+    );
+    // `(label, fader steps (sample, dB), mute step samples)`.
+    type Case = (&'static str, Vec<(u64, f32)>, &'static [u64]);
+    let cases: [Case; 7] = [
+        ("E inside the block", vec![(1_320, -8.0)], &[1_000, 1_300]),
+        ("E at the block end", vec![(1_380, -8.0)], &[1_000, 1_360]),
+        ("E in the next block", vec![(1_400, -8.0)], &[1_000, 1_390]),
+        (
+            "unmute and re-mute after E",
+            vec![(1_310, -8.0), (1_620, -3.0)],
+            &[1_000, 1_290, 1_354, 1_600],
+        ),
+        (
+            "mute at 0, unmute at q-1",
+            vec![(1_290, -8.0), (1_560, -3.0)],
+            &[1_280, 1_535],
+        ),
+        (
+            "mute at q-1, unmute at 0",
+            vec![(1_450, -8.0), (1_700, -3.0)],
+            &[1_407, 1_664],
+        ),
+        (
+            "steps at the mute and the unmute",
+            vec![(1_000, -8.0), (1_300, -3.0)],
+            &[1_000, 1_300],
+        ),
+    ];
+    for (label, steps, mutes) in cases {
+        let moves = compose_case(label, &fader_steps(-20.0, &steps), mutes, MS, 2_560);
+        let expected = if label == "unmute and re-mute after E" {
+            2
+        } else {
+            1
+        };
+        assert_eq!(moves, expected, "{label}: the case reaches the move at E");
+    }
+    let moves = compose_case(
+        "re-mute inside the unmute ramp",
+        &fader_steps(-20.0, &[(1_320, -8.0), (1_650, -3.0)]),
+        &[1_000, 1_300, 1_364, 1_600],
+        2.0,
+        2_560,
+    );
+    assert_eq!(
+        moves, 1,
+        "the dropped cut lands no move; the last unmute's does"
+    );
 }

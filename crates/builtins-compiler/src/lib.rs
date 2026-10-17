@@ -1370,19 +1370,23 @@ struct ChannelHold {
     fader_gain: Option<f32>,
 }
 
-/// One channel's block cut at the end `E` of a held ramp (#1647 D1.6, constraint 2): the first
-/// piece's span ends at `E`, and the second starts at `E + 1`.
+/// One channel's block cut at the end `E` of a held ramp (#1647 D1.6, constraint 2): the piece
+/// that holds `E` ends there, and the next starts at `E + 1`.
 #[derive(Clone, Copy, Debug)]
 struct HoldEnd {
     /// `E`: the first offset at which the stage reports the gain free (constraint 7).
     at: u32,
     /// The node time of `E`.
     node: i64,
-    /// The span of `[E + 1, frames)`; `None` when `E` is the block's last sample.
-    rest: Option<automation::NodeSpan>,
 }
 
 /// One automated channel's events of one block, with the next one pulled (#1647 D1.3).
+///
+/// The block is rendered in pieces, each a span of the cell's events: a piece ends at the cut at
+/// `E` (D1.6), at the offset of the channel's next mute event (#1651 T3b: a mute event changes
+/// where the stage holds the gain, so the piece after it is cut where that hold ends), or at the
+/// block's last sample. A piece's events are consumed to its end before the next starts, so the
+/// cell's state advances only through events the stage was given (#1647 constraint 2).
 struct FaderCellCursor<'a> {
     /// The owner's lane (the bank lane; `0` on the scalar oracle).
     lane: usize,
@@ -1390,22 +1394,32 @@ struct FaderCellCursor<'a> {
     channel: usize,
     /// `S`, the offset sum every event's value is composed with (#1646 D1).
     offsets_sum: f64,
-    /// The cell's program and the block's jump length, to build the second piece.
+    /// The cell's program and the block's jump length, to build the later pieces.
     program: automation::CellProgram<'a>,
     jump: u32,
-    /// The current piece's events; `None` once the block is spent.
+    /// The current piece's events, spent or not: it holds the cell's state for the next piece.
+    /// `None` only after a refusal (unreachable).
     events: Option<automation::CellEvents<'a, 'a>>,
     /// The block offset of the current piece's first sample.
     base: u32,
+    /// The block offset of the current piece's last sample.
+    last: u32,
     /// The next event, its offset in the block.
     next: Option<automation::Event>,
     /// The channel's held-ramp obligation (D1.6).
     obligation: &'a mut HeldRampObligation,
     /// The first offset at which the stage's gain is free in this block: an event pushed below it
-    /// is only remembered (`0`: free all block; the block length: held all block).
+    /// is only remembered (`0`: free all block; the block length: held all block). A mute event
+    /// pushed on the channel sets it again ([`Self::rehold`]).
     free_from: u32,
     /// The cut at the held ramp's end, while it is ahead.
     end: Option<HoldEnd>,
+    /// The offset of the channel's next mute event, while one is ahead (#1651 T3b).
+    mute_at: Option<u32>,
+    /// The block's node-time mapping: offset 0's node time and the seek step, and its length.
+    start: i64,
+    step: Option<(u32, i64)>,
+    frames: u32,
 }
 
 impl FaderCellCursor<'_> {
@@ -1423,55 +1437,151 @@ impl FaderCellCursor<'_> {
     }
 
     /// The offset of the cursor's next operation: its next event, or the cut at `E` once the
-    /// first piece is spent (the first piece ends at `E`, so no event lies past it).
+    /// pieces before it are spent (a piece never lies past `E`, so no event is pulled past it).
     fn next_offset(&self) -> Option<u32> {
         self.next
             .map(|event| event.offset)
             .or_else(|| self.end.map(|end| end.at))
     }
 
-    /// End the first piece at the cut and start the second. With `moving`, the cell first lands
-    /// at `E` as a seek in [`automation::SeekMode::Ramp`] does (R17-9): one `Jump` over the
-    /// block's jump length `J`, aimed at the curve at the ramp's completion `E + J - 1` (never
-    /// past the next discontinuity), which commits that target and holds the grid for the move's
-    /// own ramp (constraint 3), as after the cell's own `Jump`. Returns that landing. Bounded: one
-    /// event of a one-sample span, a binary search of the discontinuities and one curve read.
+    /// The last offset of a piece that starts at `from`: the cut at `E` or the channel's next
+    /// mute event, whichever comes first, else the block's last sample.
+    fn piece_last(&self, from: u32) -> u32 {
+        [self.end.map(|end| end.at), self.mute_at]
+            .into_iter()
+            .flatten()
+            .filter(|&at| at >= from)
+            .fold(self.frames - 1, u32::min)
+    }
+
+    /// End the piece at the cut. With `moving`, the cell first lands at `E` as a seek in
+    /// [`automation::SeekMode::Ramp`] does (R17-9): one `Jump` over the block's jump length `J`,
+    /// aimed at the curve at the ramp's completion `E + J - 1` (never past the next
+    /// discontinuity), which commits that target and holds the grid for the move's own ramp
+    /// (constraint 3), as after the cell's own `Jump`. Returns that landing. The next piece is
+    /// opened by the caller ([`Self::open`]). Bounded: one event of a one-sample span, a binary
+    /// search of the discontinuities and one curve read.
     fn cut(&mut self, end: HoldEnd, moving: bool) -> Option<automation::Event> {
         self.end = None;
-        let mut state = self.events.take()?.into_state();
-        let mut landing = None;
-        if moving {
-            match automation::NodeSpan::new(end.node, Some((0, end.node)), 1) {
-                Ok(span) => {
-                    let mut events = automation::CellEvents::new(
-                        self.program,
-                        state,
-                        span,
-                        automation::SeekMode::Ramp,
-                        self.jump,
-                    );
-                    landing = events.next();
-                    state = events.into_state();
-                }
-                // Unreachable: `NodeSpan::new` errs only for a step offset at or past the span's
-                // length, and 0 < 1. In release the cut lands nothing (the move is skipped and
-                // the lane holds its gain), no panic.
-                Err(_) => debug_assert!(false, "a one-sample span with its step at 0 is valid"),
-            }
+        if !moving {
+            return None;
         }
-        if let Some(rest) = end.rest {
-            self.base = end.at.saturating_add(1);
-            self.events = Some(automation::CellEvents::new(
-                self.program,
-                state,
-                rest,
-                controls::FADER_CELL_RULE.seek,
-                self.jump,
-            ));
-            self.pull();
-        }
+        // Unreachable: `NodeSpan::new` errs only for a step offset at or past the span's length,
+        // and 0 < 1. In release the cut lands nothing (the move is skipped and the lane holds its
+        // gain), no panic.
+        let Ok(span) = automation::NodeSpan::new(end.node, Some((0, end.node)), 1) else {
+            debug_assert!(false, "a one-sample span with its step at 0 is valid");
+            return None;
+        };
+        let state = self.events.take()?.into_state();
+        let mut events = automation::CellEvents::new(
+            self.program,
+            state,
+            span,
+            automation::SeekMode::Ramp,
+            self.jump,
+        );
+        let landing = events.next();
+        self.events = Some(events);
         landing
     }
+
+    /// Start the next piece at block offset `from` (the current piece is spent), through
+    /// [`Self::piece_last`]. `false` when there is none: `from` is past the block, or a refusal
+    /// (unreachable: the block's node times were checked against the `i64` edge, and a step kept
+    /// inside the piece lies inside it), which leaves the cell's state where it was.
+    fn open(&mut self, from: u32) -> bool {
+        if from >= self.frames {
+            return false;
+        }
+        let last = self.piece_last(from);
+        let Some(span) = piece_span(self.start, self.step, from, last) else {
+            debug_assert!(false, "a piece of a checked block is a valid span");
+            return false;
+        };
+        let Some(events) = self.events.take() else {
+            return false;
+        };
+        self.base = from;
+        self.last = last;
+        self.events = Some(automation::CellEvents::new(
+            self.program,
+            events.into_state(),
+            span,
+            controls::FADER_CELL_RULE.seek,
+            self.jump,
+        ));
+        self.pull();
+        true
+    }
+
+    /// #1651 T3b: the hold a `SetMute { muted, samples }` pushed at offset `at` gives the channel
+    /// from `at + 1` on (the gain operation at `at` kept the old hold: gain before mute). Muted
+    /// (settled or in a ramp toward `0.0`): held to the block's end, and through it. Unmuted over
+    /// `M = samples`: held until `E = at + M`, the first offset at which the stage reports the
+    /// gain free; an `E` inside the block is the cut where an owed move lands (D1.6), an `E` at
+    /// the block's end makes the move due at the next block's first sample, and a later `E` is
+    /// the next block's to find from the stage. Unmuted exactly (`M = 0`): the stage takes the
+    /// remembered gain, the cell's committed target, at `at`, so the gain is free and nothing is
+    /// owed. An older cut ahead is dropped: the stage's hold no longer ends there.
+    fn rehold(&mut self, at: u32, muted: bool, samples: u32) {
+        self.end = None;
+        let frames = self.frames;
+        let obligation = &mut *self.obligation;
+        obligation.due_at_entry = false;
+        if muted {
+            self.free_from = frames;
+            obligation.held_through = true;
+            return;
+        }
+        if samples == 0 {
+            self.free_from = 0;
+            obligation.owed = false;
+            obligation.held_through = false;
+            return;
+        }
+        match u32::try_from(u64::from(at) + u64::from(samples)) {
+            Ok(end) if end < frames => {
+                self.free_from = end;
+                self.end = hold_end(self.start, self.step, end);
+                // Unreachable: the block's node times were checked against the `i64` edge. In
+                // release no cut is set: the lane holds the gain the unmute ramp aimed for.
+                debug_assert!(
+                    self.end.is_some(),
+                    "an end inside a checked block has a node time"
+                );
+                obligation.held_through = false;
+            }
+            end => {
+                self.free_from = frames;
+                obligation.due_at_entry = end == Ok(frames);
+                obligation.held_through = true;
+            }
+        }
+    }
+}
+
+/// The span of the block offsets `[from, last]` of a block whose offset 0 is node time `start`,
+/// with seek step `step` (kept, rebased, when it lies inside the piece); `None` past the `i64`
+/// range (unreachable: the caller checked the block's span).
+fn piece_span(
+    start: i64,
+    step: Option<(u32, i64)>,
+    from: u32,
+    last: u32,
+) -> Option<automation::NodeSpan> {
+    let frames = last.checked_sub(from)?.checked_add(1)?;
+    let inside = step.filter(|&(offset, _)| offset >= from && offset <= last);
+    let span = if from == 0 {
+        automation::NodeSpan::new(start, inside, frames)
+    } else {
+        automation::NodeSpan::new(
+            span_time(start, step, u64::from(from))?,
+            inside.map(|(offset, timeline)| (offset - from, timeline)),
+            frames,
+        )
+    };
+    span.ok()
 }
 
 /// The one event driver of stored fader automation (#1647 D1.3-D1.6, R17-4): both fader owners,
@@ -1518,6 +1628,9 @@ struct MuteCellCursor<'a> {
     events: automation::CellEvents<'a, 'a>,
     /// The next event, its offset in the block.
     next: Option<automation::Event>,
+    /// The `SetMute { muted, samples }` pushed at the offset being applied, if any: the lane's
+    /// fader channel takes its hold from it (#1651 T3b).
+    pushed: Option<(bool, u32)>,
 }
 
 impl MuteCellCursor<'_> {
@@ -1580,6 +1693,63 @@ impl<'a> FaderEventDriver<'a> {
                 continue;
             }
             let program: &'a automation::Program = program;
+            // #1651 D1: the lane's mute cells, before its fader cells, so each fader channel's
+            // first piece is cut at its first mute event (T3b). A mute cell gives no grid event
+            // (a step curve is constant between its discontinuities), only its jumps over the
+            // block's mute length and a seek's exact landing; its first block lands a `Set` when
+            // the curve at the block's node time differs from its seed, as a fader cell's does
+            // (D2, departure 4).
+            let lane_mutes = mutes_used;
+            for (channel, cell) in mute.iter_mut().enumerate() {
+                let Some(AutomatedMuteCell { cell, state, terms }) = cell.as_mut() else {
+                    continue;
+                };
+                let refused =
+                    || debug_assert!(false, "an automated mute cell is refused at render");
+                // Unreachable: the cell index was prepared from this same program. In release the
+                // channel is skipped: it emits nothing and the lane keeps its mute, no panic.
+                let Some(cell_program) = program.cell(*cell as usize) else {
+                    refused();
+                    continue;
+                };
+                let step = span
+                    .step
+                    .map(|step| (step.offset, step.timeline))
+                    .or_else(|| {
+                        let value = automation::value_at(cell_program.segments(), span.start);
+                        (first_block && state.target().map(f32::to_bits) != Some(value.to_bits()))
+                            .then_some((0, span.start))
+                    });
+                let muted = hold(lane, channel).is_some_and(|hold| hold.muted);
+                // Unreachable refusal: the graph's step lies inside the block, and at most
+                // `MAXIMUM_FADER_CELLS` mute cursors are used (two channels per lane). In release
+                // the channel is skipped: it emits nothing and the lane keeps its mute.
+                let (Ok(node), Some(slot)) = (
+                    automation::NodeSpan::new(span.start, step, frames),
+                    driver.mutes.get_mut(mutes_used),
+                ) else {
+                    refused();
+                    continue;
+                };
+                let mut cursor = MuteCellCursor {
+                    lane,
+                    channel,
+                    terms: *terms,
+                    muted,
+                    events: automation::CellEvents::new(
+                        cell_program,
+                        state,
+                        node,
+                        controls::MUTE_CELL_RULE.seek,
+                        mute_jump,
+                    ),
+                    next: None,
+                    pushed: None,
+                };
+                cursor.pull();
+                *slot = Some(cursor);
+                mutes_used += 1;
+            }
             for (channel, cell) in channels.iter_mut().enumerate() {
                 let Some(AutomatedFaderCell {
                     cell,
@@ -1639,43 +1809,56 @@ impl<'a> FaderEventDriver<'a> {
                     // not: its grid moves the lane from this block's first sample on.
                     state.hold_until(first.saturating_sub(1));
                 }
-                let end = at.map(|at| hold_end(span.start, step, at, frames));
-                let first = match end {
-                    Some(Some(end)) => automation::NodeSpan::new(
-                        span.start,
-                        step.filter(|&(offset, _)| offset <= end.at),
-                        end.at + 1,
-                    ),
-                    _ => automation::NodeSpan::new(span.start, step, frames),
-                };
-                // Unreachable refusal: the span is valid (a step kept only at or before `E` lies
-                // inside `E + 1` samples, and the graph's step lies inside the block); at most
-                // `MAXIMUM_FADER_CELLS` cursors are used (two channels per lane, and the const
-                // assert bounds every bank width by `MAXIMUM_BANK_LANES`); and `hold_end` is
-                // `Some` because the block's node times were checked against the `i64` edge above.
-                // In release the channel is skipped: it emits nothing and the lane holds its gain.
-                let (Ok(node), Some(slot), false) = (
-                    first,
-                    driver.cursors.get_mut(used),
-                    matches!(end, Some(None)),
-                ) else {
+                let end = at.map(|at| hold_end(span.start, step, at));
+                // The channel's first mute event (#1651 T3b): the first piece ends there.
+                let mute_at = driver
+                    .mutes
+                    .get(lane_mutes..mutes_used)
+                    .unwrap_or(&[])
+                    .iter()
+                    .flatten()
+                    .find(|mute| mute.channel == channel)
+                    .and_then(|mute| mute.next.map(|event| event.offset));
+                // Unreachable refusal: at most `MAXIMUM_FADER_CELLS` cursors are used (two
+                // channels per lane, and the const assert bounds every bank width by
+                // `MAXIMUM_BANK_LANES`); and `hold_end` is `Some` because the block's node times
+                // were checked against the `i64` edge above. In release the channel is skipped:
+                // it emits nothing and the lane holds its gain.
+                let (Some(slot), false) = (driver.cursors.get_mut(used), matches!(end, Some(None)))
+                else {
                     refused();
                     continue;
                 };
-                let end = end.flatten();
-                let (events, landing, base) = match long_landing {
+                let mut cursor = FaderCellCursor {
+                    lane,
+                    channel,
+                    offsets_sum: *offsets_sum,
+                    program: cell_program,
+                    jump,
+                    events: None,
+                    base: 0,
+                    last: 0,
+                    next: None,
+                    obligation,
+                    free_from,
+                    end: end.flatten(),
+                    mute_at,
+                    start: span.start,
+                    step,
+                    frames,
+                };
+                match long_landing {
                     // U3 fold 2: the landing alone, a one-sample piece over its own length (it
                     // commits the target and holds the grid until its end, as the cell's own
                     // `Jump` does), then the rest of the block from its second sample. A free
                     // stage has no cut (`end` is `None`); a cut at the first sample (a move due
                     // there) takes the landing over `J` below instead.
-                    Some(length) if end.is_none() => {
-                        let one = automation::NodeSpan::new(span.start, Some((0, span.start)), 1);
-                        let rest = automation::NodeSpan::new(span.start + 1, None, frames - 1);
-                        // Unreachable: a step at 0 lies inside one sample, and the block's node
-                        // times were checked against the `i64` edge above. In release the channel
-                        // is skipped: it emits nothing and the lane holds its gain.
-                        let (Ok(one), Ok(rest)) = (one, rest) else {
+                    Some(length) if cursor.end.is_none() => {
+                        // Unreachable: a step at 0 lies inside one sample. In release the
+                        // channel is skipped: it emits nothing and the lane holds its gain.
+                        let Ok(one) =
+                            automation::NodeSpan::new(span.start, Some((0, span.start)), 1)
+                        else {
                             refused();
                             continue;
                         };
@@ -1686,104 +1869,30 @@ impl<'a> FaderEventDriver<'a> {
                             automation::SeekMode::Ramp,
                             length,
                         );
-                        let landing = landing_events.next();
-                        let state = landing_events.into_state();
-                        let events = (frames > 1).then(|| {
-                            automation::CellEvents::new(
-                                cell_program,
-                                state,
-                                rest,
-                                controls::FADER_CELL_RULE.seek,
-                                jump,
-                            )
-                        });
-                        (events, landing, 1)
+                        cursor.next = landing_events.next();
+                        cursor.events = Some(landing_events);
                     }
-                    _ => (
-                        Some(automation::CellEvents::new(
+                    _ => {
+                        let last = cursor.piece_last(0);
+                        // Unreachable: a step kept inside the piece lies inside it. In release
+                        // the channel is skipped: it emits nothing and the lane holds its gain.
+                        let Some(node) = piece_span(span.start, step, 0, last) else {
+                            refused();
+                            continue;
+                        };
+                        cursor.last = last;
+                        cursor.events = Some(automation::CellEvents::new(
                             cell_program,
                             state,
                             node,
                             mode,
                             jump,
-                        )),
-                        None,
-                        0,
-                    ),
-                };
-                let mut cursor = FaderCellCursor {
-                    lane,
-                    channel,
-                    offsets_sum: *offsets_sum,
-                    program: cell_program,
-                    jump,
-                    events,
-                    base,
-                    next: None,
-                    obligation,
-                    free_from,
-                    end,
-                };
-                if landing.is_some() {
-                    cursor.next = landing;
-                } else {
-                    cursor.pull();
+                        ));
+                        cursor.pull();
+                    }
                 }
                 *slot = Some(cursor);
                 used += 1;
-            }
-            // #1651 D1: the lane's mute cells. A mute cell gives no grid event (a step curve is
-            // constant between its discontinuities), only its jumps over the block's mute length
-            // and a seek's exact landing; its first block lands a `Set` when the curve at the
-            // block's node time differs from its seed, as a fader cell's does (D2, departure 4).
-            for (channel, cell) in mute.iter_mut().enumerate() {
-                let Some(AutomatedMuteCell { cell, state, terms }) = cell.as_mut() else {
-                    continue;
-                };
-                let refused =
-                    || debug_assert!(false, "an automated mute cell is refused at render");
-                // Unreachable: the cell index was prepared from this same program. In release the
-                // channel is skipped: it emits nothing and the lane keeps its mute, no panic.
-                let Some(cell_program) = program.cell(*cell as usize) else {
-                    refused();
-                    continue;
-                };
-                let step = span
-                    .step
-                    .map(|step| (step.offset, step.timeline))
-                    .or_else(|| {
-                        let value = automation::value_at(cell_program.segments(), span.start);
-                        (first_block && state.target().map(f32::to_bits) != Some(value.to_bits()))
-                            .then_some((0, span.start))
-                    });
-                let muted = hold(lane, channel).is_some_and(|hold| hold.muted);
-                // Unreachable refusal: the graph's step lies inside the block, and at most
-                // `MAXIMUM_FADER_CELLS` mute cursors are used (two channels per lane). In release
-                // the channel is skipped: it emits nothing and the lane keeps its mute.
-                let (Ok(node), Some(slot)) = (
-                    automation::NodeSpan::new(span.start, step, frames),
-                    driver.mutes.get_mut(mutes_used),
-                ) else {
-                    refused();
-                    continue;
-                };
-                let mut cursor = MuteCellCursor {
-                    lane,
-                    channel,
-                    terms: *terms,
-                    muted,
-                    events: automation::CellEvents::new(
-                        cell_program,
-                        state,
-                        node,
-                        controls::MUTE_CELL_RULE.seek,
-                        mute_jump,
-                    ),
-                    next: None,
-                };
-                cursor.pull();
-                *slot = Some(cursor);
-                mutes_used += 1;
             }
         }
         driver
@@ -1820,13 +1929,16 @@ impl<'a> FaderEventDriver<'a> {
     /// cut the stage did not reach starts its second piece with no move.
     fn finish(mut self) {
         for cursor in self.cursors.iter_mut().flatten() {
-            while cursor.next.is_some() {
-                cursor.pull();
-            }
-            if let Some(end) = cursor.end {
-                let _ = cursor.cut(end, false);
+            cursor.mute_at = None;
+            loop {
                 while cursor.next.is_some() {
                     cursor.pull();
+                }
+                if let Some(end) = cursor.end.filter(|end| end.at <= cursor.last) {
+                    let _ = cursor.cut(end, false);
+                }
+                if !cursor.open(cursor.last.saturating_add(1)) {
+                    break;
                 }
             }
         }
@@ -1974,22 +2086,11 @@ fn settle_adoption(
     differs.then_some(length)
 }
 
-/// The cut of a block of `frames` samples whose offset 0 is node time `start`, with seek step
-/// `step`, at offset `at`; `None` past the `i64` range (unreachable: the caller checked the
-/// block's span).
-fn hold_end(start: i64, step: Option<(u32, i64)>, at: u32, frames: u32) -> Option<HoldEnd> {
+/// The cut at offset `at` of a block whose offset 0 is node time `start`, with seek step `step`;
+/// `None` past the `i64` range (unreachable: the caller checked the block's span).
+fn hold_end(start: i64, step: Option<(u32, i64)>, at: u32) -> Option<HoldEnd> {
     let node = span_time(start, step, u64::from(at))?;
-    let next = at + 1;
-    let rest = if next < frames {
-        let rest_start = span_time(start, step, u64::from(next))?;
-        let rest_step = step
-            .filter(|&(offset, _)| offset > at)
-            .map(|(offset, timeline)| (offset - next, timeline));
-        Some(automation::NodeSpan::new(rest_start, rest_step, frames - next).ok()?)
-    } else {
-        None
-    };
-    Some(HoldEnd { at, node, rest })
+    Some(HoldEnd { at, node })
 }
 
 impl builtins::FaderOperationSource for FaderEventDriver<'_> {
@@ -2055,23 +2156,27 @@ impl builtins::FaderOperationSource for FaderEventDriver<'_> {
                 }
                 cursor.pull();
             }
-            let Some(end) = end else {
-                continue;
-            };
-            if set_at_end {
-                cursor.obligation.owed = false;
-            }
-            let landing = cursor.cut(end, moving);
-            if moving {
-                cursor.obligation.owed = false;
-                match landing {
-                    Some(landing) => push(cursor, landing),
-                    // Unreachable: a cursor's events are `Some` until its one cut (the cut clears
-                    // `end`), the one-sample span is valid, and a `Ramp` seek step always lands
-                    // (`land` returns an event). In release no move is pushed and the lane holds
-                    // the gain the held ramp aimed for, no panic.
-                    None => debug_assert!(false, "a moving cut lands its cell"),
+            if let Some(end) = end {
+                if set_at_end {
+                    cursor.obligation.owed = false;
                 }
+                let landing = cursor.cut(end, moving);
+                if moving {
+                    cursor.obligation.owed = false;
+                    match landing {
+                        Some(landing) => push(cursor, landing),
+                        // Unreachable: a cursor's events are `Some` but after a refusal, the
+                        // one-sample span is valid, and a `Ramp` seek step always lands (`land`
+                        // returns an event). In release no move is pushed and the lane holds the
+                        // gain the held ramp aimed for, no panic.
+                        None => debug_assert!(false, "a moving cut lands its cell"),
+                    }
+                }
+            }
+            // The piece ends here: the next starts at `offset + 1`, unless the channel's mute
+            // event at `offset` sets its hold first (below).
+            if cursor.last == offset && cursor.mute_at != Some(offset) {
+                let _ = cursor.open(offset.saturating_add(1));
             }
         }
         // #1651 D1: each mute cell's event at `offset` composes the stage mute `curve || terms`,
@@ -2083,6 +2188,7 @@ impl builtins::FaderOperationSource for FaderEventDriver<'_> {
                 continue;
             };
             cursor.pull();
+            cursor.pushed = None;
             let muted = curve_mutes(event.value) || cursor.terms;
             if muted == cursor.muted {
                 continue;
@@ -2103,6 +2209,9 @@ impl builtins::FaderOperationSource for FaderEventDriver<'_> {
             // is a populated member, and a mute operation carries no gain. In release the stage
             // keeps its mute, no panic.
             debug_assert!(pushed, "a stored mute event is refused at render");
+            if pushed {
+                cursor.pushed = Some((muted, samples));
+            }
             #[cfg(any(test, feature = "test-support"))]
             test_only_record_fader_event(TestOnlyFaderEvent {
                 lane: cursor.lane,
@@ -2114,6 +2223,26 @@ impl builtins::FaderOperationSource for FaderEventDriver<'_> {
                 ramp: samples,
                 mute: true,
             });
+        }
+        // #1651 T3b: a fader channel whose piece ended at its mute event takes the hold the
+        // pushed `SetMute` gives (an unpushed one, which changed nothing, keeps the old hold),
+        // and its next piece starts at `offset + 1`, cut at the new `E` or at the channel's next
+        // mute event. Bounded: one search of at most `MAXIMUM_FADER_CELLS` mute cursors per
+        // fader channel with a mute event at `offset`.
+        for cursor in self.cursors.iter_mut().flatten() {
+            if cursor.mute_at != Some(offset) {
+                continue;
+            }
+            let mute = self
+                .mutes
+                .iter()
+                .flatten()
+                .find(|mute| mute.lane == cursor.lane && mute.channel == cursor.channel);
+            cursor.mute_at = mute.and_then(|mute| mute.next.map(|event| event.offset));
+            if let Some((muted, samples)) = mute.and_then(|mute| mute.pushed) {
+                cursor.rehold(offset, muted, samples);
+            }
+            let _ = cursor.open(offset.saturating_add(1));
         }
     }
 }
