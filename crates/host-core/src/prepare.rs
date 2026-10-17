@@ -4890,6 +4890,13 @@ impl<'a> EffectiveDiff<'a> {
     /// record. The live classifier never reaches a removal (#1648 D1 rebuilds it), so this is the
     /// join's alone.
     ///
+    /// #1651 T4, a mute cell lost: each lane whose stored mute automation the change removes gets
+    /// a `Mute` record of its effective mute in `next` (`controls::EffectiveStrip::mute`, the
+    /// static mute with its VCA and solo terms) over the lane's mute length, for the same reason:
+    /// its carried stage holds `curve || terms`. The stage's batch 13b rule makes the record a
+    /// no-op when the stage already agrees. A released lane whose effective mute changed already
+    /// has its record.
+    ///
     /// # Errors
     ///
     /// [`OutOfDomain`] as [`fader_records`].
@@ -4901,35 +4908,47 @@ impl<'a> EffectiveDiff<'a> {
         let mut level = self.strip_level_records(before, after)?;
         let records = &mut level.fader;
         let change = self.change(before, after);
-        let automated_before = controls::automated_fader_lanes(self.rules.current, change.id);
-        if automated_before == [false; 2] {
+        let next = self.rules.next.structure();
+        let lost =
+            |lanes: [bool; 2], kept: [bool; 2]| [0, 1].map(|lane| lanes[lane] && !kept[lane]);
+        let fader_released = lost(
+            controls::automated_fader_lanes(self.rules.current, change.id),
+            controls::automated_fader_lanes(next, change.id),
+        );
+        let automates = |model: &SessionModel, strip: &session::StableId| {
+            controls::mute_automation(model, strip).map(|entry| entry.is_some())
+        };
+        let mute_released = lost(
+            automates(self.rules.current, change.id),
+            automates(next, change.id),
+        );
+        if fader_released == [false; 2] && mute_released == [false; 2] {
             return Ok(level);
         }
-        let automated_after =
-            controls::automated_fader_lanes(self.rules.next.structure(), change.id);
-        let mut released = [0, 1].map(|lane| automated_before[lane] && !automated_after[lane]);
+        let mut released = [fader_released, mute_released];
         for record in records.iter().flatten() {
-            if let TrackFaderRecord::FaderDb { lanes, .. } = record {
-                let covered = match lanes {
-                    BuiltinLaneSelector::Left => [true, false],
-                    BuiltinLaneSelector::Right => [false, true],
-                    BuiltinLaneSelector::Both => [true, true],
-                };
-                for (released, covered) in released.iter_mut().zip(covered) {
-                    *released &= !covered;
-                }
+            let (kind, lanes) = match record {
+                TrackFaderRecord::FaderDb { lanes, .. } => (0, lanes),
+                TrackFaderRecord::Mute { lanes, .. } => (1, lanes),
+            };
+            let covered = match lanes {
+                BuiltinLaneSelector::Left => [true, false],
+                BuiltinLaneSelector::Right => [false, true],
+                BuiltinLaneSelector::Both => [true, true],
+            };
+            for (released, covered) in released[kind].iter_mut().zip(covered) {
+                *released &= !covered;
             }
         }
-        if released == [false; 2] {
-            return Ok(level);
-        }
+        let [fader_released, mute_released] = released;
         let lengths = self.rules.lengths(&change);
-        let db = self.after.strips[after].fader_db;
+        let strip = &self.after.strips[after];
+        let (db, muted) = (strip.fader_db, strip.mute);
         // The array holds at most one `FaderDb` and one `Mute` per lane, and a released lane has
-        // no `FaderDb` yet, so a free slot is always there.
+        // no record of its kind yet, so a free slot is always there.
         let mut free = records.iter_mut().filter(|record| record.is_none());
         for (lanes, lane) in lane_records(
-            released,
+            fader_released,
             db[0].to_bits() == db[1].to_bits() && lengths.fader[0] == lengths.fader[1],
         ) {
             if let Some(slot) = free.next() {
@@ -4937,6 +4956,18 @@ impl<'a> EffectiveDiff<'a> {
                     lanes,
                     db: db[lane],
                     smoothing_samples: lengths.fader[lane],
+                });
+            }
+        }
+        for (lanes, lane) in lane_records(
+            mute_released,
+            muted[0] == muted[1] && lengths.mute[0] == lengths.mute[1],
+        ) {
+            if let Some(slot) = free.next() {
+                *slot = Some(TrackFaderRecord::Mute {
+                    lanes,
+                    muted: muted[lane],
+                    smoothing_samples: lengths.mute[lane],
                 });
             }
         }
@@ -5492,8 +5523,9 @@ struct StripJoin<'a> {
     fader: FamilyJoin<LevelRecords>,
     matrix: FamilyJoin<TrackControlRecord>,
     /// The fader lanes whose stored automation table both models hold bit for bit (#1648 D2,
-    /// [`controls::continued_fader_lanes`]), bit 0 left and bit 1 right: the fader move's
-    /// [`graph::GraphStripMove::continued_cells`].
+    /// [`controls::continued_fader_lanes`]), bit 0 left and bit 1 right, and the mute lanes of
+    /// the same rule (#1651 T4, [`controls::continued_mute_lanes`]), bit 2 left and bit 3 right:
+    /// the fader move's [`graph::GraphStripMove::continued_cells`].
     continued_cells: u8,
 }
 
@@ -5617,7 +5649,11 @@ fn join_strips<'a>(
             Ok(Some(record)) => FamilyJoin::Live(record),
         };
         let continued = controls::continued_fader_lanes(committed, model, strip.id);
-        let continued_cells = u8::from(continued[0]) | (u8::from(continued[1]) << 1);
+        let continued_mute = controls::continued_mute_lanes(committed, model, strip.id);
+        let continued_cells = u8::from(continued[0])
+            | (u8::from(continued[1]) << 1)
+            | (u8::from(continued_mute[0]) << 2)
+            | (u8::from(continued_mute[1]) << 3);
         joins.push(StripJoin {
             id,
             fader,

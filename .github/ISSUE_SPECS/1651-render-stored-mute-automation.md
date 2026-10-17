@@ -634,3 +634,85 @@ PR #1712).
   pass. `check-host-core-policy.sh`, `check-workspace-policy.sh`, `realtime_policy` (161 marked
   regions, unchanged), fmt, clippy (the five crates, all targets and features, `-D warnings`)
   and the no-feature `cargo check --all-targets`: ok.
+
+## Decision record: T4 (batch 18)
+
+- **Shipped (the strip carry of mute automation).**
+  - `LaneFaderAutomation::adopt` (`crates/builtins-compiler/src/lib.rs`) adopts the mute
+    channels by address (strip, row 6, channel): a carried channel takes the predecessor cell's
+    `CellState` and `terms` (the terms its stage heard; the successor's own `Mute` records, the
+    join's and later live writes, move them, as they move a fader channel's `S`). It owes a
+    reposition (`AutomatedMuteCell::reposition`, new) when `continued_cells` bit `2 + channel` is
+    clear, `a(n)` moved, or the carried cell still owed one; a gained channel keeps its prepared
+    seed and `terms` and repositions.
+  - At the lane's next block with node time, `FaderEventDriver::new` repositions the cell at the
+    block's node time and opens the block with a ramped landing (`SeekMode::Ramp`, a step at
+    offset 0) over the block's mute jump length. The mute cursor's one compose rule pushes
+    `SetMute { curve || terms, M }` only when that differs from the stage's mute, so a continued
+    or an agreeing cell lands nothing (and the 13b rule makes any repeat a no-op). A session
+    seek in that block lands instead, exactly. T3b's fader cut takes the landing like any mute
+    event.
+  - `LaneFaderAutomation::mute_terms`: on a cell that owes a reposition (and has node time this
+    block) the drain only stores `terms`; the driver composes them with the curve at the swap
+    block, so the swap lands the one `SetMute` the two changes owe, not one from the prepared
+    seed and a second that reverses it.
+  - `controls::continued_mute_lanes` (new, `crates/controls/src/automation.rs`; the fader and
+    the mute rule share `continued_lanes`). host-core's strip join sets bits 2 and 3 of
+    `continued_cells`; graph passes the byte unchanged (doc only).
+  - A lost mute cell: the join emits a `Mute` record of the lane's effective mute in `next`
+    (`EffectiveStrip::mute`: static, VCA and solo terms) over the lane's mute length, unless the
+    lane already has a `Mute` record. The 13b rule makes it a no-op where the stage agrees.
+- **host-core `prepare.rs` functions touched (strip join only):** the `StripJoin` struct's
+  `continued_cells` doc, `join_strips` (bits 2 and 3), and `EffectiveDiff::join_level_records`
+  (the mute release beside the fader release). `resolve_route_carry` is not touched.
+- **R18-4 for the strip (argument).** A mute adoption never stretches a live fader move: the
+  landing is a `SetMute`, which retargets only the lane's gain ramp toward `0` (or the
+  remembered gain) of the one lane and channel it addresses (dual-mono lanes have separate
+  stages), and the stage keeps `fader_gain` as the target the live move aimed for (#1638 D2,
+  D1.6), so after the unmute the lane is back at that gain. No level ramp is carried over `J`,
+  so B17-R14's window stays fader-only. Gate: below.
+- **Gates (all pass)**, `crates/host-core/tests/stored_mute_automation.rs`, every bank width
+  (Simd8 on AVX2, Simd4) and the scalar oracle, each with and without live controls, quanta 128
+  and 100, a swap at block 8, a signed never-zero source; each case compares, plane by plane,
+  the swapped run with a fresh plan of the new model fed the same PCM from the first block
+  boundary at or after `swap + M`, with the old model's plan before the swap, and holds the swap
+  block at 0 allocations, reallocations and frees:
+  - `a_rebuild_that_adds_a_mute_entry_mutes_from_the_swap_over_the_mute_length` (a gained cell
+    muted now: one `SetMute(true, 480)` per channel at the swap, the bank lane ramps; then a
+    gained cell whose curve agrees with a static mute the same rebuild opens: no jump). Red:
+    adopt without the mute channels (the lane stays open, first difference at 1,536); the
+    landing exact instead of ramped ("ramps at the swap"); the drain's `terms` composed with the
+    prepared seed (two jumps at the swap).
+  - `a_rebuild_that_removes_a_mute_entry_holds_the_static_mute`. Red: the join without the mute
+    release (the lane stays muted, first difference at 1,536).
+  - `a_rebuild_that_changes_a_mute_curve_jumps_only_when_the_composed_mute_changes` (muted now:
+    one jump; changed only after the swap: none). Red: a changed table that continues its
+    carried cursor (the jump becomes a 64-sample grid event), adopt without the mute channels.
+  - `a_mute_adoption_keeps_the_fader_move_in_flight_for_the_unmute` (R18-4: a live -12 dB
+    `FaderDb` over 2,000 in flight across a rebuild that adds a curve mute on at the swap; muted
+    to `+0.0` after the ramp, and after the curve's unmute equal to the never-swapped plan; live
+    forms). Red: a stage that remembers the in-flight gain at the mute (temporary mutation in
+    `builtins::mute_channel`, first difference at 3,200).
+  - `crates/host-core/tests/route_mute.rs::a_send_edit_and_a_mute_entry_in_one_rebuild_adopt_over_one_length`
+    un-ignored and green: the strip and the send reach `+0.0` at 1,247 (`swap + M - 1`) on Simd8
+    and Simd4. Red at the base and with adopt without the mute channels ("the strip mutes").
+- **Departures.**
+  - The scalar oracle binds the fader as a graph node, which no plan swap carries: its strip
+    restarts at the swap (prepared muted exactly, as a fresh plan). Gate 8's scalar leg holds
+    the post-ramp claim and the swap block's zero allocations only; the route_mute test runs the
+    bank widths only (its scalar leg failed on "one length for the strip and the send": the strip
+    is set at 768). Carrying a bound fader node is outside this slice.
+  - The adoption landing ramps over the block's mute jump length even when a `terms` record of
+    another length arrives at the same block (the two changes land as one `SetMute`).
+  - A cell that owes a reposition on a lane with no node time keeps it owed; a `terms` record
+    there applies at once, composed with the carried target (no curve renders on that lane).
+- **Measured.** `audit capi` `pcm_digest` `bffc21e857b5e134` (unchanged), allocations 0,
+  `total_violations` 0. `realtime_policy`: ok, 168 marked regions (unchanged: the new code sits
+  in existing regions). `lane_slot_bytes` 392 (unchanged: the new `bool` fits the mute cell's
+  padding).
+- **Ran (all pass).** `cargo test --locked` on `-p builtins-compiler --features test-support`,
+  `-p host-core --features host-core/test-support,host-core/control-provider` (579), `-p capi`,
+  `-p host-web --features host-web/test-support`, `-p control-plane --features test-support`,
+  `-p graph --features test-support`, `-p controls --all-features`; fmt, clippy (builtins-compiler,
+  controls, host-core, graph; all targets and features, `-D warnings`) and the no-feature
+  `cargo check --all-targets`.

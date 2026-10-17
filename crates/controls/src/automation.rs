@@ -575,13 +575,33 @@ pub fn continued_fader_lanes(
     next: &SessionModel,
     strip: &StableId,
 ) -> [bool; 2] {
+    continued_lanes(current, next, strip, fader_automation)
+}
+
+/// The lanes of strip `strip`'s mute (`[left, right]`) that both models automate with the same
+/// table, by the rule of [`continued_fader_lanes`] on the mute row ([`mute_automation`], #1651
+/// T4): such a lane's mute cell continues its carried event state verbatim, and every other
+/// carried mute cell is repositioned at adoption.
+#[must_use]
+pub fn continued_mute_lanes(
+    current: &SessionModel,
+    next: &SessionModel,
+    strip: &StableId,
+) -> [bool; 2] {
+    continued_lanes(current, next, strip, mute_automation)
+}
+
+/// The lanes that `entries` gives an entry in both models with the same segments.
+fn continued_lanes<'a>(
+    current: &'a SessionModel,
+    next: &'a SessionModel,
+    strip: &StableId,
+    entries: fn(&'a SessionModel, &StableId) -> [Option<&'a Automation>; 2],
+) -> [bool; 2] {
     if current.automation.is_empty() || next.automation.is_empty() {
         return [false; 2];
     }
-    let (before, after) = (
-        fader_automation(current, strip),
-        fader_automation(next, strip),
-    );
+    let (before, after) = (entries(current, strip), entries(next, strip));
     [0, 1].map(|lane| {
         matches!((before[lane], after[lane]), (Some(before), Some(after))
             if same_segments(before, after))
