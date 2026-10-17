@@ -1885,6 +1885,68 @@ mod tests {
         );
     }
 
+    /// #1650 (U3 fold, batch 17). A hand move on an automated fader is prepared in place with the
+    /// ride as its edited owner, and the in-place commit charges the ride's canonical bytes as the
+    /// full path does: the offset `-3.123456` is spelled longer than `0.0`, so the canonical text
+    /// grows.
+    ///
+    /// Test value: red if the in-place accounting leaves the automation owner out of the canonical
+    /// bytes (it would under-charge `canonical_bytes` by the offset's growth), or if the hand move is
+    /// not prepared in place.
+    #[test]
+    fn a_hand_move_on_an_automated_fader_charges_the_rides_canonical_bytes_in_place() {
+        let mut model = parse_session_json(EXAMPLE).expect("fixture");
+        let mut ride = model.automation[0].clone();
+        ride.id = id("fader-ride");
+        ride.target = row_address(
+            Owner::Strip(model.tracks[0].id.clone()),
+            Section::Builtins,
+            "fader_db",
+            Lane::Both,
+        )
+        .expect("the fader row");
+        model.automation.push(ride);
+        let mut fast = SessionStore::new(model.clone(), caps()).expect("compile");
+        let mut full = SessionStore::new(model, caps()).expect("compile");
+        let track = fast.compiled().normalized_model().tracks[0].id.clone();
+        let hand_move = SessionEdit::set_control(
+            row_address(
+                Owner::Strip(track),
+                Section::Builtins,
+                "fader_db",
+                Lane::Left,
+            )
+            .expect("the fader row"),
+            -3.123_456,
+            None,
+        );
+        let edits = [hand_move];
+        let revision = ExpectedRevision::Exact(fast.revision());
+        let prepared = fast
+            .prepare_transaction_in_place(revision, &edits)
+            .expect("prepares");
+        assert!(prepared.is_in_place());
+        assert_eq!(
+            prepared.edited_owners().expect("owners").automation.len(),
+            1,
+            "the ride is the edited owner"
+        );
+        let before = fast.compiled().resource_estimate().canonical_bytes;
+        assert_eq!(
+            fast.apply_transaction_in_place(revision, &edits),
+            full.apply_transaction_with_monitor(revision, &edits)
+        );
+        assert_eq!(fast.canonical_snapshot(), full.canonical_snapshot());
+        assert_eq!(
+            fast.compiled().resource_estimate(),
+            full.compiled().resource_estimate()
+        );
+        assert!(
+            fast.compiled().resource_estimate().canonical_bytes > before,
+            "the offset's spelling grows the canonical text"
+        );
+    }
+
     /// #1683 review fold: a solo and a master write of one strip in one transaction are two monitor
     /// writes, on the in-place path and on the full path alike. The rule that a later write
     /// replaces an earlier one holds per strip and row, never per strip.

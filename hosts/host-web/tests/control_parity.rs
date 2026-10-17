@@ -2884,6 +2884,87 @@ fn a_fader_automation_edit_rebuilds_alike_on_both_hosts() {
     }
 }
 
+/// B17-R14 (#1648 split, TBD50): a table-only rebuild of a riding fader while a hand move with
+/// its own 4,000 samples may still ramp completes as the transition fallback on both hosts, and
+/// the same rebuild with no move in flight completes exactly. Both hosts take the one decision in
+/// the shared control plane: the browser's status words carry the C ABI's watermark, flags
+/// included, and both hosts render the same bits.
+///
+/// Test value: red if either host marks the rebuild differently (an adapter-local rule), or if
+/// the shared decision is not reached through the browser's control path.
+#[test]
+fn a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both_hosts() {
+    let ride = |end_db: f32| SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-fader-ride"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                5,
+                ParameterChannel::Both,
+            ),
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Linear,
+                start_sample: 0,
+                end_sample: 1_000_000,
+                start_value: 0.0,
+                end_value: end_db,
+                unit: session::ParameterUnit::Db,
+            }],
+            offset: session::AutomationOffset::default(),
+        },
+    };
+    let hand = CAbi::edits(
+        Edit::Fader {
+            strip: T1,
+            lanes: Lanes::Both,
+            db: -6.0,
+        },
+        Some(4_000),
+    );
+    for rate in RATES {
+        for (label, moved, expected) in [
+            ("no move", false, capi::OUTCOME_EXACT),
+            (
+                "a hand move in flight",
+                true,
+                capi::OUTCOME_TRANSITION_FALLBACK,
+            ),
+        ] {
+            let model = model_at(rate);
+            let mut browser = Rig::new(&model);
+            let mut c_abi = CAbi::new(&model);
+            let mut block = 0;
+            let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi| {
+                let (b, b_reply) = browser.transaction_reply(edits);
+                let (c, c_reply) = c_abi.transaction(edits);
+                assert_eq!(b, c, "{rate} Hz, {label}: one verdict");
+                assert_eq!(b_reply, c_reply, "{rate} Hz, {label}: one reply");
+            };
+            both(&[ride(-12.0)], &mut browser, &mut c_abi);
+            same_blocks(&mut browser, &mut c_abi, block..block + 4, label);
+            block += 4;
+            if moved {
+                both(&hand, &mut browser, &mut c_abi);
+                same_blocks(&mut browser, &mut c_abi, block..block + 3, label);
+                block += 3;
+            }
+            both(&[ride(-6.0)], &mut browser, &mut c_abi);
+            same_blocks(&mut browser, &mut c_abi, block..block + 3, label);
+            let watermark = c_abi.watermark();
+            assert_eq!(
+                status_watermark(&browser),
+                watermark,
+                "{rate} Hz, {label}: the browser status carries the C ABI's watermark"
+            );
+            assert_eq!(
+                watermark.2, expected,
+                "{rate} Hz, {label}: the rebuild's outcome flags"
+            );
+        }
+    }
+}
+
 /// #1631. A `matrix_mode` switch under a stored pan entry is refused alike by both hosts: the same
 /// refusal and the same diagnostic (`control.inactive` at the entry's path, the row rule's
 /// own, through the rebuild route), and nothing commits -- the same expected revision still
@@ -4576,17 +4657,23 @@ fn a_vca_move_over_an_automated_member_is_live_alike_on_both_hosts() {
 }
 
 /// #1649 gate 2 (both hosts). Ten live moves of `v` before one render give the bits of a twin that
-/// made only the last, on both hosts (render reads the newest slot of the offsets cell, whole).
+/// made only the last, on both hosts (render reads the newest slot of the offsets cell, whole);
+/// after 28 blocks a second burst of ten (ending at -2 dB) again gives the twin's bits when the
+/// twin makes only its last, and after each burst's jump the output equals the committed
+/// session's boot.
 /// Three nested VCAs reach `t2`, declared and nested out of ID order, at 24, -24 and 2e-30 dB in
 /// ascending ID order: a move of the third to 1e-30 is `live` and renders the committed session's
 /// boot (the `S` bits it writes are the classifier gate's,
 /// `a_vca_move_writes_the_automated_lanes_offsets_cell`).
 ///
-/// Test value: red if render applies an older slot than the newest committed one, if a slot mixes
-/// two writes, or if a nested reach is composed otherwise than preparation.
+/// Test value: red if render applies an older slot than the newest committed one, if render hears
+/// only the first write of a cell (the second burst would not be heard), or if a nested reach is
+/// composed otherwise than preparation.
 #[test]
 fn many_vca_moves_before_one_render_are_the_last_alike_on_both_hosts() {
     const EDIT: u64 = 4;
+    // Each burst's run: its jump settles inside it at every rate, and two fit the sources.
+    const SPAN: u64 = 28;
     for rate in RATES {
         let model = automated_vca_model(rate, |_| {});
         let mut many = Rig::new(&model);
@@ -4596,16 +4683,39 @@ fn many_vca_moves_before_one_render_are_the_last_alike_on_both_hosts() {
         for block in 0..EDIT {
             one.step(block);
         }
-        for step in 1..=10 {
-            let db = if step == 10 { -6.0 } else { -(step as f32) };
-            let edit = [vca_offset(VCA.id, db, None)];
-            assert_eq!(many.transaction(&edit), c_abi.transaction(&edit).0);
-        }
-        one.transaction(&[vca_offset(VCA.id, -6.0, None)]);
-        for block in EDIT..EDIT + 24 {
-            let (m, c, o) = (many.step(block), c_abi.step(block), one.step(block));
-            assert_eq!(m, c, "{rate} Hz: block {block} alike on both hosts");
-            assert_eq!(m, o, "{rate} Hz: block {block} is the last move's");
+        for (burst, last) in [(0_u64, -6.0_f32), (1, -2.0)] {
+            for step in 1..=10 {
+                let db = if step == 10 {
+                    last
+                } else {
+                    -(step as f32) - 0.5 * burst as f32
+                };
+                let edit = [vca_offset(VCA.id, db, None)];
+                assert_eq!(many.transaction(&edit), c_abi.transaction(&edit).0);
+            }
+            one.transaction(&[vca_offset(VCA.id, last, None)]);
+            // The committed session's boot: a twin that also missed every write after the first
+            // would still equal `many`, so each burst is held to the boot after its jump too.
+            let committed = snapshot_bytes(|payload, expected| many.command(payload, expected));
+            let mut boot = Rig::boot(&committed, rate);
+            let first = EDIT + SPAN * burst;
+            let settled = first + settle_blocks(&mut many, model.control_smoothing_samples().fader);
+            assert!(
+                settled < first + SPAN,
+                "{rate} Hz: the jump settles inside the burst's run"
+            );
+            for block in 0..first {
+                boot.step(block);
+            }
+            for block in first..first + SPAN {
+                let (m, c, o) = (many.step(block), c_abi.step(block), one.step(block));
+                let b = boot.step(block);
+                assert_eq!(m, c, "{rate} Hz: block {block} alike on both hosts");
+                assert_eq!(m, o, "{rate} Hz: block {block} is the last move's");
+                if block >= settled {
+                    assert_eq!(m, b, "{rate} Hz: block {block} renders the committed boot");
+                }
+            }
         }
 
         let nested = automated_vca_model(rate, |model| {

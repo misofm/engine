@@ -3665,6 +3665,17 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             for record in retarget.fader.iter().map_while(|record| *record) {
                 producer.fader.write(stamp, record);
             }
+            // #1648 D2 (U3 fold): an automated lane's new `S`, with the edit's length, through
+            // the successor's own offsets cell, as the live path writes it. The record exists only
+            // for a lane the successor automates, whose cell a plan with live cells attaches.
+            for (channel, record) in retarget.offsets.iter().enumerate() {
+                if let Some(record) = *record {
+                    if !producer.fader.has_offsets(channel) {
+                        return Err(graph_failure("host.control.order"));
+                    }
+                    producer.fader.write_offsets(stamp, channel, record);
+                }
+            }
             if let Some(record) = retarget.matrix {
                 producer.producer.write(stamp, record);
             }
@@ -4610,23 +4621,8 @@ impl<'a> EffectiveDiff<'a> {
         level_differs(&self.before.strips[before], &self.after.strips[after])
     }
 
-    /// The level records of one strip: its effective values in the two models, with the lengths
-    /// the ramp rules give.
-    ///
-    /// # Errors
-    ///
-    /// [`OutOfDomain`] as [`fader_records`].
-    pub(crate) fn level_records(
-        &self,
-        before: usize,
-        after: usize,
-    ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
-        self.strip_level_records(before, after)
-            .map(|records| records.fader)
-    }
-
-    /// The level records of one strip with its offsets-cell writes (#1649 D4): the live path's
-    /// form of [`Self::level_records`].
+    /// The level records of one strip, its effective values in the two models with the lengths
+    /// the ramp rules give, and its offsets-cell writes (#1649 D4).
     ///
     /// # Errors
     ///
@@ -4646,7 +4642,9 @@ impl<'a> EffectiveDiff<'a> {
     }
 
     /// The carry retargets of one strip's fader/mute stage at a successor's strip join (#1277 D5):
-    /// its [`Self::level_records`], plus the release of each lane whose stored fader automation
+    /// its [`Self::strip_level_records`], the offsets-cell writes with them (#1648 D2, U3 fold:
+    /// an `S` the transaction moves reaches a carried automated lane as the live path's record,
+    /// with the edit's length), plus the release of each lane whose stored fader automation
     /// the change removes (#1648 D2, "a cell lost"). Such a lane's carried stage holds the curve's
     /// last target, which no model holds, so the static values of the two models cannot show the
     /// difference; a `FaderDb` of the lane's effective value in `next` moves it there over the
@@ -4663,12 +4661,13 @@ impl<'a> EffectiveDiff<'a> {
         &self,
         before: usize,
         after: usize,
-    ) -> Result<[Option<TrackFaderRecord>; 4], OutOfDomain> {
-        let mut records = self.level_records(before, after)?;
+    ) -> Result<LevelRecords, OutOfDomain> {
+        let mut level = self.strip_level_records(before, after)?;
+        let records = &mut level.fader;
         let change = self.change(before, after);
         let automated_before = controls::automated_fader_lanes(self.rules.current, change.id);
         if automated_before == [false; 2] {
-            return Ok(records);
+            return Ok(level);
         }
         let automated_after =
             controls::automated_fader_lanes(self.rules.next.structure(), change.id);
@@ -4686,7 +4685,7 @@ impl<'a> EffectiveDiff<'a> {
             }
         }
         if released == [false; 2] {
-            return Ok(records);
+            return Ok(level);
         }
         let lengths = self.rules.lengths(&change);
         let db = self.after.strips[after].fader_db;
@@ -4705,7 +4704,7 @@ impl<'a> EffectiveDiff<'a> {
                 });
             }
         }
-        Ok(records)
+        Ok(level)
     }
 
     #[cfg(feature = "control-provider")]
@@ -5209,7 +5208,7 @@ impl<T> FamilyJoin<T> {
 /// One strip present in both models, with how its fader/mute and matrix families differ.
 struct StripJoin<'a> {
     id: &'a str,
-    fader: FamilyJoin<[Option<TrackFaderRecord>; 4]>,
+    fader: FamilyJoin<LevelRecords>,
     matrix: FamilyJoin<TrackControlRecord>,
     /// The fader lanes whose stored automation table both models hold bit for bit (#1648 D2,
     /// [`controls::continued_fader_lanes`]), bit 0 left and bit 1 right: the fader move's
@@ -5316,9 +5315,17 @@ fn join_strips<'a>(
         let matrix_record = matrix_record(before_matrix, strip.matrix_or_pan, ramps, edit);
         let fader_live = live && fader_records.is_ok();
         let matrix_live = live && matrix_record.is_ok();
+        // An offsets-cell write alone (an `S` the transaction moves on an automated lane) is a
+        // live difference only where the successor has cells to take it; on a plan with no live
+        // cells the carried lane takes the change by the adoption rule (#1648 D2), so the stage
+        // still carries as `Same`.
         let fader = match fader_records {
             Err(_) => FamilyJoin::Prepared,
-            Ok(records) if records[0].is_none() => FamilyJoin::Same,
+            Ok(records)
+                if records.fader[0].is_none() && (!fader_live || records.offsets == [None; 2]) =>
+            {
+                FamilyJoin::Same
+            }
             Ok(_) if !fader_live => FamilyJoin::Prepared,
             Ok(records) => FamilyJoin::Live(records),
         };
@@ -5557,6 +5564,8 @@ fn resolve_route_carry<'a>(
 struct StripRetarget<'a> {
     id: &'a str,
     fader: [Option<TrackFaderRecord>; 4],
+    /// The automated lanes' offsets-cell writes, `[left, right]` (#1648 D2, U3 fold).
+    offsets: [Option<FaderOffsetsRecord>; 2],
     matrix: Option<TrackControlRecord>,
 }
 
@@ -5616,18 +5625,19 @@ fn resolve_strip_carry<'a>(
         if !(carries[0] && carries[1]) {
             carry.restarted.push(join.id.into());
         }
-        let fader = match join.fader {
+        let LevelRecords { fader, offsets } = match join.fader {
             FamilyJoin::Live(records) if carries[0] => records,
-            _ => [None; 4],
+            _ => LevelRecords::default(),
         };
         let matrix = match join.matrix {
             FamilyJoin::Live(record) if carries[1] => Some(record),
             _ => None,
         };
-        if fader[0].is_some() || matrix.is_some() {
+        if fader[0].is_some() || offsets != [None; 2] || matrix.is_some() {
             carry.retargets.push(StripRetarget {
                 id: join.id,
                 fader,
+                offsets,
                 matrix,
             });
         }

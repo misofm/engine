@@ -6591,11 +6591,12 @@ fn render_seek_ride_c(
 /// static fader at `-9` dB exactly from the render sample `r` the seek applied at (the fader has
 /// no latency before it), with no ramp, and differs before it. Twice: on a plan with no raised
 /// floor (the seek lands on the running plan as a `Set`), and on a plan whose floors #1285 raised,
-/// where the plain seek publishes a discontinuity successor whose lanes start fresh (D2: the
-/// restarted lane's first block takes a `Set`).
+/// where the plain seek publishes a discontinuity successor whose lanes start fresh; its timeline
+/// history carries the seek, so the seek's step in the successor's first block lands the `Set`
+/// (#1647b departure 3), not the D2 restart `Set`.
 ///
-/// Test value: red if a seek ramps the lane or reaches the fader at the wrong sample, or if a
-/// restarted lane keeps its prepared value, on the C ABI.
+/// Test value: red if a seek ramps the lane or reaches the fader at the wrong sample, on the
+/// running plan or across the discontinuity successor, on the C ABI.
 #[test]
 fn a_session_seek_sets_an_automated_fader_exactly_on_the_c_abi() {
     let (limited, edits) = limited_session();

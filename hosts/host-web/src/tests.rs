@@ -10249,6 +10249,14 @@ mod canonical_live {
     const OFFSET_DB: f32 = 1.0 / 3.0;
     /// The track the VCA holds.
     const MEMBER: usize = 1;
+    /// The automated rows' flat curve, VCA offset, hand offset and prior hand offset: the C ABI
+    /// `canonical_live` module's, where the choice is explained. `S = HAND_DB + VCA_DB` sums to
+    /// `20` under round to nearest and to the `f64` below it under round toward zero, and render's
+    /// composition of the curve with the two reaches different gains (asserted below).
+    const CURVE_DB: f32 = 3.0 / 1_048_576.0;
+    const VCA_DB: f32 = 20.0;
+    const HAND_DB: f32 = -1e-30;
+    const PRIOR_HAND_DB: f32 = 1.0;
 
     /// [`flat_fader_base`] with VCA `v` over track 1: the track's left fader at `member`, the
     /// VCA's left offset at `offset`.
@@ -10377,14 +10385,17 @@ mod canonical_live {
     }
 
     /// TBD48 D2 (browser): a live fader move on a VCA member, a live VCA offset move over it,
-    /// (#1649) that VCA move over a member whose fader is automated, and (#1650b) a hand move on
-    /// that automated fader, each made through the browser's control entry while the caller's thread runs FTZ, DAZ and
-    /// round toward zero, render from the end of their ramp the bits of the committed model booted
-    /// on a canonical thread. The pair's composition rounds to another `f32`, and another gain,
-    /// under that word (asserted), so the gate is not vacuous.
+    /// (#1649) a VCA move over a member whose fader is automated, and (#1650b) a hand move on
+    /// that automated fader, each made through the browser's control entry while the caller's
+    /// thread runs FTZ, DAZ and round toward zero, render from the end of their ramp the bits of
+    /// the committed model booted on a canonical thread. The static pair's composition rounds to
+    /// another `f32`, and another gain, under that word, and the automated rows' `S` sums to
+    /// another `f64`, which render composes to another gain (both asserted), so no row is
+    /// vacuous.
     ///
-    /// Test value: red if the browser's live transaction composes a member's effective fader in
-    /// the caller's environment: remove the guard in the core's `SessionState::command`.
+    /// Test value: red if the browser's live transaction composes a member's effective fader, or
+    /// an automated lane's offsets-cell `S`, in the caller's environment: remove the guard in the
+    /// core's `SessionState::command`.
     #[test]
     fn a_live_fader_and_vca_move_under_a_hostile_caller_word_render_the_canonical_bits() {
         // `black_box` on the inputs and outputs: under `--release` LLVM otherwise folds the
@@ -10401,13 +10412,24 @@ mod canonical_live {
             builtins::checked_fader_gain(rounded).map(f32::to_bits),
             "the gate is vacuous: the hostile word's composition converts to the same gain"
         );
-        let member = model(0.0, OFFSET_DB).tracks[MEMBER].id.clone();
-        let vca_move = set(
-            Owner::Vca(StableId::parse("v").expect("VCA ID")),
-            Section::Own,
-            1,
-            OFFSET_DB,
+        let sum = || session::vca_offsets_sum([HAND_DB, VCA_DB]).expect("two offsets");
+        let rounded = under_hostile_fp_env(sum);
+        assert_ne!(
+            builtins::checked_fader_gain(session::vca_compose_db(CURVE_DB, sum()))
+                .map(f32::to_bits),
+            builtins::checked_fader_gain(session::vca_compose_db(CURVE_DB, rounded))
+                .map(f32::to_bits),
+            "the gate is vacuous: the hostile word's S converts to the same gain"
         );
+        let member = model(0.0, OFFSET_DB).tracks[MEMBER].id.clone();
+        let vca_move = |offset| {
+            set(
+                Owner::Vca(StableId::parse("v").expect("VCA ID")),
+                Section::Own,
+                1,
+                offset,
+            )
+        };
         live_move_under_hostile_word(
             "a live fader move",
             &model(0.0, OFFSET_DB),
@@ -10417,36 +10439,35 @@ mod canonical_live {
         live_move_under_hostile_word(
             "a live VCA move",
             &model(MEMBER_DB, 0.0),
-            &vca_move,
+            &vca_move(OFFSET_DB),
             &model(MEMBER_DB, OFFSET_DB),
         );
-        // #1649: the same VCA move over a member whose left fader is automated, flat at the
-        // member's dB, writes the lane's offsets cell; render composes the curve with it.
+        // #1649: a VCA move over a member whose left fader is automated, flat at the curve's dB,
+        // writes the lane's offsets cell; render composes the curve with it.
         live_move_under_hostile_word(
             "a live VCA move on an automated lane",
-            &automated(model(MEMBER_DB, 0.0)),
-            &vca_move,
-            &automated(model(MEMBER_DB, OFFSET_DB)),
+            &automated(model(CURVE_DB, 0.0), HAND_DB),
+            &vca_move(VCA_DB),
+            &automated(model(CURVE_DB, VCA_DB), HAND_DB),
         );
         // #1650b: a hand move on that automated fader writes the ride's left offset, and the
         // lane's offsets cell with `S` = the offset and the VCA's; the static fader stays.
-        let mut moved = automated(model(MEMBER_DB, OFFSET_DB));
-        moved.automation[0].offset.left_db = MEMBER_DB;
         live_move_under_hostile_word(
             "a hand move on an automated lane",
-            &automated(model(MEMBER_DB, OFFSET_DB)),
+            &automated(model(CURVE_DB, VCA_DB), PRIOR_HAND_DB),
             &set(
                 Owner::Strip(model(0.0, 0.0).tracks[MEMBER].id.clone()),
                 Section::Builtins,
                 5,
-                MEMBER_DB,
+                HAND_DB,
             ),
-            &moved,
+            &automated(model(CURVE_DB, VCA_DB), HAND_DB),
         );
     }
 
-    /// `model` with track [`MEMBER`]'s left fader automated, flat at [`MEMBER_DB`] (#1649).
-    fn automated(mut model: session::SessionModel) -> session::SessionModel {
+    /// `model` with track [`MEMBER`]'s left fader automated, flat at [`CURVE_DB`], with the stored
+    /// left hand offset `hand` (#1649, #1650).
+    fn automated(mut model: session::SessionModel, hand: f32) -> session::SessionModel {
         let owner = session::Owner::Strip(model.tracks[MEMBER].id.clone());
         model.automation.push(session::Automation {
             id: StableId::parse("member-flat").expect("automation ID"),
@@ -10460,11 +10481,14 @@ mod canonical_live {
                 shape: session::AutomationShape::Step,
                 start_sample: 0,
                 end_sample: 1 << 20,
-                start_value: MEMBER_DB,
-                end_value: MEMBER_DB,
+                start_value: CURVE_DB,
+                end_value: CURVE_DB,
                 unit: session::ParameterUnit::Db,
             }],
-            offset: session::AutomationOffset::default(),
+            offset: session::AutomationOffset {
+                left_db: hand,
+                right_db: 0.0,
+            },
         });
         model
     }

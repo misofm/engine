@@ -75,7 +75,11 @@ Today every automation edit is "live with no records": it commits with no plan c
     them by address. No second carry program exists for cell state.
   - **At adoption.** The successor repositions each carried cursor in its own table (#1637 D4).
     If the new curve's value at the adoption block's first sample differs in bits from the carried
-    current target, the cell takes a jump there, over the fader jump length.
+    current target, the cell takes a jump there, over the fader jump length. (Amended by U3 fold
+    2 and B17-R13: on a free stage still in a ramp, the curve is compared where that ramp ends and
+    the landing is over `max(J, remaining)`; a step of the cell's own at the first sample keeps
+    the comparison there and the landing over `J`. See "U3 fold 2" and "Split (root ruling
+    B17-R13)".)
   - **A cell gained.** A lane that gains automation on a carried stage starts its cell with the
     carried stage target as its current target, then applies the adoption rule above. It is not set
     exactly: the strip is not added (A1.4 "New lanes").
@@ -564,3 +568,253 @@ over `5e695ecb6` for the coordinator.
   all pass.
 - Bytes: `Adoption` (one byte) sits in `AutomatedFaderCell`'s padding and
   `GraphStripMove::continued_cells` in the move's padding. No existing byte gate moved.
+
+## U3 fold (batch 17)
+
+Fold of the U3 review, part U3a (render and carry), on `codex/controls-batch-17k` over
+`86271e096`, committed as `9dcf288de`. **Attempt count:** #1648 is at attempt 2 of 5 with
+this fold (the implementation #1648a/#1648b, then this fold).
+
+**MAJOR 1: a live level value pending at a swap lost its ramp, and a superseded write went
+uncounted.** The plan-swap carry drain (`FaderBankProcessor::apply_pending`, which the fused bank
+calls too) did not read the offsets cells, and adoption compared the successor's prepared `S`
+with the predecessor's heard one, jumping over the fader length `J`. Now:
+
+- The carry drain reads each carried automated lane's offsets cells with `LiveSnapshot::ALL`
+  through `read_counted` (`LaneFaderAutomation::carry_offsets`) and keeps the newest record in
+  the cell (`AutomatedFaderCell::carried_record`), without moving the stage.
+- `adopt` carries that record, the heard `S` and its ramp word, and remembers the successor's
+  prepared `S` (`adopted_sum`) until the first block.
+- At the successor's first block the drain applies the record through `offsets_jump` from the
+  carried `S`, as the uninterrupted block does. A record in the successor's own cell (the join's
+  retarget, or a live write committed after the rebuild) replaces it unheard and counts one
+  superseded value.
+- The join now delivers an `S` change as an offsets record. `join_level_records` returns
+  `LevelRecords`, and the carry retarget writes the offsets records to the successor's cells,
+  with the edit's length (`LevelRules::lengths`, the live path's rule). So a VCA move in the same
+  transaction as a structural edit ramps over its own length, not `J`.
+
+**Departure (Compare).** `Adoption::Compare` is no longer decided at `adopt`. With no record of
+its own, the first block raises it when the `S` left after the carried record still differs
+from the prepared one. Live plans always deliver a record, so this happens only on a plan with
+no live cells: the join keeps an offsets-only change `Same` there, and the lane takes the
+adoption rule over `J`. There a VCA edit's own length is not honoured. That is the one case
+found, and no production host runs it (both hosts attach live cells). No watermark flag reports
+it, because a plan with no live cells has no live values. A table change (`Reposition`) still
+takes its adoption jump over `J`, even when the same transaction also moves `S` (D2).
+`Adoption` is now ordered, and `adopt` keeps the stronger of its own adoption and one the
+carried cell still owed (NIT 3).
+
+**Compare reachability (root ruling B17-R12): unreachable from every shipped host.** Proof: the
+join (`join_strips` -> `join_level_records`) writes an offsets record to the successor's cell
+whenever the transaction moves a carried automated lane's effective `S`, and it is `Live` (not
+`Same`) exactly when the successor attaches live controls (`live_strips = attach_live`). Every
+host preparation attaches them: the C ABI (`crates/capi/src/runtime/mod.rs`, both
+`prepare_host_runtime_with_live_lanes[_successor]`) and the browser (`prepare_web_host`, its
+three branches, `..._with_live_controls_and_spectrum[_collection]_successor` and
+`prepare_host_runtime_with_selected_meters_successor`) pass `Some(live_controls)`, whatever the
+`HostLiveLanes` selection, and `live_control_strips` lists every track and submix. So on a
+shipped plan the first block always reads the cell's own record and never raises `Compare` for
+an `S` change. Only host-core's plain entries (`prepare_host_runtime_successor` and the other
+`None` forms, which no shipped host calls) prepare a lane with no live cells, where `Compare` is
+the backstop and ramps over `J`. `read_offsets` now carries
+`debug_assert!(superseded.is_none(), ...)` at the raise with this proof (`superseded` is `Some`
+exactly on a lane with live cells); in release the action stays the `J` ramp. Every test of
+builtins-compiler, host-core, control-plane, capi and host-web passes with it.
+
+**MINOR 8.** The held-ramp re-report under `Reposition` is in `settle_adoption`, not D1.2, so it
+survives U2 fold 2. It changes no sample: a held stage only remembers either operation, and the
+obligation follows `free_from`. It is documented there as bookkeeping (M14 stays green). The
+reposition's `seed_target` is gated.
+
+**Gates (all pass; each red under its mutation, checked once).** In
+`crates/capi/src/runtime/live_tests.rs` (`set_control::automated_carry`, not `canonical_live`):
+
+- `vca_moves_pending_at_a_swap_keep_their_length_and_their_count` (R1c, R9, R10; a moving ride
+  and a flat ride; own 4,000 samples, the session's length, two moves, the rebuild committed
+  first): bits equal to the uninterrupted engine and `LIVE_VALUES_SUPERSEDED` equal. It is red
+  with no carry read, with the carry read uncounted, and with the heard `S` not carried.
+- `a_vca_move_inside_a_rebuild_keeps_its_own_length` (reviewer C's case with a VCA move, 4,096
+  samples and the session's length, both rides): red with no join offsets write, and red with no
+  heard `S`.
+- `a_heard_vca_move_then_a_rebuild_continues_the_ride` (R1, mid-jump and settled).
+- `an_offset_only_upsert_inside_a_rebuild_renders_as_it_does_alone` (R4).
+- `a_held_ramp_obligation_owed_at_a_swap_is_carried` (R6, R7): red with the obligation not
+  carried (M15).
+- `a_gained_ride_on_a_moving_fader_lets_the_fader_finish_its_ramp` (MINOR 8): red with no
+  `seed_target` (M13).
+
+In `crates/host-core/tests/stored_fader_automation.rs`:
+
+- `a_carried_lane_whose_s_moves_with_no_record_takes_the_adoption_rule` (the `Compare` path on
+  plans with no live cells): red with the raise removed (M1).
+
+**Not done here.** R2b and reviewer C's hand-move form need #1650b's hand offset, which is not on
+this branch. The VCA forms above exercise the same records. R4 is not a discriminating test on
+this branch, because the offset is not yet heard (#1650a). Its red check belongs to the merged
+tree. (Done on the merged tree: see "U3 fold residue" below.)
+
+**Numbers.** `lane_slot_bytes` 224 -> 304 (the carried record and the adopted `S`, both
+channels), measured by `fader_automation_sizes()`. No byte gate moved. `realtime-policy`: ok, 160
+regions in 33 files. `audit capi`: `pcm_digest` `bffc21e857b5e134`, 0 violations, 0 allocations.
+No edit under `crates/engine/src/realtime/`.
+
+## U3 fold residue (batch 17, on the merged tree with #1650b)
+
+- **R2b.** `a_hand_move_pending_at_a_swap_keeps_its_length` (`set_control::automated_carry`): a
+  live hand move of the riding fader (`fader_db`, both lanes, `-6` dB over 4,000 samples), unread
+  when a rebuild commits; moving and flat ride. Every block equals the uninterrupted engine, the
+  move is heard, the successor is adopted, `LIVE_VALUES_SUPERSEDED` is equal. Red with the carry
+  drain (`carry_offsets`) reading nothing, checked once.
+- **Reviewer C's case as a hand move.** `a_hand_move_inside_a_rebuild_keeps_its_own_length`: the
+  same hand move with an explicit 4,096-sample ramp in the transaction that adds a track (rebuild)
+  equals the hand move sent alone (`live`), moving and flat ride. Red with the join's offsets
+  records dropped, checked once. No hand-move defect found.
+- **R4 red check (merged tree).** `an_offset_only_upsert_inside_a_rebuild_renders_as_it_does_alone`
+  is red when the join's offsets record takes ramp 0 (a jump over another length), and red when
+  the record is dropped and the `Compare` backstop removed. It stays green when only the record
+  is dropped: the upsert sent alone ramps over the session's length `J`, and the `Compare`
+  backstop also ramps over `J` to the same bits, so a lost record alone is not observable in that
+  case (the hand-move and VCA forms with their own lengths are red under it).
+- Part C (B17-R12) is recorded in the U3 fold section above.
+
+## U3 fold 2 (batch 17): attempt 3 of 5
+
+Defect (verifier, at 93146057e): at a `Reposition` adoption (a table-only rebuild of the ride), a
+live level edit's own ramp was cut to the fader length `J` on a moving curve, while the watermark
+reported EXACT. `reposition` dropped the hold of the edit's ramp, and the adoption rule compared
+the curve at the block's first sample with a stage target taken at the ramp's end, so they
+differed and the block opened with a landing over `J` (0.047 from the uninterrupted engine).
+
+Fix (`crates/builtins-compiler/src/lib.rs`, `settle_adoption` and the driver's first block; no
+edit under `crates/automation` or `crates/engine/src/realtime/`):
+- On a free stage still in a ramp (`remaining > 0`), the repositioned cell holds that ramp again
+  until its last sample, and the adoption rule compares the curve where the ramp ends (with the
+  cell's discontinuity clamp, `curve_toward`, now shared with `offsets_jump`) with the stage's
+  target. An unmoved target keeps the edit's own ramp with no landing (an edit applied at the
+  first block, pending or in the rebuild's transaction).
+- When that target moved (a heard edit whose target the new table gives in other bits, even by
+  `f32` rounding), the landing length is `max(J, remaining)`: the edit still ends when it was due,
+  on the new table's curve, and a moved target never lands faster than `J`. A landing longer than
+  `J` is landed alone as a one-sample piece (`SeekMode::Ramp` over that length), and the rest of
+  the block runs from its second sample with `J`, so the block's own discontinuities still jump
+  over `J`. A landing of `J` keeps the old path.
+- A held stage is unchanged (the batch 13b report of the held ramp).
+
+Gates (`crates/capi/src/runtime/live_tests.rs`, `automated_carry`, C ABI plans):
+- `a_level_move_across_a_table_change_keeps_its_length`: a VCA move and a hand move, each with its
+  own 4,000 samples; the ride split at 10,000 (equal values up to rounding) and a change only in
+  its last 2,000 samples; the move pending at the swap, in the rebuild's transaction, and heard 1
+  and 12 blocks before it. 44 blocks, allocation-free, adopted, max `|a - u| < 1e-3`. All 16 cases
+  red at 93146057e (0.047, 0.046 heard 1, 0.024 heard 12). With the fix: 0 in 12 cases, 4.6e-6
+  heard 12 (the new table's rounding). The hand-move split keeps the offset the move stored.
+- `a_carried_move_replaced_unheard_counts_as_superseded` (MINOR): "a rebuild that moves again" and
+  "a move, a rebuild, a move", moving and flat ride: every block and `LIVE_VALUES_SUPERSEDED` equal
+  the uninterrupted engine's. Both cases red with `superseded.add_carried(1)` removed from
+  `read_offsets`, checked once each.
+- NIT: the two hand-move residue gates run on C ABI plans (the shipped preparer). Under the
+  carry-drain and join-write mutations a debug build stops first at the B17-R12 `debug_assert`
+  (the panic in render aborts the test process, red); a release build reaches the bit assert (red),
+  checked once each. Recorded in their test value.
+
+Also in this attempt (coordinator): `crates/host-core/tests/stored_fader_automation.rs` selected
+`Backend::Simd8` in `form_rig` on every target; the forms are now a `FORMS` list whose eight-lane
+entries carry `cfg(target_feature = "avx2")`, so `acted` compares five forms on x86-64 and three
+elsewhere. `scripts/check-cross-targets.sh` passes.
+
+## Split (root ruling B17-R13, batch 17)
+
+- #1648 closes on its passing gates. The in-flight Reposition length case moves to
+  `TBD50-keep-a-live-level-moves-own-length-across-a-reposition-swap.md`, following the "split a
+  blocking gate early" practice (a gate that holds a passed batch goes to a successor after one
+  fix round).
+- Current difference (verifier, at 0fac00ee9): a live level move still ramping with
+  `remaining < J` at a Reposition swap is stretched to `J` by the landing `max(J, remaining)`.
+  Gate setup: heard 24, 26 and 30 blocks (928, 672 and 160 samples left; `J` = 960). The rebuilt
+  rig differs from the uninterrupted engine by 4.8e-4, 3.1e-3 and 2.1e-3. The watermark marks it
+  as a fallback under root ruling B17-R14 (control-time, conservative; see the next point). TBD50
+  replaces that flag with the exact behaviour and deletes this path.
+- The step guard (regression fix, `settle_adoption` in `crates/builtins-compiler/src/lib.rs`):
+  when the cell's program has a discontinuity exactly at the block's first sample
+  (`program.discontinuities().binary_search(&span.start)` finds it), the curve is compared there
+  and the landing is `J`. `curve_toward` looks only past `start`, so before the guard the landing
+  ran over `remaining` and missed the step's `J` jump (8.6e-2 from a fresh plan).
+- Gate `a_step_at_a_reposition_swap_jumps_over_the_fader_length`
+  (`crates/capi/src/runtime/live_tests.rs`, `automated_carry`): VCA and hand moves of 4,000
+  samples, heard 1 and 12 blocks, then a rebuild whose ride steps to -20 dB at the swap's first
+  sample or one sample after it. The reference is a fresh plan prepared with the stepped ride and
+  given the same move. From the step plus `J`, max |a - r| < 1e-3 (measured: 7.8e-5 heard 1,
+  5.2e-4 heard 12), allocation-free, adopted. Red without the guard (8.6e-2, step at the swap).
+  Red when the long landing runs over the whole block (verifier's mutation m5: 8.6e-2, step one
+  sample after the swap; this is MINOR 3). Each was checked once.
+- MINOR 4 (`at = end` has no gate) moves to TBD50. Probe finding: for every heard move on the
+  moving ride, the stage's `fader_gain` at the swap is not the composed curve at the ramp's end
+  (0.398 at 12 blocks heard, 0.335 at 24, against 0.3018). The comparison therefore differs at
+  either point, and `at` cannot be seen by the current tables.
+- NIT 5: the doc of `a_level_move_across_a_table_change_keeps_its_length` now gives the measured
+  numbers (0, and 4.6e-6 at 12 blocks heard, where the landing recomputes the stage's ramp step).
+  NIT 6: D2 has a note that points to the fold's longer landing and the step rule.
+- Attempt count: attempt 3 of 5 plus this ruling's landing. There is no attempt 4.
+
+## Decision record: the conservative fallback flag (root ruling B17-R14, batch 17)
+
+- Mechanism: the control plane sets `CandidateOutcome::TransitionFallback` on a rebuild's
+  reservation before it publishes it (the existing writer, `ObservedReservation::set_outcome` in
+  `crates/control-plane/src/plan.rs`). Render is not touched, and nothing under
+  `crates/engine/src/realtime/` changed. The flag is reported on the watermark advance that covers
+  the rebuild's revision: the swap where the stretch happens. Both hosts take the decision in the
+  shared `control-plane` rebuild path.
+- Exact condition: the rebuild is a transaction (not a declared discontinuity), the successor's model has at least
+  one stored fader automation entry (`controls::automation_row_renders`), and the session's level
+  move window may still ramp. The window (`LevelMoveWindow` in
+  `crates/control-plane/src/control.rs`) folds every live commit's fader `FaderDb` and offsets
+  records with a nonzero ramp, and every rebuild commit that changes some kept strip's effective
+  fader dB or `S` (`controls::effective`, old model against new) with the ramp
+  `max(fader_samples, the longest explicit ramp of the transaction)`, into one bound: the newest
+  revision and the longest ramp. "May still ramp" is `watermark.revision < revision ||
+  render_clock < watermark.first_sample + ramp` (a watermark read that gives up counts as "may").
+  The watermark and the render clock are read before the reservation.
+- Departure from the coordinator's per-strip table: one window for the whole session, not one entry
+  per strip. It is a superset of the per-strip test, so it can only over-report. It is two words, so
+  it is bounded with no allocation, and it needs no strip IDs. The per-lane "table changes" test was
+  dropped (coordinator decision): a moved input arrival `a(n)` also Repositions, and control cannot
+  see `a(n)`.
+- Over-report cases: any transaction rebuild of a session with fader automation while any level
+  move may still ramp, on any strip: a move with more than `J` left, a move whose target the new
+  table did not move, a rebuild that Repositions no lane, a move on a strip that has no automation.
+  After a newer revision, the window also over-reports because the newest revision is paired with
+  the longest ramp. A rebuild while a move is still pending (no block has heard it) is flagged too.
+  `may_ramp` reads the watermark's newest `first_sample`, so any later revision restarts the
+  window: a non-level edit, or the flagged rebuild itself. A stream of live edits therefore keeps
+  the window open after one level move.
+- A second Reposition inside a stretched landing (verifier MAJOR 1, tranche 5, root option a): a
+  move with a ramp shorter than `J` (500) is flagged at R1 and landed over `J` from R1. Before this
+  fix the window closed `ramp` samples after R1's adoption, so a second table-only rebuild R2
+  between R1 + ramp and R1 + `J` landed it over `J` again and reported EXACT (verifier: 6.9e-3
+  with R2 5 blocks after R1, 1.9e-3 at 7 blocks). Fix: a flagged transaction rebuild also folds
+  `(its revision, J)` into the window, with `J = LiveRamps::for_session(next).fader_samples`, after
+  the commit and beside the rebuild's own level fold. Gate:
+  `a_second_reposition_inside_a_stretched_landing_reports_a_fallback` (capi): a VCA move of 500
+  samples heard 2 blocks; R1 reports the fallback (count 1); R2, sent 5 blocks after R1, reports
+  it too (count 2). Red without the new fold (R2 reads EXACT, count 1), checked once.
+- A cell's own jump of `J` that is still running at a Reposition swap and is landed over `J` again
+  is specified D2 behaviour, not a fallback: it has no user length, and a fresh plan with the new
+  table also jumps over `J`. The one exception is a stretched live move's landing, which the
+  tranche-5 fold above now covers.
+- Gates: `a_reposition_swap_while_a_level_move_ramps_reports_a_fallback`
+  (`crates/capi/src/runtime/live_tests.rs`): a live VCA move heard 24, 26 and 30 blocks, and a
+  move inside a rebuild heard 12 blocks, report `OUTCOME_TRANSITION_FALLBACK` (count 1) on the
+  table-only rebuild. No move, and a move whose ramp has ended (heard 40 blocks), report
+  `OUTCOME_EXACT`. Red with the `set_outcome` line removed (heard 24 reads EXACT), and red with
+  the rebuild path's fold removed (the move inside a rebuild reads EXACT). Each was checked once.
+  `a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both_hosts`
+  (`hosts/host-web/tests/control_parity.rs`): at all four rates, the browser's status words equal
+  the C ABI's watermark, flags included. A hand move in flight flags, no move is exact, and the
+  bits are the same on both hosts. No gap-1 case: the rigs have no cheap way to move `a(n)`
+  alone, and with the wide condition no lane test is left to defend.
+- Doc text appended to the flag: `crates/capi/src/abi.rs` (doc of `OUTCOME_TRANSITION_FALLBACK`),
+  the C header comment (`crates/capi/include/miso_engine_v1.h`, watermark section),
+  `docs/C_ABI_V1_QUALIFICATION.md`, `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`
+  and its SDK copy `sdk/src/browser/shipped-host.d.ts`. The doc of `watermark.rs` under
+  `crates/engine/src/realtime/` is not edited. `scripts/check-capi-abi.sh` and
+  `scripts/check-sdk-generated.sh` pass, and no pin moved.

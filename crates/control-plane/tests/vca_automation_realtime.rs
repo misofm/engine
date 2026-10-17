@@ -144,9 +144,27 @@ struct Rig {
     revision: u64,
     request: u64,
     block: u64,
+    /// The last block's samples, left plane then right.
+    last: Vec<f32>,
 }
 
 impl Rig {
+    /// A rig on [`document`], booted.
+    fn new() -> Self {
+        let (document, revision) = document();
+        let CompiledChildren { session, plan } =
+            compile_children::<Adapter>(&document, limits(), Box::new(Preparer))
+                .expect("boot compile");
+        Self {
+            session,
+            plan,
+            revision,
+            request: 1,
+            block: 0,
+            last: vec![0.0; QUANTUM * 2],
+        }
+    }
+
     /// Feed and render one block; the allocator events of the render call alone.
     fn block(&mut self) -> bench_support::alloc::Counters {
         let start = self.block * QUANTUM as u64;
@@ -172,6 +190,7 @@ impl Rig {
         let mark = bench_support::alloc::current_thread_counters();
         self.plan.render(start, output).expect("a rendered block");
         let used = bench_support::alloc::current_thread_delta_since(mark);
+        self.last.copy_from_slice(&samples);
         self.block += 1;
         used
     }
@@ -245,30 +264,27 @@ impl Rig {
     }
 }
 
-/// The rig on [`document`], warmed: the process statics and the first blocks' one-time work.
-fn rig() -> Rig {
-    let (document, revision) = document();
-    let CompiledChildren { session, plan } =
-        compile_children::<Adapter>(&document, limits(), Box::new(Preparer)).expect("boot compile");
-    let mut rig = Rig {
-        session,
-        plan,
-        revision,
-        request: 1,
-        block: 0,
-    };
+/// A rig on [`document`], warmed: the process statics and the first blocks' one-time work.
+fn warm_rig() -> Rig {
+    let mut rig = Rig::new();
     for _ in 0..4 {
         rig.block();
     }
     rig
 }
 
-/// Gate 6. Test value: red if the offsets cell's read, the jump or the composition with the new
-/// `S` allocates or frees on render.
+/// Gate 6. Every render block after the warm-up allocates and frees nothing. The script ends
+/// with `v` back at 0 dB, so once the last jump and the first grid ramp after it have passed
+/// (twelve blocks of 128 samples against a jump of 960), the output equals an unedited rig's.
+///
+/// Test value: red if the offsets cell's read, the jump or the composition with the new `S`
+/// allocates or frees on render, or if render hears only some of the writes of a cell (one that
+/// ignores every write after the first is left at -6 dB).
 #[test]
 fn a_vca_move_over_an_automated_member_renders_allocation_free() {
     bench_support::alloc::assert_installed();
-    let mut rig = rig();
+    let mut rig = warm_rig();
+    let mut plain = warm_rig();
     let script: [&[(f32, Option<u32>)]; 4] = [
         &[(-6.0, None)],
         &[(-3.0, Some(256))],
@@ -283,6 +299,7 @@ fn a_vca_move_over_an_automated_member_renders_allocation_free() {
         for _ in 0..12 {
             let block = rig.block;
             let used = rig.block();
+            plain.block();
             assert_eq!(
                 (used.allocations, used.deallocations),
                 (0, 0),
@@ -290,6 +307,17 @@ fn a_vca_move_over_an_automated_member_renders_allocation_free() {
             );
         }
     }
+    let bits = |samples: &[f32]| {
+        samples
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        bits(&rig.last),
+        bits(&plain.last),
+        "v back at 0 dB renders the unedited session"
+    );
 }
 
 /// #1650b gate 6. Hand moves of `eq0`'s automated fader commit live (each writes the ride's offset
@@ -302,7 +330,7 @@ fn a_vca_move_over_an_automated_member_renders_allocation_free() {
 #[test]
 fn a_hand_move_on_an_automated_fader_renders_allocation_free() {
     bench_support::alloc::assert_installed();
-    let mut rig = rig();
+    let mut rig = warm_rig();
     let fader = |lane| ControlAddress {
         owner: Owner::Strip(id("eq0")),
         section: Section::Builtins,

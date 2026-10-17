@@ -616,3 +616,29 @@ ok; fmt; clippy `-D warnings` (touched crates, all targets, all features); no-fe
 **Successor work.** (1) Index the rendered fader entries by strip once per list/catalog build
 instead of a scan per strip. (2) #1658 and #1654 extend `FaderOffsets`, `takes_offset` and the
 `automated` flag to the trim and the send gain.
+
+## U3 fold (batch 17)
+
+- **MINOR 5, in-place canonical bytes.** The accounting was right: `canonical_owner_bytes` counts
+  `OwnerRef::Automation` (`crates/session/src/in_place.rs`), and an in-place hand move of
+  `-3.123456` dB charges the same estimate as the full path. The reviewer's 3556 vs 3562 was the
+  mutant that counts the automation owner as 0 bytes. Gate:
+  `protocol` `model::tests::a_hand_move_on_an_automated_fader_charges_the_rides_canonical_bytes_in_place`
+  (in-place vs full `resource_estimate()`, snapshot and response; the text grows). Red under that
+  mutant (`canonical_bytes` 3555 vs 3561).
+- **MINOR 4, wire field 35.** `message_wire::tests::control_entry_rules_refuse_on_encode_and_decode_alike`
+  now refuses a control row without field 35 (red when 35 decodes as optional, default false) and
+  a section header that carries it (red when 35 leaves the control-only list).
+- **MINOR 6, SDK.** `hosts/host-web/tests/control_list_fixture.rs` rides the parity session's
+  submix `b` right fader (flat, hand offset `+1.5` dB) and writes each row's `automated`; the
+  fixture is reblessed (the `b` right `fader_db` row is the one automated row, value `+1.5`).
+  `sdk/test/control-list-evals.mjs` projects `automated` and asserts the fixture has that one row.
+  Red with the SDK decoding `automated` as `false`.
+- **NIT 1, `mask_fader_offsets`.** Kept and tested: `mask_values` is public and its contract is
+  that two masked models differ only in what is not a control value; the offset is one.
+  `controls` `mask_and_diff::the_mask_copies_a_rides_hand_move_offset`; red with the call removed.
+- **NIT 2, D6 order.** `live_delta::a_hand_move_on_an_automated_fader_writes_the_lanes_offsets_cell`
+  gains two VCAs (+24, -24 dB) and a hand move of `1e-10` dB, where the two orders give different
+  `S`; red with the hand offset added after the VCAs in `effective_strip`.
+- **NIT 4.** `docs/CONTROL_PROTOCOL_SEMANTICS.md`: a static fader change of an automated lane is a
+  structure rebuild, not "no live record".

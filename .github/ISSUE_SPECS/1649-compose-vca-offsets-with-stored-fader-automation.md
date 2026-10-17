@@ -413,3 +413,38 @@ the predecessor's heard `S`, against the successor's curve composed with its see
 `offsets_jump`'s shape. **For #1650b.** A hand move on an automated fader changes `S` through
 `EffectiveStrip::offsets_sum`; `level_records_between` then writes the offsets cell with no other
 change (the `Fader` row length via `LevelRules::lengths`).
+
+## U3 fold (batch 17)
+
+Fold of the U3 review, part U3a, on `codex/controls-batch-17k` over `86271e096`, committed as `9dcf288de`. **Attempt count:** #1649 is at attempt 2 of 5 with this fold.
+
+- **MAJOR 1** (the offsets cell across a swap): see #1648's "U3 fold (batch 17)". The carry drain
+  reads the offsets cells (`read_counted`, `ALL`). An `S` change in a structural transaction
+  reaches the successor's offsets cell as the join's record with the edit's length.
+- **MAJOR 3** (the ramp word): `a_flat_ride_under_a_vca_move_ramps_as_a_static_fader`
+  (`crates/capi/src/runtime/live_tests.rs`). A flat step ride at -7.25 dB under `v` and a
+  static -7.25 dB fader under `v` render equal bits on every block from a move of `v`, with the
+  session's length and with 256 samples. It is red with the ramp word written as 0 (M3a).
+- **MAJOR 4** (a second move): `a_second_vca_move_over_an_automated_member_is_heard` (same file,
+  `automated_vca`). Moves to -6 dB and then -2 dB each equal a plan prepared from the committed
+  session after the jump. Gate 6
+  (`crates/control-plane/tests/vca_automation_realtime.rs`) now also ends its script with `v` at
+  0 dB and asserts the last block equals an unedited rig's. Both are red when render ignores
+  every write after the first (M8).
+- **MINOR 7**: `the_scalar_oracle_renders_the_banks_fader_events`
+  (`crates/host-core/tests/stored_fader_automation.rs`) compares "the offsets writes are heard"
+  with the same live rig without the offsets writes (`render_parity(.., offsets)`). It is red
+  when the offsets reads are dropped on both owners.
+- **NIT 6**: gate 2 (`many_vca_moves_before_one_render_are_the_last_alike_on_both_hosts`,
+  `hosts/host-web/tests/control_parity.rs`) takes a second burst of ten moves. After each
+  burst's jump it is held to the committed session's boot, not only to the twin (which misses
+  the same writes under M8). It is red under M8. Its unproven "a slot mixes two writes" claim is
+  removed from the test value.
+- Checks: `builtins-compiler --features test-support`, `host-core --all-features`,
+  `control-plane --all-features`, `capi`, `host-web --lib --test control_parity` all pass.
+  `realtime-policy` 160 regions. `audit capi` `bffc21e857b5e134`, 0 violations. `lane_slot_bytes`
+  224 -> 304.
+- U3 MINOR 2: the #1649 row of both `canonical_live` modules (C ABI and browser) was vacuous (an
+  exact `f64` `S`). It now moves the VCA to `20` dB over a lane whose stored hand offset is
+  `-1e-30` dB, so `S` rounds differently under the hostile word and reaches another gain; red with
+  the `SessionState::command` guard removed. Details in the TBD48 spec's "U3 fold (batch 17)".

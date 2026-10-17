@@ -196,6 +196,15 @@ impl<'a> ObservedReservation<'a> {
             .set_superseded(superseded);
     }
 
+    /// The outcome the candidate's own revisions complete with (#1314 D1): the transition
+    /// fallback for a rebuild that may stretch a level move in flight (B17-R14).
+    pub(crate) fn set_outcome(&mut self, outcome: engine::realtime::CandidateOutcome) {
+        self.inner
+            .as_mut()
+            .expect("reservation is live")
+            .set_outcome(outcome);
+    }
+
     pub(crate) fn commit(mut self) {
         self.inner
             .take()
