@@ -5381,3 +5381,300 @@ fn a_following_routes_edits_write_its_seven_word_cell_only() {
     let delta = following_delta(&current, &next, &[]);
     assert!(delta.is_empty(), "an identical rewrite writes nothing");
 }
+
+// ---- #1654 T4: a send's own automated rows -----------------------------------------------------
+
+/// The position of [`with_bus`]'s send (the first track's route into `bus`).
+fn send_of(model: &SessionModel) -> usize {
+    model
+        .routes
+        .iter()
+        .position(|route| matches!(route.destination, RouteDestination::SubmixInput { .. }))
+        .expect("the send into bus")
+}
+
+/// One stored entry on route row `control` of route `route`, on `both`: a linear ride for the gain
+/// (row 1, dB) and the matrix (rows 3-6), a step for the route's own mute (row 2).
+fn send_entry(route: &StableId, control: u32) -> Automation {
+    let (shape, from, to, unit) = match control {
+        1 => (AutomationShape::Linear, -6.0, -2.0, ParameterUnit::Db),
+        2 => (AutomationShape::Step, 0.0, 1.0, ParameterUnit::Linear),
+        _ => (AutomationShape::Linear, 0.25, 0.5, ParameterUnit::Linear),
+    };
+    Automation {
+        id: id(&format!("send-row-{control}")),
+        target: ControlAddress {
+            owner: Owner::Route(route.clone()),
+            section: Section::Own,
+            control,
+            lane: ParameterChannel::Both,
+        },
+        segments: vec![AutomationSegment {
+            shape,
+            start_sample: 0,
+            end_sample: 4_096,
+            start_value: from,
+            end_value: to,
+            unit,
+        }],
+        offset: session::AutomationOffset::default(),
+    }
+}
+
+/// [`with_bus`]`(false)` with distinct session lengths for the three send rows (mute 10 ms, gain
+/// 5 ms, matrix 2.5 ms) and one stored entry on each route row of `rows` of its send: a route
+/// whose source strip automates nothing.
+fn with_send_rows(rows: &[u32]) -> SessionModel {
+    let mut model = with_bus(false);
+    model.control_smoothing = Some(ControlSmoothing {
+        mute_ms: 10.0,
+        fader_ms: 5.0,
+        pan_ms: 2.5,
+    });
+    let send = model.routes[send_of(&model)].id.clone();
+    for &control in rows {
+        model.automation.push(send_entry(&send, control));
+    }
+    normalized(&model)
+}
+
+/// Route row `control` of `model`'s send, on `both`.
+fn send_row(model: &SessionModel, control: u32) -> ControlAddress {
+    ControlAddress {
+        owner: Owner::Route(model.routes[send_of(model)].id.clone()),
+        section: Section::Own,
+        control,
+        lane: ParameterChannel::Both,
+    }
+}
+
+/// `[gain, ll, lr, rl, rr]` of a transform, as bits.
+fn transform_words(transform: graph::RouteTransform) -> [u32; 5] {
+    [
+        transform.gain,
+        transform.ll,
+        transform.lr,
+        transform.rl,
+        transform.rr,
+    ]
+    .map(f32::to_bits)
+}
+
+/// #1654 D3 (T4). A send automation edit needs a rebuild: an entry added on route rows 1-6 of a
+/// send, one given another segment table and one removed are each `LiveRebuild::Automation`.
+///
+/// Test value: red if a route entry change is lowered as a live value (the plan's route cells are
+/// compiled from those entries, so a live commit would ack a curve nobody hears).
+#[test]
+fn a_send_automation_edit_is_a_rebuild() {
+    let plain = with_send_rows(&[]);
+    for control in 1..=6 {
+        let added = edited(&plain, |next| {
+            let send = next.routes[send_of(next)].id.clone();
+            next.automation.push(send_entry(&send, control));
+        });
+        assert_eq!(
+            classify_live_delta(&plain, &added, STEP, &EditRamps::new()).map(|_| ()),
+            Err(LiveRebuild::Automation),
+            "row {control} added"
+        );
+    }
+    let automated = with_send_rows(&[1, 4]);
+    let moved = edited(&automated, |next| {
+        next.automation[0].segments[0].end_value = -3.0;
+    });
+    let removed = edited(&automated, |next| {
+        next.automation.remove(1);
+    });
+    for (label, next) in [("other segments", moved), ("removed", removed)] {
+        assert_eq!(
+            classify_live_delta(&automated, &next, STEP, &EditRamps::new()).map(|_| ()),
+            Err(LiveRebuild::Automation),
+            "{label}"
+        );
+    }
+}
+
+/// #1654 R17-6 and D4 (T4). On a send whose `gain_db` and `matrix_lr` stored entries render:
+///
+/// - a hand move of the gain (the entry's offset to `+3`, what `SET_CONTROL` row 1 writes) gives
+///   one seven-word record whose `gain` word is the offset `+3` dB (not a linear gain), whose flags
+///   carry bits 6 and 9 and no source lane, over the `SendGain` length (and the edit's own length
+///   when it gives one);
+/// - a static edit of the automated `matrix_lr` (the fallback) gives no record: the delta is empty,
+///   so the commit is `model_only`;
+/// - a live edit of the un-automated `matrix_ll` and of the route's own mute (D6) each give one
+///   seven-word record, never a folded one, over the `SendMatrix` and `SendMute` lengths, with the
+///   offset still in the `gain` word.
+///
+/// Every case gives the same delta through the fast path over the row it names.
+///
+/// Test value: red if a hand gain move writes the static fallback or a linear gain into word 0,
+/// if the offset reaches a matrix word, if a hand edit of an automated matrix row is acked live
+/// (automation wins), or if an un-automated row of an automated send is written in the six-word
+/// form.
+#[test]
+fn a_sends_hand_edits_lower_its_offset_and_its_unautomated_rows_only() {
+    let current = with_send_rows(&[1, 4]);
+    let send = send_of(&current);
+    let ramps = LiveRamps::for_session(&current);
+    let expected_flags = graph::RouteFollowFlags {
+        automated_gain: true,
+        automated_matrix: [false, true, false, false],
+        ..graph::RouteFollowFlags::default()
+    };
+
+    // The hand offset.
+    let next = edited(&current, |next| {
+        next.automation[0].offset = session::AutomationOffset {
+            left_db: 3.0,
+            right_db: 3.0,
+        };
+    });
+    let delta = following_delta(&current, &next, &[send_row(&current, 1)]);
+    assert!(delta.strips.is_empty());
+    let records = seven_word(&delta);
+    assert_eq!(records.len(), 1, "one seven-word record");
+    let record = records[0].1;
+    assert_eq!(record.flags(), expected_flags, "bits 6 and 9 only");
+    let matrix = &next.routes[send].channel_matrix;
+    let mut expected = graph_compiler::route_values(
+        next.routes[send].gain_db,
+        [matrix.ll, matrix.lr, matrix.rl, matrix.rr],
+    )
+    .expect("in domain");
+    expected.gain = 3.0;
+    assert_eq!(
+        transform_words(record.transform()),
+        transform_words(expected),
+        "word 0 is the offset in dB; the matrix words are the route's"
+    );
+    assert_eq!(
+        record.length(),
+        ramps.resolve(LiveRampRow::SendGain, None),
+        "the SendGain length"
+    );
+    let mut own = EditRamps::new();
+    own.set(
+        &EditRampTarget::Route(next.routes[send].id.clone()),
+        EditRampRow::RouteGain,
+        Some(77),
+    );
+    let with_own = classify_live_delta(&current, &next, ramps, &own).expect("live");
+    assert_eq!(
+        seven_word(&with_own)[0].1.length(),
+        77,
+        "the edit's own length"
+    );
+
+    // The automated matrix row's fallback: automation wins.
+    let next = edited(&current, |next| next.routes[send].channel_matrix.lr = 0.75);
+    let delta = following_delta(&current, &next, &[send_row(&current, 4)]);
+    assert!(delta.is_empty(), "no record: the commit is model_only");
+
+    // D6: the un-automated `matrix_ll` and the route's own mute.
+    for (label, control, row) in [
+        ("matrix_ll", 3, LiveRampRow::SendMatrix),
+        ("mute", 2, LiveRampRow::SendMute),
+    ] {
+        let next = edited(&current, |next| match control {
+            3 => next.routes[send].channel_matrix.ll = 0.5,
+            _ => next.routes[send].mute = true,
+        });
+        let delta = following_delta(&current, &next, &[send_row(&current, control)]);
+        let records = seven_word(&delta);
+        assert_eq!(records.len(), 1, "{label}: one seven-word record");
+        let record = records[0].1;
+        assert_eq!(
+            record.flags(),
+            graph::RouteFollowFlags {
+                mute: control == 2,
+                ..expected_flags
+            },
+            "{label}"
+        );
+        let matrix = &next.routes[send].channel_matrix;
+        let mut expected = graph_compiler::route_values(
+            next.routes[send].gain_db,
+            [matrix.ll, matrix.lr, matrix.rl, matrix.rr],
+        )
+        .expect("in domain");
+        expected.gain = 0.0;
+        assert_eq!(
+            transform_words(record.transform()),
+            transform_words(expected),
+            "{label}: the new values, the offset in word 0"
+        );
+        assert_eq!(record.length(), ramps.resolve(row, None), "{label}");
+    }
+}
+
+/// #1654 D2 (T4). A send with a rendered route entry and no source mute curve gets the seven-word
+/// lane, its producer binds the plan's automated set (bits 6 and 9 here, no source lane), and a
+/// send with no rendered entry keeps the six-word lane. `follow_route_producer_for` (the commit's
+/// pre-write check) takes the classifier's record for that send and refuses one whose automated
+/// set differs in any bit, leaving the cell unwritten.
+///
+/// Test value: red if a route-row-only send keeps the six-word lane (render cannot hear its
+/// curve), if the attach seeds flags bits 6-11 that disagree with the plan's cells, or if the
+/// pre-write check compares fewer bits than the whole set (a record whose route rows disagree
+/// would be written and acked while render ignores it).
+#[cfg(feature = "test-support")]
+#[test]
+fn a_route_row_send_binds_its_set_and_the_commit_refuses_another() {
+    let lanes = |model: &SessionModel| {
+        host_core::prepare_host_runtime_with_live_lanes(
+            &compile(model),
+            &caps(),
+            &HostLiveControlRequest::default(),
+            host_core::HostLiveLanes::ALL,
+            &host_core::LiveValuesSuperseded::default(),
+        )
+        .unwrap_or_else(|failure| {
+            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+        })
+        .1
+    };
+    let plain = lanes(&with_send_rows(&[]));
+    assert!(plain.follow_route_controls.is_empty(), "no seven-word lane");
+
+    let current = with_send_rows(&[1, 4]);
+    let handles = lanes(&current);
+    let producers = &handles.follow_route_controls;
+    assert_eq!(producers.len(), 1, "the send's seven-word lane");
+    let send_id = current.routes[send_of(&current)].id.as_str();
+    assert_eq!(&*producers[0].route_id, send_id);
+    assert_eq!(
+        producers[0].automated(),
+        graph::RouteAutomatedSet {
+            lanes: [false; 2],
+            rows: [true, false, false, true, false, false],
+        }
+    );
+
+    let next = edited(&current, |next| {
+        next.automation[0].offset = session::AutomationOffset {
+            left_db: 3.0,
+            right_db: 3.0,
+        };
+    });
+    let delta = following_delta(&current, &next, &[send_row(&current, 1)]);
+    let record = seven_word(&delta)[0].1;
+    assert_eq!(
+        host_core::follow_route_producer_for(producers, send_id, &record),
+        Some(0)
+    );
+    for bit in 4..12 {
+        let word = record.flags().to_word() ^ (1 << bit);
+        let flags = graph::RouteFollowFlags::from_word(word).expect("a defined bit");
+        let other =
+            host_core::FollowRouteControlRecord::new(record.transform(), flags, record.length())
+                .expect("in bounds");
+        assert_eq!(
+            host_core::follow_route_producer_for(producers, send_id, &other),
+            None,
+            "bit {bit} flipped"
+        );
+    }
+    assert_eq!(producers[0].test_only_write_count(), 0, "nothing written");
+}

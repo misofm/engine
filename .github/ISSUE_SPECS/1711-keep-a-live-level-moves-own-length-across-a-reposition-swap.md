@@ -390,3 +390,60 @@ measured with temporary probes in a detached worktree at `323433f6a` (removed af
   host-core `stored_fader_automation` (33), `stored_mute_automation` (13), `successor_swap` (140),
   `session_seek`, `browser_successor`, capi lib (211), host-web `control_parity` (31): all green.
   Realtime policy: 168 regions (unchanged).
+
+## Decision record: F3 and F4 (batch 19)
+
+- **G4 shipped (A1): the owed discharge is kept and gated.** The line `self.owed = false` in
+  `HeldRampObligation::block` (`crates/builtins-compiler/src/lib.rs`) now has a doc comment that
+  names the gate. Gates: `an_exact_unmute_that_frees_a_held_lane_discharges_the_owed_move` on the
+  C ABI (`crates/capi/src/runtime/live_tests.rs`, quantum 128, hand mutes as in A1) and in
+  `crates/host-core/tests/stored_fader_automation.rs` (`acted`, every one of `FORMS`: Simd8 on
+  AVX2, Simd4, the between-render forms and the scalar oracle; fader length 20 ms = 960). Both
+  compare with a rig that takes only the second hold, from block 9 (sample 1,152) on. Red with the
+  line deleted (run once, restored): C ABI first difference block 17; host-core first difference
+  at sample 2,248 (`E`).
+- **D2 shipped (A4).** `crates/control-plane/src/control.rs`: deleted the `level_moves` field,
+  `LevelMoveWindow`, `may_ramp`, `fold_level_move`, `rebuild_level_ramp`, `rebuild_moves_a_level`,
+  the B17-R14 comment, `automates`, `in_flight`, `level_fallback`, `moved`, `landing`,
+  `rebuild_level`, both folds and the live commit's `level_ramp`. The outcome is now the #1713
+  six-word flag alone (a transaction rebuild with `follow_into_six_word`; a discontinuity is
+  `Exact`). `reservation.set_outcome` and `ObservedReservation::set_outcome` stay (#1713); the doc
+  of the latter names #1713 only. `compile.rs`: `level_moves: None` deleted. The B17-R14 clause
+  is removed from `abi.rs`, `miso_engine_v1.h`, `docs/C_ABI_V1_QUALIFICATION.md` and the two d.ts
+  files (the #1713 clause kept); `crates/controls/src/automation.rs` no longer names the window.
+- **Tests deleted:** `a_reposition_swap_while_a_level_move_ramps_reports_a_fallback`,
+  `a_second_reposition_inside_a_stretched_landing_reports_a_fallback` (C ABI) and
+  `a_mute_curve_rebuild_while_a_level_move_ramps_completes_exactly_on_both_hosts` (host-web).
+- **Outcome checks (G1, G2, R19-1).** A new helper `assert_exact` (the watermark covers the newest
+  revision, its last advance reads `OUTCOME_EXACT` alone, transition-fallback count 0) is called by
+  every case of `a_level_move_across_a_table_change_keeps_its_length` (28 cases) and of
+  `moved_target_case` (G2, its case (c), and R19-1). Host-web: the B17-R14 parity test is now
+  `a_hand_move_in_flight_across_a_table_only_rebuild_completes_exactly_alike_on_both_hosts` (no
+  move and a hand move in flight: `EXACT`, no fallback on either host, same bits and watermark at
+  the four rates), and `a_moved_target_defers_its_jump_alike_on_both_hosts` asserts the same.
+- **Two rebuilds 5 blocks apart (A3): outcome only.**
+  `table_only_rebuilds_around_a_level_move_complete_exactly` (C ABI): with no move (R1, R2) and
+  with a 500-sample VCA move heard 2 blocks, each rebuild reports `OUTCOME_EXACT` with no
+  fallback, every block is allocation-free, every successor is adopted. Bits are not compared:
+  the split tables' values differ from the ride in `f32` rounding, so the adopting cell jumps
+  over `J` where a fresh plan does not (F2 record: 7.7e-5 to 1.7e-4). A bit claim needs a
+  phase-2 decision on rounding-only differences at adoption. The no-move case is also the
+  "a no-live-move rebuild stays EXACT" check.
+- **F2 note fixed.** The B17-R13 step gate's doc no longer names "a long landing"; it says the
+  step one sample after the swap must jump at its own sample (B17-R13's 8.6e-2 measurement kept
+  as history). The #1713 test's doc and comment no longer name the level-move window ("the flag
+  marks its own candidate only").
+- **G4 on both hosts.** `an_exact_unmute_discharges_the_owed_move_alike_on_both_hosts`
+  (`hosts/host-web/tests/control_parity.rs`): the A1 setup on `t1` at the four rates; the
+  browser and the C ABI give the same verdicts, replies, watermark (`EXACT`, no transition
+  fallback) and bits in every block, and from block 24 on both equal a pair of rigs that took
+  only the second hold. Block 24: the first hold's own difference ends by block 21 at every rate
+  (the session's latency), and the stale obligation's difference spans blocks 21 to 28 at
+  44.1 kHz and 25 to 40 at 96 kHz. Red with the line deleted (run once, restored): block 24 at
+  44.1 kHz.
+- Gates run: `cargo fmt --all`; clippy `-D warnings --all-targets --all-features` on control-plane,
+  capi, host-core, builtins-compiler, host-web, controls; `cargo check --locked --all-targets` (no
+  features) on the first five; tests: control-plane (`test-support`), capi lib (211 passed, 1
+  ignored), host-core `stored_fader_automation` (34), `stored_mute_automation` (13),
+  `successor_swap` (140), host-web `control_parity` (31 with the G4 parity case): all green. `scripts/check-capi-abi.sh`,
+  `check-sdk-generated.sh`, `check-sdk-types.sh`: ok. Realtime policy: 168 regions (unchanged).

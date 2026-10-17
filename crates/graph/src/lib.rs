@@ -1246,6 +1246,29 @@ impl RouteFollowFlags {
         }
     }
     // REALTIME_POLICY_END
+
+    /// The plan-fixed bits 4 to 11: the automated source lanes and route rows (#1654 D2). A
+    /// record written to a following route's cell carries the set its plan bound, or the commit
+    /// refuses it before any write (#1653 D5).
+    #[must_use]
+    pub const fn automated_set(self) -> RouteAutomatedSet {
+        RouteAutomatedSet {
+            lanes: self.automated,
+            rows: self.route_rows(),
+        }
+    }
+}
+
+/// What a plan automates of one following route (#1654 D2): flags bits 4 and 5 (the source lanes
+/// whose mute has a stored curve) and bits 6 to 11 (the route rows 1 to 6 with a stored curve, in
+/// [`RouteFollowFlags::route_rows`]'s order). Fixed by the plan; render takes it from its own
+/// cursors, never from a record.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RouteAutomatedSet {
+    /// Per source lane `[L, R]`: whether the plan automates the lane's mute.
+    pub lanes: [bool; 2],
+    /// Per route row 1 to 6: whether the plan automates it.
+    pub rows: [bool; GRAPH_ROUTE_ROWS],
 }
 
 /// One live change of a following route (#1652 D1): its open transform, its flags and the ramp in
@@ -1473,6 +1496,9 @@ pub struct GraphFollowRouteSource {
     /// Per route row, whether the predecessor plan holds the same table for it, so a carry keeps
     /// its cursor verbatim ([`Self::with_continued_rows`]).
     pub(crate) continued: [bool; GRAPH_ROUTE_ROWS],
+    /// The seeded hand offset in dB of an automated `gain_db` (#1654, batch 10 amendment): the
+    /// cell's `gain` word before any record. `+0.0` when the flags do not automate the gain.
+    pub(crate) gain_offset: f32,
 }
 
 impl GraphFollowRouteSource {
@@ -1514,6 +1540,7 @@ impl GraphFollowRouteSource {
                 gain_law,
                 flags,
                 continued: [false; GRAPH_ROUTE_ROWS],
+                gain_offset: 0.0,
             },
         )
     }
@@ -1528,6 +1555,25 @@ impl GraphFollowRouteSource {
     pub const fn with_continued_rows(mut self, rows: [bool; GRAPH_ROUTE_ROWS]) -> Self {
         self.continued = rows;
         self
+    }
+
+    /// This source with the seeded hand offset `offset_db` of the route's automated `gain_db`
+    /// (#1654 R17-6): the value the cell's `gain` word holds before the first record. A source
+    /// from [`Self::new`] seeds `+0.0`, the entry's default offset. `None` when the flags do not
+    /// automate the gain or `offset_db` is not finite.
+    #[must_use]
+    pub fn with_gain_offset(mut self, offset_db: f32) -> Option<Self> {
+        if !self.flags.automated_gain || !offset_db.is_finite() {
+            return None;
+        }
+        self.gain_offset = offset_db;
+        Some(self)
+    }
+
+    /// The seeded hand offset in dB of an automated `gain_db` ([`Self::with_gain_offset`]).
+    #[must_use]
+    pub const fn gain_offset(&self) -> f32 {
+        self.gain_offset
     }
 
     /// `a(tap)`, the arrival the route's events are timed at.
@@ -1572,10 +1618,10 @@ pub struct GraphFollowRouteControlProducer {
     /// route, which bind allocates only for a plan with a following route, so the compile-time
     /// estimate never charges it. The same for every producer of one attach.
     activity_offset_bytes: u64,
-    /// The lanes the plan automates (the bound source's `flags.automated`, #1652 D1): render
-    /// takes `automated` from its own cursors, so a record whose bits differ is refused by the
-    /// commit before any write (#1653 D5).
-    automated: [bool; 2],
+    /// The lanes and route rows the plan automates (the bound source's flags bits 4 to 11, #1652
+    /// D1, #1654 D2): render takes them from its own cursors, so a record whose set differs is
+    /// refused by the commit before any write (#1653 D5).
+    automated: RouteAutomatedSet,
     /// The bytes of the route op's cursor tables bind allocates (#1654 T3, R19-3: per column with
     /// a curve, its merged walk's table and its probe twin's), and the largest one.
     cursor_bytes: u64,
@@ -1583,10 +1629,10 @@ pub struct GraphFollowRouteControlProducer {
 }
 
 impl GraphFollowRouteControlProducer {
-    /// The source lanes whose mute the plan automates, as bound (#1653 D5): the bits every record
-    /// written to this cell must carry.
+    /// The source lanes and route rows the plan automates, as bound (#1653 D5, #1654 D2): the set
+    /// every record written to this cell must carry ([`RouteFollowFlags::automated_set`]).
     #[must_use]
-    pub const fn automated(&self) -> [bool; 2] {
+    pub const fn automated(&self) -> RouteAutomatedSet {
         self.automated
     }
 
@@ -1642,7 +1688,7 @@ pub(crate) fn follow_route_control_pair(
         cell: engine::realtime::LatestCell::new(),
         dirty: engine::realtime::DirtyWord::new(),
     });
-    let automated = source.flags().automated;
+    let automated = source.flags().automated_set();
     let (cursor_bytes, cursor_largest) = runtime::follow_route_cursor_bytes(&source);
     (
         GraphFollowRouteControlBinding {
@@ -5120,6 +5166,12 @@ pub struct GraphRouteMove {
     /// Whether the predecessor's row is a following route ([`GraphLiveRoute::following`]): the
     /// move then gets a slot in the section's side table (#1652 D3, MINOR-3).
     pub predecessor_follows: bool,
+    /// Per route row 1 to 6 ([`RouteFollowFlags::route_rows`]'s order), whether both plans'
+    /// models automate the row with the same segment table (#1654 D3,
+    /// `controls::continued_route_rows`): such a row's cell carries its cell state and heard value
+    /// verbatim, by `(route ID, row)`; another row is repositioned. All `false` for a route
+    /// neither plan gives a route row cell.
+    pub continued_rows: [bool; GRAPH_ROUTE_ROWS],
 }
 
 /// The strip delay lines of a bound graph plan, in line order (#1284 D1); `None` for any other
@@ -10793,6 +10845,62 @@ mod follow_route_tests {
                 "route-row flags that disagree: {disagreeing:?}"
             );
         }
+    }
+
+    /// #1654 T4: the automated set a commit compares before any write is exactly flags bits 4-11
+    /// (each bit alone moves it, no other bit does), and a source seeds a hand offset only for an
+    /// automated gain and only a finite one.
+    ///
+    /// Test value: red if `automated_set` drops a lane or row bit (the commit's pre-write check
+    /// then admits a record whose set render does not hold) or reads a value bit, or if a seed
+    /// offset reaches a route whose gain is not automated.
+    #[test]
+    fn the_automated_set_is_bits_4_to_11_and_only_an_automated_gain_takes_a_seed_offset() {
+        for bit in 0..12 {
+            let flags = RouteFollowFlags::from_word(1 << bit).expect("a defined bit");
+            let set = flags.automated_set();
+            let mut expected = RouteAutomatedSet::default();
+            match bit {
+                4 | 5 => expected.lanes[bit - 4] = true,
+                6..=11 => expected.rows[bit - 6] = true,
+                _ => {}
+            }
+            assert_eq!(set, expected, "bit {bit}");
+        }
+
+        let curve = steps(&[0, 128], &[0.0, 1.0], 4_096);
+        let source = mute_source([Some(&curve), None], 7);
+        let program = std::sync::Arc::clone(&source.program);
+        let rows = |gain: bool| {
+            let flags = RouteFollowFlags {
+                automated_gain: gain,
+                automated_matrix: [true, false, false, false],
+                ..RouteFollowFlags::default()
+            };
+            GraphFollowRouteSource::new(
+                std::sync::Arc::clone(&program),
+                [None, None],
+                [gain.then_some(0), None, Some(0), None, None, None],
+                0,
+                route_jumps,
+                sum_law,
+                flags,
+            )
+            .expect("a route-row source")
+        };
+        assert_eq!(rows(true).gain_offset().to_bits(), 0.0_f32.to_bits());
+        let seeded = rows(true)
+            .with_gain_offset(-3.5)
+            .expect("an automated gain");
+        assert_eq!(seeded.gain_offset().to_bits(), (-3.5_f32).to_bits());
+        assert!(
+            rows(true).with_gain_offset(f32::NAN).is_none(),
+            "not finite"
+        );
+        assert!(
+            rows(false).with_gain_offset(-3.5).is_none(),
+            "a gain the plan does not automate"
+        );
     }
 
     /// The cursor rows' jump lengths: the source mute and the route mute take the mute length,

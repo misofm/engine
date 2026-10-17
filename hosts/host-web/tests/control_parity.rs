@@ -2930,16 +2930,17 @@ fn a_fader_automation_edit_rebuilds_alike_on_both_hosts() {
     }
 }
 
-/// B17-R14 (#1648 split, #1711): a table-only rebuild of a riding fader while a hand move with
-/// its own 4,000 samples may still ramp completes as the transition fallback on both hosts, and
-/// the same rebuild with no move in flight completes exactly. Both hosts take the one decision in
-/// the shared control plane: the browser's status words carry the C ABI's watermark, flags
-/// included, and both hosts render the same bits.
+/// #1711 G1 across hosts (D2): a table-only rebuild of a riding fader while a hand move with its
+/// own 4,000 samples still ramps completes exactly on both hosts, as the same rebuild with no move
+/// in flight does: the adoption keeps the move's own length, so the B17-R14 transition fallback is
+/// deleted. Both hosts take the one decision in the shared control plane: the browser's status
+/// words carry the C ABI's watermark, flags included, neither host counts a transition fallback,
+/// and both hosts render the same bits.
 ///
-/// Test value: red if either host marks the rebuild differently (an adapter-local rule), or if
-/// the shared decision is not reached through the browser's control path.
+/// Test value: red if either host reports the rebuild differently (an adapter-local rule), or if
+/// a rebuild with a level move in flight completes as the transition fallback.
 #[test]
-fn a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both_hosts() {
+fn a_hand_move_in_flight_across_a_table_only_rebuild_completes_exactly_alike_on_both_hosts() {
     let ride = |end_db: f32| SessionEdit::UpsertAutomation {
         automation: session::Automation {
             id: id("t1-fader-ride"),
@@ -2969,14 +2970,7 @@ fn a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both
         Some(4_000),
     );
     for rate in RATES {
-        for (label, moved, expected) in [
-            ("no move", false, capi::OUTCOME_EXACT),
-            (
-                "a hand move in flight",
-                true,
-                capi::OUTCOME_TRANSITION_FALLBACK,
-            ),
-        ] {
+        for (label, moved) in [("no move", false), ("a hand move in flight", true)] {
             let model = model_at(rate);
             let mut browser = Rig::new(&model);
             let mut c_abi = CAbi::new(&model);
@@ -3004,8 +2998,18 @@ fn a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both
                 "{rate} Hz, {label}: the browser status carries the C ABI's watermark"
             );
             assert_eq!(
-                watermark.2, expected,
+                watermark.2,
+                capi::OUTCOME_EXACT,
                 "{rate} Hz, {label}: the rebuild's outcome flags"
+            );
+            assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+            assert_eq!(
+                (
+                    browser.host.watermark().transition_fallback_count,
+                    c_abi.transition_fallback_count()
+                ),
+                (0, 0),
+                "{rate} Hz, {label}: no transition fallback on either host"
             );
         }
     }
@@ -3015,7 +3019,8 @@ fn a_reposition_swap_while_a_level_move_ramps_reports_the_fallback_alike_on_both
 /// heard 3 blocks, then a table-only rebuild to -5 dB (the move's target moves): the adoption
 /// defers the cell's jump to the move's first free sample on both hosts alike, through the one
 /// shared driver. Both hosts give one verdict and reply per edit and render the same bits in every
-/// block, through the move's end and the deferred jump over the fader length.
+/// block, through the move's end and the deferred jump over the fader length, and the rebuild
+/// completes exactly on both (`OUTCOME_EXACT`, no transition fallback; #1711 D2).
 ///
 /// Test value: red if either host adopts the moved target differently (an adapter-local rule, or
 /// a browser successor that does not carry the stage's ramp the deferral waits for).
@@ -3072,93 +3077,6 @@ fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
             &mut c_abi,
         );
         same_blocks(&mut browser, &mut c_abi, 7..60, "the moved target");
-        assert_eq!(
-            status_watermark(&browser),
-            c_abi.watermark(),
-            "{rate} Hz: the browser status carries the C ABI's watermark"
-        );
-    }
-}
-
-/// #1651 gate 8 (U1 fold 1, MINOR-3): in a mute-only session (a stored mute curve on `t1`, no
-/// fader entry), a rebuild that changes the mute curve while a hand fader move with its own 4,000
-/// samples still ramps completes exactly on both hosts: B17-R14's transition-fallback window is
-/// the fader row's alone, because a mute cell's adoption lands a `SetMute`, never a level move
-/// over `J`. Both hosts report the same watermark, `EXACT`, and no transition fallback, and render
-/// the same bits.
-///
-/// Test value: red if the shared control plane opens the fallback window for a successor that
-/// automates only a mute row (the candidate is flagged `TRANSITION_FALLBACK`), or if either host
-/// marks the rebuild differently.
-#[test]
-fn a_mute_curve_rebuild_while_a_level_move_ramps_completes_exactly_on_both_hosts() {
-    let curve = |close: u64| SessionEdit::UpsertAutomation {
-        automation: session::Automation {
-            id: id("t1-mute-curve"),
-            target: address(
-                Owner::Strip(id(T1.id)),
-                Section::Builtins,
-                6,
-                ParameterChannel::Both,
-            ),
-            segments: vec![
-                session::AutomationSegment {
-                    shape: session::AutomationShape::Step,
-                    start_sample: 0,
-                    end_sample: close,
-                    start_value: 0.0,
-                    end_value: 0.0,
-                    unit: session::ParameterUnit::Linear,
-                },
-                session::AutomationSegment {
-                    shape: session::AutomationShape::Step,
-                    start_sample: close,
-                    end_sample: 1_000_000,
-                    start_value: 1.0,
-                    end_value: 1.0,
-                    unit: session::ParameterUnit::Linear,
-                },
-            ],
-            offset: session::AutomationOffset::default(),
-        },
-    };
-    let hand = CAbi::edits(
-        Edit::Fader {
-            strip: T1,
-            lanes: Lanes::Both,
-            db: -6.0,
-        },
-        Some(4_000),
-    );
-    for rate in RATES {
-        let model = model_at(rate);
-        let mut browser = Rig::new(&model);
-        let mut c_abi = CAbi::new(&model);
-        let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi| {
-            let (b, b_reply) = browser.transaction_reply(edits);
-            let (c, c_reply) = c_abi.transaction(edits);
-            assert_eq!(b, c, "{rate} Hz: one verdict");
-            assert_eq!(b_reply, c_reply, "{rate} Hz: one reply");
-            b
-        };
-        let rebuilt = |verdict: Verdict| {
-            assert!(
-                matches!(
-                    verdict,
-                    Verdict::Applied {
-                        path: EditPath::Rebuild,
-                        ..
-                    }
-                ),
-                "{rate} Hz: a mute curve edit rebuilds: {verdict:?}"
-            );
-        };
-        rebuilt(both(&[curve(20_000)], &mut browser, &mut c_abi));
-        same_blocks(&mut browser, &mut c_abi, 0..4, "the mute-only session");
-        both(&hand, &mut browser, &mut c_abi);
-        same_blocks(&mut browser, &mut c_abi, 4..7, "the hand move");
-        rebuilt(both(&[curve(30_000)], &mut browser, &mut c_abi));
-        same_blocks(&mut browser, &mut c_abi, 7..10, "the mute curve rebuild");
         let watermark = c_abi.watermark();
         assert_eq!(
             status_watermark(&browser),
@@ -3168,8 +3086,126 @@ fn a_mute_curve_rebuild_while_a_level_move_ramps_completes_exactly_on_both_hosts
         assert_eq!(
             watermark.2,
             capi::OUTCOME_EXACT,
-            "{rate} Hz: the mute-only rebuild completes exactly"
+            "{rate} Hz: the rebuild's outcome flags"
         );
+        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
+        assert_eq!(
+            (
+                browser.host.watermark().transition_fallback_count,
+                c_abi.transition_fallback_count()
+            ),
+            (0, 0),
+            "{rate} Hz: no transition fallback on either host"
+        );
+    }
+}
+
+/// #1711 G4 across hosts (A1): an exact hand unmute that frees a lane held over a moving ride
+/// discharges the move the hold owed, alike on both hosts. `t1` rides linearly from 0 to -6 dB
+/// over `[0, 1,280)`, holds -6 dB to 2,320, then rides on to -12 dB. A hand mute (ramp 256) at
+/// block 4 and an exact hand unmute (ramp 0) at block 8 hold the lane over moving grid points; a
+/// hand mute (256) at block 12 and a hand unmute (200) at block 16 hold it again where the ride is
+/// flat (nothing is remembered there; the hold ends at 2,248). Both hosts give one verdict and
+/// reply per edit, the same watermark (`EXACT`, no transition fallback) and the same bits in
+/// every block, and from block 24 on every block equals the pair of rigs that took only the
+/// second hold, at the four rates. Block 24 is past the first hold's own difference at every
+/// rate (measured: equal from block 12, 13, 21 and 22 at 44.1, 48, 88.2 and 96 kHz), and inside
+/// the difference a stale obligation makes (measured once with the line deleted: blocks 21 to 28
+/// at 44.1 kHz up to 25 to 40 at 96 kHz).
+///
+/// Test value: red if the free write at the unmute's entry does not discharge the owed move (the
+/// `owed = false` of `HeldRampObligation::block`, through the browser's control path as through
+/// the C ABI's): the stale obligation lands a move over `J` at the second hold's end.
+#[test]
+fn an_exact_unmute_discharges_the_owed_move_alike_on_both_hosts() {
+    let linear = |start: u64, end: u64, from: f32, to: f32| session::AutomationSegment {
+        shape: session::AutomationShape::Linear,
+        start_sample: start,
+        end_sample: end,
+        start_value: from,
+        end_value: to,
+        unit: session::ParameterUnit::Db,
+    };
+    let ride = SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("t1-fader-ride"),
+            target: address(
+                Owner::Strip(id(T1.id)),
+                Section::Builtins,
+                5,
+                ParameterChannel::Both,
+            ),
+            segments: vec![
+                linear(0, 1_280, 0.0, -6.0),
+                linear(1_280, 2_320, -6.0, -6.0),
+                linear(2_320, 1_000_000, -6.0, -12.0),
+            ],
+            offset: session::AutomationOffset::default(),
+        },
+    };
+    let mute = |muted: bool, ramp: u32| {
+        CAbi::edits(
+            Edit::Mute {
+                strip: T1,
+                lanes: Lanes::Both,
+                muted,
+            },
+            Some(ramp),
+        )
+    };
+    let first_hold = [(4, mute(true, 256)), (8, mute(false, 0))];
+    let second_hold = [(12, mute(true, 256)), (16, mute(false, 200))];
+    for rate in RATES {
+        let model = model_at(rate);
+        let (mut browser, mut c_abi) = (Rig::new(&model), CAbi::new(&model));
+        let (mut browser_r, mut c_abi_r) = (Rig::new(&model), CAbi::new(&model));
+        let both = |edits: &[SessionEdit], browser: &mut Rig, c_abi: &mut CAbi, label: &str| {
+            let (b, b_reply) = browser.transaction_reply(edits);
+            let (c, c_reply) = c_abi.transaction(edits);
+            assert_eq!(b, c, "{rate} Hz, {label}: one verdict");
+            assert_eq!(b_reply, c_reply, "{rate} Hz, {label}: one reply");
+        };
+        both(
+            std::slice::from_ref(&ride),
+            &mut browser,
+            &mut c_abi,
+            "the ride",
+        );
+        both(
+            std::slice::from_ref(&ride),
+            &mut browser_r,
+            &mut c_abi_r,
+            "the ride, reference",
+        );
+        for block in 0..48 {
+            for (at, edits) in first_hold.iter().chain(&second_hold) {
+                if *at == block {
+                    both(edits, &mut browser, &mut c_abi, "both holds");
+                }
+            }
+            for (at, edits) in &second_hold {
+                if *at == block {
+                    both(edits, &mut browser_r, &mut c_abi_r, "the second hold");
+                }
+            }
+            let (b, c) = (browser.step(block), c_abi.step(block));
+            assert_eq!(b, c, "{rate} Hz: block {block}, both holds");
+            let (b_r, c_r) = (browser_r.step(block), c_abi_r.step(block));
+            assert_eq!(b_r, c_r, "{rate} Hz: block {block}, the second hold");
+            if block >= 24 {
+                assert_eq!(
+                    b, b_r,
+                    "{rate} Hz: block {block} against the second hold alone"
+                );
+            }
+        }
+        let watermark = c_abi.watermark();
+        assert_eq!(
+            status_watermark(&browser),
+            watermark,
+            "{rate} Hz: the browser status carries the C ABI's watermark"
+        );
+        assert_eq!(watermark.2, capi::OUTCOME_EXACT, "{rate} Hz: outcome flags");
         assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
         assert_eq!(
             (
@@ -6058,4 +6094,109 @@ fn solo_and_a_vca_mute_compose_with_the_curve_for_a_following_send_on_both_hosts
             );
         }
     }
+}
+
+/// #1654 T4: [`follow_model`]`(false, false)` (no source mute curve) with the send `t1-b` riding
+/// its `gain_db` (route row 1) linearly from 0 to -12 dB over the run, and `change` applied: a
+/// route-row-only send, which the plan gives the seven-word cell.
+#[cfg(feature = "test-support")]
+fn send_ride_model(change: impl FnOnce(&mut SessionModel)) -> SessionModel {
+    let mut model = follow_model(false, false);
+    model.automation.push(session::Automation {
+        id: id("t1-b-gain-ride"),
+        target: address(
+            Owner::Route(id("t1-b")),
+            Section::Own,
+            1,
+            ParameterChannel::Both,
+        ),
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: u64::from(QUANTUM) * BLOCKS,
+            start_value: 0.0,
+            end_value: -12.0,
+            unit: session::ParameterUnit::Db,
+        }],
+        offset: session::AutomationOffset::default(),
+    });
+    change(&mut model);
+    model
+}
+
+/// #1654 R17-6 and root's ruling R17-1 on both hosts. On `t1-b`, whose `gain_db` stored entry
+/// renders, `SET_CONTROL gain_db = +3` is `live` alike on both hosts, one revision, with one
+/// reply; the committed document stores `+3` as the entry's offset on both fields and keeps the
+/// static gain. The in-place leg commits in place on both hosts; the same transaction by the full
+/// path (`control_plane::test_force_full_preparation`) gives the same reply, document and bits of
+/// every block, alike on both hosts.
+///
+/// Test value: red if the in-place path answers or renders otherwise than the full path for the
+/// send gain (an owners model without the route entry writes the static gain or commits
+/// `model_only`), or if the two hosts disagree.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_hand_move_on_an_automated_send_gain_is_an_offset_alike_on_both_hosts() {
+    const EDIT: u64 = 4;
+    const END: u64 = 20;
+    let model = send_ride_model(|_| {});
+    let mut expected = send_ride_model(|model| {
+        model.automation[0].offset = session::AutomationOffset {
+            left_db: 3.0,
+            right_db: 3.0,
+        };
+    });
+    expected.revision = model.revision + 1;
+    let edits = [own_edit(Owner::Route(id("t1-b")), 1, 3.0)];
+    let leg = |label: &str| {
+        let mut browser = Rig::new(&model);
+        let mut c_abi = CAbi::new(&model);
+        same_blocks(&mut browser, &mut c_abi, 0..EDIT, label);
+        let (b, reply) = browser.transaction_reply(&edits);
+        let (c, c_reply) = c_abi.transaction(&edits);
+        assert_eq!(b, c, "{label}: one verdict");
+        assert_eq!(reply, c_reply, "{label}: one reply");
+        assert_eq!(
+            b,
+            Verdict::Applied {
+                path: EditPath::Live,
+                revision: model.revision + 1
+            },
+            "{label}: a hand move is live"
+        );
+        let committed = snapshot_bytes(|payload, expected| browser.command(payload, expected));
+        let blocks: Vec<Vec<u32>> = (EDIT..END)
+            .map(|block| {
+                let (b, c) = (browser.step(block), c_abi.step(block));
+                assert_eq!(b, c, "{label}: block {block} alike on both hosts");
+                b
+            })
+            .collect();
+        (reply, committed, blocks)
+    };
+    control_plane::test_take_in_place_counts();
+    let in_place = leg("in place");
+    assert_eq!(
+        control_plane::test_take_in_place_counts(),
+        (2, 0),
+        "both hosts commit the hand move in place"
+    );
+    assert_eq!(
+        in_place.1,
+        canonical_session_json(&expected)
+            .expect("canonical")
+            .as_bytes(),
+        "the entry stores +3 on both fields and the static gain stays"
+    );
+    control_plane::test_force_full_preparation(true);
+    let full = leg("full path");
+    control_plane::test_force_full_preparation(false);
+    assert_eq!(
+        control_plane::test_take_in_place_counts().0,
+        0,
+        "the full leg commits nothing in place"
+    );
+    assert_eq!(full.0, in_place.0, "one reply on both paths");
+    assert_eq!(full.1, in_place.1, "one document");
+    assert_eq!(full.2, in_place.2, "the same bits on both paths");
 }
