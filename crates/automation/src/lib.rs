@@ -2,7 +2,8 @@
 //!
 //! A stored curve is a table of [`Segment`]s. This crate does two things with one: it evaluates
 //! the curve at a node time ([`value_at`]), and it turns a cell's table into the retarget events a
-//! stage applies, block by block ([`CellEvents`]). It reads no session, descriptor or plan, and no
+//! stage applies, block by block ([`CellEvents`]). [`Composed`] merges several cells' events into
+//! one composed output ([`compose`]). It reads no session, descriptor or plan, and no
 //! stage uses it yet.
 //!
 //! # The law
@@ -40,12 +41,16 @@
 
 extern crate alloc;
 
+pub mod compose;
 mod evaluate;
 mod events;
 mod program;
 
 pub mod corpus;
 
+pub use compose::{
+    Composable, ComposeCursor, ComposeError, Composed, ComposedEvent, CursorKind, Heard,
+};
 pub use evaluate::value_at;
 pub use events::{
     CellEvents, CellState, Event, EventKind, NodeSpan, SeekMode, SpanError, completion_of,

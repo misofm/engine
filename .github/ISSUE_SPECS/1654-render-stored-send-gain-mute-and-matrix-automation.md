@@ -479,3 +479,194 @@ Sizes (x86-64, measured): `RouteFollowFlags` 6 -> 12 bytes, `FollowRouteControlR
 the bind charge) 352 -> 360. Charges read `size_of`, so no pinned number moved. Realtime policy: 170
 marked regions in 34 files (168 before: `GraphRouteJumpLengths::for_row` and `route_gain_law` added;
 host-core's jump-rule region replaced in place).
+
+## Decision record: K1 (batch 19)
+
+`crates/automation` only (R19-2 = (b), K1). No render consumer yet: T3 (the route op) and #1655
+(batch 19b) bind it.
+
+- **Shipped.** New `crates/automation/src/compose.rs`: `Composed<T>` (one output), `ComposeCursor`
+  (one curve: its cell, `CursorKind::{Value, Gate}`, its own `CellState`, its block jump length,
+  its heard value), `Heard` (the values a composition reads), `ComposedEvent<T>`, `Composable`
+  (`same_bits`; `f32`, `bool`, arrays, pairs) and `ComposeError`. The cursor table is a boxed
+  slice allocated at bind (`Composed::new`, `try_reserve_exact`, `Composed::bytes(K) = K * 104` on
+  x86-64); no fixed array, no cap on `K`. The walk is one realtime-policy region: no index or
+  unwrap paths, bounded by `Composed::max_events` (the sum of the cursors' bounds; each step merges
+  at least one cursor event).
+- **How the walk works.** Each cursor's events are `CellEvents`, unchanged, pulled one at a time
+  over a window of the block (`NodeSpan::window`, new `pub(crate)`) from the offset after its last
+  event; with the state as its only memory this is the cell's uninterrupted stream (gate 1 holds
+  it). At each offset the composition (a caller callback over the heard values) gives `T`, and
+  the output's own `CellState` decides with the cell's rules, now `pub(crate)` in `events.rs` and
+  called by `CellEvents` itself (`unchanged_with`, `lagging`, `hold_event`, `commit_ramp`,
+  `clear_for_landing`, `free_after`, `target_toward`): change only on the target's bits, a jump
+  also when the ramp in flight lags, a held-only offset emits a held event by the held-event rule,
+  a seek landing always emits. The G5 corpus digests are unchanged (`wasm-gates`
+  `g5_native_corpus`: 7 passed).
+- **R19-4.** One offset's events are one retarget over the longest ramp among them (Set > Jump >
+  Grid for the kind).
+- **R19-3, and the owed landing: K1 owns it, through the cursors' own `CellState` deferral; the
+  fader's `HeldRampObligation` is not copied and stays the fader's.** A gate cursor's jump that
+  retargets the output, and a caller column jump (`Composed::retarget(target, start, n)`: a
+  record's ramp, a gate change of the cell), defer every value cursor's jump to the column ramp's
+  first free sample (`CellState::defer_jump`, #1711 D1). While it is pending, the value cursor's
+  grid is held (#1711's rule): the heard value and the output do not move. At the free sample each
+  value cursor whose curve moved fires the deferred jump over its own jump length to the curve at
+  the jump's completion (change only, or always with a held event outstanding), and coincident
+  landings take the longest (R19-4): "the value row's own J, the longer one if both are owed". The
+  owed bit is the cursor's held flag. A gate jump is never held; a value cursor's own jumps hold
+  its own grid by the cell's rule (a late grid restarts it, as one cell's does); a seek landing is
+  not a column jump. A cursor that pulled past the offset of a column jump is returned to the
+  state its pull started from and replayed up to that offset (it gave no event there), then
+  deferred and pulled again, so the deferral acts exactly at the offset.
+- **Departure: value jumps are not column jumps.** R19-3 lists a gate change, a record ramp and a
+  Set. A gain or matrix jump (a discontinuity, a landing) does not hold the other value cursors: a
+  landing that held the others would make two riding curves land in turn, each over its own `J`,
+  for ever. During a value jump the column is free (R19-3: "a free column retargets at once").
+- **Departure: no caller `hold_until` on the output.** R19-3 makes every caller ramp a column jump
+  (`retarget`). The one-cell hold semantics is used only by gate 1's corpus case (the test sets the
+  output's and the cursor's states directly).
+- **API for T3 and #1655.** `seed`/`seed_target`, `compose_heard`, `compose_toward(program, start,
+  n)` (each curve toward a ramp's completion: a record's target, #1649 D3), `retarget`,
+  `defer_jump(at)`/`clear_deferred_jump()` (value cursors, R19-5 at a Reposition),
+  `cursor_mut`/`cursors_mut` (`set_jump` per block, `state_mut` for a verbatim carry or a
+  reposition, `set_heard`), `copy_from` (a preallocated probe twin), `max_events`.
+
+Gates (`cargo test --locked -p automation`, all green):
+`compose::tests::one_cursor_gives_its_cells_events_over_the_corpus` (K = 1 equals `CellEvents`
+over the six G5 cases, holds and both seek modes),
+`one_cursor_gives_its_cells_events_over_random_tables` (400 seeded draws: all shapes, gaps, both
+completions, `no_restart`, fixed and block jumps, seeks, reported ramps, deferrals),
+`flat_curves_leave_the_moving_curves_events` (K = 3, two flat, 150 draws, every place and kind),
+`a_grid_event_inside_a_gate_jump_is_held_and_lands_at_its_end` (unmute J 480 at 1,000: no
+retarget in between, landing at 1,480 over 256 to the curve at 1,735, grid again from 1,728),
+`coincident_jumps_take_the_longest` (480/960 both ways: one Jump over 960),
+`a_deferral_holds_the_grid_until_it_fires`, `a_caller_retarget_holds_the_value_grid_until_its_end`,
+and `tests/allocation.rs::the_merged_walk_allocates_nothing` (10,000 blocks, seeks, retargets,
+deferrals: 0 allocations, 0 frees). Realtime policy: 171 marked regions in 35 files (170 before).
+
+## Decision record: T3 (batch 19)
+
+`crates/graph` (the route op, its cursors, the route carry, the source and the charge) and
+`crates/automation/src/compose.rs` (K1, two additions). No six-word route code, byte or bit moved.
+Nothing under `crates/engine/src/realtime/`; no `crates/lane` kernel change.
+
+- **Route op on K1.** `LiveFollowRoute` holds one `RouteColumn` per source column that hears a
+  curve: a `Composed<([f32; 2], bool)>` walk over that column's cursors (source mute of its lane
+  and the route's own mute as `Gate`, gain and the column's two matrix entries as `Value`, each
+  with its row's jump length per block, `GraphRouteJumpLengths::for_row`), a probe twin for the
+  block entry's activity probe, its roles and its carry placement. The two columns' events are
+  merged in offset order (`walk_columns`, over K1's new pull form `start`/`next_event`). One
+  composition, `column_target`: `law(curve, word 0)` when the plan automates the gain, each
+  automated matrix entry from its curve, gate `mute = static mute || route mute curve` (D5) and the
+  column's follow term, `gated_route_coefficients`, the column's entries. A column's entries do not
+  depend on the other column's gate, so the columns compose apart; the route's silence is both
+  columns silent. Retarget per column over the event's own ramp (`ColumnRamps::retarget_column`,
+  replacing `retarget`; `route_mix_column_ramps_block` unchanged). Every #1652 graph test is green
+  unchanged on the new op.
+- **Records.** A record that changes a value word takes each automated value toward the record
+  ramp's completion (`Composed::compose_toward`; gates as heard) and a gate-only record composes
+  with the heard values; a column the record moves is a column jump (`Composed::retarget`: its
+  value cursors defer to the ramp's end, R19-3). A predecessor's last read at a swap composes with
+  the heard values and defers nothing (it is retired).
+- **Carry (D3).** `GraphFollowRouteSource::with_continued_rows([bool; 6])` (new, default none;
+  T4 sets it from `continued_route_rows`). Seven -> seven: per column and role the predecessor's
+  cursor state and heard value are copied; a continued row is kept verbatim, any other cursor is
+  repositioned at the successor's first node time (its target stays the one the column heard; a
+  row the predecessor lacked starts with no target). At the first block: equal column bits leave
+  the ramp; a moved gate retargets the column at once over the mute length (a column jump); moved
+  values alone defer the placed value cursors to the column ramp's first free sample, at once when
+  settled (R19-5, #1711 D1: exact, no flag). Seven -> six keeps `heard_zeroed` over the source
+  mute cursors.
+- **Coordinator question (B lands at an old free time inside A's jump): it can happen, fixed.**
+  K1 now extends a value cursor's pending deferral to the end of a column ramp that another
+  cursor's retarget replaced and outlasts (never shortens; the cursor whose own event it is keeps
+  its cell's rule, so K = 1 stays exactly `CellEvents`: all K1 gates green). Gate:
+  `a_held_value_waits_for_the_end_of_a_jump_that_replaced_the_column_ramp` (red without the
+  extension: block 18). Compatible with the U1 fold to `next_in_run` (a cursor's own discontinuity
+  jump clears its own deferral). `events.rs` is not edited by T3.
+- **K1 additions.** Pull form (`start`, `next_event`; `walk` is built on them); `compose_toward`
+  reads `Gate` cursors as heard and repositions a copy of each value cursor's state at `start`.
+- **Charge.** The producer carries `cursor_bytes` (per column with a curve, two tables of
+  `Composed::bytes(K)`), added to `owner_bytes` and to the largest allocation.
+- **Departure: no graph-level allocation gate.** Linking `bench_support`'s audited allocator into
+  graph's lib test binary makes an existing test abort
+  (`runtime::tests::a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`,
+  green without the allocator). The walk's gate is K1's
+  (`automation/tests/allocation.rs::the_merged_walk_allocates_nothing`); host-core's
+  `route_mute.rs` render gates run the new op for mute-only routes; the send-row render gate is T4.
+
+Gates (`cargo test --locked -p graph --features test-support`, 130 lib tests green), module
+`runtime::send_automation_tests`: `a_flat_send_ride_mixes_the_static_route_bits` (offsets `+0.0`
+and `-0.0`, 40 blocks bit-equal), `a_gain_ride_across_an_unmute_fade_ends_the_fade_at_its_length_and_lands_at_its_end`,
+`a_ride_on_the_left_column_keeps_moving_while_the_right_column_fades`,
+`coincident_send_events_take_the_longest_jump`, `a_hand_offset_record_aims_at_the_curve_at_its_end_and_holds_the_grid`,
+`a_held_value_waits_for_the_end_of_a_jump_that_replaced_the_column_ramp`,
+`a_continued_send_ride_carries_its_cursor_verbatim` (red with no row continued),
+`a_moved_send_table_jumps_over_its_own_length_at_the_first_sample`,
+`a_hand_move_in_flight_at_a_swap_keeps_its_length_and_the_moved_table_lands_after_it`. The route
+op mixes at `FrameLane` on every backend: no bank width applies. host-core `--features
+test-support`: all green. Sizes (x86-64): `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 360 -> 944,
+`GraphFollowRouteSource` 112 -> 120, `GraphFollowRouteControlProducer` 104, `ComposeCursor` 104.
+Realtime policy: 171 regions in 35 files.
+
+## Decision record: T4 (batch 19)
+
+Preparation, records and the classifier; no render code (`crates/graph/src/runtime.rs` and
+`crates/automation` untouched). What shipped:
+
+- **Program.** `prepare_fader_automation` appends the route cells after every mute cell, in
+  `model.routes` order (routes into a submix only) and row order: rows 1 and 3-6 with
+  `FADER_CELL_RULE`, row 2 with `MUTE_CELL_RULE`. A session without route automation builds the
+  same program. New `PreparedBuiltinsSession::route_cells(route_id) -> Option<(Arc<Program>,
+  [Option<u32>; 6])>`. A refusal at a route cell is `host.automation.route` (each table now
+  carries its own code).
+- **Predicate.** `following_route_lanes` returns `Option<graph::RouteAutomatedSet>` (new graph
+  type: flags bits 4-5 `lanes`, bits 6-11 `rows`): `Some` when the route goes into a submix and
+  its source mute or any route row 1-6 is automated. `follows_automated_mute` follows it, so the
+  #1713 flag and the `LocalDiff` follower scan widen with no code of their own.
+- **Attach and seed.** The attach reads the source's mute cells and the route's cells (one
+  program, checked against the set), builds the flags with the new `follow_route_flags` (bits
+  6-11 from the set; both "#1654 T2" literals gone) and seeds the row 1 hand offset through the
+  new `GraphFollowRouteSource::with_gain_offset` (`gain_offset()` reads it; `+0.0` by default).
+- **Records.** `follow_route_record(route, terms, automated, gain_offset, length)` writes the
+  offset in word 0 when bit 6 is set. `follow_route_record_between` takes the offsets
+  `[before, after]` (`route_gain_offset`, the view's row 1 entry, so the in-place path reads the
+  edited entry, R17-1) and compares only the words render hears: an automated matrix word is
+  masked, so a hand edit of an automated matrix row gives no record (`model_only`, D4). The ramp
+  of an offset change is `SendGain` (the edit's own length when given).
+- **Classifier.** A send automation edit is step 3 (`LiveRebuild::Automation`); a hand gain move
+  on an automated send is one seven-word record over `SendGain`; an un-automated row of an
+  automated send (gain, matrix, mute) writes the seven-word cell (D6), never the folded form.
+- **Join.** `RouteJoin::continued_rows` (`controls::continued_route_rows`) reaches the move as the
+  new `GraphRouteMove::continued_rows: [bool; 6]`, for T3's carry.
+- **Commit.** `GraphFollowRouteControlProducer::automated()` returns the whole bound set;
+  `RouteFollowFlags::automated_set()`; new `host_core::follow_route_producer_for`, which the
+  pre-write check in `control.rs` now calls (whole set before any write, D9).
+
+Departures: the pre-write refusal is gated at the helper (`follow_route_producer_for`) and the
+producer's write count, not through a commit: a valid session cannot produce a disagreeing set.
+`docs/SESSION_SCHEMA_V1.md` is not touched here (T5 or the docs tranche).
+
+Gates: `builtins-compiler` `the_route_cells_follow_the_mute_cells_in_the_one_program`; `graph`
+`follow_route_tests::the_automated_set_is_bits_4_to_11_and_only_an_automated_gain_takes_a_seed_offset`;
+host-core `tests/live_delta.rs` `a_send_automation_edit_is_a_rebuild`,
+`a_sends_hand_edits_lower_its_offset_and_its_unautomated_rows_only` (offset word, flags, lengths,
+`model_only` matrix, D6, fast path equal), `a_route_row_send_binds_its_set_and_the_commit_refuses_another`,
+and the join's `continued_rows` pass-through in `prepare.rs`'s route-carry unit test;
+control-plane `tests/send_automation_realtime.rs`
+`a_send_with_stored_row_automation_renders_allocation_free` (live, model_only, live, live; zero
+allocations); capi `a_hand_move_on_an_automated_send_gain_commits_alike_in_place_and_full` and
+`removing_a_sends_only_route_entry_reports_a_fallback` (#1713 flag on a route-row-only send);
+host-web `a_hand_move_on_an_automated_send_gain_is_an_offset_alike_on_both_hosts` (R17-1, both
+hosts). Realtime policy 170 regions in 34 files (unchanged).
+
+Sizes (x86-64, measured): `GraphFollowRouteSource` 112 (unchanged, the offset fills padding),
+`GraphRouteMove` 12 -> 16 (control side only; the render step `RouteCarryStep` is unchanged),
+`GraphFollowRouteControlProducer` 88, `RouteAutomatedSet` 8, `LIVE_FOLLOW_ROUTE_OWNER_BYTES` 360
+(unchanged).
+
+For T3/T5: the route op must read `source.gain_offset()` as the seeded `gain` word when bit 6 is
+set (the bound transform's `gain` is the compiler's linear static gain) and
+`GraphRouteMove::continued_rows` for the carry. A route-row-only send now binds the seven-word
+lane with no source cells, and renders with the old (static) route op until T3 lands.

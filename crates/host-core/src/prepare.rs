@@ -593,6 +593,21 @@ pub fn follow_route_producer_position(
         .ok()
 }
 
+/// The position of the seven-word producer that may take `record` for route `id`: the producer
+/// of [`follow_route_producer_position`], when the record carries the automated set its plan bound
+/// (flags bits 4-11, [`graph::RouteFollowFlags::automated_set`], #1653 D5, #1654 D2). Render takes
+/// that set from its own cursors, so a record whose set differs is an internal fault: the commit
+/// refuses it before any write, and no ack precedes a drop. Allocation-free.
+#[must_use]
+pub fn follow_route_producer_for(
+    producers: &[graph::GraphFollowRouteControlProducer],
+    id: &str,
+    record: &graph::FollowRouteControlRecord,
+) -> Option<usize> {
+    follow_route_producer_position(producers, id)
+        .filter(|&index| producers[index].automated() == record.flags().automated_set())
+}
+
 /// The position of strip `id` in the canonical strip order: the tracks, then the submixes, each
 /// segment in ascending ID order, as [`HostLiveControlHandles::strips`] lists them (#1554 D6).
 /// `id_at(i)` is the ID of the strip at position `i` of `count`, the first `track_count` of
@@ -2874,31 +2889,40 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // builtins plan: the plan's one automation program, the source lanes' mute cells and the
     // seeded flags word. `terms` is the source lane's effective mute without its curve (OQ1 = C);
     // `automated` is the plan's. The arrival `a(tap)` is the compile report's, below.
+    // #1654 D2: a route that automates one of its own rows 1-6 is a following route too, with its
+    // route cells and flags bits 6-11, and its automated gain's hand offset seeded in the `gain`
+    // word.
     let mut follow_cells = Vec::new();
     for route in &model.routes {
-        if !follows_automated_mute(model, route) {
+        let Some(automated) = following_route_lanes(model, route) else {
             continue;
-        }
+        };
         let Some(source) = route_source_strip(model, route) else {
             return Err(graph_failure("host.route_control.attach"));
         };
-        let source_id = route_source_id(route);
-        // `follows_automated_mute` and the builtins plan read the same rendered mute entries, so
-        // a following route always has its cells.
-        let Some((program, cells)) = builtins.strip_mute_cells(source_id.as_str()) else {
+        // `following_route_lanes` and the builtins plan read the same rendered mute and route
+        // entries, so a following route always has the cells its set names, in the plan's one
+        // program.
+        let mute_cells = builtins.strip_mute_cells(route_source_id(route).as_str());
+        let route_cells = builtins.route_cells(route.id.as_str());
+        let (program, cells, rows) = match (mute_cells, route_cells) {
+            (Some((program, cells)), Some((other, rows)))
+                if std::sync::Arc::ptr_eq(&program, &other) =>
+            {
+                (program, cells, rows)
+            }
+            (Some((program, cells)), None) => (program, cells, [None; graph::GRAPH_ROUTE_ROWS]),
+            (None, Some((program, rows))) => (program, [None; 2], rows),
+            _ => return Err(graph_failure("host.route_control.attach")),
+        };
+        if cells.map(|cell| cell.is_some()) != automated.lanes
+            || rows.map(|cell| cell.is_some()) != automated.rows
+        {
             return Err(graph_failure("host.route_control.attach"));
-        };
-        let flags = graph::RouteFollowFlags {
-            mute: route.mute,
-            follows_mute: route.follows_mute,
-            terms: effective.strips[source].mute,
-            automated: cells.map(|cell| cell.is_some()),
-            // #1654 T2: the plan gives a route no row cell yet, so no route row is automated.
-            automated_gain: false,
-            automated_mute: false,
-            automated_matrix: [false; 4],
-        };
-        follow_cells.push((route.id.as_str(), (program, cells, flags)));
+        }
+        let flags = follow_route_flags(route, effective.strips[source].mute, automated);
+        let offset = route_gain_offset(controls::ModelView::whole(model), &route.id);
+        follow_cells.push((route.id.as_str(), (program, cells, rows, flags, offset)));
     }
     let mut artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         dispatch: backend,
@@ -2953,19 +2977,24 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         let mut sources: BTreeMap<&str, _> = follow_cells.into_iter().collect();
         artifact
             .attach_route_live_controls_following(&live_superseded, six_word, |route_id| {
-                let (program, cells, flags) = sources.remove(route_id.as_str())?;
+                let (program, cells, rows, flags, offset) = sources.remove(route_id.as_str())?;
                 let node = GraphNodeId::Route {
                     route_id: route_id.clone(),
                 };
-                graph::GraphFollowRouteSource::new(
+                let source = graph::GraphFollowRouteSource::new(
                     program,
                     cells,
-                    [None; graph::GRAPH_ROUTE_ROWS],
+                    rows,
                     graph::floored_input_arrival(&arrivals, &node),
                     follow_route_jumps,
                     graph_compiler::route_gain_law,
                     flags,
-                )
+                )?;
+                if flags.automated_gain {
+                    source.with_gain_offset(offset)
+                } else {
+                    Some(source)
+                }
             })
             .map_err(|error| match error {
                 graph::GraphRouteControlError::AlreadyAttached
@@ -4365,35 +4394,52 @@ impl SendRecord {
     }
 }
 
-/// The seven-word record of a following route (#1652 D1) as `route` holds it: the open transform
-/// (`graph_compiler::route_values`, the derivation the compiler lowers the plan's transform
-/// with, so a record's words and the plan's are one bit pattern), the flags word (the route's
-/// `mute` and `follows_mute`, the source lanes' `terms` and the plan's `automated`) and `length`.
-///
-/// # Errors
-///
-/// [`LiveRebuild::Domain`] when the gain or matrix is outside the route domain, or `length` is
-/// longer than the cell's maximum.
-pub(crate) fn follow_route_record(
+/// The flags word of a following route (#1652 D1, #1654 D2): the route's `mute` and
+/// `follows_mute`, the source lanes' `terms` and the plan's automated set (bits 4-11).
+pub(crate) fn follow_route_flags(
     route: &session::Route,
     terms: [bool; 2],
-    automated: [bool; 2],
-    length: u32,
-) -> Result<graph::FollowRouteControlRecord, LiveRebuild> {
-    let matrix = &route.channel_matrix;
-    let transform =
-        graph_compiler::route_values(route.gain_db, [matrix.ll, matrix.lr, matrix.rl, matrix.rr])
-            .map_err(|_| LiveRebuild::Domain)?;
-    let flags = graph::RouteFollowFlags {
+    automated: graph::RouteAutomatedSet,
+) -> graph::RouteFollowFlags {
+    let [automated_gain, automated_mute, ll, lr, rl, rr] = automated.rows;
+    graph::RouteFollowFlags {
         mute: route.mute,
         follows_mute: route.follows_mute,
         terms,
-        automated,
-        // #1654 T2: the plan gives a route no row cell yet, so no route row is automated.
-        automated_gain: false,
-        automated_mute: false,
-        automated_matrix: [false; 4],
-    };
+        automated: automated.lanes,
+        automated_gain,
+        automated_mute,
+        automated_matrix: [ll, lr, rl, rr],
+    }
+}
+
+/// The seven-word record of a following route (#1652 D1) as `route` holds it: the open transform
+/// (`graph_compiler::route_values`, the derivation the compiler lowers the plan's transform
+/// with, so a record's words and the plan's are one bit pattern), the flags word
+/// ([`follow_route_flags`]) and `length`. When the plan automates the route's `gain_db` (bit 6),
+/// the `gain` word is the hand offset `gain_offset` in dB instead of the static gain, which is the
+/// fallback and is not heard (#1654, batch 10 amendment); an automated matrix entry's word is its
+/// static fallback, which render ignores.
+///
+/// # Errors
+///
+/// [`LiveRebuild::Domain`] when the gain or matrix is outside the route domain, the offset is not
+/// finite, or `length` is longer than the cell's maximum.
+pub(crate) fn follow_route_record(
+    route: &session::Route,
+    terms: [bool; 2],
+    automated: graph::RouteAutomatedSet,
+    gain_offset: f32,
+    length: u32,
+) -> Result<graph::FollowRouteControlRecord, LiveRebuild> {
+    let matrix = &route.channel_matrix;
+    let mut transform =
+        graph_compiler::route_values(route.gain_db, [matrix.ll, matrix.lr, matrix.rl, matrix.rr])
+            .map_err(|_| LiveRebuild::Domain)?;
+    let flags = follow_route_flags(route, terms, automated);
+    if flags.automated_gain {
+        transform.gain = gain_offset;
+    }
     graph::FollowRouteControlRecord::new(transform, flags, length).ok_or(LiveRebuild::Domain)
 }
 
@@ -4403,15 +4449,20 @@ pub(crate) fn follow_route_record(
 /// two cannot disagree.
 ///
 /// `terms` is the source lane's effective mute without its curve per model, in `[before,
-/// after]` (`controls::effective`, OQ1 = C); `automated` is the next plan's. A record is built only
-/// when a word the models hold changes: the transform's bits, `mute`, `follows_mute` or `terms`.
-/// `automated` is the plan's, not the model's, so a route that only gains or loses its curve
+/// after]` (`controls::effective`, OQ1 = C); `automated` is the next plan's; `gain_offsets` is the
+/// hand offset of the route's `gain_db` per model, in `[before, after]` ([`route_gain_offset`]),
+/// read only when the plan automates the gain. A record is built only when a word render hears
+/// changes: the `gain` word (the offset when the gain is automated, else the static gain), an
+/// un-automated matrix entry, `mute`, `follows_mute` or `terms`. A word of an automated matrix row
+/// is the static fallback, which render ignores, so a change of only such words (or of the static
+/// gain under an automated gain) gives no record and commits `model_only`: automation wins (#1654
+/// D4). `automated` is the plan's, not the model's, so a route that only gains or loses its curve
 /// gives no record (render compares the carried ramp with its own target, #1652 D3).
 ///
 /// The ramp is the send rule of [`route_record_between`]: `gate_length` when the effective gate
 /// changes in either lane, else the `SendFollowsMute` length when only `follows_mute` changes (the
-/// curve can make that a change of target), else the longest of the changed `SendGain` and
-/// `SendMatrix` lengths, else the `SendMute` length.
+/// curve can make that a change of target), else the longest of the changed `SendGain` (the
+/// offset under an automated gain, R17-6) and `SendMatrix` lengths, else the `SendMute` length.
 ///
 /// # Errors
 ///
@@ -4422,14 +4473,18 @@ pub(crate) fn follow_route_record_between(
     before: &session::Route,
     after: &session::Route,
     terms: [[bool; 2]; 2],
-    automated: [bool; 2],
+    automated: graph::RouteAutomatedSet,
+    gain_offsets: [f32; 2],
     gates: [[bool; 2]; 2],
     gate_length: u32,
     edit: RouteEditRamps,
 ) -> Result<Option<graph::FollowRouteControlRecord>, LiveRebuild> {
-    let prior = follow_route_record(before, terms[0], automated, 0)?;
-    let current = follow_route_record(after, terms[1], automated, 0)?;
-    let transform_bits = |record: &graph::FollowRouteControlRecord| {
+    let prior = follow_route_record(before, terms[0], automated, gain_offsets[0], 0)?;
+    let current = follow_route_record(after, terms[1], automated, gain_offsets[1], 0)?;
+    // The words render hears: an automated matrix entry's word is masked (`None`).
+    let [_, _, ll, lr, rl, rr] = automated.rows;
+    let masked = [false, ll, lr, rl, rr];
+    let heard_bits = |record: &graph::FollowRouteControlRecord| {
         let graph::RouteTransform {
             gain,
             ll,
@@ -4437,30 +4492,28 @@ pub(crate) fn follow_route_record_between(
             rl,
             rr,
         } = record.transform();
-        [gain, ll, lr, rl, rr].map(f32::to_bits)
+        let words = [gain, ll, lr, rl, rr];
+        core::array::from_fn::<_, 5, _>(|word| (!masked[word]).then(|| words[word].to_bits()))
     };
-    if transform_bits(&prior) == transform_bits(&current) && prior.flags() == current.flags() {
+    let (prior_bits, current_bits) = (heard_bits(&prior), heard_bits(&current));
+    if prior_bits == current_bits && prior.flags() == current.flags() {
         return Ok(None);
     }
-    let matrix = |route: &session::Route| {
-        let matrix = &route.channel_matrix;
-        [matrix.ll, matrix.lr, matrix.rl, matrix.rr].map(f32::to_bits)
-    };
     let length = if gates[0] != gates[1] {
         gate_length
     } else if before.follows_mute != after.follows_mute {
         ramps.resolve(LiveRampRow::SendFollowsMute, edit.mute)
     } else {
-        let gain = (before.gain_db.to_bits() != after.gain_db.to_bits())
+        let gain = (prior_bits[0] != current_bits[0])
             .then(|| ramps.resolve(LiveRampRow::SendGain, edit.gain));
-        let matrix = (matrix(before) != matrix(after))
+        let matrix = (prior_bits[1..] != current_bits[1..])
             .then(|| ramps.resolve(LiveRampRow::SendMatrix, edit.matrix));
         gain.into_iter()
             .chain(matrix)
             .max()
             .unwrap_or_else(|| ramps.resolve(LiveRampRow::SendMute, edit.mute))
     };
-    follow_route_record(after, terms[1], automated, length).map(Some)
+    follow_route_record(after, terms[1], automated, gain_offsets[1], length).map(Some)
 }
 
 /// A fader or pan value outside the domain its render-side setter accepts.
@@ -5075,23 +5128,26 @@ fn route_source_id(route: &session::Route) -> &session::StableId {
     }
 }
 
-/// Whether a plan of `model` gives `route` the seven-word cell of a following route (#1652 D1):
-/// it goes into a submix and its source strip automates the mute of a lane
-/// ([`controls::mute_automation`], the entries the builtins plan compiles mute cells from). Every
-/// other route keeps the six-word cell. A route into the output never follows.
+/// Whether a plan of `model` gives `route` the seven-word cell of a following route (#1652 D1,
+/// #1654 D2): it goes into a submix and either its source strip automates the mute of a lane
+/// ([`controls::mute_automation`], the entries the builtins plan compiles mute cells from) or the
+/// route automates one of its own rows 1-6 ([`controls::route_automation`], the entries the
+/// builtins plan compiles route cells from). Every other route keeps the six-word cell. A route
+/// into the output never follows.
 #[must_use]
 pub(crate) fn follows_automated_mute(model: &SessionModel, route: &session::Route) -> bool {
     following_route_lanes(model, route).is_some()
 }
 
-/// The source lanes whose mute a plan of `model` automates for `route`, when that plan gives
-/// `route` the seven-word cell of a following route ([`follows_automated_mute`]), else `None`:
-/// the `automated` bits of the route's records (#1652 D1, #1653 D1).
+/// What a plan of `model` automates of `route` (flags bits 4-11: the source lanes whose mute has
+/// a cell and the route rows 1-6 that have one), when that plan gives `route` the seven-word cell
+/// of a following route ([`follows_automated_mute`]), else `None`: the automated set of the
+/// route's records (#1652 D1, #1653 D1, #1654 D2).
 #[must_use]
 pub(crate) fn following_route_lanes(
     model: &SessionModel,
     route: &session::Route,
-) -> Option<[bool; 2]> {
+) -> Option<graph::RouteAutomatedSet> {
     if !matches!(
         route.destination,
         session::RouteDestination::SubmixInput { .. }
@@ -5099,9 +5155,21 @@ pub(crate) fn following_route_lanes(
     {
         return None;
     }
-    let automated =
-        controls::mute_automation(model, route_source_id(route)).map(|entry| entry.is_some());
-    (automated != [false; 2]).then_some(automated)
+    let set = graph::RouteAutomatedSet {
+        lanes: controls::mute_automation(model, route_source_id(route))
+            .map(|entry| entry.is_some()),
+        rows: controls::route_automation(model, &route.id).map(|entry| entry.is_some()),
+    };
+    (set.lanes.contains(&true) || set.rows.contains(&true)).then_some(set)
+}
+
+/// The hand offset in dB of route `route`'s automated `gain_db` (row 1) as `view` holds it (#1654
+/// R17-6): the driving entry's `offset.left_db` (a shared row's two fields are equal, the
+/// validator's `control.automation.offset`), or `+0.0` when no entry drives the row. A following
+/// route's cell holds it in its `gain` word when the plan automates the gain.
+#[must_use]
+pub(crate) fn route_gain_offset(view: controls::ModelView<'_>, route: &session::StableId) -> f32 {
+    view.route_automation(route)[0].map_or(0.0, |entry| entry.offset.left_db)
 }
 
 /// The jump lengths of a following route's cursor rows (#1652 D2, #1652b, #1654 D1): the row
@@ -5830,6 +5898,9 @@ fn resolve_strip_delay_carry(
 struct RouteJoin<'a> {
     id: &'a str,
     retarget: Option<SendRecord>,
+    /// The route rows 1-6 both models automate with the same table (#1654 D3,
+    /// [`controls::continued_route_rows`]): the move's [`graph::GraphRouteMove::continued_rows`].
+    continued_rows: [bool; graph::GRAPH_ROUTE_ROWS],
 }
 
 /// The model half of the send join (#1284 D2, D3): for every route of `model` into a submix that
@@ -5886,18 +5957,20 @@ fn join_routes<'a>(
         // #1652 D3 (#1652c): a route the successor gives the seven-word cell takes the
         // seven-word record, written only when a word the models hold changes; any other route
         // keeps today's record.
-        let retarget = if follows_automated_mute(model, after) {
+        let retarget = if let Some(automated) = following_route_lanes(model, after) {
             let Some(source) = diff.source_strips(before, after) else {
                 continue;
             };
-            let automated = controls::mute_automation(model, route_source_id(after))
-                .map(|entry| entry.is_some());
             follow_route_record_between(
                 ramps,
                 before,
                 after,
                 diff.strip_mutes(source.0, source.1),
                 automated,
+                [
+                    route_gain_offset(controls::ModelView::whole(committed), &before.id),
+                    route_gain_offset(controls::ModelView::whole(model), &after.id),
+                ],
                 gates,
                 gate_length,
                 edit,
@@ -5913,6 +5986,7 @@ fn join_routes<'a>(
         joins.push(RouteJoin {
             id: after.id.as_str(),
             retarget,
+            continued_rows: controls::continued_route_rows(committed, model, &after.id),
         });
     }
     joins
@@ -5960,6 +6034,7 @@ fn resolve_route_carry<'a>(
             successor: after,
             predecessor: before,
             predecessor_follows: follows,
+            continued_rows: join.continued_rows,
         });
         if let Some(record) = join.retarget {
             carry.retargets.push((join.id, record));
@@ -6716,20 +6791,25 @@ mod tests {
             RouteJoin {
                 id: "a-main",
                 retarget: Some(record),
+                continued_rows: [false; graph::GRAPH_ROUTE_ROWS],
             },
+            // #1654 D3: the join's continued rows reach the move as they are.
             RouteJoin {
                 id: "b-main",
                 retarget: None,
+                continued_rows: [true, false, false, false, false, true],
             },
             // Present in the successor only.
             RouteJoin {
                 id: "c-main",
                 retarget: Some(record),
+                continued_rows: [false; graph::GRAPH_ROUTE_ROWS],
             },
             // Present in the predecessor's model but not a live route of either plan.
             RouteJoin {
                 id: "d-main",
                 retarget: Some(record),
+                continued_rows: [false; graph::GRAPH_ROUTE_ROWS],
             },
         ];
         let carry = resolve_route_carry(&before, &own, &joins);
@@ -6740,11 +6820,13 @@ mod tests {
                     successor: 4,
                     predecessor: 3,
                     predecessor_follows: false,
+                    continued_rows: [false; graph::GRAPH_ROUTE_ROWS],
                 },
                 graph::GraphRouteMove {
                     successor: 2,
                     predecessor: 5,
                     predecessor_follows: false,
+                    continued_rows: [true, false, false, false, false, true],
                 },
             ]
         );
@@ -6771,7 +6853,11 @@ mod tests {
             unit,
             following,
         };
-        let join = |id| RouteJoin { id, retarget: None };
+        let join = |id| RouteJoin {
+            id,
+            retarget: None,
+            continued_rows: [false; graph::GRAPH_ROUTE_ROWS],
+        };
         // (case, predecessor following, successor following, flagged)
         for (case, before, after, flagged) in [
             ("six -> six", false, false, false),

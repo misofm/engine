@@ -412,9 +412,9 @@ pub const MUTE_CELL_RULE: CellRule = CellRule {
 /// here, so preparation and the live classifier (#1648) read one list.
 ///
 /// A reader that means "the fader" tests [`fader_row`] instead (#1651 T2): neither the mute row,
-/// a route row nor a VCA row gives a lane a fader cell, a fader hand-move offset or B17-R14's
-/// window. A VCA ride makes its members' lanes event lanes ([`fader_event_lanes`],
-/// [`mute_event_lanes`]); it does not automate a member's own fader.
+/// a route row nor a VCA row gives a lane a fader cell or a fader hand-move offset. A VCA ride
+/// makes its members' lanes event lanes ([`fader_event_lanes`], [`mute_event_lanes`]); it does not
+/// automate a member's own fader.
 #[must_use]
 pub fn automation_row_renders(target: &ControlAddress) -> bool {
     fader_row(target) || mute_row(target) || route_row(target) || vca_row(target)
@@ -596,10 +596,9 @@ pub fn mute_row(target: &ControlAddress) -> bool {
 }
 
 /// Whether `target` is a strip's builtin `fader_db` row (row 5): the one rendered row whose entry
-/// gives a lane its fader cell ([`fader_automation`]), its hand-move offset (#1650) and the
-/// B17-R14 transition window. The readers of those test this predicate, not
-/// [`automation_row_renders`], so an entry on another rendered row reaches none of them (#1651
-/// T2).
+/// gives a lane its fader cell ([`fader_automation`]) and its hand-move offset (#1650). The
+/// readers of those test this predicate, not [`automation_row_renders`], so an entry on another
+/// rendered row reaches neither of them (#1651 T2).
 #[must_use]
 pub fn fader_row(target: &ControlAddress) -> bool {
     matches!(target.owner, Owner::Strip(_))

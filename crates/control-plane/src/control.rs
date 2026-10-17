@@ -646,89 +646,6 @@ pub struct SessionState<A: ControlAdapter> {
     /// from the candidate it superseded (#1310, root ruling B15-Q4); empty after a rebuild that
     /// superseded nothing.
     pub(crate) observation_forwarded: Vec<ObservationForward>,
-    /// The level moves that may still ramp, as one conservative window (root ruling B17-R14,
-    /// #1648 split; #1711 deletes it): `None` when none may.
-    pub(crate) level_moves: Option<LevelMoveWindow>,
-}
-
-/// Every live level move (a fader or offsets record with a ramp) and every level change a rebuild
-/// commits, folded into one bound (B17-R14): the newest revision among them and the longest ramp
-/// any of them takes. A move is in effect from at most the watermark's `first_sample` once the
-/// watermark covers its revision (the watermark is monotone), so every move has ended once the
-/// watermark covers `revision` and the render clock is at or past `first_sample + ramp`. The bound
-/// only errs toward "may still ramp", and it is one word pair: nothing grows with the moves.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct LevelMoveWindow {
-    revision: u64,
-    ramp: u32,
-}
-
-impl LevelMoveWindow {
-    /// Whether some move of the window may still ramp, given the watermark (`None` when a read
-    /// gave up: then it may) and the render clock read after it.
-    fn may_ramp(self, watermark: Option<PlanWatermark>, render_clock: u64) -> bool {
-        watermark.is_none_or(|watermark| {
-            watermark.revision < self.revision
-                || render_clock < watermark.first_sample.saturating_add(u64::from(self.ramp))
-        })
-    }
-}
-
-/// A transaction's level moves: the newest revision and the longest ramp (B17-R14).
-fn fold_level_move(window: &mut Option<LevelMoveWindow>, revision: u64, ramp: u32) {
-    *window = Some(match *window {
-        Some(window) => LevelMoveWindow {
-            revision: window.revision.max(revision),
-            ramp: window.ramp.max(ramp),
-        },
-        None => LevelMoveWindow { revision, ramp },
-    });
-}
-
-/// The longest ramp a level change a rebuild commits can take at its successor's first block
-/// (B17-R14): the session's fader length (the jump length `J` and the default record ramp), or a
-/// longer one the transaction gave a row.
-fn rebuild_level_ramp(model: &session::SessionModel, edit_ramps: &session::EditRamps) -> u32 {
-    edit_ramps
-        .entries()
-        .into_iter()
-        .map(|(_, _, samples)| samples)
-        .fold(
-            controls::LiveRamps::for_session(model).fader_samples,
-            u32::max,
-        )
-}
-
-/// Whether some strip both models hold has a different effective fader or `S` on a lane in
-/// `next` (B17-R14): a level change the rebuild's successor applies at its first block, and
-/// which ramps from there.
-fn rebuild_moves_a_level(
-    committed: &session::SessionModel,
-    next: &session::SessionModel,
-    monitor: &controls::MonitorOverlay,
-    next_monitor: &controls::MonitorOverlay,
-) -> bool {
-    let (before, after) = (
-        controls::effective(committed, monitor),
-        controls::effective(next, next_monitor),
-    );
-    let track_count = committed.tracks.len();
-    let ids: Vec<&str> = committed.strips().map(|strip| strip.id.as_str()).collect();
-    next.strips().zip(&after.strips).any(|(strip, value)| {
-        host_core::strip_position(
-            ids.len(),
-            track_count,
-            |index| ids[index],
-            strip.id.as_str(),
-        )
-        .and_then(|index| before.strips.get(index))
-        .is_some_and(|old| {
-            (0..2).any(|lane| {
-                old.fader_db[lane].to_bits() != value.fader_db[lane].to_bits()
-                    || old.offsets_sum[lane].to_bits() != value.offsets_sum[lane].to_bits()
-            })
-        })
-    })
 }
 
 /// The stable key of one observation tap, borrowed from the bytes that name it (#1677): the strip's
@@ -2618,17 +2535,6 @@ where
         };
         #[cfg(not(feature = "test-support"))]
         let adoption = PlanAdoption::Next;
-        // B17-R14 (#1648 split; #1711 deletes this): a successor that automates a fader lane may
-        // Reposition it (a changed table, or a moved input arrival), and a level move still
-        // ramping there is landed over `J` when less than `J` is left. Control cannot tell which
-        // lanes reposition or how much is left, so the candidate completes as the transition
-        // fallback whenever any level move may still ramp. The rebuild's own level changes join
-        // the window with the commit. A declared discontinuity carries nothing. The test is the
-        // fader row alone (#1651 T2; U1 fold 1, R18-4 withdrawn): a mute cell's adoption lands
-        // only a `SetMute` (the curve's change over the mute length, a terms record committed in
-        // the same transaction over its own ramp), never a level move over `J`, so a successor
-        // that automates only a mute row completes `Exact`.
-        //
         // #1652 U2a fold 2 (MAJOR-A; #1713 deletes this): a successor whose send join carries a
         // following route into a six-word route (a route whose source strip automates a mute
         // lane in the committed plan and automates none in the successor: the rebuild removes
@@ -2636,42 +2542,11 @@ where
         // render cannot report: one ramp of the six-word route takes the session mute length for
         // a join record, and folds two columns' moves into one. Such a rebuild completes as the
         // transition fallback, whether or not a column moves at the swap: conservative, it
-        // over-reports. It is not a level move, so it does not open the level-move window.
-        let (outcome, rebuild_level) = match &kind {
-            Rebuild::Transaction(prepared) => {
-                let session = prepared.get().prospective_session();
-                let next = session
-                    .compiled()
-                    .ok_or(CommandError::Internal)?
-                    .normalized_model();
-                let committed = self.controller.session().compiled().normalized_model();
-                let automates = next
-                    .automation
-                    .iter()
-                    .any(|entry| controls::fader_row(&entry.target));
-                let in_flight = self.level_moves.is_some_and(|window| {
-                    window.may_ramp(
-                        self.shared.watermark.read().ok(),
-                        self.publisher.render_clock(),
-                    )
-                });
-                let level_fallback = automates && in_flight;
-                let outcome = if level_fallback || follow_into_six_word {
-                    engine::realtime::CandidateOutcome::TransitionFallback
-                } else {
-                    engine::realtime::CandidateOutcome::Exact
-                };
-                let moved =
-                    rebuild_moves_a_level(committed, next, &self.monitor, &monitor_change.overlay)
-                        .then(|| rebuild_level_ramp(next, session.edit_ramps()));
-                // A rebuild flagged for a level move may land a stretched move over `J` from its
-                // first block, so the window stays open for `J` from there: a second Reposition
-                // inside that landing stretches it again (verifier MAJOR 1, B17-R13 tranche 5).
-                let landing =
-                    level_fallback.then(|| controls::LiveRamps::for_session(next).fader_samples);
-                (outcome, moved.max(landing))
-            }
-            Rebuild::Discontinuity(_) => (engine::realtime::CandidateOutcome::Exact, None),
+        // over-reports.
+        let outcome = if matches!(kind, Rebuild::Transaction(_)) && follow_into_six_word {
+            engine::realtime::CandidateOutcome::TransitionFallback
+        } else {
+            engine::realtime::CandidateOutcome::Exact
         };
         let reservation = match self
             .publisher
@@ -2863,11 +2738,6 @@ where
             // withdrawn candidate, drops below as a commit's displaced model does.
             Rebuild::Discontinuity(model) => (None, Some(*model)),
         };
-        // B17-R14: the rebuild's own level changes ramp from its successor's first block, and a
-        // flagged rebuild's landing over `J` does too.
-        if let Some(ramp) = rebuild_level {
-            fold_level_move(&mut self.level_moves, revision, ramp);
-        }
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
         let monitor_ramp = writes_monitor.then_some(monitor_change.ramp);
         let previous_monitor = core::mem::replace(&mut self.monitor, monitor_change.overlay);
@@ -3261,9 +3131,10 @@ where
         // 2a. Each route's producer, by route ID (#1557 D4): a binary search over the canonical
         // route-ID order, among the six-word producers for a folded record and among the
         // seven-word ones for a following route's record (#1653 D1). A record for a route with no
-        // producer of its kind, or a seven-word record whose `automated` bits differ from the
-        // plan's (render takes them from its own cursors), is an internal fault, found before the
-        // first write, so no ack precedes a drop (#1653 D5).
+        // producer of its kind, or a seven-word record whose automated set (flags bits 4-11: the
+        // source lanes and the route rows, #1654 D2) differs from the plan's (render takes it from
+        // its own cursors), is an internal fault, found before the first write, so no ack
+        // precedes a drop (#1653 D5).
         let route_lanes = &mut strips.routes;
         let follow_lanes = &mut strips.follow_routes;
         let mut resolved_routes = Vec::new();
@@ -3279,9 +3150,7 @@ where
                     host_core::route_producer_position(route_lanes, route.route_id)
                 }
                 host_core::SendRecord::Following(record) => {
-                    host_core::follow_route_producer_position(follow_lanes, route.route_id).filter(
-                        |&index| follow_lanes[index].automated() == record.flags().automated,
-                    )
+                    host_core::follow_route_producer_for(follow_lanes, route.route_id, &record)
                 }
             };
             let Some(index) = index else {
@@ -3516,27 +3385,6 @@ where
         } else {
             protocol::EditPath::Live
         };
-        // B17-R14: the longest ramp of the level moves this commit writes (fader and offsets
-        // records with a ramp), folded into the window once committed.
-        let level_ramp = delta
-            .strips
-            .iter()
-            .flat_map(|strip| {
-                let fader = strip.fader_records().filter_map(|record| match record {
-                    host_core::TrackFaderRecord::FaderDb {
-                        smoothing_samples, ..
-                    } => Some(smoothing_samples),
-                    host_core::TrackFaderRecord::Mute { .. } => None,
-                });
-                let offsets = strip
-                    .offsets
-                    .iter()
-                    .flatten()
-                    .map(|record| record.smoothing_samples);
-                fader.chain(offsets)
-            })
-            .filter(|&samples| samples != 0)
-            .max();
         drop(delta);
         let published = core::mem::take(&mut owners.begun);
 
@@ -3552,9 +3400,6 @@ where
         );
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
         self.monitor = monitor_change.overlay;
-        if let Some(ramp) = level_ramp {
-            fold_level_move(&mut self.level_moves, revision, ramp);
-        }
         for index in published {
             owners.effects[index]
                 .commit_owner()

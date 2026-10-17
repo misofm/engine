@@ -289,3 +289,225 @@ measured with temporary probes in a detached worktree at `323433f6a` (removed af
   (`crates/automation/src/compose.rs`, after this issue) reuses the decisions this issue adds; events.rs
   exposes them `pub(crate)`, no copy.
 - **Two PRs.** This issue ships in batch 19a with K1 and #1654.
+
+## Decision record: F1 (batch 19)
+
+- **F0 shipped.** `BuiltinFaderBank::ramp_target(lane, channel)` (`crates/builtins/src/lib.rs`, over
+  the kernel's `target_gain`) is new. `ChannelHold::fader_gain` is renamed `stage_gain`. `bank_hold`
+  fills it with the ramp target on a free stage and with `fader_gain` on a held stage. The
+  scalar oracle still gives `None`. `settle_adoption` compares the curve with `stage_gain`. No
+  other behaviour changes: `long_landing`, `length.max(remaining)` and the B17-R14 flag stay
+  (D1 and D2 are later tranches).
+- **G1, C ABI (Simd8).** `a_level_move_across_a_table_change_keeps_its_length`
+  (`crates/capi/src/runtime/live_tests.rs`) now asserts bit-equality with the uninterrupted engine
+  over 44 blocks after the swap, not 1e-3. Timings: Pending, SameTransaction, heard 1, 12, 24, 26
+  and 30. VCA and hand moves, both tables: 28 cases, all bit-equal, allocation-free, adopted.
+- **G1, host-core (Simd8 and Simd4).** New
+  `a_level_move_in_flight_across_a_table_only_rebuild_keeps_its_bits`
+  (`crates/host-core/tests/stored_fader_automation.rs`, `test-support`), with its own carry
+  harness `level_move_run` (the `carry_run` pattern: a plan exchange, a live offsets write at
+  block 4, a successor prepared on the committed model with the move). Heard 1, 12, 24, 26 and
+  30, VCA and hand moves, both tables: every block bit-equal to the uninterrupted engine,
+  allocation-free, adopted at the swap block, the strip carries. `successor.rs` is not touched.
+- **Red without F0** (`bank_hold` back to `fader_gain`, run once, restored): the C ABI gate fails
+  at "a VCA move, the ride split at 10,000, Heard(12)" (first difference block 25, sample 79); the
+  host-core gate fails (first difference block 28).
+- **Not asserted in F1: `OUTCOME_EXACT`.** The B17-R14 window still flags the heard 24, 26 and 30
+  cases (`a_reposition_swap_while_a_level_move_ramps_reports_a_fallback` is unchanged and green).
+  The outcome assertion of G1 belongs to the tranche that deletes the flag (D2).
+- **Departure: the two-rebuild case of A3 is not in F1.** Two table-only rebuilds 5 blocks apart
+  around a 500-sample move (heard 2) cannot be bit-equal to the uninterrupted engine: the second
+  rebuild comes after the move's ramp ends, the stage is then free and settled on a grid ramp, and
+  the split tables' values differ from the original ride in `f32` rounding, so the cell jumps over
+  `J` (probe: 1.4e-4 to 1.7e-4 with no move at all; 7.7e-5 with only the later rebuild). Its
+  reference must be a fresh plan with the new table (G1's "where the table's own values differ"
+  clause), or its claim is the outcome alone. Moved to the D2 tranche, which owns the outcome
+  assertion and deletes the tranche-5 fallback gate it replaces.
+- Gates run: `cargo fmt --all`; clippy `-D warnings` `--all-targets --all-features` on builtins,
+  builtins-compiler, host-core, capi; `cargo check --locked --all-targets` (no features) on the
+  same; tests of builtins, builtins-compiler, automation (all features), host-core
+  `stored_fader_automation` (31), `stored_mute_automation` (13), `successor_swap` (140),
+  `session_seek`, `browser_successor`, capi lib (209), host-web `control_parity` (30): all green.
+
+## Decision record: F2 (batch 19)
+
+- **D1 shipped (A2).** `crates/automation/src/events.rs`: new `CellState::defer_jump(at)`,
+  `clear_deferred_jump()` and `deferred_jump()` (small `pub` methods on the existing `deferred`
+  field; no new state, 32 B). One rule change: a restartable cell holds its grid events while a
+  deferral is pending (`time < deferred`); a `no_restart` cell is unchanged. The existing deferred
+  path in `next_in_run` fires the jump (a `Jump` over the block's `J`, change only, or always with
+  a held event outstanding).
+- `crates/builtins-compiler/src/lib.rs`: `settle_adoption` returns `bool` (land at the block's
+  first sample over `J`), not a length. On a `Reposition` of a free stage with a ramp in flight
+  and no step of the cell's own at the block's first sample, it holds the ramp again, compares the
+  curve at the ramp's end with the stage's ramp target, and, if it differs, calls
+  `defer_jump(node_time_at(span, remaining))` (no landing at the swap; R19-1). The landing at the
+  block's first sample over `J` stays for no ramp in flight, a held stage, D3 and `Compare`.
+  Deleted: `long_landing`, its one-sample landing arm, `length.max(remaining)` and the `jump` field
+  of `AdoptionBlock`. `clear_deferred_jump()` is called on `offsets_jump`'s free path, at the
+  R17-10 release, and at the two `release_hold_by` sites (through a new `release_lane_hold`).
+  R19-2: the decisions are the `CellState` methods above, for K1 to reuse; `compose.rs` is not
+  written here.
+- **The B17-R14 flag stays** (F4 deletes it), so F2 asserts no `OUTCOME_EXACT`: the G2 and R19-1
+  cases are inside the level-move window and still report the transition fallback.
+- **G2 (A3).** C ABI (Simd8): `a_moved_target_jumps_at_a_live_moves_first_free_sample`
+  (`crates/capi/src/runtime/live_tests.rs`). Host-core (Simd8 and Simd4):
+  `a_moved_target_jumps_over_the_fader_length_at_the_moves_first_free_sample`
+  (`crates/host-core/tests/stored_fader_automation.rs`; `level_move_run` now takes a list of
+  `(block, record)` moves and writes a later one to the successor's cells). Flat ride -3 dB, move
+  -6 dB over 4,000 from block 4, heard 12 and 30, VCA and hand, rebuild to -5 dB to 6,000 then
+  -3 dB; reference: a fresh plan with -3 dB to 4,512, -5 dB to 6,000, then -3 dB, same move. Every
+  sample bit-equal, allocation-free, adopted, the strip carries. Case (c): a second move -9 dB over
+  1,200 from block 35 (ends 5,679, after 4,512 + `J`): bit-equal to a fresh plan with the
+  rebuild's table given both moves from 5,679 on; host-core also asserts the lane still moves on
+  the move's last sample (the length).
+- **R19-1 gate.** `a_moved_target_lets_a_live_move_longer_than_the_jump_end_when_it_was_due` (C
+  ABI and host-core, same names): heard 1 and 12 (3,872 and 2,464 left, both >= `J`), bit-equal
+  to the fresh plan with the jump at 4,512.
+- **Both hosts.** `a_moved_target_defers_its_jump_alike_on_both_hosts`
+  (`hosts/host-web/tests/control_parity.rs`): hand move heard 3 blocks, rebuild to -5 dB; same
+  verdicts, replies, watermark and bits over 60 blocks at the four rates.
+- **Unit tests** (`events.rs`): `a_deferred_jump_fires_at_its_time_and_holds_the_grid_before_it`,
+  `a_cleared_deferral_fires_nothing_and_holds_no_grid`.
+- **Mutations (each run once, restored).** Land at the swap instead of deferring (the old
+  behaviour): R19-1 red (C ABI and host-core, VCA move, heard 1) and G2 red (heard 12). No grid
+  hold while deferring: G2 and R19-1 red (host-core, heard 12 and heard 1). No clear in
+  `offsets_jump`: G2 case (c) red (host-core length assertion, VCA move, heard 12). Compare at
+  the block's first sample (`at = end` removed): G2 stays green (on a flat table both points read
+  -5 dB, as A0 found for the filed G2); G1 host-core is red (heard 1, the ride split at 10,000).
+  So `at = end` is held by G1, not by G2.
+- **F1 note checked: no.** Two table-only rebuilds 5 blocks apart (riding ride, R1 split at
+  10,000 to -6 dB, R2 to -9 dB) against a fresh plan prepared with R2's table: with the 500-sample
+  move (heard 2), bit-equal up to R2, then max 7.7e-5 (block 15, 4 blocks after R2); with no move,
+  max 1.7e-4 after R1 (block 9) and 1.4e-4 after R2. Cause: at the adoption the stage's grid-ramp
+  target (taken from the old table's values) and the new table's curve differ in `f32` rounding,
+  so the cell jumps over `J` (deferred to the grid ramp's end, or at the block's first sample),
+  where a fresh plan never jumps. Not fixed (outside D1); the D2 tranche's two-rebuild case needs
+  an outcome-only claim or a phase-2 decision on rounding-only differences.
+- Gates run: `cargo fmt --all`; clippy `-D warnings --all-targets --all-features` on automation,
+  builtins, builtins-compiler, host-core, capi (and host-web `--all-targets`); `cargo check --locked
+  --all-targets` (no features) on the five; tests: automation, builtins-compiler (all features),
+  host-core `stored_fader_automation` (33), `stored_mute_automation` (13), `successor_swap` (140),
+  `session_seek`, `browser_successor`, capi lib (211), host-web `control_parity` (31): all green.
+  Realtime policy: 168 regions (unchanged).
+
+## Decision record: F3 and F4 (batch 19)
+
+- **G4 shipped (A1): the owed discharge is kept and gated.** The line `self.owed = false` in
+  `HeldRampObligation::block` (`crates/builtins-compiler/src/lib.rs`) now has a doc comment that
+  names the gate. Gates: `an_exact_unmute_that_frees_a_held_lane_discharges_the_owed_move` on the
+  C ABI (`crates/capi/src/runtime/live_tests.rs`, quantum 128, hand mutes as in A1) and in
+  `crates/host-core/tests/stored_fader_automation.rs` (`acted`, every one of `FORMS`: Simd8 on
+  AVX2, Simd4, the between-render forms and the scalar oracle; fader length 20 ms = 960). Both
+  compare with a rig that takes only the second hold, from block 9 (sample 1,152) on. Red with the
+  line deleted (run once, restored): C ABI first difference block 17; host-core first difference
+  at sample 2,248 (`E`).
+- **D2 shipped (A4).** `crates/control-plane/src/control.rs`: deleted the `level_moves` field,
+  `LevelMoveWindow`, `may_ramp`, `fold_level_move`, `rebuild_level_ramp`, `rebuild_moves_a_level`,
+  the B17-R14 comment, `automates`, `in_flight`, `level_fallback`, `moved`, `landing`,
+  `rebuild_level`, both folds and the live commit's `level_ramp`. The outcome is now the #1713
+  six-word flag alone (a transaction rebuild with `follow_into_six_word`; a discontinuity is
+  `Exact`). `reservation.set_outcome` and `ObservedReservation::set_outcome` stay (#1713); the doc
+  of the latter names #1713 only. `compile.rs`: `level_moves: None` deleted. The B17-R14 clause
+  is removed from `abi.rs`, `miso_engine_v1.h`, `docs/C_ABI_V1_QUALIFICATION.md` and the two d.ts
+  files (the #1713 clause kept); `crates/controls/src/automation.rs` no longer names the window.
+- **Tests deleted:** `a_reposition_swap_while_a_level_move_ramps_reports_a_fallback`,
+  `a_second_reposition_inside_a_stretched_landing_reports_a_fallback` (C ABI) and
+  `a_mute_curve_rebuild_while_a_level_move_ramps_completes_exactly_on_both_hosts` (host-web).
+- **Outcome checks (G1, G2, R19-1).** A new helper `assert_exact` (the watermark covers the newest
+  revision, its last advance reads `OUTCOME_EXACT` alone, transition-fallback count 0) is called by
+  every case of `a_level_move_across_a_table_change_keeps_its_length` (28 cases) and of
+  `moved_target_case` (G2, its case (c), and R19-1). Host-web: the B17-R14 parity test is now
+  `a_hand_move_in_flight_across_a_table_only_rebuild_completes_exactly_alike_on_both_hosts` (no
+  move and a hand move in flight: `EXACT`, no fallback on either host, same bits and watermark at
+  the four rates), and `a_moved_target_defers_its_jump_alike_on_both_hosts` asserts the same.
+- **Two rebuilds 5 blocks apart (A3): outcome only.**
+  `table_only_rebuilds_around_a_level_move_complete_exactly` (C ABI): with no move (R1, R2) and
+  with a 500-sample VCA move heard 2 blocks, each rebuild reports `OUTCOME_EXACT` with no
+  fallback, every block is allocation-free, every successor is adopted. Bits are not compared:
+  the split tables' values differ from the ride in `f32` rounding, so the adopting cell jumps
+  over `J` where a fresh plan does not (F2 record: 7.7e-5 to 1.7e-4). A bit claim needs a
+  phase-2 decision on rounding-only differences at adoption. The no-move case is also the
+  "a no-live-move rebuild stays EXACT" check.
+- **F2 note fixed.** The B17-R13 step gate's doc no longer names "a long landing"; it says the
+  step one sample after the swap must jump at its own sample (B17-R13's 8.6e-2 measurement kept
+  as history). The #1713 test's doc and comment no longer name the level-move window ("the flag
+  marks its own candidate only").
+- **G4 on both hosts.** `an_exact_unmute_discharges_the_owed_move_alike_on_both_hosts`
+  (`hosts/host-web/tests/control_parity.rs`): the A1 setup on `t1` at the four rates; the
+  browser and the C ABI give the same verdicts, replies, watermark (`EXACT`, no transition
+  fallback) and bits in every block, and from block 24 on both equal a pair of rigs that took
+  only the second hold. Block 24: the first hold's own difference ends by block 21 at every rate
+  (the session's latency), and the stale obligation's difference spans blocks 21 to 28 at
+  44.1 kHz and 25 to 40 at 96 kHz. Red with the line deleted (run once, restored): block 24 at
+  44.1 kHz.
+- Gates run: `cargo fmt --all`; clippy `-D warnings --all-targets --all-features` on control-plane,
+  capi, host-core, builtins-compiler, host-web, controls; `cargo check --locked --all-targets` (no
+  features) on the first five; tests: control-plane (`test-support`), capi lib (211 passed, 1
+  ignored), host-core `stored_fader_automation` (34), `stored_mute_automation` (13),
+  `successor_swap` (140), host-web `control_parity` (31 with the G4 parity case): all green. `scripts/check-capi-abi.sh`,
+  `check-sdk-generated.sh`, `check-sdk-types.sh`: ok. Realtime policy: 168 regions (unchanged).
+
+## Decision record: U1 fold 1 (batch 19)
+
+- **MAJOR-1 fixed (A2 clear list).** `crates/automation/src/events.rs`, `next_in_run`: a
+  discontinuity jump on a restartable cell drops a pending deferral (the jump compares the curve
+  with the target and replaces the ramp the deferral waits for; the stale deferral's grid hold
+  froze the lane on the step's target until the deferral's time). A `no_restart` cell is
+  unchanged. The A2 clear list is now: `reposition`, a seek landing, `clear_deferred_jump()` (the
+  free path of `offsets_jump`, the R17-10 release, the `release_hold_by` sites) and a
+  discontinuity jump of a restartable cell. `defer_jump`'s doc says so.
+- **Effect on K1.** A value cursor's own discontinuity jump inside a column-jump deferral now drops
+  that cursor's deferral (its grid moves again after its own jump, held by its own ramp by the
+  cell rule) instead of holding its grid to the column ramp's end. The other cursors keep their
+  deferrals. K = 1 still equals `CellEvents` (one rule); the K1 tests and the allocation test are
+  green unchanged.
+- **MAJOR-1 gate (host-core, Simd8 and Simd4).**
+  `a_table_step_inside_a_deferred_moves_ramp_drops_the_deferral`
+  (`crates/host-core/tests/stored_fader_automation.rs`): VCA and hand moves, heard 1 and 4, the
+  rebuild `[-5 dB step 0..2,000; linear -8 to -14 dB 2,000..8,000; -14 dB]` against a fresh plan
+  with -3 dB before 2,000: every sample bit-equal, allocation-free, adopted, carried. Red without
+  the fix: first difference sample 2,944, max 2.9e-2 (all four cases).
+- **MAJOR-1, C ABI (Simd8).** `a_table_step_inside_a_deferred_moves_ramp_drops_the_deferral`
+  (`crates/capi/src/runtime/live_tests.rs`, through `rebuilt_table_case`, which
+  `moved_target_case` now calls): VCA and hand moves, heard 1 and 4, every sample bit-equal to the
+  fresh plan, allocation-free, adopted, `OUTCOME_EXACT` with no transition fallback. Red without
+  the fix (VCA move, heard 1).
+- **MAJOR-1, both hosts.** `a_table_step_inside_a_deferred_moves_ramp_lands_alike_on_both_hosts`
+  (`hosts/host-web/tests/control_parity.rs`): hand move heard 3 blocks, the same rebuild; one
+  verdict, reply and committed document per edit, the same bits and watermark (`EXACT`, no
+  fallback), and every block equal to a reference pair prepared with -3 dB before 2,000 that takes
+  the same move and an unmoved table-only rebuild at the same block (both rebuilds keep the hand
+  move's stored offset; a rebuild with the default offset cancels the move). Red without the fix
+  (44.1 kHz, block 26).
+- **G2 parity, fixed.** `a_moved_target_defers_its_jump_alike_on_both_hosts` sent its rebuild
+  with the default offset, which cancelled the hand move (parity held, the deferral was not
+  exercised). Its rebuild now carries the committed offset (read from both hosts' snapshots, one
+  document), and every block before the one holding 4,512 equals a pair given the same move and
+  no rebuild; a later block differs (the jump is heard). Red once with the adoption landing at the
+  swap instead of deferring (`settle_adoption`, 44.1 kHz, block 10). A fresh-plan reference with a
+  real step at 4,512 is not bit-equal in this session (first difference about `J / 2` after
+  4,512 at every rate: 4,959, 4,998, 5,400 and 5,478); not chased here, phase-2 line in the
+  report.
+- **MINOR-1.** `table_only_rebuilds_around_a_level_move_complete_exactly` is deleted. Its
+  no-live-move case moved into G1, `a_level_move_across_a_table_change_keeps_its_length`: a
+  table-only rebuild with no move is adopted and reports `OUTCOME_EXACT` (outcome only: the split
+  table's rounding differs). The host-web renamed G1 parity test keeps its own no-move check.
+- **NIT.** `a_mute_curve_rebuild_while_a_level_move_ramps_renders_alike_on_both_hosts`
+  (`control_parity.rs`) restores the deleted test's both-host part: verdicts, replies, the same
+  bits over 40 blocks and the same watermark; no B17-R14 window claim.
+- **MINOR-2 gate (host-core, Simd8 and Simd4).**
+  `a_hand_mute_inside_a_pending_deferral_lands_the_lane_on_the_new_table_at_the_unmute`: G2
+  heard 12 (swap 2,048, F 4,512), hand mute at 2,560, unmute at 3,072 or 5,120, ramps 200 and 0.
+  `level_move_run_muted` adds live mutes to the carry harness. Inside: the rebuild's table is a
+  linear -5 to -8 dB to 6,000 (a flat table hides a held grid), and from the mute's end on every
+  sample is bit-equal to a fresh plan with that table. After F (G2's flat table): bit-equal to the
+  deferred-jump reference everywhere. Mutation (once each): the R17-10 release without its clear
+  is red (exact unmute); with all three builtins-compiler clears removed the ramped unmute stays
+  green, because its owed landing at `E` is a seek landing that clears the deferral. The
+  `release_lane_hold` sites are not reached by this setup.
+- Gates run: `cargo fmt --all`; clippy `-D warnings --all-targets --all-features` and no-feature
+  `cargo check --all-targets` on automation, builtins-compiler, host-core, capi and host-web;
+  tests: automation (43, compose included), builtins-compiler (all features), host-core
+  `stored_fader_automation` (36), `stored_mute_automation` (13), `successor_swap` (140), capi
+  lib (211), host-web `control_parity` (33): green. Realtime policy: 171 regions (unchanged).

@@ -1346,6 +1346,9 @@ impl AutomatedFaderCell {
         // record takes this same path at its first block, with the carried obligation.
         self.obligation.held_through = false;
         self.state.seed_target(value);
+        // A newer live move keeps its own length: a jump an adoption deferred to the end of the
+        // ramp this one replaces is dropped (#1711 D1).
+        self.state.clear_deferred_jump();
         if let Some(start) = start {
             self.state
                 .hold_until(automation::completion_of(completion, start, ramp));
@@ -1432,10 +1435,13 @@ struct ChannelHold {
     muted: bool,
     /// Frames left in the channel's ramp.
     remaining: u32,
-    /// The fader gain the stage aims for, whatever its mute (#1648 D2: an adopted cell compares
-    /// its curve with it). `None` on the scalar oracle, which no plan swap carries (its fader
-    /// owners are bound nodes, not bank lanes).
-    fader_gain: Option<f32>,
+    /// The gain an adopted cell compares its curve with (#1648 D2): on a held stage, the fader
+    /// gain it aims for (the one an unmute lands on); on a free stage, its ramp's target (#1711
+    /// F0: the cell's held grid events only remember a gain inside a live move's ramp, so the
+    /// fader gain follows the ride while the target stays where the move ends). `None` on the
+    /// scalar oracle, which no plan swap carries (its fader owners are bound nodes, not bank
+    /// lanes).
+    stage_gain: Option<f32>,
 }
 
 /// One channel's block cut at the end `E` of a held ramp (#1647 D1.6, constraint 2): the piece
@@ -1573,7 +1579,7 @@ impl FaderCellCursor<'_> {
             if let Some(release) = self.release.take()
                 && let Some(events) = self.events.take()
             {
-                events.into_state().release_hold_by(release);
+                release_lane_hold(events.into_state(), release);
             }
             return false;
         }
@@ -1589,7 +1595,7 @@ impl FaderCellCursor<'_> {
         self.last = last;
         let state = events.into_state();
         if let Some(release) = self.release.take() {
-            state.release_hold_by(release);
+            release_lane_hold(state, release);
         }
         self.events = Some(automation::CellEvents::new(
             self.program,
@@ -1895,18 +1901,13 @@ impl<'a> FaderEventDriver<'a> {
                     });
                 let hold_now = hold(lane, channel);
                 let mut mode = controls::FADER_CELL_RULE.seek;
-                // A landing longer than `J`: the remainder of the free stage's own ramp (U3 fold
-                // 2), landed alone at the block's first sample so the block's discontinuities
-                // still jump over `J`.
-                let mut long_landing = None;
-                if let Some(length) = settle_adoption(
+                if settle_adoption(
                     core::mem::replace(adoption, Adoption::None),
                     AdoptionBlock {
                         program: &cell_program,
                         span,
                         offsets_sum: *offsets_sum,
                         hold: hold_now,
-                        jump,
                     },
                     state,
                 ) && step.is_none()
@@ -1915,14 +1916,15 @@ impl<'a> FaderEventDriver<'a> {
                     // over the block's jump length, to the curve at the jump's completion.
                     step = Some((0, span.start));
                     mode = automation::SeekMode::Ramp;
-                    long_landing = (length > jump).then_some(length);
                 }
                 let (free_from, at, release) = obligation.block(hold_now, frames);
                 if release && let Some(first) = span_time(span.start, step, 0) {
                     // R17-10: a live write freed the gain the stage held through the previous
                     // block, so the cell's hold of the ramp it ended is released here, owed or
-                    // not: its grid moves the lane from this block's first sample on.
+                    // not: its grid moves the lane from this block's first sample on (and a jump
+                    // deferred to that ramp's end is dropped with it, #1711 D1).
                     state.hold_until(first.saturating_sub(1));
+                    state.clear_deferred_jump();
                 }
                 let end = at.map(|at| hold_end(span.start, step, at));
                 // The channel's first mute event (#1651 T3b): the first piece ends there.
@@ -1963,50 +1965,22 @@ impl<'a> FaderEventDriver<'a> {
                     step,
                     frames,
                 };
-                match long_landing {
-                    // U3 fold 2: the landing alone, a one-sample piece over its own length (it
-                    // commits the target and holds the grid until its end, as the cell's own
-                    // `Jump` does), then the rest of the block from its second sample. A free
-                    // stage has no cut (`end` is `None`); a cut at the first sample (a move due
-                    // there) takes the landing over `J` below instead.
-                    Some(length) if cursor.end.is_none() => {
-                        // Unreachable: a step at 0 lies inside one sample. In release the
-                        // channel is skipped: it emits nothing and the lane holds its gain.
-                        let Ok(one) =
-                            automation::NodeSpan::new(span.start, Some((0, span.start)), 1)
-                        else {
-                            refused();
-                            continue;
-                        };
-                        let mut landing_events = automation::CellEvents::new(
-                            cell_program,
-                            state,
-                            one,
-                            automation::SeekMode::Ramp,
-                            length,
-                        );
-                        cursor.next = landing_events.next();
-                        cursor.events = Some(landing_events);
-                    }
-                    _ => {
-                        let last = cursor.piece_last(0);
-                        // Unreachable: a step kept inside the piece lies inside it. In release
-                        // the channel is skipped: it emits nothing and the lane holds its gain.
-                        let Some(node) = piece_span(span.start, step, 0, last) else {
-                            refused();
-                            continue;
-                        };
-                        cursor.last = last;
-                        cursor.events = Some(automation::CellEvents::new(
-                            cell_program,
-                            state,
-                            node,
-                            mode,
-                            jump,
-                        ));
-                        cursor.pull();
-                    }
-                }
+                let last = cursor.piece_last(0);
+                // Unreachable: a step kept inside the piece lies inside it. In release
+                // the channel is skipped: it emits nothing and the lane holds its gain.
+                let Some(node) = piece_span(span.start, step, 0, last) else {
+                    refused();
+                    continue;
+                };
+                cursor.last = last;
+                cursor.events = Some(automation::CellEvents::new(
+                    cell_program,
+                    state,
+                    node,
+                    mode,
+                    jump,
+                ));
+                cursor.pull();
                 *slot = Some(cursor);
                 used += 1;
             }
@@ -2101,6 +2075,10 @@ impl HeldRampObligation {
             }
             Some(_) if due && self.owed => (0, Some(0), false),
             Some(_) => {
+                // A live write that freed a held stage at this entry (an exact unmute) discharges
+                // the move the hold owed; a stale `owed` would land a move over `J` at a later
+                // hold's end with nothing remembered there (#1711 G4,
+                // `an_exact_unmute_that_frees_a_held_lane_discharges_the_owed_move`).
                 self.owed = false;
                 (0, None, held_through && !due)
             }
@@ -2115,54 +2093,52 @@ struct AdoptionBlock<'p, 'a> {
     span: TimelineSpan,
     offsets_sum: f64,
     hold: Option<ChannelHold>,
-    /// The block's jump length `J`.
-    jump: u32,
 }
 
 /// #1648 D2, at an adopted channel's first block: settle what [`LaneFaderAutomation::adopt`] left
-/// owed, and whether the block must open with the adoption jump, and over how many samples.
+/// owed; `true` when the block must open with the adoption jump (a ramped landing at its first
+/// sample over the block's jump length `J`).
 ///
 /// A [`Adoption::Reposition`] places the cursor at the block's node time in the cell's own table
-/// (#1637 D4) and reports the stage's held ramp again (batch 13b: `reposition` drops the one the
-/// carried state held). That report changes no sample: a held stage only remembers a gain
-/// operation of either kind, and the obligation is decided by where the gain is free, not by the
-/// event's flag. It keeps the repositioned cell's events what the cell gives under a hold (held
-/// events as `RememberGain`, as the test-only event probe reports them); batch 17 U3 fold,
-/// MINOR 8: kept as bookkeeping, with no audible gate. On a free stage still in a ramp (a live
-/// level edit over its own length, applied at this block's entry or heard before the swap, or a
-/// jump) the repositioned cell holds that ramp again, and the adoption rule compares the curve
-/// where the ramp ends, where the stage's target was taken (U3 fold 2, D15-7): an unmoved target
-/// keeps the edit's own length, and only a moved one lands over the jump length.
-/// Then, for a reposition or [`Adoption::Compare`], the adoption rule: when
-/// the curve at the block's first sample (or that ramp's end), composed with this plan's `S`
-/// (`checked_fader_gain(vca_compose_db(curve, S))`, #1648 departure 4), differs in bits from the
-/// gain the stage aims for, the block opens with a jump (returns its length: `J`, or the frames
-/// the free stage's own ramp has left when that is longer, so a running edit still ends when it
-/// was due, on this table's curve; never shorter than `J`, so a moved target never lands faster
-/// than a table change does). Otherwise a repositioned
-/// cell takes the curve's value as its current target (`seed_target`: the stage already holds its
-/// gain), and a continued one keeps its carried state. A block with a seek step lands the seek
-/// instead (the caller's step wins): the seek sets the lane exactly where it applies.
+/// (#1637 D4) and reports the stage's ramp again (batch 13b: `reposition` drops the one the
+/// carried state held). On a held stage that report changes no sample: a held stage only
+/// remembers a gain operation of either kind, and the obligation is decided by where the gain is
+/// free, not by the event's flag (batch 17 U3 fold, MINOR 8: kept as bookkeeping, with no audible
+/// gate). On a free stage still in a ramp of its own (a live level move over its own length,
+/// applied at this block's entry or heard before the swap, or a jump), the ramp is not retargeted
+/// (#1711 D1, R19-1): the cell compares the curve where the ramp ends, where the stage's target
+/// was taken (U3 fold 2, D15-7). An unmoved target keeps the ramp; a moved one defers the jump to
+/// the ramp's first free sample ([`automation::CellState::defer_jump`]), where the cell jumps over
+/// `J` as at a discontinuity of its table, so the ramp ends when it was due.
+///
+/// Then, for a reposition with no such ramp, a held stage, a step of the cell's own at the
+/// block's first sample (B17-R13), or [`Adoption::Compare`], the curve at the block's first
+/// sample is compared: composed with this plan's `S` (`checked_fader_gain(vca_compose_db(curve,
+/// S))`, #1648 departure 4), when it differs in bits from the gain the stage aims for (a free
+/// stage's ramp target, #1711 F0; a held stage's fader gain) the block opens with the adoption
+/// jump. A repositioned cell whose comparison does not differ takes the curve's value as its
+/// current target (`seed_target`: the stage already holds its gain), and a continued one keeps
+/// its carried state. A block with a seek step lands the seek instead of the adoption jump (the
+/// caller's step wins), and a seek landing drops a deferred jump.
 fn settle_adoption(
     adoption: Adoption,
     block: AdoptionBlock<'_, '_>,
     state: &mut automation::CellState,
-) -> Option<u32> {
+) -> bool {
     let AdoptionBlock {
         program,
         span,
         offsets_sum,
         hold,
-        jump,
     } = block;
     if adoption == Adoption::None {
-        return None;
+        return false;
     }
-    // The landing's length: `J`, or the frames the free stage's own ramp has left when longer.
-    let mut length = jump;
     // The node time at which the curve is compared: the block's first sample, or the end of a
     // ramp the free stage still runs (U3 fold 2).
     let mut at = span.start;
+    // The free stage's ramp's first free sample, where a moved target's jump is deferred to.
+    let mut free = None;
     if adoption == Adoption::Reposition {
         state.reposition(program, span.start);
         if let Some(ChannelHold {
@@ -2172,15 +2148,12 @@ fn settle_adoption(
             && let Some(end) = node_time_at(span, u64::from(last))
         {
             // A held stage: the held ramp again (batch 13b). A free stage: the ramp it runs is the
-            // cell's own (a live level edit over its own length, or a jump) and `reposition`
-            // dropped its hold, so the cell holds it again and compares the curve where it ends
-            // (U3 fold 2, D15-7): the edit keeps its own length unless the new table moved its
-            // target.
+            // cell's own and `reposition` dropped its hold, so the cell holds it again.
             state.hold_until(end);
             // A step of the cell's own at the block's first sample jumps over `J` there, as the
             // cell does at any discontinuity (and as a plan prepared with this table does), so
-            // the curve is compared at the block's first sample and the landing is `J`
-            // (B17-R13): `curve_toward` looks only past `start` and would skip it.
+            // the curve is compared at the block's first sample (B17-R13): `curve_toward` looks
+            // only past `start` and would skip it.
             if !held
                 && program
                     .discontinuities()
@@ -2188,18 +2161,35 @@ fn settle_adoption(
                     .is_err()
             {
                 at = end;
-                length = length.max(remaining);
+                free = node_time_at(span, u64::from(remaining));
             }
         }
     }
     let value = curve_toward(program, span.start, at);
     let differs = FaderEventDriver::gain(value, offsets_sum)
-        .zip(hold.and_then(|hold| hold.fader_gain))
+        .zip(hold.and_then(|hold| hold.stage_gain))
         .is_some_and(|(gain, stage)| gain.to_bits() != stage.to_bits());
-    if !differs && adoption == Adoption::Reposition {
-        state.seed_target(value);
+    if !differs {
+        if adoption == Adoption::Reposition {
+            state.seed_target(value);
+        }
+        return false;
     }
-    differs.then_some(length)
+    match free {
+        Some(free) => {
+            state.defer_jump(free);
+            false
+        }
+        None => true,
+    }
+}
+
+/// Release the hold of a cell whose stage stopped holding the lane at node time `release` (an
+/// early unmute, #1651 T3b): the ramp a deferred jump waits for ended with it, so the deferral is
+/// dropped too (#1711 D1; a held grid would otherwise freeze the lane, #1651 U1 MAJOR-1).
+fn release_lane_hold(state: &mut automation::CellState, release: i64) {
+    state.release_hold_by(release);
+    state.clear_deferred_jump();
 }
 
 /// The cut at offset `at` of a block whose offset 0 is node time `start`, with seek step `step`;
@@ -2507,6 +2497,10 @@ struct FaderAutomationPlan {
     program_bytes: u64,
     /// Each strip that has an automated fader or mute lane, by track ID.
     strips: BTreeMap<Box<str>, PreparedStripAutomation>,
+    /// Each route into a submix that automates a row 1-6 (#1654 D1), by route ID: the program's
+    /// cell index of each row, in [`controls::route_automation`]'s order, `None` for a row no
+    /// entry drives.
+    routes: BTreeMap<Box<str>, [Option<u32>; 6]>,
 }
 
 impl FaderAutomationPlan {
@@ -2593,9 +2587,12 @@ pub fn fader_automation_sizes() -> FaderAutomationSizes {
 /// once with the fader row's cell rule (`controls::FADER_CELL_RULE`), then one cell per automated
 /// mute lane in the same order, with the mute row's rule (`controls::MUTE_CELL_RULE`). The mute
 /// cells follow every fader cell, so a session with no mute automation builds the program it built
-/// before #1651, cell for cell. `None` when no fader or mute lane is automated, so a session
-/// without either prepares exactly as before; a session with mute automation only builds mute
-/// cells only.
+/// before #1651, cell for cell. Then one cell per automated row 1-6 of each route into a submix
+/// (#1654 D1), in `model.routes` order and row order, with the fader row's rule for `gain_db` and
+/// the matrix and the mute row's rule for `mute`; they follow every mute cell, so a session with
+/// no route automation builds the program it built before #1654. `None` when no row that renders
+/// is automated, so a session without stored automation prepares exactly as before; a session
+/// with mute (or route) automation only builds those cells only.
 ///
 /// Each automated mute lane is seeded with its entry's first `start_value` and with `terms`, the
 /// strip's [`controls::EffectiveStrip::mute`] (OQ1 = C); its prepared stage mute is
@@ -2631,11 +2628,13 @@ fn prepare_fader_automation(
     let refuse = |code: &'static str, entry: &session::Automation| {
         diag(code, &format!("$.automation[id={}]", entry.id.as_str()))
     };
-    // One segment table per cell, in program order, with its entry and its row's rule; transient.
+    // One segment table per cell, in program order, with its entry, its row's refusal code and its
+    // row's rule; transient.
     let mut tables: Vec<(
         &session::Automation,
         Vec<automation::Segment>,
         controls::CellRule,
+        &'static str,
     )> = Vec::new();
     let mut strips: BTreeMap<Box<str>, PreparedStripAutomation> = BTreeMap::new();
     for (strip, values) in model.strips().zip(effective.strips.iter()) {
@@ -2672,7 +2671,12 @@ fn prepare_fader_automation(
                 offsets_ramp: ramp,
                 offsets: Arc::new(OffsetsLane::new()),
             });
-            tables.push((entry, segments, controls::FADER_CELL_RULE));
+            tables.push((
+                entry,
+                segments,
+                controls::FADER_CELL_RULE,
+                "host.automation.fader",
+            ));
         }
         strips.insert(
             Box::<str>::from(strip.id.as_str()),
@@ -2704,7 +2708,12 @@ fn prepare_fader_automation(
                 value,
                 terms: values.mute[lane],
             });
-            tables.push((entry, segments, controls::MUTE_CELL_RULE));
+            tables.push((
+                entry,
+                segments,
+                controls::MUTE_CELL_RULE,
+                "host.automation.mute",
+            ));
         }
         strips
             .entry(Box::<str>::from(strip.id.as_str()))
@@ -2714,9 +2723,47 @@ fn prepare_fader_automation(
             })
             .mute = cells;
     }
+    // #1654 D1: the route cells, after every mute cell, in `model.routes` order and row order:
+    // rows 1 (`gain_db`) and 3-6 (the matrix) with the fader's rule (grid 64, `End`), row 2
+    // (`mute`) with the mute rule (step). Only a route into a submix renders a row (an output
+    // route's entry is refused at `.target`, D8), so a session without route automation builds
+    // the program it built before, cell for cell.
+    let mut routes = BTreeMap::new();
+    for route in &model.routes {
+        if !matches!(
+            route.destination,
+            session::RouteDestination::SubmixInput { .. }
+        ) {
+            continue;
+        }
+        let entries = controls::route_automation(model, &route.id);
+        if entries.iter().all(Option::is_none) {
+            continue;
+        }
+        let mut cells = [None; 6];
+        for (row, entry) in entries.into_iter().enumerate() {
+            let Some(entry) = entry else { continue };
+            let segments = controls::stored_segments(entry);
+            // Defensive: the session validator refuses an entry with no segment.
+            if segments.is_empty() {
+                return Err(refuse("host.automation.route", entry));
+            }
+            cells[row] = Some(
+                u32::try_from(tables.len())
+                    .map_err(|_| diag("host.automation.route", "$.automation"))?,
+            );
+            let rule = if row == 1 {
+                controls::MUTE_CELL_RULE
+            } else {
+                controls::FADER_CELL_RULE
+            };
+            tables.push((entry, segments, rule, "host.automation.route"));
+        }
+        routes.insert(Box::<str>::from(route.id.as_str()), cells);
+    }
     let descriptions: Vec<automation::CellDescription<'_>> = tables
         .iter()
-        .map(|(_, segments, rule)| rule.describe(segments))
+        .map(|(_, segments, rule, _)| rule.describe(segments))
         .collect();
     let program_bytes = automation::ProgramBuilder::bytes(&descriptions);
     // A refusal at a cell is defensive: the session validator refuses every segment the builder
@@ -2734,20 +2781,14 @@ fn prepare_fader_automation(
         };
         cell.and_then(|cell| tables.get(cell)).map_or_else(
             || diag("host.automation.fader", "$.automation"),
-            |(entry, _, _)| {
-                let code = if controls::mute_row(&entry.target) {
-                    "host.automation.mute"
-                } else {
-                    "host.automation.fader"
-                };
-                refuse(code, entry)
-            },
+            |&(entry, _, _, code)| refuse(code, entry),
         )
     })?;
     Ok(Some(FaderAutomationPlan {
         program: Arc::new(program),
         program_bytes,
         strips,
+        routes,
     }))
 }
 
@@ -4031,11 +4072,16 @@ fn automated_lanes(
 /// [`FaderEventDriver::new`] (#1647 D1.6).
 fn bank_hold(bank: &BuiltinFaderBank) -> impl Fn(usize, usize) -> Option<ChannelHold> + '_ {
     |lane, channel| {
+        let held = bank.gain_held(lane, channel)?;
         Some(ChannelHold {
-            held: bank.gain_held(lane, channel)?,
+            held,
             muted: bank.is_muted(lane, channel)?,
             remaining: bank.ramp_remaining(lane, channel)?,
-            fader_gain: bank.fader_gain(lane, channel),
+            stage_gain: if held {
+                bank.fader_gain(lane, channel)
+            } else {
+                bank.ramp_target(lane, channel)
+            },
         })
     }
 }
@@ -5818,6 +5864,21 @@ impl PreparedBuiltinsSession {
             .iter()
             .any(Option::is_some)
             .then(|| (Arc::clone(&plan.program), cells))
+    }
+
+    /// Route `route_id`'s stored automation (#1654 D1), for its seven-word lane: the plan's one
+    /// automation program (the `Arc` [`Self::strip_mute_cells`] hands out) and the program's cell
+    /// index of each route row 1-6 (`gain_db`, `mute`, `matrix_ll`, `matrix_lr`, `matrix_rl`,
+    /// `matrix_rr`), `None` for a row no entry drives. `None` when the route automates no row (or
+    /// the session has no stored automation that renders). Control side; it clones one `Arc`.
+    #[must_use]
+    pub fn route_cells(
+        &self,
+        route_id: &str,
+    ) -> Option<(Arc<automation::Program>, [Option<u32>; 6])> {
+        let plan = self.fader_automation.as_ref()?;
+        let cells = *plan.routes.get(route_id)?;
+        Some((Arc::clone(&plan.program), cells))
     }
 
     /// Every route's effective follow gate, `[left, right]` per source lane, in `model.routes`
@@ -8231,7 +8292,7 @@ fn render_oracle_fader(
                         held: fader.gain_held(channel)?,
                         muted: fader.is_muted(channel),
                         remaining: fader.ramp_remaining(channel)?,
-                        fader_gain: None,
+                        stage_gain: None,
                     })
                 },
             );
@@ -16217,6 +16278,182 @@ mod tests {
             .expect("a mute-only session builds its mute cells");
         assert_eq!(cells, [Some(0), Some(1)]);
         assert!(program.cell(2).is_none(), "mute cells only");
+    }
+
+    /// #1654 D1 (T4): the route cells follow every mute cell in the plan's one program, in
+    /// `model.routes` order and row order, with the fader row's rule for `gain_db` and the matrix
+    /// and the mute row's rule for the route's own `mute`; [`PreparedBuiltinsSession::route_cells`]
+    /// names each row's cell in that same program. A session without route automation builds the
+    /// program it built before; one with route automation only builds route cells only.
+    ///
+    /// Test value: red if a route cell is placed before a mute cell (the strip cells move), if a
+    /// row takes another row's rule (a gain on a step table or a mute on the grid), if the export
+    /// names another program, row or cell, or if a route-only session builds no program.
+    #[test]
+    fn the_route_cells_follow_the_mute_cells_in_the_one_program() {
+        let plain = n_track_session(2);
+        let caps_all = CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        };
+        let sid = |text: &str| session::StableId::parse(text).expect("id");
+        let segment = |shape, start_value, end_value, unit| session::AutomationSegment {
+            shape,
+            start_sample: 0,
+            end_sample: 4_096,
+            start_value,
+            end_value,
+            unit,
+        };
+        let entry = |name: &str, owner, section, control, segment| session::Automation {
+            id: sid(name),
+            target: session::ControlAddress {
+                owner,
+                section,
+                control,
+                lane: session::ParameterChannel::Both,
+            },
+            segments: vec![segment],
+            offset: session::AutomationOffset::default(),
+        };
+        let route_entry = |name: &str, control, segment| {
+            entry(
+                name,
+                session::Owner::Route(sid("t00-bus")),
+                session::Section::Own,
+                control,
+                segment,
+            )
+        };
+        let gain = route_entry(
+            "send-gain",
+            1,
+            segment(
+                session::AutomationShape::Linear,
+                -6.0,
+                -2.0,
+                session::ParameterUnit::Db,
+            ),
+        );
+        let send_mute = route_entry(
+            "send-mute",
+            2,
+            segment(
+                session::AutomationShape::Step,
+                0.0,
+                1.0,
+                session::ParameterUnit::Linear,
+            ),
+        );
+        let lr = route_entry(
+            "send-lr",
+            4,
+            segment(
+                session::AutomationShape::Linear,
+                0.0,
+                0.5,
+                session::ParameterUnit::Linear,
+            ),
+        );
+        let strip_mute = entry(
+            "mute-t00",
+            session::Owner::Strip(sid(&track_name(0))),
+            session::Section::Builtins,
+            6,
+            segment(
+                session::AutomationShape::Step,
+                1.0,
+                0.0,
+                session::ParameterUnit::Linear,
+            ),
+        );
+        let prepare = |automation: Vec<session::Automation>| {
+            let mut model = plain.normalized_model().clone();
+            let mut send = model.routes[0].clone();
+            send.id = sid("t00-bus");
+            send.destination = session::RouteDestination::SubmixInput {
+                submix_id: sid("bus"),
+            };
+            let mut out = model.routes[0].clone();
+            out.id = sid("bus-main");
+            out.source = session::RouteSource::Submix {
+                submix_id: sid("bus"),
+                tap: session::SendTap::PostPan,
+            };
+            model.routes.push(send);
+            model.routes.push(out);
+            let console = model.console.clone();
+            model
+                .submixes
+                .push(session::Submix::unity(sid("bus"), &console));
+            model.automation = automation;
+            let compiled = compile_session(&model, caps_all).expect("the session compiles");
+            prepare_session_builtins(&compiled, &[], caps()).expect("prepared")
+        };
+        let mute_segments = controls::stored_segments(&strip_mute);
+        let describe = |entry: &session::Automation, rule: controls::CellRule| {
+            automation::ProgramBuilder::bytes(&[rule.describe(&controls::stored_segments(entry))])
+        };
+
+        let strip_only = prepare(vec![strip_mute.clone()]);
+        assert!(strip_only.route_cells("t00-bus").is_none());
+        let strip_bytes = strip_only
+            .fader_automation
+            .as_ref()
+            .expect("cells")
+            .program_bytes;
+
+        let both = prepare(vec![
+            lr.clone(),
+            strip_mute.clone(),
+            gain.clone(),
+            send_mute.clone(),
+        ]);
+        let plan = both.fader_automation.as_ref().expect("cells");
+        assert_eq!(
+            plan.program_bytes,
+            automation::ProgramBuilder::bytes(&[
+                controls::MUTE_CELL_RULE.describe(&mute_segments),
+                controls::MUTE_CELL_RULE.describe(&mute_segments),
+                controls::FADER_CELL_RULE.describe(&controls::stored_segments(&gain)),
+                controls::MUTE_CELL_RULE.describe(&controls::stored_segments(&send_mute)),
+                controls::FADER_CELL_RULE.describe(&controls::stored_segments(&lr)),
+            ]),
+            "the strip's mute cells, then the route's rows in row order with their rules"
+        );
+        let (program, cells) = both.route_cells("t00-bus").expect("the send's cells");
+        assert!(
+            Arc::ptr_eq(&program, &plan.program),
+            "the plan's one program"
+        );
+        assert_eq!(cells, [Some(2), Some(3), None, Some(4), None, None]);
+        assert_eq!(
+            both.strip_mute_cells(&track_name(0))
+                .map(|(_, cells)| cells),
+            Some([Some(0), Some(1)]),
+            "the strip's cells keep their indices"
+        );
+        assert!(both.route_cells("bus-main").is_none(), "an output route");
+        assert_ne!(strip_bytes, plan.program_bytes);
+
+        let route_only = prepare(vec![gain.clone()]);
+        let (program, cells) = route_only
+            .route_cells("t00-bus")
+            .expect("a route-only session builds its route cells");
+        assert_eq!(cells, [Some(0), None, None, None, None, None]);
+        assert!(program.cell(1).is_none(), "route cells only");
+        assert_eq!(
+            route_only
+                .fader_automation
+                .as_ref()
+                .expect("cells")
+                .program_bytes,
+            describe(&gain, controls::FADER_CELL_RULE)
+        );
     }
 
     struct HarnessSink;
