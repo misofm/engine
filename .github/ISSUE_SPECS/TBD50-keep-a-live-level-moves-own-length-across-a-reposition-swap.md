@@ -39,18 +39,28 @@ conservative fallback flag of B17-R14 with the exact behaviour and deletes that 
   So the watermark reports `OUTCOME_TRANSITION_FALLBACK`. This is conservative: it is also set
   when no move is stretched (any transaction rebuild of a session with fader automation while any
   level move may still ramp; see the #1648 decision record "the conservative fallback flag").
-- Also stretched and not flagged: a cell's own jump of `J` that is still running at a Reposition
-  swap (`remaining < J`, landed over `J` again from the swap). This is read from the code, not
-  measured.
-- Found while landing B17-R13 (measured with a temporary probe): for every heard move on the moving
-  ride the stage's `fader_gain` at the swap is not the composed curve at the ramp's end (0.398 at
-  12 blocks heard and 0.335 at 24, against 0.3018), so the adoption rule's comparison always
-  differs and every heard move lands at the swap (over `remaining`, or `J`). The 4.6e-6 at 12
-  blocks heard comes from that landing recomputing the stage's ramp step. Find why the stage's
-  target moves during the move before designing the comparison.
-- Also from B17-R13 (MINOR 4, not gated): the comparison point `at = end` in `settle_adoption` has
-  no gate, because of the finding above (the comparison differs at either point). A gate needs a
-  heard move whose stage target equals the curve at its ramp's end.
+- First thing to find out, before the design work (root's note): why the stage target moves
+  during a heard move (0.398 at 12 blocks, 0.335 at 24, against 0.3018). This may be a defect of
+  its own. Measured while landing B17-R13 with a temporary probe: for every heard move on the
+  moving ride, the stage's `fader_gain` at the swap is not the composed curve at the ramp's end.
+  So the adoption rule's comparison always differs, and every heard move lands at the swap (over
+  `remaining`, or `J`). The 4.6e-6 at 12 blocks heard comes from that landing recomputing the
+  stage's ramp step.
+- A second Reposition inside a stretched landing (B17-R13 tranche 5): a flagged rebuild also folds
+  `(its revision, J)` into the window, so a second table-only rebuild inside the first one's
+  landing over `J` is flagged too (gate
+  `a_second_reposition_inside_a_stretched_landing_reports_a_fallback`). D2 deletes this with the
+  rest of the flag.
+- Further over-report: `may_ramp` reads the watermark's newest `first_sample`, so any later
+  revision restarts the window (a non-level edit, or the flagged rebuild itself). A stream of live
+  edits keeps it open after one level move.
+- A cell's own jump of `J` that is still running at a Reposition swap and is landed over `J` again
+  is specified D2 behaviour, not a defect: it has no user length, and a fresh plan with the new
+  table also jumps over `J`. The exception is a stretched live move's landing, which is covered by
+  the tranche-5 fold today and by D1 after this issue.
+- MINOR 4 (from B17-R13, not gated): the comparison point `at = end` in `settle_adoption` has no
+  gate. It is observable with a heard move on the flat ride (`S` moves, the curve does not), then
+  a table whose step falls inside the remaining ramp. G2 can use that setup.
 
 ## Decision to make at filing
 
@@ -78,7 +88,8 @@ conservative fallback flag of B17-R14 with the exact behaviour and deletes that 
   the swap is bit-equal to the uninterrupted engine's (or, where the table's own values differ,
   to a fresh plan prepared with the new table and given the same move), allocation-free, adopted,
   and the rebuild's watermark advance reports `OUTCOME_EXACT`.
-- G2. The comparison point: a heard move whose stage target equals the curve at its ramp's end
+- G2. The comparison point (setup: a heard move on the flat ride, then a table whose step falls
+  inside the remaining ramp): a heard move whose stage target equals the curve at its ramp's end
   keeps its own length with less than `J` left (red if the curve is compared at the block's first
   sample).
 - G3. The B17-R13 step gate and the #1648 gates stay green; realtime policy count unchanged or

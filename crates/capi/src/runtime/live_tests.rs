@@ -9355,6 +9355,52 @@ mod set_control {
             }
         }
 
+        /// B17-R13 tranche 5 (verifier MAJOR 1). A live VCA move with a 500-sample ramp, heard 2
+        /// blocks, is stretched to `J` (960) by a table-only rebuild R1, which reports the
+        /// transition fallback; a second table-only rebuild R2 sent 5 blocks after R1's adoption,
+        /// inside that landing over `J` but past the move's own 500 samples, stretches it again
+        /// and reports the fallback too.
+        ///
+        /// Test value: red if a flagged rebuild does not keep the level-move window open for `J`
+        /// from its adoption (R2 then reports `OUTCOME_EXACT`, checked once).
+        #[test]
+        fn a_second_reposition_inside_a_stretched_landing_reports_a_fallback() {
+            let fallback = crate::abi::OUTCOME_TRANSITION_FALLBACK;
+            let document = riding();
+            let track = first_track(&document);
+            let offset = session::AutomationOffset::default();
+            let mut a = Rig::new(&document);
+            for _ in 0..4 {
+                a.step();
+            }
+            send(
+                &mut a,
+                &[vca_move(-6.0, Some(500))],
+                protocol::EditPath::Live,
+                "the move",
+            );
+            for _ in 0..2 {
+                a.step();
+            }
+            for (label, end_db, fallbacks) in [("R1", -6.0, 1), ("R2", -9.0, 2)] {
+                send(
+                    &mut a,
+                    &[split_ride(&track, (10_000, end_db), offset)],
+                    protocol::EditPath::Rebuild,
+                    label,
+                );
+                for _ in 0..5 {
+                    a.step();
+                }
+                assert_eq!(a.summary().3, 0, "{label}: the successor is adopted");
+                assert_eq!(
+                    outcome(&a),
+                    (fallback, fallbacks),
+                    "{label}: the rebuild's outcome flags and the transition-fallback count"
+                );
+            }
+        }
+
         /// U3 fold 2, MINOR (#1648 D2, D15-2). Two live VCA moves around a rebuild, with no block
         /// between any of them: a move pending at a rebuild whose own transaction moves `v`
         /// again, and a move, a rebuild, then a second live move. The first move is replaced

@@ -784,9 +784,23 @@ elsewhere. `scripts/check-cross-targets.sh` passes.
   table did not move, a rebuild that Repositions no lane, a move on a strip that has no automation.
   After a newer revision, the window also over-reports because the newest revision is paired with
   the longest ramp. A rebuild while a move is still pending (no block has heard it) is flagged too.
-- Not flagged (not a live level move): a cell's own jump of `J` that is still running at a
-  Reposition swap is extended in the same way. This is read from the code, not measured (TBD50
-  context).
+  `may_ramp` reads the watermark's newest `first_sample`, so any later revision restarts the
+  window: a non-level edit, or the flagged rebuild itself. A stream of live edits therefore keeps
+  the window open after one level move.
+- A second Reposition inside a stretched landing (verifier MAJOR 1, tranche 5, root option a): a
+  move with a ramp shorter than `J` (500) is flagged at R1 and landed over `J` from R1. Before this
+  fix the window closed `ramp` samples after R1's adoption, so a second table-only rebuild R2
+  between R1 + ramp and R1 + `J` landed it over `J` again and reported EXACT (verifier: 6.9e-3
+  with R2 5 blocks after R1, 1.9e-3 at 7 blocks). Fix: a flagged transaction rebuild also folds
+  `(its revision, J)` into the window, with `J = LiveRamps::for_session(next).fader_samples`, after
+  the commit and beside the rebuild's own level fold. Gate:
+  `a_second_reposition_inside_a_stretched_landing_reports_a_fallback` (capi): a VCA move of 500
+  samples heard 2 blocks; R1 reports the fallback (count 1); R2, sent 5 blocks after R1, reports
+  it too (count 2). Red without the new fold (R2 reads EXACT, count 1), checked once.
+- A cell's own jump of `J` that is still running at a Reposition swap and is landed over `J` again
+  is specified D2 behaviour, not a fallback: it has no user length, and a fresh plan with the new
+  table also jumps over `J`. The one exception is a stretched live move's landing, which the
+  tranche-5 fold above now covers.
 - Gates: `a_reposition_swap_while_a_level_move_ramps_reports_a_fallback`
   (`crates/capi/src/runtime/live_tests.rs`): a live VCA move heard 24, 26 and 30 blocks, and a
   move inside a rebuild heard 12 blocks, report `OUTCOME_TRANSITION_FALLBACK` (count 1) on the

@@ -2626,11 +2626,14 @@ where
                     engine::realtime::CandidateOutcome::Exact
                 };
                 let moved =
-                    rebuild_moves_a_level(committed, next, &self.monitor, &monitor_change.overlay);
-                (
-                    outcome,
-                    moved.then(|| rebuild_level_ramp(next, session.edit_ramps())),
-                )
+                    rebuild_moves_a_level(committed, next, &self.monitor, &monitor_change.overlay)
+                        .then(|| rebuild_level_ramp(next, session.edit_ramps()));
+                // A flagged rebuild may land a stretched move over `J` from its first block, so
+                // the window stays open for `J` from there: a second Reposition inside that
+                // landing stretches it again (verifier MAJOR 1, B17-R13 tranche 5).
+                let landing = (outcome == engine::realtime::CandidateOutcome::TransitionFallback)
+                    .then(|| controls::LiveRamps::for_session(next).fader_samples);
+                (outcome, moved.max(landing))
             }
             Rebuild::Discontinuity(_) => (engine::realtime::CandidateOutcome::Exact, None),
         };
@@ -2824,7 +2827,8 @@ where
             // withdrawn candidate, drops below as a commit's displaced model does.
             Rebuild::Discontinuity(model) => (None, Some(*model)),
         };
-        // B17-R14: the rebuild's own level changes ramp from its successor's first block.
+        // B17-R14: the rebuild's own level changes ramp from its successor's first block, and a
+        // flagged rebuild's landing over `J` does too.
         if let Some(ramp) = rebuild_level {
             fold_level_move(&mut self.level_moves, revision, ramp);
         }
