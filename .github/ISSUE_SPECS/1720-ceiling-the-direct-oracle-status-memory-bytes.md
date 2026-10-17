@@ -1,7 +1,7 @@
 # Ceiling the direct oracle's status memory bytes
 
 Proposed by the controls coordinator from batch 20 (#1669 review, NIT/placeholder; 2026-10-17).
-A draft for root to file. Not phase-2 automation work: test hygiene for the browser identity
+Filed by root. Not phase-2 automation work: test hygiene for the browser identity
 gate. Code anchors at `589403170`.
 
 ## Product outcome
