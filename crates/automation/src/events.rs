@@ -81,6 +81,56 @@ impl NodeSpan {
             frames,
         })
     }
+
+    /// The block length.
+    pub(crate) const fn frames(&self) -> u32 {
+        self.frames
+    }
+
+    /// The seek step's offset, if the block has one.
+    pub(crate) const fn step_offset(&self) -> Option<u32> {
+        match self.step {
+            Some((offset, _)) => Some(offset),
+            None => None,
+        }
+    }
+
+    /// The node time at `offset` (the step's time from the step on); `None` past the block or the
+    /// `i64` range.
+    pub(crate) fn time_at(&self, offset: u32) -> Option<i64> {
+        if offset >= self.frames {
+            return None;
+        }
+        match self.step {
+            Some((step, time)) if offset >= step => time.checked_add(i64::from(offset - step)),
+            _ => self.start.checked_add(i64::from(offset)),
+        }
+    }
+
+    /// The offsets `[from, to)` of this block as a span of their own, whose offset 0 is `from`:
+    /// the same node times, and the seek step when it lies inside the window. `None` for an empty
+    /// or out-of-block window, or past the `i64` range. A cell's events over the window are the
+    /// block's events at those offsets, shifted by `from`, for a state advanced to `from`: the
+    /// event generator keeps nothing across offsets but its [`CellState`].
+    pub(crate) fn window(&self, from: u32, to: u32) -> Option<Self> {
+        if from >= to || to > self.frames {
+            return None;
+        }
+        let frames = to - from;
+        let (start, step) = match self.step {
+            Some((step, time)) if from > step => (time.checked_add(i64::from(from - step))?, None),
+            Some((step, time)) if step < to => (
+                self.start.checked_add(i64::from(from))?,
+                Some((step - from, time)),
+            ),
+            _ => (self.start.checked_add(i64::from(from))?, None),
+        };
+        Some(Self {
+            start,
+            step,
+            frames,
+        })
+    }
 }
 
 /// The ramp in flight, the current target and the cursor of one cell, kept across blocks.
@@ -216,6 +266,85 @@ impl CellState {
             None
         }
     }
+
+    /// `true` when a retarget whose target has the same bits as the current one (`same`, which
+    /// is `false` with no target) changes nothing the stage holds: no held event is outstanding.
+    /// The change-only rule of every grid and jump event, shared with the merged walk
+    /// ([`crate::compose`]).
+    pub(crate) const fn unchanged_with(&self, same: bool) -> bool {
+        same && !self.held
+    }
+
+    /// `true` when the ramp in flight completes after a ramp of `ramp` samples started at `time`
+    /// would ([`completion_of`] under `completion`): it is still short of its target there, so
+    /// change only must not drop a jump.
+    pub(crate) const fn lagging(&self, completion: Completion, time: i64, ramp: u32) -> bool {
+        self.ramp_done != IDLE && self.ramp_done > completion_of(completion, time, ramp)
+    }
+
+    /// The held-event rule: a held event whose value `differs` from the current target (or with
+    /// no target) is outstanding; one that does not is emitted only to clear an outstanding one.
+    /// Returns whether the held event is emitted.
+    pub(crate) const fn hold_event(&mut self, differs: bool) -> bool {
+        if !differs && !self.held {
+            return false;
+        }
+        self.held = differs;
+        true
+    }
+
+    /// A retarget of `n` samples from `start` committed: no held event is outstanding and the
+    /// ramp in flight completes at [`completion_of`] (none for `n = 0`).
+    pub(crate) const fn commit_ramp(&mut self, completion: Completion, start: i64, n: u32) {
+        self.held = false;
+        self.ramp_done = if n == 0 {
+            IDLE
+        } else {
+            completion_of(completion, start, n)
+        };
+    }
+
+    /// A seek landing's reset: a deferred jump belongs to the old position and is dropped, and no
+    /// held event stays outstanding.
+    pub(crate) const fn clear_for_landing(&mut self) {
+        self.deferred = IDLE;
+        self.held = false;
+    }
+
+    /// The first node time at which the ramp in flight no longer runs under `completion`, if a
+    /// ramp is in flight.
+    pub(crate) const fn free_after(&self, completion: Completion) -> Option<i64> {
+        if self.ramp_done == IDLE {
+            return None;
+        }
+        Some(match completion {
+            Completion::End => self.ramp_done.saturating_add(1),
+            Completion::After => self.ramp_done,
+        })
+    }
+}
+
+/// The value a ramp of `n` samples started at `start` aims for on `program`, with `state`'s
+/// cursor: the curve at its completion, but never past the next discontinuity, which a jump of its
+/// own retargets at its exact time. The one rule of every grid, jump and landing target, and of
+/// the merged walk's record target ([`crate::compose`]).
+pub(crate) fn target_toward(
+    program: &CellProgram<'_>,
+    state: &CellState,
+    start: i64,
+    n: u32,
+) -> f32 {
+    let mut at = completion_of(program.completion, start, n);
+    let ahead = program
+        .discontinuities
+        .get(state.cursor as usize..)
+        .unwrap_or(&[]);
+    if let Some(&next) = ahead.get(ahead.partition_point(|&time| time <= start))
+        && next <= at
+    {
+        at = next - 1;
+    }
+    value_at(program.segments, at)
 }
 
 fn to_cursor(index: usize) -> u32 {
@@ -328,46 +457,27 @@ impl<'a, 's> CellEvents<'a, 's> {
 
     /// The first node time at which the lane's ramp in flight no longer runs.
     fn free_at(&self) -> i64 {
-        if self.state.ramp_done == IDLE {
-            return IDLE;
-        }
-        match self.program.completion {
-            Completion::End => self.state.ramp_done.saturating_add(1),
-            Completion::After => self.state.ramp_done,
-        }
+        self.state
+            .free_after(self.program.completion)
+            .unwrap_or(IDLE)
     }
 
     /// The value a ramp of `n` samples started at `start` aims for: the curve at its completion,
     /// but never past the next discontinuity, which a jump of its own retargets at its exact time.
     fn target_at(&self, start: i64, n: u32) -> f32 {
-        let mut at = self.completion(start, n);
-        let ahead = self
-            .program
-            .discontinuities
-            .get(self.state.cursor as usize..)
-            .unwrap_or(&[]);
-        if let Some(&next) = ahead.get(ahead.partition_point(|&time| time <= start))
-            && next <= at
-        {
-            at = next - 1;
-        }
-        value_at(self.program.segments, at)
+        target_toward(&self.program, self.state, start, n)
     }
 
     /// `true` when a retarget to `value` changes nothing the stage holds.
     fn unchanged(&self, value: f32) -> bool {
-        self.state.has_target && self.state.target == value.to_bits() && !self.state.held
+        self.state
+            .unchanged_with(self.state.has_target && self.state.target == value.to_bits())
     }
 
     fn commit(&mut self, value: f32, start: i64, n: u32) {
         self.state.target = value.to_bits();
         self.state.has_target = true;
-        self.state.held = false;
-        self.state.ramp_done = if n == 0 {
-            IDLE
-        } else {
-            self.completion(start, n)
-        };
+        self.state.commit_ramp(self.program.completion, start, n);
     }
 
     /// The landing of the seek step at `offset`, node time `time`.
@@ -375,8 +485,7 @@ impl<'a, 's> CellEvents<'a, 's> {
         let cursor = self.program.discontinuities.partition_point(|&d| d < time);
         let on_time = self.program.discontinuities.get(cursor) == Some(&time);
         self.state.cursor = to_cursor(cursor + usize::from(on_time));
-        self.state.deferred = IDLE;
-        self.state.held = false;
+        self.state.clear_for_landing();
         match self.mode {
             SeekMode::Exact => {
                 let value = value_at(self.program.segments, time);
@@ -411,8 +520,7 @@ impl<'a, 's> CellEvents<'a, 's> {
         // the discontinuity: its target can equal the jump's (a grid ramp aimed at `d - 1` where
         // `value(d - 1) == value(d)` but the left limit differs), and change only must not drop
         // the jump then.
-        let lagging =
-            self.state.ramp_done != IDLE && self.state.ramp_done > self.completion(time, ramp);
+        let lagging = self.state.lagging(self.program.completion, time, ramp);
         if self.unchanged(value) && !lagging {
             return None;
         }
@@ -439,10 +547,9 @@ impl<'a, 's> CellEvents<'a, 's> {
             !self.program.no_restart && self.state.deferred != IDLE && time < self.state.deferred;
         if (in_flight && (self.program.no_restart || done < self.state.ramp_done)) || deferring {
             let differs = !self.state.has_target || self.state.target != value.to_bits();
-            if !differs && !self.state.held {
+            if !self.state.hold_event(differs) {
                 return None;
             }
-            self.state.held = differs;
             return Some(Event {
                 offset,
                 value,

@@ -1141,7 +1141,7 @@ pub(crate) const FOLLOW_ROUTE_CELL_WORDS: usize = 7;
 ///
 /// `terms[lane]` is the source lane's effective mute without its curve (`controls::effective`'s
 /// source-lane mute: static mute, VCA mute and solo term). `automated[lane]` is fixed by the plan:
-/// whether that source lane has a stored mute curve.
+/// whether that source lane has a stored mute curve (its own or a reaching VCA's, #1655 D4).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RouteFollowFlags {
     /// The route's own mute: it silences the route whatever the source does.
@@ -1354,15 +1354,50 @@ impl FollowRouteControlLane {
 }
 // REALTIME_POLICY_END
 
-/// The length, in samples, of one jump of a stored mute curve, resolved from the block's three
-/// session lengths (#1652b). Host-core hands in the row rule (`controls::LiveRamps::from_lengths`
-/// and `for_row(LiveRampRow::Mute)`, the rule the strip's mute stage uses), so graph never spells
-/// the mute row and the strip ramp and the send ramp cannot differ in length.
-pub type GraphMuteJumpLength = fn(GraphJumpLengths) -> u32;
+/// Which jump length one cursor of a following route takes (#1652b, #1655 D4): the mute rule for
+/// a source lane's own mute, `VcaMute` for a reaching VCA's mute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphRouteCursorRow {
+    /// A source lane's stored mute (#1652).
+    SourceMute,
+    /// The stored mute of an automated VCA that reaches the source lane (#1655 D4).
+    VcaMute,
+}
 
-/// What one following route reads of its source strip's stored mute (#1652 D2, #1652b): the plan's
-/// immutable automation program, the source lanes' mute cells in it, the arrival `a(tap)` of the
-/// route's tap, the mute row's jump length and the seeded flags word.
+/// The jump lengths, in samples, of a following route's cursor rows for one block, resolved from
+/// the block's three session lengths by [`GraphRouteJumpRule`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphRouteJumpLengths {
+    /// The mute row's length: a source lane's own mute.
+    pub mute: u32,
+    /// The `VcaMute` row's length: a reaching VCA's mute curve (#1655 D4).
+    pub vca_mute: u32,
+}
+
+impl GraphRouteJumpLengths {
+    // REALTIME_POLICY_BEGIN
+    /// The jump length of a cursor of `row`.
+    #[must_use]
+    pub const fn for_row(self, row: GraphRouteCursorRow) -> u32 {
+        match row {
+            GraphRouteCursorRow::SourceMute => self.mute,
+            GraphRouteCursorRow::VcaMute => self.vca_mute,
+        }
+    }
+    // REALTIME_POLICY_END
+}
+
+/// The jump lengths of a following route's cursor rows, resolved from the block's three session
+/// lengths (#1652b, #1655 D4). Host-core hands in the row rules
+/// (`controls::LiveRamps::from_lengths` and `for_row` of `LiveRampRow::Mute` and `VcaMute`, the
+/// rules the strip's stages use), so graph never spells a row and the strip ramp and the send ramp
+/// cannot differ in length.
+pub type GraphRouteJumpRule = fn(GraphJumpLengths) -> GraphRouteJumpLengths;
+
+/// What one following route reads of its stored automation (#1652 D2, #1652b, #1655 D4): the
+/// plan's immutable automation program, the source lanes' mute cells in it, the cells of the
+/// automated VCA mutes that reach each source lane, the arrival `a(tap)` of the route's tap, the
+/// cursor rows' jump-length rule and the seeded flags word.
 ///
 /// The program is the one the strip's own stage reads (an `Arc` clone, no copy); the route keeps
 /// its own cursors over it, so two readers of one table never share state. `a(tap)` is the route
@@ -1373,39 +1408,65 @@ pub type GraphMuteJumpLength = fn(GraphJumpLengths) -> u32;
 pub struct GraphFollowRouteSource {
     pub(crate) program: std::sync::Arc<automation::Program>,
     pub(crate) cells: [Option<u32>; 2],
+    /// Per source lane, the mute cells of the automated VCAs that reach it, in ascending VCA ID
+    /// (#1655 D4): the route ORs them into the lane's follow term at `a(tap)`.
+    pub(crate) vca_mutes: [Box<[u32]>; 2],
     pub(crate) arrival: u64,
-    pub(crate) mute_jump: GraphMuteJumpLength,
+    pub(crate) jumps: GraphRouteJumpRule,
     pub(crate) flags: RouteFollowFlags,
+    /// Per source lane, whether the predecessor plan holds the same VCA mute tables for it, in
+    /// the same order ([`Self::with_continued_vca_mutes`]).
+    pub(crate) continued_vca: [bool; 2],
 }
 
 impl GraphFollowRouteSource {
     /// The source of a following route: `cells[lane]` is the source lane's mute cell in
-    /// `program`, `None` for a lane the plan does not automate; `arrival` is `a(tap)`;
-    /// `mute_jump` resolves the mute row's jump length; `flags` is the seeded flags word.
+    /// `program`, `None` for a lane whose own mute the plan does not automate; `vca_mutes[lane]`
+    /// are the mute cells in `program` of the automated VCAs that reach the lane, in ascending VCA
+    /// ID (#1655 D4, empty when none does); `arrival` is `a(tap)`; `jumps` resolves the cursor
+    /// rows' jump lengths; `flags` is the seeded flags word.
     ///
-    /// `None` when no lane is automated (the route keeps the six-word cell), when a cell is not in
-    /// `program`, or when `flags.automated` disagrees with `cells` (the plan fixes which lanes
-    /// are automated, D1).
+    /// `None` when no source lane is automated (the route keeps the six-word cell), when a cell is
+    /// not in `program`, or when `flags.automated` disagrees with the lanes that have a curve (own
+    /// cell or VCA mute cells; the plan fixes which lanes are automated, D1).
     #[must_use]
     pub fn new(
         program: std::sync::Arc<automation::Program>,
         cells: [Option<u32>; 2],
+        vca_mutes: [Vec<u32>; 2],
         arrival: u64,
-        mute_jump: GraphMuteJumpLength,
+        jumps: GraphRouteJumpRule,
         flags: RouteFollowFlags,
     ) -> Option<Self> {
-        let automated = cells.map(|cell| cell.is_some());
+        let automated = [0, 1].map(|lane| {
+            cells.get(lane).copied().flatten().is_some()
+                || vca_mutes.get(lane).is_some_and(|list| !list.is_empty())
+        });
         let in_program = cells
             .iter()
             .flatten()
+            .chain(vca_mutes.iter().flatten())
             .all(|&cell| program.cell(cell as usize).is_some());
-        (automated != [false; 2] && in_program && flags.automated == automated).then_some(Self {
+        (automated.contains(&true) && in_program && flags.automated == automated).then(|| Self {
             program,
             cells,
+            vca_mutes: vca_mutes.map(Vec::into_boxed_slice),
             arrival,
-            mute_jump,
+            jumps,
             flags,
+            continued_vca: [false; 2],
         })
+    }
+
+    /// This source with `lanes[lane]` set for each source lane whose VCA mute tables the
+    /// predecessor plan holds unchanged, the same VCAs in the same order (#1655 D6,
+    /// `controls::continued_mute_lanes`): at a plan swap that lane's VCA mute cursors carry their
+    /// state and heard values verbatim, where otherwise they are placed again at the successor's
+    /// node time. By default no lane continues.
+    #[must_use]
+    pub const fn with_continued_vca_mutes(mut self, lanes: [bool; 2]) -> Self {
+        self.continued_vca = lanes;
+        self
     }
 
     /// `a(tap)`, the arrival the route's events are timed at.
@@ -1429,8 +1490,12 @@ pub struct GraphFollowRouteControlBinding {
     pub node: GraphNodeId,
     /// Reader half of the seven-word cell; the writer stays on the control plane.
     pub control: Box<FollowRouteControlLane>,
-    /// The source strip's mute cells, `a(tap)`, the jump length and the seeded flags.
+    /// The source strip's mute cells, the reaching VCA mute cells, `a(tap)`, the jump rule and
+    /// the seeded flags.
     pub source: GraphFollowRouteSource,
+    /// The route op's cursor tables, allocated at attach so a failed allocation is a typed
+    /// refusal ([`GraphRouteControlError::CursorTable`]); bind moves them into the op.
+    pub(crate) columns: runtime::FollowColumns,
 }
 
 /// The control-plane half of one following route's seven-word cell (#1652 D1): the counterpart of
@@ -1453,6 +1518,10 @@ pub struct GraphFollowRouteControlProducer {
     /// takes `automated` from its own cursors, so a record whose bits differ is refused by the
     /// commit before any write (#1653 D5).
     automated: [bool; 2],
+    /// The bytes of the route op's cursor tables bind allocates (#1654 T3, R19-3: per column with
+    /// a curve, its merged walk's table and its probe twin's), and the largest one.
+    cursor_bytes: u64,
+    cursor_largest: u64,
 }
 
 impl GraphFollowRouteControlProducer {
@@ -1507,16 +1576,21 @@ pub(crate) fn follow_route_control_pair(
     activity_bytes: u64,
     activity_largest: u64,
     activity_routes: u64,
-) -> (
-    GraphFollowRouteControlBinding,
-    GraphFollowRouteControlProducer,
-) {
+) -> Result<
+    (
+        GraphFollowRouteControlBinding,
+        GraphFollowRouteControlProducer,
+    ),
+    automation::ComposeError,
+> {
+    let columns = runtime::FollowColumns::bind(&source)?;
     let lane = std::sync::Arc::new(FollowRouteLane {
         cell: engine::realtime::LatestCell::new(),
         dirty: engine::realtime::DirtyWord::new(),
     });
     let automated = source.flags().automated;
-    (
+    let (cursor_bytes, cursor_largest) = runtime::follow_route_cursor_bytes(&source);
+    Ok((
         GraphFollowRouteControlBinding {
             node: GraphNodeId::Route {
                 route_id: route_id.clone(),
@@ -1528,6 +1602,7 @@ pub(crate) fn follow_route_control_pair(
                 superseded: superseded.clone(),
             }),
             source,
+            columns,
         },
         GraphFollowRouteControlProducer {
             route_id: route_id.as_str().into(),
@@ -1538,8 +1613,10 @@ pub(crate) fn follow_route_control_pair(
             activity_offset_bytes: runtime::route_activity_offset_bytes(activity_routes)
                 .unwrap_or(u64::MAX),
             automated,
+            cursor_bytes,
+            cursor_largest,
         },
-    )
+    ))
 }
 
 /// Why [`PreparedGraphPlan::attach_route_controls`] refused.
@@ -1550,6 +1627,9 @@ pub enum GraphRouteControlError {
     /// A route into a submix is also a node the plan requires a processor for; a live route is
     /// never a [`GraphNodeBinding`] (its op would not mix).
     BoundRoute,
+    /// A following route's cursor tables were refused (#1654 T3: an allocation failure; a
+    /// source's cells are always its program's).
+    CursorTable(automation::ComposeError),
 }
 
 /// The bytes bind allocates for one live route's render-side owner, its boxed state (issue #1220
@@ -1578,7 +1658,9 @@ pub struct RouteControlResources {
     pub cell_bytes: u64,
     /// Per route: the boxed [`RouteControlLane`], the plan's [`GraphRouteControlBinding`] entry
     /// (held until bind) and the boxed render-side owner bind builds; for a following route the
-    /// boxed [`FollowRouteControlLane`], its [`GraphFollowRouteControlBinding`] and its owner.
+    /// boxed [`FollowRouteControlLane`], its [`GraphFollowRouteControlBinding`], its owner and
+    /// its route op's cursor tables (#1654 T3: per column with a curve, two tables of one cursor
+    /// per curve).
     pub owner_bytes: u64,
     /// The producer tables: one [`GraphRouteControlProducer`] per six-word route and one
     /// [`GraphFollowRouteControlProducer`] per following route.
@@ -1646,6 +1728,10 @@ pub fn route_control_resources(
     let follow_lane = count(core::mem::size_of::<FollowRouteControlLane>());
     let follow_binding = count(core::mem::size_of::<GraphFollowRouteControlBinding>());
     let follow_owner = count(LIVE_FOLLOW_ROUTE_OWNER_BYTES);
+    // #1654 T3: each following route's cursor tables, sized by its own curves.
+    let cursor_bytes = following.iter().fold(0_u64, |sum, producer| {
+        sum.saturating_add(producer.cursor_bytes)
+    });
     let owner_bytes = six
         .saturating_mul(lane.saturating_add(binding).saturating_add(owner))
         .saturating_add(
@@ -1654,7 +1740,11 @@ pub fn route_control_resources(
                     .saturating_add(follow_binding)
                     .saturating_add(follow_owner),
             ),
-        );
+        )
+        .saturating_add(cursor_bytes);
+    for producer in following {
+        largest = largest.max(producer.cursor_largest);
+    }
     let six_producers =
         six.saturating_mul(count(core::mem::size_of::<GraphRouteControlProducer>()));
     let seven_producers = seven.saturating_mul(count(core::mem::size_of::<
@@ -2727,7 +2817,9 @@ impl PreparedGraphPlan {
     /// canonical route-ID order. `following` is asked once per route into a submix, in that
     /// order, so a route into an output never follows (decision 13 P11).
     ///
-    /// Refused as [`Self::attach_route_controls`] is.
+    /// Refused as [`Self::attach_route_controls`] is, and with
+    /// [`GraphRouteControlError::CursorTable`] when a following route's cursor tables cannot be
+    /// allocated (nothing is attached then).
     pub fn attach_route_controls_following(
         &mut self,
         superseded: &engine::realtime::LiveValuesSuperseded,
@@ -2817,7 +2909,8 @@ impl PreparedGraphPlan {
                     activity_bytes,
                     activity_largest,
                     u64::try_from(self.routes.len()).unwrap_or(u64::MAX),
-                );
+                )
+                .map_err(GraphRouteControlError::CursorTable)?;
                 follow_bindings.push(binding);
                 follow_producers.push(producer);
                 continue;
@@ -4959,6 +5052,10 @@ pub struct GraphLiveRoute {
     /// Whether the route is a following route (#1652 D1): a successor's move from this row
     /// carries [`GraphRouteMove::predecessor_follows`].
     pub following: bool,
+    /// A following route's automated source lanes (its flags' `automated`, the follow curves its
+    /// cursors hear); `[false; 2]` for a six-word route. A successor's join compares it with its
+    /// own to find a carried route that loses a source mute curve (B19-R7).
+    pub automated: [bool; 2],
 }
 
 impl GraphLiveRoute {
@@ -10487,9 +10584,12 @@ mod follow_route_tests {
         StableGraphId::parse(value).expect("a route ID")
     }
 
-    /// The mute row's jump length of the tests: the session's `mute_ms` length.
-    pub(crate) fn mute_length(lengths: GraphJumpLengths) -> u32 {
-        lengths.mute_samples
+    /// The cursor rows' jump lengths of the tests: the session's `mute_ms` length for both rows.
+    pub(crate) fn route_jumps(lengths: GraphJumpLengths) -> GraphRouteJumpLengths {
+        GraphRouteJumpLengths {
+            mute: lengths.mute_samples,
+            vca_mute: lengths.mute_samples,
+        }
     }
 
     /// A program of one mute-shaped cell per given lane (steps, completion `End`, block jump
@@ -10524,8 +10624,15 @@ mod follow_route_tests {
             automated: cells.map(|cell| cell.is_some()),
             ..RouteFollowFlags::default()
         };
-        GraphFollowRouteSource::new(program, cells, arrival, mute_length, flags)
-            .expect("a valid source")
+        GraphFollowRouteSource::new(
+            program,
+            cells,
+            [Vec::new(), Vec::new()],
+            arrival,
+            route_jumps,
+            flags,
+        )
+        .expect("a valid source")
     }
 
     /// A step curve: `values[i]` from `times[i]` on (the first value from the start).
@@ -10545,9 +10652,9 @@ mod follow_route_tests {
     }
 
     /// A source refuses no automated lane, a cell outside its program and `automated` flags that
-    /// disagree with its cells.
+    /// disagree with its cells (own or reaching VCA mute cells, #1655 D4).
     ///
-    /// Test value: red if a route with no automated lane takes the seven-word render state, or if
+    /// Test value: red if a route with no automation takes the seven-word render state, or if
     /// render could look up a cell its program does not hold.
     #[test]
     fn the_source_refuses_no_lane_a_missing_cell_and_disagreeing_flags() {
@@ -10556,17 +10663,40 @@ mod follow_route_tests {
         assert_eq!(source.arrival(), 7);
         let program = std::sync::Arc::clone(&source.program);
         let flags = source.flags();
-        let new = |cells, flags| {
+        let new_with = |cells, vca_mutes, flags| {
             GraphFollowRouteSource::new(
                 std::sync::Arc::clone(&program),
                 cells,
+                vca_mutes,
                 0,
-                mute_length,
+                route_jumps,
                 flags,
             )
             .is_some()
         };
+        let new = |cells, flags| new_with(cells, [Vec::new(), Vec::new()], flags);
         assert!(new([Some(0), None], flags));
+        // #1655 D4: a lane is automated by its own cell or by a reaching VCA mute's cells.
+        let both = RouteFollowFlags {
+            automated: [true, true],
+            ..flags
+        };
+        assert!(
+            new_with([Some(0), None], [Vec::new(), vec![0]], both),
+            "a lane only a VCA mute reaches"
+        );
+        assert!(
+            new_with([None, None], [vec![0, 0], vec![0]], both),
+            "VCA mute cells alone"
+        );
+        assert!(
+            !new_with([Some(0), None], [Vec::new(), vec![1]], both),
+            "a VCA mute cell outside the program"
+        );
+        assert!(
+            !new_with([Some(0), None], [vec![0], Vec::new()], both),
+            "VCA flags that disagree"
+        );
         assert!(!new([None, None], RouteFollowFlags::default()), "no lane");
         assert!(!new([Some(1), None], flags), "a cell outside the program");
         assert!(
@@ -10579,6 +10709,20 @@ mod follow_route_tests {
             ),
             "flags that disagree"
         );
+    }
+
+    /// The cursor rows' jump lengths: the source mute takes the mute length and a VCA mute the
+    /// `VcaMute` length.
+    ///
+    /// Test value: red if a route cursor would jump over another row's length.
+    #[test]
+    fn each_cursor_row_takes_its_own_jump_length() {
+        let lengths = GraphRouteJumpLengths {
+            mute: 3,
+            vca_mute: 4,
+        };
+        assert_eq!(lengths.for_row(GraphRouteCursorRow::SourceMute), 3);
+        assert_eq!(lengths.for_row(GraphRouteCursorRow::VcaMute), 4);
     }
 
     /// The layout: bit 0 mute, 1 follows_mute, 2-3 terms L/R, 4-5 automated L/R. Every one of the
@@ -10692,7 +10836,8 @@ mod follow_route_tests {
     fn the_producer_write_reaches_the_binding_under_the_published_revision() {
         let superseded = LiveValuesSuperseded::new();
         let (mut binding, mut producer) =
-            follow_route_control_pair(&route_id("send"), &superseded, one_lane_source(), 0, 0, 0);
+            follow_route_control_pair(&route_id("send"), &superseded, one_lane_source(), 0, 0, 0)
+                .expect("tables");
         assert_eq!(&*producer.route_id, "send");
         assert_eq!(
             binding.node,
@@ -10770,6 +10915,7 @@ mod follow_route_tests {
                     activity.1,
                     ACTIVITY_ROUTES,
                 )
+                .expect("tables")
                 .1
             })
             .collect();
@@ -10785,11 +10931,14 @@ mod follow_route_tests {
                 + core::mem::size_of::<GraphRouteControlBinding>()
                 + LIVE_ROUTE_OWNER_BYTES,
         );
+        // #1654 T3: the one-lane source's left column hears one curve: its walk's table and its
+        // probe twin's, one cursor each.
+        let cursors = 2 * size(automation::Composed::<([f32; 2], bool)>::bytes(1));
         let seven_owner = size(
             core::mem::size_of::<FollowRouteControlLane>()
                 + core::mem::size_of::<GraphFollowRouteControlBinding>()
                 + LIVE_FOLLOW_ROUTE_OWNER_BYTES,
-        );
+        ) + cursors;
         let six_table = 2 * size(core::mem::size_of::<GraphRouteControlProducer>());
         let seven_table = 3 * size(core::mem::size_of::<GraphFollowRouteControlProducer>());
         let ids = 2 * (1 + 2 + 3 + 4 + 5);

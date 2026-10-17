@@ -1273,17 +1273,18 @@ impl LiveRoute {
 
 // REALTIME_POLICY_END
 
-/// One following route's render state (#1652 D1, D2): a route into a submix whose source strip has
-/// an automated mute lane. Its own type, boxed beside [`LiveRoute`], so a six-word route keeps its
-/// bytes ([`live_route_owner_bytes`]), its code path and its bits.
+/// One following route's render state (#1652 D1, D2; #1654 T3; #1655 D4): a route into a submix
+/// whose source lane has an automated mute (its own, or a reaching VCA's). Its own type, boxed beside [`LiveRoute`], so a six-word route keeps its bytes
+/// ([`live_route_owner_bytes`]), its code path and its bits.
 ///
-/// `transform` and `flags` are the last applied cell words (or the seeded ones): render gates the
-/// open transform itself ([`crate::RouteFollowFlags::gate`], [`gated_route_coefficients`]) at the
-/// block entry after its cell changes and at every event of the source lanes' stored mute curves,
-/// which it evaluates with its own cursors ([`FollowCursors`]) in the node time of its tap,
-/// `τ_tap(r) = timeline(r + ΣP - a(tap))`. Only a source column whose target bits change
-/// retargets: a new [`IndexedRamp`] for that column from the coefficients it is at
-/// ([`ColumnRamps`], root ruling R18-5).
+/// `transform` and `flags` are the last applied cell words (or the seeded ones): render composes
+/// each source column's target itself ([`column_target`]: its gate,
+/// [`gated_route_coefficients`]) at the block entry after its cell changes and at every
+/// event of the curves it hears, which it walks with one merged walk per column
+/// ([`automation::Composed`], K1) in the node time of its tap, `τ_tap(r) = timeline(r + ΣP -
+/// a(tap))`. Only a column whose target bits change retargets: a new [`IndexedRamp`] for that
+/// column from the coefficients it is at ([`ColumnRamps`], root ruling R18-5), over the event's
+/// own ramp.
 pub(crate) struct LiveFollowRoute {
     /// The two column ramps and how far into each the route is.
     ramps: ColumnRamps,
@@ -1296,12 +1297,12 @@ pub(crate) struct LiveFollowRoute {
     /// The open transform the last applied record (or preparation) gave.
     transform: crate::RouteTransform,
     /// The flags the last applied record (or preparation) gave; render composes with the plan's
-    /// `automated` ([`FollowCursors::automated`]), never the record's.
+    /// automated lanes (the cursors it holds, [`ColumnRoles`]), never the record's.
     flags: crate::RouteFollowFlags,
     control: Box<crate::FollowRouteControlLane>,
-    /// The cursors over the source lanes' stored mute cells.
+    /// The merged walks over the curves the route hears.
     follow: FollowCursors,
-    /// This block's node spans and jump length, set by [`Self::begin_block`] and read by
+    /// This block's node spans and jump lengths, set by [`Self::begin_block`] and read by
     /// [`Self::mix`].
     block: FollowBlock,
 }
@@ -1367,28 +1368,35 @@ impl ColumnRamps {
         self.positions[0] >= self.ramps[0].length && self.positions[1] >= self.ramps[1].length
     }
 
-    /// Retarget each column whose target bits change, from the coefficients it is at, over
-    /// `length`; a column whose bits do not change keeps its ramp and position. A column's new
-    /// ramp holds the target in the other column's entries, so only its own entries decide
-    /// whether it ramps or steps ([`IndexedRamp::new`]'s non-finite rule).
-    fn retarget(&mut self, target: [f32; 4], length: u32) {
-        let at = self.coefficients();
-        for (column, indices) in COLUMNS.iter().enumerate() {
-            let (Some(ramp), Some(position)) =
-                (self.ramps.get_mut(column), self.positions.get_mut(column))
-            else {
-                continue;
-            };
-            if indices
-                .iter()
-                .all(|&index| target[index].to_bits() == ramp.target[index].to_bits())
-            {
-                continue;
+    /// Retarget column `column` when its entries of `target` change bits, from the coefficients
+    /// it is at, over its own `length` (#1654 T3: each column takes its event's ramp); a column
+    /// whose bits do not change keeps its ramp and position. The new ramp holds the target in the
+    /// other column's entries, which are never read, so only its own entries decide whether it
+    /// ramps or steps ([`IndexedRamp::new`]'s non-finite rule).
+    fn retarget_column(&mut self, column: usize, target: [f32; 4], length: u32) {
+        let (Some(indices), Some(ramp), Some(&position)) = (
+            COLUMNS.get(column),
+            self.ramps.get(column),
+            self.positions.get(column),
+        ) else {
+            return;
+        };
+        if indices.iter().all(|&index| {
+            target.get(index).map(|value| value.to_bits())
+                == ramp.target.get(index).map(|value| value.to_bits())
+        }) {
+            return;
+        }
+        let at = ramp.coefficients_at(position);
+        let mut start = target;
+        for &index in indices {
+            if let (Some(slot), Some(&value)) = (start.get_mut(index), at.get(index)) {
+                *slot = value;
             }
-            let mut start = target;
-            for &index in indices {
-                start[index] = at[index];
-            }
+        }
+        if let (Some(ramp), Some(position)) =
+            (self.ramps.get_mut(column), self.positions.get_mut(column))
+        {
             *ramp = IndexedRamp::new(start, target, length);
             *position = 0;
         }
@@ -1436,20 +1444,181 @@ impl ColumnRamps {
 }
 // REALTIME_POLICY_END
 
-/// A following route's own cursors over its source strip's stored mute cells (#1652 D2): the
-/// plan's immutable program, a cell and a [`automation::CellState`] per source lane, the curve
-/// state the route has heard, `a(tap)` and the mute row's jump-length rule.
+/// One source column's composed target: its two coefficients (its [`COLUMNS`] entries) and
+/// whether its gate silences it.
+type ColumnTarget = ([f32; 2], bool);
+
+/// Which cursors of a column's table carry its follow curves (#1652 D2, #1655 D4): the source
+/// lane's own stored mute (`None` when the plan does not automate it) first, then the mute curves
+/// of the automated VCAs that reach the source lane, any number of them, in ascending VCA ID.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ColumnRoles {
+    /// The source lane's own mute cursor's index.
+    own: Option<usize>,
+    /// The first VCA mute cursor's index.
+    vca_start: usize,
+    /// How many VCA mute cursors the column holds.
+    vca_count: usize,
+}
+
+impl ColumnRoles {
+    /// The cursor indices of the column's VCA mute curves (#1655 D4).
+    const fn vca(self) -> core::ops::Range<usize> {
+        self.vca_start..self.vca_start.saturating_add(self.vca_count)
+    }
+
+    /// Whether the column hears a curve of its source lane's follow term: the lane's own mute or
+    /// a reaching VCA mute.
+    const fn has_follow(self) -> bool {
+        self.own.is_some() || self.vca_count > 0
+    }
+
+    /// The curves' share of the column's follow term under the values `value(cursor)` (#1652 D2,
+    /// #1655 D4): the source lane's own mute curve OR each reaching VCA mute curve. `false` with
+    /// no such curve.
+    fn follow_curve(self, value: impl Fn(usize) -> f32) -> bool {
+        self.own.is_some_and(|index| value(index) != 0.0)
+            || self.vca().any(|index| value(index) != 0.0)
+    }
+}
+
+/// The cells of `column`'s cursor table under `source` and their roles: the source lane's own
+/// mute cursor, then its VCA mute cursors (#1655 D4), every one a gate. Control side: it
+/// allocates the list.
+fn column_cells(
+    source: &crate::GraphFollowRouteSource,
+    column: usize,
+) -> (Vec<(u32, automation::CursorKind)>, ColumnRoles) {
+    use automation::CursorKind::Gate;
+    let own = source.cells.get(column).copied().flatten();
+    let vca: &[u32] = source.vca_mutes.get(column).map_or(&[], |list| list);
+    let mut cells = Vec::with_capacity(usize::from(own.is_some()) + vca.len());
+    let own = own.map(|cell| {
+        cells.push((cell, Gate));
+        0
+    });
+    let vca_start = cells.len();
+    cells.extend(vca.iter().map(|&cell| (cell, Gate)));
+    (
+        cells,
+        ColumnRoles {
+            own,
+            vca_start,
+            vca_count: vca.len(),
+        },
+    )
+}
+
+/// The cursor tables bind allocates for one following route of `source` (#1654 T3, R19-3): per
+/// column with a curve, its walk's and its probe twin's tables (VCA mute cursors included, #1655
+/// D4), plus the source's VCA mute cell lists, which the binding holds until bind. Returns the
+/// total bytes and the largest single allocation.
+pub(crate) fn follow_route_cursor_bytes(source: &crate::GraphFollowRouteSource) -> (u64, u64) {
+    let mut total = 0_u64;
+    let mut largest = 0_u64;
+    for list in &source.vca_mutes {
+        let bytes = u64::try_from(core::mem::size_of_val::<[u32]>(list)).unwrap_or(u64::MAX);
+        total = total.saturating_add(bytes);
+        largest = largest.max(bytes);
+    }
+    for column in 0..COLUMNS.len() {
+        let (cells, _) = column_cells(source, column);
+        let count = cells.len();
+        if count == 0 {
+            continue;
+        }
+        let table =
+            u64::try_from(automation::Composed::<ColumnTarget>::bytes(count)).unwrap_or(u64::MAX);
+        total = total.saturating_add(table.saturating_mul(2));
+        largest = largest.max(table);
+    }
+    (total, largest)
+}
+
+/// One source column's merged walk (#1654 T3, K1): its cursor table over the curves it hears, a
+/// twin over the same cells for the block entry's activity probe, its roles and whether its VCA
+/// mute cursors continue at a carried first block.
+struct RouteColumn {
+    walk: automation::Composed<ColumnTarget>,
+    probe: automation::Composed<ColumnTarget>,
+    roles: ColumnRoles,
+    /// Whether every VCA mute cursor (#1655 D4) carried its predecessor's state verbatim (the
+    /// lane's VCA mute tables continue); else they are placed again at the first block's node
+    /// time, as the own mute cursor always is.
+    vca_continued: bool,
+}
+
+impl RouteColumn {
+    /// `column`'s walk under `source`, or `None` when the column hears no curve. Control side:
+    /// it allocates the two tables ([`follow_route_cursor_bytes`]).
+    ///
+    /// # Errors
+    ///
+    /// The tables' refusal: the source holds only cells of its program
+    /// (`GraphFollowRouteSource::new`), so only an allocation failure.
+    fn bind(
+        source: &crate::GraphFollowRouteSource,
+        column: usize,
+    ) -> Result<Option<Self>, automation::ComposeError> {
+        let (cells, roles) = column_cells(source, column);
+        if cells.is_empty() {
+            return Ok(None);
+        }
+        let table =
+            || automation::Composed::new(&source.program, &cells, automation::Completion::End);
+        Ok(Some(Self {
+            walk: table()?,
+            probe: table()?,
+            roles,
+            vca_continued: true,
+        }))
+    }
+}
+
+/// A following route's column walks ([`RouteColumn`]), allocated when its lane is attached and
+/// moved into its route op at bind (U2 fold 1: a failed allocation is a typed refusal).
+pub(crate) struct FollowColumns([Option<RouteColumn>; 2]);
+
+impl FollowColumns {
+    /// Both columns' walks under `source`. Control side.
+    ///
+    /// # Errors
+    ///
+    /// A table's refusal ([`RouteColumn::bind`]).
+    pub(crate) fn bind(
+        source: &crate::GraphFollowRouteSource,
+    ) -> Result<Self, automation::ComposeError> {
+        Ok(Self([
+            RouteColumn::bind(source, 0)?,
+            RouteColumn::bind(source, 1)?,
+        ]))
+    }
+}
+
+/// A following route's merged walks over the curves it hears (#1652 D2, #1654 T3): the plan's
+/// immutable program, one [`RouteColumn`] per source column that hears a curve, whether each
+/// column's target silences it, `a(tap)` and the cursor rows' jump-length rule.
 struct FollowCursors {
     program: std::sync::Arc<automation::Program>,
-    /// `[L, R]`; `None` for a lane the plan does not automate.
-    cells: [Option<u32>; 2],
-    states: [automation::CellState; 2],
-    /// Per lane, the curve value the route has heard (`value != 0`), from the seed on; on a
-    /// carried route, the predecessor's until its first block places the cursors.
-    curve: [bool; 2],
+    columns: [Option<RouteColumn>; 2],
+    silent: [bool; 2],
     /// `a(tap)`.
     arrival: u64,
-    mute_jump: crate::GraphMuteJumpLength,
+    jumps: crate::GraphRouteJumpRule,
+    /// Per column, whether the predecessor's VCA mute tables of the source lane continue
+    /// ([`crate::GraphFollowRouteSource::with_continued_vca_mutes`], #1655 D6).
+    continued_vca: [bool; 2],
+    /// Per column, the predecessor's column heard its source lane's own mute curve and this
+    /// column hears no follow curve (own or VCA mute, #1655 D4): a removed curve, set by a carry
+    /// and read by its first block (U2 fold 1, MAJOR-3).
+    dropped: [bool; 2],
+    /// Per column, the predecessor heard VCA mute curves and this column hears no follow curve
+    /// (#1655 D4): a removed curve that lands at once over the `VcaMute` length at the carry
+    /// (B19-R7).
+    dropped_vca: [bool; 2],
+    /// Per column, the predecessor's heard follow curve ([`ColumnRoles::follow_curve`]), set by a
+    /// carry: the first block compares the follow curves as one gate (#1655 D4).
+    follow_heard: [bool; 2],
     /// How the route's next block begins: fresh, carried or running.
     start: FollowStart,
 }
@@ -1457,70 +1626,91 @@ struct FollowCursors {
 /// How a following route's next block begins (#1652b, #1652 D3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FollowStart {
-    /// The route of a fresh plan has rendered no block: its first block sets the curve exactly at
-    /// its first sample when the curve there differs from the seed (#1647 D2, as the strip's
-    /// fresh lane).
+    /// The route of a fresh plan has rendered no block: its first block sets a column exactly at
+    /// its first sample when a curve there differs from its seed (#1647 D2, as the strip's fresh
+    /// lane).
     Fresh,
-    /// The route took a predecessor's ramps and heard curve at a plan swap (D3): its first block
-    /// applies its cell with the heard curve, then places its cursors at its own node time with
-    /// the curve's value there (no `Set`) and compares.
+    /// The route took a predecessor's ramps and cursors at a plan swap (D3): its first block
+    /// applies its cell with the heard values, then places the cursors that do not continue at
+    /// its own node time and compares.
     Carried,
     /// Every later block.
     Running,
 }
 
-/// One block's node spans per source lane and the block's mute jump length (#1652b). A lane with
-/// no span (no cell, no timeline, no jump-length cell, or a span at the `i64` edge) holds its
-/// curve and emits nothing this block.
+/// One block's node span per column, its cursor rows' jump lengths and the node time at its first
+/// sample (#1652b, #1654 T3). A column with no span holds its curves and emits nothing this block.
 #[derive(Clone, Copy)]
 struct FollowBlock {
     spans: [Option<automation::NodeSpan>; 2],
-    jump: u32,
+    lengths: crate::GraphRouteJumpLengths,
+    start: Option<i64>,
 }
 
 impl FollowBlock {
     const IDLE: Self = Self {
         spans: [None; 2],
-        jump: 0,
+        lengths: crate::GraphRouteJumpLengths {
+            mute: 0,
+            vca_mute: 0,
+        },
+        start: None,
     };
 }
 
+/// What a column's composition reads besides its heard values: the open transform and the flags.
+#[derive(Clone, Copy)]
+struct Composition<'a> {
+    transform: &'a crate::RouteTransform,
+    flags: crate::RouteFollowFlags,
+}
+
 impl LiveFollowRoute {
-    /// The bound route (#1652b): its open transform `transform` (the plan's prepared route), its
-    /// cell's reader `control` and its source `source`. Each automated lane's cursor is seeded with
-    /// the curve's first `start_value`, and the bound target composes that curve with the seeded
-    /// flags, as #1651's prepared stage mute does; both column ramps are settled on it, so an idle
-    /// route mixes exactly what a prepared route of that gate mixes. Control side.
+    /// The bound route (#1652b, #1654 T3): its open transform `transform` (the plan's prepared
+    /// route), its cell's reader `control` and its source `source`. Each column's cursors are
+    /// seeded with their curves' first `start_value`, and each column's bound target composes
+    /// them with the seeded flags, as #1651's prepared stage mute does; both column ramps are
+    /// settled on it, so an idle route mixes exactly what a prepared route of that target mixes.
+    /// Control side: it allocates the cursor tables. `columns` are the source's walks
+    /// ([`FollowColumns::bind`]).
     pub(crate) fn new(
         transform: crate::RouteTransform,
         control: Box<crate::FollowRouteControlLane>,
         source: &crate::GraphFollowRouteSource,
+        columns: FollowColumns,
     ) -> Self {
-        let mut states = [automation::CellState::new(); 2];
-        let mut curve = [false; 2];
-        for ((state, curve), cell) in states.iter_mut().zip(&mut curve).zip(source.cells) {
-            let seed = cell
-                .and_then(|cell| source.program.cell(cell as usize))
-                .and_then(|cell| cell.segments().first())
-                .map(|segment| segment.start_value);
-            if let Some(seed) = seed {
-                state.seed_target(seed);
-                *curve = seed != 0.0;
-            }
-        }
-        let follow = FollowCursors {
+        let mut follow = FollowCursors {
             program: std::sync::Arc::clone(&source.program),
-            cells: source.cells,
-            states,
-            curve,
+            columns: columns.0,
+            silent: [false; 2],
             arrival: source.arrival,
-            mute_jump: source.mute_jump,
+            jumps: source.jumps,
+            continued_vca: source.continued_vca,
+            dropped: [false; 2],
+            dropped_vca: [false; 2],
+            follow_heard: [false; 2],
             start: FollowStart::Fresh,
         };
-        let (target, mute) = follow.compose(&transform, source.flags, curve);
+        let composition = Composition {
+            transform: &transform,
+            flags: source.flags,
+        };
+        let targets = [0, 1].map(|column| follow.heard_target(column, composition));
+        for ((column, target), silent) in follow
+            .columns
+            .iter_mut()
+            .zip(targets)
+            .zip(&mut follow.silent)
+        {
+            *silent = target.1;
+            if let Some(column) = column {
+                column.walk.seed_target(target);
+                column.probe.seed_target(target);
+            }
+        }
         Self {
-            ramps: ColumnRamps::settled(target),
-            mute,
+            ramps: ColumnRamps::settled(full_target(targets)),
+            mute: targets[0].1 && targets[1].1,
             delayed: false,
             route: u32::MAX,
             transform,
@@ -1533,56 +1723,144 @@ impl LiveFollowRoute {
 }
 
 // REALTIME_POLICY_BEGIN
+/// The full four-coefficient target of two column targets.
+const fn full_target(targets: [ColumnTarget; 2]) -> [f32; 4] {
+    let [(zero, _), (one, _)] = targets;
+    [zero[0], one[0], zero[1], one[1]]
+}
+
+/// `full` with `column`'s entries replaced by `entries`.
+fn with_column(mut full: [f32; 4], column: usize, entries: [f32; 2]) -> [f32; 4] {
+    if let Some(indices) = COLUMNS.get(column) {
+        for (&index, entry) in indices.iter().zip(entries) {
+            if let Some(slot) = full.get_mut(index) {
+                *slot = entry;
+            }
+        }
+    }
+    full
+}
+
+/// `column`'s entries of `full`.
+fn column_entries(full: [f32; 4], column: usize) -> [f32; 2] {
+    let indices = COLUMNS.get(column).copied().unwrap_or([0, 2]);
+    indices.map(|index| full.get(index).copied().unwrap_or(0.0))
+}
+
+/// Whether `a` and `b` have the same bits.
+fn same_entries(a: [f32; 2], b: [f32; 2]) -> bool {
+    a.map(f32::to_bits) == b.map(f32::to_bits)
+}
+
+/// Source column `column`'s target (#1652 D2): the open transform gated by the route's own mute
+/// and the column's follow term `follows_mute && (source curve || VCA mute curves || terms)`
+/// (#1655 D4: each reaching automated VCA mute in the tap's node time), under the curve values
+/// `value(cursor)`; [`gated_route_coefficients`] of that, the column's entries. The one composition
+/// of the seed, the cell's block entry, a record's target and every curve event, so their bits
+/// cannot differ. A column's entries do not depend on the other column's gate, so the two columns
+/// compose apart.
+fn column_target(
+    column: usize,
+    roles: ColumnRoles,
+    composition: Composition<'_>,
+    value: impl Fn(usize) -> f32,
+) -> ColumnTarget {
+    let Composition { transform, flags } = composition;
+    let mute = flags.mute;
+    let zeroed = flags.follows_mute
+        && (roles.follow_curve(&value) || flags.terms.get(column).copied().unwrap_or(false));
+    let mut follow_zeroed = [false; 2];
+    if let Some(slot) = follow_zeroed.get_mut(column) {
+        *slot = zeroed;
+    }
+    let all = gated_route_coefficients(
+        transform,
+        crate::RouteGate {
+            mute,
+            follow_zeroed,
+        },
+    );
+    (column_entries(all, column), mute || zeroed)
+}
+
+impl RouteColumn {
+    /// The follow curves' share the column has heard ([`ColumnRoles::follow_curve`]).
+    fn heard_follow(&self) -> bool {
+        let cursors = self.walk.cursors();
+        self.roles.follow_curve(|index| {
+            cursors
+                .get(index)
+                .map_or(0.0, automation::ComposeCursor::heard)
+        })
+    }
+}
+
 impl FollowCursors {
-    /// The plan's `automated` flags: which source lanes have a cell.
-    const fn automated(&self) -> [bool; 2] {
-        [self.cells[0].is_some(), self.cells[1].is_some()]
+    /// Column `column`'s target composed with the values it has heard (a column with no curve:
+    /// the cell's words alone).
+    fn heard_target(&self, column: usize, composition: Composition<'_>) -> ColumnTarget {
+        match self.columns.get(column).and_then(Option::as_ref) {
+            Some(walk) => walk.walk.compose_heard(|heard| {
+                column_target(column, walk.roles, composition, |index| heard.value(index))
+            }),
+            None => column_target(column, ColumnRoles::default(), composition, |_| 0.0),
+        }
     }
 
-    /// [`follow_target`] with the plan's `automated`.
-    fn compose(
-        &self,
-        transform: &crate::RouteTransform,
-        flags: crate::RouteFollowFlags,
-        curve: [bool; 2],
-    ) -> ([f32; 4], bool) {
-        follow_target(self.automated(), transform, flags, curve)
-    }
-
-    /// Per column, whether the curve the route has heard zeroes it under `flags`: the curve's
-    /// share of [`crate::RouteFollowFlags::gate`] (`follows_mute && automated && curve`).
+    /// Per column, whether the source curves the route has heard zero it under `flags`: the
+    /// curves' share of the follow term (`follows_mute && automated && (own curve || VCA mute
+    /// curves)`, #1655 D4).
     fn heard_zeroed(&self, flags: crate::RouteFollowFlags) -> [bool; 2] {
-        let automated = self.automated();
-        [0, 1].map(|lane| flags.follows_mute && automated[lane] && self.curve[lane])
+        [0, 1].map(|column| {
+            flags.follows_mute
+                && self
+                    .columns
+                    .get(column)
+                    .and_then(Option::as_ref)
+                    .is_some_and(RouteColumn::heard_follow)
+        })
     }
 
-    /// The block's spans at the tap's node time (`node_span(a(tap))`, R17-3) and its mute jump
-    /// length (the host-core rule over the block's lengths, whenever the block has them). Takes
-    /// the start and returns it: the first block of a fresh route with no seek reaching it lands
-    /// a `Set` at offset 0 on a lane whose curve there differs from what the lane holds; the first
-    /// block of a carried route instead seeds each lane's cursor with the curve's value at its
-    /// first sample and returns that value as the lane's placed curve, which the block entry
-    /// takes after the cell (D3: the successor places its cursors fresh, and its block entry
-    /// compares). With no jump lengths or no node span the block has no events, nothing is placed
-    /// and the curve holds (#1652 NIT-1: production plans always attach both).
-    fn block(
-        &mut self,
-        time: &crate::GraphBlockTime<'_>,
-    ) -> (FollowBlock, FollowStart, [Option<bool>; 2]) {
+    /// The block's spans at the tap's node time (`node_span(a(tap))`, R17-3), one per column,
+    /// and its cursor rows' jump lengths (the host-core rule over the block's lengths, each at
+    /// most the route ramp bound), which every cursor takes. Takes the start and returns it: the
+    /// first block of a fresh route with no seek reaching it lands a `Set` at offset 0 in a
+    /// column one of whose curves there differs from what its cursor holds. With no jump lengths
+    /// or no node span the block has no events and the curves hold (#1652 NIT-1: production
+    /// plans always attach both).
+    fn block(&mut self, time: &crate::GraphBlockTime<'_>) -> (FollowBlock, FollowStart) {
         let start = core::mem::replace(&mut self.start, FollowStart::Running);
-        let carried = start == FollowStart::Carried;
-        let mut placed = [None; 2];
         let frames = time.frames();
         let Some(lengths) = time.jump_lengths() else {
-            return (FollowBlock::IDLE, start, placed);
+            return (FollowBlock::IDLE, start);
         };
-        let jump = core::cmp::min((self.mute_jump)(lengths), crate::ROUTE_RAMP_LENGTH_MAXIMUM);
+        let rule = (self.jumps)(lengths);
+        let bound = |length: u32| core::cmp::min(length, crate::ROUTE_RAMP_LENGTH_MAXIMUM);
+        let lengths = crate::GraphRouteJumpLengths {
+            mute: bound(rule.mute),
+            vca_mute: bound(rule.vca_mute),
+        };
+        for column in self.columns.iter_mut().flatten() {
+            if let Some(cursor) = column
+                .roles
+                .own
+                .and_then(|index| column.walk.cursor_mut(index))
+            {
+                cursor.set_jump(lengths.for_row(crate::GraphRouteCursorRow::SourceMute));
+            }
+            // #1655 D4: each reaching VCA mute curve jumps over the `VcaMute` row's length.
+            for index in column.roles.vca() {
+                if let Some(cursor) = column.walk.cursor_mut(index) {
+                    cursor.set_jump(lengths.vca_mute);
+                }
+            }
+        }
         let idle = FollowBlock {
-            spans: [None; 2],
-            jump,
+            lengths,
+            ..FollowBlock::IDLE
         };
         let Some(span) = time.node_span(self.arrival) else {
-            return (idle, start, placed);
+            return (idle, start);
         };
         let length = i64::from(frames);
         if frames == 0
@@ -1591,23 +1869,11 @@ impl FollowCursors {
                 .step
                 .is_some_and(|step| step.timeline.checked_add(length).is_none())
         {
-            return (idle, start, placed);
+            return (idle, start);
         }
-        let mut spans = [None; 2];
-        for (((slot, cell), state), placed) in spans
-            .iter_mut()
-            .zip(self.cells)
-            .zip(&mut self.states)
-            .zip(&mut placed)
-        {
-            let Some(program) = cell.and_then(|cell| self.program.cell(cell as usize)) else {
-                continue;
-            };
-            if carried {
-                let value = automation::value_at(program.segments(), span.start);
-                state.seed_target(value);
-                *placed = Some(value != 0.0);
-            }
+        let program = &self.program;
+        let spans = [0, 1].map(|column| {
+            let walk = self.columns.get(column).and_then(Option::as_ref)?;
             let step = span
                 .step
                 .map(|step| (step.offset, step.timeline))
@@ -1615,96 +1881,126 @@ impl FollowCursors {
                     if start != FollowStart::Fresh {
                         return None;
                     }
-                    let value = automation::value_at(program.segments(), span.start);
-                    (state.target().map(f32::to_bits) != Some(value.to_bits()))
-                        .then_some((0, span.start))
+                    let differs = walk.walk.cursors().iter().any(|cursor| {
+                        program.cell(cursor.cell() as usize).is_some_and(|cell| {
+                            let value = automation::value_at(cell.segments(), span.start);
+                            cursor.state().target().map(f32::to_bits) != Some(value.to_bits())
+                        })
+                    });
+                    differs.then_some((0, span.start))
                 });
             // The graph's step lies inside the block, so the span is valid; a refused one leaves
-            // the lane holding its curve, with no panic.
-            *slot = automation::NodeSpan::new(span.start, step, frames).ok();
-        }
-        (FollowBlock { spans, jump }, start, placed)
+            // the column holding its curves, with no panic.
+            automation::NodeSpan::new(span.start, step, frames).ok()
+        });
+        (
+            FollowBlock {
+                spans,
+                lengths,
+                start: Some(span.start),
+            },
+            start,
+        )
     }
 }
 
-/// A following route's target and whether it silences (#1652 D2), for `transform` and `flags`
-/// while the curves are at `curve`, with `automated` the plan's: `gated_route_coefficients` of the
-/// open transform under [`crate::RouteFollowFlags::gate`]. The one composition of the seed, the
-/// cell's block entry and every curve event, so their bits cannot differ.
-fn follow_target(
-    automated: [bool; 2],
-    transform: &crate::RouteTransform,
-    flags: crate::RouteFollowFlags,
-    curve: [bool; 2],
-) -> ([f32; 4], bool) {
-    let gate = crate::RouteFollowFlags { automated, ..flags }.gate(curve);
-    (gated_route_coefficients(transform, gate), gate.silences())
-}
-
-/// Walk one block's events of both source lanes in offset order (#1652 D2), with `states` and
-/// `curve` advanced as the events come out, and call `change(offset, curve, set)` once per offset
-/// that has an event: `curve` after every event at that offset, `set` when one of them is a seek's
-/// exact `Set`. A held grid event changes no curve. Bounded by the cells' per-block event bound
-/// ([`automation::CellProgram::max_events`]); allocation-, lock- and panic-free.
-fn follow_walk(
+/// Walk one block's events of both columns in offset order (#1652 D2, #1654 T3), each column's
+/// merged walk ([`automation::Composed`]) composing with [`column_target`], and call
+/// `change(column, event)` per event, a column's events in its own order and the two columns'
+/// at one offset in column order. Bounded by the columns' per-block event bounds
+/// ([`automation::Composed::max_events`]); allocation-, lock- and panic-free.
+fn walk_columns(
     program: &automation::Program,
-    cells: [Option<u32>; 2],
-    states: &mut [automation::CellState; 2],
-    curve: &mut [bool; 2],
-    block: FollowBlock,
-    mut change: impl FnMut(u32, [bool; 2], bool),
+    mut columns: [Option<(&mut automation::Composed<ColumnTarget>, ColumnRoles)>; 2],
+    spans: [Option<automation::NodeSpan>; 2],
+    composition: Composition<'_>,
+    mut change: impl FnMut(usize, automation::ComposedEvent<ColumnTarget>),
 ) {
-    let [left, right] = states;
-    let events = |cell: Option<u32>, span: Option<automation::NodeSpan>, state| {
-        let program = program.cell(cell? as usize)?;
-        Some(automation::CellEvents::new(
-            program,
-            state,
-            span?,
-            automation::SeekMode::Exact,
-            block.jump,
-        ))
-    };
-    let mut events = [
-        events(cells[0], block.spans[0], left),
-        events(cells[1], block.spans[1], right),
-    ];
-    let mut next = [None; 2];
-    for (next, events) in next.iter_mut().zip(&mut events) {
-        *next = events.as_mut().and_then(Iterator::next);
+    for (column, span) in columns.iter_mut().zip(spans) {
+        match (column.as_mut(), span) {
+            (Some((walk, _)), Some(span)) => {
+                walk.start(program, span, automation::SeekMode::Exact);
+            }
+            _ => *column = None,
+        }
     }
-    // Each pass consumes at least one event, so the loop ends with the iterators.
+    let mut next = [None; 2];
+    for (index, (slot, column)) in next.iter_mut().zip(&mut columns).enumerate() {
+        *slot = next_column_event(index, column, program, composition);
+    }
+    // Each pass consumes at least one event, so the loop ends with the walks.
     while let Some(offset) = next.iter().flatten().map(|event| event.offset).min() {
-        let mut set = false;
-        for ((next, events), curve) in next.iter_mut().zip(&mut events).zip(curve.iter_mut()) {
-            let Some(event) = next.filter(|event| event.offset == offset) else {
+        for (index, (slot, column)) in next.iter_mut().zip(&mut columns).enumerate() {
+            let Some(event) = slot.filter(|event| event.offset == offset) else {
                 continue;
             };
-            if !event.held {
-                *curve = event.value != 0.0;
-            }
-            set |= event.kind == automation::EventKind::Set;
-            *next = events.as_mut().and_then(Iterator::next);
+            change(index, event);
+            *slot = next_column_event(index, column, program, composition);
         }
-        change(offset, *curve, set);
     }
+}
+
+/// Column `index`'s next event, if it walks this block.
+fn next_column_event(
+    index: usize,
+    column: &mut Option<(&mut automation::Composed<ColumnTarget>, ColumnRoles)>,
+    program: &automation::Program,
+    composition: Composition<'_>,
+) -> Option<automation::ComposedEvent<ColumnTarget>> {
+    let (walk, roles) = column.as_mut()?;
+    let roles = *roles;
+    walk.next_event(program, |heard| {
+        column_target(index, roles, composition, |cursor| heard.value(cursor))
+    })
 }
 
 impl LiveFollowRoute {
     /// Read the cell under `snapshot` and retarget each column whose target bits change from the
-    /// coefficients it is at over the record's ramp (#1652 D2). The record composes with the
-    /// curve the route has heard. Returns how many values were applied: `0` or `1`.
+    /// coefficients it is at over the record's ramp (#1652 D2). Returns how many values were
+    /// applied: `0` or `1`.
+    ///
+    /// The record composes with the curve values heard (#1652). With `at`, the node time of the
+    /// block's first sample (a block entry), a column the record moves is a column jump over the
+    /// record's ramp ([`automation::Composed::retarget`]); with no `at` (a predecessor's last read
+    /// at a swap) the column's walk only takes the target.
     #[inline]
-    fn apply_cell(&mut self, snapshot: LiveSnapshot) -> usize {
+    fn apply_cell(&mut self, snapshot: LiveSnapshot, at: Option<i64>) -> usize {
         let mut applied = 0;
         if let Some(record) = self.control.read(snapshot) {
             self.transform = record.transform();
             self.flags = record.flags();
-            let (target, mute) =
-                self.follow
-                    .compose(&self.transform, self.flags, self.follow.curve);
-            self.mute = mute;
-            self.ramps.retarget(target, record.length());
+            let length = record.length();
+            let Self {
+                ramps,
+                mute,
+                transform,
+                flags,
+                follow,
+                ..
+            } = self;
+            let composition = Composition {
+                transform,
+                flags: *flags,
+            };
+            for column in 0..COLUMNS.len() {
+                let target = follow.heard_target(column, composition);
+                let moves = !same_entries(column_entries(ramps.target(), column), target.0);
+                ramps.retarget_column(
+                    column,
+                    with_column(ramps.target(), column, target.0),
+                    length,
+                );
+                if let Some(silent) = follow.silent.get_mut(column) {
+                    *silent = target.1;
+                }
+                if let Some(walk) = follow.columns.get_mut(column).and_then(Option::as_mut) {
+                    match at {
+                        Some(start) if moves => walk.walk.retarget(target, start, length),
+                        _ => walk.walk.seed_target(target),
+                    }
+                }
+            }
+            *mute = follow.silent[0] && follow.silent[1];
             applied = 1;
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -1714,108 +2010,331 @@ impl LiveFollowRoute {
 
     /// Take the ramp state of the predecessor's live route of the same ID, of either kind
     /// (#1652 D3): its column ramps (a six-word predecessor's one ramp in both columns), their
-    /// positions, its mute and the curve it had heard (`[false; 2]` from a six-word one). The
-    /// cursors do not carry: this plan's own, unplaced, are placed at its first block's node
-    /// time, after its cell applies with the heard curve, and the block entry then compares.
-    fn adopt(&mut self, ramps: ColumnRamps, mute: bool, curve: [bool; 2]) {
+    /// positions and its mute; from a following predecessor `from`, per column, the own mute
+    /// cursor's state and heard value, which is placed at this plan's first block (a cursor the
+    /// predecessor did not hold starts with no target), after its cell applies with the heard
+    /// values, and the block entry then compares. A source lane's VCA mute cursors (#1655 D4, D6)
+    /// carry verbatim by position when the lane's VCA mute tables continue
+    /// ([`crate::GraphFollowRouteSource::with_continued_vca_mutes`]) and `a(tap)` did not move;
+    /// else they start fresh and are placed at the first block. The follow curves heard (own and
+    /// VCA mutes ORed) are kept for the first block's comparison.
+    fn adopt(&mut self, ramps: ColumnRamps, mute: bool, from: Option<&Self>) {
         self.ramps = ramps;
         self.mute = mute;
-        self.follow.curve = curve;
+        self.follow.silent = from.map_or([mute; 2], |from| from.follow.silent);
+        // #1655 D6: a lane's VCA mute cursors continue verbatim only when their tables do and
+        // the tap's arrival did not move (their node time is the tap's).
+        let same_arrival = from.is_some_and(|from| from.follow.arrival == self.follow.arrival);
+        let FollowCursors {
+            columns,
+            dropped,
+            dropped_vca,
+            follow_heard,
+            continued_vca,
+            ..
+        } = &mut self.follow;
+        for (column, (walk, dropped)) in columns.iter_mut().zip(dropped).enumerate() {
+            let previous = from
+                .and_then(|from| from.follow.columns.get(column))
+                .and_then(Option::as_ref);
+            // The follow curves the predecessor's column heard that this column does not
+            // (MAJOR-3). The follow curves (own and VCA mutes) are one gate: dropped only when
+            // none is left.
+            let has_follow = walk.as_ref().is_some_and(|walk| walk.roles.has_follow());
+            *dropped = previous.is_some_and(|previous| previous.roles.own.is_some()) && !has_follow;
+            let previous_vca = previous.map_or(0, |previous| previous.roles.vca_count);
+            if let Some(slot) = dropped_vca.get_mut(column) {
+                *slot = previous_vca > 0 && !has_follow;
+            }
+            if let Some(slot) = follow_heard.get_mut(column) {
+                *slot = previous.is_some_and(RouteColumn::heard_follow);
+            }
+            let Some(walk) = walk else {
+                continue;
+            };
+            // #1655 D4, D6: the VCA mute cursors, verbatim by position when the lane's tables
+            // continue (the same VCAs in the same order), else fresh, placed at the first block.
+            let vca_continues = continued_vca.get(column).copied().unwrap_or(false)
+                && same_arrival
+                && previous_vca == walk.roles.vca_count;
+            let previous_vca_start = previous.map_or(0, |previous| previous.roles.vca_start);
+            for (offset, index) in walk.roles.vca().enumerate() {
+                let carried = previous.filter(|_| vca_continues).and_then(|previous| {
+                    previous
+                        .walk
+                        .cursors()
+                        .get(previous_vca_start.saturating_add(offset))
+                });
+                if let Some(cursor) = walk.walk.cursor_mut(index) {
+                    match carried {
+                        Some(carried) => {
+                            *cursor.state_mut() = *carried.state();
+                            cursor.set_heard(carried.heard());
+                        }
+                        None => {
+                            *cursor.state_mut() = automation::CellState::new();
+                            cursor.set_heard(0.0);
+                        }
+                    }
+                }
+            }
+            walk.vca_continued = vca_continues;
+            let Some(index) = walk.roles.own else {
+                continue;
+            };
+            let carried = previous.and_then(|previous| {
+                let index = previous.roles.own?;
+                previous.walk.cursors().get(index)
+            });
+            if let Some(cursor) = walk.walk.cursor_mut(index) {
+                match carried {
+                    Some(carried) => {
+                        *cursor.state_mut() = *carried.state();
+                        cursor.set_heard(carried.heard());
+                    }
+                    None => {
+                        // A curve the predecessor did not hear gated nothing.
+                        *cursor.state_mut() = automation::CellState::new();
+                        cursor.set_heard(0.0);
+                    }
+                }
+            }
+        }
         self.follow.start = FollowStart::Carried;
     }
 
-    /// The route op's block entry (#1652 D2): take the block's spans at the tap's node time; read
-    /// the cell under the block's snapshot and retarget each column whose bits change over the
-    /// record's ramp; on a carried route's first block (D3), place the curve at its own node time,
-    /// compare the composed target with the adopted ramps' and retarget each changed column over
-    /// the session mute length; decide the block's activity. Returns the offset from which the
-    /// route mixes this block (`Some(0)`: the whole block), or `None` when it is inactive.
+    /// A carried route's first block, after its cell (#1652 D3), at node time `at`: the own mute
+    /// cursor and each VCA mute cursor that does not continue are placed there with the curve's
+    /// value (no `Set`). Then each column composes and compares with the adopted ramp's target:
+    /// equal bits leave the ramp; otherwise the column retargets at once (a column jump, R19-3)
+    /// over the longest own length among the follow curves that moved (#1655 D4: the follow
+    /// curves, the source lane's own mute and every reaching VCA mute, are compared as one gate,
+    /// their OR against the one the predecessor heard; a move takes the longest own length among
+    /// the curves that close the column, for an open among all of them: the mute length for the
+    /// own mute, `VcaMute` for a VCA mute, R19-4). A column that no longer hears a follow curve of
+    /// its predecessor (U2 fold 1, MAJOR-3) lands at once over the removed curve's own length (the
+    /// longer one with a coincident gate move, R19-4), also with a column ramp in flight
+    /// (B19-R7). With send rows off this is the column jump an uninterrupted gate change makes;
+    /// the control plane still marks such a rebuild `TransitionFallback` while a live send move
+    /// may ramp, a conservative over-report (#1718). Any other move lands at once over the
+    /// mute length. No landing state survives the carry. A column with no curve compares its
+    /// cell's target the same way.
+    fn place_carried(&mut self, at: i64) {
+        let Self {
+            ramps,
+            mute,
+            transform,
+            flags,
+            follow,
+            block,
+            ..
+        } = self;
+        let composition = Composition {
+            transform,
+            flags: *flags,
+        };
+        let lengths = block.lengths;
+        let jump = lengths.mute;
+        for column in 0..COLUMNS.len() {
+            let adopted = column_entries(ramps.target(), column);
+            // The longest own length of the follow curves the column no longer hears (MAJOR-3):
+            // the mute length for its own mute, `VcaMute` for a VCA mute.
+            let dropped_own = follow.dropped.get(column).copied().unwrap_or(false);
+            let dropped_vca = follow.dropped_vca.get(column).copied().unwrap_or(false);
+            let has_dropped = dropped_own || dropped_vca;
+            let dropped = core::cmp::max(
+                if dropped_own { lengths.mute } else { 0 },
+                if dropped_vca { lengths.vca_mute } else { 0 },
+            );
+            let landing = if has_dropped { dropped } else { jump };
+            let Some(walk) = follow.columns.get_mut(column).and_then(Option::as_mut) else {
+                let target = column_target(column, ColumnRoles::default(), composition, |_| 0.0);
+                ramps.retarget_column(
+                    column,
+                    with_column(ramps.target(), column, target.0),
+                    landing,
+                );
+                if let Some(silent) = follow.silent.get_mut(column) {
+                    *silent = target.1;
+                }
+                continue;
+            };
+            let roles = walk.roles;
+            // The own mute gate and (#1655 D4) the VCA mute gates that do not continue are placed
+            // at `at` with their curves' values.
+            let placed = roles
+                .own
+                .into_iter()
+                .chain(roles.vca().filter(|_| !walk.vca_continued));
+            for index in placed {
+                let Some(cursor) = walk.walk.cursor_mut(index) else {
+                    continue;
+                };
+                let Some(cell) = follow.program.cell(cursor.cell() as usize) else {
+                    continue;
+                };
+                let value = automation::value_at(cell.segments(), at);
+                cursor.state_mut().reposition(&cell, at);
+                cursor.state_mut().seed_target(value);
+                cursor.set_heard(value);
+            }
+            // The follow curves (own mute OR every VCA mute) are one gate: it moved when its OR
+            // differs from the one the predecessor heard (#1655 D4; with the own mute alone,
+            // that cursor's heard value against its curve, as before).
+            // Its length is the longest among the follow curves that close it (a close) or, for
+            // an open, among all of them (which ones were closed is not kept across a carry).
+            let mut gate_length = None;
+            if roles.has_follow() {
+                let heard = follow.follow_heard.get(column).copied().unwrap_or(false);
+                let now = walk.heard_follow();
+                if now != heard {
+                    let cursors = walk.walk.cursors();
+                    let counts = |index: Option<usize>| {
+                        index.is_some_and(|index| {
+                            !now || cursors
+                                .get(index)
+                                .is_some_and(|cursor| cursor.heard() != 0.0)
+                        })
+                    };
+                    let mut length = 0_u32;
+                    if counts(roles.own) {
+                        length = core::cmp::max(
+                            length,
+                            lengths.for_row(crate::GraphRouteCursorRow::SourceMute),
+                        );
+                    }
+                    if roles.vca().any(|index| counts(Some(index))) {
+                        length = core::cmp::max(length, lengths.vca_mute);
+                    }
+                    gate_length = Some(length);
+                }
+            }
+            let target = walk.walk.compose_heard(|heard| {
+                column_target(column, roles, composition, |index| heard.value(index))
+            });
+            if same_entries(adopted, target.0) {
+                walk.walk.seed_target(target);
+            } else {
+                // A gate move coincident with a removed curve's landing takes the longer length
+                // (R19-4); a move with no gate move lands over the removed curve's length (or the
+                // mute length), as an uninterrupted gate change does (B19-R7; the control
+                // plane's flag over-reports it).
+                let length = gate_length.map_or(landing, |length| core::cmp::max(length, dropped));
+                ramps.retarget_column(
+                    column,
+                    with_column(ramps.target(), column, target.0),
+                    length,
+                );
+                walk.walk.retarget(target, at, length);
+            }
+            if let Some(silent) = follow.silent.get_mut(column) {
+                *silent = target.1;
+            }
+        }
+        *mute = follow.silent[0] && follow.silent[1];
+    }
+
+    /// The route op's block entry (#1652 D2, #1654 T3): take the block's spans at the tap's node
+    /// time; read the cell under the block's snapshot and retarget each column whose bits change
+    /// over the record's ramp; on a carried route's first block (D3), place the cursors and
+    /// compare; decide the block's activity. Returns the offset from which the route mixes this
+    /// block (`Some(0)`: the whole block), or `None` when it is inactive.
     ///
-    /// The cell composes with the curve the route has heard (the curve at the block's first
-    /// sample before that sample's events; on a carried first block the predecessor's, as the
-    /// uninterrupted plan's block entry would compose it, #1652 MAJOR-3), and the block's curve
-    /// events follow in offset order, as the strip's stage orders them (#1651). Inactive only
-    /// when the route is muted, past both ramps and undelayed at entry and no event of the block
-    /// leaves it otherwise: the changes are found first on copies of the cursors, so a route that
-    /// opens inside the block mixes from that offset (MAJOR-1: its destination leaves it out of
-    /// the frames before), and a muted route with no change moves no bit. An inactive block
-    /// commits the copies' cursors (no event of it retargets, since every silencing target is
-    /// `[+0.0; 4]`).
+    /// The cell composes with the values the route has heard, and the block's curve events
+    /// follow in offset order, as the strip's stage orders them (#1651). Inactive only when the
+    /// route is muted, past both ramps and undelayed at entry and no event of the block leaves it
+    /// otherwise: the changes are found first on each column's probe twin, so a route that opens
+    /// inside the block mixes from that offset (MAJOR-1: its destination leaves it out of the
+    /// frames before), and a muted route with no change moves no bit. An inactive block commits
+    /// the twins' state (no event of it retargets, since every silencing target is `[+0.0; 4]`).
     #[inline]
     fn begin_block(
         &mut self,
         snapshot: LiveSnapshot,
         time: &crate::GraphBlockTime<'_>,
     ) -> Option<u32> {
-        // The spans first: a carried route's first block places its cursors at its own node time.
-        // A running or fresh route's curve is unchanged by it.
-        let (block, start, placed) = self.follow.block(time);
+        let (block, start) = self.follow.block(time);
         self.block = block;
-        self.apply_cell(snapshot);
-        if start == FollowStart::Carried {
-            // #1652 D3: after the join's record (if any, through the cell, with the heard
-            // curve), the successor takes the curve at its node time and compares its composed
-            // target with the adopted ramps'; each column whose bits change retargets over the
-            // session mute length: the curve's own jump.
-            let automated = self.follow.automated();
-            for ((curve, placed), automated) in
-                self.follow.curve.iter_mut().zip(placed).zip(automated)
-            {
-                if let Some(placed) = placed {
-                    *curve = placed;
-                } else if !automated {
-                    *curve = false;
-                }
-            }
-            let (target, mute) =
-                self.follow
-                    .compose(&self.transform, self.flags, self.follow.curve);
-            self.mute = mute;
-            self.ramps.retarget(target, self.block.jump);
+        let carried = match (start, block.start) {
+            (FollowStart::Carried, Some(at)) => Some(at),
+            _ => None,
+        };
+        self.apply_cell(snapshot, block.start);
+        if let Some(at) = carried {
+            self.place_carried(at);
         }
         if !(self.mute && self.ramps.is_settled() && !self.delayed) {
             return Some(0);
         }
-        let mut states = self.follow.states;
-        let mut curve = self.follow.curve;
-        let mut target = self.ramps.target().map(f32::to_bits);
+        let Self {
+            ramps,
+            transform,
+            flags,
+            follow,
+            block,
+            ..
+        } = self;
+        let FollowCursors {
+            program,
+            columns,
+            silent: heard_silent,
+            ..
+        } = follow;
+        let composition = Composition {
+            transform,
+            flags: *flags,
+        };
+        for column in columns.iter_mut().flatten() {
+            let _copied = column.probe.copy_from(&column.walk);
+        }
+        let mut target = ramps.target().map(f32::to_bits);
+        let mut silent = *heard_silent;
         let mut from = None;
-        let (follow, transform, flags, jump) =
-            (&self.follow, &self.transform, self.flags, self.block.jump);
-        follow_walk(
-            &follow.program,
-            follow.cells,
-            &mut states,
-            &mut curve,
-            self.block,
-            |offset, curve, set| {
-                let (next, mute) = follow.compose(transform, flags, curve);
-                let next = next.map(f32::to_bits);
+        let [zero, one] = columns;
+        walk_columns(
+            program,
+            [
+                zero.as_mut().map(|walk| (&mut walk.probe, walk.roles)),
+                one.as_mut().map(|walk| (&mut walk.probe, walk.roles)),
+            ],
+            block.spans,
+            composition,
+            |column, event| {
+                if event.held {
+                    return;
+                }
+                if let Some(slot) = silent.get_mut(column) {
+                    *slot = event.value.1;
+                }
+                let muted = silent[0] && silent[1];
+                let next = with_column(target.map(f32::from_bits), column, event.value.0)
+                    .map(f32::to_bits);
                 // A retarget is to a target that does not silence, so it always activates.
-                let settled = next == target || set || jump == 0;
+                let settled =
+                    next == target || event.kind == automation::EventKind::Set || event.ramp == 0;
                 target = next;
-                if from.is_none() && !(mute && settled) {
-                    from = Some(offset);
+                if from.is_none() && !(muted && settled) {
+                    from = Some(event.offset);
                 }
             },
         );
         if from.is_none() {
-            self.follow.states = states;
-            self.follow.curve = curve;
+            for column in [zero, one].into_iter().flatten() {
+                let _copied = column.walk.copy_from(&column.probe);
+            }
+            *heard_silent = silent;
         }
         from
     }
 
-    /// D2: mix the block, retargeting at each curve event whose target's bits change: mix
-    /// `[0, o)`, retarget each changed column from the coefficients it is at over the block's
-    /// mute jump length (`0` for a seek's `Set`), mix `[o, q)`. The indexed law makes the split
-    /// exact: the result is the same block split at `o` with the retarget at the second part's
-    /// entry, bit for bit.
+    /// D2: mix the block, retargeting at each column event whose target's bits change: mix
+    /// `[0, o)`, retarget that column from the coefficients it is at over the event's ramp (`0`
+    /// for a seek's `Set`), mix `[o, q)`. The indexed law makes the split exact: the result is the
+    /// same block split at `o` with the retarget at the second part's entry, bit for bit.
     #[inline]
     fn mix(&mut self, left: &mut [f32], right: &mut [f32]) {
         let frames = core::cmp::min(left.len(), right.len());
         let mut from = 0_usize;
-        let automated = self.follow.automated();
         let Self {
             ramps,
             mute,
@@ -1827,27 +2346,41 @@ impl LiveFollowRoute {
         } = self;
         let FollowCursors {
             program,
-            cells,
-            states,
-            curve,
+            columns,
+            silent,
             ..
         } = follow;
-        let jump = block.jump;
-        follow_walk(
+        let composition = Composition {
+            transform,
+            flags: *flags,
+        };
+        let [zero, one] = columns;
+        walk_columns(
             program,
-            *cells,
-            states,
-            curve,
-            *block,
-            |offset, curve, set| {
-                let (target, silences) = follow_target(automated, transform, *flags, curve);
-                *mute = silences;
-                if target.map(f32::to_bits) == ramps.target().map(f32::to_bits) {
+            [
+                zero.as_mut().map(|walk| (&mut walk.walk, walk.roles)),
+                one.as_mut().map(|walk| (&mut walk.walk, walk.roles)),
+            ],
+            block.spans,
+            composition,
+            |column, event| {
+                if event.held {
                     return;
                 }
-                let at = core::cmp::min(offset as usize, frames);
+                if let Some(slot) = silent.get_mut(column) {
+                    *slot = event.value.1;
+                }
+                *mute = silent[0] && silent[1];
+                if same_entries(column_entries(ramps.target(), column), event.value.0) {
+                    return;
+                }
+                let at = core::cmp::min(event.offset as usize, frames);
                 mix_follow_part(left, right, from, at, ramps);
-                ramps.retarget(target, if set { 0 } else { jump });
+                ramps.retarget_column(
+                    column,
+                    with_column(ramps.target(), column, event.value.0),
+                    event.ramp,
+                );
                 from = at;
             },
         );
@@ -5713,14 +6246,17 @@ impl RouteCarryCheck {
 /// What a six-word successor of a following predecessor compares at its first block (#1652 D3,
 /// the curve removed): its own prepared target and mute, the columns the predecessor's heard
 /// curve zeroed (so a record the join wrote composes with that curve first, MAJOR-3), and the
-/// mute row's jump-length rule the predecessor's source carried, which a six-word route does not
+/// cursor rows' jump-length rule the predecessor's source carried, which a six-word route does not
 /// hold.
 #[derive(Clone, Copy)]
 struct SixWordCarryCheck {
     prepared: [f32; 4],
     mute: bool,
     zeroed: [bool; 2],
-    mute_jump: crate::GraphMuteJumpLength,
+    jumps: crate::GraphRouteJumpRule,
+    /// Whether the predecessor heard a VCA mute curve (#1655 D4): its removal reopens over the
+    /// longer of the mute and `VcaMute` lengths (R19-4).
+    vca: bool,
 }
 
 /// One six-word successor's comparison at its first block (#1652 D3, the curve removed), in the
@@ -5737,7 +6273,14 @@ fn finish_six_word_carry(
     lengths: Option<crate::GraphJumpLengths>,
 ) {
     let length = lengths.map_or(0, |lengths| {
-        core::cmp::min((check.mute_jump)(lengths), crate::ROUTE_RAMP_LENGTH_MAXIMUM)
+        let rule = (check.jumps)(lengths);
+        let mute = rule.for_row(crate::GraphRouteCursorRow::SourceMute);
+        let vca = if check.vca {
+            rule.for_row(crate::GraphRouteCursorRow::VcaMute)
+        } else {
+            0
+        };
+        core::cmp::min(core::cmp::max(mute, vca), crate::ROUTE_RAMP_LENGTH_MAXIMUM)
     });
     if let Some((target, mute)) = live.apply_pending_heard(snapshot, check.zeroed) {
         live.retarget_carried(target, mute, length);
@@ -5752,9 +6295,9 @@ fn finish_six_word_carry(
 /// following route) the curve the predecessor had heard.
 ///
 /// * six -> six: [`LiveRoute::adopt`], exactly as before #1652.
-/// * either -> seven: [`LiveFollowRoute::adopt`]; its first block applies its cell with the heard
-///   curve, places its own cursors at its own node time and compares
-///   ([`LiveFollowRoute::begin_block`]).
+/// * either -> seven: [`LiveFollowRoute::adopt`] (a following predecessor's cursors by column and
+///   role, #1654 D3); its first block applies its cell with the heard values, places the cursors
+///   that do not continue at its own node time and compares ([`LiveFollowRoute::begin_block`]).
 /// * seven -> six: [`LiveRoute::adopt_state`] of [`ColumnRamps::one_ramp`]; when the adopted
 ///   target's bits differ from the successor's prepared target, or the heard curve zeroes a
 ///   column (a record the join wrote must compose with it), the comparison is left in `check` for
@@ -5781,18 +6324,14 @@ fn carry_route(
             )
         }
         CarriedRoute::Seven(from) => {
-            from.apply_cell(LiveSnapshot::ALL);
-            let zeroed = from.follow.heard_zeroed(from.flags);
-            (
-                from.ramps,
-                from.mute,
-                Some((from.follow.curve, zeroed, from.follow.mute_jump)),
-            )
+            from.apply_cell(LiveSnapshot::ALL, None);
+            let from: &LiveFollowRoute = from;
+            (from.ramps, from.mute, Some(from))
         }
     };
     match into {
         CarriedRoute::Seven(into) => {
-            into.adopt(ramps, mute, follow.map_or([false; 2], |(curve, ..)| curve));
+            into.adopt(ramps, mute, follow);
             false
         }
         CarriedRoute::Six(into) => {
@@ -5801,9 +6340,16 @@ fn carry_route(
             let (prepared, prepared_mute) = (into.ramp.target, into.mute);
             let (ramp, position) = ramps.one_ramp();
             into.adopt_state(ramp, position, mute);
-            let Some((_, zeroed, mute_jump)) = follow else {
+            let Some(from) = follow else {
                 return false;
             };
+            let (zeroed, jumps) = (from.follow.heard_zeroed(from.flags), from.follow.jumps);
+            let vca = from
+                .follow
+                .columns
+                .iter()
+                .flatten()
+                .any(|column| column.roles.vca_count > 0);
             if prepared.map(f32::to_bits) == ramp.target.map(f32::to_bits) && zeroed == [false; 2] {
                 into.mute = prepared_mute;
                 return false;
@@ -5818,7 +6364,8 @@ fn carry_route(
                 prepared,
                 mute: prepared_mute,
                 zeroed,
-                mute_jump,
+                jumps,
+                vca,
             });
             true
         }
@@ -6398,8 +6945,8 @@ impl crate::runtime::Runtime {
     /// own cell under the block's snapshot (the join's record, if any, through the cell, as its
     /// block entry would); without one, it compares its prepared target with the adopted ramp's
     /// and, on a bits change, retargets from the coefficients it is at over the session mute
-    /// length (`mute_jump` of the block's `lengths`, `0` with none). Each comparison is taken
-    /// once. Bounded by `moves.len()`; allocation-, lock- and panic-free.
+    /// length (the jump rule's source-mute length of the block's `lengths`, `0` with none). Each
+    /// comparison is taken once. Bounded by `moves.len()`; allocation-, lock- and panic-free.
     pub(crate) fn finish_route_carry(
         &mut self,
         moves: &[RouteCarryStep],
@@ -7069,6 +7616,7 @@ pub(crate) struct RuntimeParts {
         (
             Box<crate::FollowRouteControlLane>,
             crate::GraphFollowRouteSource,
+            FollowColumns,
         ),
     >,
     pub(crate) bindings: BTreeMap<GraphNodeId, Option<Box<dyn GraphRuntimeProcessor>>>,
@@ -7235,7 +7783,12 @@ impl RuntimeParts {
     ) -> Self {
         self.follow_route_controls = controls
             .into_iter()
-            .map(|binding| (binding.node, (binding.control, binding.source)))
+            .map(|binding| {
+                (
+                    binding.node,
+                    (binding.control, binding.source, binding.columns),
+                )
+            })
             .collect();
         self
     }
@@ -7287,11 +7840,11 @@ impl RuntimeParts {
             let prepared = gated_route_coefficients(&transform, gate);
             // Issue #1220 D6: a route with a lane is live; its activity index and delay are set
             // once the plan's route-activity table exists (`bind_live_routes`).
-            if let Some((control, source)) = self.follow_route_controls.remove(node) {
+            if let Some((control, source, columns)) = self.follow_route_controls.remove(node) {
                 // #1652b: a following route composes its own bound target from the open
                 // transform, the seeded flags and the curves' first values.
                 NodeKind::LiveFollowRoute(Box::new(LiveFollowRoute::new(
-                    transform, control, &source,
+                    transform, control, &source, columns,
                 )))
             } else {
                 match self.route_controls.remove(node) {
@@ -8693,9 +9246,9 @@ fn live_route_rows(
             };
             // #1652 D3: a following route is listed as a six-word one is, so the successor's
             // join carries it by route ID whatever its kind in either plan.
-            let (route, following) = match &op.kind {
-                NodeKind::LiveRoute(live) => (live.route, false),
-                NodeKind::LiveFollowRoute(live) => (live.route, true),
+            let (route, following, automated) = match &op.kind {
+                NodeKind::LiveRoute(live) => (live.route, false, [false; 2]),
+                NodeKind::LiveFollowRoute(live) => (live.route, true, live.flags.automated),
                 _ => return None,
             };
             let GraphNodeId::Route { route_id } = &route_gates.get(route as usize)?.0 else {
@@ -8705,6 +9258,7 @@ fn live_route_rows(
                 route_id: Box::from(route_id.as_str()),
                 unit: u32::try_from(unit).expect("a unit index fits the op index width"),
                 following,
+                automated,
             })
         })
         .collect()
@@ -17751,11 +18305,13 @@ mod follow_route_op_tests {
                 0,
                 0,
                 0,
-            );
+            )
+            .expect("tables");
             let route = Box::new(LiveFollowRoute::new(
                 transform,
                 binding.control,
                 &binding.source,
+                binding.columns,
             ));
             let (gate, pin) = RevisionGate::pair(0);
             Self {
@@ -18853,5 +19409,941 @@ mod follow_route_op_tests {
                 assert_eq!(successor.route.ramp, reopened);
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::needless_range_loop,
+    reason = "block and column indices name node times and columns in the assertions"
+)]
+mod follow_curve_tests {
+    //! #1654 T3 and its folds, #1655 D4 and D6: the following route op on the merged walk (K1)
+    //! over the follow curves a send hears (its source lanes' own mutes and the reaching VCA
+    //! mutes), driven at its block entry and its mix from graph fixtures, across hand moves,
+    //! carries and seeks. The route op is not banked and mixes at `FrameLane` on every backend, so
+    //! no case depends on a bank width.
+    use super::{IndexedRamp, LiveFollowRoute};
+    use crate::follow_route_tests::route_jumps;
+    use crate::{
+        FollowRouteControlRecord, GraphBlockTime, GraphFollowRouteSource, GraphJumpLengths,
+        GraphPreparedSourceSetDriver, RenderError, RouteFollowFlags, RouteGate, RouteTransform,
+        StableGraphId, TimelineSpan, gated_route_coefficients,
+    };
+    use automation::{Segment, Shape};
+    use engine::realtime::{GatePin, LiveValuesSuperseded, RevisionGate};
+
+    /// The send's lengths: the mute rule 200 ([`route_jumps`] maps it from the mute length).
+    const LENGTHS: GraphJumpLengths = GraphJumpLengths {
+        fader_samples: 480,
+        mute_samples: 200,
+        pan_samples: 960,
+    };
+    const QUANTUM: usize = 64;
+
+    /// An identity timeline (`timeline(s) = s`).
+    struct Timeline;
+
+    impl GraphPreparedSourceSetDriver for Timeline {
+        fn claim_count(&self) -> usize {
+            0
+        }
+        fn begin_block(&mut self, _first_sample: u64, _frames: u32) -> Result<(), RenderError> {
+            Ok(())
+        }
+        fn copy_track_input(
+            &mut self,
+            _claim_index: usize,
+            _left: &mut [f32],
+            _right: &mut [f32],
+        ) -> Result<(), RenderError> {
+            Ok(())
+        }
+        fn timeline_block(&self, first: i128, _frames: u32) -> Option<TimelineSpan> {
+            Some(TimelineSpan {
+                start: i64::try_from(first).ok()?,
+                step: None,
+            })
+        }
+    }
+
+    const fn seg(start: u64, end: u64, v0: f32, v1: f32, shape: Shape) -> Segment {
+        Segment {
+            start,
+            end,
+            start_value: v0,
+            end_value: v1,
+            shape,
+        }
+    }
+
+    fn flat(value: f32) -> Vec<Segment> {
+        vec![seg(0, 1 << 30, value, value, Shape::Linear)]
+    }
+
+    /// A mute curve `before` until `at`, then `after`.
+    fn step(at: u64, before: f32, after: f32) -> Vec<Segment> {
+        vec![seg(0, at, before, after, Shape::Step)]
+    }
+
+    /// The curves a send hears: its source lanes' own mutes and, per source lane, the mute curves
+    /// of the automated VCAs that reach it, in ascending VCA ID (#1655 D4).
+    #[derive(Clone, Default)]
+    struct Curves {
+        source: [Option<Vec<Segment>>; 2],
+        vca: [Vec<Vec<Segment>>; 2],
+        /// The tap's arrival `a(tap)`.
+        arrival: u64,
+    }
+
+    /// The `VcaMute` row's length in these cases (#1655 D4): 320, unlike the mute rule's 200, so
+    /// a VCA mute cursor that took another row's length is seen.
+    const VCA_MUTE: u32 = 320;
+
+    /// The send's cursor rows' jump lengths: [`route_jumps`] with the `VcaMute` row at
+    /// [`VCA_MUTE`].
+    fn send_jumps(lengths: GraphJumpLengths) -> crate::GraphRouteJumpLengths {
+        crate::GraphRouteJumpLengths {
+            vca_mute: VCA_MUTE,
+            ..route_jumps(lengths)
+        }
+    }
+
+    struct Send {
+        route: Box<LiveFollowRoute>,
+        producer: crate::GraphFollowRouteControlProducer,
+        gate: RevisionGate,
+        pin: GatePin,
+        revision: u64,
+    }
+
+    impl Send {
+        /// A route of `transform` over `curves`, at `curves.arrival`, following its source.
+        fn new(curves: &Curves, transform: RouteTransform) -> Self {
+            Self::continuing_vca(curves, transform, [false; 2])
+        }
+
+        /// [`Self::new`] whose source lanes `continued_vca` continue the predecessor's VCA mute
+        /// tables (#1655 D6).
+        fn continuing_vca(
+            curves: &Curves,
+            transform: RouteTransform,
+            continued_vca: [bool; 2],
+        ) -> Self {
+            let all: Vec<&Vec<Segment>> = curves
+                .source
+                .iter()
+                .flatten()
+                .chain(curves.vca.iter().flatten())
+                .collect();
+            let descriptions: Vec<_> = all
+                .iter()
+                .map(|segments| automation::CellDescription {
+                    segments,
+                    grid_ramp: 64,
+                    grid: 64,
+                    jump: automation::JumpLength::Block,
+                    completion: automation::Completion::End,
+                    no_restart: false,
+                })
+                .collect();
+            let program = std::sync::Arc::new(
+                automation::ProgramBuilder::build(&descriptions).expect("cells"),
+            );
+            let mut next = 0_u32;
+            let mut index = |curve: &Option<Vec<Segment>>| {
+                curve.as_ref().map(|_| {
+                    next += 1;
+                    next - 1
+                })
+            };
+            let cells = [index(&curves.source[0]), index(&curves.source[1])];
+            let vca_mutes = curves.vca.each_ref().map(|lane| {
+                lane.iter()
+                    .map(|_| {
+                        next += 1;
+                        next - 1
+                    })
+                    .collect::<Vec<u32>>()
+            });
+            let flags = RouteFollowFlags {
+                follows_mute: true,
+                automated: [0, 1].map(|lane| cells[lane].is_some() || !vca_mutes[lane].is_empty()),
+                ..RouteFollowFlags::default()
+            };
+            let source = GraphFollowRouteSource::new(
+                program,
+                cells,
+                vca_mutes,
+                curves.arrival,
+                send_jumps,
+                flags,
+            )
+            .expect("source")
+            .with_continued_vca_mutes(continued_vca);
+            let (binding, producer) = crate::follow_route_control_pair(
+                &StableGraphId::parse("send").expect("ID"),
+                &LiveValuesSuperseded::new(),
+                source,
+                0,
+                0,
+                0,
+            )
+            .expect("tables");
+            let route = Box::new(LiveFollowRoute::new(
+                transform,
+                binding.control,
+                &binding.source,
+                binding.columns,
+            ));
+            let (gate, pin) = RevisionGate::pair(0);
+            Self {
+                route,
+                producer,
+                gate,
+                pin,
+                revision: 0,
+            }
+        }
+
+        /// Write and publish one record: `transform` and `flags` over `length`.
+        fn write_with(&mut self, transform: RouteTransform, flags: RouteFollowFlags, length: u32) {
+            self.revision += 1;
+            let record = FollowRouteControlRecord::new(transform, flags, length).expect("record");
+            self.producer
+                .write(self.pin.stamp(self.revision).expect("stamp"), record);
+            self.pin.publish(&self.gate, self.revision);
+        }
+
+        /// Write and publish one record: `transform`, the route's own flags, over `length` (a
+        /// live send move, D6).
+        fn write(&mut self, transform: RouteTransform, length: u32) {
+            let flags = self.route.flags;
+            self.write_with(transform, flags, length);
+        }
+
+        /// The route op's block of `left.len()` samples whose first sample reads node time
+        /// `first` through `driver`: its block entry, then its mix when active.
+        fn block_with(
+            &mut self,
+            first: u64,
+            lengths: GraphJumpLengths,
+            driver: &dyn GraphPreparedSourceSetDriver,
+            left: &mut [f32],
+            right: &mut [f32],
+        ) {
+            let frames = u32::try_from(left.len()).expect("frames");
+            let time = GraphBlockTime::new(Some(first), frames, Some(lengths), Some(driver));
+            if self
+                .route
+                .begin_block(self.gate.snapshot(), &time)
+                .is_some()
+            {
+                self.route.mix(left, right);
+            }
+        }
+
+        /// One block of [`QUANTUM`] samples from `first` over a fixed input; its output bits.
+        fn run(&mut self, first: u64) -> Vec<u32> {
+            let (mut left, mut right) = input(QUANTUM);
+            self.block_with(first, LENGTHS, &Timeline, &mut left, &mut right);
+            bits((&left, &right))
+        }
+    }
+
+    fn input(frames: usize) -> (Vec<f32>, Vec<f32>) {
+        let left = (0..frames)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 17.0)
+            .collect();
+        let right = (0..frames)
+            .map(|i| ((i * 53 % 97) as f32 - 48.0) / 13.0)
+            .collect();
+        (left, right)
+    }
+
+    fn bits(planes: (&[f32], &[f32])) -> Vec<u32> {
+        planes
+            .0
+            .iter()
+            .chain(planes.1)
+            .map(|x| x.to_bits())
+            .collect()
+    }
+
+    const OPEN: RouteTransform = RouteTransform {
+        gain: 0.5,
+        ll: 0.9,
+        lr: 0.2,
+        rl: -0.3,
+        rr: 0.8,
+    };
+
+    /// The open coefficients of `transform` with linear gain `gain`.
+    fn open(transform: RouteTransform, gain: f32) -> [f32; 4] {
+        gated_route_coefficients(&RouteTransform { gain, ..transform }, RouteGate::OPEN)
+    }
+
+    /// The coefficients of `transform` with linear gain `gain` whose follow term zeroes the
+    /// columns `zeroed`.
+    fn zeroed(transform: RouteTransform, gain: f32, zeroed: [bool; 2]) -> [f32; 4] {
+        gated_route_coefficients(
+            &RouteTransform { gain, ..transform },
+            RouteGate {
+                mute: false,
+                follow_zeroed: zeroed,
+            },
+        )
+    }
+
+    /// The route's column ramps after each block of a run from node time 0, by block.
+    fn ramps_by_block(send: &mut Send, blocks: u64) -> Vec<[IndexedRamp; 2]> {
+        (0..blocks)
+            .map(|index| {
+                send.run(index * QUANTUM as u64);
+                send.route.ramps.ramps
+            })
+            .collect()
+    }
+
+    /// A ramp from anything toward `target` over `length` (the start is the test's to check).
+    fn aims(ramp: &IndexedRamp, target: [f32; 4], length: u32, column: usize) -> bool {
+        let indices = super::COLUMNS[column];
+        ramp.length == length
+            && indices
+                .iter()
+                .all(|&index| ramp.target[index].to_bits() == target[index].to_bits())
+    }
+
+    /// One plan swap at the start of block `at` (#1654 D3): `successor` takes `predecessor`'s
+    /// route state, as `carry_live_routes` does per move.
+    fn swap(successor: &mut Send, predecessor: &mut Send) {
+        let pending = super::carry_route(
+            super::CarriedRoute::Seven(&mut successor.route),
+            super::CarriedRoute::Seven(&mut predecessor.route),
+            None,
+        );
+        assert!(!pending);
+    }
+
+    /// The predecessor of a carry: `curves` under `base`, a live send move to `moved` over 2,000
+    /// samples written at block 18 (node time 1,152), run to the swap at block 20 (1,280).
+    fn moving(curves: &Curves, base: RouteTransform, moved: RouteTransform) -> Send {
+        let mut predecessor = Send::new(curves, base);
+        for index in 0..18_u64 {
+            predecessor.run(index * 64);
+        }
+        predecessor.write(moved, 2_000);
+        for index in 18..20_u64 {
+            predecessor.run(index * 64);
+        }
+        predecessor
+    }
+
+    /// R19-4 on the follow curves: the source lane's own mute and a reaching VCA mute both close
+    /// the left column at one offset (1,000); the column takes one retarget over the longer of
+    /// the two own lengths, whichever curve owns it (the `VcaMute` 320 against a mute length of
+    /// 200, and the mute length 480 against 320).
+    ///
+    /// Red if coincident gate events take one curve's length regardless, or retarget twice.
+    #[test]
+    fn coincident_follow_curve_events_take_the_longest_jump() {
+        let curves = Curves {
+            source: [Some(step(1_000, 0.0, 1.0)), None],
+            vca: [vec![step(1_000, 0.0, 1.0)], Vec::new()],
+            ..Curves::default()
+        };
+        let closed = zeroed(OPEN, 0.5, [true, false]);
+        for (mute, longest) in [(200, VCA_MUTE), (480, 480)] {
+            let lengths = GraphJumpLengths {
+                mute_samples: mute,
+                ..LENGTHS
+            };
+            let mut send = Send::new(&curves, OPEN);
+            let mut ramps = Vec::new();
+            for index in 0..30_u64 {
+                let (mut left, mut right) = input(QUANTUM);
+                send.block_with(
+                    index * QUANTUM as u64,
+                    lengths,
+                    &Timeline,
+                    &mut left,
+                    &mut right,
+                );
+                ramps.push(send.route.ramps);
+            }
+            let jump = ramps[1_000 / QUANTUM];
+            assert!(
+                aims(&jump.ramps[0], closed, longest, 0),
+                "mute {mute}: {:?} over {}",
+                jump.ramps[0].target,
+                jump.ramps[0].length
+            );
+            assert_eq!(
+                u64::from(jump.positions[0]),
+                QUANTUM as u64 - 1_000 % QUANTUM as u64,
+                "mute {mute}: one retarget at 1,000"
+            );
+            for later in &ramps[1_000 / QUANTUM + 1..] {
+                assert_eq!(later.ramps, jump.ramps, "mute {mute}: no second retarget");
+            }
+        }
+    }
+
+    /// R19-5 on a mute-following send: a live send move (gain 0.5 -> 1.0 over 2,000 from 1,152)
+    /// in flight at a swap (1,280) whose follow curves are unchanged (the own mute and a VCA mute
+    /// are placed again at the successor's node time) keeps its own length: every block up to
+    /// and past the move's end is the never-swapped twin's, bit for bit.
+    ///
+    /// Red if the carry retargets the column when its composition equals the adopted target
+    /// (the move would be cut to the mute length at the swap).
+    #[test]
+    fn a_live_send_move_in_flight_at_a_swap_keeps_its_length() {
+        let curves = Curves {
+            source: [Some(step(4_000, 0.0, 1.0)), None],
+            vca: [Vec::new(), vec![step(4_000, 0.0, 1.0)]],
+            ..Curves::default()
+        };
+        let moved = RouteTransform { gain: 1.0, ..OPEN };
+        let mut twin = moving(&curves, OPEN, moved);
+        let mut predecessor = moving(&curves, OPEN, moved);
+        let mut successor = Send::new(&curves, moved);
+        swap(&mut successor, &mut predecessor);
+        for index in 20..80_u64 {
+            assert_eq!(
+                successor.run(index * 64),
+                twin.run(index * 64),
+                "block {index}"
+            );
+        }
+    }
+
+    /// U2 fold 1, MAJOR-3: a send whose left lane loses its own mute curve at a swap (the right
+    /// lane keeps its own), settled. No cursor's curve carries the move and no join record moves
+    /// the cell, so the carry itself lands the left column on the cell's words at the
+    /// successor's first sample, over the removed curve's own length (the mute length, 200); a
+    /// removed VCA mute lands over the `VcaMute` length (320); the right column keeps its ramp.
+    ///
+    /// Red if the column stays on the removed curve's last value, or lands over another length.
+    #[test]
+    fn a_removed_follow_curve_lands_the_column_on_its_static_value() {
+        let right = Some(flat(0.0));
+        let cases = [
+            (
+                Curves {
+                    source: [Some(flat(1.0)), right.clone()],
+                    ..Curves::default()
+                },
+                200,
+            ),
+            (
+                Curves {
+                    source: [None, right.clone()],
+                    vca: [vec![flat(1.0)], Vec::new()],
+                    ..Curves::default()
+                },
+                VCA_MUTE,
+            ),
+        ];
+        let after = Curves {
+            source: [None, right],
+            ..Curves::default()
+        };
+        let target = open(OPEN, 0.5);
+        for (index, (before, length)) in cases.iter().enumerate() {
+            let mut predecessor = Send::new(before, OPEN);
+            for block in 0..20_u64 {
+                predecessor.run(block * 64);
+            }
+            let kept = predecessor.route.ramps.ramps[1];
+            let mut successor = Send::new(&after, OPEN);
+            swap(&mut successor, &mut predecessor);
+            successor.run(20 * 64);
+            let ramp = successor.route.ramps.ramps[0];
+            assert!(
+                aims(&ramp, target, *length, 0),
+                "case {index}: {:?} over {}",
+                ramp.target,
+                ramp.length
+            );
+            assert_eq!(successor.route.ramps.positions[0], 64, "case {index}");
+            assert_eq!(successor.route.ramps.ramps[1], kept, "case {index}");
+        }
+    }
+
+    /// B19-R7 (a removed curve with a live move in flight): the left lane's own mute curve, which
+    /// holds the left column shut, is removed at a swap (1,280) while a live send move (gain 1.0
+    /// -> 0.5 over 2,000 from 1,152) runs on the right column. Column 0 lands at once on the moved
+    /// cell's words over the mute length (200), the column jump an uninterrupted gate change
+    /// makes (the control plane flags such a rebuild `TransitionFallback`); column 1, which lost
+    /// nothing, keeps its move. An open curve's removal composes the adopted target and moves
+    /// nothing.
+    ///
+    /// Red if the removal never lands, or lands late (an owed landing), or touches column 1.
+    #[test]
+    fn a_removed_follow_curve_lands_at_once_across_a_move_in_flight() {
+        let before = Curves {
+            source: [Some(flat(1.0)), Some(flat(0.0))],
+            ..Curves::default()
+        };
+        let after = Curves {
+            source: [None, Some(flat(0.0))],
+            ..Curves::default()
+        };
+        let base = RouteTransform { gain: 1.0, ..OPEN };
+        let moved = RouteTransform { gain: 0.5, ..OPEN };
+        let mut predecessor = moving(&before, base, moved);
+        let record = predecessor.route.ramps.ramps;
+        assert_eq!(record[1].length, 2_000, "the move is in flight");
+        let mut successor = Send::new(&after, moved);
+        swap(&mut successor, &mut predecessor);
+        successor.run(20 * 64);
+        let ramp = successor.route.ramps.ramps[0];
+        assert!(
+            aims(&ramp, open(OPEN, 0.5), 200, 0),
+            "{:?} over {}",
+            ramp.target,
+            ramp.length
+        );
+        assert_eq!(successor.route.ramps.positions[0], 64);
+        for index in 21..49_u64 {
+            successor.run(index * 64);
+            assert_eq!(
+                successor.route.ramps.ramps[1], record[1],
+                "block {index}: column 1's move runs on"
+            );
+            assert_eq!(successor.route.ramps.ramps[0], ramp, "block {index}");
+        }
+    }
+
+    /// A timeline that seeks at render sample `at` (a block's first sample) to `to`: identity
+    /// before, `to + (s - at)` from there.
+    struct Seeking {
+        at: u64,
+        to: i64,
+    }
+
+    impl GraphPreparedSourceSetDriver for Seeking {
+        fn claim_count(&self) -> usize {
+            0
+        }
+        fn begin_block(&mut self, _first_sample: u64, _frames: u32) -> Result<(), RenderError> {
+            Ok(())
+        }
+        fn copy_track_input(
+            &mut self,
+            _claim_index: usize,
+            _left: &mut [f32],
+            _right: &mut [f32],
+        ) -> Result<(), RenderError> {
+            Ok(())
+        }
+        fn timeline_block(&self, first: i128, _frames: u32) -> Option<TimelineSpan> {
+            let at = i128::from(self.at);
+            let start = if first < at {
+                first
+            } else {
+                i128::from(self.to) + (first - at)
+            };
+            let step = (first == at).then_some(crate::TimelineStep {
+                offset: 0,
+                timeline: self.to,
+            });
+            Some(TimelineSpan {
+                start: i64::try_from(if step.is_some() { first } else { start }).ok()?,
+                step,
+            })
+        }
+    }
+
+    /// One block of [`QUANTUM`] samples from render sample `first` read through `driver`.
+    fn run_seeking(send: &mut Send, first: u64, driver: &Seeking) {
+        let (mut left, mut right) = input(QUANTUM);
+        send.block_with(first, LENGTHS, driver, &mut left, &mut right);
+    }
+
+    /// B19-R7 (no stale value survives): a send loses its left lane's own mute curve at a swap
+    /// (1,280) with a live send move in flight. Then either nothing, a further rebuild of the same
+    /// plan at 1,600, or a seek (identity at 1,920 and at 3,136, forward 1,920 -> 5,000, back
+    /// 1,920 -> 256). At block 120 every column aims at the fresh plan's target (a plan that never
+    /// heard the curve, bound with the moved values, through the same timeline), bit for bit.
+    ///
+    /// Red if a landing is dropped by a seek or by the second rebuild and leaves the removed
+    /// curve's value.
+    #[test]
+    fn a_removed_follow_curve_leaves_no_stale_value_after_a_seek_or_a_further_rebuild() {
+        let before = Curves {
+            source: [Some(step(1_000, 0.0, 1.0)), Some(flat(0.0))],
+            ..Curves::default()
+        };
+        let after = Curves {
+            source: [None, Some(flat(0.0))],
+            ..Curves::default()
+        };
+        let base = RouteTransform { gain: 1.0, ..OPEN };
+        let moved = RouteTransform { gain: 0.5, ..OPEN };
+        // (seek at, seek to, a second rebuild at block 25)
+        let scenarios = [
+            (u64::MAX, 0_i64, false),
+            (u64::MAX, 0, true),
+            (1_920, 1_920, false),
+            (3_136, 3_136, false),
+            (1_920, 5_000, false),
+            (1_920, 256, false),
+            (1_920, 256, true),
+        ];
+        for &(at, to, rebuild) in &scenarios {
+            let driver = Seeking { at, to };
+            let mut fresh = Send::new(&after, moved);
+            let mut predecessor = Send::new(&before, base);
+            for index in 0..20_u64 {
+                if index == 18 {
+                    predecessor.write(moved, 2_000);
+                }
+                run_seeking(&mut predecessor, index * 64, &driver);
+                run_seeking(&mut fresh, index * 64, &driver);
+            }
+            let mut successor = Send::new(&after, moved);
+            swap(&mut successor, &mut predecessor);
+            for index in 20..120_u64 {
+                if rebuild && index == 25 {
+                    let mut next = Send::new(&after, moved);
+                    swap(&mut next, &mut successor);
+                    successor = next;
+                }
+                run_seeking(&mut successor, index * 64, &driver);
+                run_seeking(&mut fresh, index * 64, &driver);
+            }
+            for column in 0..2 {
+                let want = fresh.route.ramps.ramps[column].target;
+                let got = successor.route.ramps.ramps[column];
+                assert!(
+                    aims(&got, want, got.length, column),
+                    "seek {at} -> {to}, rebuild {rebuild}, column {column}: {:?} != {want:?}",
+                    got.target
+                );
+            }
+        }
+    }
+
+    /// U2 fold 1 (reviewer's missing test): a hand mute of the send (a gate-only record over 200
+    /// at 960) and the source's left mute curve closing at 1,000 (a gate fade over the mute
+    /// length): the hand mute's fade runs whole (the curve's gate event finds the column already
+    /// aimed at silence and does not restart it), and while the curve stays closed a hand unmute
+    /// (at 1,920) leaves the left column shut and reopens only the right one.
+    ///
+    /// Red if a gate event of the curve restarts the hand mute's fade, or if the hand unmute
+    /// reopens the column the curve still closes.
+    #[test]
+    fn a_hand_mute_and_a_gate_fade_together() {
+        let curves = Curves {
+            source: [Some(step(1_000, 0.0, 1.0)), None],
+            ..Curves::default()
+        };
+        let mut send = Send::new(&curves, OPEN);
+        let mut ramps = ramps_by_block(&mut send, 15);
+        let muted = RouteFollowFlags {
+            mute: true,
+            ..send.route.flags
+        };
+        send.write_with(OPEN, muted, 200);
+        ramps.extend((15..30).map(|index| {
+            send.run(index * QUANTUM as u64);
+            send.route.ramps.ramps
+        }));
+        let fade = ramps[15];
+        for column in 0..2 {
+            assert!(
+                aims(&fade[column], [0.0; 4], 200, column),
+                "column {column}"
+            );
+        }
+        for block in 16..19 {
+            assert_eq!(
+                ramps[block], fade,
+                "block {block}: the hand fade runs whole"
+            );
+        }
+        let unmuted = RouteFollowFlags {
+            mute: false,
+            ..send.route.flags
+        };
+        send.write_with(OPEN, unmuted, 200);
+        send.run(30 * QUANTUM as u64);
+        let reopened = send.route.ramps.ramps;
+        assert!(
+            super::COLUMNS[0]
+                .iter()
+                .all(|&index| reopened[0].target[index].to_bits() == 0.0_f32.to_bits()),
+            "the curve keeps the left column shut"
+        );
+        assert!(
+            aims(&reopened[1], open(OPEN, 0.5), 200, 1),
+            "the right column reopens"
+        );
+    }
+
+    /// U2 fold 1 (reviewer's missing test): a source mute curve added at a swap (1,280) to a send
+    /// whose live send move (gain 0.5 -> 1.0 over 2,000 from 1,152) is in flight, the curve
+    /// closed there. The added gate is a gate change: the left column fades to silence at once
+    /// over the mute length (R19-3), and the right column, which the curve does not reach, keeps
+    /// the move.
+    ///
+    /// Red if the added gate waits for the move's end, or if it cuts the move on the other column.
+    #[test]
+    fn a_source_mute_added_while_a_move_is_in_flight_fades_its_column_at_once() {
+        let before = Curves {
+            source: [None, Some(flat(0.0))],
+            ..Curves::default()
+        };
+        let after = Curves {
+            source: [Some(flat(1.0)), Some(flat(0.0))],
+            ..Curves::default()
+        };
+        let moved = RouteTransform { gain: 1.0, ..OPEN };
+        let mut predecessor = moving(&before, OPEN, moved);
+        let record = predecessor.route.ramps.ramps;
+        let mut successor = Send::new(&after, moved);
+        swap(&mut successor, &mut predecessor);
+        successor.run(20 * 64);
+        let fade = successor.route.ramps.ramps[0];
+        assert!(
+            aims(&fade, [0.0; 4], 200, 0),
+            "{:?} over {}",
+            fade.target,
+            fade.length
+        );
+        assert_eq!(successor.route.ramps.positions[0], 64);
+        assert_eq!(
+            successor.route.ramps.ramps[1], record[1],
+            "the move runs on"
+        );
+    }
+
+    /// #1655 D4 (V4): a send whose source's left lane only an automated VCA mute reaches (no own
+    /// mute curve) closes its left column when the VCA mutes (0 -> 1 at 1,000), in the tap's node
+    /// time: at render sample `1,000 + a(tap)`, over the `VcaMute` length (320), for `a(tap)` 0
+    /// and 100. The right column, which no curve reaches, stays open.
+    ///
+    /// Red if the follow term leaves out the VCA mute curves (the send keeps passing audio), if the
+    /// VCA curve is read in render time instead of the tap's node time, or if its close takes
+    /// another row's length.
+    #[test]
+    fn a_vca_mute_step_closes_a_following_send_at_its_tap_time() {
+        let transform = RouteTransform { gain: 0.5, ..OPEN };
+        let opened = open(OPEN, 0.5);
+        let closed = zeroed(OPEN, 0.5, [true, false]);
+        for arrival in [0_u64, 100] {
+            let curves = Curves {
+                vca: [vec![step(1_000, 0.0, 1.0)], Vec::new()],
+                arrival,
+                ..Curves::default()
+            };
+            let mut send = Send::new(&curves, transform);
+            let close = 1_000 + arrival;
+            let (block, offset) = (close / QUANTUM as u64, close % QUANTUM as u64);
+            for index in 0..block {
+                send.run(index * QUANTUM as u64);
+                assert_eq!(
+                    send.route.ramps.ramps,
+                    [IndexedRamp::settled(opened); 2],
+                    "a(tap) {arrival}, block {index}: open"
+                );
+            }
+            send.run(block * QUANTUM as u64);
+            let ramps = send.route.ramps;
+            assert!(
+                aims(&ramps.ramps[0], closed, VCA_MUTE, 0),
+                "a(tap) {arrival}: the left column closes over the VcaMute length"
+            );
+            assert_eq!(
+                u64::from(ramps.positions[0]),
+                QUANTUM as u64 - offset,
+                "a(tap) {arrival}: the close is at render sample {close}"
+            );
+            assert_eq!(
+                ramps.ramps[1],
+                IndexedRamp::settled(opened),
+                "a(tap) {arrival}"
+            );
+            for index in block + 1..block + 8 {
+                send.run(index * QUANTUM as u64);
+            }
+            assert_eq!(
+                send.route.ramps.target().map(f32::to_bits),
+                closed.map(f32::to_bits),
+                "a(tap) {arrival}: closed after the fade"
+            );
+        }
+    }
+
+    /// #1655 D4 (V4): the follow term ORs the source lane's own mute curve with the VCA mute
+    /// curve: own closed until 1,000, again from 3,200 to 5,000; VCA closed from 3,000 to 4,000.
+    /// The left column opens at 1,000 (mute length 200), closes at 3,000 (`VcaMute` 320) and opens
+    /// at 5,000 (mute length); the own close at 3,200 and the VCA open at 4,000 move nothing.
+    ///
+    /// Red if one curve replaces the other instead of ORing (a move at 3,200 or 4,000, or none at
+    /// 3,000), or if the column's events take each other's lengths.
+    #[test]
+    fn a_vca_mute_ors_with_the_source_lanes_own_mute() {
+        let own = crate::follow_route_tests::steps(
+            &[0, 1_000, 3_200, 5_000],
+            &[1.0, 0.0, 1.0, 0.0],
+            1 << 20,
+        );
+        let vca = crate::follow_route_tests::steps(&[0, 3_000, 4_000], &[0.0, 1.0, 0.0], 1 << 20);
+        let curves = Curves {
+            source: [Some(own), None],
+            vca: [vec![vca], Vec::new()],
+            ..Curves::default()
+        };
+        let transform = RouteTransform { gain: 0.5, ..OPEN };
+        let opened = open(OPEN, 0.5);
+        let closed = zeroed(OPEN, 0.5, [true, false]);
+        let mut send = Send::new(&curves, transform);
+        assert_eq!(
+            send.route.ramps.target().map(f32::to_bits),
+            closed.map(f32::to_bits),
+            "the bound target is closed by the own curve"
+        );
+        let events = [
+            (1_000_u64, opened, 200_u32),
+            (3_000, closed, VCA_MUTE),
+            (5_000, opened, 200),
+        ];
+        let mut previous = send.route.ramps.ramps[0];
+        for index in 0..90_u64 {
+            send.run(index * QUANTUM as u64);
+            let ramp = send.route.ramps.ramps[0];
+            match events
+                .iter()
+                .find(|(at, _, _)| at / QUANTUM as u64 == index)
+            {
+                Some(&(at, target, length)) => {
+                    assert!(aims(&ramp, target, length, 0), "the event at {at}");
+                    assert_eq!(
+                        u64::from(send.route.ramps.positions[0]),
+                        QUANTUM as u64 - at % QUANTUM as u64,
+                        "the event at {at}: its offset"
+                    );
+                }
+                None => assert_eq!(ramp, previous, "block {index}: no move"),
+            }
+            previous = ramp;
+            assert!(
+                aims(&send.route.ramps.ramps[1], opened, 0, 1),
+                "block {index}: the right column stays open"
+            );
+        }
+    }
+
+    /// #1655 D6 (V4), the carry of a VCA mute cursor. A send whose left lane a VCA mute reaches
+    /// (closing at 1,300, opening at 2,000) and whose right lane has its own mute and a VCA mute,
+    /// carried at 1,344 inside the left column's fade, renders the never-swapped twin's bits
+    /// whether its VCA mute tables continue (verbatim) or not (placed again at the successor's
+    /// node time).
+    ///
+    /// Red if a VCA mute cursor's state or heard value is lost at a carry (a second close, a
+    /// fade cut short, or the open at 2,000 missed), in either placement.
+    #[test]
+    fn a_carried_vca_mute_renders_the_twins_bits_continued_or_repositioned() {
+        let curves = || Curves {
+            source: [None, Some(step(1_800, 0.0, 1.0))],
+            vca: [
+                vec![crate::follow_route_tests::steps(
+                    &[0, 1_300, 2_000],
+                    &[0.0, 1.0, 0.0],
+                    1 << 20,
+                )],
+                vec![step(2_400, 1.0, 0.0)],
+            ],
+            ..Curves::default()
+        };
+        let transform = RouteTransform { gain: 0.5, ..OPEN };
+        for continued in [true, false] {
+            let mut twin = Send::new(&curves(), transform);
+            let mut predecessor = Send::new(&curves(), transform);
+            for index in 0..21_u64 {
+                assert_eq!(twin.run(index * 64), predecessor.run(index * 64));
+            }
+            let mut successor = Send::continuing_vca(&curves(), transform, [continued; 2]);
+            swap(&mut successor, &mut predecessor);
+            for index in 21..60_u64 {
+                assert_eq!(
+                    successor.run(index * 64),
+                    twin.run(index * 64),
+                    "continued {continued}, block {index}"
+                );
+            }
+        }
+    }
+
+    /// #1655 D6 (V4), a moved VCA mute table: a settled send whose left lane's VCA mute table
+    /// changes at a swap (flat open to flat closed, and back) moves the column at the successor's
+    /// first sample over the `VcaMute` length; with the lane's own mute closed in both plans, the
+    /// same change moves nothing (OR). A VCA mute removed with no follow curve left lands over
+    /// the `VcaMute` length too.
+    ///
+    /// Red if a moved VCA curve at a carry lands over the mute length, lands as a step, or does
+    /// not land; or if a carry compares the VCA curve alone instead of the OR.
+    #[test]
+    fn a_moved_vca_mute_table_lands_over_its_own_length_at_the_first_sample() {
+        let transform = RouteTransform { gain: 0.5, ..OPEN };
+        let opened = open(OPEN, 0.5);
+        let closed = zeroed(OPEN, 0.5, [true, false]);
+        let lane = |own: Option<f32>, vca: Option<f32>| Curves {
+            source: [own.map(flat), None],
+            vca: [vca.map(flat).into_iter().collect(), Vec::new()],
+            ..Curves::default()
+        };
+        let cases = [
+            (lane(None, Some(0.0)), lane(None, Some(1.0)), Some(closed)),
+            (lane(None, Some(1.0)), lane(None, Some(0.0)), Some(opened)),
+            (lane(Some(1.0), Some(0.0)), lane(Some(1.0), Some(1.0)), None),
+        ];
+        for (case, (before, after, moved)) in cases.into_iter().enumerate() {
+            let mut predecessor = Send::new(&before, transform);
+            for index in 0..20_u64 {
+                predecessor.run(index * 64);
+            }
+            let held = predecessor.route.ramps.ramps;
+            let mut successor = Send::new(&after, transform);
+            swap(&mut successor, &mut predecessor);
+            successor.run(20 * 64);
+            let ramps = successor.route.ramps;
+            match moved {
+                Some(target) => {
+                    assert!(aims(&ramps.ramps[0], target, VCA_MUTE, 0), "case {case}");
+                    assert_eq!(ramps.positions[0], 64, "case {case}: at the first sample");
+                }
+                None => assert_eq!(ramps.ramps, held, "case {case}: the OR holds"),
+            }
+            assert_eq!(ramps.ramps[1], held[1], "case {case}: the right column");
+        }
+
+        // The VCA mute removed: the predecessor's left column closed by it, the successor's
+        // left column hearing no follow curve (the right lane's own mute keeps the send
+        // following).
+        let right = Some(flat(0.0));
+        let before = Curves {
+            source: [None, right.clone()],
+            vca: [vec![flat(1.0)], Vec::new()],
+            ..Curves::default()
+        };
+        let after = Curves {
+            source: [None, right],
+            ..Curves::default()
+        };
+        let mut predecessor = Send::new(&before, transform);
+        for index in 0..20_u64 {
+            predecessor.run(index * 64);
+        }
+        let mut successor = Send::new(&after, transform);
+        swap(&mut successor, &mut predecessor);
+        successor.run(20 * 64);
+        let ramp = successor.route.ramps.ramps[0];
+        assert!(
+            aims(&ramp, opened, VCA_MUTE, 0),
+            "the removed VCA mute lands over its own length: {ramp:?}"
+        );
     }
 }

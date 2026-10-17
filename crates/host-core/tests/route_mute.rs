@@ -2529,3 +2529,71 @@ fn the_following_route_charge_covers_its_attach_and_bind() {
         resources.total_bytes
     );
 }
+
+/// #1654 U2 fold 1, MAJOR-3 on a mute-following send (every bank width and the scalar oracle).
+/// The send `t-b` hears `t`'s right lane, whose mute entry holds it muted; `t`'s left lane has its
+/// own mute entry too. A rebuild at block 6 removes the right lane's entry: the send stays a
+/// following route (the left lane's curve keeps it seven-word), no join record moves its cell, and
+/// no cursor of the successor's right column hears a curve. The carry lands the send's column on
+/// the successor's static value over the removed curve's own length (the mute length): from the
+/// first block boundary after that landing, the send's plane is the successor prepared fresh, bit
+/// for bit, and render allocates nothing.
+///
+/// Test value: red if a removed source mute curve of a send that stays seven-word leaves the send
+/// on the removed curve's last value (muted).
+#[cfg(feature = "test-support")]
+#[test]
+fn removing_a_source_mute_curve_of_a_following_send_lands_on_the_fresh_plan() {
+    use follow::*;
+    use successor::{BLOCKS, QUANTUM, SWAP_BLOCK};
+    let pcm = successor::Feed::new("t", 29);
+    let lane_entry = |name: &str, lane: session::ParameterChannel, from: f32| {
+        let mut entry = mute_entry(from, &[]);
+        entry.id = sid(name);
+        entry.target.lane = lane;
+        entry
+    };
+    let mut b = model(QUANTUM as u32, SendTap::PreFader, false, true);
+    b.automation = vec![lane_entry(
+        "mute-left",
+        session::ParameterChannel::Left,
+        0.0,
+    )];
+    let mut a = b.clone();
+    a.automation.push(lane_entry(
+        "mute-right",
+        session::ParameterChannel::Right,
+        1.0,
+    ));
+    let quiet = |_: usize,
+                 _: &mut host_core::HostLiveControlHandles,
+                 _: &mut engine::realtime::PlanRevisionGate| {};
+    for backend in follow::backends() {
+        let what = format!("{backend:?}");
+        let fresh =
+            successor::reference_run(&successor::Session::compile(b.clone()), &[&pcm], backend);
+        let fresh = plane(&fresh, 1);
+        let (swapped, handles) = live_swap(&a, Some((&b, &a)), backend, &pcm, quiet);
+        assert_eq!(
+            handles
+                .expect("the successor's handles")
+                .follow_route_controls
+                .len(),
+            1,
+            "{what}: the send stays a following route"
+        );
+        assert_quiet(&swapped, &what);
+        let send = plane(&swapped, 1);
+        let at = SWAP_BLOCK * QUANTUM;
+        assert!(
+            first_difference_from(&send[..at], &fresh[..at], 0).is_some(),
+            "{what}: not vacuous, the removed curve is heard before the swap"
+        );
+        let landed = next_boundary(at + M as usize, QUANTUM);
+        assert_bits_equal(
+            &send[landed..BLOCKS * QUANTUM],
+            &fresh[landed..BLOCKS * QUANTUM],
+            &format!("{what}: the fresh plan after the landing"),
+        );
+    }
+}

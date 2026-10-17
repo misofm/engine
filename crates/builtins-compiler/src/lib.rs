@@ -310,30 +310,51 @@ struct OffsetsWriter {
     writer: CellWriter<OFFSETS_CELL_WORDS>,
 }
 
-/// One automated fader channel's offsets-cell value (#1649 D4): the lane's offset sum `S`
-/// (`controls::EffectiveStrip::offsets_sum`) and the length of the jump a change of it asks for
-/// (the lane's fader length of the edit, `LevelRules::lengths`). A write stores both in one slot,
-/// so render never reads the halves of two sums.
+/// One fader event lane's offsets-cell value (#1649 D4, #1655 D3): the lane's offset sum `S`
+/// (`controls::EffectiveStrip::offsets_sum`), the length of the jump a change of it asks for (the
+/// lane's fader length of the edit, `LevelRules::lengths`) and, on an event lane whose own fader
+/// is not automated, the member's static fader dB `own_db`. A write stores them in one slot, so
+/// render never reads the halves of two sums or a sum with another `own_db`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FaderOffsetsRecord {
     /// `S`.
     pub offsets_sum: f64,
     /// The jump's length in samples; `0` is an exact set.
     pub smoothing_samples: u32,
+    /// The member's static fader dB (#1655 D3), on a fader event lane whose own fader is not
+    /// automated: its hand fader move, which the lane composes with `S` and the reaching VCA
+    /// curves. `None` keeps the lane's `own_db`; a lane whose own fader is automated reads no
+    /// `own_db` (its own value is its curve). A `Some` is finite.
+    pub own_db: Option<f32>,
 }
 
+/// The `own_db` word of a record with no `own_db` (a quiet NaN: a `Some` is finite).
+const NO_OWN_DB: u32 = 0x7fc0_0000;
+
 impl FaderOffsetsRecord {
-    /// The cell's words: `S`'s `f64` bits, low word first, then the ramp word.
+    /// The cell's words: `S`'s `f64` bits, low word first, the ramp word, then the `own_db` bits
+    /// ([`NO_OWN_DB`] for `None`).
     const fn words(self) -> [u32; OFFSETS_CELL_WORDS] {
         let bits = self.offsets_sum.to_bits();
-        [bits as u32, (bits >> 32) as u32, self.smoothing_samples]
+        let own = match self.own_db {
+            Some(own) => own.to_bits(),
+            None => NO_OWN_DB,
+        };
+        [
+            bits as u32,
+            (bits >> 32) as u32,
+            self.smoothing_samples,
+            own,
+        ]
     }
 
     /// The record a slot's words hold.
     const fn from_words(words: [u32; OFFSETS_CELL_WORDS]) -> Self {
+        let own = f32::from_bits(words[3]);
         Self {
             offsets_sum: f64::from_bits((words[0] as u64) | ((words[1] as u64) << 32)),
             smoothing_samples: words[2],
+            own_db: if own.is_nan() { None } else { Some(own) },
         }
     }
 }
@@ -713,10 +734,12 @@ fn matrix_lane(superseded: &LiveValuesSuperseded) -> (MatrixCells, MatrixReader)
     )
 }
 
-/// Words of an automated fader lane's offsets cell (#1646 D1, written by #1649): the lane's offset
-/// sum `S` as the low and high words of its `f64` bits, then the ramp word (the jump length a VCA
-/// edit asks for).
-const OFFSETS_CELL_WORDS: usize = 3;
+/// Words of a fader event lane's offsets cell (#1646 D1, written by #1649): the lane's offset sum
+/// `S` as the low and high words of its `f64` bits, the ramp word (the jump length a VCA edit asks
+/// for), then the `own_db` word (#1655 D3, batch 19 amendment: a slot of four words and one of
+/// three are both 32 bytes, so every offsets cell takes it; unread on a lane whose own fader is
+/// automated).
+const OFFSETS_CELL_WORDS: usize = 4;
 
 /// What one automated fader channel's offsets cell shares between its writer (control,
 /// [`FaderCells::write_offsets`]) and its reader (render, [`LaneFaderAutomation::read_offsets`]):
@@ -751,10 +774,9 @@ impl core::fmt::Debug for OffsetsLane {
 /// The event state lives here, beside the lane's ramp state, so the stage's carry moves it with
 /// the lane (#1648 extends [`FaderBankProcessor::adopt_lane`]).
 struct AutomatedFaderCell {
-    /// The cell's index in the plan's [`automation::Program`].
-    cell: u32,
-    /// Seeded with the prepared curve value, so the first grid event on a flat curve emits nothing.
-    state: automation::CellState,
+    /// The channel's curve: its own cell, or the composed curve of a fader event lane an automated
+    /// VCA `offset_db` lane reaches (#1655 V2).
+    curve: FaderCurve,
     /// The offsets cell (#1649), shared with the strip's [`FaderCells`] when the strip has a live
     /// control lane.
     offsets: Arc<OffsetsLane>,
@@ -782,6 +804,351 @@ struct AutomatedFaderCell {
     /// ([`Adoption::Compare`]).
     adopted_sum: Option<f64>,
 }
+
+/// The curve of one fader event channel (#1646 D1, #1655 V2).
+#[derive(Debug)]
+enum FaderCurve {
+    /// The channel's own fader cell alone: the lane is automated and no automated VCA `offset_db`
+    /// lane reaches it. Its events are the cell's [`automation::CellEvents`], as before #1655, so
+    /// no bit of a session without VCA automation moves.
+    Cell {
+        /// The cell's index in the plan's [`automation::Program`].
+        cell: u32,
+        /// Seeded with the prepared curve value, so the first grid event on a flat curve emits
+        /// nothing.
+        state: automation::CellState,
+    },
+    /// The lane's composed curve (R19-2 = (b)): one output over its own curve (when its fader is
+    /// automated) and every reaching automated VCA `offset_db` curve.
+    Composed(Box<FaderComposite>),
+}
+
+/// The composed curve of a fader event lane that automated VCA `offset_db` lanes reach (#1655 D2,
+/// R19-2): one [`automation::Composed`] output whose cursors are the lane's own fader cell (when
+/// its fader is automated) and then each reaching automated VCA lane's cell, in ascending VCA ID.
+/// Its value is the lane's fader dB `vca_compose_db(own, S + c_1 + ... + c_m)` (the `f64` sum in
+/// D2's order: `S` first, then the curves in cursor order), `own` the own curve's value or the
+/// member's static `own_db` (D3). The output keeps one cell's hold rule
+/// ([`automation::Composed::with_held_grid`]), so a step of one curve keeps its jump length while
+/// another rides, and one cell's jump rule ([`automation::Composed::with_jump_release`], #1655
+/// U3 fold 1), so a jump the lane emits replaces the hold and the deferral the lane put on every
+/// cursor; every other rule of the single cell (the held-ramp obligation, the R17-10 release, the
+/// adoption and its deferred jump, #1711) acts on it through the same driver, applied to every
+/// cursor.
+#[derive(Debug)]
+struct FaderComposite {
+    walk: automation::Composed<f32>,
+    /// Cursor 0 is the lane's own fader cell.
+    own_curve: bool,
+    /// The member's static fader dB (D3), the lane's own value when `own_curve` is `false`: the
+    /// prepared one until an offsets record carries another.
+    own_db: f32,
+    /// At an adopted channel until its first block's offsets reads: the `own_db` this plan was
+    /// prepared with (the rule of [`AutomatedFaderCell::adopted_sum`]).
+    adopted_own_db: Option<f32>,
+}
+
+/// The curve of one mute event channel (#1651 D1, #1655 V2).
+#[derive(Debug)]
+enum MuteCurve {
+    /// The channel's own mute cell alone, as before #1655.
+    Cell {
+        /// The cell's index in the plan's [`automation::Program`].
+        cell: u32,
+        /// Seeded with the prepared curve value, so a fresh lane's first block emits nothing.
+        state: automation::CellState,
+    },
+    /// The lane's composed curve: one output over its own mute cell (when its mute is automated)
+    /// and every reaching automated VCA `mute` lane's cell, in ascending VCA ID; its value is
+    /// `own || v_1 || ... || v_m` (D4). The stage mute is that value `|| terms`.
+    Composed(Box<MuteComposite>),
+}
+
+/// The composed mute curve of a mute event lane that automated VCA `mute` lanes reach (#1655 D4).
+#[derive(Debug)]
+struct MuteComposite {
+    walk: automation::Composed<bool>,
+    /// Cursor 0 is the lane's own mute cell.
+    own_curve: bool,
+}
+
+impl FaderCurve {
+    /// The prepared channel: its own cell alone when no automated VCA lane reaches it, else the
+    /// composed curve over its cells, seeded with the lane's prepared fader dB. Control side: a
+    /// composed channel allocates its cursor table.
+    fn prepared(
+        program: &automation::Program,
+        cell: &PreparedFaderCell,
+    ) -> Result<Self, automation::ComposeError> {
+        if let (Some(own), true) = (cell.cell, cell.vca.is_empty()) {
+            let mut state = automation::CellState::new();
+            state.seed_target(cell.value);
+            return Ok(Self::Cell { cell: own, state });
+        }
+        let cells: Vec<(u32, automation::CursorKind)> = cell
+            .cell
+            .into_iter()
+            .chain(cell.vca.iter().copied())
+            .map(|cell| (cell, automation::CursorKind::Value))
+            .collect();
+        let mut walk =
+            automation::Composed::new(program, &cells, controls::FADER_CELL_RULE.completion)?
+                .with_held_grid()
+                .with_jump_release();
+        // The prepared value, composed once inside preparation's `CanonicalFpEnv` (D2, R17-7).
+        walk.seed_target(cell.fader_db);
+        Ok(Self::Composed(Box::new(FaderComposite {
+            walk,
+            own_curve: cell.cell.is_some(),
+            own_db: cell.own_db,
+            adopted_own_db: None,
+        })))
+    }
+}
+
+impl MuteCurve {
+    /// The prepared channel: its own cell alone when no automated VCA mute lane reaches it, else
+    /// the composed curve over its cells, seeded with the prepared curve mute. Control side.
+    fn prepared(
+        program: &automation::Program,
+        cell: &PreparedMuteCell,
+    ) -> Result<Self, automation::ComposeError> {
+        if let (Some(own), true) = (cell.cell, cell.vca.is_empty()) {
+            let mut state = automation::CellState::new();
+            state.seed_target(cell.value);
+            return Ok(Self::Cell { cell: own, state });
+        }
+        let cells: Vec<(u32, automation::CursorKind)> = cell
+            .cell
+            .into_iter()
+            .chain(cell.vca.iter().copied())
+            .map(|cell| (cell, automation::CursorKind::Gate))
+            .collect();
+        let mut walk =
+            automation::Composed::new(program, &cells, controls::MUTE_CELL_RULE.completion)?;
+        walk.seed_target(cell.curve_muted);
+        Ok(Self::Composed(Box::new(MuteComposite {
+            walk,
+            own_curve: cell.cell.is_some(),
+        })))
+    }
+}
+
+// REALTIME_POLICY_BEGIN
+/// A composed lane's fader dB (#1655 D2): `vca_compose_db(own, S + c_1 + ... + c_m)`, the `f64`
+/// sum in order, `S` first. Render runs it inside the render entry's `CanonicalFpEnv` (R17-7).
+fn composed_db(own: f32, offsets_sum: f64, curves: impl Iterator<Item = f32>) -> f32 {
+    let sum = curves.fold(offsets_sum, |sum, value| sum + f64::from(value));
+    session::vca_compose_db(own, sum)
+}
+
+/// Copy the cursor states and heard values of `from` into `into` when both tables have one
+/// layout (the same own cursor and as many VCA cursors: a continued channel's, whose tables
+/// continue bit for bit); a repositioned channel places its cursors again.
+fn carry_cursors<T: automation::Composable>(
+    into: &mut automation::Composed<T>,
+    from: &automation::Composed<T>,
+) {
+    if into.cursors().len() != from.cursors().len() {
+        return;
+    }
+    for (cursor, carried) in into.cursors_mut().iter_mut().zip(from.cursors()) {
+        *cursor.state_mut() = *carried.state();
+        cursor.set_heard(carried.heard());
+    }
+}
+
+impl FaderComposite {
+    /// The composition of the heard values with `S = offsets_sum`.
+    fn composition(&self, offsets_sum: f64) -> impl FnMut(automation::Heard<'_>) -> f32 + use<> {
+        let (own_curve, own_db) = (self.own_curve, self.own_db);
+        move |heard| {
+            let first = usize::from(own_curve);
+            let own = if own_curve { heard.value(0) } else { own_db };
+            composed_db(
+                own,
+                offsets_sum,
+                (first..heard.len()).map(|index| heard.value(index)),
+            )
+        }
+    }
+
+    /// The lane's value with every curve read by `read(cell)` (a cell the program does not hold
+    /// reads its heard value), composed with `offsets_sum`.
+    fn compose_with(
+        &self,
+        program: &automation::Program,
+        offsets_sum: f64,
+        mut read: impl FnMut(&automation::CellProgram<'_>) -> f32,
+    ) -> f32 {
+        let cursors = self.walk.cursors();
+        let mut values = cursors.iter().map(|cursor| {
+            program
+                .cell(cursor.cell() as usize)
+                .map_or(cursor.heard(), |cell| read(&cell))
+        });
+        let own = if self.own_curve {
+            values.next().unwrap_or(self.own_db)
+        } else {
+            self.own_db
+        };
+        composed_db(own, offsets_sum, values)
+    }
+
+    /// The composed value toward a ramp started at `start` and completing at `at`: each curve by
+    /// [`curve_toward`].
+    fn toward(&self, program: &automation::Program, offsets_sum: f64, start: i64, at: i64) -> f32 {
+        self.compose_with(program, offsets_sum, |cell| curve_toward(cell, start, at))
+    }
+
+    /// The composed value at node time `time`.
+    fn value_at(&self, program: &automation::Program, offsets_sum: f64, time: i64) -> f32 {
+        self.compose_with(program, offsets_sum, |cell| {
+            automation::value_at(cell.segments(), time)
+        })
+    }
+
+    /// The output's next event of the block begun on the walk, as a cell event whose value is
+    /// the composed fader dB.
+    fn next_event(
+        &mut self,
+        program: &automation::Program,
+        offsets_sum: f64,
+    ) -> Option<automation::Event> {
+        let compose = self.composition(offsets_sum);
+        self.walk
+            .next_event(program, compose)
+            .map(|event| automation::Event {
+                offset: event.offset,
+                value: event.value,
+                ramp: event.ramp,
+                kind: event.kind,
+                held: event.held,
+            })
+    }
+
+    /// Apply `apply` to every cursor's state: the single cell's rule on each of the lane's curves.
+    fn each_state(&mut self, mut apply: impl FnMut(&mut automation::CellState)) {
+        for cursor in self.walk.cursors_mut() {
+            apply(cursor.state_mut());
+        }
+    }
+
+    /// Set each cursor's jump length for the block: the fader row's for the own cursor, the VCA
+    /// `offset_db` row's for the VCA cursors (#1655, `block_jumps`).
+    fn set_jumps(&mut self, fader: u32, vca: u32) {
+        let own = usize::from(self.own_curve);
+        for (index, cursor) in self.walk.cursors_mut().iter_mut().enumerate() {
+            cursor.set_jump(if index < own { fader } else { vca });
+        }
+    }
+}
+
+impl MuteComposite {
+    /// `own || v_1 || ... || v_m` of the heard values.
+    fn composition(heard: automation::Heard<'_>) -> bool {
+        (0..heard.len()).any(|index| curve_mutes(heard.value(index)))
+    }
+
+    /// Whether some curve mutes at node time `time`.
+    fn mutes_at(&self, program: &automation::Program, time: i64) -> bool {
+        self.walk.cursors().iter().any(|cursor| {
+            program.cell(cursor.cell() as usize).map_or_else(
+                || curve_mutes(cursor.heard()),
+                |cell| curve_mutes(automation::value_at(cell.segments(), time)),
+            )
+        })
+    }
+
+    /// Set each cursor's jump length for the block: the mute row's for the own cursor, the VCA
+    /// `mute` row's for the VCA cursors.
+    fn set_jumps(&mut self, mute: u32, vca: u32) {
+        let own = usize::from(self.own_curve);
+        for (index, cursor) in self.walk.cursors_mut().iter_mut().enumerate() {
+            cursor.set_jump(if index < own { mute } else { vca });
+        }
+    }
+}
+
+impl FaderCurve {
+    /// #1648 D2, at a plan swap: take the carried channel's event state (its cell's, or a composed
+    /// curve's output and, with one layout, its cursors). A composed channel carried from a lone
+    /// cell (a gained VCA curve) takes the cell's ramp in flight and no target; a lone cell
+    /// carried from a composed channel (a lost VCA curve) starts fresh. Every such change of
+    /// shape repositions (the reaching VCA tables differ, so the join continues no cell).
+    /// Allocation-free.
+    fn carry(&mut self, from: &Self) {
+        match (self, from) {
+            (Self::Cell { state, .. }, Self::Cell { state: carried, .. }) => *state = *carried,
+            (Self::Composed(curve), Self::Composed(carried)) => {
+                if curve.own_curve == carried.own_curve {
+                    carry_cursors(&mut curve.walk, &carried.walk);
+                }
+                curve
+                    .walk
+                    .set_output(*carried.walk.output_state(), carried.walk.target());
+                // The `own_db` the stage heard; the successor's own records move it, and an
+                // unequal one with none takes the adoption rule (as `S`, `read_offsets`).
+                curve.adopted_own_db = Some(curve.own_db);
+                curve.own_db = carried.own_db;
+            }
+            (Self::Composed(curve), Self::Cell { state: carried, .. }) => {
+                curve.walk.set_output(*carried, None);
+            }
+            (Self::Cell { state, .. }, Self::Composed(_)) => {
+                *state = automation::CellState::new();
+            }
+        }
+    }
+}
+
+impl MuteCurve {
+    /// #1651 T4, at a plan swap: take the carried channel's event state, by the rule of
+    /// [`FaderCurve::carry`]. Allocation-free.
+    fn carry(&mut self, from: &Self) {
+        match (self, from) {
+            (Self::Cell { state, .. }, Self::Cell { state: carried, .. }) => *state = *carried,
+            (Self::Composed(curve), Self::Composed(carried)) => {
+                if curve.own_curve == carried.own_curve {
+                    carry_cursors(&mut curve.walk, &carried.walk);
+                }
+                curve
+                    .walk
+                    .set_output(*carried.walk.output_state(), carried.walk.target());
+            }
+            (Self::Composed(curve), Self::Cell { state: carried, .. }) => {
+                curve
+                    .walk
+                    .set_output(*carried, carried.target().map(curve_mutes));
+            }
+            (Self::Cell { state, .. }, Self::Composed(carried)) => {
+                *state = automation::CellState::new();
+                if let Some(muted) = carried.walk.target() {
+                    state.seed_target(f32::from(u8::from(muted)));
+                }
+            }
+        }
+    }
+
+    /// The curve mute the stage has heard (the output's current target).
+    fn heard(&self) -> bool {
+        match self {
+            Self::Cell { state, .. } => state.target().is_some_and(curve_mutes),
+            Self::Composed(curve) => curve.walk.target() == Some(true),
+        }
+    }
+
+    /// Whether the curve mutes at node time `time` (`None` when a cell is not the program's).
+    fn mutes_at(&self, program: &automation::Program, time: i64) -> Option<bool> {
+        match self {
+            Self::Cell { cell, .. } => program
+                .cell(*cell as usize)
+                .map(|program| curve_mutes(automation::value_at(program.segments(), time))),
+            Self::Composed(curve) => Some(curve.mutes_at(program, time)),
+        }
+    }
+}
+// REALTIME_POLICY_END
 
 /// What an automated channel's first block after a plan swap owes (#1648 D2). Set by
 /// [`LaneFaderAutomation::adopt`] at the swap block (and raised to `Compare` by the first block's
@@ -835,12 +1202,11 @@ struct HeldRampObligation {
 /// (#1312) carries every later value of it, the `Mute` record the shared commit emits from the
 /// effective mute, and the block drain gives that value to this cell
 /// ([`LaneFaderAutomation::mute_terms`]) instead of to the stage.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 struct AutomatedMuteCell {
-    /// The cell's index in the plan's [`automation::Program`].
-    cell: u32,
-    /// Seeded with the prepared curve value, so a fresh lane's first block emits nothing.
-    state: automation::CellState,
+    /// The channel's curve: its own cell, or the composed curve of a mute event lane an automated
+    /// VCA `mute` lane reaches (#1655 V2).
+    curve: MuteCurve,
     /// The mute terms the session does not automate.
     terms: bool,
     /// The cell's first block after a plan swap that carried its lane repositions it (#1651 T4,
@@ -875,6 +1241,10 @@ struct LaneFaderAutomation {
     /// The mute row's jump length of that block (`LiveRamps::for_row(Mute)`, #1651 D1), from the
     /// same three lengths; `None` exactly when [`Self::fader_jump`] is.
     mute_jump: Option<u32>,
+    /// The VCA rows' jump lengths of that block, `[offset_db, mute]` (`LiveRamps::for_row` of
+    /// `VcaOffset` and `VcaMute`, #1655): a composed channel's VCA cursors take them; `None`
+    /// exactly when [`Self::fader_jump`] is.
+    vca_jumps: Option<[u32; 2]>,
     /// The lane has rendered no block yet (#1647 D2): its first block takes a `Set` when the
     /// curve at that block's node time differs from the value it was seeded with.
     fresh: bool,
@@ -882,48 +1252,53 @@ struct LaneFaderAutomation {
 
 impl LaneFaderAutomation {
     /// The lane's automation, from its prepared cells, sharing each fader channel's offsets cell.
-    /// Control side.
-    fn new(program: &Arc<automation::Program>, strip: &PreparedStripAutomation) -> Self {
-        let cells = &strip.fader;
-        Self {
+    /// Control side: a composed channel allocates its cursor table (#1655 V2).
+    ///
+    /// # Errors
+    ///
+    /// The [`automation::ComposeError`] of a composed channel's table: unreachable for a plan's
+    /// own cells (each names a cell of `program`, and a composed channel has at least one), and
+    /// [`automation::ComposeError::Allocation`] when the table cannot be allocated.
+    fn new(
+        program: &Arc<automation::Program>,
+        strip: &PreparedStripAutomation,
+    ) -> Result<Self, automation::ComposeError> {
+        let mut mute = [None, None];
+        for (slot, cell) in mute.iter_mut().zip(&strip.mute) {
+            let Some(cell) = cell else { continue };
+            *slot = Some(AutomatedMuteCell {
+                curve: MuteCurve::prepared(program, cell)?,
+                terms: cell.terms,
+                reposition: false,
+            });
+        }
+        let mut channels = [None, None];
+        for (slot, cell) in channels.iter_mut().zip(&strip.fader) {
+            let Some(cell) = cell else { continue };
+            *slot = Some(AutomatedFaderCell {
+                curve: FaderCurve::prepared(program, cell)?,
+                offsets: Arc::clone(&cell.offsets),
+                offsets_reader: CellReader::new(),
+                offsets_dirty: DirtyReader::new(),
+                offsets_sum: cell.offsets_sum,
+                offsets_ramp: cell.offsets_ramp,
+                obligation: HeldRampObligation::default(),
+                adoption: Adoption::None,
+                carried_record: None,
+                adopted_sum: None,
+            });
+        }
+        Ok(Self {
             program: Arc::clone(program),
-            mute: strip.mute.map(|cell| {
-                cell.map(|cell| {
-                    let mut state = automation::CellState::new();
-                    state.seed_target(cell.value);
-                    AutomatedMuteCell {
-                        cell: cell.cell,
-                        state,
-                        terms: cell.terms,
-                        reposition: false,
-                    }
-                })
-            }),
-            channels: core::array::from_fn(|channel| {
-                cells[channel].as_ref().map(|cell| {
-                    let mut state = automation::CellState::new();
-                    state.seed_target(cell.value);
-                    AutomatedFaderCell {
-                        cell: cell.cell,
-                        state,
-                        offsets: Arc::clone(&cell.offsets),
-                        offsets_reader: CellReader::new(),
-                        offsets_dirty: DirtyReader::new(),
-                        offsets_sum: cell.offsets_sum,
-                        offsets_ramp: cell.offsets_ramp,
-                        obligation: HeldRampObligation::default(),
-                        adoption: Adoption::None,
-                        carried_record: None,
-                        adopted_sum: None,
-                    }
-                })
-            }),
+            mute,
+            channels,
             arrival: 0,
             span: None,
             fader_jump: None,
             mute_jump: None,
+            vca_jumps: None,
             fresh: true,
-        }
+        })
     }
 
     // REALTIME_POLICY_BEGIN
@@ -969,7 +1344,7 @@ impl LaneFaderAutomation {
             });
             cell.reposition = match carried {
                 Some((carried, carried_arrival)) => {
-                    cell.state = carried.state;
+                    cell.curve.carry(&carried.curve);
                     cell.terms = carried.terms;
                     continued_cells & (1 << (MUTE_CONTINUED_SHIFT + channel)) == 0
                         || carried_arrival != arrival
@@ -991,7 +1366,7 @@ impl LaneFaderAutomation {
             });
             cell.adoption = match carried {
                 Some((carried, carried_arrival)) => {
-                    cell.state = carried.state;
+                    cell.curve.carry(&carried.curve);
                     cell.obligation = carried.obligation;
                     cell.adopted_sum = Some(cell.offsets_sum);
                     cell.offsets_sum = carried.offsets_sum;
@@ -1045,6 +1420,7 @@ impl LaneFaderAutomation {
         self.span = time.node_span(self.arrival);
         self.fader_jump = jumps.map(|jumps| jumps.fader);
         self.mute_jump = jumps.map(|jumps| jumps.mute);
+        self.vca_jumps = jumps.map(|jumps| [jumps.vca_offset, jumps.vca_mute]);
     }
 
     /// #1651 D1, the drain branch: a mute value the block drain read for channel `channel`, whose
@@ -1070,7 +1446,7 @@ impl LaneFaderAutomation {
             return;
         };
         cell.terms = terms;
-        let heard = cell.state.target().is_some_and(curve_mutes) || terms;
+        let heard = cell.curve.heard() || terms;
         let stage_muted = stage.muted(channel);
         if heard == stage_muted {
             return;
@@ -1085,10 +1461,8 @@ impl LaneFaderAutomation {
         // the curve it holds.
         let at_node = match (cell.reposition, self.mute_jump, self.span) {
             (true, Some(_), Some(span)) => node_time_at(span, 0)
-                .zip(self.program.cell(cell.cell as usize))
-                .map(|(time, program)| {
-                    curve_mutes(automation::value_at(program.segments(), time)) || terms
-                }),
+                .and_then(|time| cell.curve.mutes_at(&self.program, time))
+                .map(|muted| muted || terms),
             _ => None,
         };
         let muted = at_node.unwrap_or(heard);
@@ -1187,6 +1561,19 @@ impl LaneFaderAutomation {
                     "the adoption rule stands in for a live offsets record"
                 );
                 cell.offsets_sum = sum;
+                cell.adoption = cell.adoption.max(Adoption::Compare);
+            }
+            // #1655 D3: a composed channel's `own_db` takes the same rule as its `S`.
+            if let FaderCurve::Composed(curve) = &mut cell.curve
+                && let Some(prepared) = curve.adopted_own_db.take()
+                && own.is_none()
+                && prepared.to_bits() != curve.own_db.to_bits()
+            {
+                debug_assert!(
+                    superseded.is_none(),
+                    "the adoption rule stands in for a live own_db record"
+                );
+                curve.own_db = prepared;
                 cell.adoption = cell.adoption.max(Adoption::Compare);
             }
         }
@@ -1295,27 +1682,58 @@ impl AutomatedFaderCell {
         self.offsets_ramp = ramp;
         let completion = controls::FADER_CELL_RULE.completion;
         let start = span.and_then(|span| node_time_at(span, 0));
-        let value = match (start, program.cell(self.cell as usize)) {
-            (Some(start), Some(cell)) => curve_toward(
-                &cell,
-                start,
-                automation::completion_of(completion, start, ramp),
-            ),
-            (Some(_), None) => return false,
-            (None, _) => match self.state.target() {
-                Some(value) => value,
-                None => return true,
-            },
-        };
         let compose =
             |value, sum| builtins::checked_fader_gain(session::vca_compose_db(value, sum)).ok();
-        let Some(gain) = compose(value, self.offsets_sum) else {
-            return false;
+        // `value` is the channel's new target (a cell's curve value, a composed channel's fader
+        // dB), `gain` its gain, `current` the gain of the target the lane heard.
+        let (value, gain, current) = match &mut self.curve {
+            FaderCurve::Cell { cell, state } => {
+                let value = match (start, program.cell(*cell as usize)) {
+                    (Some(start), Some(cell)) => curve_toward(
+                        &cell,
+                        start,
+                        automation::completion_of(completion, start, ramp),
+                    ),
+                    (Some(_), None) => return false,
+                    (None, _) => match state.target() {
+                        Some(value) => value,
+                        None => return true,
+                    },
+                };
+                let Some(gain) = compose(value, self.offsets_sum) else {
+                    return false;
+                };
+                let current = state.target().and_then(|target| compose(target, heard));
+                (value, gain, current)
+            }
+            FaderCurve::Composed(curve) => {
+                // #1655 D3: a record of an event lane whose own fader is not automated carries
+                // the member's `own_db`, composed with the new `S` and the curves.
+                if let (false, Some(own_db)) = (curve.own_curve, record.own_db) {
+                    curve.own_db = own_db;
+                }
+                let value = match start {
+                    Some(start) => curve.toward(
+                        program,
+                        self.offsets_sum,
+                        start,
+                        automation::completion_of(completion, start, ramp),
+                    ),
+                    None => {
+                        let compose = curve.composition(self.offsets_sum);
+                        curve.walk.compose_heard(compose)
+                    }
+                };
+                let Some(gain) = builtins::checked_fader_gain(value).ok() else {
+                    return false;
+                };
+                let current = curve
+                    .walk
+                    .target()
+                    .and_then(|target| builtins::checked_fader_gain(target).ok());
+                (value, gain, current)
+            }
         };
-        let current = self
-            .state
-            .target()
-            .and_then(|target| compose(target, heard));
         if current.map(f32::to_bits) == Some(gain.to_bits()) {
             return true;
         }
@@ -1330,11 +1748,26 @@ impl AutomatedFaderCell {
         if stage.gain_held(channel) {
             let remaining = stage.ramp_remaining(channel);
             let applied = stage.apply(channel, operation);
-            self.state = automation::CellState::new();
-            if let (Some(last), Some(span)) = (remaining.checked_sub(1), span)
-                && let Some(end) = node_time_at(span, u64::from(last))
-            {
-                self.state.hold_until(end);
+            let end = remaining
+                .checked_sub(1)
+                .zip(span)
+                .and_then(|(last, span)| node_time_at(span, u64::from(last)));
+            match &mut self.curve {
+                FaderCurve::Cell { state, .. } => {
+                    *state = automation::CellState::new();
+                    if let Some(end) = end {
+                        state.hold_until(end);
+                    }
+                }
+                FaderCurve::Composed(curve) => {
+                    curve.walk.clear_target();
+                    curve.each_state(|state| {
+                        *state = automation::CellState::new();
+                        if let Some(end) = end {
+                            state.hold_until(end);
+                        }
+                    });
+                }
             }
             return applied;
         }
@@ -1345,13 +1778,24 @@ impl AutomatedFaderCell {
         // block's R17-10 release must not cut it (#1647 U2 fold 3, F1). A successor's carried
         // record takes this same path at its first block, with the carried obligation.
         self.obligation.held_through = false;
-        self.state.seed_target(value);
+        let hold = start.map(|start| automation::completion_of(completion, start, ramp));
         // A newer live move keeps its own length: a jump an adoption deferred to the end of the
         // ramp this one replaces is dropped (#1711 D1).
-        self.state.clear_deferred_jump();
-        if let Some(start) = start {
-            self.state
-                .hold_until(automation::completion_of(completion, start, ramp));
+        match &mut self.curve {
+            FaderCurve::Cell { state, .. } => {
+                state.seed_target(value);
+                state.clear_deferred_jump();
+                if let Some(hold) = hold {
+                    state.hold_until(hold);
+                }
+            }
+            FaderCurve::Composed(curve) => {
+                curve.walk.seed_target(value);
+                curve.walk.clear_deferred_jump();
+                if let Some(hold) = hold {
+                    curve.each_state(|state| state.hold_until(hold));
+                }
+            }
         }
         true
     }
@@ -1392,13 +1836,18 @@ fn span_time(start: i64, step: Option<(u32, i64)>, offset: u64) -> Option<i64> {
     base.checked_add(i64::try_from(offset - from).ok()?)
 }
 
-/// The fader and mute rows' jump lengths of one block (#1639 D2, #1651 D1).
+/// The fader, mute and VCA rows' jump lengths of one block (#1639 D2, #1651 D1, #1655).
 #[derive(Clone, Copy, Debug)]
 struct BlockJumps {
     /// `LiveRamps::for_row(Fader)`.
     fader: u32,
     /// `LiveRamps::for_row(Mute)`.
     mute: u32,
+    /// `LiveRamps::for_row(VcaOffset)`: a composed channel's VCA offset cursors (resolved by
+    /// row, not assumed equal to the fader's).
+    vca_offset: u32,
+    /// `LiveRamps::for_row(VcaMute)`.
+    vca_mute: u32,
 }
 
 /// The fader and mute rows' jump lengths of a block (#1639 D2, #1647a departure 7, #1651 D1),
@@ -1414,6 +1863,8 @@ fn block_jumps(time: &GraphBlockTime<'_>) -> Option<BlockJumps> {
         BlockJumps {
             fader: ramps.for_row(effect_contract::control::LiveRampRow::Fader),
             mute: ramps.for_row(effect_contract::control::LiveRampRow::Mute),
+            vca_offset: ramps.for_row(effect_contract::control::LiveRampRow::VcaOffset),
+            vca_mute: ramps.for_row(effect_contract::control::LiveRampRow::VcaMute),
         }
     })
 }
@@ -1468,12 +1919,10 @@ struct FaderCellCursor<'a> {
     channel: usize,
     /// `S`, the offset sum every event's value is composed with (#1646 D1).
     offsets_sum: f64,
-    /// The cell's program and the block's jump length, to build the later pieces.
-    program: automation::CellProgram<'a>,
+    /// The block's jump length of a lone cell, to build the later pieces.
     jump: u32,
-    /// The current piece's events, spent or not: it holds the cell's state for the next piece.
-    /// `None` only after a refusal (unreachable).
-    events: Option<automation::CellEvents<'a, 'a>>,
+    /// The channel's events: a lone cell's or a composed curve's (#1655 V2).
+    walk: ChannelEvents<'a>,
     /// The block offset of the current piece's first sample.
     base: u32,
     /// The block offset of the current piece's last sample.
@@ -1500,18 +1949,46 @@ struct FaderCellCursor<'a> {
     frames: u32,
 }
 
+/// One fader channel's events in a block (#1655 V2): a lone cell's, piece by piece, or a composed
+/// curve's, whose walk is begun on each piece.
+enum ChannelEvents<'a> {
+    Cell {
+        /// The cell's program.
+        program: automation::CellProgram<'a>,
+        /// The current piece's events, spent or not: it holds the cell's state for the next piece.
+        /// `None` only after a refusal (unreachable).
+        events: Option<automation::CellEvents<'a, 'a>>,
+    },
+    Composed {
+        /// The plan's program.
+        program: &'a automation::Program,
+        /// The composed curve; its walk holds every cursor's state for the next piece.
+        curve: &'a mut FaderComposite,
+    },
+}
+
 impl FaderCellCursor<'_> {
     /// Pull the current piece's next event, rebased to the block.
     fn pull(&mut self) {
         let base = self.base;
-        self.next = self
-            .events
-            .as_mut()
-            .and_then(Iterator::next)
-            .map(|event| automation::Event {
-                offset: event.offset.saturating_add(base),
-                ..event
-            });
+        let sum = self.offsets_sum;
+        let next = match &mut self.walk {
+            ChannelEvents::Cell { events, .. } => events.as_mut().and_then(Iterator::next),
+            ChannelEvents::Composed { program, curve } => curve.next_event(program, sum),
+        };
+        self.next = next.map(|event| automation::Event {
+            offset: event.offset.saturating_add(base),
+            ..event
+        });
+    }
+
+    /// The gain of event value `value`: a lone cell's curve value composed with `S`, a composed
+    /// curve's fader dB as it is; `None` when it has no fader gain (unreachable).
+    fn gain(&self, value: f32) -> Option<f32> {
+        match self.walk {
+            ChannelEvents::Cell { .. } => FaderEventDriver::gain(value, self.offsets_sum),
+            ChannelEvents::Composed { .. } => builtins::checked_fader_gain(value).ok(),
+        }
     }
 
     /// The offset of the cursor's next operation: its next event, or the cut at `E` once the
@@ -1522,14 +1999,9 @@ impl FaderCellCursor<'_> {
             .or_else(|| self.end.map(|end| end.at))
     }
 
-    /// The last offset of a piece that starts at `from`: the cut at `E` or the channel's next
-    /// mute event, whichever comes first, else the block's last sample.
+    /// The last offset of a piece that starts at `from` ([`piece_last`]).
     fn piece_last(&self, from: u32) -> u32 {
-        [self.end.map(|end| end.at), self.mute_at]
-            .into_iter()
-            .flatten()
-            .filter(|&at| at >= from)
-            .fold(self.frames - 1, u32::min)
+        piece_last(self.end, self.mute_at, self.frames, from)
     }
 
     /// End the piece at the cut. With `moving`, the cell first lands at `E` as a seek in
@@ -1551,17 +2023,31 @@ impl FaderCellCursor<'_> {
             debug_assert!(false, "a one-sample span with its step at 0 is valid");
             return None;
         };
-        let state = self.events.take()?.into_state();
-        let mut events = automation::CellEvents::new(
-            self.program,
-            state,
-            span,
-            automation::SeekMode::Ramp,
-            self.jump,
-        );
-        let landing = events.next();
-        self.events = Some(events);
-        landing
+        let sum = self.offsets_sum;
+        match &mut self.walk {
+            ChannelEvents::Cell { program, events } => {
+                let state = events.take()?.into_state();
+                let mut landing_events = automation::CellEvents::new(
+                    *program,
+                    state,
+                    span,
+                    automation::SeekMode::Ramp,
+                    self.jump,
+                );
+                let landing = landing_events.next();
+                *events = Some(landing_events);
+                landing
+            }
+            ChannelEvents::Composed { program, curve } => {
+                // Every cursor lands (R17-9 on each curve), and the output lands over the longest
+                // of their jumps (R19-4).
+                curve.walk.start(program, span, automation::SeekMode::Ramp);
+                let landing = curve.next_event(program, sum);
+                // The one-sample span holds no other offset: the walk ends here.
+                while curve.next_event(program, sum).is_some() {}
+                landing
+            }
+        }
     }
 
     /// Start the next piece at block offset `from` (the current piece is spent), through
@@ -1576,10 +2062,17 @@ impl FaderCellCursor<'_> {
         if from >= self.frames {
             // The block is spent: no later piece reads the events, and the cell's state lives
             // in its lane slot.
-            if let Some(release) = self.release.take()
-                && let Some(events) = self.events.take()
-            {
-                release_lane_hold(events.into_state(), release);
+            if let Some(release) = self.release.take() {
+                match &mut self.walk {
+                    ChannelEvents::Cell { events, .. } => {
+                        if let Some(events) = events.take() {
+                            release_lane_hold(events.into_state(), release);
+                        }
+                    }
+                    ChannelEvents::Composed { curve, .. } => {
+                        curve.each_state(|state| release_lane_hold(state, release));
+                    }
+                }
             }
             return false;
         }
@@ -1588,22 +2081,35 @@ impl FaderCellCursor<'_> {
             debug_assert!(false, "a piece of a checked block is a valid span");
             return false;
         };
-        let Some(events) = self.events.take() else {
-            return false;
-        };
+        let release = self.release.take();
+        match &mut self.walk {
+            ChannelEvents::Cell { program, events } => {
+                let Some(spent) = events.take() else {
+                    return false;
+                };
+                let state = spent.into_state();
+                if let Some(release) = release {
+                    release_lane_hold(state, release);
+                }
+                *events = Some(automation::CellEvents::new(
+                    *program,
+                    state,
+                    span,
+                    controls::FADER_CELL_RULE.seek,
+                    self.jump,
+                ));
+            }
+            ChannelEvents::Composed { program, curve } => {
+                if let Some(release) = release {
+                    curve.each_state(|state| release_lane_hold(state, release));
+                }
+                curve
+                    .walk
+                    .start(program, span, controls::FADER_CELL_RULE.seek);
+            }
+        }
         self.base = from;
         self.last = last;
-        let state = events.into_state();
-        if let Some(release) = self.release.take() {
-            release_lane_hold(state, release);
-        }
-        self.events = Some(automation::CellEvents::new(
-            self.program,
-            state,
-            span,
-            controls::FADER_CELL_RULE.seek,
-            self.jump,
-        ));
         self.pull();
         true
     }
@@ -1663,6 +2169,44 @@ impl FaderCellCursor<'_> {
                 self.free_from = frames;
                 obligation.due_at_entry = end == Ok(frames);
                 obligation.held_through = true;
+            }
+        }
+    }
+}
+
+/// The last offset of a piece that starts at `from` in a block of `frames` samples: the cut at
+/// `E` (`end`) or the channel's next mute event (`mute_at`), whichever comes first, else the
+/// block's last sample.
+fn piece_last(end: Option<HoldEnd>, mute_at: Option<u32>, frames: u32, from: u32) -> u32 {
+    [end.map(|end| end.at), mute_at]
+        .into_iter()
+        .flatten()
+        .filter(|&at| at >= from)
+        .fold(frames.saturating_sub(1), u32::min)
+}
+
+/// A fader channel as the driver placed it at a block's entry, before its first piece.
+enum Placed<'a> {
+    Cell {
+        program: automation::CellProgram<'a>,
+        state: &'a mut automation::CellState,
+    },
+    Composed(&'a mut FaderComposite),
+}
+
+impl Placed<'_> {
+    /// R17-10: release the hold of the ramp a live write ended at the block's entry (`release`,
+    /// the node time before the block's first sample) and drop a jump deferred to its end: on a
+    /// lone cell, or on every cursor of a composed curve.
+    fn release_at_entry(&mut self, release: i64) {
+        match self {
+            Self::Cell { state, .. } => {
+                state.hold_until(release);
+                state.clear_deferred_jump();
+            }
+            Self::Composed(curve) => {
+                curve.each_state(|state| state.hold_until(release));
+                curve.walk.clear_deferred_jump();
             }
         }
     }
@@ -1732,7 +2276,7 @@ struct MuteCellCursor<'a> {
     /// The stage mute: the stage's at the block's first sample (after the drain), then each
     /// composition the driver pushed.
     muted: bool,
-    events: automation::CellEvents<'a, 'a>,
+    events: MuteEvents<'a>,
     /// The next event, its offset in the block.
     next: Option<automation::Event>,
     /// The `SetMute { muted, samples }` pushed at the offset being applied, if any: the lane's
@@ -1740,10 +2284,32 @@ struct MuteCellCursor<'a> {
     pushed: Option<(bool, u32)>,
 }
 
+/// One mute channel's events in a block (#1655 V2): a lone cell's or a composed curve's, whose
+/// value is `1.0` when the curves mute.
+enum MuteEvents<'a> {
+    Cell(automation::CellEvents<'a, 'a>),
+    Composed {
+        program: &'a automation::Program,
+        curve: &'a mut MuteComposite,
+    },
+}
+
 impl MuteCellCursor<'_> {
     /// Pull the cell's next event.
     fn pull(&mut self) {
-        self.next = self.events.next();
+        self.next = match &mut self.events {
+            MuteEvents::Cell(events) => events.next(),
+            MuteEvents::Composed { program, curve } => curve
+                .walk
+                .next_event(program, MuteComposite::composition)
+                .map(|event| automation::Event {
+                    offset: event.offset,
+                    value: f32::from(u8::from(event.value)),
+                    ramp: event.ramp,
+                    kind: event.kind,
+                    held: event.held,
+                }),
+        };
     }
 }
 
@@ -1784,11 +2350,14 @@ impl<'a> FaderEventDriver<'a> {
                 span,
                 fader_jump,
                 mute_jump,
+                vca_jumps,
                 fresh,
                 ..
             } = automation;
             let first_block = core::mem::replace(fresh, false);
-            let (Some(span), Some(jump), Some(mute_jump)) = (*span, *fader_jump, *mute_jump) else {
+            let (Some(span), Some(jump), Some(mute_jump), Some([vca_offset_jump, vca_mute_jump])) =
+                (*span, *fader_jump, *mute_jump, *vca_jumps)
+            else {
                 continue;
             };
             let length = i64::from(frames);
@@ -1809,8 +2378,7 @@ impl<'a> FaderEventDriver<'a> {
             let lane_mutes = mutes_used;
             for (channel, cell) in mute.iter_mut().enumerate() {
                 let Some(AutomatedMuteCell {
-                    cell,
-                    state,
+                    curve,
                     terms,
                     reposition,
                 }) = cell.as_mut()
@@ -1819,42 +2387,77 @@ impl<'a> FaderEventDriver<'a> {
                 };
                 let refused =
                     || debug_assert!(false, "an automated mute cell is refused at render");
-                // Unreachable: the cell index was prepared from this same program. In release the
-                // channel is skipped: it emits nothing and the lane keeps its mute, no panic.
-                let Some(cell_program) = program.cell(*cell as usize) else {
-                    refused();
-                    continue;
-                };
                 // #1651 T4: a repositioned cell (a carried lane whose table changed or was
                 // gained) is placed at the block's node time in its own table, and the block
                 // opens with a ramped landing over the mute length, which pushes `SetMute` only
                 // when `curve || terms` differs from the stage's mute. A seek step in the block
-                // lands instead (the seek sets the lane exactly where it applies).
+                // lands instead (the seek sets the lane exactly where it applies). A composed
+                // curve (#1655 D4) places each cursor in its own cell.
                 let adopted = core::mem::replace(reposition, false);
-                if adopted {
-                    state.reposition(&cell_program, span.start);
-                }
                 let mut mode = controls::MUTE_CELL_RULE.seek;
-                let step = span
-                    .step
-                    .map(|step| (step.offset, step.timeline))
-                    .or_else(|| {
+                let mut step_with = |differs: bool| {
+                    span.step
+                        .map(|step| (step.offset, step.timeline))
+                        .or_else(|| {
+                            if adopted {
+                                mode = automation::SeekMode::Ramp;
+                                return Some((0, span.start));
+                            }
+                            (first_block && differs).then_some((0, span.start))
+                        })
+                };
+                let muted = hold(lane, channel).is_some_and(|hold| hold.muted);
+                let events = match curve {
+                    MuteCurve::Cell { cell, state } => {
+                        // Unreachable: the cell index was prepared from this same program. In
+                        // release the channel is skipped: it emits nothing and the lane keeps its
+                        // mute, no panic.
+                        let Some(cell_program) = program.cell(*cell as usize) else {
+                            refused();
+                            continue;
+                        };
                         if adopted {
-                            mode = automation::SeekMode::Ramp;
-                            return Some((0, span.start));
+                            state.reposition(&cell_program, span.start);
                         }
                         let value = automation::value_at(cell_program.segments(), span.start);
-                        (first_block && state.target().map(f32::to_bits) != Some(value.to_bits()))
-                            .then_some((0, span.start))
-                    });
-                let muted = hold(lane, channel).is_some_and(|hold| hold.muted);
+                        let step =
+                            step_with(state.target().map(f32::to_bits) != Some(value.to_bits()));
+                        let Ok(node) = automation::NodeSpan::new(span.start, step, frames) else {
+                            refused();
+                            continue;
+                        };
+                        MuteEvents::Cell(automation::CellEvents::new(
+                            cell_program,
+                            state,
+                            node,
+                            mode,
+                            mute_jump,
+                        ))
+                    }
+                    MuteCurve::Composed(curve) => {
+                        let curve: &'a mut MuteComposite = curve;
+                        if adopted {
+                            for cursor in curve.walk.cursors_mut() {
+                                if let Some(cell) = program.cell(cursor.cell() as usize) {
+                                    cursor.state_mut().reposition(&cell, span.start);
+                                }
+                            }
+                        }
+                        curve.set_jumps(mute_jump, vca_mute_jump);
+                        let value = curve.mutes_at(program, span.start);
+                        let step = step_with(curve.walk.target() != Some(value));
+                        let Ok(node) = automation::NodeSpan::new(span.start, step, frames) else {
+                            refused();
+                            continue;
+                        };
+                        curve.walk.start(program, node, mode);
+                        MuteEvents::Composed { program, curve }
+                    }
+                };
                 // Unreachable refusal: the graph's step lies inside the block, and at most
                 // `MAXIMUM_FADER_CELLS` mute cursors are used (two channels per lane). In release
                 // the channel is skipped: it emits nothing and the lane keeps its mute.
-                let (Ok(node), Some(slot)) = (
-                    automation::NodeSpan::new(span.start, step, frames),
-                    driver.mutes.get_mut(mutes_used),
-                ) else {
+                let Some(slot) = driver.mutes.get_mut(mutes_used) else {
                     refused();
                     continue;
                 };
@@ -1863,7 +2466,7 @@ impl<'a> FaderEventDriver<'a> {
                     channel,
                     terms: *terms,
                     muted,
-                    events: automation::CellEvents::new(cell_program, state, node, mode, mute_jump),
+                    events,
                     next: None,
                     pushed: None,
                 };
@@ -1873,8 +2476,7 @@ impl<'a> FaderEventDriver<'a> {
             }
             for (channel, cell) in channels.iter_mut().enumerate() {
                 let Some(AutomatedFaderCell {
-                    cell,
-                    state,
+                    curve,
                     offsets_sum,
                     obligation,
                     adoption,
@@ -1885,33 +2487,68 @@ impl<'a> FaderEventDriver<'a> {
                 };
                 let refused =
                     || debug_assert!(false, "an automated fader cell is refused at render");
-                // Unreachable: the cell index was prepared from this same program. In release the
-                // channel is skipped: it emits nothing and the lane holds its gain, no panic.
-                let Some(cell_program) = program.cell(*cell as usize) else {
-                    refused();
-                    continue;
-                };
-                let mut step = span
-                    .step
-                    .map(|step| (step.offset, step.timeline))
-                    .or_else(|| {
-                        let value = automation::value_at(cell_program.segments(), span.start);
-                        (first_block && state.target().map(f32::to_bits) != Some(value.to_bits()))
-                            .then_some((0, span.start))
-                    });
                 let hold_now = hold(lane, channel);
+                let owed = core::mem::replace(adoption, Adoption::None);
+                let first_step = |differs: bool| {
+                    span.step
+                        .map(|step| (step.offset, step.timeline))
+                        .or_else(|| (first_block && differs).then_some((0, span.start)))
+                };
+                // The channel's first-block step and the adoption rule (#1648 D2, #1711): one
+                // rule on a lone cell and on a composed curve (#1655 V2).
+                let (mut step, landing, mut placed) = match curve {
+                    FaderCurve::Cell { cell, state } => {
+                        // Unreachable: the cell index was prepared from this same program. In
+                        // release the channel is skipped: it emits nothing and the lane holds its
+                        // gain, no panic.
+                        let Some(cell_program) = program.cell(*cell as usize) else {
+                            refused();
+                            continue;
+                        };
+                        let value = automation::value_at(cell_program.segments(), span.start);
+                        let step =
+                            first_step(state.target().map(f32::to_bits) != Some(value.to_bits()));
+                        let landing = settle_adoption(
+                            owed,
+                            span,
+                            hold_now,
+                            &mut CellAdoption {
+                                program: &cell_program,
+                                state: &mut *state,
+                                offsets_sum: *offsets_sum,
+                            },
+                        );
+                        (
+                            step,
+                            landing,
+                            Placed::Cell {
+                                program: cell_program,
+                                state,
+                            },
+                        )
+                    }
+                    FaderCurve::Composed(curve) => {
+                        let curve: &'a mut FaderComposite = curve;
+                        curve.set_jumps(jump, vca_offset_jump);
+                        let value = curve.value_at(program, *offsets_sum, span.start);
+                        let step = first_step(
+                            curve.walk.target().map(f32::to_bits) != Some(value.to_bits()),
+                        );
+                        let landing = settle_adoption(
+                            owed,
+                            span,
+                            hold_now,
+                            &mut ComposedAdoption {
+                                program,
+                                curve: &mut *curve,
+                                offsets_sum: *offsets_sum,
+                            },
+                        );
+                        (step, landing, Placed::Composed(curve))
+                    }
+                };
                 let mut mode = controls::FADER_CELL_RULE.seek;
-                if settle_adoption(
-                    core::mem::replace(adoption, Adoption::None),
-                    AdoptionBlock {
-                        program: &cell_program,
-                        span,
-                        offsets_sum: *offsets_sum,
-                        hold: hold_now,
-                    },
-                    state,
-                ) && step.is_none()
-                {
+                if landing && step.is_none() {
                     // The adoption jump (#1648 D2): a ramped landing at the block's first sample
                     // over the block's jump length, to the curve at the jump's completion.
                     step = Some((0, span.start));
@@ -1923,8 +2560,7 @@ impl<'a> FaderEventDriver<'a> {
                     // block, so the cell's hold of the ramp it ended is released here, owed or
                     // not: its grid moves the lane from this block's first sample on (and a jump
                     // deferred to that ramp's end is dropped with it, #1711 D1).
-                    state.hold_until(first.saturating_sub(1));
-                    state.clear_deferred_jump();
+                    placed.release_at_entry(first.saturating_sub(1));
                 }
                 let end = at.map(|at| hold_end(span.start, step, at));
                 // The channel's first mute event (#1651 T3b): the first piece ends there.
@@ -1946,40 +2582,44 @@ impl<'a> FaderEventDriver<'a> {
                     refused();
                     continue;
                 };
-                let mut cursor = FaderCellCursor {
-                    lane,
-                    channel,
-                    offsets_sum: *offsets_sum,
-                    program: cell_program,
-                    jump,
-                    events: None,
-                    base: 0,
-                    last: 0,
-                    next: None,
-                    obligation,
-                    free_from,
-                    end: end.flatten(),
-                    mute_at,
-                    release: None,
-                    start: span.start,
-                    step,
-                    frames,
-                };
-                let last = cursor.piece_last(0);
+                let end = end.flatten();
+                let last = piece_last(end, mute_at, frames, 0);
                 // Unreachable: a step kept inside the piece lies inside it. In release
                 // the channel is skipped: it emits nothing and the lane holds its gain.
                 let Some(node) = piece_span(span.start, step, 0, last) else {
                     refused();
                     continue;
                 };
-                cursor.last = last;
-                cursor.events = Some(automation::CellEvents::new(
-                    cell_program,
-                    state,
-                    node,
-                    mode,
+                let walk = match placed {
+                    Placed::Cell { program, state } => ChannelEvents::Cell {
+                        program,
+                        events: Some(automation::CellEvents::new(
+                            program, state, node, mode, jump,
+                        )),
+                    },
+                    Placed::Composed(curve) => {
+                        curve.walk.start(program, node, mode);
+                        ChannelEvents::Composed { program, curve }
+                    }
+                };
+                let mut cursor = FaderCellCursor {
+                    lane,
+                    channel,
+                    offsets_sum: *offsets_sum,
                     jump,
-                ));
+                    walk,
+                    base: 0,
+                    last,
+                    next: None,
+                    obligation,
+                    free_from,
+                    end,
+                    mute_at,
+                    release: None,
+                    start: span.start,
+                    step,
+                    frames,
+                };
                 cursor.pull();
                 *slot = Some(cursor);
                 used += 1;
@@ -1995,10 +2635,13 @@ impl<'a> FaderEventDriver<'a> {
         builtins::checked_fader_gain(session::vca_compose_db(value, offsets_sum)).ok()
     }
 
-    /// The fader operation of `event` on a channel whose offset sum is `offsets_sum`, or `None`
-    /// when the composed value has no fader gain.
-    fn operation(event: automation::Event, offsets_sum: f64) -> Option<builtins::FaderOperation> {
-        let gain = Self::gain(event.value, offsets_sum)?;
+    /// The fader operation of `event` on `cursor`'s channel, or `None` when its value has no fader
+    /// gain ([`FaderCellCursor::gain`]).
+    fn operation(
+        cursor: &FaderCellCursor<'_>,
+        event: automation::Event,
+    ) -> Option<builtins::FaderOperation> {
+        let gain = cursor.gain(event.value)?;
         Some(if event.held {
             builtins::FaderOperation::RememberGain { gain }
         } else {
@@ -2087,12 +2730,115 @@ impl HeldRampObligation {
     }
 }
 
-/// What the adoption rule of one automated channel reads at its first block after a plan swap.
-struct AdoptionBlock<'p, 'a> {
+/// The curve of one adopted fader channel, as the adoption rule reads and moves it
+/// ([`settle_adoption`]): a lone cell ([`CellAdoption`]) or a composed curve
+/// ([`ComposedAdoption`], #1655 V2), so both take one rule.
+trait AdoptedCurve {
+    /// Place the curve at node time `t` in its own table(s) (a reposition, #1637 D4).
+    fn reposition(&mut self, t: i64);
+    /// Report a ramp of the stage that completes at node time `end` (the grid holds inside it).
+    fn hold_until(&mut self, end: i64);
+    /// Whether a curve has a discontinuity (a step of its own) at node time `t`.
+    fn steps_at(&self, t: i64) -> bool;
+    /// The channel's value toward a ramp started at `start` and completing at `at`
+    /// ([`curve_toward`]; a composed curve composes each).
+    fn toward(&self, start: i64, at: i64) -> f32;
+    /// The fader gain of the channel's value `value`.
+    fn gain(&self, value: f32) -> Option<f32>;
+    /// A repositioned curve whose comparison did not differ takes `value`, the channel's value
+    /// toward `start..at`, as its current target (the stage already holds its gain).
+    fn seed(&mut self, start: i64, at: i64, value: f32);
+    /// Defer the curve's jump to node time `at` ([`automation::CellState::defer_jump`]).
+    fn defer_jump(&mut self, at: i64);
+}
+
+/// A lone cell's curve under the adoption rule.
+struct CellAdoption<'p, 'a, 's> {
     program: &'p automation::CellProgram<'a>,
-    span: TimelineSpan,
+    state: &'s mut automation::CellState,
     offsets_sum: f64,
-    hold: Option<ChannelHold>,
+}
+
+/// A composed curve under the adoption rule (#1655 V2): each of the cell rule's moves acts on
+/// every cursor.
+struct ComposedAdoption<'p, 's> {
+    program: &'p automation::Program,
+    curve: &'s mut FaderComposite,
+    offsets_sum: f64,
+}
+
+impl AdoptedCurve for CellAdoption<'_, '_, '_> {
+    fn reposition(&mut self, t: i64) {
+        self.state.reposition(self.program, t);
+    }
+    fn hold_until(&mut self, end: i64) {
+        self.state.hold_until(end);
+    }
+    fn steps_at(&self, t: i64) -> bool {
+        self.program.discontinuities().binary_search(&t).is_ok()
+    }
+    fn toward(&self, start: i64, at: i64) -> f32 {
+        curve_toward(self.program, start, at)
+    }
+    fn gain(&self, value: f32) -> Option<f32> {
+        FaderEventDriver::gain(value, self.offsets_sum)
+    }
+    fn seed(&mut self, _start: i64, _at: i64, value: f32) {
+        self.state.seed_target(value);
+    }
+    fn defer_jump(&mut self, at: i64) {
+        self.state.defer_jump(at);
+    }
+}
+
+impl AdoptedCurve for ComposedAdoption<'_, '_> {
+    /// Each cursor is placed afresh in its own cell at `t` and hears its curve there: with no
+    /// target of its own, a deferred jump fires and a landing lands on every curve, so the
+    /// composed value is the successor's tables' wherever the comparison differs (the cursors'
+    /// carried targets belong to the tables they were built on).
+    fn reposition(&mut self, t: i64) {
+        let program = self.program;
+        for cursor in self.curve.walk.cursors_mut() {
+            let Some(cell) = program.cell(cursor.cell() as usize) else {
+                continue;
+            };
+            let state = cursor.state_mut();
+            *state = automation::CellState::new();
+            state.reposition(&cell, t);
+            cursor.set_heard(automation::value_at(cell.segments(), t));
+        }
+    }
+    fn hold_until(&mut self, end: i64) {
+        self.curve.each_state(|state| state.hold_until(end));
+    }
+    fn steps_at(&self, t: i64) -> bool {
+        self.curve.walk.cursors().iter().any(|cursor| {
+            self.program
+                .cell(cursor.cell() as usize)
+                .is_some_and(|cell| cell.discontinuities().binary_search(&t).is_ok())
+        })
+    }
+    fn toward(&self, start: i64, at: i64) -> f32 {
+        self.curve.toward(self.program, self.offsets_sum, start, at)
+    }
+    fn gain(&self, value: f32) -> Option<f32> {
+        builtins::checked_fader_gain(value).ok()
+    }
+    fn seed(&mut self, start: i64, at: i64, value: f32) {
+        let program = self.program;
+        for cursor in self.curve.walk.cursors_mut() {
+            let Some(cell) = program.cell(cursor.cell() as usize) else {
+                continue;
+            };
+            let heard = curve_toward(&cell, start, at);
+            cursor.state_mut().seed_target(heard);
+            cursor.set_heard(heard);
+        }
+        self.curve.walk.seed_target(value);
+    }
+    fn defer_jump(&mut self, at: i64) {
+        self.curve.walk.defer_jump(at);
+    }
 }
 
 /// #1648 D2, at an adopted channel's first block: settle what [`LaneFaderAutomation::adopt`] left
@@ -2122,15 +2868,10 @@ struct AdoptionBlock<'p, 'a> {
 /// caller's step wins), and a seek landing drops a deferred jump.
 fn settle_adoption(
     adoption: Adoption,
-    block: AdoptionBlock<'_, '_>,
-    state: &mut automation::CellState,
+    span: TimelineSpan,
+    hold: Option<ChannelHold>,
+    curve: &mut impl AdoptedCurve,
 ) -> bool {
-    let AdoptionBlock {
-        program,
-        span,
-        offsets_sum,
-        hold,
-    } = block;
     if adoption == Adoption::None {
         return false;
     }
@@ -2140,7 +2881,7 @@ fn settle_adoption(
     // The free stage's ramp's first free sample, where a moved target's jump is deferred to.
     let mut free = None;
     if adoption == Adoption::Reposition {
-        state.reposition(program, span.start);
+        curve.reposition(span.start);
         if let Some(ChannelHold {
             held, remaining, ..
         }) = hold
@@ -2149,35 +2890,31 @@ fn settle_adoption(
         {
             // A held stage: the held ramp again (batch 13b). A free stage: the ramp it runs is the
             // cell's own and `reposition` dropped its hold, so the cell holds it again.
-            state.hold_until(end);
+            curve.hold_until(end);
             // A step of the cell's own at the block's first sample jumps over `J` there, as the
             // cell does at any discontinuity (and as a plan prepared with this table does), so
             // the curve is compared at the block's first sample (B17-R13): `curve_toward` looks
             // only past `start` and would skip it.
-            if !held
-                && program
-                    .discontinuities()
-                    .binary_search(&span.start)
-                    .is_err()
-            {
+            if !held && !curve.steps_at(span.start) {
                 at = end;
                 free = node_time_at(span, u64::from(remaining));
             }
         }
     }
-    let value = curve_toward(program, span.start, at);
-    let differs = FaderEventDriver::gain(value, offsets_sum)
+    let value = curve.toward(span.start, at);
+    let differs = curve
+        .gain(value)
         .zip(hold.and_then(|hold| hold.stage_gain))
         .is_some_and(|(gain, stage)| gain.to_bits() != stage.to_bits());
     if !differs {
         if adoption == Adoption::Reposition {
-            state.seed_target(value);
+            curve.seed(span.start, at, value);
         }
         return false;
     }
     match free {
         Some(free) => {
-            state.defer_jump(free);
+            curve.defer_jump(free);
             false
         }
         None => true,
@@ -2232,7 +2969,7 @@ impl builtins::FaderOperationSource for FaderEventDriver<'_> {
             // at `E`.
             let moving = end.is_some() && cursor.obligation.owed && !set_at_end;
             let mut push = |cursor: &FaderCellCursor<'_>, event: automation::Event| {
-                let pushed = Self::operation(event, cursor.offsets_sum)
+                let pushed = Self::operation(cursor, event)
                     .is_some_and(|operation| sink.push(cursor.lane, selector, operation).is_ok());
                 // Unreachable refusal: one cursor per lane and channel, and constraint 7 with
                 // R17-8 push one gain operation per cursor and offset (no `Duplicate`); the lane
@@ -2369,7 +3106,8 @@ pub struct TestOnlyFaderEvent {
     pub kind: automation::EventKind,
     /// A held grid event (a `RememberGain`).
     pub held: bool,
-    /// The curve value, before `S`.
+    /// The curve value, before `S`; on a composed channel (#1655 V2) the composed fader dB, `S`
+    /// and the VCA curves included.
     pub value: f32,
     /// The ramp length.
     pub ramp: u32,
@@ -2442,16 +3180,44 @@ pub fn test_only_take_fader_events() -> (Vec<TestOnlyFaderEvent>, bool) {
     })
 }
 
+/// One VCA's cells in the plan's program (#1655 D1), `[row][lane]`: row 0 `offset_db`, row 1
+/// `mute`; lane 0 left, 1 right; `None` for a lane no entry drives.
+pub type VcaCells = [[Option<u32>; 2]; 2];
+
+/// A fader owner's lane automation at bind ([`LaneFaderAutomation::new`]). Control side.
+///
+/// # Panics
+///
+/// When a composed channel's cursor table cannot be allocated: the failure of any allocation of
+/// the bind (as a `Box::new` aborts). The plan's cells are its own program's, and a composed
+/// channel has at least one, so the table's other refusals are unreachable.
+fn bound_lane_automation(
+    program: &Arc<automation::Program>,
+    strip: &PreparedStripAutomation,
+) -> LaneFaderAutomation {
+    match LaneFaderAutomation::new(program, strip) {
+        Ok(automation) => automation,
+        Err(error) => panic!("a prepared lane binds its automation: {error:?}"),
+    }
+}
+
 /// One automated fader channel as preparation computed it (#1646 D1, D2), with its offsets cell
 /// (#1649), which the strip's [`FaderCells`] and its fader owner share.
 #[derive(Clone, Debug)]
 struct PreparedFaderCell {
-    /// The cell's index in the program.
-    cell: u32,
-    /// The prepared curve value: the entry's first `start_value`, the curve at node time `-a(n)`
-    /// for every `a(n)` (D2, the hold rule).
+    /// The index in the program of the lane's own fader cell; `None` on a fader event lane whose
+    /// own fader is not automated (#1655 D3).
+    cell: Option<u32>,
+    /// The cells of the automated VCA `offset_db` lanes that reach the lane, in ascending VCA ID
+    /// (#1655 D1); empty when none does (the lane renders its own cell alone, as before #1655).
+    vca: Box<[u32]>,
+    /// The prepared own value: the own entry's first `start_value`, the curve at node time
+    /// `-a(n)` for every `a(n)` (D2, the hold rule); `own_db` with no own cell.
     value: f32,
-    /// The lane's prepared fader dB, `vca_compose_db(value, S)`, composed once inside
+    /// The member's static fader dB (#1655 D3), the lane's own value with no own cell.
+    own_db: f32,
+    /// The lane's prepared fader dB, `vca_compose_db(value, S)` (#1655 D2: `S` and then each
+    /// reaching VCA curve's first `start_value`), composed once inside
     /// [`lane::fpenv::CanonicalFpEnv`] (D2). It is the lane's prepared fader parameter, so the
     /// lowering bakes it through the same `checked_fader_gain` path a static fader takes.
     fader_db: f32,
@@ -2464,13 +3230,19 @@ struct PreparedFaderCell {
 }
 
 /// One automated mute channel as preparation computed it (#1651 D1, batch 18 amendment).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct PreparedMuteCell {
-    /// The cell's index in the program, after every fader cell.
-    cell: u32,
-    /// The prepared curve value: the entry's first `start_value` (`0` or `1`), the curve at node
-    /// time `-a(n)` for every `a(n)` (the hold rule, as #1646 D2 for the fader).
+    /// The index in the program of the lane's own mute cell, after every fader cell; `None` on a
+    /// mute event lane whose own mute is not automated (#1655 D4).
+    cell: Option<u32>,
+    /// The cells of the automated VCA `mute` lanes that reach the lane, in ascending VCA ID.
+    vca: Box<[u32]>,
+    /// The prepared own curve value: the entry's first `start_value` (`0` or `1`), the curve at
+    /// node time `-a(n)` for every `a(n)` (the hold rule, as #1646 D2 for the fader); `0` with no
+    /// own cell.
     value: f32,
+    /// The prepared curve mute: `own || v_1 || ... || v_m` at the curves' first `start_value`s.
+    curve_muted: bool,
     /// `terms`: the lane's mute without the curve, `controls::EffectiveStrip::mute` (OQ1 = C: the
     /// strip's own static mute, any reaching VCA's, or the solo term).
     terms: bool,
@@ -2497,6 +3269,10 @@ struct FaderAutomationPlan {
     program_bytes: u64,
     /// Each strip that has an automated fader or mute lane, by track ID.
     strips: BTreeMap<Box<str>, PreparedStripAutomation>,
+    /// Each VCA with an automated `offset_db` or `mute` lane (#1655 D1), by VCA ID: the program's
+    /// cell index of each `[row][lane]` (row 0 `offset_db`, row 1 `mute`), `None` for a lane no
+    /// entry drives.
+    vcas: BTreeMap<Box<str>, VcaCells>,
 }
 
 impl FaderAutomationPlan {
@@ -2525,9 +3301,9 @@ impl FaderAutomationPlan {
             return effective;
         };
         [0, 1].map(|lane| {
-            cells.mute[lane].as_ref().map_or(effective[lane], |cell| {
-                curve_mutes(cell.value) || cell.terms
-            })
+            cells.mute[lane]
+                .as_ref()
+                .map_or(effective[lane], |cell| cell.curve_muted || cell.terms)
         })
     }
 
@@ -2536,6 +3312,47 @@ impl FaderAutomationPlan {
         fader_automation_sizes()
             .program_overhead_bytes
             .checked_add(self.program_bytes)
+    }
+
+    /// The composed channels' bytes among `members` (#1655 R19-6): each composed fader or mute
+    /// channel's boxed curve and its cursor table (one cursor per curve: the reach pairs), and the
+    /// largest of those single allocations.
+    fn composed_bytes<'a>(&self, members: impl Iterator<Item = &'a str>) -> Option<(u64, u64)> {
+        let sizes = fader_automation_sizes();
+        let mut total = 0_u64;
+        let mut largest = 0_u64;
+        for cells in members.filter_map(|track| self.strip(track)) {
+            let faders = cells
+                .fader
+                .iter()
+                .flatten()
+                .filter(|cell| cell.cell.is_none() || !cell.vca.is_empty())
+                .map(|cell| {
+                    (
+                        sizes.fader_composite_bytes,
+                        usize::from(cell.cell.is_some()) + cell.vca.len(),
+                    )
+                });
+            let mutes = cells
+                .mute
+                .iter()
+                .flatten()
+                .filter(|cell| cell.cell.is_none() || !cell.vca.is_empty())
+                .map(|cell| {
+                    (
+                        sizes.mute_composite_bytes,
+                        usize::from(cell.cell.is_some()) + cell.vca.len(),
+                    )
+                });
+            for (curve, cursors) in faders.chain(mutes) {
+                let table = sizes
+                    .cursor_bytes
+                    .checked_mul(u64::try_from(cursors).ok()?)?;
+                total = total.checked_add(curve)?.checked_add(table)?;
+                largest = largest.max(curve).max(table);
+            }
+        }
+        Some((total, largest))
     }
 
     /// The automated fader channels among `members`: one offsets cell each (#1649).
@@ -2563,6 +3380,14 @@ pub struct FaderAutomationSizes {
     /// program handle of both channels). A fader bank with an automated member holds one per bank
     /// lane.
     pub lane_slot_bytes: u64,
+    /// One composed fader channel's boxed curve (#1655 V2): its output state and `own_db`, beside
+    /// its cursor table.
+    pub fader_composite_bytes: u64,
+    /// One composed mute channel's boxed curve (#1655 V2), beside its cursor table.
+    pub mute_composite_bytes: u64,
+    /// One cursor of a composed channel's table: one (member channel, curve) pair's event state
+    /// (R19-6), `automation::Composed::bytes(1)`.
+    pub cursor_bytes: u64,
 }
 
 /// The retained sizes stored fader automation charges (#1646 D4): a plan with automation charges
@@ -2575,6 +3400,9 @@ pub fn fader_automation_sizes() -> FaderAutomationSizes {
         program_overhead_bytes: bytes(core::mem::size_of::<SharedAllocation<automation::Program>>()),
         offsets_cell_bytes: bytes(core::mem::size_of::<SharedAllocation<OffsetsLane>>()),
         lane_slot_bytes: bytes(core::mem::size_of::<Option<LaneFaderAutomation>>()),
+        fader_composite_bytes: bytes(core::mem::size_of::<FaderComposite>()),
+        mute_composite_bytes: bytes(core::mem::size_of::<MuteComposite>()),
+        cursor_bytes: bytes(automation::Composed::<f32>::bytes(1)),
     }
 }
 
@@ -2583,9 +3411,9 @@ pub fn fader_automation_sizes() -> FaderAutomationSizes {
 /// once with the fader row's cell rule (`controls::FADER_CELL_RULE`), then one cell per automated
 /// mute lane in the same order, with the mute row's rule (`controls::MUTE_CELL_RULE`). The mute
 /// cells follow every fader cell, so a session with no mute automation builds the program it built
-/// before #1651, cell for cell. `None` when no fader or mute lane is automated, so a session
-/// without either prepares exactly as before; a session with mute automation only builds mute
-/// cells only.
+/// before #1651, cell for cell. The VCA cells (#1655 D1) follow every mute cell. `None` when no
+/// row that renders is automated, so a session without stored automation prepares exactly as
+/// before; a session with mute (or VCA) automation only builds those cells only.
 ///
 /// Each automated mute lane is seeded with its entry's first `start_value` and with `terms`, the
 /// strip's [`controls::EffectiveStrip::mute`] (OQ1 = C); its prepared stage mute is
@@ -2621,48 +3449,118 @@ fn prepare_fader_automation(
     let refuse = |code: &'static str, entry: &session::Automation| {
         diag(code, &format!("$.automation[id={}]", entry.id.as_str()))
     };
-    // One segment table per cell, in program order, with its entry and its row's rule; transient.
+    // One segment table per cell, in program order, with its entry, its row's refusal code and its
+    // row's rule; transient.
     let mut tables: Vec<(
         &session::Automation,
         Vec<automation::Segment>,
         controls::CellRule,
+        &'static str,
     )> = Vec::new();
     let mut strips: BTreeMap<Box<str>, PreparedStripAutomation> = BTreeMap::new();
-    for (strip, values) in model.strips().zip(effective.strips.iter()) {
+    // #1655: the VCA reach, read only when an entry drives a VCA row (a session without VCA
+    // automation reads its strips' own entries alone, as before). Indices into `model.vcas`, in
+    // ascending VCA ID.
+    let vca_rows = model.automation.iter().any(|entry| {
+        controls::vca_offset_row(&entry.target) || controls::vca_mute_row(&entry.target)
+    });
+    let reach: Vec<Vec<usize>> = if vca_rows {
+        model.vca_reach()
+    } else {
+        Vec::new()
+    };
+    let reach_of = |index: usize| reach.get(index).map_or(&[][..], Vec::as_slice);
+    // The fader and mute event lanes that automated VCA lanes reach, `(strip, lane, VCAs)`: their
+    // VCA cells follow every mute cell, so they are filled in once those exist. Transient.
+    let mut composed_faders: Vec<(Box<str>, usize, Vec<usize>)> = Vec::new();
+    let mut composed_mutes: Vec<(Box<str>, usize, Vec<usize>)> = Vec::new();
+    // The reaching VCAs (indices) whose `entries` row drives lane `lane`.
+    let reaching = |index: usize,
+                    lane: usize,
+                    entries: for<'m> fn(
+        &'m session::SessionModel,
+        &session::StableId,
+    ) -> [Option<&'m session::Automation>; 2]|
+     -> Vec<usize> {
+        reach_of(index)
+            .iter()
+            .copied()
+            .filter(|&vca| {
+                model
+                    .vcas
+                    .get(vca)
+                    .is_some_and(|vca| entries(model, &vca.id)[lane].is_some())
+            })
+            .collect()
+    };
+    for (index, (strip, values)) in model.strips().zip(effective.strips.iter()).enumerate() {
         let entries = controls::fader_automation(model, strip.id);
-        if entries.iter().all(Option::is_none) {
+        let events = if vca_rows {
+            controls::fader_event_lanes(model, strip.id, reach_of(index))
+        } else {
+            entries.map(|entry| entry.is_some())
+        };
+        if !events.contains(&true) {
             continue;
         }
         let mut cells = [None, None];
         for (lane, entry) in entries.into_iter().enumerate() {
-            let Some(entry) = entry else { continue };
-            let segments = controls::stored_segments(entry);
-            // Defensive: the session validator refuses an entry with no segment.
-            let value = segments
-                .first()
-                .ok_or_else(|| refuse("host.automation.fader", entry))?
-                .start_value;
+            if !events.get(lane).copied().unwrap_or(false) {
+                continue;
+            }
+            let own_db = [strip.fader.left_db, strip.fader.right_db][lane];
+            let (cell, value) = match entry {
+                Some(entry) => {
+                    let segments = controls::stored_segments(entry);
+                    // Defensive: the session validator refuses an entry with no segment.
+                    let value = segments
+                        .first()
+                        .ok_or_else(|| refuse("host.automation.fader", entry))?
+                        .start_value;
+                    let cell = u32::try_from(tables.len())
+                        .map_err(|_| diag("host.automation.fader", "$.automation"))?;
+                    tables.push((
+                        entry,
+                        segments,
+                        controls::FADER_CELL_RULE,
+                        "host.automation.fader",
+                    ));
+                    (Some(cell), value)
+                }
+                None => (None, own_db),
+            };
             let offsets_sum = values.offsets_sum[lane];
+            let vcas = if vca_rows {
+                reaching(index, lane, controls::vca_offset_automation)
+            } else {
+                Vec::new()
+            };
             // The caller's body holds `CanonicalFpEnv` across this composition and the lowering
-            // that bakes its gain (D2).
+            // that bakes its gain (D2). A lane reached by VCA curves composes once its VCA cells
+            // exist (below).
             let fader_db = session::vca_compose_db(value, offsets_sum);
-            // Defensive: the session validator bounds every `start_value` to the fader domain
-            // (#1645) and `vca_compose_db` clamps to it, so a validated session never fails this
-            // domain check. It refuses with a typed diagnostic rather than reach the lowering's
-            // `expect("preflighted parameters")`.
-            builtins::checked_fader_gain(fader_db)
-                .map_err(|_| refuse("host.automation.fader", entry))?;
-            let cell = u32::try_from(tables.len())
-                .map_err(|_| diag("host.automation.fader", "$.automation"))?;
+            if vcas.is_empty() {
+                // Defensive: the session validator bounds every `start_value` to the fader
+                // domain (#1645) and `vca_compose_db` clamps to it, so a validated session never
+                // fails this domain check. It refuses with a typed diagnostic rather than reach
+                // the lowering's `expect("preflighted parameters")`.
+                if let Some(entry) = entry {
+                    builtins::checked_fader_gain(fader_db)
+                        .map_err(|_| refuse("host.automation.fader", entry))?;
+                }
+            } else {
+                composed_faders.push((Box::<str>::from(strip.id.as_str()), lane, vcas));
+            }
             cells[lane] = Some(PreparedFaderCell {
                 cell,
+                vca: Box::default(),
                 value,
+                own_db,
                 fader_db,
                 offsets_sum,
                 offsets_ramp: ramp,
                 offsets: Arc::new(OffsetsLane::new()),
             });
-            tables.push((entry, segments, controls::FADER_CELL_RULE));
         }
         strips.insert(
             Box::<str>::from(strip.id.as_str()),
@@ -2673,28 +3571,54 @@ fn prepare_fader_automation(
         );
     }
     // #1651 D1: the mute cells, after every fader cell.
-    for (strip, values) in model.strips().zip(effective.strips.iter()) {
+    for (index, (strip, values)) in model.strips().zip(effective.strips.iter()).enumerate() {
         let entries = controls::mute_automation(model, strip.id);
-        if entries.iter().all(Option::is_none) {
+        let events = if vca_rows {
+            controls::mute_event_lanes(model, strip.id, reach_of(index))
+        } else {
+            entries.map(|entry| entry.is_some())
+        };
+        if !events.contains(&true) {
             continue;
         }
         let mut cells = [None, None];
         for (lane, entry) in entries.into_iter().enumerate() {
-            let Some(entry) = entry else { continue };
-            let segments = controls::stored_segments(entry);
-            // Defensive: the session validator refuses an entry with no segment.
-            let value = segments
-                .first()
-                .ok_or_else(|| refuse("host.automation.mute", entry))?
-                .start_value;
-            let cell = u32::try_from(tables.len())
-                .map_err(|_| diag("host.automation.mute", "$.automation"))?;
+            if !events.get(lane).copied().unwrap_or(false) {
+                continue;
+            }
+            let (cell, value) = match entry {
+                Some(entry) => {
+                    let segments = controls::stored_segments(entry);
+                    // Defensive: the session validator refuses an entry with no segment.
+                    let value = segments
+                        .first()
+                        .ok_or_else(|| refuse("host.automation.mute", entry))?
+                        .start_value;
+                    let cell = u32::try_from(tables.len())
+                        .map_err(|_| diag("host.automation.mute", "$.automation"))?;
+                    tables.push((
+                        entry,
+                        segments,
+                        controls::MUTE_CELL_RULE,
+                        "host.automation.mute",
+                    ));
+                    (Some(cell), value)
+                }
+                None => (None, 0.0),
+            };
+            if vca_rows {
+                let vcas = reaching(index, lane, controls::vca_mute_automation);
+                if !vcas.is_empty() {
+                    composed_mutes.push((Box::<str>::from(strip.id.as_str()), lane, vcas));
+                }
+            }
             cells[lane] = Some(PreparedMuteCell {
                 cell,
+                vca: Box::default(),
                 value,
+                curve_muted: curve_mutes(value),
                 terms: values.mute[lane],
             });
-            tables.push((entry, segments, controls::MUTE_CELL_RULE));
         }
         strips
             .entry(Box::<str>::from(strip.id.as_str()))
@@ -2704,9 +3628,109 @@ fn prepare_fader_automation(
             })
             .mute = cells;
     }
+    // #1655 D1: the VCA cells, after every mute cell, in ascending VCA ID, then row (`offset_db`
+    // with the fader's rule, `mute` with the mute rule), then lane: one cell per automated VCA
+    // lane, shared by every member it reaches. A session without VCA automation builds the program
+    // it built before, cell for cell.
+    let mut vcas: BTreeMap<Box<str>, VcaCells> = BTreeMap::new();
+    if vca_rows {
+        let mut order: Vec<usize> = (0..model.vcas.len()).collect();
+        order.sort_by(|&one, &two| model.vcas[one].id.as_str().cmp(model.vcas[two].id.as_str()));
+        for index in order {
+            let vca = &model.vcas[index];
+            let rows = [
+                (
+                    controls::vca_offset_automation(model, &vca.id),
+                    controls::FADER_CELL_RULE,
+                ),
+                (
+                    controls::vca_mute_automation(model, &vca.id),
+                    controls::MUTE_CELL_RULE,
+                ),
+            ];
+            if rows
+                .iter()
+                .all(|(entries, _)| entries.iter().all(Option::is_none))
+            {
+                continue;
+            }
+            let mut cells = [[None; 2]; 2];
+            for (row, (entries, rule)) in rows.into_iter().enumerate() {
+                for (lane, entry) in entries.into_iter().enumerate() {
+                    let Some(entry) = entry else { continue };
+                    let segments = controls::stored_segments(entry);
+                    // Defensive: the session validator refuses an entry with no segment.
+                    if segments.is_empty() {
+                        return Err(refuse("host.automation.vca", entry));
+                    }
+                    cells[row][lane] = Some(
+                        u32::try_from(tables.len())
+                            .map_err(|_| diag("host.automation.vca", "$.automation"))?,
+                    );
+                    tables.push((entry, segments, rule, "host.automation.vca"));
+                }
+            }
+            vcas.insert(Box::<str>::from(vca.id.as_str()), cells);
+        }
+    }
+    // Each composed lane takes its reaching VCA cells, in ascending VCA ID, and its prepared
+    // value: the own value with `S` and then each VCA curve's first `start_value` (D2), composed
+    // inside the caller's `CanonicalFpEnv`.
+    let vca_cell = |vca: usize, row: usize, lane: usize| {
+        let cells = vcas.get(model.vcas.get(vca)?.id.as_str())?;
+        cells.get(row)?.get(lane).copied().flatten()
+    };
+    let first_value = |cell: u32| {
+        tables
+            .get(cell as usize)
+            .and_then(|(_, segments, _, _)| segments.first())
+            .map(|first| first.start_value)
+    };
+    for (track, lane, reaching) in composed_faders {
+        let Some(prepared) = strips
+            .get_mut(&track)
+            .and_then(|strip| strip.fader.get_mut(lane))
+            .and_then(Option::as_mut)
+        else {
+            continue;
+        };
+        let cells: Vec<u32> = reaching
+            .iter()
+            .filter_map(|&vca| vca_cell(vca, 0, lane))
+            .collect();
+        let seeds = cells
+            .iter()
+            .map(|&cell| first_value(cell))
+            .collect::<Option<Vec<f32>>>()
+            .ok_or_else(|| diag("host.automation.vca", "$.automation"))?;
+        prepared.fader_db = composed_db(prepared.value, prepared.offsets_sum, seeds.into_iter());
+        // Defensive, as the lone cell's check: `vca_compose_db` clamps to the fader domain.
+        builtins::checked_fader_gain(prepared.fader_db)
+            .map_err(|_| diag("host.automation.vca", "$.automation"))?;
+        prepared.vca = cells.into_boxed_slice();
+    }
+    for (track, lane, reaching) in composed_mutes {
+        let Some(prepared) = strips
+            .get_mut(&track)
+            .and_then(|strip| strip.mute.get_mut(lane))
+            .and_then(Option::as_mut)
+        else {
+            continue;
+        };
+        let cells: Vec<u32> = reaching
+            .iter()
+            .filter_map(|&vca| vca_cell(vca, 1, lane))
+            .collect();
+        for &cell in &cells {
+            let seed =
+                first_value(cell).ok_or_else(|| diag("host.automation.vca", "$.automation"))?;
+            prepared.curve_muted |= curve_mutes(seed);
+        }
+        prepared.vca = cells.into_boxed_slice();
+    }
     let descriptions: Vec<automation::CellDescription<'_>> = tables
         .iter()
-        .map(|(_, segments, rule)| rule.describe(segments))
+        .map(|(_, segments, rule, _)| rule.describe(segments))
         .collect();
     let program_bytes = automation::ProgramBuilder::bytes(&descriptions);
     // A refusal at a cell is defensive: the session validator refuses every segment the builder
@@ -2724,20 +3748,14 @@ fn prepare_fader_automation(
         };
         cell.and_then(|cell| tables.get(cell)).map_or_else(
             || diag("host.automation.fader", "$.automation"),
-            |(entry, _, _)| {
-                let code = if controls::mute_row(&entry.target) {
-                    "host.automation.mute"
-                } else {
-                    "host.automation.fader"
-                };
-                refuse(code, entry)
-            },
+            |&(entry, _, _, code)| refuse(code, entry),
         )
     })?;
     Ok(Some(FaderAutomationPlan {
         program: Arc::new(program),
         program_bytes,
         strips,
+        vcas,
     }))
 }
 
@@ -5805,14 +6823,25 @@ impl PreparedBuiltinsSession {
         track_id: &str,
     ) -> Option<(Arc<automation::Program>, [Option<u32>; 2])> {
         let plan = self.fader_automation.as_ref()?;
-        let cells = plan
-            .strip(track_id)?
-            .mute
-            .map(|cell| cell.map(|cell| cell.cell));
+        let mute = &plan.strip(track_id)?.mute;
+        let cells = [0, 1].map(|lane| mute[lane].as_ref().and_then(|cell| cell.cell));
         cells
             .iter()
             .any(Option::is_some)
             .then(|| (Arc::clone(&plan.program), cells))
+    }
+
+    /// VCA `vca_id`'s stored automation (#1655 D1), for the members' records and the following
+    /// routes of the host (V3, V4): the plan's one automation program (the `Arc`
+    /// [`Self::strip_mute_cells`] hands out) and the program's cell index of each `[row][lane]`
+    /// (row 0 `offset_db`, row 1 `mute`; lane 0 left, 1 right), `None` for a lane no entry drives.
+    /// `None` when the VCA automates neither row (or the session has no stored automation that
+    /// renders). Control side; it clones one `Arc`.
+    #[must_use]
+    pub fn vca_cells(&self, vca_id: &str) -> Option<(Arc<automation::Program>, VcaCells)> {
+        let plan = self.fader_automation.as_ref()?;
+        let cells = *plan.vcas.get(vca_id)?;
+        Some((Arc::clone(&plan.program), cells))
     }
 
     /// Every route's effective follow gate, `[left, right]` per source lane, in `model.routes`
@@ -5993,7 +7022,7 @@ impl PreparedBuiltinsSession {
             // #1646 R17-4: the oracle installs the same lane automation as a fader bank lane.
             let automation = fader_automation.as_ref().and_then(|plan| {
                 plan.strip(&strip.track_id)
-                    .map(|cells| Box::new(LaneFaderAutomation::new(&plan.program, cells)))
+                    .map(|cells| Box::new(bound_lane_automation(&plan.program, cells)))
             });
             let StripPreparation {
                 graph_id,
@@ -6180,14 +7209,31 @@ impl PreparedBuiltinsSession {
             {
                 continue;
             }
+            // #1655 R19-6: each composed channel's curve and cursor table (the reach pairs), as
+            // bank payload under the existing caps.
+            let (composed, _) =
+                automation.composed_bytes(members.iter().filter_map(|member| match member {
+                    GraphNodeId::TrackStage { track_id, .. } => Some(track_id.as_str()),
+                    _ => None,
+                }))?;
             payload_bytes = payload_bytes
                 .checked_add(slots_per_bank)?
-                .checked_add(sizes.offsets_cell_bytes.checked_mul(channels)?)?;
+                .checked_add(sizes.offsets_cell_bytes.checked_mul(channels)?)?
+                .checked_add(composed)?;
         }
         if payload_bytes == 0 {
             return Some(none);
         }
         let program_bytes = automation.retained_program_bytes()?;
+        let (_, largest_composed) = automation.composed_bytes(
+            groups
+                .iter()
+                .flat_map(|members| members.iter())
+                .filter_map(|member| match member {
+                    GraphNodeId::TrackStage { track_id, .. } => Some(track_id.as_str()),
+                    _ => None,
+                }),
+        )?;
         Some(GraphBuiltinBankResourceEstimate {
             payload_bytes: payload_bytes.checked_add(program_bytes)?,
             // A ceiling on the largest single allocation: the program's arrays are each within its
@@ -6195,7 +7241,8 @@ impl PreparedBuiltinsSession {
             largest_allocation_bytes: slots_per_bank
                 .max(sizes.offsets_cell_bytes)
                 .max(sizes.program_overhead_bytes)
-                .max(automation.program_bytes),
+                .max(automation.program_bytes)
+                .max(largest_composed),
             ..none
         })
     }
@@ -6276,17 +7323,21 @@ impl PreparedBuiltinsSession {
                         .count(),
                 )
                 .ok()?;
-                let channels = plan.automated_channels(unbanked)?;
+                let channels = plan.automated_channels(unbanked.clone())?;
+                // #1655 R19-6: each composed channel's curve and cursor table.
+                let (composed, largest_composed) = plan.composed_bytes(unbanked)?;
                 if strips == 0 {
                     (0, 0)
                 } else {
                     (
                         lane.checked_mul(strips)?
                             .checked_add(sizes.offsets_cell_bytes.checked_mul(channels)?)?
+                            .checked_add(composed)?
                             .checked_add(plan.retained_program_bytes()?)?,
                         lane.max(sizes.offsets_cell_bytes)
                             .max(sizes.program_overhead_bytes)
-                            .max(plan.program_bytes),
+                            .max(plan.program_bytes)
+                            .max(largest_composed),
                     )
                 }
             }
@@ -6479,7 +7530,7 @@ impl PreparedBuiltinsSession {
                                         .map(|lane| {
                                             let track = members.get(lane).map(track_of)?;
                                             let cells = plan.strip(track)?;
-                                            Some(LaneFaderAutomation::new(&plan.program, cells))
+                                            Some(bound_lane_automation(&plan.program, cells))
                                         })
                                         .collect()
                                 }
@@ -7750,17 +8801,34 @@ fn resource_plan(
     // #1649 D4: the strips whose fader automation gives their producer offsets-cell writers (the
     // rule `prepare_fader_automation` and `FaderCells::attach_offsets` follow). Transient.
     let model = session.normalized_model();
+    // #1655: a fader event lane an automated VCA `offset_db` lane reaches has an offsets cell
+    // too, also when its own fader is not automated.
     let automated: BTreeSet<&str> = if model.automation.is_empty() {
         BTreeSet::new()
     } else {
+        let vca_rows = model
+            .automation
+            .iter()
+            .any(|entry| controls::vca_offset_row(&entry.target));
+        let reach = if vca_rows {
+            model.vca_reach()
+        } else {
+            Vec::new()
+        };
         model
             .strips()
-            .filter(|strip| {
-                controls::fader_automation(model, strip.id)
-                    .iter()
-                    .any(Option::is_some)
+            .enumerate()
+            .filter(|(index, strip)| {
+                if vca_rows {
+                    let reach = reach.get(*index).map_or(&[][..], Vec::as_slice);
+                    controls::fader_event_lanes(model, strip.id, reach).contains(&true)
+                } else {
+                    controls::fader_automation(model, strip.id)
+                        .iter()
+                        .any(Option::is_some)
+                }
             })
-            .map(|strip| strip.id.as_str())
+            .map(|(_, strip)| strip.id.as_str())
             .collect()
     };
     for control in controls {
@@ -16185,7 +17253,7 @@ mod tests {
             .as_ref()
             .expect("left fader cell")
             .cell;
-        assert_eq!(fader_cell, 0, "the fader cell keeps its index");
+        assert_eq!(fader_cell, Some(0), "the fader cell keeps its index");
         let (program, cells) = both
             .strip_mute_cells(&track_name(0))
             .expect("track 0 automates its mute");
@@ -18570,5 +19638,671 @@ mod tests {
                 "$.tracks[id=vocal].fader.left_db",
             )])
         );
+    }
+
+    /// #1655 V2: one session's fader banks over its strips, stored automation bound as a fader
+    /// bank binds it, rendered from timeline 0 with every input sample `1.0` (so each output
+    /// sample is the lane's stage gain) and `a(n) = 0`. The jump lengths `[fader, mute,
+    /// vca_offset, vca_mute]` are set per block as `set_block_time` sets them.
+    /// Per block, per strip, its left and right gains as bits.
+    type RigBlocks = Vec<Vec<[Vec<u32>; 2]>>;
+
+    struct VcaRig {
+        processor: FaderBankProcessor,
+        plan: Option<FaderAutomationPlan>,
+        lanes: usize,
+        jumps: [u32; 4],
+        first: u64,
+    }
+
+    fn vca_caps() -> CompileCaps {
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        }
+    }
+
+    fn vca_rig(model: &session::SessionModel, backend: Backend, jumps: [u32; 4]) -> VcaRig {
+        let compiled = compile_session(model, vca_caps()).expect("the session compiles");
+        let effective = effective_of(&compiled);
+        let _canonical = lane::CanonicalFpEnv::enter();
+        let plan = prepare_fader_automation(&compiled, &effective).expect("prepared");
+        let width = BankWidth::for_backend(backend).expect("a bank width");
+        let model = compiled.normalized_model();
+        let mut parameters = Vec::new();
+        let mut automation = Vec::new();
+        for (strip, values) in model.strips().zip(effective.strips.iter()) {
+            let id = strip.id.as_str();
+            let prepared = plan
+                .as_ref()
+                .map_or((values.fader_db, values.mute), |plan| {
+                    (
+                        plan.fader_db(id, values.fader_db),
+                        plan.mute(id, values.mute),
+                    )
+                });
+            parameters.push(
+                strip_parameters(&strip, prepared, caps().maximum_smoothing_samples)
+                    .expect("parameters"),
+            );
+            automation.push(plan.as_ref().and_then(|plan| {
+                plan.strip(id).map(|cells| {
+                    LaneFaderAutomation::new(&plan.program, cells).expect("the lane binds")
+                })
+            }));
+        }
+        let lanes = parameters.len();
+        assert!(
+            lanes <= width.lanes() as usize,
+            "one bank holds the session"
+        );
+        automation.resize_with(width.lanes() as usize, || None);
+        let automated = automation.iter().any(Option::is_some);
+        VcaRig {
+            processor: FaderBankProcessor {
+                bank: BuiltinFaderBank::new(backend, width, parameters).expect("bank"),
+                controls: (0..width.lanes()).map(|_| None).collect(),
+                automation: if automated {
+                    automation.into_boxed_slice()
+                } else {
+                    Box::default()
+                },
+                process_calls: 0,
+                frames_processed: 0,
+                control_delivery: BuiltinControlDelivery::BetweenRenderCalls,
+            },
+            plan,
+            lanes,
+            jumps,
+            first: 0,
+        }
+    }
+
+    impl VcaRig {
+        /// One block of `frames`: per strip, its left and right gains, as bits.
+        fn block(&mut self, frames: u32) -> Vec<[Vec<u32>; 2]> {
+            let [fader, mute, vca_offset, vca_mute] = self.jumps;
+            for slot in self.processor.automation.iter_mut().flatten() {
+                slot.span = Some(TimelineSpan {
+                    start: i64::try_from(self.first).expect("time"),
+                    step: None,
+                });
+                slot.fader_jump = Some(fader);
+                slot.mute_jump = Some(mute);
+                slot.vca_jumps = Some([vca_offset, vca_mute]);
+            }
+            let width = self.processor.bank.width().lanes() as usize;
+            let samples = width * frames as usize;
+            let (mut left, mut right) = (vec![1.0_f32; samples], vec![1.0_f32; samples]);
+            {
+                let _canonical = lane::CanonicalFpEnv::enter();
+                self.processor
+                    .process(&mut left, &mut right, frames, self.first)
+                    .expect("process");
+            }
+            self.first += u64::from(frames);
+            (0..self.lanes)
+                .map(|lane| {
+                    [&left, &right].map(|plane| {
+                        (0..frames as usize)
+                            .map(|sample| plane[sample * width + lane].to_bits())
+                            .collect()
+                    })
+                })
+                .collect()
+        }
+
+        /// `blocks` blocks of `frames`, and every stored event the driver gave the stage.
+        fn run(&mut self, blocks: u32, frames: u32) -> (RigBlocks, Vec<TestOnlyFaderEvent>) {
+            let _ = test_only_take_fader_events();
+            let mut out = Vec::new();
+            let mut events = Vec::new();
+            for _ in 0..blocks {
+                out.push(self.block(frames));
+                let (taken, overflow) = test_only_take_fader_events();
+                assert!(!overflow, "the event probe holds one block");
+                events.extend(taken);
+            }
+            (out, events)
+        }
+    }
+
+    fn vca_model(tracks: usize) -> session::SessionModel {
+        let mut model = n_track_session(tracks).normalized_model().clone();
+        model.vcas.clear();
+        model.automation.clear();
+        model
+    }
+
+    fn stable(id: &str) -> session::StableId {
+        session::StableId::parse(id).expect("stable ID")
+    }
+
+    fn vca_of(id: &str, offset_db: f32, members: &[&str]) -> session::Vca {
+        session::Vca {
+            id: stable(id),
+            fader: session::DualMonoFader {
+                left_db: offset_db,
+                right_db: offset_db,
+                left_mute: false,
+                right_mute: false,
+            },
+            members: members.iter().map(|member| stable(member)).collect(),
+        }
+    }
+
+    fn vca_segment(
+        shape: session::AutomationShape,
+        span: (u64, u64),
+        values: (f32, f32),
+        unit: session::ParameterUnit,
+    ) -> session::AutomationSegment {
+        session::AutomationSegment {
+            shape,
+            start_sample: span.0,
+            end_sample: span.1,
+            start_value: values.0,
+            end_value: values.1,
+            unit,
+        }
+    }
+
+    /// A `dB` or `0`/`1` step table: `before` until `at`, then `after` to 100,000.
+    fn step_table(
+        at: u64,
+        before: f32,
+        after: f32,
+        unit: session::ParameterUnit,
+    ) -> Vec<session::AutomationSegment> {
+        vec![
+            vca_segment(
+                session::AutomationShape::Step,
+                (0, at),
+                (before, before),
+                unit,
+            ),
+            vca_segment(
+                session::AutomationShape::Step,
+                (at, 100_000),
+                (after, after),
+                unit,
+            ),
+        ]
+    }
+
+    /// A linear `dB` ride from `from` to `to` over `[0, end)`.
+    fn ride_table(end: u64, from: f32, to: f32) -> Vec<session::AutomationSegment> {
+        vec![vca_segment(
+            session::AutomationShape::Linear,
+            (0, end),
+            (from, to),
+            session::ParameterUnit::Db,
+        )]
+    }
+
+    fn stored(
+        name: &str,
+        owner: session::Owner,
+        control: u32,
+        lane: session::ParameterChannel,
+        segments: Vec<session::AutomationSegment>,
+    ) -> session::Automation {
+        let section = match owner {
+            session::Owner::Vca(_) => session::Section::Own,
+            _ => session::Section::Builtins,
+        };
+        session::Automation {
+            id: stable(name),
+            target: session::ControlAddress {
+                owner,
+                section,
+                control,
+                lane,
+            },
+            segments,
+            offset: session::AutomationOffset::default(),
+        }
+    }
+
+    fn vca_owner(id: &str) -> session::Owner {
+        session::Owner::Vca(stable(id))
+    }
+
+    fn strip_owner(index: usize) -> session::Owner {
+        session::Owner::Strip(stable(&track_name(index)))
+    }
+
+    /// #1655 gate 1 at the fader stage (V2): a flat VCA `offset_db` ride at `-6` dB and a flat VCA
+    /// mute at `0` render, bit for bit, the session with those static values, for a member with
+    /// its own fader ride (`t01` left) and for lanes with none (`t00`, `t01` right). The ridden
+    /// VCA's static offset (`+3`, its fallback) is in no sum.
+    ///
+    /// Red if a composed channel adds the VCA curve with other arithmetic than the static path
+    /// (another order, an `f32` sum, the fallback in `S`), if its prepared gain differs, or if a
+    /// flat curve emits a move.
+    #[test]
+    fn a_flat_vca_ride_renders_the_static_vca_offset_bits() {
+        for backend in input_test_backends() {
+            let own = stored(
+                "own-ride",
+                strip_owner(1),
+                5,
+                session::ParameterChannel::Left,
+                ride_table(4_096, -6.5, -2.0),
+            );
+            let mut fixed = vca_model(2);
+            fixed.vcas = vec![vca_of("v", -6.0, &["t00", "t01"])];
+            fixed.automation = vec![own.clone()];
+            let mut ridden = fixed.clone();
+            ridden.vcas = vec![vca_of("v", 3.0, &["t00", "t01"])];
+            ridden.automation = vec![
+                own,
+                stored(
+                    "vca-ride",
+                    vca_owner("v"),
+                    1,
+                    session::ParameterChannel::Both,
+                    ride_table(100_000, -6.0, -6.0),
+                ),
+                stored(
+                    "vca-mute",
+                    vca_owner("v"),
+                    2,
+                    session::ParameterChannel::Both,
+                    step_table(50_000, 0.0, 0.0, session::ParameterUnit::Linear),
+                ),
+            ];
+            let mut fixed = vca_rig(&fixed, backend, [480; 4]);
+            let mut ridden = vca_rig(&ridden, backend, [480; 4]);
+            let plan = ridden.plan.as_ref().expect("cells");
+            let t00 = plan.strip(&track_name(0)).expect("t00 is an event lane");
+            assert!(
+                t00.fader
+                    .iter()
+                    .flatten()
+                    .all(|cell| cell.cell.is_none() && cell.vca.len() == 1)
+            );
+            assert!(
+                t00.mute
+                    .iter()
+                    .flatten()
+                    .all(|cell| cell.cell.is_none() && cell.vca.len() == 1)
+            );
+            let (fixed, _) = fixed.run(40, 128);
+            let (ridden, events) = ridden.run(40, 128);
+            assert_eq!(fixed, ridden, "{backend:?}");
+            assert!(
+                events
+                    .iter()
+                    .all(|event| event.lane == 1 && event.channel == 0 && !event.mute),
+                "only the member's own ride moves: {backend:?}"
+            );
+        }
+    }
+
+    /// #1655 D2 (V2): every grid event of a member lane a linear VCA ride reaches is
+    /// `vca_compose_db(own, S + c)` at the grid ramp's completion, with `own` the member's own
+    /// ride (`t01` left) or its static fader dB (`t00`, `t01` right), and `S` its offset sum.
+    ///
+    /// Red if a composed channel reads the VCA curve at another time than its own, composes with
+    /// another own value, or drops a grid event.
+    #[test]
+    fn a_vca_ride_composes_with_each_members_own_value_at_every_grid_event() {
+        for backend in input_test_backends() {
+            let own_table = ride_table(4_096, -6.5, -2.0);
+            let vca_table = ride_table(8_192, -12.0, 0.0);
+            let mut model = vca_model(2);
+            model.vcas = vec![vca_of("v", 0.0, &["t00", "t01"])];
+            model.automation = vec![
+                stored(
+                    "own-ride",
+                    strip_owner(1),
+                    5,
+                    session::ParameterChannel::Left,
+                    own_table.clone(),
+                ),
+                stored(
+                    "vca-ride",
+                    vca_owner("v"),
+                    1,
+                    session::ParameterChannel::Both,
+                    vca_table.clone(),
+                ),
+            ];
+            let stored_segments = |table: &[session::AutomationSegment]| {
+                table
+                    .iter()
+                    .map(|segment| automation::Segment {
+                        start: segment.start_sample,
+                        end: segment.end_sample,
+                        start_value: segment.start_value,
+                        end_value: segment.end_value,
+                        shape: automation::Shape::Linear,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (own_curve, vca_curve) = (stored_segments(&own_table), stored_segments(&vca_table));
+            let mut rig = vca_rig(&model, backend, [480; 4]);
+            let static_db = |track: usize, channel: usize| {
+                let strip = &model.tracks[track].fader;
+                [strip.left_db, strip.right_db][channel]
+            };
+            let (_, events) = rig.run(24, 128);
+            let mut checked = [[0_usize; 2]; 2];
+            for event in events.iter().filter(|event| !event.mute && !event.held) {
+                assert_eq!(event.kind, automation::EventKind::Grid, "{event:?}");
+                let at = i64::try_from(event.sample).expect("time") + 63;
+                if at >= 4_096 {
+                    continue;
+                }
+                let own = if (event.lane, event.channel) == (1, 0) {
+                    automation::value_at(&own_curve, at)
+                } else {
+                    static_db(event.lane, event.channel)
+                };
+                let expected = composed_db(
+                    own,
+                    0.0,
+                    core::iter::once(automation::value_at(&vca_curve, at)),
+                );
+                assert_eq!(
+                    event.value.to_bits(),
+                    expected.to_bits(),
+                    "{event:?} {backend:?}"
+                );
+                checked[event.lane][event.channel] += 1;
+            }
+            assert!(
+                checked.iter().flatten().all(|&count| count >= 40),
+                "every member lane moves on the grid: {checked:?}"
+            );
+        }
+    }
+
+    /// The non-held fader events of lane 0's left channel from sample 1,000 on, as `(sample,
+    /// kind, ramp)`.
+    fn moves_after_step(events: &[TestOnlyFaderEvent]) -> Vec<(u64, automation::EventKind, u32)> {
+        events
+            .iter()
+            .filter(|event| {
+                (event.lane, event.channel) == (0, 0)
+                    && !event.mute
+                    && !event.held
+                    && event.sample >= 1_000
+            })
+            .map(|event| (event.sample, event.kind, event.ramp))
+            .collect()
+    }
+
+    /// #1655 R19-2 (V2): a VCA step inside a member's own grid ride keeps its jump length `J`,
+    /// and a member's own step inside a VCA ride keeps its `J`: the step at 1,000 jumps over
+    /// 480, the riding curve's grid points whose ramps would end inside it are held, and the
+    /// first one whose ramp ends after it (1,472) moves the lane again.
+    ///
+    /// Red if a grid event of one curve retargets the composed lane inside another curve's jump
+    /// (the step would end after 24 samples, at the grid point 1,024).
+    #[test]
+    fn a_step_inside_another_curves_ride_keeps_its_jump_length() {
+        for backend in input_test_backends() {
+            for vca_steps in [true, false] {
+                let (own, vca) = if vca_steps {
+                    (
+                        ride_table(8_000, 0.0, -24.0),
+                        step_table(1_000, -6.0, -12.0, session::ParameterUnit::Db),
+                    )
+                } else {
+                    (
+                        step_table(1_000, -6.0, -12.0, session::ParameterUnit::Db),
+                        ride_table(8_000, 0.0, -24.0),
+                    )
+                };
+                let mut model = vca_model(2);
+                model.vcas = vec![vca_of("v", 0.0, &["t00"])];
+                model.automation = vec![
+                    stored(
+                        "own",
+                        strip_owner(0),
+                        5,
+                        session::ParameterChannel::Left,
+                        own,
+                    ),
+                    stored(
+                        "vca",
+                        vca_owner("v"),
+                        1,
+                        session::ParameterChannel::Left,
+                        vca,
+                    ),
+                ];
+                let mut rig = vca_rig(&model, backend, [480; 4]);
+                let (_, events) = rig.run(16, 128);
+                assert_eq!(
+                    moves_after_step(&events).get(..2),
+                    Some(
+                        &[
+                            (1_000, automation::EventKind::Jump, 480),
+                            (1_472, automation::EventKind::Grid, 64),
+                        ][..]
+                    ),
+                    "vca steps {vca_steps}, {backend:?}"
+                );
+            }
+        }
+    }
+
+    /// #1655 R19-4 (V2): a member's own step and a VCA step at one sample are one jump over the
+    /// longer of their rows' lengths, both ways round; an own unmute and a VCA unmute at one
+    /// sample are one `SetMute` over the longer of the mute and VCA mute lengths.
+    ///
+    /// Red if coincident events emit twice, or the composed jump takes the shorter or the first
+    /// curve's length.
+    #[test]
+    fn coincident_member_and_vca_events_take_the_longest_jump() {
+        for backend in input_test_backends() {
+            for (own_jump, vca_jump) in [(480, 960), (960, 480)] {
+                let db = session::ParameterUnit::Db;
+                let toggle = session::ParameterUnit::Linear;
+                let mut model = vca_model(2);
+                model.vcas = vec![vca_of("v", 0.0, &["t00"])];
+                model.automation = vec![
+                    stored(
+                        "own",
+                        strip_owner(0),
+                        5,
+                        session::ParameterChannel::Left,
+                        step_table(1_000, -6.0, -12.0, db),
+                    ),
+                    stored(
+                        "own-mute",
+                        strip_owner(0),
+                        6,
+                        session::ParameterChannel::Left,
+                        step_table(1_000, 1.0, 0.0, toggle),
+                    ),
+                    stored(
+                        "vca",
+                        vca_owner("v"),
+                        1,
+                        session::ParameterChannel::Left,
+                        step_table(1_000, -3.0, -1.0, db),
+                    ),
+                    stored(
+                        "vca-mute",
+                        vca_owner("v"),
+                        2,
+                        session::ParameterChannel::Left,
+                        step_table(1_000, 1.0, 0.0, toggle),
+                    ),
+                ];
+                let mut rig = vca_rig(&model, backend, [own_jump, own_jump, vca_jump, vca_jump]);
+                let (_, events) = rig.run(12, 128);
+                let at_step = events
+                    .iter()
+                    .filter(|event| (event.lane, event.channel, event.sample) == (0, 0, 1_000))
+                    .map(|event| (event.mute, event.kind, event.ramp, event.held))
+                    .collect::<Vec<_>>();
+                let longest = own_jump.max(vca_jump);
+                assert_eq!(
+                    at_step,
+                    [
+                        (false, automation::EventKind::Jump, longest, false),
+                        (true, automation::EventKind::Jump, longest, false),
+                    ],
+                    "{own_jump}/{vca_jump} {backend:?}"
+                );
+            }
+        }
+    }
+
+    /// #1655 D2 (V2): a session without VCA automation (static VCAs over automated members) and
+    /// one whose only VCA automation is a mute keep every fader channel a lone cell over its own
+    /// table, as before #1655, and build no VCA cell for the offset; so no fader event of such a
+    /// session goes through the composed walk and no bit of it can move.
+    ///
+    /// Red if a VCA without automation, or a VCA mute curve, turns a member's fader channel into a
+    /// composed one.
+    #[test]
+    fn a_session_without_vca_offset_automation_keeps_its_lone_fader_cells() {
+        let db = session::ParameterUnit::Db;
+        let toggle = session::ParameterUnit::Linear;
+        let mut model = vca_model(2);
+        model.vcas = vec![vca_of("v", -6.0, &["t00", "t01"])];
+        model.automation = vec![
+            stored(
+                "own",
+                strip_owner(0),
+                5,
+                session::ParameterChannel::Both,
+                ride_table(4_096, -6.5, -2.0),
+            ),
+            stored(
+                "own-mute",
+                strip_owner(1),
+                6,
+                session::ParameterChannel::Left,
+                step_table(1_000, 1.0, 0.0, toggle),
+            ),
+        ];
+        let rig = vca_rig(&model, Backend::Simd4, [480; 4]);
+        let plan = rig.plan.as_ref().expect("cells");
+        assert!(plan.vcas.is_empty(), "no VCA cell");
+        for slot in rig.processor.automation.iter().flatten() {
+            assert!(
+                slot.channels
+                    .iter()
+                    .flatten()
+                    .all(|cell| matches!(cell.curve, FaderCurve::Cell { .. }))
+            );
+            assert!(
+                slot.mute
+                    .iter()
+                    .flatten()
+                    .all(|cell| matches!(cell.curve, MuteCurve::Cell { .. }))
+            );
+        }
+        model.automation.push(stored(
+            "vca-mute",
+            vca_owner("v"),
+            2,
+            session::ParameterChannel::Both,
+            step_table(1_000, 0.0, 1.0, toggle),
+        ));
+        let _ = db;
+        let rig = vca_rig(&model, Backend::Simd4, [480; 4]);
+        let plan = rig.plan.as_ref().expect("cells");
+        assert_eq!(
+            plan.vcas.get("v").copied(),
+            Some([[None, None], [Some(3), Some(4)]]),
+            "the VCA mute cells follow every strip cell, the offset row has none"
+        );
+        for slot in rig.processor.automation.iter().flatten() {
+            assert!(
+                slot.channels
+                    .iter()
+                    .flatten()
+                    .all(|cell| matches!(cell.curve, FaderCurve::Cell { .. }))
+            );
+            assert!(
+                slot.mute
+                    .iter()
+                    .flatten()
+                    .all(|cell| matches!(cell.curve, MuteCurve::Composed(_)))
+            );
+        }
+    }
+
+    /// #1648 D2 and #1655 D6 on a composed channel (V2): a plan swap at sample 1,100 that carries
+    /// every lane renders, bit for bit, the uninterrupted bank, whether the join continues the
+    /// composed cells verbatim (`continued_cells` set) or repositions them (clear), over a VCA
+    /// ride that reaches a member with its own ride and one with none (the swap inside a grid
+    /// ramp), and continued across a VCA step's jump (1,000 over 480: the own ride's grid stays
+    /// held to its end).
+    ///
+    /// Red if a composed channel's carry loses its cursors' or its output's state (a continued
+    /// walk restarts), or if its reposition compares at another time than the ramp's end (an
+    /// unchanged curve would jump at the swap).
+    #[test]
+    fn a_carried_composed_lane_renders_the_uninterrupted_bits() {
+        for backend in input_test_backends() {
+            for (continued, vca_table) in [
+                (0b1111_u8, ride_table(8_192, -12.0, 0.0)),
+                (0, ride_table(8_192, -12.0, 0.0)),
+                (
+                    0b1111,
+                    step_table(1_000, -6.0, -12.0, session::ParameterUnit::Db),
+                ),
+            ] {
+                let mut model = vca_model(2);
+                model.vcas = vec![vca_of("v", 0.0, &["t00", "t01"])];
+                model.automation = vec![
+                    stored(
+                        "own-ride",
+                        strip_owner(1),
+                        5,
+                        session::ParameterChannel::Left,
+                        ride_table(4_096, -6.5, -2.0),
+                    ),
+                    stored(
+                        "vca-ride",
+                        vca_owner("v"),
+                        1,
+                        session::ParameterChannel::Both,
+                        vca_table,
+                    ),
+                    stored(
+                        "vca-mute",
+                        vca_owner("v"),
+                        2,
+                        session::ParameterChannel::Both,
+                        step_table(1_500, 0.0, 1.0, session::ParameterUnit::Linear),
+                    ),
+                ];
+                let mut uninterrupted = vca_rig(&model, backend, [480; 4]);
+                let mut predecessor = vca_rig(&model, backend, [480; 4]);
+                let (expected, _) = uninterrupted.run(24, 100);
+                let (before, _) = predecessor.run(11, 100);
+                assert_eq!(before[..], expected[..11]);
+                let mut successor = vca_rig(&model, backend, [480; 4]);
+                for lane in 0..successor.lanes {
+                    assert!(successor.processor.adopt_lane(
+                        lane,
+                        &predecessor.processor,
+                        lane,
+                        continued
+                    ));
+                }
+                successor.first = predecessor.first;
+                let (after, _) = successor.run(13, 100);
+                assert_eq!(
+                    after[..],
+                    expected[11..],
+                    "continued {continued:#b} {backend:?}"
+                );
+            }
+        }
     }
 }

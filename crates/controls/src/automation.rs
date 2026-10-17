@@ -15,7 +15,9 @@ use crate::effect_rows::{has_rows, session_unit};
 use crate::error::ControlError;
 use crate::lane::Side;
 use crate::registry::resolve;
+use crate::vca::{VCA_MUTE, VCA_OFFSET_DB};
 use session::Lane;
+use std::collections::BTreeMap;
 
 /// Whether `target` names an effect instance (a console slot or an insert) whose identity has no
 /// control rows: a `cid` effect, or a native effect the launch registry lacks.
@@ -45,21 +47,20 @@ fn effect_has_no_rows(model: &SessionModel, target: &ControlAddress) -> bool {
     identity.is_some_and(|identity| !has_rows(identity))
 }
 
-/// Whether the row at `target` takes a stored hand-move offset (#1650 D2, root's ruling R17-6):
-/// only a strip's builtin `fader_db`. The slices that render the input trim (#1658) and the send
-/// gain (#1654) add their rows here.
+/// Whether the row at `target` takes a stored hand-move offset (#1650 D2, root's ruling R17-6): a
+/// strip's builtin `fader_db` and a VCA's `offset_db` (row 1, [`vca_offset_row`], per lane, #1655
+/// D5 and root's ruling of 2026-10-14: a level control). The slices that render the input trim
+/// (#1658) and the send gain (#1654) add their rows here.
 pub(crate) fn takes_offset(target: &ControlAddress) -> bool {
-    matches!(target.owner, Owner::Strip(_))
-        && target.section == Section::Builtins
-        && target.control == FADER_DB
+    fader_row(target) || vca_offset_row(target)
 }
 
 /// The offset rule of one entry whose target is accepted (#1650 D2), per lane, left then right:
 /// on a lane that takes no offset (the entry does not drive it, or its row takes none) the
 /// offset is exactly `+0.0`, else `control.automation.offset`; on a driven lane of a row that
-/// takes one, the offset lies in the row's own domain (`fader_db`: `[-144, 24]` dB, the VCA
-/// offset domain), else `control.domain`. `-0.0` is a valid zero only on a lane that takes an
-/// offset, so a lane without one has one spelling.
+/// takes one, the offset lies in the row's own domain (`fader_db` and a VCA's `offset_db`:
+/// `[-144, 24]` dB, the VCA offset domain), else `control.domain`. `-0.0` is a valid zero only on
+/// a lane that takes an offset, so a lane without one has one spelling.
 fn offset_faults(
     automation: &Automation,
     descriptor: &ControlDescriptor,
@@ -116,9 +117,10 @@ pub struct ControlDiagnostic {
 ///   `input_filter_order`). It is reported once per lane, at the LPF entry's segment when the LPF
 ///   is automated, else at the HPF entry's;
 /// - `control.automation.offset`: a hand-move offset (#1650 D2) that is not `+0.0` on a lane the
-///   entry does not drive, or on any lane of a row that takes no offset (only `fader_db` takes
-///   one); `control.domain` for an offset outside the fader row's domain. Each is reported at
-///   `.offset.left_db` or `.offset.right_db`, after the entry's segments.
+///   entry does not drive, or on any lane of a row that takes no offset (only `fader_db` and a
+///   VCA's `offset_db` take one, #1655 D5); `control.domain` for an offset outside the row's
+///   domain. Each is reported at `.offset.left_db` or `.offset.right_db`, after the entry's
+///   segments.
 ///
 /// A target is reported once, at `.target`; its segments are judged only when the target is
 /// accepted. A segment is reported once, at `.segments[<i>]`: a domain fault first, else a shape
@@ -389,16 +391,116 @@ pub const MUTE_CELL_RULE: CellRule = CellRule {
     seek: SeekMode::Exact,
 };
 
-/// Whether a stored automation of `target` renders (#1646, #1647, #1651): the fader row of a
-/// strip (builtin row 5, [`fader_row`]) and its mute row (builtin row 6, [`mute_row`]). An entry
-/// on any other row is validated and kept in the session but compiles to no cell. Every rendering
-/// slice adds its row here, so preparation and the live classifier (#1648) read one list.
+/// Whether a stored automation of `target` renders (#1646, #1647, #1651, #1655): the fader row of
+/// a strip (builtin row 5, [`fader_row`]), its mute row (builtin row 6, [`mute_row`]) and a VCA's
+/// rows 1 and 2 (`offset_db`, [`vca_offset_row`], and `mute`, [`vca_mute_row`]). An entry on any
+/// other row (a send's rows among them, #1654) is validated and kept in the session but compiles
+/// to no cell. Every rendering slice adds its row here, so preparation and the live classifier
+/// (#1648) read one list.
 ///
-/// A reader that means "the fader" tests [`fader_row`] instead (#1651 T2): the mute row gives no
-/// lane a fader cell or a hand-move offset.
+/// A reader that means "the fader" tests [`fader_row`] instead (#1651 T2): neither the mute row
+/// nor a VCA row gives a lane a fader cell or a fader hand-move offset. A VCA ride
+/// makes its members' lanes event lanes ([`fader_event_lanes`], [`mute_event_lanes`]); it does not
+/// automate a member's own fader.
 #[must_use]
 pub fn automation_row_renders(target: &ControlAddress) -> bool {
-    fader_row(target) || mute_row(target)
+    fader_row(target) || mute_row(target) || vca_row(target)
+}
+
+/// Whether `target` is a VCA's `offset_db` row (row 1, #1655): per lane, a level control that
+/// takes a hand-move offset (D5).
+#[must_use]
+pub fn vca_offset_row(target: &ControlAddress) -> bool {
+    matches!(target.owner, Owner::Vca(_))
+        && target.section == Section::Own
+        && target.control == VCA_OFFSET_DB
+}
+
+/// Whether `target` is a VCA's `mute` row (row 2, #1655): per lane, a toggle whose curve ORs into
+/// each reached member lane's stage mute (D4); a hand VCA mute stays a live static value.
+#[must_use]
+pub fn vca_mute_row(target: &ControlAddress) -> bool {
+    matches!(target.owner, Owner::Vca(_))
+        && target.section == Section::Own
+        && target.control == VCA_MUTE
+}
+
+/// Whether `target` is one of a VCA's rendered rows ([`vca_offset_row`] or [`vca_mute_row`]).
+fn vca_row(target: &ControlAddress) -> bool {
+    vca_offset_row(target) || vca_mute_row(target)
+}
+
+/// The stored automation entries that drive VCA `vca`'s `offset_db`, per lane (`[left, right]`),
+/// by the rule of [`fader_automation`] on [`vca_offset_row`] (#1655): the first entry per lane in
+/// table order. An empty table returns at once.
+#[must_use]
+pub fn vca_offset_automation<'a>(
+    model: &'a SessionModel,
+    vca: &StableId,
+) -> [Option<&'a Automation>; 2] {
+    owner_row_automation(model, vca, vca_offset_row)
+}
+
+/// The stored automation entries that drive VCA `vca`'s `mute`, per lane (`[left, right]`), by the
+/// rule of [`vca_offset_automation`] on [`vca_mute_row`] (#1655).
+#[must_use]
+pub fn vca_mute_automation<'a>(
+    model: &'a SessionModel,
+    vca: &StableId,
+) -> [Option<&'a Automation>; 2] {
+    owner_row_automation(model, vca, vca_mute_row)
+}
+
+/// The lanes of strip `strip` that are fader event lanes (#1655 D2, batch 19 amendment), per lane
+/// (`[left, right]`): the strip's own fader lane is automated ([`automated_fader_lanes`]), or an
+/// automated VCA `offset_db` lane reaches it (VCA lane `l` reaches its members' lane `l`). `reach`
+/// is the strip's VCA reach in `model` (its entry of [`SessionModel::vca_reach`], or
+/// [`SessionModel::vca_reach_of`]): indices into `model.vcas`. The one rule of preparation, the
+/// classifier, the strip join and the route attach. An empty table returns at once.
+///
+/// A reader that means "this strip's own entry" (the `fader_db` row's value and flag, the lane's
+/// own hand offset, the mask) reads [`fader_automation`] instead.
+#[must_use]
+pub fn fader_event_lanes(model: &SessionModel, strip: &StableId, reach: &[usize]) -> [bool; 2] {
+    event_lanes(
+        model,
+        reach,
+        automated_fader_lanes(model, strip),
+        vca_offset_automation,
+    )
+}
+
+/// The lanes of strip `strip` that are mute event lanes (#1655 D4, batch 19 amendment), per lane
+/// (`[left, right]`): the strip's own mute lane is automated ([`mute_automation`]), or an
+/// automated VCA `mute` lane reaches it. `reach` is as for [`fader_event_lanes`]. A following send
+/// of such a lane takes the seven-word route cell.
+#[must_use]
+pub fn mute_event_lanes(model: &SessionModel, strip: &StableId, reach: &[usize]) -> [bool; 2] {
+    if model.automation.is_empty() {
+        return [false; 2];
+    }
+    let own = mute_automation(model, strip).map(|entry| entry.is_some());
+    event_lanes(model, reach, own, vca_mute_automation)
+}
+
+/// `own`, ORed per lane with whether some VCA of `reach` has an entry `entries` gives on that lane.
+fn event_lanes<'a>(
+    model: &'a SessionModel,
+    reach: &[usize],
+    own: [bool; 2],
+    entries: fn(&'a SessionModel, &StableId) -> [Option<&'a Automation>; 2],
+) -> [bool; 2] {
+    let mut lanes = own;
+    if model.automation.is_empty() || lanes == [true; 2] {
+        return lanes;
+    }
+    for vca in reach.iter().filter_map(|&index| model.vcas.get(index)) {
+        let driven = entries(model, &vca.id);
+        for lane in 0..2 {
+            lanes[lane] |= driven[lane].is_some();
+        }
+    }
+    lanes
 }
 
 /// Whether `target` is a strip's builtin `mute` row (row 6): the rendered row whose entry gives a
@@ -429,7 +531,7 @@ pub fn fader_automation<'a>(
     model: &'a SessionModel,
     strip: &StableId,
 ) -> [Option<&'a Automation>; 2] {
-    row_automation(model, strip, fader_row)
+    owner_row_automation(model, strip, fader_row)
 }
 
 /// The stored automation entries that drive strip `strip`'s mute, per lane (`[left, right]`), by
@@ -439,20 +541,24 @@ pub fn mute_automation<'a>(
     model: &'a SessionModel,
     strip: &StableId,
 ) -> [Option<&'a Automation>; 2] {
-    row_automation(model, strip, mute_row)
+    owner_row_automation(model, strip, mute_row)
 }
 
-/// The entries on the row `row` accepts that drive strip `strip`, per lane; the first entry per
-/// lane in table order.
-fn row_automation<'a>(
+/// The entries on the row `row` accepts whose owner (a strip or a VCA; `row` fixes the kind) has
+/// the ID `owner`, per lane; the first entry per lane in table order.
+fn owner_row_automation<'a>(
     model: &'a SessionModel,
-    strip: &StableId,
+    owner: &StableId,
     row: fn(&ControlAddress) -> bool,
 ) -> [Option<&'a Automation>; 2] {
     let mut lanes = [None, None];
     for automation in &model.automation {
         let target = &automation.target;
-        if !row(target) || !matches!(&target.owner, Owner::Strip(owner) if owner == strip) {
+        let id = match &target.owner {
+            Owner::Strip(id) | Owner::Vca(id) => id,
+            Owner::Route(_) | Owner::Session => continue,
+        };
+        if !row(target) || id != owner {
             continue;
         }
         for (index, lane) in [Lane::Left, Lane::Right].into_iter().enumerate() {
@@ -522,6 +628,15 @@ pub fn automated_fader_lanes(model: &SessionModel, strip: &StableId) -> [bool; 2
 ///
 /// A difference needs a plan rebuild: a plan's cells are compiled from these entries at
 /// preparation, so no live record can carry a changed curve.
+///
+/// With equal entries, it is also a difference when the `(member strip, lane)` set that an
+/// automated VCA lane reaches differs between the two models (#1655 D5, root's ruling of
+/// 2026-10-14): a membership or nesting edit of a VCA that some rendered entry drives. Each newly
+/// reached pair needs new event state, so only a rebuild can carry it (decision 14 rule 1). An
+/// automated VCA added or removed is already a difference of the entries. A VCA lane `l` reaches
+/// its members' lane `l`, and the entries (so the automated lanes) are equal here, so the rule
+/// compares, per automated VCA (by ID), the strip IDs it reaches ([`SessionModel::vca_reach`]). A reach change that involves only VCAs no rendered entry drives
+/// stays D15-6's live update.
 #[must_use]
 pub fn rendered_automation_changed(current: &SessionModel, next: &SessionModel) -> bool {
     fn rendered(model: &SessionModel) -> impl Iterator<Item = &Automation> {
@@ -533,11 +648,49 @@ pub fn rendered_automation_changed(current: &SessionModel, next: &SessionModel) 
     let (mut before, mut after) = (rendered(current), rendered(next));
     loop {
         match (before.next(), after.next()) {
-            (None, None) => return false,
+            (None, None) => break,
             (Some(before), Some(after)) if same_curve(before, after) => {}
             _ => return true,
         }
     }
+    vca_reach_changed(current, next)
+}
+
+/// Whether some VCA that a rendered entry of `next` drives ([`vca_row`]) is reached by another set
+/// of strips in `current` than in `next` (the reach rule of [`rendered_automation_changed`]). No
+/// reach table is built when no rendered entry is on a VCA row.
+fn vca_reach_changed(current: &SessionModel, next: &SessionModel) -> bool {
+    let mut automated: Vec<&StableId> = next
+        .automation
+        .iter()
+        .filter(|automation| vca_row(&automation.target))
+        .filter_map(|automation| match &automation.target.owner {
+            Owner::Vca(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    if automated.is_empty() {
+        return false;
+    }
+    automated.sort_unstable();
+    automated.dedup();
+    let (before, after) = (reached_strips(current), reached_strips(next));
+    automated
+        .into_iter()
+        .any(|vca| before.get(vca) != after.get(vca))
+}
+
+/// Per VCA ID of `model`, the IDs of the strips that reach it, in strip order: the inverse of
+/// [`SessionModel::vca_reach`], which reads any model (a strip list in any order). A VCA no strip
+/// reaches has no key.
+fn reached_strips(model: &SessionModel) -> BTreeMap<&StableId, Vec<&StableId>> {
+    let mut reached: BTreeMap<&StableId, Vec<&StableId>> = BTreeMap::new();
+    for (strip, reach) in model.strips().zip(model.vca_reach()) {
+        for vca in reach.into_iter().filter_map(|index| model.vcas.get(index)) {
+            reached.entry(&vca.id).or_default().push(strip.id);
+        }
+    }
+    reached
 }
 
 /// Whether two entries have the same `id`, `target` and `segments`, `f32` values by bits.
@@ -567,14 +720,22 @@ fn same_segments(before: &Automation, after: &Automation) -> bool {
 /// table (#1648 D2): the entry that drives the lane in `current` and the one that drives it in
 /// `next` ([`fader_automation`]) have the same segments, `f32` values by bits. A successor's strip
 /// join reads it: such a lane's cell continues its carried event state verbatim, and every other
-/// carried cell is repositioned in its own table at adoption.
+/// carried cell is repositioned in its own table at adoption. #1655 D6: a fader event lane
+/// continues when its own table and each reaching automated VCA `offset_db` table (in ascending
+/// VCA ID) are the same set, bit for bit (a lane with no own entry in either model included).
 #[must_use]
 pub fn continued_fader_lanes(
     current: &SessionModel,
     next: &SessionModel,
     strip: &StableId,
 ) -> [bool; 2] {
-    continued_lanes(current, next, strip, fader_automation)
+    continued_lanes(
+        current,
+        next,
+        strip,
+        fader_automation,
+        vca_offset_automation,
+    )
 }
 
 /// The lanes of strip `strip`'s mute (`[left, right]`) that both models automate with the same
@@ -587,23 +748,64 @@ pub fn continued_mute_lanes(
     next: &SessionModel,
     strip: &StableId,
 ) -> [bool; 2] {
-    continued_lanes(current, next, strip, mute_automation)
+    continued_lanes(current, next, strip, mute_automation, vca_mute_automation)
 }
 
-/// The lanes that `entries` gives an entry in both models with the same segments.
+/// The curves of one event lane in one model: its own entry, and each reaching VCA's entry on the
+/// matching VCA row (`vca_entries`) with the VCA's ID, in ascending VCA ID (#1655 D6).
+type LaneCurves<'a> = (Option<&'a Automation>, Vec<(&'a str, &'a Automation)>);
+
+/// The lanes of strip `strip` whose curves both models render with the same tables (#1648 D2,
+/// #1655 D6): the own entry (`entries`) is absent in both or has the same segments, and the
+/// reaching VCAs with an entry on the lane (`vca_entries`, by the rule of [`fader_event_lanes`])
+/// are the same VCAs, in ascending VCA ID, each with the same segments, and the lane has a curve.
+/// With no VCA row automated in either model this is the own-entry rule alone, as before #1655.
 fn continued_lanes<'a>(
     current: &'a SessionModel,
     next: &'a SessionModel,
     strip: &StableId,
     entries: fn(&'a SessionModel, &StableId) -> [Option<&'a Automation>; 2],
+    vca_entries: fn(&'a SessionModel, &StableId) -> [Option<&'a Automation>; 2],
 ) -> [bool; 2] {
     if current.automation.is_empty() || next.automation.is_empty() {
         return [false; 2];
     }
-    let (before, after) = (entries(current, strip), entries(next, strip));
+    let curves = |model: &'a SessionModel| -> [LaneCurves<'a>; 2] {
+        let own = entries(model, strip);
+        let mut vcas = [Vec::new(), Vec::new()];
+        if model.automation.iter().any(|entry| vca_row(&entry.target)) {
+            for vca in model
+                .vca_reach_of(strip)
+                .into_iter()
+                .filter_map(|index| model.vcas.get(index))
+            {
+                let driven = vca_entries(model, &vca.id);
+                for (lane, curves) in vcas.iter_mut().enumerate() {
+                    if let Some(entry) = driven[lane] {
+                        curves.push((vca.id.as_str(), entry));
+                    }
+                }
+            }
+        }
+        let [left, right] = vcas;
+        [(own[0], left), (own[1], right)]
+    };
+    let (before, after) = (curves(current), curves(next));
     [0, 1].map(|lane| {
-        matches!((before[lane], after[lane]), (Some(before), Some(after))
-            if same_segments(before, after))
+        let ((own_before, vcas_before), (own_after, vcas_after)) = (&before[lane], &after[lane]);
+        let own = match (own_before, own_after) {
+            (Some(before), Some(after)) => same_segments(before, after),
+            (None, None) => true,
+            _ => false,
+        };
+        own && (own_before.is_some() || !vcas_before.is_empty())
+            && vcas_before.len() == vcas_after.len()
+            && vcas_before
+                .iter()
+                .zip(vcas_after)
+                .all(|((id_before, before), (id_after, after))| {
+                    id_before == id_after && same_segments(before, after)
+                })
     })
 }
 

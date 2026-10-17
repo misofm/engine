@@ -287,7 +287,7 @@ segment whose unit is not the row's, or a value the row refuses), `control.autom
 addresses that submix's entry for the slot (#1202). A session does not have to state a parameter
 value for the row it automates: the row exists whether or not the session states it.
 
-**The fader and mute rows render; every other row is inert today.** An entry on a strip's fader
+**The fader, mute and VCA rows render; every other row is inert today.** An entry on a strip's fader
 (`builtins` row 5) is compiled into the plan as a table (#1646) and rendered on the C ABI and in
 the browser alike (#1647): the lane follows its curve in node time, reaching the curve's value at
 the end of each 64-sample retarget on a fixed grid, taking each discontinuity at its exact sample
@@ -306,7 +306,31 @@ curve and a hand unmute leaves a closed curve closed. Only a change of that OR m
 control list marks a lane's `mute` row `automated` (`ControlEntry` field 35) while a mute entry
 drives the lane (#1651, root ruling R18-2); the row's value stays the lane's static (hand) mute. A
 session seek sets it exactly where the seek changes it, and a ramp toward a state the seek leaves
-unchanged finishes. Stored automation has no queue: render generates its events from the plan. An entry on any other row,
+unchanged finishes. An entry on a VCA's own rows (#1655: row 1
+`offset_db` and row 2 `mute`, per lane) is compiled into the same table after every mute entry, one
+table per automated VCA lane, and rendered on the C ABI and in the browser alike through the VCA's
+members, since a VCA has no audio: each member lane the VCA reaches, directly or through nested
+VCAs, follows the VCA curves in its own fader node time, so a member behind a latent insert hears
+the VCA move with its own audio. A member lane's fader dB is `vca_compose_db(own, S + c_1 + ... +
+c_m)`: `own` is the lane's own curve when its fader is automated, else its static fader dB; the
+`c_k` are the reaching automated VCA curves in ascending VCA ID; the sum is in `f64`, `S` first, and
+`S` holds the lane's own hand offset, then the static offsets of the reaching VCAs no entry drives,
+then the hand offsets of the reaching automated VCAs, each group in ascending VCA ID. Static terms
+come first, then the automated curves: a class B summation order under the standing
+summation-order ruling (with F16), equal to the static path's ascending-ID order except in F16's
+degenerate cases, so a flat VCA ride renders the bits of the same static VCA offset. Events of
+several curves at one sample take one jump over the longest of their rows' lengths. A member
+lane's mute is its own curve OR each reaching VCA `mute` curve OR its other mute terms, and a
+following send of a member follows the VCA mute curves in its tap's node time. A hand move of an
+automated VCA `offset_db` writes the entry's offset (live), a hand VCA mute ORs with the curve
+(live), and a hand fader move of a member with no fader entry of its own stays live. An edit of a
+VCA entry, and a change of which member lanes an automated VCA reaches (membership, nesting, or an
+automated VCA added or removed), is a rebuild; a VCA no entry drives keeps its live edits. A
+session without VCA automation renders the bits it rendered before. Send rows do not render: an
+entry on a send's own rows (a route into a submix, rows 1-6) is valid and inert, as below (#1654
+renders them later). A route into the output stays prepared: its rows are rebuild-only, so an
+entry on one is refused `control.automation.target`. Stored automation has no queue: render
+generates its events from the plan. An entry on any other row,
 for the strip, a console slot or an insert, is valid and inert: it authors and round-trips and
 renders nothing until its row's slice lands. Rendering the whole table identically on every
 platform is owned by issue #1058; #140, which once gated it, was descoped
@@ -336,14 +360,15 @@ fields 1 and 2. A missing record or lane is `schema.missing_field` and a third k
 `schema.unknown_field`, at their paths. The row rule (`controls::automation_diagnostics`) judges
 each lane at `$.automation[id=<id>].offset.left_db` or `.right_db`, after the segments:
 
-- Only `fader_db` (builtins control 5 of a strip) takes an offset (`takes_offset`). The input trim
-  and the send gain do not yet: the slices that render them (#1658, #1654) add them.
+- `fader_db` (builtins control 5 of a strip) and a VCA's `offset_db` (own control 1, per lane,
+  #1655) take an offset (`takes_offset`). The input trim and the send gain do not yet: the slices
+  that render them (#1658, #1654) add them.
 - A lane that takes no offset holds exactly `+0.0`, else `control.automation.offset`. That is a
   lane the entry does not drive (`right_db` of a `left` entry, `left_db` of a `right` entry) and
   every lane of an entry whose row takes no offset. `-0.0` is refused there too, so "no offset"
   has one spelling.
-- A lane a `fader_db` entry drives holds an offset in the fader's own domain, `[-144, 24]` dB (the
-  VCA offset domain), else `control.domain`. `-0.0` is a valid zero there.
+- A lane a `fader_db` or VCA `offset_db` entry drives holds an offset in the fader's own domain,
+  `[-144, 24]` dB (the VCA offset domain), else `control.domain`. `-0.0` is a valid zero there.
 
 The offset of a lane belongs to the entry that drives the lane, so a lane-granular hand move on a
 `both` entry needs no entry split. `RemoveAutomation` removes the offset with the entry;
@@ -351,7 +376,7 @@ The offset of a lane belongs to the entry that drives the lane, so a lane-granul
 new target. The offset is stored, checked, round-tripped (canonical JSON, wire, SDK) and heard
 (#1650b): render composes each fader event of the lane as `vca_compose_db(curve, S)`, where `S`
 is the `f64` sum of the lane's own offset first and then the reaching VCA offsets in ascending VCA
-ID. On a lane a rendered `fader_db` entry drives, the `fader_db` row reads and writes the offset:
+ID (with VCA automation, the order of the VCA rows above). On a lane a rendered `fader_db` entry drives, the `fader_db` row reads and writes the offset:
 `SET_CONTROL fader_db` sets it (live, one offsets-cell write; a `both` write sets both lanes),
 `CONTROL_STATE_GET` and the control list report it as the row's value, and the list marks the row
 `automated` (`ControlEntry` field 35). The static fader value of an automated lane is its fallback,

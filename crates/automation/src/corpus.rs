@@ -46,16 +46,16 @@ const fn seg(start: u64, end: u64, v0: f32, v1: f32, shape: Shape) -> Segment {
 }
 
 /// One case's curve table and cell parameters.
-struct Case {
-    table: Vec<Segment>,
-    ramp: u32,
-    jump: JumpLength,
-    completion: Completion,
-    no_restart: bool,
-    mode: SeekMode,
+pub(crate) struct Case {
+    pub(crate) table: Vec<Segment>,
+    pub(crate) ramp: u32,
+    pub(crate) jump: JumpLength,
+    pub(crate) completion: Completion,
+    pub(crate) no_restart: bool,
+    pub(crate) mode: SeekMode,
 }
 
-fn case_of(case: usize) -> Case {
+pub(crate) fn case_of(case: usize) -> Case {
     let (table, ramp, jump, completion, no_restart, mode) = match case {
         // A 60 dB linear fade over one second at 48 kHz, a fader cell.
         0 => (
@@ -135,14 +135,14 @@ fn case_of(case: usize) -> Case {
 }
 
 /// One block of a case's fixed mapping.
-struct Block {
-    span: NodeSpan,
-    jump: u32,
+pub(crate) struct Block {
+    pub(crate) span: NodeSpan,
+    pub(crate) jump: u32,
     /// A ramp to report to the state before the block, as a completion node time.
-    hold: Option<i64>,
+    pub(crate) hold: Option<i64>,
 }
 
-fn blocks(case: usize) -> Vec<Block> {
+pub(crate) fn blocks(case: usize) -> Vec<Block> {
     let mut out = Vec::new();
     let mut push = |start: i64, step: Option<(u32, i64)>, frames: u32, jump: u32, hold| {
         if let Ok(span) = NodeSpan::new(start, step, frames) {

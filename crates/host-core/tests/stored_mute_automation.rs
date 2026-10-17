@@ -294,6 +294,7 @@ impl Rig {
                         builtins_compiler::FaderOffsetsRecord {
                             offsets_sum,
                             smoothing_samples: window,
+                            own_db: None,
                         },
                     );
                 }

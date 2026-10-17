@@ -10,7 +10,8 @@
 //! that drives the lane (#1650 D3), so that entry is an owner of the edit too (root's ruling
 //! R17-1 = A): a `fader_db` write clones the rendered entries that drive the strip's fader lanes
 //! with the strip, and [`crate::set`] on the owners model reads and writes them as it would on the
-//! whole model.
+//! whole model. A VCA's `offset_db` takes the same rule (#1655 D5): a write to VCA row 1 clones
+//! the rendered entries that drive its lanes with the VCA.
 
 use session::{OwnerSlots, SessionModel};
 
@@ -95,8 +96,28 @@ impl<'m> OwnerEdits<'m> {
         {
             self.take_fader_automation(strip);
         }
+        if let Owner::Vca(vca) = &address.owner
+            && crate::automation::vca_offset_row(address)
+        {
+            self.take_vca_offset_automation(vca);
+        }
         crate::registry::set(&mut self.owners, address, value, ramp, sample_rate)
             .map_err(OwnerEditError::Control)
+    }
+
+    /// Clone the rendered entries that drive VCA `vca`'s `offset_db` lanes into the owners model,
+    /// in ID order, unless they are there already (#1655 D5, R17-1 = A on the VCA offset). A scan
+    /// of the committed table, with an early out when it is empty.
+    fn take_vca_offset_automation(&mut self, vca: &session::StableId) {
+        if self.committed.automation.is_empty() {
+            return;
+        }
+        for entry in crate::automation::vca_offset_automation(self.committed, vca)
+            .into_iter()
+            .flatten()
+        {
+            insert_sorted(&mut self.owners.automation, entry, |entry| &entry.id);
+        }
     }
 
     /// Clone the rendered entries that drive strip `strip`'s fader lanes into the owners model, in

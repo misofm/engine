@@ -5381,3 +5381,55 @@ fn a_following_routes_edits_write_its_seven_word_cell_only() {
     let delta = following_delta(&current, &next, &[]);
     assert!(delta.is_empty(), "an identical rewrite writes nothing");
 }
+
+/// #1653 D5 (the commit's pre-write check, [`host_core::follow_route_producer_for`]): a send whose
+/// source strip automates its left mute binds the seven-word lane, its producer holds the plan's
+/// automated lanes (`[true, false]`), and the check takes the classifier's record for that send
+/// and refuses one whose automated lanes differ in either bit, leaving the cell unwritten.
+///
+/// Test value: red if the pre-write check compares no lane bit or only one (a record whose lanes
+/// disagree with the plan would be written and acked while render ignores them).
+#[cfg(feature = "test-support")]
+#[test]
+fn a_following_send_binds_its_lanes_and_the_commit_refuses_others() {
+    let current = with_automated_follow(true);
+    let (_, handles) = host_core::prepare_host_runtime_with_live_lanes(
+        &compile(&current),
+        &caps(),
+        &HostLiveControlRequest::default(),
+        host_core::HostLiveLanes::ALL,
+        &host_core::LiveValuesSuperseded::default(),
+    )
+    .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
+    let producers = &handles.follow_route_controls;
+    assert_eq!(producers.len(), 1, "the send's seven-word lane");
+    let send = current
+        .routes
+        .iter()
+        .position(|route| route.follows_mute)
+        .expect("the following send");
+    let send_id = current.routes[send].id.as_str();
+    assert_eq!(&*producers[0].route_id, send_id);
+    assert_eq!(producers[0].automated(), [true, false]);
+
+    let next = edited(&current, |next| next.routes[send].gain_db = -6.0);
+    let delta = following_delta(&current, &next, &[]);
+    let record = seven_word(&delta)[0].1;
+    assert_eq!(
+        host_core::follow_route_producer_for(producers, send_id, &record),
+        Some(0)
+    );
+    for bit in [4, 5] {
+        let word = record.flags().to_word() ^ (1 << bit);
+        let flags = graph::RouteFollowFlags::from_word(word).expect("a defined bit");
+        let other =
+            host_core::FollowRouteControlRecord::new(record.transform(), flags, record.length())
+                .expect("in bounds");
+        assert_eq!(
+            host_core::follow_route_producer_for(producers, send_id, &other),
+            None,
+            "bit {bit} flipped"
+        );
+    }
+    assert_eq!(producers[0].test_only_write_count(), 0, "nothing written");
+}
