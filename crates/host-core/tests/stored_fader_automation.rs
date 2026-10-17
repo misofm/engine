@@ -2856,6 +2856,276 @@ fn a_ride_gained_on_a_carried_static_fader_jumps_from_the_stages_gain() {
     }
 }
 
+// #1711 G1: a live level move in flight across a table-only rebuild.
+
+/// The block a [`level_move_run`] commits its live move at.
+#[cfg(feature = "test-support")]
+const MOVE_BLOCK: usize = 4;
+
+/// The length of the ride of [`level_move_model`], from `0` to `-12` dB.
+#[cfg(feature = "test-support")]
+const RIDE_FRAMES: u64 = 48_000;
+
+/// The live move of [`level_move_model`]: `S` to `-6` dB over 4,000 samples.
+#[cfg(feature = "test-support")]
+const LEVEL_MOVE: (f64, u32) = (-6.0, 4_000);
+
+/// Two tracks (two bank lanes) at quantum 128 with fader length 20 ms (`J` = 960), track 0
+/// riding linearly from `0` to `-12` dB over [`RIDE_FRAMES`] (split in two at `split.0` with the
+/// second segment ending at `split.1` dB when given: `-12` keeps the ride), with its entry's
+/// stored offset `hand` dB and, for a VCA move, a VCA of track 0 at `vca` dB.
+#[cfg(feature = "test-support")]
+fn level_move_model(split: Option<(u64, f32)>, hand: f32, vca: Option<f32>) -> SessionModel {
+    let mut model = plain(2, 128);
+    model.control_smoothing = smoothing(20.0);
+    let lin = AutomationShape::Linear;
+    let segments = match split {
+        None => vec![segment(lin, 0, RIDE_FRAMES, 0.0, -12.0)],
+        Some((at, end_db)) => {
+            let k = -12.0 * at as f32 / RIDE_FRAMES as f32;
+            vec![
+                segment(lin, 0, at, 0.0, k),
+                segment(lin, at, RIDE_FRAMES, k, end_db),
+            ]
+        }
+    };
+    let mut entry = fader_entry(&model, 0, ParameterChannel::Both, segments);
+    (entry.offset.left_db, entry.offset.right_db) = (hand, hand);
+    model.automation = vec![entry];
+    if let Some(db) = vca {
+        model.vcas = vec![session::Vca {
+            id: id("vca-move"),
+            fader: session::DualMonoFader {
+                left_db: db,
+                right_db: db,
+                left_mute: false,
+                right_mute: false,
+            },
+            members: vec![model.tracks[0].id.clone()],
+        }];
+    }
+    model
+}
+
+/// What a [`level_move_run`] rendered.
+#[cfg(feature = "test-support")]
+struct LevelMoveRun {
+    /// Each block's output bits, both planes.
+    blocks: Vec<Vec<u32>>,
+    /// The render calls' `(allocations, reallocations, frees)`, summed.
+    allocations: (u64, u64, u64),
+    /// The block whose render adopted the successor, if one did.
+    adopted: Option<usize>,
+    /// The successor's `restarted_strips()`.
+    restarted: Vec<Box<str>>,
+}
+
+/// `a` prepared with live controls on `backend` and rendered for `blocks` blocks of DC `1.0`;
+/// at [`MOVE_BLOCK`]'s entry the live offsets record [`LEVEL_MOVE`] is written on both channels
+/// of track 0. With `b = Some((next, committed, swap))`, `next` is prepared as the successor of
+/// the plan on the committed model `committed` and swapped in at block `swap` (the C ABI's
+/// carry: `adopt_persisting`, the successor's gate published at the next revision).
+#[cfg(feature = "test-support")]
+fn level_move_run(
+    a: &SessionModel,
+    b: Option<(&SessionModel, &SessionModel, usize)>,
+    backend: graph_compiler::Backend,
+    blocks: usize,
+) -> LevelMoveRun {
+    use builtins_compiler::TestOnlyWriteGate;
+    use engine::realtime::{PlanExchangeConfig, SwapOutcome, plan_exchange};
+    let quantum = a.quantum_frames as usize;
+    let caps = rig_caps(a);
+    let request = host_core::HostLiveControlRequest::default();
+    let fail = |failure: host_core::PrepareDiagnostics| -> ! {
+        panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+    };
+    let compiled = |model: &SessionModel| {
+        let document = canonical_session_json(model).expect("canonical");
+        host_core::compile_host_session(&document, &caps)
+            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())))
+    };
+    let (prepared, mut handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
+        &compiled(a),
+        &caps,
+        &request,
+        backend,
+    )
+    .unwrap_or_else(|failure| fail(failure));
+    let PreparedHost {
+        mut plan,
+        mut sources,
+        inventory,
+        ..
+    } = prepared;
+    let mut gate = plan.take_revision_gate().expect("the plan's gate");
+    let (mut publisher, mut owner, _retirer) = plan_exchange(
+        plan,
+        PlanExchangeConfig {
+            retirement_capacity: core::num::NonZeroUsize::MIN,
+        },
+    )
+    .unwrap_or_else(|_| panic!("plan exchange"));
+    bench_support::alloc::assert_installed();
+    let plane = vec![1.0_f32; quantum];
+    let mut run = LevelMoveRun {
+        blocks: Vec::with_capacity(blocks),
+        allocations: (0, 0, 0),
+        adopted: None,
+        restarted: Vec::new(),
+    };
+    let mut successor_sources = None;
+    let mut successor_gate = None;
+    for block in 0..blocks {
+        if let Some((next, committed, swap)) = b
+            && block == swap
+        {
+            let committed = compiled(committed).normalized_model().clone();
+            let revision = gate.last_published() + 1;
+            let base = host_core::SuccessorBase::new(&inventory, &committed, revision);
+            let (mut prepared, next_handles) =
+                host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+                    &compiled(next),
+                    &caps,
+                    &request,
+                    base,
+                    backend,
+                )
+                .unwrap_or_else(|failure| fail(failure));
+            prepared.sources.adopt_persisting(&mut sources);
+            run.restarted = prepared.restarted_strips().to_vec();
+            let PreparedHost {
+                mut plan,
+                sources: next_sources,
+                ..
+            } = prepared;
+            let mut next_gate = plan.take_revision_gate().expect("the successor's gate");
+            next_gate.publish(revision);
+            successor_gate = Some((next_handles, next_gate));
+            publisher
+                .reserve_replacement(plan, engine::realtime::PlanAdoption::Next)
+                .unwrap_or_else(|_| panic!("reserve the successor"))
+                .commit();
+            successor_sources = Some(next_sources);
+        }
+        if block == MOVE_BLOCK {
+            let (offsets_sum, smoothing_samples) = LEVEL_MOVE;
+            gate.write_published(|stamp| {
+                for channel in 0..2 {
+                    handles.strip_controls[0].fader.write_offsets(
+                        stamp,
+                        channel,
+                        builtins_compiler::FaderOffsetsRecord {
+                            offsets_sum,
+                            smoothing_samples,
+                        },
+                    );
+                }
+            });
+        }
+        let at = block * quantum;
+        successor_sources
+            .as_mut()
+            .unwrap_or(&mut sources)
+            .submit(
+                NINE_SOURCE,
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: at as u64,
+                    sample_rate_hz: RATE,
+                    planes: &[&plane, &plane],
+                    frames: quantum as u32,
+                    end_of_region: false,
+                },
+            )
+            .expect("source block");
+        let mut samples = vec![0.0_f32; quantum * 2];
+        let output =
+            PlanarBufferMut::try_new(&mut samples, 2, quantum, quantum).expect("output planes");
+        let mark = bench_support::alloc::current_thread_counters();
+        let report = owner
+            .render_contiguous(RenderIo { output }, at as u64)
+            .unwrap_or_else(|error| panic!("render: {error:?}"));
+        let delta = bench_support::alloc::current_thread_delta_since(mark);
+        run.allocations.0 += delta.allocations;
+        run.allocations.1 += delta.reallocations;
+        run.allocations.2 += delta.deallocations;
+        if report.swap == SwapOutcome::Applied {
+            run.adopted = Some(block);
+        }
+        run.blocks
+            .push(samples.iter().map(|sample| sample.to_bits()).collect());
+    }
+    drop(handles);
+    drop(successor_gate);
+    run
+}
+
+/// #1711 G1 on host-core, at both bank widths. A live level move (`S` to `-6` dB over its own
+/// 4,000 samples, from block 4) on the riding fader, heard 1, 12, 24, 26 and 30 blocks (3,872,
+/// 2,464, 928, 672 and 160 samples left; `J` = 960), then a table-only rebuild: the same ride
+/// split in two at 10,000, or a change only in its last 2,000 samples. The move is a VCA move
+/// (the committed model's VCA moves) or a hand move (the ride's stored offset moves, R17-1).
+/// Every block, before and after the swap, is bit-equal to the uninterrupted engine's, the
+/// render is allocation-free, the successor is adopted at the swap block and the strip carries.
+///
+/// Test value: red if the adoption rule compares the curve with the stage's fader gain rather
+/// than its ramp's target (#1711 F0: the held grid events only remember a gain inside the move's
+/// ramp, so the fader gain follows the ride and every heard move lands at the swap), or if it
+/// compares at the block's first sample rather than at the ramp's end.
+#[cfg(feature = "test-support")]
+#[test]
+fn a_level_move_in_flight_across_a_table_only_rebuild_keeps_its_bits() {
+    const AFTER: usize = 44;
+    let changes = [
+        ("the ride split at 10,000", (10_000, -12.0)),
+        (
+            "a change in the last 2,000 samples",
+            (RIDE_FRAMES - 2_000, -6.0),
+        ),
+    ];
+    // (label, the stored hand offset after the move, the VCA before and after it)
+    let moves = [
+        ("a VCA move", 0.0, Some((0.0_f32, -6.0_f32))),
+        ("a hand move", -6.0, None),
+    ];
+    for backend in [
+        #[cfg(target_feature = "avx2")]
+        graph_compiler::Backend::Simd8,
+        graph_compiler::Backend::Simd4,
+    ] {
+        for (what, hand, vca) in moves {
+            let a = level_move_model(None, 0.0, vca.map(|vca| vca.0));
+            let committed = level_move_model(None, hand, vca.map(|vca| vca.1));
+            for heard in [1, 12, 24, 26, 30] {
+                let swap = MOVE_BLOCK + heard;
+                let blocks = swap + AFTER;
+                let reference = level_move_run(&a, None, backend, blocks);
+                assert_eq!(reference.allocations, (0, 0, 0));
+                for (change, split) in changes {
+                    let label = format!("{backend:?}, {what}, heard {heard}, {change}");
+                    let next = level_move_model(Some(split), hand, vca.map(|vca| vca.1));
+                    let run = level_move_run(&a, Some((&next, &committed, swap)), backend, blocks);
+                    assert_eq!(run.adopted, Some(swap), "{label}: adopted at the swap");
+                    assert!(run.restarted.is_empty(), "{label}: the strip carries");
+                    assert_eq!(run.allocations, (0, 0, 0), "{label}: allocation-free");
+                    assert_ne!(
+                        reference.blocks[swap - 1],
+                        level_move_run(&committed, None, backend, swap).blocks[swap - 1],
+                        "{label}: the move is still heard before the swap"
+                    );
+                    let first = run
+                        .blocks
+                        .iter()
+                        .zip(&reference.blocks)
+                        .position(|(run, reference)| run != reference);
+                    assert_eq!(first, None, "{label}: first block that differs");
+                }
+            }
+        }
+    }
+}
+
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod canonical_preparation {
     use super::*;

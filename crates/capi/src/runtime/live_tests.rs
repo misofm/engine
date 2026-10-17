@@ -9056,20 +9056,25 @@ mod set_control {
             SessionEdit::UpsertAutomation { automation }
         }
 
-        /// U3 fold 2 (#1648 D2, D15-7). A live level move with its own 4,000 samples on the
-        /// riding fader (a VCA move and a hand move), and a rebuild whose only change is the
-        /// ride's table: the same ride split in two at sample 10,000, or a change only in its
+        /// U3 fold 2 (#1648 D2, D15-7) and #1711 G1. A live level move with its own 4,000 samples
+        /// on the riding fader (a VCA move and a hand move), and a rebuild whose only change is
+        /// the ride's table: the same ride split in two at sample 10,000, or a change only in its
         /// last 2,000 samples. The move is pending at the swap, in the rebuild's transaction, or
-        /// heard 1 and 12 blocks before it. Every block of the rebuilt rig stays within 1e-3 of
-        /// the uninterrupted engine's over 44 blocks, allocation-free, and the successor is
-        /// adopted. Measured: 0 pending, in the transaction and heard 1; 4.6e-6 heard 12, where
-        /// the landing over the rest of the move's ramp recomputes the stage's ramp step at the
-        /// swap (B17-R13, NIT 5).
+        /// heard 1, 12, 24, 26 and 30 blocks before it (3,872, 2,464, 928, 672 and 160 samples
+        /// left, the last three shorter than the fader length `J` = 960). Every block of the
+        /// rebuilt rig is bit-equal to the uninterrupted engine's over 44 blocks, allocation-free,
+        /// and the successor is adopted.
         ///
-        /// Test value: red if the repositioned cell drops the hold of the ramp the free stage
-        /// still runs, or compares the curve at the block's first sample rather than at that
-        /// ramp's end with the stage's target: on a moving ride they differ, and the adoption
-        /// jump replaces the edit's 4,000 samples with the fader length (960; 0.047 at HEAD).
+        /// The watermark outcome is not asserted here: until D2 deletes the B17-R14 window, the
+        /// heard 24, 26 and 30 cases still report `OUTCOME_TRANSITION_FALLBACK`
+        /// (`a_reposition_swap_while_a_level_move_ramps_reports_a_fallback`).
+        ///
+        /// Test value: red if the adoption rule compares the curve with the stage's fader gain
+        /// rather than its ramp's target (#1711 F0: the held grid events only remember a gain, so
+        /// the fader gain follows the ride and every heard move lands at the swap; 4.6e-6 heard
+        /// 12, up to 3.1e-3 heard 24 to 30), if the repositioned cell drops the hold of the ramp
+        /// the free stage still runs, or if it compares the curve at the block's first sample
+        /// rather than at that ramp's end.
         #[test]
         fn a_level_move_across_a_table_change_keeps_its_length() {
             bench_support::alloc::assert_installed();
@@ -9091,6 +9096,9 @@ mod set_control {
                 MoveTiming::SameTransaction,
                 MoveTiming::Heard(1),
                 MoveTiming::Heard(12),
+                MoveTiming::Heard(24),
+                MoveTiming::Heard(26),
+                MoveTiming::Heard(30),
             ];
             for (what, edit) in &moves {
                 for &(change, table) in &changes {
@@ -9131,29 +9139,9 @@ mod set_control {
                                 label,
                             );
                         }
-                        let [a, u, _] = &mut rigs;
-                        let mut worst = (0.0_f32, 0_u64);
-                        for _ in 0..44 {
-                            let block = a.block;
-                            let (x, used) = a.step_counted();
-                            assert_eq!(
-                                (used.allocations, used.deallocations),
-                                (0, 0),
-                                "{label}: block {block} allocated or freed"
-                            );
-                            for (p, q) in x.iter().zip(&u.step()) {
-                                if (p - q).abs() > worst.0 {
-                                    worst = ((p - q).abs(), block);
-                                }
-                            }
-                        }
-                        assert_eq!(a.summary().3, 0, "{label}: the successor is adopted");
-                        assert!(
-                            worst.0 < 1e-3,
-                            "{label}: max |a - u| {} at block {}",
-                            worst.0,
-                            worst.1
-                        );
+                        let (first, _) = lockstep(&mut rigs, 44);
+                        assert_eq!(rigs[0].summary().3, 0, "{label}: the successor is adopted");
+                        assert_eq!(first, None, "{label}: first difference (block, sample)");
                     }
                 }
             }

@@ -1432,10 +1432,13 @@ struct ChannelHold {
     muted: bool,
     /// Frames left in the channel's ramp.
     remaining: u32,
-    /// The fader gain the stage aims for, whatever its mute (#1648 D2: an adopted cell compares
-    /// its curve with it). `None` on the scalar oracle, which no plan swap carries (its fader
-    /// owners are bound nodes, not bank lanes).
-    fader_gain: Option<f32>,
+    /// The gain an adopted cell compares its curve with (#1648 D2): on a held stage, the fader
+    /// gain it aims for (the one an unmute lands on); on a free stage, its ramp's target (#1711
+    /// F0: the cell's held grid events only remember a gain inside a live move's ramp, so the
+    /// fader gain follows the ride while the target stays where the move ends). `None` on the
+    /// scalar oracle, which no plan swap carries (its fader owners are bound nodes, not bank
+    /// lanes).
+    stage_gain: Option<f32>,
 }
 
 /// One channel's block cut at the end `E` of a held ramp (#1647 D1.6, constraint 2): the piece
@@ -2136,7 +2139,8 @@ struct AdoptionBlock<'p, 'a> {
 /// Then, for a reposition or [`Adoption::Compare`], the adoption rule: when
 /// the curve at the block's first sample (or that ramp's end), composed with this plan's `S`
 /// (`checked_fader_gain(vca_compose_db(curve, S))`, #1648 departure 4), differs in bits from the
-/// gain the stage aims for, the block opens with a jump (returns its length: `J`, or the frames
+/// gain the stage aims for (a free stage's ramp target, #1711 F0; a held stage's fader gain),
+/// the block opens with a jump (returns its length: `J`, or the frames
 /// the free stage's own ramp has left when that is longer, so a running edit still ends when it
 /// was due, on this table's curve; never shorter than `J`, so a moved target never lands faster
 /// than a table change does). Otherwise a repositioned
@@ -2194,7 +2198,7 @@ fn settle_adoption(
     }
     let value = curve_toward(program, span.start, at);
     let differs = FaderEventDriver::gain(value, offsets_sum)
-        .zip(hold.and_then(|hold| hold.fader_gain))
+        .zip(hold.and_then(|hold| hold.stage_gain))
         .is_some_and(|(gain, stage)| gain.to_bits() != stage.to_bits());
     if !differs && adoption == Adoption::Reposition {
         state.seed_target(value);
@@ -4031,11 +4035,16 @@ fn automated_lanes(
 /// [`FaderEventDriver::new`] (#1647 D1.6).
 fn bank_hold(bank: &BuiltinFaderBank) -> impl Fn(usize, usize) -> Option<ChannelHold> + '_ {
     |lane, channel| {
+        let held = bank.gain_held(lane, channel)?;
         Some(ChannelHold {
-            held: bank.gain_held(lane, channel)?,
+            held,
             muted: bank.is_muted(lane, channel)?,
             remaining: bank.ramp_remaining(lane, channel)?,
-            fader_gain: bank.fader_gain(lane, channel),
+            stage_gain: if held {
+                bank.fader_gain(lane, channel)
+            } else {
+                bank.ramp_target(lane, channel)
+            },
         })
     }
 }
@@ -8231,7 +8240,7 @@ fn render_oracle_fader(
                         held: fader.gain_held(channel)?,
                         muted: fader.is_muted(channel),
                         remaining: fader.ramp_remaining(channel)?,
-                        fader_gain: None,
+                        stage_gain: None,
                     })
                 },
             );
