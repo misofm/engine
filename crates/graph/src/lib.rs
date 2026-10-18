@@ -6424,6 +6424,27 @@ mod tests {
             resource.emitted_op_layout_delta_bytes,
             op_delta.max(unit_delta)
         );
+        // Issue #936 and #1609: the executor's two bind-sized tables and the block-end unit table
+        // each hold one entry per emitted op, so they scale with the op count.
+        let doubled = GraphRuntimeMetadataResourceEstimate::checked_for(2 * emitted)
+            .expect("checked runtime metadata");
+        for (table, twice) in [
+            (
+                resource.active_unit_table_bytes,
+                doubled.active_unit_table_bytes,
+            ),
+            (
+                resource.source_input_table_bytes,
+                doubled.source_input_table_bytes,
+            ),
+            (
+                resource.block_end_unit_table_bytes,
+                doubled.block_end_unit_table_bytes,
+            ),
+        ] {
+            assert!(table > 0, "a table is charged for emitted ops");
+            assert_eq!(twice, 2 * table, "one entry per emitted op");
+        }
         // The executor's layout witness mirrors every field but the one it removes, the two #936
         // tables included: the owner-level delta is then exactly the runtime-level one, and a
         // table added to `GraphExecutor` alone would inflate it by its box.
@@ -10892,6 +10913,13 @@ mod follow_route_tests {
         assert_eq!(alone.routes, 2);
         assert_eq!(alone.route_id_bytes, 2 * (1 + 2));
         assert_eq!(alone.activity_bytes, activity.0);
+        // #1652 MAJOR-1: a plan with a following route also charges the activation offsets bind
+        // adds to the table, one `u32` per prepared route, once.
+        assert_eq!(
+            both.activity_bytes,
+            alone.activity_bytes + ACTIVITY_ROUTES * 4,
+            "the activation offsets are charged with the table"
+        );
         let following = route_control_resources(&[], &seven);
         assert_eq!(
             alone.cell_bytes + following.cell_bytes,

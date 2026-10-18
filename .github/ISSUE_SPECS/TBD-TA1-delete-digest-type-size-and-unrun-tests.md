@@ -47,9 +47,24 @@ console-workload, audit, graph-compiler, graph, effect-compiler.
 ## Test value
 
 No new test. Two tests were rewritten as relations without `size_of`:
-`effect_control_resources_charge_a_shared_owner_once` (red if two producers that share one factory
-are charged it twice) and `effect_control_resources_charge_no_registry_owned_factory` (red if the
-launch registry's factory is charged to a plan). Both claims were in the deleted exact-byte forms.
+`effect_control_resources_charge_actual_tables_and_shared_owner_once` (red if two producers that
+share one factory are charged it twice, or if the producer table is charged by length and not by
+capacity) and `effect_control_resources_charge_no_registry_owned_factory` (red if the launch
+registry's factory is charged to a plan). Both claims were in the deleted exact-byte forms.
+
+Review fold 1 kept three relations the first cut lost, each recorded red on a mutant and restored:
+- `live_scalar_owner_bytes_are_published_and_capped_before_binding` keeps "runtime metadata is
+  admitted once" (`plain` estimate minus semantic estimate == `checked_for_with_response_bindings`
+  total, from node IDs and string lengths, no `size_of`). Mutant: pass `0` for
+  `response_binding_string_bytes` in `graph-compiler/src/compile.rs` -> RED, `left: 448`,
+  `right: 492`.
+- `the_charge_counts_each_kind_and_the_activity_table_once` asserts the #1652 MAJOR-1 activation
+  offsets (`both.activity_bytes == alone.activity_bytes + ACTIVITY_ROUTES * 4`, one `u32` per
+  prepared route). Mutant: `activity_bytes.saturating_add(offsets)` -> `saturating_add(0)` in
+  `graph/src/lib.rs` -> RED, `left: 4096`, `right: 4124`.
+- `runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow` asserts that the two #936
+  tables and the #1609 block-end table hold one entry per emitted op (doubling the op count
+  doubles each, and each is nonzero).
 
 ## Evidence
 
@@ -70,13 +85,13 @@ lines), helpers and docs included.
 
 | file | test | what went | lines |
 |---|---|---|---|
-| `crates/graph-compiler/src/lib.rs` | `live_scalar_owner_bytes_are_published_and_capped_before_binding` | the runtime-metadata re-derivation | 60 |
+| `crates/graph-compiler/src/lib.rs` | `live_scalar_owner_bytes_are_published_and_capped_before_binding` | nothing after review fold 1: its runtime-metadata block uses no `size_of` and was restored | 0 |
 | same | `effect_control_resource_uses_independent_queue_and_owner_arithmetic` | owner bytes from `size_of`; now: the deltas agree, are zero exactly when nothing is controlled, exact caps accept and one below refuses | about 100 |
 | same | `runtime_bank_slot_reservation_is_published_and_capped_transactionally` | the `size_of` slot literal; now folds the product's `checked_for` reservation | about 45 |
-| `crates/graph/src/lib.rs` | `runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow`, `split_table_resource_is_zero_when_declined_and_one_entry_when_eligible` | `size_of` totals; layout witnesses, fold and overflow stay | about 40 |
-| same | `the_charge_counts_each_kind_its_own_bytes_and_the_activity_table_once` (renamed `the_charge_counts_each_kind_and_the_activity_table_once`) | per-kind `size_of` bytes; counts, IDs, joint sum and activity-once stay | about 30 |
+| `crates/graph/src/lib.rs` | `runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow`, `split_table_resource_is_zero_when_declined_and_one_entry_when_eligible` | `size_of` totals; layout witnesses, one-entry-per-op scaling, fold and overflow stay | about 28 |
+| same | `the_charge_counts_each_kind_its_own_bytes_and_the_activity_table_once` (renamed `the_charge_counts_each_kind_and_the_activity_table_once`) | per-kind `size_of` bytes; counts, IDs, joint sum, activation offsets and activity-once stay | about 23 |
 | `crates/graph-compiler/tests/live_routes.rs` | `route_control_resources_cover_the_allocation` | the `LatestCell` layout pin and the field-by-field formula; the audited-allocator ceiling stays | 19 |
-| `crates/effect-compiler/src/prepare.rs` | `effect_control_resources_charge_actual_tables_and_shared_owner_once` (now `effect_control_resources_charge_a_shared_owner_once`), `effect_control_resources_charge_no_registry_owned_factory` | rewritten as relations | 69 |
+| `crates/effect-compiler/src/prepare.rs` | `effect_control_resources_charge_actual_tables_and_shared_owner_once`, `effect_control_resources_charge_no_registry_owned_factory` | rewritten as relations (shared factory once, table by capacity, registry factory not charged) | 58 |
 
 ### (c) Ignored tests that assert nothing, and unrun ignored sweeps
 
@@ -148,7 +163,7 @@ owner rules (ASK 1):
 4. `tools/console-workload/tests/gain_pan_profile.rs` `phase_profile`: an ignored measurement
    harness no workflow runs (R9 retired descriptive benchmarks). Deleting it leaves the
    `graph::test_only_phase_profile` probes with no consumer but their own test.
-5. Exact move-table byte counts in `crates/host-core/tests/successor_swap.rs` (about ten sites) and
+5. Exact move-table byte counts in `crates/host-core/tests/successor_swap.rs` (14 `size_of` sites) and
    single `size_of` lines in `host-core` `route_mute.rs`, `submix_strip.rs`, `prepare.rs` and `capi`
    `resource_lifecycle.rs`: each is one line inside a larger test and encodes a move or entry count.
    The launch-effect fixture tests in `graph-compiler/src/lib.rs` (a MERGE family) also use
@@ -166,6 +181,10 @@ owner rules (ASK 1):
   product's accounting rule, not a struct total.
 
 ### Docs updated
+
+`.github/ISSUE_SPECS/1379-define-how-node-tails-compose-through-gain-in-the-graph-extent.md` (lines
+169 and 263) names `ZERO_DELAY_CANONICAL_SHA256` as a re-pin step. That pin is deleted here, so the
+step no longer applies; #1379's spec is left as written.
 
 `crates/graph/tests/MUTATIONS.md` and `crates/graph-compiler/tests/MUTATIONS.md` gain a TA1 note
 naming the rows whose tests were deleted or trimmed; `docs/derivations/241-schema-repins.md`

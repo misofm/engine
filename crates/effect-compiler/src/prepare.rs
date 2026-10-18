@@ -1327,13 +1327,14 @@ mod owner_tests {
         assert_eq!(rig.owner.committed(), &edited[..]);
     }
 
-    /// Red if two producers that share one factory are charged that factory twice: the charge is
-    /// then no smaller than for two producers with a factory each.
+    /// Red if two producers that share one factory are charged that factory twice (the charge is
+    /// then no smaller than for two producers with a factory each), or if the producer table is
+    /// charged by its length and not by the capacity its vector holds.
     #[test]
-    fn effect_control_resources_charge_a_shared_owner_once() {
+    fn effect_control_resources_charge_actual_tables_and_shared_owner_once() {
         let shared: Arc<dyn NativeEffectFactory> = Arc::new(ParametricEqFactory);
-        let charge = |factories: [Arc<dyn NativeEffectFactory>; 2]| {
-            let mut producers = Vec::with_capacity(2);
+        let charge = |factories: [Arc<dyn NativeEffectFactory>; 2], capacity: usize| {
+            let mut producers = Vec::with_capacity(capacity);
             for ((track, effect), factory) in [("track-a", "effect-a"), ("track-b", "effect-b")]
                 .into_iter()
                 .zip(factories)
@@ -1342,15 +1343,25 @@ mod owner_tests {
             }
             effect_control_resources(&producers).expect("resource facts")
         };
-        let once = charge([Arc::clone(&shared), Arc::clone(&shared)]);
-        let twice = charge([Arc::new(ParametricEqFactory), Arc::new(ParametricEqFactory)]);
+        let once = charge([Arc::clone(&shared), Arc::clone(&shared)], 2);
+        let twice = charge(
+            [Arc::new(ParametricEqFactory), Arc::new(ParametricEqFactory)],
+            2,
+        );
         assert!(
             once.owned_payload_bytes < twice.owned_payload_bytes,
             "a shared factory is charged once: {} against {}",
             once.owned_payload_bytes,
             twice.owned_payload_bytes
         );
-        assert_eq!(once.producer_table_bytes, twice.producer_table_bytes);
+        let spare = charge([Arc::clone(&shared), Arc::clone(&shared)], 5);
+        assert!(once.producer_table_bytes > 0);
+        assert_eq!(
+            2 * spare.producer_table_bytes,
+            5 * once.producer_table_bytes,
+            "the table is charged by its capacity"
+        );
+        assert_eq!(spare.owned_payload_bytes, once.owned_payload_bytes);
     }
 
     /// #1469 Amendment 1. Red if a plan is charged for a factory the process-lifetime launch
