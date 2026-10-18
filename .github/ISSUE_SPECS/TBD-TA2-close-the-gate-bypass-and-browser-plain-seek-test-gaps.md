@@ -27,7 +27,7 @@ Two tests that the mutation pilot found weak now assert what their names claim:
   The first command submission before the swap then fails the host
   (`web.internal.pending_shape`). Audio and latency are unchanged, so no host-web test saw it
   (`control_parity::a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_hosts`
-  checks bits and latency only).
+  checks result verdicts, bits and latency, not the host's table bookkeeping).
 
 ## Decisions
 

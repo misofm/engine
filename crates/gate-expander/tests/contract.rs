@@ -236,7 +236,8 @@ fn bypass_is_exact_identity_at_all_rates() {
         .map(|frame| if (frame / 8) % 2 == 0 { QUIET } else { -QUIET })
         .collect();
     left_input[0] = f32::from_bits(0x8000_0000);
-    let right_input: Vec<f32> = left_input.iter().map(|value| -value).collect();
+    let mut right_input: Vec<f32> = left_input.iter().map(|value| -value).collect();
+    right_input[0] = f32::from_bits(0x8000_0000);
     let bits = |samples: &[f32]| {
         samples
             .iter()
