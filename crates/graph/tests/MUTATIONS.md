@@ -737,7 +737,7 @@ each source file restored after its run. x86-64 AVX2 host, debug profile. The ga
 
 ## TA1 policy cut (2026-10-18): tests these rows name that no longer exist or no longer assert it
 
-The owner-approved test policy cut (`.github/ISSUE_SPECS/TBD-TA1-delete-digest-type-size-and-unrun-tests.md`)
+The owner-approved test policy cut (`.github/ISSUE_SPECS/1722-delete-digest-type-size-and-unrun-tests.md`)
 deleted or trimmed some tests that rows above name. The rows stay as history; they were not re-run.
 
 - 916-16 and 916-17: the builtins-compiler scalar-oracle pairing tests

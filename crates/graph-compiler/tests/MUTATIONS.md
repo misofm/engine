@@ -350,7 +350,7 @@ compiler's builtin bank plan in attempt 4 (1045-14, 1045-15), builtin bank lower
 
 ## TA1 policy cut (2026-10-18): tests these rows name that no longer exist or no longer assert it
 
-The owner-approved test policy cut (`.github/ISSUE_SPECS/TBD-TA1-delete-digest-type-size-and-unrun-tests.md`)
+The owner-approved test policy cut (`.github/ISSUE_SPECS/1722-delete-digest-type-size-and-unrun-tests.md`)
 deleted or trimmed some tests that rows above name. The rows stay as history; they were not re-run.
 
 - 964-2: `issue122_reverse_route_ids_emit_sorted_levels_and_bind` no longer pins the plan's SHA-256.
