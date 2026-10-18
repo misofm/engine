@@ -217,19 +217,62 @@ fn missing_and_misordered_initial_records_return_exact_errors() {
     assert_eq!(error.code, "effect.parameter.initial");
 }
 
+/// Bypass is exact dry identity on an input that the gate acts on.
+///
+/// At the active values (`T = -20`, `rho = 20`, range 48 dB, hold 0 ms) a -60 dBFS plateau that
+/// lasts 4,800 frames closes the gate onto the range floor, so the unbypassed output is not dry.
+/// The same input, bypassed, must come back bit-exact dry (signed zero included) at every launch
+/// rate. The unbypassed render is asserted not dry, so the bypass check cannot pass vacuously:
+/// at default values the prepared lane is open with the full hold and every sample is dry
+/// whatever the bypass word says.
+///
+/// Red mutations: the kernel ignores the bypass word (`kernel.rs`, the identity mask), or the
+/// prepared gate drops the bypass flag (`lib.rs`, `bypass: L::splat(0.0)`).
 #[test]
 fn bypass_is_exact_identity_at_all_rates() {
+    const FRAMES: usize = 4_800;
+    const QUIET: f32 = 1.0 / 1_024.0;
+    let mut left_input: Vec<f32> = (0..FRAMES)
+        .map(|frame| if (frame / 8) % 2 == 0 { QUIET } else { -QUIET })
+        .collect();
+    left_input[0] = f32::from_bits(0x8000_0000);
+    let right_input: Vec<f32> = left_input.iter().map(|value| -value).collect();
+    let bits = |samples: &[f32]| {
+        samples
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    };
     for rate in [44_100, 48_000, 88_200, 96_000] {
-        let values = initial_values();
+        let values = support::active_values();
+
+        let mut effect = prepare(request_at_rate(&values, rate));
+        let mut left = left_input.clone();
+        let mut right = right_input.clone();
+        render_scalar(&mut effect, &mut left, &mut right, 128);
+        assert_ne!(
+            bits(&left),
+            bits(&left_input),
+            "unbypassed left must act at {rate} Hz"
+        );
+        assert_ne!(
+            bits(&right),
+            bits(&right_input),
+            "unbypassed right must act at {rate} Hz"
+        );
+
         let mut request = request_at_rate(&values, rate);
         request.bypass = true;
         let mut effect = GateExpanderFactory.prepare(request).expect("prepare");
-        let mut left = [f32::from_bits(0x8000_0000), 0.25, -0.5];
-        let mut right = [-0.0, -0.25, 0.5];
-        let expected = (left, right);
-        render_scalar(&mut effect, &mut left, &mut right, 3);
-        assert_eq!(left, expected.0);
-        assert_eq!(right, expected.1);
+        let mut left = left_input.clone();
+        let mut right = right_input.clone();
+        render_scalar(&mut effect, &mut left, &mut right, 128);
+        assert_eq!(bits(&left), bits(&left_input), "bypassed left at {rate} Hz");
+        assert_eq!(
+            bits(&right),
+            bits(&right_input),
+            "bypassed right at {rate} Hz"
+        );
         assert_eq!(effect.metadata.latency, LatencySamples(0));
     }
 }
