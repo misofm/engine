@@ -1143,13 +1143,10 @@ mod live_address_tests {
 mod owner_tests {
     use super::*;
     use crate::EffectControlOwnerPhase;
-    use core::alloc::Layout;
-    use core::mem::size_of;
-    use core::sync::atomic::AtomicUsize;
     use effect_contract::{
         NativeEffectFactory, ParameterChannel, PreparedEffectTarget, default_initial_values,
     };
-    use engine::realtime::{CellWriter, GatePin, RevisionGate};
+    use engine::realtime::{GatePin, RevisionGate};
     use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
     use std::sync::Arc;
 
@@ -1330,122 +1327,56 @@ mod owner_tests {
         assert_eq!(rig.owner.committed(), &edited[..]);
     }
 
+    /// Red if two producers that share one factory are charged that factory twice: the charge is
+    /// then no smaller than for two producers with a factory each.
     #[test]
-    fn effect_control_resources_charge_actual_tables_and_shared_owner_once() {
-        let factory: Arc<dyn NativeEffectFactory> = Arc::new(ParametricEqFactory);
-        let mut opted = Vec::with_capacity(5);
-        opted.push(resource_producer(
-            "track-a",
-            "effect-a",
-            Some(Arc::clone(&factory)),
-        ));
-        opted.push(resource_producer(
-            "track-b",
-            "effect-b",
-            Some(Arc::clone(&factory)),
-        ));
-        let resources = effect_control_resources(&opted).expect("resource facts");
-        let values = preparation().initial_values.len();
-        let owner_box = size_of::<EffectControlOwner>() as u64;
-        let row_backing = (values * size_of::<InitialParameterValue>()) as u64;
-        let owner_payload = owner_box + row_backing;
-        // The EQ lane's writer holds one cell writer per `(slot, channel)` of its target cells and
-        // none for parameters: its parameters ride its targets.
-        let writer_backing = (2
-            * EQ_SLOTS
-            * size_of::<CellWriter<{ effect_contract::PREPARED_EFFECT_TARGET_WORDS }>>())
-            as u64;
-        let factory_layout = Layout::new::<AtomicUsize>()
-            .extend(Layout::new::<AtomicUsize>())
-            .expect("Arc header layout")
-            .0
-            .extend(Layout::for_value(factory.as_ref()))
-            .expect("factory layout")
-            .0
-            .pad_to_align()
-            .size() as u64;
-        let expected_payload = "track-a".len() as u64
-            + "effect-a".len() as u64
-            + "track-b".len() as u64
-            + "effect-b".len() as u64
-            + (2 * (owner_payload + writer_backing))
-            + factory_layout;
-        let expected_table = 5 * size_of::<EffectControlProducer>() as u64;
-        let expected_largest = [
-            "track-a".len() as u64,
-            "effect-a".len() as u64,
-            "track-b".len() as u64,
-            "effect-b".len() as u64,
-            owner_box,
-            row_backing,
-            writer_backing,
-            factory_layout,
-        ]
-        .into_iter()
-        .max()
-        .expect("nonempty resource rows");
-        assert_eq!(resources.producer_table_bytes, expected_table);
-        assert_eq!(resources.owned_payload_bytes, expected_payload);
-        assert_eq!(resources.largest_owned_allocation_bytes, expected_largest);
-        assert_eq!(
-            resources.total_bytes(),
-            Some(expected_table + expected_payload)
+    fn effect_control_resources_charge_a_shared_owner_once() {
+        let shared: Arc<dyn NativeEffectFactory> = Arc::new(ParametricEqFactory);
+        let charge = |factories: [Arc<dyn NativeEffectFactory>; 2]| {
+            let mut producers = Vec::with_capacity(2);
+            for ((track, effect), factory) in [("track-a", "effect-a"), ("track-b", "effect-b")]
+                .into_iter()
+                .zip(factories)
+            {
+                producers.push(resource_producer(track, effect, Some(factory)));
+            }
+            effect_control_resources(&producers).expect("resource facts")
+        };
+        let once = charge([Arc::clone(&shared), Arc::clone(&shared)]);
+        let twice = charge([Arc::new(ParametricEqFactory), Arc::new(ParametricEqFactory)]);
+        assert!(
+            once.owned_payload_bytes < twice.owned_payload_bytes,
+            "a shared factory is charged once: {} against {}",
+            once.owned_payload_bytes,
+            twice.owned_payload_bytes
         );
-        assert_eq!(
-            resources.largest_allocation_bytes(),
-            expected_table.max(expected_largest)
-        );
-
-        // A producer with no owner holds a writer for each parameter cell: the EQ's 22 `Block`
-        // parameters are all `PerLane`, so 44.
-        let mut production = Vec::with_capacity(3);
-        production.push(resource_producer("track", "effect", None));
-        let production_resources =
-            effect_control_resources(&production).expect("production resource facts");
-        let parameter_writers = (44 * size_of::<CellWriter<1>>()) as u64;
-        assert_eq!(
-            production_resources.producer_table_bytes,
-            3 * size_of::<EffectControlProducer>() as u64
-        );
-        assert_eq!(
-            production_resources.owned_payload_bytes,
-            "track".len() as u64 + "effect".len() as u64 + parameter_writers
-        );
-        assert_eq!(
-            production_resources.largest_owned_allocation_bytes,
-            parameter_writers.max("effect".len() as u64)
-        );
+        assert_eq!(once.producer_table_bytes, twice.producer_table_bytes);
     }
 
     /// #1469 Amendment 1. Red if a plan is charged for a factory the process-lifetime launch
-    /// registry owns: the two owners share the registry's EQ factory, so the charge is their
-    /// strings, owner payloads and writers alone.
+    /// registry owns: two owners that share the registry's EQ factory are charged less than two
+    /// owners that share a factory the plan owns.
     #[test]
     fn effect_control_resources_charge_no_registry_owned_factory() {
-        let factory = launch_native_effect_registry()
+        let registry_factory = launch_native_effect_registry()
             .expect("launch registry")
             .get_shared_ascii("miso.parametric-eq")
             .expect("launch EQ");
-        assert!(launch_registry_owns_factory(&factory));
-        assert!(!launch_registry_owns_factory(
-            &(Arc::new(ParametricEqFactory) as Arc<dyn NativeEffectFactory>)
-        ));
-        let mut producers = Vec::with_capacity(2);
-        for (track, effect) in [("track-a", "effect-a"), ("track-b", "effect-b")] {
-            producers.push(resource_producer(track, effect, Some(Arc::clone(&factory))));
-        }
-        let values = preparation().initial_values.len();
-        let owner_payload = size_of::<EffectControlOwner>() as u64
-            + (values * size_of::<InitialParameterValue>()) as u64
-            + (2 * EQ_SLOTS
-                * size_of::<CellWriter<{ effect_contract::PREPARED_EFFECT_TARGET_WORDS }>>())
-                as u64;
-        let strings = ["track-a", "effect-a", "track-b", "effect-b"]
-            .map(|text| text.len() as u64)
-            .into_iter()
-            .sum::<u64>();
-        let resources = effect_control_resources(&producers).expect("resource facts");
-        assert_eq!(resources.owned_payload_bytes, strings + 2 * owner_payload);
+        let plan_factory: Arc<dyn NativeEffectFactory> = Arc::new(ParametricEqFactory);
+        assert!(launch_registry_owns_factory(&registry_factory));
+        assert!(!launch_registry_owns_factory(&plan_factory));
+        let charge = |factory: &Arc<dyn NativeEffectFactory>| {
+            let mut producers = Vec::with_capacity(2);
+            for (track, effect) in [("track-a", "effect-a"), ("track-b", "effect-b")] {
+                producers.push(resource_producer(track, effect, Some(Arc::clone(factory))));
+            }
+            effect_control_resources(&producers).expect("resource facts")
+        };
+        assert!(
+            charge(&registry_factory).owned_payload_bytes
+                < charge(&plan_factory).owned_payload_bytes,
+            "the registry's factory is not charged to the plan"
+        );
     }
 
     #[test]

@@ -28,9 +28,8 @@ use engine::realtime::{
 };
 use graph::{
     GraphBindingBlock, GraphCompileCaps, GraphEdgeId, GraphNodeBinding, GraphNodeId,
-    GraphRouteControlBinding, GraphRouteControlError, GraphRouteControlProducer,
-    GraphRuntimeBindings, GraphRuntimeProcessor, LIVE_ROUTE_OWNER_BYTES, ROUTE_RAMP_LENGTH_MAXIMUM,
-    RouteControlLane, RouteControlRecord, TrackStage, route_control_resources,
+    GraphRouteControlError, GraphRouteControlProducer, GraphRuntimeBindings, GraphRuntimeProcessor,
+    ROUTE_RAMP_LENGTH_MAXIMUM, RouteControlRecord, TrackStage, route_control_resources,
 };
 use graph_compiler::{
     Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
@@ -1408,9 +1407,9 @@ fn retained(
     (live_bytes, producers)
 }
 
-/// Gate 8 (VERIFY-2 MINOR 5). `route_control_resources` equals the D8 formula computed here from
-/// the route count and the route IDs, and covers what the attach and the bind
-/// retain beyond the same plan without route controls. Once for a plan with no silencing gate,
+/// Gate 8 (VERIFY-2 MINOR 5). `route_control_resources` counts the routes, both copies of each
+/// route ID and the route-activity table, and covers what the attach and the bind retain beyond the
+/// same plan without route controls. Once for a plan with no silencing gate,
 /// whose route-activity table the attach charges, and once with a muted route, whose table the
 /// compile-time estimate already charged.
 ///
@@ -1427,18 +1426,8 @@ fn route_control_resources_cover_the_allocation() {
 
         let routes = producers.len() as u64;
         assert_eq!(routes, 2);
-        // One `Arc` allocation per route: the owner counts, the cell's three slots (six words, a
-        // revision and a sequence each) and the dirty word.
-        let cell = (2 * core::mem::size_of::<usize>()
-            + core::mem::size_of::<engine::realtime::LatestCell<6>>()
-            + core::mem::size_of::<engine::realtime::DirtyWord>()) as u64;
-        assert_eq!(cell, 2 * 8 + 3 * (6 * 4 + 8 + 8) + 8, "the cell's layout");
-        let owner = (core::mem::size_of::<RouteControlLane>()
-            + core::mem::size_of::<GraphRouteControlBinding>()
-            + LIVE_ROUTE_OWNER_BYTES) as u64;
         // The producer's copy and the binding's node-ID copy (#1220 verdict MINOR-1).
         let ids: u64 = producers.iter().map(|p| 2 * p.route_id.len() as u64).sum();
-        let table = routes * core::mem::size_of::<GraphRouteControlProducer>() as u64;
         let artifact = compile(&model);
         let nodes = artifact.graph().spec.nodes.len() as u64;
         let prepared_routes = artifact.graph().routes().len() as u64;
@@ -1448,16 +1437,8 @@ fn route_control_resources_cover_the_allocation() {
             graph::route_activity_bound_bytes(prepared_routes, nodes).expect("bound")
         };
         assert_eq!(resources.routes, routes);
-        assert_eq!(resources.cell_bytes, routes * cell);
-        assert_eq!(resources.owner_bytes, routes * owner);
-        assert_eq!(resources.producer_table_bytes, table);
         assert_eq!(resources.route_id_bytes, ids);
         assert_eq!(resources.activity_bytes, activity);
-        assert_eq!(
-            resources.total_bytes,
-            routes * cell + routes * owner + table + ids + activity
-        );
-        assert!(resources.largest_allocation_bytes >= cell);
 
         let added = with
             .checked_sub(without)

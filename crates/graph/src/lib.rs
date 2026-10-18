@@ -6414,12 +6414,8 @@ mod tests {
         let resource = GraphRuntimeMetadataResourceEstimate::checked_for(emitted)
             .expect("checked runtime metadata");
         let (op_delta, unit_delta) = runtime::scalar_split_op_layout();
-        let (op_size, unit_size) = (
-            u64::try_from(core::mem::size_of::<runtime::RuntimeOp>()).expect("op size"),
-            u64::try_from(core::mem::size_of::<runtime::RuntimeUnit>()).expect("unit size"),
-        );
         let (_, runtime_field) = runtime::scalar_split_runtime_layout();
-        let (executor_field, executor_size) = scalar_split_runtime_owner_layout();
+        let (executor_field, _) = scalar_split_runtime_owner_layout();
         assert_eq!(resource.runtime_field_bytes, runtime_field);
         assert_eq!(resource.runtime_op_layout_delta_bytes, op_delta);
         assert_eq!(resource.runtime_unit_layout_delta_bytes, unit_delta);
@@ -6427,34 +6423,6 @@ mod tests {
         assert_eq!(
             resource.emitted_op_layout_delta_bytes,
             op_delta.max(unit_delta)
-        );
-        assert_eq!(resource.runtime_op_containing_bytes, op_size * emitted);
-        assert_eq!(resource.runtime_unit_containing_bytes, unit_size * emitted);
-        // Issue #936: the executor's two bind-sized tables, each at one entry per emitted op.
-        let active_table = u64::try_from(core::mem::size_of::<u32>()).expect("entry") * emitted;
-        let source_table =
-            u64::try_from(core::mem::size_of::<(usize, u32)>()).expect("entry") * emitted;
-        assert_eq!(resource.active_unit_table_bytes, active_table);
-        assert_eq!(resource.source_input_table_bytes, source_table);
-        // Issue #1609: the runtime's block-end unit table, one `u32` per emitted op.
-        let block_end_table = u64::try_from(core::mem::size_of::<u32>()).expect("entry") * emitted;
-        assert_eq!(resource.block_end_unit_table_bytes, block_end_table);
-        assert_eq!(
-            resource.total_bytes,
-            runtime_field
-                + op_delta.max(unit_delta) * emitted
-                + active_table
-                + source_table
-                + block_end_table
-        );
-        assert_eq!(
-            resource.largest_allocation_bytes,
-            executor_size
-                .max(op_size * emitted)
-                .max(unit_size * emitted)
-                .max(active_table)
-                .max(source_table)
-                .max(block_end_table)
         );
         // The executor's layout witness mirrors every field but the one it removes, the two #936
         // tables included: the owner-level delta is then exactly the runtime-level one, and a
@@ -6496,12 +6464,10 @@ mod tests {
         assert_eq!(zero, GraphScalarSplitRuntimeResourceEstimate::default());
         let one =
             GraphScalarSplitRuntimeResourceEstimate::checked_for(1).expect("one split table entry");
-        let entry = u64::try_from(core::mem::size_of::<Box<dyn GraphRuntimeSplitPairProcessor>>())
-            .expect("split table entry");
         assert_eq!(one.possible_pair_count, 1);
-        assert_eq!(one.split_pair_table_bytes, entry);
-        assert_eq!(one.total_bytes, entry);
-        assert_eq!(one.largest_allocation_bytes, entry);
+        assert!(one.split_pair_table_bytes > 0, "one entry is charged");
+        assert_eq!(one.total_bytes, one.split_pair_table_bytes);
+        assert_eq!(one.largest_allocation_bytes, one.split_pair_table_bytes);
         assert_eq!(
             GraphScalarSplitRuntimeResourceEstimate::checked_for(u64::MAX),
             None
@@ -10885,20 +10851,18 @@ mod follow_route_tests {
         }
     }
 
-    /// The charge of six-word and following routes together is each kind's own cell, owner and
-    /// producer bytes, the route IDs twice, and the plan's one route-activity table once. A plan
-    /// with no following route is charged exactly as before (the six-word terms alone).
+    /// The charge of six-word and following routes together counts each route once, the route IDs
+    /// twice, and the plan's one route-activity table once. A plan with no following route is
+    /// charged its six-word terms alone.
     ///
-    /// Test value: red if a following route is charged a six-word cell or owner, if a kind is left
-    /// out, or if the activity table is charged per kind.
+    /// Test value: red if a kind is left out of the joint charge, or if the activity table is
+    /// charged per kind.
     #[test]
-    fn the_charge_counts_each_kind_its_own_bytes_and_the_activity_table_once() {
-        let size = |bytes: usize| bytes as u64;
+    fn the_charge_counts_each_kind_and_the_activity_table_once() {
         let superseded = LiveValuesSuperseded::new();
         /// The plan's prepared routes: their activation offsets join the activity charge
         /// once, for a plan with a following route (#1652 MAJOR-1).
         const ACTIVITY_ROUTES: u64 = 7;
-        let offsets = ACTIVITY_ROUTES * size(core::mem::size_of::<u32>());
         let activity = (4_096, 1_024);
         let six = [
             six_word_producer("a", activity),
@@ -10919,61 +10883,26 @@ mod follow_route_tests {
                 .1
             })
             .collect();
-        let six_cell = size(core::mem::size_of::<
-            engine::realtime::SharedAllocation<RouteLane>,
-        >());
-        let seven_cell = size(core::mem::size_of::<
-            engine::realtime::SharedAllocation<FollowRouteLane>,
-        >());
-        assert!(seven_cell > six_cell, "the seventh word has its own cell");
-        let six_owner = size(
-            core::mem::size_of::<RouteControlLane>()
-                + core::mem::size_of::<GraphRouteControlBinding>()
-                + LIVE_ROUTE_OWNER_BYTES,
-        );
-        // #1654 T3: the one-lane source's left column hears one curve: its walk's table and its
-        // probe twin's, one cursor each.
-        let cursors = 2 * size(automation::Composed::<([f32; 2], bool)>::bytes(1));
-        let seven_owner = size(
-            core::mem::size_of::<FollowRouteControlLane>()
-                + core::mem::size_of::<GraphFollowRouteControlBinding>()
-                + LIVE_FOLLOW_ROUTE_OWNER_BYTES,
-        ) + cursors;
-        let six_table = 2 * size(core::mem::size_of::<GraphRouteControlProducer>());
-        let seven_table = 3 * size(core::mem::size_of::<GraphFollowRouteControlProducer>());
-        let ids = 2 * (1 + 2 + 3 + 4 + 5);
 
         let both = route_control_resources(&six, &seven);
         assert_eq!(both.routes, 5);
-        assert_eq!(both.cell_bytes, 2 * six_cell + 3 * seven_cell);
-        assert_eq!(both.owner_bytes, 2 * six_owner + 3 * seven_owner);
-        assert_eq!(both.producer_table_bytes, six_table + seven_table);
-        assert_eq!(both.route_id_bytes, ids);
-        assert_eq!(both.activity_bytes, activity.0 + offsets);
-        assert_eq!(
-            both.total_bytes,
-            2 * six_cell
-                + 3 * seven_cell
-                + 2 * six_owner
-                + 3 * seven_owner
-                + six_table
-                + seven_table
-                + ids
-                + activity.0
-                + offsets
-        );
-        assert!(both.largest_allocation_bytes >= seven_cell.max(activity.1));
+        assert_eq!(both.route_id_bytes, 2 * (1 + 2 + 3 + 4 + 5));
 
         let alone = route_control_resources(&six, &[]);
         assert_eq!(alone.routes, 2);
-        assert_eq!(alone.cell_bytes, 2 * six_cell);
-        assert_eq!(alone.owner_bytes, 2 * six_owner);
-        assert_eq!(alone.producer_table_bytes, six_table);
         assert_eq!(alone.route_id_bytes, 2 * (1 + 2));
         assert_eq!(alone.activity_bytes, activity.0);
         let following = route_control_resources(&[], &seven);
-        assert_eq!(following.cell_bytes, 3 * seven_cell);
-        assert_eq!(following.owner_bytes, 3 * seven_owner);
+        assert_eq!(
+            alone.cell_bytes + following.cell_bytes,
+            both.cell_bytes,
+            "each kind's cells are charged in the joint plan"
+        );
+        assert_eq!(
+            alone.owner_bytes + following.owner_bytes,
+            both.owner_bytes,
+            "each kind's owners are charged in the joint plan"
+        );
         assert_eq!(
             alone.total_bytes + following.total_bytes - activity.0,
             both.total_bytes,

@@ -29,10 +29,8 @@
 //! is one cohort's builtin strip in its fixed order (AGENTS.md: input section, fader, pan
 //! matrix), so slot 0 is the input section, slot 1 the fader and slot 2 the pan matrix.
 //!
-//! `digests` (also ignored) prints the 64-block digest of every native session row with the probes
-//! off and on, so a change to the probes can be checked against a base commit's bits in one
-//! command. `probes_split_the_bank_units_and_move_no_bit` is the standing, untimed gate: the
-//! probes fire where they claim to and render the row's bits.
+//! `probes_split_the_bank_units_and_move_no_bit` is the standing, untimed gate: the probes fire
+//! where they claim to and render the row's bits.
 //!
 //! Cycles are derived, not counted: the core clock is calibrated from a dependent chain of scalar
 //! `f32` adds at [`FADD_LATENCY_CYCLES`] cycles each (Zen 3), timed by the same monotonic clock the
@@ -42,7 +40,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use bench_support::digest::Sha256Sink;
-use console_workload::{PlanConfig, QUANTUM, SessionRuntime, Workload, native_session_rows};
+use console_workload::{PlanConfig, QUANTUM, SessionRuntime, Workload};
 use graph::test_only_phase_profile as profile;
 use profile::bank;
 
@@ -420,21 +418,6 @@ fn digest(workload: Workload, blocks: u64) -> String {
         runtime.hash_output(&mut hash);
     }
     hash.finish_hex()
-}
-
-#[test]
-#[ignore = "measurement harness; run with --ignored --nocapture"]
-fn digests() {
-    for workload in native_session_rows() {
-        profile::enable(false);
-        let off = digest(workload, 64);
-        profile::reset();
-        profile::enable(true);
-        let on = digest(workload, 64);
-        profile::enable(false);
-        println!("{:<44} {off}", workload.kind());
-        assert_eq!(on, off, "{}: the probes moved a bit", workload.kind());
-    }
 }
 
 /// The probes fire where they claim to, and a profiled render is the row's own bits.

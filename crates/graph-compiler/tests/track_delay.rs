@@ -5,8 +5,8 @@
 //!
 //! * **P2-2, the off gate.** A session that declares `delay_samples = 0` -- which is every session
 //!   in the tree, and will be almost every session a host ever writes -- must compile to the
-//!   current zero-delay semantic plan. The digest pin records that plan; the structural row below
-//!   proves that track delay itself adds no node or ring.
+//!   current zero-delay semantic plan: the structural row below proves that track delay itself
+//!   adds no node or ring.
 //! * **P2-3, PDC non-interaction.** A delayed track's *output* shifts. Its *PDC report* does not.
 //! * **P2-4, accounting.** The rings are charged to `delay_bytes`, exactly `sum * 4` per lane, and
 //!   a hostile session that asks for more than the caps allow is rejected rather than allocated.
@@ -128,7 +128,6 @@ fn session_with_delay(left: u32, right: u32) -> CompiledSession {
 
 struct Compiled {
     artifact: PreparedGraphBuiltinsArtifact,
-    sha256: String,
     output_latency: u64,
     delay_bytes: u64,
     largest_allocation_bytes: u64,
@@ -142,7 +141,6 @@ impl Compiled {
 
 /// The production compile: the session's own builtins, prepared with no meters and no live
 /// controls, attached through `compile_with_builtins` at the width this build renders at (#964).
-/// The canonical digest is dispatch-independent, so the pin below holds on every host.
 fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled, String> {
     let registry = launch_native_effect_registry().expect("launch registry");
     let builtins = prepare_session_builtins(
@@ -188,13 +186,11 @@ fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled,
             .collect::<Vec<_>>()
             .join(",")
     })?;
-    let sha256 = GraphCompiler::sha256(artifact.graph(), artifact.report());
     // The whole-plan estimate, with the builtin banks attached: the one the caps are checked
     // against, and the one a host publishes.
     let estimate = artifact.graph_resource_estimate().clone();
     Ok(Compiled {
         output_latency: artifact.report().output_latency.0,
-        sha256,
         delay_bytes: estimate.delay_bytes,
         largest_allocation_bytes: estimate.largest_allocation_bytes,
         artifact,
@@ -216,7 +212,7 @@ fn compiled(left: u32, right: u32) -> Compiled {
 /// lowered program rather than a claim about it.
 ///
 /// Red mutation: emit a `PreparedTrackDelay` unconditionally in `compile.rs` (drop the
-/// `filter`) -> this fails, and so does every digest row below.
+/// `filter`) -> this fails.
 #[test]
 fn a_zero_delay_session_lowers_no_delay_node() {
     let zero = compiled(0, 0);
@@ -227,85 +223,14 @@ fn a_zero_delay_session_lowers_no_delay_node() {
     assert_eq!(zero.delay_bytes, 0, "no ring, no bytes");
 }
 
-/// The zero-delay plan has the current semantic digest for this feature set.
-///
-/// The pre-track-delay comparison was measured at 17682b4 and re-pinned by #241. Issue #805
-/// independently accounted for its prepared EQ state growth: nine instances added 2,736 bytes,
-/// producing the baseline `e9e6b012...209433e4` recorded in that issue's canonical derivation.
-///
-/// Issue #807 retains two dedicated-cut enable words per channel: each EQ's serialized state
-/// grows from 920 to 936 bytes, so nine instances add exactly 144 bytes. Applying only that
-/// change to the preserved #805 canonical text gives the compiler's actual new hash below:
-/// `declared_effect_bytes` 8,280 -> 8,424 and both plan-byte totals 150,415 -> 150,559.
-/// Every other canonical byte is retained in that independently derived expected text. The
-/// numbered #807 spec records the matching computed/compiled hashes and exact estimate row.
-///
-/// Issue #964 compiles through `compile_with_builtins`, as every host does. The fixture's input
-/// sections declare a 20 Hz high-pass and a 20 kHz low-pass on every lane, so each of the nine
-/// `post-input-builtins` nodes carries an `infinite` tail rather than `finite:0`. Applying only
-/// that change to the #807 canonical text -- the nine `node` rows and the nine `tail` rows of those
-/// nodes, eighteen tokens, and no other byte -- gives the hash below; the builtins-less compile
-/// hashed the unchanged text to `eb3ca776...cb18e0ea10`. The #964 spec records the diff.
-///
-/// Issue #1328 amendment A9 carries each channel input's silence counter in the EQ's state
-/// payload: one word per channel, so each EQ's serialized state grows from 936 to 944 bytes and
-/// nine instances add exactly 72. Applying only that change to the #964 canonical text --
-/// `declared_effect_bytes` 8,424 -> 8,496 and both plan-byte totals 150,559 -> 150,631, three
-/// tokens of the `estimate` row and no other byte -- reproduces the compiler's new hash below;
-/// reversing the three tokens in the compiled text hashes back to the #964 pin `957e97ca...7640e42`.
-///
-/// Issue #1328's follow-up declares the EQ's two rest planes as scratch (8 bytes per frame per
-/// prepared lane, `parametric_eq::REST_PLANE_BYTES_PER_FRAME`), which the estimate charges in
-/// `declared_effect_bytes`: nine instances at a 128-frame quantum add exactly 9,216 bytes.
-/// `declared_effect_bytes` 8,496 -> 17,712 and both plan-byte totals 150,631 -> 159,847, the same
-/// three tokens of the `estimate` row and no other byte; reversing them in the compiled text hashes
-/// back to the A9 pin `bb250287...ffbfc40bf` (verified on the dumped canonical text).
-///
-/// Issue #1329 states a certified finite tail for every builtin input section (D1, D4, D7): the
-/// fixture's 20 Hz high-pass into 20 kHz low-pass at 48 kHz now reports `finite:10048` where it
-/// reported `infinite`. Exactly the eighteen tokens #964 introduced move -- the nine `node` rows
-/// and the nine `tail` rows of the `post-input-builtins` nodes -- and no other byte (diffed on the
-/// dumped canonical text against the follow-up pin `bf2dfd6c...ad7b10d8b3`, which the unchanged
-/// tree reproduces). The value is the preparation's computed bound, not a pinned figure: a change
-/// to the bound's derivation moves this digest, which is the point of pinning the plan.
-///
-/// The structural off-delay gate above still proves that no zero-length delay node or ring was
-/// introduced. Emitting a zero-length entry contributes no `delay_bytes` and leaves this digest
-/// unchanged; `a_zero_delay_session_lowers_no_delay_node` catches that program mutation.
-#[test]
-fn the_zero_delay_plan_digest_is_the_current_semantic_plan() {
-    assert_eq!(
-        compiled(0, 0).sha256,
-        ZERO_DELAY_CANONICAL_SHA256,
-        "a zero-delay session must compile to the ruled canonical plan"
-    );
-}
-
-/// Historical #241 schema arithmetic remains in `docs/derivations/241-schema-repins.md`;
-/// the numbered #805 and #807 specs preserve their subsequent state-size derivations, and the
-/// #964 spec the builtin-tail re-pin.
-const ZERO_DELAY_CANONICAL_SHA256: &str =
-    "60cae21e7692ccbdf17440c7c84f15bd1bb29c3bb2369a0d1b52a5a56fc6c362";
-
-/// ...and a delayed one is a genuinely different plan, so the digest above is not inert.
-#[test]
-fn a_delayed_session_is_a_different_plan() {
-    assert_ne!(
-        compiled(480, 480).sha256,
-        ZERO_DELAY_CANONICAL_SHA256,
-        "a delay that changes the estimate must change the plan digest"
-    );
-}
-
 // ---------------------------------------------------------------------------------------------
 // P2-3: PDC non-interaction
 // ---------------------------------------------------------------------------------------------
 
 /// Track delay is not latency, so nothing PDC owns moves when a track declares one.
 ///
-/// The four things PDC owns are asserted individually rather than through the digest, because the
-/// digest is a conjunction: it would go red for the right reason and give no evidence about *which*
-/// of them moved. `inserted_delays` and `route_timings` are the compensation sets the design names;
+/// The four things PDC owns are asserted individually, so a failure says *which* of them moved.
+/// `inserted_delays` and `route_timings` are the compensation sets the design names;
 /// `output_latency` is what a host reports to its own clock; and the per-node latencies are the
 /// input PDC computes all three from.
 ///

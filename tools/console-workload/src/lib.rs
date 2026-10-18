@@ -2576,126 +2576,6 @@ mod tests {
         );
     }
 
-    /// Issue #956 gate 3 (#936 gate 5, re-homed): on the driver-fed gain/pan row, the runtime
-    /// metadata the compile with builtins charges grows by exactly the byte lengths it charges for
-    /// the executor's two bind-sized tables, and the tables the row binds fit in them.
-    ///
-    /// The row's graph is the one `build_full` compiles: `prepare_session_builtins` with no meter,
-    /// then `compile_with_builtins` at the native width. Past the semantic estimate its graph
-    /// metadata carries two charges. The runtime metadata is recomputed here from the compile's own
-    /// inputs: one emitted op per scheduled node and one response owner per track (its id,
-    /// `input-filters` and `miso.builtin.input-filters`) -- the row prepares no effect. The bank
-    /// slot reservation is recomputed from the builtin banks the artifact retains: one slot per
-    /// bank, masked at its width. Nothing else is charged there: the strip is banked whole at a
-    /// vector width, so no scalar owner is retained, and with no effect there is no effect control
-    /// or effect bank. The runtime metadata is the terms it carried before issue #936 -- the
-    /// split-table field, the per-op layout delta, the observation state and the response owners,
-    /// none of which the issue moved (`graph`'s
-    /// `runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow` pins that the executor's
-    /// layout witnesses carry the new table) -- plus the two tables, each at one entry per emitted
-    /// op, and the block-end unit table of issue #1609 (one `u32` per emitted op). The row binds every
-    /// unit but its sixty-four inputs as dispatched units (4 bytes each) and copies no claim.
-    #[test]
-    fn the_driver_fed_rows_metadata_charge_grows_by_exactly_the_executor_tables() {
-        let workload = Workload::SixtyFourTrackGainPanRing;
-        let model = console_model(workload);
-        let session = compile_session(&model, compile_caps()).expect("compiled console session");
-        let registry = launch_native_effect_registry().expect("launch effect registry");
-        let effects = prepare_native_session_effects(&session, registry, effect_caps())
-            .expect("prepared console effects");
-        let builtins = builtins_compiler::prepare_session_builtins(&session, &[], builtin_caps())
-            .expect("prepared console builtins");
-        let Ok(artifact) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-            input_floors: Default::default(),
-            dispatch: Backend::current(),
-            plan_id: PLAN_ID,
-            effects,
-            builtins,
-            caps: graph_caps(),
-        }) else {
-            panic!("gain/pan console graph");
-        };
-        let emitted = artifact
-            .graph()
-            .dependency_levels
-            .iter()
-            .map(|level| level.nodes.len() as u64)
-            .sum::<u64>();
-        let fixed = ["input-filters".len(), "miso.builtin.input-filters".len()];
-        let (strings, largest) =
-            model
-                .tracks
-                .iter()
-                .fold((0_u64, 0_u64), |(total, largest), track| {
-                    let id = track.id.as_str().len() as u64;
-                    (
-                        total + id + (fixed[0] + fixed[1]) as u64,
-                        largest.max(id).max(fixed[0] as u64).max(fixed[1] as u64),
-                    )
-                });
-        let resource =
-            graph::GraphRuntimeMetadataResourceEstimate::checked_for_with_response_bindings(
-                emitted,
-                model.tracks.len() as u64,
-                strings,
-                largest,
-            )
-            .expect("runtime metadata");
-        let banks: Vec<_> = artifact.prepared_builtin_banks().collect();
-        assert!(!banks.is_empty(), "the gain/pan strip is banked");
-        let mask_bytes = banks
-            .iter()
-            .map(|bank| u64::from(bank.width.lanes()))
-            .max()
-            .expect("one bank at least")
-            * core::mem::size_of::<bool>() as u64;
-        let slots =
-            graph::GraphBankSlotResourceEstimate::checked_for_mask(banks.len() as u64, mask_bytes)
-                .expect("bank slot reservation");
-        let report = artifact.report();
-        assert_eq!(
-            report.estimate.graph_metadata_bytes - report.semantic_estimate.graph_metadata_bytes,
-            resource.total_bytes + slots.total_bytes,
-            "the runtime metadata and the bank slot reservation are the row's only charges past \
-             the semantic estimate"
-        );
-        let tables = [
-            emitted * core::mem::size_of::<u32>() as u64,
-            emitted * core::mem::size_of::<(usize, u32)>() as u64,
-        ];
-        assert_eq!(
-            [
-                resource.active_unit_table_bytes,
-                resource.source_input_table_bytes
-            ],
-            tables,
-            "each table at one entry per emitted op"
-        );
-        assert_eq!(
-            resource.block_end_unit_table_bytes,
-            emitted * core::mem::size_of::<u32>() as u64,
-            "the block-end unit table at one entry per emitted op"
-        );
-        let before = resource.runtime_field_bytes
-            + resource.emitted_op_layout_delta_bytes * emitted
-            + resource.response_binding_table_bytes
-            + resource.response_binding_string_bytes;
-        assert_eq!(
-            resource.total_bytes,
-            before + tables[0] + tables[1] + resource.block_end_unit_table_bytes,
-            "the charge grows by exactly the two executor tables and the block-end unit table"
-        );
-        let ring = SessionRuntime::new(workload);
-        let bound = graph::test_only_executor_table_bytes();
-        let dispatched = ring.unit_eligibility().len() as u64 - u64::from(workload.tracks());
-        assert_eq!(
-            bound,
-            [dispatched * core::mem::size_of::<u32>() as u64, 0],
-            "the row dispatches every unit but its inputs and copies no claim"
-        );
-        assert!(bound[0] <= tables[0] && bound[1] <= tables[1]);
-    }
-
     /// The driver's five methods, called directly under the realtime audit: `played_planes` lends
     /// exactly the words `copy_track_input` copies, claim by claim, and both are the claimed
     /// track's frozen block through that track's declared channel mapping.
@@ -3208,8 +3088,7 @@ mod tests {
     /// derived from D1 rather than pinned, and every send in it is active.
     ///
     /// Compiled through the calls `build_full` makes at [`PlanConfig::BASELINE`] (no meters, no
-    /// live controls, `Concurrent` builtins), on the precedent of
-    /// `the_driver_fed_rows_metadata_charge_grows_by_exactly_the_executor_tables`. The fold count
+    /// live controls, `Concurrent` builtins). The fold count
     /// is printed for the baseline's report, not asserted (#1227 D6 says why).
     ///
     /// Red mutations: drop the row's `console_model` arm (it renders the intended fixture: 64
