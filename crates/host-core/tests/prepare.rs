@@ -5,14 +5,12 @@
 //! checked against the row the facade itself reports, and every source-control rejection is typed.
 
 use builtins::{MeterMetricSet, MeterTap};
-use core::mem::{size_of, size_of_val};
 use host_core::{
-    EffectControlProducer, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
-    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES, LiveValuesSuperseded,
-    PrepareRejection, SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission,
-    compile_host_session, control_table_bytes, default_source_ring_frames, diagnostic_lines,
-    prepare_host_runtime, prepare_host_runtime_with_live_controls,
-    prepare_host_runtime_with_live_lanes,
+    HostLiveControlRequest, HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport,
+    HostShapePolicy, LAUNCH_SAMPLE_RATES, LiveValuesSuperseded, PrepareRejection,
+    SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission, compile_host_session,
+    control_table_bytes, default_source_ring_frames, diagnostic_lines, prepare_host_runtime,
+    prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_lanes,
     prepare_host_runtime_with_selected_meters_between_render_calls, prepare_host_session,
     source_id_arena_bytes,
 };
@@ -386,8 +384,12 @@ fn retained_bytes_projection_matches_the_live_set() {
     );
 }
 
+/// Red if the host reports (and so admits) effect-control bytes for anything but the producers it
+/// hands out: a copy with another capacity, a subset, or a figure of its own. The charge itself
+/// (table by capacity, a shared factory once, no registry-owned factory) is the effect compiler's,
+/// and its relations are tested there (`effect_control_resources_charge_*`).
 #[test]
-fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
+fn effect_control_report_charges_the_producers_the_host_hands_out() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
     let live_controls = HostLiveControlRequest::default();
     let (prepared, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
@@ -404,73 +406,25 @@ fn effect_control_report_uses_actual_native_capacity_strings_and_owners() {
         9,
         "launch EQ fixture has one effect per track"
     );
-    let table = (handles.effect_controls.capacity() * size_of::<EffectControlProducer>()) as u64;
-    let mut payload = handles
-        .effect_controls
-        .iter()
-        .flat_map(|producer| [producer.track_id.len(), producer.effect_id.len()])
-        .map(|bytes| bytes as u64)
-        .sum::<u64>();
-    let mut largest_owned = handles
-        .effect_controls
-        .iter()
-        .flat_map(|producer| [producer.track_id.len(), producer.effect_id.len()])
-        .map(|bytes| bytes as u64)
-        .max()
-        .unwrap_or(0);
+    // All nine owners share one factory.
     let shared_factory = handles.effect_controls[0].owner().unwrap().factory();
-    // Each EQ lane's writer holds one cell writer per `(slot, channel)` of its target cells, and
-    // none for parameters (its parameters ride its targets): the EQ has six target slots.
-    let writer_array = (2
-        * 6
-        * size_of::<engine::realtime::CellWriter<{ effect_contract::PREPARED_EFFECT_TARGET_WORDS }>>(
-        )) as u64;
     for producer in &handles.effect_controls {
-        payload += writer_array;
-        largest_owned = largest_owned.max(writer_array);
         let owner = producer.owner().expect("live EQ owner");
         assert!(std::sync::Arc::ptr_eq(shared_factory, owner.factory()));
-        for bytes in [size_of_val(owner), size_of_val(owner.committed())] {
-            payload += bytes as u64;
-            largest_owned = largest_owned.max(bytes as u64);
-        }
     }
-    // All nine owners share one factory Arc: its actual header/layout is charged at most once.
-    let factory_bytes = core::alloc::Layout::new::<[core::sync::atomic::AtomicUsize; 2]>()
-        .extend(core::alloc::Layout::for_value(shared_factory.as_ref()))
-        .expect("factory layout")
-        .0
-        .pad_to_align()
-        .size() as u64;
-    // #1469 Amendment 1: a factory the launch registry owns is charged to no plan.
-    if !host_core::launch_registry_owns_factory(shared_factory) {
-        payload += factory_bytes;
-        largest_owned = largest_owned.max(factory_bytes);
-    }
+    let report = prepared.report.effect_control_resources;
     assert_eq!(
-        prepared
-            .report
-            .effect_control_resources
-            .producer_table_bytes,
-        table
+        report,
+        effect_compiler::effect_control_resources(&handles.effect_controls)
+            .expect("resource facts"),
+        "the report is the charge of the producers handed out"
     );
+    assert!(report.producer_table_bytes > 0 && report.owned_payload_bytes > 0);
     assert_eq!(
-        prepared.report.effect_control_resources.owned_payload_bytes,
-        payload
-    );
-    assert_eq!(
-        prepared
-            .report
-            .effect_control_resources
-            .largest_owned_allocation_bytes,
-        largest_owned
-    );
-    assert_eq!(
-        prepared
-            .report
-            .effect_control_resources
-            .largest_allocation_bytes(),
-        table.max(largest_owned)
+        report.largest_allocation_bytes(),
+        report
+            .producer_table_bytes
+            .max(report.largest_owned_allocation_bytes)
     );
 }
 

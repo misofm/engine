@@ -35,179 +35,6 @@ pub use runtime::{
     test_only_source_plane_reset, test_only_split_pair_table_witness,
 };
 
-/// Phase-level timing of `GraphExecutor::render`: the instrument of the gain/pan phase profile
-/// (issue #960, `tools/console-workload/tests/gain_pan_profile.rs`), first built for the
-/// plumbing-floor diagnosis. Test builds only: nothing here exists in a production build, and a
-/// `test-support` build that never calls [`test_only_phase_profile::enable`] pays one
-/// thread-local read per block and nothing per unit (plus, with the feature, one per bank-chain
-/// probe site).
-///
-/// The clock is `std::time::Instant` (the vDSO monotonic clock), because `crates/graph` may not
-/// carry the `unsafe` block `_rdtsc` needs. A probe is taken only where the *kind* of unit
-/// changes, so a block whose units are grouped by kind costs a handful of probes rather than one
-/// per unit; the harness measures the probe cost and states it beside the numbers.
-///
-/// A bank unit is one [`BANK`](test_only_phase_profile::BANK) phase here. With the
-/// `test-support` feature, [`bank`](test_only_phase_profile::bank) splits the chain inside it
-/// into the gather, each slot, the collapse seam, the scatter and the route/master fold (issue
-/// #960); [`enable`](test_only_phase_profile::enable) and
-/// [`reset`](test_only_phase_profile::reset) drive both profiles together. What `BANK` holds
-/// beyond the chain's sub-phases is the unit's dispatch, member setup and observation.
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub mod test_only_phase_profile {
-    use core::cell::Cell;
-    use std::time::Instant;
-
-    /// Render entry to the first source work: the host planes' shape check.
-    pub const ENTER: usize = 0;
-    /// The source set's `begin_block` and the `copy_track_input` loop. Empty when the plan binds
-    /// no source set, as the bound-feed console rows do; on `sixty_four_track_gain_pan_ring` it is
-    /// the driver's `begin_block` alone, because every claim is read in place (issue #918).
-    pub const SOURCE: usize = 1;
-    /// Plain units whose op is a host-bound processor (`NodeKind::Bound`): on the bound-feed
-    /// console rows, the sixty-four `FrozenGraphSource` copies.
-    pub const BOUND: usize = 2;
-    /// Plain units whose op is a route (`NodeKind::Route`).
-    pub const ROUTE: usize = 3;
-    /// The session Output op's unit.
-    pub const OUTPUT: usize = 4;
-    /// A plain identity unit with one input that is not in place: `reduce_plane`'s copy arm.
-    pub const IDENTITY_COPY: usize = 5;
-    /// A plain identity unit in place over its one input: dispatch and nothing else.
-    pub const IDENTITY_ALIAS: usize = 6;
-    /// Any other plain unit.
-    pub const OTHER_OP: usize = 7;
-    /// A bank unit: its dispatch, member setup and observation, and the whole chain run that
-    /// [`bank`] splits.
-    pub const BANK: usize = 8;
-    /// The unit loop's end to the return (on the pre-#916 tree, the end-of-block master copy).
-    pub const EXIT: usize = 9;
-    pub const COUNT: usize = 10;
-
-    thread_local! {
-        static ENABLED: Cell<bool> = const { Cell::new(false) };
-        static NANOS: Cell<[u64; COUNT]> = const { Cell::new([0; COUNT]) };
-        static BLOCKS: Cell<u64> = const { Cell::new(0) };
-        static PROBES: Cell<u64> = const { Cell::new(0) };
-        static RUNS: Cell<[(usize, u64); RUNS_CAPACITY]> =
-            const { Cell::new([(COUNT, 0); RUNS_CAPACITY]) };
-    }
-
-    /// Runs of same-kind units recorded from the first profiled block, `(kind, units)`.
-    pub const RUNS_CAPACITY: usize = 16;
-
-    /// The unit-kind runs of the first block profiled since the last reset, in schedule order;
-    /// `(COUNT, 0)` marks unused entries.
-    #[must_use]
-    pub fn runs() -> [(usize, u64); RUNS_CAPACITY] {
-        RUNS.with(Cell::get)
-    }
-
-    /// The bank chain's sub-phase profile (issue #960): the gather, each slot, the collapse seam,
-    /// the scatter and the route/master fold inside every [`BANK`] unit.
-    #[cfg(feature = "test-support")]
-    pub use rack::test_only_bank_phase_profile as bank;
-
-    /// Switch the probes on or off for this thread, the bank chain's sub-phase probes included.
-    /// Off, `render` reads one thread-local per block and nothing else, and a bank chain one per
-    /// probe site.
-    pub fn enable(enabled: bool) {
-        ENABLED.with(|value| value.set(enabled));
-        #[cfg(feature = "test-support")]
-        bank::enable(enabled);
-    }
-
-    /// Zero the accumulators, the bank chain's sub-phase totals included.
-    pub fn reset() {
-        NANOS.with(|value| value.set([0; COUNT]));
-        BLOCKS.with(|value| value.set(0));
-        PROBES.with(|value| value.set(0));
-        RUNS.with(|value| value.set([(COUNT, 0); RUNS_CAPACITY]));
-        #[cfg(feature = "test-support")]
-        bank::reset();
-    }
-
-    /// `(nanoseconds per phase, blocks profiled, probes taken)` since the last reset.
-    #[must_use]
-    pub fn snapshot() -> ([u64; COUNT], u64, u64) {
-        (
-            NANOS.with(Cell::get),
-            BLOCKS.with(Cell::get),
-            PROBES.with(Cell::get),
-        )
-    }
-
-    /// One block's running probe. `None` when disabled, so the hot path is one `Option` test.
-    pub(crate) struct Probe {
-        last: Instant,
-        phase: usize,
-        nanos: [u64; COUNT],
-        probes: u64,
-        runs: [(usize, u64); RUNS_CAPACITY],
-        run: usize,
-    }
-
-    impl Probe {
-        #[inline]
-        pub(crate) fn start() -> Option<Self> {
-            ENABLED.with(Cell::get).then(|| Self {
-                last: Instant::now(),
-                phase: ENTER,
-                nanos: [0; COUNT],
-                probes: 1,
-                runs: [(COUNT, 0); RUNS_CAPACITY],
-                run: 0,
-            })
-        }
-
-        /// Charge the time since the last probe to the current phase and make `next` current.
-        #[inline]
-        pub(crate) fn enter(&mut self, next: usize) {
-            let now = Instant::now();
-            self.nanos[self.phase] +=
-                u64::try_from(now.duration_since(self.last).as_nanos()).unwrap_or(u64::MAX);
-            self.last = now;
-            self.phase = next;
-            self.probes += 1;
-        }
-
-        /// Charge a unit of kind `kind`; a probe is taken only when the kind changes.
-        #[inline]
-        pub(crate) fn unit(&mut self, kind: usize) {
-            if kind != self.phase {
-                self.enter(kind);
-                if self.run < RUNS_CAPACITY && self.runs[self.run].1 != 0 {
-                    self.run += 1;
-                }
-                if self.run < RUNS_CAPACITY {
-                    self.runs[self.run].0 = kind;
-                }
-            }
-            if self.run < RUNS_CAPACITY {
-                self.runs[self.run].1 += 1;
-            }
-        }
-
-        #[inline]
-        pub(crate) fn finish(mut self) {
-            self.enter(COUNT - 1);
-            NANOS.with(|value| {
-                let mut total = value.get();
-                for (slot, nanos) in total.iter_mut().zip(self.nanos) {
-                    *slot += nanos;
-                }
-                value.set(total);
-            });
-            if BLOCKS.with(Cell::get) == 0 {
-                RUNS.with(|value| value.set(self.runs));
-            }
-            BLOCKS.with(|value| value.set(value.get() + 1));
-            PROBES.with(|value| value.set(value.get() + self.probes));
-        }
-    }
-}
-
 use core::cell::Cell;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
@@ -5225,6 +5052,26 @@ pub fn test_only_timeline_at(
     graph_source_driver_mut(plan)?.timeline_at(source_read_sample)
 }
 
+/// The entries of the plan's carry tables that [`carry_program_retained_bytes`] charges, as
+/// counts: `[source moves, input-section lane moves, strip-stage moves, effect-lane moves]`. All
+/// zero for a plan without a carry program or for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_only_carry_counts(plan: &mut PreparedRenderPlan) -> [usize; 4] {
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .map_or([0; 4], |executor| {
+            [
+                executor
+                    .carry
+                    .as_ref()
+                    .map_or(0, |program| program.sources.len()),
+                executor.carry_inputs.len(),
+                executor.carry_strips.len(),
+                executor.carry_effects.len(),
+            ]
+        })
+}
+
 /// Bytes the plan's installed [`GraphCarryProgram`] retains; zero for a plan without one or for
 /// any other plan.
 pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
@@ -5876,16 +5723,10 @@ impl PreparedPlanExecutor for GraphExecutor {
         *next_block_sample = time
             .absolute_sample
             .saturating_add(runtime.arena.frames() as u64);
-        #[cfg(any(test, feature = "test-support"))]
-        let mut probe = test_only_phase_profile::Probe::start();
         let (left, right) = output.stereo_planes_mut()?;
         let Some(mut host) = runtime::HostMaster::new(left, right, runtime.arena.frames()) else {
             return Err(RenderError::InvalidEnvelope);
         };
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some(probe) = probe.as_mut() {
-            probe.enter(test_only_phase_profile::SOURCE);
-        }
         // #1396 D1: the source-read sample, `ΣP` ahead of the render clock.
         let block_source_read_sample = time.absolute_sample.checked_add(*source_read_offset);
         let source_validity = if let Some(source_set) = source_set.as_mut() {
@@ -5953,10 +5794,6 @@ impl PreparedPlanExecutor for GraphExecutor {
             {
                 dispatched += 1;
             }
-            #[cfg(any(test, feature = "test-support"))]
-            if let Some(probe) = probe.as_mut() {
-                probe.unit(runtime.test_only_unit_phase(unit));
-            }
             if let Err(error) = runtime.execute(
                 unit,
                 time.absolute_sample,
@@ -5998,10 +5835,6 @@ impl PreparedPlanExecutor for GraphExecutor {
         // Issue #1609: the block rendered without failure, so a result an observer held for it
         // may now be published.
         runtime.block_end_observers();
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some(probe) = probe {
-            probe.finish();
-        }
         Ok(())
     }
     // REALTIME_POLICY_END

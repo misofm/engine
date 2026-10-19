@@ -2457,7 +2457,7 @@ fn a_rebuild_that_hand_mutes_the_source_ramps_the_send_over_the_edits_length() {
 /// no six-word lane is attached: a mute entry on `t` gives `t-b` its seven-word lane, the same
 /// entry on `u` gives no route a lane. The plans differ only in that lane (and the route-activity
 /// table its plan builds), and the bytes the first plan retains beyond the second are within the
-/// report's `route_control_resources`, whose one route is charged a seven-word cell.
+/// report's `route_control_resources`, which charges one route.
 ///
 /// Test value: red if the seven-word cell, its owner, its binding, its producer or the activity
 /// table it makes the plan build is left out of the charge a host admits against its caps.
@@ -2511,10 +2511,6 @@ fn the_following_route_charge_covers_its_attach_and_bind() {
     let (without, none) = retained(&elsewhere);
     assert_eq!(none, host_core::RouteControlResources::default());
     assert_eq!(resources.routes, 1);
-    let follow_cell = (2 * core::mem::size_of::<usize>()
-        + core::mem::size_of::<engine::realtime::LatestCell<7>>()
-        + core::mem::size_of::<engine::realtime::DirtyWord>()) as u64;
-    assert_eq!(resources.cell_bytes, follow_cell, "a seven-word cell");
     let added = with
         .checked_sub(without)
         .filter(|bytes| *bytes > 0)

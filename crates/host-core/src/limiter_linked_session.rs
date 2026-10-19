@@ -1,9 +1,8 @@
-//! The single cross-target owner of the 64-track linked-limiter session corpus (#996/#997).
-//! Non-repeating hot noise exercises linked ramps, gain-ring mirroring, one-sided unlinks and
-//! later equal designed words at every available width (`Simd8` with `avx2`, `Simd4`, `Scalar`).
-//! Its shared master/observation pin detects common scalar/vector mirroring and premature-relink
-//! defects that comparing the current widths alone cannot detect. The pin's pre-#990 provenance
-//! is recorded below; this is a current state-transition contract, not a timing witness.
+//! The 64-track linked-limiter session (#996/#997). Non-repeating hot noise exercises linked
+//! ramps, gain-ring mirroring, one-sided unlinks and later equal designed words at every available
+//! width (`Simd8` with `avx2`, `Simd4`, `Scalar`), through the host's own preparation and live
+//! control channels. It checks the session-visible state transitions; the rendered words are
+//! owned by gate G5's `true-peak-limiter` case `maximum/link_unlink_relink` (see "What is pinned").
 //!
 //! # Why this test exists
 //!
@@ -100,16 +99,16 @@
 //!   the right channel's window is still answered from the previous van Herk block, which is where
 //!   a stale right ring gives a wrong minimum.
 //!
-//! # What is pinned, and how
+//! # What is pinned, and where
 //!
-//! One SHA-256 over, after every block, the master's 256 output words and every limiter's
-//! published window (its sequence number and both channels' reduction words). It was recorded on
-//! the **pre-#990 kernel**, which never links: this tree with `crates/true-peak-limiter` put back
-//! to its text at `bbcf8ce1`. `Simd8`, `Simd4` and `Scalar` rendered the same digest there, in
-//! dev and in release, and so does the batch head. One pin serves every width because banking
-//! regroups lanes and never changes a lane's arithmetic.
+//! Nothing here. This test used to pin one SHA-256 over every block's master words and limiter
+//! readings, recorded on the pre-#990 kernel. TA3 (2026-10-19) moved that claim to gate G5:
+//! `crates/true-peak-limiter/src/corpus.rs` case 5, `maximum/link_unlink_relink`, drives the
+//! prepared core through a linked ramp, one-sided unlinks on a bank's edge lanes and re-equalled
+//! pairs, and its pin, from the scalar oracle, equals the words a never-linking kernel renders.
+//! G5 compares it at every width, natively and under wasmtime.
 //!
-//! Four checks run ahead of the pin, and all four held on the pre-#990 kernel:
+//! Four checks run here, and all four held on the pre-#990 kernel:
 //!
 //! * every lane of a bank carries the retarget that unlinks some bank (above);
 //! * every limiter is limiting: from block 3, more than 6 dB of reduction on both channels at
@@ -135,11 +134,10 @@
 //! rest of its plan. A cheaper proof (for example at silent rest, the #990 verification's L2)
 //! would be class A and is out of scope here.
 //!
-//! What this test asserts about it: a session cannot see *whether* a pair relinked, only the
-//! words it rendered. So it asserts that every block after a pair is equal again renders the
-//! pre-#990 words. A kernel that relinks on designed agreement alone (row 996-K2 of
-//! `crates/true-peak-limiter/tests/MUTATIONS.md`) moves the digest. The relink decision itself is
-//! asserted inside the crate, where the kernel's choice is visible
+//! A session cannot see *whether* a pair relinked, only the words it rendered, and this test no
+//! longer pins words. A kernel that relinks on designed agreement alone (row 996-K2 of
+//! `crates/true-peak-limiter/tests/MUTATIONS.md`) moves the G5 case `maximum/link_unlink_relink`.
+//! The relink decision itself is asserted inside the crate, where the kernel's choice is visible
 //! (`the_linked_body_engages_exactly_where_the_record_allows`, #990 gate 2).
 //!
 //! # Width
@@ -148,12 +146,11 @@
 //! the `#[cfg(test)]` seam that is `prepare_host_runtime_with_live_controls` at a named backend. It
 //! renders W8/W4/Scalar in CI's x86-64-v3 debug and release package runs, and W4/Scalar in the
 //! AArch64 product debug run. AArch64 release's package subset does not run host-core. The Wasm
-//! guest does not contain this corpus: it plays one frozen block per track, and a per-block source
-//! there is tooling (the #996 verdict's owner ruling).
+//! guest does not run this session (a per-block source there is tooling, the #996 verdict's owner
+//! ruling); the G5 case named above carries the linked pair's words to every target instead.
 
 use core::ops::RangeInclusive;
 
-use bench_support::digest::Sha256Sink;
 use effect_contract::{EffectControlRecord, ParameterChannel};
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use graph_compiler::Backend;
@@ -189,9 +186,6 @@ const LIMITING_FROM: usize = 3;
 const REDUCTION_FLOOR: f32 = 0.5;
 /// Blocks, from [`LIMITING_FROM`], at whose end each limiter's reduction must have risen.
 const MINIMUM_RISES: usize = 4;
-
-/// SHA-256 of the scenario, recorded on the pre-#990 kernel at every width (see the module note).
-const PIN: &str = "6d87267b7502a4b4cb663315629d777350ce6ecc62a2d14e0eaebca9b88d9ff9";
 
 const LEFT: &[ParameterChannel] = &[ParameterChannel::Left];
 const RIGHT: &[ParameterChannel] = &[ParameterChannel::Right];
@@ -529,9 +523,8 @@ fn push(console: &mut Console, channel: usize, record: EffectControlRecord) {
     console.gate.publish(revision);
 }
 
-/// What the run saw, besides its digest.
+/// What the run saw.
 struct Run {
-    digest: String,
     /// `[block][track]` published reduction words, `(left, right)`.
     readings: Vec<Vec<(f32, f32)>>,
     /// Track -> `(bank, lane)` at the run's width (see [`placement`]).
@@ -541,7 +534,6 @@ struct Run {
 fn run(backend: Backend) -> Run {
     let mut console = prepare(backend);
     let placement = placement(&console, backend);
-    let mut hash = Sha256Sink::new();
     let mut readings = Vec::with_capacity(BLOCKS);
     // Before block 0, so both land at its first sample.
     for track in 0..TRACKS {
@@ -621,9 +613,6 @@ fn run(backend: Backend) -> Run {
             samples.iter().all(|word| word.is_finite()),
             "block {block}: the master is finite"
         );
-        for word in samples {
-            hash.update(word.to_bits().to_le_bytes());
-        }
         let mut row = Vec::with_capacity(TRACKS);
         for track in 0..TRACKS {
             let handle = &console.handles.effect_observations[console.observers[track]];
@@ -635,15 +624,11 @@ fn run(backend: Backend) -> Run {
                 block as u64 + 1,
                 "block {block}: track {track} publishes one window per block"
             );
-            hash.update(window.sequence.to_le_bytes());
-            hash.update(window.left.to_bits().to_le_bytes());
-            hash.update(window.right.to_bits().to_le_bytes());
             row.push((window.left, window.right));
         }
         readings.push(row);
     }
     Run {
-        digest: hash.finish_hex(),
         readings,
         placement,
     }
@@ -677,27 +662,22 @@ fn unlinking_lanes(placement: &[(usize, usize)]) -> Vec<usize> {
 // The 8-lane (AVX2) twin of the `_at_simd4` and `_at_scalar` tests below (issue #1112).
 #[test]
 #[cfg(target_feature = "avx2")]
-fn the_hot_console_renders_the_pre_990_words_at_simd8() {
+fn the_hot_console_links_unlinks_and_limits_at_simd8() {
     check(Backend::Simd8);
 }
 
 #[test]
-fn the_hot_console_renders_the_pre_990_words_at_simd4() {
+fn the_hot_console_links_unlinks_and_limits_at_simd4() {
     check(Backend::Simd4);
 }
 
 #[test]
-fn the_hot_console_renders_the_pre_990_words_at_scalar() {
+fn the_hot_console_links_unlinks_and_limits_at_scalar() {
     check(Backend::Scalar);
 }
 
 fn check(backend: Backend) {
     let run = run(backend);
-
-    println!(
-        "limiter linked session digest at {backend:?}: {}",
-        run.digest
-    );
 
     // Every lane of a bank, the two edge lanes included, carries the retarget that unlinks some
     // bank.
@@ -760,13 +740,4 @@ fn check(backend: Backend) {
             }
         }
     }
-
-    if std::env::var_os("MISO_ENGINE_REPIN_LIMITER_LINKED_SESSION").is_some() {
-        println!("limiter linked session checks pass at {backend:?}");
-        return;
-    }
-    assert_eq!(
-        run.digest, PIN,
-        "{backend:?}: the hot console's words moved from the pre-#990 kernel's"
-    );
 }

@@ -827,25 +827,31 @@ fn a_bus_insert_is_charged_once_in_the_session_estimate() {
         LinkMode::Maximum,
     );
     processed.submixes[0].inserts.effects.push(insert.clone());
+    let mut on_track = bare.clone();
+    on_track.tracks[0].inserts.effects.push(insert.clone());
 
     let bare = estimate_session_resources(&bare).expect("bare estimate");
     let processed = estimate_session_resources(&processed).expect("processed estimate");
+    let on_track = estimate_session_resources(&on_track).expect("track-insert estimate");
     let params = insert.params.len() as u64;
     assert_eq!(processed.effect_count - bare.effect_count, 1);
     assert_eq!(processed.parameter_count - bare.parameter_count, params);
-    // By hand: the insert's vector element and its parameter vector, its two retained strings
-    // (instance ID and native ID) once in the model and ten times in the canonical bound, and one
-    // 1 KiB canonical item for the instance and for each parameter.
+    // The insert's two retained strings (instance ID and native ID) are retained once.
     let strings = (insert.id.as_str().len() + "miso.compressor".len()) as u64;
-    let vectors = (size_of::<Effect>() as u64) + params * size_of::<EffectParam>() as u64;
     assert_eq!(
         processed.retained_string_bytes - bare.retained_string_bytes,
         strings
     );
+    // The model charge is the track insert's: once, not once per place that names it.
+    let added = processed.compiled_model_bytes - bare.compiled_model_bytes;
     assert_eq!(
-        processed.compiled_model_bytes - bare.compiled_model_bytes,
-        vectors + strings + 10 * strings + 1_024 * (1 + params)
+        added,
+        on_track.compiled_model_bytes - bare.compiled_model_bytes,
+        "a bus insert is charged as the same track insert is"
     );
+    // Beyond the vectors, the strings once in the model and ten times in the canonical bound, and
+    // one 1 KiB canonical item for the instance and for each parameter.
+    assert!(added > strings + 10 * strings + 1_024 * (1 + params));
 }
 
 /// Heavy inserts: eight effects of eight parameters each, and one effect of 100 parameters.

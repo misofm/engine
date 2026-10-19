@@ -35,8 +35,10 @@
 //!
 //! An effect crate's cases are appended, never inserted: [`LANE_DIGESTS`] is indexed by case
 //! number, so a new block of cases has to go on the end for the existing pins to keep describing
-//! the same computations. Issue #943 appended one lane case, the banked sample-peak meter kernel,
-//! after the element-wise block: it extends [`LANE_DIGESTS`] at its end, so every existing lane
+//! the same computations. A delegated crate may append a case inside its own block; the blocks
+//! after it then move up by one, as described next for #943 (TA3 did this for the limiter).
+//! Issue #943 appended one lane case, the banked sample-peak meter kernel, after the element-wise
+//! block: it extends [`LANE_DIGESTS`] at its end, so every existing lane
 //! pin keeps its index, while the delegated blocks after it -- whose pins live in their own crates
 //! and are indexed there -- move up by one. The original layout ends with the compressor family of issue #88.
 //! Issue #213 appends two builtin cases after that family, preserving the original eight-case
@@ -221,8 +223,11 @@ pub const BUILTINS_ORIGINAL_CASE_COUNT: usize = 8;
 /// summed box ramp on its `2^-14` grid, and the two-rounding multiply/add one-pole on the reduction
 /// word with its D7 `flush`. One case per link mode, one at the `W_MIN` window with near-Nyquist
 /// input, one at the longest lookahead, and one of subnormal input between bursts, which is where
-/// the flush has to remove the same bits on every target. Lane generic, and their pins live in that
-/// crate.
+/// the flush has to remove the same bits on every target. A sixth case (TA3) drives the prepared
+/// core block by block through the #990 linked pair: a linked ramp, one-sided unlinks on the bank's
+/// edge lanes and pairs made equal again. Appending it moved the compressor, builtin-tail and
+/// automation blocks up by one index; their pins are indexed in their own crates. Lane generic, and
+/// their pins live in that crate.
 pub const LIMITER_CASE_COUNT: usize = limiter_corpus::CASE_COUNT;
 
 /// Cases delegated to [`compressor::corpus`] (issue #88 E4), replayed under wasm.

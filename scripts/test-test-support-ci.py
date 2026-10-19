@@ -158,7 +158,7 @@ def main() -> int:
               feature_b(f"{package}/test-support"))
     fails("every test-support feature removed from test-debug-a",
           {"builtins-compiler", "control-plane", "effect-compiler", "effect-contract", "engine",
-           "graph", "host-core", "host-web", "protocol", "rack"},
+           "graph", "host-core", "host-web", "protocol"},
           in_a(DEBUG_A_FEATURES, "--features engine/realtime-audit\n"))
     fails("every test-support feature removed from test-debug-b",
           {"builtins", "lane", "parametric-eq"},

@@ -218,6 +218,10 @@ pub(crate) struct SwappedRun {
     pub(crate) blocks: Vec<Block>,
     /// The successor's report.
     pub(crate) successor: host_core::HostPrepareReport,
+    /// The successor's carry-table entries, `graph::test_only_carry_counts`.
+    // Read by the successor_swap cases; every test binary shares this file.
+    #[allow(dead_code)]
+    pub(crate) carry_counts: [usize; 4],
     /// The producers each set held after the hand-over: the predecessor's, then the successor's.
     pub(crate) predecessor_sources: SourceControlSet,
     pub(crate) successor_sources: SourceControlSet,
@@ -297,6 +301,7 @@ pub(crate) fn swapped_run_with(
         Successor::Fresh => 0,
     };
     let restarted = b_prepared.restarted_strips().to_vec();
+    let carry_counts = graph::test_only_carry_counts(&mut b_prepared.plan);
     let PreparedHost {
         mut plan,
         sources: mut b_sources,
@@ -326,6 +331,7 @@ pub(crate) fn swapped_run_with(
     SwappedRun {
         blocks,
         successor: report,
+        carry_counts,
         predecessor_sources: a_sources,
         successor_sources: b_sources,
         adopted,

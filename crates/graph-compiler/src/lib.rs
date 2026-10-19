@@ -382,13 +382,6 @@ mod tests {
         (index, nodes)
     }
 
-    fn literal_bank_slot_reservation_bytes(bank_count: u64, lanes: u64) -> u64 {
-        let stage = core::mem::size_of::<Box<dyn rack::BankStage>>() as u64;
-        let slot = core::mem::size_of::<rack::BankSlot>() as u64;
-        let mask = lanes * core::mem::size_of::<bool>() as u64;
-        bank_count * (stage + 3 * slot + 3 * mask)
-    }
-
     /// Track stages the builtins compiler banks, one bank each per cohort.
     ///
     /// Three since issue #212: the post-input builtin stage, the fader, and the pan matrix. It was
@@ -12411,7 +12404,12 @@ mod tests {
         assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
-        let expected_bank_slot_bytes = literal_bank_slot_reservation_bytes(bank_count, lanes);
+        // The product's own slot reservation for these banks at this width (TA3): the
+        // deltas below hold it to the reports, without re-deriving its layout.
+        let expected_bank_slot_bytes =
+            graph::GraphBankSlotResourceEstimate::checked_for(bank_count, width)
+                .expect("bank slot reservation")
+                .total_bytes;
         let quantum = u64::from(session.quantum().0);
         let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
@@ -12821,7 +12819,12 @@ mod tests {
 
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
-        let expected_bank_slot_bytes = literal_bank_slot_reservation_bytes(bank_count, lanes);
+        // The product's own slot reservation for these banks at this width (TA3): the
+        // deltas below hold it to the reports, without re-deriving its layout.
+        let expected_bank_slot_bytes =
+            graph::GraphBankSlotResourceEstimate::checked_for(bank_count, width)
+                .expect("bank slot reservation")
+                .total_bytes;
         let quantum = u64::from(session.quantum().0);
         let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
@@ -13178,7 +13181,12 @@ mod tests {
 
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
-        let expected_bank_slot_bytes = literal_bank_slot_reservation_bytes(bank_count, lanes);
+        // The product's own slot reservation for these banks at this width (TA3): the
+        // deltas below hold it to the reports, without re-deriving its layout.
+        let expected_bank_slot_bytes =
+            graph::GraphBankSlotResourceEstimate::checked_for(bank_count, width)
+                .expect("bank slot reservation")
+                .total_bytes;
         let quantum = u64::from(session.quantum().0);
         let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
@@ -13546,7 +13554,12 @@ mod tests {
 
         let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
         let bank_count = u64::try_from(expected_banks).expect("bank count");
-        let expected_bank_slot_bytes = literal_bank_slot_reservation_bytes(bank_count, lanes);
+        // The product's own slot reservation for these banks at this width (TA3): the
+        // deltas below hold it to the reports, without re-deriving its layout.
+        let expected_bank_slot_bytes =
+            graph::GraphBankSlotResourceEstimate::checked_for(bank_count, width)
+                .expect("bank slot reservation")
+                .total_bytes;
         let quantum = u64::from(session.quantum().0);
         let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
         let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;

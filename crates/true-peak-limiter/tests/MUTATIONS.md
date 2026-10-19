@@ -418,7 +418,7 @@ run printed the pin, `b22ef17c…`.
 |---|---|---|---|
 | 996-M1 | #990 M1: the mirrored backward pass skips its store into the right ring (`sliding_minimum_uniform_mirrored`) | channels stay equal: `ch00` parts at block 17 | `881bf62b…` |
 | 996-K1 | the pair keeps the shared path after it unlinks: the decision in `LimiterCore::process_block` drops `designed_gain_agree`, so a one-sided retarget renders linked | one-sided retarget parts nothing: `ch03` at block 17 | `4c664808…` |
-| 996-K2 | #990 M12: `LimiterCore::process_block` no longer writes the decision back to `gain_linked`, so a pair relinks as soon as its designed words agree again, without reset, restore or `desymmetrize` | the pin | `198af660…` |
+| 996-K2 | #990 M12: `LimiterCore::process_block` no longer writes the decision back to `gain_linked`, so a pair relinks as soon as its designed words agree again, without reset, restore or `desymmetrize` | the pin (since TA3: G5 case `maximum/link_unlink_relink`, see the TA3 section) | `198af660…` (historical: the digest of the deleted session pin) |
 | 996-M2 | #990 M2: the box term is not stored into the right box ring (`linked_frame_uniform`) | channels stay equal: `ch00` at block 17 | `a6cf49f7…` |
 | 996-M6 | #990 M6: the required gain is not stored into the right ring at the cursor (`linked_frame_uniform`) | channels stay equal: `ch00` at block 17 | `2abf0380…` |
 | 996-M7 | #990 M7: the right box sum is not set from the left at block end (`limiter_block_uniform`) | reduction floor | `c25993b2…` |
@@ -609,3 +609,35 @@ What the rows say:
 * **M6 and M10 are payload-only defects**: the right channel's ring words go stale while every
   output word of a linked block is right, until the pair unlinks. The payload and complete-state
   comparisons after every block are what see them.
+
+## TA3 (2026-10-19) — the linked pair's words moved to gate G5
+
+The test policy cut TA3 (`.github/ISSUE_SPECS/1726-finish-the-test-policy-cut.md`) deleted the
+host-core session pin (`PIN`, `6d87267b…`) of `crates/host-core/src/limiter_linked_session.rs`.
+Its session checks stay, renamed `the_hot_console_links_unlinks_and_limits_at_simd8`, `_at_simd4`
+and `_at_scalar`; they still own the "equal", "parts nothing" and "floor" cells above. The cells
+marked "pin" (996-K2, and 997-K2, M1, M2, M6, S0, SL at `Scalar`) now belong to G5 case 5 of
+`src/corpus.rs`, `maximum/link_unlink_relink`: the prepared core, `LinkMode::Maximum`, eight
+uniform lanes, a linked ramp at block 3, one-sided retargets of lane 0 and lane 7 at block 4, both
+made equal again at block 5. Its pin is the scalar oracle's (`31b09672…`), and it is identical at
+`Scalar`, `Simd4` and `Simd8`.
+
+Driver: one mutation at a time in `src/lib.rs`, then
+`cargo test -p wasm-gates --test g5_native_corpus g5_native_digests_match_pins` (dev profile, an
+`x86-64-v3` build, so all three widths), then the file restored with `git checkout`.
+
+| # | mutation | `Scalar` | `Simd4` | `Simd8` |
+|---|---|---|---|---|
+| TA3-NL | control: the decision is always `false` (the kernel never links, as before #990) | green | green | green |
+| TA3-K2 | 996-K2 / 997-K2: the decision is not written back to `gain_linked` | RED | RED | RED |
+| TA3-K1 | 996-K1: the decision drops `designed_gain_agree` (both sites) | RED | RED | RED |
+| TA3-M1 | #990 M1: the mirrored backward pass skips its store into the right ring | RED | RED | RED |
+| TA3-M2 | #990 M2: `linked_frame_uniform` does not store the box term into the right box ring | RED | RED | RED |
+| TA3-M6 | #990 M6: `linked_frame_uniform` does not store the required gain into the right ring | RED | RED | RED |
+| TA3-M9 | #990 M9: the right ramps are not set from the left at block end | green | green | green |
+| TA3-E0 | `designed_gain_agree` skips lane 0 | RED | RED | green |
+
+NL green is the case's reference: its pin is the words of the pre-#990 behaviour. M9 is green
+here; the session test's "equal" check (`ch16`) still owns it at every width. E0 is green at
+`Simd8` because lanes 0 and 7 unlink in the same block, so the eight-lane bank unlinks through
+lane 7; the session test's `ch48` row still owns E0 and EL at `Simd8`.
