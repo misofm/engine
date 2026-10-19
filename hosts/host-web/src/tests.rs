@@ -7602,6 +7602,137 @@ mod structural_apply {
         assert_eq!(rig.host.service(None), RESULT_OK);
     }
 
+    /// Root ruling B16-R9's bookkeeping on the browser: a plain session seek declares the
+    /// discontinuity in the same call, so the host keeps and counts the successor it publishes as
+    /// it keeps a declaration's. From #1285's floors (a muted track behind a true-peak limiter
+    /// removed), swapped or still waiting for its block, the plain seek publishes one successor;
+    /// the host holds that plan's tables for its adoption block, counts one blocking rebuild,
+    /// names the successor's meter header from the rendering plan, and admits a command
+    /// submission against it before the swap. The next block adopts it and the host stays ready.
+    /// Mirrors the C ABI's `an_accepted_plain_session_seek_publishes_one_successor_and_applies`.
+    ///
+    /// Test value: red if the browser's plain seek reaches the control plane without the host's
+    /// plan bookkeeping (`run_control`): the audio and the latency are the same, but the
+    /// successor has no tables, is not counted and is not named, and the first submission before
+    /// its swap fails the host (`web.internal.pending_shape`).
+    #[test]
+    fn a_plain_session_seek_keeps_and_counts_its_successor_on_the_browser() {
+        for swap in [true, false] {
+            let mut model = gate_model();
+            let limited = &mut model.tracks[0];
+            limited.fader.left_mute = true;
+            limited.fader.right_mute = true;
+            limited.inserts.effects.push(session::Effect {
+                id: StableId::parse("lim").expect("insert ID"),
+                identity: session::EffectIdentity::Native {
+                    effect_id: StableId::parse("miso.true-peak-limiter").expect("limiter id"),
+                },
+                quality: session::EffectQuality::Normal,
+                bypass: false,
+                link_mode: session::LinkMode::Maximum,
+                params: Vec::new(),
+                sidechain: session::SidechainDeclaration::None,
+            });
+            let edits = [
+                SessionEdit::RemoveRoute {
+                    route_id: model.routes[0].id.clone(),
+                },
+                SessionEdit::RemoveTrack {
+                    track_id: model.tracks[0].id.clone(),
+                },
+            ];
+            let mut rig = Rig::boot(&model, options(), None);
+            for _ in 0..APPLY_BEFORE {
+                rig.step();
+            }
+            assert!(matches!(
+                rig.apply(&edits, 1),
+                Outcome::Applied {
+                    path: EditPath::Rebuild,
+                    ..
+                }
+            ));
+            if swap {
+                for _ in 0..4 {
+                    rig.step();
+                }
+                assert!(!rig.pending(), "swap {swap}: the removal was adopted");
+            } else {
+                assert!(
+                    rig.pending(),
+                    "swap {swap}: the removal waits for its block"
+                );
+            }
+            let counted = rig.host.blocking_rebuilds();
+            let newest = |rig: &Rig| {
+                rig.host
+                    .ready
+                    .as_ref()
+                    .expect("ready")
+                    .control
+                    .newest_plan_epoch()
+            };
+            let before = newest(&rig);
+
+            const FRAME: u64 = 1_280;
+            assert_eq!(rig.host.session_seek(None, 2, FRAME, None), RESULT_OK);
+            let successor = newest(&rig);
+            assert_eq!(successor, before + 1, "swap {swap}: one successor");
+            assert_eq!(
+                rig.host.blocking_rebuilds(),
+                counted + 1,
+                "swap {swap}: the successor is counted"
+            );
+            {
+                let ready = rig.host.ready.as_ref().expect("ready");
+                let waiting: Vec<_> = ready
+                    .pending_shapes
+                    .iter()
+                    .filter(|entry| !entry.adopted)
+                    .collect();
+                assert_eq!(
+                    waiting.len(),
+                    1,
+                    "swap {swap}: the successor's tables, and no superseded candidate's"
+                );
+                assert_eq!(waiting[0].epoch, successor, "swap {swap}");
+                assert_eq!(
+                    rig.host.meter_successor_address(),
+                    core::ptr::from_ref(&waiting[0].shape.meter_header).addr(),
+                    "swap {swap}: the rendering plan names the successor's header"
+                );
+            }
+            assert_eq!(
+                rig.host.submit_commands(0),
+                RESULT_OK,
+                "swap {swap}: a submission before the swap is admitted on the successor"
+            );
+            assert_eq!(rig.host.status().state, STATE_READY, "swap {swap}");
+
+            let quantum = u64::from(QUANTUM);
+            let lane = |lane: u64| {
+                (FRAME..FRAME + quantum)
+                    .map(|frame| strip_sample(0, lane, frame))
+                    .collect::<Vec<f32>>()
+            };
+            let planes = [lane(0), lane(1)];
+            let views: [&[f32]; 2] = [&planes[0], &planes[1]];
+            assert_eq!(
+                rig.host
+                    .submit_source(SOURCE, 2, FRAME, 48_000, &views, QUANTUM, false),
+                RESULT_OK
+            );
+            assert_eq!(rig.host.render_next(), RESULT_OK, "swap {swap}");
+            assert_eq!(
+                rig.epoch(),
+                successor,
+                "swap {swap}: the next block adopts it"
+            );
+            assert_eq!(rig.host.status().state, STATE_READY, "swap {swap}");
+            assert_eq!(rig.host.service(None), RESULT_OK);
+        }
+    }
+
     /// #1310 on the browser path, which runs the same control plane: a structural edit while a
     /// candidate waits unadopted commits and supersedes it. The first candidate never renders; the
     /// replacement carries both transactions and is adopted at the next block.
