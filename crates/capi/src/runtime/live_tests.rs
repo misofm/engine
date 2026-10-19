@@ -10624,50 +10624,6 @@ fn the_cost_of_a_live_only_command_does_not_grow_with_the_session() {
     );
 }
 
-/// The timing line of the whole command, before (the full preparation forced) and after (in place),
-/// for a fader edit at 64 and 256 tracks: `cargo test --release -p capi -- --ignored --nocapture
-/// timing_line`.
-#[test]
-#[ignore = "descriptive timing"]
-fn in_place_command_timing_line() {
-    for tracks in [64_usize, 256] {
-        let mut rig = Rig::with_limits(&grown_session(tracks), grown_limits());
-        rig.step();
-        let fader = |db: f32| {
-            vec![SessionEdit::set_control(
-                strip_row(
-                    "g0007",
-                    protocol::control_core::Section::Builtins,
-                    5,
-                    protocol::control_core::Lane::Both,
-                ),
-                db,
-                None,
-            )]
-        };
-        for (label, force) in [("full", true), ("in place", false)] {
-            control_plane::test_force_full_preparation(force);
-            let calls = 200_u32;
-            let mut spent = std::time::Duration::ZERO;
-            for call in 0..calls + 1 {
-                let bytes = rig.transaction(&fader(if call % 2 == 0 { -6.0 } else { -3.0 }));
-                let start = std::time::Instant::now();
-                let (result, _) = command_c(rig.session, &bytes);
-                if call > 0 {
-                    spent += start.elapsed();
-                }
-                assert_eq!(result, crate::RESULT_OK);
-                rig.drain_reliable();
-            }
-            println!(
-                "fader edit, {tracks} tracks, {label}: {:?} per command",
-                spent / calls
-            );
-        }
-        control_plane::test_force_full_preparation(false);
-    }
-}
-
 /// `document` with one stored fader ride on its first track (builtin 5, both lanes).
 fn with_fader_automation(document: &str) -> String {
     with_model(document, |model| {

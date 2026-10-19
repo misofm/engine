@@ -267,3 +267,6 @@ prose reason recorded in the commit was not, and this document supersedes it.
 
 The companion assertion `a_delayed_session_is_a_different_plan` keeps its meaning: a 480-sample
 delay changes `total_delay_samples` and `delay_bytes` away from 0, so the digest is not inert.
+
+(2026-10-18: the TA1 test policy cut deleted the zero-delay digest pin and this companion
+assertion. This document is history.)

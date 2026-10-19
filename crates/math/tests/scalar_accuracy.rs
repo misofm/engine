@@ -285,41 +285,13 @@ fn f32_functions_match_platform_libm_in_f64() {
 /// `sqrt` is the one function here that IEEE 754 specifies exactly, and it is re-derived rather
 /// than vendored (VENDORED.md), so it gets the strongest check available. The default run strides
 /// the bit pattern by 1021 (odd, and coprime with the 2^23 exponent stride, so every exponent and
-/// a dense spread of significands are covered); `sqrtf_is_correctly_rounded_exhaustive` walks all
-/// 2^31 non-negative patterns and is `#[ignore]`d because it costs about 40 s.
+/// a dense spread of significands are covered).
 #[test]
 fn sqrtf_is_correctly_rounded() {
     check_sqrtf(1021);
     for bits in [0, 1, 0x007f_ffff, 0x0080_0000, 0x3f80_0000, 0x7f7f_ffff] {
         assert_sqrtf_matches_software(f32::from_bits(bits));
     }
-}
-
-/// All 2^32 raw patterns are checked against the independent software oracle. Non-NaN results
-/// must match bit-for-bit; NaNs are compared by class because their sign and payload are
-/// target-dependent.
-#[test]
-#[ignore = "2^32 sweep: run with --release -- --ignored"]
-fn sqrtf_is_correctly_rounded_exhaustive() {
-    let mut non_nan = 0_u64;
-    let mut nan = 0_u64;
-    for raw in 0..=u64::from(u32::MAX) {
-        let x = f32::from_bits(raw as u32);
-        let got = m::sqrtf(x);
-        let want = software_sqrtf(x);
-        if got.is_nan() || want.is_nan() {
-            assert!(
-                got.is_nan() && want.is_nan(),
-                "sqrtf({x:?}) NaN disagreement"
-            );
-            nan += 1;
-        } else {
-            assert_eq!(got.to_bits(), want.to_bits(), "sqrtf({x:?})");
-            non_nan += 1;
-        }
-    }
-    assert_eq!(non_nan, 2_139_095_042);
-    assert_eq!(nan, 2_155_872_254);
 }
 
 fn check_sqrtf(stride: u32) {
@@ -429,20 +401,6 @@ fn sqrt_is_correctly_rounded() {
     assert_sqrt_matches_software(-1.0);
     assert_sqrt_matches_software(f64::NEG_INFINITY);
     assert_sqrt_matches_software(f64::NAN);
-}
-
-/// Large deterministic raw-pattern sweep against the independent exact-integer oracle.
-#[test]
-#[ignore = "large deterministic sqrt oracle sweep"]
-fn sqrt_is_correctly_rounded_large_oracle() {
-    let mut state = 0x1319_8a2e_0370_7344_u64;
-    for _ in 0..100_000_000 {
-        state ^= state >> 12;
-        state ^= state << 25;
-        state ^= state >> 27;
-        let bits = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
-        assert_sqrt_matches_software(f64::from_bits(bits));
-    }
 }
 
 /// `floor`/`floorf` agree with the platform on every exponent class, including the signed-zero and

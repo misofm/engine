@@ -347,3 +347,22 @@ prevalidation (1045-4, Sol's P5b), the real builtin bank kernels rendering at th
 quadratic compile and bind (1045-5). Bank attachment left this list in attempt 3 (1045-12), the
 compiler's builtin bank plan in attempt 4 (1045-14, 1045-15), builtin bank lowering in attempt 5
 (1045-17, 1045-18). The spec's attempt-5 evidence carries the complete layer map.
+
+## TA1 policy cut (2026-10-18): tests these rows name that no longer exist or no longer assert it
+
+The owner-approved test policy cut (`.github/ISSUE_SPECS/1722-delete-digest-type-size-and-unrun-tests.md`)
+deleted or trimmed some tests that rows above name. The rows stay as history; they were not re-run.
+
+- 964-2: `issue122_reverse_route_ids_emit_sorted_levels_and_bind` no longer pins the plan's SHA-256.
+  Its schedule, level and rendered-PCM assertions remain.
+- 964-3 and its two rechecks: `track_delay::the_zero_delay_plan_digest_is_the_current_semantic_plan`
+  and its companion `a_delayed_session_is_a_different_plan` are deleted. The structural off gate
+  `a_zero_delay_session_lowers_no_delay_node` remains.
+- 964-5: `runtime_bank_slot_reservation_is_published_and_capped_transactionally` now folds the
+  product's own `GraphBankSlotResourceEstimate::checked_for` reservation onto the observed prior
+  in place of a `size_of` literal. By reading, the mutation in that row still moves the published
+  estimate away from that fold; it was not re-run.
+- 964-6: `effect_control_resource_uses_independent_queue_and_owner_arithmetic` no longer derives
+  the owner bytes from `size_of`. It asserts that the three deltas agree, are zero exactly when no
+  instance is controlled, and that the exact caps accept and one byte below refuses. A partial
+  under-charge such as this row's is left to the allocator ceiling in `tests/bypass_resources.rs`.

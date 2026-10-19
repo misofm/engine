@@ -734,3 +734,19 @@ each source file restored after its run. x86-64 AVX2 host, debug profile. The ga
 | 1220-10 | the arena-form sum skips a destination whose every input is inactive (#1217 verdict 2, V3c) | `graph/src/runtime.rs` `reduce_gated` | `a_bus_whose_every_send_goes_inactive_is_refilled_with_positive_zero` | RED, 1 of 10: `plane 0 frame 0: -1.2888975, expected +0.0`. |
 | 1220-11 | `route_segments` forgets that an opening run stored (#1217 verdict 2, MC) | `graph/src/runtime.rs` `route_segments` | `host-core` `a_middle_inactive_route_keeps_every_active_contribution` | RED, 1 of 13: `Bus, 3 inputs, muted [1], plane 0: sample 0: 0.29300022 != 0.36220396`. |
 | 1220-12 | a second attach is accepted (the `AlreadyAttached` refusal removed) | `graph/src/lib.rs` `attach_route_controls` | `route_controls_attach_once` | RED: the second call returns `Ok(2)`, replacing the first call's lanes and orphaning its producers. |
+
+## TA1 policy cut (2026-10-18): tests these rows name that no longer exist or no longer assert it
+
+The owner-approved test policy cut (`.github/ISSUE_SPECS/1722-delete-digest-type-size-and-unrun-tests.md`)
+deleted or trimmed some tests that rows above name. The rows stay as history; they were not re-run.
+
+- 916-16 and 916-17: the builtins-compiler scalar-oracle pairing tests
+  `actual_scalar_graph_queues_fuse_and_fall_back_against_separate_owners`,
+  `staggered_observed_scalar_track_stays_separate_while_eligible_peer_pairs`,
+  `actual_scalar_nonadjacent_output_track_takes_the_split_pair_now_the_output_is_dedicated` and
+  `actual_scalar_overlapping_nonadjacent_candidates_select_one_and_keep_the_other_separate` are
+  deleted. The other tests those rows name remain.
+- #936 "the metadata test" (`runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow`)
+  no longer re-derives the charge from `size_of`; it keeps the layout-witness, fold and overflow
+  assertions. console-workload "gate 5"
+  (`the_driver_fed_rows_metadata_charge_grows_by_exactly_the_executor_tables`) is deleted.

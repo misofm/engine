@@ -2,17 +2,14 @@
 //!
 //! `classify_live_edit` reads a transaction of `SetControl`s from the rows it names, with no model
 //! clone and no canonical JSON, and must give exactly what `classify_live_delta_with_monitor` gives
-//! for the same models. This file holds the three gates:
+//! for the same models. This file holds the two gates:
 //!
 //! 1. the differential: the #1560 parity script and a seeded random set of edits, the full
 //!    classifier as the oracle;
-//! 2. the cost: the allocations of a live-only classification do not depend on the track count;
-//! 3. one descriptive timing line (ignored: `cargo test --release -p host-core --all-features
-//!    --test live_edit_classifier -- --ignored --nocapture`).
+//! 2. the cost: the allocations of a live-only classification do not depend on the track count.
 #![cfg(all(feature = "control-provider", feature = "test-support"))]
 
 use std::collections::BTreeSet;
-use std::time::Instant;
 
 #[path = "support/edit_sessions.rs"]
 mod edit_sessions;
@@ -400,71 +397,4 @@ fn the_cost_of_a_live_edit_does_not_grow_with_the_session() {
             .all(|count| count.0 == counts[0].0 && count.1 == counts[0].1),
         "solo: the allocations depend on the track count: {counts:?}"
     );
-}
-
-// ---------------------------------------------------------------------------------------------
-// Gate 3: one descriptive timing line
-// ---------------------------------------------------------------------------------------------
-
-/// The timing line: a fader edit on the session #1562a timed, 200 calls, by the full classifier
-/// (before) and by `classify_live_edit` (after).
-#[test]
-#[ignore = "descriptive timing: cargo test --release -p host-core --all-features --test live_edit_classifier -- --ignored --nocapture"]
-fn timing_line() {
-    for tracks in [64, 256] {
-        let store = store(plain_session(tracks));
-        let edits = [set(strip_row("t0003", FADER_DB, Lane::Both), -9.0)];
-        let none = MonitorOverlay::default();
-        let (prepared, overlay, ramp) = prepare(&store, &edits, &none).expect("applies");
-        let current = store.compiled().normalized_model();
-        let next = prepared
-            .compiled()
-            .expect("a compiled transaction")
-            .normalized_model();
-        let monitor = MonitorBase {
-            committed: &none,
-            next: &overlay,
-            ramp,
-        };
-        let ramps = LiveRamps::for_session(next);
-        let calls = 200;
-        let start = Instant::now();
-        for _ in 0..calls {
-            let delta = classify_live_delta_with_monitor(
-                current,
-                next,
-                ramps,
-                prepared.edit_ramps(),
-                monitor,
-            )
-            .expect("live");
-            assert_eq!(delta.strips.len(), 1);
-        }
-        let before = start.elapsed() / calls;
-        let start = Instant::now();
-        for _ in 0..calls {
-            let delta = classify_live_edit(
-                current,
-                next,
-                ramps,
-                prepared.edit_ramps(),
-                monitor,
-                prepared.set_control_rows(),
-            )
-            .expect("live");
-            assert_eq!(delta.strips.len(), 1);
-        }
-        let after = start.elapsed() / calls;
-        // The protocol's preparation of the same transaction (a model clone and a compile), which
-        // this slice does not change: the share of a whole command that stays linear in the session.
-        let start = Instant::now();
-        for _ in 0..calls {
-            let prepared = prepare(&store, &edits, &none).expect("applies");
-            drop(prepared);
-        }
-        let preparation = start.elapsed() / calls;
-        println!(
-            "classifier fader edit, {tracks} tracks: full {before:?} per call, fast {after:?} per call; protocol preparation of the transaction {preparation:?}"
-        );
-    }
 }
