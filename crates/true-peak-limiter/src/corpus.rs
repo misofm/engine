@@ -19,15 +19,39 @@
 //! same signal at every width. Nothing crosses lanes except the `Maximum` link, which links the two
 //! channels of one lane and not two lanes of one channel.
 //!
+//! # The linked pair (#990, #996, #997)
+//!
+//! Case 5, `maximum/link_unlink_relink`, is the only case that drives the whole prepared core
+//! ([`LimiterCore::process_block`]) block by block instead of one `limiter_block` call, because the
+//! linked-pair decision and its record live there. Eight 128-frame blocks, every lane at the same
+//! 5 ms lookahead so the bank is uniform and the linked body runs, `LinkMode::Maximum`, and loud
+//! noise whose level changes every 96 frames so every limiter limits and its window minimum moves.
+//! The retargets ([`LINKED_RETARGETS`]) land while the output carries delayed audio (from frame
+//! 486): a linked ramp of both channels of every lane at block 3, a one-sided retarget of lane 0
+//! and of lane 7 at block 4 (each unlinks its bank at every width: lane 0 and the last lane of a
+//! four-lane bank, the edge lanes of the eight-lane one), and the other channel made equal again at
+//! block 5, after which the pairs must stay dual. Its pin equals the words of a kernel that never
+//! links, so it renders what a mirrored right ring leaves behind after an unlink and a pair that
+//! relinks on designed agreement alone (`tests/MUTATIONS.md`, section "TA3"). It replaced the
+//! host-core 64-track linked-limiter session pin (TA3, 2026-10-19), whose session checks stay in
+//! `crates/host-core/src/limiter_linked_session.rs`.
+//!
 //! # No NaN
 //!
 //! The determinism claim excludes NaN payloads (wasm canonicalises them). Every case is driven with
 //! finite input inside the ranges the boundary check accepts, and the crate's determinism test
 //! asserts the outputs are finite rather than assuming it.
 
+use effect_contract::{
+    EffectQuality, LinkMode, PreparedEffectMetadata, PreparedPorts, PreparedSidechainPort,
+};
 use lane::Lane;
 
-use crate::{ChannelState, Cursors, LimiterCoef, PARAMETER_COUNT, Shape, limiter_block};
+use crate::{
+    ChannelState, Cursors, LimiterCoef, LimiterCore, PARAMETER_COUNT, QUALITIES, RAMP_UPDATES,
+    Shape, TRUE_PEAK_LIMITER_DESCRIPTOR, limit_coefficient, limiter_block, release_coefficient,
+    tail_and_rest,
+};
 
 /// Independent tracks in every case; a multiple of the widest backend.
 pub const LANES: usize = 8;
@@ -42,7 +66,7 @@ pub const POINTS: usize = 2 * LANES * FRAMES;
 const RATE: u32 = 48_000;
 
 /// Number of corpus cases.
-pub const CASE_COUNT: usize = 5;
+pub const CASE_COUNT: usize = 6;
 
 /// Human-readable name of each case, indexed by case number.
 pub const CASE_NAMES: [&str; CASE_COUNT] = [
@@ -51,6 +75,7 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
     "dual_mono/near_nyquist_w_min",
     "dual_mono/impulse_train_long_lookahead",
     "dual_mono/subnormal_release_flush",
+    "maximum/link_unlink_relink",
 ];
 
 /// The pinned digest of each case, generated from the scalar `Lane` instantiation.
@@ -93,6 +118,12 @@ pub const D90_DIGESTS: [[u8; 32]; CASE_COUNT] = [
         0x54, 0x6b, 0x4a, 0x87, 0x98, 0x61, 0xe7, 0x8d, 0x96, 0x22, 0x62, 0x9b, 0x0a, 0x14, 0xb1,
         0x42, 0x93, 0xca, 0x05, 0x80, 0x2e, 0x25, 0x30, 0x46, 0xe2, 0x79, 0xb5, 0x58, 0xba, 0x6a,
         0xe0, 0x26,
+    ],
+    // maximum/link_unlink_relink
+    [
+        0x31, 0xb0, 0x96, 0x72, 0xde, 0x3d, 0xfa, 0x2d, 0x04, 0x2d, 0x87, 0x0e, 0x8a, 0x1e, 0xca,
+        0x84, 0x9e, 0xf8, 0x79, 0x50, 0x9f, 0x1c, 0xc1, 0xbd, 0x8d, 0xa7, 0xcf, 0x71, 0x6a, 0xb0,
+        0x69, 0xcd,
     ],
 ];
 
@@ -206,6 +237,10 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
     assert_eq!(out.len(), POINTS, "corpus output must be POINTS long");
     let width = L::WIDTH;
     assert!(LANES.is_multiple_of(width), "LANES must divide by a width");
+    if case == LINKED_CASE {
+        run_linked::<L>(out);
+        return;
+    }
 
     let shape = Shape::new(RATE).expect("launch rate");
     let coefficients = LimiterCoef::<L>::new(case == 1, false);
@@ -251,6 +286,207 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
                 out[lane * FRAMES + frame] = left_block[frame * width + offset].to_bits();
                 out[(LANES + lane) * FRAMES + frame] =
                     right_block[frame * width + offset].to_bits();
+            }
+        }
+    }
+}
+
+/// The case that drives the prepared core block by block (see the module note).
+const LINKED_CASE: usize = 5;
+
+/// Frames per block of [`LINKED_CASE`]: eight blocks make [`FRAMES`].
+const LINKED_BLOCK: usize = 128;
+
+/// Frames per noise segment of [`LINKED_CASE`]: divides neither the block nor the 241-frame window.
+const LINKED_SEGMENT: usize = 96;
+
+/// Per-lane ceiling (dB) and release (ms) of [`LINKED_CASE`], equal on both channels; every lane
+/// at the 5 ms lookahead, so the bank is uniform.
+const LINKED_CEILINGS: [f32; LANES] = [-1.0, -3.0, -6.0, -2.0, -4.0, -1.5, -5.0, -2.5];
+const LINKED_RELEASES: [f32; LANES] = [50.0, 100.0, 200.0, 30.0, 400.0, 75.0, 150.0, 250.0];
+const LINKED_LOOKAHEAD: f32 = 5.0;
+
+/// The parameter a [`LinkedRetarget`] moves.
+#[derive(Clone, Copy)]
+enum LinkedParameter {
+    Ceiling,
+    Release,
+}
+
+/// Before `block`, lane `lane` (every lane when `None`) moves `parameter` to `value` on the left
+/// channel when `left` and on the right channel when `right`.
+struct LinkedRetarget {
+    block: usize,
+    lane: Option<usize>,
+    parameter: LinkedParameter,
+    left: bool,
+    right: bool,
+    value: f32,
+}
+
+/// The schedule of [`LINKED_CASE`] (see the module note).
+const LINKED_RETARGETS: [LinkedRetarget; 5] = [
+    // A linked ramp on both channels of every lane.
+    LinkedRetarget {
+        block: 3,
+        lane: None,
+        parameter: LinkedParameter::Ceiling,
+        left: true,
+        right: true,
+        value: -7.0,
+    },
+    // Lane 0 unlinks on its left channel.
+    LinkedRetarget {
+        block: 4,
+        lane: Some(0),
+        parameter: LinkedParameter::Ceiling,
+        left: true,
+        right: false,
+        value: -9.0,
+    },
+    // The last lane unlinks on its right channel.
+    LinkedRetarget {
+        block: 4,
+        lane: Some(LANES - 1),
+        parameter: LinkedParameter::Release,
+        left: false,
+        right: true,
+        value: 20.0,
+    },
+    // Both made equal again: the pairs stay dual.
+    LinkedRetarget {
+        block: 5,
+        lane: Some(0),
+        parameter: LinkedParameter::Ceiling,
+        left: false,
+        right: true,
+        value: -9.0,
+    },
+    LinkedRetarget {
+        block: 5,
+        lane: Some(LANES - 1),
+        parameter: LinkedParameter::Release,
+        left: true,
+        right: false,
+        value: 20.0,
+    },
+];
+
+/// One lane's stereo pair for [`LINKED_CASE`]: uniform noise, each channel at its own level
+/// between +6 and +18 dBFS peak, redrawn every [`LINKED_SEGMENT`] frames.
+fn fill_linked(lane: usize, left: &mut [f32], right: &mut [f32]) {
+    let mut rng = Rng::new(0x0996_0997_0990_0001 ^ (lane as u64).wrapping_mul(0x9E37_79B9));
+    let unit = |rng: &mut Rng| f32::from((rng.next() >> 48) as u16) * (1.0 / 65_536.0);
+    let (mut left_level, mut right_level) = (0.0, 0.0);
+    for frame in 0..FRAMES {
+        if frame.is_multiple_of(LINKED_SEGMENT) {
+            left_level = 2.0 + 6.0 * unit(&mut rng);
+            right_level = 2.0 + 6.0 * unit(&mut rng);
+        }
+        left[frame] = left_level * (unit(&mut rng) * 2.0 - 1.0);
+        right[frame] = right_level * (unit(&mut rng) * 2.0 - 1.0);
+    }
+}
+
+/// Runs [`LINKED_CASE`] at width `L::WIDTH` through the prepared core.
+fn run_linked<L: Lane>(out: &mut [u32]) {
+    let width = L::WIDTH;
+    let mut left_lanes = vec![0.0_f32; LANES * FRAMES];
+    let mut right_lanes = vec![0.0_f32; LANES * FRAMES];
+    for lane in 0..LANES {
+        fill_linked(
+            lane,
+            &mut left_lanes[lane * FRAMES..(lane + 1) * FRAMES],
+            &mut right_lanes[lane * FRAMES..(lane + 1) * FRAMES],
+        );
+    }
+    let quality = QUALITIES
+        .iter()
+        .find(|quality| quality.sample_rate == RATE)
+        .expect("launch rate");
+    let mut left_block = vec![0.0_f32; LINKED_BLOCK * width];
+    let mut right_block = vec![0.0_f32; LINKED_BLOCK * width];
+    for group in 0..LANES / width {
+        // Both channels of a lane start equal: the pair is linked from block 0.
+        let defaults: Vec<[f32; PARAMETER_COUNT]> = (0..width)
+            .map(|offset| {
+                let lane = group * width + offset;
+                [
+                    LINKED_CEILINGS[lane],
+                    LINKED_RELEASES[lane],
+                    LINKED_LOOKAHEAD,
+                ]
+            })
+            .collect();
+        let bound = tail_and_rest(RATE, EffectQuality::Normal);
+        let metadata = PreparedEffectMetadata {
+            descriptor: &TRUE_PEAK_LIMITER_DESCRIPTOR,
+            sample_rate: RATE,
+            quantum: LINKED_BLOCK as u32,
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::Maximum,
+            ports: PreparedPorts {
+                sidechain: PreparedSidechainPort::None,
+            },
+            latency: quality.latency,
+            tail: bound.tail,
+            tail_every_peak: bound.tail_every_peak,
+            rest: bound.rest,
+            composition: bound.composition,
+            state_sizes: quality.maximum_state,
+            scratch_bytes: quality.scratch_fixed_bytes,
+            automation_capacity: 16,
+        };
+        let mut core = LimiterCore::<L>::new(
+            metadata,
+            defaults.clone().into_boxed_slice(),
+            defaults.into_boxed_slice(),
+        )
+        .expect("corpus core");
+        for block in 0..FRAMES / LINKED_BLOCK {
+            for retarget in LINKED_RETARGETS.iter().filter(|r| r.block == block) {
+                for offset in 0..width {
+                    let lane = group * width + offset;
+                    if retarget.lane.is_some_and(|target| target != lane) {
+                        continue;
+                    }
+                    for (moves, state) in [
+                        (retarget.left, &mut core.left),
+                        (retarget.right, &mut core.right),
+                    ] {
+                        if !moves {
+                            continue;
+                        }
+                        match retarget.parameter {
+                            LinkedParameter::Ceiling => state.limit[offset]
+                                .set_target(limit_coefficient(retarget.value), RAMP_UPDATES),
+                            LinkedParameter::Release => state.release[offset].set_target(
+                                release_coefficient(retarget.value, RATE),
+                                RAMP_UPDATES,
+                            ),
+                        }
+                    }
+                }
+            }
+            let first = block * LINKED_BLOCK;
+            for frame in 0..LINKED_BLOCK {
+                for offset in 0..width {
+                    let lane = group * width + offset;
+                    left_block[frame * width + offset] = left_lanes[lane * FRAMES + first + frame];
+                    right_block[frame * width + offset] =
+                        right_lanes[lane * FRAMES + first + frame];
+                }
+            }
+            core.process_block(&mut left_block, &mut right_block, LINKED_BLOCK);
+            for frame in 0..LINKED_BLOCK {
+                for offset in 0..width {
+                    let lane = group * width + offset;
+                    out[lane * FRAMES + first + frame] =
+                        left_block[frame * width + offset].to_bits();
+                    out[(LANES + lane) * FRAMES + first + frame] =
+                        right_block[frame * width + offset].to_bits();
+                }
             }
         }
     }

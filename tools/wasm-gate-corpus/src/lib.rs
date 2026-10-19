@@ -221,8 +221,11 @@ pub const BUILTINS_ORIGINAL_CASE_COUNT: usize = 8;
 /// summed box ramp on its `2^-14` grid, and the two-rounding multiply/add one-pole on the reduction
 /// word with its D7 `flush`. One case per link mode, one at the `W_MIN` window with near-Nyquist
 /// input, one at the longest lookahead, and one of subnormal input between bursts, which is where
-/// the flush has to remove the same bits on every target. Lane generic, and their pins live in that
-/// crate.
+/// the flush has to remove the same bits on every target. A sixth case (TA3) drives the prepared
+/// core block by block through the #990 linked pair: a linked ramp, one-sided unlinks on the bank's
+/// edge lanes and pairs made equal again. Appending it moved the compressor, builtin-tail and
+/// automation blocks up by one index; their pins are indexed in their own crates. Lane generic, and
+/// their pins live in that crate.
 pub const LIMITER_CASE_COUNT: usize = limiter_corpus::CASE_COUNT;
 
 /// Cases delegated to [`compressor::corpus`] (issue #88 E4), replayed under wasm.
