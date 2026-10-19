@@ -219,8 +219,8 @@ pub(crate) struct SwappedRun {
     /// The successor's report.
     pub(crate) successor: host_core::HostPrepareReport,
     /// The successor's carry-table entries, `graph::test_only_carry_counts`.
-    #[allow(dead_code)]
     // Read by the successor_swap cases; every test binary shares this file.
+    #[allow(dead_code)]
     pub(crate) carry_counts: [usize; 4],
     /// The producers each set held after the hand-over: the predecessor's, then the successor's.
     pub(crate) predecessor_sources: SourceControlSet,

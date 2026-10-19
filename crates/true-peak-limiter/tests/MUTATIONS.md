@@ -418,7 +418,7 @@ run printed the pin, `b22ef17c…`.
 |---|---|---|---|
 | 996-M1 | #990 M1: the mirrored backward pass skips its store into the right ring (`sliding_minimum_uniform_mirrored`) | channels stay equal: `ch00` parts at block 17 | `881bf62b…` |
 | 996-K1 | the pair keeps the shared path after it unlinks: the decision in `LimiterCore::process_block` drops `designed_gain_agree`, so a one-sided retarget renders linked | one-sided retarget parts nothing: `ch03` at block 17 | `4c664808…` |
-| 996-K2 | #990 M12: `LimiterCore::process_block` no longer writes the decision back to `gain_linked`, so a pair relinks as soon as its designed words agree again, without reset, restore or `desymmetrize` | the pin (since TA3: G5 case `maximum/link_unlink_relink`, see the TA3 section) | `198af660…` |
+| 996-K2 | #990 M12: `LimiterCore::process_block` no longer writes the decision back to `gain_linked`, so a pair relinks as soon as its designed words agree again, without reset, restore or `desymmetrize` | the pin (since TA3: G5 case `maximum/link_unlink_relink`, see the TA3 section) | `198af660…` (historical: the digest of the deleted session pin) |
 | 996-M2 | #990 M2: the box term is not stored into the right box ring (`linked_frame_uniform`) | channels stay equal: `ch00` at block 17 | `a6cf49f7…` |
 | 996-M6 | #990 M6: the required gain is not stored into the right ring at the cursor (`linked_frame_uniform`) | channels stay equal: `ch00` at block 17 | `2abf0380…` |
 | 996-M7 | #990 M7: the right box sum is not set from the left at block end (`limiter_block_uniform`) | reduction floor | `c25993b2…` |

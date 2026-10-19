@@ -35,8 +35,10 @@
 //!
 //! An effect crate's cases are appended, never inserted: [`LANE_DIGESTS`] is indexed by case
 //! number, so a new block of cases has to go on the end for the existing pins to keep describing
-//! the same computations. Issue #943 appended one lane case, the banked sample-peak meter kernel,
-//! after the element-wise block: it extends [`LANE_DIGESTS`] at its end, so every existing lane
+//! the same computations. A delegated crate may append a case inside its own block; the blocks
+//! after it then move up by one, as described next for #943 (TA3 did this for the limiter).
+//! Issue #943 appended one lane case, the banked sample-peak meter kernel, after the element-wise
+//! block: it extends [`LANE_DIGESTS`] at its end, so every existing lane
 //! pin keeps its index, while the delegated blocks after it -- whose pins live in their own crates
 //! and are indexed there -- move up by one. The original layout ends with the compressor family of issue #88.
 //! Issue #213 appends two builtin cases after that family, preserving the original eight-case
