@@ -750,3 +750,12 @@ deleted or trimmed some tests that rows above name. The rows stay as history; th
   no longer re-derives the charge from `size_of`; it keeps the layout-witness, fold and overflow
   assertions. console-workload "gate 5"
   (`the_driver_fed_rows_metadata_charge_grows_by_exactly_the_executor_tables`) is deleted.
+
+## TA3 policy cut (2026-10-19): further tests these rows name that no longer exist
+
+The second owner-approved policy cut (`.github/ISSUE_SPECS/TBD-TA3-finish-the-test-policy-cut.md`)
+deleted the last three builtins-compiler scalar-oracle pairing tests. The rows stay as history.
+
+- 916-16 and 916-17: `actual_scalar_nonadjacent_failed_render_materializes_post_fader_before_error`
+  and `actual_scalar_nonadjacent_ramp_retarget_and_failed_retry_stay_at_original_boundaries` are
+  deleted. The allocation_tracker tests these rows name remain.
