@@ -612,7 +612,7 @@ What the rows say:
 
 ## TA3 (2026-10-19) — the linked pair's words moved to gate G5
 
-The test policy cut TA3 (`.github/ISSUE_SPECS/TBD-TA3-finish-the-test-policy-cut.md`) deleted the
+The test policy cut TA3 (`.github/ISSUE_SPECS/1726-finish-the-test-policy-cut.md`) deleted the
 host-core session pin (`PIN`, `6d87267b…`) of `crates/host-core/src/limiter_linked_session.rs`.
 Its session checks stay, renamed `the_hot_console_links_unlinks_and_limits_at_simd8`, `_at_simd4`
 and `_at_scalar`; they still own the "equal", "parts nothing" and "floor" cells above. The cells

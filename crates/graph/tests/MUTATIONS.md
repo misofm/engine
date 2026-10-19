@@ -753,7 +753,7 @@ deleted or trimmed some tests that rows above name. The rows stay as history; th
 
 ## TA3 policy cut (2026-10-19): further tests these rows name that no longer exist
 
-The second owner-approved policy cut (`.github/ISSUE_SPECS/TBD-TA3-finish-the-test-policy-cut.md`)
+The second owner-approved policy cut (`.github/ISSUE_SPECS/1726-finish-the-test-policy-cut.md`)
 deleted the last three builtins-compiler scalar-oracle pairing tests. The rows stay as history.
 
 - 916-16 and 916-17: `actual_scalar_nonadjacent_failed_render_materializes_post_fader_before_error`
