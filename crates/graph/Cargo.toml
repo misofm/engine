@@ -10,7 +10,7 @@ publish.workspace = true
 name = "graph"
 
 [features]
-test-support = ["rack/test-support"]
+test-support = []
 
 [dependencies]
 # The route op of a following send evaluates its source strip's stored mute curves with the
