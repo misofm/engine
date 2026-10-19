@@ -45,10 +45,10 @@ const SOURCE: &str = "fixture-source";
 const AUX_SOURCE: &str = "aux-source";
 const MUTED_TRACK: &str = "a-muted";
 
-/// Bytes of `moves` strip-stage moves in a carry program (#1277 D8): one per carried fader or
-/// matrix stage.
-fn strip_moves(moves: u64) -> u64 {
-    moves * core::mem::size_of::<graph::GraphStripMove>() as u64
+/// The carry program's table entries, `[source moves, input-section lane moves, strip-stage
+/// moves, effect-lane moves]` (#1276, #1277 D8, #1280): `graph::test_only_carry_counts`.
+fn carry_counts(prepared: &mut host_core::PreparedHost) -> [usize; 4] {
+    graph::test_only_carry_counts(&mut prepared.plan)
 }
 
 /// The command queue a successor's carried timeline brings (#1641 D7): every successor's carried
@@ -211,11 +211,9 @@ fn added_muted_track_keeps_playing(backend: Backend) {
         fresh.source_overhead_bytes
     );
     assert_eq!(
-        report.carry_program_retained_bytes,
-        core::mem::size_of::<(u32, u32)>() as u64
-            + 2 * core::mem::size_of::<graph::GraphLaneMove>() as u64
-            + strip_moves(4),
-        "one (u32, u32) source move, the two unchanged input sections (#1276) and the fader and \
+        run.carry_counts,
+        [1, 2, 4, 0],
+        "one source move, the two unchanged input sections (#1276) and the fader and \
          matrix stage of both kept strips (#1277)"
     );
 
@@ -311,8 +309,8 @@ fn a_changed_source_gets_its_own_ring() {
             timeline_queue_bytes()
         );
         assert_eq!(
-            prepared.report.carry_program_retained_bytes,
-            2 * core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(4),
+            carry_counts(&mut prepared),
+            [0, 2, 4, 0],
             "no source move; the two unchanged input sections (#1276) and the fader and matrix \
              stage of both strips (#1277)"
         );
@@ -964,10 +962,7 @@ fn filtered_strips_keep_their_state(backend: Backend) {
     // Nine input sections recorded, and all nine carry: one source move and nine lane moves, and
     // (#1277) the fader and matrix stage of each of the nine strips.
     assert_eq!(a.prepare(backend).inventory.input_section_count(), 9);
-    assert_eq!(
-        run.successor.carry_program_retained_bytes,
-        8 + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(18)
-    );
+    assert_eq!(run.carry_counts, [1, 9, 18, 0]);
 }
 
 /// Gate 1 at eight lanes: banks of eight and one become eight and two, so every kept lane moves
@@ -1677,8 +1672,8 @@ fn a_changed_section_starts_at_rest(name: &str, edit: fn(&mut session::DualMonoB
         let run = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
         assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
         assert_eq!(
-            run.successor.carry_program_retained_bytes,
-            core::mem::size_of::<(u32, u32)>() as u64 + strip_moves(2),
+            run.carry_counts,
+            [1, 0, 2, 0],
             "{name}, {backend:?}: the source moves, the changed section does not; the strip's \
              fader and matrix stage still do (#1277)"
         );
@@ -1729,31 +1724,26 @@ fn a_changed_control_kind_carries_no_input_section() {
 }
 
 fn a_changed_control_kind_carries_no_input_section_at(a: &Session, b: &Session, backend: Backend) {
-    let source_only = core::mem::size_of::<(u32, u32)>() as u64;
+    let source_only = [1, 0, 0, 0];
     // Predecessor without live controls, successor with them.
     let plain = a.prepare(backend);
-    let live = LivePlan::successor(b, &plain.inventory, &a.model, backend);
+    let mut live = LivePlan::successor(b, &plain.inventory, &a.model, backend);
     assert_eq!(
-        live.prepared.report.carry_program_retained_bytes, source_only,
+        carry_counts(&mut live.prepared),
+        source_only,
         "plain -> live"
     );
     // Predecessor with live controls, successor without them.
     let live = LivePlan::fresh(a, backend);
-    let plain = b
+    let mut plain = b
         .prepare_successor(&live.prepared.inventory, &a.model, &caps(), backend)
         .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
-    assert_eq!(
-        plain.report.carry_program_retained_bytes, source_only,
-        "live -> plain"
-    );
+    assert_eq!(carry_counts(&mut plain), source_only, "live -> plain");
     // The control: the same kind on both sides carries all nine sections.
-    let plain = b
+    let mut plain = b
         .prepare_successor(&a.prepare(backend).inventory, &a.model, &caps(), backend)
         .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
-    assert_eq!(
-        plain.report.carry_program_retained_bytes,
-        source_only + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(18)
-    );
+    assert_eq!(carry_counts(&mut plain), [1, 9, 18, 0]);
 }
 
 /// D1's strip-kind clause: B removes track `eq0` and adds a submix named `eq0`, with `eq0`'s input
@@ -1802,12 +1792,12 @@ fn a_track_replaced_by_a_submix_of_its_name_does_not_carry() {
     b_model.routes.push(out);
     let b = Session::compile(b_model);
     for backend in backends() {
-        let prepared = b
+        let mut prepared = b
             .prepare_successor(&a.prepare(backend).inventory, &a.model, &caps(), backend)
             .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
         assert_eq!(
-            prepared.report.carry_program_retained_bytes,
-            8 + core::mem::size_of::<graph::GraphLaneMove>() as u64 + strip_moves(2),
+            carry_counts(&mut prepared),
+            [1, 1, 2, 0],
             "{backend:?}: the source and eq1's section move, the submix's section does not; eq1's \
              fader and matrix stage move, the submix's do not (#1277)"
         );
@@ -3247,11 +3237,7 @@ fn strip_state_survives_a_swap(backend: Backend) {
     assert!(run.restarted.is_empty(), "{backend:?}: {:?}", run.restarted);
     // Nine strips: one source move, nine input lanes, and a fader and a matrix move each.
     assert_eq!(a.prepare(backend).inventory.strip_stage_count(), 18);
-    assert_eq!(
-        run.successor.carry_program_retained_bytes,
-        8 + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64
-            + 18 * core::mem::size_of::<graph::GraphStripMove>() as u64
-    );
+    assert_eq!(run.carry_counts, [1, 9, 18, 0]);
 }
 
 /// Red if a stage is keyed by lane or index, not strip ID (the added track sorts first, so every
@@ -3290,8 +3276,8 @@ fn a_strip_behind_an_effect_still_carries(backend: Backend) {
     let run = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
     assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
     assert!(run.restarted.is_empty(), "{backend:?}: {:?}", run.restarted);
-    assert!(
-        run.successor.carry_program_retained_bytes >= strip_moves(18),
+    assert_eq!(
+        run.carry_counts[2], 18,
         "{backend:?}: all eighteen strip stages move"
     );
 }
@@ -4380,7 +4366,7 @@ fn a_changed_control_kind_carries_no_strip_stage() {
     let b = Session::compile(with_muted_track(strip_state_session()));
     for backend in backends() {
         let predecessor = a.prepare(backend);
-        let successor = CellPlan::successor(
+        let mut successor = CellPlan::successor(
             &b,
             &predecessor.inventory,
             &a.model,
@@ -4390,9 +4376,9 @@ fn a_changed_control_kind_carries_no_strip_stage() {
         );
         assert_eq!(successor.live.prepared.restarted_strips().len(), 9);
         assert_eq!(
-            successor.live.prepared.report.carry_program_retained_bytes,
+            carry_counts(&mut successor.live.prepared),
             // The source only: the control kind differs, so no input lane and no strip stage moves.
-            8,
+            [1, 0, 0, 0],
             "{backend:?}"
         );
     }
@@ -4693,8 +4679,8 @@ struct PlainRun {
     transitions: [u64; 3],
     /// The successor's `carry_refusal_count()` after the last block (D6).
     refusals: u64,
-    /// The successor's `carry_program_retained_bytes`.
-    carry_bytes: u64,
+    /// The successor's carry-table entries ([`carry_counts`]).
+    carry_counts: [usize; 4],
     /// Effect lanes the predecessor's inventory records.
     effect_lanes: usize,
 }
@@ -4731,7 +4717,7 @@ fn plain_run(
     let mut restarted = Vec::new();
     let mut swap_allocator = ((0, 0, 0), (0, 0));
     let mut collapses = [[0; 2]; 2];
-    let mut carry_bytes = 0;
+    let mut carry_counts = [0; 4];
     feed.submit(&mut plan.sources, 48_000, 0);
     for block in 0..BLOCKS {
         if let (SWAP_BLOCK, Some((session, committed))) = (block, b) {
@@ -4741,7 +4727,7 @@ fn plain_run(
                 .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
             successor.plan.force_mono_collapse_off(successor_dual);
             restarted = successor.restarted_strips().to_vec();
-            carry_bytes = successor.report.carry_program_retained_bytes;
+            carry_counts = self::carry_counts(&mut successor);
             assert_eq!(successor.sources.adopt_persisting(&mut plan.sources), 1);
             if block + 1 < BLOCKS {
                 feed.submit(&mut successor.sources, 48_000, block + 1);
@@ -4777,7 +4763,7 @@ fn plain_run(
         collapses,
         transitions: plan.plan.bank_collapse_transitions(),
         refusals: graph::carry_refusal_count(&mut plan.plan).expect("a graph plan"),
-        carry_bytes,
+        carry_counts,
         effect_lanes,
     }
 }
@@ -4977,8 +4963,8 @@ fn console_chains_keep_collapsing(backend: Backend, successor_dual: bool, inputs
         let kept = Session::compile(with_muted_track(base()));
         let carried = plain_run(&a, Some((&kept, &a.model)), &feed, backend, false);
         assert_eq!(
-            carried.carry_bytes - run.carry_bytes,
-            9 * core::mem::size_of::<graph::GraphLaneMove>() as u64,
+            carried.carry_counts[1] - run.carry_counts[1],
+            9,
             "{backend:?}"
         );
     }
@@ -5172,8 +5158,8 @@ fn a_prepared_change_to_one_slot_restarts_only_its_strip(backend: Backend, slots
     assert_eq!(run.restarted, vec![Box::<str>::from("eq3")], "{backend:?}");
     assert_eq!(carried_all.restarted, Vec::<Box<str>>::new(), "{backend:?}");
     assert_eq!(
-        carried_all.carry_bytes - run.carry_bytes,
-        core::mem::size_of::<graph::GraphEffectMove>() as u64,
+        carried_all.carry_counts[3] - run.carry_counts[3],
+        1,
         "{backend:?}: one move fewer"
     );
     assert_eq!(
@@ -5407,8 +5393,8 @@ fn a_removed_console_slot_restarts_every_strip(backend: Backend) {
     assert_eq!(run.restarted, every_strip, "{backend:?}");
     assert_eq!(unchanged.restarted, Vec::<Box<str>>::new(), "{backend:?}");
     assert_eq!(
-        unchanged.carry_bytes - run.carry_bytes,
-        9 * core::mem::size_of::<graph::GraphEffectMove>() as u64,
+        unchanged.carry_counts[3] - run.carry_counts[3],
+        9,
         "{backend:?}: the removed slot's nine lanes do not move, the other forty-five do"
     );
     assert_eq!(run.refusals, 0, "{backend:?}");

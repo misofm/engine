@@ -5052,6 +5052,26 @@ pub fn test_only_timeline_at(
     graph_source_driver_mut(plan)?.timeline_at(source_read_sample)
 }
 
+/// The entries of the plan's carry tables that [`carry_program_retained_bytes`] charges, as
+/// counts: `[source moves, input-section lane moves, strip-stage moves, effect-lane moves]`. All
+/// zero for a plan without a carry program or for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_only_carry_counts(plan: &mut PreparedRenderPlan) -> [usize; 4] {
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .map_or([0; 4], |executor| {
+            [
+                executor
+                    .carry
+                    .as_ref()
+                    .map_or(0, |program| program.sources.len()),
+                executor.carry_inputs.len(),
+                executor.carry_strips.len(),
+                executor.carry_effects.len(),
+            ]
+        })
+}
+
 /// Bytes the plan's installed [`GraphCarryProgram`] retains; zero for a plan without one or for
 /// any other plan.
 pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
