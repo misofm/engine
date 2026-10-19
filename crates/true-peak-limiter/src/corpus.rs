@@ -22,11 +22,11 @@
 //! # The linked pair (#990, #996, #997)
 //!
 //! Case 5, `maximum/link_unlink_relink`, is the only case that drives the whole prepared core
-//! ([`LimiterCore::process_block`]) block by block instead of one `limiter_block` call, because the
+//! (`LimiterCore::process_block`) block by block instead of one `limiter_block` call, because the
 //! linked-pair decision and its record live there. Eight 128-frame blocks, every lane at the same
 //! 5 ms lookahead so the bank is uniform and the linked body runs, `LinkMode::Maximum`, and loud
 //! noise whose level changes every 96 frames so every limiter limits and its window minimum moves.
-//! The retargets ([`LINKED_RETARGETS`]) land while the output carries delayed audio (from frame
+//! The retargets (`LINKED_RETARGETS`) land while the output carries delayed audio (from frame
 //! 486): a linked ramp of both channels of every lane at block 3, a one-sided retarget of lane 0
 //! and of lane 7 at block 4 (each unlinks its bank at every width: lane 0 and the last lane of a
 //! four-lane bank, the edge lanes of the eight-lane one), and the other channel made equal again at
