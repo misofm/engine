@@ -225,60 +225,6 @@ fn a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor() {
     assert_eq!(left[1_500].to_bits(), 0.5_f32.to_bits());
 }
 
-/// A value at or above the section 4.4 magnitude limit is rejected even though it is finite.
-#[test]
-fn the_boundary_limit_rejects_a_finite_but_absurd_value() {
-    let values = values_with(&[(0, 0.0), (1, 1.0), (5, 0.0), (6, 0.5)]);
-    let mut effect = prepare(request(&values));
-    let mut left = vec![0.0_f32; 2_048];
-    let mut right = vec![0.0_f32; 2_048];
-    // Ratio 1 and makeup 0 make this the identity path, so the input reaches the output unchanged
-    // and the only thing under test is the limit itself.
-    left[0] = 1.0e31;
-    let mut trips = 0_u64;
-    let mut offset = 0;
-    while offset < left.len() {
-        let report = effect.process(
-            EffectProcessBlock::new(
-                &mut left[offset..offset + 128],
-                &mut right[offset..offset + 128],
-                None,
-                offset as u64,
-                &[],
-                128,
-            )
-            .expect("block"),
-        );
-        trips += report.nonfinite_left_blocks;
-        offset += 128;
-    }
-    assert_eq!(trips, 1, "1e31 is above the 1e30 boundary limit");
-
-    // And a value just below it is not rejected.
-    let mut effect = prepare(request(&values));
-    let mut left = vec![0.0_f32; 2_048];
-    let mut right = vec![0.0_f32; 2_048];
-    left[0] = 9.9e29;
-    let mut trips = 0_u64;
-    let mut offset = 0;
-    while offset < left.len() {
-        let report = effect.process(
-            EffectProcessBlock::new(
-                &mut left[offset..offset + 128],
-                &mut right[offset..offset + 128],
-                None,
-                offset as u64,
-                &[],
-                128,
-            )
-            .expect("block"),
-        );
-        trips += report.nonfinite_left_blocks;
-        offset += 128;
-    }
-    assert_eq!(trips, 0, "9.9e29 is below the limit and passes through");
-}
-
 /// The recursive word flushes to exactly `+0.0`, which is what makes a settled compressor an exact
 /// identity again.
 ///

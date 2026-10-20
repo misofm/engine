@@ -7538,51 +7538,6 @@ mod tests {
         );
     }
 
-    /// E9: partition invariance over the gate's block sizes (master plan P1).
-    #[test]
-    fn partition_invariance_holds_over_block_sizes() {
-        let values = values_with(-6.0, 100.0, 5.0);
-        let frames = 512_usize;
-        let mut noise = Noise(0x7777);
-        let source_left: Vec<f32> = (0..frames).map(|_| noise.next() * 4.0).collect();
-        let source_right: Vec<f32> = (0..frames).map(|_| noise.next() * 4.0).collect();
-
-        let mut reference = TruePeakLimiterFactory
-            .prepare(request_at(&values, 48_000, 512))
-            .expect("prepare");
-        let mut left = source_left.clone();
-        let mut right = source_right.clone();
-        render(&mut reference, &mut left, &mut right, 512);
-        let reference_state = snapshot(&reference);
-
-        for block in [1_usize, 7, 64, 128] {
-            let mut effect = TruePeakLimiterFactory
-                .prepare(request_at(&values, 48_000, 512))
-                .expect("prepare");
-            let mut partitioned_left = source_left.clone();
-            let mut partitioned_right = source_right.clone();
-            render(
-                &mut effect,
-                &mut partitioned_left,
-                &mut partitioned_right,
-                block,
-            );
-            for frame in 0..frames {
-                assert_eq!(
-                    partitioned_left[frame].to_bits(),
-                    left[frame].to_bits(),
-                    "block {block} left frame {frame}"
-                );
-                assert_eq!(
-                    partitioned_right[frame].to_bits(),
-                    right[frame].to_bits(),
-                    "block {block} right frame {frame}"
-                );
-            }
-            assert_eq!(snapshot(&effect), reference_state, "block {block}");
-        }
-    }
-
     /// E10: the D7 boundary check replaces every per-value recovery path.
     #[test]
     fn a_nonfinite_block_is_zeroed_reset_and_counted() {

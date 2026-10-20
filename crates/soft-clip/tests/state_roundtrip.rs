@@ -38,50 +38,6 @@ fn live_instance(frames: usize) -> (Box<dyn effect_contract::PreparedNativeEffec
     (effect, frames as u64)
 }
 
-#[test]
-fn a_snapshot_restores_into_a_fresh_instance_and_continues_bit_for_bit() {
-    // 17 frames in: mid-ramp (remaining 47) and mid-history, at cursor position 17.
-    let (mut source, first_sample) = live_instance(17);
-    let payload = support::snapshot(source.as_ref());
-    assert_eq!(word(&payload.0, 0), 1, "layout version in the header");
-    assert_eq!(word(&payload.0, 1), 208, "data word count in the header");
-    assert_eq!(word(&payload.1, 3), 47, "drive ramp is still live");
-
-    let values = values_from([(6.0, -6.0), (0.0, 3.0), (1.0, 0.5)]);
-    let mut destination = prepare(&values);
-    destination
-        .restore_state_payload(1, as_input(&payload))
-        .expect("restore");
-    assert_eq!(support::snapshot(destination.as_ref()), payload);
-
-    let mut expected_left: Vec<f32> = (0..256).map(|index| signal(index + 17, 0)).collect();
-    let mut expected_right: Vec<f32> = (0..256).map(|index| signal(index + 17, 1)).collect();
-    let mut actual_left = expected_left.clone();
-    let mut actual_right = expected_right.clone();
-    for offset in (0..256).step_by(FRAMES) {
-        process(
-            source.as_mut(),
-            &mut expected_left[offset..offset + FRAMES],
-            &mut expected_right[offset..offset + FRAMES],
-            first_sample + offset as u64,
-            &[],
-        );
-        process(
-            destination.as_mut(),
-            &mut actual_left[offset..offset + FRAMES],
-            &mut actual_right[offset..offset + FRAMES],
-            first_sample + offset as u64,
-            &[],
-        );
-    }
-    assert_eq!(bits(&actual_left), bits(&expected_left));
-    assert_eq!(bits(&actual_right), bits(&expected_right));
-    assert_eq!(
-        support::snapshot(source.as_ref()),
-        support::snapshot(destination.as_ref())
-    );
-}
-
 /// #1071: every word the effect itself can hold restores, subnormals included, and the restored
 /// instance continues bit for bit. A subnormal mix is inside its `[0, 1]` domain, a ramp between
 /// two subnormal mixes steps by a subnormal, and the dry history holds the input unflushed.

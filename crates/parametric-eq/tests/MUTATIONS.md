@@ -86,12 +86,12 @@ and the PCM-fixture rows. These are the three mutations issue #105 used against 
 All three fail `automation_starts_a_64_sample_word_ramp`. 5 leaves the words at
 `start + 64 * step` instead of exactly `target`; 6 makes frame 0 use the pre-event words, so the
 first ramped word is `start`; 7 advances twice on the first frame. 7 also fails
-`automation_is_partition_invariant`, because the number of additions then depends on how the block
+`automation_is_partition_invariant` (deleted by TA4; KEEP catcher parametric-eq `randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores`), because the number of additions then depends on how the block
 was cut.
 
 ### 8 — one segment for lanes of different ramp ages
 
-`every_width_matches_the_scalar_instantiation` fails at block 2, track 0, frame 0. This is the
+`every_width_matches_the_scalar_instantiation` (deleted by TA4; KEEP catcher parametric-eq `randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores`) fails at block 2, track 0, frame 0. This is the
 mutation that matters for the bank: at `WIDTH = 1` there is only one lane, so no cut is ever needed
 and the scalar path is unaffected; at `WIDTH = 8` the lanes whose ramps ended mid-block keep
 stepping past their target. A width difference that only appears when ramps of different ages
@@ -200,7 +200,7 @@ tree restored between rows.
 | # | mutation | file | test | result |
 |---|---|---|---|---|
 | M2-E1 | `PreparedParametricEq::desymmetrize` drops `sections` | `parametric-eq/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
-| M2-E2 | the collapsed body hard-codes `stationary = true` instead of reading the one live channel's `no_ramp_in_flight` | `parametric-eq/src/lib.rs` `render_mono` | `the_collapsed_body_renders_the_dual_bodys_left_plane` | RED — 2 failed; a ramping block taking the interleaved cascade renders a coefficient that is not the one in force |
+| M2-E2 | the collapsed body hard-codes `stationary = true` instead of reading the one live channel's `no_ramp_in_flight` | `parametric-eq/src/lib.rs` `render_mono` | `the_collapsed_body_renders_the_dual_bodys_left_plane` (deleted by TA4; KEEP catcher parametric-eq `response::asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity`) | RED — 2 failed; a ramping block taking the interleaved cascade renders a coefficient that is not the one in force |
 
 `remaining` and `identity` are on the copy list and are not individually red, and the reason is
 worth stating: both are read only to choose a *schedule* — the interleaved cascade over the
@@ -269,7 +269,7 @@ Rows re-run for attempt 2 (the tail keeps #976's rule; see the issue's attempt 2
 | # | mutation | gate that goes red | result |
 |---|---|---|---|
 | 977-M1 | `interleave`: `admitted = true` | gate 1 scalar `cbbb3c83…` and bank `5f519f25…` (the poisoned dry lane's `NaN` state reaches the output on its refused blocks and the plane faults); gate 2 (refused blocks ran 0 masked pairs); in-crate (a refused block ran 0) | RED |
-| 977-M1m | `interleave_mono`: `admitted = true` | gate 1 bank-mono `ded71138…`; gate 2 (mono refused 0); in-crate; and `interleave_identity::disabled_cuts_preserve_all_high_pass_signed_zero_against_four_section_oracle` (`+0.0` where the oracle keeps `-0.0`) | RED |
+| 977-M1m | `interleave_mono`: `admitted = true` | gate 1 bank-mono `ded71138…`; gate 2 (mono refused 0); in-crate; and `interleave_identity::disabled_cuts_preserve_all_high_pass_signed_zero_against_four_section_oracle` (deleted by TA4; KEEP catcher parametric-eq `elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag`) (`+0.0` where the oracle keeps `-0.0`) | RED |
 | 977-M2 | `interleave`: `admitted = false` | gate 2 (scalar DryHpfInPair: 228 masked pairs on admitted blocks); in-crate (2 masked pairs on an admitted block); no digest moves | RED |
 | 977-M2m | `interleave_mono`: `admitted = false` | gate 2 (bank-mono: 26); in-crate (mono); no digest moves | RED |
 | 977-M3 | `interleave`: the tail made select-free on admitted blocks too (`if !admitted && (…dry…)`), attempt 1's rule | in-crate: `Simd4 hpf 00000000 lpf 01100110: the tail keeps #976's rule` (1 select-free tail, want 0); no digest moves | RED |
@@ -304,7 +304,7 @@ with the same messages and digests.
 | # | mutation | gate that goes red | result |
 |---|---|---|---|
 | 979-M1 | back to the exact `+0.0` test (`*word == 0` only) | gate 2: `Scalar section 3: 0 of 9 later blocks elide` (the shipped rule's cliff); gate 3: `1.0` refused | RED |
-| 979-M2 | accept magnitudes below `FLUSH_EPS` (the floor set to `1`) | gate 3: `1e-30` elided, integrators differ (the executed section flushes it to `+0.0`); also `a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands` and `the_interleaved_cascade_renders_the_per_section_path_bit_for_bit` (seeded subnormal states) | RED |
+| 979-M2 | accept magnitudes below `FLUSH_EPS` (the floor set to `1`) | gate 3: `1e-30` elided, integrators differ (the executed section flushes it to `+0.0`); also `a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands` (deleted by TA4; KEEP catcher parametric-eq `elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag`) and `the_interleaved_cascade_renders_the_per_section_path_bit_for_bit` (seeded subnormal states) | RED |
 | 979-M3 | accept `-0.0` (`word & MAGNITUDE_MASK == 0` for the zero term) | gate 3: `-0.0` elided, integrators differ (the executed section flushes it to `+0.0`) | RED |
 | 979-M4 | accept above the cap (`[FLOOR, 0x7f80_0000)`, the rule as briefed before the amendment) | gate 3: the word above the ceiling (`1.0000001e30`) admitted; gate 1: scalar `c060ba98…`, bank `b0063058…`, bank-mono `7698bb8b…`, and the restored-overflow leg reports no fault (the band restored with `ic2 = -f32::MAX` is elided and the block renders audio) | RED |
 
@@ -435,8 +435,8 @@ drives EQ ramps through prepared targets. Debug profile, AVX2 host (the EQ binds
 
 | # | mutation | gate that goes red | result |
 |---|---|---|---|
-| 1278-M1 | `Channel::commit_track` stores a moving band's step as `(target - current) / remaining` instead of the carried step | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (342 of 390 scalar and bank comparisons diverge, on all three ramps); the differential (`the instance restored from its snapshot rendered 0xbeb91443 where the lane, continuing, rendered 0xbeb91440`) | RED |
-| 1278-M2 | the remaining-path walk held to the design's `NORM_TOLERANCE` instead of `RAMP_PATH_NORM_TOLERANCE` | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (the 10 kHz bell refused at samples 0-63); the differential (`lane 1's snapshot refused by a fresh instance (effect.state.payload)`) | RED |
+| 1278-M1 | `Channel::commit_track` stores a moving band's step as `(target - current) / remaining` instead of the carried step | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (deleted by TA4; KEEP catcher parametric-eq `response::asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity`) (342 of 390 scalar and bank comparisons diverge, on all three ramps); the differential (`the instance restored from its snapshot rendered 0xbeb91443 where the lane, continuing, rendered 0xbeb91440`) | RED |
+| 1278-M2 | the remaining-path walk held to the design's `NORM_TOLERANCE` instead of `RAMP_PATH_NORM_TOLERANCE` | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (deleted by TA4; KEEP catcher parametric-eq `response::asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity`) (the 10 kHz bell refused at samples 0-63); the differential (`lane 1's snapshot refused by a fresh instance (effect.state.payload)`) | RED |
 | 1278-M3 | `PreparedParametricEq::restore_track` commits the left channel before decoding the right | `a_restore_refused_on_one_channel_moves_neither` (`the scalar instance moved`) | RED |
 
 ## #1328: exact rest, the input-gated joint flush and the desymmetrize caches
@@ -465,3 +465,14 @@ it names, the named tests run, and the source restored.
 | 1328-M9 | the silent fast path skips without `silence_advance` | the same test (`the silence counter after 68 silent blocks`) | RED |
 | 1328-M10 | `rest_plane`'s unarmed branch returns the last written plane instead of the unarmed one | the sparse gate (its train starts after armed silence) | RED |
 | 1328-M11 | `lane_is_inert` without its pair term | `elision::a_non_inert_state_in_a_dead_section_refuses_elision`, `exact_rest::a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms` | RED |
+
+## TA4 deletions
+
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Each one's caught mutants were also red in the KEEP test named beside it. That is the recorded catcher of the deleted test's sampled mutants; the mutation of each row above was not re-run.
+
+- `automation_is_partition_invariant`: parametric-eq `randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores`
+- `every_width_matches_the_scalar_instantiation`: parametric-eq `randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores`
+- `the_collapsed_body_renders_the_dual_bodys_left_plane`: parametric-eq `response::asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity`
+- `disabled_cuts_preserve_all_high_pass_signed_zero_against_four_section_oracle`: parametric-eq `elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag`
+- `a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands`: parametric-eq `elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag`
+- `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample`: parametric-eq `response::asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity`

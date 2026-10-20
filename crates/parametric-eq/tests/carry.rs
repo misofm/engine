@@ -20,9 +20,9 @@
 mod support;
 
 use effect_contract::{
-    BankWidth, EffectBankProcessBlock, EffectProcessBlock, InitialParameterValue,
-    NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PreparedEffect,
-    PreparedEffectBank, StatePayloadInput, StatePayloadOutput,
+    BankWidth, EffectProcessBlock, InitialParameterValue, NativeEffectFactory, ParameterChannel,
+    PrepareEffectBankRequest, PreparedEffect, PreparedEffectBank, StatePayloadInput,
+    StatePayloadOutput,
 };
 use parametric_eq::{EqBandKind, ParametricEqFactory};
 use support::{
@@ -31,8 +31,6 @@ use support::{
 
 /// Samples rendered before the ramp starts, so the integrators hold signal.
 const WARM: usize = 37;
-/// Samples compared after each restore: past the 64-sample ramp's end.
-const TAIL: usize = 100;
 
 /// A deterministic test signal with no exact zero.
 fn signal(frames: usize, seed: u32) -> Vec<f32> {
@@ -70,7 +68,6 @@ fn moved(
 
 /// One ramp: the prepared configuration, and the targets applied after so many ramp samples.
 struct Ramp {
-    name: &'static str,
     values: Vec<InitialParameterValue>,
     retargets: Vec<(usize, Vec<InitialParameterValue>, Vec<bool>)>,
 }
@@ -82,18 +79,18 @@ fn ramps() -> Vec<Ramp> {
     let (second, second_changed) = moved(&first, 450.0, 11.0, 0.6);
     let (swing, swing_changed) = moved(&wide, 10_000.0, 24.0, 0.1);
     vec![
+        // bell moving in frequency, gain and Q.
         Ramp {
-            name: "bell moving in frequency, gain and Q",
             values: bell.clone(),
             retargets: vec![(0, first.clone(), first_changed.clone())],
         },
+        // 10 kHz bell at Q 0.1 swinging -24 dB to +24 dB.
         Ramp {
-            name: "10 kHz bell at Q 0.1 swinging -24 dB to +24 dB",
             values: wide,
             retargets: vec![(0, swing, swing_changed)],
         },
+        // bell retargeted 17 samples into its ramp.
         Ramp {
-            name: "bell retargeted 17 samples into its ramp",
             values: bell,
             retargets: vec![(0, first, first_changed), (17, second, second_changed)],
         },
@@ -127,137 +124,8 @@ fn continuing(ramp: &Ramp, elapsed: usize) -> PreparedEffect {
     effect
 }
 
-/// Renders `TAIL` frames through the restored bank lane `lane`, the other lanes fed another signal.
-fn bank_tail(
-    ramp: &Ramp,
-    width: BankWidth,
-    lane: usize,
-    payload: &Payload,
-    first: u64,
-) -> Option<(Vec<f32>, Vec<f32>)> {
-    let lanes = width.lanes() as usize;
-    let requests: Vec<_> = (0..lanes).map(|_| request(&ramp.values, false)).collect();
-    let mut bank = ParametricEqFactory
-        .bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: width.backend(),
-            width,
-            requests: &requests,
-            active_mask: width.full_mask(),
-        })
-        .expect("bank request")?;
-    let sizes = bank.metadata.program_key.state_sizes;
-    bank.processor
-        .restore_track_state_payload(
-            lane as u32,
-            1,
-            StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("input"),
-        )
-        .unwrap_or_else(|error| panic!("{width:?}: the bank lane refused ({})", error.code));
-    let (tail_left, tail_right) = (signal(TAIL, 5), signal(TAIL, 6));
-    let (other_left, other_right) = (signal(TAIL, 7), signal(TAIL, 8));
-    let mut left = vec![0.0_f32; TAIL * lanes];
-    let mut right = vec![0.0_f32; TAIL * lanes];
-    for frame in 0..TAIL {
-        for track in 0..lanes {
-            let (l, r) = if track == lane {
-                (tail_left[frame], tail_right[frame])
-            } else {
-                (other_left[frame], other_right[frame])
-            };
-            left[frame * lanes + track] = l;
-            right[frame * lanes + track] = r;
-        }
-    }
-    let offsets = vec![0_u32; lanes + 1];
-    bank.processor.process_bank(
-        EffectBankProcessBlock::new(
-            &mut left,
-            &mut right,
-            None,
-            TAIL as u32,
-            width,
-            first,
-            &[],
-            &offsets,
-            128,
-        )
-        .expect("bank block"),
-    );
-    let gather = |plane: &[f32]| (0..TAIL).map(|frame| plane[frame * lanes + lane]).collect();
-    Some((gather(&left), gather(&right)))
-}
-
 fn same_bits(a: &[f32], b: &[f32]) -> bool {
     a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
-}
-
-#[test]
-fn a_mid_ramp_restore_continues_bit_for_bit_at_every_sample() {
-    let mut banks_bound = 0;
-    let mut failures = Vec::new();
-    for ramp in ramps() {
-        for elapsed in 0..=64_usize {
-            let mut lane = continuing(&ramp, elapsed);
-            let payload = snapshot(&lane);
-            let first = (WARM + elapsed) as u64;
-            let mut restored = ParametricEqFactory
-                .prepare(request(&ramp.values, false))
-                .expect("prepare");
-            let sizes = restored.metadata.state_sizes;
-            if let Err(error) = restored.processor.restore_state_payload(
-                1,
-                StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("input"),
-            ) {
-                failures.push(format!(
-                    "{}: sample {elapsed}: the scalar restore refused ({})",
-                    ramp.name, error.code
-                ));
-                continue;
-            }
-            let (mut left, mut right) = (signal(TAIL, 5), signal(TAIL, 6));
-            let (mut restored_left, mut restored_right) = (left.clone(), right.clone());
-            lane.processor.process(
-                EffectProcessBlock::new(&mut left, &mut right, None, first, &[], 128)
-                    .expect("tail"),
-            );
-            restored.processor.process(
-                EffectProcessBlock::new(
-                    &mut restored_left,
-                    &mut restored_right,
-                    None,
-                    first,
-                    &[],
-                    128,
-                )
-                .expect("tail"),
-            );
-            if !same_bits(&left, &restored_left) || !same_bits(&right, &restored_right) {
-                failures.push(format!(
-                    "{}: sample {elapsed}: the restored instance diverges from the continuing lane",
-                    ramp.name
-                ));
-            }
-            for &width in BankWidth::ALL {
-                let target = width.lanes() as usize - 1;
-                // A width this build does not execute declines by design (issue #1112).
-                let Some((bank_left, bank_right)) =
-                    bank_tail(&ramp, width, target, &payload, first)
-                else {
-                    continue;
-                };
-                banks_bound += 1;
-                if !same_bits(&left, &bank_left) || !same_bits(&right, &bank_right) {
-                    failures.push(format!(
-                        "{}: sample {elapsed}: {width:?} bank lane {target} diverges from the \
-                         continuing lane",
-                        ramp.name
-                    ));
-                }
-            }
-        }
-    }
-    assert!(banks_bound > 0, "no width bound a bank");
-    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 /// A restore validates both channels before it commits either: a payload whose left section is a

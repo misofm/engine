@@ -28,7 +28,7 @@ cargo test --release --locked -p soft-clip --test <test binary>
 | 3 | the odd-phase sample is read from row `base - 30` instead of `base - 31` | `src/kernel.rs` | `polyphase_identity` | RED |
 | 4 | the bypass mask is inverted | `src/kernel.rs` | `polyphase_identity` | RED |
 | 5 | the segment length is the first lane's countdown instead of the minimum over all lanes and parameters | `src/lib.rs` | `lane_identity` | RED |
-| 6 | the kernel never writes `h.pos` back, keeping the history position in a local | `src/kernel.rs` | `partition_invariance` | RED |
+| 6 | the kernel never writes `h.pos` back, keeping the history position in a local | `src/kernel.rs` | `partition_invariance` (deleted by TA4; KEEP catcher lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`) | RED |
 | 7 | the §4.4 boundary check is skipped and every block is accepted | `src/lib.rs` | `boundary_check` | RED |
 | 8 | a `Vec::with_capacity(frames)` is added to the per-block driver | `src/lib.rs` | `allocation` | RED |
 | 9 | a restore writes the payload's ages in reverse order into the history | `src/lib.rs` | `state_roundtrip` | RED |
@@ -109,3 +109,9 @@ mutation and the defect are the same edit. Both reset kinds are now inside the m
 
 * The wasm leg of the corpus (`tools/wasm-gates`) is exercised by
   `scripts/run-wasm-gates.sh`; its own mutations live in that crate's `MUTATIONS.md`.
+
+## TA4 deletions
+
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Each one's caught mutants were also red in the KEEP test named beside it. That is the recorded catcher of the deleted test's sampled mutants; the mutation of each row above was not re-run.
+
+- `partition_invariance` (the test binary; its one test, `every_partition_renders_the_one_shot_bits_and_state`): lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`

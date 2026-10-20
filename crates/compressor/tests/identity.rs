@@ -22,21 +22,6 @@ fn render(
 }
 
 #[test]
-fn bypass_preserves_exact_dry_bits_at_sample_zero() {
-    let values = values_with(&[]);
-    let mut preparation = request(&values);
-    preparation.bypass = true;
-    let mut effect = prepare(preparation);
-    let input_left = noise(FRAMES, 0xB1_A5_00_01, 0.75);
-    let input_right = noise(FRAMES, 0xB1_A5_00_02, 0.75);
-    let (left, right) = render(effect.as_mut(), &input_left, &input_right);
-    for index in 0..FRAMES {
-        assert_eq!(left[index].to_bits(), input_left[index].to_bits());
-        assert_eq!(right[index].to_bits(), input_right[index].to_bits());
-    }
-}
-
-#[test]
 fn zero_mix_is_dry_while_gain_reduction_runs() {
     let compressing = values_with(&[(0, -40.0), (1, 20.0), (2, 0.0)]);
     let input_left = noise(FRAMES, 0xB1_A5_00_03, 0.75);
