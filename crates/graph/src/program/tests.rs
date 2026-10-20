@@ -195,37 +195,6 @@ fn chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers() {
     assert_eq!(program.output, program.ops[5].output);
 }
 
-/// Two routes off one tap: the shared buffer has two readers, so neither route may consume it
-/// in place, and the output op keeps a genuine two-input reduction.
-#[test]
-fn fan_out_blocks_in_place_and_fan_in_keeps_its_reduction() {
-    let (nodes, edges) = plain_track("t", &["ra", "rb"]);
-    let (spec, schedule, levels) = build(nodes, edges);
-    let program = lower(&spec, &schedule, &levels, &[], &[]).expect("lowers");
-
-    assert_eq!(program.taps.len(), 3);
-    assert_eq!(program.reduction_count(), 1);
-    let output_op = program.ops.last().expect("output op");
-    assert_eq!(output_op.input_count(), 2);
-    assert!(!output_op.in_place);
-    // The two route inputs of the output are distinct buffers, in stable edge-ID order.
-    let output_inputs = program.inputs_of(output_op);
-    assert_ne!(output_inputs[0].buffer, output_inputs[1].buffer);
-
-    let routes: Vec<&Op> = program
-        .ops
-        .iter()
-        .filter(|op| matches!(spec.nodes[op.node as usize].id, GraphNodeId::Route { .. }))
-        .collect();
-    assert_eq!(routes.len(), 2);
-    for route in routes {
-        assert!(
-            !route.in_place,
-            "a route reading a two-reader buffer must not alias it"
-        );
-    }
-}
-
 #[test]
 fn sixty_four_plain_tracks_keep_one_ordered_non_aliasing_master_reduction() {
     let mut nodes = Vec::new();

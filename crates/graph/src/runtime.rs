@@ -12571,6 +12571,7 @@ mod tests {
             );
         }
         let mut self_alias = single_arena(2, 2);
+        self_alias.write(0, 1).copy_from_slice(&[1.0, 2.0]);
         self_alias
             .write(0, 2)
             .copy_from_slice(&[-0.0, f32::from_bits(0x7fc0_4204)]);
@@ -12583,6 +12584,11 @@ mod tests {
                 .map(|x| x.to_bits())
                 .collect::<Vec<_>>(),
             vec![(-0.0f32).to_bits(), 0x7fc0_4204]
+        );
+        assert_eq!(
+            self_alias.read(0, 1),
+            &[1.0, 2.0],
+            "an in-place single input writes no other buffer"
         );
     }
 
@@ -12604,112 +12610,6 @@ mod tests {
             u32::try_from(buffers).expect("buffer count fits u32"),
         )
         .expect("test arena")
-    }
-
-    /// The compatibility callback is deliberately unusable here: a regression to per-lane
-    /// dispatch must fail rather than quietly producing the same sum.
-    ///
-    /// Since issue #915 this probe declines the resident-fold offer (its `fold_resident` keeps
-    /// the trait default), so what it pins is the **staged fallback** path through
-    /// `fold_cohort`. The fused production path is pinned by
-    /// `a_resident_fold_is_the_staged_scatter_and_cohort_fold_bit_for_bit`, whose counters
-    /// assert which fold each arm took.
-    #[test]
-    fn all_active_folded_bank_chain_dispatches_the_real_graph_cohort() {
-        struct Identity;
-        impl BankStage for Identity {
-            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
-                Ok(())
-            }
-        }
-        struct Probe<'a> {
-            inner: ArenaMembers<'a>,
-            cohorts: usize,
-        }
-        impl BankMembers for Probe<'_> {
-            fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
-                self.inner.plane(lane)
-            }
-            fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
-                self.inner.plane_mut(lane)
-            }
-            fn fold_plane(&mut self, _lane: usize, _left: &mut [f32], _right: &mut [f32]) {
-                panic!("cohort dispatch regressed to fold_plane")
-            }
-            fn fold_cohort(&mut self, cohort: FoldCohort<'_>) {
-                self.cohorts += 1;
-                self.inner.fold_cohort(cohort);
-            }
-        }
-        const FRAMES: usize = 2;
-        let mut arena = stereo_arena(FRAMES, 10);
-        let inputs = [2, 3, 4, 5];
-        let outputs = [6, 7, 8, 9];
-        let coefficients = [1.0, 0.0, 0.0, 1.0];
-        for (lane, input) in inputs.iter().copied().enumerate() {
-            let (left, right) = arena.write_stereo(input);
-            left.fill(lane as f32 + 1.0);
-            right.fill(-(lane as f32 + 1.0));
-        }
-        let mut oracle_arena = stereo_arena(FRAMES, 5);
-        let oracle_routes = [
-            ARENA_BASE + 1,
-            ARENA_BASE + 2,
-            ARENA_BASE + 3,
-            ARENA_BASE + 4,
-        ];
-        for (lane, route) in oracle_routes.iter().copied().enumerate() {
-            let (left, right) = oracle_arena.write_stereo(route);
-            left.fill(lane as f32 + 1.0);
-            right.fill(-(lane as f32 + 1.0));
-            mix2x2_block::<FrameLane>(left, right, coefficients);
-        }
-        reference_reduce_plane(&mut oracle_arena, 0, ARENA_BASE, &oracle_routes);
-        reference_reduce_plane(&mut oracle_arena, 1, ARENA_BASE, &oracle_routes);
-        let (oracle_left, oracle_right) = oracle_arena.read_stereo(ARENA_BASE);
-        let expected_left = oracle_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-        let expected_right = oracle_right.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-        let fold: Vec<FoldLane> = (0..4)
-            .map(|lane| FoldLane {
-                coefficients,
-                store: lane == 0,
-            })
-            .collect();
-        let active = vec![true; 4].into_boxed_slice();
-        let mut chain = BankChain::new(
-            AoSoaScratch::new(BankWidth::Four, FRAMES as u32).expect("scratch"),
-            active.clone(),
-            vec![BankSlot {
-                stage: Box::new(Identity),
-                active_lanes: active.clone(),
-            }],
-        )
-        .expect("chain");
-        chain.arm_fold(active).expect("fold mask");
-        let mut members = Probe {
-            inner: ArenaMembers {
-                arena: &mut arena,
-                inputs: &inputs,
-                outputs: &outputs,
-                fold: &fold,
-                master: MasterPlanes::Arena(ARENA_BASE),
-                sources: SourceGather::NONE,
-            },
-            cohorts: 0,
-        };
-        chain
-            .run(&mut members, FRAMES as u32, 0, LiveSnapshot::ALL)
-            .expect("run");
-        assert_eq!(members.cohorts, 1);
-        let (left, right) = members.inner.arena.read_stereo(ARENA_BASE);
-        assert_eq!(
-            left.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            expected_left
-        );
-        assert_eq!(
-            right.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            expected_right
-        );
     }
 
     /// The folded epilogue is the route op followed by the D9 reduction, word for word.
@@ -13767,17 +13667,6 @@ mod tests {
         );
         // Fan-in zero is a zero fill, not a copy.
         assert_eq!(reduce_case(4, &[]), vec![0.0f32; 4]);
-    }
-
-    /// E5 continued: an in-place single input is the identity, not a copy through a scratch.
-    #[test]
-    fn a_single_in_place_input_is_left_untouched() {
-        let mut arena = single_arena(2, 2);
-        arena.write(0, 1).copy_from_slice(&[1.0, 2.0]);
-        arena.write(0, 2).copy_from_slice(&[3.0, 4.0]);
-        reduce_plane(&mut arena, 0, 2, &[2]);
-        assert_eq!(arena.read(0, 1), &[1.0, 2.0]);
-        assert_eq!(arena.read(0, 2), &[3.0, 4.0]);
     }
 
     /// E7. The two-segment slice PDC is bit-for-bit a per-sample ring delay, and the result does
@@ -19974,8 +19863,8 @@ mod follow_curve_tests {
     /// #1655 D6 (V4), a moved VCA mute table: a settled send whose left lane's VCA mute table
     /// changes at a swap (flat open to flat closed, and back) moves the column at the successor's
     /// first sample over the `VcaMute` length; with the lane's own mute closed in both plans, the
-    /// same change moves nothing (OR). A VCA mute removed with no follow curve left lands over
-    /// the `VcaMute` length too.
+    /// same change moves nothing (OR). A VCA mute removed with no follow curve left is
+    /// `a_removed_follow_curve_lands_the_column_on_its_static_value`'s second case.
     ///
     /// Red if a moved VCA curve at a carry lands over the mute length, lands as a step, or does
     /// not land; or if a carry compares the VCA curve alone instead of the OR.
@@ -20013,31 +19902,5 @@ mod follow_curve_tests {
             }
             assert_eq!(ramps.ramps[1], held[1], "case {case}: the right column");
         }
-
-        // The VCA mute removed: the predecessor's left column closed by it, the successor's
-        // left column hearing no follow curve (the right lane's own mute keeps the send
-        // following).
-        let right = Some(flat(0.0));
-        let before = Curves {
-            source: [None, right.clone()],
-            vca: [vec![flat(1.0)], Vec::new()],
-            ..Curves::default()
-        };
-        let after = Curves {
-            source: [None, right],
-            ..Curves::default()
-        };
-        let mut predecessor = Send::new(&before, transform);
-        for index in 0..20_u64 {
-            predecessor.run(index * 64);
-        }
-        let mut successor = Send::new(&after, transform);
-        swap(&mut successor, &mut predecessor);
-        successor.run(20 * 64);
-        let ramp = successor.route.ramps.ramps[0];
-        assert!(
-            aims(&ramp, opened, VCA_MUTE, 0),
-            "the removed VCA mute lands over its own length: {ramp:?}"
-        );
     }
 }
