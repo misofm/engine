@@ -35,7 +35,8 @@ is the graph group: the crates `graph`, `graph-compiler`, `builtins-compiler` an
 - DELETE `runtime::tests::all_active_folded_bank_chain_dispatches_the_real_graph_cohort`.
   Defender: `runtime::tests::a_resident_fold_is_the_staged_scatter_and_cohort_fold_bit_for_bit`
   (its staged arm panics in `fold_plane`, counts `[cohorts, 0, cohorts]` and matches the fused
-  arm bit for bit, at both widths).
+  arm bit for bit, at both widths). The oracle half (the fused arm against the route and the
+  reduction) is `runtime::tests::a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit`.
 - DELETE `tests::executor_applies_exact_pdc_then_fixed_pairwise_reduction`. Defenders:
   `tests::enabled_and_bypass_pdc_align_at_launch_rates_and_quanta` renders an inserted
   compensation delay on a `RouteDestination` edge into a two-route output sum, exact sample, both
