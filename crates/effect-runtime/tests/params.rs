@@ -1,9 +1,8 @@
-//! Parameter domain validation, clamping, mapping and defaults.
+//! Parameter domain validation, clamping and defaults.
 
 use effect_runtime::params::{
     ParameterKind, ParameterMapping, ParameterSpec, clamp_to_domain, initial_defaults,
-    inverse_map_normalized, is_negative_zero, map_normalized, normalize_zero,
-    parameter_value_valid,
+    is_negative_zero, normalize_zero, parameter_value_valid,
 };
 
 const THRESHOLD: ParameterSpec = ParameterSpec::continuous(-80.0, 0.0, -18.0);
@@ -95,67 +94,6 @@ fn clamping_always_lands_in_the_domain() {
         "enumeration falls back"
     );
     assert_eq!(clamp_to_domain(&SLOPE, 24.0), 24.0);
-}
-
-/// The mapping is exact at both ends and monotone in between.
-#[test]
-fn mapping_is_exact_at_the_ends_and_monotone() {
-    for spec in [&THRESHOLD, &FREQUENCY] {
-        assert_eq!(map_normalized(spec, 0.0).to_bits(), spec.minimum.to_bits());
-        assert_eq!(map_normalized(spec, 1.0).to_bits(), spec.maximum.to_bits());
-        assert_eq!(map_normalized(spec, -5.0).to_bits(), spec.minimum.to_bits());
-        assert_eq!(map_normalized(spec, 7.0).to_bits(), spec.maximum.to_bits());
-        assert_eq!(
-            map_normalized(spec, f32::NAN).to_bits(),
-            spec.minimum.to_bits()
-        );
-        let mut previous = map_normalized(spec, 0.0);
-        for step in 1..=100 {
-            let value = map_normalized(spec, step as f32 / 100.0);
-            assert!(
-                value >= previous,
-                "not monotone at {step}: {previous} -> {value}"
-            );
-            assert!(parameter_value_valid(spec, value));
-            previous = value;
-        }
-    }
-}
-
-/// A logarithmic mapping is constant-ratio: the midpoint is the geometric mean.
-#[test]
-fn a_logarithmic_mapping_is_constant_ratio() {
-    let middle = map_normalized(&FREQUENCY, 0.5);
-    let geometric = (10.0f64 * 20_000.0).sqrt();
-    assert!(
-        (f64::from(middle) - geometric).abs() <= geometric * 1e-4,
-        "{middle} vs {geometric}"
-    );
-    let linear_middle = map_normalized(&THRESHOLD, 0.5);
-    assert!((linear_middle - (-40.0)).abs() <= 1e-4, "{linear_middle}");
-}
-
-/// The mapping round-trips through its inverse.
-#[test]
-fn the_mapping_inverse_round_trips() {
-    for spec in [&THRESHOLD, &FREQUENCY] {
-        for step in 0..=20 {
-            let t = step as f32 / 20.0;
-            let value = map_normalized(spec, t);
-            let back = inverse_map_normalized(spec, value);
-            assert!((back - t).abs() <= 1e-4, "{t} -> {value} -> {back}");
-        }
-        assert_eq!(inverse_map_normalized(spec, spec.minimum), 0.0);
-        assert!((inverse_map_normalized(spec, spec.maximum) - 1.0).abs() <= 1e-6);
-    }
-}
-
-/// A degenerate range has no meaningful position and reports `0.0` rather than a NaN.
-#[test]
-fn a_degenerate_range_has_no_position() {
-    let point = ParameterSpec::continuous(5.0, 5.0, 5.0);
-    assert_eq!(inverse_map_normalized(&point, 5.0), 0.0);
-    assert_eq!(map_normalized(&point, 0.5).to_bits(), 5.0f32.to_bits());
 }
 
 /// Defaults are written in order, clamped, and the write count is reported.

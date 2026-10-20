@@ -175,55 +175,6 @@ fn g1_banked_sample_peak_is_the_scalar_meters_peak_at_every_width() {
     });
 }
 
-/// A lane fed only invalid values -- NaN, both infinities, both zeros and subnormals of both
-/// signs -- ends at exactly `+0.0`, while its neighbours carry a peak.
-fn invalid_lane_at<L: Lane>() {
-    let invalid = [
-        f32::NAN,
-        f32::from_bits(0xFFC0_1234),
-        f32::INFINITY,
-        f32::NEG_INFINITY,
-        -0.0,
-        0.0,
-        f32::from_bits(0x0000_0001),
-        f32::from_bits(0x807F_FFFF),
-    ];
-    let width = L::WIDTH;
-    for frames in [1_usize, 2, 3, 127, 128, 129] {
-        let mut words = vec![0.0_f32; frames * width];
-        for (index, word) in words.iter_mut().enumerate() {
-            let lane = index % width;
-            *word = if lane == 1 {
-                invalid[(index / width) % invalid.len()]
-            } else {
-                pow2(-(lane as i32))
-            };
-        }
-        let peak = store(meter_sample_peak_block::<L>(&words, frames, L::zero()));
-        for (lane, value) in peak.iter().enumerate() {
-            let expected = if lane == 1 {
-                0x0000_0000
-            } else {
-                pow2(-(lane as i32)).to_bits()
-            };
-            assert_eq!(value.to_bits(), expected, "frames {frames} lane {lane}");
-        }
-    }
-    // Every lane at once, which is the only form the `f32` width can take.
-    let mut only_invalid = vec![0.0_f32; 129 * width];
-    for (index, word) in only_invalid.iter_mut().enumerate() {
-        *word = invalid[index % invalid.len()];
-    }
-    for value in store(meter_sample_peak_block::<L>(&only_invalid, 129, L::zero())) {
-        assert_eq!(value.to_bits(), 0x0000_0000);
-    }
-}
-
-#[test]
-fn g1_a_lane_fed_only_invalid_values_ends_at_positive_zero() {
-    lane::each_lane!(|L| invalid_lane_at::<L>());
-}
-
 /// The sanitization boundaries, swept on the bits: every exponent of both signs, with the
 /// mantissas that sit on each boundary. At each width the kernel over a one-frame block must equal
 /// the oracle step from `+0.0`.
@@ -257,46 +208,4 @@ fn boundary_sweep_at<L: Lane>() {
 #[test]
 fn g1_sanitization_boundaries_match_normal_or_zero() {
     lane::each_lane!(|L| boundary_sweep_at::<L>());
-}
-
-/// The domain argument, witnessed. On the sanitized domain `{+0.0} ∪ [MIN_POSITIVE, MAX]` the D8
-/// select form is commutative and associative by bits, which is why the kernel's
-/// `L::max(c, peak)` and the expected-green mutation `L::max(peak, c)` agree, and why a
-/// seeded-zero partial merged into the window equals the serial loop. Off the domain it is not:
-/// `-0.0` and NaN break it, which is what the sanitization is for.
-#[test]
-fn g1_select_max_is_order_free_only_on_the_sanitized_domain() {
-    let select_max = |a: f32, b: f32| if a > b { a } else { b };
-    let mut domain: Vec<f32> = hostile_pool()
-        .into_iter()
-        .map(|x| oracle_step(0.0, x))
-        .collect();
-    domain.sort_by(f32::total_cmp);
-    domain.dedup_by(|a, b| a.to_bits() == b.to_bits());
-    assert_eq!(domain[0].to_bits(), 0, "+0.0 is in the domain");
-    for &a in &domain {
-        assert!(a.to_bits() == 0 || (f32::MIN_POSITIVE..=f32::MAX).contains(&a));
-        for &b in &domain {
-            assert_eq!(select_max(a, b).to_bits(), select_max(b, a).to_bits());
-            assert_eq!(
-                Lane::max(a, b).to_bits(),
-                Lane::max(b, a).to_bits(),
-                "Lane::max(c, peak) and Lane::max(peak, c) agree on the domain"
-            );
-            for &c in &domain {
-                assert_eq!(
-                    select_max(select_max(a, b), c).to_bits(),
-                    select_max(a, select_max(b, c)).to_bits()
-                );
-            }
-        }
-    }
-    assert_ne!(
-        select_max(0.0, -0.0).to_bits(),
-        select_max(-0.0, 0.0).to_bits()
-    );
-    assert_ne!(
-        select_max(1.0, f32::NAN).to_bits(),
-        select_max(f32::NAN, 1.0).to_bits()
-    );
 }

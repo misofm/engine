@@ -1,6 +1,6 @@
 //! Public API integration coverage for checked-in fixtures.
 
-use conformance::{FixtureError, FixtureLimits, PcmFixture, PlanarBlock, parse_manifest};
+use conformance::{FixtureError, FixtureLimits, PcmFixture, parse_manifest};
 use engine::{LAUNCH_SAMPLE_RATES, SampleRateHz};
 
 #[test]
@@ -18,13 +18,12 @@ fn checked_in_manifest_lists_only_valid_exact_fixtures() {
     }
 }
 
-/// Owner ruling R5 (#1036): blocks and fixtures exist at the launch rates only. The former
+/// Owner ruling R5 (#1036): fixtures exist at the launch rates only. The former
 /// extended research rates (176.4-384 kHz) refuse exactly like any other rate.
 #[test]
-fn planar_blocks_and_fixtures_accept_only_launch_rates() {
+fn fixtures_accept_only_launch_rates() {
     let samples = [0.0_f32];
     for rate in LAUNCH_SAMPLE_RATES {
-        assert!(PlanarBlock::try_new(rate, 1, 1, &samples).is_ok());
         let bytes = PcmFixture::encode(rate, 1, 1, &samples).expect("launch-rate fixture");
         assert_eq!(
             PcmFixture::parse(&bytes, FixtureLimits::default())
@@ -35,10 +34,6 @@ fn planar_blocks_and_fixtures_accept_only_launch_rates() {
     }
     let launch = PcmFixture::encode(SampleRateHz(48_000), 1, 1, &samples).expect("launch");
     for rate in [176_400, 192_000, 352_800, 384_000, 0, 32_000, 192_001].map(SampleRateHz) {
-        assert!(
-            PlanarBlock::try_new(rate, 1, 1, &samples).is_err(),
-            "{rate:?}"
-        );
         assert_eq!(
             PcmFixture::encode(rate, 1, 1, &samples),
             Err(FixtureError::InvalidField),

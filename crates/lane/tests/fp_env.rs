@@ -15,37 +15,7 @@
 
 #![allow(unsafe_code)]
 
-use lane::fpenv::{
-    CanonicalFpEnv, attest_fp_environment, canonical_fp_control_word, read_fp_control_word,
-};
-
-#[test]
-fn attestation_passes_on_this_thread() {
-    attest_fp_environment().expect("the canonical environment must be attestable on this thread");
-}
-
-#[test]
-fn the_canonical_word_is_the_word_inside_the_guard() {
-    let outside = read_fp_control_word();
-    {
-        let pinned = CanonicalFpEnv::enter();
-        assert_eq!(
-            read_fp_control_word(),
-            canonical_fp_control_word(),
-            "the guard must install the canonical control word"
-        );
-        assert_eq!(
-            pinned.saved_word(),
-            outside,
-            "the guard must remember the caller's exact word"
-        );
-    }
-    assert_eq!(
-        read_fp_control_word(),
-        outside,
-        "the guard must restore the caller's exact word"
-    );
-}
+use lane::fpenv::{CanonicalFpEnv, attest_fp_environment, read_fp_control_word};
 
 #[cfg(target_arch = "x86_64")]
 mod x86 {

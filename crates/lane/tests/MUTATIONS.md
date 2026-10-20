@@ -340,7 +340,7 @@ run in dev (the corpus in release), and restored. Host AMD EPYC 7313P, rustc 1.9
 
 L-green is the expected-green row: on the sanitized domain `{+0.0} ∪ [MIN_POSITIVE, MAX]` the D8
 select form is commutative by bits, so the operand order is free.
-`g1_select_max_is_order_free_only_on_the_sanitized_domain` witnesses that argument directly, and
+`g1_select_max_is_order_free_only_on_the_sanitized_domain` (deleted by TA4; KEEP catcher lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`) witnesses that argument directly, and
 also that it fails off the domain (`max(+0, -0)` and `max(1, NaN)` depend on the order).
 
 ## Issue #949 — the `f64` lane vocabulary
@@ -502,3 +502,9 @@ browser's render-closure trap gate. Host AMD EPYC 7313P, rustc 1.97.1, `x86-64-v
 | 1219-M11 | the settled frames re-implemented as a private loop, and `mix2x2_block` then flushing its outputs (two edits: a static mix that drifts from the ramp's settled path) | gate 3 alone (`case 2, length 3830 ... left frame 3`, `-0.0` against `mix2x2_block`'s `+0.0`) | RED |
 | 1219-M12 | attempt 2: `route_mix_ramp_block` back to `let count = left.len(); let right = &mut right[..count];` | `--callgraph probe_ramp` on the probe: `FAIL probe_ramp: unexpected trap owner in the render closure: ...route_mix_ramp_block...`, `closure=5 traps=3`, entry `slice_index_fail` (unmutated: `closure=4 traps=0 trap_owners=[]`). Native gates cannot see it: bits do not move. | RED (probe), GREEN (native) |
 | 1219-M13 | attempt 2: `route_mix_settled_tail` passes its planes uncut (`mix2x2_block::<f32>(left, right, c)`) | `--callgraph probe_ramp`: `FAIL ... unexpected trap owner ...: route_mix_settled_tail`, `closure=5 traps=3` | RED (probe), GREEN (native) |
+
+## TA4 deletions
+
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Each one's caught mutants were also red in the KEEP test named beside it. That is the recorded catcher of the deleted test's sampled mutants; the mutation of each row above was not re-run.
+
+- `g1_select_max_is_order_free_only_on_the_sanitized_domain`: lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`

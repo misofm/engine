@@ -1217,71 +1217,7 @@ pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), Descripto
         Err(DescriptorErrorSet(e))
     }
 }
-pub fn map_normalized(m: ParameterMapping, a: f32, b: f32, x: f32) -> Option<f32> {
-    if !(a.is_finite() && b.is_finite() && a < b && x.is_finite() && (0.0..=1.0).contains(&x)) {
-        return None;
-    }
-    if x == 0.0 {
-        return Some(a);
-    }
-    if x == 1.0 {
-        return Some(b);
-    }
-    match m {
-        ParameterMapping::Linear => Some(a + x * (b - a)),
-        ParameterMapping::Logarithmic if a > 0.0 => Some(a * math::powf(b / a, x)),
-        ParameterMapping::Exponential => Some(a + (b - a) * x * x),
-        _ => None,
-    }
-}
-pub fn inverse_map_normalized(m: ParameterMapping, a: f32, b: f32, v: f32) -> Option<f32> {
-    if !(a.is_finite() && b.is_finite() && a < b && v.is_finite() && v >= a && v <= b) {
-        return None;
-    }
-    if canonical_bits(v) == canonical_bits(a) {
-        return Some(0.0);
-    }
-    if canonical_bits(v) == canonical_bits(b) {
-        return Some(1.0);
-    }
-    match m {
-        ParameterMapping::Linear => Some((v - a) / (b - a)),
-        ParameterMapping::Logarithmic if a > 0.0 => Some(math::logf(v / a) / math::logf(b / a)),
-        ParameterMapping::Exponential => Some(((v - a) / (b - a)).sqrt()),
-        _ => None,
-    }
-}
 
-/// Select a legal stepped-domain value, with exact ties resolved toward the lower value.
-pub fn map_stepped_normalized(choices: &[f32], x: f32) -> Option<f32> {
-    if choices.len() < 2
-        || !x.is_finite()
-        || !(0.0..=1.0).contains(&x)
-        || choices.iter().any(|v| !v.is_finite())
-        || choices.windows(2).any(|pair| pair[0] >= pair[1])
-    {
-        return None;
-    }
-    let position = x * (choices.len() - 1) as f32;
-    let lower = position.floor() as usize;
-    let upper = position.ceil() as usize;
-    if position - lower as f32 <= upper as f32 - position {
-        Some(choices[lower])
-    } else {
-        Some(choices[upper])
-    }
-}
-
-/// Return the normalized zero-based index of an exact legal stepped-domain value.
-pub fn inverse_map_stepped_normalized(choices: &[f32], value: f32) -> Option<f32> {
-    if choices.len() < 2 || !value.is_finite() {
-        return None;
-    }
-    choices
-        .iter()
-        .position(|choice| canonical_bits(*choice) == canonical_bits(value))
-        .map(|index| index as f32 / (choices.len() - 1) as f32)
-}
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PreparedPorts {
     pub sidechain: PreparedSidechainPort,

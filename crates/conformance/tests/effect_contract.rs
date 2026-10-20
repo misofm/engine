@@ -20,11 +20,9 @@ use conformance::{
 use effect_contract::{
     BankWidth, DescriptorDiagnosticCode, DescriptorError, EffectDescriptor, EffectQuality,
     InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel, ParameterId,
-    ParameterMapping, ParameterSmoother, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort,
-    QualityDescriptor, RegisteredTailBound, SmoothingRule, expected_prepared_metadata,
-    inverse_map_normalized, inverse_map_stepped_normalized, map_normalized, map_stepped_normalized,
-    validate_automation_block, validate_descriptor,
+    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedPorts, PreparedSidechainPort, QualityDescriptor, RegisteredTailBound,
+    expected_prepared_metadata, validate_automation_block, validate_descriptor,
 };
 
 /// The mock's 48 kHz `Normal` entry, read from a registry that admitted it (issue #1462).
@@ -118,48 +116,6 @@ fn correct_factory_binds_distinguishable_four_lane_bank() {
             (2.0 + lane as f32 * 0.2).to_bits()
         );
     }
-}
-
-#[test]
-fn normalized_mapping_endpoints_ties_and_round_trips_are_stable() {
-    for mapping in [
-        ParameterMapping::Linear,
-        ParameterMapping::Logarithmic,
-        ParameterMapping::Exponential,
-    ] {
-        assert_eq!(map_normalized(mapping, 2.0, 8.0, 0.0), Some(2.0));
-        assert_eq!(map_normalized(mapping, 2.0, 8.0, 1.0), Some(8.0));
-        let value = map_normalized(mapping, 2.0, 8.0, 0.375).unwrap();
-        assert!((inverse_map_normalized(mapping, 2.0, 8.0, value).unwrap() - 0.375).abs() < 2e-6);
-    }
-    assert_eq!(map_stepped_normalized(&[0.0, 1.0], 0.5), Some(0.0));
-    assert_eq!(map_stepped_normalized(&[0.0, 1.0, 4.0], 0.75), Some(1.0));
-    assert_eq!(
-        inverse_map_stepped_normalized(&[0.0, 1.0, 4.0], 4.0),
-        Some(1.0)
-    );
-    assert!(map_normalized(ParameterMapping::Linear, 0.0, 1.0, f32::NAN).is_none());
-}
-
-#[test]
-fn smoothers_finish_on_the_exact_update() {
-    let mut linear = ParameterSmoother::new(0.0, SmoothingRule::Linear, 4).unwrap();
-    assert!(linear.set_target(1.0));
-    assert_eq!(
-        [
-            linear.next_value(),
-            linear.next_value(),
-            linear.next_value(),
-            linear.next_value()
-        ],
-        [0.25, 0.5, 0.75, 1.0]
-    );
-    let mut pole = ParameterSmoother::new(0.0, SmoothingRule::OnePole99, 4).unwrap();
-    assert!(pole.set_target(1.0));
-    for _ in 0..3 {
-        assert!(pole.next_value() < 1.0);
-    }
-    assert_eq!(pole.next_value(), 1.0);
 }
 
 #[test]

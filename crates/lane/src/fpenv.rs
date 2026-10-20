@@ -529,13 +529,6 @@ impl CanonicalFpEnv {
             _not_send_not_sync: PhantomData,
         }
     }
-
-    /// The exact control word this guard will restore.
-    #[inline]
-    #[must_use]
-    pub fn saved_word(&self) -> FpControlWord {
-        self.saved
-    }
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -586,11 +579,6 @@ impl CanonicalFpEnv {
             _not_send_not_sync: PhantomData,
         }
     }
-
-    /// The exact control word this guard will restore; there is none on this target.
-    #[inline]
-    #[must_use]
-    pub fn saved_word(&self) -> FpControlWord {}
 }
 
 /// Why a render thread's floating-point environment could not be pinned.

@@ -1,8 +1,5 @@
-//! Deterministic fixture, numerical comparison, and repeatability harnesses.
+//! Deterministic fixture, effect-conformance, and protocol-corpus harnesses.
 
-mod block;
-mod compare;
-mod determinism;
 mod effect;
 mod fixture;
 mod manifest;
@@ -11,12 +8,6 @@ mod protocol_corpus;
 pub mod ramp_endpoint;
 mod randomized;
 
-pub use block::{BlockError, PlanarBlock};
-pub use compare::{
-    ComparisonError, ComparisonReport, ComparisonTolerance, SampleLocation, SnrDb,
-    compare_f32_to_f64,
-};
-pub use determinism::{DeterminismError, verify_bit_exact_repeat};
 pub use dsp_reference::{F64PlanarBuffer, IdentityProcessor, render_planar_f64};
 pub use effect::{
     ConformanceConfig, DUAL_ACCUMULATOR_DELAY_DESCRIPTOR, DualAccumulatorDelayFactory,
@@ -89,34 +80,5 @@ mod tests {
             let value = generator.next_bipolar_f32();
             assert!((-1.0..1.0).contains(&value));
         }
-    }
-
-    #[test]
-    fn block_metrics_and_repeat_bits_cover_boundaries() {
-        let actual = [1.0_f32, -0.0];
-        let block = PlanarBlock::try_new(SampleRateHz(48_000), 1, 2, &actual).expect("block");
-        let expected = [1.0_f64, 0.0];
-        let reference =
-            PlanarBlock::try_new(SampleRateHz(48_000), 1, 2, &expected).expect("reference");
-        let report = compare_f32_to_f64(
-            block,
-            reference,
-            ComparisonTolerance {
-                absolute: 1e-6,
-                relative: 2e-5,
-                relative_floor: 1e-12,
-            },
-        )
-        .expect("compare");
-        assert!(report.within_tolerance);
-        assert_eq!(report.peak_error, 0.0);
-        assert!(
-            verify_bit_exact_repeat(
-                &[f32::from_bits(0x8000_0000), f32::from_bits(0x7fc0_0042)],
-                &[f32::from_bits(0x8000_0000), f32::from_bits(0x7fc0_0042)]
-            )
-            .is_ok()
-        );
-        assert!(verify_bit_exact_repeat(&[0.0], &[-0.0]).is_err());
     }
 }

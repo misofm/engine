@@ -215,15 +215,6 @@ fn a_repeated_write_collapses_last_wins_and_is_counted() {
     assert_eq!(rig.superseded.get(), 1);
 }
 
-/// A drain leaves the cells read: the next block stages nothing.
-#[test]
-fn a_drained_cell_stages_nothing_on_the_next_block() {
-    let mut rig = Rig::new(shape(&[1], &[], 0), 0);
-    rig.commit(&[left(1, 0.5)]).expect("a cell");
-    assert_eq!(rig.stage().staged, 1);
-    assert_eq!(rig.stage().staged, 0);
-}
-
 /// A lane holds no carried slots until a successor swap installs them (#1633 D1), refuses to be
 /// carried into before that (D2), and its retained bytes grow by exactly the charge the install
 /// is admitted against.

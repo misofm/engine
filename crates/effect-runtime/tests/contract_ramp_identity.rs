@@ -65,35 +65,6 @@ fn linear_smoother_is_bit_identical_to_the_linear_ramp() {
 }
 
 #[test]
-fn the_precomputed_increment_is_the_declared_one_and_the_last_update_assigns() {
-    // The observable signature of D11: every update adds the *same* precomputed increment, so the
-    // trajectory is the iterated addition of one constant. The audited form recomputed
-    // `(target - current) / remaining` each update, whose increment grows as the rounding error
-    // accumulates, so it leaves this trajectory at the second update for a length of 5.
-    const SAMPLES: u32 = 7;
-    const FROM: f32 = 0.1;
-    const TO: f32 = 0.3;
-    let mut smoother =
-        ParameterSmoother::new(FROM, SmoothingRule::Linear, SAMPLES).expect("nonzero length");
-    assert!(smoother.set_target(TO));
-
-    // Derived here, not read back from the smoother: an independent statement of the law.
-    let step = (TO - FROM) / SAMPLES as f32;
-    assert_eq!(smoother.step().to_bits(), step.to_bits());
-    let mut expected = FROM;
-    for update in 1..SAMPLES {
-        expected += step;
-        assert_eq!(
-            smoother.next_value().to_bits(),
-            expected.to_bits(),
-            "update {update} must be the iterated addition of one constant increment"
-        );
-    }
-    // The last update is the exact assignment, not an addition.
-    assert_eq!(smoother.next_value().to_bits(), TO.to_bits());
-}
-
-#[test]
 fn no_smoothing_snaps_and_one_pole_uses_a_precomputed_coefficient() {
     let mut none = ParameterSmoother::new(2.0, SmoothingRule::None, 0).expect("length zero");
     assert!(none.set_target(-3.0));

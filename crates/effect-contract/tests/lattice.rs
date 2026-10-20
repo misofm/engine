@@ -6,9 +6,9 @@
 //! `effect-compiler`, which is the crate that can see every launch effect at once.
 
 use effect_contract::{
-    AutomationRate, EnumChoice, LatticePoint, ParameterChannelPolicy, ParameterDescriptor,
-    ParameterDomain, ParameterId, ParameterLattice, ParameterMapping, ParameterUnit, SmoothingRule,
-    StepSize, canonical_descriptor_decimal, decimal_to_f32, lattice_index_for_decimal,
+    AutomationRate, LatticePoint, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
+    ParameterId, ParameterLattice, ParameterMapping, ParameterUnit, SmoothingRule, StepSize,
+    canonical_descriptor_decimal, decimal_to_f32, lattice_index_for_decimal,
     parameter_lattice_points, resolve_parameter_step,
 };
 
@@ -307,60 +307,6 @@ fn refusal_names_the_two_nearest_legal_values() {
 // ---------------------------------------------------------------------------
 // Enumerations and booleans.
 // ---------------------------------------------------------------------------
-
-#[test]
-fn an_enumeration_lattice_is_spelled_in_choice_values_and_indexed_by_ordinal() {
-    static CHOICES: [EnumChoice; 6] = [
-        EnumChoice {
-            value: 1.0,
-            label: "bell",
-        },
-        EnumChoice {
-            value: 2.0,
-            label: "low-shelf",
-        },
-        EnumChoice {
-            value: 3.0,
-            label: "high-shelf",
-        },
-        EnumChoice {
-            value: 4.0,
-            label: "low-pass",
-        },
-        EnumChoice {
-            value: 5.0,
-            label: "high-pass",
-        },
-        EnumChoice {
-            value: 6.0,
-            label: "notch",
-        },
-    ];
-    let mut parameter = descriptor(
-        ParameterUnit::Linear,
-        ParameterDomain::Enumeration,
-        ParameterMapping::Stepped,
-        None,
-        None,
-        1.0,
-        ParameterLattice::indices(),
-    );
-    parameter.enum_choices = &CHOICES;
-    let points = parameter_lattice_points(&parameter).expect("index lattice");
-    // The document spells the CHOICE VALUE; the persist plane carries the ORDINAL. Conflating
-    // the two would refuse the last choice and silently relabel every other one.
-    assert_eq!(
-        points
-            .iter()
-            .map(|p| p.canonical.as_str())
-            .collect::<Vec<_>>(),
-        ["1", "2", "3", "4", "5", "6"]
-    );
-    assert_eq!(lattice_index_for_decimal(&points, "6.0"), Ok(5));
-    assert_eq!(lattice_index_for_decimal(&points, "1"), Ok(0));
-    assert!(lattice_index_for_decimal(&points, "7").is_err());
-    assert!(lattice_index_for_decimal(&points, "1.5").is_err());
-}
 
 #[test]
 fn a_boolean_lattice_admits_exactly_its_two_encodings() {

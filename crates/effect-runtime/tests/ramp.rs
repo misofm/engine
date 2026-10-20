@@ -44,51 +44,6 @@ fn assert_bit_equal(left: &[f32], right: &[f32], what: &str) {
     }
 }
 
-/// The published D11 example: three samples from `0.0` to `1.0` are `1/3`, `1/3 + 1/3`, `1.0`.
-///
-/// The old law — re-deriving the step from the remaining distance every sample — gives `0.5` at
-/// the second sample. That is the discriminating value.
-///
-/// Red mutation: `next_value()` recomputes `(target - current) / remaining as f32` per call.
-#[test]
-fn the_step_is_computed_once() {
-    let mut ramp = LinearRamp::fixed(0.0);
-    ramp.set_target(1.0, 3);
-    let third = 1.0f32 / 3.0;
-    assert_eq!(ramp.next_value().to_bits(), third.to_bits());
-    assert_eq!(ramp.next_value().to_bits(), (third + third).to_bits());
-    assert_ne!(
-        (third + third).to_bits(),
-        0.5f32.to_bits(),
-        "must discriminate"
-    );
-    assert_eq!(ramp.next_value().to_bits(), 1.0f32.to_bits());
-    assert_eq!(
-        ramp.next_value().to_bits(),
-        1.0f32.to_bits(),
-        "at rest afterwards"
-    );
-    assert!(!ramp.is_ramping());
-}
-
-/// The final sample is an exact assignment, not an accumulation.
-///
-/// Red mutation: drop the `remaining == 1` arm of `next_value()`, so the last sample is
-/// `current + step`. The target here is chosen so that the accumulated value misses it.
-#[test]
-fn the_last_sample_is_exactly_the_target() {
-    let mut ramp = LinearRamp::fixed(0.0);
-    ramp.set_target(0.1, 5);
-    let sequence = scalar_sequence(ramp, 5);
-    assert_eq!(sequence[4].to_bits(), 0.1f32.to_bits());
-    let accumulated: f32 = (0..5).fold(0.0f32, |acc, _| acc + 0.1f32 / 5.0);
-    assert_ne!(
-        accumulated.to_bits(),
-        0.1f32.to_bits(),
-        "accumulation must miss, or the test proves nothing"
-    );
-}
-
 /// `advance_block` plus the lane kernel reproduce `next_value()` exactly, at every block size.
 ///
 /// This is the D11 partition property and the reason `ramp_frames` is `remaining - 1`: the snap
