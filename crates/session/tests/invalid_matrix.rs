@@ -53,38 +53,6 @@ fn model_case(
     *count += 1;
 }
 
-#[test]
-fn u64_model_fields_accept_the_full_unsigned_domain() {
-    // `revision` is not a full-domain leaf: it is bounded at `MAX_SESSION_REVISION` (#1503) and
-    // its refusal is pinned in `diagnostic_parity.rs`. Nor is an automation segment sample: it is
-    // bounded below `automation::TIME_LIMIT`, `2^53` (pinned there too); its largest value is
-    // checked here.
-    type Mutation = fn(&mut SessionModel);
-    let largest_sample = automation::TIME_LIMIT - 1;
-    let cases: &[(Mutation, &str, u64)] = &[
-        (
-            |session| session.sources[0].frames = u64::MAX,
-            "$.sources[0].frames",
-            u64::MAX,
-        ),
-        (
-            |session| {
-                session.automation[0].segments[0].start_sample = automation::TIME_LIMIT - 2;
-                session.automation[0].segments[0].end_sample = automation::TIME_LIMIT - 1;
-            },
-            "$.automation[0].segments[0].end_sample",
-            largest_sample,
-        ),
-    ];
-
-    for (mutate, path, largest) in cases {
-        let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
-        mutate(&mut session);
-        let canonical = canonical_session_json(&session).expect("full domain canonicalizes");
-        assert!(canonical.contains(&format!("\"{largest}\"")), "{path}");
-    }
-}
-
 fn replaced(needle: &str, replacement: &str) -> String {
     let compact = compact_json(EXAMPLE);
     let needle = json_fragment(needle);

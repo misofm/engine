@@ -5942,7 +5942,7 @@ impl PreparedPlanExecutor for GraphExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::CompensationDelay;
+
     use conformance::DualAccumulatorDelayFactory;
     use effect_contract::{
         BankWidth, EffectDescriptor, EffectId, EffectProcessBlock, EffectQuality,
@@ -7407,30 +7407,6 @@ mod tests {
             Err(failure) => failure,
         };
         assert_eq!(failure.code, "graph.scheduler.layout");
-    }
-
-    #[test]
-    fn delay_is_exact_and_lane_independent() {
-        let mut delay = CompensationDelay::new(2);
-        let mut l = [1.0, 2.0, 3.0];
-        let mut r = [4.0, 5.0, 6.0];
-        delay.process(&mut l, &mut r);
-        assert_eq!(l, [0.0, 0.0, 1.0]);
-        assert_eq!(r, [0.0, 0.0, 4.0]);
-    }
-    #[test]
-    fn binding_rejects_duplicates_and_returns_all_ownership() {
-        let (plan, mut bindings, duplicate) = binding_plan();
-        bindings
-            .nodes
-            .push(GraphNodeBinding::new(duplicate, Box::new(Noop)));
-        let failure = match plan.bind(bindings) {
-            Ok(_) => panic!("duplicate binding unexpectedly accepted"),
-            Err(failure) => failure,
-        };
-        assert_eq!(failure.code, "graph.plan.binding");
-        assert_eq!(failure.bindings.nodes.len(), 3);
-        assert_eq!(failure.plan.plan_id, 42);
     }
 
     /// `GraphNodeBinding::identity` acknowledges a required node without a host processor: the

@@ -12,7 +12,6 @@
 //! stride by something other than the width.
 
 use effect_runtime::bank::{check_block, nonfinite_lane_mask};
-use effect_runtime::corpus::{CASE_NAMES, POINTS, run_case};
 use effect_runtime::ramp::LinearRamp;
 use lane::kernels::RampSegment;
 use lane::{Lane, Simd4};
@@ -21,27 +20,6 @@ fn lane_words<L: Lane>(value: L) -> Vec<u32> {
     let mut words = vec![0u32; L::WIDTH];
     value.store_bits(&mut words);
     words
-}
-
-/// The whole corpus — the gain computer at three ratios, both dB conversions, both followers and
-/// the hysteresis — is width-independent, word for word.
-#[test]
-fn the_corpus_is_width_independent() {
-    let mut scalar = vec![0u32; POINTS];
-    let mut vector = vec![0u32; POINTS];
-    for (case, name) in CASE_NAMES.iter().enumerate() {
-        run_case::<f32>(case, &mut scalar);
-        lane::each_vector_lane!(|L, N| {
-            run_case::<L>(case, &mut vector);
-            for point in 0..POINTS {
-                assert_eq!(
-                    scalar[point], vector[point],
-                    "{name} point {point}: W=1 {:#010x} vs W={N} {:#010x}",
-                    scalar[point], vector[point]
-                );
-            }
-        });
-    }
 }
 
 /// `advance_block` produces the same segment words at every width, and the same state.

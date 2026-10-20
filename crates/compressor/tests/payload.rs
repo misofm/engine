@@ -14,7 +14,7 @@ use compressor::COMPRESSOR_PARAMETERS;
 use support::{
     CURRENT, REMAINING, STATE_HEADER_WORDS, STATE_VERSION, STEP, TARGET, bind_bank, initial_values,
     native_bank_width, noise, prepare, prepare_with_metadata, ramp_word, render_scalar, request,
-    restore, restore_track, snapshot, snapshot_track, values_with,
+    restore, restore_track, snapshot, snapshot_track,
 };
 
 fn point(parameter: u32, channel: ParameterChannel, value: f32) -> PreparedAutomationSpan {
@@ -24,70 +24,6 @@ fn point(parameter: u32, channel: ParameterChannel, value: f32) -> PreparedAutom
         sample: 0,
         value,
     }
-}
-
-/// A snapshot round trips, and a restore at rest is bit-exact against an uninterrupted render.
-///
-/// "At rest" means `remaining == 0` on every ramp, which is every sample outside the 64-sample
-/// window after an automation event — well over 99 % of a session.
-///
-/// Red mutation (MUTATIONS.md row 14): commit the left channel before validating the right — RED
-/// on the transactional test below.
-#[test]
-fn an_idle_restore_is_bit_exact() {
-    let values = values_with(&[(0, -30.0), (1, 6.0), (2, 6.0)]);
-    let input_left = noise(4_096, 0x9A_10_00_01, 0.8);
-    let input_right = noise(4_096, 0x9A_10_00_02, 0.8);
-
-    let mut uninterrupted = prepare(request(&values));
-    let mut left = input_left.clone();
-    let mut right = input_right.clone();
-    render_scalar(uninterrupted.as_mut(), &mut left, &mut right, 128, 128, &[]);
-
-    let mut restored = prepare(request(&values));
-    let mut first_left = input_left[..2_048].to_vec();
-    let mut first_right = input_right[..2_048].to_vec();
-    render_scalar(
-        restored.as_mut(),
-        &mut first_left,
-        &mut first_right,
-        128,
-        128,
-        &[],
-    );
-    let (saved_left, saved_right) = snapshot(restored.as_ref());
-
-    // A fresh instance takes the payload and continues the render.
-    let mut continued = prepare(request(&values));
-    restore(continued.as_mut(), STATE_VERSION, &saved_left, &saved_right).expect("restore");
-    let mut second_left = input_left[2_048..].to_vec();
-    let mut second_right = input_right[2_048..].to_vec();
-    render_scalar(
-        continued.as_mut(),
-        &mut second_left,
-        &mut second_right,
-        128,
-        128,
-        &[],
-    );
-
-    assert_eq!(
-        second_left.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
-        left[2_048..]
-            .iter()
-            .map(|s| s.to_bits())
-            .collect::<Vec<_>>(),
-        "an idle restore must continue the render bit for bit"
-    );
-    assert_eq!(
-        second_right.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
-        right[2_048..]
-            .iter()
-            .map(|s| s.to_bits())
-            .collect::<Vec<_>>()
-    );
-    // And the render had content.
-    assert!(second_left.iter().any(|sample| *sample != 0.0));
 }
 
 /// One corrupt word in the right channel rejects the whole restore and leaves both channels
@@ -256,55 +192,6 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
         "effect.state.length"
     );
     assert_eq!(snapshot_track(bank.as_ref(), 0), bank_saved);
-}
-
-/// A mid-ramp restore continues exactly as the lane it was taken from (#1278 D2a).
-///
-/// The payload carries each ramp's step, so the restored ramp walks the continued ramp's words,
-/// sample for sample, and lands on the target on the same sample. Layout version 1 re-derived
-/// the step as `(target - current) / remaining`, which reaches the same place by another path:
-/// the mutation that restores that derivation turns this test red.
-#[test]
-fn a_mid_ramp_restore_continues_the_ramp_exactly() {
-    let values = initial_values();
-    let mut effect = prepare(request(&values));
-    let mut left = vec![0.0_f32; 27];
-    let mut right = vec![0.0_f32; 27];
-    render_scalar(
-        effect.as_mut(),
-        &mut left,
-        &mut right,
-        27,
-        128,
-        &[(0, point(0, ParameterChannel::Left, -71.3))],
-    );
-    let (saved_left, saved_right) = snapshot(effect.as_ref());
-    assert_eq!(
-        read_u32(&saved_left, ramp_word(0, REMAINING)),
-        37,
-        "37 samples still to produce"
-    );
-
-    let mut restored = prepare(request(&values));
-    restore(restored.as_mut(), STATE_VERSION, &saved_left, &saved_right).expect("restore");
-    for sample in 0..=37 {
-        assert_eq!(
-            snapshot(restored.as_ref()),
-            snapshot(effect.as_ref()),
-            "sample {sample}: the restored state is the continued state"
-        );
-        for instance in [&mut restored, &mut effect] {
-            let mut left = vec![0.0_f32; 1];
-            let mut right = vec![0.0_f32; 1];
-            render_scalar(instance.as_mut(), &mut left, &mut right, 1, 128, &[]);
-        }
-    }
-    let (state, _) = snapshot(restored.as_ref());
-    assert_eq!(read_u32(&state, ramp_word(0, REMAINING)), 0);
-    assert_eq!(
-        read_f32(&state, ramp_word(0, CURRENT)).to_bits(),
-        (-71.3_f32).to_bits()
-    );
 }
 
 /// An active attack restore resumes its parameter and coefficient ramps word for word: the

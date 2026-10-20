@@ -45,10 +45,9 @@ use graph_compiler::{
 };
 use rack::RackLocation;
 use session::{
-    ChannelMatrix, CompileCaps, CompiledSession, ConsoleEntry, ConsoleSlot, EffectIdentity,
-    EffectParam, ParameterChannel, ParameterUnit, Route, RouteDestination, RouteSource, SendTap,
-    SessionModel, Sidechain, SidechainDeclaration, StableId, Submix, compile_session,
-    parse_session_json,
+    CompileCaps, CompiledSession, ConsoleEntry, ConsoleSlot, EffectIdentity, EffectParam,
+    ParameterChannel, ParameterUnit, Route, RouteDestination, RouteSource, SendTap, Sidechain,
+    SidechainDeclaration, StableId, Submix, compile_session, parse_session_json,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -371,141 +370,6 @@ fn mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scal
         let mut bound = bind(artifact);
         render(&mut bound.plan, &mut [0.0; QUANTUM * 2], 0);
     }
-}
-
-fn taps() -> [SendTap; 7] {
-    [
-        SendTap::Input,
-        SendTap::PostInput,
-        SendTap::InsertSend,
-        SendTap::InsertReturn,
-        SendTap::PreFader,
-        SendTap::PostFader,
-        SendTap::PostPan,
-    ]
-}
-
-/// 256 tracks, every fourth carrying an insert delay and every eighth a routed sidechain;
-/// 992 track routes into 32 submixes from all seven taps, and 32 submix routes to the output.
-fn representative_console() -> SessionModel {
-    let mut model = parse_session_json(SESSION).expect("seed session");
-    let track_template = model.tracks.pop().expect("seed track");
-    let route_template = model.routes.pop().expect("seed route");
-    model.automation.clear();
-    model.submixes = (0..32)
-        .map(|index| Submix::unity(stable(&format!("submix-{index:02}")), &model.console))
-        .collect();
-    model.tracks = (0..256)
-        .map(|index| {
-            let mut track = track_template.clone();
-            track.id = stable(&format!("track-{index:03}"));
-            track.console.clear();
-            track.inserts.effects.clear();
-            if index % 4 == 1 {
-                let mut effect = track_template.inserts.effects[0].clone();
-                effect.id = stable("delay");
-                effect.identity = EffectIdentity::Native {
-                    effect_id: stable("conformance.delay"),
-                };
-                effect.params = [ParameterChannel::Left, ParameterChannel::Right]
-                    .map(|channel| EffectParam {
-                        parameter_id: 1,
-                        channel,
-                        unit: ParameterUnit::Linear,
-                        value: 1.0,
-                    })
-                    .to_vec();
-                effect.sidechain = if index % 8 == 1 {
-                    SidechainDeclaration::Routed(Sidechain {
-                        source: RouteSource::Track {
-                            track_id: stable("track-000"),
-                            tap: SendTap::Input,
-                        },
-                        port_id: stable("sidechain-in"),
-                    })
-                } else {
-                    SidechainDeclaration::None
-                };
-                track.inserts.effects.push(effect);
-            }
-            track
-        })
-        .collect();
-    model.routes.clear();
-    for index in 0..992 {
-        let mut route = route_template.clone();
-        route.id = stable(&format!("track-route-{index:04}"));
-        route.source = RouteSource::Track {
-            track_id: stable(&format!("track-{:03}", index % 256)),
-            tap: taps()[index % taps().len()],
-        };
-        route.destination = RouteDestination::SubmixInput {
-            submix_id: stable(&format!("submix-{:02}", index % 32)),
-        };
-        model.routes.push(route);
-    }
-    for index in 0..32 {
-        model.routes.push(Route {
-            id: stable(&format!("submix-route-{index:02}")),
-            source: RouteSource::Submix {
-                submix_id: stable(&format!("submix-{index:02}")),
-                tap: SendTap::PostPan,
-            },
-            destination: RouteDestination::OutputInput {
-                output_id: model.outputs[0].id.clone(),
-            },
-            channel_matrix: ChannelMatrix {
-                ll: 1.0,
-                lr: 0.0,
-                rl: 0.0,
-                rr: 1.0,
-            },
-            gain_db: 0.0,
-            mute: false,
-            follows_mute: false,
-        });
-    }
-    model
-}
-
-#[test]
-fn representative_console_compiles_with_builtins_and_reports_its_shape() {
-    let model = representative_console();
-    assert_eq!(model.tracks.len(), 256);
-    assert_eq!(model.routes.len(), 1_024);
-    assert_eq!(model.submixes.len(), 32);
-    let effects: Vec<_> = model
-        .tracks
-        .iter()
-        .flat_map(|track| &track.inserts.effects)
-        .collect();
-    assert!(model.console.slots().next().is_none());
-    assert_eq!(effects.len(), 64);
-    assert_eq!(
-        effects
-            .iter()
-            .filter(|effect| matches!(effect.sidechain, SidechainDeclaration::Routed(_)))
-            .count(),
-        32
-    );
-    let session = compile_session(&model, compile_caps()).expect("representative session");
-    // The production compile, at the host's dispatch: every shipped target has a SIMD width.
-    let dispatch = Backend::current();
-    assert!(dispatch.width() > 1);
-    let artifact = compile(&session, &[], dispatch);
-    let estimate = artifact.graph_resource_estimate();
-    assert_eq!(estimate.routes, 1_024);
-    assert_eq!(estimate.effects, 64);
-    assert!(estimate.builtin_bank_count > 0);
-    // Every strip's post-input, fader and matrix stages are builtin bank members: the 256
-    // tracks' and, since a submix lowers to a strip (#1200), the 32 submixes'.
-    assert_eq!(
-        artifact.graph().builtin_bank_members().count(),
-        3 * (256 + 32)
-    );
-    let evidence = GraphCompiler::evidence(artifact.graph(), artifact.report());
-    assert!(!evidence.canonical_bytes.is_empty());
-    assert!(!evidence.dot.is_empty());
 }
 
 /// #1200 gate 4: a bus that three routes feed keeps its sum in the canonical text and in

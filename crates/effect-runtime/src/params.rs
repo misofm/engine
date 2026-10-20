@@ -17,11 +17,8 @@
 //! # Mapping
 //!
 //! The mapping describes how a normalised `[0, 1]` control position becomes a value, which is a
-//! control-plane concern: a fader is linear in its own travel and logarithmic in frequency. The
-//! logarithmic mapping is exact at both ends by construction (`t = 0` returns `minimum` and
-//! `t = 1` returns `maximum`) and uses `math`, never the platform libm (D6).
-
-use math::{exp2f, log2f};
+//! control-plane concern: a fader is linear in its own travel and logarithmic in frequency. This
+//! module only records the mapping; no render or prepare path maps a position.
 
 /// How a normalised `[0, 1]` position maps onto a parameter's range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,54 +174,6 @@ pub fn clamp_to_domain(spec: &ParameterSpec, value: f32) -> f32 {
         }
     };
     normalize_zero(clamped)
-}
-
-/// Maps a normalised position `t` in `[0, 1]` onto the parameter's range.
-///
-/// `t` is clamped to `[0, 1]` first, so a control surface that overshoots cannot leave the domain.
-/// The result is always a valid value for the spec.
-///
-/// Frozen operation order, logarithmic: `lo = log2(minimum)`, `hi = log2(maximum)`,
-/// `exp2(lo + t * (hi - lo))`, with `t == 0` and `t == 1` short-circuited to the exact endpoints
-/// so a mapping round-trip is exact where it is observable.
-#[must_use]
-pub fn map_normalized(spec: &ParameterSpec, t: f32) -> f32 {
-    let t = if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) };
-    if t == 0.0 {
-        return clamp_to_domain(spec, spec.minimum);
-    }
-    if t == 1.0 {
-        return clamp_to_domain(spec, spec.maximum);
-    }
-    let value = match spec.mapping {
-        ParameterMapping::Logarithmic if spec.minimum > 0.0 && spec.maximum > 0.0 => {
-            let lo = log2f(spec.minimum);
-            let hi = log2f(spec.maximum);
-            exp2f(lo + t * (hi - lo))
-        }
-        _ => spec.minimum + t * (spec.maximum - spec.minimum),
-    };
-    clamp_to_domain(spec, value)
-}
-
-/// The normalised position of `value`: the inverse of [`map_normalized`].
-///
-/// Returns `0.0` for a degenerate range (`maximum <= minimum`), where no position is meaningful.
-#[must_use]
-pub fn inverse_map_normalized(spec: &ParameterSpec, value: f32) -> f32 {
-    let value = clamp_to_domain(spec, value);
-    if spec.minimum.is_nan() || spec.maximum.is_nan() || spec.maximum <= spec.minimum {
-        return 0.0;
-    }
-    let t = match spec.mapping {
-        ParameterMapping::Logarithmic if spec.minimum > 0.0 && spec.maximum > 0.0 => {
-            let lo = log2f(spec.minimum);
-            let hi = log2f(spec.maximum);
-            (log2f(value) - lo) / (hi - lo)
-        }
-        _ => (value - spec.minimum) / (spec.maximum - spec.minimum),
-    };
-    if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) }
 }
 
 /// Fills `out` with each spec's default, clamped into its own domain.

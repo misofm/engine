@@ -27,8 +27,7 @@ resource row belongs to exactly one class:
   it is red and raises the budget with its reason. The gate prints each row's headroom as a live
   report. A zero row is red too, because a row that stops being charged is a decrease a ceiling
   cannot see; that the rows charge every allocation is capi's allocator oracle
-  (`crates/capi/tests/resource_lifecycle.rs`), and the native budgets of this fixture are
-  `hosts/host-web/tests/retained_ceilings.rs`.
+  (`crates/capi/tests/resource_lifecycle.rs`).
 
 Everything else in the printed document -- the status snapshots, the result transcripts, the
 SET_CONTROL, observation and automation timelines and the four PCM digests, which

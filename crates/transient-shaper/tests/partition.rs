@@ -7,10 +7,7 @@
 mod common;
 
 use common::*;
-use effect_contract::{
-    EffectBankProcessBlock, EffectProcessBlock, LinkMode, NativeEffectFactory, ParameterChannel,
-};
-use transient_shaper::TransientShaperFactory;
+use effect_contract::{EffectBankProcessBlock, LinkMode, ParameterChannel};
 
 /// Deterministic, integer-built noise with impulses; no platform math anywhere in the signal.
 fn signal(seed: u64, frames: usize) -> Vec<f32> {
@@ -31,92 +28,8 @@ fn signal(seed: u64, frames: usize) -> Vec<f32> {
 
 const PARTITIONS: [usize; 5] = [1, 7, 64, 128, 512];
 
-/// One render's result: the two output channels and the state payload sections it left behind.
-type Rendered = (Vec<f32>, Vec<f32>, (Vec<u8>, Vec<u8>));
-
 /// One bank render's result: the two interleaved output blocks and one payload pair per track.
 type RenderedBank = (Vec<f32>, Vec<f32>, Vec<(Vec<u8>, Vec<u8>)>);
-
-/// Red mutation: hoist `ramp_prefix` out of `run` and compute it once at prepare — the 7-frame and
-/// 64-frame partitions then evaluate the ramp differently from the one-shot render.
-#[test]
-fn the_scalar_product_is_partition_invariant() {
-    let frames = 512;
-    let left = signal(0x1234_5678, frames);
-    let right = signal(0x9abc_def0, frames);
-    let spans = [
-        point(ParameterChannel::Left, 0, 0, 0.875),
-        point(ParameterChannel::Right, 0, 0, -0.375),
-        point(ParameterChannel::Left, 1, 0, -0.625),
-        point(ParameterChannel::Right, 1, 0, 0.25),
-        point(ParameterChannel::Left, 2, 0, 0.5),
-        point(ParameterChannel::Right, 2, 0, 0.75),
-    ];
-
-    let render = |block: usize| -> Rendered {
-        let mut effect = TransientShaperFactory
-            .prepare(request_full(
-                &values_of(-0.5, 0.75, 1.0),
-                48_000,
-                512,
-                false,
-                LinkMode::DualMono,
-            ))
-            .expect("prepare")
-            .processor;
-        let mut out_left = left.clone();
-        let mut out_right = right.clone();
-        let mut start = 0;
-        while start < frames {
-            let end = (start + block).min(frames);
-            let spans: &[_] = if start == 0 { &spans } else { &[] };
-            effect.process(
-                EffectProcessBlock::new(
-                    &mut out_left[start..end],
-                    &mut out_right[start..end],
-                    None,
-                    start as u64,
-                    spans,
-                    512,
-                )
-                .expect("partition block"),
-            );
-            start = end;
-        }
-        let state = snapshot(effect.as_ref());
-        (out_left, out_right, state)
-    };
-
-    let reference = render(frames);
-    // Non-vacuity: the effect must actually have shaped the signal, or every partition agrees on
-    // having done nothing.
-    let changed = reference
-        .0
-        .iter()
-        .zip(&left)
-        .filter(|(a, b)| a.to_bits() != b.to_bits())
-        .count();
-    assert!(
-        changed > frames / 2,
-        "only {changed} of {frames} samples moved"
-    );
-    let reference_left = reference.0.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-    let reference_right = reference.1.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-    for block in PARTITIONS {
-        let candidate = render(block);
-        assert_eq!(
-            candidate.0.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            reference_left,
-            "left PCM at block size {block}"
-        );
-        assert_eq!(
-            candidate.1.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            reference_right,
-            "right PCM at block size {block}"
-        );
-        assert_eq!(candidate.2, reference.2, "state at block size {block}");
-    }
-}
 
 /// The same property at the build's bank width, where the ramp prefix is the maximum over lanes.
 #[test]

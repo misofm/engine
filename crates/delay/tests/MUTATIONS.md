@@ -32,8 +32,8 @@ Mutations are listed in the order the gates appear in the issue-#93 plan's eval 
 | M14 | G5 vacuity | `corpus::run_case` reports zeros instead of what it rendered | `corpus_cases_are_finite_distinct_and_alive` | `case dual_mono is silent` -- the guard that stops a vacuous digest passing |
 | M15 | E10 | `bind_homogeneous_bank` answers `Ok(None)` before validating its members | `bank_fallback_validates_every_member` | a malformed member is accepted instead of rejected |
 | M16 | E3 oracle | the oracle's `damping_coefficient` returns `G` instead of `G / (1 + G)` | `damped_matrix_tail_matches_reference_oracle` | worst deviation 5.2e-2 -- the oracle is independent of the engine's mapping |
-| M17 | #1278 D2a | `read_carried_ramp` re-derives the step from `(current, target, remaining)` through `LinearRamp::set_target` instead of carrying the read step (the pre-#1278 delay restore) | `a_mid_ramp_restore_continues_bit_identically` | `channel 1 frame 23: restored twin diverged`, `left: 1028197727` / `right: 1028197726` -- one ulp, on the first continued frame |
-| M17b | #1278 D2a | restore re-derives only the cross-feedback ramp's step (`self.cross` rebuilt with `set_target`); feedback and cross reach the output only through the ring, after the test's render window | `a_mid_ramp_restore_continues_bit_identically` (its restored-snapshot assertion) | the restored twin's snapshot differs from the payload it restored -- the render alone stayed green under this edit and under a feedback-only re-derivation |
+| M17 | #1278 D2a | `read_carried_ramp` re-derives the step from `(current, target, remaining)` through `LinearRamp::set_target` instead of carrying the read step (the pre-#1278 delay restore) | `a_mid_ramp_restore_continues_bit_identically` (deleted by TA4) | `channel 1 frame 23: restored twin diverged`, `left: 1028197727` / `right: 1028197726` -- one ulp, on the first continued frame |
+| M17b | #1278 D2a | restore re-derives only the cross-feedback ramp's step (`self.cross` rebuilt with `set_target`); feedback and cross reach the output only through the ring, after the test's render window | `a_mid_ramp_restore_continues_bit_identically` (deleted by TA4) (its restored-snapshot assertion) | the restored twin's snapshot differs from the payload it restored -- the render alone stayed green under this edit and under a feedback-only re-derivation |
 | M19 | #1278 D2a | `read_carried_ramp` drops its `ramp_path_inside` clause (and with it the `remaining <= 64` bound, the finite-step check and the settled-step check) | `a_carried_ramp_is_refused_unless_its_whole_path_is_valid` | `NaN step`: `left: Ok(())` / `right: Err("effect.state.parameter")` -- every other delay target, the scale-20 differential included, stays green |
 
 ## Two things the table is careful about
@@ -56,3 +56,9 @@ left `M7c`, `M9` and `M10` alive, and each survivor was a real gap rather than a
 **Two mutations fail by panicking rather than by asserting.** `M7b` underflows
 `transition_remaining` and `M15` reaches the test's own `panic!`. Both are unambiguous reds, and
 both are recorded as what they are rather than dressed up as assertion failures.
+
+## TA4 deletions
+
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
+
+- `a_mid_ramp_restore_continues_bit_identically`: no plausible same-crate KEEP catcher recorded

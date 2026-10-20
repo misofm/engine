@@ -41,7 +41,7 @@ done
 # The rows still above 1 are not laziness, they are one blocked change. `effect-contract`
 # is `std` and control-plane; `effect-runtime` is `no_std` and lane-generic;
 # neither may depend on the other, so each defines its own `normalize_zero`, `is_negative_zero`,
-# parameter-domain predicate, mapping pair and `StatePayloadError`, and every effect crate carries
+# parameter-domain predicate and `StatePayloadError`, and every effect crate carries
 # a small `state_error` bridge between the two error types. Collapsing them needs one edge -
 # `effect-runtime` depending on `effect-contract`, which requires making the contract `no_std`
 # (its only `std` uses are `BTreeMap`, `BTreeSet` and `Arc`, all of them `alloc`) - and then a
@@ -66,8 +66,8 @@ fn\s+advance_ramps\(                     1  95
 fn\s+check_block[(<]                     1  95
 fn\s+normalize_zero\(                    2  95
 fn\s+is_negative_zero\(                  2  95
-fn\s+map_normalized\(                    2  95
-fn\s+inverse_map_normalized\(            2  95
+fn\s+map_normalized\(                    0  95
+fn\s+inverse_map_normalized\(            0  95
 fn\s+parameter_value_valid\(             3  95
 fn\s+validate_state_lengths\(            2  95
 fn\s+state_error\(                       6  95

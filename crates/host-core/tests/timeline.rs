@@ -631,7 +631,7 @@ fn a_latent_successor_keeps_the_newest_entries_in_a_history_of_its_own_size() {
 /// Test value: red if a discontinuity successor moves the sources and not the timeline (it
 /// restarts it, or steps it back with the source-read clock). The plan has no latency, so its
 /// history holds one entry and no overlap: the reader's overlap rule is the `source` unit tests'
-/// (`a_node_block_reports_the_steps_of_a_source_read_step_back`).
+/// (`a_node_block_reports_the_step_of_a_seek_inside_it_or_at_its_first_sample`).
 #[test]
 fn a_discontinuity_keeps_the_sources_and_the_timeline_in_step() {
     const OFFSET: u64 = 3 * Q;

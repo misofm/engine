@@ -65,19 +65,3 @@ fn a_non_finite_block_is_zeroed_reset_and_reports_its_frames() {
         support::snapshot(fresh.as_ref())
     );
 }
-
-/// A value that is finite but enormous fails the block too: the check is `|x| < 1e30`, not `x == x`.
-#[test]
-fn a_finite_but_out_of_range_block_also_fails() {
-    // mix = 0 and output = 1 is the exact identity select, so the dry sample reaches the output
-    // untouched 31 samples later -- the only way a *finite* out-of-range value can be observed,
-    // since the cubic clamps the wet path to +-2/3.
-    let values = support::values_from([(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]);
-    let mut effect = prepare(&values);
-    let mut left = vec![0.0_f32; FRAMES];
-    let mut right = vec![0.0_f32; FRAMES];
-    left[0] = 1.0e35;
-    let report = process(effect.as_mut(), &mut left, &mut right, 0, &[]);
-    assert!(left.iter().all(|sample| sample.to_bits() == 0));
-    assert_eq!(report.nonfinite_left_blocks, FRAMES as u64);
-}

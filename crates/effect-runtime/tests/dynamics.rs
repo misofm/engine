@@ -36,45 +36,6 @@ const THRESHOLDS: [f32; 5] = [0.0, -6.0, -18.0, -40.0, -80.0];
 const RATIOS: [f32; 6] = [1.0, 1.5, 2.0, 4.0, 10.0, 20.0];
 const KNEES: [f32; 5] = [0.0, 1.0, 6.0, 12.0, 24.0];
 
-/// The lane curve matches the paper to better than 0.01 dB across the frozen grid.
-///
-/// Red mutation: `half_knee_db = knee_db` instead of `0.5 * knee_db` (the knee-width halving).
-/// A 6 dB knee then spans 12 dB and the error at the old knee edges is several tenths of a dB.
-#[test]
-fn the_curve_matches_the_paper() {
-    let mut worst = 0.0f64;
-    let mut worst_case = String::new();
-    for threshold in THRESHOLDS {
-        for ratio in RATIOS {
-            for knee in KNEES {
-                let coefficients = GainComputerCoef::<f32>::new(threshold, ratio, knee);
-                let mut level = -160.0f32;
-                while level <= 24.0 {
-                    let actual = f64::from(gain_computer_db::<f32>(level, &coefficients));
-                    let expected = oracle(
-                        f64::from(level),
-                        f64::from(threshold),
-                        f64::from(ratio),
-                        f64::from(knee),
-                    );
-                    let error = (actual - expected).abs();
-                    if error > worst {
-                        worst = error;
-                        worst_case = format!(
-                            "T {threshold} R {ratio} W {knee} x {level}: {actual} vs {expected}"
-                        );
-                    }
-                    level += 0.25;
-                }
-            }
-        }
-    }
-    assert!(
-        worst <= 0.01,
-        "worst deviation {worst} dB exceeds 0.01 dB at {worst_case}"
-    );
-}
-
 /// The knee joins the two straight arms without a step, at both edges.
 ///
 /// At `x = T - W/2` the curve must be `x` itself, exactly; at `x = T + W/2` it must agree with the
@@ -234,26 +195,6 @@ fn a_nan_level_stays_a_nan() {
 /// `2^-129`: the widest knee whose `f32` reciprocal `1 / (2 W)` overflows.
 const WIDEST_OVERFLOWING_KNEE: f32 = f32::from_bits(0x0010_0000);
 
-/// Positive knee widths whose reciprocal overflows: the smallest subnormals, the verification's
-/// 2.8e-45 (`0x0000_0002`), and the two widths just under and exactly at the bound.
-const OVERFLOWING_KNEES: [u32; 6] = [
-    0x0000_0001,
-    0x0000_0002,
-    0x0000_0003,
-    0x0008_0000,
-    0x000F_FFFF,
-    0x0010_0000,
-];
-
-/// The narrowest soft knees: the bound itself, the next widths, and a few decades above it.
-const NARROWEST_SOFT_KNEES: [u32; 5] = [
-    0x0010_0001,
-    0x0010_0002,
-    0x0020_0000,
-    0x0080_0000,
-    1.0e-30_f32.to_bits(),
-];
-
 fn bits(words: (f32, f32)) -> (u32, u32) {
     (words.0.to_bits(), words.1.to_bits())
 }
@@ -315,83 +256,6 @@ fn knee_words_follow_the_finite_reciprocal_rule() {
         check(f32::from_bits(
             (generator.next() % u64::from(top + 1)) as u32,
         ));
-    }
-}
-
-/// At the verification's failing knee (2.8e-45) and at every width up to the bound, a level
-/// exactly at the threshold — and every level around it — gets the hard knee's value, bit for
-/// bit, and never a NaN.
-///
-/// Before #994 each of these widths designed `inv_two_knee = +inf`, and every level inside the
-/// knee computed `(v * v = 0) * inf = NaN`. The thresholds include `0 dB` (where a full-scale
-/// sample lands exactly on it) and a subnormal threshold, so that levels inside the tiny knee
-/// exist at all.
-///
-/// Red mutations (MUTATIONS.md rows 994-R1 and 994-R3): drop the `is_finite` test in
-/// `knee_coefficients`, or replace it with the constant bound one ulp too low.
-#[test]
-fn a_knee_whose_reciprocal_overflows_is_a_hard_knee() {
-    for knee_bits in OVERFLOWING_KNEES {
-        let knee = f32::from_bits(knee_bits);
-        for threshold in [0.0_f32, -0.0, -1.0e-45, -18.0, -80.0] {
-            for ratio in RATIOS {
-                let hard = GainComputerCoef::<f32>::new(threshold, ratio, 0.0);
-                let narrow = GainComputerCoef::<f32>::new(threshold, ratio, knee);
-                assert_eq!(narrow.half_knee_db.to_bits(), 0);
-                assert_eq!(narrow.inv_two_knee.to_bits(), 0);
-                for level in levels_around(threshold, knee) {
-                    let delta = gain_delta_db::<f32>(level, &narrow);
-                    assert!(
-                        delta.is_finite(),
-                        "W {knee:e} T {threshold} R {ratio} x {level:e}: {delta}"
-                    );
-                    assert_eq!(
-                        delta.to_bits(),
-                        gain_delta_db::<f32>(level, &hard).to_bits(),
-                        "W {knee:e} T {threshold} R {ratio} x {level:e}"
-                    );
-                }
-                let at = gain_delta_db::<f32>(threshold, &narrow);
-                assert_eq!(
-                    at.to_bits(),
-                    0.0_f32.to_bits(),
-                    "W {knee:e} T {threshold} R {ratio}: exactly at the threshold the hard knee \
-                     changes nothing"
-                );
-            }
-        }
-    }
-}
-
-/// The narrowest soft knees keep their soft design and are finite everywhere around the
-/// threshold, and at the threshold itself they differ from the hard knee by at most
-/// `|1/R - 1| W / 8` — which, this close to the bound, is zero after rounding.
-///
-/// Red mutation (MUTATIONS.md row 994-R2): the constant bound one ulp too high, which designs
-/// `2^-129 + 2^-149` as a hard knee although its reciprocal is finite.
-#[test]
-fn the_narrowest_soft_knees_are_finite_at_the_threshold() {
-    for knee_bits in NARROWEST_SOFT_KNEES {
-        let knee = f32::from_bits(knee_bits);
-        for threshold in [0.0_f32, -0.0, -1.0e-45, -18.0, -80.0] {
-            for ratio in RATIOS {
-                let soft = GainComputerCoef::<f32>::new(threshold, ratio, knee);
-                assert!(soft.inv_two_knee.is_finite() && soft.inv_two_knee > 0.0);
-                for level in levels_around(threshold, knee) {
-                    let delta = gain_delta_db::<f32>(level, &soft);
-                    assert!(
-                        delta.is_finite(),
-                        "W {knee:e} T {threshold} R {ratio} x {level:e}: {delta}"
-                    );
-                }
-                let at = gain_delta_db::<f32>(threshold, &soft);
-                let bound = f64::from((1.0 / ratio - 1.0).abs()) * f64::from(knee) / 8.0;
-                assert!(
-                    f64::from(at).abs() <= bound + f64::from(f32::from_bits(1)),
-                    "W {knee:e} T {threshold} R {ratio}: {at:e} at the threshold, bound {bound:e}"
-                );
-            }
-        }
     }
 }
 

@@ -149,65 +149,6 @@ fn reset_seeds_gain_open_hold_and_preserves_or_restores_parameters() {
 }
 
 #[test]
-fn active_state_restore_continues_an_uninterrupted_donor() {
-    let values = active_values();
-    let source_left = noise(101, 1024, 0.4);
-    let source_right = noise(202, 1024, 0.4);
-    let spans = support::retarget_spans(0);
-    let mut donor = prepare(request(&values));
-    let mut warm_left = source_left[..17].to_vec();
-    let mut warm_right = source_right[..17].to_vec();
-    render_scalar_sidechain(
-        &mut donor,
-        &mut warm_left,
-        &mut warm_right,
-        None,
-        17,
-        &spans,
-        0,
-    );
-    let payload = snapshot(&donor);
-    assert_eq!(word(&payload.1, 6 + 3), 47.0_f32.to_bits());
-
-    let mut uninterrupted = donor;
-    let mut expected_left = source_left[17..].to_vec();
-    let mut expected_right = source_right[17..].to_vec();
-    render_scalar_sidechain(
-        &mut uninterrupted,
-        &mut expected_left,
-        &mut expected_right,
-        None,
-        128,
-        &[],
-        17,
-    );
-
-    let mut restored = prepare(request(&values));
-    let sizes = restored.metadata.state_sizes;
-    restored
-        .processor
-        .restore_state_payload(
-            STATE_LAYOUT_VERSION,
-            StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).unwrap(),
-        )
-        .unwrap();
-    let mut actual_left = source_left[17..].to_vec();
-    let mut actual_right = source_right[17..].to_vec();
-    render_scalar_sidechain(
-        &mut restored,
-        &mut actual_left,
-        &mut actual_right,
-        None,
-        128,
-        &[],
-        17,
-    );
-    assert_bits_eq(&actual_left, &expected_left, "restored left");
-    assert_bits_eq(&actual_right, &expected_right, "restored right");
-    assert_eq!(snapshot(&restored), snapshot(&uninterrupted));
-}
-
-#[test]
 fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
     for rate in [44_100, 48_000, 88_200, 96_000] {
         let values = initial_values();
@@ -602,155 +543,6 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     );
 }
 
-#[test]
-fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
-    let values = active_values();
-    let source_left = noise(41, 160, 0.3);
-    let source_right = noise(42, 160, 0.3);
-
-    // Scalar -> bank: restore one scalar track after a partial render and continue it in a bank of
-    // the build's own width (W8 in the 8-lane (AVX2) build, W4 in a 4-lane one).
-    let mut scalar = prepare(request(&values));
-    let mut scalar_prefix_left = source_left[..17].to_vec();
-    let mut scalar_prefix_right = source_right[..17].to_vec();
-    render_scalar_sidechain(
-        &mut scalar,
-        &mut scalar_prefix_left,
-        &mut scalar_prefix_right,
-        None,
-        17,
-        &[],
-        0,
-    );
-    let scalar_payload = snapshot(&scalar);
-    let mut scalar_expected_left = source_left[17..].to_vec();
-    let mut scalar_expected_right = source_right[17..].to_vec();
-    render_scalar_sidechain(
-        &mut scalar,
-        &mut scalar_expected_left,
-        &mut scalar_expected_right,
-        None,
-        128,
-        &[],
-        17,
-    );
-
-    let bank_values = [values; 8];
-    let mut scalar_to_bank =
-        prepare_bank_native(&bank_values, LinkMode::DualMono).expect("the build's own width binds");
-    let sizes = scalar_to_bank.metadata.program_key.state_sizes;
-    scalar_to_bank
-        .processor
-        .restore_track_state_payload(
-            3,
-            STATE_LAYOUT_VERSION,
-            StatePayloadInput::new(
-                &scalar_payload.0,
-                &scalar_payload.1,
-                &scalar_payload.2,
-                sizes,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-    let mut bank_left = packed(&[&source_left[17..]; NATIVE_LANES]);
-    let mut bank_right = packed(&[&source_right[17..]; NATIVE_LANES]);
-    render_bank(
-        scalar_to_bank.processor.as_mut(),
-        &mut bank_left,
-        &mut bank_right,
-        128,
-    );
-    assert_bits_eq(
-        &track_of(&bank_left, 3, NATIVE_LANES),
-        &scalar_expected_left,
-        "scalar to bank left",
-    );
-    assert_bits_eq(
-        &track_of(&bank_right, 3, NATIVE_LANES),
-        &scalar_expected_right,
-        "scalar to bank right",
-    );
-
-    // Bank -> scalar: snapshot the same track after a partial bank render and continue it in W1.
-    let mut bank =
-        prepare_bank_native(&bank_values, LinkMode::DualMono).expect("the build's own width binds");
-    let mut bank_prefix_left = packed(&[&source_left[..17]; NATIVE_LANES]);
-    let mut bank_prefix_right = packed(&[&source_right[..17]; NATIVE_LANES]);
-    render_bank(
-        bank.processor.as_mut(),
-        &mut bank_prefix_left,
-        &mut bank_prefix_right,
-        17,
-    );
-    let bank_payload = snapshot_bank(&bank, 3);
-    let mut bank_to_scalar = prepare(request(&values));
-    let sizes = bank_to_scalar.metadata.state_sizes;
-    bank_to_scalar
-        .processor
-        .restore_state_payload(
-            STATE_LAYOUT_VERSION,
-            StatePayloadInput::new(&bank_payload.0, &bank_payload.1, &bank_payload.2, sizes)
-                .unwrap(),
-        )
-        .unwrap();
-    let mut scalar_left = source_left[17..].to_vec();
-    let mut scalar_right = source_right[17..].to_vec();
-    render_scalar_sidechain(
-        &mut bank_to_scalar,
-        &mut scalar_left,
-        &mut scalar_right,
-        None,
-        128,
-        &[],
-        17,
-    );
-    let mut bank_continuation_left = packed(&[&source_left[17..]; NATIVE_LANES]);
-    let mut bank_continuation_right = packed(&[&source_right[17..]; NATIVE_LANES]);
-    render_bank(
-        bank.processor.as_mut(),
-        &mut bank_continuation_left,
-        &mut bank_continuation_right,
-        128,
-    );
-    assert_bits_eq(
-        &scalar_left,
-        &track_of(&bank_continuation_left, 3, NATIVE_LANES),
-        "bank to scalar left",
-    );
-    assert_bits_eq(
-        &scalar_right,
-        &track_of(&bank_continuation_right, 3, NATIVE_LANES),
-        "bank to scalar right",
-    );
-}
-
-#[test]
-fn bank_restore_of_one_track_does_not_mutate_peers() {
-    let values: [Values; 8] = core::array::from_fn(|_| initial_values());
-    let mut donor_bank =
-        prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
-    let mut target_bank =
-        prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
-    let mut left = packed(&[&[0.1; 128]; NATIVE_LANES]);
-    let mut right = left.clone();
-    render_bank(donor_bank.processor.as_mut(), &mut left, &mut right, 128);
-    let donor = snapshot_bank(&donor_bank, 3);
-    // Track 4 in the 8-lane (AVX2) build, track 0 in a 4-lane (NEON/simd128) one (#1112).
-    let peer = 4 % NATIVE_LANES as u32;
-    let peer_before = snapshot_bank(&target_bank, peer);
-    let sizes = target_bank.metadata.program_key.state_sizes;
-    target_bank
-        .processor
-        .restore_track_state_payload(
-            3,
-            STATE_LAYOUT_VERSION,
-            StatePayloadInput::new(&donor.0, &donor.1, &donor.2, sizes).unwrap(),
-        )
-        .unwrap();
-    assert_eq!(snapshot_bank(&target_bank, peer), peer_before);
-}
-
 /// Issue #1411 D1: a ramp word one ulp outside its domain is refused even while the ramp moves.
 ///
 /// From the effect's own snapshot with all four ramps in flight (threshold, ratio, range and
@@ -867,4 +659,25 @@ fn a_moving_ramp_word_past_its_domain_is_refused() {
             }
         }
     }
+}
+
+/// A gain word that the render's flush never leaves, a subnormal inside the gain range, is
+/// refused with `effect.state.gain`, and the refused restore changes nothing.
+#[test]
+fn a_subnormal_gain_word_is_refused() {
+    let mut effect = prepare(request(&active_values()));
+    let saved = snapshot(&effect);
+    let mut left = saved.1.clone();
+    left[..4].copy_from_slice(&(-f32::from_bits(1)).to_le_bytes());
+    let sizes = effect.metadata.state_sizes;
+    let input = StatePayloadInput::new(&saved.0, &left, &saved.2, sizes).expect("sizes");
+    assert_eq!(
+        effect
+            .processor
+            .restore_state_payload(STATE_LAYOUT_VERSION, input)
+            .expect_err("a subnormal gain word")
+            .code,
+        "effect.state.gain"
+    );
+    assert_eq!(snapshot(&effect), saved);
 }

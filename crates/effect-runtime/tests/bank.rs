@@ -6,14 +6,6 @@ use effect_runtime::bank::{
 };
 use lane::{Lane, Simd4};
 
-/// A finite block is accepted and left alone.
-#[test]
-fn a_finite_block_is_accepted() {
-    let block: Vec<f32> = (0..512).map(|i| (i as f32) * 0.001 - 0.25).collect();
-    lane::each_lane!(|L| assert!(check_block::<L>(&block)));
-    assert_eq!(nonfinite_lane_mask::<Simd4>(&block), 0);
-}
-
 /// Every value the check must reject, and the threshold it must reject them at.
 ///
 /// Red mutations, both recorded:

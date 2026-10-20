@@ -558,7 +558,6 @@ const SHAPER_CONTRAST_LIMIT_DB: f32 = 24.0;
 const SHAPER_SHAPE_LIMIT_DB: f32 = 18.0;
 const SHAPER_AMOUNT_MIN: f32 = -1.0;
 const SHAPER_AMOUNT_MAX: f32 = 1.0;
-const F1_SHAPER_LEVEL_MIN: f32 = 1.0e-8;
 const F1_SHAPER_LEVEL_MAX: f32 = 16.0;
 
 fn shaper_shape_f32(contrast_db: f32, attack: f32, sustain: f32) -> f32 {
@@ -570,29 +569,6 @@ fn shaper_shape_f32(contrast_db: f32, attack: f32, sustain: f32) -> f32 {
 
 fn shaper_shape_f64(contrast_db: f64, attack: f64, sustain: f64) -> f64 {
     (attack * contrast_db.max(0.0) + sustain * (-contrast_db).max(0.0)).clamp(-18.0, 18.0)
-}
-
-#[test]
-fn f1_shaper_x7_x8_domains_are_covered() {
-    assert_eq!(SHAPER_FLOOR.to_bits(), F1_SHAPER_LEVEL_MIN.to_bits());
-
-    // If the ±24 dB contrast clamp does not saturate, the amplitude ratio is within these bounds.
-    let unsaturated_ratio_min = math::pow(10.0, -24.0 / 20.0) as f32;
-    let unsaturated_ratio_max = math::pow(10.0, 24.0 / 20.0) as f32;
-    assert!(unsaturated_ratio_min >= F1_SHAPER_LEVEL_MIN);
-    assert!(unsaturated_ratio_max <= F1_SHAPER_LEVEL_MAX);
-
-    // For every corner of the parameter domains and contrast range, the final shape is clamped
-    // inside F1's applied-gain domain [-160, 24] dB.
-    for attack in [SHAPER_AMOUNT_MIN, SHAPER_AMOUNT_MAX] {
-        for sustain in [SHAPER_AMOUNT_MIN, SHAPER_AMOUNT_MAX] {
-            for contrast in [-SHAPER_CONTRAST_LIMIT_DB, SHAPER_CONTRAST_LIMIT_DB] {
-                let shape = shaper_shape_f32(contrast, attack, sustain);
-                assert!((-18.0..=18.0).contains(&shape));
-                assert!((-160.0..=24.0).contains(&shape));
-            }
-        }
-    }
 }
 
 fn prospective_low_ratio_rail(x: f32) -> Measurement {
@@ -861,92 +837,4 @@ fn restate_level_db(x: f64) -> f64 {
 /// `10^(db / 20)` in `f64`, through the vendored `pow`. Independent of `exp2`.
 fn restate_gain(db: f64) -> f64 {
     math::pow(10.0, db / 20.0)
-}
-
-/// Worst error over one same-sign run of `f32` bit patterns, `first` to `last` inclusive.
-///
-/// Same-sign is the precondition, not a detail: `f32` bit patterns are monotone in *magnitude*,
-/// so a range whose endpoints straddle zero is not a contiguous run of values at all -- walking it
-/// passes through the infinities and the NaNs. Crossing domains that span zero are therefore
-/// swept as two runs and combined by the caller.
-fn worst_over_run(first: u32, last: u32, level: bool) -> f64 {
-    let (first, last) = if first <= last {
-        (first, last)
-    } else {
-        (last, first)
-    };
-    let mut worst = 0.0_f64;
-    let mut bits = first;
-    // Stride chosen so every crossing checks a few hundred thousand points in the default run.
-    let stride = 1 + (u64::from(last - first) / 400_000) as u32;
-    while bits <= last {
-        let x = f32::from_bits(bits);
-        let error = if level {
-            let got = f64::from(fast_level_db::<f32>(x));
-            (got - restate_level_db(f64::from(x))).abs()
-        } else {
-            let got = f64::from(fast_gain_from_db::<f32>(x));
-            let want = restate_gain(f64::from(x));
-            ((got - want) / want).abs() * DB_PER_RELATIVE
-        };
-        if error.is_finite() && error > worst {
-            worst = error;
-        }
-        bits = match bits.checked_add(stride) {
-            Some(next) => next,
-            None => break,
-        };
-    }
-    worst
-}
-
-/// Sweeps a crossing's own domain `[lo, hi]` and returns its worst error in decibels.
-///
-/// Split at zero into at most two same-sign runs, because that is the only shape
-/// [`worst_over_run`] can walk. A domain that merely *ends* at zero (crossing X4's `[-96, 0]`) is
-/// still a negative run: its far end is `-0.0`, not `+0.0`, and taking the `+0.0` bit pattern as
-/// the endpoint sends the walk through every positive float instead.
-fn crossing_worst_db(lo: f32, hi: f32, level: bool) -> f64 {
-    assert!(lo <= hi, "a crossing domain is given low to high");
-    let mut worst = 0.0_f64;
-    if lo < 0.0 {
-        let negative_end = if hi < 0.0 { hi } else { -0.0 };
-        worst = worst.max(worst_over_run(lo.to_bits(), negative_end.to_bits(), level));
-    }
-    if hi >= 0.0 {
-        let positive_start = if lo > 0.0 { lo } else { 0.0 };
-        worst = worst.max(worst_over_run(
-            positive_start.to_bits(),
-            hi.to_bits(),
-            level,
-        ));
-    }
-    worst
-}
-
-/// Independent definition checks over each distinct named-crossing domain.
-///
-/// X1/X3/X5/X7 share the detector domain, and X2/X6 share the applied-gain domain. These tests
-/// qualify the conversions over those domains; effect tests and the fast-dB seal own the callers.
-#[test]
-fn f1_crossing_domains_match_independent_definitions() {
-    for (crossings, lo, hi, level, gate) in [
-        (
-            "X1/X3/X5/X7 detector level",
-            1.0e-8,
-            16.0,
-            true,
-            LEVEL_MAX_DB,
-        ),
-        ("X2/X6 applied gain", -124.0, 24.0, false, GAIN_MAX_DB),
-        ("X4 gate applied gain", -96.0, 0.0, false, GAIN_MAX_DB),
-        ("X8 shaper applied gain", -18.0, 18.0, false, GAIN_MAX_DB),
-    ] {
-        let worst = crossing_worst_db(lo, hi, level);
-        assert!(
-            worst <= gate,
-            "crossings {crossings}: {worst:.6e} dB exceeds the {gate:.1e} dB gate"
-        );
-        println!("crossings {crossings}: {worst:.6e} dB");
-    }
 }

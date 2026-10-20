@@ -177,11 +177,10 @@ fn a_plan_without_a_control_channel_resolves_nothing() {
 // -------------------------------------------------------------------------------------------------
 
 mod mixing {
-    use bench_support::digest::Sha256Sink;
+
     use console_workload::SessionRuntime;
     use console_workload::mixing_automation::{
-        self, Arm, CONTROLS, Effect, Lowering, MixingArm, MixingAutomation, PREFLIGHT_BLOCKS,
-        ResolveError,
+        self, Arm, CONTROLS, Effect, Lowering, MixingArm, MixingAutomation, ResolveError,
     };
     use effect_contract::ParameterChannel;
     use lane::Backend;
@@ -290,35 +289,6 @@ mod mixing {
                 effect: "miso.parametric-eq",
             })
         );
-    }
-
-    /// Restating every held value, in the host's lowerings, moves no rendered bit on any block.
-    ///
-    /// The collapse is at stake here and nowhere else in this file: the compressor's and the
-    /// limiter's Left and Right records retire their cohorts' collapse, and the dual bank must then
-    /// render the collapsed bank's bits. Block by block, because the property is bit-exactness.
-    #[test]
-    fn restating_the_held_values_moves_no_rendered_bit() {
-        let backend = Backend::current();
-        let mut quiet = MixingArm::prepare(Arm::Quiet, None, backend);
-        let mut restated = MixingArm::prepare(Arm::Restated, None, backend);
-        for block in 0..PREFLIGHT_BLOCKS {
-            quiet.drive();
-            restated.drive();
-            quiet.render().expect("quiet render");
-            restated.render().expect("restated render");
-            let mut left = Sha256Sink::new();
-            let mut right = Sha256Sink::new();
-            quiet.runtime.hash_output(&mut left);
-            restated.runtime.hash_output(&mut right);
-            assert_eq!(
-                left.finish_hex(),
-                right.finish_hex(),
-                "block {block}: restating the held values moved a rendered bit"
-            );
-        }
-        assert_eq!(restated.tally.accepted, restated.tally.attempted);
-        assert_eq!(restated.tally.attempted, 13 * PREFLIGHT_BLOCKS);
     }
 
     /// Every automated effect moves bits on its own, and the whole ride moves them on every

@@ -28,9 +28,7 @@
 //! lane's `-0.0` as `+0.0` while another lane's matrix ramps, where that lane's own
 //! `MatrixBuiltins` passes the `-0.0` through (first found at eight lanes): with any lane
 //! ramping, the bank runs the ramp arithmetic on every lane, and `1 * -0.0 + 0 * x` is `+0.0`.
-//! The fixed-input gate beside it
-//! (`stage.rs::banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections`) never feeds
-//! a signed zero. Until #1072 lands, the per-PR test compares the two zeros as one value on a
+//! Until #1072 lands, the per-PR test compares the two zeros as one value on a
 //! block where a matrix ramp may be in flight; the ignored test below is the reproducer.
 
 use builtins::{

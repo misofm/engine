@@ -4,7 +4,7 @@
 | `check-web-audioworklet-callgraph.py --self-test` (a)-(f) | synthetic disassembly per case | each case is the red mutation of one rule; the runner fails if any escapes |
 | `test-web-audioworklet.mjs` trap-containment test (F5) | remove the `try` around `miso_engine_web_v1_render` in `process()` | the `process()` call throws instead of returning `true` |
 | `tests::facade_source_rules_reach_the_browser_host` (F1) | delete the `end_of_region != (end == region_end)` check from `host_core::SourceControlSet::submit` | the region-end submission returns `RESULT_BACKPRESSURE` (6) instead of `RESULT_INVALID_ARGUMENT` (1) |
-| `tests::default_ring_covers_stall_tolerance` (F3) | `+ 2` -> `+ 1` in `default_source_ring_frames` | 48 000/128 yields 4 992 where 5 120 is required |
+| `tests::default_ring_covers_stall_tolerance` (deleted by TA4) (F3) | `+ 2` -> `+ 1` in `default_source_ring_frames` | 48 000/128 yields 4 992 where 5 120 is required |
 | `tests::ring_prefill_survives_stall` (F3) | `SOURCE_STALL_TOLERANCE_MS = 50` (a 21-quantum ring) | the ring runs dry mid-stall and a starved quantum renders zeros instead of the ramp |
 | `test-web-audioworklet.mjs` pipelining test (F3) | make `#saturated` return `true` at one unsettled source request | the second of four in-flight chunks is refused and its planes are never transferred |
 | `tests::native_identity_session_digest_pins_the_wasm_parity` + `direct-oracle.mjs` parity assertion (F4/E4) | flip one hex digit of `directOracle.nativePcmF32leSha256` in `expected.json` | both legs fail against the pin, and they fail with the same value |
@@ -565,3 +565,9 @@ qualification of decision 15's heavy gates" (#1605) or the first CI run that app
 | same (S3), Chromium, Firefox, WebKit | in `#submit` (`sdk/src/core/observation-subscriptions.ts`), drop `if (!rendered)` so the typed refusal is thrown whatever `next` returns | gate 3: the render instance's close ends in `backpressure` (`resolved: false`, log `[ok, bp]`) |
 | same (S4) | `current.renderedQuanta >= since` in `next` | gate 1: early, and more than one close send in the log |
 | same (S5) | the browser engine passes no `renderWait` | gates 1 and 3 |
+
+## TA4 deletions
+
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
+
+- `default_ring_covers_stall_tolerance`: no plausible same-crate KEEP catcher recorded

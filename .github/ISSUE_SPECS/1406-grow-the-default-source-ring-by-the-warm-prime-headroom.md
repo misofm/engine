@@ -160,7 +160,7 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
   `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and
   `sdk/src/browser/shipped-host.d.ts` (the ring comments only), `scripts/test-web-audioworklet.mjs`
   (gate 4's case at `:1103-1128` only)
-- `hosts/host-web/src/tests.rs` (`default_ring_covers_stall_tolerance` and the doc comment of
+- `hosts/host-web/src/tests.rs` (`default_ring_covers_stall_tolerance` (deleted by TA4) and the doc comment of
   `ring_prefill_survives_stall` only), `hosts/host-web/MUTATIONS.md` (rows 7 and 8 only)
 - `hosts/host-web/src/lib.rs` (the doc comment of the ring override field only),
   `hosts/host-web/DEPLOYMENT.md` (the ring sentence only),

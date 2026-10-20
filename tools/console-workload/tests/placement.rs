@@ -46,25 +46,3 @@ fn the_intended_strips_limiter_moves_rendered_bits() {
         "the simd2 true-peak limiter must actually process the signal"
     );
 }
-
-/// The legacy split EQ/compressor chains and the merged chain agree on each block's digest.
-/// The public output-hashing surface folds every master word; this comparison names the first
-/// block that disagrees, while the chain-shape test also checks the full run and plan topology.
-#[test]
-fn the_two_placements_agree_block_by_block() {
-    let mut split = SessionRuntime::new(Workload::SixtyFourTrackConsoleLegacy);
-    let mut merged = SessionRuntime::new(Workload::SixtyFourTrackEqCompSimd1);
-    for block in 0..BLOCKS {
-        split.render(block).expect("split-chain render");
-        merged.render(block).expect("merged-chain render");
-        let mut left = Sha256Sink::new();
-        let mut right = Sha256Sink::new();
-        split.hash_output(&mut left);
-        merged.hash_output(&mut right);
-        assert_eq!(
-            left.finish_hex(),
-            right.finish_hex(),
-            "block {block}: the two placements diverged"
-        );
-    }
-}

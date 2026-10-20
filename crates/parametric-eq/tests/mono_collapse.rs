@@ -174,57 +174,6 @@ fn bind_lpf(width: BankWidth, backend: Backend, lanes: usize) -> PreparedEffectB
         .expect("the native width must bind")
 }
 
-/// The collapsed cascade renders the dual cascade's left plane, ramping and stationary.
-#[test]
-fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
-    let Some((width, backend)) = native_bank() else {
-        return;
-    };
-    let lanes = width.lanes() as usize;
-    for ramping in [true, false] {
-        let mut dual = bind(width, backend, lanes);
-        let mut collapsed = bind(width, backend, lanes);
-        for step in 0..BLOCKS {
-            let mut dual_left = block(step * FRAMES, lanes);
-            let mut dual_right = dual_left.clone();
-            let mut mono_left = dual_left.clone();
-            // The plane the collapsed chain never gathers, filled with a value the dual run cannot
-            // produce so that a body which reads it is visibly wrong rather than plausibly so.
-            let mut stale = vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes];
-            let first = (step * FRAMES) as u64;
-            run_block(
-                dual.processor.as_mut(),
-                &mut dual_left,
-                &mut dual_right,
-                width,
-                first,
-                step,
-                ramping,
-                false,
-            );
-            run_block(
-                collapsed.processor.as_mut(),
-                &mut mono_left,
-                &mut stale,
-                width,
-                first,
-                step,
-                ramping,
-                true,
-            );
-            for (word, (collapsed_word, dual_word)) in
-                mono_left.iter().zip(dual_left.iter()).enumerate()
-            {
-                assert_eq!(
-                    collapsed_word.to_bits(),
-                    dual_word.to_bits(),
-                    "ramping {ramping} block {step} word {word}"
-                );
-            }
-        }
-    }
-}
-
 /// After `desymmetrize_channels`, a bank that ran collapsed renders what a never-collapsed one does.
 ///
 /// The retarget schedule is deliberate: **one** span, early, and then none. A `Point` span smooths

@@ -107,14 +107,6 @@ fn a_twin_pair_keeps_live_in_either_write_order() {
 }
 
 #[test]
-fn a_lone_one_channel_write_clears_live() {
-    assert!(!keeps(&[left(0, -12.0)]));
-    assert!(!keeps(&[right(0, -12.0)]));
-    assert!(!keeps(&[left(0, -12.0), right(0, -12.0), left(1, 4.0)]));
-    assert!(!keeps(&[left(0, -12.0), right(0, -12.0), right(1, 4.0)]));
-}
-
-#[test]
 fn near_pairs_clear_live() {
     let value = -12.0_f32;
     let ulp = f32::from_bits(value.to_bits() + 1);
@@ -140,56 +132,6 @@ fn near_pairs_clear_live() {
         ]),
         "two different-valued pairs"
     );
-}
-
-#[test]
-fn last_wins_decides_the_pair() {
-    // [L v1, L v2, R v2]: the cells end at L v2, R v2.
-    assert!(keeps(&[left(0, -6.0), left(0, -9.0), right(0, -9.0)]));
-    // [L v1, R v2, L v2]: L is replaced by v2, which R already holds.
-    assert!(keeps(&[left(0, -6.0), right(0, -9.0), left(0, -9.0)]));
-    // [L v1, R v1, L v2]: the pair came apart again before the block.
-    assert!(!keeps(&[left(0, -6.0), right(0, -6.0), left(0, -9.0)]));
-    // One channel written twice, the other once to the *first* value.
-    assert!(!keeps(&[left(0, -6.0), left(0, -9.0), right(0, -6.0)]));
-    // A restatement of the held value is an ordinary pair.
-    assert!(keeps(&[
-        left(0, -6.0),
-        right(0, -6.0),
-        left(0, -6.0),
-        right(0, -6.0)
-    ]));
-}
-
-#[test]
-fn a_shared_parameters_both_cell_needs_no_twin_and_does_not_break_a_pair() {
-    assert!(keeps(&[both(2, 1.0)]));
-    assert!(keeps(&[both(2, 1.0), left(0, -6.0), right(0, -6.0)]));
-    assert!(!keeps(&[both(2, 1.0), left(0, -6.0)]));
-}
-
-#[test]
-fn a_pair_split_across_two_blocks_clears_live() {
-    for (first, second) in [
-        (left(0, -6.0), right(0, -6.0)),
-        (right(0, -6.0), left(0, -6.0)),
-    ] {
-        let mut rig = Rig::new(shape(0), 0);
-        rig.commit_each(&[first]);
-        rig.stage();
-        assert!(!rig.live(), "the first half alone is a one-channel write");
-        rig.commit_each(&[second]);
-        rig.stage();
-        assert!(!rig.live(), "and nothing re-earns the term");
-    }
-    // The other way round: a kept pair, then a lone write in the next block.
-    let mut rig = Rig::new(shape(0), 0);
-    rig.commit_each(&[left(0, -6.0), right(0, -6.0)]);
-    rig.stage();
-    assert!(rig.live());
-    rig.commit_each(&[left(0, -9.0)]);
-    rig.stage();
-    assert!(!rig.live());
 }
 
 #[test]

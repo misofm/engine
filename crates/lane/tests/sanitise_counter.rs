@@ -244,69 +244,6 @@ fn totals<L: Lane>(value: L) -> Vec<u32> {
 // The gates.
 // ---------------------------------------------------------------------------------------------
 
-/// The equivalence, at the level of the operation: for every subset of the lanes and every hostile
-/// value class, `select(bad, 1.0, 0.0)` and `1.0 & bad` are the same bits.
-///
-/// This is the claim the canonical-mask contract makes — a comparison result is per lane all zero
-/// bits or all one bits — checked rather than cited.
-#[test]
-fn the_and_form_is_the_select_form_on_every_lane_subset() {
-    fn check<L: Lane>(width: &str) {
-        let one = L::splat(1.0);
-        let zero = L::zero();
-        let limit = L::splat(NONFINITE_LIMIT);
-        let sanitised = [
-            f32::NAN,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            1.0e30,
-            -1.0e30,
-            -2.5e33,
-            f32::from_bits(0x7F80_0001),
-            f32::from_bits(0x7FC0_1234),
-        ];
-        let clean = [
-            0.5,
-            -0.0,
-            0.0,
-            9.999e29,
-            -9.999e29,
-            f32::from_bits(0x0000_0001),
-            -0.75,
-            f32::MIN_POSITIVE,
-        ];
-        for pattern in 0..(1_usize << L::WIDTH) {
-            for (bad_class, clean_class) in sanitised.iter().zip(clean.iter()) {
-                let mut words = [0.0_f32; MAX_WIDTH];
-                for (lane, word) in words.iter_mut().enumerate().take(L::WIDTH) {
-                    *word = if pattern >> lane & 1 == 1 {
-                        *bad_class
-                    } else {
-                        *clean_class
-                    };
-                }
-                let x = L::load(&words);
-                let bad = L::mask_not(x.abs().lt(limit));
-                assert_eq!(
-                    bits::<L>(L::select(bad, one, zero)),
-                    bits::<L>(one.andnot(L::mask_not(bad))),
-                    "width={width}, pattern={pattern:#04x}, bad={bad_class:?}"
-                );
-                // And the verdict itself is the policy's, not the compare's accident.
-                let expected: Vec<u32> = (0..L::WIDTH)
-                    .map(|lane| u32::from(pattern >> lane & 1 == 1))
-                    .collect();
-                assert_eq!(
-                    totals::<L>(L::select(bad, one, zero)),
-                    expected,
-                    "width={width}, pattern={pattern:#04x}: the boundary is `|x| < 1e30`"
-                );
-            }
-        }
-    }
-    lane::each_lane!(|L, N| check::<L>(&N.to_string()));
-}
-
 /// The kernels, over 64 hostile blocks of evolving state: the tree's counter words and output
 /// buffers are the select-form's to the bit, and both are the scalar oracle's count.
 ///

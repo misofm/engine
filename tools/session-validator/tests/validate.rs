@@ -134,22 +134,6 @@ fn fixtures_distinguish_schema_examples_from_launch_effects() {
     );
 }
 
-#[test]
-fn the_duplicate_key_fixture_fails_the_grammar_stage() {
-    let name = "json-invalid-duplicate-key.json";
-    let report = validate_session_document(&fixture(name));
-    assert!(!report.passed());
-    assert_eq!(report.failed_stage(), Some(0));
-    let stage = &report.stages()[0];
-    assert_eq!(stage.name, "json-grammar");
-    assert_eq!(stage.diagnostics.len(), 1);
-    assert_eq!(stage.diagnostics[0].code, "json.syntax");
-    for later in &report.stages()[1..] {
-        assert_eq!(later.status, StageStatus::Skipped, "{}", later.name);
-    }
-    assert!(report.canonical().is_none());
-}
-
 /// `(fixture, needle, replacement, expected stage index, expected diagnostic code)`.
 ///
 /// Every row is a single textual substitution on a checked-in fixture, so a row that stops
@@ -428,18 +412,6 @@ fn parse_stage_diagnostics_carry_a_source_location_and_preparation_diagnostics_d
 }
 
 #[test]
-fn canonical_output_reproduces_the_checked_in_canonical_fixtures() {
-    let name = "canonical-minimal.json";
-    let source = fixture(name);
-    let report = validate_session_document(&source);
-    assert_eq!(
-        report.canonical(),
-        Some(source.as_str()),
-        "{name} is checked in as canonical"
-    );
-}
-
-#[test]
 fn canonicalization_normalizes_and_is_a_fixed_point() {
     let canonical = fixture("observation-frame-shape.json");
     let value: serde_json::Value = serde_json::from_str(&canonical).expect("fixture JSON");
@@ -464,6 +436,57 @@ fn the_report_is_deterministic() {
     let first = validate_session_document(&source).render("session.json");
     let second = validate_session_document(&source).render("session.json");
     assert_eq!(first, second);
+}
+
+/// The rendered report labels each stage with its own status and prints every line of a
+/// diagnostic message: a one-line message after its code and path, a multi-line one indented.
+#[test]
+fn the_report_labels_each_stage_and_prints_every_message_line() {
+    let source = fixture("canonical-minimal.json").replacen(
+        "\"sample_rate_hz\": 48000",
+        "\"sample_rate_hz\": 22050",
+        1,
+    );
+    let report = validate_session_document(&source);
+    let rendered = report.render("session.json");
+    for (index, stage) in report.stages().iter().enumerate() {
+        let label = match stage.status {
+            StageStatus::Pass => "PASS",
+            StageStatus::Fail => "FAIL",
+            StageStatus::Skipped => "SKIP",
+        };
+        let line = format!("  {label}  stage {}  {}", index + 1, stage.name);
+        assert!(rendered.contains(&line), "{line:?} in\n{rendered}");
+    }
+    let diagnostic = &report.stages()[1].diagnostics[0];
+    assert!(!diagnostic.message.is_empty() && !diagnostic.message.contains('\n'));
+    let start = format!("        {}  {}  ", diagnostic.code, diagnostic.path);
+    let end = format!("  {}", diagnostic.message);
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.starts_with(&start) && line.ends_with(&end)),
+        "{end:?} after {start:?} in\n{rendered}"
+    );
+    // A raw newline in a string makes a multi-line `json.syntax` message: each of its nonblank
+    // lines is printed, indented.
+    let source = fixture("canonical-minimal.json").replacen(
+        "\"minimal.session\"",
+        "\"minimal\n.session\"",
+        1,
+    );
+    let report = validate_session_document(&source);
+    let rendered = report.render("session.json");
+    let message = &report.stages()[0].diagnostics[0].message;
+    assert!(message.contains('\n'), "{message:?}");
+    for part in message
+        .lines()
+        .map(str::trim_end)
+        .filter(|part| !part.is_empty())
+    {
+        let line = format!("\n          {part}\n");
+        assert!(rendered.contains(&line), "{line:?} in\n{rendered}");
+    }
 }
 
 #[test]

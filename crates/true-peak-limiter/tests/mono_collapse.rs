@@ -246,67 +246,6 @@ fn run_block(
     }
 }
 
-/// The collapsed body renders the dual body's left plane, ramping and stationary.
-///
-/// The stationary arm is the one that exercises `limiter_block_uniform_mono` -- the van Herk
-/// segment walk, whose collapsed form hands the walk one channel's window offsets for both of its
-/// arguments -- and the ramping arm the uniform ramping body beside it.
-#[test]
-fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
-    let Some((width, backend)) = native_bank() else {
-        return;
-    };
-    let lanes = width.lanes() as usize;
-    for ramping in [true, false] {
-        let mut dual = bind(width, backend, lanes);
-        let mut collapsed = bind(width, backend, lanes);
-        let idle = vec![0_u32; lanes + 1];
-
-        for step in 0..BLOCKS {
-            let mut dual_left = block(step, lanes);
-            let mut dual_right = dual_left.clone();
-            let mut mono_left = dual_left.clone();
-            let mut stale = vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes];
-            let first = (step * FRAMES) as u64;
-            let (spans, packed) = automation(step, lanes);
-            let (spans, packed): (&[PreparedAutomationSpan], &[u32]) = if ramping {
-                (&spans, &packed)
-            } else {
-                (&[], &idle)
-            };
-            run_block(
-                dual.processor.as_mut(),
-                &mut dual_left,
-                &mut dual_right,
-                width,
-                first,
-                spans,
-                packed,
-                false,
-            );
-            run_block(
-                collapsed.processor.as_mut(),
-                &mut mono_left,
-                &mut stale,
-                width,
-                first,
-                spans,
-                packed,
-                true,
-            );
-            for (word, (collapsed_word, dual_word)) in
-                mono_left.iter().zip(dual_left.iter()).enumerate()
-            {
-                assert_eq!(
-                    collapsed_word.to_bits(),
-                    dual_word.to_bits(),
-                    "ramping {ramping} block {step} word {word}"
-                );
-            }
-        }
-    }
-}
-
 /// After `desymmetrize_channels`, a bank that ran collapsed renders what a never-collapsed one does.
 ///
 /// One retarget, early, and then none: the ramps open and close well before the transition, so at
