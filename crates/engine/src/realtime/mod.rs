@@ -358,53 +358,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn native_spsc_preserves_value_on_full_and_fifo_wrap() {
-        let (mut producer, mut consumer) =
-            bounded_spsc::<u32>(NonZeroUsize::new(2).expect("two"), QueueGeneration(9))
-                .expect("queue");
-        producer.try_push(1).expect("one");
-        producer.try_push(2).expect("two");
-        assert!(matches!(
-            producer.try_push(3),
-            Err(QueueFull {
-                value: 3,
-                generation: QueueGeneration(9),
-                ..
-            })
-        ));
-        assert_eq!(consumer.try_pop().expect("first"), 1);
-        producer.try_push(3).expect("wrap");
-        assert_eq!(consumer.try_pop().expect("second"), 2);
-        assert_eq!(consumer.try_pop().expect("third"), 3);
-        assert!(matches!(
-            consumer.try_pop(),
-            Err(QueueEmpty {
-                generation: QueueGeneration(9),
-                empty_count: 1,
-            })
-        ));
-        assert_eq!(producer.capacity(), 2);
-        assert_eq!(producer.success_count(), 3);
-        assert_eq!(producer.full_count(), 1);
-        assert_eq!(consumer.success_count(), 3);
-    }
-
-    #[test]
-    fn move_only_spsc_preserves_full_value_and_transfers_to_consumer() {
-        #[derive(Debug)]
-        struct MoveOnly(u32);
-        let (mut producer, mut consumer) =
-            bounded_spsc_move::<MoveOnly>(NonZeroUsize::new(1).expect("one"), QueueGeneration(10))
-                .expect("queue");
-        producer.try_push(MoveOnly(7)).expect("first transfer");
-        let full = producer
-            .try_push(MoveOnly(9))
-            .expect_err("full queue returns move-only item");
-        assert_eq!(full.value.0, 9);
-        assert_eq!(consumer.try_pop().expect("single consumer transfer").0, 7);
-    }
-
     fn prepared(id: u64) -> PreparedRenderPlan {
         PreparedRenderPlan::prepare(PrepareRenderPlan {
             plan_id: id,

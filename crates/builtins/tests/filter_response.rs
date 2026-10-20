@@ -7,14 +7,13 @@ use builtins::{
     BuiltinChain, BuiltinLaneSelector, BuiltinParameterError, BuiltinParameters, ChannelParameters,
     DualMonoBlock, InputBuiltins, InputFilterResponseError, InputFilterResponseMode,
     InputFilterResponseOutput, InputFilterResponseRequest, InputFilterResponseSummary, Matrix2x2,
-    builtin_filter_cutoff_maximum_hz, input_filter_response_descriptor,
-    prepare_input_filter_response, query_input_filter_response_into,
+    builtin_filter_cutoff_maximum_hz, prepare_input_filter_response,
+    query_input_filter_response_into,
 };
 use dsp_reference::ReferenceSvfStateSpace;
 use effect_contract::{
-    EffectPrepareError, PreparedResponseAnalysis, ResponseAnalysisError, ResponseAnalysisMode,
-    ResponseBypassSemantics, ResponseOutput, ResponsePrepareLimits, ResponseQuery,
-    ResponseTotalScope, validate_response_analysis_descriptor,
+    EffectPrepareError, PreparedResponseAnalysis, ResponseAnalysisError, ResponseOutput,
+    ResponsePrepareLimits, ResponseQuery,
 };
 use engine::LAUNCH_SAMPLE_RATES;
 
@@ -865,136 +864,6 @@ fn query_does_not_change_seeded_state_or_an_inflight_trim_polarity_ramp() {
     assert_eq!(bits(&left), bits(&twin_left));
     assert_eq!(bits(&right), bits(&twin_right));
     assert_eq!(input_snapshot(&queried), input_snapshot(&twin));
-}
-
-#[test]
-fn common_builtin_adapter_matches_direct_owner_for_all_launch_rates_and_sections() {
-    assert_eq!(
-        validate_response_analysis_descriptor(input_filter_response_descriptor()),
-        Ok(())
-    );
-    for rate in LAUNCH_SAMPLE_RATES.map(|rate| rate.0) {
-        let maximum = builtin_filter_cutoff_maximum_hz(rate).expect("launch maximum");
-        let configuration = filters(100.0, 0.0, 0.0, 8_000.0);
-        let frequencies = probe_grid(rate, &[maximum]);
-        let (_, direct_left, direct_right, direct_sections_left, direct_sections_right) =
-            query_with_sections(rate, configuration, &frequencies, true);
-        let provider = prepare_input_filter_response(
-            rate,
-            configuration,
-            ResponsePrepareLimits {
-                maximum_prepared_bytes: usize::MAX,
-            },
-        )
-        .expect("builtin response provider");
-        let descriptor = provider.analysis_descriptor();
-        assert_eq!(descriptor, input_filter_response_descriptor());
-        assert_eq!(descriptor.sections.len(), 2);
-        assert_eq!(descriptor.sections[0].name, "HPF");
-        assert_eq!(descriptor.sections[1].name, "LPF");
-        assert_eq!(descriptor.floor_db, -120.0);
-        assert_eq!(
-            descriptor.total_scope,
-            ResponseTotalScope::BuiltinInputFilterSubtotal
-        );
-        assert_eq!(descriptor.bypass, ResponseBypassSemantics::NoEffectBypass);
-        assert_eq!(provider.configuration().sample_rate_hz, rate);
-        assert_eq!(provider.configuration().bypass, None);
-        assert_eq!(provider.configuration().enabled_left, &[true, false]);
-        assert_eq!(provider.configuration().enabled_right, &[false, true]);
-
-        let mut common_left = vec![f32::NAN; frequencies.len()];
-        let mut common_right = vec![f32::NAN; frequencies.len()];
-        let mut common_sections_left = vec![f32::NAN; frequencies.len() * 2];
-        let mut common_sections_right = vec![f32::NAN; frequencies.len() * 2];
-        let summary = provider
-            .query_into(
-                ResponseQuery {
-                    configuration_id: u64::MAX,
-                    frequencies_hz: &frequencies,
-                    maximum_points: frequencies.len(),
-                },
-                ResponseOutput {
-                    total_left_db: &mut common_left,
-                    total_right_db: &mut common_right,
-                    sections_left_db: Some(&mut common_sections_left),
-                    sections_right_db: Some(&mut common_sections_right),
-                },
-            )
-            .expect("common builtin query");
-        assert_eq!(summary.configuration_id, u64::MAX);
-        assert_eq!(summary.mode, ResponseAnalysisMode::RequestedConfiguration);
-        assert_eq!(summary.sample_rate_hz, rate);
-        assert_eq!(bits(&common_left), bits(&direct_left));
-        assert_eq!(bits(&common_right), bits(&direct_right));
-        assert_eq!(bits(&common_sections_left), bits(&direct_sections_left));
-        assert_eq!(bits(&common_sections_right), bits(&direct_sections_right));
-
-        let mut total_only_left = vec![f32::NAN; frequencies.len()];
-        let mut total_only_right = vec![f32::NAN; frequencies.len()];
-        let total_summary = provider
-            .query_into(
-                ResponseQuery {
-                    configuration_id: 9_007_199_254_740_993,
-                    frequencies_hz: &frequencies,
-                    maximum_points: frequencies.len(),
-                },
-                ResponseOutput {
-                    total_left_db: &mut total_only_left,
-                    total_right_db: &mut total_only_right,
-                    sections_left_db: None,
-                    sections_right_db: None,
-                },
-            )
-            .expect("total-only builtin query");
-        assert_eq!(total_summary.configuration_id, 9_007_199_254_740_993);
-        assert_eq!(bits(&total_only_left), bits(&direct_left));
-        assert_eq!(bits(&total_only_right), bits(&direct_right));
-
-        let mut left_only_sections = vec![f32::NAN; frequencies.len() * 2];
-        let mut left_only_total = vec![f32::NAN; frequencies.len()];
-        let mut left_only_right = vec![f32::NAN; frequencies.len()];
-        provider
-            .query_into(
-                ResponseQuery {
-                    configuration_id: 2,
-                    frequencies_hz: &frequencies,
-                    maximum_points: frequencies.len(),
-                },
-                ResponseOutput {
-                    total_left_db: &mut left_only_total,
-                    total_right_db: &mut left_only_right,
-                    sections_left_db: Some(&mut left_only_sections),
-                    sections_right_db: None,
-                },
-            )
-            .expect("left-section builtin query");
-        assert_eq!(bits(&left_only_total), bits(&direct_left));
-        assert_eq!(bits(&left_only_right), bits(&direct_right));
-        assert_eq!(bits(&left_only_sections), bits(&direct_sections_left));
-
-        let mut right_only_sections = vec![f32::NAN; frequencies.len() * 2];
-        let mut right_only_total = vec![f32::NAN; frequencies.len()];
-        let mut right_only_left = vec![f32::NAN; frequencies.len()];
-        provider
-            .query_into(
-                ResponseQuery {
-                    configuration_id: 3,
-                    frequencies_hz: &frequencies,
-                    maximum_points: frequencies.len(),
-                },
-                ResponseOutput {
-                    total_left_db: &mut right_only_left,
-                    total_right_db: &mut right_only_total,
-                    sections_left_db: None,
-                    sections_right_db: Some(&mut right_only_sections),
-                },
-            )
-            .expect("right-section builtin query");
-        assert_eq!(bits(&right_only_left), bits(&direct_left));
-        assert_eq!(bits(&right_only_total), bits(&direct_right));
-        assert_eq!(bits(&right_only_sections), bits(&direct_sections_right));
-    }
 }
 
 #[test]

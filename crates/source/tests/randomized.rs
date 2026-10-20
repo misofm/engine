@@ -1,8 +1,7 @@
 //! Issue #1051: the source ring against an independent model, over random edge-biased schedules.
 //!
-//! `seek_schedule_model.rs` drives the production `PcmSourceRing` through 256 frozen schedules of
-//! one fixed shape: one channel, a quantum of four, one scripted sequence of submissions, seeks
-//! and renders per schedule. This file draws the schedules instead, per seed and edge-biased:
+//! This file draws the schedules that drive the production `PcmSourceRing`, per seed and
+//! edge-biased:
 //!
 //! * the quantum from 1 to 16 frames, the capacity from one to eight quanta, one to three
 //!   channels, a starting generation of 1 or far from it;

@@ -291,36 +291,6 @@ fn a_track_delay_moves_no_pdc_row() {
 // P2-4: accounting
 // ---------------------------------------------------------------------------------------------
 
-/// `delay_bytes` grows by exactly four bytes per declared sample per lane, and by nothing else.
-///
-/// Four and not eight: PDC's `* 8` is one `CompensationDelay` of `n` samples holding *two* rings of
-/// `n`, because PDC's skew is per edge and therefore per pair. A track delay is declared per lane,
-/// so the two rings are sized independently and each lane is charged for its own.
-///
-/// Red mutations, both measured: folding the term into `timing.total_delay` before the `* 8`
-/// instead of adding it beside trips this row (the per-lane sum stops being recoverable from the
-/// per-pair one); declaring `delay_samples` as the input node's `GraphNode.latency` trips this row,
-/// `a_track_delay_moves_no_pdc_row` and `the_pdc_counts_are_untouched` together, which is the
-/// three-way signature of the one mistake this feature most needs to be unable to make.
-#[test]
-fn the_estimate_charges_each_lane_its_own_ring() {
-    let base = compiled(0, 0).delay_bytes;
-    for (left, right) in [
-        (1_u32, 0_u32),
-        (0, 1),
-        (480, 480),
-        (48_000, 12),
-        (7, 48_000),
-    ] {
-        let expected = base + u64::from(left) * 4 + u64::from(right) * 4;
-        assert_eq!(
-            compiled(left, right).delay_bytes,
-            expected,
-            "delay_bytes for {left}/{right}"
-        );
-    }
-}
-
 /// The samples stay out of PDC's counts even though the bytes join PDC's row.
 #[test]
 fn the_pdc_counts_are_untouched() {

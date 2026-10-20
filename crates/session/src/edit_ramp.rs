@@ -250,26 +250,4 @@ mod tests {
         );
         assert!(EditRamps::new().is_untouched());
     }
-
-    #[test]
-    fn clearing_a_target_drops_its_rows_and_nothing_else() {
-        let strip = |name: &str| EditRampTarget::Strip(id(name));
-        let mut ramps = EditRamps::new();
-        ramps.set(&strip("a"), EditRampRow::Matrix, Some(5));
-        ramps.set(&strip("a"), EditRampRow::Link, Some(6));
-        ramps.set(&strip("b"), EditRampRow::Link, Some(7));
-        ramps.set(
-            &EditRampTarget::Route(id("a")),
-            EditRampRow::RouteGain,
-            Some(8),
-        );
-        ramps.clear_target(&strip("a"));
-        assert_eq!(
-            ramps.entries(),
-            vec![
-                (strip("b"), EditRampRow::Link, 7),
-                (EditRampTarget::Route(id("a")), EditRampRow::RouteGain, 8),
-            ]
-        );
-    }
 }

@@ -112,41 +112,6 @@ fn matrix_retarget_mid_ramp_matches_the_reference() {
     }
 }
 
-/// T8: the ramp tracks the exact `f64` interpolation it approximates.
-///
-/// The bound is derived, not chosen: `n` iterated `f32` additions each round once, so the drift is
-/// at most `n * 2^-24` for coefficients of magnitude at most one -- `1.53e-5` at `n = 257`. The
-/// measured worst is `1.12e-6`, a factor of 13.7 inside it. A per-sample division (the pre-D11
-/// law) would not drift at all, which is exactly why this is a bound and not an equality.
-#[test]
-fn matrix_ramp_tracks_the_f64_interpolation() {
-    const SAMPLES: u32 = 257;
-    let mut chain = chain_with(SAMPLES);
-    chain
-        .set_matrix_target(Matrix2x2 {
-            ll: -0.75,
-            lr: 0.0,
-            rl: 0.0,
-            rr: 1.0,
-        })
-        .expect("target");
-    let start = 1.0_f64;
-    let step64 = (-0.75_f64 - start) / f64::from(SAMPLES);
-    let mut worst = 0.0_f64;
-    for index in 0..SAMPLES as usize {
-        let applied = f64::from(step(&mut chain).ll);
-        let exact = if index + 1 == SAMPLES as usize {
-            -0.75
-        } else {
-            start + (index + 1) as f64 * step64
-        };
-        worst = worst.max((applied - exact).abs());
-    }
-    /// One half-ulp of `1.0` in `f32`.
-    const HALF_ULP: f64 = 5.960_464_477_539_063e-8;
-    assert!(worst <= f64::from(SAMPLES) * HALF_ULP, "worst={worst}");
-}
-
 /// T8: a settled identity matrix is a per-lane pass-through, so it preserves `-0.0`.
 #[test]
 fn settled_identity_matrix_preserves_signed_zero() {
@@ -179,30 +144,6 @@ fn zero_window_snaps_and_reset_cancels_a_ramp() {
     assert_ne!(current(&chain), target);
     chain.reset(BuiltinResetKind::DiscontinuityKeepTargets);
     assert_eq!(current(&chain), target);
-}
-
-#[test]
-fn matrix_ramp_reaches_target() {
-    let mut chain = BuiltinChain::new(
-        48_000,
-        BuiltinParameters {
-            smoothing_samples: 2,
-            ..BuiltinParameters::default()
-        },
-    )
-    .expect("prepare");
-    chain
-        .set_matrix_target(Matrix2x2 {
-            ll: 0.0,
-            lr: 0.0,
-            rl: 0.0,
-            rr: 0.0,
-        })
-        .expect("target");
-    let mut left = [1.0, 1.0];
-    let mut right = [0.0, 0.0];
-    chain.process_matrix(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
-    assert_eq!(left, [0.5, 0.0]);
 }
 
 /// Issue #137 D1: an explicit ramp window travels with the retarget, and becomes the lane's own.

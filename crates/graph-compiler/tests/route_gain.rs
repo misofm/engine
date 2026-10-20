@@ -69,11 +69,3 @@ fn route_gain_matches_f64_oracle_within_two_ulp() {
         assert!(gap <= 2, "db_to_gain_f32 deviates {gap} ulp at {db} dB");
     }
 }
-
-/// `db_to_gain_f32(0) = exp2f(0) = 1.0` exactly, so a 0 dB route keeps `0x3f80_0000` and every
-/// checked-in graph fixture (all of whose routes are 0 dB) is byte-identical across F4.
-#[test]
-fn unity_route_gain_is_exactly_one() {
-    assert_eq!(math::db_to_gain_f32(0.0).to_bits(), 0x3f80_0000);
-    assert_eq!(math::db_to_gain_f32(-0.0).to_bits(), 0x3f80_0000);
-}

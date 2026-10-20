@@ -220,7 +220,7 @@ settled dispatch witness and signed-zero law, plus
 `matrix2x2_block` otherwise; both settled call sites (the `maximum == 0` block and the post-ramp
 tail) go through it. The gates:
 
-- gate 2, `tests::settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane`
+- gate 2, `tests::settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane` (deleted by TA4; KEEP catcher builtins `randomized::the_banks_render_their_scalar_sections_under_random_retargets`)
   (`src/tests.rs`): the `#[cfg(test)]` witness `MATRIX_SELECT_FREE_BLOCKS` counts the arm per
   settled segment, at W8, W4 and the scalar stage;
 - gate 3, `settled_matrix_shapes_render_the_base_bits` (`tests/matrix.rs`): one SHA-256 over every
@@ -285,7 +285,7 @@ its own settled check: `BuiltinFaderBank::try_process_settled_with_matrix` at `S
 `FaderMuteRampBuiltins::process_fader_matrix` and `BuiltinChain::process_dual_mono`. The gates:
 
 - gate 1 (lane), in `crates/lane/tests/MUTATIONS.md`;
-- the dispatch witness, `tests::fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane`
+- the dispatch witness, `tests::fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane` (deleted by TA4; KEEP catcher builtins `tests::full_public_chain_matches_the_three_section_reference`)
   (`src/tests.rs`): the `#[cfg(test)]` counter `FUSED_SELECT_FREE_BLOCKS` counts the arm per fused
   call at W8, W4 and both scalar sites, over identity members, partial banks, instant retargets to
   and from the identity, and ramps that decline the fused call;
@@ -367,3 +367,10 @@ restored.
 
 Before attempt 2 both S-1 rows were green, because the safety net moved both seeds at once and
 either half refused the commit.
+
+## TA4 deletions
+
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Each one's caught mutants were also red in the KEEP test named beside it. That is the recorded catcher of the deleted test's sampled mutants; the mutation of each row above was not re-run.
+
+- `settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane`: builtins `randomized::the_banks_render_their_scalar_sections_under_random_retargets`
+- `fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane`: builtins `tests::full_public_chain_matches_the_three_section_reference`

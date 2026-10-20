@@ -480,9 +480,7 @@ struct Lifetime {
 ///
 /// `bank_windows` computes those ranges and pass 2 *holds* every slot freed inside one until
 /// the window closes, instead of returning it to the free list where an op the bank hoists past
-/// its releaser could take it. `a_bank_window_never_recycles_a_physical_slot` constructs the
-/// smallest graph that reaches the defect and
-/// `bank_window_hoisting_preserves_dataflow_on_random_graphs` interprets seeded graphs in the
+/// its releaser could take it. `bank_window_hoisting_preserves_dataflow_on_random_graphs` interprets seeded graphs in the
 /// order the executor actually runs them.
 ///
 /// ## The rejected alternative: dedication by bank membership
