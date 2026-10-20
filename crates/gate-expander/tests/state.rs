@@ -660,3 +660,24 @@ fn a_moving_ramp_word_past_its_domain_is_refused() {
         }
     }
 }
+
+/// A gain word that the render's flush never leaves, a subnormal inside the gain range, is
+/// refused with `effect.state.gain`, and the refused restore changes nothing.
+#[test]
+fn a_subnormal_gain_word_is_refused() {
+    let mut effect = prepare(request(&active_values()));
+    let saved = snapshot(&effect);
+    let mut left = saved.1.clone();
+    left[..4].copy_from_slice(&(-f32::from_bits(1)).to_le_bytes());
+    let sizes = effect.metadata.state_sizes;
+    let input = StatePayloadInput::new(&saved.0, &left, &saved.2, sizes).expect("sizes");
+    assert_eq!(
+        effect
+            .processor
+            .restore_state_payload(STATE_LAYOUT_VERSION, input)
+            .expect_err("a subnormal gain word")
+            .code,
+        "effect.state.gain"
+    );
+    assert_eq!(snapshot(&effect), saved);
+}

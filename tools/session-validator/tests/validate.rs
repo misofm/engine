@@ -438,6 +438,57 @@ fn the_report_is_deterministic() {
     assert_eq!(first, second);
 }
 
+/// The rendered report labels each stage with its own status and prints every line of a
+/// diagnostic message: a one-line message after its code and path, a multi-line one indented.
+#[test]
+fn the_report_labels_each_stage_and_prints_every_message_line() {
+    let source = fixture("canonical-minimal.json").replacen(
+        "\"sample_rate_hz\": 48000",
+        "\"sample_rate_hz\": 22050",
+        1,
+    );
+    let report = validate_session_document(&source);
+    let rendered = report.render("session.json");
+    for (index, stage) in report.stages().iter().enumerate() {
+        let label = match stage.status {
+            StageStatus::Pass => "PASS",
+            StageStatus::Fail => "FAIL",
+            StageStatus::Skipped => "SKIP",
+        };
+        let line = format!("  {label}  stage {}  {}", index + 1, stage.name);
+        assert!(rendered.contains(&line), "{line:?} in\n{rendered}");
+    }
+    let diagnostic = &report.stages()[1].diagnostics[0];
+    assert!(!diagnostic.message.is_empty() && !diagnostic.message.contains('\n'));
+    let start = format!("        {}  {}  ", diagnostic.code, diagnostic.path);
+    let end = format!("  {}", diagnostic.message);
+    assert!(
+        rendered
+            .lines()
+            .any(|line| line.starts_with(&start) && line.ends_with(&end)),
+        "{end:?} after {start:?} in\n{rendered}"
+    );
+    // A raw newline in a string makes a multi-line `json.syntax` message: each of its nonblank
+    // lines is printed, indented.
+    let source = fixture("canonical-minimal.json").replacen(
+        "\"minimal.session\"",
+        "\"minimal\n.session\"",
+        1,
+    );
+    let report = validate_session_document(&source);
+    let rendered = report.render("session.json");
+    let message = &report.stages()[0].diagnostics[0].message;
+    assert!(message.contains('\n'), "{message:?}");
+    for part in message
+        .lines()
+        .map(str::trim_end)
+        .filter(|part| !part.is_empty())
+    {
+        let line = format!("\n          {part}\n");
+        assert!(rendered.contains(&line), "{line:?} in\n{rendered}");
+    }
+}
+
 #[test]
 fn effect_preparation_matches_engine_and_cli_refuses_without_canonical_output() {
     use effect_compiler::{

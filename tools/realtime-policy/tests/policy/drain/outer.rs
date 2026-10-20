@@ -530,6 +530,10 @@ fn a_constructor_that_loops_is_refused_anywhere_in_a_region() {
             "fn build() {\n    let _: [u8; 2] = array::from_fn(|_| 0);\n}",
         ),
         (
+            "array-from-fn-after-a-field-named-std",
+            "fn build() {\n    let _ = S { std: &array::from_fn(|_| 0) };\n}",
+        ),
+        (
             "a-longer-path-ending-in-array-from-fn",
             "fn build() {\n    let _: [u8; 2] = other::core::array::from_fn(|_| 0);\n}",
         ),
