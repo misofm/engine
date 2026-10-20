@@ -5543,14 +5543,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn launch_parametric_eq_fixture_retains_banks_and_matches_scalar_across_blocks() {
+    /// The parametric-EQ launch fixture, with its builtins compiled in as identities (#964): the EQ
+    /// is then the only state that can make the second block differ from the first, and the only
+    /// stage between the dry impulse and the bypass pins.
+    fn launch_parametric_eq_fixture() -> session::SessionModel {
         let mut model = parse_session_json(PARAMETRIC_EQ_NINE_TRACK_FIXTURE)
             .expect("accepted parametric-EQ fixture");
-        assert_eq!(model.tracks.len(), 9);
-        // #964: the builtins are compiled in, as identities. The EQ must be the only state that can
-        // make the second block differ from the first, and the only stage between the dry impulse
-        // and the bypass pins below.
         identity_builtins(&mut model);
         let first_effect = &model.tracks[0].console[0];
         assert!(first_effect.params.iter().any(|parameter| {
@@ -5563,253 +5561,867 @@ mod tests {
                 && parameter.channel == ParameterChannel::Right
                 && parameter.value == 2400.0
         }));
-        let session = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
+        model
+    }
+
+    fn launch_multiband_compressor_fixture() -> session::SessionModel {
+        let model = accepted_multiband_compressor_graph_fixture();
+        assert!(model.tracks.iter().all(|track| matches!(
+            track.inserts.effects[0].sidechain,
+            SidechainDeclaration::None
+        )));
+        model
+    }
+
+    /// The strip is the `console.pre_insert` slot: keyless by construction (decision 12).
+    fn assert_one_pre_insert_strip(model: &session::SessionModel) {
+        assert_eq!(model.console.pre_insert.len(), 1);
+        assert!(
+            model
+                .tracks
+                .iter()
+                .all(|track| track.console.len() == 1 && track.inserts.effects.is_empty())
+        );
+    }
+
+    fn launch_soft_clip_fixture() -> session::SessionModel {
+        let model = accepted_soft_clip_graph_fixture();
+        assert_one_pre_insert_strip(&model);
+        model
+    }
+
+    fn launch_transient_shaper_fixture() -> session::SessionModel {
+        let model = accepted_transient_shaper_graph_fixture();
+        assert_one_pre_insert_strip(&model);
+        model
+    }
+
+    fn launch_eq_carries_state(blocks: &[Vec<f32>], _frames: usize) {
+        assert!(
+            blocks[0]
+                .iter()
+                .zip(&blocks[1])
+                .any(|(first, second)| first.to_bits() != second.to_bits()),
+            "the second block must retain the first block's EQ state"
+        );
+    }
+
+    fn launch_renders_the_first_block(blocks: &[Vec<f32>], _frames: usize) {
+        assert!(
+            blocks[0].iter().any(|sample| *sample != 0.0),
+            "the zero-latency effect renders the current input in the first block"
+        );
+    }
+
+    fn launch_renders_every_block(blocks: &[Vec<f32>], _frames: usize) {
+        for pcm in blocks {
+            assert!(pcm.iter().any(|sample| *sample != 0.0));
+        }
+    }
+
+    fn launch_limiter_output_starts_at_its_latency(blocks: &[Vec<f32>], frames: usize) {
+        let mut reached_fixed_latency = false;
+        for (block, pcm) in blocks.iter().enumerate() {
+            for frame in 0..frames {
+                let absolute = block * frames + frame;
+                let (left, right) = (pcm[frame], pcm[frames + frame]);
+                if absolute < 486 {
+                    assert_eq!(left, 0.0, "left output before fixed limiter latency");
+                    assert_eq!(right, 0.0, "right output before fixed limiter latency");
+                }
+                if absolute == 486 {
+                    reached_fixed_latency = left != 0.0 && right != 0.0;
+                }
+            }
+        }
+        assert!(
+            reached_fixed_latency,
+            "one-shot limiter input first appears at the frozen T=486 samples"
+        );
+    }
+
+    fn launch_multiband_renders_now_and_on_release(blocks: &[Vec<f32>], frames: usize) {
+        let both = |absolute: usize| {
+            let pcm = &blocks[absolute / frames];
+            let frame = absolute % frames;
+            pcm[frame] != 0.0 && pcm[frames + frame] != 0.0
+        };
+        assert!(both(0), "active burst renders at the current first sample");
+        assert!(
+            both(1_280),
+            "later probe crosses latency while carried release state remains active"
+        );
+    }
+
+    fn launch_soft_clip_support_is_frozen(blocks: &[Vec<f32>], frames: usize) {
+        let peak = |lane: &[f32]| {
+            lane.iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+                .map(|(index, _)| index)
+                .expect("lane output")
+        };
+        let (left, right) = blocks[0].split_at(frames);
+        assert_eq!(peak(left), 31);
+        assert_eq!(peak(right), 31);
+        assert_ne!(left[60].to_bits(), 0.0_f32.to_bits());
+        assert_ne!(right[60].to_bits(), 0.0_f32.to_bits());
+        assert!(left[61..].iter().all(|sample| *sample == 0.0));
+        assert!(right[61..].iter().all(|sample| *sample == 0.0));
+        assert!(blocks[1].iter().all(|sample| *sample == 0.0));
+    }
+
+    fn launch_eq_bypass_keeps_the_dry_impulse(pcm: &[f32], frames: usize) {
+        assert_eq!(pcm[0].to_bits(), 1.40625_f32.to_bits());
+        assert_eq!(pcm[frames].to_bits(), (-0.703125_f32).to_bits());
+        assert!(
+            pcm.iter()
+                .enumerate()
+                .all(|(index, sample)| index == 0 || index == frames || *sample == 0.0),
+            "bypass retains the dry impulse without changing the rack graph"
+        );
+    }
+
+    /// How a launch fixture pins the bank bytes on the report's estimate.
+    #[derive(Clone, Copy)]
+    enum LaunchEstimatePin {
+        /// Not pinned.
+        None,
+        /// Above the semantic estimates, against the per-node inserts arm of the same chain
+        /// (`per_node_inserts_artifact`); `every_field` adds the audio-buffer and metadata deltas.
+        PerNode { every_field: bool },
+        /// Directly against the reference arm, whose rack names the same nodes.
+        Reference,
+    }
+
+    /// One launch effect's frozen graph fixture.
+    struct LaunchFixture {
+        what: &'static str,
+        /// The registry ID; `bank_effect_id` is the effect ID a bank member's metadata names.
+        effect: &'static str,
+        bank_effect_id: &'static str,
+        model: fn() -> session::SessionModel,
+        tracks: usize,
+        /// A console slot banks in `Simd1` with a padded remainder and its reference arm is the
+        /// test-only `Scalar` oracle (#1098); an insert banks in the dynamic rack, full groups only,
+        /// and its reference arm is the same backend with every bank declined.
+        console: bool,
+        /// Insert rows: the leading tracks that share one cohort.
+        homogeneous: usize,
+        /// Every prepared entry's latency and tail, where pinned.
+        latency: Option<u64>,
+        tail: Option<TailSamples>,
+        /// Every prepared entry declares no sidechain port.
+        keyless: bool,
+        input: fn(&GraphNodeId) -> Box<dyn GraphRuntimeProcessor>,
+        blocks: u64,
+        /// Bank and reference PCM are bit-identical; otherwise within the ten-track bound.
+        exact: bool,
+        output: fn(&[Vec<f32>], usize),
+        estimate: LaunchEstimatePin,
+        /// The canonical evidence, every route at `latency`, the whole bypass graph and the
+        /// one-byte-below plan cap are pinned.
+        closes: bool,
+        /// The report's output latency is pinned to `latency`.
+        output_latency: bool,
+        /// The bypass preparation's entries keep this latency and, where given, tail.
+        bypass_entries: Option<(u64, Option<TailSamples>)>,
+        /// A registry that declines the console group fails the compile.
+        declining_registry_fails: bool,
+        /// Two post-bank observers bound in reverse handle order run in handle order.
+        observed: bool,
+        bypass_render: Option<fn(&[f32], usize)>,
+        plan_id: u64,
+    }
+
+    fn render_launch_blocks(
+        plan: &mut PreparedRenderPlan,
+        blocks: u64,
+        frames: usize,
+    ) -> Vec<Vec<f32>> {
+        (0..blocks)
+            .map(|block| {
+                let mut pcm = vec![0.0_f32; frames * 2];
+                plan.render(
+                    RenderIo {
+                        output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
+                            .expect("output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("render");
+                pcm
+            })
+            .collect()
+    }
+
+    /// Every launch effect's fixture: banks of the frozen width and membership, the same graph,
+    /// PDC and PCM as its bank-free reference across carried state, a bypass that keeps the graph,
+    /// and, where it closes, a one-byte-below plan cap that rejects transactionally.
+    #[test]
+    fn launch_effect_fixtures_bank_render_and_bypass_as_frozen() {
+        let rows = [
+            LaunchFixture {
+                what: "parametric EQ",
+                effect: "miso.parametric-eq",
+                bank_effect_id: "parametric-eq",
+                model: launch_parametric_eq_fixture,
+                tracks: 9,
+                console: true,
+                homogeneous: 9,
+                latency: None,
+                tail: None,
+                keyless: false,
+                input: parametric_eq_input_binding,
+                blocks: 2,
+                exact: true,
+                output: launch_eq_carries_state,
+                estimate: LaunchEstimatePin::None,
+                closes: false,
+                output_latency: false,
+                bypass_entries: None,
+                declining_registry_fails: true,
+                observed: true,
+                bypass_render: Some(launch_eq_bypass_keeps_the_dry_impulse),
+                plan_id: 1_042,
             },
-        )
-        .expect("compiled parametric-EQ fixture");
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
-            delegate: registry
-                .get_shared_ascii("miso.parametric-eq")
-                .expect("registered launch parametric EQ"),
-        })
-            as Box<dyn NativeEffectFactory>])
-        .expect("scalar launch registry");
+            LaunchFixture {
+                what: "compressor",
+                effect: "miso.compressor",
+                bank_effect_id: "compressor",
+                model: accepted_compressor_graph_fixture,
+                tracks: 10,
+                console: false,
+                homogeneous: 9,
+                latency: Some(0),
+                tail: None,
+                keyless: false,
+                input: parametric_eq_input_binding,
+                blocks: 16,
+                exact: true,
+                output: launch_renders_the_first_block,
+                estimate: LaunchEstimatePin::None,
+                closes: false,
+                output_latency: false,
+                bypass_entries: Some((0, None)),
+                declining_registry_fails: false,
+                observed: false,
+                bypass_render: None,
+                plan_id: 1_013,
+            },
+            LaunchFixture {
+                what: "gate/expander",
+                effect: "miso.gate-expander",
+                bank_effect_id: "gate-expander",
+                model: accepted_gate_expander_graph_fixture,
+                tracks: 10,
+                console: false,
+                homogeneous: 9,
+                latency: Some(0),
+                tail: Some(TailSamples::Finite(0)),
+                keyless: false,
+                input: parametric_eq_input_binding,
+                blocks: 16,
+                exact: true,
+                output: launch_renders_the_first_block,
+                estimate: LaunchEstimatePin::None,
+                closes: false,
+                output_latency: false,
+                bypass_entries: Some((0, None)),
+                declining_registry_fails: false,
+                observed: false,
+                bypass_render: None,
+                plan_id: 1_014,
+            },
+            LaunchFixture {
+                what: "true-peak limiter",
+                effect: "miso.true-peak-limiter",
+                bank_effect_id: "true-peak-limiter",
+                model: accepted_true_peak_limiter_graph_fixture,
+                tracks: 10,
+                console: true,
+                homogeneous: 10,
+                latency: Some(486),
+                tail: Some(TailSamples::Infinite),
+                keyless: false,
+                input: true_peak_limiter_input_binding,
+                blocks: 16,
+                exact: true,
+                output: launch_limiter_output_starts_at_its_latency,
+                estimate: LaunchEstimatePin::PerNode { every_field: true },
+                closes: true,
+                output_latency: true,
+                bypass_entries: Some((486, None)),
+                declining_registry_fails: false,
+                observed: false,
+                bypass_render: None,
+                plan_id: 1_050,
+            },
+            LaunchFixture {
+                what: "multiband compressor",
+                effect: "miso.multiband-compressor",
+                bank_effect_id: "multiband-compressor",
+                model: launch_multiband_compressor_fixture,
+                tracks: 10,
+                console: false,
+                homogeneous: 10,
+                latency: Some(0),
+                tail: Some(TailSamples::Infinite),
+                keyless: true,
+                input: multiband_compressor_input_binding,
+                blocks: 20,
+                exact: false,
+                output: launch_multiband_renders_now_and_on_release,
+                estimate: LaunchEstimatePin::Reference,
+                closes: true,
+                output_latency: false,
+                bypass_entries: None,
+                declining_registry_fails: false,
+                observed: false,
+                bypass_render: None,
+                plan_id: 1_080,
+            },
+            LaunchFixture {
+                what: "soft clip",
+                effect: "miso.soft-clip",
+                bank_effect_id: "soft-clip",
+                model: launch_soft_clip_fixture,
+                tracks: 10,
+                console: true,
+                homogeneous: 10,
+                latency: Some(31),
+                tail: Some(TailSamples::Finite(29)),
+                keyless: true,
+                input: soft_clip_input_binding,
+                blocks: 2,
+                exact: true,
+                output: launch_soft_clip_support_is_frozen,
+                estimate: LaunchEstimatePin::PerNode { every_field: false },
+                closes: true,
+                output_latency: false,
+                bypass_entries: Some((31, Some(TailSamples::Finite(29)))),
+                declining_registry_fails: false,
+                observed: false,
+                bypass_render: None,
+                plan_id: 1_100,
+            },
+            LaunchFixture {
+                what: "transient shaper",
+                effect: "miso.transient-shaper",
+                bank_effect_id: "transient-shaper",
+                model: launch_transient_shaper_fixture,
+                tracks: 10,
+                console: true,
+                homogeneous: 10,
+                latency: Some(0),
+                tail: Some(TailSamples::Finite(0)),
+                keyless: true,
+                input: transient_shaper_input_binding,
+                blocks: 2,
+                exact: true,
+                output: launch_renders_every_block,
+                estimate: LaunchEstimatePin::PerNode { every_field: false },
+                closes: true,
+                output_latency: false,
+                bypass_entries: None,
+                declining_registry_fails: false,
+                observed: false,
+                bypass_render: None,
+                plan_id: 1_120,
+            },
+        ];
+        let unbounded = CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        };
         let effect_caps = EffectCompileCaps {
             maximum_total_state_bytes: 1 << 20,
             maximum_scratch_bytes: 1 << 20,
             maximum_automation_spans_per_block: 32,
         };
-        let bank_effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared bank-capable effects");
-        let bank_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_042,
-            effects: bank_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
-        // #1098: a console slot never renders per node on a vector backend. A factory that
-        // declines the console group fails the compile rather than falling back per node, so the
-        // per-node reference is the test-only `Scalar` oracle, where nothing banks.
-        let declined = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_043,
-            effects: prepare_native_session_effects(&session, &scalar_registry, effect_caps)
-                .expect("prepared declining effects"),
-            caps: integration_caps(),
-        });
-        let Err(declined) = declined else {
-            panic!("a declined console group rendered per node on a vector backend");
-        };
-        assert_eq!(
-            declined
-                .diagnostics
-                .diagnostics()
-                .iter()
-                .map(|diagnostic| diagnostic.code)
-                .collect::<Vec<_>>(),
-            ["console.slot.unbanked"],
-            "a declined console group fails the compile"
-        );
-        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: Backend::Scalar,
-            plan_id: 1_043,
-            effects: prepare_native_session_effects(&session, registry, effect_caps)
-                .expect("prepared scalar effects"),
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("scalar graph: {:?}", failure.diagnostics));
-
-        // #1098: the ninth track's EQ binds as a padded bank of one, so nothing renders per node.
-        let width = BankWidth::for_backend(bank_artifact.report().rack_cohorts.dispatch);
-        let (expected_banks, expected_scalar_tails) = width.map_or((0, 9), |width| {
-            (9_usize.div_ceil(width.lanes() as usize), 0)
-        });
-        assert_eq!(bank_artifact.graph().prepared_bank_count(), expected_banks);
-        assert_eq!(
-            bank_artifact
-                .report()
-                .rack_cohorts
-                .bound_groups_in(RackLocation::Simd1)
-                .count(),
-            expected_banks
-        );
-        assert_eq!(
-            bank_artifact
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
-                .len(),
-            expected_scalar_tails
-        );
-        assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
-        assert!(scalar_artifact.report().rack_cohorts.bound_slots.is_empty());
-        assert_eq!(
-            scalar_artifact
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
-                .len(),
-            9,
-            "the Scalar oracle puts every member on the per-node path"
-        );
-        assert_eq!(
-            bank_artifact.graph().sequential_schedule,
-            scalar_artifact.graph().sequential_schedule
-        );
-        assert_eq!(
-            bank_artifact.graph().route_timings,
-            scalar_artifact.graph().route_timings
-        );
-        assert_eq!(
-            bank_artifact.graph().inserted_delays,
-            scalar_artifact.graph().inserted_delays
-        );
-        let expected_schedule = bank_artifact.graph().sequential_schedule.clone();
-        let expected_route_timings = bank_artifact.graph().route_timings.clone();
-
-        let envelope = bank_artifact.envelope();
-        let frames = envelope.quantum.0 as usize;
-        let observer_order = Arc::new(AtomicU64::new(0));
-        let observed_post_bank_audio = Arc::new(AtomicBool::new(false));
-        let mut bank_plan = bind_session_builtins(
-            bank_artifact,
-            parametric_eq_input_binding,
-            // Deliberately reverse insertion order: binding handles, not insertion order,
-            // decide the stable observer schedule after the SIMD rack boundary.
-            vec![
-                GraphNodeObserverBinding::new(
-                    track_node("eq0", TrackStage::PostSimd1),
-                    2,
-                    Box::new(RepeatedOrderedPostBankObserver {
-                        expected_order: 1,
-                        order: Arc::clone(&observer_order),
-                        observed_post_bank_audio: Arc::clone(&observed_post_bank_audio),
-                    }),
-                ),
-                GraphNodeObserverBinding::new(
-                    track_node("eq0", TrackStage::PostSimd1),
-                    1,
-                    Box::new(RepeatedOrderedPostBankObserver {
-                        expected_order: 0,
-                        order: Arc::clone(&observer_order),
-                        observed_post_bank_audio: Arc::clone(&observed_post_bank_audio),
-                    }),
-                ),
-            ],
-        );
-        let mut scalar_plan =
-            bind_session_builtins(scalar_artifact, parametric_eq_input_binding, Vec::new());
-        let mut bank_blocks = Vec::new();
-        for block in 0..2_u64 {
-            let mut bank_pcm = vec![0.0_f32; frames * 2];
-            let mut scalar_pcm = vec![0.0_f32; frames * 2];
-            bank_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
-                            .expect("bank output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("bank render");
-            scalar_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
-                            .expect("scalar output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("scalar render");
-            for (sample, scalar_sample) in bank_pcm.iter().zip(&scalar_pcm) {
+        let registry = launch_native_effect_registry().expect("launch registry");
+        for row in rows {
+            let what = row.what;
+            let n = row.tracks;
+            let model = (row.model)();
+            assert_eq!(model.tracks.len(), n, "{what}");
+            let session = compile_session(&model, unbounded).expect("accepted fixture");
+            assert_eq!(session.sample_rate().0, 48_000, "{what}");
+            assert_eq!(session.quantum().0, 128, "{what}");
+            let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
+                delegate: registry
+                    .get_shared_ascii(row.effect)
+                    .expect("registered launch effect"),
+            })
+                as Box<dyn NativeEffectFactory>])
+            .expect("declining registry");
+            let effects = prepare_native_session_effects(&session, registry, effect_caps)
+                .expect("prepared bank-capable effects");
+            assert_eq!(effects.entries.len(), n, "{what}");
+            assert!(
+                effects.entries.iter().all(|entry| {
+                    row.latency
+                        .is_none_or(|latency| entry.metadata.latency == LatencySamples(latency))
+                        && row.tail.is_none_or(|tail| entry.metadata.tail == tail)
+                        && (!row.keyless
+                            || matches!(
+                                entry.metadata.ports.sidechain,
+                                PreparedSidechainPort::None
+                            ))
+                }),
+                "{what}: prepared latency, tail and ports"
+            );
+            let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
+                dispatch: host_dispatch(),
+                plan_id: row.plan_id,
+                effects,
+                caps: integration_caps(),
+            })
+            .unwrap_or_else(|failure| panic!("{what} graph: {:?}", failure.diagnostics));
+            if row.declining_registry_fails {
+                // #1098: a console slot never renders per node on a vector backend. A factory that
+                // declines the console group fails the compile rather than falling back per node.
+                let Err(declined) = compile_with_session_builtins(SessionBuiltinsCompile {
+                    dispatch: host_dispatch(),
+                    plan_id: row.plan_id + 1,
+                    effects: prepare_native_session_effects(
+                        &session,
+                        &scalar_registry,
+                        effect_caps,
+                    )
+                    .expect("prepared declining effects"),
+                    caps: integration_caps(),
+                }) else {
+                    panic!(
+                        "{what}: a declined console group rendered per node on a vector backend"
+                    );
+                };
                 assert_eq!(
-                    sample.to_bits(),
-                    scalar_sample.to_bits(),
-                    "bank/scalar PCM must be exact"
+                    declined
+                        .diagnostics
+                        .diagnostics()
+                        .iter()
+                        .map(|diagnostic| diagnostic.code)
+                        .collect::<Vec<_>>(),
+                    ["console.slot.unbanked"],
+                    "{what}: a declined console group fails the compile"
                 );
             }
-            bank_blocks.push(bank_pcm);
-        }
-        assert!(
-            bank_blocks[0]
-                .iter()
-                .zip(&bank_blocks[1])
-                .any(|(first, second)| first.to_bits() != second.to_bits()),
-            "the second block must retain the first block's EQ state"
-        );
-        assert_eq!(observer_order.load(Ordering::SeqCst), 4);
-        assert!(observed_post_bank_audio.load(Ordering::SeqCst));
+            let (reference_dispatch, reference_registry) = if row.console {
+                (Backend::Scalar, registry)
+            } else {
+                (host_dispatch(), &scalar_registry)
+            };
+            let reference = compile_with_session_builtins(SessionBuiltinsCompile {
+                dispatch: reference_dispatch,
+                plan_id: row.plan_id + 1,
+                effects: prepare_native_session_effects(&session, reference_registry, effect_caps)
+                    .expect("prepared reference effects"),
+                caps: integration_caps(),
+            })
+            .unwrap_or_else(|failure| panic!("{what} reference graph: {:?}", failure.diagnostics));
 
-        let mut bypass_model = model.clone();
-        for track in &mut bypass_model.tracks {
-            track.console[0].bypass = true;
+            let location = if row.console {
+                RackLocation::Simd1
+            } else {
+                RackLocation::Dynamic
+            };
+            let cohorts = &artifact.report().rack_cohorts;
+            let width = BankWidth::for_backend(cohorts.dispatch);
+            let lanes = width.map_or(1, |width| width.lanes() as usize);
+            let expected_banks = match width {
+                None => 0,
+                Some(_) if row.console => n.div_ceil(lanes),
+                Some(_) => row.homogeneous / lanes,
+            };
+            assert_eq!(
+                artifact.graph().prepared_bank_count(),
+                expected_banks,
+                "{what}"
+            );
+            assert_eq!(
+                cohorts.bound_groups_in(location).count(),
+                expected_banks,
+                "{what}"
+            );
+            if !row.console {
+                assert!(
+                    cohorts
+                        .bound_groups_in(location)
+                        .all(|bank| bank.active_count() == lanes),
+                    "{what}: an insert binds full banks only"
+                );
+            }
+            assert_eq!(
+                cohorts
+                    .bound_groups_in(location)
+                    .map(|bank| {
+                        bank.members
+                            .iter()
+                            .flatten()
+                            .map(|member| member.track_id.as_str().to_owned())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>(),
+                (0..expected_banks)
+                    .map(|bank| {
+                        (bank * lanes..((bank + 1) * lanes).min(n))
+                            .map(|index| format!("eq{index}"))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>(),
+                "{what}: stable bank membership"
+            );
+            assert_eq!(
+                cohorts
+                    .scalar_in(location)
+                    .iter()
+                    .map(|tail| tail.track_id.as_str().to_owned())
+                    .collect::<Vec<_>>(),
+                ((expected_banks * lanes).min(n)..n)
+                    .map(|index| format!("eq{index}"))
+                    .collect::<Vec<_>>(),
+                "{what}: stable scalar-tail order"
+            );
+            assert_eq!(reference.graph().prepared_bank_count(), 0, "{what}");
+            assert!(
+                reference.report().rack_cohorts.bound_slots.is_empty(),
+                "{what}"
+            );
+            assert_eq!(
+                reference.report().rack_cohorts.scalar_in(location).len(),
+                n,
+                "{what}: the reference puts every member on the per-node path"
+            );
+
+            if !matches!(row.estimate, LaunchEstimatePin::None) {
+                let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
+                let bank_count = u64::try_from(expected_banks).expect("bank count");
+                // The product's own slot reservation for these banks at this width (TA3): the
+                // deltas below hold it to the reports, without re-deriving its layout.
+                let slot_bytes =
+                    graph::GraphBankSlotResourceEstimate::checked_for(bank_count, width)
+                        .expect("bank slot reservation")
+                        .total_bytes;
+                let quantum = u64::from(session.quantum().0);
+                let scratch_bytes = bank_count * lanes * quantum * 2 * 4;
+                let runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
+                let metadata_bytes = bank_count
+                    * (u64::try_from(core::mem::size_of::<graph::GraphPreparedEffectBank>())
+                        .expect("bank metadata size")
+                        + lanes)
+                    + cohorts
+                        .bound_groups_in(location)
+                        .flat_map(|bank| bank.members.iter().flatten())
+                        .map(|member| {
+                            u64::try_from(core::mem::size_of::<EffectNodeId>())
+                                .expect("member metadata size")
+                                + u64::try_from(member.track_id.as_str().len())
+                                    .expect("track ID bytes")
+                                + u64::try_from(row.bank_effect_id.len()).expect("effect ID bytes")
+                        })
+                        .sum::<u64>();
+                let estimate = &artifact.report().estimate;
+                assert_eq!(estimate.effect_bank_count, bank_count, "{what}");
+                assert_eq!(estimate.effect_bank_scratch_bytes, scratch_bytes, "{what}");
+                assert_eq!(
+                    estimate.effect_bank_runtime_buffer_bytes, runtime_buffer_bytes,
+                    "{what}"
+                );
+                assert_eq!(
+                    estimate.effect_bank_metadata_bytes, metadata_bytes,
+                    "{what}"
+                );
+                let reference_estimate = &reference.report().estimate;
+                assert_eq!(reference_estimate.effect_bank_count, 0, "{what}");
+                assert_eq!(reference_estimate.effect_bank_scratch_bytes, 0, "{what}");
+                assert_eq!(
+                    reference_estimate.effect_bank_runtime_buffer_bytes, 0,
+                    "{what}"
+                );
+                assert_eq!(reference_estimate.effect_bank_metadata_bytes, 0, "{what}");
+                let overhead = scratch_bytes + runtime_buffer_bytes + metadata_bytes + slot_bytes;
+                if let LaunchEstimatePin::PerNode { every_field } = row.estimate {
+                    // The estimate's bank-free arm, on the same backend: the strip folded into
+                    // every track's inserts, where a declined group renders per node (#1098). Its
+                    // node and edge IDs name another rack, so the two are compared above their
+                    // dispatch-independent semantic estimates. The effect banks are all that
+                    // separate the two.
+                    let per_node =
+                        per_node_inserts_artifact(&model, &[row.effect], row.plan_id + 1);
+                    let banked = artifact.report();
+                    let unbanked = per_node.report();
+                    if every_field {
+                        assert_eq!(
+                            banked.estimate.audio_buffer_samples
+                                - banked.semantic_estimate.audio_buffer_samples,
+                            unbanked.estimate.audio_buffer_samples
+                                - unbanked.semantic_estimate.audio_buffer_samples
+                                + (scratch_bytes + runtime_buffer_bytes) / 4,
+                            "{what}"
+                        );
+                        assert_eq!(
+                            banked.estimate.graph_metadata_bytes
+                                - banked.semantic_estimate.graph_metadata_bytes,
+                            unbanked.estimate.graph_metadata_bytes
+                                - unbanked.semantic_estimate.graph_metadata_bytes
+                                + metadata_bytes
+                                + slot_bytes,
+                            "{what}"
+                        );
+                    }
+                    assert_eq!(
+                        banked.estimate.incremental_plan_bytes
+                            - banked.semantic_estimate.incremental_plan_bytes,
+                        unbanked.estimate.incremental_plan_bytes
+                            - unbanked.semantic_estimate.incremental_plan_bytes
+                            + overhead,
+                        "{what}"
+                    );
+                    assert_eq!(
+                        banked.estimate.session_plus_plan_bytes
+                            - banked.semantic_estimate.session_plus_plan_bytes,
+                        unbanked.estimate.session_plus_plan_bytes
+                            - unbanked.semantic_estimate.session_plus_plan_bytes
+                            + overhead,
+                        "{what}"
+                    );
+                    assert_builtin_attachment_matches(&artifact, &per_node, what);
+                } else {
+                    assert_eq!(
+                        estimate.incremental_plan_bytes,
+                        reference_estimate.incremental_plan_bytes + overhead,
+                        "{what}"
+                    );
+                    assert_eq!(
+                        estimate.session_plus_plan_bytes,
+                        reference_estimate.session_plus_plan_bytes + overhead,
+                        "{what}"
+                    );
+                    assert_builtin_attachment_matches(&artifact, &reference, what);
+                }
+            }
+
+            assert_eq!(
+                artifact.graph().sequential_schedule,
+                reference.graph().sequential_schedule,
+                "{what}"
+            );
+            assert_eq!(
+                artifact.graph().route_timings,
+                reference.graph().route_timings,
+                "{what}"
+            );
+            assert_eq!(
+                artifact.graph().inserted_delays,
+                reference.graph().inserted_delays,
+                "{what}"
+            );
+            let routes_arrive_at = |artifact: &PreparedGraphBuiltinsArtifact, latency: u64| {
+                artifact.graph().route_timings.iter().all(|route| {
+                    route.source_arrival == LatencySamples(latency)
+                        && route.compensation_delay == LatencySamples(0)
+                        && route.destination_arrival == LatencySamples(latency)
+                })
+            };
+            let latency = row.latency.unwrap_or(0);
+            if row.closes {
+                assert_eq!(
+                    GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
+                    GraphCompiler::evidence(reference.graph(), reference.report()).canonical_bytes,
+                    "{what}"
+                );
+                assert!(routes_arrive_at(&artifact, latency), "{what}");
+            }
+            if row.output_latency {
+                assert_eq!(
+                    artifact.report().output_latency,
+                    LatencySamples(latency),
+                    "{what}"
+                );
+                assert_eq!(
+                    artifact.report().output_latency,
+                    reference.report().output_latency,
+                    "{what}"
+                );
+                assert_eq!(
+                    artifact.report().output_tail,
+                    reference.report().output_tail,
+                    "{what}"
+                );
+            }
+            let expected_schedule = artifact.graph().sequential_schedule.clone();
+            let expected_route_timings = artifact.graph().route_timings.clone();
+            let expected_delays = artifact.graph().inserted_delays.clone();
+            let expected_canonical_bytes =
+                GraphCompiler::evidence(artifact.graph(), artifact.report())
+                    .canonical_bytes
+                    .clone();
+            let expected_output_latency = artifact.report().output_latency;
+            let expected_output_tail = artifact.report().output_tail;
+            // The whole-plan figure, builtin banks attached: the one the compile caps (#964).
+            let minimum_plan_bytes = artifact.graph_resource_estimate().incremental_plan_bytes;
+
+            let frames = artifact.envelope().quantum.0 as usize;
+            let observer_order = Arc::new(AtomicU64::new(0));
+            let observed_post_bank_audio = Arc::new(AtomicBool::new(false));
+            // Deliberately reverse insertion order: binding handles, not insertion order, decide
+            // the stable observer schedule after the SIMD rack boundary.
+            let observers: Vec<GraphNodeObserverBinding> = if row.observed {
+                [(2, 1), (1, 0)]
+                    .into_iter()
+                    .map(|(handle, expected_order)| {
+                        GraphNodeObserverBinding::new(
+                            track_node("eq0", TrackStage::PostSimd1),
+                            handle,
+                            Box::new(RepeatedOrderedPostBankObserver {
+                                expected_order,
+                                order: Arc::clone(&observer_order),
+                                observed_post_bank_audio: Arc::clone(&observed_post_bank_audio),
+                            }),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut bank_plan = bind_session_builtins(artifact, row.input, observers);
+            let mut reference_plan = bind_session_builtins(reference, row.input, Vec::new());
+            let bank_blocks = render_launch_blocks(&mut bank_plan, row.blocks, frames);
+            let reference_blocks = render_launch_blocks(&mut reference_plan, row.blocks, frames);
+            if row.exact {
+                assert_pcm_bits_equal(&bank_blocks, &reference_blocks, what);
+            } else {
+                for (bank, reference) in bank_blocks
+                    .iter()
+                    .flatten()
+                    .zip(reference_blocks.iter().flatten())
+                {
+                    assert!(bank.is_finite() && reference.is_finite(), "{what}");
+                    let bound = 1.0e-5 + 2.0e-5 * reference.abs();
+                    assert!(
+                        (bank - reference).abs() <= bound,
+                        "{what}: ten-track accumulated bank/reference error: \
+                         bank={bank} reference={reference} bound={bound}"
+                    );
+                }
+            }
+            (row.output)(&bank_blocks, frames);
+            if row.observed {
+                assert_eq!(
+                    observer_order.load(Ordering::SeqCst),
+                    2 * row.blocks,
+                    "{what}"
+                );
+                assert!(observed_post_bank_audio.load(Ordering::SeqCst), "{what}");
+            }
+
+            let mut bypass_model = model.clone();
+            for track in &mut bypass_model.tracks {
+                if row.console {
+                    track.console[0].bypass = true;
+                } else {
+                    track.inserts.effects[0].bypass = true;
+                }
+            }
+            let bypass_session =
+                compile_session(&bypass_model, unbounded).expect("compiled bypass fixture");
+            let bypass_effects =
+                prepare_native_session_effects(&bypass_session, registry, effect_caps)
+                    .expect("prepared bypass effects");
+            if let Some((latency, tail)) = row.bypass_entries {
+                assert!(
+                    bypass_effects.entries.iter().all(|entry| {
+                        entry.metadata.latency == LatencySamples(latency)
+                            && tail.is_none_or(|tail| entry.metadata.tail == tail)
+                    }),
+                    "{what}: bypass keeps the prepared latency"
+                );
+            }
+            let bypass = compile_with_session_builtins(SessionBuiltinsCompile {
+                dispatch: host_dispatch(),
+                plan_id: row.plan_id + 2,
+                effects: bypass_effects,
+                caps: integration_caps(),
+            })
+            .unwrap_or_else(|failure| panic!("{what} bypass graph: {:?}", failure.diagnostics));
+            assert_eq!(
+                bypass.graph().sequential_schedule,
+                expected_schedule,
+                "{what}: bypass does not change graph scheduling"
+            );
+            assert_eq!(
+                bypass.graph().route_timings,
+                expected_route_timings,
+                "{what}: bypass does not change PDC timings"
+            );
+            if row.closes {
+                assert_eq!(
+                    bypass.graph().prepared_bank_count(),
+                    expected_banks,
+                    "{what}"
+                );
+                assert_eq!(bypass.graph().inserted_delays, expected_delays, "{what}");
+                assert_eq!(
+                    GraphCompiler::evidence(bypass.graph(), bypass.report()).canonical_bytes,
+                    expected_canonical_bytes,
+                    "{what}"
+                );
+                assert!(routes_arrive_at(&bypass, latency), "{what}");
+            }
+            if row.output_latency {
+                assert_eq!(
+                    bypass.report().output_latency,
+                    expected_output_latency,
+                    "{what}"
+                );
+                assert_eq!(bypass.report().output_tail, expected_output_tail, "{what}");
+            }
+            if let Some(check) = row.bypass_render {
+                let mut bypass_plan = bind_session_builtins(bypass, row.input, Vec::new());
+                let pcm = render_launch_blocks(&mut bypass_plan, 1, frames);
+                check(&pcm[0], frames);
+            }
+
+            if row.closes {
+                let mut constrained_caps = integration_caps();
+                constrained_caps.maximum_plan_bytes = minimum_plan_bytes
+                    .checked_sub(1)
+                    .expect("nonzero full graph plan estimate");
+                let Err(cap_failure) = compile_with_session_builtins(SessionBuiltinsCompile {
+                    dispatch: host_dispatch(),
+                    plan_id: row.plan_id + 3,
+                    effects: prepare_native_session_effects(&session, registry, effect_caps)
+                        .expect("prepared effects for transactional cap"),
+                    caps: constrained_caps,
+                }) else {
+                    panic!("{what}: a one-byte-below graph cap must reject before publication");
+                };
+                assert!(
+                    cap_failure
+                        .diagnostics
+                        .diagnostics()
+                        .iter()
+                        .any(|diagnostic| {
+                            diagnostic.code == "graph.resource.limit"
+                                && diagnostic.path == "$.graph_compile_caps"
+                        }),
+                    "{what}"
+                );
+                assert_eq!(cap_failure.effects.entries.len(), n, "{what}");
+                assert_eq!(
+                    cap_failure.effects.session.normalized_model().tracks.len(),
+                    n,
+                    "{what}: cap rejection returns every prepared input"
+                );
+            }
         }
-        let bypass_session = compile_session(
-            &bypass_model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("compiled bypass fixture");
-        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
-            .expect("prepared bypass effects");
-        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_044,
-            effects: bypass_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("bypass graph: {:?}", failure.diagnostics));
-        assert_eq!(
-            bypass_artifact.graph().sequential_schedule,
-            expected_schedule,
-            "bypass does not change graph scheduling"
-        );
-        assert_eq!(
-            bypass_artifact.graph().route_timings,
-            expected_route_timings,
-            "bypass does not change PDC timings"
-        );
-        let mut bypass_plan =
-            bind_session_builtins(bypass_artifact, parametric_eq_input_binding, Vec::new());
-        let mut bypass_pcm = vec![0.0_f32; frames * 2];
-        bypass_plan
-            .render(
-                RenderIo {
-                    output: PlanarBufferMut::try_new(&mut bypass_pcm, 2, frames, frames)
-                        .expect("bypass output"),
-                },
-                RenderTime { absolute_sample: 0 },
-            )
-            .expect("bypass render");
-        assert_eq!(bypass_pcm[0].to_bits(), 1.40625_f32.to_bits());
-        assert_eq!(bypass_pcm[frames].to_bits(), (-0.703125_f32).to_bits());
-        assert!(
-            bypass_pcm
-                .iter()
-                .enumerate()
-                .all(|(index, sample)| index == 0 || index == frames || *sample == 0.0),
-            "bypass retains the dry impulse without changing the rack graph"
-        );
     }
 
     /// An EQ lane's cell writer, held beside the plan the fixture binds.
@@ -6400,225 +7012,6 @@ mod tests {
         assert!(
             candidate.plan.bank_collapse_transitions()[0] > 0,
             "the final left/right target state survives collapse restoration"
-        );
-    }
-
-    #[test]
-    fn launch_compressor_fixture_retains_bank_tail_and_connected_scalar_with_zero_pdc() {
-        let model = accepted_compressor_graph_fixture();
-        assert_eq!(model.tracks.len(), 10);
-        let session = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("accepted compressor fixture");
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let compressor = registry
-            .get_shared_ascii("miso.compressor")
-            .expect("registered compressor");
-        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
-            delegate: compressor,
-        })
-            as Box<dyn NativeEffectFactory>])
-        .expect("scalar compressor registry");
-        let effect_caps = EffectCompileCaps {
-            maximum_total_state_bytes: 1 << 20,
-            maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
-        };
-        let effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared compressor effects");
-        assert_eq!(effects.entries.len(), 10);
-        assert!(
-            effects
-                .entries
-                .iter()
-                .all(|entry| entry.metadata.latency == LatencySamples(0))
-        );
-        let scalar_effects =
-            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
-                .expect("prepared scalar compressor effects");
-        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_013,
-            effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("compressor graph: {:?}", failure.diagnostics));
-        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_014,
-            effects: scalar_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("scalar compressor graph: {:?}", failure.diagnostics));
-        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
-        if let Some(width) = width {
-            let lanes = width.lanes() as usize;
-            let expected_banks = 9 / lanes;
-            let expected_scalar_tails = 1 + 9 % lanes;
-            assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
-            assert_eq!(
-                artifact
-                    .report()
-                    .rack_cohorts
-                    .bound_groups_in(RackLocation::Dynamic)
-                    .count(),
-                expected_banks
-            );
-            assert_eq!(
-                artifact
-                    .report()
-                    .rack_cohorts
-                    .scalar_in(RackLocation::Dynamic)
-                    .len(),
-                expected_scalar_tails
-            );
-            assert!(
-                artifact
-                    .report()
-                    .rack_cohorts
-                    .scalar_in(RackLocation::Dynamic)
-                    .iter()
-                    .any(|id| id.track_id.as_str() == "eq8")
-            );
-            assert!(
-                artifact
-                    .report()
-                    .rack_cohorts
-                    .scalar_in(RackLocation::Dynamic)
-                    .iter()
-                    .any(|id| id.track_id.as_str() == "eq9")
-            );
-        } else {
-            assert_eq!(artifact.graph().prepared_bank_count(), 0);
-            assert_eq!(
-                artifact
-                    .report()
-                    .rack_cohorts
-                    .scalar_in(RackLocation::Dynamic)
-                    .len(),
-                10
-            );
-        }
-        assert_eq!(
-            artifact.graph().sequential_schedule,
-            scalar_artifact.graph().sequential_schedule
-        );
-        assert_eq!(
-            artifact.graph().route_timings,
-            scalar_artifact.graph().route_timings
-        );
-        assert_eq!(
-            artifact.graph().inserted_delays,
-            scalar_artifact.graph().inserted_delays
-        );
-        let expected_schedule = artifact.graph().sequential_schedule.clone();
-        let expected_route_timings = artifact.graph().route_timings.clone();
-
-        let envelope = artifact.envelope();
-        let mut bank_plan =
-            bind_session_builtins(artifact, parametric_eq_input_binding, Vec::new());
-        let mut scalar_plan =
-            bind_session_builtins(scalar_artifact, parametric_eq_input_binding, Vec::new());
-        let frames = envelope.quantum.0 as usize;
-        let mut rendered_nonzero = false;
-        let mut first_block_nonzero = false;
-        for block in 0..16_u64 {
-            let mut bank_pcm = vec![0.0_f32; frames * 2];
-            let mut scalar_pcm = vec![0.0_f32; frames * 2];
-            bank_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
-                            .expect("bank output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("bank render");
-            scalar_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
-                            .expect("scalar output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("scalar render");
-            assert_eq!(
-                bank_pcm
-                    .iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>(),
-                scalar_pcm
-                    .iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>(),
-                "retained compressor bank and scalar fallback render the same PCM"
-            );
-            rendered_nonzero |= bank_pcm.iter().any(|sample| *sample != 0.0);
-            if block == 0 {
-                first_block_nonzero = bank_pcm.iter().any(|sample| *sample != 0.0);
-            }
-        }
-        assert!(
-            rendered_nonzero,
-            "the causal compressor path rendered audio"
-        );
-        assert!(
-            first_block_nonzero,
-            "the zero-latency compressor renders the current first block"
-        );
-
-        let mut bypass_model = model.clone();
-        for track in &mut bypass_model.tracks {
-            track.inserts.effects[0].bypass = true;
-        }
-        let bypass_session = compile_session(
-            &bypass_model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("bypass compressor fixture");
-        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
-            .expect("prepared bypass compressor effects");
-        assert!(
-            bypass_effects
-                .entries
-                .iter()
-                .all(|entry| entry.metadata.latency == LatencySamples(0))
-        );
-        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_015,
-            effects: bypass_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("bypass compressor graph: {:?}", failure.diagnostics));
-        assert_eq!(
-            bypass_artifact.graph().sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(
-            bypass_artifact.graph().route_timings,
-            expected_route_timings
         );
     }
 
@@ -11400,1712 +11793,6 @@ mod tests {
         // the round-trips it measured really are one per realised chain and not one per slot.
         let [chains, slots] = plan.bank_shape();
         (pcm, transposes, chains, slots)
-    }
-
-    #[test]
-    fn launch_gate_expander_fixture_retains_width_correct_banks_and_scalar_fallbacks() {
-        let model = accepted_gate_expander_graph_fixture();
-        assert_eq!(model.tracks.len(), 10);
-        let session = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("accepted gate/expander fixture");
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let gate_expander = registry
-            .get_shared_ascii("miso.gate-expander")
-            .expect("registered gate/expander");
-        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
-            delegate: gate_expander,
-        })
-            as Box<dyn NativeEffectFactory>])
-        .expect("scalar gate/expander registry");
-        let effect_caps = EffectCompileCaps {
-            maximum_total_state_bytes: 1 << 20,
-            maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
-        };
-        let effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared gate/expander effects");
-        assert_eq!(effects.entries.len(), 10);
-        assert!(effects.entries.iter().all(|entry| {
-            entry.metadata.latency == LatencySamples(0)
-                && entry.metadata.tail == TailSamples::Finite(0)
-        }));
-        let scalar_effects =
-            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
-                .expect("prepared scalar gate/expander effects");
-        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_014,
-            effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("gate/expander graph: {:?}", failure.diagnostics));
-        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_015,
-            effects: scalar_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("scalar gate/expander graph: {:?}", failure.diagnostics));
-        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
-        if let Some(width) = width {
-            let lanes = width.lanes() as usize;
-            let expected_banks = 9 / lanes;
-            let expected_scalar_tails = 1 + 9 % lanes;
-            assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
-            assert_eq!(
-                artifact
-                    .report()
-                    .rack_cohorts
-                    .bound_groups_in(RackLocation::Dynamic)
-                    .count(),
-                expected_banks
-            );
-            assert!(
-                artifact
-                    .report()
-                    .rack_cohorts
-                    .bound_groups_in(RackLocation::Dynamic)
-                    .all(|bank| bank.active_count() == lanes)
-            );
-            assert_eq!(
-                artifact
-                    .report()
-                    .rack_cohorts
-                    .scalar_in(RackLocation::Dynamic)
-                    .len(),
-                expected_scalar_tails
-            );
-            assert!(
-                artifact
-                    .report()
-                    .rack_cohorts
-                    .scalar_in(RackLocation::Dynamic)
-                    .iter()
-                    .any(|id| id.track_id.as_str() == "eq8")
-            );
-            assert!(
-                artifact
-                    .report()
-                    .rack_cohorts
-                    .scalar_in(RackLocation::Dynamic)
-                    .iter()
-                    .any(|id| id.track_id.as_str() == "eq9")
-            );
-        } else {
-            assert_eq!(artifact.graph().prepared_bank_count(), 0);
-            assert_eq!(
-                artifact
-                    .report()
-                    .rack_cohorts
-                    .scalar_in(RackLocation::Dynamic)
-                    .len(),
-                10
-            );
-        }
-        assert_eq!(
-            artifact.graph().sequential_schedule,
-            scalar_artifact.graph().sequential_schedule
-        );
-        assert_eq!(
-            artifact.graph().route_timings,
-            scalar_artifact.graph().route_timings
-        );
-        assert_eq!(
-            artifact.graph().inserted_delays,
-            scalar_artifact.graph().inserted_delays
-        );
-        let expected_schedule = artifact.graph().sequential_schedule.clone();
-        let expected_route_timings = artifact.graph().route_timings.clone();
-        let envelope = artifact.envelope();
-        let mut bank_plan =
-            bind_session_builtins(artifact, parametric_eq_input_binding, Vec::new());
-        let mut scalar_plan =
-            bind_session_builtins(scalar_artifact, parametric_eq_input_binding, Vec::new());
-        let frames = envelope.quantum.0 as usize;
-        let mut rendered_nonzero = false;
-        let mut first_block_nonzero = false;
-        for block in 0..16_u64 {
-            let mut bank_pcm = vec![0.0_f32; frames * 2];
-            let mut scalar_pcm = vec![0.0_f32; frames * 2];
-            bank_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
-                            .expect("bank output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("bank render");
-            scalar_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
-                            .expect("scalar output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("scalar render");
-            assert_eq!(
-                bank_pcm
-                    .iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>(),
-                scalar_pcm
-                    .iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>(),
-                "bank and scalar gate/expander paths remain exact through carried state"
-            );
-            rendered_nonzero |= bank_pcm.iter().any(|sample| *sample != 0.0);
-            if block == 0 {
-                first_block_nonzero = bank_pcm.iter().any(|sample| *sample != 0.0);
-            }
-        }
-        assert!(rendered_nonzero, "the active gate fixture rendered audio");
-        assert!(
-            first_block_nonzero,
-            "the zero-latency gate renders current input in the first block"
-        );
-
-        let mut bypass_model = model.clone();
-        for track in &mut bypass_model.tracks {
-            track.inserts.effects[0].bypass = true;
-        }
-        let bypass_session = compile_session(
-            &bypass_model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("compiled bypass gate/expander fixture");
-        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
-            .expect("prepared bypass gate/expander effects");
-        assert!(
-            bypass_effects
-                .entries
-                .iter()
-                .all(|entry| entry.metadata.latency == LatencySamples(0))
-        );
-        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_016,
-            effects: bypass_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("bypass gate/expander graph: {:?}", failure.diagnostics));
-        assert_eq!(
-            bypass_artifact.graph().sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(
-            bypass_artifact.graph().route_timings,
-            expected_route_timings
-        );
-    }
-
-    #[test]
-    fn launch_true_peak_limiter_fixture_retains_banks_tails_latency_and_transactional_caps() {
-        let model = accepted_true_peak_limiter_graph_fixture();
-        assert_eq!(model.tracks.len(), 10);
-        let session = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("accepted true-peak limiter fixture");
-        assert_eq!(session.sample_rate().0, 48_000);
-        assert_eq!(session.quantum().0, 128);
-
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let effect_caps = EffectCompileCaps {
-            maximum_total_state_bytes: 1 << 20,
-            maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
-        };
-        let effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared bank-capable limiter effects");
-        assert_eq!(effects.entries.len(), 10);
-        assert!(effects.entries.iter().all(|entry| {
-            entry.metadata.latency == LatencySamples(486)
-                && entry.metadata.tail == TailSamples::Infinite
-        }));
-        // #1098: a console slot never renders per node on a vector backend, so the bank-free arm
-        // is the test-only `Scalar` oracle, where nothing banks.
-        let scalar_effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared scalar limiter effects");
-        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_050,
-            effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("true-peak limiter graph: {:?}", failure.diagnostics));
-        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: Backend::Scalar,
-            plan_id: 1_051,
-            effects: scalar_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("scalar limiter graph: {:?}", failure.diagnostics));
-        // The estimate's bank-free arm, on the same backend: the strip folded into every track's
-        // inserts, where a declined group renders per node (#1098). Its node and edge IDs name
-        // another rack, so the two are compared above their dispatch-independent semantic
-        // estimates: what each compile adds for its banks, per-node owners and runtime metadata.
-        // The effect banks are all that separate the two.
-        let per_node = per_node_inserts_artifact(&model, &["miso.true-peak-limiter"], 1_051);
-
-        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
-        // #1098: the remainder binds as one padded bank, so nothing renders per node.
-        let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
-            (10_usize.div_ceil(width.lanes() as usize), 0)
-        });
-        assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
-        assert_eq!(
-            artifact
-                .report()
-                .rack_cohorts
-                .bound_groups_in(RackLocation::Simd1)
-                .count(),
-            expected_banks
-        );
-        assert_eq!(
-            artifact
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
-                .len(),
-            expected_scalar_tails
-        );
-        let actual_members: Vec<Vec<String>> = artifact
-            .report()
-            .rack_cohorts
-            .bound_groups_in(RackLocation::Simd1)
-            .map(|bank| {
-                bank.members
-                    .iter()
-                    .flatten()
-                    .map(|member| member.track_id.as_str().to_owned())
-                    .collect()
-            })
-            .collect();
-        let expected_members: Vec<Vec<String>> = width.map_or_else(Vec::new, |width| {
-            let lanes = width.lanes() as usize;
-            (0..expected_banks)
-                .map(|bank| {
-                    (bank * lanes..((bank + 1) * lanes).min(10))
-                        .map(|index| format!("eq{index}"))
-                        .collect()
-                })
-                .collect()
-        });
-        assert_eq!(
-            actual_members, expected_members,
-            "full banks retain stable membership"
-        );
-        let actual_tails: Vec<_> = artifact
-            .report()
-            .rack_cohorts
-            .scalar_in(RackLocation::Simd1)
-            .iter()
-            .map(|tail| tail.track_id.as_str().to_owned())
-            .collect();
-        let expected_tails: Vec<_> =
-            (expected_banks * width.map_or(1, |width| width.lanes() as usize)..10)
-                .map(|index| format!("eq{index}"))
-                .collect();
-        assert_eq!(actual_tails, expected_tails, "scalar tail order is stable");
-        assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
-        let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
-        let bank_count = u64::try_from(expected_banks).expect("bank count");
-        // The product's own slot reservation for these banks at this width (TA3): the
-        // deltas below hold it to the reports, without re-deriving its layout.
-        let expected_bank_slot_bytes =
-            graph::GraphBankSlotResourceEstimate::checked_for(bank_count, width)
-                .expect("bank slot reservation")
-                .total_bytes;
-        let quantum = u64::from(session.quantum().0);
-        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
-        let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
-        let expected_bank_metadata_bytes = bank_count
-            * (u64::try_from(core::mem::size_of::<graph::GraphPreparedEffectBank>())
-                .expect("bank metadata size")
-                + lanes)
-            + artifact
-                .report()
-                .rack_cohorts
-                .bound_groups_in(RackLocation::Simd1)
-                .flat_map(|bank| bank.members.iter().flatten())
-                .map(|member| {
-                    u64::try_from(core::mem::size_of::<EffectNodeId>())
-                        .expect("member metadata size")
-                        + u64::try_from(member.track_id.as_str().len()).expect("track ID bytes")
-                        + u64::try_from("true-peak-limiter".len()).expect("effect ID bytes")
-                })
-                .sum::<u64>();
-        assert_eq!(artifact.report().estimate.effect_bank_count, bank_count);
-        assert_eq!(
-            artifact.report().estimate.effect_bank_scratch_bytes,
-            expected_bank_scratch_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.effect_bank_runtime_buffer_bytes,
-            expected_bank_runtime_buffer_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.effect_bank_metadata_bytes,
-            expected_bank_metadata_bytes
-        );
-        assert_eq!(scalar_artifact.report().estimate.effect_bank_count, 0);
-        assert_eq!(
-            scalar_artifact.report().estimate.effect_bank_scratch_bytes,
-            0
-        );
-        assert_eq!(
-            scalar_artifact
-                .report()
-                .estimate
-                .effect_bank_runtime_buffer_bytes,
-            0
-        );
-        assert_eq!(
-            scalar_artifact.report().estimate.effect_bank_metadata_bytes,
-            0
-        );
-        assert_eq!(
-            artifact.report().estimate.audio_buffer_samples
-                - artifact.report().semantic_estimate.audio_buffer_samples,
-            per_node.report().estimate.audio_buffer_samples
-                - per_node.report().semantic_estimate.audio_buffer_samples
-                + (expected_bank_scratch_bytes + expected_bank_runtime_buffer_bytes) / 4
-        );
-        assert_eq!(
-            artifact.report().estimate.graph_metadata_bytes
-                - artifact.report().semantic_estimate.graph_metadata_bytes,
-            per_node.report().estimate.graph_metadata_bytes
-                - per_node.report().semantic_estimate.graph_metadata_bytes
-                + expected_bank_metadata_bytes
-                + expected_bank_slot_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.incremental_plan_bytes
-                - artifact.report().semantic_estimate.incremental_plan_bytes,
-            per_node.report().estimate.incremental_plan_bytes
-                - per_node.report().semantic_estimate.incremental_plan_bytes
-                + expected_bank_scratch_bytes
-                + expected_bank_runtime_buffer_bytes
-                + expected_bank_metadata_bytes
-                + expected_bank_slot_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.session_plus_plan_bytes
-                - artifact.report().semantic_estimate.session_plus_plan_bytes,
-            per_node.report().estimate.session_plus_plan_bytes
-                - per_node.report().semantic_estimate.session_plus_plan_bytes
-                + expected_bank_scratch_bytes
-                + expected_bank_runtime_buffer_bytes
-                + expected_bank_metadata_bytes
-                + expected_bank_slot_bytes
-        );
-        assert_builtin_attachment_matches(&artifact, &per_node, "limiter");
-        assert_eq!(
-            artifact.graph().sequential_schedule,
-            scalar_artifact.graph().sequential_schedule
-        );
-        assert_eq!(
-            artifact.graph().route_timings,
-            scalar_artifact.graph().route_timings
-        );
-        assert_eq!(
-            artifact.graph().inserted_delays,
-            scalar_artifact.graph().inserted_delays
-        );
-        assert_eq!(
-            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
-            GraphCompiler::evidence(scalar_artifact.graph(), scalar_artifact.report())
-                .canonical_bytes
-        );
-        assert_eq!(artifact.report().output_latency, LatencySamples(486));
-        assert_eq!(
-            artifact.report().output_latency,
-            scalar_artifact.report().output_latency
-        );
-        assert_eq!(
-            artifact.report().output_tail,
-            scalar_artifact.report().output_tail
-        );
-        assert!(artifact.graph().route_timings.iter().all(|route| {
-            route.source_arrival == LatencySamples(486)
-                && route.compensation_delay == LatencySamples(0)
-                && route.destination_arrival == LatencySamples(486)
-        }));
-        let expected_schedule = artifact.graph().sequential_schedule.clone();
-        let expected_route_timings = artifact.graph().route_timings.clone();
-        let expected_delays = artifact.graph().inserted_delays.clone();
-        let expected_canonical_bytes = GraphCompiler::evidence(artifact.graph(), artifact.report())
-            .canonical_bytes
-            .clone();
-        let expected_output_latency = artifact.report().output_latency;
-        let expected_output_tail = artifact.report().output_tail;
-        // The whole-plan figure, builtin banks attached: the one the compile caps (#964).
-        let minimum_plan_bytes = artifact.graph_resource_estimate().incremental_plan_bytes;
-
-        let envelope = artifact.envelope();
-        let frames = envelope.quantum.0 as usize;
-        let mut bank_plan =
-            bind_session_builtins(artifact, true_peak_limiter_input_binding, Vec::new());
-        let mut scalar_plan =
-            bind_session_builtins(scalar_artifact, true_peak_limiter_input_binding, Vec::new());
-        let mut reached_fixed_latency = false;
-        for block in 0..16_u64 {
-            let mut bank_pcm = vec![0.0_f32; frames * 2];
-            let mut scalar_pcm = vec![0.0_f32; frames * 2];
-            bank_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
-                            .expect("bank output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("bank render");
-            scalar_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
-                            .expect("scalar output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("scalar render");
-            assert_eq!(
-                bank_pcm
-                    .iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>(),
-                scalar_pcm
-                    .iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>(),
-                "bank, tails, and scalar limiter render exact carried release state"
-            );
-            for frame in 0..frames {
-                let absolute = block * frames as u64 + frame as u64;
-                let left = bank_pcm[frame];
-                let right = bank_pcm[frames + frame];
-                if absolute < 486 {
-                    assert_eq!(left, 0.0, "left output before fixed limiter latency");
-                    assert_eq!(right, 0.0, "right output before fixed limiter latency");
-                }
-                if absolute == 486 {
-                    reached_fixed_latency = left != 0.0 && right != 0.0;
-                }
-            }
-        }
-        assert!(
-            reached_fixed_latency,
-            "one-shot limiter input first appears at the frozen T=486 samples"
-        );
-
-        let mut bypass_model = model.clone();
-        for track in &mut bypass_model.tracks {
-            track.console[0].bypass = true;
-        }
-        let bypass_session = compile_session(
-            &bypass_model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("compiled bypass limiter fixture");
-        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
-            .expect("prepared bypass limiter effects");
-        assert!(
-            bypass_effects
-                .entries
-                .iter()
-                .all(|entry| entry.metadata.latency == LatencySamples(486))
-        );
-        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_052,
-            effects: bypass_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("bypass limiter graph: {:?}", failure.diagnostics));
-        assert_eq!(
-            bypass_artifact.graph().prepared_bank_count(),
-            expected_banks
-        );
-        assert_eq!(
-            bypass_artifact.graph().sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(
-            bypass_artifact.graph().route_timings,
-            expected_route_timings
-        );
-        assert_eq!(bypass_artifact.graph().inserted_delays, expected_delays);
-        assert_eq!(
-            bypass_artifact.report().output_latency,
-            expected_output_latency
-        );
-        assert_eq!(bypass_artifact.report().output_tail, expected_output_tail);
-        assert_eq!(
-            GraphCompiler::evidence(bypass_artifact.graph(), bypass_artifact.report())
-                .canonical_bytes,
-            expected_canonical_bytes
-        );
-        assert!(bypass_artifact.graph().route_timings.iter().all(|route| {
-            route.source_arrival == LatencySamples(486)
-                && route.compensation_delay == LatencySamples(0)
-                && route.destination_arrival == LatencySamples(486)
-        }));
-
-        let cap_effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared limiter effects for transactional cap");
-        let mut constrained_caps = integration_caps();
-        constrained_caps.maximum_plan_bytes = minimum_plan_bytes
-            .checked_sub(1)
-            .expect("nonzero full graph plan estimate");
-        let cap_failure = match compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_053,
-            effects: cap_effects,
-            caps: constrained_caps,
-        }) {
-            Ok(_) => panic!("one-byte-below limiter graph cap must reject before publication"),
-            Err(failure) => failure,
-        };
-        assert!(
-            cap_failure
-                .diagnostics
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| {
-                    diagnostic.code == "graph.resource.limit"
-                        && diagnostic.path == "$.graph_compile_caps"
-                })
-        );
-        assert_eq!(cap_failure.effects.entries.len(), 10);
-        assert_eq!(
-            cap_failure.effects.session.normalized_model().tracks.len(),
-            10,
-            "cap rejection returns every prepared limiter input"
-        );
-    }
-
-    #[test]
-    fn launch_multiband_compressor_fixture_closes_bank_graph_and_transactional_caps() {
-        let model = accepted_multiband_compressor_graph_fixture();
-        assert_eq!(model.tracks.len(), 10);
-        assert!(model.tracks.iter().all(|track| matches!(
-            track.inserts.effects[0].sidechain,
-            SidechainDeclaration::None
-        )));
-        let session = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("accepted multiband-compressor fixture");
-        assert_eq!(session.sample_rate().0, 48_000);
-        assert_eq!(session.quantum().0, 128);
-
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let multiband = registry
-            .get_shared_ascii("miso.multiband-compressor")
-            .expect("registered multiband compressor");
-        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
-            delegate: multiband,
-        })
-            as Box<dyn NativeEffectFactory>])
-        .expect("scalar multiband-compressor registry");
-        let effect_caps = EffectCompileCaps {
-            maximum_total_state_bytes: 1 << 20,
-            maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
-        };
-        let effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared bank-capable multiband effects");
-        assert_eq!(effects.entries.len(), 10);
-        assert!(effects.entries.iter().all(|entry| {
-            entry.metadata.latency == LatencySamples(0)
-                && entry.metadata.tail == TailSamples::Infinite
-                && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
-        }));
-        let scalar_effects =
-            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
-                .expect("prepared scalar multiband effects");
-        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_080,
-            effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("multiband graph: {:?}", failure.diagnostics));
-        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_081,
-            effects: scalar_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("scalar multiband graph: {:?}", failure.diagnostics));
-
-        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
-        let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
-            let lanes = width.lanes() as usize;
-            (10 / lanes, 10 % lanes)
-        });
-        assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
-        assert_eq!(
-            artifact
-                .report()
-                .rack_cohorts
-                .bound_groups_in(RackLocation::Dynamic)
-                .count(),
-            expected_banks
-        );
-        assert_eq!(
-            artifact
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Dynamic)
-                .len(),
-            expected_scalar_tails
-        );
-        let actual_members: Vec<Vec<String>> = artifact
-            .report()
-            .rack_cohorts
-            .bound_groups_in(RackLocation::Dynamic)
-            .map(|bank| {
-                bank.members
-                    .iter()
-                    .flatten()
-                    .map(|member| member.track_id.as_str().to_owned())
-                    .collect()
-            })
-            .collect();
-        let expected_members: Vec<Vec<String>> = width.map_or_else(Vec::new, |width| {
-            let lanes = width.lanes() as usize;
-            (0..expected_banks)
-                .map(|bank| {
-                    (bank * lanes..(bank + 1) * lanes)
-                        .map(|index| format!("eq{index}"))
-                        .collect()
-                })
-                .collect()
-        });
-        assert_eq!(
-            actual_members, expected_members,
-            "stable full-bank membership"
-        );
-        let expected_tail_start = expected_banks * width.map_or(1, |width| width.lanes() as usize);
-        assert_eq!(
-            artifact
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Dynamic)
-                .iter()
-                .map(|tail| tail.track_id.as_str().to_owned())
-                .collect::<Vec<_>>(),
-            (expected_tail_start..10)
-                .map(|index| format!("eq{index}"))
-                .collect::<Vec<_>>(),
-            "stable scalar-tail membership"
-        );
-        assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
-
-        let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
-        let bank_count = u64::try_from(expected_banks).expect("bank count");
-        // The product's own slot reservation for these banks at this width (TA3): the
-        // deltas below hold it to the reports, without re-deriving its layout.
-        let expected_bank_slot_bytes =
-            graph::GraphBankSlotResourceEstimate::checked_for(bank_count, width)
-                .expect("bank slot reservation")
-                .total_bytes;
-        let quantum = u64::from(session.quantum().0);
-        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
-        let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
-        let expected_bank_metadata_bytes = bank_count
-            * (u64::try_from(core::mem::size_of::<graph::GraphPreparedEffectBank>())
-                .expect("bank metadata size")
-                + lanes)
-            + artifact
-                .report()
-                .rack_cohorts
-                .bound_groups_in(RackLocation::Dynamic)
-                .flat_map(|bank| bank.members.iter().flatten())
-                .map(|member| {
-                    u64::try_from(core::mem::size_of::<EffectNodeId>())
-                        .expect("member metadata size")
-                        + u64::try_from(member.track_id.as_str().len()).expect("track ID bytes")
-                        + u64::try_from("multiband-compressor".len()).expect("effect ID bytes")
-                })
-                .sum::<u64>();
-        assert_eq!(artifact.report().estimate.effect_bank_count, bank_count);
-        assert_eq!(
-            artifact.report().estimate.effect_bank_scratch_bytes,
-            expected_bank_scratch_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.effect_bank_runtime_buffer_bytes,
-            expected_bank_runtime_buffer_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.effect_bank_metadata_bytes,
-            expected_bank_metadata_bytes
-        );
-        assert_eq!(scalar_artifact.report().estimate.effect_bank_count, 0);
-        assert_eq!(
-            artifact.report().estimate.incremental_plan_bytes,
-            scalar_artifact.report().estimate.incremental_plan_bytes
-                + expected_bank_scratch_bytes
-                + expected_bank_runtime_buffer_bytes
-                + expected_bank_metadata_bytes
-                + expected_bank_slot_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.session_plus_plan_bytes,
-            scalar_artifact.report().estimate.session_plus_plan_bytes
-                + expected_bank_scratch_bytes
-                + expected_bank_runtime_buffer_bytes
-                + expected_bank_metadata_bytes
-                + expected_bank_slot_bytes
-        );
-        assert_builtin_attachment_matches(&artifact, &scalar_artifact, "multiband");
-        assert_eq!(
-            artifact.graph().sequential_schedule,
-            scalar_artifact.graph().sequential_schedule
-        );
-        assert_eq!(
-            artifact.graph().route_timings,
-            scalar_artifact.graph().route_timings
-        );
-        assert_eq!(
-            artifact.graph().inserted_delays,
-            scalar_artifact.graph().inserted_delays
-        );
-        assert_eq!(
-            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
-            GraphCompiler::evidence(scalar_artifact.graph(), scalar_artifact.report())
-                .canonical_bytes
-        );
-        assert!(artifact.graph().route_timings.iter().all(|route| {
-            route.source_arrival == LatencySamples(0)
-                && route.compensation_delay == LatencySamples(0)
-                && route.destination_arrival == LatencySamples(0)
-        }));
-        let expected_schedule = artifact.graph().sequential_schedule.clone();
-        let expected_route_timings = artifact.graph().route_timings.clone();
-        let expected_delays = artifact.graph().inserted_delays.clone();
-        let expected_canonical_bytes = GraphCompiler::evidence(artifact.graph(), artifact.report())
-            .canonical_bytes
-            .clone();
-        // The whole-plan figure, builtin banks attached: the one the compile caps (#964).
-        let minimum_plan_bytes = artifact.graph_resource_estimate().incremental_plan_bytes;
-
-        let envelope = artifact.envelope();
-        let frames = envelope.quantum.0 as usize;
-        let mut bank_plan =
-            bind_session_builtins(artifact, multiband_compressor_input_binding, Vec::new());
-        let mut scalar_plan = bind_session_builtins(
-            scalar_artifact,
-            multiband_compressor_input_binding,
-            Vec::new(),
-        );
-        let mut reached_current_sample = false;
-        let mut reached_release_probe = false;
-        for block in 0..20_u64 {
-            let mut bank_pcm = vec![0.0_f32; frames * 2];
-            let mut scalar_pcm = vec![0.0_f32; frames * 2];
-            bank_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
-                            .expect("bank output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("bank render");
-            scalar_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
-                            .expect("scalar output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("scalar render");
-            for (&bank, &scalar) in bank_pcm.iter().zip(&scalar_pcm) {
-                assert!(bank.is_finite() && scalar.is_finite());
-                let bound = 1.0e-5 + 2.0e-5 * scalar.abs();
-                assert!(
-                    (bank - scalar).abs() <= bound,
-                    "ten-track accumulated bank/scalar error: bank={bank} scalar={scalar} bound={bound}"
-                );
-            }
-            for frame in 0..frames {
-                let absolute = block * frames as u64 + frame as u64;
-                let left = bank_pcm[frame];
-                let right = bank_pcm[frames + frame];
-                if absolute == 0 {
-                    reached_current_sample = left != 0.0 && right != 0.0;
-                } else if absolute == 1_280 {
-                    reached_release_probe |= left != 0.0 && right != 0.0;
-                }
-            }
-        }
-        assert!(
-            reached_current_sample,
-            "active burst renders at the current first sample"
-        );
-        assert!(
-            reached_release_probe,
-            "later probe crosses latency while carried release state remains active"
-        );
-
-        let mut bypass_model = model.clone();
-        for track in &mut bypass_model.tracks {
-            track.inserts.effects[0].bypass = true;
-        }
-        let bypass_session = compile_session(
-            &bypass_model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("compiled bypass multiband fixture");
-        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
-            .expect("prepared bypass multiband effects");
-        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_082,
-            effects: bypass_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("bypass multiband graph: {:?}", failure.diagnostics));
-        assert_eq!(
-            bypass_artifact.graph().prepared_bank_count(),
-            expected_banks
-        );
-        assert_eq!(
-            bypass_artifact.graph().sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(
-            bypass_artifact.graph().route_timings,
-            expected_route_timings
-        );
-        assert_eq!(bypass_artifact.graph().inserted_delays, expected_delays);
-        assert_eq!(
-            GraphCompiler::evidence(bypass_artifact.graph(), bypass_artifact.report())
-                .canonical_bytes,
-            expected_canonical_bytes
-        );
-        assert!(bypass_artifact.graph().route_timings.iter().all(|route| {
-            route.source_arrival == LatencySamples(0)
-                && route.compensation_delay == LatencySamples(0)
-                && route.destination_arrival == LatencySamples(0)
-        }));
-
-        let cap_effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared multiband effects for transactional cap");
-        let mut constrained_caps = integration_caps();
-        constrained_caps.maximum_plan_bytes = minimum_plan_bytes
-            .checked_sub(1)
-            .expect("nonzero full graph plan estimate");
-        let cap_failure = match compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_083,
-            effects: cap_effects,
-            caps: constrained_caps,
-        }) {
-            Ok(_) => panic!("one-byte-below multiband graph cap must reject before publication"),
-            Err(failure) => failure,
-        };
-        assert!(
-            cap_failure
-                .diagnostics
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| {
-                    diagnostic.code == "graph.resource.limit"
-                        && diagnostic.path == "$.graph_compile_caps"
-                })
-        );
-        assert_eq!(cap_failure.effects.entries.len(), 10);
-        assert_eq!(
-            cap_failure.effects.session.normalized_model().tracks.len(),
-            10,
-            "cap rejection returns every prepared multiband input"
-        );
-    }
-
-    #[test]
-    fn launch_soft_clip_fixture_closes_banks_tails_pdc_support_and_transactional_caps() {
-        let model = accepted_soft_clip_graph_fixture();
-        assert_eq!(model.tracks.len(), 10);
-        // The strip is the `console.pre_insert` slot: keyless by construction (decision 12).
-        assert_eq!(model.console.pre_insert.len(), 1);
-        assert!(
-            model
-                .tracks
-                .iter()
-                .all(|track| track.console.len() == 1 && track.inserts.effects.is_empty())
-        );
-        let session = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("accepted soft-clip fixture");
-        assert_eq!(session.sample_rate().0, 48_000);
-        assert_eq!(session.quantum().0, 128);
-
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let effect_caps = EffectCompileCaps {
-            maximum_total_state_bytes: 1 << 20,
-            maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
-        };
-        let effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared bank-capable soft-clip effects");
-        assert_eq!(effects.entries.len(), 10);
-        assert!(effects.entries.iter().all(|entry| {
-            entry.metadata.latency == LatencySamples(31)
-                && entry.metadata.tail == TailSamples::Finite(29)
-                && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
-        }));
-        // #1098: a console slot never renders per node on a vector backend, so the bank-free arm
-        // is the test-only `Scalar` oracle, where nothing banks.
-        let scalar_effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared scalar soft-clip effects");
-        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_100,
-            effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("soft-clip graph: {:?}", failure.diagnostics));
-        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: Backend::Scalar,
-            plan_id: 1_101,
-            effects: scalar_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("scalar soft-clip graph: {:?}", failure.diagnostics));
-        // The estimate's bank-free arm, on the same backend: the strip folded into every track's
-        // inserts, where a declined group renders per node (#1098). Its node and edge IDs name
-        // another rack, so the two are compared above their dispatch-independent semantic
-        // estimates: what each compile adds for its banks, per-node owners and runtime metadata.
-        // The effect banks are all that separate the two.
-        let per_node = per_node_inserts_artifact(&model, &["miso.soft-clip"], 1_101);
-
-        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
-        // #1098: the remainder binds as one padded bank, so nothing renders per node.
-        let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
-            (10_usize.div_ceil(width.lanes() as usize), 0)
-        });
-        assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
-        assert_eq!(
-            artifact
-                .report()
-                .rack_cohorts
-                .bound_groups_in(RackLocation::Simd1)
-                .count(),
-            expected_banks
-        );
-        assert_eq!(
-            artifact
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
-                .len(),
-            expected_scalar_tails
-        );
-        let actual_members = artifact
-            .report()
-            .rack_cohorts
-            .bound_groups_in(RackLocation::Simd1)
-            .map(|bank| {
-                bank.members
-                    .iter()
-                    .flatten()
-                    .map(|member| member.track_id.as_str().to_owned())
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let expected_members = width.map_or_else(Vec::new, |width| {
-            let lanes = width.lanes() as usize;
-            (0..expected_banks)
-                .map(|bank| {
-                    (bank * lanes..((bank + 1) * lanes).min(10))
-                        .map(|index| format!("eq{index}"))
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(actual_members, expected_members, "stable bank membership");
-        let tail_start = expected_banks * width.map_or(1, |width| width.lanes() as usize);
-        assert_eq!(
-            artifact
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
-                .iter()
-                .map(|tail| tail.track_id.as_str().to_owned())
-                .collect::<Vec<_>>(),
-            (tail_start..10)
-                .map(|index| format!("eq{index}"))
-                .collect::<Vec<_>>(),
-            "stable scalar-tail order"
-        );
-        assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
-
-        let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
-        let bank_count = u64::try_from(expected_banks).expect("bank count");
-        // The product's own slot reservation for these banks at this width (TA3): the
-        // deltas below hold it to the reports, without re-deriving its layout.
-        let expected_bank_slot_bytes =
-            graph::GraphBankSlotResourceEstimate::checked_for(bank_count, width)
-                .expect("bank slot reservation")
-                .total_bytes;
-        let quantum = u64::from(session.quantum().0);
-        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
-        let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
-        let expected_bank_metadata_bytes = bank_count
-            * (u64::try_from(core::mem::size_of::<graph::GraphPreparedEffectBank>())
-                .expect("bank metadata size")
-                + lanes)
-            + artifact
-                .report()
-                .rack_cohorts
-                .bound_groups_in(RackLocation::Simd1)
-                .flat_map(|bank| bank.members.iter().flatten())
-                .map(|member| {
-                    u64::try_from(core::mem::size_of::<EffectNodeId>())
-                        .expect("member metadata size")
-                        + u64::try_from(member.track_id.as_str().len()).expect("track ID bytes")
-                        + u64::try_from("soft-clip".len()).expect("effect ID bytes")
-                })
-                .sum::<u64>();
-        assert_eq!(artifact.report().estimate.effect_bank_count, bank_count);
-        assert_eq!(
-            artifact.report().estimate.effect_bank_scratch_bytes,
-            expected_bank_scratch_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.effect_bank_runtime_buffer_bytes,
-            expected_bank_runtime_buffer_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.effect_bank_metadata_bytes,
-            expected_bank_metadata_bytes
-        );
-        assert_eq!(scalar_artifact.report().estimate.effect_bank_count, 0);
-        assert_eq!(
-            artifact.report().estimate.incremental_plan_bytes
-                - artifact.report().semantic_estimate.incremental_plan_bytes,
-            per_node.report().estimate.incremental_plan_bytes
-                - per_node.report().semantic_estimate.incremental_plan_bytes
-                + expected_bank_scratch_bytes
-                + expected_bank_runtime_buffer_bytes
-                + expected_bank_metadata_bytes
-                + expected_bank_slot_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.session_plus_plan_bytes
-                - artifact.report().semantic_estimate.session_plus_plan_bytes,
-            per_node.report().estimate.session_plus_plan_bytes
-                - per_node.report().semantic_estimate.session_plus_plan_bytes
-                + expected_bank_scratch_bytes
-                + expected_bank_runtime_buffer_bytes
-                + expected_bank_metadata_bytes
-                + expected_bank_slot_bytes
-        );
-        assert_builtin_attachment_matches(&artifact, &per_node, "soft clip");
-        assert_eq!(
-            artifact.graph().sequential_schedule,
-            scalar_artifact.graph().sequential_schedule
-        );
-        assert_eq!(
-            artifact.graph().route_timings,
-            scalar_artifact.graph().route_timings
-        );
-        assert_eq!(
-            artifact.graph().inserted_delays,
-            scalar_artifact.graph().inserted_delays
-        );
-        assert_eq!(
-            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
-            GraphCompiler::evidence(scalar_artifact.graph(), scalar_artifact.report())
-                .canonical_bytes
-        );
-        assert!(artifact.graph().route_timings.iter().all(|route| {
-            route.source_arrival == LatencySamples(31)
-                && route.compensation_delay == LatencySamples(0)
-                && route.destination_arrival == LatencySamples(31)
-        }));
-        let expected_schedule = artifact.graph().sequential_schedule.clone();
-        let expected_route_timings = artifact.graph().route_timings.clone();
-        let expected_delays = artifact.graph().inserted_delays.clone();
-        let expected_canonical_bytes = GraphCompiler::evidence(artifact.graph(), artifact.report())
-            .canonical_bytes
-            .clone();
-        // The whole-plan figure, builtin banks attached: the one the compile caps (#964).
-        let minimum_plan_bytes = artifact.graph_resource_estimate().incremental_plan_bytes;
-
-        let envelope = artifact.envelope();
-        let frames = envelope.quantum.0 as usize;
-        let mut bank_plan = bind_session_builtins(artifact, soft_clip_input_binding, Vec::new());
-        let mut scalar_plan =
-            bind_session_builtins(scalar_artifact, soft_clip_input_binding, Vec::new());
-        for block in 0..2_u64 {
-            let mut bank_pcm = vec![0.0_f32; frames * 2];
-            let mut scalar_pcm = vec![0.0_f32; frames * 2];
-            bank_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
-                            .expect("bank output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("bank render");
-            scalar_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
-                            .expect("scalar output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("scalar render");
-            assert_eq!(
-                bank_pcm
-                    .iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>(),
-                scalar_pcm
-                    .iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>(),
-                "bank/tails and scalar delegates preserve consecutive carried state"
-            );
-            if block == 0 {
-                let left = &bank_pcm[..frames];
-                let right = &bank_pcm[frames..];
-                let left_peak = left
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
-                    .map(|(index, _)| index)
-                    .expect("left output");
-                let right_peak = right
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
-                    .map(|(index, _)| index)
-                    .expect("right output");
-                assert_eq!(left_peak, 31);
-                assert_eq!(right_peak, 31);
-                assert_ne!(left[60].to_bits(), 0.0_f32.to_bits());
-                assert_ne!(right[60].to_bits(), 0.0_f32.to_bits());
-                assert!(left[61..].iter().all(|sample| *sample == 0.0));
-                assert!(right[61..].iter().all(|sample| *sample == 0.0));
-            } else {
-                assert!(bank_pcm.iter().all(|sample| *sample == 0.0));
-            }
-        }
-
-        let mut bypass_model = model.clone();
-        for track in &mut bypass_model.tracks {
-            track.console[0].bypass = true;
-        }
-        let bypass_session = compile_session(
-            &bypass_model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("compiled bypass soft-clip fixture");
-        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
-            .expect("prepared bypass soft-clip effects");
-        assert!(bypass_effects.entries.iter().all(|entry| {
-            entry.metadata.latency == LatencySamples(31)
-                && entry.metadata.tail == TailSamples::Finite(29)
-        }));
-        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_102,
-            effects: bypass_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("bypass soft-clip graph: {:?}", failure.diagnostics));
-        assert_eq!(
-            bypass_artifact.graph().prepared_bank_count(),
-            expected_banks
-        );
-        assert_eq!(
-            bypass_artifact.graph().sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(
-            bypass_artifact.graph().route_timings,
-            expected_route_timings
-        );
-        assert_eq!(bypass_artifact.graph().inserted_delays, expected_delays);
-        assert_eq!(
-            GraphCompiler::evidence(bypass_artifact.graph(), bypass_artifact.report())
-                .canonical_bytes,
-            expected_canonical_bytes
-        );
-        assert!(bypass_artifact.graph().route_timings.iter().all(|route| {
-            route.source_arrival == LatencySamples(31)
-                && route.compensation_delay == LatencySamples(0)
-                && route.destination_arrival == LatencySamples(31)
-        }));
-
-        let cap_effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared soft-clip effects for transactional cap");
-        let mut constrained_caps = integration_caps();
-        constrained_caps.maximum_plan_bytes = minimum_plan_bytes
-            .checked_sub(1)
-            .expect("nonzero full graph plan estimate");
-        let cap_failure = match compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_103,
-            effects: cap_effects,
-            caps: constrained_caps,
-        }) {
-            Ok(_) => panic!("one-byte-below soft-clip graph cap must reject before publication"),
-            Err(failure) => failure,
-        };
-        assert!(
-            cap_failure
-                .diagnostics
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.code == "graph.resource.limit"
-                    && diagnostic.path == "$.graph_compile_caps")
-        );
-        assert_eq!(cap_failure.effects.entries.len(), 10);
-        assert_eq!(
-            cap_failure.effects.session.normalized_model().tracks.len(),
-            10,
-            "cap rejection returns every prepared soft-clip input"
-        );
-    }
-
-    #[test]
-    fn launch_transient_shaper_fixture_closes_banks_tails_pdc_and_transactional_caps() {
-        let model = accepted_transient_shaper_graph_fixture();
-        assert_eq!(model.tracks.len(), 10);
-        // The strip is the `console.pre_insert` slot: keyless by construction (decision 12).
-        assert_eq!(model.console.pre_insert.len(), 1);
-        assert!(
-            model
-                .tracks
-                .iter()
-                .all(|track| track.console.len() == 1 && track.inserts.effects.is_empty())
-        );
-        let session = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("accepted transient-shaper fixture");
-        assert_eq!(session.sample_rate().0, 48_000);
-        assert_eq!(session.quantum().0, 128);
-
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let effect_caps = EffectCompileCaps {
-            maximum_total_state_bytes: 1 << 20,
-            maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
-        };
-        let effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared bank-capable transient-shaper effects");
-        assert_eq!(effects.entries.len(), 10);
-        assert!(effects.entries.iter().all(|entry| {
-            entry.metadata.latency == LatencySamples(0)
-                && entry.metadata.tail == TailSamples::Finite(0)
-                && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
-        }));
-        // #1098: a console slot never renders per node on a vector backend, so the bank-free arm
-        // is the test-only `Scalar` oracle, where nothing banks.
-        let scalar_effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared scalar transient-shaper effects");
-        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_120,
-            effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("transient-shaper graph: {:?}", failure.diagnostics));
-        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: Backend::Scalar,
-            plan_id: 1_121,
-            effects: scalar_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| {
-            panic!("scalar transient-shaper graph: {:?}", failure.diagnostics)
-        });
-        // The estimate's bank-free arm, on the same backend: the strip folded into every track's
-        // inserts, where a declined group renders per node (#1098). Its node and edge IDs name
-        // another rack, so the two are compared above their dispatch-independent semantic
-        // estimates: what each compile adds for its banks, per-node owners and runtime metadata.
-        // The effect banks are all that separate the two.
-        let per_node = per_node_inserts_artifact(&model, &["miso.transient-shaper"], 1_121);
-
-        let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
-        // #1098: the remainder binds as one padded bank, so nothing renders per node.
-        let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
-            (10_usize.div_ceil(width.lanes() as usize), 0)
-        });
-        assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
-        assert_eq!(
-            artifact
-                .report()
-                .rack_cohorts
-                .bound_groups_in(RackLocation::Simd1)
-                .count(),
-            expected_banks
-        );
-        assert_eq!(
-            artifact
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
-                .len(),
-            expected_scalar_tails
-        );
-        let actual_members = artifact
-            .report()
-            .rack_cohorts
-            .bound_groups_in(RackLocation::Simd1)
-            .map(|bank| {
-                bank.members
-                    .iter()
-                    .flatten()
-                    .map(|member| member.track_id.as_str().to_owned())
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let expected_members = width.map_or_else(Vec::new, |width| {
-            let lanes = width.lanes() as usize;
-            (0..expected_banks)
-                .map(|bank| {
-                    (bank * lanes..((bank + 1) * lanes).min(10))
-                        .map(|index| format!("eq{index}"))
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(actual_members, expected_members, "stable bank membership");
-        let tail_start = expected_banks * width.map_or(1, |width| width.lanes() as usize);
-        assert_eq!(
-            artifact
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
-                .iter()
-                .map(|tail| tail.track_id.as_str().to_owned())
-                .collect::<Vec<_>>(),
-            (tail_start..10)
-                .map(|index| format!("eq{index}"))
-                .collect::<Vec<_>>(),
-            "stable scalar-tail order"
-        );
-        assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
-
-        let lanes = width.map_or(0_u64, |width| u64::from(width.lanes()));
-        let bank_count = u64::try_from(expected_banks).expect("bank count");
-        // The product's own slot reservation for these banks at this width (TA3): the
-        // deltas below hold it to the reports, without re-deriving its layout.
-        let expected_bank_slot_bytes =
-            graph::GraphBankSlotResourceEstimate::checked_for(bank_count, width)
-                .expect("bank slot reservation")
-                .total_bytes;
-        let quantum = u64::from(session.quantum().0);
-        let expected_bank_scratch_bytes = bank_count * lanes * quantum * 2 * 4;
-        let expected_bank_runtime_buffer_bytes = bank_count * lanes * quantum * 2 * 4;
-        let expected_bank_metadata_bytes = bank_count
-            * (u64::try_from(core::mem::size_of::<graph::GraphPreparedEffectBank>())
-                .expect("bank metadata size")
-                + lanes)
-            + artifact
-                .report()
-                .rack_cohorts
-                .bound_groups_in(RackLocation::Simd1)
-                .flat_map(|bank| bank.members.iter().flatten())
-                .map(|member| {
-                    u64::try_from(core::mem::size_of::<EffectNodeId>())
-                        .expect("member metadata size")
-                        + u64::try_from(member.track_id.as_str().len()).expect("track ID bytes")
-                        + u64::try_from("transient-shaper".len()).expect("effect ID bytes")
-                })
-                .sum::<u64>();
-        assert_eq!(artifact.report().estimate.effect_bank_count, bank_count);
-        assert_eq!(
-            artifact.report().estimate.effect_bank_scratch_bytes,
-            expected_bank_scratch_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.effect_bank_runtime_buffer_bytes,
-            expected_bank_runtime_buffer_bytes
-        );
-        assert_eq!(
-            artifact.report().estimate.effect_bank_metadata_bytes,
-            expected_bank_metadata_bytes
-        );
-        assert_eq!(scalar_artifact.report().estimate.effect_bank_count, 0);
-        let bank_overhead = expected_bank_scratch_bytes
-            + expected_bank_runtime_buffer_bytes
-            + expected_bank_metadata_bytes
-            + expected_bank_slot_bytes;
-        assert_eq!(
-            artifact.report().estimate.incremental_plan_bytes
-                - artifact.report().semantic_estimate.incremental_plan_bytes,
-            per_node.report().estimate.incremental_plan_bytes
-                - per_node.report().semantic_estimate.incremental_plan_bytes
-                + bank_overhead
-        );
-        assert_eq!(
-            artifact.report().estimate.session_plus_plan_bytes
-                - artifact.report().semantic_estimate.session_plus_plan_bytes,
-            per_node.report().estimate.session_plus_plan_bytes
-                - per_node.report().semantic_estimate.session_plus_plan_bytes
-                + bank_overhead
-        );
-        assert_builtin_attachment_matches(&artifact, &per_node, "transient shaper");
-        assert_eq!(
-            artifact.graph().sequential_schedule,
-            scalar_artifact.graph().sequential_schedule
-        );
-        assert_eq!(
-            artifact.graph().route_timings,
-            scalar_artifact.graph().route_timings
-        );
-        assert_eq!(
-            artifact.graph().inserted_delays,
-            scalar_artifact.graph().inserted_delays
-        );
-        assert_eq!(
-            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
-            GraphCompiler::evidence(scalar_artifact.graph(), scalar_artifact.report())
-                .canonical_bytes
-        );
-        assert!(artifact.graph().route_timings.iter().all(|route| {
-            route.source_arrival == LatencySamples(0)
-                && route.compensation_delay == LatencySamples(0)
-                && route.destination_arrival == LatencySamples(0)
-        }));
-        let expected_schedule = artifact.graph().sequential_schedule.clone();
-        let expected_route_timings = artifact.graph().route_timings.clone();
-        let expected_delays = artifact.graph().inserted_delays.clone();
-        let expected_canonical_bytes = GraphCompiler::evidence(artifact.graph(), artifact.report())
-            .canonical_bytes
-            .clone();
-        // The whole-plan figure, builtin banks attached: the one the compile caps (#964).
-        let minimum_plan_bytes = artifact.graph_resource_estimate().incremental_plan_bytes;
-
-        let envelope = artifact.envelope();
-        let frames = envelope.quantum.0 as usize;
-        let mut bank_plan =
-            bind_session_builtins(artifact, transient_shaper_input_binding, Vec::new());
-        let mut scalar_plan =
-            bind_session_builtins(scalar_artifact, transient_shaper_input_binding, Vec::new());
-        for block in 0..2_u64 {
-            let mut bank_pcm = vec![0.0_f32; frames * 2];
-            let mut scalar_pcm = vec![0.0_f32; frames * 2];
-            bank_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut bank_pcm, 2, frames, frames)
-                            .expect("bank output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("bank render");
-            scalar_plan
-                .render(
-                    RenderIo {
-                        output: PlanarBufferMut::try_new(&mut scalar_pcm, 2, frames, frames)
-                            .expect("scalar output"),
-                    },
-                    RenderTime {
-                        absolute_sample: block * frames as u64,
-                    },
-                )
-                .expect("scalar render");
-            assert_eq!(
-                bank_pcm
-                    .iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>(),
-                scalar_pcm
-                    .iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>(),
-                "consecutive bank/tail PCM and carried state match scalar delegates"
-            );
-            assert!(bank_pcm.iter().any(|sample| *sample != 0.0));
-        }
-
-        let mut bypass_model = model.clone();
-        for track in &mut bypass_model.tracks {
-            track.console[0].bypass = true;
-        }
-        let bypass_session = compile_session(
-            &bypass_model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("compiled bypass transient-shaper fixture");
-        let bypass_effects = prepare_native_session_effects(&bypass_session, registry, effect_caps)
-            .expect("prepared bypass transient-shaper effects");
-        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_122,
-            effects: bypass_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| {
-            panic!("bypass transient-shaper graph: {:?}", failure.diagnostics)
-        });
-        assert_eq!(
-            bypass_artifact.graph().prepared_bank_count(),
-            expected_banks
-        );
-        assert_eq!(
-            bypass_artifact.graph().sequential_schedule,
-            expected_schedule
-        );
-        assert_eq!(
-            bypass_artifact.graph().route_timings,
-            expected_route_timings
-        );
-        assert_eq!(bypass_artifact.graph().inserted_delays, expected_delays);
-        assert_eq!(
-            GraphCompiler::evidence(bypass_artifact.graph(), bypass_artifact.report())
-                .canonical_bytes,
-            expected_canonical_bytes
-        );
-        assert!(bypass_artifact.graph().route_timings.iter().all(|route| {
-            route.source_arrival == LatencySamples(0)
-                && route.compensation_delay == LatencySamples(0)
-                && route.destination_arrival == LatencySamples(0)
-        }));
-
-        let cap_effects = prepare_native_session_effects(&session, registry, effect_caps)
-            .expect("prepared transient-shaper effects for transactional cap");
-        let mut constrained_caps = integration_caps();
-        constrained_caps.maximum_plan_bytes = minimum_plan_bytes
-            .checked_sub(1)
-            .expect("nonzero full graph plan estimate");
-        let cap_failure = match compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_123,
-            effects: cap_effects,
-            caps: constrained_caps,
-        }) {
-            Ok(_) => panic!("one-byte-below transient graph cap must reject before publication"),
-            Err(failure) => failure,
-        };
-        assert!(
-            cap_failure
-                .diagnostics
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.code == "graph.resource.limit"
-                    && diagnostic.path == "$.graph_compile_caps")
-        );
-        assert_eq!(cap_failure.effects.entries.len(), 10);
-        assert_eq!(
-            cap_failure.effects.session.normalized_model().tracks.len(),
-            10,
-            "cap rejection returns every prepared transient-shaper input"
-        );
     }
 
     #[test]
