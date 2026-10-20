@@ -129,8 +129,8 @@ bits. This closes decision 14's F4 for the multiband compressor.
 - `crates/host-core/src/live_delta.rs` (D3 only: the variant, its arm and its docs; stream B owns
   the file, so coordinate the merge order with its coordinator),
   `crates/host-core/tests/live_delta.rs`
-- `crates/capi/src/runtime/live_tests.rs` (rewrite `a_prepared_bypass_change_rebuilds_and_renders_the_committed_model`,
-  `:2716-2722`, see gate 5; stream B owns the file)
+- `crates/capi/src/runtime/live_tests.rs` (gate 5's C ABI case; the capi read cut deleted it as a twin
+  of host-core `tests/live_delta.rs::a_prepared_bypass_change_needs_a_rebuild`)
 - `docs/C_ABI_V1_QUALIFICATION.md` (the one sentence at `:393`)
 - `hosts/host-web/src/lib.rs` (the `COMMAND_EFFECT_BYPASS` doc comment, and #1315's
   prepared-bypass refusal if D8 leaves it no caller), `hosts/host-web/src/tests.rs` (D8's
@@ -175,10 +175,10 @@ bits. This closes decision 14's F4 for the multiband compressor.
    insert bypassed and `control_smoothing.mute_ms = 0`, a `Bypass(false)` record admitted before
    block 4: blocks 0-3 equal the dry input, and every block from 4 on is bit-identical to a plan
    prepared with the insert enabled and fed the same input (the wet path ran throughout). With the
-   default table, the same holds from the first block after #1341's crossfade ends. On the C ABI, rewrite
-   `a_prepared_bypass_change_rebuilds_and_renders_the_committed_model` as the live case: the
+   default table, the same holds from the first block after #1341's crossfade ends. On the C ABI, the live case: the
    bypass change commits with no plan replacement, and the render from the first block after the
-   crossfade equals the control that never bypassed.
+   crossfade equals the control that never bypassed (the capi read cut deleted the C ABI test as a
+   twin of host-core `tests/live_delta.rs::a_prepared_bypass_change_needs_a_rebuild`).
 6. **Realtime.** The bank render path still allocates nothing (`tests/no_alloc_render.rs`), the
    recovery block included.
 7. **Click against the mute baseline** (root, 2026-10-05, from #1055). The bypass crossfade's click
