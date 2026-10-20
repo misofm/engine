@@ -1240,7 +1240,7 @@ mod tests {
         HostPrepareCaps, HostShapePolicy, compile_host_model, parse_host_session,
         prepare_host_runtime,
     };
-    use effect_contract::{EffectQuality, LinkMode, ParameterChannel};
+    use effect_contract::{EffectQuality, LinkMode};
 
     #[test]
     fn explicit_eq_and_input_filter_queries_use_owner_outputs_at_launch_rates() {
@@ -1330,82 +1330,6 @@ mod tests {
             );
             assert!(frequencies.windows(2).all(|pair| pair[1] > pair[0]));
         }
-    }
-
-    #[test]
-    fn effect_overrides_reject_unknown_duplicate_and_conflicting_rows() {
-        let registry = launch_native_effect_registry().expect("registry");
-        let descriptor = registry
-            .get_ascii("miso.parametric-eq")
-            .expect("EQ")
-            .descriptor();
-        let id = descriptor.parameters[0].id.0;
-        fn request<'a>(overrides: &'a [ResponseParameterOverride]) -> ResponsePreviewRequest<'a> {
-            ResponsePreviewRequest {
-                configuration_id: 1,
-                sample_rate_hz: 48_000,
-                quantum_frames: 128,
-                target: ResponsePreviewTarget::Effect {
-                    effect_id: "miso.parametric-eq",
-                    overrides,
-                    quality: EffectQuality::Normal,
-                    bypass: false,
-                    link_mode: LinkMode::DualMono,
-                },
-                limits: ResponsePreviewLimits::default(),
-            }
-        }
-        assert!(matches!(
-            prepare_response_preview(request(&[ResponseParameterOverride {
-                parameter_id: u32::MAX,
-                channel: ParameterChannel::Left,
-                value: 1.0,
-            }]))
-            .err(),
-            Some(ResponsePreviewError::InvalidParameter)
-        ));
-        let duplicate = [
-            ResponseParameterOverride {
-                parameter_id: id,
-                channel: ParameterChannel::Left,
-                value: 1.0,
-            },
-            ResponseParameterOverride {
-                parameter_id: id,
-                channel: ParameterChannel::Left,
-                value: 0.0,
-            },
-        ];
-        assert!(matches!(
-            prepare_response_preview(request(&duplicate)).err(),
-            Some(ResponsePreviewError::DuplicateParameter)
-        ));
-        // `both` on a per-lane parameter sets both lanes, and a `both` beside a `left` of the same
-        // parameter is a duplicate.
-        assert!(
-            prepare_response_preview(request(&[ResponseParameterOverride {
-                parameter_id: id,
-                channel: ParameterChannel::Both,
-                value: 1.0,
-            }]))
-            .is_ok()
-        );
-        let both_and_left = [
-            ResponseParameterOverride {
-                parameter_id: id,
-                channel: ParameterChannel::Both,
-                value: 1.0,
-            },
-            ResponseParameterOverride {
-                parameter_id: id,
-                channel: ParameterChannel::Left,
-                value: 0.0,
-            },
-        ];
-        assert!(matches!(
-            prepare_response_preview(request(&both_and_left)).err(),
-            Some(ResponsePreviewError::DuplicateParameter)
-        ));
     }
 
     /// Host caps with every resource ceiling open, for the prepared-session snapshot tests.

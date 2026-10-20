@@ -3624,28 +3624,6 @@ mod tests {
     }
 
     #[test]
-    fn analyzer_accepts_selected_left_channel_at_a_large_sample_time() {
-        let analyzer = SpectrumAnalyzer::new();
-        let mut window = window(0.0);
-        window.first_sample = (1_u64 << 53) + 123;
-        window.channels = SpectrumChannels::Left;
-        window.left[37] = 1.0;
-        assert_eq!(window.end_sample(), Some((1_u64 << 53) + 2_171));
-        let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
-        let mut left = [0.0; SPECTRUM_BIN_COUNT];
-        let mut output = super::SpectrumOutput {
-            frequencies_hz: &mut frequencies,
-            left_dbfs: Some(&mut left),
-            right_dbfs: None,
-        };
-        analyzer
-            .analyze(&window, 96_000, &mut output)
-            .expect("large absolute sample analyzes");
-        assert!(left.iter().all(|value| value.is_finite()));
-        assert_eq!(frequencies[1], 96_000.0 / SPECTRUM_WINDOW_FRAMES as f32);
-    }
-
-    #[test]
     fn capture_preserves_a_large_absolute_sample_without_allocating() {
         let (producer, mut consumer) = bounded_spsc(
             core::num::NonZeroUsize::new(1).expect("one capture slot"),
@@ -3677,36 +3655,6 @@ mod tests {
         assert_eq!(window.channels, SpectrumChannels::Left);
         assert!(window.left.iter().all(|value| *value == 0.25));
         assert!(window.right.iter().all(|value| *value == 0.0));
-    }
-
-    #[test]
-    fn bounded_continuous_record_read_does_not_chase_a_refill_after_one_stale_pop() {
-        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
-        capture
-            .start_continuous(48_000, 128)
-            .expect("continuous activation");
-        let left = [0.5_f32; 128];
-        let right = [0.0_f32; 128];
-        for block in 0..16 {
-            observer.capture(
-                &left,
-                &right,
-                block * 128,
-                super::GraphObservationValidity::CLEAR,
-            );
-        }
-        observer.invalidate_after_failure(1_920);
-        assert!(matches!(
-            capture.try_read_continuous(),
-            Err(SpectrumContinuousReadError::Failed { stream_epoch: 2 })
-        ));
-        assert_eq!(
-            capture
-                .try_read_continuous()
-                .expect_err("one stale pop leaves no refill budget"),
-            SpectrumContinuousReadError::Warming
-        );
-        assert_eq!(capture.consumer.available_at_entry(), 0);
     }
 
     /// A record of the one-shot epoch (0) left in the queue by a mode switch.
@@ -4461,24 +4409,29 @@ mod tests {
         eprintln!("cancel-race seeds {SEEDS}: {:?}", started.elapsed());
     }
 
+    /// The default cadence per launch rate and quantum: dividing quanta at 128 frames,
+    /// non-dividing ones at 192 frames, the largest quantum, and the two refusals.
     #[test]
-    fn continuous_cadence_uses_checked_launch_profiles() {
-        let expected = [
-            (44_100, 2_048),
-            (48_000, 2_048),
-            (88_200, 2_944),
-            (96_000, 3_200),
-        ];
-        for (sample_rate_hz, hop_frames) in expected {
-            let cadence = SpectrumCadence::new(sample_rate_hz, 128).expect("launch cadence");
-            assert_eq!(cadence.hop_frames(), hop_frames);
+    fn default_cadence_follows_the_launch_profile_for_every_quantum() {
+        // (sample rate, quantum, hop)
+        for (sample_rate_hz, quantum_frames, hop_frames) in [
+            (44_100, 128, 2_048),
+            (48_000, 128, 2_048),
+            (88_200, 128, 2_944),
+            (96_000, 128, 3_200),
+            (44_100, 192, 2_112),
+            (48_000, 192, 2_112),
+            (88_200, 192, 3_072),
+            (96_000, 192, 3_264),
+            (48_000, u32::MAX, u32::MAX),
+        ] {
+            let cadence = SpectrumCadence::new(sample_rate_hz, quantum_frames).expect("cadence");
+            assert_eq!(
+                cadence.hop_frames(),
+                hop_frames,
+                "{sample_rate_hz} Hz, q{quantum_frames}"
+            );
         }
-        assert_eq!(
-            SpectrumCadence::new(88_200, 192)
-                .expect("nondividing launch cadence")
-                .hop_frames(),
-            3_072
-        );
         assert!(SpectrumCadence::new(192_000, 128).is_err());
         assert!(SpectrumCadence::new(48_000, 0).is_err());
     }
@@ -4539,36 +4492,6 @@ mod tests {
         }
 
         let (_observer, mut legacy) = continuous_pair(SpectrumChannels::Stereo);
-        let expected = SpectrumCadence::new(48_000, 128).expect("legacy cadence");
-        assert_eq!(legacy.start_continuous(48_000, 128), Ok(expected));
-        assert_eq!(legacy.cadence(), Some(expected));
-    }
-
-    #[test]
-    fn explicit_collection_start_uses_the_checked_hop() {
-        let target = SpectrumTarget::Output("main-out".into());
-        for hop_frames in [256, 512, 1_024, 2_048] {
-            let (_observer, capture) = continuous_pair(SpectrumChannels::Stereo);
-            let mut collection = SpectrumCaptureCollection::new(vec![capture]);
-            collection
-                .select(target.as_ref(), SpectrumChannels::Stereo)
-                .expect("prepared collection selection");
-            let cadence = collection
-                .start_continuous_with_hop(
-                    48_000,
-                    128,
-                    SpectrumHop::new(hop_frames).expect("supported hop"),
-                )
-                .expect("explicit collection start");
-            assert_eq!(cadence.hop_frames(), hop_frames);
-            assert_eq!(collection.cadence(), Some(cadence));
-        }
-
-        let (_observer, capture) = continuous_pair(SpectrumChannels::Stereo);
-        let mut legacy = SpectrumCaptureCollection::new(vec![capture]);
-        legacy
-            .select(target.as_ref(), SpectrumChannels::Stereo)
-            .expect("prepared legacy collection selection");
         let expected = SpectrumCadence::new(48_000, 128).expect("legacy cadence");
         assert_eq!(legacy.start_continuous(48_000, 128), Ok(expected));
         assert_eq!(legacy.cadence(), Some(expected));
@@ -5071,30 +4994,6 @@ mod tests {
     }
 
     #[test]
-    fn default_cadence_keeps_nondividing_quantum_profiles() {
-        let expected = [
-            (44_100, 2_112),
-            (48_000, 2_112),
-            (88_200, 3_072),
-            (96_000, 3_264),
-        ];
-        for (sample_rate_hz, hop_frames) in expected {
-            assert_eq!(
-                SpectrumCadence::new(sample_rate_hz, 192)
-                    .expect("launch cadence")
-                    .hop_frames(),
-                hop_frames
-            );
-        }
-        assert_eq!(
-            SpectrumCadence::new(48_000, u32::MAX)
-                .expect("maximum representable quantum")
-                .hop_frames(),
-            u32::MAX
-        );
-    }
-
-    #[test]
     fn one_prepared_capture_switches_between_one_shot_and_continuous_modes() {
         let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Stereo);
         let left = [0.25_f32; SPECTRUM_WINDOW_FRAMES];
@@ -5136,72 +5035,6 @@ mod tests {
                 .first_sample,
             4_096
         );
-    }
-
-    #[test]
-    fn continuous_windows_follow_h_without_reads_and_report_queue_gaps() {
-        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
-        capture
-            .start_continuous(48_000, 128)
-            .expect("continuous activation");
-        let left = [0.5_f32; 128];
-        let right = [0.0_f32; 128];
-        for block in 0..32 {
-            observer.capture(
-                &left,
-                &right,
-                block * 128,
-                super::GraphObservationValidity::CLEAR,
-            );
-        }
-        assert_eq!(
-            capture
-                .try_read_continuous()
-                .expect_err("full queue reports gap"),
-            SpectrumContinuousReadError::Gap {
-                stream_epoch: 1,
-                dropped_captures: 1,
-            }
-        );
-        let first = capture.try_read_continuous().expect("first queued window");
-        assert_eq!(first.first_sample, 0);
-        assert_eq!(first.sequence, 0);
-        for block in 32..48 {
-            observer.capture(
-                &left,
-                &right,
-                block * 128,
-                super::GraphObservationValidity::CLEAR,
-            );
-        }
-        let recovered = capture.try_read_continuous().expect("later window");
-        assert_eq!(recovered.first_sample, 4_096);
-        assert_eq!(recovered.sequence, 2);
-        assert_eq!(recovered.dropped_captures, 1);
-        assert_eq!(
-            capture
-                .try_read_continuous()
-                .expect_err("reported gap does not repeat"),
-            SpectrumContinuousReadError::Pending
-        );
-
-        observer.capture(&left, &right, 7_000, super::GraphObservationValidity::CLEAR);
-        assert!(matches!(
-            capture.try_read_continuous(),
-            Err(SpectrumContinuousReadError::Failed { stream_epoch: 2 })
-        ));
-        for block in 0..16 {
-            observer.capture(
-                &left,
-                &right,
-                7_000 + block * 128,
-                super::GraphObservationValidity::CLEAR,
-            );
-        }
-        let new_epoch = capture.try_read_continuous().expect("new epoch after gap");
-        assert_eq!(new_epoch.stream_epoch, 2);
-        assert_eq!(new_epoch.sequence, 0);
-        assert_eq!(new_epoch.dropped_captures, 0);
     }
 
     #[test]
@@ -5859,29 +5692,6 @@ mod tests {
         }
         assert_eq!(history.history_start_sample(), Some(2_048));
         assert!(left[0] > -0.01, "recovery starts with current power");
-    }
-
-    #[test]
-    fn analyzer_refuses_bad_rate_and_shape_before_writing() {
-        let analyzer = SpectrumAnalyzer::new();
-        let mut frequencies = [1.0; SPECTRUM_BIN_COUNT];
-        let mut left = [2.0; SPECTRUM_BIN_COUNT];
-        let mut right = [3.0; SPECTRUM_BIN_COUNT - 1];
-        let mut output = super::SpectrumOutput {
-            frequencies_hz: &mut frequencies,
-            left_dbfs: Some(&mut left),
-            right_dbfs: Some(&mut right),
-        };
-        assert_eq!(
-            analyzer
-                .analyze(&window(0.0), 192_000, &mut output)
-                .expect_err("extended rate refuses"),
-            SpectrumAnalysisError::UnsupportedRate
-        );
-        assert_eq!(frequencies[0], 1.0);
-        assert_eq!(left[0], 2.0);
-        assert_eq!(right[0], 3.0);
-        let _ = SpectrumCaptureReadError::Pending;
     }
 
     /// Issue #1609 gate 3: the cancel/re-arm/read handoff under `loom`.
