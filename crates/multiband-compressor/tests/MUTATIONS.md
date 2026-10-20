@@ -219,9 +219,3 @@ mutated file was restored byte for byte from a saved copy.
 | 994-M1 | `knee_coefficients` without its `is_finite` test (the pre-#994 design) | `effect-runtime/src/dynamics.rs` | `knee_tests::a_band_level_at_the_threshold_never_takes_a_nan_target` | RED: `W 0x00000002 T 0e0 R 1 x 0e0: -100 is a duck at the threshold` — at ratio 1, which compresses nothing, the NaN target still became a -100 dB target |
 | 994-M2 | `BAND_KNEE = knee_coefficients(2.0 * KNEE_DB)` | `src/lib.rs` | `knee_tests::the_fixed_knee_words_are_unchanged` | RED |
 | 994-M3 | the rule as a constant bound one ulp too low: `knee_db >= f32::from_bits(0x0010_0000)` | `effect-runtime/src/dynamics.rs` | `knee_tests::a_band_level_at_the_threshold_never_takes_a_nan_target` | RED |
-
-## TA5 deletions
-
-The 2026-10 test audit (TA5, the batch 2 sample measured at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 2 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 2 recorded no same-crate catcher.
-
-- `the_two_stage_split_matches_the_reference_and_recombines_flat`: no same-crate KEEP catcher recorded

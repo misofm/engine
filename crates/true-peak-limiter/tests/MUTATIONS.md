@@ -27,7 +27,7 @@ cargo test -p true-peak-limiter --lib phase_outputs
 | 6 | `flush(target.max(released))` → `target.max(released)` | `src/lib.rs` `channel_frame` | `silence_restores_exact_identity_including_signed_zero` |
 | 7 | van Herk suffix pass guarded by `complete && width < 2`, so it never runs at W4/W8 | `src/lib.rs` `sliding_minimum` | `lane_identity_holds_across_widths` |
 | 8 | `left.prefix.fill(1.0)` / `right.prefix.fill(1.0)` at block entry (min-filter prefix not carried across blocks) | `src/lib.rs` `limiter_block` | `partition_invariance_holds_over_block_sizes` (deleted by TA4) |
-| 9 | `return;` inserted after `limiter_block` so the §4.4 boundary check never runs | `src/lib.rs` `LimiterCore::process_block` | `a_nonfinite_block_is_zeroed_reset_and_counted` (deleted by TA5) |
+| 9 | `return;` inserted after `limiter_block` so the §4.4 boundary check never runs | `src/lib.rs` `LimiterCore::process_block` | `a_nonfinite_block_is_zeroed_reset_and_counted` (deleted by TA5; no catcher recorded) |
 | 10 | the `recomputed == box_sum` check in restore disabled | `src/lib.rs` `read_lane` | `state_round_trips_and_rejects_corruption` |
 | 11 | `peak = history[6].abs()` → `peak = L::zero()` (sample term dropped from `P`) | `src/lib.rs` `detector_peak` | `fixed_latency_guarded_ceiling_and_bypass_bits_hold` |
 | 12 | `box_sum.div(window)` → `box_sum.mul(1.0.div(window))` (reciprocal instead of divide) | `src/lib.rs` `channel_frame` | `silence_restores_exact_identity_including_signed_zero` |
@@ -146,7 +146,7 @@ Every row below is a **bit** test. The claims here are about *when* a state word
 | # | mutation | file | test that turned red |
 |---|---|---|---|
 | round2-1 | the block-end write-back of `prefix` dropped | `src/lib.rs` `limiter_block_uniform` | `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_restore_that_desyncs_the_phase_falls_back`, `fixed_latency_guarded_ceiling_and_bypass_bits_hold`, `lane_identity_holds_across_widths`, `partition_invariance_holds_over_block_sizes` (deleted by TA4) |
-| round2-2 | the block-end write-back of `phase` dropped, so the cohort restarts each block at the phase it entered the previous one with | `src/lib.rs` `limiter_block_uniform` | `a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim`, `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_negative_zero_input_block_is_not_treated_as_silence` (deleted by TA5), `a_restore_that_desyncs_the_phase_falls_back`, `a_restore_withdraws_the_silence_claim`, `a_settled_silent_limiter_renders_exactly_the_never_fast_path` |
+| round2-2 | the block-end write-back of `phase` dropped, so the cohort restarts each block at the phase it entered the previous one with | `src/lib.rs` `limiter_block_uniform` | `a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim`, `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_negative_zero_input_block_is_not_treated_as_silence` (deleted by TA5; catcher `the_bank_renders_its_scalar_instances_under_random_state`), `a_restore_that_desyncs_the_phase_falls_back`, `a_restore_withdraws_the_silence_claim`, `a_settled_silent_limiter_renders_exactly_the_never_fast_path` |
 | round2-3 | `.min(ring - left_end)` dropped from the segment run | `src/lib.rs` `segment` | `the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits` — **and nothing else** |
 | round2-4 | `.min(ring - left_expiring)` dropped from the segment run | `src/lib.rs` `segment` | `the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits` — **and nothing else** |
 | round2-5 | `.min(ring - start)` dropped from the segment run | `src/lib.rs` `segment` | six render tests, including `a_settled_silent_limiter_renders_exactly_the_never_fast_path` and `a_restore_that_desyncs_the_phase_falls_back` |
@@ -240,9 +240,9 @@ the recursive word, the cursors, the phases and all four ramps — are compared,
 
 | # | mutation | file | test that turned red |
 |---|---|---|---|
-| 182-6 | input `block_is_positive_zero` legs dropped from the admission test | `src/lib.rs` `LimiterCore::process_block` | `a_settled_silent_limiter_renders_exactly_the_never_fast_path`, `a_negative_zero_input_block_is_not_treated_as_silence` (deleted by TA5), `a_stale_detector_history_refuses_the_claim` |
+| 182-6 | input `block_is_positive_zero` legs dropped from the admission test | `src/lib.rs` `LimiterCore::process_block` | `a_settled_silent_limiter_renders_exactly_the_never_fast_path`, `a_negative_zero_input_block_is_not_treated_as_silence` (deleted by TA5; catcher `the_bank_renders_its_scalar_instances_under_random_state`), `a_stale_detector_history_refuses_the_claim` |
 | 182-7 | `block_is_positive_zero(&self.reduction)` dropped from `is_at_silent_rest` | `src/lib.rs` `ChannelState::is_at_silent_rest` | `a_limiter_still_releasing_through_the_silence_is_never_frozen` |
-| 182-8 | `block_is_positive_zero(&self.main_ring)` dropped | `src/lib.rs` `ChannelState::is_at_silent_rest` | `a_settled_silent_limiter_renders_exactly_the_never_fast_path`, `a_negative_zero_input_block_is_not_treated_as_silence` (deleted by TA5) |
+| 182-8 | `block_is_positive_zero(&self.main_ring)` dropped | `src/lib.rs` `ChannelState::is_at_silent_rest` | `a_settled_silent_limiter_renders_exactly_the_never_fast_path`, `a_negative_zero_input_block_is_not_treated_as_silence` (deleted by TA5; catcher `the_bank_renders_its_scalar_instances_under_random_state`) |
 | 182-9 | `block_is_positive_zero(&self.history)` dropped | `src/lib.rs` `ChannelState::is_at_silent_rest` | `a_stale_detector_history_refuses_the_claim` — **and nothing else** |
 | 182-10 | output `block_is_positive_zero` legs dropped from the claim | `src/lib.rs` `LimiterCore::process_block` | `a_settled_silent_limiter_renders_exactly_the_never_fast_path` |
 | 182-11 | `self.cursors.advance(frames, &self.shape)` deleted from the fast path | `src/lib.rs` `LimiterCore::process_block` | `a_settled_silent_limiter_...`, `a_negative_zero_input_...`, `a_stale_detector_history_...` (via the state comparison, not the sample comparison) |
@@ -647,10 +647,3 @@ lane 7; the session test's `ch48` row still owns E0 and EL at `Simd8`.
 The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
 
 - `partition_invariance_holds_over_block_sizes`: no plausible same-crate KEEP catcher recorded
-
-## TA5 deletions
-
-The 2026-10 test audit (TA5, the batch 2 sample measured at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 2 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 2 recorded no same-crate catcher.
-
-- `a_nonfinite_block_is_zeroed_reset_and_counted`: no same-crate KEEP catcher recorded
-- `a_negative_zero_input_block_is_not_treated_as_silence`: true-peak-limiter `the_bank_renders_its_scalar_instances_under_random_state`

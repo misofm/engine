@@ -46,12 +46,12 @@ a row, and one test that `scripts/lib/aarch64-known-defects.py` lists as a known
    reported them unused, looped until it reported nothing; no `#[allow(dead_code)]` was added.
    Deletes two test files left with no test: `crates/host-core/tests/strip_handles.rs` and
    `crates/transient-shaper/tests/partition.rs`.
-3. Updates the references: each `MUTATIONS.md` row or doc line that names a deleted test now says
-   "(deleted by TA5)", and each such file ends with a "TA5 deletions" list that names a KEEP
-   catcher only where batch 2 recorded it red on that test's sampled mutants in the same crate.
-   Code comments and open specs that name a deleted test say so in place (#1339, #1340, #1586,
-   #1713). Recorded log output and dated records (`docs/handoffs`, `docs/audits`, `artifacts/`)
-   are not edited.
+3. Updates the references: each `MUTATIONS.md` row that names a deleted test names a remaining
+   same-crate catcher that batch 2 recorded red on that test's sampled mutants, or says "(deleted
+   by TA5; no catcher recorded)". No list of deleted tests is added to a tracked file. Code
+   comments and open specs (#1339, #1340, #1586, #1713) note a deleted name only where it would
+   otherwise be a stale reference. Recorded log output and dated records (`docs/handoffs`,
+   `docs/audits`, `artifacts/`) are not edited.
 4. Gives the `qualification` job `test-debug-a` ("workspace debug tests (minus DSP crates and
    evidence tools)") `timeout-minutes: 22` in place of 15: 1.5 times the slowest recent green run
    (14:41). This refers to #1728 and does not close it; #1728's gate (ten consecutive green runs
@@ -210,4 +210,7 @@ per-test list, part 1/3" to "part 3/3"). The PR diff is the list of what went.
 
 ## Survivor gaps
 
-- (to be filled)
+Batch 2 left 12 mutants that no sampled and no covering KEEP test turned red. Agent T5S read each
+at `ad5c7ae86`: 3 equivalent, 1 unreachable, 2 dead code, 6 real gaps. The six real gaps (one
+small test each) and the decision on the dead contract are the successor spec
+`TBD-TA5-gap-close-the-batch-2-mutation-survivor-gaps.md`.

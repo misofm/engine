@@ -163,7 +163,7 @@ bits. This closes decision 14's F4 for the multiband compressor.
    `TRACKS / lanes()` banks; the render is bit-identical to today's prepared-bypass lowering
    (`todays_lowering`) and to `Backend::Scalar` at music levels.
 3. **A hot bypassed lane in a bound bank.** `a_hot_bypassed_multiband_lane_leaves_its_neighbours_bits_unchanged`
-   (deleted by TA5, so this gate writes it again) keeps its name and assertion (zero neighbour taps moved), now with the hot lane inside a bound
+   (deleted by TA5) keeps its name and assertion (zero neighbour taps moved), now with the hot lane inside a bound
    mixed bank (assert the bank binds). Its in-test positive control under #1087's lowering is
    removed, because the lowering is now the production path; D1's red mutation replaces it.
 4. **Lowering.** `native_session.rs` asserts that the bypassed multiband entry is lowered

@@ -173,7 +173,7 @@ the lift is heard with the tail already in place.
    block equals a reference that runs A and lifts the delay's bypass live at block 7. #1282's gate-3
    delay leg is deleted, and its multiband leg stays.
 7. **Deleted, superseded:** `the_delay_keeps_its_prepared_bypass_because_a_shunt_would_move_a_bit`
-   (`bypass_shunt_identity.rs:798-858`; already deleted by TA5), whose claim gate 1 now reverses. Update the red-mutation
+   (`bypass_shunt_identity.rs:798-858`; deleted by TA5), whose claim gate 1 now reverses. Update the red-mutation
    doc of `the_never_banked_list_is_exactly_the_launch_effects_that_decline_a_bank` (`:754-760`).
 8. **Click against the mute baseline** (root, 2026-10-05, from #1055). The bypass
    crossfade's click is measured against #1055's mute baseline, at the session's `muteMs` default,

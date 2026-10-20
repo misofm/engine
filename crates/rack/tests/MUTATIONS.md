@@ -23,8 +23,8 @@ cargo test --locked -p rack -p rack-compiler -p graph-compiler
 |---|---|---|---|---|---|
 | M1 | `scatter_lane` reads the wrong lane: `*sample = chunk[lane]` becomes `chunk[lane ^ 1]` | `rack/src/lib.rs` | `gather_scatter_round_trip_is_bit_exact` | RED | ``assertion `left == right` failed: left lane=0 frame=0`` |
 | M2 | `gather_lane` chunks by frames instead of lanes: `chunks_exact_mut(lanes)` becomes `chunks_exact_mut(frames as usize)` | `rack/src/lib.rs` | `stage_sees_frame_major_layout` | RED | ``assertion `left == right` failed: lane=0 frame=1`` |
-| M3 | `BankChain::run` drops the identity-slot guard: `if slot.active_lanes.iter().any(..)` becomes `if true` | `rack/src/lib.rs` | `identity_everywhere_slot_is_not_executed` (deleted by TA5) | RED | ``assertion `left == right` failed: both live slots ran once per block; the identity-everywhere slot never ran`` |
-| M3b | the transpose counter moves inside the slot loop (master plan §4.5: it is *per chain*, not per slot) | `rack/src/lib.rs` | `identity_everywhere_slot_is_not_executed` (deleted by TA5) | RED | ``assertion `left == right` failed`` (2 live slots ⇒ 10 counted round-trips for 5 blocks) |
+| M3 | `BankChain::run` drops the identity-slot guard: `if slot.active_lanes.iter().any(..)` becomes `if true` | `rack/src/lib.rs` | `identity_everywhere_slot_is_not_executed` (deleted by TA5; catcher `prepared_slot_activity_preserves_dispatch_trace_and_errors`) | RED | ``assertion `left == right` failed: both live slots ran once per block; the identity-everywhere slot never ran`` |
+| M3b | the transpose counter moves inside the slot loop (master plan §4.5: it is *per chain*, not per slot) | `rack/src/lib.rs` | `identity_everywhere_slot_is_not_executed` (deleted by TA5; catcher `prepared_slot_activity_preserves_dispatch_trace_and_errors`) | RED | ``assertion `left == right` failed`` (2 live slots ⇒ 10 counted round-trips for 5 blocks) |
 | M4 | `BankChain::new` stops enforcing "a slot may only be active on an active lane" | `rack/src/lib.rs` | `chain_new_rejects_mask_shape_and_lane_implication` | RED | ``assertion `left == right` failed: a slot may not be active on a lane the chain never gathers`` |
 | M5 | `AoSoaScratch::new` re-adds a plane: `vec![0.0; length]` becomes `vec![0.0; length * 2]` for the left plane | `rack/src/lib.rs` | `scratch_allocates_exactly_two_planes` | RED | ``assertion `left == right` failed`` |
 | M6 | `gather_lane` drops the first frame of every block: `.zip(left)` becomes `.zip(&left[1..])` | `rack/src/lib.rs` | `chain_run_is_partition_invariant` | RED | ``assertion `left == right` failed: partition=1 lane=0 frame=0`` |
@@ -305,9 +305,3 @@ the graph suites of `graph/tests/MUTATIONS.md` issue #915, and console-workload
 
 Row 915-R1 is the reason the rack half of gate 1 exists. Whether the staging block is written is
 invisible to every digest, so it is pinned where it can be seen.
-
-## TA5 deletions
-
-The 2026-10 test audit (TA5, the batch 2 sample measured at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 2 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 2 recorded no same-crate catcher.
-
-- `identity_everywhere_slot_is_not_executed`: rack `tests::full_bank_gather_scatter_round_trip_is_bit_exact`, `tests::prepared_slot_activity_preserves_dispatch_trace_and_errors`

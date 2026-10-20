@@ -3080,7 +3080,7 @@ fn a_table_step_inside_a_deferred_moves_ramp_releases_a_composed_lane_alike_on_b
 }
 
 /// The table step inside a deferred move's ramp (#1711 U1 fold 1), over the session
-/// `model_of(rate)`; the composed twin above is its one caller since TA5 deleted the plain case.
+/// `model_of(rate)`.
 fn table_step_inside_a_deferred_move(model_of: fn(u32) -> SessionModel) {
     let segment = |shape, start, end, from, to| session::AutomationSegment {
         shape,

@@ -354,13 +354,12 @@ the stereo arm does not, and uncommanded they agree.
 
 ## Issue #1211 — one mute owner and live-control producers per strip
 
-Driver: `cargo test -p host-core --test strip_controls --test strip_handles` (the `strip_handles`
-binary deleted by TA5) and `cargo test -p host-core --test randomized`, one mutation at a time, tree
+Driver: `cargo test -p host-core --test strip_controls --test strip_handles` (deleted by TA5) and `cargo test -p host-core --test randomized`, one mutation at a time, tree
 restored between rows. Delivery host: x86_64 AVX2+FMA.
 
 | Row | Mutation | Red |
 | --- | --- | --- |
-| 1211-M5 | build the control requests from `live_control_tracks` (the track prefix) again | `a_bus_fader_record_renders_as_the_session_with_that_fader` (three producers) and `handles_list_tracks_then_submixes_and_file_bus_effects` (deleted by TA5) (`left: ["t0", "t1", "t2"]`) |
+| 1211-M5 | build the control requests from `live_control_tracks` (the track prefix) again | `a_bus_fader_record_renders_as_the_session_with_that_fader` (three producers) and `handles_list_tracks_then_submixes_and_file_bus_effects` (deleted by TA5; no catcher recorded) (`left: ["t0", "t1", "t2"]`) |
 | 1211-M6 | sort `strip_controls` by ID instead of by `canonical_index` | `a_bus_fader_record_renders_as_the_session_with_that_fader` (the bus producer is no longer at strip index 3) |
 | 1211-M7 | `live_records` draws over `handles.track_count` instead of `strip_controls.len()` | `randomized_consoles_render_the_same_bits_armed_dual_and_serialized` (`bus_live_records: 0`) |
 
@@ -403,9 +402,3 @@ Gate 4's base behaviour was replayed by removing the attach call entirely: the t
 |---|---|---|
 | 1246-H1 | `longest_vca_id_bytes` measures the first VCA, not the longest | `the_session_shape_measures_the_longest_vca_id`: 1, not 46 |
 | 1246-H2 | `longest_vca_id_bytes` measures the track IDs | the same test: 2, not 46 |
-
-## TA5 deletions
-
-The 2026-10 test audit (TA5, the batch 2 sample measured at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 2 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 2 recorded no same-crate catcher.
-
-- `handles_list_tracks_then_submixes_and_file_bus_effects`: no same-crate KEEP catcher recorded
