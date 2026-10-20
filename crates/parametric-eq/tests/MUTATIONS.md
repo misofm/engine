@@ -86,12 +86,12 @@ and the PCM-fixture rows. These are the three mutations issue #105 used against 
 All three fail `automation_starts_a_64_sample_word_ramp`. 5 leaves the words at
 `start + 64 * step` instead of exactly `target`; 6 makes frame 0 use the pre-event words, so the
 first ramped word is `start`; 7 advances twice on the first frame. 7 also fails
-`automation_is_partition_invariant` (deleted by TA4; KEEP catcher parametric-eq `randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores`), because the number of additions then depends on how the block
+`automation_is_partition_invariant` (deleted by TA4), because the number of additions then depends on how the block
 was cut.
 
 ### 8 — one segment for lanes of different ramp ages
 
-`every_width_matches_the_scalar_instantiation` (deleted by TA4; KEEP catcher parametric-eq `randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores`) fails at block 2, track 0, frame 0. This is the
+`every_width_matches_the_scalar_instantiation` (deleted by TA4) fails at block 2, track 0, frame 0. This is the
 mutation that matters for the bank: at `WIDTH = 1` there is only one lane, so no cut is ever needed
 and the scalar path is unaffected; at `WIDTH = 8` the lanes whose ramps ended mid-block keep
 stepping past their target. A width difference that only appears when ramps of different ages
@@ -200,7 +200,7 @@ tree restored between rows.
 | # | mutation | file | test | result |
 |---|---|---|---|---|
 | M2-E1 | `PreparedParametricEq::desymmetrize` drops `sections` | `parametric-eq/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
-| M2-E2 | the collapsed body hard-codes `stationary = true` instead of reading the one live channel's `no_ramp_in_flight` | `parametric-eq/src/lib.rs` `render_mono` | `the_collapsed_body_renders_the_dual_bodys_left_plane` (deleted by TA4; KEEP catcher parametric-eq `response::asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity`) | RED — 2 failed; a ramping block taking the interleaved cascade renders a coefficient that is not the one in force |
+| M2-E2 | the collapsed body hard-codes `stationary = true` instead of reading the one live channel's `no_ramp_in_flight` | `parametric-eq/src/lib.rs` `render_mono` | `the_collapsed_body_renders_the_dual_bodys_left_plane` (deleted by TA4) | RED — 2 failed; a ramping block taking the interleaved cascade renders a coefficient that is not the one in force |
 
 `remaining` and `identity` are on the copy list and are not individually red, and the reason is
 worth stating: both are read only to choose a *schedule* — the interleaved cascade over the
@@ -435,8 +435,8 @@ drives EQ ramps through prepared targets. Debug profile, AVX2 host (the EQ binds
 
 | # | mutation | gate that goes red | result |
 |---|---|---|---|
-| 1278-M1 | `Channel::commit_track` stores a moving band's step as `(target - current) / remaining` instead of the carried step | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (deleted by TA4; KEEP catcher parametric-eq `response::asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity`) (342 of 390 scalar and bank comparisons diverge, on all three ramps); the differential (`the instance restored from its snapshot rendered 0xbeb91443 where the lane, continuing, rendered 0xbeb91440`) | RED |
-| 1278-M2 | the remaining-path walk held to the design's `NORM_TOLERANCE` instead of `RAMP_PATH_NORM_TOLERANCE` | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (deleted by TA4; KEEP catcher parametric-eq `response::asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity`) (the 10 kHz bell refused at samples 0-63); the differential (`lane 1's snapshot refused by a fresh instance (effect.state.payload)`) | RED |
+| 1278-M1 | `Channel::commit_track` stores a moving band's step as `(target - current) / remaining` instead of the carried step | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (deleted by TA4) (342 of 390 scalar and bank comparisons diverge, on all three ramps); the differential (`the instance restored from its snapshot rendered 0xbeb91443 where the lane, continuing, rendered 0xbeb91440`) | RED |
+| 1278-M2 | the remaining-path walk held to the design's `NORM_TOLERANCE` instead of `RAMP_PATH_NORM_TOLERANCE` | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (deleted by TA4) (the 10 kHz bell refused at samples 0-63); the differential (`lane 1's snapshot refused by a fresh instance (effect.state.payload)`) | RED |
 | 1278-M3 | `PreparedParametricEq::restore_track` commits the left channel before decoding the right | `a_restore_refused_on_one_channel_moves_neither` (`the scalar instance moved`) | RED |
 
 ## #1328: exact rest, the input-gated joint flush and the desymmetrize caches
@@ -468,11 +468,11 @@ it names, the named tests run, and the source restored.
 
 ## TA4 deletions
 
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Each one's caught mutants were also red in the KEEP test named beside it. That is the recorded catcher of the deleted test's sampled mutants; the mutation of each row above was not re-run.
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
 
-- `automation_is_partition_invariant`: parametric-eq `randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores`
-- `every_width_matches_the_scalar_instantiation`: parametric-eq `randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores`
-- `the_collapsed_body_renders_the_dual_bodys_left_plane`: parametric-eq `response::asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity`
+- `automation_is_partition_invariant`: no plausible same-crate KEEP catcher recorded
+- `every_width_matches_the_scalar_instantiation`: no plausible same-crate KEEP catcher recorded
+- `the_collapsed_body_renders_the_dual_bodys_left_plane`: no plausible same-crate KEEP catcher recorded
 - `disabled_cuts_preserve_all_high_pass_signed_zero_against_four_section_oracle`: parametric-eq `elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag`
 - `a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands`: parametric-eq `elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag`
-- `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample`: parametric-eq `response::asymmetric_cascade_sections_are_independent_and_bypass_is_total_identity`
+- `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample`: no plausible same-crate KEEP catcher recorded

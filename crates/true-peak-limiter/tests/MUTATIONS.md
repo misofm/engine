@@ -26,7 +26,7 @@ cargo test -p true-peak-limiter --lib phase_outputs
 | 5 | `smoothed = box_sum / window` → `smoothed = quantised` (box smoother removed, bare minimum applied) | `src/lib.rs` `channel_frame` | `the_gain_ramp_falls_gradually_and_arrives_at_the_requirement` |
 | 6 | `flush(target.max(released))` → `target.max(released)` | `src/lib.rs` `channel_frame` | `silence_restores_exact_identity_including_signed_zero` |
 | 7 | van Herk suffix pass guarded by `complete && width < 2`, so it never runs at W4/W8 | `src/lib.rs` `sliding_minimum` | `lane_identity_holds_across_widths` |
-| 8 | `left.prefix.fill(1.0)` / `right.prefix.fill(1.0)` at block entry (min-filter prefix not carried across blocks) | `src/lib.rs` `limiter_block` | `partition_invariance_holds_over_block_sizes` (deleted by TA4; KEEP catcher lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`) |
+| 8 | `left.prefix.fill(1.0)` / `right.prefix.fill(1.0)` at block entry (min-filter prefix not carried across blocks) | `src/lib.rs` `limiter_block` | `partition_invariance_holds_over_block_sizes` (deleted by TA4) |
 | 9 | `return;` inserted after `limiter_block` so the §4.4 boundary check never runs | `src/lib.rs` `LimiterCore::process_block` | `a_nonfinite_block_is_zeroed_reset_and_counted` |
 | 10 | the `recomputed == box_sum` check in restore disabled | `src/lib.rs` `read_lane` | `state_round_trips_and_rejects_corruption` |
 | 11 | `peak = history[6].abs()` → `peak = L::zero()` (sample term dropped from `P`) | `src/lib.rs` `detector_peak` | `fixed_latency_guarded_ceiling_and_bypass_bits_hold` |
@@ -145,7 +145,7 @@ Every row below is a **bit** test. The claims here are about *when* a state word
 
 | # | mutation | file | test that turned red |
 |---|---|---|---|
-| round2-1 | the block-end write-back of `prefix` dropped | `src/lib.rs` `limiter_block_uniform` | `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_restore_that_desyncs_the_phase_falls_back`, `fixed_latency_guarded_ceiling_and_bypass_bits_hold`, `lane_identity_holds_across_widths`, `partition_invariance_holds_over_block_sizes` (deleted by TA4; KEEP catcher lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`) |
+| round2-1 | the block-end write-back of `prefix` dropped | `src/lib.rs` `limiter_block_uniform` | `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_restore_that_desyncs_the_phase_falls_back`, `fixed_latency_guarded_ceiling_and_bypass_bits_hold`, `lane_identity_holds_across_widths`, `partition_invariance_holds_over_block_sizes` (deleted by TA4) |
 | round2-2 | the block-end write-back of `phase` dropped, so the cohort restarts each block at the phase it entered the previous one with | `src/lib.rs` `limiter_block_uniform` | `a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim`, `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_negative_zero_input_block_is_not_treated_as_silence`, `a_restore_that_desyncs_the_phase_falls_back`, `a_restore_withdraws_the_silence_claim`, `a_settled_silent_limiter_renders_exactly_the_never_fast_path` |
 | round2-3 | `.min(ring - left_end)` dropped from the segment run | `src/lib.rs` `segment` | `the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits` — **and nothing else** |
 | round2-4 | `.min(ring - left_expiring)` dropped from the segment run | `src/lib.rs` `segment` | `the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits` — **and nothing else** |
@@ -158,7 +158,7 @@ Every row below is a **bit** test. The claims here are about *when* a state word
 | round2-11 | the alignment sample read from tap 0 instead of tap 6 | `src/lib.rs` `detector_peak` | `every_case_has_one_digest_at_every_width` (the E12 `D90_DIGESTS`) |
 | round2-12 | the left channel takes the **right** channel's block-end phase: `left.phase.fill(left_phase)` → `fill(right_phase)` | `src/lib.rs` `limiter_block_uniform` | `the_two_channels_of_a_uniform_cohort_keep_their_own_phases` — **and nothing else** |
 | round2-13 | the mirror of round2-12: `right.phase.fill(right_phase)` → `fill(left_phase)` | `src/lib.rs` `limiter_block_uniform` | `the_two_channels_of_a_uniform_cohort_keep_their_own_phases` — **and nothing else** |
-| round2-14 | the two channels' block-end `prefix` write-backs are swapped | `src/lib.rs` `limiter_block_uniform` | seven tests, including `lane_identity_holds_across_widths`, `partition_invariance_holds_over_block_sizes` (deleted by TA4; KEEP catcher lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`), `output_true_peak_never_exceeds_the_ceiling` and `passes_effect_contract_conformance` |
+| round2-14 | the two channels' block-end `prefix` write-backs are swapped | `src/lib.rs` `limiter_block_uniform` | seven tests, including `lane_identity_holds_across_widths`, `partition_invariance_holds_over_block_sizes` (deleted by TA4), `output_true_peak_never_exceeds_the_ceiling` and `passes_effect_contract_conformance` |
 
 ### Why a crossed phase needed its own test and a crossed prefix did not
 
@@ -644,6 +644,6 @@ lane 7; the session test's `ch48` row still owns E0 and EL at `Simd8`.
 
 ## TA4 deletions
 
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Each one's caught mutants were also red in the KEEP test named beside it. That is the recorded catcher of the deleted test's sampled mutants; the mutation of each row above was not re-run.
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
 
-- `partition_invariance_holds_over_block_sizes`: lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`
+- `partition_invariance_holds_over_block_sizes`: no plausible same-crate KEEP catcher recorded

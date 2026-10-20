@@ -20,13 +20,26 @@ KEEP tests. 392 mutants, 292 viable, 21 survivors.
 - UNIQUE: at least one mutant only this test caught. THIN, WEAK, NO-COVERAGE: too few tries or
   catches to judge.
 
+MEASURED-REDUNDANT cannot see allocation, count or ceiling claims; tests whose claim is one of these
+are kept or restored. The verifier's review restored three such tests (below, "Restored"). The
+deleted capi `set_control::automated_vca` tests (`a_vca_move_over_an_automated_member_is_live_and_renders_the_prepared_plan`,
+`vca_reach_and_count_changes_over_an_automated_member_are_live`, through the deleted helper `case`),
+`set_control::automated_hand_move::a_hand_move_on_an_automated_fader_is_live_and_renders_the_stored_offset`
+(through the deleted helper `leg`) and `set_control::automated_carry::an_exact_unmute_that_frees_a_held_lane_discharges_the_owed_move`
+also asserted that every render block after the live edit makes 0 allocations and 0 frees on the
+C ABI (`bench_support::alloc` thread counters). The same render path still has its allocation
+counts in host-core: `tests/stored_vca_automation.rs` (`rig.allocations == (0, 0)` on the render
+thread in its VCA ride, mute and carry tests) and `tests/stored_fader_automation.rs`
+(`rendering_fader_events_allocates_nothing`, and the carry runs' swap-block counts).
+
 "Redundant" means: no mutant of the sample needs this test. It is not a proof over all mutants,
 and the KEEP catchers below are the recorded catchers of the sampled mutants, not of every row
 mutation that a `MUTATIONS.md` names.
 
 ## What this change does
 
-1. Deletes the 140 MEASURED-REDUNDANT tests that still exist as measured (2 skipped, below).
+1. Deletes 137 of the 142 MEASURED-REDUNDANT tests: 2 no longer exist as measured and 3 are
+   restored after review (both below, "Skipped" and "Restored").
 2. Deletes the 8 REDUNDANT-IF-PEER-KEPT tests that the greedy cover drops. The cover keeps 4:
    `audit` `vectorization::tests::rust_disambiguator_suffix_is_narrowly_supported` and
    `parametric-eq` `malformed_requests_preserve_output_sentinels_and_opaque_ids` stay;
@@ -82,8 +95,9 @@ mutation that a `MUTATIONS.md` names.
    clippy `--all-targets --all-features`), looped until it reported nothing. No
    `#[allow(dead_code)]` was added. Test files left with no test are deleted whole.
 6. Updates the references: each `MUTATIONS.md` row or doc line that names a deleted test now says
-   "deleted by TA4" and names the KEEP catcher batch 1 recorded for that test's mutants, and each
-   such `MUTATIONS.md` ends with a "TA4 deletions" list. Open specs that name a deleted test or file
+   "deleted by TA4". It names a KEEP catcher only where batch 1 recorded that catcher red on the
+   deleted test's mutants in the same crate and it can plausibly see the row's mutation; otherwise
+   it names none. Each such `MUTATIONS.md` ends with a "TA4 deletions" list. Open specs that name a deleted test or file
    (#1290, #1350, #1406, #1654, #1696, #1722) say so in place.
 
 ## Non-goals
@@ -106,7 +120,7 @@ Line numbers are at `b9135008d`. Each test lists the number of sampled mutants i
 KEEP tests that were also red on them (count per catcher; "other candidates only" are the cover's
 peers, "timeout" is a 20-minute KEEP run counted as caught).
 
-### Deleted tests (153, 7,175 lines)
+### Deleted tests (150, 6,905 lines)
 
 #### audit
 
@@ -231,8 +245,6 @@ peers, "timeout" is a 20-minute KEEP run counted as caught).
 
 - `tests::delay_is_exact_and_lane_independent`, `crates/graph/src/lib.rs:7412-7420`; 4 caught: `graph lib runtime::tests::a_successor_line_continues_the_predecessors_pending_samples_head_aligned` (4)
 - `tests::binding_rejects_duplicates_and_returns_all_ownership`, `crates/graph/src/lib.rs:7421-7434`; 3 caught: `graph lib program::tests::chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers` (2); `graph lib program::tests::delayed_edge_gets_staging_buffer_and_blocks_in_place` (1)
-- `program::tests::a_bank_window_never_recycles_a_physical_slot`, `crates/graph/src/program/tests.rs:1319-1393`; 10 caught: `graph lib program::tests::chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers` (5); `graph lib program::tests::delayed_edge_gets_staging_buffer_and_blocks_in_place` (3); `graph lib program::tests::bank_window_hoisting_preserves_dataflow_on_random_graphs` (1); `graph lib program::tests::a_delayed_stage_boundary_is_not_elided` (1)
-- `program::tests::no_slot_is_recycled_inside_a_merged_bank_window`, `crates/graph/src/program/tests.rs:1395-1455`; 7 caught: `graph lib program::tests::chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers` (4); `graph lib program::tests::delayed_edge_gets_staging_buffer_and_blocks_in_place` (2); `graph lib program::tests::a_delayed_stage_boundary_is_not_elided` (1)
 - `runtime::tests::every_lane_width_matches_the_scalar_reference_on_hostile_values`, `crates/graph/src/runtime.rs:12429-12432`; 4 caught: `graph lib runtime::tests::a_host_plane_reduction_is_the_arena_reduction_bit_for_bit` (3); `graph lib runtime::tests::negative_zero_survives_every_reduction_group_edge` (1)
 
 #### graph-compiler
@@ -299,10 +311,6 @@ peers, "timeout" is a 20-minute KEEP run counted as caught).
 - `set_control_writes_exactly_the_field_its_address_names`, `crates/protocol/tests/edit_ramps.rs:776-814`; 3 caught: `host-web lib tests::structural_apply::a_master_designated_after_an_empty_boot_reads_as_a_boot_designation` (1); `protocol console_session_edits::a_slot_set_change_that_skips_a_track_refuses_whole` (1); `session json_grammar::u64_decimal_strings_cover_full_domain_and_reject_noncanonical_forms` (1)
 - `vca_refusals_commit_nothing`, `crates/protocol/tests/vca_edits.rs:306-526`; 3 caught: `host-web control_parity::a_vca_move_over_an_automated_member_is_live_alike_on_both_hosts` (1); `protocol console_session_edits::a_slot_set_change_that_skips_a_track_refuses_whole` (1); `protocol submix_strip_edits::every_strip_opcode_edits_a_submix` (1)
 
-#### rack
-
-- `tests::prepared_slot_dispatch_uses_constant_activity_checks`, `crates/rack/src/lib.rs:5000-5133`; 4 caught: `rack lib tests::disengaging_copies_the_prefixs_state_once` (1); `console-workload paired_spans::the_limiter_bank_renders_the_dual_bits_in_every_scenario` (1); `rack lib tests::a_fully_folded_full_bank_offers_its_resident_block_before_writing_staging` (1); `rack lib tests::a_partial_agreement_slot_declines_the_collapse` (1)
-
 #### realtime-policy
 
 - `binary::two_arguments_exit_two`, `tools/realtime-policy/tests/policy/binary.rs:29-37`; 4 caught: `realtime-policy policy::binary::a_root_with_a_missing_scan_root_exits_one` (1); `realtime-policy policy::run::a_valid_tree_exits_zero_and_prints_the_success_line` (1); `realtime-policy policy::boundary::a_boundary_finding_names_the_marker_line` (1); `realtime-policy policy::boundary::a_marker_inside_an_attribute_is_refused` (1)
@@ -355,12 +363,13 @@ peers, "timeout" is a 20-minute KEEP run counted as caught).
 - `crates/soft-clip/tests/partition_invariance.rs` (118), `crates/source/tests/seek_schedule_model.rs`
   (533), `hosts/host-web/tests/retained_ceilings.rs` (294), `tools/session-validator/tests/skill.rs`
   (111): every test in them is listed above; their helpers go with them. `retained_ceilings.rs`
-  held the native budgets of the browser identity fixture; the browser rows keep their ceilings in
-  `tests/browser-v1/expected.json` (`check-browser-expected-resources.py`). host-web's `lane`
+  held the native budgets of the browser identity fixture: the shipped wasm32 artifact's ceilings
+  stay in `expected.json` (checked by `check-browser-expected-resources.py`); the deleted file
+  ceilinged only the native 8- and 4-lane builds, which do not ship. host-web's `lane`
   dev-dependency served only it and the deleted `canonical_live` module, so it goes too
   (`Cargo.lock` loses that edge).
 
-### Deleted helpers (compiler-reported, 75 items, 2,088 lines)
+### Deleted helpers (compiler-reported, 71 items, 2,041 lines)
 
 - `Command`, `crates/builtins/tests/stage.rs:860-883`
 - `automation_script`, `crates/builtins/tests/stage.rs:885-960`
@@ -393,8 +402,6 @@ peers, "timeout" is a 20-minute KEEP run counted as caught).
 - `taps`, `crates/graph-compiler/tests/compile_shapes.rs:376-386`
 - `representative_console`, `crates/graph-compiler/tests/compile_shapes.rs:388-469`
 - `assert_estimate_moves_by_the_route_activity_charge`, `crates/graph-compiler/tests/route_coefficients.rs:544-578`
-- `dynamic_track`, `crates/graph/src/program/tests.rs:720-751`
-- `dynamic_effect`, `crates/graph/src/program/tests.rs:753-759`
 - `assert_width_matches_reference`, `crates/graph/src/runtime.rs:12313-12427`
 - `compare_holey_population`, `crates/lane/tests/fader_matrix.rs:430-502`
 - `run_scalar`, `crates/lane/tests/fader_matrix.rs:510-543`
@@ -416,8 +423,6 @@ peers, "timeout" is a 20-minute KEEP run counted as caught).
 - `bank_tail`, `crates/parametric-eq/tests/carry.rs:130-188`
 - `refusal_codes`, `crates/protocol/tests/vca_edits.rs:278-297`
 - `Refusal`, `crates/protocol/tests/vca_edits.rs:299-304`
-- `reset_prepared_activity_observation`, `crates/rack/src/lib.rs:2104-2107`
-- `prepared_activity_observation`, `crates/rack/src/lib.rs:2109-2112`
 - `Rendered`, `crates/transient-shaper/tests/partition.rs:34-35`
 - `FADER_RAMP`, `hosts/host-web/src/tests.rs:7063-7065`
 - `live_fader`, `hosts/host-web/src/tests.rs:7067-7097`
@@ -438,8 +443,7 @@ peers, "timeout" is a 20-minute KEEP run counted as caught).
 - `automated`, `hosts/host-web/src/tests.rs:10766-10792`
 - `benchmark_text_mutation`, `tools/audit/src/fixture_builtins.rs:5752-5763`
 
-Also: the `rack` `TEST_PREPARED_ACTIVITY_QUERIES` counter and its `#[cfg(test)]` increment in
-`PreparedSlot::has_active_lanes` (only the two deleted readers read it); the `parametric-eq`
+Also: the `parametric-eq`
 `carry.rs` `Ramp::name` field (read only by deleted tests; each ramp keeps its name as a comment);
 the emptied `host-web` `tests::canonical_live` module.
 
@@ -448,6 +452,27 @@ Lead for a successor, not fixed here (the compiler does not report it): `builtin
 `#[cfg(test)]` counters that are now written and never read. Their readers were the deleted
 `settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane` and
 `fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane`.
+
+### Restored after review
+
+The TA4 verifier (READY WITH FIXES) restored these exactly as at `b9135008d`:
+
+- `graph` `program::tests::a_bank_window_never_recycles_a_physical_slot` (the #169 minimal
+  reproduction; a regression reproducer is never-delete) and
+  `no_slot_is_recycled_inside_a_merged_bank_window`, with their helpers `dynamic_track` and
+  `dynamic_effect` (`crates/graph/src/program/tests.rs`), and the `program.rs` doc line that cites
+  the first.
+- `rack` `tests::prepared_slot_dispatch_uses_constant_activity_checks` (a count claim: the dispatch
+  makes a constant number of activity checks, which mutation cannot see), with the `#[cfg(test)]`
+  `TEST_PREPARED_ACTIVITY_QUERIES` counter, its increment in `PreparedSlot::has_active_lanes` and
+  its readers `reset_prepared_activity_observation` and `prepared_activity_observation`.
+
+### The browser hostile-FP live gate
+
+TA4 deleted host-web `tests::canonical_live::a_live_fader_and_vca_move_under_a_hostile_caller_word_render_the_canonical_bits`
+(#1709 D2). The capi test of the same name stays (`crates/capi/src/runtime/live_tests.rs:8158`),
+so the browser side of that check is gone. `TBD-TA4-gap-1-test-the-fp-environment-refusal.md`
+records it in case the owner wants the browser side back.
 
 ### Skipped
 

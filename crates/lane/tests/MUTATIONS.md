@@ -340,7 +340,7 @@ run in dev (the corpus in release), and restored. Host AMD EPYC 7313P, rustc 1.9
 
 L-green is the expected-green row: on the sanitized domain `{+0.0} ∪ [MIN_POSITIVE, MAX]` the D8
 select form is commutative by bits, so the operand order is free.
-`g1_select_max_is_order_free_only_on_the_sanitized_domain` (deleted by TA4; KEEP catcher lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`) witnesses that argument directly, and
+`g1_select_max_is_order_free_only_on_the_sanitized_domain` (deleted by TA4) witnesses that argument directly, and
 also that it fails off the domain (`max(+0, -0)` and `max(1, NaN)` depend on the order).
 
 ## Issue #949 — the `f64` lane vocabulary
@@ -505,6 +505,6 @@ browser's render-closure trap gate. Host AMD EPYC 7313P, rustc 1.97.1, `x86-64-v
 
 ## TA4 deletions
 
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Each one's caught mutants were also red in the KEEP test named beside it. That is the recorded catcher of the deleted test's sampled mutants; the mutation of each row above was not re-run.
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
 
-- `g1_select_max_is_order_free_only_on_the_sanitized_domain`: lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`
+- `g1_select_max_is_order_free_only_on_the_sanitized_domain`: no plausible same-crate KEEP catcher recorded

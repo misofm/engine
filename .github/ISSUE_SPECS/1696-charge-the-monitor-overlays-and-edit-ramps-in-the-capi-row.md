@@ -65,8 +65,7 @@ hosts charge the same, because the row is computed once, in the core.
   (`assert_capi_retained_bytes_are_complete`, `:867`; driver `:995`). It observes the compile of
   one session; it never populates a solo, a master or a pending candidate, so a term that the
   commit path adds later is outside it. The browser's ceilings are
-  `hosts/host-web/tests/retained_ceilings.rs` (deleted by TA4: batch 1 measured both its tests
-  redundant) and `tests/browser-v1/expected.json`
+  `hosts/host-web/tests/retained_ceilings.rs` (deleted by TA4) and `tests/browser-v1/expected.json`
   (`resourceCeilings`, `:69`).
 
 ## Decisions to take (the implementer proposes, the coordinator rules)
@@ -142,8 +141,8 @@ hosts charge the same, because the row is computed once, in the core.
 2. The existing exact equality `capi_retained_bytes == observed terms` still holds on every
    fixture, with the new term added to the right-hand side as an observed value.
 3. The same session on the browser: `WebResourceReport` reads the same core charge; the
-   `retained_ceilings.rs` budgets (deleted by TA4) and `check-browser-expected-resources.py` pass with the moved
-   rows re-pinned from measurement, each with its reason.
+   `check-browser-expected-resources.py` ceilings pass with the moved rows re-pinned from
+   measurement, each with its reason. (`retained_ceilings.rs` was deleted by TA4: the shipped wasm32 artifact's ceilings stay in `expected.json` (checked by `check-browser-expected-resources.py`); the deleted file ceilinged only the native 8- and 4-lane builds, which do not ship.)
 4. A control plane at the exact `maximum_control_retained_bytes` that the session needs without
    the overlay is refused when the overlay is populated, on both hosts, with the typed resource
    code, and accepted with the limit raised by the charge.

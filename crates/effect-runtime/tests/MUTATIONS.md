@@ -250,10 +250,10 @@ list of overflowing widths in these tests therefore also carries `0x0000_0002` (
 
 ## TA4 deletions
 
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Each one's caught mutants were also red in the KEEP test named beside it. That is the recorded catcher of the deleted test's sampled mutants; the mutation of each row above was not re-run.
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
 
 - `the_step_is_computed_once`: effect-runtime `contract_ramp_identity::linear_smoother_is_bit_identical_to_the_linear_ramp`
 - `the_curve_matches_the_paper`: effect-runtime `dynamics::knee_words_follow_the_finite_reciprocal_rule`
-- `the_corpus_is_width_independent`: lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`
+- `the_corpus_is_width_independent`: no plausible same-crate KEEP catcher recorded
 - `a_knee_whose_reciprocal_overflows_is_a_hard_knee`: effect-runtime `dynamics::knee_words_follow_the_finite_reciprocal_rule`
 - `the_narrowest_soft_knees_are_finite_at_the_threshold`: effect-runtime `dynamics::knee_words_follow_the_finite_reciprocal_rule`

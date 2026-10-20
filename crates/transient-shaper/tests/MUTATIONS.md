@@ -187,6 +187,6 @@ dropped.
 
 ## TA4 deletions
 
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Each one's caught mutants were also red in the KEEP test named beside it. That is the recorded catcher of the deleted test's sampled mutants; the mutation of each row above was not re-run.
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
 
-- `the_scalar_product_is_partition_invariant`: effect-runtime `contract_ramp_identity::linear_smoother_is_bit_identical_to_the_linear_ramp`
+- `the_scalar_product_is_partition_invariant`: no plausible same-crate KEEP catcher recorded

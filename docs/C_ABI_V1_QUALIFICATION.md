@@ -1092,4 +1092,4 @@ that window is admitted against the plan that renders.
   `an_edit_that_supersedes_a_discontinuity_successor_is_prepared_at_it`; `host-core`
   `successor_swap::a_declared_discontinuity_resets_the_floors_at_every_rate_and_width`; `host-web`
   `tests::structural_apply::a_declared_discontinuity_resets_the_floors_on_the_browser` and the
-  parity row `control_parity::a_declared_discontinuity_resets_the_floors_alike_on_both_hosts` (deleted by TA4; KEEP catcher graph `program::tests::chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers`).
+  parity row `control_parity::a_declared_discontinuity_resets_the_floors_alike_on_both_hosts` (deleted by TA4).

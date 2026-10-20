@@ -15,3 +15,7 @@ Split the decision out of the hardware access: a pure function that takes the th
 1. A unit test in `crates/lane` calls the pure function with a readback whose control bits differ from the canonical word and gets `CanonicalWordRefused`; with a `restored` word that differs from `observed` it gets `RestoreRefused`; with matching words it gets `Ok`.
 2. The mutant `attest_fp_environment -> Ok(())` is red, measured once (PR evidence, not a committed test).
 3. No rendered bit moves; `cargo test -p lane -p host-core` is green.
+
+## Related: the browser side of the hostile-FP live gate
+
+TA4 deleted host-web `tests::canonical_live::a_live_fader_and_vca_move_under_a_hostile_caller_word_render_the_canonical_bits` (#1709 D2, browser); the capi test of the same name stays (`crates/capi/src/runtime/live_tests.rs:8158`), so only the C ABI side of that check remains. If the owner wants the browser side back, restore it from `b9135008d` (`hosts/host-web/src/tests.rs`) with the `lane` test-support dev-dependency.

@@ -366,7 +366,7 @@ now only through the test-support switch `structural_command_for_test` (the refu
 
 **Gates -> tests** (`cargo test --locked -p host-web --features host-web/test-support`):
 - gate 1: `tests::structural_apply::a_rebuild_swaps_without_a_gap`
-- gate 2: `a_live_edit_is_part_of_the_base_the_successor_is_prepared_from` (deleted by TA4; KEEP catcher host-web `tests::structural_apply::a_master_designated_after_an_empty_boot_reads_as_a_boot_designation`) (the ramp is in flight
+- gate 2: `a_live_edit_is_part_of_the_base_the_successor_is_prepared_from` (deleted by TA4) (the ramp is in flight
   at the adoption block)
 - gate 3: `a_malformed_transaction_is_refused_and_changes_nothing`,
   `a_rate_or_quantum_change_is_refused_as_a_required_reprepare`,

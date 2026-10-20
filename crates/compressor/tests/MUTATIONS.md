@@ -212,7 +212,7 @@ Driver: one mutation at a time, `CARGO_INCREMENTAL=0 cargo test --locked -p comp
 | # | mutation | red |
 |---|---|---|
 | 981-M1 | the recursive words are never written back to their channels | gate 1, `scenario_981_heterogeneous_hostile_render_is_pinned`, `cross_target`, and 22 more tests across `conformance`, `identity`, `lane_identity`, `mono_collapse`, `nonfinite`, `observation`, `oracle`, `partition` and `ramps` (27 red) |
-| 981-M2 | `start` is ignored: the settled slice begins at frame 0 | gate 1, `scenario_981_*`, `cross_target`, `lane_identity::bank_matches_scalar_per_lane_bits` (deleted by TA4; KEEP catcher lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`), `partition::block_partitions_are_invariant`, `partition::bank_block_partitions_are_invariant`, and three `ramps` tests (12 red) |
+| 981-M2 | `start` is ignored: the settled slice begins at frame 0 | gate 1, `scenario_981_*`, `cross_target`, `lane_identity::bank_matches_scalar_per_lane_bits` (deleted by TA4), `partition::block_partitions_are_invariant`, `partition::bank_block_partitions_are_invariant`, and three `ramps` tests (12 red) |
 | 981-M3 | every detector takes `settled_main`, so `Silent` and `Sidechain` blocks read the main input | gate 1 (its `Silent` and `Sidechain` cases under a quiet main), `contract::links_are_exact_and_connected_sidechain_is_distinct_from_main_detection`, `nonfinite::a_nan_in_the_sidechain_alone_is_clamped_to_the_level_floor` (6 red). Neither `causality` nor `partition::linked_sidechain_partitions_are_invariant` went red, which is why the grid carries the sidechain cases |
 | 981-M4 | the right channel's `one_frame` updates the left recursive word (`&mut gain_left`), the verification's replacement for "right before left" | gate 1, `scenario_981_*`, `cross_target`, `lane_identity`, four `mono_collapse` tests, two `nonfinite`, `observation`, `oracle` and two `ramps` tests (17 red) |
 
@@ -230,7 +230,7 @@ differentials see dispatch as well as bits.
 
 | # | mutation | red |
 |---|---|---|
-| 982-M1 | the arm ignores `bypass` | `identity::bypass_preserves_exact_dry_bits_at_sample_zero` (deleted by TA4; KEEP catcher lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`), gate 1 (`the_all_wet_arm_is_the_base_body_on_all_wet_tables`, the three differentials), gate 3, `conformance`, `contract::every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency`, `mono_collapse::a_statically_bypassed_bank_collapses_to_the_dual_bits` (9 red) |
+| 982-M1 | the arm ignores `bypass` | `identity::bypass_preserves_exact_dry_bits_at_sample_zero` (deleted by TA4), gate 1 (`the_all_wet_arm_is_the_base_body_on_all_wet_tables`, the three differentials), gate 3, `conformance`, `contract::every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency`, `mono_collapse::a_statically_bypassed_bank_collapses_to_the_dual_bits` (9 red) |
 | 982-M2 | the arm is taken when any lane is wet (`mask_any`) | gate 1 on the mixed corpus banks (`the_settled_body_is_the_base_body_on_the_corpus_table`, `randomized_differential_simd4`/`_simd8`), gate 3, `scenario_981_*`, `cross_target`, `lane_identity::every_width_produces_the_same_words` (7 red) |
 | 982-M3 | the arm drops `+ makeup` | gate 1, `scenario_982_all_wet_render_is_pinned`, `cross_target` (its `f32` lane 7 has mix 1 and makeup 6), `lane_identity::every_width_produces_the_same_words` (7 red). `oracle` stays green, as the verification found |
 | 982-M4 | the arm is never taken | gate 3 (`the_all_wet_arm_is_taken_exactly_when_every_lane_is_wet`) and gate 1's dispatch assertion (5 red). No bit-exactness test can see it: it is a performance-only regression |
@@ -246,7 +246,7 @@ frames with ramps ending at frame 40.
 | # | mutation | red |
 |---|---|---|
 | 983-M1 | pass 2 reads `targets[k + 1]` (`targets.iter().cycle().skip(1)`) | gate 1, all three scenarios, `cross_target`, `partition` (both), `lane_identity`, four `mono_collapse`, `conformance`, `contract` and two `ramps` tests (20 red) |
-| 983-M2 | the last, short chunk is skipped (`chunks_exact_mut` on the outer loop) | gate 1, all three scenarios, `cross_target`, `partition::block_partitions_are_invariant` (deleted by TA4; KEEP catcher lane `fader_matrix::select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity`), `partition::bank_block_partitions_are_invariant`, `conformance`, `contract` (13 red) |
+| 983-M2 | the last, short chunk is skipped (`chunks_exact_mut` on the outer loop) | gate 1, all three scenarios, `cross_target`, `partition::block_partitions_are_invariant` (deleted by TA4), `partition::bank_block_partitions_are_invariant`, `conformance`, `contract` (13 red) |
 | 983-M3 | pass 1 runs only for the first chunk; later chunks reuse its targets | gate 1, all three scenarios, `cross_target`, `partition` (both), `lane_identity`, `conformance` and three `ramps` tests (16 red) |
 | 983-M4 | `gl` and `gr` swapped in pass 2 | gate 1, all three scenarios, `cross_target`, `lane_identity`, two `nonfinite`, `conformance` and two `ramps` tests (15 red) |
 | 984-M1 | the `abs` arm is taken for every link mode | gate 1, all three scenarios, `cross_target` (`maximum_link`, `average_link`), `identity::average_link_is_two_products_and_an_add`, `contract::links_are_exact_and_connected_sidechain_is_distinct_from_main_detection` (11 red) |
@@ -337,7 +337,7 @@ Driver as for #981-#985, dev profile, one mutation at a time on a scratch copy.
 | # | mutation | red |
 |---|---|---|
 | 1006-M1 | the `remaining == 0` hold dropped: a ramp at rest takes its target, as on its last sample | `randomized_differential_simd4`/`_simd8` (their payload restores at `remaining = 0`), both #1006 scenarios (4 red) |
-| 1006-M3 | the output ramps (attack, release, makeup, mix) advanced in pass 1 as well, the brief's "attack in pass 1" | gate 1, both #1006 scenarios, `partition::block_partitions_are_invariant` (deleted by TA4; KEEP catcher lane `fader_matrix::select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity`), `payload::an_active_attack_restore_*`, `ramps::an_attack_cancel_to_current_*`, `native_points`, `cross_target`, two `mono_collapse` tests and `ramps::a_both_channel_point_on_every_bank_lane_*` (`bench_ramp`'s preflight until #1027 ported it) (16 red) |
+| 1006-M3 | the output ramps (attack, release, makeup, mix) advanced in pass 1 as well, the brief's "attack in pass 1" | gate 1, both #1006 scenarios, `partition::block_partitions_are_invariant` (deleted by TA4), `payload::an_active_attack_restore_*`, `ramps::an_attack_cancel_to_current_*`, `native_points`, `cross_target`, two `mono_collapse` tests and `ramps::a_both_channel_point_on_every_bank_lane_*` (`bench_ramp`'s preflight until #1027 ported it) (16 red) |
 | 1006-M5 | the wet arm taken while a mix ramp is open (both bodies) | gate 1 (its witness and its bits), both #1006 scenarios, `partition`, `lane_identity::every_width_produces_the_same_words`, `cross_target` (9 red) |
 | 1006-M6 | the words scattered from before the prefix (the dual prefix's word write-back dropped) | gate 1, `scenario_981`, `982`, `983` and `1006`, the bank scenario, #982's witness gate, `cross_target`, two `ramps` tests, `mono_collapse` (16 red) |
 | 1006-M7 | the collapsed prefix skips the curve redesign on a moved lane | gate 1, `scenario_985`, `scenario_1006`, the bank scenario, two `mono_collapse` tests (11 red) |
@@ -376,9 +376,9 @@ preservation gate for widths the rule must not move, not a red gate.
 
 ## TA4 deletions
 
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Each one's caught mutants were also red in the KEEP test named beside it. That is the recorded catcher of the deleted test's sampled mutants; the mutation of each row above was not re-run.
+The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
 
 - `the_collapsed_body_renders_the_dual_bodys_left_plane`: compressor `mono_collapse::mono_reopen_drives_the_next_render_from_the_copied_state`
-- `bank_matches_scalar_per_lane_bits`: lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`
-- `block_partitions_are_invariant`: lane `fader_matrix::select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity`
-- `bypass_preserves_exact_dry_bits_at_sample_zero`: lane `sanitise_counter::every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts`
+- `bank_matches_scalar_per_lane_bits`: no plausible same-crate KEEP catcher recorded
+- `block_partitions_are_invariant`: no plausible same-crate KEEP catcher recorded
+- `bypass_preserves_exact_dry_bits_at_sample_zero`: no plausible same-crate KEEP catcher recorded

@@ -2084,6 +2084,8 @@ const _: () = assert!(
 impl PreparedSlot {
     #[inline(always)]
     fn has_active_lanes(&self) -> bool {
+        #[cfg(test)]
+        TEST_PREPARED_ACTIVITY_QUERIES.with(|count| count.set(count.get() + 1));
         self.active_lanes != 0
     }
 
@@ -2095,7 +2097,18 @@ impl PreparedSlot {
 
 #[cfg(test)]
 thread_local! {
+    static TEST_PREPARED_ACTIVITY_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_PREPARED_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_prepared_activity_observation() {
+    TEST_PREPARED_ACTIVITY_QUERIES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn prepared_activity_observation() -> usize {
+    TEST_PREPARED_ACTIVITY_QUERIES.with(std::cell::Cell::get)
 }
 
 /// The staged planar tiles for one ordered folded cohort.
@@ -4982,6 +4995,141 @@ mod tests {
         let mut seam_failure = collapsed;
         seam_failure[3].fail = Some(TraceKind::Dual);
         exercise_trace_case(&seam_failure, Some(2), 149);
+    }
+
+    #[test]
+    fn prepared_slot_dispatch_uses_constant_activity_checks() {
+        reset_prepared_activity_observation();
+        let full = [true; 4];
+        let specs = [
+            TraceSpec {
+                id: 0,
+                mask: full,
+                seam: SeamSide::UpstreamOfSeam,
+                mono_capable: true,
+                fail: None,
+                delta: 1.0,
+            },
+            TraceSpec {
+                id: 1,
+                mask: full,
+                seam: SeamSide::SeamSide,
+                mono_capable: false,
+                fail: None,
+                delta: 2.0,
+            },
+        ];
+        TEST_TRACE.with(|trace| *trace.borrow_mut() = TraceObservation::with_queues(&specs));
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 4).expect("scratch"),
+            vec![true; 4].into_boxed_slice(),
+            specs.into_iter().map(trace_slot).collect(),
+        )
+        .expect("chain");
+        let mut planes = Planes {
+            left: (0..4).map(|lane| vec![lane as f32; 4]).collect(),
+            right: (0..4).map(|lane| vec![32.0 + lane as f32; 4]).collect(),
+        };
+        chain.force_mono_collapse_off(true);
+        chain
+            .run(&mut planes, 4, 0, LiveSnapshot::ALL)
+            .expect("ordinary run");
+        assert!(!chain.is_collapsed());
+        chain.force_mono_collapse_off(false);
+        chain.arm_mono_collapse(true);
+        chain
+            .run(&mut planes, 4, 4, LiveSnapshot::ALL)
+            .expect("collapsed run");
+        assert!(chain.is_collapsed());
+        assert_eq!(chain.collapses(), 1);
+        let trace = TEST_TRACE.with(|trace| trace.borrow().clone());
+        assert_eq!(
+            trace.ordered_events(),
+            &[
+                Some(TraceEvent {
+                    kind: TraceKind::Begin,
+                    stage: 0,
+                    first_sample: 0,
+                    frames: 0,
+                    queue_before: 2,
+                    arithmetic_before: 0
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Begin,
+                    stage: 1,
+                    first_sample: 0,
+                    frames: 0,
+                    queue_before: 2,
+                    arithmetic_before: 0
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Dual,
+                    stage: 0,
+                    first_sample: 0,
+                    frames: 4,
+                    queue_before: 1,
+                    arithmetic_before: 0
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Dual,
+                    stage: 1,
+                    first_sample: 0,
+                    frames: 4,
+                    queue_before: 1,
+                    arithmetic_before: 0
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Begin,
+                    stage: 0,
+                    first_sample: 4,
+                    frames: 0,
+                    queue_before: 1,
+                    arithmetic_before: 1
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Begin,
+                    stage: 1,
+                    first_sample: 4,
+                    frames: 0,
+                    queue_before: 1,
+                    arithmetic_before: 1
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Mono,
+                    stage: 0,
+                    first_sample: 4,
+                    frames: 4,
+                    queue_before: 0,
+                    arithmetic_before: 1
+                }),
+                Some(TraceEvent {
+                    kind: TraceKind::Dual,
+                    stage: 1,
+                    first_sample: 4,
+                    frames: 4,
+                    queue_before: 0,
+                    arithmetic_before: 1
+                }),
+            ]
+        );
+        assert_eq!(trace.queues[..2], [0, 0]);
+        assert_eq!(trace.arithmetic[..2], [2, 2]);
+        assert_eq!(
+            trace_plane_bits(&planes),
+            (
+                (0..4)
+                    .map(|lane| vec![(lane as f32 + 6.0).to_bits(); 4])
+                    .collect(),
+                (0..4)
+                    .map(|lane| vec![(lane as f32 + 6.0).to_bits(); 4])
+                    .collect(),
+            )
+        );
+        assert_eq!(
+            prepared_activity_observation(),
+            10,
+            "ordinary, prefix-mono and seam-dual guards plus two stage publications"
+        );
     }
 
     /// Every bit pattern a 32-bit word can carry that a permutation must not touch: quiet and
