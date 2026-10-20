@@ -641,9 +641,3 @@ NL green is the case's reference: its pin is the words of the pre-#990 behaviour
 here; the session test's "equal" check (`ch16`) still owns it at every width. E0 is green at
 `Simd8` because lanes 0 and 7 unlink in the same block, so the eight-lane bank unlinks through
 lane 7; the session test's `ch48` row still owns E0 and EL at `Simd8`.
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `partition_invariance_holds_over_block_sizes`: no plausible same-crate KEEP catcher recorded

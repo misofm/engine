@@ -109,9 +109,3 @@ mutation and the defect are the same edit. Both reset kinds are now inside the m
 
 * The wasm leg of the corpus (`tools/wasm-gates`) is exercised by
   `scripts/run-wasm-gates.sh`; its own mutations live in that crate's `MUTATIONS.md`.
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `partition_invariance` (the test binary; its one test, `every_partition_renders_the_one_shot_bits_and_state`): no plausible same-crate KEEP catcher recorded

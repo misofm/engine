@@ -366,12 +366,3 @@ deleted or trimmed some tests that rows above name. The rows stay as history; th
   the owner bytes from `size_of`. It asserts that the three deltas agree, are zero exactly when no
   instance is controlled, and that the exact caps accept and one byte below refuses. A partial
   under-charge such as this row's is left to the allocator ceiling in `tests/bypass_resources.rs`.
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `direct_graph_report_exposes_zero_output_latency_and_tail_without_identity_change`: no plausible same-crate KEEP catcher recorded
-- `dynamic_rack_compressors_bank_and_render_bit_identically_to_the_per_node_path`: no plausible same-crate KEEP catcher recorded
-- `console_sixty_four_track_fixture_banks_its_dynamic_compressor_bit_identically`: graph-compiler `tests::add_a_track_keeps_existing_track_bits_and_one_transpose_per_chain`
-- `the_estimate_charges_each_lane_its_own_ring`: graph-compiler `track_delay::a_ring_is_a_named_allocation`

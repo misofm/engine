@@ -465,14 +465,3 @@ it names, the named tests run, and the source restored.
 | 1328-M9 | the silent fast path skips without `silence_advance` | the same test (`the silence counter after 68 silent blocks`) | RED |
 | 1328-M10 | `rest_plane`'s unarmed branch returns the last written plane instead of the unarmed one | the sparse gate (its train starts after armed silence) | RED |
 | 1328-M11 | `lane_is_inert` without its pair term | `elision::a_non_inert_state_in_a_dead_section_refuses_elision`, `exact_rest::a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms` | RED |
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `automation_is_partition_invariant`: no plausible same-crate KEEP catcher recorded
-- `every_width_matches_the_scalar_instantiation`: no plausible same-crate KEEP catcher recorded
-- `the_collapsed_body_renders_the_dual_bodys_left_plane`: no plausible same-crate KEEP catcher recorded
-- `disabled_cuts_preserve_all_high_pass_signed_zero_against_four_section_oracle`: parametric-eq `elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag`
-- `a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands`: parametric-eq `elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag`
-- `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample`: no plausible same-crate KEEP catcher recorded

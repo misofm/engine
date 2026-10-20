@@ -759,10 +759,3 @@ deleted the last three builtins-compiler scalar-oracle pairing tests. The rows s
 - 916-16 and 916-17: `actual_scalar_nonadjacent_failed_render_materializes_post_fader_before_error`
   and `actual_scalar_nonadjacent_ramp_retarget_and_failed_retry_stay_at_original_boundaries` are
   deleted. The allocation_tracker tests these rows name remain.
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `the_driver_fed_gain_pan_row_dispatches_every_unit_but_its_inputs`: no plausible same-crate KEEP catcher recorded
-- `a_muted_route_seals_one_route_mute_row_after_its_transform`: no plausible same-crate KEEP catcher recorded

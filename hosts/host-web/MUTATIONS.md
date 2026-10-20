@@ -565,9 +565,3 @@ qualification of decision 15's heavy gates" (#1605) or the first CI run that app
 | same (S3), Chromium, Firefox, WebKit | in `#submit` (`sdk/src/core/observation-subscriptions.ts`), drop `if (!rendered)` so the typed refusal is thrown whatever `next` returns | gate 3: the render instance's close ends in `backpressure` (`resolved: false`, log `[ok, bp]`) |
 | same (S4) | `current.renderedQuanta >= since` in `next` | gate 1: early, and more than one close send in the log |
 | same (S5) | the browser engine passes no `renderWait` | gates 1 and 3 |
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `default_ring_covers_stall_tolerance`: no plausible same-crate KEEP catcher recorded

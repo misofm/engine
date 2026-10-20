@@ -373,12 +373,3 @@ file was restored byte for byte from a saved copy.
 
 `the_narrowest_soft_knees_do_not_duck_a_sample_at_the_threshold` stays green under both: it is a
 preservation gate for widths the rule must not move, not a red gate.
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `the_collapsed_body_renders_the_dual_bodys_left_plane`: compressor `mono_collapse::mono_reopen_drives_the_next_render_from_the_copied_state`
-- `bank_matches_scalar_per_lane_bits`: no plausible same-crate KEEP catcher recorded
-- `block_partitions_are_invariant`: no plausible same-crate KEEP catcher recorded
-- `bypass_preserves_exact_dry_bits_at_sample_zero`: no plausible same-crate KEEP catcher recorded

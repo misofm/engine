@@ -367,10 +367,3 @@ restored.
 
 Before attempt 2 both S-1 rows were green, because the safety net moved both seeds at once and
 either half refused the commit.
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane`: no plausible same-crate KEEP catcher recorded
-- `fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane`: no plausible same-crate KEEP catcher recorded
