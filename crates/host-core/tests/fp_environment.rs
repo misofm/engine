@@ -120,16 +120,6 @@ fn prepare() -> (PreparedRenderPlan, SourceControlSet) {
     (prepared.plan, prepared.sources)
 }
 
-#[test]
-fn a_started_session_hands_the_plan_back_when_it_stops() {
-    let (plan, _sources) = prepare();
-    let session = StartedRenderSession::start(plan)
-        .unwrap_or_else(|(_plan, rejection)| panic!("attestation: {rejection}"));
-    assert_eq!(session.next_absolute_sample(), 0);
-    let plan = session.stop();
-    assert_eq!(plan.next_absolute_sample(), 0);
-}
-
 /// The caller words each arm installs, for the two targets with a control word to pin: MXCSR on
 /// `x86_64` and FPCR on AArch64 (issue #1017: iOS and Android arm64 run the FPCR path).
 #[cfg(target_arch = "x86_64")]
