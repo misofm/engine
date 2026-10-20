@@ -610,6 +610,46 @@ fn a_left_channel_command_declines_exactly_one_lane() {
     );
 }
 
+/// Two per-lane EQ **target** writes that leave the channels agreeing, applied in one block, keep
+/// the lane; written apart, or to different words, they decline it.
+///
+/// # The contract this pins, after decision 15's cells (issue #1345 D3)
+///
+/// The EQ is a prepared-target owner: every edit reaches the drain as designed targets in cells,
+/// one per `(slot, channel)`. A `Left` edit and a `Right` edit to the same value are two owner
+/// transactions that write the two channel cells with equal designed words. The lane folds its
+/// witness from the cells' final contents: two cells applied in one block with equal words are one
+/// both-channel write (and are applied once, as a `Both` target), so the lane keeps `LIVE`. This is
+/// the structural form of #1004's pairing rule. It was not the rule while targets were a FIFO: a
+/// FIFO has no last-wins staging, so equal last targets per channel did not mean equal state, and
+/// the pair declined. A cell holds the last write, so equal words mean equal state, given that
+/// `LIVE` held before (the channels were doing identical work).
+///
+/// What still declines: a pair split across two blocks (each block sees a lone write), words that
+/// differ, and `[Left A, Both C, Right A]` (the cells end at `C` and `A`).
+///
+/// Red mutations: fold each applied target cell as a lone write (never pairing) -> the first test
+/// fails; pair any two applied target cells whatever their words -> the other two fail.
+#[test]
+fn two_per_lane_target_writes_that_agree_in_one_block_keep_the_lane() {
+    let (_session, mut console) = prepare(&mono_session());
+    let [before, lanes] = census(&console);
+    assert_eq!(before, lanes, "the fixture starts fully eligible");
+
+    push(&mut console, "eq2", parameter(ParameterChannel::Left, -6.0));
+    push(
+        &mut console,
+        "eq2",
+        parameter(ParameterChannel::Right, -6.0),
+    );
+    render(&mut console, 8);
+    assert_eq!(
+        census(&console),
+        [before, lanes],
+        "two one-channel EQ targets with equal words, applied in one block, are one both-channel write"
+    );
+}
+
 #[test]
 fn two_per_lane_target_writes_split_across_blocks_or_unequal_decline_the_lane() {
     let (_session, mut console) = prepare(&mono_session());
@@ -652,7 +692,7 @@ const COMPRESSOR_SESSION: &str =
 /// Twin `Parameter` spans keep the lane; a lone half, or a twin one ulp apart, declines it.
 ///
 /// The span half of the contract `two_per_lane_target_writes_that_agree_in_one_block_keep_the_lane`
-/// (deleted by TA5) stated for targets (issue #1004, issue #1012). A `Left` record and a `Right` record of the same
+/// states for targets (issue #1004, issue #1012). A `Left` record and a `Right` record of the same
 /// parameter and the same value, drained in one block, stage as adjacent twin spans; the
 /// compressor validates and applies `pending[0][p]` and `pending[1][p]` by the same code from the
 /// same value, so the two channels stay in bit-equal state and `LIVE` is kept. Any one-channel

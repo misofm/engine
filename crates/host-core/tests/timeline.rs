@@ -532,6 +532,31 @@ fn a_seek_queued_at_the_swap_block_lands_in_the_successors_first_block() {
     );
 }
 
+/// The D3 guard (batch 16a fold MINOR 3): a successor prepared by hand at another rate or quantum
+/// gets a fresh timeline with a producer of its own, not a vacant one whose carry the swap block
+/// would refuse.
+///
+/// Test value: red if the guard is dropped (every successor's timeline vacant): this successor
+/// would hold no timeline producer until a carry that cannot happen.
+#[test]
+fn a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline() {
+    let a = Session::compile(one_track());
+    let predecessor = a.prepare(Backend::current());
+    for (rate, quantum) in [(44_100, QUANTUM as u32), (48_000, 2 * QUANTUM as u32)] {
+        let mut model = one_track();
+        model.sample_rate_hz = rate;
+        model.quantum_frames = quantum;
+        let b = Session::compile(model);
+        let mut successor = successor_of(&b, &a, &predecessor.inventory, false);
+        let fresh = producer(&mut successor.sources);
+        assert_eq!(
+            fresh.active_generation(),
+            SourceGeneration(1),
+            "{rate} Hz, {quantum} frames"
+        );
+    }
+}
+
 /// Gate 2, a successor with a larger `A_max`: its history is its own, of its own `K`.
 ///
 /// Test value: red if the successor sizes its history from the predecessor's `K` (a seek its

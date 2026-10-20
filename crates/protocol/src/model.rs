@@ -1703,7 +1703,7 @@ mod tests {
     use super::*;
     use crate::control_rows::row_address;
     use controls::{Lane, Owner, Section};
-    use session::{ControlSmoothing, canonical_session_json, parse_session_json};
+    use session::{ControlSmoothing, ParameterChannel, canonical_session_json, parse_session_json};
 
     const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
@@ -2277,6 +2277,50 @@ mod tests {
             .expect("only final candidate is policy checked");
         assert_eq!(commit.applied_operations, edits.len());
         assert_eq!(store.compiled().normalized_model().sample_rate_hz, 96_000);
+    }
+
+    #[test]
+    fn effects_and_parameters_follow_exact_key_rules() {
+        let mut store = store();
+        let edit = SessionEdit::set_control(
+            controls::ControlAddress {
+                owner: Owner::Strip(id("vocal")),
+                section: Section::Inserts(id("eq")),
+                control: 1,
+                lane: Lane::Both,
+            },
+            1.0,
+            None,
+        );
+        store
+            .apply_transaction(
+                ExpectedRevision::Exact(store.revision()),
+                &[
+                    // The fixture's effect id is not a launch effect, so name one the control
+                    // core can address.
+                    SessionEdit::SetEffectIdentity {
+                        track_id: id("vocal"),
+                        rack_name: RackName::Inserts,
+                        effect_id: id("eq"),
+                        identity: EffectIdentity::Native {
+                            effect_id: id("miso.parametric-eq"),
+                        },
+                    },
+                    edit.clone(),
+                    edit,
+                ],
+            )
+            .expect("same compound key replaces");
+        let effect = &store.compiled().normalized_model().tracks[0]
+            .inserts
+            .effects[0];
+        let written: Vec<_> = effect
+            .params
+            .iter()
+            .filter(|param| param.parameter_id == 1 && param.channel == ParameterChannel::Both)
+            .collect();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].value, 1.0);
     }
 
     fn store_at(revision: u64) -> SessionStore {

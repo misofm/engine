@@ -425,6 +425,44 @@ fn a_sign_of_zero_delay_edit_is_a_rebuild_by_its_row() {
     );
 }
 
+/// #1554 gate 1, D5. Red if a submix strip is left structural: its fader, mute and pan are live
+/// records addressed to the submix's ID, as a track's are, and a track's records are not
+/// addressed to it.
+#[test]
+fn a_submix_strip_fader_mute_and_pan_are_live() {
+    let current = with_bus(false);
+    assert_eq!(
+        classify(&current, |next| next.submixes[0].fader.left_db = -6.0),
+        Ok(vec![(
+            "bus".to_owned(),
+            vec![fader_db(BuiltinLaneSelector::Left, -6.0, 0)],
+            None
+        )])
+    );
+    assert_eq!(
+        classify(&current, |next| {
+            next.submixes[0].fader.left_mute = true;
+            next.submixes[0].fader.right_mute = true;
+        }),
+        Ok(vec![(
+            "bus".to_owned(),
+            vec![mute(BuiltinLaneSelector::Both, true, 0)],
+            None
+        )])
+    );
+    let panned = classify(&current, |next| {
+        next.submixes[0].matrix_or_pan = MatrixOrPan::Pan {
+            left: 0.5,
+            right: 0.5,
+            smoothing_samples: 0,
+        };
+    })
+    .expect("a submix pan is live");
+    assert_eq!(panned.len(), 1);
+    assert_eq!(panned[0].0, "bus");
+    assert!(panned[0].1.is_empty() && panned[0].2.is_some());
+}
+
 /// A delta's strip records and its route records, owned.
 type Both = (Vec<Strip>, Vec<RouteRecordRow>);
 
@@ -813,6 +851,112 @@ fn records_follow_effective_values_not_raw_ones() {
     .expect("live");
     assert_eq!(strips.len(), 1);
     assert_eq!(routes.len(), 1);
+}
+
+/// #1558 gate 5, D7. Red if a record takes the wrong row's length: a VCA offset edit's own length
+/// moves the member, the session's `fader_ms` length applies without one, a membership change takes
+/// the `VcaOffset` row's session length, the strip's own `fader_db` edit wins over the VCA's on a
+/// lane it moved, and a gate change from the source's mute takes the source's `Mute` length.
+#[test]
+fn vca_and_follow_records_take_the_ramp_of_the_edit_that_moved_them() {
+    use BuiltinLaneSelector::{Both, Left};
+    let session_ramps = LiveRamps {
+        fader_samples: 100,
+        mute_samples: 300,
+        pan_samples: 200,
+        link_samples: 0,
+    };
+    let current = with_vca(0.0, 0.0, [false; 2]);
+    let vca_target = EditRampTarget::Vca(current.vcas[0].id.clone());
+    let first = track_id(&current, 0);
+    let strips = |current: &SessionModel,
+                  edit: fn(&mut SessionModel),
+                  ramps: &EditRamps|
+     -> Vec<TrackFaderRecord> {
+        let (strips, _) = classify_both(current, edit, session_ramps, ramps).expect("live");
+        assert_eq!(strips.len(), 1);
+        assert_eq!(strips[0].0, first);
+        strips[0].1.clone()
+    };
+    let mut ramp = EditRamps::new();
+    ramp.set(&vca_target, EditRampRow::VcaFader, Some(480));
+    assert_eq!(
+        strips(&current, |next| next.vcas[0].fader.left_db = -6.0, &ramp),
+        vec![fader_db(Left, -6.0, 480)]
+    );
+    // No edit length: `fader_ms`.
+    assert_eq!(
+        strips(
+            &current,
+            |next| next.vcas[0].fader.left_db = -6.0,
+            &EditRamps::new()
+        ),
+        vec![fader_db(Left, -6.0, 100)]
+    );
+    // A mute takes the VCA mute's edit, else `mute_ms`.
+    let mut mute_ramp = EditRamps::new();
+    mute_ramp.set(&vca_target, EditRampRow::VcaMute, Some(48));
+    assert_eq!(
+        strips(
+            &current,
+            |next| next.vcas[0].fader.left_mute = true,
+            &mute_ramp
+        ),
+        vec![mute(Left, true, 48)]
+    );
+    assert_eq!(
+        strips(
+            &current,
+            |next| next.vcas[0].fader.left_mute = true,
+            &EditRamps::new()
+        ),
+        vec![mute(Left, true, 300)]
+    );
+    // The strip's own edit first: own length 0 steps the lane the strip moved, and the VCA's 480
+    // applies to the lane only it moved; the two lanes are two records.
+    let mut both = EditRamps::new();
+    both.set(&vca_target, EditRampRow::VcaFader, Some(480));
+    both.set(
+        &EditRampTarget::Strip(current.tracks[0].id.clone()),
+        EditRampRow::Fader,
+        Some(0),
+    );
+    assert_eq!(
+        strips(
+            &current,
+            |next| {
+                next.tracks[0].fader.left_db = -2.0;
+                next.vcas[0].fader.right_db = -6.0;
+            },
+            &both
+        ),
+        vec![
+            fader_db(Left, -2.0, 0),
+            fader_db(BuiltinLaneSelector::Right, -6.0, 480)
+        ]
+    );
+    // One value, one length: both lanes merge.
+    assert_eq!(
+        strips(
+            &current,
+            |next| {
+                next.vcas[0].fader.left_db = -6.0;
+                next.vcas[0].fader.right_db = -6.0;
+            },
+            &ramp
+        ),
+        vec![fader_db(Both, -6.0, 480)]
+    );
+    // A membership change has no edit length: the `VcaOffset` row's session length.
+    let loud = with_vca(-6.0, -6.0, [false; 2]);
+    let (changed, _) = classify_both(
+        &loud,
+        |next| next.vcas[0].members.clear(),
+        session_ramps,
+        &ramp,
+    )
+    .expect("live");
+    assert_eq!(changed[0].1, vec![fader_db(Both, 0.0, 100)]);
 }
 
 /// #1558 gate 5. Red if a gate change from the source's mute ramps on its own: the send takes the
@@ -3357,6 +3501,98 @@ fn a_submix_effect_bypass_is_live() {
     );
 }
 
+/// `with_effects` with the first track routed into submix `bus`, whose strip carries the console
+/// soft-clip slot's entry and a compressor insert of its own.
+fn with_effect_bus() -> SessionModel {
+    let fixture = parse_session_json(FIXTURE).expect("fixture parses");
+    let mut compressor = fixture.lower_track(&fixture.tracks[0]).pre_insert[0].clone();
+    compressor.id = id("bcomp");
+    compressor.identity = EffectIdentity::Native {
+        effect_id: id("miso.compressor"),
+    };
+    compressor.params.clear();
+    compressor.bypass = false;
+    let mut model = with_effects();
+    let first = model.tracks[0].id.clone();
+    let bus = id("bus");
+    let route = model
+        .routes
+        .iter_mut()
+        .find(|route| matches!(&route.source, RouteSource::Track { track_id, .. } if *track_id == first))
+        .expect("first track's route");
+    let output = core::mem::replace(
+        &mut route.destination,
+        RouteDestination::SubmixInput {
+            submix_id: bus.clone(),
+        },
+    );
+    let mut bus_main = route.clone();
+    bus_main.id = id("bus-main");
+    bus_main.follows_mute = false;
+    bus_main.source = RouteSource::Submix {
+        submix_id: bus.clone(),
+        tap: SendTap::PostPan,
+    };
+    bus_main.destination = output;
+    model.routes.push(bus_main);
+    let mut submix = Submix::unity(bus, &model.console);
+    submix.inserts.effects.push(compressor);
+    model.submixes.push(submix);
+    normalized(&model)
+}
+
+/// #1554 D5 on effect parameters. Red if a submix strip's console entry or insert parameter is
+/// left structural, or is addressed to a track: each is a record at its own strip's ID and
+/// instance address.
+#[test]
+fn submix_effect_params_are_live() {
+    let current = with_effect_bus();
+    assert_eq!(current.submixes.len(), 1);
+    assert_eq!(
+        current.submixes[0].console.len(),
+        1,
+        "bus carries the clip slot"
+    );
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.submixes[0].console[0].params.push(param(
+                1,
+                ParameterChannel::Both,
+                ParameterUnit::Db,
+                6.0,
+            ));
+        }),
+        Ok((
+            Vec::new(),
+            vec![(
+                "bus".to_owned(),
+                LiveEffectAddress::console(0),
+                vec![record(0, Lane::Left, 6.0), record(0, Lane::Right, 6.0)]
+            )]
+        )),
+        "submix console entry"
+    );
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.submixes[0].inserts.effects[0].params.push(param(
+                1,
+                ParameterChannel::Left,
+                ParameterUnit::Db,
+                -30.0,
+            ));
+        }),
+        Ok((
+            Vec::new(),
+            vec![(
+                "bus".to_owned(),
+                LiveEffectAddress::insert(0),
+                vec![record(0, Lane::Left, -30.0)]
+            )]
+        )),
+        "submix insert"
+    );
+}
+
 /// An automation on `with_effects`' EQ insert (`insert(2)` of the first track).
 fn eq_automation(model: &SessionModel, parameter_id: u32, unit: ParameterUnit) -> Automation {
     Automation {
@@ -3672,6 +3908,64 @@ fn matrix_of(route: &session::Route) -> [f32; 4] {
 fn folded(gain_db: f32, matrix: [f32; 4], mute: bool, source_lane_muted: [bool; 2]) -> [f32; 4] {
     graph_compiler::route_coefficients(gain_db, matrix, mute, source_lane_muted)
         .expect("in the route domain")
+}
+
+/// Gate 1. Red if a send record carries other bits than the coefficients preparation folds from the
+/// post-commit values, or is emitted for a send whose held target does not change: a gain edit on a
+/// muted send (the silenced `+0.0` target stays as it was) or a sign-of-zero rewrite. The unmute
+/// then carries the gain the muted edit set.
+#[test]
+fn send_records_are_the_folded_target_of_the_post_commit_values() {
+    let current = with_bus(false);
+    let send = send_index(&current);
+    let id = current.routes[send].id.as_str().to_owned();
+    let matrix = matrix_of(&current.routes[send]);
+    let gain = current.routes[send].gain_db;
+
+    assert_eq!(classify_routes(&current, |_| {}), Ok(Vec::new()));
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].gain_db = -6.0),
+        Ok(vec![(
+            id.clone(),
+            folded(-6.0, matrix, false, [false; 2]),
+            false,
+            0
+        )])
+    );
+    let swapped = [0.0, 1.0, 1.0, 0.0];
+    assert_eq!(
+        classify_routes(&current, |next| {
+            let m = &mut next.routes[send].channel_matrix;
+            (m.ll, m.lr, m.rl, m.rr) = (0.0, 1.0, 1.0, 0.0);
+        }),
+        Ok(vec![(
+            id.clone(),
+            folded(gain, swapped, false, [false; 2]),
+            false,
+            0
+        )])
+    );
+    assert_eq!(
+        classify_routes(&current, |next| next.routes[send].mute = true),
+        Ok(vec![(id.clone(), [0.0; 4], true, 0)])
+    );
+
+    // A gain edit on a muted send gives no record, and the later unmute carries the new gain.
+    let muted = edited(&current, |model| model.routes[send].mute = true);
+    assert_eq!(
+        classify_routes(&muted, |next| next.routes[send].gain_db = -6.0),
+        Ok(Vec::new())
+    );
+    let edited_while_muted = edited(&muted, |model| model.routes[send].gain_db = -6.0);
+    assert_eq!(
+        classify_routes(&edited_while_muted, |next| next.routes[send].mute = false),
+        Ok(vec![(
+            id,
+            folded(-6.0, matrix, false, [false; 2]),
+            false,
+            0
+        )])
+    );
 }
 
 /// Gate 1. Red if a following send's record ignores the source lane mutes (the rebuilt plan would

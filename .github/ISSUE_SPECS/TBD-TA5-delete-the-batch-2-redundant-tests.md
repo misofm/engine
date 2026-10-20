@@ -33,23 +33,24 @@ for allocation, counts, ceilings, bytes, reproducers, randomness) and held 11 as
 HELD-RANDOMIZED; those are not in the 162. This PR then read each of the 162 and answered the
 AGENTS.md question, "which plausible defect turns this red that no remaining test catches?". A
 test is kept when the answer names a real edge case that the measured mutants could not reach and
-no remaining test asserts (the remaining tests checked are named per test); otherwise it is
-deleted. Reading found what the triage missed: a randomized differential named `run_seeds`, an
-allocation audit inside a macro, three tests that a `MUTATIONS.md` records as the only red test of
-a row, and one test that `scripts/lib/aarch64-known-defects.py` lists as a known AArch64 failure.
+no remaining test asserts. Every DELETE answer names the claim and the remaining test, by its full
+name, that asserts it; every KEEP answer names the remaining tests checked. The first pass named
+siblings only by file for 73 DELETE answers; the TA5 verifier found that 5 of them were the only
+defenders of their claims, so all 73 were read again and kept wherever no remaining test could be
+named. Reading also found what the triage missed: a randomized differential named `run_seeds`, an
+allocation audit inside a macro, tests that a `MUTATIONS.md` records as the only red test of a
+row, and one test that `scripts/lib/aarch64-known-defects.py` lists as a known AArch64 failure.
 
 ## What this change does
 
-1. Deletes 131 of the 162 tests and keeps 31 by reading (list below). None of the 162 had moved
+1. Deletes 98 of the 162 tests and keeps 64 by reading (list below). None of the 162 had moved
    or gone since `81a3074fc`; nothing was skipped.
-2. Deletes 48 helper items (984 lines) only after `cargo clippy --all-targets --all-features`
+2. Deletes 34 helper items (476 lines) only after `cargo clippy --all-targets --all-features`
    reported them unused, looped until it reported nothing; no `#[allow(dead_code)]` was added.
-   Deletes two test files left with no test: `crates/host-core/tests/strip_handles.rs` and
-   `crates/transient-shaper/tests/partition.rs`.
+   No test file is left empty.
 3. Updates the references: each `MUTATIONS.md` row that names a deleted test names a remaining
-   same-crate catcher that batch 2 recorded red on that test's sampled mutants, or says "(deleted
-   by TA5; no catcher recorded)". No list of deleted tests is added to a tracked file. Code
-   comments and open specs (#1339, #1340, #1586, #1713) note a deleted name only where it would
+   test that can see the row's mutation, or says "(deleted by TA5; no catcher recorded)". No list of deleted tests is added to a tracked file. Code
+   comments and open specs (#1339, #1340, #1713) note a deleted name only where it would
    otherwise be a stale reference. Recorded log output and dated records (`docs/handoffs`,
    `docs/audits`, `artifacts/`) are not edited.
 4. Gives the `qualification` job `test-debug-a` ("workspace debug tests (minus DSP crates and
@@ -64,43 +65,41 @@ a row, and one test that `scripts/lib/aarch64-known-defects.py` lists as a known
 | audit | 0 | 1 | 0 |
 | automation | 1 | 0 | 30 |
 | bench-support | 1 | 0 | 5 |
-| builtins | 5 | 2 | 406 |
+| builtins | 4 | 3 | 349 |
 | builtins-compiler | 0 | 1 | 0 |
-| capi | 9 | 1 | 603 |
-| compressor | 3 | 0 | 252 |
+| capi | 7 | 3 | 501 |
+| compressor | 2 | 1 | 165 |
 | console-workload | 2 | 0 | 83 |
 | control-plane | 0 | 1 | 0 |
-| controls | 3 | 0 | 117 |
+| controls | 2 | 1 | 78 |
 | delay | 1 | 0 | 12 |
 | dsp-reference | 1 | 1 | 15 |
-| effect-compiler | 2 | 1 | 38 |
+| effect-compiler | 0 | 3 | 0 |
 | effect-contract | 2 | 1 | 46 |
-| effect-runtime | 5 | 1 | 97 |
+| effect-runtime | 4 | 2 | 80 |
 | engine | 3 | 0 | 139 |
 | gate-expander | 0 | 2 | 0 |
-| graph | 4 | 0 | 326 |
+| graph | 3 | 1 | 180 |
 | graph-compiler | 7 | 0 | 590 |
-| host-core | 30 | 3 | 1,270 |
-| host-web | 5 | 3 | 328 |
-| lane | 4 | 1 | 76 |
-| math | 2 | 1 | 23 |
-| multiband-compressor | 3 | 0 | 151 |
-| parametric-eq | 5 | 2 | 464 |
-| protocol | 5 | 2 | 343 |
-| rack | 5 | 1 | 322 |
+| host-core | 20 | 13 | 735 |
+| host-web | 2 | 6 | 142 |
+| lane | 3 | 2 | 72 |
+| math | 1 | 2 | 6 |
+| multiband-compressor | 1 | 2 | 83 |
+| parametric-eq | 4 | 3 | 307 |
+| protocol | 3 | 4 | 152 |
+| rack | 4 | 2 | 248 |
 | realtime-policy | 11 | 2 | 177 |
-| session | 2 | 1 | 34 |
+| session | 1 | 2 | 21 |
 | soft-clip | 2 | 0 | 126 |
 | source | 3 | 0 | 115 |
-| transient-shaper | 3 | 1 | 197 |
+| transient-shaper | 1 | 3 | 44 |
 | true-peak-limiter | 2 | 2 | 63 |
-| **total** | **131** | **31** | **6,448** |
+| **total** | **98** | **64** | **4,564** |
 
-Lines are the deleted test functions with their doc comments, at `ad5c7ae86`. Shortstat of the
-deletion commit: 107 files changed, 129 insertions, 7,783 deletions (tests, helpers, imports, the
-two files, and the reference updates).
+Lines are the deleted test functions with their doc comments, at `ad5c7ae86`. Shortstat against `ad5c7ae86`: 83 files changed, 349 insertions(+), 5,221 deletions(-).
 
-## Kept by reading (31)
+## Kept by reading (64)
 
 - audit `fixture_builtins::tests::check_rejects_owned_jsonl_tuple_mutations`: a field or record
   change in an owned JSONL after the manifest is regenerated; the format test only deletes,
@@ -168,6 +167,42 @@ two files, and the reference updates).
 - true-peak-limiter `production_tracks_the_f64_oracle`: the only independent `f64` oracle of the
   limiter gain law (E5); E4 bounds the peak only.
 
+Added by the re-reading and the review fold:
+
+- builtins `an_enable_from_rest_jumps_the_recursion_only_when_the_integrators_are_zero`: an enable from rest jumps the recursion, restored integrators ramp; no remaining test enables from rest.
+- capi `runtime::live_tests::a_live_edit_on_a_pending_candidate_completes_at_the_swap`: a live edit on a pending candidate completes at the swap; the remaining candidate test checks lanes and bits, not the watermark.
+- capi `runtime::live_tests::a_removed_fader_ride_releases_to_the_static_fader`: a removed ride releases to a fresh static-fader plan; the remaining removal tests compare host with host.
+- compressor `a_statically_bypassed_bank_collapses_to_the_dual_bits`: a prepared-bypass bank collapses to the dual bits; the only one (compressor MUTATIONS 985-M4).
+- controls `the_effect_lane_follows_the_effect_rows`: an insert or console slot attaches the effect lane; the remaining lane test covers route and input rows.
+- effect-compiler `every_builtin_row_declares_a_lawful_lattice_at_every_launch_rate`: every builtin row has a lawful lattice at every launch rate; the others check three rows.
+- effect-compiler `prepare::owner_tests::invalid_edit_poison_survives_valid_overwrite_until_discard`: a valid write does not clear a poisoned candidate; the sibling writes nothing after the poison.
+- effect-runtime `the_ratio_sets_the_slope`: ratio 1 is a bit-exact identity and a ratio below 1 expands; no other test uses a ratio below 1.
+- graph `runtime::tests::the_host_planes_are_the_arena_oracles_master_bit_for_bit_at_every_stride`: the only red test of graph MUTATIONS rows 916-1, 916-1b, 916-6 and 916-15 (restored after review).
+- host-core `a_repointed_route_does_not_carry_its_line_at_every_rate_and_width`: a repointed route does not carry its PDC line; the sibling covers the send value only.
+- host-core `a_seek_step_after_the_unmute_ramps_end_in_its_block_still_lands`: a seek step after the unmute ramp's end in the same block lands (#1647 MAJOR-4).
+- host-core `a_submix_strip_fader_mute_and_pan_are_live`: a submix pan is a live record at the bus ID; fader and mute are covered elsewhere, pan is not.
+- host-core `a_successor_at_another_rate_or_quantum_starts_a_fresh_timeline`: a successor at another rate or quantum gets a fresh timeline producer (the D3 guard).
+- host-core `handles_list_tracks_then_submixes_and_file_bus_effects`: strip handle order, per-track meters and bus effect channels and observation handles (host-core MUTATIONS 1211-M5).
+- host-core `send_records_are_the_folded_target_of_the_post_commit_values`: a gain edit on a muted send gives no record and the unmute carries it; no other test edits a muted send.
+- host-core `spectrum_carry::a_continuous_capture_carries_and_its_reader_keeps_receiving`: a continuous spectrum capture reads across a swap with no gap; the siblings cover one-shot captures.
+- host-core `submix_effect_params_are_live`: a submix console-slot parameter is a record at the console address; the sibling covers an insert bypass.
+- host-core `two_per_lane_target_writes_that_agree_in_one_block_keep_the_lane`: #1345 D3 positive arm, in host-core (restored after review; console-workload's twin stays deleted).
+- host-core `vca_and_follow_records_take_the_ramp_of_the_edit_that_moved_them`: VCA, membership and strip-own records take their edit's ramp on non-automated lanes.
+- host-web `tests::selected_observation_reads_keep_same_track_owner_windows_and_sequences`: two effects of one track keep their own observation windows and sequences.
+- host-web `tests::source_seek_keeps_the_meter_epoch_and_absolute_peak_clock`: a source seek keeps the meter epoch and the absolute peak clock.
+- host-web `tests::the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing`: the seek exports' lifecycle refusals and `source_seek_report_ptr` returning 0 when not ready, an ABI rule (restored after review).
+- lane `any_state_word_in_the_band_arms_the_block`: any state word of any section in the band arms the block; the siblings plant one word.
+- math `f1_gain_from_db_subsample`: the only per-PR check of the GAIN_MAX_DB bound; the full sweep is nightly (restored after review).
+- multiband-compressor `each_channel_counts_its_own_input`: #1328 A9 exact per-channel silence counts (restored after review).
+- multiband-compressor `shim::tests::the_smoother_has_exact_ends`: the smoother's exact ends (coefficient 0 arrives, 1 freezes); the sibling uses fixed coefficients.
+- parametric-eq `padded_banks::a_padded_lane_fed_positive_zero_writes_positive_zero_at_rest`: a padded EQ lane fed +0.0 writes exactly +0.0 in every schedule.
+- protocol `controller::tests::b3b1_btlv_telemetry_echo_and_counters_are_typed_and_nondestructive`: BTLV telemetry configure echo, idempotence, non-resetting counter reads, NotFound selector.
+- protocol `model::tests::effects_and_parameters_follow_exact_key_rules`: a repeated (parameter, channel) key leaves one entry with the last value.
+- rack `run_hands_the_blocks_snapshot_to_every_active_slot_in_every_block`: each block's snapshot reaches every active slot, silent blocks too (the watermark must not run early).
+- session `insignificant_whitespace_and_shuffled_keys_canonicalize`: shuffled keys and whitespace canonicalize to the canonical bytes (canonical JSON rule).
+- transient-shaper `a_padded_request_binds_and_still_validates_every_lane`: a padded transient-shaper bank request validates its clones; the conformance probes use full masks.
+- transient-shaper `the_bank_is_partition_invariant`: the transient-shaper bank partition invariance, the crate's only one.
+
 ## Deleted helpers (compiler-reported)
 
 - `crates/capi/src/runtime/live_tests.rs`: `live_alone`
@@ -175,23 +210,17 @@ two files, and the reference updates).
 - `crates/dsp-reference/src/svf.rs`: `IMPULSE_FRAMES`
 - `crates/engine/src/realtime/spsc.rs`: `fail_if_stalled`, `STALL_DEADLINE`, `EndedOnDrop` and its
   `Drop`
-- `crates/graph/src/runtime.rs`: `HostShape` and its impl, `render_arena_oracle`,
-  `fill_output_slot`, `output_slot`, `stereo_bits`, `OUTPUT_SLOT_FILL`, `direct_bank_parts`,
-  `test_only_set_host_master_declined`
 - `crates/host-core/src/prepare.rs`: `instance`; `tests/browser_successor.rs`:
-  `session_without_eq1`; `tests/live_delta.rs`: `with_effect_bus`; `tests/spectrum.rs`:
-  `render_window`; `tests/successor_swap.rs`: `a_repointed_route_does_not_carry_its_line`,
-  `two_bus_session`
+  `session_without_eq1`; `tests/spectrum.rs`: `render_window`
 - `crates/lane/tests/f64_lane.rs`: `square_mismatches`, `square_pool`, `oracle_square_bits`;
   `tests/fader_matrix.rs`: `fused_select_free_width`, `FUSED_FRAMES`,
   `fused_select_free_differences`, `FusedDifferences` and its `record`, `FUSED_MUTES`,
-  `FUSED_GAINS`, `fused_family_source`; `tests/input_chain_arming.rs`: `every_state_word_arms`
+  `FUSED_GAINS`, `fused_family_source`
 - `crates/math/tests/m2_lane_identity.rs`: `exp2_caller_edges`, `FastGain` and its `LaneFn`
 - `crates/multiband-compressor/tests/crossover.rs`: `rms`, `complex_gain`, `CROSSOVERS`
 - `crates/parametric-eq/tests/carry.rs`: `same_bits`; `tests/exact_rest.rs`: `at_rest`,
   `HELD_BLOCKS`, `REST_BOUND_SAMPLES`
 - `crates/rack/src/lib.rs`: `WrongWidthPlanes` and its `BankMembers`
-- `hosts/host-web/src/ffi.rs`: `test_seek_report_addresses`
 
 Leads the compiler does not report are in the successor spec
 `TBD-TA5-successor-audit-leads.md`.

@@ -372,7 +372,7 @@ it; the count exists beside the digests for the same reason `minmax_lowering_mis
 ## Issue #954 — the select-free fused fader/matrix kernel
 
 `fader_matrix_block_without_identity` is `fader_matrix_block`'s second arm with no `L::select` in
-the body. Gate 1, `select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity` (deleted by TA5; no catcher recorded)
+the body. Gate 1, `select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity` (deleted by TA5; catcher builtins `fused_fader_matrix_shapes_match_the_separate_stages`)
 (`tests/fader_matrix.rs`), holds it equal to two oracles with no identity lane: oracle A is
 `fader_matrix_block` with an all-false mask, oracle B is `gain_mute_block` on each plane followed by
 `matrix2x2_block_without_identity`. It covers five input families (the four hostile ones and an

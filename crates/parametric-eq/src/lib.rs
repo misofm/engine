@@ -8501,6 +8501,164 @@ mod padded_banks {
         }
     }
 
+    /// Gate 3 (P2a verdict, L4): a padded lane fed `+0.0` writes exactly `+0.0` -- never `-0.0`,
+    /// never a subnormal -- and keeps every integrator exactly `+0.0`, finite and at rest, block
+    /// after block, whatever design it clones and whatever schedule its bank takes.
+    ///
+    /// Every band family, at both gain extremes and both Q extremes, on all four bands, with both
+    /// cuts on and the right channel detuned, cloned into every padded lane of a one-member bank at
+    /// both widths. The member drives the bank through each schedule it has: stationary and elided
+    /// (quiet music), refused (a `-0.0` word, then a non-finite one), ramping (a prepared target on
+    /// the member mid-run, so every lane runs the ramped kernel and the padded ones with a `+0.0`
+    /// increment) and faulting (a `9.5e29` sine, D7). `Channel::recover_failed_lanes` states why
+    /// the frame body writes `+0.0` from `+0.0` for every designed word; this is that claim,
+    /// measured.
+    ///
+    /// Red if a padded lane is not at rest when bound, or if any path writes it a signed zero or a
+    /// word other than `+0.0` (a padded lane's output feeds the next slot of a chain and its own
+    /// next block, so a `-0.0` there would travel).
+    #[test]
+    fn a_padded_lane_fed_positive_zero_writes_positive_zero_at_rest() {
+        let rate = 48_000;
+        let parameters = PARAMETRIC_EQ_DESCRIPTOR.parameters.len();
+        let mut blocks = 0_u64;
+        for lanes in lane_counts() {
+            for kind in 1..=6_u32 {
+                for (gain, q) in [(-24.0, 0.1), (24.0, 18.0), (-24.0, 18.0), (24.0, 0.1)] {
+                    let mut values = Vec::with_capacity(parameters * 2);
+                    for index in 0..parameters {
+                        for (side, channel) in [ParameterChannel::Left, ParameterChannel::Right]
+                            .into_iter()
+                            .enumerate()
+                        {
+                            let detune = 1.0 + 0.1 * side as f32;
+                            let value = match (index < 24, index % 6, index) {
+                                (true, 0, _) => 1.0,
+                                (true, 1, _) => kind as f32,
+                                (true, 2, _) => 200.0 * (1 + index / 6) as f32 * detune,
+                                (true, 3, _) => gain,
+                                (true, 4, _) => q,
+                                (true, _, _) => 0.5,
+                                (false, _, 24 | 27) => 1.0,
+                                (false, _, 25) => 20.0 * detune,
+                                (false, _, 28) => 18_000.0 / detune,
+                                (false, _, _) => q,
+                            };
+                            values.push(InitialParameterValue {
+                                parameter_index: index as u32,
+                                channel,
+                                value,
+                            });
+                        }
+                    }
+                    let initial = [values];
+                    let member_of = vec![0; lanes];
+                    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+                    let mut bank = bind(lanes, &requests(&initial, &member_of, rate), &mask);
+                    let at_bind: Vec<Payload> = (1..lanes)
+                        .map(|lane| lane_payload(bank.as_ref(), lane))
+                        .collect();
+                    let context = format!("{lanes} lanes, kind {kind}, gain {gain}, Q {q}");
+                    let mut planes = [vec![0.0; QUANTUM * lanes], vec![0.0; QUANTUM * lanes]];
+                    let offsets = vec![0_u32; lanes + 1];
+                    for block in 0..12_u64 {
+                        let first = block * QUANTUM as u64;
+                        if block == 4 {
+                            // The member's first band retuned: a 64-sample ramp on lane 0 only.
+                            let mut candidate = initial[0].clone();
+                            let mut changed = vec![false; parameters * 2];
+                            for side in 0..2 {
+                                candidate[2 * 2 + side].value = 3_000.0;
+                                changed[2 * 2 + side] = true;
+                            }
+                            let mut targets = [PreparedEffectTarget {
+                                slot: 0,
+                                channel: ParameterChannel::Left,
+                                words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+                            }; EQ_SECTION_COUNT * 2];
+                            let count = ParametricEqFactory
+                                .prepare_targets(
+                                    EffectTargetRequest {
+                                        sample_rate: rate,
+                                        values: &candidate,
+                                        changed: &changed,
+                                    },
+                                    &mut targets,
+                                )
+                                .expect("a legal target");
+                            for target in &targets[..count] {
+                                bank.apply_prepared_target_lane(0, target)
+                                    .expect("a target on the member");
+                            }
+                        }
+                        let mut input = [
+                            sine(1.0e-3, first, QUANTUM, rate, 0.0),
+                            sine(1.0e-3, first, QUANTUM, rate, 1.9),
+                        ];
+                        match block {
+                            2 => input[0][17] = -0.0,
+                            3 => input[1][40] = f32::NAN,
+                            6 | 7 => {
+                                input = [
+                                    sine(9.5e29, first, QUANTUM, rate, 0.0),
+                                    sine(9.5e29, first, QUANTUM, rate, 1.9),
+                                ];
+                            }
+                            _ => {}
+                        }
+                        gather(&mut planes, lanes, &[0], &[input]);
+                        render(
+                            bank.as_mut(),
+                            &mut planes,
+                            lanes,
+                            QUANTUM,
+                            first,
+                            false,
+                            &[],
+                            &offsets,
+                        );
+                        for lane in 1..lanes {
+                            for (channel, plane) in planes.iter().enumerate() {
+                                if let Some(word) = column(plane, lanes, lane, QUANTUM)
+                                    .into_iter()
+                                    .find(|word| word.to_bits() != 0)
+                                {
+                                    panic!(
+                                        "{context}, block {block}: padded lane {lane}, channel \
+                                         {channel} wrote {:#010x}",
+                                        word.to_bits()
+                                    );
+                                }
+                            }
+                            let payload = lane_payload(bank.as_ref(), lane);
+                            for (side, words) in payload.iter().enumerate().skip(1) {
+                                for section in 0..EQ_SECTION_COUNT {
+                                    for integrator in 0..2 {
+                                        let word =
+                                            (section * STATE_WORDS_PER_BAND + integrator) * 4;
+                                        assert_eq!(
+                                            &words[word..word + 4],
+                                            &[0; 4],
+                                            "{context}, block {block}: padded lane {lane}, \
+                                             channel {side}, section {section}: an integrator \
+                                             left +0.0"
+                                        );
+                                    }
+                                }
+                            }
+                            assert!(
+                                without_silence(&payload) == without_silence(&at_bind[lane - 1]),
+                                "{context}, block {block}: padded lane {lane} moved a word"
+                            );
+                        }
+                        blocks += 1;
+                    }
+                }
+            }
+        }
+        assert!(blocks > 0);
+    }
+
     /// Gate 4, the planted state: a non-finite integrator planted in one member recovers that
     /// member alone and reports it alone, at every member count and on either channel.
     ///

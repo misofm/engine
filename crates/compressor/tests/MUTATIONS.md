@@ -169,7 +169,7 @@ tree restored between rows.
 | M2-C7 | `Channel::copy_state_from` drops `main` | `compressor/src/kernel.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED — the delay ring the output is read out of |
 | M2-C8 | `Channel::copy_state_from` drops `detector` | `compressor/src/kernel.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED — the detector ring the lookahead tap gathers from |
 
-`a_statically_bypassed_bank_collapses_to_the_dual_bits` (deleted by TA5; catcher `mono_reopen_drives_the_next_render_from_the_copied_state`) carries no mutation of its own: it is
+`a_statically_bypassed_bank_collapses_to_the_dual_bits` carries no mutation of its own: it is
 coverage for the one place a **prepared** bypass and a **live** one differ. A live bypass clears the
 witness' `UNBYPASSED` term and declines the collapse; a prepared bypass on a live-control-free bank
 does not, because `EffectBankStage::lane_symmetry` is the designed-word comparison alone. The effect
@@ -230,7 +230,7 @@ differentials see dispatch as well as bits.
 
 | # | mutation | red |
 |---|---|---|
-| 982-M1 | the arm ignores `bypass` | `identity::bypass_preserves_exact_dry_bits_at_sample_zero` (deleted by TA4), gate 1 (`the_all_wet_arm_is_the_base_body_on_all_wet_tables`, the three differentials), gate 3, `conformance`, `contract::every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency`, `mono_collapse::a_statically_bypassed_bank_collapses_to_the_dual_bits` (deleted by TA5; catcher `mono_reopen_drives_the_next_render_from_the_copied_state`) (9 red) |
+| 982-M1 | the arm ignores `bypass` | `identity::bypass_preserves_exact_dry_bits_at_sample_zero` (deleted by TA4), gate 1 (`the_all_wet_arm_is_the_base_body_on_all_wet_tables`, the three differentials), gate 3, `conformance`, `contract::every_launch_rate_processes_scalar_and_supported_bank_at_zero_latency`, `mono_collapse::a_statically_bypassed_bank_collapses_to_the_dual_bits` (9 red) |
 | 982-M2 | the arm is taken when any lane is wet (`mask_any`) | gate 1 on the mixed corpus banks (`the_settled_body_is_the_base_body_on_the_corpus_table`, `randomized_differential_simd4`/`_simd8`), gate 3, `scenario_981_*`, `cross_target`, `lane_identity::every_width_produces_the_same_words` (7 red) |
 | 982-M3 | the arm drops `+ makeup` | gate 1, `scenario_982_all_wet_render_is_pinned`, `cross_target` (its `f32` lane 7 has mix 1 and makeup 6), `lane_identity::every_width_produces_the_same_words` (7 red). `oracle` stays green, as the verification found |
 | 982-M4 | the arm is never taken | gate 3 (`the_all_wet_arm_is_taken_exactly_when_every_lane_is_wet`) and gate 1's dispatch assertion (5 red). No bit-exactness test can see it: it is a performance-only regression |
@@ -268,7 +268,7 @@ same witness-keyed "both NaN" rule as the dual half, and the grid runs a third p
 |---|---|---|
 | 985-M2 | the short last chunk is skipped (`chunks_exact_mut` on the outer loop), the verification's replacement for "the body reads the right plane", which cannot be written | gate 1 (its 31-, 33- and 97-frame blocks: the grid on every table and the three differentials), `scenario_985_collapsed_render_is_pinned` (7 red) |
 | 985-M3 | the recursive word's write-back is dropped | gate 1, `scenario_985_*`, and four `mono_collapse` tests including `the_collapsed_body_renders_the_dual_bodys_left_plane` (deleted by TA4; KEEP catcher compressor `mono_collapse::mono_reopen_drives_the_next_render_from_the_copied_state`) (11 red) |
-| 985-M4 | the collapsed wet arm ignores `bypass` | `mono_collapse::a_statically_bypassed_bank_collapses_to_the_dual_bits` (deleted by TA5; catcher `mono_reopen_drives_the_next_render_from_the_copied_state`), gate 1 (7 red) |
+| 985-M4 | the collapsed wet arm ignores `bypass` | `mono_collapse::a_statically_bypassed_bank_collapses_to_the_dual_bits`, gate 1 (7 red) |
 
 | # | mutation | why it survives |
 |---|---|---|

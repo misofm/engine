@@ -1502,6 +1502,73 @@ fn watermark(rig: &Rig) -> (u64, u64, u64, u64) {
     )
 }
 
+/// #1314 gate 2: a rebuild (r1) and then a live fader edit (r2), committed before any render,
+/// both complete at the swap block and not one block earlier: the live edit went to the pending
+/// candidate's revision gate, so the running plan never reports either revision.
+#[test]
+fn a_live_edit_on_a_pending_candidate_completes_at_the_swap() {
+    let document = long_session(1, 48_000);
+    let model = parse_session_json(&document).expect("model");
+    let mut rig = Rig::new(&document);
+    let initial = rig.summary().0;
+    for _ in 0..3 {
+        rig.step();
+        assert_eq!(watermark(&rig), (initial, 0, crate::OUTCOME_EXACT, 0));
+    }
+    assert_eq!(rig.apply(&[content_edit(&model)]), crate::RESULT_OK);
+    let r1 = rig.summary().0;
+    assert_eq!(rig.summary().3, 1, "a candidate is pending");
+    let edit = fader_edit(
+        "eq0",
+        DualMonoFader {
+            left_db: -6.0,
+            right_db: -6.0,
+            left_mute: false,
+            right_mute: false,
+        },
+    );
+    assert_eq!(rig.apply(&edit), crate::RESULT_OK);
+    let r2 = rig.summary().0;
+    assert_eq!((r1, r2), (initial + 1, initial + 2));
+    assert_eq!(
+        rig.summary().3,
+        1,
+        "the live edit went to the one candidate"
+    );
+    assert_eq!(watermark(&rig), (initial, 0, crate::OUTCOME_EXACT, 0));
+
+    let k = rig.block;
+    rig.render();
+    assert_eq!(
+        watermark(&rig),
+        (r2, k * rig.quantum as u64, crate::OUTCOME_EXACT, 2)
+    );
+
+    // A rebuild alone carries its own revision to its swap.
+    rig.render();
+    let source = &model.sources[0];
+    let edit = SessionEdit::SetSourceContent {
+        source_id: source.id.clone(),
+        content: format!("blake3:{}", "cd".repeat(32)),
+        channels: source.channels,
+        bit_depth: source.bit_depth,
+        frames: source.frames,
+    };
+    assert_eq!(rig.apply(&[edit]), crate::RESULT_OK);
+    let r3 = rig.summary().0;
+    assert_eq!(rig.summary().3, 1, "a second candidate is pending");
+    assert_eq!(
+        watermark(&rig),
+        (r2, k * rig.quantum as u64, crate::OUTCOME_EXACT, 2)
+    );
+    let swap = rig.block;
+    rig.render();
+    assert_eq!(
+        watermark(&rig),
+        (r3, swap * rig.quantum as u64, crate::OUTCOME_EXACT, 3)
+    );
+}
+
 /// #1314 gate 3: on one thread, a live edit committed between blocks 3 and 4 completes in block 4,
 /// from its first sample, and block 5 publishes nothing new.
 #[test]
@@ -10004,6 +10071,43 @@ fn an_unchanged_fader_ride_carries_with_no_jump() {
     }
     for (index, (live, reference)) in live.iter().zip(&reference).enumerate() {
         assert_eq!(bits(live), bits(reference), "block {index} from the swap");
+    }
+}
+
+/// #1648 gate 4. Removing the ride rebuilds; the released lane ramps from the curve's last target
+/// to its static value over the fader jump length, and from the end of that release every sample
+/// equals a fresh plan of the new session (a static fader), session-seeked to the adoption block.
+///
+/// Test value: red if a removed entry leaves the lane on its last automated value, or steps it.
+#[test]
+fn a_removed_fader_ride_releases_to_the_static_fader() {
+    let (old, new) = (ride_document(Some(-12.0)), ride_document(None));
+    let mut rig = Rig::new(&old);
+    for _ in 0..8 {
+        rig.step();
+    }
+    let edit = SessionEdit::RemoveAutomation {
+        automation_id: StableId::parse("fader-ride").expect("automation ID"),
+    };
+    let (adoption, live) = rebuild_and_adopt(&mut rig, &[edit], ADOPTED_BLOCKS);
+    let reference = seeked_reference(&new, adoption, ADOPTED_BLOCKS);
+    let jump = 960_usize;
+    let quantum = rig.quantum;
+    for plane in 0..2 {
+        let (live, reference) = (
+            plane_bits(&live, plane, quantum),
+            plane_bits(&reference, plane, quantum),
+        );
+        assert_ne!(
+            live[jump - quantum..jump - 1],
+            reference[jump - quantum..jump - 1],
+            "plane {plane}: the lane is still in its release"
+        );
+        assert_eq!(
+            live[jump - 1..],
+            reference[jump - 1..],
+            "plane {plane}: the static fader's bits from the release's last sample"
+        );
     }
 }
 

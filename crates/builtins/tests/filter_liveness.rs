@@ -547,6 +547,64 @@ fn a_disable_in_the_enables_drain_still_completes_and_elides() {
     }
 }
 
+/// Gate 3: an enable from a settled disabled section jumps the recursion and crossfades the
+/// mix, so its first sample is the dry input; restored integrators on an identity section take
+/// the six-word ramp instead.
+#[test]
+fn an_enable_from_rest_jumps_the_recursion_only_when_the_integrators_are_zero() {
+    for rate in LAUNCH_RATES {
+        for section in 0..2 {
+            let target = design(rate, section, if section == 0 { 200.0 } else { 3_000.0 });
+            let words = target.coefficients;
+            let mut input = disabled_at(rate);
+            input.apply_prepared_filter(target).expect("enable");
+            let output = render_frame(&mut input, 0, 0.625);
+            assert_eq!(output[0].to_bits(), 0.625_f32.to_bits());
+            assert_eq!(output[1].to_bits(), (-0.625_f32).to_bits());
+            // The kernel's frame-0 word, as it computes it: the start plus one step.
+            let after_one = |start: f32, target: f32| start + (target - start) * (1.0 / 64.0);
+            let identity_mix = [1.0_f32, 0.0, 0.0];
+            let expected = [
+                words[0],
+                words[1],
+                words[2],
+                after_one(identity_mix[0], words[3]),
+                after_one(identity_mix[1], words[4]),
+                after_one(identity_mix[2], words[5]),
+            ];
+            for channel in 0..2 {
+                assert_eq!(
+                    current_words(&input, channel, section),
+                    bits6(expected),
+                    "rate {rate} section {section} channel {channel}"
+                );
+            }
+
+            // Restored non-zero integrators on the identity section: rule 4.
+            let mut restored = disabled_at(rate);
+            let mut state = [0_u32; 8];
+            for channel in 0..2 {
+                state[channel * 4 + section * 2] = 0.25_f32.to_bits();
+                state[channel * 4 + section * 2 + 1] = (-0.125_f32).to_bits();
+            }
+            builtins::test_support::set_input_state_words(&mut restored, state);
+            restored.apply_prepared_filter(target).expect("enable");
+            render_frame(&mut restored, 0, 0.625);
+            let ramped: [f32; 6] = core::array::from_fn(|index| {
+                let start = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0][index];
+                after_one(start, words[index])
+            });
+            for channel in 0..2 {
+                assert_eq!(
+                    current_words(&restored, channel, section),
+                    bits6(ramped),
+                    "restored rate {rate} section {section} channel {channel}"
+                );
+            }
+        }
+    }
+}
+
 /// `||M||_V` in `f64` for a 2x2 matrix `M`: the operator norm induced by
 /// `||x||_V^2 = x1^2 + sqrt(2) x1 x2 + x2^2`, the shared eigenbasis norm of every `k = sqrt(2)`
 /// design. With `R = [[1, r], [0, r]]`, `r = 1/sqrt(2)` (so `||x||_V = ||R x||_2`), it is the

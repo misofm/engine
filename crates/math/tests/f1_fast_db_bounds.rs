@@ -395,6 +395,24 @@ fn f1_domain_and_clamping() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+fn f1_gain_from_db_subsample() {
+    let (lo, hi) = gain_domain();
+    assert_sweep(
+        "fast_gain_from_db negative subsample",
+        sweep(lo, hi, 4099, gain_error_db),
+        GAIN_MAX_DB,
+        200_000,
+    );
+    let (lo, hi) = gain_domain_positive();
+    assert_sweep(
+        "fast_gain_from_db positive subsample",
+        sweep(lo, hi, 4099, gain_error_db),
+        GAIN_MAX_DB,
+        200_000,
+    );
+}
+
+#[test]
 fn f1_level_db_subsample() {
     let (lo, hi) = level_domain();
     assert_sweep(

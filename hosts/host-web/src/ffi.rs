@@ -4421,6 +4421,18 @@ pub(crate) fn test_buffer_address(handle: u32, kind: u32) -> usize {
     with_host_mut(handle, 0, |host| buffer_pointer(host, kind).addr())
 }
 
+/// The address `miso_engine_web_v1_source_seek_report_ptr` returns before its `u32` cast (a
+/// native address does not fit it), and the record's own address.
+#[cfg(test)]
+pub(crate) fn test_seek_report_addresses(handle: u32) -> (usize, usize) {
+    with_host(handle, (0, 0), |host| {
+        (
+            seek_report_pointer(host).addr(),
+            ptr::from_ref(host.seek_report()).addr(),
+        )
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn test_status(handle: u32) -> Option<crate::WebStatus> {
     with_host(handle, None, |host| Some(*host.status()))

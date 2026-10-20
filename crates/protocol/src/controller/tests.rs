@@ -2949,6 +2949,155 @@ fn an_event_frame_under_the_retired_cancellation_id_is_refused() {
 }
 
 #[test]
+fn b3b1_btlv_telemetry_echo_and_counters_are_typed_and_nondestructive() {
+    fn frame(
+        message_id: MessageId,
+        request_id: u64,
+        revision: ExpectedRevision,
+        payload: &[u8],
+        count: u32,
+    ) -> Vec<u8> {
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; crate::OUTER_HEADER_BYTES + payload.len()];
+        let (wire_revision, flags) = match revision {
+            ExpectedRevision::Any => (0, 1),
+            ExpectedRevision::Exact(revision) => (revision.0, 0),
+        };
+        codec
+            .write_outer_header(
+                &mut bytes,
+                crate::FrameKind::Command,
+                message_id,
+                StatusCode::Ok,
+                request_id,
+                wire_revision,
+                flags,
+                payload.len() as u32,
+                count,
+            )
+            .expect("header");
+        bytes[crate::OUTER_HEADER_BYTES..].copy_from_slice(payload);
+        bytes
+    }
+    let codec = ProtocolCodec::default();
+    let configuration = TelemetryConfiguration {
+        meter_handles: vec![1],
+        meter_period_blocks: 4,
+        counter_ids: vec![crate::CounterId::ControlCommandBackpressure],
+        counter_period_blocks: 8,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: crate::DiagnosticSeverity::Warning,
+    };
+    let mut config_payload = vec![
+        0;
+        codec
+            .encoded_telemetry_configuration_len(&configuration)
+            .expect("config length")
+    ];
+    codec
+        .encode_telemetry_configuration(&configuration, &mut config_payload)
+        .expect("config");
+    let mut controller = controller(8);
+    let first = controller
+        .process_b1b_btlv(
+            &frame(
+                MessageId::TelemetryConfigure,
+                1,
+                ExpectedRevision::Exact(SessionRevision(7)),
+                &config_payload,
+                6,
+            ),
+            &mut DecodeScratch::new(&mut [0_u16; 6]),
+        )
+        .expect("configure");
+    assert_eq!(first.status, StatusCode::Ok);
+    assert_eq!(
+        codec.decode_telemetry_configuration(first.payload(), 6),
+        Ok(configuration.clone())
+    );
+    assert_eq!(controller.provider().telemetry_configuration, configuration);
+    let second = controller
+        .process_b1b_btlv(
+            &frame(
+                MessageId::TelemetryConfigure,
+                2,
+                ExpectedRevision::Exact(SessionRevision(7)),
+                &config_payload,
+                6,
+            ),
+            &mut DecodeScratch::new(&mut [0_u16; 6]),
+        )
+        .expect("idempotent configure");
+    assert_eq!(second.payload(), first.payload());
+
+    let request = CountersRequest {
+        all: false,
+        ids: vec![1, 5],
+    };
+    let mut request_payload = [0_u8; 32];
+    codec
+        .encode_counters_request(&request, &mut request_payload)
+        .expect("counter request");
+    let first = controller
+        .process_b1b_btlv(
+            &frame(
+                MessageId::CountersGet,
+                3,
+                ExpectedRevision::Any,
+                &request_payload,
+                2,
+            ),
+            &mut DecodeScratch::new(&mut [0_u16; 2]),
+        )
+        .expect("counter read");
+    let second = controller
+        .process_b1b_btlv(
+            &frame(
+                MessageId::CountersGet,
+                4,
+                ExpectedRevision::Any,
+                &request_payload,
+                2,
+            ),
+            &mut DecodeScratch::new(&mut [0_u16; 2]),
+        )
+        .expect("nonreset read");
+    assert_eq!(first.payload(), second.payload());
+    assert_eq!(
+        codec
+            .decode_counter_snapshot(first.payload(), 3)
+            .expect("snapshot")
+            .values
+            .len(),
+        2
+    );
+    let unknown = CountersRequest {
+        all: false,
+        ids: vec![99],
+    };
+    let mut unknown_payload = [0_u8; 32];
+    codec
+        .encode_counters_request(&unknown, &mut unknown_payload)
+        .expect("unknown selector");
+    assert_eq!(
+        controller
+            .process_b1b_btlv(
+                &frame(
+                    MessageId::CountersGet,
+                    5,
+                    ExpectedRevision::Any,
+                    &unknown_payload,
+                    2
+                ),
+                &mut DecodeScratch::new(&mut [0_u16; 2]),
+            )
+            .expect("unknown response")
+            .status,
+        StatusCode::NotFound
+    );
+}
+
+#[test]
 fn b3b2_diagnostics_btlv_pages_are_typed_nondestructive_and_expire_old_cursors() {
     fn frame(request_id: u64, request: DiagnosticsRequest) -> Vec<u8> {
         let codec = ProtocolCodec::default();

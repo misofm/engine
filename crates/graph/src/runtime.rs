@@ -8278,6 +8278,20 @@ thread_local! {
     static HOST_MASTER_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Decline (`true`) or restore (`false`) the host-plane master for every later bind on this
+/// thread: issue #916's arena oracle, on the pattern of [`test_only_set_route_fold_declined`].
+///
+/// A plan bound declined has no Output unit, every folded master is [`FoldTarget::Arena`], and a
+/// redirect into the Output op is not withheld. So its Output op and its folds write the Output's
+/// arena buffer, as every plan did before the issue, and nothing writes the host's planes. The
+/// test copies that buffer out itself, which is the executor's old end-of-block copy. The switch
+/// is read once per bind, in `preflight_sequential`. Callers restore `false` after the bind they
+/// meant to decline.
+#[cfg(test)]
+pub(crate) fn test_only_set_host_master_declined(declined: bool) {
+    HOST_MASTER_DECLINED.with(|slot| slot.set(declined));
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Issue #918's copy oracle. Bind-time only; render never reads it.
@@ -15089,8 +15103,184 @@ mod tests {
         (executor, program)
     }
 
+    /// `Input -> PostInputBuiltins (a one-lane W4 builtin bank) -> Output`, one track, no route
+    /// (issue #916). The bank's last slot is dedicated storage whose sole reader is the Output op,
+    /// so `scatter_target` offers a redirect *into the Output op*, which `build_sequential`
+    /// withholds. The arena oracle, bound with the host master declined, takes it.
+    fn direct_bank_parts(
+        output_meters: Option<&Published>,
+    ) -> (crate::PreparedGraphPlan, crate::GraphRuntimeBindings) {
+        const FRAMES: u32 = 13;
+        let id = |text: &str| crate::StableGraphId::parse(text).expect("stable id");
+        let input = GraphNodeId::TrackStage {
+            track_id: id("track00"),
+            stage: TrackStage::Input,
+        };
+        let member = GraphNodeId::TrackStage {
+            track_id: id("track00"),
+            stage: TrackStage::PostInputBuiltins,
+        };
+        let output = GraphNodeId::Output {
+            output_id: id("main"),
+        };
+        let port = |node: &GraphNodeId, kind| crate::GraphPortId {
+            node: node.clone(),
+            kind,
+            effect_port: None,
+        };
+        let edge = |id, source: &GraphNodeId, destination: &GraphNodeId| crate::GraphEdge {
+            id,
+            source: port(source, crate::GraphPortKind::MainOutput),
+            destination: port(destination, crate::GraphPortKind::MainInput),
+            path: "$.issue916".to_owned(),
+        };
+        let mut edges = vec![
+            edge(
+                GraphEdgeId::TrackMain {
+                    target: member.clone(),
+                },
+                &input,
+                &member,
+            ),
+            edge(
+                GraphEdgeId::RouteSource {
+                    route_id: id("route00"),
+                },
+                &member,
+                &output,
+            ),
+        ];
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        let levels = [
+            vec![input.clone()],
+            vec![member.clone()],
+            vec![output.clone()],
+        ];
+        let schedule: Vec<_> = levels.iter().flatten().cloned().collect();
+        let mut nodes: Vec<_> = schedule
+            .iter()
+            .cloned()
+            .map(|id| crate::GraphNode {
+                id,
+                latency: effect_contract::LatencySamples(0),
+                tail: effect_contract::TailSamples::Finite(0),
+            })
+            .collect();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        let envelope = engine::realtime::RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: engine::QuantumFrames(FRAMES),
+            output_channels: NonZeroUsize::new(2).expect("stereo"),
+        };
+        let plan = crate::PreparedGraphPlan::new(crate::PreparedGraphPlanParts {
+            plan_id: 916,
+            spec: GraphSpec {
+                nodes,
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: levels
+                .iter()
+                .enumerate()
+                .map(|(level, nodes)| crate::DependencyLevel {
+                    level: level as u64,
+                    nodes: nodes.clone(),
+                })
+                .collect(),
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: crate::GraphResourceEstimate {
+                logical_nodes: 0,
+                materialized_nodes: 0,
+                edges: 0,
+                schedule_items: 0,
+                dependency_levels: 0,
+                reductions: 0,
+                routes: 0,
+                effects: 0,
+                audio_buffer_samples: 0,
+                total_delay_samples: 0,
+                delay_bytes: 0,
+                graph_metadata_bytes: 0,
+                declared_effect_bytes: 0,
+                effect_bank_count: 0,
+                effect_bank_scratch_bytes: 0,
+                effect_bank_runtime_buffer_bytes: 0,
+                effect_bank_metadata_bytes: 0,
+                builtin_bank_bytes: 0,
+                builtin_bank_scratch_bytes: 0,
+                builtin_bank_count: 0,
+                largest_allocation_bytes: 0,
+                incremental_plan_bytes: 0,
+                session_plus_plan_bytes: 0,
+            },
+            envelope,
+            required_bindings: vec![input.clone(), member.clone(), output.clone()],
+            routes: Vec::new(),
+            track_delays: Vec::new(),
+            effects: Vec::new(),
+            effect_controls: Vec::new(),
+            effect_observations: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: vec![GraphPreparedBuiltinBank {
+                backend: lane::Backend::Simd4,
+                members: vec![member].into_boxed_slice(),
+                processor: Box::new(CrossTilt),
+                scratch: AoSoaScratch::new(BankWidth::Four, FRAMES).expect("scratch"),
+            }],
+            observers: Vec::new(),
+        });
+        let mut observers = Vec::new();
+        if let Some(published) = output_meters {
+            for handle in [OUTPUT_METER_HANDLE, OUTPUT_METER_HANDLE + 1] {
+                observers.push(GraphNodeObserverBinding::new(
+                    output.clone(),
+                    handle,
+                    Box::new(WordMeter {
+                        handle,
+                        accepts_resident: false,
+                        published: Arc::clone(published),
+                    }),
+                ));
+            }
+        }
+        (
+            plan,
+            crate::GraphRuntimeBindings {
+                envelope,
+                nodes: vec![
+                    GraphNodeBinding::new(input, Box::new(NoiseInput(7))),
+                    GraphNodeBinding::identity(output),
+                ],
+                observers,
+            },
+        )
+    }
+
     /// NaN padding with a recognisable payload: the words a host plane holds before a render.
     const HOST_PAD: u32 = 0x7fc0_0916;
+    /// The pattern the arena buffer of the session Output is filled with before every block.
+    const OUTPUT_SLOT_FILL: [u32; 2] = [0x7fc1_0916, 0x7fc2_0916];
+
+    fn stereo_bits((left, right): (&[f32], &[f32])) -> Vec<u32> {
+        left.iter()
+            .chain(right)
+            .map(|word| word.to_bits())
+            .collect()
+    }
+
+    /// The session output's arena buffer of a bound executor.
+    fn output_slot(program: &ExecutionProgram) -> u32 {
+        program.output.0 + ARENA_BASE
+    }
+
+    fn fill_output_slot(executor: &mut crate::GraphExecutor, program: &ExecutionProgram) {
+        let (left, right) = executor.runtime.buffer_mut(output_slot(program));
+        left.fill(f32::from_bits(OUTPUT_SLOT_FILL[0]));
+        right.fill(f32::from_bits(OUTPUT_SLOT_FILL[1]));
+    }
 
     /// One host-plane render through `GraphExecutor::render`, the executor half of
     /// `PreparedRenderPlan::render`.
@@ -15110,6 +15300,334 @@ mod tests {
                 absolute_sample: first_sample,
             },
         )
+    }
+
+    /// Issue #916's arena oracle: the render loop `GraphExecutor::render` ran before the issue,
+    /// over a runtime bound with the host master declined, then its end-of-block copy of the
+    /// Output's arena buffer into `output`.
+    ///
+    /// Returns that buffer's words as they stood just before the first unit that writes the
+    /// master into it. That unit is the Output op's own, unless the Output op's reduction was
+    /// neutralised to its own slot. Then the master was written earlier, by the chains that fold
+    /// into it or by a chain whose scatter was redirected into it. A host-plane render must leave
+    /// the buffer holding exactly those words, because only the master's writers touch it after
+    /// that point, and they now write the host's planes.
+    fn render_arena_oracle(
+        executor: &mut crate::GraphExecutor,
+        program: &ExecutionProgram,
+        mut output: engine::realtime::PlanarBufferMut<'_>,
+        first_sample: u64,
+    ) -> Vec<u32> {
+        let slot = output_slot(program);
+        let runtime = &mut executor.runtime;
+        assert_eq!(
+            runtime.output_unit, None,
+            "the oracle binds with no Output unit"
+        );
+        let frames = runtime.arena.frames();
+        let untouched = f32::from_bits(HOST_PAD);
+        let (mut left, mut right) = (vec![untouched; frames], vec![untouched; frames]);
+        let mut host = HostMaster::new(&mut left, &mut right, frames).expect("oracle host");
+        // The Output op is the last op writing its slot: dedicated storage is never recycled.
+        let output_unit = (0..runtime.units.len())
+            .rev()
+            .find(|unit| matches!(&runtime.units[*unit], RuntimeUnit::Op(op) if op.output == slot))
+            .expect("the Output op's unit");
+        let neutralised = matches!(
+            &runtime.units[output_unit],
+            RuntimeUnit::Op(op) if *op.inputs == [slot]
+        );
+        let writes_slot = |unit: &RuntimeUnit| match unit {
+            RuntimeUnit::Bank {
+                members,
+                lanes,
+                fold,
+                master,
+                ..
+            } => {
+                (!fold.is_empty() && *master == FoldTarget::Arena(slot))
+                    || members[members.len() - lanes..]
+                        .iter()
+                        .any(|member| member.output == slot)
+            }
+            RuntimeUnit::Op(_) => false,
+        };
+        let validity = GraphObservationValidity::CLEAR;
+        let mut before_master = None;
+        for unit in 0..runtime.units.len() {
+            let writes_master =
+                unit == output_unit || (neutralised && writes_slot(&runtime.units[unit]));
+            if writes_master && before_master.is_none() {
+                before_master = Some(stereo_bits(runtime.buffer(slot)));
+            }
+            runtime
+                .execute(
+                    unit,
+                    first_sample,
+                    LiveSnapshot::ALL,
+                    host.reborrow(),
+                    None,
+                    &crate::GraphBlockTime::new(
+                        Some(first_sample),
+                        u32::try_from(frames).expect("oracle frames"),
+                        None,
+                        None,
+                    ),
+                )
+                .expect("oracle unit");
+            runtime
+                .observe_unit(unit, first_sample, validity, &host)
+                .expect("oracle observer");
+        }
+        // The executor's end-of-block copy, exactly as it stood before issue #916.
+        let (arena_left, arena_right) = runtime.buffer(slot);
+        output
+            .plane_mut(0)
+            .expect("left")
+            .copy_from_slice(arena_left);
+        output
+            .plane_mut(1)
+            .expect("right")
+            .copy_from_slice(arena_right);
+        assert!(
+            left.iter()
+                .chain(&right)
+                .all(|word| word.to_bits() == HOST_PAD),
+            "an arena-oracle unit wrote the host planes"
+        );
+        before_master.expect("a master writer ran")
+    }
+
+    /// Which issue #916 gate-1 plan to bind.
+    #[derive(Clone, Copy, Debug)]
+    enum HostShape {
+        /// 64 tracks in eight W8 cohorts, every route folded into the Output: the console shape.
+        /// `frames`.
+        Folded(u32),
+        /// The same plan with the fold declined: 64 route ops and a 64-input reduction.
+        Unfolded,
+        /// The bus plan with its three pads: the tracks fold into the bus, the bus redirects its
+        /// scatter into its fader, and the Output's one input is the bus route. The Output's slot
+        /// is a pad's.
+        Submix,
+        /// The bus plan with no pads: nothing folds, and the Output's slot is a track's input
+        /// slot, which the tracks' bank gathers and whose route runs in place on it.
+        SubmixOnATrackSlot,
+        /// One track, its route folded into the Output: a fan-in-one master that only stores.
+        OneRouteFolded,
+        /// The same with the fold declined: the Output op's fan-in-one copy.
+        OneRouteUnfolded,
+        /// [`direct_bank_parts`]: a bank's last slot straight into the Output op.
+        BankIntoOutput,
+    }
+
+    impl HostShape {
+        const ALL: [Self; 8] = [
+            Self::Folded(13),
+            Self::Folded(128),
+            Self::Unfolded,
+            Self::Submix,
+            Self::SubmixOnATrackSlot,
+            Self::OneRouteFolded,
+            Self::OneRouteUnfolded,
+            Self::BankIntoOutput,
+        ];
+
+        const fn frames(self) -> u32 {
+            match self {
+                Self::Folded(frames) => frames,
+                _ => 13,
+            }
+        }
+
+        /// `[bank_route_folds, bank_scatter_redirects]` of the host-plane plan.
+        const fn shape(self) -> [u64; 2] {
+            match self {
+                Self::Folded(..) => [64, 0],
+                Self::Unfolded | Self::OneRouteUnfolded | Self::BankIntoOutput => [0, 0],
+                Self::Submix => [4, 1],
+                Self::SubmixOnATrackSlot => [0, 1],
+                Self::OneRouteFolded => [1, 0],
+            }
+        }
+
+        /// Bind the host-plane plan, or with `oracle` the arena oracle of the same plan.
+        fn bind(
+            self,
+            oracle: bool,
+            published: &Published,
+        ) -> (crate::GraphExecutor, ExecutionProgram) {
+            let console = |tracks, width, frames| {
+                let fixture = FoldFixture {
+                    output_meters: true,
+                    ..FoldFixture::metered(width, tracks, frames)
+                };
+                let (plan, bindings, _) = fold_fixture_parts(fixture, published);
+                (plan, bindings)
+            };
+            let (plan, bindings) = match self {
+                Self::Folded(frames) => console(64, CONSOLE_WIDTH, frames),
+                Self::Unfolded => console(64, CONSOLE_WIDTH, 13),
+                Self::OneRouteFolded | Self::OneRouteUnfolded => console(1, BankWidth::Four, 13),
+                Self::Submix => folded_bus_parts(3, Some(published)),
+                Self::SubmixOnATrackSlot => folded_bus_parts(0, Some(published)),
+                Self::BankIntoOutput => direct_bank_parts(Some(published)),
+            };
+            let declined = matches!(self, Self::Unfolded | Self::OneRouteUnfolded);
+            test_only_set_route_fold_declined(declined);
+            test_only_set_host_master_declined(oracle);
+            let bound = bind_executor(plan, bindings, None);
+            test_only_set_route_fold_declined(false);
+            test_only_set_host_master_declined(false);
+            bound
+        }
+    }
+
+    /// Gate 1 of issue #916: the host's planes after a render are the arena oracle's master bit
+    /// for bit, at a stride equal to the block and seven words wider, with every padding word
+    /// untouched; every observer window, the two Output meters' included, is the oracle's; and
+    /// the session output's arena buffer is left holding exactly what it held before the
+    /// master's first writer ran, so neither the Output op nor a folded Output master writes it.
+    ///
+    /// The oracle is [`render_arena_oracle`]: the same plan bound with the host master declined,
+    /// driven through the render loop that preceded the issue, then copied out of the arena as
+    /// the executor's end-of-block copy did. The shapes cover the three the brief names -- 64
+    /// folded routes, 64 unfolded routes, and one submix into the Output -- plus a submix whose
+    /// Output slot is a gathered track input, a folded and an unfolded fan-in-one route, and a
+    /// bank straight into the Output op (whose scatter redirect is withheld).
+    ///
+    /// Red mutations (`crates/graph/tests/MUTATIONS.md`, rows 916-1 to 916-6, 916-10, 916-11 and
+    /// 916-15). They restore the arena path with the end-of-block copy, which only the
+    /// output-slot check sees. They write the Output op's master to the arena and skip the host,
+    /// install every folded Output master as an arena master, and read the fan-in-one input from
+    /// the other plane. They identify the Output op by buffer index, stop withholding the redirect
+    /// into the Output op, and fill the planes on success. They undedicate the Output, and point
+    /// its observers at the arena.
+    #[test]
+    fn the_host_planes_are_the_arena_oracles_master_bit_for_bit_at_every_stride() {
+        const BLOCKS: u64 = 4;
+        for shape in HostShape::ALL {
+            let frames = shape.frames() as usize;
+            for stride in [frames, frames + 7] {
+                let (oracle_published, published) = (Published::default(), Published::default());
+                let (mut oracle, oracle_program) = shape.bind(true, &oracle_published);
+                let (mut candidate, program) = shape.bind(false, &published);
+                assert_eq!(program, oracle_program, "{shape:?}: one lowered program");
+                let redirects = match shape {
+                    // The oracle takes the redirect into the Output op; the host-plane plan
+                    // withholds it and changes nothing else.
+                    HostShape::BankIntoOutput => 1,
+                    _ => shape.shape()[1],
+                };
+                assert_eq!(
+                    [
+                        candidate.runtime.route_folds(),
+                        candidate.runtime.scatter_redirects()
+                    ],
+                    shape.shape(),
+                    "{shape:?}: [route folds, scatter redirects]"
+                );
+                assert_eq!(
+                    [
+                        oracle.runtime.route_folds(),
+                        oracle.runtime.scatter_redirects()
+                    ],
+                    [shape.shape()[0], redirects],
+                    "{shape:?}: the oracle's [route folds, scatter redirects]"
+                );
+                {
+                    use engine::realtime::PreparedPlanExecutor as _;
+                    assert_eq!(candidate.bank_shape(), oracle.bank_shape(), "{shape:?}");
+                }
+                let unit = candidate.runtime.output_unit.expect("an Output unit");
+                assert!(
+                    matches!(&candidate.runtime.units[unit], RuntimeUnit::Op(op) if op.output == output_slot(&program)),
+                    "{shape:?}: the Output unit runs the op that owns the output slot"
+                );
+                let mut masters = Vec::new();
+                for block in 0..BLOCKS {
+                    let first_sample = block * frames as u64;
+                    fill_output_slot(&mut oracle, &oracle_program);
+                    fill_output_slot(&mut candidate, &program);
+                    let mut expected = vec![f32::from_bits(HOST_PAD); 2 * stride];
+                    let before_master = render_arena_oracle(
+                        &mut oracle,
+                        &oracle_program,
+                        engine::realtime::PlanarBufferMut::try_new(
+                            &mut expected,
+                            2,
+                            frames,
+                            stride,
+                        )
+                        .expect("oracle output"),
+                        first_sample,
+                    );
+                    let mut actual = vec![f32::from_bits(HOST_PAD); 2 * stride];
+                    render_host(
+                        &mut candidate,
+                        engine::realtime::PlanarBufferMut::try_new(&mut actual, 2, frames, stride)
+                            .expect("host output"),
+                        first_sample,
+                    )
+                    .expect("host-plane render");
+                    let bits =
+                        |words: &[f32]| words.iter().map(|word| word.to_bits()).collect::<Vec<_>>();
+                    assert_eq!(
+                        bits(&actual),
+                        bits(&expected),
+                        "{shape:?}, stride {stride}, block {block}: the host planes are the oracle's"
+                    );
+                    for (index, word) in actual.iter().enumerate() {
+                        if index % stride >= frames {
+                            assert_eq!(
+                                word.to_bits(),
+                                HOST_PAD,
+                                "{shape:?}, stride {stride}, block {block}: padding word {index}"
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        stereo_bits(candidate.runtime.buffer(output_slot(&program))),
+                        before_master,
+                        "{shape:?}, stride {stride}, block {block}: the output slot was written"
+                    );
+                    let master: Vec<u32> = actual[..frames]
+                        .iter()
+                        .chain(&actual[stride..stride + frames])
+                        .map(|word| word.to_bits())
+                        .collect();
+                    assert!(
+                        master.iter().any(|word| *word != 0 && *word != HOST_PAD),
+                        "{shape:?}: the block carries audio"
+                    );
+                    masters.push(master);
+                }
+                let frames_of = |published: &Published| published.lock().unwrap().clone();
+                let (oracle_frames, frames_seen) =
+                    (frames_of(&oracle_published), frames_of(&published));
+                assert_eq!(
+                    frames_seen, oracle_frames,
+                    "{shape:?}, stride {stride}: every observer window is the oracle's"
+                );
+                let output_windows: Vec<&MeterFrame> = frames_seen
+                    .iter()
+                    .filter(|frame| frame.handle >= OUTPUT_METER_HANDLE)
+                    .collect();
+                assert_eq!(
+                    output_windows.len(),
+                    2 * BLOCKS as usize,
+                    "{shape:?}: both Output meters saw every block"
+                );
+                for window in output_windows {
+                    let block = (window.first_sample / frames as u64) as usize;
+                    let seen: Vec<u32> = window.left.iter().chain(&window.right).copied().collect();
+                    assert_eq!(
+                        seen, masters[block],
+                        "{shape:?}: an Output meter reads the planes the host receives"
+                    );
+                }
+            }
+        }
     }
 
     /// `t00 Input -> Output`, and with `read_output` also `Output -> t01 PostFader`: a hand-built

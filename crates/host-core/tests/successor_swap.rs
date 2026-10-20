@@ -8921,6 +8921,72 @@ fn compensated_submix_lines_keep_their_audio_at_every_rate_and_width() {
     }
 }
 
+/// Two submixes, each with a limited and an unlimited track: `eq0` (limited) and `eq1` into
+/// `bus1`, `eq3` (limited) and `eq2` into `bus2`. Both unlimited routes carry a line.
+fn two_bus_session(rate: u32, silent: Option<&str>) -> SessionModel {
+    let mut model = pdc_session(rate, &["eq0", "eq3"]);
+    add_bus(&mut model, "bus1");
+    add_bus(&mut model, "bus2");
+    send_route_to(&mut model, "eq0", "bus1");
+    send_route_to(&mut model, "eq1", "bus1");
+    send_route_to(&mut model, "eq2", "bus2");
+    send_route_to(&mut model, "eq3", "bus2");
+    if let Some(track) = silent {
+        model = with_mute(model, track, true);
+    }
+    model
+}
+
+/// Gate 4: B re-points `eq1`'s route from `bus1` to `bus2`. The route keeps its ID and gets
+/// another destination, so its line does not carry and its strip is not restarted.
+///
+/// With `eq1` muted in both sessions the re-pointed line holds only zeros, so the run equals B
+/// from frame 0 exactly when every other line carried: `eq2`'s line into `bus2` is the one that
+/// does. With `eq1` playing, the new route's line starts at rest and the swap block misses the
+/// audio B's line holds: red if the line followed the route ID into the other bus, where it
+/// would play the old pending audio and match B.
+fn a_repointed_route_does_not_carry_its_line(backend: Backend, rate: u32) {
+    let what = format!("{backend:?} at {rate} Hz");
+    let feed = Feed::new(SOURCE, 1);
+    for silent in [Some("eq1"), None] {
+        let a_model = two_bus_session(rate, silent);
+        let mut b_model = a_model.clone();
+        send_route_to(&mut b_model, "eq1", "bus2");
+        let (a, b) = (Session::compile(a_model), Session::compile(b_model));
+        let (run, reference) = pdc_runs(&a, &b, &feed, backend, &what);
+        assert_eq!(
+            run.restarted,
+            Vec::<Box<str>>::new(),
+            "{what}: the re-pointed route's strip keeps its state"
+        );
+        // Before the swap A renders, and A routes `eq1` through the other bus.
+        let difference = run.blocks[SWAP_BLOCK..]
+            .iter()
+            .zip(&reference.blocks[SWAP_BLOCK..])
+            .position(|(swapped, fresh)| swapped != fresh);
+        if silent.is_some() {
+            assert_eq!(
+                difference, None,
+                "{what}: every other line carried, and the re-pointed one held silence"
+            );
+        } else {
+            assert!(
+                difference.is_some(),
+                "{what}: the new route's line starts at rest, so B's audio is missing after the swap"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_repointed_route_does_not_carry_its_line_at_every_rate_and_width() {
+    for backend in backends() {
+        for rate in PDC_RATES {
+            a_repointed_route_does_not_carry_its_line(backend, rate);
+        }
+    }
+}
+
 // Issue #1285 (slice 15 of #1269): latency floors. A successor is compiled with every node's
 // input arrival in its predecessor as a floor, so removing a latent effect, or the track that
 // holds it, moves no surviving path in time: every compensation line keeps its length and carries.
@@ -10193,6 +10259,82 @@ mod spectrum_carry {
                     .all(|(a, b)| a.to_bits() == b.to_bits()),
             "{label}: the planes equal the reference's bit for bit"
         );
+    }
+
+    /// Gate 1: a continuous capture keeps reading, window for window, across the swap.
+    #[test]
+    fn a_continuous_capture_carries_and_its_reader_keeps_receiving() {
+        let (a, b) = sessions();
+        let request = stereo_post_matrix();
+        let expected = reference(&b, &request, Drive::Stream);
+        let run = swapped(
+            &a,
+            &request,
+            &b,
+            &request,
+            Drive::Stream,
+            Promote::AsReported,
+        );
+        assert_eq!(run.blocks[SWAP].carry, CarryOutcome::Carried);
+        assert_eq!(run.blocks[SWAP].swap, SwapOutcome::Applied);
+        assert_eq!(
+            run.pairing,
+            vec![SpectrumPair {
+                successor: 0,
+                predecessor: 0
+            }]
+        );
+        assert_eq!(
+            run.record,
+            vec![ObserverCarry {
+                kind: ObserverKind::Spectrum,
+                successor: 0,
+                predecessor: 0
+            }],
+            "the swap block moved exactly the observers the control side's list pairs"
+        );
+
+        let reads = &run.driver.reads;
+        assert_eq!(reads.len(), TOTAL);
+        let first_ready = reads
+            .iter()
+            .position(|read| read.status == SpectrumStreamStatus::Ready)
+            .expect("the stream produces before the swap");
+        assert!(first_ready < SWAP, "a window is complete before the swap");
+        let mut next_sequence = 0;
+        let mut spanning = false;
+        let mut after_swap = 0;
+        for (block, (got, want)) in reads.iter().zip(&expected.reads).enumerate() {
+            assert_eq!(got.status, want.status, "block {block}: status");
+            if block > first_ready {
+                assert!(
+                    matches!(
+                        got.status,
+                        SpectrumStreamStatus::Ready | SpectrumStreamStatus::Pending
+                    ),
+                    "block {block}: no Failed, Gap or Warming after the stream first produced, got {:?}",
+                    got.status
+                );
+            }
+            match (&got.window, &want.window) {
+                (Some(got), Some(want)) => {
+                    assert_same_window(got, want, &format!("block {block}"));
+                    assert_eq!(got.sequence, next_sequence, "block {block}: no gap");
+                    assert_eq!(got.stream_epoch, 1, "block {block}: the epoch never moved");
+                    next_sequence += 1;
+                    spanning |= got.first_sample < SWAP_SAMPLE
+                        && got.end_sample().expect("end") > SWAP_SAMPLE;
+                    after_swap += usize::from(block >= SWAP);
+                }
+                (None, None) => {}
+                _ => panic!("block {block}: a window on one side only"),
+            }
+        }
+        assert!(
+            spanning,
+            "a window spans the swap, or the carry is not tested"
+        );
+        assert!(after_swap >= 3, "the reader keeps receiving after the swap");
     }
 
     /// Without the pairing the host reads the predecessor's capture, whose observer sits in the
