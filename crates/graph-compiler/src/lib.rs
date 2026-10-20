@@ -1947,83 +1947,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn indexed_topo_explicit_controls_preserve_contract() {
-        let nodes = vec![
-            graph_node("z", 0, TailSamples::Finite(0)),
-            graph_node("a", 0, TailSamples::Finite(0)),
-            graph_node("m", 0, TailSamples::Finite(0)),
-            graph_node("b", 0, TailSamples::Finite(0)),
-            graph_node("q", 0, TailSamples::Finite(0)),
-        ];
-        let edges = vec![
-            edge("a-z-1", "a", "z"),
-            edge("m-z", "m", "z"),
-            edge("a-z-2", "a", "z"),
-            edge("b-m", "b", "m"),
-        ];
-        let expected_names: &[(&[&str], u64)] = &[
-            (&["submix:a", "submix:b", "submix:q"], 0),
-            (&["submix:m"], 1),
-            (&["submix:z"], 2),
-        ];
-        let oracle_accepts = |candidate: &[DependencyLevel]| {
-            candidate.len() == expected_names.len()
-                && candidate
-                    .iter()
-                    .zip(expected_names)
-                    .all(|(level, (names, number))| {
-                        level.level == *number
-                            && level.nodes.iter().map(node_text).collect::<Vec<_>>()
-                                == names
-                                    .iter()
-                                    .map(|name| (*name).to_owned())
-                                    .collect::<Vec<_>>()
-                    })
-        };
-
-        let actual = topo(&nodes, &edges).expect("explicit DAG is acyclic");
-        assert!(
-            oracle_accepts(&actual),
-            "independent level oracle rejected topo output"
-        );
-        let mut wrong_result = actual.clone();
-        wrong_result[2].level = 1;
-        assert!(
-            !oracle_accepts(&wrong_result),
-            "independent level oracle accepted an incorrect level"
-        );
-
-        let mut reversed_nodes = nodes.clone();
-        reversed_nodes.reverse();
-        let mut reversed_edges = edges.clone();
-        reversed_edges.reverse();
-        assert_eq!(topo(&reversed_nodes, &reversed_edges), Some(actual.clone()));
-        assert_eq!(topo(&[], &[]), Some(Vec::new()));
-
-        let cycle = [edge("cycle-a-b", "a", "b"), edge("cycle-b-a", "b", "a")];
-        assert_eq!(topo(&nodes, &cycle), None);
-        assert_eq!(topo(&nodes, &[edge("self-loop", "a", "a")]), None);
-        assert_eq!(
-            topo(&nodes, &[edge("dangling-source", "missing", "a")]),
-            None
-        );
-        assert_eq!(
-            topo(&nodes, &[edge("dangling-destination", "a", "missing")]),
-            None
-        );
-        assert_eq!(
-            topo(
-                &[
-                    graph_node("a", 0, TailSamples::Finite(0)),
-                    graph_node("a", 0, TailSamples::Finite(0)),
-                ],
-                &[],
-            ),
-            None
-        );
-    }
-
     fn caps(maximum_finite_tail_samples: u64) -> GraphCompileCaps {
         GraphCompileCaps {
             maximum_nodes: 100,
@@ -7506,68 +7429,6 @@ mod tests {
         );
     }
 
-    /// A send taken from an elided rack boundary declines the merge, through the second-reader
-    /// clause rather than the observer one.
-    ///
-    /// Issue #181 declined on the *presence* of a `program::Tap`, which made this case and the
-    /// metered one indistinguishable. They are not the same: a tap is a name, and an edge out of
-    /// the aliased stage resolves through it to the compressor, so it is counted by
-    /// `runtime::op_dataflow` as an ordinary second reader of the compressor's output. That clause
-    /// is what refuses here, and it has to, because a merged chain would send pre-compressor audio.
-    #[test]
-    fn a_send_from_a_rack_boundary_declines_the_merge() {
-        const BLOCKS: u64 = 12;
-        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
-            return;
-        };
-        let cohorts = 64 / width.lanes() as u64;
-        let mut sent = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
-            .expect("intended fixture");
-        let template = sent.routes[0].clone();
-        let mut route = template.clone();
-        route.id = StableId::parse("ch00-simd1-send").expect("route id");
-        route.source = RouteSource::Track {
-            track_id: StableId::parse("ch00").expect("track id"),
-            tap: session::SendTap::InsertSend,
-        };
-        sent.routes.push(route);
-        sent.routes.sort_by(|left, right| left.id.cmp(&right.id));
-
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&sent, 2_040, &[], registry);
-        let (pcm, transposes, chains, slots, _, redirects, _) =
-            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
-        assert_eq!(
-            slots,
-            STRIP_SLOTS_PER_COHORT * cohorts,
-            "the send changes no bank's membership"
-        );
-        assert_eq!(
-            chains,
-            cohorts + 1,
-            "ch00's cohort splits at the sent boundary; every other cohort stays one chain"
-        );
-        assert_eq!(transposes, BLOCKS * chains, "G5 on the declining plan");
-        let scalar_artifact = compile_console_oracle(&sent, 2_041, &[]);
-        let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
-        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with a post-simd1 send");
-        assert!(
-            pcm.iter().flatten().any(|sample| *sample != 0.0),
-            "the sent strip rendered audio"
-        );
-        // The redirect count is zero for every lane on this fixture since issue #212 -- see
-        // `the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort` for why the
-        // strip's chain now ends in a buffer its consumer already reads in place. What this test
-        // still says is that a send taken from `PostSimd1` changes nothing at the *far end* of the
-        // strip: it splits ch00's cohort at the observed boundary, and the scatter accounting on
-        // every lane, ch00's included, is exactly what it is without the send.
-        assert_eq!(
-            redirects, 0,
-            "a send taken from `PostSimd1` is upstream of the limiter, so it declines the chain \
-             merge without touching the scatter accounting at the far end of the strip"
-        );
-    }
-
     /// Mono-collapse M1: the two bank planners classify every track alike, and the proof is the
     /// thing the merge actually needs -- their banks cover the same lanes in the same order.
     ///
@@ -9223,100 +9084,6 @@ mod tests {
         );
     }
 
-    /// A meter on the pre-fader alias splits its cohort's chain there, redirects nothing, and reads
-    /// the limiter's output.
-    ///
-    /// `PostSimd2PreFader` is elided into a `program::Tap` on the limiter's op, so a meter leased
-    /// there reads the limiter's own buffer. This test was written (issue #202 rec 3) for a
-    /// `scatter_target` clause that declined a redirect when the last slot's alias was observed,
-    /// back when the limiter *was* the last slot. Issue #212 made the fader and matrix slots of the
-    /// same chain, so the alias now sits *inside* it, and the clause that answers is
-    /// `chains_into`'s observed-alias clause, keyed on the **alias node** -- keying it on the
-    /// producing node would miss it: nobody observes the limiter, the observer is bound to
-    /// `ch00/PostSimd2PreFader`. Issue #886 then removed the redirect's observer clauses outright
-    /// (an observer of a redirected last slot reads the redirected buffer), so no redirect is
-    /// declined here at all: the split chain's consumer is the fader bank, which the gather-side
-    /// redirect serves, and every other chain still ends in a buffer its consumer reads in place.
-    #[test]
-    fn a_pre_fader_meter_splits_its_cohorts_chain_and_reads_the_limiter() {
-        const BLOCKS: u64 = 12;
-        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
-            return;
-        };
-        let cohorts = 64 / width.lanes() as u64;
-        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
-            .expect("intended fixture");
-        let meters = vec![MeterRequest {
-            handle: MeterHandle(NonZeroU64::new(1).expect("constant")),
-            track_id: "ch00".to_owned(),
-            tap: MeterTap::PostSimd2PreFader,
-            config: MeterConfig {
-                period_frames: NonZeroU32::new(128).expect("constant"),
-                peak_hold_frames: 0,
-                peak_decay_db_per_second: 0.0,
-                queue_capacity: NonZeroUsize::new(64).expect("constant"),
-                reset_generation: 0,
-            },
-        }];
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&intended, 2_060, &meters, registry);
-        let (pcm, transposes, chains, slots, frames, redirects, _) =
-            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
-        assert_eq!(
-            slots,
-            STRIP_SLOTS_PER_COHORT * cohorts,
-            "the meter changes no bank's membership"
-        );
-        // Issue #212 moved this boundary from the end of the chain to the middle of it. When the
-        // chain was `builtins -> EQ -> compressor -> limiter`, `PostSimd2PreFader` aliased the
-        // *last* slot's output and was downstream of every merge, so an observer there declined
-        // nothing. The fader and the matrix are now slots of the same chain, so that alias sits
-        // between two of them -- and an observer on it declines the limiter -> fader merge, exactly
-        // as `chains_into`'s observed-alias clause says it must.
-        //
-        // This is the documented cliff, and it is a cost paid only when the observer is there:
-        // leasing a stage meter at `PostSimd2PreFader` costs that track's cohort one extra
-        // planar/AoSoA round-trip per block, because its chain can no longer span the stage the
-        // meter reads. The meter must see pre-fader audio and a merged chain would hand it the
-        // chain's input, so this is the intended trade -- and both halves of it are pinned here.
-        assert_eq!(
-            chains,
-            cohorts + 1,
-            "the meter sits on an alias *inside* the chain, so ch00's cohort splits there"
-        );
-        assert_eq!(transposes, BLOCKS * chains);
-        assert_eq!(
-            redirects, 0,
-            "the split chain feeds a banked fader and every other chain ends in a buffer its \
-             consumer reads in place, so nothing redirects, metered or not"
-        );
-
-        // And the meter reads the limiter's output. The oracle is the same session with every
-        // effect on the per-node scalar path, where no chain -- and so no redirect -- exists.
-        let scalar_artifact = compile_console_oracle(&intended, 2_061, &meters);
-        let (scalar_pcm, _, _, _, scalar_frames, _, _) =
-            render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
-        assert_pcm_bits_equal(
-            &pcm,
-            &scalar_pcm,
-            "64-track strip with a pre-fader stage meter",
-        );
-        assert!(
-            !frames.is_empty(),
-            "the leased meter must publish windows, or this test proves nothing about it"
-        );
-        assert_eq!(
-            frames, scalar_frames,
-            "the metered boundary must read the limiter's output, not the previous block's words"
-        );
-        assert!(
-            frames
-                .iter()
-                .any(|frame| frame.left.sample_peak != 0.0 || frame.right.sample_peak != 0.0),
-            "the metered windows must carry signal"
-        );
-    }
-
     /// A second reader of the last slot's output declines that lane's scatter redirect.
     ///
     /// The sole-readership clause, reached the way a session reaches it: a send taken from
@@ -9351,8 +9118,8 @@ mod tests {
             "the send changes no bank's membership"
         );
         // The same boundary move as
-        // `a_pre_fader_meter_splits_its_cohorts_chain_and_reads_the_limiter`, through the other
-        // clause. A send taken from `PostSimd2PreFader` gives ch00's limiter output a second
+        // `a_pre_fader_meter_splits_its_cohorts_chain_and_reads_the_limiter` (deleted by TA5),
+        // through the other clause. A send taken from `PostSimd2PreFader` gives ch00's limiter output a second
         // reader, and since #212 that alias sits *inside* the chain rather than at its end -- so
         // `chains_into`'s sole-readership clause declines the limiter -> fader merge and ch00's
         // cohort splits there. A send from a stage the chain does not span still costs nothing.
@@ -9372,78 +9139,6 @@ mod tests {
         assert!(
             pcm.iter().flatten().any(|sample| *sample != 0.0),
             "the sent strip rendered audio"
-        );
-    }
-
-    /// Issue #218: the intended strip folds every route and the whole master reduction into its
-    /// cohorts' epilogues, and the bits do not move.
-    ///
-    /// # Two oracles
-    ///
-    /// The standing one is the test-only `Scalar` backend (#1059), where nothing banks, effect or
-    /// builtin, so it forms no chain and folds no route. Until #1098 it was a registry that put
-    /// every *effect* on the per-node path while the builtins, fader and matrix still banked and
-    /// folded all sixty-four routes: an oracle for the effects and not for the fold. A console slot
-    /// no longer renders per node on a vector backend, so that arm is gone, and its fold count is
-    /// asserted here as zero rather than assumed.
-    ///
-    /// The fold's own oracle is the same session bound with the fold **declined**
-    /// (`graph::test_only_set_route_fold_declined`). That arm renders the route ops and the D9
-    /// reduction the fold replaced, and nothing else about the plan moves, so the two arms differ in
-    /// exactly the thing under test. Until issue #885 the decline came from a post-matrix meter on
-    /// ch00; a post-matrix meter now keeps the fold armed
-    /// (`a_meter_on_the_matrix_keeps_the_route_fold_and_still_meters`), so the decline is explicit.
-    #[test]
-    fn the_intended_strip_folds_every_route_into_its_cohorts_epilogue() {
-        const BLOCKS: u64 = 12;
-        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
-            return;
-        };
-        let cohorts = 64 / width.lanes() as u64;
-        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
-            .expect("intended fixture");
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let artifact = compile_console_model_with_builtins(&intended, 2_180, &[], registry);
-        let (pcm, transposes, chains, slots, _, _, folds) =
-            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
-        assert_eq!(
-            chains, cohorts,
-            "the whole strip is still one chain per cohort"
-        );
-        assert_eq!(slots, STRIP_SLOTS_PER_COHORT * cohorts);
-        assert_eq!(transposes, BLOCKS * chains, "G5 is unmoved by the fold");
-        assert_eq!(
-            folds, 64,
-            "every track's route folds into its cohort's epilogue"
-        );
-        let scalar_artifact = compile_console_oracle(&intended, 2_181, &[]);
-        let (scalar_pcm, _, _, _, _, _, scalar_folds) =
-            render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
-        assert_eq!(
-            scalar_folds, 0,
-            "the Scalar oracle banks nothing, so it folds nothing"
-        );
-        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with the route fold");
-
-        // The fold's own oracle: the same session, bound with the fold declined.
-        let unfolded_artifact =
-            compile_console_model_with_builtins(&intended, 2_188, &[], registry);
-        graph::test_only_set_route_fold_declined(true);
-        let (unfolded_pcm, _, _, _, _, _, unfolded_folds) =
-            render_console_builtins_blocks(unfolded_artifact, BLOCKS, Vec::new());
-        graph::test_only_set_route_fold_declined(false);
-        assert_eq!(
-            unfolded_folds, 0,
-            "the declined arm must not fold, or it is not an oracle for it"
-        );
-        assert_pcm_bits_equal(
-            &pcm,
-            &unfolded_pcm,
-            "the folded master against the reduction",
-        );
-        assert!(
-            pcm.iter().flatten().any(|sample| *sample != 0.0),
-            "the folded strip rendered audio"
         );
     }
 

@@ -459,20 +459,9 @@ it names, the named tests run, and the source restored.
 |---|---|---|---|
 | 1328-M4 | the rest threshold always armed (attempt 3's law: `silence_step` returns `REST_EPS`, `silence_armable` always true) | `exact_rest::a_sparse_input_through_four_boosting_shelves_gets_every_boost_at_every_rate` (`44100 Hz, 10 Hz shelves, period 2 … misses the ordinary run by 1.102885e3`), `a_tiny_input_through_four_boosting_shelves_gets_every_boost`, `an_exact_zero_inside_the_cascade_moves_nothing_while_the_input_is_live` | RED |
 | 1328-M5 | A8's law: armed by a zero *section* input (thresholds from `v0 == 0` in `svf_step_when`, every block armable) | the sparse gate (`… misses the ordinary run by 1.0375549e3`) and the cancellation gate (`DC at 1e-6 … misses the ordinary run by 6.996817e-5 … (peak 7.826055e3)`); the chain gate stays green | RED |
-| 1328-M6 | `Channel::commit_track` drops the restored silence word | `carry::a_restore_mid_silence_arms_the_joint_flush_on_the_continuing_lanes_frame`, `carry::a_malformed_silence_word_is_refused` | RED |
+| 1328-M6 | `Channel::commit_track` drops the restored silence word | `carry::a_restore_mid_silence_arms_the_joint_flush_on_the_continuing_lanes_frame` (deleted by TA5; catcher `a_malformed_silence_word_is_refused`), `carry::a_malformed_silence_word_is_refused` | RED |
 | 1328-M7 | `desymmetrize` drops `self.right.silence = self.left.silence` | `mono_collapse::a_desymmetrized_bank_carries_the_collapsed_channels_silence_counter` | RED |
 | 1328-M8 | the silent fast path earned without every lane armed (`quiet && (armed \|\| true)`) | `exact_rest::a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms` | RED |
 | 1328-M9 | the silent fast path skips without `silence_advance` | the same test (`the silence counter after 68 silent blocks`) | RED |
 | 1328-M10 | `rest_plane`'s unarmed branch returns the last written plane instead of the unarmed one | the sparse gate (its train starts after armed silence) | RED |
 | 1328-M11 | `lane_is_inert` without its pair term | `elision::a_non_inert_state_in_a_dead_section_refuses_elision`, `exact_rest::a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms` | RED |
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `automation_is_partition_invariant`: no plausible same-crate KEEP catcher recorded
-- `every_width_matches_the_scalar_instantiation`: no plausible same-crate KEEP catcher recorded
-- `the_collapsed_body_renders_the_dual_bodys_left_plane`: no plausible same-crate KEEP catcher recorded
-- `disabled_cuts_preserve_all_high_pass_signed_zero_against_four_section_oracle`: parametric-eq `elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag`
-- `a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands`: parametric-eq `elision::a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag`
-- `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample`: no plausible same-crate KEEP catcher recorded

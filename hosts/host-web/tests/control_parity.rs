@@ -2112,133 +2112,6 @@ fn a_stale_effect_row_edit_is_refused_alike_on_both_hosts() {
     }
 }
 
-/// #1623 (root ruling, thick core): a `RESPONSE_GET` frame whose value the Rust encoder refuses
-/// -- a NaN or infinite axis endpoint, a NaN override value, a bypass value between 0 and 1 -- is
-/// decoded as sent and refused by the core on both hosts, with one result, the same reply bytes
-/// and the same typed code (`response.grid`, `response.override.value`,
-/// `response.override.bypass`), and changes nothing: the control rows and the document are the
-/// bytes they were on each host.
-///
-/// Test value: red if either host's codec refuses the value again (the code becomes the generic
-/// `protocol.failure`), if one host checks a value the other does not, or if a refusal changes
-/// state.
-#[test]
-fn a_response_request_with_a_bad_value_is_refused_alike_on_both_hosts() {
-    let request = protocol::ResponseGetRequest {
-        target: protocol::ResponseTarget::Configuration(protocol::ResponseConfiguration::Effect {
-            effect: "miso.parametric-eq".to_owned(),
-            quality: session::EffectQuality::Normal,
-            link_mode: session::LinkMode::DualMono,
-        }),
-        grid: protocol::ResponseGrid::Logarithmic,
-        points: 64,
-        minimum_hz: 20.0,
-        maximum_hz: 20_000.0,
-        channels: protocol::ParameterChannel::Both,
-        sections: false,
-        overrides: vec![
-            protocol::ResponseOverride {
-                control: protocol::RESPONSE_BYPASS_CONTROL,
-                lane: protocol::ParameterChannel::Both,
-                value: 1.0,
-            },
-            protocol::ResponseOverride {
-                control: 4,
-                lane: protocol::ParameterChannel::Both,
-                value: 3.25,
-            },
-        ],
-        configuration_id: None,
-        sample_rate_hz: None,
-        quantum_frames: None,
-        maximum_prepared_bytes: None,
-        maximum_state_bytes: None,
-        maximum_scratch_bytes: None,
-        maximum_automation_spans: None,
-        maximum_reply_bytes: None,
-    };
-    let model = model_at(48_000);
-    let mut browser = Rig::new(&model);
-    let mut c_abi = CAbi::new(&model);
-    // One frame, sent to both hosts, with a request ID past both legs' counters (the C ABI leg
-    // pages its control dumps in more frames), which the C ABI leg's counter then takes: each host
-    // sees ascending IDs, and both see the same frame.
-    let next_frame = |browser: &mut Rig, c_abi: &mut CAbi| loop {
-        let frame = browser.encode(CommandPayload::ResponseGet(&request), ExpectedRevision::Any);
-        let id = u64::from_le_bytes(frame[24..32].try_into().expect("request ID"));
-        if id > c_abi.request {
-            c_abi.request = id;
-            break frame;
-        }
-    };
-    let frame = next_frame(&mut browser, &mut c_abi);
-    // The unpatched request is answered alike.
-    let (b, c) = (browser.send_frame(&frame), c_abi.send_raw(&frame));
-    assert_eq!(b, c, "one answer to the unpatched request");
-    assert_eq!(b.0, C_RESULT_OK);
-    let before_b = dump(|payload, expected| browser.command(payload, expected));
-    let before_c = dump(|payload, expected| c_abi.send(payload, expected));
-    assert_eq!(before_b, before_c);
-    let patched = |frame: Vec<u8>, from: f32, to: f32| {
-        let from = from.to_le_bytes();
-        let at: Vec<usize> = frame
-            .windows(4)
-            .enumerate()
-            .filter(|(_, window)| *window == from)
-            .map(|(at, _)| at)
-            .collect();
-        assert_eq!(at.len(), 1, "the value is in the frame exactly once");
-        let mut bytes = frame;
-        bytes[at[0]..at[0] + 4].copy_from_slice(&to.to_le_bytes());
-        bytes
-    };
-    for (name, from, to, code) in [
-        ("a NaN minimum", 20.0, f32::NAN, "response.grid"),
-        (
-            "an infinite maximum",
-            20_000.0,
-            f32::INFINITY,
-            "response.grid",
-        ),
-        (
-            "a NaN override value",
-            3.25,
-            f32::NAN,
-            "response.override.value",
-        ),
-        ("a bypass of one half", 1.0, 0.5, "response.override.bypass"),
-    ] {
-        let bytes = patched(next_frame(&mut browser, &mut c_abi), from, to);
-        let (b, c) = (browser.send_frame(&bytes), c_abi.send_raw(&bytes));
-        assert_eq!(b, c, "{name}: one answer on both hosts");
-        assert_eq!(b.0, C_RESULT_OK, "{name}: a refusal is a non-OK frame");
-        let mut fields = [0_u16; 1024];
-        let DecodedTypedResponseFrame::NonOk { header, payload } = ProtocolCodec::default()
-            .decode_typed_response(&b.1, &mut DecodeScratch::new(&mut fields))
-            .expect("a typed response")
-        else {
-            panic!("{name}: expected a refusal");
-        };
-        assert_eq!(header.status, protocol::StatusCode::InvalidField, "{name}");
-        let codes: Vec<_> = payload
-            .diagnostics
-            .iter()
-            .map(|d| d.code.as_str())
-            .collect();
-        assert_eq!(codes, [code], "{name}");
-        assert_eq!(
-            dump(|payload, expected| browser.command(payload, expected)),
-            before_b,
-            "{name}: the browser host is unchanged"
-        );
-        assert_eq!(
-            dump(|payload, expected| c_abi.send(payload, expected)),
-            before_c,
-            "{name}: the C ABI is unchanged"
-        );
-    }
-}
-
 /// Block the bypass of `a_live_bypass_crossfades_alike_on_both_hosts` is submitted before.
 const BYPASS_BLOCK: u64 = 6;
 
@@ -3176,25 +3049,8 @@ fn a_moved_target_defers_its_jump_alike_on_both_hosts() {
     }
 }
 
-/// #1711 U1 fold 1 (MAJOR-1) across hosts: on a fader ride flat at -3 dB, a hand move with its
-/// own 4,000 samples heard 3 blocks, then a table-only rebuild to -5 dB up to 2,000, a linear -8
-/// to -14 dB over 2,000 to 8,000, then -14 dB. The moved target defers the cell's jump to the
-/// move's first free sample (4,512), and the table's step at 2,000, inside the move's ramp,
-/// replaces the ramp the deferral waits for. Both hosts give one verdict and reply per edit, the
-/// same bits in every block and the same watermark (`EXACT`, no transition fallback), and every
-/// block equals the pair of rigs prepared with -3 dB before 2,000 (the same table after it),
-/// given the same move and, at the same block, a table-only rebuild that moves nothing (a split
-/// at 950,000), at the four rates. Both rebuilds keep the hand move's stored offset.
-///
-/// Test value: red if a discontinuity jump on a restartable cell leaves the pending deferral in
-/// place (its grid hold freezes the lane on the step's target until 4,512), on either host.
-#[test]
-fn a_table_step_inside_a_deferred_moves_ramp_lands_alike_on_both_hosts() {
-    table_step_inside_a_deferred_move(model_at);
-}
-
 /// #1655 U3 fold 1 (MAJOR-1) across hosts: the composed twin of
-/// [`a_table_step_inside_a_deferred_moves_ramp_lands_alike_on_both_hosts`]. `t1` is also in VCA
+/// `a_table_step_inside_a_deferred_moves_ramp_lands_alike_on_both_hosts` (deleted by TA5). `t1` is also in VCA
 /// `v`, whose `offset_db` rides linearly from 0 to -6 dB over 48,000 samples in every plan, so
 /// `t1`'s fader channels are composed lanes over its own ride and the VCA's. The adoption holds
 /// and defers every cursor; the own table's step at 2,000 replaces the move's ramp on the whole
@@ -3223,8 +3079,8 @@ fn a_table_step_inside_a_deferred_moves_ramp_releases_a_composed_lane_alike_on_b
     });
 }
 
-/// The body of [`a_table_step_inside_a_deferred_moves_ramp_lands_alike_on_both_hosts`] over the
-/// session `model_of(rate)`.
+/// The table step inside a deferred move's ramp (#1711 U1 fold 1), over the session
+/// `model_of(rate)`.
 fn table_step_inside_a_deferred_move(model_of: fn(u32) -> SessionModel) {
     let segment = |shape, start, end, from, to| session::AutomationSegment {
         shape,

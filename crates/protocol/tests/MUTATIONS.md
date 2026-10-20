@@ -46,9 +46,3 @@ Driver: a scratch script (PR evidence, not committed), one mutation at a time on
 | M7 | the console decoder reads `pre_insert` from the `post_insert` field | `session_wire.rs` | `console_declaration_and_track_entry_opcodes_round_trip_canonically` and the three above |
 | M8 | `ConsoleSlotFixed` reported as `session.edit.not_found` | `controller.rs` | `retired_and_console_refused_codes_meet_their_conformance_rows` |
 | M9 | `SetTrackConsole` writes the first track's entries | `model.rs` | `every_console_edit_round_trips_...`, `a_slot_set_change_that_skips_a_track_refuses_whole` |
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `a_slot_set_change_that_skips_a_track_is_never_acknowledged`: protocol `console_session_edits::a_slot_set_change_that_skips_a_track_refuses_whole`

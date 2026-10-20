@@ -54,7 +54,7 @@ six-word. Costs and limits:
 
 The conservative flag: `PlanStateInventory::carries_a_following_route_into_a_six_word_route`, its
 field and its join line, the control plane's `follow_into_six_word` term, and the gates
-`a_rebuild_that_drops_a_following_route_to_six_words_reports_a_fallback` (capi),
+`a_rebuild_that_drops_a_following_route_to_six_words_reports_a_fallback` (capi; deleted by TA5),
 `a_rebuild_that_drops_a_following_route_to_six_words_reports_the_fallback_alike` (host-web) and
 `the_join_flags_a_following_route_carried_into_a_six_word_one` (host-core), replaced by gate 3.
 

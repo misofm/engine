@@ -372,7 +372,7 @@ it; the count exists beside the digests for the same reason `minmax_lowering_mis
 ## Issue #954 — the select-free fused fader/matrix kernel
 
 `fader_matrix_block_without_identity` is `fader_matrix_block`'s second arm with no `L::select` in
-the body. Gate 1, `select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity`
+the body. Gate 1, `select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity` (deleted by TA5; catcher builtins `fused_fader_matrix_shapes_match_the_separate_stages`)
 (`tests/fader_matrix.rs`), holds it equal to two oracles with no identity lane: oracle A is
 `fader_matrix_block` with an all-false mask, oracle B is `gain_mute_block` on each plane followed by
 `matrix2x2_block_without_identity`. It covers five input families (the four hostile ones and an
@@ -502,9 +502,3 @@ browser's render-closure trap gate. Host AMD EPYC 7313P, rustc 1.97.1, `x86-64-v
 | 1219-M11 | the settled frames re-implemented as a private loop, and `mix2x2_block` then flushing its outputs (two edits: a static mix that drifts from the ramp's settled path) | gate 3 alone (`case 2, length 3830 ... left frame 3`, `-0.0` against `mix2x2_block`'s `+0.0`) | RED |
 | 1219-M12 | attempt 2: `route_mix_ramp_block` back to `let count = left.len(); let right = &mut right[..count];` | `--callgraph probe_ramp` on the probe: `FAIL probe_ramp: unexpected trap owner in the render closure: ...route_mix_ramp_block...`, `closure=5 traps=3`, entry `slice_index_fail` (unmutated: `closure=4 traps=0 trap_owners=[]`). Native gates cannot see it: bits do not move. | RED (probe), GREEN (native) |
 | 1219-M13 | attempt 2: `route_mix_settled_tail` passes its planes uncut (`mix2x2_block::<f32>(left, right, c)`) | `--callgraph probe_ramp`: `FAIL ... unexpected trap owner ...: route_mix_settled_tail`, `closure=5 traps=3` | RED (probe), GREEN (native) |
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `g1_select_max_is_order_free_only_on_the_sanitized_domain`: no plausible same-crate KEEP catcher recorded

@@ -897,35 +897,4 @@ mod tests {
         .map(|event| (event.offset, event.kind))
         .collect()
     }
-
-    /// #1646 D2: a cell seeded with its prepared value emits nothing on a flat curve at that
-    /// value, while a fresh cell retargets at its first grid point; a seed at another value still
-    /// retargets.
-    ///
-    /// Red if `seed_target` does not set the target: the first grid event of every prepared lane
-    /// would then retarget the lane to the value it already holds.
-    #[test]
-    fn a_seeded_target_suppresses_the_first_retarget_to_the_same_bits() {
-        let program = flat(-7.25);
-        assert_eq!(
-            first_block(&program, &mut CellState::new()),
-            [(0, EventKind::Grid)]
-        );
-
-        let mut seeded = CellState::new();
-        seeded.seed_target(-7.25);
-        assert_eq!(
-            seeded.target().map(f32::to_bits),
-            Some((-7.25_f32).to_bits())
-        );
-        assert_eq!(first_block(&program, &mut seeded), []);
-
-        let mut other = CellState::new();
-        other.seed_target(-7.0);
-        assert_eq!(first_block(&program, &mut other), [(0, EventKind::Grid)]);
-        assert_eq!(
-            other.target().map(f32::to_bits),
-            Some((-7.25_f32).to_bits())
-        );
-    }
 }

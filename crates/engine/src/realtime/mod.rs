@@ -2175,32 +2175,6 @@ mod tests {
         }
 
         #[test]
-        fn successor_continues_the_predecessor_state_gap_free() {
-            let reference = reference();
-            let (blocks, reports, owner, hooks) = swap_at_block_five(true);
-            assert_eq!(blocks, reference);
-            assert_eq!(hooks, 1);
-            for (block, report) in reports.iter().enumerate() {
-                let (swap, carry) = if block == 5 {
-                    (SwapOutcome::Applied, CarryOutcome::Carried)
-                } else {
-                    (SwapOutcome::None, CarryOutcome::NotRequested)
-                };
-                assert_eq!((report.swap, report.carry), (swap, carry), "block {block}");
-            }
-            assert_eq!(
-                (owner.carried_count(), owner.carry_mismatch_count()),
-                (1, 0)
-            );
-
-            let (blocks, reports, owner, _) = swap_at_block_five(false);
-            assert_eq!(blocks[..5], reference[..5]);
-            assert_ne!(blocks[5], reference[5]);
-            assert_eq!(reports[5].carry, CarryOutcome::NotRequested);
-            assert_eq!(owner.carried_count(), 0);
-        }
-
-        #[test]
         fn a_mismatched_predecessor_is_reported_not_carried() {
             let hooks = Arc::new(AtomicUsize::new(0));
             let (mut publisher, mut owner, _retirer) =

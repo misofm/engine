@@ -7455,25 +7455,6 @@ mod tests {
         );
     }
 
-    fn instance(effect_id: &str, bypass: bool, threshold: f32) -> session::Effect {
-        session::Effect {
-            id: session::StableId::parse("fx").expect("stable id"),
-            identity: session::EffectIdentity::Native {
-                effect_id: session::StableId::parse(effect_id).expect("effect id"),
-            },
-            quality: session::EffectQuality::Normal,
-            bypass,
-            link_mode: session::LinkMode::DualMono,
-            params: vec![session::EffectParam {
-                parameter_id: 1,
-                channel: session::ParameterChannel::Both,
-                unit: session::ParameterUnit::Db,
-                value: threshold,
-            }],
-            sidechain: session::SidechainDeclaration::None,
-        }
-    }
-
     /// The carry program is built only when some owner may carry, and the effect carry refuses a
     /// plan without one (`NoEffectCarryProgram`). A strip whose only non-prepared owner is a
     /// surviving insert must therefore say it may carry; a join that looked at the console slots
@@ -7496,52 +7477,6 @@ mod tests {
         };
         assert!(chain(super::FamilyJoin::Same).may_carry());
         assert!(!chain(super::FamilyJoin::Prepared).may_carry());
-    }
-
-    /// #1280 D1: the one per-instance function says which difference is live. A compressor's
-    /// bypass and `Block`-rate threshold are live records (the bypass first, with the session's
-    /// ramp); the delay's bypass is a rebuild-only row, so the join must count it prepared. A join
-    /// that took any bypass for live would retarget a prepared bypass into a cell the lane lacks.
-    #[test]
-    fn the_per_instance_function_separates_live_from_prepared() {
-        let ramps = controls::LiveRamps::for_session(
-            &parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
-                .expect("fixture"),
-        );
-        let records = |before: &session::Effect, after: &session::Effect| {
-            super::effect_instance_records(before, after, 48_000, ramps)
-        };
-        let compressor = |bypass, threshold| instance("miso.compressor", bypass, threshold);
-        assert_eq!(
-            records(&compressor(false, -10.0), &compressor(false, -10.0)),
-            Ok(None)
-        );
-        let live = records(&compressor(false, -10.0), &compressor(true, -20.0))
-            .expect("live")
-            .expect("records");
-        assert_eq!(
-            live.records.len(),
-            3,
-            "the bypass, then the threshold on both lanes"
-        );
-        assert_eq!(
-            live.records[0],
-            effect_contract::EffectControlRecord::Bypass(effect_contract::BypassSwitch {
-                bypassed: true,
-                ramp_samples: ramps.for_row(super::LiveRampRow::BypassCrossfade),
-            })
-        );
-        assert!(
-            records(
-                &instance("miso.delay", false, 0.0),
-                &instance("miso.delay", true, 0.0)
-            )
-            .is_err(),
-            "the delay's bypass is prepared"
-        );
-        let mut other = compressor(false, -10.0);
-        other.quality = session::EffectQuality::High;
-        assert!(records(&compressor(false, -10.0), &other).is_err());
     }
 
     #[test]

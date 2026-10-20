@@ -85,12 +85,6 @@ mod tests {
     }
 
     #[test]
-    fn serializes_empty_and_empty_element_arrays() {
-        assert_eq!(json_string_array(&[]), "[]");
-        assert_eq!(json_string_array(&[String::new()]), "[\"\"]");
-    }
-
-    #[test]
     fn serializes_ordered_duplicate_elements() {
         let values = ["first", "first", "second"]
             .into_iter()

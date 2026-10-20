@@ -56,9 +56,3 @@ left `M7c`, `M9` and `M10` alive, and each survivor was a real gap rather than a
 **Two mutations fail by panicking rather than by asserting.** `M7b` underflows
 `transition_remaining` and `M15` reaches the test's own `panic!`. Both are unambiguous reds, and
 both are recorded as what they are rather than dressed up as assertion failures.
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `a_mid_ramp_restore_continues_bit_identically`: no plausible same-crate KEEP catcher recorded

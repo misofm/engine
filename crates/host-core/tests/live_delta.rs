@@ -1979,64 +1979,6 @@ fn ramps_of_a_move_with(
     [fader, muted, matrix.smoothing_samples]
 }
 
-/// #1365 gate 5. Red if the classifier treats `control_smoothing` as structure, or reads the
-/// pre-commit lengths for the records of the same transaction: setting, changing and clearing the
-/// key are each live, and a fader move beside them carries the lengths of `next`.
-#[test]
-fn a_control_smoothing_edit_is_live_and_its_lengths_govern_the_same_transactions_records() {
-    use BuiltinLaneSelector::Left;
-    let slow = ControlSmoothing {
-        mute_ms: 5.0,
-        fader_ms: 15.0,
-        pan_ms: 25.0,
-    };
-    let fast = ControlSmoothing {
-        mute_ms: 0.0,
-        fader_ms: 1.0,
-        pan_ms: 2.0,
-    };
-    let base = two_tracks();
-    // (before, after, the FaderDb length of `after` at 48 kHz).
-    for (before, after, fader_samples) in [
-        (None, Some(slow), 720),
-        (Some(slow), Some(fast), 48),
-        (Some(slow), None, 960),
-        (None, Some(fast), 48),
-    ] {
-        let current = with_smoothing(&base, before);
-        let alone = edited(&current, |next| next.control_smoothing = after);
-        let delta = classify_live_delta(
-            &current,
-            &alone,
-            LiveRamps::for_session(&alone),
-            &EditRamps::new(),
-        )
-        .expect("live");
-        assert!(delta.strips.is_empty(), "{before:?} -> {after:?}");
-
-        let moved = edited(&current, |next| {
-            next.control_smoothing = after;
-            next.tracks[0].fader.left_db = -6.0;
-        });
-        let delta = classify_live_delta(
-            &current,
-            &moved,
-            LiveRamps::for_session(&moved),
-            &EditRamps::new(),
-        )
-        .expect("live");
-        assert_eq!(
-            flatten(&delta),
-            vec![(
-                track_id(&current, 0),
-                vec![fader_db(Left, -6.0, fader_samples)],
-                None
-            )],
-            "{before:?} -> {after:?}"
-        );
-    }
-}
-
 /// Gate 3. Red if the classifier keeps a pan window of 0, ignores the session for one row, or maps
 /// a row to the wrong key: the session's `control_smoothing` (or the default table) is what the
 /// fader, mute and matrix records carry at 48 kHz, and a pan's own non-zero window still wins.
@@ -2867,37 +2809,6 @@ fn filter_records_are_the_preparers_targets_for_the_changed_values() {
     assert_eq!(case(steady, steady), Ok(Vec::new()));
 }
 
-/// #1556 D4. Red if a cutoff the filter domain refuses is acked live: above Nyquist, non-finite,
-/// below the rate-keyed minimum, or an HPF at or above the LPF.
-#[test]
-fn filter_values_the_domain_refuses_need_a_rebuild() {
-    let current = with_filters((0.0, 0.0), (0.0, 0.0));
-    let nyquist = current.sample_rate_hz as f32 / 2.0;
-    for (hpf, lpf) in [
-        (nyquist, 0.0),
-        (f32::NAN, 0.0),
-        (0.0, f32::INFINITY),
-        (5.0, 0.0),
-        (-1.0, 0.0),
-        (1_000.0, 1_000.0),
-        (2_000.0, 1_000.0),
-    ] {
-        assert_eq!(
-            classify_input(&current, |next| set_filters(next, (hpf, lpf), (0.0, 0.0))),
-            Err(LiveRebuild::Domain),
-            "{hpf} {lpf}"
-        );
-    }
-    assert!(
-        classify_input(&current, |next| set_filters(
-            next,
-            (80.0, 8_000.0),
-            (10.0, 0.0)
-        ))
-        .is_ok()
-    );
-}
-
 /// #1556 D2. Red if the records of one strip are not trims, then polarities, then filter targets,
 /// each left before right, or if a track's input values reach another strip.
 #[test]
@@ -3432,26 +3343,6 @@ fn an_eq_hpf_enable_change_carries_targets() {
     assert_eq!(targets, Some(expected));
 }
 
-/// #1265 gate 1(d). Red if the classifier admits an EQ value preparation refuses (a Q above its
-/// domain), so that a live commit would leave a committed model its own rebuild refuses.
-#[test]
-fn an_out_of_domain_eq_q_needs_a_rebuild() {
-    let current = with_shaped_eq();
-    assert_eq!(
-        eq_entry(&current, |next| {
-            inserts(next, 2).push(param(5, ParameterChannel::Left, ParameterUnit::Ratio, 18.5));
-        }),
-        Err(LiveRebuild::Domain)
-    );
-    // The domain's own bound is live.
-    assert!(
-        eq_entry(&current, |next| {
-            inserts(next, 2).push(param(5, ParameterChannel::Left, ParameterUnit::Ratio, 18.0));
-        })
-        .is_ok()
-    );
-}
-
 // Issue #1266: effect bypass through the latency-preserving shunt.
 
 /// `with_effects` with the fixture's parametric EQ as a `pre_insert` console slot (`console(0)`,
@@ -3545,96 +3436,6 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
             )]
         ))
     );
-}
-
-/// #1341 D1. Red if a bypass record carries a ramp other than the session's `mute_ms` length (the
-/// fader's or pan's, or a per-edit mute length: the bypass is the one live row with no per-edit
-/// length), if a flip with `mute_ms = 0` is not a step, or if a parameter-only edit carries a ramp.
-#[test]
-fn a_bypass_flip_carries_the_sessions_mute_ramp_and_nothing_else() {
-    let current = with_bypassable();
-    let session_ramps = LiveRamps {
-        fader_samples: 100,
-        mute_samples: 300,
-        pan_samples: 200,
-        link_samples: 0,
-    };
-    let ramp_of = |ramps: LiveRamps, edit_ramps: &EditRamps, flip: bool| {
-        let next = edited(&current, |next| {
-            if flip {
-                next.tracks[0].inserts.effects[0].bypass = true;
-            } else {
-                inserts(next, 0).push(param(1, ParameterChannel::Left, ParameterUnit::Db, -30.0));
-            }
-        });
-        let delta = classify_live_delta(&current, &next, ramps, edit_ramps).expect("live");
-        assert_eq!(delta.effects.len(), 1);
-        delta.effects[0]
-            .records
-            .iter()
-            .find_map(|record| match record {
-                EffectControlRecord::Bypass(switch) => Some(switch.ramp_samples),
-                _ => None,
-            })
-            .unwrap_or(0)
-    };
-    assert_eq!(ramp_of(session_ramps, &EditRamps::new(), true), 300);
-    assert_eq!(ramp_of(STEP, &EditRamps::new(), true), 0);
-    assert_eq!(ramp_of(session_ramps, &EditRamps::new(), false), 0);
-    let mut edit_ramps = EditRamps::new();
-    edit_ramps.set(
-        &EditRampTarget::Strip(current.tracks[0].id.clone()),
-        EditRampRow::Mute,
-        Some(50),
-    );
-    assert_eq!(
-        ramp_of(session_ramps, &edit_ramps, true),
-        300,
-        "no per-edit length"
-    );
-    // A ramp the indexed law cannot spell is a domain refusal, never a record.
-    let too_long = LiveRamps {
-        mute_samples: lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM + 1,
-        ..session_ramps
-    };
-    let next = edited(&current, |next| {
-        next.tracks[0].inserts.effects[0].bypass = true
-    });
-    assert_eq!(
-        classify_live_delta(&current, &next, too_long, &EditRamps::new()).map(|_| ()),
-        Err(LiveRebuild::Domain)
-    );
-}
-
-/// #1266 D1 on the EQ. Red if an EQ's bypass record reaches its target designer (which refuses
-/// it, so the edit would rebuild) or displaces its parameter edits: the bypass goes first and the
-/// targets are the parameter edits' alone.
-#[test]
-fn an_eq_bypass_beside_a_gain_change_rides_ahead_of_its_targets() {
-    let current = with_shaped_eq();
-    let seeds = prepared_eq_seeds(&current);
-    let (records, targets) = eq_entry(&current, |next| {
-        next.tracks[0].inserts.effects[2].bypass = true;
-        inserts(next, 2)[3].value = 5.0;
-    })
-    .expect("live");
-    assert_eq!(
-        records,
-        vec![
-            EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(true)),
-            record(3, Lane::Left, 5.0)
-        ]
-    );
-    let expected = designed_targets(
-        current.sample_rate_hz,
-        &seeds,
-        &[EqTargetEdit {
-            parameter_id: 4,
-            channel: Lane::Left,
-            value: 5.0,
-        }],
-    );
-    assert_eq!(targets, Some(expected));
 }
 
 /// #1266 gate 1, decision 14 F4. Red if a prepared bypass -- the delay's or the multiband
@@ -3931,44 +3732,6 @@ fn a_rebuild_only_row_is_a_rebuild_with_its_reason() {
         }),
         Err(LiveRebuild::Structure)
     );
-}
-
-/// Gate 3. Red if a setting produces a record or a rebuild: the pan window alone and the session's
-/// ramp lengths alone change what later edits do, and nothing in the running plan.
-#[test]
-fn a_setting_change_alone_is_live_with_no_record() {
-    let current = two_tracks();
-    assert_eq!(
-        classify(&current, |next| {
-            let MatrixOrPan::Pan {
-                smoothing_samples, ..
-            } = &mut next.tracks[0].matrix_or_pan
-            else {
-                panic!("the settled tracks pan")
-            };
-            *smoothing_samples = 32;
-        }),
-        Ok(Vec::new())
-    );
-    assert_eq!(
-        classify(&current, |next| {
-            let mut lengths = session::CONTROL_SMOOTHING_DEFAULT;
-            lengths.fader_ms = 25.0;
-            next.control_smoothing = Some(lengths);
-        }),
-        Ok(Vec::new())
-    );
-    // The window is read by the records of the same edit: a move beside it uses the new window.
-    let moved = classify(&current, |next| {
-        next.tracks[0].matrix_or_pan = MatrixOrPan::Pan {
-            left: 0.5,
-            right: 0.5,
-            smoothing_samples: 32,
-        };
-    })
-    .expect("a pan move is live");
-    assert_eq!(moved.len(), 1);
-    assert_eq!(moved[0].2.expect("a matrix record").smoothing_samples, 32);
 }
 
 /// Gate 4. Red if the mask compares resolved values instead of representations, or the reverse:

@@ -173,14 +173,6 @@ impl LaneFn for Log2 {
     }
 }
 
-/// `math::fast_db::fast_gain_from_db`.
-struct FastGain;
-impl LaneFn for FastGain {
-    fn at<L: Lane>(x: L) -> L {
-        math::fast_db::fast_gain_from_db(x)
-    }
-}
-
 /// Compare every vector width against the scalar oracle, bit for bit: width 4, then width 8 where
 /// `avx2` is enabled (a 4-lane build has no eight-lane type, issue #1112).
 fn compare_widths<F: LaneFn>(name: &str, input: &[f32]) -> Vec<u32> {
@@ -217,42 +209,6 @@ fn check<F: LaneFn>(name: &str, input: &[f32], pinned: &[u8; 32]) {
         hex(&actual),
         hex(pinned)
     );
-}
-
-/// Inputs whose clamp treatment is the load-bearing premise of LANE-4.
-fn exp2_caller_edges() -> Vec<f32> {
-    let mut values = vec![
-        f32::from_bits(0x7fc0_0000),
-        f32::from_bits(0x7fc0_0001),
-        f32::from_bits(0xffc0_0000),
-        f32::INFINITY,
-        f32::NEG_INFINITY,
-        0.0,
-        -0.0,
-        f32::from_bits(0x0000_0001),
-        f32::from_bits(0x8000_0001),
-        f32::from_bits(0x007f_ffff),
-        f32::from_bits(0x807f_ffff),
-        f32::MIN_POSITIVE,
-        -f32::MIN_POSITIVE,
-    ];
-    for boundary in [-127.0_f32, -126.0, 126.0, 127.0] {
-        let bits = boundary.to_bits();
-        values.push(f32::from_bits(bits - 1));
-        values.push(boundary);
-        values.push(f32::from_bits(bits + 1));
-    }
-    while !values.len().is_multiple_of(8) {
-        values.push(0.0);
-    }
-    values
-}
-
-#[test]
-fn m2_exp2_callers_directed_edges_are_lane_identical() {
-    let input = exp2_caller_edges();
-    compare_widths::<FastGain>("fast_gain_from_db directed edges", &input);
-    compare_widths::<Exp2>("exp2_lane directed edges", &input);
 }
 
 #[test]

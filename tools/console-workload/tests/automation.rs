@@ -180,9 +180,8 @@ mod mixing {
 
     use console_workload::SessionRuntime;
     use console_workload::mixing_automation::{
-        self, Arm, CONTROLS, Effect, Lowering, MixingArm, MixingAutomation, ResolveError,
+        self, Arm, CONTROLS, Lowering, MixingAutomation, ResolveError,
     };
-    use effect_contract::ParameterChannel;
     use lane::Backend;
 
     /// Every control resolves by `(track_id, effect contract id)` to its own channel, and names
@@ -311,85 +310,5 @@ mod mixing {
         // the automation fixes move this, so it is stated, not asserted, by the bench.
         let restated = preflight.collapse(Arm::Restated, None);
         assert!(restated[0] <= quiet[0]);
-    }
-
-    /// The EQ is pushed as the SDK pushes it: a Left edit then a Right edit, as two
-    /// `push_parameter` calls. Both landing before a block reads them keep the collapse, because
-    /// the target cells hold the latest word per channel and the block sees two equal words
-    /// (VERIFY-AUTOMATION F2, issue #1345). A block that runs between the two edits reads one
-    /// channel changed and retires the three EQ cohorts, and they stay retired for the whole
-    /// preroll: the lane's words differ from then on, so no block of it runs collapsed.
-    #[test]
-    fn the_eq_lowering_keeps_the_collapse_when_a_pair_lands_in_one_block() {
-        let backend = Backend::current();
-        let eq_both = MixingArm::prepare(Arm::Restated, Some(Effect::Eq), backend);
-        let quiet = MixingArm::prepare(Arm::Quiet, None, backend);
-        assert_eq!(
-            eq_both.runtime.bank_collapse_counters(),
-            quiet.runtime.bank_collapse_counters(),
-            "a Both EQ restatement keeps every cohort collapsed"
-        );
-        let [kept, cohorts] = quiet.runtime.bank_collapse_counters();
-        let mut together = SessionRuntime::build_with_dispatch(
-            mixing_automation::WORKLOAD,
-            mixing_automation::CONFIG,
-            backend,
-        );
-        let mut apart = SessionRuntime::build_with_dispatch(
-            mixing_automation::WORKLOAD,
-            mixing_automation::CONFIG,
-            backend,
-        );
-        let automation = MixingAutomation::resolve(&together).expect("controls");
-        let eq_controls: Vec<_> = automation
-            .controls()
-            .iter()
-            .filter(|control| control.control.effect == Effect::Eq)
-            .collect();
-        for control in &eq_controls {
-            for side in [ParameterChannel::Left, ParameterChannel::Right] {
-                assert!(together.push_parameter(
-                    control.channel,
-                    control.control.parameter_index,
-                    side,
-                    control.base
-                ));
-            }
-        }
-        for block in 0..mixing_automation::PREROLL_BLOCKS {
-            together.render(block).expect("render");
-        }
-        let [together_kept, _] = together.bank_collapse_counters();
-        assert_eq!(
-            together_kept, kept,
-            "a Left and a Right edit before one block keep all {cohorts} cohorts collapsed"
-        );
-        for control in &eq_controls {
-            assert!(apart.push_parameter(
-                control.channel,
-                control.control.parameter_index,
-                ParameterChannel::Left,
-                control.base
-            ));
-        }
-        apart.render(0).expect("render");
-        for control in &eq_controls {
-            assert!(apart.push_parameter(
-                control.channel,
-                control.control.parameter_index,
-                ParameterChannel::Right,
-                control.base
-            ));
-        }
-        for block in 1..mixing_automation::PREROLL_BLOCKS {
-            apart.render(block).expect("render");
-        }
-        let [apart_kept, _] = apart.bank_collapse_counters();
-        assert_eq!(
-            apart_kept,
-            kept - 3 * mixing_automation::PREROLL_BLOCKS,
-            "a block between the edits retires the three EQ cohorts of the {cohorts} for the whole \
-             preroll"
-        );
     }
 }

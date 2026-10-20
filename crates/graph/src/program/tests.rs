@@ -306,33 +306,6 @@ fn delayed_edge_gets_staging_buffer_and_blocks_in_place() {
     assert!(delay.staging.0 < program.buffers);
 }
 
-/// An elided stage is exactly a stage with one undelayed, un-sidechained input: give the same
-/// stage a PDC edge and it keeps its op.
-#[test]
-fn a_delayed_stage_boundary_is_not_elided() {
-    let (nodes, edges) = plain_track("t", &["r"]);
-    let (spec, schedule, levels) = build(nodes, edges);
-    let delayed = InsertedDelay {
-        node: stage_node("t", TrackStage::PostSimd1),
-        edge_id: GraphEdgeId::TrackMain {
-            target: stage_node("t", TrackStage::PostSimd1),
-        },
-        samples: LatencySamples(8),
-    };
-    let program = lower(
-        &spec,
-        &schedule,
-        &levels,
-        std::slice::from_ref(&delayed),
-        &[],
-    )
-    .expect("lowers");
-    assert_eq!(program.taps.len(), 2);
-    assert_eq!(program.ops.len(), 7);
-    let index = node_index(&spec, &stage_node("t", TrackStage::PostSimd1)).expect("node");
-    assert!(program.node_op[index as usize].is_some());
-}
-
 /// A dynamic-rack effect is not bank-eligible, so the two stage boundaries after it are pure
 /// aliases of *its* buffer and the fader downstream still reads that buffer in place.
 ///

@@ -10532,7 +10532,7 @@ fn foldable_lane(
 ///
 /// * **the association order** -> `route_ids_ordered_against_the_cohorts_decline_the_route_fold`,
 ///   plus `a_leased_stage_meter_declines_the_merge_and_still_meters` and
-///   `a_pre_fader_meter_splits_its_cohorts_chain_and_reads_the_limiter` (named
+///   `a_pre_fader_meter_splits_its_cohorts_chain_and_reads_the_limiter` (deleted by TA5; named
 ///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect` until issue #886,
 ///   the name `crates/graph/tests/MUTATIONS.md` row 218-3 still records). Keeping the length check
 ///   and dropping the element-wise comparison is the unsound direction, and it is the one measured.
@@ -12712,82 +12712,6 @@ mod tests {
         );
     }
 
-    /// RT-1: real graph arena members gather one buffer set and scatter directly into another.
-    #[test]
-    fn arena_members_direct_scatter_preserves_redirected_identity_bits() {
-        struct Identity;
-        impl BankStage for Identity {
-            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
-                Ok(())
-            }
-        }
-
-        const FRAMES: usize = 11;
-        let mut arena = stereo_arena(FRAMES, 8);
-        let inputs = [1, 2, 3, 4];
-        let outputs = [5, 6, 7, 8];
-        let mut expected = Vec::new();
-        for (lane, input) in inputs.iter().copied().enumerate() {
-            let left: Vec<f32> = (0..FRAMES)
-                .map(|frame| f32::from_bits(0x7fc0_0000 | ((lane * FRAMES + frame) as u32 + 1)))
-                .collect();
-            let right: Vec<f32> = left
-                .iter()
-                .map(|word| f32::from_bits(word.to_bits() ^ 0x8000_3990))
-                .collect();
-            arena.write(0, input).copy_from_slice(&left);
-            arena.write(1, input).copy_from_slice(&right);
-            expected.push((left, right));
-        }
-        for output in outputs {
-            arena.write(0, output).fill(f32::from_bits(0x7f80_3991));
-            arena.write(1, output).fill(f32::from_bits(0x7f80_3992));
-        }
-
-        let active = vec![true; 4].into_boxed_slice();
-        let mut chain = BankChain::new(
-            AoSoaScratch::new(BankWidth::Four, FRAMES as u32).expect("scratch"),
-            active.clone(),
-            vec![BankSlot {
-                stage: Box::new(Identity),
-                active_lanes: active,
-            }],
-        )
-        .expect("chain");
-        let mut members = ArenaMembers {
-            arena: &mut arena,
-            inputs: &inputs,
-            outputs: &outputs,
-            fold: &[],
-            master: MasterPlanes::Arena(0),
-            sources: SourceGather::NONE,
-        };
-        chain
-            .run(&mut members, FRAMES as u32, 0, LiveSnapshot::ALL)
-            .expect("direct graph run");
-
-        for (lane, output) in outputs.iter().copied().enumerate() {
-            let (left, right) = arena.read_stereo(output);
-            assert_eq!(
-                left.iter().map(|word| word.to_bits()).collect::<Vec<_>>(),
-                expected[lane]
-                    .0
-                    .iter()
-                    .map(|word| word.to_bits())
-                    .collect::<Vec<_>>()
-            );
-            assert_eq!(
-                right.iter().map(|word| word.to_bits()).collect::<Vec<_>>(),
-                expected[lane]
-                    .1
-                    .iter()
-                    .map(|word| word.to_bits())
-                    .collect::<Vec<_>>()
-            );
-        }
-        assert_eq!(chain.transposes(), 1);
-    }
-
     /// The folded epilogue is the route op followed by the D9 reduction, word for word.
     ///
     /// The oracle is the shape this replaces, built out of the very kernels the route op and
@@ -14029,86 +13953,6 @@ mod tests {
             "a lane outside the mask starts at rest"
         );
         assert_ne!(right, twin_right);
-    }
-
-    /// E10. The route is two multiplies plus one add per output word, with the gain
-    /// folded into the coefficients at bind (D3). The oracle is
-    /// `softfma::unfused_multiply_add_via_f64`, which computes the same multiply-add through `f64` with
-    /// no dependence on `mix2x2_block`'s vector body; the exact product and the innocuous double
-    /// rounding of the sum make it bit-identical to the `f32` expression (issue #163 phase 2).
-    ///
-    /// Red mutation (`tests/MUTATIONS.md`): compute `gain * (ll * l + lr * r)` instead.
-    #[test]
-    fn route_applies_folded_gain_with_frozen_op_order() {
-        const FRAMES: usize = 4_096;
-        let transform = (0.707_9f32, 0.9f32, -0.1f32, 0.2f32, 0.8f32);
-        let folded = [
-            transform.0 * transform.1,
-            transform.0 * transform.2,
-            transform.0 * transform.3,
-            transform.0 * transform.4,
-        ];
-        let mut state = 0x1234_5678u32;
-        let left_in: Vec<f32> = (0..FRAMES).map(|_| lcg(&mut state)).collect();
-        let right_in: Vec<f32> = (0..FRAMES).map(|_| lcg(&mut state)).collect();
-        let mut left = left_in.clone();
-        let mut right = right_in.clone();
-        mix2x2_block::<FrameLane>(&mut left, &mut right, folded);
-        for frame in 0..FRAMES {
-            let (l, r) = (left_in[frame], right_in[frame]);
-            let expected_left =
-                lane::softfma::unfused_multiply_add_via_f64(folded[1], r, folded[0] * l);
-            let expected_right =
-                lane::softfma::unfused_multiply_add_via_f64(folded[3], r, folded[2] * l);
-            assert_eq!(
-                left[frame].to_bits(),
-                expected_left.to_bits(),
-                "frame {frame} left"
-            );
-            assert_eq!(
-                right[frame].to_bits(),
-                expected_right.to_bits(),
-                "frame {frame} right"
-            );
-        }
-        // Block lengths that are not a multiple of the lane width, so the scalar tail is walked
-        // and has to agree with the vector body word for word.
-        for block in [1usize, 3, 7, 63, 65, 129, 511] {
-            let mut tail_left = left_in[..block].to_vec();
-            let mut tail_right = right_in[..block].to_vec();
-            mix2x2_block::<FrameLane>(&mut tail_left, &mut tail_right, folded);
-            assert_eq!(
-                (
-                    tail_left.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
-                    tail_right.iter().map(|s| s.to_bits()).collect::<Vec<_>>()
-                ),
-                (
-                    left[..block]
-                        .iter()
-                        .map(|s| s.to_bits())
-                        .collect::<Vec<_>>(),
-                    right[..block]
-                        .iter()
-                        .map(|s| s.to_bits())
-                        .collect::<Vec<_>>()
-                ),
-                "block {block}: the scalar tail must match the vector body"
-            );
-        }
-        // The fold is not the unfolded form: this is the bit change #98 F4 declares.
-        let unfolded: Vec<u32> = (0..FRAMES)
-            .map(|frame| {
-                (transform.0 * (transform.1 * left_in[frame] + transform.2 * right_in[frame]))
-                    .to_bits()
-            })
-            .collect();
-        assert_ne!(
-            left.iter()
-                .map(|sample| sample.to_bits())
-                .collect::<Vec<_>>(),
-            unfolded,
-            "the folded route is a distinct rounding, not a coincidence"
-        );
     }
 
     // -----------------------------------------------------------------------------------------

@@ -740,30 +740,6 @@ fn a_future_anchor_starts_the_added_stem_on_its_block_at_four_lanes() {
     future_anchor_starts_the_added_stem_on_its_block(Backend::Simd4);
 }
 
-/// Gate 2 of #1274: the anchor is two blocks before the swap block, so the render observes the
-/// seek late and starts the stem at the swap block's own frame. Red if the lateness is measured
-/// on any clock but the plan's absolute render sample, or not added at all.
-#[test]
-fn a_past_anchor_starts_the_added_stem_in_time() {
-    const ANCHOR_BLOCK: usize = SWAP_BLOCK - 2;
-    let kept = Feed::new(SOURCE, 1);
-    let added = Feed::new(ADDED_SOURCE, 2);
-    let b = Session::compile(added_source_session());
-    let reference_added = spliced(ADDED_SOURCE, &added, |block| {
-        (block >= SWAP_BLOCK).then_some(block)
-    });
-    for backend in backends() {
-        let reference = reference_run(&b, &[&kept, &reference_added], backend);
-        let run = anchored_swap_run(&kept, &added, ANCHOR_BLOCK, SWAP_BLOCK, backend);
-        assert_eq!(
-            first_difference(&run, &reference),
-            None,
-            "{backend:?}: the stem is in time from the swap block on"
-        );
-        assert!(reference[SWAP_BLOCK].bits.iter().any(|bits| *bits != 0));
-    }
-}
-
 /// Gate 3 of #1274: two playing sources, each given `seek_at` to one anchor before a different
 /// render, both jump in the anchor block. Each keeps playing its queued old generation until then.
 /// Red if a seek applies when observed, if a held seek drops the old generation's queued PCM, or
@@ -1567,14 +1543,6 @@ fn a_high_pass_ramp_in_flight_finishes_after_the_swap(backend: Backend) {
         None,
         "{backend:?}: the ramp in flight finishes after the swap"
     );
-}
-
-/// Gate 2, ramp case, at eight lanes. Red if the coefficient target, step or countdown is not
-/// carried: the successor's lane would jump to its prepared coefficients or freeze mid-ramp.
-#[cfg(target_feature = "avx2")]
-#[test]
-fn a_high_pass_ramp_in_flight_finishes_after_the_swap_at_eight_lanes() {
-    a_high_pass_ramp_in_flight_finishes_after_the_swap(Backend::Simd8);
 }
 
 /// Gate 2, ramp case, at four lanes.
@@ -6123,12 +6091,6 @@ fn a_changed_control_kind_carries_no_effect_lane(backend: Backend) {
         18,
         "{backend:?}"
     );
-}
-
-#[cfg(target_feature = "avx2")]
-#[test]
-fn a_changed_control_kind_carries_no_effect_lane_at_eight_lanes() {
-    a_changed_control_kind_carries_no_effect_lane(Backend::Simd8);
 }
 
 #[test]

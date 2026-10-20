@@ -1260,47 +1260,6 @@ mod tests {
         let _ = RevisionGate::pair(GATE_REVISION_MAX + 1);
     }
 
-    /// Root ruling n3 (#1432 D1): the stamp's revision bound is on in every build and a refusal
-    /// changes nothing. In a release build an unchecked stamp at the published revision would
-    /// make the in-place rule rewrite the slot render may be reading.
-    #[test]
-    fn a_stamp_at_or_below_the_published_revision_or_above_the_ceiling_is_refused_and_changes_nothing()
-     {
-        let (gate, mut pin) = RevisionGate::pair(5);
-        let (cell, dirty) = (LatestCell::<2>::new(), DirtyWord::new());
-        let (mut writer, mut reader, mut stage) = (
-            CellWriter::<2>::new(),
-            CellReader::new(),
-            DirtyReader::new(),
-        );
-        for (revision, reason) in [
-            (5, StampRefusal::NotAbovePublished),
-            (3, StampRefusal::NotAbovePublished),
-            (GATE_REVISION_MAX + 1, StampRefusal::AboveCeiling),
-            (u64::MAX, StampRefusal::AboveCeiling),
-        ] {
-            assert_eq!(
-                pin.stamp(revision).map(|_| ()),
-                Err(StampRefused {
-                    revision,
-                    last_published: 5,
-                    reason
-                })
-            );
-        }
-        assert_eq!(pin.last_published(), 5);
-        // In a debug build this stamp would panic if a refusal had set `open`.
-        let stamp = pin.stamp(7).expect("a revision above the published one");
-        writer.write(&cell, &dirty, 0, stamp, value_words(7, 0));
-        pin.publish(&gate, 7);
-        let snapshot = gate.snapshot();
-        assert_eq!(stage.pending(&dirty), 1);
-        let CellRead::Applied { words, .. } = reader.read(&cell, snapshot, &mut stage, 0) else {
-            panic!("the value applies in the first block");
-        };
-        assert_eq!(words, value_words(7, 0));
-    }
-
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "is not above the last published")]

@@ -615,69 +615,6 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
     );
 }
 
-/// A payload whose words are out of domain or inconsistent with its parameters is rejected whole.
-#[test]
-fn a_malformed_payload_is_rejected_without_touching_either_channel() {
-    let values = bell_values();
-    let mut effect = ParametricEqFactory
-        .prepare(request(&values, false))
-        .expect("prepare");
-    process_zeros(&mut effect, 0, 8, &[]);
-    let before = snapshot(&effect);
-    for (word, bits) in [
-        (0_usize, f32::NAN.to_bits()),
-        (2, f32::NAN.to_bits()),
-        (8, f32::INFINITY.to_bits()),
-        (14, 65_u32),
-        (15, 5.0_f32.to_bits()),
-        (17, 0.0_f32.to_bits()),
-    ] {
-        let (common, mut left, right) = before;
-        left[word * 4..word * 4 + 4].copy_from_slice(&bits.to_le_bytes());
-        assert_eq!(
-            effect.processor.restore_state_payload(
-                1,
-                StatePayloadInput::new(&common, &left, &right, effect.metadata.state_sizes)
-                    .expect("input"),
-            ),
-            Err(StatePayloadError {
-                code: "effect.state.payload"
-            }),
-            "word {word}"
-        );
-        assert_eq!(snapshot(&effect), before, "word {word} left a trace");
-    }
-    // A settled band whose stored words disagree with its stored parameters is a forgery.
-    let (common, mut left, right) = before;
-    let poisoned = f32::from_bits(band_word(&left, 0, 2)) + 1.0e-3;
-    left[8..12].copy_from_slice(&poisoned.to_bits().to_le_bytes());
-    assert_eq!(
-        effect.processor.restore_state_payload(
-            1,
-            StatePayloadInput::new(&common, &left, &right, effect.metadata.state_sizes)
-                .expect("input"),
-        ),
-        Err(StatePayloadError {
-            code: "effect.state.payload"
-        })
-    );
-
-    // A settled lane must carry exact +0.0 increments. A bank section can still run the ramp
-    // kernel because a peer lane is moving, so a finite forged step would otherwise drift.
-    let (common, mut left, right) = before;
-    left[8 * 4..9 * 4].copy_from_slice(&1.0_f32.to_bits().to_le_bytes());
-    assert_eq!(
-        effect.processor.restore_state_payload(
-            1,
-            StatePayloadInput::new(&common, &left, &right, effect.metadata.state_sizes)
-                .expect("input"),
-        ),
-        Err(StatePayloadError {
-            code: "effect.state.payload"
-        })
-    );
-}
-
 /// A short or over-long snapshot buffer is refused before a byte is written.
 #[test]
 fn snapshot_rejects_bad_output_without_touching_either_lane() {

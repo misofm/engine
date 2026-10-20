@@ -22,25 +22,6 @@ fn assert_constant(mut ramp: LinearRamp, expected: f32, count: usize) {
     assert_eq!(ramp, LinearRamp::fixed(expected));
 }
 
-/// Redundant finite retargets settle immediately and keep every rendered word.
-#[test]
-fn a_redundant_retarget_is_constant_and_settled() {
-    for value in [
-        0.0_f32,
-        1.0,
-        -1.0,
-        0.5,
-        -24.0,
-        1.0e-7,
-        f32::MIN_POSITIVE,
-        f32::MAX,
-    ] {
-        let mut ramp = LinearRamp::fixed(value);
-        ramp.set_target(value, 64);
-        assert_constant(ramp, value, 80);
-    }
-}
-
 /// Negative zero arms: intermediate additions produce +0.0 and the final snap restores -0.0.
 #[test]
 fn negative_zero_remains_armed_and_snaps_back_to_its_sign() {

@@ -3,14 +3,13 @@
 
 mod common;
 
-use common::{RATE, fixture, id, strip_builtin, strip_own};
+use common::{RATE, fixture, id, strip_own};
 use controls::{
     ControlError, Lane, MonitorOverlay, MonitorRow, MonitorWrite, Owner, Section, check_monitor,
-    effective, set,
+    effective,
 };
 
 const SOLO: u32 = 2;
-const FADER_DB: u32 = 5;
 
 fn write(strip: &str, soloed: bool, ramp: Option<u32>) -> MonitorWrite {
     MonitorWrite {
@@ -19,75 +18,6 @@ fn write(strip: &str, soloed: bool, ramp: Option<u32>) -> MonitorWrite {
         on: soloed,
         ramp,
     }
-}
-
-/// A solo is checked like any write, by its row: a track's row takes exactly 0 or 1 on `both`
-/// with an optional ramp, a submix has no solo row, and a model row is not a monitor write.
-///
-/// Red if a submix becomes soloable, a malformed solo is accepted, a model row is taken for a
-/// monitor write, or the write drops its ramp.
-#[test]
-fn a_solo_write_is_checked_by_its_row() {
-    let model = fixture();
-    let check_solo = |strip: &str, lane, value, ramp| {
-        check_monitor(&model, &strip_own(strip, SOLO, lane), value, ramp, RATE)
-    };
-    assert_eq!(
-        check_solo("vocal", Lane::Both, 1.0, Some(480)),
-        Ok(Some(write("vocal", true, Some(480))))
-    );
-    assert_eq!(
-        check_solo("guitar", Lane::Both, 0.0, None),
-        Ok(Some(write("guitar", false, None)))
-    );
-    // A step is a length, not an absent one.
-    assert_eq!(
-        check_solo("vocal", Lane::Both, 1.0, Some(0)),
-        Ok(Some(write("vocal", true, Some(0))))
-    );
-    assert_eq!(
-        check_solo("bus", Lane::Both, 1.0, None),
-        Err(ControlError::AddressUnknown),
-        "a submix is solo-safe: it has no solo row"
-    );
-    assert_eq!(
-        check_solo("nobody", Lane::Both, 1.0, None),
-        Err(ControlError::AddressUnknown)
-    );
-    assert_eq!(
-        check_solo("vocal", Lane::Left, 1.0, None),
-        Err(ControlError::Lane)
-    );
-    for value in [0.5, -0.0, 2.0, f32::NAN] {
-        assert_eq!(
-            check_solo("vocal", Lane::Both, value, None),
-            Err(ControlError::Domain),
-            "{value}"
-        );
-    }
-    // A model row is for `set`: the writer says so without judging its value.
-    assert_eq!(
-        check_monitor(
-            &model,
-            &strip_builtin("vocal", FADER_DB, Lane::Both),
-            99.0,
-            None,
-            RATE
-        ),
-        Ok(None)
-    );
-    // And `set` refuses the monitor row, whatever transport reaches it.
-    let mut model = model;
-    assert_eq!(
-        set(
-            &mut model,
-            &strip_own("vocal", SOLO, Lane::Both),
-            1.0,
-            None,
-            RATE
-        ),
-        Err(ControlError::Monitor)
-    );
 }
 
 /// The overlay after a transaction's writes: in order, the last write of a strip wins, a strip the

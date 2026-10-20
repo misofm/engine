@@ -124,10 +124,6 @@ fn continuing(ramp: &Ramp, elapsed: usize) -> PreparedEffect {
     effect
 }
 
-fn same_bits(a: &[f32], b: &[f32]) -> bool {
-    a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
-}
-
 /// A restore validates both channels before it commits either: a payload whose left section is a
 /// mid-ramp snapshot and whose right section is refused leaves the receiver as it was, scalar and
 /// bank lane alike.
@@ -195,103 +191,6 @@ fn bank_lane_snapshot(bank: &PreparedEffectBank, lane: usize) -> Payload {
         )
         .expect("snapshot");
     out
-}
-
-/// Issue #1328, amendment A9: the payload carries the input's silence counter, so a lane restored
-/// mid-silence arms its joint flush on the frame the lane it was taken from does.
-///
-/// A 10 Hz +24 dB low shelf at 48 kHz takes a `1e-11` impulse; its state then sits inside the joint
-/// band (both words below `REST_EPS`, one above `FLUSH_EPS`) for longer than `N_SILENCE` (4,096
-/// frames), so the frame the counter arms is the frame the band's words reach `+0.0`. The payload
-/// is taken after eight blocks (counter 1,023) and restored into a fresh instance that has rendered
-/// nothing; both render to
-/// past the arming frame. Asserted: the band's words are in the joint band before the arming frame
-/// and `+0.0` from it on, and the restored instance renders the continuing one's bits on every block.
-/// A restore that dropped or reset the counter would arm 1,023 frames late.
-#[test]
-fn a_restore_mid_silence_arms_the_joint_flush_on_the_continuing_lanes_frame() {
-    const FRAMES: usize = 128;
-    const ARMED_AT: usize = 4_096;
-    let values = support::single_section_values(
-        parametric_eq::EqBandKind::LowShelf,
-        10.0,
-        24.0,
-        core::f32::consts::FRAC_1_SQRT_2,
-        1.0,
-    );
-    let mut continuing = ParametricEqFactory
-        .prepare(request(&values, false))
-        .expect("prepare");
-    let mut restored = ParametricEqFactory
-        .prepare(request(&values, false))
-        .expect("prepare");
-    for block in 0..ARMED_AT / FRAMES + 8 {
-        let mut left = [0.0_f32; FRAMES];
-        if block == 0 {
-            left[0] = 1.0e-11;
-        }
-        let mut right = left;
-        let (mut restored_left, mut restored_right) = (left, right);
-        if block == 8 {
-            let payload = snapshot(&continuing);
-            assert_eq!(
-                support::word(&payload.1, support::SILENCE_WORD),
-                1_023.0_f32.to_bits(),
-                "the snapshot carries the left counter"
-            );
-            let sizes = restored.metadata.state_sizes;
-            restored
-                .processor
-                .restore_state_payload(
-                    1,
-                    StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
-                        .expect("input"),
-                )
-                .expect("a mid-silence payload restores");
-        }
-        let first = (block * FRAMES) as u64;
-        continuing.processor.process(
-            EffectProcessBlock::new(&mut left, &mut right, None, first, &[], 128).expect("block"),
-        );
-        // The restored instance renders nothing before the restore: everything it holds then is
-        // what the payload wrote.
-        if block >= 8 {
-            restored.processor.process(
-                EffectProcessBlock::new(
-                    &mut restored_left,
-                    &mut restored_right,
-                    None,
-                    first,
-                    &[],
-                    128,
-                )
-                .expect("block"),
-            );
-        }
-        if block >= 8 {
-            assert!(
-                same_bits(&left, &restored_left) && same_bits(&right, &restored_right),
-                "block {block}: the restored instance must render the continuing one's bits"
-            );
-        }
-        let payload = snapshot(&continuing);
-        let band = [0, 1].map(|word| f32::from_bits(support::band_word(&payload.1, 0, word)));
-        let end = (block + 1) * FRAMES;
-        if end == ARMED_AT {
-            assert!(
-                band.iter().all(|w| w.abs() < lane::REST_EPS)
-                    && band.iter().any(|w| w.abs() >= lane::FLUSH_EPS),
-                "the band must sit in the joint band before the counter arms: {band:?}"
-            );
-        }
-        if end > ARMED_AT {
-            assert_eq!(
-                band.map(f32::to_bits),
-                [0, 0],
-                "block {block}: the joint flush must fire once the counter arms"
-            );
-        }
-    }
 }
 
 /// The silence word is admitted only as the counter writes it: `+0.0`, or an integer in

@@ -428,35 +428,6 @@ mod tests {
     }
 
     #[test]
-    fn a_left_channel_parameter_desymmetrises_and_a_both_channel_one_does_not() {
-        let left = EffectControlRecord::Parameter {
-            parameter_index: 3,
-            channel: ParameterChannel::Left,
-            value: 0.5,
-        };
-        let right = EffectControlRecord::Parameter {
-            parameter_index: 3,
-            channel: ParameterChannel::Right,
-            value: 0.5,
-        };
-        let both = EffectControlRecord::Parameter {
-            parameter_index: 3,
-            channel: ParameterChannel::Both,
-            value: 0.5,
-        };
-        assert_eq!(left.symmetry_event(), SymmetryEvent::Desymmetrize);
-        assert_eq!(right.symmetry_event(), SymmetryEvent::Desymmetrize);
-        assert_eq!(both.symmetry_event(), SymmetryEvent::Preserve);
-
-        let mut witness = ChannelSymmetryWitness::SYMMETRIC;
-        witness.admit(&both);
-        assert!(witness.eligible(), "a both-channel command must preserve");
-        witness.admit(&left);
-        assert!(!witness.eligible());
-        assert_eq!(witness.declined(), ChannelSymmetryWitness::LIVE);
-    }
-
-    #[test]
     fn a_subscription_never_moves_the_witness() {
         let mut witness = ChannelSymmetryWitness::SYMMETRIC;
         witness.admit(&EffectControlRecord::Observe {

@@ -43,8 +43,8 @@ bits. This closes decision 14's F4 for the multiband compressor.
   issue does not change that.
 - **Tests that pin today's behaviour.**
   - `crates/graph-compiler/tests/bypass_cohorts.rs:716` (`a_mixed_bypass_multiband_cohort_keeps_its_prepared_bypass`)
-    and `:794` (`a_hot_bypassed_multiband_lane_leaves_its_neighbours_bits_unchanged`, whose
-    positive control is the whole-bank recovery under #1087's lowering).
+    and, until TA5 deleted it, `:794` (`a_hot_bypassed_multiband_lane_leaves_its_neighbours_bits_unchanged`,
+    whose positive control was the whole-bank recovery under #1087's lowering).
   - `crates/effect-compiler/tests/native_session.rs:516-528` asserts the multiband's prepared
     bypass and the list.
   - `crates/multiband-compressor/tests/nonfinite.rs:168` (`the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset`)
@@ -162,10 +162,11 @@ bits. This closes decision 14's F4 for the multiband compressor.
    `initial_bypass == true`, `metadata.bypass == false` and a lane; the cohort binds
    `TRACKS / lanes()` banks; the render is bit-identical to today's prepared-bypass lowering
    (`todays_lowering`) and to `Backend::Scalar` at music levels.
-3. **A hot bypassed lane in a bound bank.** `a_hot_bypassed_multiband_lane_leaves_its_neighbours_bits_unchanged`
-   keeps its name and assertion (zero neighbour taps moved), now with the hot lane inside a bound
-   mixed bank (assert the bank binds). Its in-test positive control under #1087's lowering is
-   removed, because the lowering is now the production path; D1's red mutation replaces it.
+3. **A hot bypassed lane in a bound bank.** A new test (TA5 deleted the old
+   `a_hot_bypassed_multiband_lane_leaves_its_neighbours_bits_unchanged`) asserts that zero neighbour
+   taps move with the hot lane inside a bound mixed bank (assert the bank binds). It needs no
+   positive control under #1087's lowering, because that lowering is now the production path;
+   D1's red mutation replaces it.
 4. **Lowering.** `native_session.rs` asserts that the bypassed multiband entry is lowered
    (`initial_bypass`, `!metadata.bypass`, a lane), and that every launch descriptor lowers.
 5. **A live lift is heard, bit-exactly.** In `crates/host-core/tests/live_delta.rs`: the classifier

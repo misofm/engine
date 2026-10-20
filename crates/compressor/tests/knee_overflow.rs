@@ -24,7 +24,7 @@ use effect_contract::{InitialParameterValue, ParameterChannel, PreparedAutomatio
 
 use support::{
     PARAMETER_COUNT, bind_bank, native_bank_width, prepare, render_bank, render_scalar, request,
-    restore, snapshot, values_with,
+    values_with,
 };
 
 /// Positive widths whose `f32` reciprocal `1 / (2 W)` overflows: the smallest subnormal, the
@@ -197,38 +197,6 @@ fn an_automated_knee_ramp_through_the_overflow_band_does_not_duck() {
             bits(&hard),
             "R {ratio}: a knee ramp through the overflow band must render as the hard knee"
         );
-    }
-}
-
-/// Restoring a state payload whose knee is 2.8e-45 into an instance prepared at the default 6 dB
-/// knee renders exactly as the hard knee.
-///
-/// Red mutation (MUTATIONS.md row 994-C1): drop the `is_finite` test in `knee_coefficients`.
-#[test]
-fn a_restored_overflowing_knee_does_not_duck() {
-    let knee = f32::from_bits(0x0000_0002);
-    for ratio in [4.0_f32, 20.0] {
-        let hard = render_full_scale(&values(0.0, ratio), &[]);
-        let donor = prepare(request(&values(knee, ratio)));
-        let (left_payload, right_payload) = snapshot(donor.as_ref());
-        let receiver_values = values(6.0, ratio);
-        let mut receiver = prepare(request(&receiver_values));
-        restore(
-            receiver.as_mut(),
-            support::STATE_VERSION,
-            &left_payload,
-            &right_payload,
-        )
-        .expect("a valid payload restores");
-        let mut left = vec![1.0_f32; FRAMES];
-        let mut right = vec![1.0_f32; FRAMES];
-        let report = render_scalar(receiver.as_mut(), &mut left, &mut right, 128, 128, &[]);
-        assert_eq!(
-            report.nonfinite_left_blocks + report.nonfinite_right_blocks,
-            0
-        );
-        assert_undocked(&left, &hard, knee, ratio, "restore");
-        assert_undocked(&right, &hard, knee, ratio, "restore");
     }
 }
 

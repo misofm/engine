@@ -368,17 +368,8 @@ file was restored byte for byte from a saved copy.
 
 | # | mutation | test | result |
 |---|---|---|---|
-| 994-C1 | `knee_coefficients` without its `is_finite` test (the pre-#994 design) | `knee_overflow` | RED, 4 of 5: the prepare, automation, restore and bank tests. First failure `prepare: W 3e-45 (0x00000002) R 4 frame 0: 0.11473124 vs f64 reference 1` — the NaN target clamped to -100 dB and a 0.1 ms attack duck the very first full-scale sample by 18.8 dB. The automation test is red although both of its endpoints (0 and `1e-38`) are outside the overflow band: the `Linear 64` ramp passes through it |
+| 994-C1 | `knee_coefficients` without its `is_finite` test (the pre-#994 design) | `knee_overflow` | RED, 4 of 5: the prepare, automation, restore (`a_restored_overflowing_knee_does_not_duck`, deleted by TA5; no catcher recorded) and bank tests. First failure `prepare: W 3e-45 (0x00000002) R 4 frame 0: 0.11473124 vs f64 reference 1` — the NaN target clamped to -100 dB and a 0.1 ms attack duck the very first full-scale sample by 18.8 dB. The automation test is red although both of its endpoints (0 and `1e-38`) are outside the overflow band: the `Linear 64` ramp passes through it |
 | 994-C2 | the rule as a constant bound one ulp too low: `knee_db >= f32::from_bits(0x0010_0000)` | `knee_overflow` | RED, 2 of 5: the prepare and bank tests, the two whose widths include `2^-129` itself |
 
 `the_narrowest_soft_knees_do_not_duck_a_sample_at_the_threshold` stays green under both: it is a
 preservation gate for widths the rule must not move, not a red gate.
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `the_collapsed_body_renders_the_dual_bodys_left_plane`: compressor `mono_collapse::mono_reopen_drives_the_next_render_from_the_copied_state`
-- `bank_matches_scalar_per_lane_bits`: no plausible same-crate KEEP catcher recorded
-- `block_partitions_are_invariant`: no plausible same-crate KEEP catcher recorded
-- `bypass_preserves_exact_dry_bits_at_sample_zero`: no plausible same-crate KEEP catcher recorded

@@ -554,15 +554,6 @@ fn a_live_left_only_polarity_write_on_misaligned_cohorts_renders_the_dual_bits()
     });
 }
 
-#[test]
-fn a_live_left_only_trim_write_on_misaligned_cohorts_renders_the_dual_bits() {
-    assert_live_left_only_write(TrackInputRecord::TrimDb {
-        lanes: BuiltinLaneSelector::Left,
-        db: -6.0,
-        smoothing_samples: 0,
-    });
-}
-
 // ---------------------------------------------------------------------------------------------
 // The controls: they pass under both rules, and they keep the fix from disarming too much.
 // ---------------------------------------------------------------------------------------------

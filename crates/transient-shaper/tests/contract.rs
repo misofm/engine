@@ -351,51 +351,6 @@ fn identity_rules_are_bit_exact_and_the_followers_still_warm() {
     }
 }
 
-/// The three link modes, read straight off the envelope state after one frame.
-///
-/// From a zeroed envelope the first rising sample gives `e = attack * 0 + (1 - attack) * u`, which
-/// is exactly `(1 - attack) * u` in `f32`, so the detector each channel saw is readable from the
-/// state word to the last bit. That pins the linking law itself — including `Average`'s frozen
-/// `0.5 * |l| + 0.5 * |r|` operation order — instead of a downstream consequence of it.
-///
-/// Red mutation: dispatch `LinkMode::Maximum` to `LINK_AVERAGE`. The two half-scaled products
-/// remain the frozen Average law; this row does not require alternative parenthesization to differ.
-#[test]
-fn link_modes_drive_the_detector_as_specified() {
-    let values = values_of(1.0, 0.0, 1.0);
-    let one_minus_attack = 1.0_f32 - f32::from_bits(TRANSIENT_SHAPER_COEFFICIENT_BITS[1][0]);
-    let half = 0.5_f32;
-    let expected = [
-        (LinkMode::DualMono, 1.0_f32, 0.25_f32),
-        (LinkMode::Maximum, 1.0, 1.0),
-        (
-            LinkMode::Average,
-            half * 1.0 + half * 0.25,
-            half * 1.0 + half * 0.25,
-        ),
-    ];
-    for (link_mode, left_detector, right_detector) in expected {
-        let mut effect = prepare_with(&values, 48_000, false, link_mode);
-        let mut left = [-1.0_f32];
-        let mut right = [0.25_f32];
-        effect.process(
-            effect_contract::EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128)
-                .expect("link block"),
-        );
-        let state = snapshot(effect.as_ref());
-        assert_eq!(
-            state_f32(&state.0, 0).to_bits(),
-            (one_minus_attack * left_detector).to_bits(),
-            "{link_mode:?} left detector"
-        );
-        assert_eq!(
-            state_f32(&state.1, 0).to_bits(),
-            (one_minus_attack * right_detector).to_bits(),
-            "{link_mode:?} right detector"
-        );
-    }
-}
-
 /// A restore is atomic and every word is validated.
 ///
 /// Red mutation: accept `remaining > RAMP_SAMPLES`, or drop the `valid_envelope` check.

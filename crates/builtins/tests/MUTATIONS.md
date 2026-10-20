@@ -12,7 +12,7 @@ Command form: `cargo test -p builtins --test <file> <name> -- --exact`.
 | M1 | `let denominator = 1.0 + t1;` → `1.0 - t1` | `builtins/src/lib.rs` (`SvfSection::design`) | T1 `prepared_sections_match_reference_coefficients` | FAILED, `rate=44100, cutoff=10, high_pass=true` |
 | M2 | drop the D7 flush of `s1`, joint arm included: `self.s1 = if rest { 0.0 } else { flush(n1) }` → `self.s1 = n1` (#1328; before it, `self.s1 = flush(n1)` → `n1`, red at `index=3670`). Dropping only the per-word arm (`else { n1 }`) stays green: this signal never leaves `n1` below `FLUSH_EPS` beside an `n2` at or above `REST_EPS` | `dsp-reference/src/tpt.rs` | T2 `scalar_stage_is_bit_identical_to_reference_recurrence` | FAILED, `rate=44100, signal=1, index=2645` (re-run for #1328) |
 | M2b | drop only the per-word arm of the D7 flush (#1328): `self.s1 = if rest { 0.0 } else { flush(n1) }` → `else { n1 }`, and separately the same for `s2` | `dsp-reference/src/tpt.rs` | T2b `scalar_stage_is_the_reference_recurrence_where_the_per_word_flush_fires` (T2 stays green on both: its signals reach rest through the joint arm) | FAILED, `rate=44100, index=257` (`s1`) and `rate=44100, index=276` (`s2`) |
-| M3a | every bank lane takes lane 0's coefficients (`zip(sections)` → `sections[0]`) | `builtins/src/lib.rs` (`svf_coef`) | T3 `bank_is_bit_identical_to_scalar_stage_at_every_width` | FAILED, `width=4, members=3, lane=1, frame=0` |
+| M3a | every bank lane takes lane 0's coefficients (`zip(sections)` → `sections[0]`) | `builtins/src/lib.rs` (`svf_coef`) | T3 `bank_is_bit_identical_to_scalar_stage_at_every_width` (deleted by TA5; catcher `randomized::the_banks_render_their_scalar_sections_under_random_retargets`) | FAILED, `width=4, members=3, lane=1, frame=0` |
 | M3c | report counters sum every lane, not only the members (`take(self.members)` → `take(L::WIDTH)`) | `builtins/src/lib.rs` (`InputStage::members_sum`) | T3, padding-lane arm | FAILED, `width=4, members=1` |
 | M4 | high-pass mix `m1 = -k` → `-k * 1.001` | `builtins/src/lib.rs` (`SvfSection::design`) | T1, T2 **and** the determinism corpus | all three FAILED |
 | M5 | the fixture oracle drops the identity-section `-0.0` mapping | `tools/audit/src/fixture_builtins.rs` | `issue064_checked_corpus_is_read_only_complete_and_has_no_authoring_reachability` | FAILED at the PCM semantics check |
@@ -200,7 +200,7 @@ what the rows below record.
 | # | mutation | site | suite | verdict |
 |---|---|---|---|---|
 | C-1 | the retarget writer `set_trim_signed` drops its refresh | `builtins/src/lib.rs` | `input_liveness_mono` (3 tests) | RED — `the cached channel-symmetry flag is stale for lane 0`, on `an_asymmetric_retarget_declines_the_lane_on_the_admitting_block`, `re_equalising_the_words_restores_the_designed_term_and_nothing_more` and `a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy`. This is the drain's own invalidation, and it is the one a live-words cache exists to have |
-| C-2 | the **dual** ramping arm of `process` drops its refresh | `builtins/src/lib.rs` | `host-core::input_liveness_live_controls` (2 tests) | RED — `stale for lane 2`, on `re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits` and `the_collapse_census_follows_the_commands`. A ramp advances the compared words on every block it runs, with no record drained: a drain-only invalidation is **not** sufficient, and this row is the proof |
+| C-2 | the **dual** ramping arm of `process` drops its refresh | `builtins/src/lib.rs` | `host-core::input_liveness_live_controls` (2 tests) | RED — `stale for lane 2`, on `re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits` (deleted by TA5; catcher `the_collapse_census_follows_the_commands`) and `the_collapse_census_follows_the_commands`. A ramp advances the compared words on every block it runs, with no record drained: a drain-only invalidation is **not** sufficient, and this row is the proof |
 | C-3 | the **collapsed** ramping arm of `process_mono` drops its refresh (after `mirror_trim_ramp`) | `builtins/src/lib.rs` | — (green across `builtins`, `rack`, `host-core`, `console-workload`, `parametric-eq`, `builtins-compiler`, `graph`) | **EQUIVALENT, and kept anyway.** `mirror_trim_ramp` assigns channel `1`'s whole record from channel `0`'s, so every compared ramp word is equal when it returns -- and it was equal on entry too, which `debug_assert!(self.trim_ramp_channels_agree())` at the top of `process_mono` states. The comparison therefore lands where it already was. The refresh is kept because the equivalence rests on the mirror being *total*: a mirror that ever became partial or conditional would make this row red, and the cost is one walk on a ramping collapsed block |
 
 ### Row count
@@ -367,10 +367,3 @@ restored.
 
 Before attempt 2 both S-1 rows were green, because the safety net moved both seeds at once and
 either half refused the commit.
-
-## TA4 deletions
-
-The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
-
-- `settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane`: no plausible same-crate KEEP catcher recorded
-- `fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane`: no plausible same-crate KEEP catcher recorded

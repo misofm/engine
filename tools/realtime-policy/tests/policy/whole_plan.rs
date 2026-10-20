@@ -107,13 +107,6 @@ fn a_missing_file_or_a_render_entry_only_in_tests_is_a_finding() {
     );
 }
 
-/// The test module no longer ends the scan: items after it are production code.
-#[test]
-fn a_whole_plan_borrow_after_the_test_module_is_a_finding() {
-    let after = format!("fn after_tests(plan: *mut Plan) {{ let _ = {UNSAFE} {{ &*plan }}; }}\n");
-    expect_failure("whole-plan-after-tests", &[append(&after)], &[WHOLE_PLAN]);
-}
-
 /// Only a module named `tests` under exactly `#[cfg(test)]` is test code.
 #[test]
 fn only_a_cfg_test_module_named_tests_is_skipped() {

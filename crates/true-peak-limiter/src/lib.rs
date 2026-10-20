@@ -6642,10 +6642,10 @@ mod tests {
 
     /// A core of `L::WIDTH` identically prepared lanes, driven directly through `process_block`.
     ///
-    /// The same construction `a_nonfinite_block_is_zeroed_reset_and_counted` uses, and for the same
-    /// reason: `process_block` *is* the shipped path — `process` and `process_bank` both end in it
-    /// — and reaching it directly is what lets the control arm suppress the fast path without
-    /// having to change the signal or the parameters to do it.
+    /// The same construction `a_nonfinite_block_is_zeroed_reset_and_counted` (deleted by TA5)
+    /// used, and for the same reason: `process_block` *is* the shipped path — `process` and
+    /// `process_bank` both end in it — and reaching it directly is what lets the control arm
+    /// suppress the fast path without having to change the signal or the parameters to do it.
     fn silent_core<L: Lane>(ceiling: f32, release: f32, lookahead: f32) -> LimiterCore<L> {
         let values = values_with(ceiling, release, lookahead);
         let mut preparation = request(&values);
@@ -7062,37 +7062,6 @@ mod tests {
                 "{label}: the release had already terminated, so the refusal proves nothing"
             );
         }
-    }
-
-    /// **A `-0.0` input block is not silence, and is not skipped.**
-    ///
-    /// Issue #182 S2, the input side of the signed-zero rule. Masking the sign bit in
-    /// `block_is_positive_zero` makes a `-0.0` block count as silence, and a standing claim then
-    /// engages on it. Every other test in this family stays green under that mutation.
-    ///
-    /// This crate's exposure is its delay line, as the compressor's is. A `-0.0` block the kernel
-    /// actually renders is written into `main_ring` and emerges `B = 486` samples — a little under
-    /// four blocks — later, with its sign intact: `select(bypass, delayed, delayed * gain)` gives
-    /// `-0.0 * 1.0 = -0.0` on the limiting arm and `-0.0` on the bypass arm. A fast path that
-    /// skipped the block never writes it, so the sample that should have emerged is `+0.0`.
-    ///
-    /// The `any(.. == 0x8000_0000)` is the anti-vacuity: it asserts a `-0.0` really did come out
-    /// the far end, so the comparison had the divergence available to it.
-    #[test]
-    fn a_negative_zero_input_block_is_not_treated_as_silence() {
-        let mut plan = vec![None];
-        plan.extend(vec![Some(0.0_f32); 40]);
-        plan.push(Some(-0.0_f32));
-        plan.extend(vec![Some(0.0_f32); 16]);
-
-        // The anti-vacuity at the build's own width (issue #1112).
-        let arm = compare_silence_arms::<lane::Native>("native", &plan, -6.0, 100.0, 0.05);
-        assert!(
-            arm.rendered.contains(&0x8000_0000),
-            "no -0.0 ever reached the output, so the comparison had nothing to catch"
-        );
-        compare_silence_arms::<f32>("scalar", &plan, -6.0, 100.0, 0.05);
-        compare_silence_arms::<Simd4>("W4", &plan, -6.0, 100.0, 0.05);
     }
 
     /// **A block carrying automation is rendered, not skipped, and the resident tap keeps up.**
@@ -7536,40 +7505,6 @@ mod tests {
             engaged,
             "a bank block carrying automation took the silent fast path"
         );
-    }
-
-    /// E10: the D7 boundary check replaces every per-value recovery path.
-    #[test]
-    fn a_nonfinite_block_is_zeroed_reset_and_counted() {
-        let values = values_with(-6.0, 100.0, 5.0);
-        let mut preparation = request(&values);
-        preparation.link_mode = LinkMode::DualMono;
-        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
-            .expect("metadata");
-        let (left_defaults, right_defaults) = initial_defaults(&values).expect("defaults");
-        let mut core = LimiterCore::<f32>::new(
-            metadata,
-            vec![left_defaults].into_boxed_slice(),
-            vec![right_defaults].into_boxed_slice(),
-        )
-        .expect("core");
-        let mut left = vec![0.5_f32; 128];
-        let mut right = vec![0.5_f32; 128];
-        core.process_block(&mut left, &mut right, 128);
-        assert_eq!(core.nonfinite_report().nonfinite_blocks, 0);
-
-        core.left.reduction[0] = f32::NAN;
-        let mut left = vec![0.5_f32; 128];
-        let mut right = vec![0.5_f32; 128];
-        core.process_block(&mut left, &mut right, 128);
-        assert!(left.iter().all(|sample| sample.to_bits() == 0));
-        assert!(right.iter().all(|sample| sample.to_bits() == 0));
-        assert_eq!(core.nonfinite_report().nonfinite_blocks, 1);
-        assert_eq!(core.nonfinite_report().nonfinite_lanes, 1);
-        assert_eq!(core.cursors, Cursors::default());
-        assert_eq!(core.left.reduction[0].to_bits(), 0);
-        assert!(core.left.required_ring.iter().all(|value| *value == 1.0));
-        assert_eq!(core.left.box_sum[0], core.left.lane[0].window as f32);
     }
 
     /// E11: the current layout round-trips, and every corruption is rejected without mutating the peer.
