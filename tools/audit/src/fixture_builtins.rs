@@ -5620,54 +5620,6 @@ mod tests {
         remove_temporary_root(root);
     }
 
-    #[test]
-    fn check_rejects_benchmark_identity_parameter_and_pcm_hash_mutations() {
-        let files = complete_files();
-        for (name, mutate) in [
-            (
-                "workload_id",
-                benchmark_text_mutation(
-                    "workload_id = \"issue035.full_chain_filters.48000hz.q128\"",
-                    "workload_id = \"issue035.full_chain_filters.96000hz.q128\"",
-                ),
-            ),
-            (
-                "missing_parameter",
-                benchmark_text_mutation("matrix_rr = 0.7\n", ""),
-            ),
-            (
-                "declared_pcm_hash",
-                benchmark_text_mutation(
-                    "input_pcm_sha256 = \"e53eead1da91f80b8c93a730bd1a45629f4efdddf90c3642d38498d29952d1ff\"",
-                    "input_pcm_sha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"",
-                ),
-            ),
-        ] {
-            let root = temporary_root(&format!("benchmark-{name}"));
-            let mut mutated = files.clone();
-            mutate(&mut mutated);
-            write_fixture(&root, &mutated);
-            assert!(
-                check_fixture_root(&root).is_err(),
-                "accepted benchmark {name} mutation"
-            );
-            remove_temporary_root(root);
-        }
-
-        let root = temporary_root("benchmark-pcm-content");
-        let mut mutated = files;
-        mutated
-            .get_mut("pcm/filters-asymmetric.f32le")
-            .expect("fixture PCM")
-            .push(0);
-        write_fixture(&root, &mutated);
-        assert!(
-            check_fixture_root(&root).is_err(),
-            "accepted benchmark PCM manifest-hash mismatch"
-        );
-        remove_temporary_root(root);
-    }
-
     fn reject_payload_mutation(
         files: &BTreeMap<String, Vec<u8>>,
         class: &str,
@@ -5747,19 +5699,6 @@ mod tests {
 
     fn complete_files() -> BTreeMap<String, Vec<u8>> {
         generated().into_iter().collect()
-    }
-
-    fn benchmark_text_mutation(
-        from: &'static str,
-        to: &'static str,
-    ) -> impl FnOnce(&mut BTreeMap<String, Vec<u8>>) {
-        move |files| {
-            let path = "benchmark/full_chain_filters-48000.toml";
-            let input = std::str::from_utf8(files.get(path).expect("benchmark input"))
-                .expect("benchmark input UTF-8");
-            assert!(input.contains(from), "frozen benchmark field");
-            files.insert(path.to_owned(), input.replacen(from, to, 1).into_bytes());
-        }
     }
 
     fn write_fixture(root: &Path, files: &BTreeMap<String, Vec<u8>>) {

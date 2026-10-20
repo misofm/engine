@@ -380,8 +380,7 @@ mod tests {
     use std::process::{Command, Stdio};
 
     use super::{
-        BANK_WIDTH, BUILTINS_IDENTITY_LANE_OPS, COMPRESSOR_LANE_OPS, EQ_LANE_OPS, LIMITER_LANE_OPS,
-        OPS_PER_CYCLE, floor_row, lane_samples_per_block,
+        BANK_WIDTH, BUILTINS_IDENTITY_LANE_OPS, OPS_PER_CYCLE, floor_row, lane_samples_per_block,
     };
     use console_workload::{
         BUS_SEND_WORKLOADS, CONSOLE_STRIP_WORKLOADS, Workload, native_session_rows,
@@ -642,25 +641,5 @@ input as $rust |
             );
             assert!(row.control.is_none(), "{}", workload.kind());
         }
-    }
-
-    #[test]
-    fn the_current_effect_recount_keeps_fractional_link_work_and_composes_the_strip() {
-        // The linked stereo max is shared by the two channel samples, hence the .5 in the
-        // compressor inventory. The limiter's shared link has the same accounting shape.
-        assert_eq!(COMPRESSOR_LANE_OPS, 81.5);
-        assert_eq!(LIMITER_LANE_OPS, 129.5);
-        assert_eq!(EQ_LANE_OPS, 27.0);
-        let console = floor_row(Workload::SixtyFourTrackConsole).expect("derived console row");
-        let expected = (69.0 + 27.0 + 81.5 + 129.5) / (BANK_WIDTH * OPS_PER_CYCLE);
-        assert!((console.cycles_per_lane_sample() - expected).abs() < 1.0e-12);
-        let compressor = floor_row(Workload::SixtyFourTrackCompressorOnly).expect("compressor");
-        let builtins = floor_row(Workload::SixtyFourTrackBuiltinsOnly).expect("builtins");
-        assert!(
-            ((compressor.cycles_per_lane_sample() - builtins.cycles_per_lane_sample())
-                - COMPRESSOR_LANE_OPS / (BANK_WIDTH * OPS_PER_CYCLE))
-                .abs()
-                < 1.0e-12
-        );
     }
 }

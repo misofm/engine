@@ -65,7 +65,8 @@ hosts charge the same, because the row is computed once, in the core.
   (`assert_capi_retained_bytes_are_complete`, `:867`; driver `:995`). It observes the compile of
   one session; it never populates a solo, a master or a pending candidate, so a term that the
   commit path adds later is outside it. The browser's ceilings are
-  `hosts/host-web/tests/retained_ceilings.rs` and `tests/browser-v1/expected.json`
+  `hosts/host-web/tests/retained_ceilings.rs` (deleted by TA4: batch 1 measured both its tests
+  redundant) and `tests/browser-v1/expected.json`
   (`resourceCeilings`, `:69`).
 
 ## Decisions to take (the implementer proposes, the coordinator rules)
@@ -104,7 +105,7 @@ hosts charge the same, because the row is computed once, in the core.
    admissions.
 3. Re-pins of every moved row, each measured on the final tree with its reason: the capi
    `maximum_capi_retained_bytes` fixtures that sit at a measured floor, the browser
-   `resourceCeilings` in `expected.json` and the `retained_ceilings.rs` budgets
+   `resourceCeilings` in `expected.json` and the `retained_ceilings.rs` budgets (deleted by TA4)
    (`scripts/check-browser-expected-resources.py` measures the browser), and the SDK or fixture
    files that carry a figure. Owner decision 4 applies: budgets stay ceilings, not exact counts,
    except the `capi_retained_bytes` equality, which stays exact.
@@ -117,7 +118,7 @@ hosts charge the same, because the row is computed once, in the core.
 - `crates/controls/src/effective.rs` (a reserve or a capacity accessor on `MonitorOverlay`) and
   `crates/session/src/edit_ramp.rs` (a ceiling function over the row counts), with their tests.
 - `crates/capi/tests/resource_lifecycle.rs`, `crates/capi/src/runtime/live_tests.rs` and
-  `live_peak_tests.rs` where a floor moves; `hosts/host-web/tests/retained_ceilings.rs`,
+  `live_peak_tests.rs` where a floor moves; `hosts/host-web/tests/retained_ceilings.rs` (deleted by TA4),
   `hosts/host-web/tests/browser-v1/expected.json`.
 - This spec file's decision record.
 
@@ -141,7 +142,7 @@ hosts charge the same, because the row is computed once, in the core.
 2. The existing exact equality `capi_retained_bytes == observed terms` still holds on every
    fixture, with the new term added to the right-hand side as an observed value.
 3. The same session on the browser: `WebResourceReport` reads the same core charge; the
-   `retained_ceilings.rs` budgets and `check-browser-expected-resources.py` pass with the moved
+   `retained_ceilings.rs` budgets (deleted by TA4) and `check-browser-expected-resources.py` pass with the moved
    rows re-pinned from measurement, each with its reason.
 4. A control plane at the exact `maximum_control_retained_bytes` that the session needs without
    the overlay is refused when the overlay is populated, on both hosts, with the typed resource

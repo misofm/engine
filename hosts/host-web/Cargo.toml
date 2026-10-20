@@ -42,9 +42,6 @@ math.workspace = true
 # `control_smoothing_parity.rs`. Never linked into the browser artifact: a dev-dependency does not
 # reach `-p host-web`'s release build.
 capi.workspace = true
-# Dev-only: `tests/retained_ceilings.rs` picks each budget by the native lane width (#1060), and
-# the #1709 live gate runs a hostile caller environment (`lane::fpenv::under_hostile_fp_env`).
-lane = { workspace = true, features = ["test-support"] }
 # The tests name `protocol` directly: its command frames drive the control plane the C ABI embeds
 # beside the browser host (`tests/control_parity.rs`, #1560, which absorbed #1399's
 # `strip_cells_cross_host.rs`). The browser artifact links `protocol` already, through the control

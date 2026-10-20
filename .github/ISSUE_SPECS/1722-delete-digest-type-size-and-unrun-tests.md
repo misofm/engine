@@ -177,7 +177,7 @@ owner rules (ASK 1):
 - Product code: `tools/audit` `builtins.rs` and `builtins_graph.rs` fixture identities are checks
   in the tool itself, not test assertions.
 - Ceilings: `graph` `runtime.rs` executor-table bound, `bypass_resources.rs`, allocation trackers.
-- `track_delay.rs` `the_estimate_charges_each_lane_its_own_ring`: four bytes per `f32` sample is the
+- `track_delay.rs` `the_estimate_charges_each_lane_its_own_ring` (deleted by TA4; KEEP catcher graph-compiler `track_delay::a_ring_is_a_named_allocation`): four bytes per `f32` sample is the
   product's accounting rule, not a struct total.
 
 ### Docs updated

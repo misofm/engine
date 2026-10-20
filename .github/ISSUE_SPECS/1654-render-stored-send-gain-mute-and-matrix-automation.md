@@ -729,7 +729,7 @@ Gates (all green), with red-without-the-feature evidence (once each):
 - Gate 4: capi `a_hand_send_mute_ors_with_its_curve_on_the_c_abi`; host-web
   `a_hand_send_mute_ors_with_its_curve_on_both_hosts`. Red with the curve replacing the static mute
   (not ORed): "the hand mute shuts the send while the curve is open".
-- Gate 5: capi `an_output_route_entry_is_refused_on_the_c_abi`; host-web
+- Gate 5: capi `an_output_route_entry_is_refused_on_the_c_abi` (deleted by TA4; KEEP catcher graph `program::tests::chain_of_seven_stages_lowers_to_six_ops_three_taps_and_two_buffers`); host-web
   `an_output_route_entry_is_refused_alike_on_both_hosts` (one diagnostic,
   `control.automation.target`).
 - Gate 6: zero render allocations in host-core gates 1, 2 and 7 (`bench_support::alloc` thread

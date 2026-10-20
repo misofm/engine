@@ -2530,52 +2530,6 @@ mod tests {
         );
     }
 
-    /// Issue #956 gate 2 (#936 gate 1, re-homed): at the native width the executor dispatches
-    /// only the units that do work.
-    ///
-    /// Both gain/pan rows bind the same units: sixty-four track inputs, the cohorts' bank chains
-    /// and the Output op. On the bound-feed row every input is a host processor
-    /// (`NodeKind::Bound`) that writes its buffer, so every unit is dispatched every block. On the
-    /// driver-fed row every input is a claim its bank's gather reads in place (issue #918): a
-    /// plain, unobserved `SourceInput` op whose dispatch would return at once, which bind leaves
-    /// out of the dispatched-unit table. So the loop dispatches every unit but the sixty-four
-    /// inputs, once per block (`graph::test_only_unit_dispatches`, reset before every block), and
-    /// the row still renders the bound row's bits
-    /// (`the_driver_fed_gain_pan_row_renders_the_bound_rows_bits`).
-    #[test]
-    fn the_driver_fed_gain_pan_row_dispatches_every_unit_but_its_inputs() {
-        const BLOCKS: u64 = 64;
-        let tracks = u64::from(Workload::SixtyFourTrackGainPanRing.tracks());
-        let mut censuses = Vec::new();
-        for (workload, skipped) in [
-            (Workload::SixtyFourTrackGainPanRing, tracks),
-            (Workload::SixtyFourTrackGainPanOnly, 0),
-        ] {
-            let mut runtime = SessionRuntime::new(workload);
-            let units = runtime.unit_eligibility().len() as u64;
-            assert!(
-                units > tracks,
-                "{}: the inputs, the bank chains and the Output",
-                workload.kind()
-            );
-            censuses.push(units);
-            for block in 0..BLOCKS {
-                graph::test_only_unit_dispatch_reset();
-                runtime.render(block).expect("console render");
-                assert_eq!(
-                    graph::test_only_unit_dispatches(),
-                    units - skipped,
-                    "{}, block {block}: units dispatched",
-                    workload.kind()
-                );
-            }
-        }
-        assert_eq!(
-            censuses[0], censuses[1],
-            "the census keeps every unit: the feed changes what is dispatched, not what is bound"
-        );
-    }
-
     /// The driver's five methods, called directly under the realtime audit: `played_planes` lends
     /// exactly the words `copy_track_input` copies, claim by claim, and both are the claimed
     /// track's frozen block through that track's declared channel mapping.

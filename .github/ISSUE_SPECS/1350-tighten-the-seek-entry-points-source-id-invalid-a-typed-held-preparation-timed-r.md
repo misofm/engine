@@ -36,7 +36,7 @@ Four seek-path defects found in the #1275 review are closed:
 - **Untimed reads.** `begin_block` (`:1103`) and `read_block` (`:1077`) use `SeekClock::Now`, which
   applies an anchored seek at once and ignores its anchor. Production renders through
   `begin_block_at` (`:1721`). The untimed paths are called only by the crate's own tests and by
-  `crates/source/tests/randomized.rs:454` and `crates/source/tests/seek_schedule_model.rs:486`.
+  `crates/source/tests/randomized.rs:454` and `crates/source/tests/seek_schedule_model.rs:486` (deleted by TA4).
 
 ## Decisions frozen for this slice
 
@@ -69,7 +69,7 @@ Four seek-path defects found in the #1275 review are closed:
 
 - `crates/capi/src/ffi.rs`, `crates/capi/src/runtime/error.rs` (or the #1309 successor file)
 - `crates/source/src/lib.rs`, `crates/source/tests/randomized.rs`,
-  `crates/source/tests/seek_schedule_model.rs`
+  `crates/source/tests/seek_schedule_model.rs` (deleted by TA4)
 
 ## Non-goals
 

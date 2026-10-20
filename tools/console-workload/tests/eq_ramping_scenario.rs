@@ -155,8 +155,3 @@ fn check(workload: Workload) {
 fn eq_only_gain_rides_move_bits_and_agree_between_supported_widths() {
     check(Workload::SixtyFourTrackEqOnly);
 }
-
-#[test]
-fn mono_console_both_rides_move_bits_and_agree_between_supported_widths() {
-    check(Workload::SixtyFourTrackConsoleMono);
-}

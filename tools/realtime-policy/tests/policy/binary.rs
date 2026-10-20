@@ -25,13 +25,3 @@ fn a_root_with_a_missing_scan_root_exits_one() {
         "failure line expected: {stderr}"
     );
 }
-
-#[test]
-fn two_arguments_exit_two() {
-    let output = binary()
-        .args(["one", "two"])
-        .output()
-        .expect("run the binary");
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-}

@@ -246,22 +246,6 @@ fn a_debug_assert_that_a_file_shadows_is_not_taken_at_its_word() {
     });
 }
 
-/// F2 (root Amendment 2): a workspace proc macro named `debug_assert` rebinds the count with no
-/// `macro_rules!`, no `macro` and no `use`, and `#[macro_use] extern crate` brings it into the
-/// drain's file. The file here holds only `#[proc_macro] pub fn debug_assert`. Two rules refuse it
-/// and either alone suffices: F2 (a `debug_assert` that no `!` follows is a shadow, so the base
-/// tree's drains that name a count in one are refused) and D3's (d) (a `proc_macro` identifier).
-/// The row is red only if both are dropped.
-#[test]
-fn a_proc_macro_named_debug_assert_is_refused() {
-    let tree = Tree::base("proc-macro-fn");
-    tree.apply(&[Edit::Create {
-        path: "crates/shadowing/src/lib.rs",
-        text: "#[proc_macro]\npub fn debug_assert(input: TokenStream) -> TokenStream {\n    input\n}\n",
-    }]);
-    assert_classes(&tree, &[DRAIN]);
-}
-
 /// D2: text that is not a definition or an import of the name leaves `debug_assert!` trusted: a
 /// string, a comment, a longer name, a `use` of another macro, a `use<..>` bound.
 #[test]

@@ -134,22 +134,6 @@ fn fixtures_distinguish_schema_examples_from_launch_effects() {
     );
 }
 
-#[test]
-fn the_duplicate_key_fixture_fails_the_grammar_stage() {
-    let name = "json-invalid-duplicate-key.json";
-    let report = validate_session_document(&fixture(name));
-    assert!(!report.passed());
-    assert_eq!(report.failed_stage(), Some(0));
-    let stage = &report.stages()[0];
-    assert_eq!(stage.name, "json-grammar");
-    assert_eq!(stage.diagnostics.len(), 1);
-    assert_eq!(stage.diagnostics[0].code, "json.syntax");
-    for later in &report.stages()[1..] {
-        assert_eq!(later.status, StageStatus::Skipped, "{}", later.name);
-    }
-    assert!(report.canonical().is_none());
-}
-
 /// `(fixture, needle, replacement, expected stage index, expected diagnostic code)`.
 ///
 /// Every row is a single textual substitution on a checked-in fixture, so a row that stops
@@ -425,18 +409,6 @@ fn parse_stage_diagnostics_carry_a_source_location_and_preparation_diagnostics_d
             "typed preparation has no source text: {diagnostic:?}"
         );
     }
-}
-
-#[test]
-fn canonical_output_reproduces_the_checked_in_canonical_fixtures() {
-    let name = "canonical-minimal.json";
-    let source = fixture(name);
-    let report = validate_session_document(&source);
-    assert_eq!(
-        report.canonical(),
-        Some(source.as_str()),
-        "{name} is checked in as canonical"
-    );
 }
 
 #[test]

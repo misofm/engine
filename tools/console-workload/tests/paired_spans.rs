@@ -1406,16 +1406,6 @@ fn run_all(fxs: &[Fx]) {
 }
 
 #[test]
-fn the_eq_bank_renders_the_dual_bits_in_every_scenario() {
-    run_all(&[Fx::Eq]);
-}
-
-#[test]
-fn the_compressor_bank_renders_the_dual_bits_in_every_scenario() {
-    run_all(&[Fx::Compressor]);
-}
-
-#[test]
 fn the_limiter_bank_renders_the_dual_bits_in_every_scenario() {
     run_all(&[Fx::Limiter]);
 }
@@ -2228,24 +2218,6 @@ fn a_restatement_keeps_every_cohort_collapsed() {
         restated, once,
         "restating a held value moves no rendered bit"
     );
-}
-
-/// The product's EQ path never needed the rule: the SDK sends a symmetric both-channel EQ edit as
-/// one `Both` target, which the witness always preserved. This holds on the base tree as well
-/// (VERIFY-AUTOMATION F2), and is here so that stays true.
-#[test]
-fn an_eq_only_both_channel_ride_keeps_every_cohort_collapsed() {
-    const BLOCKS: u64 = 16;
-    let (counters, _, _) = console_run(Backend::current(), BLOCKS, &|block, tracks| {
-        (0..tracks.len())
-            .step_by(3)
-            .map(|track| {
-                let gain = if block.is_multiple_of(2) { 2.0 } else { -2.0 };
-                (track, Push::Both(EQ, EQ_GAIN, gain))
-            })
-            .collect()
-    });
-    assert_eq!(counters[0], BLOCKS * counters[1]);
 }
 
 /// A one-channel write or a near pair retires exactly its own cohort, on the block it lands.
