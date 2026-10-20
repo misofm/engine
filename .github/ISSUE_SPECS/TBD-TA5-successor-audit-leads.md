@@ -1,12 +1,12 @@
 # Record the lead the last test-audit PR found and did not fix (TA5 successor)
 
-TA5 (`TBD-TA5-delete-the-batch-2-redundant-tests.md`) deleted 98 tests of the batch 2 sample and
+TA5 (`TBD-TA5-delete-the-batch-2-redundant-tests.md`) deleted 97 tests of the batch 2 sample and
 did not add scope. It found one lead. It does not block TA5.
 
 ## Lead
 
 **The redundancy measurement over-reports on its own.** Of batch 2's 162 MEASURED-REDUNDANT
-tests, reading kept 64. Some carry a claim that another record states and the name triage did not
+tests, reading kept 65. Some carry a claim that another record states and the name triage did not
 read: the only red test of a `MUTATIONS.md` row (gate-expander row 3, effect-contract 140-1,
 parametric-eq recorded failures 1 and 1b, graph 916-1 to 916-15), a known AArch64 release failure
 in `scripts/lib/aarch64-known-defects.py` (`m2_exp2_lane_identity`, #1019), and a randomized

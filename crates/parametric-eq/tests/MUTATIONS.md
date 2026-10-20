@@ -446,7 +446,7 @@ run, and the edit reverted (#1328 attempt 4; the attempt records are in the issu
 
 | # | mutation | gate that goes red | result |
 |---|---|---|---|
-| 1328-M1 | `lane::flush_pair` without its input term (attempt 3's law: `rest = abs(n1) < REST_EPS && abs(n2) < REST_EPS`) | `exact_rest::a_tiny_input_through_four_boosting_shelves_gets_every_boost` (`10 Hz, input 2.7939677e-11 … misses the ordinary run by 1.5091782e3`), dev and release; `the_low_shelf_fixed_point_reaches_exact_rest` (deleted by TA5; no catcher recorded) stays green | RED |
+| 1328-M1 | `lane::flush_pair` without its input term (attempt 3's law: `rest = abs(n1) < REST_EPS && abs(n2) < REST_EPS`) | `exact_rest::a_tiny_input_through_four_boosting_shelves_gets_every_boost` (`10 Hz, input 2.7939677e-11 … misses the ordinary run by 1.5091782e3`), dev and release; `the_low_shelf_fixed_point_reaches_exact_rest` stays green | RED |
 | 1328-M2 | `self.right.identity = self.left.identity;` dropped from `desymmetrize` | `mono_collapse::a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_masks`: dev through `identity_flags_agree` (`lib.rs`), release on the right plane at block 27 after the left-only retarget | RED |
 | 1328-M3 | `self.right.dry = self.left.dry;` dropped from `desymmetrize` | the same test, dev only (`identity_flags_agree`); release renders the same bits (a stale dry lane runs the identity section wet, which moves at most `-0.0` to `+0.0`, and this input moves none) | RED (dev) |
 

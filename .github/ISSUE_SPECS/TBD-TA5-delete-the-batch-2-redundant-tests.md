@@ -36,16 +36,16 @@ test is kept when the answer names a real edge case that the measured mutants co
 no remaining test asserts. Every DELETE answer names the claim and the remaining test, by its full
 name, that asserts it; every KEEP answer names the remaining tests checked. The first pass named
 siblings only by file for 73 DELETE answers; the TA5 verifier found that 5 of them were the only
-defenders of their claims, so all 73 were read again and kept wherever no remaining test could be
+defenders of their claims, so all 73 were read again (and one more was restored on re-check) and kept wherever no remaining test could be
 named. Reading also found what the triage missed: a randomized differential named `run_seeds`, an
 allocation audit inside a macro, tests that a `MUTATIONS.md` records as the only red test of a
 row, and one test that `scripts/lib/aarch64-known-defects.py` lists as a known AArch64 failure.
 
 ## What this change does
 
-1. Deletes 98 of the 162 tests and keeps 64 by reading (list below). None of the 162 had moved
+1. Deletes 97 of the 162 tests and keeps 65 by reading (list below). None of the 162 had moved
    or gone since `81a3074fc`; nothing was skipped.
-2. Deletes 34 helper items (476 lines) only after `cargo clippy --all-targets --all-features`
+2. Deletes 31 helper items (465 lines) only after `cargo clippy --all-targets --all-features`
    reported them unused, looped until it reported nothing; no `#[allow(dead_code)]` was added.
    No test file is left empty.
 3. Updates the references: each `MUTATIONS.md` row that names a deleted test names a remaining
@@ -86,7 +86,7 @@ row, and one test that `scripts/lib/aarch64-known-defects.py` lists as a known A
 | lane | 3 | 2 | 72 |
 | math | 1 | 2 | 6 |
 | multiband-compressor | 1 | 2 | 83 |
-| parametric-eq | 4 | 3 | 307 |
+| parametric-eq | 3 | 4 | 244 |
 | protocol | 3 | 4 | 152 |
 | rack | 4 | 2 | 248 |
 | realtime-policy | 11 | 2 | 177 |
@@ -95,11 +95,11 @@ row, and one test that `scripts/lib/aarch64-known-defects.py` lists as a known A
 | source | 3 | 0 | 115 |
 | transient-shaper | 1 | 3 | 44 |
 | true-peak-limiter | 2 | 2 | 63 |
-| **total** | **98** | **64** | **4,564** |
+| **total** | **97** | **65** | **4,501** |
 
-Lines are the deleted test functions with their doc comments, at `ad5c7ae86`. Shortstat against `ad5c7ae86`: 83 files changed, 349 insertions(+), 5,221 deletions(-).
+Lines are the deleted test functions with their doc comments, at `ad5c7ae86`. Shortstat against `ad5c7ae86`: 82 files changed, 350 insertions(+), 5,143 deletions(-).
 
-## Kept by reading (64)
+## Kept by reading (65)
 
 - audit `fixture_builtins::tests::check_rejects_owned_jsonl_tuple_mutations`: a field or record
   change in an owned JSONL after the manifest is regenerated; the format test only deletes,
@@ -143,6 +143,9 @@ Lines are the deleted test functions with their doc comments, at `ad5c7ae86`. Sh
   with a 2^24 + 3 frame block.
 - math `m2_exp2_lane_identity`: a known AArch64 release failure (LANE-3, #1019) named in
   `scripts/lib/aarch64-known-defects.py`; x86 mutants cannot reach it.
+- parametric-eq `the_low_shelf_fixed_point_reaches_exact_rest`: #1328 gate 2, the reproducer of the 10 Hz
+  slope-0.1 shelf stuck at 6.01e-20, and a ceiling claim (rest within `REST_BOUND_SAMPLES`); the
+  named defender plants +-1e-15 with every band disabled (restored on re-check).
 - parametric-eq `a_non_finite_input_block_is_zeroed_counted_once_and_leaves_the_next_block_clean`:
   the count claim (one block on one channel, not one per sample).
 - parametric-eq `svf_words_match_the_independent_oracle_on_the_complete_grid`: the only gate on the
@@ -218,8 +221,7 @@ Added by the re-reading and the review fold:
   `FUSED_GAINS`, `fused_family_source`
 - `crates/math/tests/m2_lane_identity.rs`: `exp2_caller_edges`, `FastGain` and its `LaneFn`
 - `crates/multiband-compressor/tests/crossover.rs`: `rms`, `complex_gain`, `CROSSOVERS`
-- `crates/parametric-eq/tests/carry.rs`: `same_bits`; `tests/exact_rest.rs`: `at_rest`,
-  `HELD_BLOCKS`, `REST_BOUND_SAMPLES`
+- `crates/parametric-eq/tests/carry.rs`: `same_bits`
 - `crates/rack/src/lib.rs`: `WrongWidthPlanes` and its `BankMembers`
 
 Leads the compiler does not report are in the successor spec
