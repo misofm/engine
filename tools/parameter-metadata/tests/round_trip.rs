@@ -316,8 +316,9 @@ fn stage(host: &mut AudioWorkletEngineHost, kind: u32, rack: u8, effect_index: u
 /// engine" is the claim that the document's row and the catalog's row agree on the ID and on
 /// whether the control is automatable, and that the document's `liveUpdatable` is that flag. The
 /// host half (a `SET_CONTROL` on an insert row commits, renders and matches a fresh plan; a
-/// rebuild-class row is refused before commit) is held by `hosts/host-web/tests/control_admission.rs`
-/// and `crates/controls/tests/effect_rows.rs`.
+/// rebuild-class row is refused before commit) is held by `crates/host-core/tests/live_delta.rs`,
+/// reached through the browser by `hosts/host-web/tests/control_parity.rs`, and by
+/// `crates/controls/tests/effect_rows.rs`.
 ///
 /// Red mutation: renumber a parameter in the generator's `effects` block (or give it a different
 /// `automatable` flag) without the catalog -> the catalog lookup or the flag comparison fails; an
