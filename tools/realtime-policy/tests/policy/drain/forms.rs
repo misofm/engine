@@ -83,7 +83,13 @@ fn the_forms_that_d6_and_d8_state_pass() {
 
 #[test]
 fn a_count_that_the_rule_cannot_prove_is_refused() {
-    let rows: [(&str, String); 10] = [
+    let rows: [(&str, String); 11] = [
+        (
+            "count-in-an-expression-macro",
+            counted(
+                "let available = control.available_at_entry();\n    let _ = touch!(available);",
+            ),
+        ),
         (
             "count-on-the-right-of-a-comparison",
             counted(
