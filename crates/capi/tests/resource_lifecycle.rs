@@ -3578,50 +3578,6 @@ fn assert_count_refusal(document: &str, compile_limits: &CompileLimits, case: &s
     assert_eq!(diagnostics, b"host.resource.count\t$\n", "{case}");
 }
 
-/// Test value: turns red if the C bound ignores the new word, treats zero as "no submixes" (or as
-/// unbounded), or stops refusing the remaining reserved words.
-#[test]
-fn maximum_submixes_bounds_submixes_and_zero_defers_to_maximum_tracks() {
-    let document = two_track_three_submix_session();
-
-    // Zero: the submix bound is `maximum_tracks`.
-    assert_count_refusal(
-        &document,
-        &submix_limits(2, 0),
-        "zero word, three submixes over two tracks",
-    );
-    assert_prepares(
-        &document,
-        &submix_limits(3, 0),
-        "zero word, three submixes within three tracks",
-    );
-
-    // Nonzero: the word is the bound, whatever `maximum_tracks` is.
-    assert_prepares(
-        &document,
-        &submix_limits(2, 3),
-        "three submixes at a cap of three",
-    );
-    assert_count_refusal(
-        &document,
-        &submix_limits(2, 2),
-        "three submixes over a cap of two",
-    );
-    assert_count_refusal(
-        &document,
-        &submix_limits(3, 2),
-        "the word overrides a larger track cap",
-    );
-
-    // The two remaining reserved words still refuse, each on its own.
-    for word in 0..2 {
-        let mut nonzero = submix_limits(2, 3);
-        nonzero.reserved[word] = 1;
-        let (result, _) = compile_result_c(&document, &nonzero);
-        assert_eq!(result, RESULT_INVALID_ARGUMENT, "reserved[{word}]");
-    }
-}
-
 // Issue #1243 D2: a C ABI caller bounds VCA groups through `maximum_vcas`, the word after
 // `maximum_submixes` that was `reserved[0]`. Zero means "use `maximum_tracks`", exactly as for
 // submixes; the word is a bound of its own, never `maximum_submixes` (held at zero below, which
@@ -3658,39 +3614,56 @@ fn vca_limits(maximum_tracks: u64, maximum_vcas: u64) -> CompileLimits {
     }
 }
 
-/// Test value: turns red if the C bound ignores the new word, treats zero as "no VCAs" (or as
-/// unbounded), reads `maximum_submixes` in its place, or stops refusing the remaining reserved
+/// #1206 D2 and #1243 D2, one row per word: `maximum_submixes` bounds submixes and
+/// `maximum_vcas` bounds VCA groups, each a bound of its own whose zero means `maximum_tracks`.
+/// The VCA row holds `maximum_submixes` at zero, so it cannot pass by reading that word.
+///
+/// Test value: turns red if the C bound ignores a word, treats zero as "none" (or as unbounded),
+/// reads `maximum_submixes` in place of `maximum_vcas`, or stops refusing the remaining reserved
 /// words while the named word is set.
 #[test]
-fn maximum_vcas_bounds_vcas_and_zero_defers_to_maximum_tracks() {
-    let document = two_track_three_vca_session();
+fn maximum_submixes_and_vcas_bound_their_kind_and_zero_defers_to_maximum_tracks() {
+    type Row = (&'static str, String, fn(u64, u64) -> CompileLimits);
+    let rows: [Row; 2] = [
+        ("submixes", two_track_three_submix_session(), submix_limits),
+        ("VCAs", two_track_three_vca_session(), vca_limits),
+    ];
+    for (kind, document, limits) in rows {
+        // Zero: the bound is `maximum_tracks`.
+        assert_count_refusal(
+            &document,
+            &limits(2, 0),
+            &format!("zero word, three {kind} over two tracks"),
+        );
+        assert_prepares(
+            &document,
+            &limits(3, 0),
+            &format!("zero word, three {kind} within three tracks"),
+        );
 
-    // Zero: the VCA bound is `maximum_tracks`.
-    assert_count_refusal(
-        &document,
-        &vca_limits(2, 0),
-        "zero word, three VCAs over two tracks",
-    );
-    assert_prepares(
-        &document,
-        &vca_limits(3, 0),
-        "zero word, three VCAs within three tracks",
-    );
+        // Nonzero: the word is the bound, whatever `maximum_tracks` is.
+        assert_prepares(
+            &document,
+            &limits(2, 3),
+            &format!("three {kind} at a cap of three"),
+        );
+        assert_count_refusal(
+            &document,
+            &limits(2, 2),
+            &format!("three {kind} over a cap of two"),
+        );
+        assert_count_refusal(
+            &document,
+            &limits(3, 2),
+            &format!("{kind}: the word overrides a larger track cap"),
+        );
 
-    // Nonzero: the word is the bound, whatever `maximum_tracks` is.
-    assert_prepares(&document, &vca_limits(2, 3), "three VCAs at a cap of three");
-    assert_count_refusal(&document, &vca_limits(2, 2), "three VCAs over a cap of two");
-    assert_count_refusal(
-        &document,
-        &vca_limits(3, 2),
-        "the word overrides a larger track cap",
-    );
-
-    // Only the named word is freed: each remaining reserved word still refuses on its own.
-    for word in 0..2 {
-        let mut nonzero = vca_limits(2, 3);
-        nonzero.reserved[word] = 1;
-        let (result, _) = compile_result_c(&document, &nonzero);
-        assert_eq!(result, RESULT_INVALID_ARGUMENT, "reserved[{word}]");
+        // Only the named word is freed: each remaining reserved word still refuses on its own.
+        for word in 0..2 {
+            let mut nonzero = limits(2, 3);
+            nonzero.reserved[word] = 1;
+            let (result, _) = compile_result_c(&document, &nonzero);
+            assert_eq!(result, RESULT_INVALID_ARGUMENT, "{kind}: reserved[{word}]");
+        }
     }
 }
