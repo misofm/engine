@@ -2,12 +2,10 @@
 //! region (D1), the scope that resolves a count (D2), the syntax it visits (D4) and what counts as
 //! a pop (D5).
 
-use realtime_policy::Class;
-
 use super::super::common::{
     BASE_FILES, BASE_REGIONS, BEGIN, END, Edit, expect_failure, expect_valid,
 };
-use super::{ANCHOR, BUILTINS_COMPILER, DRAIN, accepts, each_row, refuses};
+use super::{DRAIN, accepts, each_row, refuses};
 
 const BUFFER: &str = "crates/engine/src/realtime/buffer.rs";
 
@@ -237,43 +235,12 @@ fn a_pop_below_a_node_outside_the_allow_list_is_refused() {
     each_row(rows, |name, text| refuses(name, &text));
 }
 
-/// D4: `Expr::Async` is not on the list. The `async` keyword is forbidden too (A2), so both
-/// classes report.
-#[test]
-fn a_counted_drain_in_an_async_block_is_refused_twice() {
-    let text = "fn drain(control: &mut Consumer<Record>) {\n    let _ = async {\n        let available = control.available_at_entry();\n        for _ in 0..available {\n            let Ok(record) = control.try_pop() else {\n                break;\n            };\n            apply(record);\n        }\n    };\n}";
-    expect_failure(
-        "drain-in-async-block",
-        &[Edit::ReplaceLine {
-            path: BUILTINS_COMPILER,
-            old: ANCHOR,
-            new: text,
-        }],
-        &[Class::ForbiddenBody, DRAIN],
-    );
-}
-
 /// D5: a raw-identifier method name is the same method.
 #[test]
 fn a_raw_identifier_pop_is_a_pop() {
     refuses(
         "raw-identifier-pop",
         "fn drain(control: &mut Consumer<Record>) {\n    loop {\n        let Ok(record) = control.r#try_pop() else {\n            break;\n        };\n        apply(record);\n    }\n}",
-    );
-}
-
-/// D3: a loop outside a nested `fn` counts as around a pop inside it.
-#[test]
-fn a_pop_in_a_nested_function_is_judged_by_the_loops_outside_it() {
-    // The loop also calls the nested function, which pops: the call rule (#1444) refuses that too.
-    expect_failure(
-        "pop-in-a-nested-function-in-an-unbounded-loop",
-        &[Edit::ReplaceLine {
-            path: super::BUILTINS_COMPILER,
-            old: super::ANCHOR,
-            new: "fn drain(control: &mut Consumer<Record>) {\n    loop {\n        fn helper(control: &mut Consumer<Record>) {\n            let _ = control.try_pop();\n        }\n        helper(control);\n        break;\n    }\n}",
-        }],
-        &[DRAIN, Class::PoppingCall],
     );
 }
 

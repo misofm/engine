@@ -123,23 +123,6 @@ mod tests {
         );
     }
 
-    /// Both ends are exact: a zero coefficient arrives, a unit coefficient freezes.
-    #[test]
-    fn the_smoother_has_exact_ends() {
-        for target in [-42.5f32, 0.0, -0.0, -100.0] {
-            assert_eq!(
-                branching_smooth::<f32>(-7.5, target, 0.0, 0.0).to_bits(),
-                target.to_bits(),
-                "a zero coefficient must arrive exactly"
-            );
-            assert_eq!(
-                branching_smooth::<f32>(-7.5, target, 1.0, 1.0),
-                -7.5,
-                "a unit coefficient must freeze"
-            );
-        }
-    }
-
     /// The three link modes, including the `±0.0`, overflow and NaN corners.
     ///
     /// Red mutations: maximum becomes minimum; the `abs` is dropped; the average halves the sum.

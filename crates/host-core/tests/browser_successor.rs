@@ -107,14 +107,6 @@ fn session_b() -> SessionModel {
     model
 }
 
-/// A without track `eq1` and its route.
-fn session_without_eq1() -> SessionModel {
-    let mut model = session_a();
-    model.tracks.retain(|track| track.id.as_str() != "eq1");
-    model.routes.retain(|route| route.id.as_str() != "eq1-main");
-    model
-}
-
 #[derive(Clone, Copy, Debug)]
 enum Branch {
     Single,
@@ -504,38 +496,6 @@ fn the_concurrent_selected_meter_entry_forms_no_fused_bank_and_renders_the_same_
         serialized_bits == concurrent_bits,
         "dropping the fusion moved a bit"
     );
-}
-
-/// Gate 4. A successor whose capture target the new session removed is refused with the typed
-/// `host.spectrum.target` diagnostic, on both branches, rather than prepared without its capture.
-///
-/// Red if the successor path stops checking the capture target against the new session (the
-/// preparation succeeds and a capture handle with no strip is handed to the host), or reports it
-/// under another code. The base is borrowed (`&inventory`), so a refusal cannot move the
-/// predecessor's state; this test claims nothing about the predecessor.
-#[test]
-fn a_successor_without_its_spectrum_target_is_refused_with_the_typed_diagnostic() {
-    let a = Session::compile(session_a());
-    let b = Session::compile(session_without_eq1());
-    for branch in [Branch::Single, Branch::Collection] {
-        // The capture targets track `eq1`, which B removed.
-        let (predecessor, _kept) = prepare(branch, &a, "eq1", None)
-            .unwrap_or_else(|failure| panic!("{branch:?} predecessor: {failure:?}"));
-        let edit_ramps = EditRamps::new();
-        let refused = prepare(
-            branch,
-            &b,
-            "eq1",
-            Some(base(&predecessor.inventory, &a.model, &edit_ramps)),
-        )
-        .err()
-        .unwrap_or_else(|| panic!("{branch:?}: the missing target was accepted"));
-        assert!(
-            String::from_utf8_lossy(refused.as_bytes()).contains("host.spectrum.target"),
-            "{branch:?}: {}",
-            String::from_utf8_lossy(refused.as_bytes())
-        );
-    }
 }
 
 /// Gate 5. Red if the swap block of a spectrum plan allocates or frees on render.

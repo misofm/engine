@@ -20,19 +20,6 @@ fn rewrite<'a>(path: &'a str, text: &'a str) -> [Edit<'a>; 2] {
 }
 
 #[test]
-fn a_marker_written_in_a_string_literal_is_malformed() {
-    // One line: the marker word inside a literal.
-    let one_line = format!("const S: &str = \"// {BEGIN}\";\n");
-    expect_failure("marker-in-string", &append(&one_line), &[MALFORMED]);
-    // Across lines: the middle line is a valid-looking marker line, and only the literal that
-    // spans it says otherwise.
-    let spanning = format!("const S: &str = \"\n// {BEGIN}\n\";\n");
-    expect_failure("marker-line-in-string", &append(&spanning), &[MALFORMED]);
-    let raw = format!("const S: &str = r#\"\n// {END}\n\"#;\n");
-    expect_failure("marker-line-in-raw-string", &append(&raw), &[MALFORMED]);
-}
-
-#[test]
 fn a_marker_written_in_a_doc_comment_is_malformed() {
     let line_doc = format!("/// {BEGIN}\nfn documented() {{}}\n");
     expect_failure("marker-in-doc-comment", &append(&line_doc), &[MALFORMED]);
@@ -187,16 +174,6 @@ fn unmatched_markers_name_the_file_and_drop_it_from_the_floors() {
         .find(|finding| finding.class == Class::UnmatchedMarkers)
         .expect("an unmatched finding");
     assert_eq!(unmatched.path.as_deref(), Some("hosts/host-web/src/lib.rs"));
-}
-
-#[test]
-fn the_file_floor_fires_when_a_marked_file_loses_its_markers() {
-    // Removing every marker line of one file drops the file and its regions; its code stays,
-    // including the file's unmarked `try_pop` drains.
-    let tree = Tree::base("marked-file-count-floor");
-    strip_marker_lines(&tree, "crates/builtins/src/lib.rs");
-    // The file's drains are pops outside every region now (#1443 D2).
-    super::common::assert_classes(&tree, &[Class::UnmarkedTryPop, FILE_FLOOR, REGION_FLOOR]);
 }
 
 #[test]

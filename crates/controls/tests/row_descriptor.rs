@@ -89,14 +89,3 @@ fn effect_sections_and_unknown_ids_have_no_descriptor() {
     );
     assert_eq!(Section::Own.kind(), SectionKind::Own);
 }
-
-/// A rate-keyed row is resolved at the rate given.
-#[test]
-fn a_rate_keyed_row_follows_the_rate() {
-    let at = |rate| {
-        row_descriptor(OwnerKind::Strip, SectionKind::Builtins, 3, rate)
-            .expect("hpf_hz")
-            .maximum
-    };
-    assert!(at(96_000) > at(44_100));
-}

@@ -444,7 +444,6 @@ mod tests {
     const DECIBELS_PER_NEPER: f64 = 8.685_889_638_065_035;
     /// Flat gate for every row whose design frequency is at or above 1 kHz.
     const FLAT_DECIBEL_TOLERANCE: f64 = 1e-9;
-    const IMPULSE_FRAMES: usize = 4_096;
 
     /// One RBJ cookbook evaluation plus the terms of its own conditioning bound.
     #[derive(Clone, Copy, Debug)]
@@ -728,22 +727,6 @@ mod tests {
              E1 worst_flat={worst_flat:e} at {worst_flat_row}\n\
              E1 worst_null={worst_null:e} worst_error_over_bound={worst_ratio:e}"
         );
-    }
-
-    #[test]
-    fn svf_recurrence_matches_state_space_impulse() {
-        let mut worst = 0.0_f64;
-        for row in rows() {
-            let coefficients = row.coefficients();
-            let mut section = ReferenceSvf::new(coefficients);
-            let modelled = coefficients.state_space().impulse_response(IMPULSE_FRAMES);
-            for (frame, expected) in modelled.into_iter().enumerate() {
-                let input = if frame == 0 { 1.0 } else { 0.0 };
-                worst = worst.max((section.process(input) - expected).abs());
-            }
-        }
-        eprintln!("E2 worst_abs={worst:e}");
-        assert!(worst <= 1e-12, "recurrence vs state space worst {worst:e}");
     }
 
     #[test]

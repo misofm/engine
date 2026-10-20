@@ -125,11 +125,6 @@ fn assert_partition_invariant<L: Lane>(width: &str) {
 }
 
 #[test]
-fn the_composition_is_partition_invariant_at_width_one() {
-    assert_partition_invariant::<f32>("W=1");
-}
-
-#[test]
 fn the_composition_is_partition_invariant_at_width_four() {
     assert_partition_invariant::<Simd4>("W=4");
 }

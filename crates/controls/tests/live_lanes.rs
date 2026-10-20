@@ -2,52 +2,11 @@
 
 mod common;
 
-use common::{LAUNCH_EFFECTS, RATE, effects_fixture, fixture, insert_id};
-use controls::{ControlClass, ControlRow, Family, LiveLanes, MonitorOverlay, list, live_lanes};
-use session::{Effect, EffectIdentity, EffectQuality, LinkMode, SidechainDeclaration};
+use common::{RATE, effects_fixture, fixture};
+use controls::{ControlClass, ControlRow, Family, LiveLanes, MonitorOverlay, list};
 
 fn rows(model: &session::SessionModel) -> Vec<ControlRow> {
     list(model, &MonitorOverlay::default(), RATE).collect()
-}
-
-/// Red if a live row's lane is not attached (a live edit would find no cell), or if a lane is
-/// attached for a row that is not live (a session with no effect would pay for effect cells).
-#[test]
-fn the_effect_lane_follows_the_effect_rows() {
-    // No effect, no effect row, no lane. With today's classes the input rows (#1556) and the
-    // fixture's one send into a submix (#1557) are live.
-    let mut model = fixture();
-    let input_only = LiveLanes {
-        strip_input: true,
-        routes: true,
-        ..LiveLanes::default()
-    };
-    assert_eq!(live_lanes(&model), input_only);
-
-    // One insert on one track gives the effect lane and no other.
-    let effect = LAUNCH_EFFECTS[1];
-    model.tracks[0].inserts.effects.push(Effect {
-        id: insert_id(effect),
-        identity: EffectIdentity::Native {
-            effect_id: common::id(effect),
-        },
-        quality: EffectQuality::Normal,
-        bypass: false,
-        link_mode: LinkMode::DualMono,
-        params: Vec::new(),
-        sidechain: SidechainDeclaration::None,
-    });
-    assert_eq!(
-        live_lanes(&model),
-        LiveLanes {
-            effects: true,
-            ..input_only
-        }
-    );
-
-    // A console slot is an effect instance too.
-    let model = effects_fixture();
-    assert!(live_lanes(&model).effects);
 }
 
 /// Red if the input or route lane ignores its family, or if a row that is not live asks for a

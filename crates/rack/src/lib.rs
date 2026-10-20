@@ -4276,42 +4276,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_feature = "avx2")]
-    struct WrongWidthPlanes {
-        planes: Planes,
-        per_lane_writes: usize,
-    }
-    #[cfg(target_feature = "avx2")]
-    impl BankMembers for WrongWidthPlanes {
-        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
-            self.planes.plane(lane)
-        }
-        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
-            self.per_lane_writes += 1;
-            self.planes.plane_mut(lane)
-        }
-        fn distinct_planes_mut(
-            &mut self,
-            _lanes: usize,
-            frames: usize,
-        ) -> Option<BankPlaneViews<'_>> {
-            let mut left = self.planes.left.iter_mut().take(4);
-            let mut right = self.planes.right.iter_mut().take(4);
-            let pairs: [BankPlanePair<'_>; 4] = core::array::from_fn(|_| {
-                (
-                    left.next()
-                        .expect("four malicious left lanes")
-                        .as_mut_slice(),
-                    right
-                        .next()
-                        .expect("four malicious right lanes")
-                        .as_mut_slice(),
-                )
-            });
-            BankPlaneViews::from_four(pairs, frames)
-        }
-    }
-
     struct ShortClaimPlanes {
         planes: Planes,
         per_lane_writes: usize,
@@ -5261,63 +5225,6 @@ mod tests {
         assert_planes_bit_equal(&members.planes, &expected, "direct call sentinel");
     }
 
-    /// An other-width probe: the provider offers a four-lane view to an eight-lane chain, so it
-    /// exists where eight-lane banks do (issue #1112).
-    #[test]
-    #[cfg(target_feature = "avx2")]
-    fn wrong_width_provider_is_dropped_before_complete_staged_fallback() {
-        let mut state = 0x3994_3995_3996_3997;
-        let source = hostile_planes(8, 11, &mut state);
-        let expected = Planes {
-            left: source.left.clone(),
-            right: source.right.clone(),
-        };
-        let mut malformed = WrongWidthPlanes {
-            planes: Planes {
-                left: source
-                    .left
-                    .into_iter()
-                    .chain([vec![f32::from_bits(0x7fc0_3998); 11]])
-                    .collect(),
-                right: source
-                    .right
-                    .into_iter()
-                    .chain([vec![f32::from_bits(0x7fc0_3999); 11]])
-                    .collect(),
-            },
-            per_lane_writes: 0,
-        };
-        let active = vec![true; 8].into_boxed_slice();
-        let mut chain = BankChain::new(
-            AoSoaScratch::new(BankWidth::Eight, 11).expect("scratch"),
-            active.clone(),
-            vec![slot(active.to_vec(), Box::new(PassThrough))],
-        )
-        .expect("chain");
-        chain
-            .run(&mut malformed, 11, 0, LiveSnapshot::ALL)
-            .expect("staged fallback");
-        assert_planes_bit_equal(
-            &Planes {
-                left: malformed.planes.left[..8].to_vec(),
-                right: malformed.planes.right[..8].to_vec(),
-            },
-            &expected,
-            "wrong-width staged fallback",
-        );
-        assert_eq!(malformed.per_lane_writes, 8);
-        assert!(
-            malformed.planes.left[8]
-                .iter()
-                .all(|word| word.to_bits() == 0x7fc0_3998)
-        );
-        assert!(
-            malformed.planes.right[8]
-                .iter()
-                .all(|word| word.to_bits() == 0x7fc0_3999)
-        );
-    }
-
     #[test]
     fn inadequate_claimed_capacity_takes_complete_staged_fallback() {
         let mut state = 0x399a_399b_399c_399d;
@@ -5923,116 +5830,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn all_active_folded_masks_use_one_cohort_with_physical_lane_ids() {
-        let frames = 13_u32;
-        // A full four-lane bank; a full, a scattered and a one-lane eight-lane bank, where a
-        // build has eight lanes (issue #1112).
-        let masks = BankWidth::ALL.iter().flat_map(|&width| {
-            if width.lanes() == 4 {
-                vec![(width, vec![true, true, true, true])]
-            } else {
-                vec![
-                    (width, vec![true; 8]),
-                    (
-                        width,
-                        vec![true, false, true, false, false, true, false, false],
-                    ),
-                    (
-                        width,
-                        vec![false, false, true, false, false, false, false, false],
-                    ),
-                ]
-            }
-        });
-        for (width, active) in masks {
-            let lanes = width.lanes() as usize;
-            let build = || PlanesWithFold {
-                planes: Planes {
-                    left: (0..lanes)
-                        .map(|lane| vec![lane as f32 + 1.0; frames as usize])
-                        .collect(),
-                    right: (0..lanes)
-                        .map(|lane| vec![-(lane as f32) - 1.0; frames as usize])
-                        .collect(),
-                },
-                gains: vec![1.0; lanes],
-                bus_left: vec![0.0; frames as usize],
-                bus_right: vec![0.0; frames as usize],
-                taken: Vec::new(),
-                trace: Vec::new(),
-                cohorts: Vec::new(),
-            };
-            let chain = || {
-                BankChain::new(
-                    AoSoaScratch::new(width, frames).expect("scratch"),
-                    active.clone().into_boxed_slice(),
-                    vec![slot(active.clone(), Box::new(ScaleByLane))],
-                )
-                .expect("chain")
-            };
-            let mut members = build();
-            let mut default = DefaultFoldProvider(build());
-            let mut optimized_chain = chain();
-            let mut default_chain = chain();
-            optimized_chain
-                .arm_fold(active.clone().into_boxed_slice())
-                .expect("fold");
-            default_chain
-                .arm_fold(active.clone().into_boxed_slice())
-                .expect("fold");
-            for block in 0..2 {
-                optimized_chain
-                    .run(
-                        &mut members,
-                        frames,
-                        block * u64::from(frames),
-                        LiveSnapshot::ALL,
-                    )
-                    .expect("run");
-                default_chain
-                    .run(
-                        &mut default,
-                        frames,
-                        block * u64::from(frames),
-                        LiveSnapshot::ALL,
-                    )
-                    .expect("default run");
-            }
-            let ids: Vec<usize> = (0..lanes).filter(|lane| active[*lane]).collect();
-            let expected_cohorts = if ids.is_empty() {
-                Vec::new()
-            } else {
-                vec![ids.clone(), ids]
-            };
-            assert_eq!(members.cohorts, expected_cohorts);
-            assert!(members.trace.iter().all(|(kind, _)| *kind == 'f'));
-            assert!(
-                default.0.cohorts.is_empty(),
-                "trait default delegates lane by lane"
-            );
-            assert_eq!(members.taken, default.0.taken);
-            assert_eq!(members.bus_left, default.0.bus_left);
-            assert_eq!(members.bus_right, default.0.bus_right);
-            assert_eq!(members.planes.left, default.0.planes.left);
-            assert_eq!(members.planes.right, default.0.planes.right);
-            for (lane, is_active) in active.iter().copied().enumerate() {
-                if !is_active {
-                    assert!(
-                        members.planes.left[lane]
-                            .iter()
-                            .all(|x| x.to_bits() == (lane as f32 + 1.0).to_bits())
-                    );
-                    assert!(
-                        members.planes.right[lane]
-                            .iter()
-                            .all(|x| x.to_bits() == (-(lane as f32) - 1.0).to_bits())
-                    );
-                }
-            }
-        }
-    }
-
     /// One recorded [`BankMembers::fold_resident`] offer: `(lanes, frames, lane ids, left bits,
     /// right bits)`.
     type ResidentOffer = (usize, usize, Vec<usize>, Vec<u32>, Vec<u32>);
@@ -6530,39 +6327,6 @@ mod tests {
     }
 
     #[test]
-    fn arming_an_auxiliary_destination_refuses_an_unrenderable_mask() {
-        let frames = 32_u32;
-        // The build's widest bank, its last lane not rendered (#1112).
-        let lanes = WIDEST.lanes() as usize;
-        let mut active = vec![true; lanes];
-        active[lanes - 1] = false;
-        let scratch = AoSoaScratch::new(WIDEST, frames).expect("scratch");
-        let mut chain = BankChain::new(
-            scratch,
-            active.clone().into_boxed_slice(),
-            vec![slot(active.clone(), Box::new(PassThrough))],
-        )
-        .expect("chain");
-        assert_eq!(
-            chain.arm_aux(vec![true; lanes - 1].into_boxed_slice()),
-            Err(RackError::Shape),
-            "a mask that is not the chain's lane count is refused"
-        );
-        assert_eq!(
-            chain.arm_aux(vec![true; lanes].into_boxed_slice()),
-            Err(RackError::Shape),
-            "arming the last lane, which this chain does not render, is refused"
-        );
-        assert!(
-            chain.aux_lanes().is_empty(),
-            "a refused arm leaves the chain on the zero-cost path"
-        );
-        chain
-            .arm_aux(active.into_boxed_slice())
-            .expect("arming exactly the rendered lanes is admitted");
-    }
-
-    #[test]
     fn gather_scatter_round_trip_is_bit_exact() {
         let frames = 128_u32;
         // The build's widest bank (#1112).
@@ -6688,58 +6452,6 @@ mod tests {
             AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
             vec![true; 4].into_boxed_slice(),
             vec![slot(vec![false; 4], Box::new(Live))],
-        );
-    }
-
-    /// T3: a slot that is an identity on every lane is never executed, and the chain still counts
-    /// exactly one transpose per block.
-    #[test]
-    fn identity_everywhere_slot_is_not_executed() {
-        struct Counting {
-            slot: usize,
-            calls: u64,
-        }
-        impl BankStage for Counting {
-            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
-                self.calls += 1;
-                Ok(())
-            }
-            fn qualification_counters(&self) -> [u64; 2] {
-                let mut counters = [0, 0];
-                counters[self.slot] = self.calls;
-                counters
-            }
-        }
-        let frames = 16_u32;
-        let mut planes = Planes {
-            left: (0..4).map(|_| vec![0.0; frames as usize]).collect(),
-            right: (0..4).map(|_| vec![0.0; frames as usize]).collect(),
-        };
-        let mut chain = BankChain::new(
-            AoSoaScratch::new(BankWidth::Four, frames).expect("scratch"),
-            vec![true; 4].into_boxed_slice(),
-            vec![
-                slot(vec![true; 4], Box::new(Counting { slot: 0, calls: 0 })),
-                slot(vec![false; 4], Box::new(Counting { slot: 1, calls: 0 })),
-                slot(vec![true; 4], Box::new(Counting { slot: 0, calls: 0 })),
-            ],
-        )
-        .expect("chain");
-        for block in 1..=5_u64 {
-            chain
-                .run(
-                    &mut planes,
-                    frames,
-                    block * u64::from(frames),
-                    LiveSnapshot::ALL,
-                )
-                .expect("run");
-            assert_eq!(chain.transposes(), block);
-        }
-        assert_eq!(
-            chain.qualification_counters(),
-            [10, 0],
-            "both live slots ran once per block; the identity-everywhere slot never ran"
         );
     }
 

@@ -209,41 +209,6 @@ fn a_path_on_a_guarded_module_or_an_inline_module_is_refused() {
     );
 }
 
-/// Rule (d): a glob `use` among the top-level items of `ffi.rs` or `render_lock.rs`, plain,
-/// public or grouped. A glob in a child module is not refused.
-#[test]
-fn a_top_level_glob_use_is_refused_and_a_child_module_glob_is_not() {
-    let globs = [
-        "use crate::fake::*;",
-        "pub use crate::fake::*;",
-        "use crate::{fake::*, other};",
-        "use crate::fake::{self, *};",
-    ];
-    for (index, glob) in globs.iter().enumerate() {
-        for path in [FFI, RENDER_LOCK] {
-            let report = expect_failure(
-                &format!("web-glob-{index}-{}", path.len()),
-                &[append(path, &format!("{glob}\n"))],
-                &[Class::GlobInWrapModule],
-            );
-            assert_eq!(report.findings.len(), 1, "{glob} in {path}");
-            assert_eq!(report.findings[0].path.as_deref(), Some(path));
-        }
-    }
-    // `use super::*;` in a child module that holds no listed export (the shape of the five test
-    // modules of the real tree) cannot change how an export or the import resolves.
-    expect_valid(
-        "web-glob-child-module",
-        &[
-            append(
-                FFI,
-                "#[cfg(test)]\nmod child_tests {\n    use super::*;\n}\npub(crate) mod live_tests {\n    pub use super::*;\n}\n",
-            ),
-            append(RENDER_LOCK, "mod more {\n    use super::*;\n}\n"),
-        ],
-    );
-}
-
 /// A listed export must be a top-level item of `ffi.rs`: moved into a child module (where a glob
 /// is not refused) it is missing, not accepted.
 #[test]

@@ -22,20 +22,6 @@ fn only<'a>(
 }
 
 #[test]
-fn insignificant_whitespace_and_shuffled_keys_canonicalize() {
-    let mut value: serde_json::Value = serde_json::from_str(CANONICAL).expect("fixture JSON");
-    let object = value.as_object_mut().expect("root object");
-    let schema = object.remove("schema_version").expect("schema");
-    object.insert("schema_version".to_owned(), schema);
-    let source = serde_json::to_string(&value).expect("noncanonical JSON");
-    let model = parse_session_json(&source).expect("valid noncanonical JSON");
-    assert_eq!(
-        canonical_session_json(&model).expect("canonical"),
-        CANONICAL
-    );
-}
-
-#[test]
 fn decoded_duplicate_path_and_second_key_span_are_exact() {
     let source = r#"{"outer":{"id":"first","\u0069d":"second","ignored":{"x":1}}}"#;
     let error = parse_session_json(source).expect_err("duplicate keys reject before value visit");

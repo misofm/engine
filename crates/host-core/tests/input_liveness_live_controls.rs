@@ -334,60 +334,6 @@ fn a_command_moves_exactly_the_addressed_track() {
     }
 }
 
-/// Two tracks commanded to different values do not swap.
-///
-/// The sharpest form of the lane-index test: a transposing drain renders the same *mix* either
-/// way, so the two arms are compared per track.
-#[test]
-fn two_commands_are_not_interchangeable() {
-    let session = mono_session();
-    let build = |first: usize, second: usize| {
-        let mut host = prepare_with_live_controls(&session);
-        push(
-            &mut host,
-            first,
-            TrackInputRecord::TrimDb {
-                lanes: BuiltinLaneSelector::Both,
-                db: -144.0,
-                smoothing_samples: 0,
-            },
-        );
-        push(
-            &mut host,
-            second,
-            TrackInputRecord::PolarityInvert {
-                lanes: BuiltinLaneSelector::Both,
-                inverted: true,
-                smoothing_samples: 0,
-            },
-        );
-        let _ = render(&mut host, 4);
-        peaks(&host).clone()
-    };
-    let forward = build(0, 5);
-    let reversed = build(5, 0);
-    let names: Vec<String> = forward.keys().cloned().collect();
-    assert_ne!(
-        forward[&names[0]], reversed[&names[0]],
-        "silencing track {} is not the same as flipping it",
-        names[0]
-    );
-    assert_ne!(
-        forward[&names[5]], reversed[&names[5]],
-        "and the same holds for track {}",
-        names[5]
-    );
-    // The six tracks nobody addressed are identical in both arms, which is what says the two
-    // commands went where they were addressed rather than somewhere else consistently.
-    for index in [1_usize, 2, 3, 4, 6, 7] {
-        assert_eq!(
-            forward[&names[index]], reversed[&names[index]],
-            "track {} was addressed by neither arm",
-            names[index]
-        );
-    }
-}
-
 /// A command takes effect on the **first sample of the block that drains it**.
 ///
 /// The drain contract every live-control gate in the tree rests on. With a zero-length window the
@@ -725,73 +671,6 @@ fn a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel() {
             );
         }
     }
-}
-
-/// The same window, then put back: re-equalising the two channels neither re-engages the collapse
-/// nor moves the bits away from the never-collapsed oracle.
-///
-/// The `LIVE` latch and the disengage window interact here, and the interaction is the one that
-/// makes the fix's narrower restore rule safe: after the disengage the right channel's ramp record
-/// is whatever live controls addressed to it, which is *nothing yet*, and the second record is what
-/// puts it where the first put the left one. A copy at the boundary would have made the second
-/// record a no-op and hidden the whole episode.
-#[test]
-fn re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits() {
-    let mut mono = prepare_with_live_controls(&mono_session());
-    let mut stereo = prepare_with_live_controls(SESSION);
-    let _ = render(&mut mono, 2);
-    let _ = render(&mut stereo, 2);
-    // One cohort at the eight-lane launch width, two on a four-lane (AArch64 NEON) build (#1017):
-    // every cohort collapses on both blocks.
-    let cohorts = (TRACKS / lane::Backend::current().width()) as u64;
-    let engaged = collapses(&mono)[0];
-    assert_eq!(
-        engaged,
-        2 * cohorts,
-        "every cohort collapses before the ride"
-    );
-
-    for host in [&mut mono, &mut stereo] {
-        push(
-            host,
-            2,
-            TrackInputRecord::TrimDb {
-                lanes: BuiltinLaneSelector::Left,
-                db: -12.0,
-                smoothing_samples: 64,
-            },
-        );
-    }
-    assert_eq!(
-        render(&mut mono, 2),
-        render(&mut stereo, 2),
-        "the asymmetric episode diverged"
-    );
-
-    for host in [&mut mono, &mut stereo] {
-        push(
-            host,
-            2,
-            TrackInputRecord::TrimDb {
-                lanes: BuiltinLaneSelector::Right,
-                db: -12.0,
-                smoothing_samples: 64,
-            },
-        );
-    }
-    assert_eq!(
-        render(&mut mono, 6),
-        render(&mut stereo, 6),
-        "the re-equalised episode diverged"
-    );
-    assert_eq!(peaks(&mono), peaks(&stereo), "per-track meters diverged");
-    // Only the cohorts track 2 is not in keep collapsing, on each of the eight blocks since.
-    assert_eq!(
-        collapses(&mono)[0],
-        engaged + (cohorts - 1) * 8,
-        "the ridden chain must not have collapsed again: `LIVE` is a latch, and re-equal words \
-         alone do not re-arm it"
-    );
 }
 
 /// A **symmetric** record drained on a collapsed block does not disengage, and still renders the

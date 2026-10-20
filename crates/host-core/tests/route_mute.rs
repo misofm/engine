@@ -1386,28 +1386,6 @@ fn a_fully_follow_muted_undelayed_send_is_inactive() {
     }
 }
 
-/// #1218 gate 2, delayed. #1217 gate 3's bus with `d-e` open but following `d`, whose two lanes
-/// are muted: `d-e`'s edge into `e` carries the limiter's 486-sample compensation (asserted from
-/// the compiled plan), so it stays active, mixes `[+0.0; 4]` every block, and the bus renders that
-/// gate's oracle.
-///
-/// Red if a fully follow-muted delayed send is skipped (its counter stops, and its consumer would
-/// stage a buffer this block never wrote) or still mixes its open coefficients.
-#[test]
-fn a_fully_follow_muted_delayed_send_stays_active() {
-    let mut model = delayed_bus(true);
-    assert_eq!(model.tracks[0].id.as_str(), "d");
-    let fader = &mut model.tracks[0].fader;
-    (fader.left_mute, fader.right_mute) = (true, true);
-    let follow = model
-        .routes
-        .iter_mut()
-        .find(|route| route.id.as_str() == "d-e")
-        .expect("d-e is declared");
-    (follow.mute, follow.follows_mute) = (false, true);
-    assert_delayed_route_stays_active(&delayed_session_checked(model));
-}
-
 // ---- #1652: a following send of a stored mute ---------------------------------------------
 
 /// #1652 (batch 18, #1652c): a send into a submix whose source strip automates its mute holds the

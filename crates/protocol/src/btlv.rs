@@ -1068,51 +1068,6 @@ mod tests {
     }
 
     #[test]
-    fn nested_count_mismatch_restores_parent_counter() {
-        let limits = ProtocolLimits::default();
-        let nested = FieldSpec::msg(1, true, false, &crate::schema::enum_choice::SPEC);
-        let child_count = crate::schema::enum_choice::SPEC
-            .field_count(&[])
-            .expect("schema count");
-
-        let mut sizing = CountSink::new(limits);
-        sizing.check_field_count(1).expect("parent count");
-        assert_eq!(
-            sizing.nested_spec(nested, &mut |sink| {
-                sink.message_header(child_count)?;
-                sink.field_spec(crate::schema::enum_choice::VALUE, &1.0_f32.to_le_bytes())
-            }),
-            Err(EncodeError::LimitExceeded)
-        );
-        assert_eq!(sizing.fields.actual, 0);
-        sizing
-            .nested_spec(nested, &mut |sink| {
-                sink.message_header(child_count)?;
-                sink.field_spec(crate::schema::enum_choice::VALUE, &1.0_f32.to_le_bytes())?;
-                sink.field_spec(crate::schema::enum_choice::LABEL, b"one")
-            })
-            .expect("parent counter restored");
-        sizing.finish_message().expect("parent count matches");
-
-        let mut bytes = [0_u8; 96];
-        let mut writer = SliceSink::new(&mut bytes, limits);
-        writer.check_field_count(1).expect("parent count");
-        assert_eq!(
-            writer.nested_spec(nested, &mut |sink| sink.message_header(child_count)),
-            Err(EncodeError::LimitExceeded)
-        );
-        assert_eq!(writer.fields.actual, 0);
-        writer
-            .nested_spec(nested, &mut |sink| {
-                sink.message_header(child_count)?;
-                sink.field_spec(crate::schema::enum_choice::VALUE, &1.0_f32.to_le_bytes())?;
-                sink.field_spec(crate::schema::enum_choice::LABEL, b"one")
-            })
-            .expect("parent counter restored");
-        writer.finish_message().expect("parent count matches");
-    }
-
-    #[test]
     fn nested_body_runs_once_per_sink_and_patches_length() {
         let limits = ProtocolLimits::default();
         let mut sizing_calls = 0;

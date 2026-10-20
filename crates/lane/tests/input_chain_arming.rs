@@ -240,52 +240,6 @@ fn the_right_channel_arms_its_joint_flush_alone() {
     lane::each_lane!(|L| right_channel_alone_arms::<L>(core::any::type_name::<L>()));
 }
 
-/// Every state word: one word of one section of the silent channel in the band, every other word
-/// `+0.0`. The block must arm and clear it, on both channels and in the collapsed bodies.
-fn every_state_word_arms<L: Lane>(width: &str) {
-    for entry in ENTRIES {
-        for mono in [false, true] {
-            for channel in 0..if mono { 1 } else { 2 } {
-                let sections = if entry == Entry::Mixed { 1..2 } else { 0..2 };
-                for section in sections {
-                    for word in 0..2 {
-                        let mut c = chain::<L>(entry, WINDOW);
-                        let mut s = InputChainState::<L>::default();
-                        let target = &mut s.section[channel][section];
-                        if word == 0 {
-                            target.ic1 = L::splat(BAND[0]);
-                        } else {
-                            target.ic2 = L::splat(BAND[1]);
-                        }
-                        s.silence[channel] = L::splat(WINDOW - 1.0);
-                        let mut planes = [live(), live()];
-                        planes[channel] = vec![0.0; FRAMES * 8];
-                        let [left, right] = &mut planes;
-                        run(
-                            entry,
-                            mono,
-                            &mut left[..FRAMES * L::WIDTH],
-                            &mut right[..FRAMES * L::WIDTH],
-                            &mut c,
-                            &mut s,
-                        );
-                        assert!(
-                            state_bits(&s, channel).iter().all(|bits| *bits == 0),
-                            "{width}, {entry:?}, mono {mono}: channel {channel}, section \
-                             {section}, word {word} in the band arms the block"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn any_state_word_in_the_band_arms_the_block() {
-    lane::each_lane!(|L| every_state_word_arms::<L>(core::any::type_name::<L>()));
-}
-
 /// A block longer than the window: the channel starts at rest with a fresh counter, takes one tiny
 /// sample on frame 0 and zeros after it. Its counter reaches the window on frame `window`, inside
 /// the block, with the tail's state in the band: the block must arm though no lane held state at

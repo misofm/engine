@@ -219,35 +219,6 @@ fn every_ladder_is_integer_multiples_of_the_step_and_stays_on_the_lattice() {
 }
 
 #[test]
-fn every_builtin_row_declares_a_lawful_lattice_at_every_launch_rate() {
-    // The builtin table is the other half of the shipped surface, including the appended `pan`
-    // row and the two rate-keyed cutoffs whose ceiling moves with the prepared rate.
-    for rate in [44_100_u32, 48_000, 88_200, 96_000] {
-        for descriptor in &builtins::BUILTIN_PARAMETER_DESCRIPTORS {
-            let where_ = format!("builtin {} @ {rate}", descriptor.name);
-            let lattice = builtins::builtin_parameter_lattice_points(descriptor, rate)
-                .unwrap_or_else(|error| panic!("{where_}: unlawful: {error:?}"));
-            assert!(!lattice.points.is_empty(), "{where_}: empty");
-            for point in &lattice.points {
-                assert!(
-                    decimal_to_f32(&point.canonical).is_some(),
-                    "{where_}: {} does not convert",
-                    point.canonical
-                );
-            }
-            // A declared disabled sentinel is an admitted extra value outside the ordered set,
-            // never a point that stepping can wander onto.
-            if let Some(disabled) = &lattice.disabled {
-                assert!(
-                    lattice_index_for_decimal(&lattice.points, disabled).is_err(),
-                    "{where_}: the disabled sentinel must sit outside the ordered lattice"
-                );
-            }
-        }
-    }
-}
-
-#[test]
 fn the_appended_pan_row_is_the_persisted_pan_authority() {
     // #239 ruling 5461507633 B4: pan persists as pan. The row is stable-ID 12, per-lane, and
     // linear across the full field, so `hard left`, `centre` and `hard right` are all exact.

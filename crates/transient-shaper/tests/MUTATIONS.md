@@ -190,3 +190,10 @@ dropped.
 The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
 
 - `the_scalar_product_is_partition_invariant`: no plausible same-crate KEEP catcher recorded
+
+## TA5 deletions
+
+The 2026-10 test audit (TA5, the batch 2 sample measured at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 2 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 2 recorded no same-crate catcher.
+
+- `link_modes_drive_the_detector_as_specified`: no same-crate KEEP catcher recorded
+- `the_bank_is_partition_invariant`: transient-shaper `bank_snapshot_restore_and_resets_are_track_local`

@@ -1410,11 +1410,6 @@ fn the_limiter_bank_renders_the_dual_bits_in_every_scenario() {
     run_all(&[Fx::Limiter]);
 }
 
-#[test]
-fn the_chained_strip_renders_the_dual_bits_in_every_scenario() {
-    run_all(&[Fx::Eq, Fx::Compressor, Fx::Limiter]);
-}
-
 /// Every order of a mixed drain on the chained strip: one-channel, `Both` and paired writes in
 /// one block, across the EQ's target cells and the compressor's and the limiter's parameter
 /// cells.

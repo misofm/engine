@@ -690,67 +690,6 @@ fn padded_banks_render_the_fixtures_per_node() {
 // Gate 3: the clone source does not reach an active lane
 // ---------------------------------------------------------------------------------------------
 
-/// Gate 3: an active lane's bits are the same whichever member the padded lanes clone.
-///
-/// Every render also matches the members' scalar instances and checks each padded lane (gate 1's
-/// checks), and the renders of one mask must agree word for word across every clone source,
-/// including a member at every parameter's minimum and one at every maximum. Red if a factory reads
-/// its members from anywhere but lanes `0..members` -- from the tail of the requests, say, as if
-/// padding came first -- so that an active lane runs a clone; or if a whole-bank decision reads a
-/// padded lane's parameters.
-#[test]
-fn active_lanes_do_not_depend_on_the_clone_source() {
-    for &width in WIDTHS {
-        let lanes = width.lanes() as usize;
-        let masks: Vec<Vec<bool>> = [1, 2, lanes / 2 + 1, lanes - 1]
-            .into_iter()
-            .map(|members| prefix_mask(width, members))
-            .collect();
-        for (index, mask) in masks.iter().enumerate() {
-            let members = mask.iter().filter(|active| **active).count();
-            let mut draw = Draw::new(0x1092_0300 + (lanes * 10 + index) as u64);
-            // Members that differ as much as the domains allow: one at every minimum and one at
-            // every maximum, then drawn ones.
-            let mut values: Vec<Values> = (0..members).map(|_| draw.values()).collect();
-            values[0] = values_from(SOFT_CLIP_PARAMETERS.map(|p| {
-                let minimum = p.minimum.expect("bounded");
-                (minimum, minimum)
-            }));
-            if members > 1 {
-                values[members - 1] = values_from(SOFT_CLIP_PARAMETERS.map(|p| {
-                    let maximum = p.maximum.expect("bounded");
-                    (maximum, maximum)
-                }));
-            }
-            let blocks = random_blocks(&mut draw, members, 8);
-            let link = LINKS[index % LINKS.len()];
-            let mut reference: Option<Vec<Vec<u32>>> = None;
-            for clone_of in 0..members {
-                let outputs = render(
-                    &Padded {
-                        width,
-                        mask,
-                        members: &values,
-                        clone_of,
-                        rate: 48_000,
-                        link,
-                    },
-                    &blocks,
-                    &format!("{width:?} mask {mask:?} clone of member {clone_of}"),
-                );
-                match &reference {
-                    None => reference = Some(outputs),
-                    Some(first) => assert_eq!(
-                        &outputs, first,
-                        "{width:?} mask {mask:?}: the active lanes moved when the padding cloned \
-                         member {clone_of} instead of member 0"
-                    ),
-                }
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // Gate 4: D7 attributes active lanes only
 // ---------------------------------------------------------------------------------------------

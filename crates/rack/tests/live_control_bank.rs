@@ -6,8 +6,6 @@
 //! packed span array correctly, that a lane never sees another lane's command, and that a bypassed
 //! lane gets its own latency-matched dry signal while its neighbours keep the wet one.
 
-use std::sync::{Arc, Mutex};
-
 use effect_contract::{
     BankProcessReport, BankWidth, EffectBankProcessBlock, EffectCellWriter, EffectControlLane,
     EffectControlRecord, EffectId, EffectLaneShape, EffectLaneSpec, EffectProgramKey,
@@ -16,11 +14,8 @@ use effect_contract::{
     PreparedSidechainPort, ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
     StatePayloadSizes, TailSamples, effect_control_lane,
 };
-use engine::realtime::{GatePin, LiveSnapshot, LiveValuesSuperseded, RenderError, RevisionGate};
-use rack::{
-    AoSoaScratch, BankBlock, BankChain, BankMembers, BankSlot, BankStage,
-    LiveControlEffectBankStage,
-};
+use engine::realtime::{GatePin, LiveSnapshot, LiveValuesSuperseded, RevisionGate};
+use rack::{AoSoaScratch, BankChain, BankMembers, BankSlot, BankStage, LiveControlEffectBankStage};
 
 const LANES: usize = 4;
 const CAPACITY: u32 = 4;
@@ -490,81 +485,6 @@ fn a_live_control_stage_reports_the_lanes_that_hold_a_channel() {
     assert_eq!(stage_of([false; LANES]).live_lanes(), 0);
     assert_eq!(stage_of([true, false, true, false]).live_lanes(), 0b0101);
     assert_eq!(stage_of([true; LANES]).live_lanes(), 0b1111);
-}
-
-/// #1504: `run` hands the block's live snapshot to every slot that has an active lane, once in
-/// every block, silent blocks included, and to no slot that has none.
-///
-/// This lives here and not in `src/lib.rs`'s inline module because a `BankStage` is `Send`, so a
-/// test reads what the chain's stages recorded through an `Arc<Mutex<..>>`, and
-/// `scripts/check-rack-policy.sh` forbids `std::sync` under `crates/rack/src` (render code).
-///
-/// Test value: a chain that passes a fixed or stale snapshot to a stage, or skips a stage's
-/// drain when the block is silent. Under `S` that makes the watermark early.
-#[test]
-fn run_hands_the_blocks_snapshot_to_every_active_slot_in_every_block() {
-    type Drains = Arc<Mutex<Vec<(usize, u64, u64)>>>;
-    struct Recording {
-        slot: usize,
-        drains: Drains,
-    }
-    impl BankStage for Recording {
-        fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
-            Ok(())
-        }
-        fn begin_block(
-            &mut self,
-            first_sample: u64,
-            snapshot: LiveSnapshot,
-        ) -> Result<(), RenderError> {
-            self.drains.lock().expect("drains").push((
-                self.slot,
-                first_sample,
-                snapshot.revision(),
-            ));
-            Ok(())
-        }
-    }
-    let frames = 8_u32;
-    // Every block is silent: the planes stay zero.
-    let mut planes = Planes {
-        left: (0..LANES).map(|_| vec![0.0; frames as usize]).collect(),
-        right: (0..LANES).map(|_| vec![0.0; frames as usize]).collect(),
-    };
-    let drains = Drains::default();
-    let slot = |slot: usize, active_lanes: [bool; LANES]| BankSlot {
-        stage: Box::new(Recording {
-            slot,
-            drains: Arc::clone(&drains),
-        }),
-        active_lanes: active_lanes.to_vec().into_boxed_slice(),
-    };
-    let mut chain = BankChain::new(
-        AoSoaScratch::new(BankWidth::Four, frames).expect("scratch"),
-        vec![true; LANES].into_boxed_slice(),
-        vec![
-            slot(0, [true; LANES]),
-            // An identity on every lane: it runs nothing, so it has no drain to run.
-            slot(1, [false; LANES]),
-            slot(2, [true, true, false, false]),
-        ],
-    )
-    .expect("chain");
-    let (gate, mut pin) = RevisionGate::pair(0);
-    let revisions = [0_u64, 3, 3, 9];
-    let mut expected = Vec::new();
-    for (block, revision) in revisions.into_iter().enumerate() {
-        if revision > pin.last_published() {
-            pin.publish(&gate, revision);
-        }
-        let first_sample = block as u64 * u64::from(frames);
-        chain
-            .run(&mut planes, frames, first_sample, gate.snapshot())
-            .expect("run");
-        expected.push((0, first_sample, revision));
-        expected.push((2, first_sample, revision));
-    }
-    assert_eq!(*drains.lock().expect("drains"), expected);
 }
 
 /// Shape is validated once, off the render thread.

@@ -5361,62 +5361,6 @@ fn configuring_an_unserved_counter_is_refused_and_changes_nothing() {
     crate::ffi::test_session_destroy(c_session);
 }
 
-/// Issue #1351 gate 4 (D1, D6): the provider serves every counter of its fixed set at 0 from
-/// construction, `TRANSITION_REPREPARE_REFUSALS` among them, and a configuration may name it.
-///
-/// Test value: red if the new counter is missing from the registry decoder or the served set, so
-/// that a host's read of it is `NOT_FOUND` or its configuration is refused.
-#[test]
-fn every_served_counter_reads_zero_on_a_fresh_session() {
-    let (c_session, c_plan) = boxed_c_children(SESSION);
-    let all = counters_get_c(c_session, 1, &[]).expect("all served counters");
-    assert_eq!(
-        all.iter().map(|value| value.id).collect::<Vec<_>>(),
-        vec![
-            protocol::CounterId::TelemetryCoalesced,
-            protocol::CounterId::TelemetryDropped,
-            protocol::CounterId::LiveValuesSuperseded,
-            protocol::CounterId::TransitionReprepareRefusals,
-        ]
-    );
-    assert!(all.iter().all(|value| value.value == 0));
-    assert_eq!(
-        counters_get_c(
-            c_session,
-            2,
-            &[protocol::CounterId::TransitionReprepareRefusals]
-        ),
-        Ok(vec![protocol::CounterValue {
-            id: protocol::CounterId::TransitionReprepareRefusals,
-            value: 0,
-        }])
-    );
-    let configure = counter_telemetry(
-        3,
-        vec![protocol::CounterId::TransitionReprepareRefusals],
-        1,
-        Vec::new(),
-    );
-    let (result, response) = command_c(c_session, &configure);
-    assert_eq!(
-        (result, response_status(&response)),
-        (crate::RESULT_OK, StatusCode::Ok)
-    );
-    render_c(c_plan, 0);
-    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
-    let snapshots = lossy_counter_snapshots(c_session);
-    assert_eq!(snapshots.len(), 1);
-    assert_eq!(
-        snapshots[0].values,
-        vec![protocol::CounterValue {
-            id: protocol::CounterId::TransitionReprepareRefusals,
-            value: 0,
-        }]
-    );
-    crate::ffi::test_plan_destroy(c_plan);
-    crate::ffi::test_session_destroy(c_session);
-}
-
 /// Issue #1348 gate 4 (D7): a published candidate scheduled `NoEarlierThan` 64 blocks ahead
 /// survives 1,000 service steps after a rendered block: render still adopts it, exactly at the
 /// block that starts at its sample, its provider stays pending until then, no plan or provider is

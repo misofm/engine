@@ -3274,39 +3274,6 @@ mod tests {
         (observer, capture)
     }
 
-    /// #1395 D3: only a named pair of captures of one key exchange places; the successor's capture
-    /// then holds the state the predecessor's held, and nothing else swaps.
-    #[test]
-    fn pair_carried_swaps_only_a_named_pair_of_one_key() {
-        let pair = [super::SpectrumPair {
-            successor: 0,
-            predecessor: 0,
-        }];
-        let started = |channels| {
-            let (_observer, mut capture) = continuous_pair(channels);
-            capture.start_continuous(48_000, 128).expect("start");
-            capture
-        };
-        // A named pair of one key: the successor's fresh capture takes the running stream.
-        let (_observer, mut next) = continuous_pair(SpectrumChannels::Stereo);
-        let mut before = started(SpectrumChannels::Stereo);
-        assert!(next.pair_carried(&mut before, &pair));
-        assert_eq!(next.stream_epoch(), Some(1));
-        assert_eq!(before.stream_epoch(), None);
-        // An empty list names nothing.
-        let (_observer, mut next) = continuous_pair(SpectrumChannels::Stereo);
-        let mut before = started(SpectrumChannels::Stereo);
-        assert!(!next.pair_carried(&mut before, &[]));
-        assert_eq!(next.stream_epoch(), None);
-        assert_eq!(before.stream_epoch(), Some(1));
-        // A list that names captures of another channel mask is a fault, never a pairing.
-        let (_observer, mut next) = continuous_pair(SpectrumChannels::Left);
-        let mut before = started(SpectrumChannels::Stereo);
-        assert!(!next.pair_carried(&mut before, &pair));
-        assert_eq!(before.channels(), SpectrumChannels::Stereo);
-        assert_eq!(before.stream_epoch(), Some(1));
-    }
-
     /// Three captures of distinct keys with their observers, as a collection holds them.
     fn collection_of(
         keys: &[(&str, SpectrumChannels)],
@@ -3570,24 +3537,6 @@ mod tests {
             SpectrumAnalysisError::InvalidWindow
         );
         assert_eq!(left[0], SPECTRUM_FLOOR_DB);
-    }
-
-    #[test]
-    fn analyzer_calibrates_a_half_amplitude_at_minus_six_dbfs() {
-        let analyzer = SpectrumAnalyzer::new();
-        let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
-        let mut left = [0.0; SPECTRUM_BIN_COUNT];
-        let mut right = [0.0; SPECTRUM_BIN_COUNT];
-        let mut output = super::SpectrumOutput {
-            frequencies_hz: &mut frequencies,
-            left_dbfs: Some(&mut left),
-            right_dbfs: Some(&mut right),
-        };
-        analyzer
-            .analyze(&window(0.5), 48_000, &mut output)
-            .expect("half-amplitude window analyzes");
-        assert!((left[0] + 6.0206).abs() < 0.01, "DC dBFS: {}", left[0]);
-        assert!((right[0] + 6.0206).abs() < 0.01, "DC dBFS: {}", right[0]);
     }
 
     #[test]

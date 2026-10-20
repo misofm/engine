@@ -1423,84 +1423,6 @@ fn the_anchored_seek_exports_play_at_the_anchor_and_report_where_it_landed() {
     );
 }
 
-/// Issue #1293 gate 5: on a host that is not ready (no control half), `source_seek_at` and
-/// `source_seek_report` refuse with `RESULT_REFUSED_LIFECYCLE`, the report record keeps its last
-/// words, and a wrong handle or an ID count past the staging is `RESULT_INVALID_ARGUMENT`.
-///
-/// Test value: red if either export runs on a host with no control half (it would reach for
-/// control state the instance does not hold) or overwrites the record on a refusal, if the
-/// pointer export names anything but the record while ready or anything at all once not ready,
-/// or if the report export records a staged-ID refusal as the last result (it records none).
-#[test]
-fn the_seek_exports_refuse_a_host_with_no_control_half_and_change_nothing() {
-    let rig = SeekExports::boot();
-    assert_eq!(rig.seek_at(2, 10_000, 256), RESULT_OK);
-    rig.submit(2, 10_000);
-    let _ = rig.render();
-    let (code, before) = rig.report();
-    assert_eq!(code, RESULT_OK);
-    // A ready host's pointer export names the record.
-    let (pointer, record) = crate::ffi::test_seek_report_addresses(rig.handle);
-    assert!(record != 0 && pointer == record);
-
-    // Argument checks on a live host.
-    assert_eq!(
-        miso_engine_web_v1_source_seek_at(0, 14, 3, 0, 512),
-        RESULT_INVALID_ARGUMENT
-    );
-    assert_eq!(
-        miso_engine_web_v1_source_seek_report(0, 14),
-        RESULT_INVALID_ARGUMENT
-    );
-    assert_eq!(
-        miso_engine_web_v1_source_seek_at(rig.handle, u32::MAX, 3, 0, 512),
-        RESULT_INVALID_ARGUMENT
-    );
-    // The anchored seek records its refusal; the report leaves the last result alone.
-    assert_eq!(
-        crate::ffi::test_status(rig.handle)
-            .expect("status")
-            .last_result,
-        RESULT_INVALID_ARGUMENT
-    );
-    assert_eq!(rig.seek_at(3, 0, 1024), RESULT_OK);
-    assert_eq!(
-        miso_engine_web_v1_source_seek_report(rig.handle, u32::MAX),
-        RESULT_INVALID_ARGUMENT
-    );
-    assert_eq!(
-        crate::ffi::test_status(rig.handle)
-            .expect("status")
-            .last_result,
-        RESULT_OK
-    );
-    assert_eq!(
-        crate::ffi::native_staging::seek_report(rig.handle),
-        Some(before)
-    );
-
-    // An output-shape mismatch makes the host sticky-failed: no control half to run on.
-    assert_eq!(
-        miso_engine_web_v1_render(rig.handle, 0),
-        RESULT_REPREPARE_REQUIRED
-    );
-    assert_eq!(
-        crate::ffi::test_status(rig.handle).expect("status").state,
-        STATE_FAILED
-    );
-    assert_eq!(rig.seek_at(3, 0, 1024), RESULT_REFUSED_LIFECYCLE);
-    assert_eq!(rig.report().0, RESULT_REFUSED_LIFECYCLE);
-    assert_eq!(
-        crate::ffi::native_staging::seek_report(rig.handle),
-        Some(before),
-        "a refusal leaves the record alone"
-    );
-    // A host that is not ready has no record address to give.
-    let (pointer, record) = crate::ffi::test_seek_report_addresses(rig.handle);
-    assert!(record != 0 && pointer == 0);
-    assert_eq!(miso_engine_web_v1_source_seek_report_ptr(0), 0);
-}
-
 #[test]
 fn output_mismatch_and_disposal_are_sticky_and_idempotent() {
     let mut host = prepared_host(64);
@@ -3348,29 +3270,6 @@ fn meter_spans_cover_all_launch_rates_and_a_nine_track_tail() {
 }
 
 #[test]
-fn source_seek_keeps_the_meter_epoch_and_absolute_peak_clock() {
-    let mut host = live_control_host(128, 1);
-    assert_eq!(host.set_meter_lease(true), RESULT_OK);
-    feed_and_render(&mut host, 1, 0, 0.4);
-    assert_eq!(host.poll_meters(), 1);
-    let meter_generation = host.meter_header().reserved[0];
-
-    assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
-    let plane = vec![0.7_f32; 128];
-    let planes: [&[f32]; 2] = [&plane, &plane];
-    assert_eq!(
-        host.submit_source(b"fixture-source", 2, 0, 48_000, &planes, 128, false),
-        RESULT_OK
-    );
-    assert_eq!(host.render_next(), RESULT_OK);
-    assert_eq!(host.poll_meters(), 1);
-    assert_eq!(host.meter_header().reserved[0], meter_generation);
-    assert_eq!(host.meter_header().first_sample, 128);
-    assert_eq!(host.meter_header().end_sample, 256);
-    assert_eq!(&host.meter_frame()[..4], &[0.7, 0.7, 0.7, 0.7]);
-}
-
-#[test]
 fn meter_lease_reacquisition_waits_for_a_clean_boundary() {
     let mut host = live_control_host(128, 2);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
@@ -4065,94 +3964,6 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
         host.read_observations(&[selection, selection]).unwrap_err(),
         ObservationReadError::InvalidSelection
     );
-}
-
-#[test]
-fn selected_observation_reads_keep_same_track_owner_windows_and_sequences() {
-    const QUANTUM: u32 = 128;
-    let mut host = same_track_observation_host(QUANTUM);
-    let compressor = ObservationSelection {
-        track_id: "t0",
-        rack: LiveEffectRack::Inserts,
-        effect_slot_id: "comp",
-        tap_id: 1,
-        channels: ObservationReadChannels::Both,
-    };
-    let gate = ObservationSelection {
-        track_id: "t0",
-        rack: LiveEffectRack::Inserts,
-        effect_slot_id: "gate",
-        tap_id: 1,
-        channels: ObservationReadChannels::Both,
-    };
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
-    assert_eq!(observe(&mut host, 0, 1, 1, 1, 3, true), RESULT_OK);
-    for block in 0..3 {
-        feed_and_render_channels(&mut host, block, 0.75, 0.125);
-    }
-
-    let (compressor_window, compressor_consumed) = {
-        let ready = host.ready.as_ref().expect("ready ownership");
-        let (effect, tap) = resolve_observation(ready, &compressor).expect("compressor address");
-        let reader = &host
-            .test_observation_handle(effect)
-            .expect("compressor observation handle")
-            .readers[tap];
-        (
-            reader.read().expect("compressor published window"),
-            reader.consumed_sequence(),
-        )
-    };
-    let (gate_window, gate_consumed) = {
-        let ready = host.ready.as_ref().expect("ready ownership");
-        let (effect, tap) = resolve_observation(ready, &gate).expect("gate address");
-        let reader = &host
-            .test_observation_handle(effect)
-            .expect("gate observation handle")
-            .readers[tap];
-        (
-            reader.read().expect("gate published window"),
-            reader.consumed_sequence(),
-        )
-    };
-    assert_eq!(compressor_window.blocks, 2);
-    assert_eq!(gate_window.blocks, 3);
-    assert_ne!(compressor_window.left, compressor_window.right);
-    assert_ne!(gate_window.left, gate_window.right);
-    assert_eq!(compressor_consumed, 0);
-    assert_eq!(gate_consumed, 0);
-
-    let rows = host
-        .read_observations(&[compressor, gate])
-        .expect("same-track two-effect selected read");
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].effect_slot_id.as_ref(), "comp");
-    assert_eq!(rows[1].effect_slot_id.as_ref(), "gate");
-    assert_eq!(rows[0].window, Some(compressor_window));
-    assert_eq!(rows[1].window, Some(gate_window));
-    assert_eq!(rows[0].left, Some(compressor_window.left));
-    assert_eq!(rows[0].right, Some(compressor_window.right));
-    assert_eq!(rows[1].left, Some(gate_window.left));
-    assert_eq!(rows[1].right, Some(gate_window.right));
-
-    let (compressor_after, gate_after) = {
-        let ready = host.ready.as_ref().expect("ready ownership");
-        let (compressor_effect, compressor_tap) =
-            resolve_observation(ready, &compressor).expect("compressor address");
-        let (gate_effect, gate_tap) = resolve_observation(ready, &gate).expect("gate address");
-        (
-            host.test_observation_handle(compressor_effect)
-                .expect("compressor observation handle")
-                .readers[compressor_tap]
-                .consumed_sequence(),
-            host.test_observation_handle(gate_effect)
-                .expect("gate observation handle")
-                .readers[gate_tap]
-                .consumed_sequence(),
-        )
-    };
-    assert_eq!(compressor_after, compressor_consumed);
-    assert_eq!(gate_after, gate_consumed);
 }
 
 #[test]

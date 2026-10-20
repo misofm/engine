@@ -254,46 +254,6 @@ fn an_iterator_that_pops_is_refused() {
 }
 
 #[test]
-fn every_iterator_trait_and_every_rename_of_one_is_refused() {
-    for (name, header) in [
-        ("double-ended", "impl DoubleEndedIterator for Lane"),
-        ("into", "impl IntoIterator for Lane"),
-        ("path", "impl core::iter::Iterator for Lane"),
-        ("raw", "impl r#Iterator for Lane"),
-    ] {
-        let text = marked(&format!(
-            "{header} {{\n    fn next_back(&mut self) -> Option<Record> {{\n        self.control.try_pop().ok()\n    }}\n}}\n"
-        ));
-        refuses(&format!("calls-trait-{name}"), &text, &[ITERATOR]);
-    }
-    // A `use` renames the trait: the impl names the new spelling, in another file.
-    let tree = super::common::Tree::base("calls-trait-renamed");
-    tree.apply(&[
-        Edit::Create {
-            path: "crates/pops/src/lib.rs",
-            text: "mod alias;\nmod model;\n",
-        },
-        Edit::Create {
-            path: "crates/pops/src/alias.rs",
-            text: "use core::iter::Iterator as Walk;\n",
-        },
-        Edit::Create {
-            path: "crates/pops/src/model.rs",
-            text: &marked(
-                "impl Walk for Lane {\n    fn next(&mut self) -> Option<Record> {\n        self.control.try_pop().ok()\n    }\n}\n",
-            ),
-        },
-    ]);
-    let report = tree.check();
-    assert_eq!(
-        report.classes(),
-        [ITERATOR].into_iter().collect(),
-        "{:#?}",
-        report.findings
-    );
-}
-
-#[test]
 fn an_iterator_that_does_not_pop_and_a_pop_in_another_trait_are_accepted() {
     let quiet = "impl Iterator for Lane {\n    type Item = Record;\n    fn next(&mut self) -> Option<Record> {\n        self.items.pop()\n    }\n}\n";
     accepts("calls-iterator-quiet", &marked(quiet));

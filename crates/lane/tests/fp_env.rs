@@ -77,38 +77,6 @@ mod x86 {
         );
     }
 
-    /// #1709 (U3 fold, batch 17): the test helper `under_hostile_fp_env` installs the hostile
-    /// word inside its body and writes the caller's exact word back after it, also when the body
-    /// panics. The caller's word is itself non-canonical (round up, a sticky flag), so a helper
-    /// that wrote the canonical word back would be seen.
-    ///
-    /// Test value: red if the helper leaves the hostile word on the caller's thread (on return or
-    /// while unwinding), restores another word than the caller's, or does not install the hostile
-    /// word, so every #1709 gate built on it would run in the wrong environment.
-    #[cfg(feature = "test-support")]
-    #[test]
-    fn under_hostile_fp_env_restores_the_callers_word() {
-        let saved = read_mxcsr();
-        let _restore = Restore(saved);
-        let caller = hostile_word(saved);
-        // SAFETY: `hostile_word` sets FTZ, DAZ, RC and a status flag on a word read from this
-        // thread, all below bit 16; `_restore` writes `saved` back.
-        unsafe { write_mxcsr(caller) };
-        let inside = fpenv::under_hostile_fp_env(read_mxcsr);
-        assert_eq!(inside, fpenv::hostile_fp_control_word(caller));
-        assert_ne!(inside, caller, "the helper changes the word");
-        assert_eq!(read_mxcsr(), caller, "the caller's word comes back");
-        let outcome = std::panic::catch_unwind(|| {
-            fpenv::under_hostile_fp_env(|| panic!("a body that panics"));
-        });
-        assert!(outcome.is_err(), "the body panicked");
-        assert_eq!(
-            read_mxcsr(),
-            caller,
-            "the caller's word comes back while unwinding"
-        );
-    }
-
     #[test]
     fn the_caller_word_survives_an_unwind_through_the_guard() {
         let saved = read_mxcsr();

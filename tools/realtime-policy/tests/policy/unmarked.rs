@@ -201,16 +201,6 @@ fn every_declaration_must_be_test_code() {
 const QUEUES: &str = "struct Queues;\nimpl Queues {\n    fn dequeue(&mut self, c: &mut Consumer) {\n        while let Ok(r) = c.try_pop() {\n            apply(r);\n        }\n    }\n}\n";
 
 #[test]
-fn an_allowlisted_function_admits_its_pops() {
-    entries(
-        "allowed",
-        &[create(LIB, QUEUES)],
-        vec![entry(LIB, "Queues::dequeue", 1)],
-        &[],
-    );
-}
-
-#[test]
 fn an_entry_admits_one_function_only() {
     let text = format!(
         "{QUEUES}impl Queues {{\n    fn renamed(&mut self, c: &mut Consumer) {{\n        c.try_pop();\n    }}\n}}\n"

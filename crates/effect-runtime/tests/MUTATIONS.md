@@ -257,3 +257,10 @@ The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) delete
 - `the_corpus_is_width_independent`: no plausible same-crate KEEP catcher recorded
 - `a_knee_whose_reciprocal_overflows_is_a_hard_knee`: effect-runtime `dynamics::knee_words_follow_the_finite_reciprocal_rule`
 - `the_narrowest_soft_knees_are_finite_at_the_threshold`: effect-runtime `dynamics::knee_words_follow_the_finite_reciprocal_rule`
+
+## TA5 deletions
+
+The 2026-10 test audit (TA5, the batch 2 sample measured at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 2 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 2 recorded no same-crate catcher.
+
+- `words_are_little_endian`: effect-runtime `float_words_round_trip_by_bits`
+- `snapshot_then_restore_returns_every_word`: effect-runtime `float_words_round_trip_by_bits`

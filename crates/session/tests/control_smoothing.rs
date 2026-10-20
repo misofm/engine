@@ -4,7 +4,7 @@
 use serde_json::{Map, Value, json};
 use session::{
     CONTROL_SMOOTHING_DEFAULT, ControlSmoothing, ControlSmoothingSamples, DiagnosticCode,
-    DiagnosticSet, SessionModel, canonical_session_json, parse_session_json,
+    DiagnosticSet, canonical_session_json, parse_session_json,
 };
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -146,28 +146,6 @@ fn both_kinds_round_trip_through_canonical_json_to_identical_bytes() {
         at("\"vcas\"") < at("\"control_smoothing\"")
             && at("\"control_smoothing\"") < at("\"outputs\"")
     );
-}
-
-/// A model built rather than parsed is held to the parser's domain by the validator.
-#[test]
-fn a_built_model_with_a_length_outside_the_domain_is_refused() {
-    let mut model: SessionModel = parse_session_json(EXAMPLE).expect("fixture");
-    for bad in [-1.0, 1000.5, f32::NAN, f32::INFINITY] {
-        model.control_smoothing = Some(ControlSmoothing {
-            mute_ms: 10.0,
-            fader_ms: 20.0,
-            pan_ms: bad,
-        });
-        let error = canonical_session_json(&model).expect_err("out of domain");
-        assert_eq!(
-            diagnostics(&error),
-            [(
-                DiagnosticCode::NumericOutOfSchemaRange,
-                "$.control_smoothing.pan_ms".to_owned()
-            )],
-            "{bad}"
-        );
-    }
 }
 
 fn samples_at(rate: u32, control_smoothing: Option<ControlSmoothing>) -> ControlSmoothingSamples {

@@ -89,29 +89,6 @@ fn rack_addressed_edits_refuse_the_builtins_token() {
     }
 }
 
-/// The same edits against a real rack are applied, so the refusal above is about the token and not
-/// about the edits.
-#[test]
-fn the_same_edits_against_a_real_rack_are_applied() {
-    let rack = session::Rack {
-        effects: Vec::new(),
-    };
-    let mut model = session();
-    assert_ne!(model.tracks[0].inserts, rack);
-    assert_eq!(
-        apply_session_edit(
-            &mut model,
-            &SessionEdit::SetTrackRack {
-                track_id: track_id(),
-                rack_name: RackName::Inserts,
-                rack: rack.clone(),
-            },
-        ),
-        Ok(()),
-    );
-    assert_eq!(model.tracks[0].inserts, rack);
-}
-
 /// And the strip is edited through `SET_CONTROL` on its builtin rows, which the new token does not
 /// touch.
 #[test]

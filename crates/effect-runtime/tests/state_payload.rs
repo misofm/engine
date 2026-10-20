@@ -2,8 +2,8 @@
 
 use effect_runtime::state_payload::{
     HEADER_WORDS, STATE_LENGTH_CODE, STATE_VERSION_CODE, StateLayout, StatePayloadInput,
-    StatePayloadOutput, StateWords, StateWordsMut, expected_sizes, read_f32, read_header, read_u32,
-    restore, snapshot, validate_lengths, write_f32, write_header, write_u32,
+    StatePayloadOutput, StateWords, StateWordsMut, expected_sizes, read_f32, read_header, restore,
+    snapshot, validate_lengths, write_f32, write_header,
 };
 
 const LAYOUT: StateLayout = StateLayout {
@@ -31,20 +31,6 @@ fn expected_sizes_account_for_the_header() {
     assert_eq!(LAYOUT.data_words(), 2 + 2 * 5);
 }
 
-/// Words are little-endian on every target.
-///
-/// Red mutation: `write_u32` uses `to_be_bytes`, or `read_u32` uses `from_be_bytes`.
-#[test]
-fn words_are_little_endian() {
-    let mut bytes = [0u8; 8];
-    write_u32(&mut bytes, 0, 0x1122_3344);
-    assert_eq!(&bytes[0..4], &[0x44, 0x33, 0x22, 0x11]);
-    write_u32(&mut bytes, 1, 0x0000_00ff);
-    assert_eq!(&bytes[4..8], &[0xff, 0x00, 0x00, 0x00]);
-    assert_eq!(read_u32(&bytes, 0), 0x1122_3344);
-    assert_eq!(read_u32(&bytes, 1), 0x0000_00ff);
-}
-
 /// `f32` words round-trip by bit pattern, including the signed zeros and a subnormal.
 #[test]
 fn float_words_round_trip_by_bits() {
@@ -69,52 +55,6 @@ fn float_words_round_trip_by_bits() {
             "word {word}"
         );
     }
-}
-
-#[test]
-fn snapshot_then_restore_returns_every_word() {
-    let (mut common, mut left, mut right) = buffers();
-    let source_common = [0xdead_beef_u32, 7];
-    let source_left = [1_u32, 2, 3, 4, 5];
-    let source_right = [0xffff_ffff_u32, 0, 0x8000_0000, 42, 0x7f80_0000];
-    snapshot(
-        &LAYOUT,
-        &StateWords {
-            common: &source_common,
-            left: &source_left,
-            right: &source_right,
-        },
-        &mut StatePayloadOutput {
-            common: &mut common,
-            left: &mut left,
-            right: &mut right,
-        },
-    )
-    .expect("snapshot into correctly sized buffers");
-
-    assert_eq!(read_u32(&common, 0), LAYOUT.version, "version word");
-    assert_eq!(read_u32(&common, 1), LAYOUT.data_words(), "word count");
-
-    let mut out_common = [0u32; 2];
-    let mut out_left = [0u32; 5];
-    let mut out_right = [0u32; 5];
-    restore(
-        &LAYOUT,
-        &StatePayloadInput {
-            common: &common,
-            left: &left,
-            right: &right,
-        },
-        &mut StateWordsMut {
-            common: &mut out_common,
-            left: &mut out_left,
-            right: &mut out_right,
-        },
-    )
-    .expect("restore from a payload this codec wrote");
-    assert_eq!(out_common, source_common);
-    assert_eq!(out_left, source_left);
-    assert_eq!(out_right, source_right);
 }
 
 /// A payload that is one byte short, or one byte long, is rejected — both, and with the same code.

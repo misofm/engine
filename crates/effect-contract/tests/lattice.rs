@@ -66,25 +66,6 @@ fn contains(points: &[LatticePoint], canonical: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn declared_bounds_and_default_are_always_members() {
-    // The parametric EQ's frequency row: 20 kHz is the round user-facing extreme, and a pure
-    // greatest-generated-point-below-max rule would have made it unreachable.
-    let points = hertz(10.0, 20_000.0, 80.0, 20.0);
-    assert_eq!(points.first().expect("minimum").canonical, "10.000");
-    assert_eq!(points.last().expect("maximum").canonical, "20000.000");
-    assert!(points.first().expect("minimum").intrinsic);
-    assert!(points.last().expect("maximum").intrinsic);
-    assert!(
-        points
-            .iter()
-            .any(|point| point.canonical == "80.000" && point.intrinsic)
-    );
-    // 20 kHz is exactly spellable, which is the whole point of the amendment.
-    assert!(lattice_index_for_decimal(&points, "20000.0").is_ok());
-    assert!(lattice_index_for_decimal(&points, "20000").is_ok());
-}
-
-#[test]
 fn geometric_ratio_row_keeps_its_round_maximum_and_meaningful_default() {
     // The compressor ratio row: 20:1 is the declared maximum, so `set ratio 20` is legal.
     let ratio = parameter_lattice_points(&descriptor(

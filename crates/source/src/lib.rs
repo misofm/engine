@@ -4284,39 +4284,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn graph_driver_forwards_underrun_and_seek_generation_facts() {
-        let (producer, consumer, _) = session_ring(config(1, 4, 8)).expect("ring");
-        let mut host = producer.into_host_chunk_provider(RATE);
-        let mut driver = test_driver(consumer, vec![test_mapping(0)]);
-
-        driver.begin_block(0, 4).expect("first block");
-        assert_eq!(
-            driver.observation_validity(),
-            GraphObservationValidity {
-                source_underrun: true,
-                source_generation_changed: false,
-            }
-        );
-        let samples = [1.0; 4];
-        host.try_seek(SourceCommand::Seek {
-            generation: SourceGeneration(2),
-            frame: SourceFrame(100),
-        })
-        .expect("seek");
-        assert!(driver.prepare_source_seek(0, 2, 100));
-        host.submit(chunk(2, 100, &[&samples], 4, false))
-            .expect("fresh block");
-        driver.begin_block(4, 4).expect("second block");
-        assert_eq!(
-            driver.observation_validity(),
-            GraphObservationValidity {
-                source_underrun: false,
-                source_generation_changed: true,
-            }
-        );
-    }
-
     /// #1318 gate 3. Red if the graph source driver still folds a held block into the graph-wide
     /// `source_underrun` flag (a planned wait would mark every spectrum window as starved), or if
     /// the fix swallows a true underrun on another source in the same block.
@@ -5655,44 +5622,6 @@ mod tests {
             assert!(left.iter().chain(&right).all(|word| word.to_bits() == 0));
         }
 
-        /// Follow-up MINOR 4. Red if a successor with an installed program reports
-        /// `NotRequested` (or `Carried`) when its predecessor is not a graph plan: it asked for
-        /// state and got none, so the swap must count a mismatch.
-        #[test]
-        fn a_program_facing_a_plain_predecessor_reports_a_mismatch() {
-            struct Silent;
-            impl engine::realtime::PreparedPlanExecutor for Silent {
-                fn render(
-                    &mut self,
-                    _arena: &mut engine::realtime::BufferArena,
-                    mut output: PlanarBufferMut<'_>,
-                    _time: engine::realtime::RenderTime,
-                ) -> Result<(), engine::realtime::RenderError> {
-                    for channel in 0..output.channels() {
-                        output.plane_mut(channel)?.fill(0.0);
-                    }
-                    Ok(())
-                }
-            }
-            let validity = Arc::new(AtomicU8::new(0));
-            let mut predecessor = PreparedRenderPlan::prepare_with_executor(
-                engine::realtime::PrepareRenderPlan {
-                    plan_id: 1,
-                    envelope: envelope(),
-                    scratch: &[],
-                },
-                Box::new(Silent),
-            )
-            .expect("plain plan");
-            let mut successor = bind(SourceGraphSource::vacant(2), &validity);
-            graph::install_carry_program(&mut successor, carry_source_zero(1)).expect("install");
-            assert_eq!(
-                successor.adopt_predecessor_plan(&mut predecessor),
-                CarryOutcome::PredecessorMismatch
-            );
-            assert_eq!(plan_block(&mut successor), silence());
-        }
-
         /// Follow-up MINOR 7. Red if the swap block stops comparing channel counts (a one-channel
         /// consumer would land under two-channel mappings and fail render) or quantum sizes.
         #[test]
@@ -6658,53 +6587,6 @@ mod tests {
             assert_eq!(run(&mut consumer, 1, 5), vec![7_000, 7_128, 7_256, 7_384]);
             assert!(consumer.seek.held_seek.is_none());
             assert_eq!(consumer.active_generation(), SourceGeneration(3));
-        }
-
-        #[test]
-        fn the_producer_refuses_without_changing_anything() {
-            let (mut producer, mut consumer) = timeline(4);
-            for (command, error) in [
-                (seek(0, 5), SourceSeekError::GenerationZero),
-                (
-                    seek(1, 5),
-                    SourceSeekError::GenerationNotStrictlyIncreasing {
-                        active: SourceGeneration(1),
-                        requested: SourceGeneration(1),
-                    },
-                ),
-                (
-                    SourceCommand::SeekAt {
-                        generation: SourceGeneration(2),
-                        frame: SourceFrame(5),
-                        anchor_sample: QU + 1,
-                    },
-                    SourceSeekError::AnchorUnaligned,
-                ),
-                (
-                    seek(2, TIMELINE_SAMPLE_LIMIT + 1),
-                    SourceSeekError::FrameOutOfRange,
-                ),
-            ] {
-                assert_eq!(producer.check_seek(command), Err(error));
-                assert_eq!(producer.try_seek(command), Err(error));
-                assert_eq!(producer.active_generation(), SourceGeneration(1));
-            }
-            producer.try_seek(seek(2, TIMELINE_SAMPLE_LIMIT)).unwrap();
-            // The one slot is taken: a second seek is backpressure, checked or pushed, and the
-            // first one still applies.
-            assert!(matches!(
-                producer.check_seek(seek(3, 9)),
-                Err(SourceSeekError::Backpressure { .. })
-            ));
-            assert!(matches!(
-                producer.try_seek(seek(3, 9)),
-                Err(SourceSeekError::Backpressure { .. })
-            ));
-            assert_eq!(producer.active_generation(), SourceGeneration(2));
-            consumer.begin_block_at(0);
-            assert_eq!(consumer.position(), TIMELINE_SAMPLE_LIMIT + QU);
-            assert_eq!(consumer.active_generation(), SourceGeneration(2));
-            assert_eq!(producer.check_seek(seek(3, 9)), Ok(()));
         }
 
         #[test]

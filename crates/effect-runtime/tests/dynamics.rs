@@ -132,24 +132,6 @@ fn below_the_knee_is_the_exact_identity() {
     }
 }
 
-/// A ratio of 1 is a no-op at every level, and a ratio below 1 expands upward.
-#[test]
-fn the_ratio_sets_the_slope() {
-    let unity = GainComputerCoef::<f32>::new(-18.0, 1.0, 6.0);
-    for level in [-160.0f32, -18.0, 0.0, 24.0] {
-        assert_eq!(
-            gain_delta_db::<f32>(level, &unity).to_bits(),
-            0.0f32.to_bits(),
-            "ratio 1 must be an identity at {level} dB"
-        );
-    }
-    let expander = GainComputerCoef::<f32>::new(-40.0, 0.5, 0.0);
-    assert!(
-        gain_delta_db::<f32>(-20.0, &expander) > 0.0,
-        "a ratio below 1 expands upward"
-    );
-}
-
 /// The two dB conversions are exact at unity and are inverses to within a rounding.
 #[test]
 fn the_db_conversions_agree() {

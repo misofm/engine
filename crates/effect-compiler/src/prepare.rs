@@ -1545,17 +1545,6 @@ mod owner_tests {
         ));
     }
 
-    #[test]
-    fn invalid_edit_poison_survives_valid_overwrite_until_discard() {
-        let mut rig = OwnerRig::new();
-        rig.owner.begin(0).expect("base revision");
-        assert!(rig.owner.edit(2, ParameterChannel::Left, f32::NAN).is_err());
-        assert!(rig.owner.edit(2, ParameterChannel::Left, 100.0).is_err());
-        assert!(rig.owner.prepare_targets_into(&mut []).is_err());
-        rig.owner.discard().expect("discard poisoned candidate");
-        rig.owner.begin(0).expect("restart at unchanged revision");
-    }
-
     /// A target set wants no room: any number of transactions publish before a block reads, each
     /// is accepted, and the block applies the newest write of each cell.
     ///

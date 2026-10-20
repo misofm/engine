@@ -372,7 +372,7 @@ it; the count exists beside the digests for the same reason `minmax_lowering_mis
 ## Issue #954 — the select-free fused fader/matrix kernel
 
 `fader_matrix_block_without_identity` is `fader_matrix_block`'s second arm with no `L::select` in
-the body. Gate 1, `select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity`
+the body. Gate 1, `select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity` (deleted by TA5)
 (`tests/fader_matrix.rs`), holds it equal to two oracles with no identity lane: oracle A is
 `fader_matrix_block` with an all-false mask, oracle B is `gain_mute_block` on each plane followed by
 `matrix2x2_block_without_identity`. It covers five input families (the four hostile ones and an
@@ -508,3 +508,9 @@ browser's render-closure trap gate. Host AMD EPYC 7313P, rustc 1.97.1, `x86-64-v
 The 2026-10 test audit (TA4, batch 1 mutation measurement at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 1 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 1 recorded no same-crate catcher that could plausibly see the row's mutation.
 
 - `g1_select_max_is_order_free_only_on_the_sanitized_domain`: no plausible same-crate KEEP catcher recorded
+
+## TA5 deletions
+
+The 2026-10 test audit (TA5, the batch 2 sample measured at `81a3074fc`) deleted the tests named below. Where a KEEP test is named, batch 2 recorded it red on that test's sampled mutants in this crate; the mutation of each row above was not re-run. Where none is named, batch 2 recorded no same-crate catcher.
+
+- `select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity`: no same-crate KEEP catcher recorded

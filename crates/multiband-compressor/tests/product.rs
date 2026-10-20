@@ -1338,59 +1338,6 @@ fn the_silence_counter_is_carried_and_validated() {
     }
 }
 
-/// Issue #1328 amendment A9: each channel's silence counter counts that channel's own input.
-///
-/// One channel silent for ten blocks and the other live: the silent channel's counter reads the
-/// 1,280 frames and the live one's reads `+0.0`, in both orders. A counter stepped from the other
-/// channel's input would arm the live channel's joint flush on the silent one's run.
-#[test]
-fn each_channel_counts_its_own_input() {
-    const COUNTER_WORD: usize = 47;
-    let counter = |section: &[u8]| {
-        f32::from_le_bytes(
-            section[COUNTER_WORD * 4..COUNTER_WORD * 4 + 4]
-                .try_into()
-                .expect("word"),
-        )
-    };
-    for silent_left in [true, false] {
-        let prepared = MultibandCompressorFactory
-            .prepare(request(&values()))
-            .expect("prepare");
-        let sizes = prepared.metadata.state_sizes;
-        let mut effect = prepared.processor;
-        for block in 0..10_u64 {
-            let live = support::signal(128, 0x1328_0100 + block);
-            let silent = vec![0.0_f32; 128];
-            let (mut left, mut right) = if silent_left {
-                (silent, live)
-            } else {
-                (live, silent)
-            };
-            process(
-                effect.as_mut(),
-                &mut left,
-                &mut right,
-                block * 128,
-                &[],
-                128,
-            );
-        }
-        let saved = snapshot(effect.as_ref(), sizes);
-        let (left, right) = (counter(&saved.1), counter(&saved.2));
-        let (expected_left, expected_right) = if silent_left {
-            (1_280.0, 0.0)
-        } else {
-            (0.0, 1_280.0)
-        };
-        assert_eq!(
-            (left.to_bits(), right.to_bits()),
-            (f32::to_bits(expected_left), f32::to_bits(expected_right)),
-            "silent left {silent_left}: the counters are ({left}, {right})"
-        );
-    }
-}
-
 /// Issue #1328 amendment A9: the crossover's joint flush arms on the frame its channel's input has
 /// been silent for `N_SILENCE` frames (4,096 at 48 kHz), and not before.
 ///

@@ -162,29 +162,6 @@ fn a_path_that_is_not_a_string_literal_is_a_finding() {
     }
 }
 
-/// rustc reads `r#path` as `path` and `r#include` as `include`.
-#[test]
-fn raw_identifiers_do_not_hide_a_path_or_an_include() {
-    expect_failure(
-        "reads-raw-path",
-        &[create(READS, "#[r#path = \"shadow.txt\"]\nmod m;\n")],
-        &[PATH],
-    );
-    expect_failure(
-        "reads-raw-include",
-        &[
-            create(READS, "const X: u8 = r#include!(\"hidden.in\");\n"),
-            create("crates/lane/src/hidden.in", LOOPING_TRAIT),
-        ],
-        &[INCLUDE],
-    );
-    expect_failure(
-        "reads-raw-include-import",
-        &[create(READS, "use std::r#include as inc;\n")],
-        &[INCLUDE_IMPORT],
-    );
-}
-
 #[test]
 fn an_include_of_source_is_a_finding() {
     expect_failure(

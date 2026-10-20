@@ -134,7 +134,7 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
    no row; 257 selections are refused by the codec.
 4. **Browser bytes unchanged.** `selected_observation_reads_are_bounded_stable_and_non_consuming`
    (`hosts/host-web/src/tests.rs:6318`), `selected_observation_reads_keep_same_track_owner_windows_and_sequences`
-   (`:6460`) and `selected_observation_numeric_read_refuses_failed_host_without_touching_output`
+   (`:6460`, deleted by TA5) and `selected_observation_numeric_read_refuses_failed_host_without_touching_output`
    (`:6550`) pass unchanged.
 5. **Same rows on both hosts.** A native test boots the same session on both hosts, arms the same
    tap (C ABI by `Observe`, browser by kind 7), renders the same PCM, and gets equal status,

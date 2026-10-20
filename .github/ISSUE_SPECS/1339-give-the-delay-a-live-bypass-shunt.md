@@ -37,7 +37,7 @@ the lift is heard with the tail already in place.
   carrying non-finite or runaway values downstream. A bypassed delay's output is that dry block,
   which is already in range. Zeroing it is a dropout of a valid signal, caused by wet state nobody
   hears. The test `the_delay_keeps_its_prepared_bypass_because_a_shunt_would_move_a_bit`
-  (`crates/graph-compiler/tests/bypass_shunt_identity.rs:798-858`) pins exactly that dropout: a
+  (`crates/graph-compiler/tests/bypass_shunt_identity.rs:798-858`; deleted by TA5) pinned exactly that dropout: a
   1 ms delay at `0.95` feedback fed `9e29` trips the ring check, and the prepared bypass zeroes the
   block. So this correctness reason does not hold, and decision 15 D15-13 E4 gives the delay a live
   shunt.
@@ -173,7 +173,7 @@ the lift is heard with the tail already in place.
    block equals a reference that runs A and lifts the delay's bypass live at block 7. #1282's gate-3
    delay leg is deleted, and its multiband leg stays.
 7. **Deleted, superseded:** `the_delay_keeps_its_prepared_bypass_because_a_shunt_would_move_a_bit`
-   (`bypass_shunt_identity.rs:798-858`), whose claim gate 1 now reverses. Update the red-mutation
+   (`bypass_shunt_identity.rs:798-858`; already deleted by TA5), whose claim gate 1 now reverses. Update the red-mutation
    doc of `the_never_banked_list_is_exactly_the_launch_effects_that_decline_a_bank` (`:754-760`).
 8. **Click against the mute baseline** (root, 2026-10-05, from #1055). The bypass
    crossfade's click is measured against #1055's mute baseline, at the session's `muteMs` default,
