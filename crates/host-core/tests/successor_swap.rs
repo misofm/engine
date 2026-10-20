@@ -230,9 +230,8 @@ fn added_muted_track_keeps_playing(backend: Backend) {
     );
 }
 
-/// Gate 1 at eight lanes. Red if the successor still allocates and plays a fresh ring, or if the
+/// Gate 1 on every width. Red if the successor still allocates and plays a fresh ring, or if the
 /// carry or the producer hand-over loses the queued block or the read position.
-/// Gate 1 at four lanes, the NEON/simd128 width.
 #[test]
 fn an_added_muted_track_keeps_the_source_playing_on_every_width() {
     for backend in backends() {
@@ -722,9 +721,8 @@ fn future_anchor_starts_the_added_stem_on_its_block(backend: Backend) {
     assert_eq!(first_difference(&silent, &reference), Some(ANCHOR_BLOCK));
 }
 
-/// Gate 1 of #1274 at eight lanes. Red if a held seek discards the primed generation (the stem is
+/// Gate 1 of #1274 on every width. Red if a held seek discards the primed generation (the stem is
 /// silent at the anchor) or applies when observed (the stem starts early).
-/// Gate 1 of #1274 at four lanes.
 #[test]
 fn a_future_anchor_starts_the_added_stem_on_its_block_on_every_width() {
     for backend in backends() {
@@ -1534,11 +1532,10 @@ fn collapsed_strips_keep_collapsing(backend: Backend, successor_dual: bool) {
     }
 }
 
-/// Gate 3 at eight lanes. Red if a successor chain that receives carried lanes clears its
+/// Gate 3 on every width. Red if a successor chain that receives carried lanes clears its
 /// channel-agreement flag (it needs a proof to engage, and a chain with an effect in its prefix,
 /// which declines the proof, would never collapse again), or if the carry skips the disengage
 /// copy of a collapsed predecessor (the dual successor reads a stale right channel).
-/// Gate 3 at four lanes.
 #[test]
 fn collapsed_strips_keep_collapsing_across_a_swap_on_every_width() {
     for backend in backends() {
@@ -2228,11 +2225,10 @@ fn a_lane_from_a_delayed_strip_keeps_its_chain_dual_after_the_swap(backend: Back
     assert_eq!(first_direct_difference(&run, &dual), None, "{backend:?}");
 }
 
-/// The carried agreement at eight lanes. Red if a predecessor chain that can never collapse hands
+/// The carried agreement on every width. Red if a predecessor chain that can never collapse hands
 /// over the unmaintained `true` it was bound with (the stereo-neighbour and delay cases), or if
 /// the successor ignores a cleared flag (the armed case): the successor collapses a lane whose
 /// channels disagree.
-/// The carried agreement at four lanes.
 #[test]
 fn a_diverged_lane_keeps_its_chain_dual_after_the_swap_on_every_width() {
     for backend in backends() {

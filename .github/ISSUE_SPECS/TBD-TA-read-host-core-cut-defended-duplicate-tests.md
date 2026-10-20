@@ -26,19 +26,21 @@ Tests and test lines as the readers counted them (lines of the test function bod
 | file | tests before -> after | kept | deleted (lines) | merged rows (lines) -> new tests |
 |---|---|---|---|---|
 | `tests/successor_swap.rs` | 166 -> 113 | 66 | 2 (13) | 98 (686) -> 47 |
-| `tests/live_delta.rs` | 67 -> 62 | 62 | 4 (48) | 1 (42) -> into an existing test |
+| `tests/live_delta.rs` | 67 -> 63 | 63 | 3 (31) | 1 (42) -> into an existing test |
 | `tests/stored_fader_automation.rs` | 37 -> 35 | 35 | 0 | 2 (85) -> into existing tests |
-| `src/spectrum.rs` (tests) | 53 -> 47 | 46 | 5 (166) | 2 (44) -> 1 |
+| `src/spectrum.rs` (tests) | 53 -> 50 | 49 | 2 (87) | 2 (44) -> 1 |
 | `src/response.rs` (tests) | 4 -> 3 | 3 | 1 (75) | 0 |
-| `tests/fp_environment.rs` | 3 -> 2 | 2 | 1 (9) | 0 |
 | `tests/live_lanes.rs` | 3 -> 2 | 2 | 1 (36) | 0 |
 | `tests/response_frame.rs` | 5 -> 3 | 2 | 1 (4) | 2 (131) -> 1 |
-| 45 other files | unchanged | 273 | 0 | 0 |
-| **total** | **611 -> 540** | **491** | **15 (351)** | **105 (988) -> 49 new** |
+| 46 other files | unchanged | 276 | 0 | 0 |
+| **total** | **611 -> 545** | **496** | **10 (246)** | **105 (988) -> 49 new** |
 
-Diff against `64fe78c46`: 9 files, +399 / -1260 lines.
+Diff against `64fe78c46`: see the PR shortstat.
 
-## Restores by the integrator
+## Restores
+
+By the integrator:
+
 
 - `host_core::response::tests::explicit_eq_and_input_filter_queries_use_owner_outputs_at_launch_rates`:
   the only test of configuration ID 2^53+1. The named defender
@@ -48,12 +50,27 @@ Diff against `64fe78c46`: 9 files, +399 / -1260 lines.
   test of a row in `hosts/host-web/MUTATIONS.md` (never-delete class). The reader grepped only the
   host-core ledger. Restored exactly as at `64fe78c46`.
 
+By the verifier (strict rule: a delete whose defender does not assert the whole claim goes back),
+each restored exactly as at `64fe78c46` and now KEEP:
+
+- `spectrum::tests::analyzer_accepts_selected_left_channel_at_a_large_sample_time`: the defender
+  never runs the analyzer at 2^53+123 or at 96 kHz.
+- `fp_environment.rs::a_started_session_hands_the_plan_back_when_it_stops`: it runs on every
+  target; the defender is x86_64/aarch64 only and does not check `next_absolute_sample` after
+  `stop()`.
+- `spectrum::tests::explicit_collection_start_uses_the_checked_hop`: it covers hops 256, 512, 1024
+  and 2048 and the legacy start; the defender covers 1024 only.
+- `live_delta.rs::fader_records_precede_mute_records`: it checks a track's own fader-then-mute
+  order; the defender checks that order only on the VCA path.
+- `spectrum::tests::bounded_continuous_record_read_does_not_chase_a_refill_after_one_stale_pop`:
+  the defender drops the `available_at_entry() == 0` assertion.
+
 ## Lane-width merges in successor_swap.rs
 
 98 tests named `*_at_eight_lanes` / `*_at_four_lanes` became 47 tests:
 `<base>_on_every_width` loops over `backends()` (Simd8 under `avx2`, then Simd4), and
 `<base>_at_the_build_width` runs `Backend::current()`. A static check over the base and the new
-file compared, per merged test, the widths its parts ran with the widths it runs now:
+file compared, per merged test, the widths its parts ran with the widths it runs now (each merged test has one doc comment that matches it):
 
 - On an AVX2 build, all 47 run exactly the old widths: 23 `on_every_width` tests run {8, 4} as
   their parts did; 24 `at_the_build_width` tests run {8}, because their four-lane part was ignored
@@ -67,19 +84,19 @@ file compared, per merged test, the widths its parts ran with the widths it runs
 Readers' class labels on KEEP rows (one class per test): counts or ceilings 66; allocation or
 realtime gates 64; regression reproducers 38; MUTATIONS.md sole red tests 24 (25 with the restore);
 the acked-batch question 20; randomized or seeded differentials 13; ABI or wire 4; run by a
-workflow or script 2. The other 258 KEEP rows name a unique claim without a class.
+workflow or script 2. The other 258 reader KEEP rows (plus the 7 restores) name a unique claim without a class.
 
 ## Mutation spot-check
 
 Seed `20261020`; `random.sample` of 30 from the 1,130 current `host-core` mutants
-(`cargo mutants --list --json -p host-core`, cargo-mutants 27.1.0) whose function the 15 deleted
-tests covered (coverage map `cov.tsv`/`fns.tsv` at `81a3074fc`, joined by file and function name).
+(`cargo mutants --list --json -p host-core`, cargo-mutants 27.1.0) whose function the 15 first-pass deleted
+tests covered (the 5 verifier restores were among them) (coverage map `cov.tsv`/`fns.tsv` at `81a3074fc`, joined by file and function name).
 `--diff` lists no product mutants here, because the diff touches tests only. Each mutant was
 applied with `git apply`, the full `cargo test --locked -p host-core --all-features` ran
 (fail-fast), and the file was reverted (signal-safe; the tree was clean at the end).
 
 - 26 of 30 caught by a remaining `host-core` test.
-- 4 not caught. For each one the 15 deleted tests ran at `64fe78c46` with the mutant in place:
+- 4 not caught. For each one those 15 tests ran at `64fe78c46` with the mutant in place:
   none of them is red. So the cut lost no catcher; these are older gaps in the `host-core` suite.
   Tests in other packages (host-web, capi) cover these functions but were not run.
 

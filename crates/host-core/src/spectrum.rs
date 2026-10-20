@@ -3624,6 +3624,28 @@ mod tests {
     }
 
     #[test]
+    fn analyzer_accepts_selected_left_channel_at_a_large_sample_time() {
+        let analyzer = SpectrumAnalyzer::new();
+        let mut window = window(0.0);
+        window.first_sample = (1_u64 << 53) + 123;
+        window.channels = SpectrumChannels::Left;
+        window.left[37] = 1.0;
+        assert_eq!(window.end_sample(), Some((1_u64 << 53) + 2_171));
+        let mut frequencies = [0.0; SPECTRUM_BIN_COUNT];
+        let mut left = [0.0; SPECTRUM_BIN_COUNT];
+        let mut output = super::SpectrumOutput {
+            frequencies_hz: &mut frequencies,
+            left_dbfs: Some(&mut left),
+            right_dbfs: None,
+        };
+        analyzer
+            .analyze(&window, 96_000, &mut output)
+            .expect("large absolute sample analyzes");
+        assert!(left.iter().all(|value| value.is_finite()));
+        assert_eq!(frequencies[1], 96_000.0 / SPECTRUM_WINDOW_FRAMES as f32);
+    }
+
+    #[test]
     fn capture_preserves_a_large_absolute_sample_without_allocating() {
         let (producer, mut consumer) = bounded_spsc(
             core::num::NonZeroUsize::new(1).expect("one capture slot"),
@@ -3655,6 +3677,36 @@ mod tests {
         assert_eq!(window.channels, SpectrumChannels::Left);
         assert!(window.left.iter().all(|value| *value == 0.25));
         assert!(window.right.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn bounded_continuous_record_read_does_not_chase_a_refill_after_one_stale_pop() {
+        let (mut observer, mut capture) = continuous_pair(SpectrumChannels::Left);
+        capture
+            .start_continuous(48_000, 128)
+            .expect("continuous activation");
+        let left = [0.5_f32; 128];
+        let right = [0.0_f32; 128];
+        for block in 0..16 {
+            observer.capture(
+                &left,
+                &right,
+                block * 128,
+                super::GraphObservationValidity::CLEAR,
+            );
+        }
+        observer.invalidate_after_failure(1_920);
+        assert!(matches!(
+            capture.try_read_continuous(),
+            Err(SpectrumContinuousReadError::Failed { stream_epoch: 2 })
+        ));
+        assert_eq!(
+            capture
+                .try_read_continuous()
+                .expect_err("one stale pop leaves no refill budget"),
+            SpectrumContinuousReadError::Warming
+        );
+        assert_eq!(capture.consumer.available_at_entry(), 0);
     }
 
     /// A record of the one-shot epoch (0) left in the queue by a mode switch.
@@ -4492,6 +4544,36 @@ mod tests {
         }
 
         let (_observer, mut legacy) = continuous_pair(SpectrumChannels::Stereo);
+        let expected = SpectrumCadence::new(48_000, 128).expect("legacy cadence");
+        assert_eq!(legacy.start_continuous(48_000, 128), Ok(expected));
+        assert_eq!(legacy.cadence(), Some(expected));
+    }
+
+    #[test]
+    fn explicit_collection_start_uses_the_checked_hop() {
+        let target = SpectrumTarget::Output("main-out".into());
+        for hop_frames in [256, 512, 1_024, 2_048] {
+            let (_observer, capture) = continuous_pair(SpectrumChannels::Stereo);
+            let mut collection = SpectrumCaptureCollection::new(vec![capture]);
+            collection
+                .select(target.as_ref(), SpectrumChannels::Stereo)
+                .expect("prepared collection selection");
+            let cadence = collection
+                .start_continuous_with_hop(
+                    48_000,
+                    128,
+                    SpectrumHop::new(hop_frames).expect("supported hop"),
+                )
+                .expect("explicit collection start");
+            assert_eq!(cadence.hop_frames(), hop_frames);
+            assert_eq!(collection.cadence(), Some(cadence));
+        }
+
+        let (_observer, capture) = continuous_pair(SpectrumChannels::Stereo);
+        let mut legacy = SpectrumCaptureCollection::new(vec![capture]);
+        legacy
+            .select(target.as_ref(), SpectrumChannels::Stereo)
+            .expect("prepared legacy collection selection");
         let expected = SpectrumCadence::new(48_000, 128).expect("legacy cadence");
         assert_eq!(legacy.start_continuous(48_000, 128), Ok(expected));
         assert_eq!(legacy.cadence(), Some(expected));

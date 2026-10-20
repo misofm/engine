@@ -306,6 +306,24 @@ fn mute_records_address_exactly_the_changed_lanes() {
     );
 }
 
+/// Gate 1(d). Red if the fixed fader-then-mute order changes.
+#[test]
+fn fader_records_precede_mute_records() {
+    use BuiltinLaneSelector::Left;
+    let current = two_tracks();
+    assert_eq!(
+        classify(&current, |next| {
+            next.tracks[0].fader.left_mute = true;
+            next.tracks[0].fader.left_db = -12.0;
+        }),
+        Ok(vec![(
+            track_id(&current, 0),
+            vec![fader_db(Left, -12.0, 0), mute(Left, true, 0)],
+            None
+        )])
+    );
+}
+
 /// Gate 1(e). Red if a pan record carries a target other than the lowered one, or is emitted
 /// when only the representation or the smoothing changes.
 #[test]
