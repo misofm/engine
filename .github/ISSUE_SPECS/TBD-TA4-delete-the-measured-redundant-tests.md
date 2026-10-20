@@ -32,9 +32,24 @@ mutation that a `MUTATIONS.md` names.
    `parametric-eq` `malformed_requests_preserve_output_sentinels_and_opaque_ids` stay;
    `conformance` `tolerance_boundary_tie_and_snr_cases_are_explicit` and `effect-runtime`
    `the_mapping_inverse_round_trips` are UNIQUE only on test-only code and go with it (item 4).
-   (The brief said 6 of 10; the data has 10 IF-PEER-KEPT rows, 2 of them kept by the cover, plus
-   2 UNIQUE rows in the cover, so the cover drops 8. Each dropped test's candidate-only mutants are
-   in code that a kept test catches or that item 4 deletes.)
+   Deviation from root's brief, which said "delete 6": the data has 10 IF-PEER-KEPT rows. The
+   cover keeps 2 of them; its other 2 kept tests are UNIQUE rows, not IF-PEER-KEPT. So the cover
+   drops 8, and all 8 are deleted. Evidence per test (its candidate-only mutants, and who still
+   catches them):
+   - `conformance` `scaled_sum_squares_handles_extreme_finite_values` (m9174, m9175, m9176,
+     m9193) and `block_metrics_and_repeat_bits_cover_boundaries` (m9120, m9121, m9122): every
+     mutant is in `compare.rs`, which item 4 deletes; `tolerance_boundary_tie_and_snr_cases_are_explicit`
+     also caught each one.
+   - `effect-runtime` `mapping_is_exact_at_the_ends_and_monotone`,
+     `a_logarithmic_mapping_is_constant_ratio` (m17453, m17454) and
+     `a_degenerate_range_has_no_position` (m17453, m17454, m17480): every mutant is in
+     `params::map_normalized`/`inverse_map_normalized`, which item 4 deletes;
+     `the_mapping_inverse_round_trips` also caught each one.
+   - `audit` `near_name_impostor_does_not_satisfy_probe` and
+     `exact_probe_path_and_body_boundaries_are_preserved` (m4430): also red in the kept
+     `rust_disambiguator_suffix_is_narrowly_supported`.
+   - `parametric-eq` `common_eq_adapter_preserves_input_ownership_capacity_and_refusal_sentinels`
+     (m35416): also red in the kept `malformed_requests_preserve_output_sentinels_and_opaque_ids`.
 3. Keeps every UNIQUE (except item 4), THIN, WEAK and NO-COVERAGE test.
 4. Deletes code that only tests call, with its UNIQUE tests. Proof: `git grep` over `crates/`,
    `hosts/` and `tools/` outside test code finds no caller, and the workspace builds warning-free
@@ -428,8 +443,11 @@ Also: the `rack` `TEST_PREPARED_ACTIVITY_QUERIES` counter and its `#[cfg(test)]`
 `carry.rs` `Ramp::name` field (read only by deleted tests; each ramp keeps its name as a comment);
 the emptied `host-web` `tests::canonical_live` module.
 
-Lead, not deleted (the compiler is silent on it): `builtins` `MATRIX_SELECT_FREE_BLOCKS` and
-`FUSED_SELECT_FREE_BLOCKS` are `#[cfg(test)]` counters that are now written and never read.
+Lead for a successor, not fixed here (the compiler does not report it): `builtins`
+`MATRIX_SELECT_FREE_BLOCKS` and `FUSED_SELECT_FREE_BLOCKS` (`crates/builtins/src/lib.rs`) are
+`#[cfg(test)]` counters that are now written and never read. Their readers were the deleted
+`settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane` and
+`fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane`.
 
 ### Skipped
 
@@ -441,4 +459,38 @@ Lead, not deleted (the compiler is silent on it): `builtins` `MATRIX_SELECT_FREE
 
 ## Survivor gaps
 
-Placeholder: agent T4S fills this section from its worktree (`codex/batch-test-gaps-ta4`).
+Batch 1 left 21 survivors: viable mutants that no candidate and no covering KEEP test turned red.
+Agent T4S classified each one (branch `codex/batch-test-gaps-ta4`, merged here):
+
+- EQUIVALENT 6: m38090 (rack `BankStage::begin_block` default body), m26403 (lane
+  `scheduling_barrier`, an empty `asm!`), m26693 (lane scalar select: disjoint bits, so `|` is `^`),
+  m4419 (audit `vectorization.rs:336`, the next clause catches it), m35318 and m6786
+  (`Complex::is_finite` in parametric-eq and builtins responses: a later finite check catches
+  every non-finite value).
+- UNREACHABLE 3: m17240 and m17239 (effect-contract `ExactDecimal::parse`; its one product caller
+  passes canonical digits only) and m26408 (lane `attest_fp_environment` refusals, which need a
+  control word that does not read back). m26408 goes to
+  `TBD-TA4-gap-1-test-the-fp-environment-refusal.md` (a pure decision seam and its test).
+- DEAD CODE 7: m9108, m9109, m9111, m9118 (`conformance` `PlanarBlock`, `compare_f32_to_f64`) and
+  m16329, m16330 (`effect-contract` `map_stepped_normalized`) are in code that item 4 deleted.
+  m42034 (`source` `validate_output_shape`, reached only through the test-only `read_block`) goes
+  to `TBD-TA4-gap-2-remove-test-only-public-functions.md`.
+- REAL GAP 5, closed by 4 new tests. Each was red with its mutant applied and is green on the branch:
+  - m18792, gate-expander `tests/state.rs::a_subnormal_gain_word_is_refused` (red at
+    `state.rs:886`). A restore that stops refusing a subnormal gain word (`normal_or_zero`
+    dropped or weakened) turns it red; no other test feeds a gain word outside the normal/zero set.
+  - m41330 and m41333, session-validator
+    `tests/validate.rs::the_report_labels_each_stage_and_prints_every_message_line` (red at the
+    label assertion, `validate.rs:487`, and at the multi-line assertion, `:512`). A report that
+    loses its stage labels or drops message lines turns it red; the other tests only compare two
+    renders or search stderr for the result line.
+  - m39691, realtime-policy `tests/policy/drain/forms.rs` row `count-in-an-expression-macro` (red in
+    `a_count_that_the_rule_cannot_prove_is_refused`). A D7 check that stops seeing a count used
+    inside a non-assert macro in expression position turns it red.
+  - m39758, realtime-policy `tests/policy/drain/outer.rs` row
+    `array-from-fn-after-a-field-named-std` (red in
+    `a_constructor_that_loops_is_refused_anywhere_in_a_region`). An `array::from_fn` exemption that
+    matches a path with a single `:` turns it red.
+
+Successors: `TBD-TA4-gap-1-test-the-fp-environment-refusal.md` and
+`TBD-TA4-gap-2-remove-test-only-public-functions.md` (now only the `source` `read_block` item).
