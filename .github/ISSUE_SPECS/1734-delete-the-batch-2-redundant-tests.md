@@ -224,8 +224,7 @@ Added by the re-reading and the review fold:
 - `crates/parametric-eq/tests/carry.rs`: `same_bits`
 - `crates/rack/src/lib.rs`: `WrongWidthPlanes` and its `BankMembers`
 
-Leads the compiler does not report are in the successor spec
-`TBD-TA5-successor-audit-leads.md`.
+The lesson for any later pool-wide cut is the last section of this spec.
 
 ## Objective gates
 
@@ -244,4 +243,19 @@ per-test list, part 1/3" to "part 3/3"). The PR diff is the list of what went.
 Batch 2 left 12 mutants that no sampled and no covering KEEP test turned red. Agent T5S read each
 at `ad5c7ae86`: 3 equivalent, 1 unreachable, 2 dead code, 6 real gaps. The six real gaps (one
 small test each) and the decision on the dead contract are the successor spec
-`TBD-TA5-gap-close-the-batch-2-mutation-survivor-gaps.md`.
+`1733-close-the-batch-2-mutation-survivor-gaps.md`.
+
+## Lesson for any later pool-wide cut
+
+**The redundancy measurement over-reports on its own.** Of batch 2's 162 MEASURED-REDUNDANT
+tests, reading kept 65. Some carry a claim that another record states and the name triage did not
+read: the only red test of a `MUTATIONS.md` row (gate-expander row 3, effect-contract 140-1,
+parametric-eq recorded failures 1 and 1b, graph 916-1 to 916-15), a known AArch64 release failure
+in `scripts/lib/aarch64-known-defects.py` (`m2_exp2_lane_identity`, #1019), and a randomized
+differential named `run_seeds` (host-core `a_bus_renders_the_bits_of_a_track_fed_its_sum`).
+Others were the only test of a claim that only reading against named siblings shows; a first pass
+that cited siblings only by file deleted five of those, and review restored them. B2's
+projection of about 2,647 deletable pool tests therefore does not stand. If a pool-wide cut is
+ever reopened, its brief must first match every candidate against the `MUTATIONS.md`
+sole-catcher rows, the known-defect lists and the seeded-differential helpers, and every DELETE
+answer must name, by its full name, the remaining test that asserts the same claim.

@@ -1,4 +1,4 @@
-# Close the batch 2 mutation-survivor gaps (TBD-TA5-gap)
+# Close the batch 2 mutation-survivor gaps
 
 ## Mission
 
