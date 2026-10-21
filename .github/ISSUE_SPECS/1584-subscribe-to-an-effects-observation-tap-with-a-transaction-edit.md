@@ -418,13 +418,13 @@ What shipped, on `codex/controls-batch-12k`:
 
 Gates (D6a's seven) and tests:
 
-1. Restarted owner, subscribe applied: `observation_carry::a_restarted_effects_subscription_survives_the_rebuild_at_eight_lanes`
+1. Restarted owner, subscribe applied: `observation_carry::a_restarted_effects_subscription_survives_the_rebuild_at_the_build_width`
    (pending=false), and E13 rewritten as `a_plan_replacement_keeps_the_subscriptions_the_host_armed`
    (`effect_observation.rs`; the replacement changes the slot's link mode so nothing carries). The
    reference is a record applied at the adoption block in the successor's own queue: same state and input,
    windows equal field for field, first window at `SWAP_SAMPLE`.
 2. Pending subscribe: the same test with pending=true (the record waits in the predecessor's queue).
-3. Pending disarm: `a_pending_disarm_leaves_the_restarted_tap_unarmed_at_eight_lanes`.
+3. Pending disarm: `a_pending_disarm_leaves_the_restarted_tap_unarmed_at_the_build_width`.
 4. Removed owner: `a_removed_effect_ends_its_binding_with_an_event` (insert removed, strip removed, ID
    reused for `miso.delay`: one `OBSERVATION_ENDED`, committing revision, stable key, sequence after the
    commit's, successor has no tap); `controls/tests/observation.rs` (`after()` incl. console slot and an
