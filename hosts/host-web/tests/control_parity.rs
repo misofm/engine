@@ -1770,8 +1770,9 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
 ///
 /// Red if a value lowers to a different lane or cell, ramps over a different length, composes
 /// with a VCA or a solo differently, drains differently, or is refused with a different code on
-/// one host. The control run proves the script is heard: the edits move the output away from a
-/// run with no edits, and dropping any one edit changes some block at 48 kHz.
+/// one host. At every rate the script also supersedes at least one write (the two fader edits of
+/// block 4), and at least 40 blocks differ from a run with no edits on the same session, so the
+/// script is heard. Which edit moves which block is held in `host-core`'s `live_delta.rs`.
 #[test]
 fn both_hosts_give_the_same_result_for_the_same_control_edits() {
     let steps = script();

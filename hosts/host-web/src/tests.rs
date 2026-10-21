@@ -1214,7 +1214,8 @@ impl SeekExports {
 ///
 /// Test value: red if `source_seek_at` is wired through `plan.prepare_source_seek` (the D4 trap:
 /// the future anchor would be `RESULT_INTERNAL`), if it queues a plain seek (sound from the next
-/// block), or if the report export reads another word order or a stale record. The session has
+/// block), if the report export reads another word order or a stale record, or if either seek
+/// export maps an unknown source to a result other than `RESULT_INVALID_ARGUMENT`. The session has
 /// one source, so this test cannot show which source's ring the report reads.
 #[test]
 fn the_anchored_seek_exports_play_at_the_anchor_and_report_where_it_landed() {
@@ -1231,6 +1232,11 @@ fn the_anchored_seek_exports_play_at_the_anchor_and_report_where_it_landed() {
     rig.stage(b"no-such-source");
     assert_eq!(
         miso_engine_web_v1_source_seek_at(rig.handle, 14, 2, 10_000, 256),
+        RESULT_INVALID_ARGUMENT
+    );
+    // The plain seek export refuses an unknown source the same way.
+    assert_eq!(
+        miso_engine_web_v1_source_seek(rig.handle, 14, 2, 10_000),
         RESULT_INVALID_ARGUMENT
     );
     assert_eq!(
