@@ -230,18 +230,13 @@ fn added_muted_track_keeps_playing(backend: Backend) {
     );
 }
 
-/// Gate 1 at eight lanes. Red if the successor still allocates and plays a fresh ring, or if the
+/// Gate 1 on every width. Red if the successor still allocates and plays a fresh ring, or if the
 /// carry or the producer hand-over loses the queued block or the read position.
-#[cfg(target_feature = "avx2")]
 #[test]
-fn an_added_muted_track_keeps_the_source_playing_at_eight_lanes() {
-    added_muted_track_keeps_playing(Backend::Simd8);
-}
-
-/// Gate 1 at four lanes, the NEON/simd128 width.
-#[test]
-fn an_added_muted_track_keeps_the_source_playing_at_four_lanes() {
-    added_muted_track_keeps_playing(Backend::Simd4);
+fn an_added_muted_track_keeps_the_source_playing_on_every_width() {
+    for backend in backends() {
+        added_muted_track_keeps_playing(backend);
+    }
 }
 
 /// Gate 2. Red if the carry pairs sources, or the producer hand-over finds them, by index: the
@@ -726,18 +721,13 @@ fn future_anchor_starts_the_added_stem_on_its_block(backend: Backend) {
     assert_eq!(first_difference(&silent, &reference), Some(ANCHOR_BLOCK));
 }
 
-/// Gate 1 of #1274 at eight lanes. Red if a held seek discards the primed generation (the stem is
+/// Gate 1 of #1274 on every width. Red if a held seek discards the primed generation (the stem is
 /// silent at the anchor) or applies when observed (the stem starts early).
-#[cfg(target_feature = "avx2")]
 #[test]
-fn a_future_anchor_starts_the_added_stem_on_its_block_at_eight_lanes() {
-    future_anchor_starts_the_added_stem_on_its_block(Backend::Simd8);
-}
-
-/// Gate 1 of #1274 at four lanes.
-#[test]
-fn a_future_anchor_starts_the_added_stem_on_its_block_at_four_lanes() {
-    future_anchor_starts_the_added_stem_on_its_block(Backend::Simd4);
+fn a_future_anchor_starts_the_added_stem_on_its_block_on_every_width() {
+    for backend in backends() {
+        future_anchor_starts_the_added_stem_on_its_block(backend);
+    }
 }
 
 /// Gate 3 of #1274: two playing sources, each given `seek_at` to one anchor before a different
@@ -911,49 +901,6 @@ fn without_track(mut model: SessionModel, id: &str) -> SessionModel {
 fn with_muted_track(mut model: SessionModel) -> SessionModel {
     add_track(&mut model, "eq0", MUTED_TRACK, SOURCE, true);
     model
-}
-
-/// Gate 1 of #1276, at one width.
-fn filtered_strips_keep_their_state(backend: Backend) {
-    let a = Session::compile(filtered_session(false));
-    let b = Session::compile(with_muted_track(filtered_session(false)));
-    assert_eq!(
-        b.compiled.normalized_model().tracks[0].id.as_str(),
-        MUTED_TRACK
-    );
-    let feed = Feed::new(SOURCE, 3);
-    let reference = reference_run(&b, &[&feed], backend);
-    let run = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
-    assert_eq!(
-        (run.blocks[SWAP_BLOCK].swap, run.blocks[SWAP_BLOCK].carry),
-        (SwapOutcome::Applied, CarryOutcome::Carried),
-        "{backend:?}: the swap block"
-    );
-    assert_eq!(
-        first_difference(&run.blocks, &reference),
-        None,
-        "{backend:?}: every block equals the post-edit session rendered from frame 0"
-    );
-    assert!(reference[SWAP_BLOCK].bits.iter().any(|bits| *bits != 0));
-    // Nine input sections recorded, and all nine carry: one source move and nine lane moves, and
-    // (#1277) the fader and matrix stage of each of the nine strips.
-    assert_eq!(a.prepare(backend).inventory.input_section_count(), 9);
-    assert_eq!(run.carry_counts, [1, 9, 18, 0]);
-}
-
-/// Gate 1 at eight lanes: banks of eight and one become eight and two, so every kept lane moves
-/// and two cross into the next bank. Red if a filter restarts at rest, or a lane is imported at
-/// its old lane index instead of its strip's new one.
-#[cfg(target_feature = "avx2")]
-#[test]
-fn filtered_strips_keep_their_state_across_a_swap_at_eight_lanes() {
-    filtered_strips_keep_their_state(Backend::Simd8);
-}
-
-/// Gate 1 at four lanes: banks of four, four and one become four, four and two.
-#[test]
-fn filtered_strips_keep_their_state_across_a_swap_at_four_lanes() {
-    filtered_strips_keep_their_state(Backend::Simd4);
 }
 
 /// A live input record pushed into a run's queue for `strip` before block `block` renders.
@@ -1435,48 +1382,37 @@ fn a_restarting_input_lane_does_not_count_its_replaced_writes(backend: Backend) 
     );
 }
 
-#[cfg(target_feature = "avx2")]
 #[test]
-fn a_restarting_input_lane_does_not_count_its_replaced_writes_at_eight_lanes() {
-    a_restarting_input_lane_does_not_count_its_replaced_writes(Backend::Simd8);
+fn a_restarting_input_lane_does_not_count_its_replaced_writes_on_every_width() {
+    for backend in backends() {
+        a_restarting_input_lane_does_not_count_its_replaced_writes(backend);
+    }
 }
 
-#[test]
-fn a_restarting_input_lane_does_not_count_its_replaced_writes_at_four_lanes() {
-    a_restarting_input_lane_does_not_count_its_replaced_writes(Backend::Simd4);
-}
-
-/// Gate 2 at eight lanes. Red if the carry exports a lane before draining its queue: the record
+/// Gate 2, at every width. Red if the carry exports a lane before draining its queue: the record
 /// is lost with the retired plan.
-#[cfg(target_feature = "avx2")]
+///
+/// The later-bank rows write a carried strip in the second predecessor bank while a strip at the
+/// same lane of the first bank restarts at the swap. Red if the input drain's lane mask is built
+/// from the first bank's moves instead of the moves of the bank being drained: the first bank's
+/// mask lacks that lane, so the pending trim write of the later bank's lane is lost at the swap.
+/// The first-bank rows cannot see it, and a first bank whose lanes all carry (a full mask) would
+/// not either.
 #[test]
-fn a_pending_trim_record_survives_the_swap_at_eight_lanes() {
-    a_pending_trim_record_survives_the_swap(Backend::Simd8, "eq2", None);
-}
-
-/// Gate 2 at four lanes.
-#[test]
-fn a_pending_trim_record_survives_the_swap_at_four_lanes() {
-    a_pending_trim_record_survives_the_swap(Backend::Simd4, "eq2", None);
-}
-
-/// Gate 2 on a carried strip in the second predecessor bank (`eq8` is lane 0 of it at eight lanes).
-/// `eq0`, lane 0 of the first bank, restarts at the swap. Red if the input drain's lane mask is
-/// built from the first bank's moves instead of the moves of the bank being drained: the first
-/// bank's mask lacks lane 0, so the pending trim write of the later bank's lane 0 is lost at the
-/// swap. The first-bank tests above cannot see it, and a first bank whose lanes all carry (a full
-/// mask) would not either.
-#[cfg(target_feature = "avx2")]
-#[test]
-fn a_pending_trim_record_in_a_later_bank_survives_the_swap_at_eight_lanes() {
-    a_pending_trim_record_survives_the_swap(Backend::Simd8, "eq8", Some("eq0"));
-}
-
-/// Gate 2 on a carried strip in the second predecessor bank (`eq5` is lane 1 of it at four lanes).
-/// `eq1`, lane 1 of the first bank, restarts at the swap; see the eight-lane case.
-#[test]
-fn a_pending_trim_record_in_a_later_bank_survives_the_swap_at_four_lanes() {
-    a_pending_trim_record_survives_the_swap(Backend::Simd4, "eq5", Some("eq1"));
+fn a_pending_trim_record_survives_the_swap_in_every_bank_on_every_width() {
+    let rows = [
+        #[cfg(target_feature = "avx2")]
+        (Backend::Simd8, "eq2", None),
+        (Backend::Simd4, "eq2", None),
+        // `eq8` is lane 0 of the second bank at eight lanes; `eq0`, lane 0 of the first, restarts.
+        #[cfg(target_feature = "avx2")]
+        (Backend::Simd8, "eq8", Some("eq0")),
+        // `eq5` is lane 1 of the second bank at four lanes; `eq1`, lane 1 of the first, restarts.
+        (Backend::Simd4, "eq5", Some("eq1")),
+    ];
+    for (backend, strip, restarting) in rows {
+        a_pending_trim_record_survives_the_swap(backend, strip, restarting);
+    }
 }
 
 /// Gate 2 of #1276, second case: at a 32-frame quantum, a high-pass target admitted before block
@@ -1596,22 +1532,16 @@ fn collapsed_strips_keep_collapsing(backend: Backend, successor_dual: bool) {
     }
 }
 
-/// Gate 3 at eight lanes. Red if a successor chain that receives carried lanes clears its
+/// Gate 3 on every width. Red if a successor chain that receives carried lanes clears its
 /// channel-agreement flag (it needs a proof to engage, and a chain with an effect in its prefix,
 /// which declines the proof, would never collapse again), or if the carry skips the disengage
 /// copy of a collapsed predecessor (the dual successor reads a stale right channel).
-#[cfg(target_feature = "avx2")]
 #[test]
-fn collapsed_strips_keep_collapsing_across_a_swap_at_eight_lanes() {
-    collapsed_strips_keep_collapsing(Backend::Simd8, false);
-    collapsed_strips_keep_collapsing(Backend::Simd8, true);
-}
-
-/// Gate 3 at four lanes.
-#[test]
-fn collapsed_strips_keep_collapsing_across_a_swap_at_four_lanes() {
-    collapsed_strips_keep_collapsing(Backend::Simd4, false);
-    collapsed_strips_keep_collapsing(Backend::Simd4, true);
+fn collapsed_strips_keep_collapsing_across_a_swap_on_every_width() {
+    for backend in backends() {
+        collapsed_strips_keep_collapsing(backend, false);
+        collapsed_strips_keep_collapsing(backend, true);
+    }
 }
 
 /// Gate 4 of #1276, one edit. B applies `edit` to `eq0`'s input section in the same transaction
@@ -2295,24 +2225,17 @@ fn a_lane_from_a_delayed_strip_keeps_its_chain_dual_after_the_swap(backend: Back
     assert_eq!(first_direct_difference(&run, &dual), None, "{backend:?}");
 }
 
-/// The carried agreement at eight lanes. Red if a predecessor chain that can never collapse hands
+/// The carried agreement on every width. Red if a predecessor chain that can never collapse hands
 /// over the unmaintained `true` it was bound with (the stereo-neighbour and delay cases), or if
 /// the successor ignores a cleared flag (the armed case): the successor collapses a lane whose
 /// channels disagree.
-#[cfg(target_feature = "avx2")]
 #[test]
-fn a_diverged_lane_keeps_its_chain_dual_after_the_swap_at_eight_lanes() {
-    a_diverged_lane_keeps_its_chain_dual_after_the_swap(Backend::Simd8, true);
-    a_diverged_lane_keeps_its_chain_dual_after_the_swap(Backend::Simd8, false);
-    a_lane_from_a_delayed_strip_keeps_its_chain_dual_after_the_swap(Backend::Simd8);
-}
-
-/// The carried agreement at four lanes.
-#[test]
-fn a_diverged_lane_keeps_its_chain_dual_after_the_swap_at_four_lanes() {
-    a_diverged_lane_keeps_its_chain_dual_after_the_swap(Backend::Simd4, true);
-    a_diverged_lane_keeps_its_chain_dual_after_the_swap(Backend::Simd4, false);
-    a_lane_from_a_delayed_strip_keeps_its_chain_dual_after_the_swap(Backend::Simd4);
+fn a_diverged_lane_keeps_its_chain_dual_after_the_swap_on_every_width() {
+    for backend in backends() {
+        a_diverged_lane_keeps_its_chain_dual_after_the_swap(backend, true);
+        a_diverged_lane_keeps_its_chain_dual_after_the_swap(backend, false);
+        a_lane_from_a_delayed_strip_keeps_its_chain_dual_after_the_swap(backend);
+    }
 }
 
 /// D6 and P11 of #1276. Installing the input section refuses a plan with no carry program (no
@@ -2738,14 +2661,10 @@ fn a_collapsed_chain_renders_the_forced_dual_bits(backend: Backend) {
 }
 
 #[test]
-fn a_collapsed_chain_renders_the_forced_dual_bits_at_four_lanes() {
-    a_collapsed_chain_renders_the_forced_dual_bits(Backend::Simd4);
-}
-
-#[cfg(target_feature = "avx2")]
-#[test]
-fn a_collapsed_chain_renders_the_forced_dual_bits_at_eight_lanes() {
-    a_collapsed_chain_renders_the_forced_dual_bits(Backend::Simd8);
+fn a_collapsed_chain_renders_the_forced_dual_bits_on_every_width() {
+    for backend in backends() {
+        a_collapsed_chain_renders_the_forced_dual_bits(backend);
+    }
 }
 
 // Issue #1277 (slice 8 of #1269): a strip keeps its fader, mute and pan or matrix state through a
@@ -3211,15 +3130,11 @@ fn strip_state_survives_a_swap(backend: Backend) {
 /// Red if a stage is keyed by lane or index, not strip ID (the added track sorts first, so every
 /// kept lane moves and two cross into the next bank), if a stage is left out of the program, or
 /// if the join lists a strip that carried.
-#[cfg(target_feature = "avx2")]
 #[test]
-fn strip_state_survives_a_swap_at_eight_lanes() {
-    strip_state_survives_a_swap(Backend::Simd8);
-}
-
-#[test]
-fn strip_state_survives_a_swap_at_four_lanes() {
-    strip_state_survives_a_swap(Backend::Simd4);
+fn strip_state_survives_a_swap_on_every_width() {
+    for backend in backends() {
+        strip_state_survives_a_swap(backend);
+    }
 }
 
 /// A strip whose chain has an effect between its input section and its fader still carries its
@@ -3358,32 +3273,20 @@ fn records_in_the_pending_successor_apply_at_its_first_block(backend: Backend, f
 }
 
 #[test]
-fn a_ramp_in_flight_finishes_after_the_swap_at_four_lanes() {
-    for form in forms() {
-        a_ramp_in_flight_finishes_after_the_swap(Backend::Simd4, form);
-    }
-}
-
-#[cfg(target_feature = "avx2")]
-#[test]
-fn a_ramp_in_flight_finishes_after_the_swap_at_eight_lanes() {
-    for form in forms() {
-        a_ramp_in_flight_finishes_after_the_swap(Backend::Simd8, form);
+fn a_ramp_in_flight_finishes_after_the_swap_on_every_width() {
+    for backend in backends() {
+        for form in forms() {
+            a_ramp_in_flight_finishes_after_the_swap(backend, form);
+        }
     }
 }
 
 #[test]
-fn records_in_the_pending_successor_apply_at_its_first_block_at_four_lanes() {
-    for form in forms() {
-        records_in_the_pending_successor_apply_at_its_first_block(Backend::Simd4, form);
-    }
-}
-
-#[cfg(target_feature = "avx2")]
-#[test]
-fn records_in_the_pending_successor_apply_at_its_first_block_at_eight_lanes() {
-    for form in forms() {
-        records_in_the_pending_successor_apply_at_its_first_block(Backend::Simd8, form);
+fn records_in_the_pending_successor_apply_at_its_first_block_on_every_width() {
+    for backend in backends() {
+        for form in forms() {
+            records_in_the_pending_successor_apply_at_its_first_block(backend, form);
+        }
     }
 }
 
@@ -3490,17 +3393,11 @@ fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
 }
 
 #[test]
-fn a_live_difference_retargets_the_carried_stage_at_four_lanes() {
-    for form in forms() {
-        a_live_difference_retargets_the_carried_stage(Backend::Simd4, form);
-    }
-}
-
-#[cfg(target_feature = "avx2")]
-#[test]
-fn a_live_difference_retargets_the_carried_stage_at_eight_lanes() {
-    for form in forms() {
-        a_live_difference_retargets_the_carried_stage(Backend::Simd8, form);
+fn a_live_difference_retargets_the_carried_stage_on_every_width() {
+    for backend in backends() {
+        for form in forms() {
+            a_live_difference_retargets_the_carried_stage(backend, form);
+        }
     }
 }
 
@@ -3681,17 +3578,11 @@ fn a_carried_lane_counts_its_replaced_writes(backend: Backend, form: Form) {
 }
 
 #[test]
-fn a_carried_lane_counts_its_replaced_writes_at_four_lanes() {
-    for form in forms() {
-        a_carried_lane_counts_its_replaced_writes(Backend::Simd4, form);
-    }
-}
-
-#[cfg(target_feature = "avx2")]
-#[test]
-fn a_carried_lane_counts_its_replaced_writes_at_eight_lanes() {
-    for form in forms() {
-        a_carried_lane_counts_its_replaced_writes(Backend::Simd8, form);
+fn a_carried_lane_counts_its_replaced_writes_on_every_width() {
+    for backend in backends() {
+        for form in forms() {
+            a_carried_lane_counts_its_replaced_writes(backend, form);
+        }
     }
 }
 
@@ -3899,17 +3790,11 @@ fn a_vca_added_over_a_strip_retargets_its_carried_stage(backend: Backend, form: 
 }
 
 #[test]
-fn a_vca_added_over_a_strip_retargets_its_carried_stage_at_four_lanes() {
-    for form in forms() {
-        a_vca_added_over_a_strip_retargets_its_carried_stage(Backend::Simd4, form);
-    }
-}
-
-#[cfg(target_feature = "avx2")]
-#[test]
-fn a_vca_added_over_a_strip_retargets_its_carried_stage_at_eight_lanes() {
-    for form in forms() {
-        a_vca_added_over_a_strip_retargets_its_carried_stage(Backend::Simd8, form);
+fn a_vca_added_over_a_strip_retargets_its_carried_stage_on_every_width() {
+    for backend in backends() {
+        for form in forms() {
+            a_vca_added_over_a_strip_retargets_its_carried_stage(backend, form);
+        }
     }
 }
 
@@ -4202,39 +4087,25 @@ fn a_followed_mute_change_retargets_the_fused_stage_whole(backend: Backend) {
 }
 
 #[test]
-fn a_followed_mute_change_retargets_the_fused_stage_whole_at_four_lanes() {
-    a_followed_mute_change_retargets_the_fused_stage_whole(Backend::Simd4);
-}
-
-#[cfg(target_feature = "avx2")]
-#[test]
-fn a_followed_mute_change_retargets_the_fused_stage_whole_at_eight_lanes() {
-    a_followed_mute_change_retargets_the_fused_stage_whole(Backend::Simd8);
-}
-
-#[test]
-fn a_followed_mute_change_leaves_the_matrix_stage_carrying_at_four_lanes() {
-    a_followed_mute_change_leaves_the_matrix_stage_carrying(Backend::Simd4);
-}
-
-#[cfg(target_feature = "avx2")]
-#[test]
-fn a_followed_mute_change_leaves_the_matrix_stage_carrying_at_eight_lanes() {
-    a_followed_mute_change_leaves_the_matrix_stage_carrying(Backend::Simd8);
-}
-
-#[test]
-fn a_followed_mute_change_carries_and_retargets_the_stage_at_four_lanes() {
-    for form in forms() {
-        a_followed_mute_change_carries_and_retargets_the_stage(Backend::Simd4, form);
+fn a_followed_mute_change_retargets_the_fused_stage_whole_on_every_width() {
+    for backend in backends() {
+        a_followed_mute_change_retargets_the_fused_stage_whole(backend);
     }
 }
 
-#[cfg(target_feature = "avx2")]
 #[test]
-fn a_followed_mute_change_carries_and_retargets_the_stage_at_eight_lanes() {
-    for form in forms() {
-        a_followed_mute_change_carries_and_retargets_the_stage(Backend::Simd8, form);
+fn a_followed_mute_change_leaves_the_matrix_stage_carrying_on_every_width() {
+    for backend in backends() {
+        a_followed_mute_change_leaves_the_matrix_stage_carrying(backend);
+    }
+}
+
+#[test]
+fn a_followed_mute_change_carries_and_retargets_the_stage_on_every_width() {
+    for backend in backends() {
+        for form in forms() {
+            a_followed_mute_change_carries_and_retargets_the_stage(backend, form);
+        }
     }
 }
 
@@ -4771,22 +4642,11 @@ fn console_effect_state_survives_a_swap(backend: Backend) {
     assert_eq!(run.effect_lanes, 54, "{backend:?}");
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn console_effect_state_survives_a_swap_at_eight_lanes() {
-    console_effect_state_survives_a_swap(Backend::Simd8);
-}
-
-/// Four lanes: the NEON and simd128 width. A console effect bank binds only at the width its
-/// build executes (decision D4), so on a build with eight lanes this case is ignored.
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn console_effect_state_survives_a_swap_at_four_lanes() {
-    console_effect_state_survives_a_swap(Backend::Simd4);
+fn console_effect_state_survives_a_swap_at_the_build_width() {
+    console_effect_state_survives_a_swap(Backend::current());
 }
 
 /// For each of the six effects, alone on every strip, the state it holds at the swap block is
@@ -4822,20 +4682,11 @@ fn every_console_effect_does_work(backend: Backend) {
     }
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn every_console_effect_does_work_at_eight_lanes() {
-    every_console_effect_does_work(Backend::Simd8);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn every_console_effect_does_work_at_four_lanes() {
-    every_console_effect_does_work(Backend::Simd4);
+fn every_console_effect_does_work_at_the_build_width() {
+    every_console_effect_does_work(Backend::current());
 }
 
 /// Gate 4: the swap block of gate 1, with every console effect carried, allocates and frees
@@ -4854,20 +4705,11 @@ fn the_effect_carry_allocates_and_frees_nothing(backend: Backend) {
     );
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn the_effect_carry_allocates_and_frees_nothing_at_eight_lanes() {
-    the_effect_carry_allocates_and_frees_nothing(Backend::Simd8);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn the_effect_carry_allocates_and_frees_nothing_at_four_lanes() {
-    the_effect_carry_allocates_and_frees_nothing(Backend::Simd4);
+fn the_effect_carry_allocates_and_frees_nothing_at_the_build_width() {
+    the_effect_carry_allocates_and_frees_nothing(Backend::current());
 }
 
 /// `model` with every track's input section flat: no filters, no trim, no polarity inversion.
@@ -4957,25 +4799,14 @@ fn console_chains_keep_collapsing(backend: Backend, successor_dual: bool, inputs
     }
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn console_chains_keep_collapsing_across_a_swap_at_eight_lanes() {
+fn console_chains_keep_collapsing_across_a_swap_at_the_build_width() {
+    let backend = Backend::current();
     for inputs_restart in [false, true] {
-        console_chains_keep_collapsing(Backend::Simd8, false, inputs_restart);
-        console_chains_keep_collapsing(Backend::Simd8, true, inputs_restart);
-    }
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn console_chains_keep_collapsing_across_a_swap_at_four_lanes() {
-    for inputs_restart in [false, true] {
-        console_chains_keep_collapsing(Backend::Simd4, false, inputs_restart);
-        console_chains_keep_collapsing(Backend::Simd4, true, inputs_restart);
+        console_chains_keep_collapsing(backend, false, inputs_restart);
+        console_chains_keep_collapsing(backend, true, inputs_restart);
     }
 }
 
@@ -5029,20 +4860,11 @@ fn a_chain_that_could_not_collapse_hands_over_no_agreement(backend: Backend) {
     assert_eq!(run.collapses[1][0], 0, "{backend:?}: a mirrored source");
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn a_chain_that_could_not_collapse_hands_over_no_agreement_at_eight_lanes() {
-    a_chain_that_could_not_collapse_hands_over_no_agreement(Backend::Simd8);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn a_chain_that_could_not_collapse_hands_over_no_agreement_at_four_lanes() {
-    a_chain_that_could_not_collapse_hands_over_no_agreement(Backend::Simd4);
+fn a_chain_that_could_not_collapse_hands_over_no_agreement_at_the_build_width() {
+    a_chain_that_could_not_collapse_hands_over_no_agreement(Backend::current());
 }
 
 /// [`console_session`] with the input section's filters, trim and polarity off, so nothing
@@ -5182,22 +5004,13 @@ fn a_restarted_slot_starts_at_rest_at_its_new_value(backend: Backend) {
     );
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn a_prepared_change_to_one_slot_restarts_only_its_strip_at_eight_lanes() {
-    a_prepared_change_to_one_slot_restarts_only_its_strip(Backend::Simd8, &ALL_SLOTS);
-    a_restarted_slot_starts_at_rest_at_its_new_value(Backend::Simd8);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn a_prepared_change_to_one_slot_restarts_only_its_strip_at_four_lanes() {
-    a_prepared_change_to_one_slot_restarts_only_its_strip(Backend::Simd4, &ALL_SLOTS);
-    a_restarted_slot_starts_at_rest_at_its_new_value(Backend::Simd4);
+fn a_prepared_change_to_one_slot_restarts_only_its_strip_at_the_build_width() {
+    let backend = Backend::current();
+    a_prepared_change_to_one_slot_restarts_only_its_strip(backend, &ALL_SLOTS);
+    a_restarted_slot_starts_at_rest_at_its_new_value(backend);
 }
 
 /// A compressor insert that changes no sample: threshold at 0 dB and ratio 1.
@@ -5260,20 +5073,11 @@ fn an_added_insert_restarts_its_strip_and_its_console_slots_carry(backend: Backe
     assert_eq!(run.refusals, 0, "{backend:?}");
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_eight_lanes() {
-    an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::Simd8);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_four_lanes() {
-    an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::Simd4);
+fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_the_build_width() {
+    an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::current());
 }
 
 /// An insert carries when it is a lane of a bank in both plans (#1280a), and the compressor insert
@@ -5312,20 +5116,11 @@ fn a_surviving_insert_restarts_its_strip(backend: Backend) {
     assert_eq!(run.refusals, 0, "{backend:?}");
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn a_surviving_insert_restarts_its_strip_at_eight_lanes() {
-    a_surviving_insert_restarts_its_strip(Backend::Simd8);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn a_surviving_insert_restarts_its_strip_at_four_lanes() {
-    a_surviving_insert_restarts_its_strip(Backend::Simd4);
+fn a_surviving_insert_restarts_its_strip_at_the_build_width() {
+    a_surviving_insert_restarts_its_strip(Backend::current());
 }
 
 /// `model` without console slot `slot`: its declaration and every strip's entry.
@@ -5368,20 +5163,11 @@ fn a_removed_console_slot_restarts_every_strip(backend: Backend) {
     assert_eq!(run.refusals, 0, "{backend:?}");
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn a_removed_console_slot_restarts_every_strip_at_eight_lanes() {
-    a_removed_console_slot_restarts_every_strip(Backend::Simd8);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn a_removed_console_slot_restarts_every_strip_at_four_lanes() {
-    a_removed_console_slot_restarts_every_strip(Backend::Simd4);
+fn a_removed_console_slot_restarts_every_strip_at_the_build_width() {
+    a_removed_console_slot_restarts_every_strip(Backend::current());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5725,22 +5511,13 @@ fn unrendered_live_writes_survive_the_swap(backend: Backend, address: LiveEffect
     );
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn unrendered_live_writes_survive_the_swap_at_eight_lanes() {
-    unrendered_live_writes_survive_the_swap(Backend::Simd8, EQ_ADDRESS);
-    unrendered_live_writes_survive_the_swap(Backend::Simd8, COMP_ADDRESS);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn unrendered_live_writes_survive_the_swap_at_four_lanes() {
-    unrendered_live_writes_survive_the_swap(Backend::Simd4, EQ_ADDRESS);
-    unrendered_live_writes_survive_the_swap(Backend::Simd4, COMP_ADDRESS);
+fn unrendered_live_writes_survive_the_swap_at_the_build_width() {
+    let backend = Backend::current();
+    unrendered_live_writes_survive_the_swap(backend, EQ_ADDRESS);
+    unrendered_live_writes_survive_the_swap(backend, COMP_ADDRESS);
 }
 
 /// Every swap block of the gates below makes no allocator call and no render-audit allocation or
@@ -5795,20 +5572,11 @@ fn a_live_ramp_in_flight_finishes_after_the_swap(backend: Backend) {
     );
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn a_live_ramp_in_flight_finishes_after_the_swap_at_eight_lanes() {
-    a_live_ramp_in_flight_finishes_after_the_swap(Backend::Simd8);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn a_live_ramp_in_flight_finishes_after_the_swap_at_four_lanes() {
-    a_live_ramp_in_flight_finishes_after_the_swap(Backend::Simd4);
+fn a_live_ramp_in_flight_finishes_after_the_swap_at_the_build_width() {
+    a_live_ramp_in_flight_finishes_after_the_swap(Backend::current());
 }
 
 /// Gate 3: 40 values of one compressor parameter are written to A's cells after A's last block,
@@ -5885,20 +5653,11 @@ fn the_newest_value_wins_and_the_count_is_exact(backend: Backend) {
     );
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn the_newest_value_wins_and_the_count_is_exact_at_eight_lanes() {
-    the_newest_value_wins_and_the_count_is_exact(Backend::Simd8);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn the_newest_value_wins_and_the_count_is_exact_at_four_lanes() {
-    the_newest_value_wins_and_the_count_is_exact(Backend::Simd4);
+fn the_newest_value_wins_and_the_count_is_exact_at_the_build_width() {
+    the_newest_value_wins_and_the_count_is_exact(Backend::current());
 }
 
 /// The filtered fixture cut to its first `tracks` tracks, each with a true-peak limiter insert and
@@ -5973,20 +5732,12 @@ fn a_bypassed_lane_keeps_its_delayed_dry_signal(backend: Backend, tracks: usize)
     );
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`, on a full bank: a console effect bank binds only
+/// at the width its build executes (#1017).
 #[test]
-fn a_bypassed_lane_keeps_its_delayed_dry_signal_at_eight_lanes() {
-    a_bypassed_lane_keeps_its_delayed_dry_signal(Backend::Simd8, 8);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn a_bypassed_lane_keeps_its_delayed_dry_signal_at_four_lanes() {
-    a_bypassed_lane_keeps_its_delayed_dry_signal(Backend::Simd4, 4);
+fn a_bypassed_lane_keeps_its_delayed_dry_signal_at_the_build_width() {
+    let backend = Backend::current();
+    a_bypassed_lane_keeps_its_delayed_dry_signal(backend, backend.width());
 }
 
 /// #1341 gate 6: a swap at a block inside a bypass crossfade renders bit-identically to the same
@@ -6037,23 +5788,13 @@ fn a_bypass_crossfade_in_flight_continues_after_the_swap(backend: Backend, slot:
     );
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn a_bypass_crossfade_in_flight_continues_after_the_swap_at_eight_lanes() {
+fn a_bypass_crossfade_in_flight_continues_after_the_swap_at_the_build_width() {
+    let backend = Backend::current();
     for slot in ["comp", "limiter"] {
-        a_bypass_crossfade_in_flight_continues_after_the_swap(Backend::Simd8, slot);
-    }
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn a_bypass_crossfade_in_flight_continues_after_the_swap_at_four_lanes() {
-    for slot in ["comp", "limiter"] {
-        a_bypass_crossfade_in_flight_continues_after_the_swap(Backend::Simd4, slot);
+        a_bypass_crossfade_in_flight_continues_after_the_swap(backend, slot);
     }
 }
 
@@ -6254,20 +5995,11 @@ fn a_live_difference_on_a_carried_lane_is_retargeted(backend: Backend) {
     }
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn a_live_difference_on_a_carried_lane_is_retargeted_at_eight_lanes() {
-    a_live_difference_on_a_carried_lane_is_retargeted(Backend::Simd8);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn a_live_difference_on_a_carried_lane_is_retargeted_at_four_lanes() {
-    a_live_difference_on_a_carried_lane_is_retargeted(Backend::Simd4);
+fn a_live_difference_on_a_carried_lane_is_retargeted_at_the_build_width() {
+    a_live_difference_on_a_carried_lane_is_retargeted(Backend::current());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -6544,44 +6276,15 @@ fn pending_observe_swap(
     }
 }
 
-#[cfg(target_feature = "avx2")]
+/// The acknowledged Observe records in the retired queues -- one subscribe, and every queue full --
+/// at the build's own width, `Backend::current()`, on a full bank of insert lanes: a console effect
+/// bank binds only at the width its build executes (#1017).
 #[test]
-fn a_pending_subscribe_is_applied_at_the_carry_at_eight_lanes() {
-    pending_observe_records_are_applied_at_the_carry(
-        Backend::Simd8,
-        8,
-        PendingObserve::OneSubscribe,
-    );
-}
-
-#[cfg(target_feature = "avx2")]
-#[test]
-fn full_observe_queues_are_applied_at_the_carry_at_eight_lanes() {
-    pending_observe_records_are_applied_at_the_carry(Backend::Simd8, 8, PendingObserve::FullQueues);
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn a_pending_subscribe_is_applied_at_the_carry_at_four_lanes() {
-    pending_observe_records_are_applied_at_the_carry(
-        Backend::Simd4,
-        4,
-        PendingObserve::OneSubscribe,
-    );
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn full_observe_queues_are_applied_at_the_carry_at_four_lanes() {
-    pending_observe_records_are_applied_at_the_carry(Backend::Simd4, 4, PendingObserve::FullQueues);
+fn pending_observe_records_are_applied_at_the_carry_at_the_build_width() {
+    let backend = Backend::current();
+    for pending in [PendingObserve::OneSubscribe, PendingObserve::FullQueues] {
+        pending_observe_records_are_applied_at_the_carry(backend, backend.width(), pending);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -6734,43 +6437,23 @@ fn an_insert_group_changes_form(backend: Backend, insert: Insert, forward: bool)
     );
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn a_group_of_inserts_becomes_a_bank_at_eight_lanes() {
+fn a_group_of_inserts_becomes_a_bank_at_the_build_width() {
+    let backend = Backend::current();
     for insert in [Insert::Compressor, Insert::Limiter] {
-        an_insert_group_changes_form(Backend::Simd8, insert, true);
+        an_insert_group_changes_form(backend, insert, true);
     }
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn a_bank_of_inserts_falls_apart_at_eight_lanes() {
+fn a_bank_of_inserts_falls_apart_at_the_build_width() {
+    let backend = Backend::current();
     for insert in [Insert::Compressor, Insert::Limiter] {
-        an_insert_group_changes_form(Backend::Simd8, insert, false);
-    }
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn a_group_of_inserts_becomes_a_bank_at_four_lanes() {
-    for insert in [Insert::Compressor, Insert::Limiter] {
-        an_insert_group_changes_form(Backend::Simd4, insert, true);
-    }
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn a_bank_of_inserts_falls_apart_at_four_lanes() {
-    for insert in [Insert::Compressor, Insert::Limiter] {
-        an_insert_group_changes_form(Backend::Simd4, insert, false);
+        an_insert_group_changes_form(backend, insert, false);
     }
 }
 
@@ -6880,25 +6563,14 @@ fn a_live_difference_crosses_the_form_change(backend: Backend, forward: bool) {
     );
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
+/// its build executes (#1017).
 #[test]
-fn live_values_cross_the_form_change_at_eight_lanes() {
+fn live_values_cross_the_form_change_at_the_build_width() {
+    let backend = Backend::current();
     for forward in [true, false] {
-        an_unread_value_crosses_the_form_change(Backend::Simd8, forward);
-        a_live_difference_crosses_the_form_change(Backend::Simd8, forward);
-    }
-}
-
-#[test]
-#[cfg_attr(
-    not(any(target_feature = "neon", target_feature = "simd128")),
-    ignore = "a console effect bank binds only at the width its build executes, and four lanes \
-              is the NEON and simd128 width (#1017)"
-)]
-fn live_values_cross_the_form_change_at_four_lanes() {
-    for forward in [true, false] {
-        an_unread_value_crosses_the_form_change(Backend::Simd4, forward);
-        a_live_difference_crosses_the_form_change(Backend::Simd4, forward);
+        an_unread_value_crosses_the_form_change(backend, forward);
+        a_live_difference_crosses_the_form_change(backend, forward);
     }
 }
 
@@ -7786,26 +7458,18 @@ mod meter_carry {
         }
     }
 
-    #[cfg(target_feature = "avx2")]
     #[test]
-    fn meters_carry_through_the_predecessors_readers_at_eight_lanes() {
-        meters_carry(Backend::Simd8, Reader::Direct);
+    fn meters_carry_through_the_predecessors_readers_on_every_width() {
+        for backend in backends() {
+            meters_carry(backend, Reader::Direct);
+        }
     }
 
     #[test]
-    fn meters_carry_through_the_predecessors_readers_at_four_lanes() {
-        meters_carry(Backend::Simd4, Reader::Direct);
-    }
-
-    #[cfg(target_feature = "avx2")]
-    #[test]
-    fn paired_readers_follow_the_record_at_eight_lanes() {
-        meters_carry(Backend::Simd8, Reader::Paired);
-    }
-
-    #[test]
-    fn paired_readers_follow_the_record_at_four_lanes() {
-        meters_carry(Backend::Simd4, Reader::Paired);
+    fn paired_readers_follow_the_record_on_every_width() {
+        for backend in backends() {
+            meters_carry(backend, Reader::Paired);
+        }
     }
 
     /// Gate 2: a changed window length starts every meter fresh, and a changed key starts that
@@ -8343,33 +8007,18 @@ mod observation_carry {
 
     const SWAP_SAMPLE: u64 = (SWAP_BLOCK * QUANTUM) as u64;
 
-    #[cfg(target_feature = "avx2")]
+    /// At the build's own width, `Backend::current()`: a console effect bank binds only at the
+    /// width its build executes (#1017).
     #[test]
-    fn taps_follow_their_effect_through_every_form_at_eight_lanes() {
+    fn taps_follow_their_effect_through_every_form_at_the_build_width() {
+        let backend = Backend::current();
         for form in [
             Form::NodeToNode,
             Form::BankToBank,
             Form::NodeToBank,
             Form::BankToNode,
         ] {
-            taps_carry(Backend::Simd8, form);
-        }
-    }
-
-    #[test]
-    #[cfg_attr(
-        not(any(target_feature = "neon", target_feature = "simd128")),
-        ignore = "a console effect bank binds only at the width its build executes, and four \
-                  lanes is the NEON and simd128 width (#1017)"
-    )]
-    fn taps_follow_their_effect_through_every_form_at_four_lanes() {
-        for form in [
-            Form::NodeToNode,
-            Form::BankToBank,
-            Form::NodeToBank,
-            Form::BankToNode,
-        ] {
-            taps_carry(Backend::Simd4, form);
+            taps_carry(backend, form);
         }
     }
 
@@ -8414,20 +8063,11 @@ mod observation_carry {
         );
     }
 
-    #[cfg(target_feature = "avx2")]
+    /// At the build's own width, `Backend::current()`: a console effect bank binds only at the
+    /// width its build executes (#1017).
     #[test]
-    fn a_restarted_effect_starts_its_tap_fresh_at_eight_lanes() {
-        a_restarted_effect_starts_its_tap_fresh(Backend::Simd8);
-    }
-
-    #[test]
-    #[cfg_attr(
-        not(any(target_feature = "neon", target_feature = "simd128")),
-        ignore = "a console effect bank binds only at the width its build executes, and four \
-                  lanes is the NEON and simd128 width (#1017)"
-    )]
-    fn a_restarted_effect_starts_its_tap_fresh_at_four_lanes() {
-        a_restarted_effect_starts_its_tap_fresh(Backend::Simd4);
+    fn a_restarted_effect_starts_its_tap_fresh_at_the_build_width() {
+        a_restarted_effect_starts_its_tap_fresh(Backend::current());
     }
 
     /// A compressor insert whose link mode changed restarts, with a base that holds it and a
@@ -8532,23 +8172,13 @@ mod observation_carry {
         );
     }
 
-    #[cfg(target_feature = "avx2")]
+    /// At the build's own width, `Backend::current()`: a console effect bank binds only at the
+    /// width its build executes (#1017).
     #[test]
-    fn a_restarted_effects_subscription_survives_the_rebuild_at_eight_lanes() {
+    fn a_restarted_effects_subscription_survives_the_rebuild_at_the_build_width() {
+        let backend = Backend::current();
         for pending in [false, true] {
-            a_restarted_effects_subscription_survives_the_rebuild(Backend::Simd8, pending);
-        }
-    }
-
-    #[test]
-    #[cfg_attr(
-        not(any(target_feature = "neon", target_feature = "simd128")),
-        ignore = "a console effect bank binds only at the width its build executes, and four \
-                  lanes is the NEON and simd128 width (#1017)"
-    )]
-    fn a_restarted_effects_subscription_survives_the_rebuild_at_four_lanes() {
-        for pending in [false, true] {
-            a_restarted_effects_subscription_survives_the_rebuild(Backend::Simd4, pending);
+            a_restarted_effects_subscription_survives_the_rebuild(backend, pending);
         }
     }
 
@@ -8589,20 +8219,11 @@ mod observation_carry {
         );
     }
 
-    #[cfg(target_feature = "avx2")]
+    /// At the build's own width, `Backend::current()`: a console effect bank binds only at the
+    /// width its build executes (#1017).
     #[test]
-    fn a_pending_disarm_leaves_the_restarted_tap_unarmed_at_eight_lanes() {
-        a_pending_disarm_leaves_the_restarted_tap_unarmed(Backend::Simd8);
-    }
-
-    #[test]
-    #[cfg_attr(
-        not(any(target_feature = "neon", target_feature = "simd128")),
-        ignore = "a console effect bank binds only at the width its build executes, and four \
-                  lanes is the NEON and simd128 width (#1017)"
-    )]
-    fn a_pending_disarm_leaves_the_restarted_tap_unarmed_at_four_lanes() {
-        a_pending_disarm_leaves_the_restarted_tap_unarmed(Backend::Simd4);
+    fn a_pending_disarm_leaves_the_restarted_tap_unarmed_at_the_build_width() {
+        a_pending_disarm_leaves_the_restarted_tap_unarmed(Backend::current());
     }
 
     /// #1584 D6a gate 6: the table arms every carried tap too, and the prepared arm never wins
@@ -8650,23 +8271,13 @@ mod observation_carry {
         assert_eq!(armed.allocator, ((0, 0, 0), (0, 0)), "{what}");
     }
 
-    #[cfg(target_feature = "avx2")]
+    /// At the build's own width, `Backend::current()`: a console effect bank binds only at the
+    /// width its build executes (#1017).
     #[test]
-    fn a_carried_tap_is_not_restarted_by_the_prepared_arm_at_eight_lanes() {
+    fn a_carried_tap_is_not_restarted_by_the_prepared_arm_at_the_build_width() {
+        let backend = Backend::current();
         for form in [Form::NodeToNode, Form::BankToBank, Form::NodeToBank] {
-            a_carried_tap_is_not_restarted_by_the_prepared_arm(Backend::Simd8, form);
-        }
-    }
-
-    #[test]
-    #[cfg_attr(
-        not(any(target_feature = "neon", target_feature = "simd128")),
-        ignore = "a console effect bank binds only at the width its build executes, and four \
-                  lanes is the NEON and simd128 width (#1017)"
-    )]
-    fn a_carried_tap_is_not_restarted_by_the_prepared_arm_at_four_lanes() {
-        for form in [Form::NodeToNode, Form::BankToBank, Form::NodeToBank] {
-            a_carried_tap_is_not_restarted_by_the_prepared_arm(Backend::Simd4, form);
+            a_carried_tap_is_not_restarted_by_the_prepared_arm(backend, form);
         }
     }
 
@@ -9525,15 +9136,11 @@ fn undelayed_send_session() -> SessionModel {
     with_strip_delay(model, "eq2", [0, 0])
 }
 
-#[cfg(target_feature = "avx2")]
 #[test]
-fn strip_delays_and_a_send_ramp_cross_the_swap_at_eight_lanes() {
-    strip_delays_and_a_send_ramp_cross_the_swap(Backend::Simd8);
-}
-
-#[test]
-fn strip_delays_and_a_send_ramp_cross_the_swap_at_four_lanes() {
-    strip_delays_and_a_send_ramp_cross_the_swap(Backend::Simd4);
+fn strip_delays_and_a_send_ramp_cross_the_swap_on_every_width() {
+    for backend in backends() {
+        strip_delays_and_a_send_ramp_cross_the_swap(backend);
+    }
 }
 
 /// The left and the right plane of one rendered block.
@@ -9600,15 +9207,11 @@ fn a_changed_lane_delay_restarts_only_its_lane(backend: Backend) {
     }
 }
 
-#[cfg(target_feature = "avx2")]
 #[test]
-fn a_changed_lane_delay_restarts_only_its_lane_at_eight_lanes() {
-    a_changed_lane_delay_restarts_only_its_lane(Backend::Simd8);
-}
-
-#[test]
-fn a_changed_lane_delay_restarts_only_its_lane_at_four_lanes() {
-    a_changed_lane_delay_restarts_only_its_lane(Backend::Simd4);
+fn a_changed_lane_delay_restarts_only_its_lane_on_every_width() {
+    for backend in backends() {
+        a_changed_lane_delay_restarts_only_its_lane(backend);
+    }
 }
 
 /// Gate 2b: B re-points the send [`SEND`] from `bus1` to `bus2` (no submix has a delay and the
@@ -9656,15 +9259,11 @@ fn a_repointed_send_starts_at_its_prepared_value(backend: Backend) {
     );
 }
 
-#[cfg(target_feature = "avx2")]
 #[test]
-fn a_repointed_send_starts_at_its_prepared_value_at_eight_lanes() {
-    a_repointed_send_starts_at_its_prepared_value(Backend::Simd8);
-}
-
-#[test]
-fn a_repointed_send_starts_at_its_prepared_value_at_four_lanes() {
-    a_repointed_send_starts_at_its_prepared_value(Backend::Simd4);
+fn a_repointed_send_starts_at_its_prepared_value_on_every_width() {
+    for backend in backends() {
+        a_repointed_send_starts_at_its_prepared_value(backend);
+    }
 }
 
 /// Gate 2c: B changes `eq0`'s delay and re-points `eq3`'s send. The restart set is exactly the
@@ -9689,15 +9288,11 @@ fn only_the_delay_changed_strip_is_restarted(backend: Backend) {
     assert_eq!(run.restarted, vec![Box::<str>::from("eq0")], "{backend:?}");
 }
 
-#[cfg(target_feature = "avx2")]
 #[test]
-fn only_the_delay_changed_strip_is_restarted_at_eight_lanes() {
-    only_the_delay_changed_strip_is_restarted(Backend::Simd8);
-}
-
-#[test]
-fn only_the_delay_changed_strip_is_restarted_at_four_lanes() {
-    only_the_delay_changed_strip_is_restarted(Backend::Simd4);
+fn only_the_delay_changed_strip_is_restarted_on_every_width() {
+    for backend in backends() {
+        only_the_delay_changed_strip_is_restarted(backend);
+    }
 }
 
 /// Gate 5 (#1225 D8): B is A plus a muted track that sorts first, and changes the carried send's
@@ -9773,15 +9368,11 @@ fn a_carried_send_is_retargeted_to_the_successors_gain(backend: Backend) {
     );
 }
 
-#[cfg(target_feature = "avx2")]
 #[test]
-fn a_carried_send_is_retargeted_to_the_successors_gain_at_eight_lanes() {
-    a_carried_send_is_retargeted_to_the_successors_gain(Backend::Simd8);
-}
-
-#[test]
-fn a_carried_send_is_retargeted_to_the_successors_gain_at_four_lanes() {
-    a_carried_send_is_retargeted_to_the_successors_gain(Backend::Simd4);
+fn a_carried_send_is_retargeted_to_the_successors_gain_on_every_width() {
+    for backend in backends() {
+        a_carried_send_is_retargeted_to_the_successors_gain(backend);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

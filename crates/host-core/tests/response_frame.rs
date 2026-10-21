@@ -98,13 +98,17 @@ fn serve(query: &ResponseGetRequest) -> Vec<u8> {
     reply
 }
 
+/// The refusals a request can reach, with the status and code the core answers: those the entry
+/// itself makes for a session-less caller (an address target, a missing or unsupported rate or
+/// quantum, a reply over the caller's own bound), and those a client sends as given. The SDK's
+/// `response-evals.mjs` lists the client rows; `crates/capi/tests/response_get.rs` lists them for
+/// a C ABI session.
+///
+/// Red if the entry answers one of them, or refuses it with another status or code; or if a
+/// client-side check is put back in front of a client row and the core's answer drifts, or the
+/// core stops refusing one: nothing then stands between a client and the engine.
 #[test]
-fn a_request_with_a_rate_and_a_quantum_is_answered() {
-    assert_eq!(refusal(&serve(&request())), None);
-}
-
-#[test]
-fn a_request_the_entry_cannot_resolve_is_refused_with_its_code() {
+fn every_refusal_a_request_can_reach_has_its_status_and_code() {
     let mut strip = request();
     strip.target = ResponseTarget::Strip("track-1".to_owned());
     strip.sections = false;
@@ -116,6 +120,32 @@ fn a_request_the_entry_cannot_resolve_is_refused_with_its_code() {
     bad_rate.sample_rate_hz = Some(192_000);
     let mut small_reply = request();
     small_reply.maximum_reply_bytes = Some(100);
+    let mut zero_log = request();
+    zero_log.minimum_hz = 0.0;
+    let with_quality = |quality| {
+        let mut query = request();
+        query.target = ResponseTarget::Configuration(ResponseConfiguration::Effect {
+            effect: "miso.parametric-eq".to_owned(),
+            quality,
+            link_mode: session::LinkMode::DualMono,
+        });
+        query
+    };
+    let mut twice = request();
+    twice.overrides = vec![
+        ResponseOverride {
+            control: 4,
+            lane: ParameterChannel::Both,
+            value: 1.0,
+        },
+        ResponseOverride {
+            control: 4,
+            lane: ParameterChannel::Left,
+            value: 2.0,
+        },
+    ];
+    let mut one_point = request();
+    one_point.points = 1;
     for (name, query, status, code) in [
         (
             "a strip target",
@@ -147,53 +177,6 @@ fn a_request_the_entry_cannot_resolve_is_refused_with_its_code() {
             StatusCode::LimitExceeded,
             "response.reply_too_large",
         ),
-    ] {
-        let reply = serve(&query);
-        let (got_status, message, codes) = refusal(&reply).unwrap_or_else(|| panic!("{name}"));
-        assert_eq!(
-            (got_status, message),
-            (status, MessageId::ResponseGet),
-            "{name}"
-        );
-        assert_eq!(codes, [code], "{name}");
-    }
-}
-
-/// The refusals a client sends as given, with the status and code the core answers. The SDK's
-/// `response-evals.mjs` lists the same rows; `crates/capi/tests/response_get.rs` lists them for a
-/// C ABI session.
-///
-/// Red if a client-side check is put back in front of one of them and the core's answer drifts, or
-/// if the core stops refusing one: nothing then stands between a client and the engine.
-#[test]
-fn the_core_refuses_what_a_thin_client_sends_as_given() {
-    let mut zero_log = request();
-    zero_log.minimum_hz = 0.0;
-    let with_quality = |quality| {
-        let mut query = request();
-        query.target = ResponseTarget::Configuration(ResponseConfiguration::Effect {
-            effect: "miso.parametric-eq".to_owned(),
-            quality,
-            link_mode: session::LinkMode::DualMono,
-        });
-        query
-    };
-    let mut twice = request();
-    twice.overrides = vec![
-        ResponseOverride {
-            control: 4,
-            lane: ParameterChannel::Both,
-            value: 1.0,
-        },
-        ResponseOverride {
-            control: 4,
-            lane: ParameterChannel::Left,
-            value: 2.0,
-        },
-    ];
-    let mut one_point = request();
-    one_point.points = 1;
-    for (name, query, status, code) in [
         (
             "a logarithmic axis from zero",
             zero_log,

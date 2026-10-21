@@ -448,9 +448,9 @@ to H1 (H7); **m9** C6's design list per rate (H5); **NITs 1-9** folded.
   states a gain "(#1379 D1: a peak gain and an incremental gain after silence)", and its home is
   `tail_and_rest` (#1377). Its gates 1-3 are per-effect real-kernel runs and a recomputation of its
   rest helper; no gate or deliverable reads a composed graph extent. Its one graph-compiler edit,
-  `launch_true_peak_limiter_fixture_retains_banks_tails_latency_and_transactional_caps`
-  (`crates/graph-compiler/src/lib.rs:12354`, the assertion at `:12383`), checks the effect entry's
-  own `metadata.tail`, not `output_tail`. So #1375's dependency on #1379 narrows to #1464 and
+  the true-peak-limiter row of `tests::launch_effect_fixtures_bank_render_and_bypass_as_frozen`
+  (`crates/graph-compiler/src/lib.rs`, the row's `tail` field and the prepared-entry assertion),
+  checks the effect entry's own `metadata.tail`, not `output_tail`. So #1375's dependency on #1379 narrows to #1464 and
   #1465, its D4 is restated to H1 (as #1376's), and #1376 can follow A2. **Batch condition:** a
   plan-level tail that #1375 or #1376 makes finite is sound only once C composes it through gain
   (before C the extent ignores the compressor's makeup, as it ignores a fader today), so #1375 and

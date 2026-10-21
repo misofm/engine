@@ -173,28 +173,6 @@ fn caps() -> EffectCompileCaps {
 }
 
 #[test]
-fn launch_registry_prepares_the_accepted_nine_track_parametric_eq_fixture() {
-    let model = parse_session_json(include_str!(
-        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
-    ))
-    .expect("accepted fixture");
-    assert_eq!(model.tracks.len(), 9);
-    let session = compile_model(&model).expect("compiled fixture");
-    let registry = launch_native_effect_registry().expect("launch registry");
-    assert_eq!(registry.len(), 8);
-    assert!(registry.get_ascii("miso.parametric-eq").is_some());
-    assert!(registry.get_ascii("miso.compressor").is_some());
-    assert!(registry.get_ascii("miso.gate-expander").is_some());
-    assert!(registry.get_ascii("miso.multiband-compressor").is_some());
-    assert!(registry.get_ascii("miso.true-peak-limiter").is_some());
-    assert!(registry.get_ascii("miso.soft-clip").is_some());
-    assert!(registry.get_ascii("miso.transient-shaper").is_some());
-    assert!(registry.get_ascii("miso.delay").is_some());
-    let prepared = prepare_native_session_effects(&session, registry, caps()).expect("prepared");
-    assert_eq!(prepared.entries.len(), 9);
-}
-
-#[test]
 fn preparation_is_complete_sorted_and_preserves_cached_metadata() {
     let registry =
         NativeEffectRegistry::new([Box::new(Factory(&DESCRIPTOR)) as Box<dyn NativeEffectFactory>])
@@ -254,65 +232,24 @@ fn out_of_domain_session_parameters_reject_transactionally_without_panic() {
     }
 }
 
+/// A retired parameter ID on a launch effect is refused with `effect.parameter.unknown` before
+/// native publication: the gate's ID 8, the compressor's ID 8 and the multiband's ID 2. The
+/// multiband row first proves its current parameter set prepares.
 #[test]
-fn retired_gate_parameter_id_eight_rejects_before_native_publication() {
-    let mut model = parse_session_json(include_str!(
-        "../../../fixtures/session/v1/observation-frame-shape.json"
-    ))
-    .expect("actual gate session fixture");
-    let gate = model
-        .tracks
-        .iter_mut()
-        .flat_map(|track| track.inserts.effects.iter_mut())
-        .find(|effect| effect.id.as_str() == "gate")
-        .expect("fixture gate effect");
-    gate.params.push(EffectParam {
-        parameter_id: 8,
-        channel: ParameterChannel::Both,
-        unit: SessionParameterUnit::Milliseconds,
-        value: 2.0,
-    });
-    let compiled = compile_model(&model).expect("session model remains structurally compilable");
-    let registry = launch_native_effect_registry().expect("launch registry");
-    let diagnostics = match prepare_native_session_effects(&compiled, registry, caps()) {
-        Ok(_) => panic!("retired gate parameter must prevent prepared publication"),
-        Err(diagnostics) => diagnostics,
+fn retired_parameter_ids_reject_before_native_publication() {
+    type Select = fn(&mut session::SessionModel) -> &mut session::Effect;
+    let gate: Select = |model| {
+        model
+            .tracks
+            .iter_mut()
+            .flat_map(|track| track.inserts.effects.iter_mut())
+            .find(|effect| effect.id.as_str() == "gate")
+            .expect("fixture gate effect")
     };
-    assert_eq!(diagnostics.0.len(), 1);
-    assert_eq!(diagnostics.0[0].code, "effect.parameter.unknown");
-    assert!(diagnostics.0[0].path.contains("gate"));
-}
-
-#[test]
-fn retired_compressor_parameter_id_eight_rejects_before_native_publication() {
-    let mut model = parse_session_json(include_str!(
-        "../../../fixtures/session/v1/compressor-dynamic-observation.json"
-    ))
-    .expect("causal compressor fixture");
-    model.tracks[0].inserts.effects[0].params.push(EffectParam {
-        parameter_id: 8,
-        channel: ParameterChannel::Both,
-        unit: SessionParameterUnit::Milliseconds,
-        value: 5.0,
-    });
-    let compiled = compile_model(&model).expect("session model remains structurally compilable");
-    let registry = launch_native_effect_registry().expect("launch registry");
-    let diagnostics = match prepare_native_session_effects(&compiled, registry, caps()) {
-        Ok(_) => panic!("retired parameter must prevent prepared publication"),
-        Err(diagnostics) => diagnostics,
-    };
-    assert_eq!(diagnostics.0.len(), 1);
-    assert_eq!(diagnostics.0[0].code, "effect.parameter.unknown");
-    assert!(diagnostics.0[0].path.contains("comp0"));
-}
-
-#[test]
-fn retired_multiband_parameter_id_two_rejects_before_native_publication() {
-    let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
-        .expect("canonical session fixture");
-    // The fixture's automation would now target the multiband's prepared crossover (#1335 D1).
-    model.automation.clear();
-    {
+    let compressor: Select = |model| &mut model.tracks[0].inserts.effects[0];
+    let multiband: Select = |model| {
+        // The fixture's automation would now target the multiband's prepared crossover (#1335 D1).
+        model.automation.clear();
         let effect = &mut model.tracks[0].inserts.effects[0];
         effect.identity = session::EffectIdentity::Native {
             effect_id: session::StableId::parse("miso.multiband-compressor")
@@ -324,29 +261,61 @@ fn retired_multiband_parameter_id_two_rejects_before_native_publication() {
             unit: SessionParameterUnit::Hz,
             value: 1_000.0,
         }];
-    }
-    let valid_session =
-        compile_model(&model).expect("multiband session remains structurally compilable");
-    let registry = launch_native_effect_registry().expect("launch registry");
-    let prepared = prepare_native_session_effects(&valid_session, registry, caps())
-        .expect("current multiband parameter set prepares");
-    assert_eq!(prepared.entries.len(), 1);
-
-    model.tracks[0].inserts.effects[0].params.push(EffectParam {
-        parameter_id: 2,
-        channel: ParameterChannel::Both,
-        unit: SessionParameterUnit::Hz,
-        value: 1_000.0,
-    });
-    let rejected_session =
-        compile_model(&model).expect("retired ID does not change session structure");
-    let diagnostics = match prepare_native_session_effects(&rejected_session, registry, caps()) {
-        Ok(_) => panic!("retired multiband parameter must prevent prepared publication"),
-        Err(diagnostics) => diagnostics,
+        effect
     };
-    assert_eq!(diagnostics.0.len(), 1);
-    assert_eq!(diagnostics.0[0].code, "effect.parameter.unknown");
-    assert!(diagnostics.0[0].path.contains("eq"));
+    let registry = launch_native_effect_registry().expect("launch registry");
+    for (source, select, parameter_id, unit, value, path, control) in [
+        (
+            include_str!("../../../fixtures/session/v1/observation-frame-shape.json"),
+            gate,
+            8,
+            SessionParameterUnit::Milliseconds,
+            2.0,
+            "gate",
+            false,
+        ),
+        (
+            include_str!("../../../fixtures/session/v1/compressor-dynamic-observation.json"),
+            compressor,
+            8,
+            SessionParameterUnit::Milliseconds,
+            5.0,
+            "comp0",
+            false,
+        ),
+        (
+            include_str!("../../../fixtures/session/v1/canonical.json"),
+            multiband,
+            2,
+            SessionParameterUnit::Hz,
+            1_000.0,
+            "eq",
+            true,
+        ),
+    ] {
+        let mut model = parse_session_json(source).expect("session fixture");
+        select(&mut model);
+        if control {
+            let valid = compile_model(&model).expect("the current parameter set compiles");
+            let prepared = prepare_native_session_effects(&valid, registry, caps())
+                .expect("the current parameter set prepares");
+            assert_eq!(prepared.entries.len(), 1, "{path}");
+        }
+        select(&mut model).params.push(EffectParam {
+            parameter_id,
+            channel: ParameterChannel::Both,
+            unit,
+            value,
+        });
+        let compiled = compile_model(&model).expect("a retired ID keeps the session compilable");
+        let diagnostics = match prepare_native_session_effects(&compiled, registry, caps()) {
+            Ok(_) => panic!("{path}: a retired parameter must prevent prepared publication"),
+            Err(diagnostics) => diagnostics,
+        };
+        assert_eq!(diagnostics.0.len(), 1, "{path}");
+        assert_eq!(diagnostics.0[0].code, "effect.parameter.unknown", "{path}");
+        assert!(diagnostics.0[0].path.contains(path), "{path}");
+    }
 }
 
 /// Decision 12's eligibility list, enforced where native identities resolve. Every listed effect

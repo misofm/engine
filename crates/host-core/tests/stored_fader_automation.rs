@@ -794,40 +794,72 @@ fn first_difference(a: &[f32], b: &[f32]) -> Option<usize> {
         .position(|(a, b)| a.to_bits() != b.to_bits())
 }
 
-/// #1647 gate 1: a linear dB fade from `-40` to `0` dB over 48,000 samples on a DC source of
-/// `1.0`, `control_smoothing` explicit 0. At each completion sample `64k + 63` the output equals
-/// `checked_fader_gain(curve(64k + 63))` exactly, and every sample equals the stage driven
-/// directly with the grid's retargets (the ramp kernel's interpolation between them).
+/// #1647 gate 1 and D1.4 (MAJOR-3 of the U2 review): a linear dB fade from `-40` to `0` dB over
+/// 48,000 samples on a DC source of `1.0`, `control_smoothing` explicit 0, on a track in no VCA
+/// (`S = +0.0`) and on the member of a VCA at `-6` dB. At each completion sample `64k + 63` the
+/// output equals `checked_fader_gain(vca_compose_db(curve(64k + 63), S))` exactly, and every
+/// sample equals the stage driven directly with the composed grid retargets (the ramp kernel's
+/// interpolation between them).
 ///
 /// Test value: red if a completion is off by one, if the grid follows render samples instead of
-/// node time, if an event's gain is not composed and converted as the static fader's, or if the
-/// first grid event is lost to the seed.
+/// node time, if an event's gain is not composed and converted as the static fader's, if the
+/// first grid event is lost to the seed, or if render converts an event's value without `S` (the
+/// member's ride would ignore its VCA once the curve moves).
 #[test]
 fn a_fader_fade_reaches_the_curve_at_each_completion_sample() {
     const FRAMES: u64 = 48_000 + 1_024;
-    let mut model = plain(1, 128);
-    model.control_smoothing = smoothing(0.0);
-    let entry = fader_entry(&model, 0, ParameterChannel::Both, fade());
-    model.automation = vec![entry.clone()];
-    let mut rig = Rig::new(&model);
-    rig.until(FRAMES);
-    for k in 0..FRAMES / 64 {
-        let t = 64 * k + 63;
+    for vca in [None, Some(-6.0_f32)] {
+        let mut model = plain(1, 128);
+        model.control_smoothing = smoothing(0.0);
+        let entry = fader_entry(&model, 0, ParameterChannel::Both, fade());
+        model.automation = vec![entry.clone()];
+        if let Some(db) = vca {
+            model.vcas = vec![session::Vca {
+                id: id("vca-ride"),
+                fader: session::DualMonoFader {
+                    left_db: db,
+                    right_db: db,
+                    left_mute: false,
+                    right_mute: false,
+                },
+                members: vec![model.tracks[0].id.clone()],
+            }];
+        }
+        let offsets = vca.map_or(0.0, f64::from);
+        let mut rig = Rig::new(&model);
+        rig.until(FRAMES);
+        let mut held = curve(&entry, 0);
+        let operations: Vec<_> = (0..FRAMES)
+            .step_by(64)
+            .filter_map(|at| {
+                let value = curve(&entry, at as i64 + 63);
+                (value.to_bits() != held.to_bits()).then(|| {
+                    held = value;
+                    (
+                        at,
+                        builtins::FaderOperation::RetargetGain {
+                            gain: composed(value, offsets),
+                            samples: 64,
+                        },
+                    )
+                })
+            })
+            .collect();
+        let expected = reference_from(composed(curve(&entry, 0), offsets), &operations, FRAMES);
         for plane in &rig.out {
+            for t in (63..FRAMES).step_by(64) {
+                assert_eq!(
+                    plane[t as usize].to_bits(),
+                    composed(curve(&entry, t as i64), offsets).to_bits(),
+                    "VCA {vca:?}: completion sample {t}"
+                );
+            }
             assert_eq!(
-                plane[t as usize].to_bits(),
-                gain(curve(&entry, t as i64)).to_bits(),
-                "completion sample {t}"
+                first_difference(&plane[..FRAMES as usize], &expected),
+                None,
+                "VCA {vca:?}: every sample is the stage's, composed with S"
             );
         }
-    }
-    let expected = reference(-40.0, &grid_operations(&entry, FRAMES), FRAMES);
-    for plane in &rig.out {
-        assert_eq!(
-            first_difference(&plane[..FRAMES as usize], &expected),
-            None,
-            "every sample is the ramp kernel's"
-        );
     }
 }
 
@@ -2683,69 +2715,6 @@ fn composed(db: f32, offsets: f64) -> f32 {
     builtins::checked_fader_gain(session::vca_compose_db(db, offsets)).expect("fader domain")
 }
 
-/// #1647 D1.4 (MAJOR-3 of the U2 review): every event of a moving curve on a VCA member is
-/// composed with the lane's offset sum `S`. Gate 1's fade on a track a VCA at `-6` dB reaches:
-/// at each completion sample `64k + 63` the output equals
-/// `checked_fader_gain(vca_compose_db(curve, S))` exactly, and every sample equals the stage driven
-/// directly with the composed grid retargets.
-///
-/// Test value: red if render converts an event's value without `S` (the member's ride would
-/// ignore its VCA once the curve moves), or composes it otherwise than the static path.
-#[test]
-fn a_vca_offset_composes_with_every_fader_event() {
-    const FRAMES: u64 = 8_192;
-    const OFFSET: f32 = -6.0;
-    let mut model = plain(1, 128);
-    model.control_smoothing = smoothing(0.0);
-    let entry = fader_entry(&model, 0, ParameterChannel::Both, fade());
-    model.automation = vec![entry.clone()];
-    model.vcas = vec![session::Vca {
-        id: id("vca-ride"),
-        fader: session::DualMonoFader {
-            left_db: OFFSET,
-            right_db: OFFSET,
-            left_mute: false,
-            right_mute: false,
-        },
-        members: vec![model.tracks[0].id.clone()],
-    }];
-    let offsets = f64::from(OFFSET);
-    let mut rig = Rig::new(&model);
-    rig.until(FRAMES);
-    let mut held = curve(&entry, 0);
-    let operations: Vec<_> = (0..FRAMES)
-        .step_by(64)
-        .filter_map(|at| {
-            let value = curve(&entry, at as i64 + 63);
-            (value.to_bits() != held.to_bits()).then(|| {
-                held = value;
-                (
-                    at,
-                    builtins::FaderOperation::RetargetGain {
-                        gain: composed(value, offsets),
-                        samples: 64,
-                    },
-                )
-            })
-        })
-        .collect();
-    let expected = reference_from(composed(curve(&entry, 0), offsets), &operations, FRAMES);
-    for plane in &rig.out {
-        for t in (63..FRAMES).step_by(64) {
-            assert_eq!(
-                plane[t as usize].to_bits(),
-                composed(curve(&entry, t as i64), offsets).to_bits(),
-                "completion sample {t}"
-            );
-        }
-        assert_eq!(
-            first_difference(&plane[..FRAMES as usize], &expected),
-            None,
-            "every sample is the stage's, composed with S"
-        );
-    }
-}
-
 /// #1647 batch 13b constraint 4 and departure 3 (MINOR-11 of the U2 review).
 ///
 /// - A ramp that ends muted keeps the obligation: a live mute of 300 samples at 0 on a fade the
@@ -3415,22 +3384,25 @@ const MOVED_TARGET_MOVES: [MovedTargetMove; 2] = [
     ("a hand move", -6.0, None),
 ];
 
-/// #1711 G2 on host-core, at both bank widths. [`MOVE`] heard 12 and 30 blocks (2,464 and 160
-/// samples left; `J` = 960) on a ride flat at -3 dB, then a table-only rebuild to -5 dB up to
-/// 6,000: the move's target moves, so the cell jumps over `J` at the move's first free sample
-/// (4,512), not at the swap. Every sample is bit-equal to a fresh plan whose table has that jump
-/// as a real discontinuity at 4,512 and that is given the same move. Case (c): a second live move
-/// (`S` to -9 dB over 1,200 samples from block 35, before 4,512, ending after `4,512 + J`) clears
-/// the deferral: from its last sample on, every sample is bit-equal to a fresh plan with the new
-/// table given both moves, and the lane still moves on that move's last samples.
+/// #1711 G2 and R19-1 on host-core, at both bank widths. [`MOVE`] heard 1, 12 and 30 blocks
+/// (3,872, 2,464 and 160 samples left; `J` = 960) on a ride flat at -3 dB, then a table-only
+/// rebuild to -5 dB up to 6,000: the move's target moves, so the cell jumps over `J` at the move's
+/// first free sample (4,512), not at the swap; a move with at least `J` left runs to its end as the
+/// uninterrupted engine runs it (R19-1). Every sample is bit-equal to a fresh plan whose table has
+/// that jump as a real discontinuity at 4,512 and that is given the same move. Case (c), heard 12
+/// and 30: a second live move (`S` to -9 dB over 1,200 samples from block 35, before 4,512, ending
+/// after `4,512 + J`) clears the deferral: from its last sample on, every sample is bit-equal to a
+/// fresh plan with the new table given both moves, and the lane still moves on that move's last
+/// samples.
 ///
 /// Test value: red if the adoption lands a moved target at the swap instead of deferring its jump
-/// (the old landing; checked once), if the grid is not held until the deferral fires (the grid
-/// point 32 samples before the move's end restarts the ramp toward -5 dB; checked once), or, case
-/// (c), if the newer move does not clear the deferral (the deferred jump then cuts the move short
-/// at `4,512 + J`; checked once). The comparison point `at = end` is not observable here (on a
-/// flat table both points read -5 dB); G1 (`a_level_move_in_flight_across_a_table_only_rebuild_
-/// keeps_its_bits`) holds it.
+/// (the old landing; checked once), if it retargets the move at the swap (over its remaining
+/// frames, or over `J`) instead of deferring the jump to the ramp's end, if the grid is not held
+/// until the deferral fires (the grid point 32 samples before the move's end restarts the ramp
+/// toward -5 dB; checked once), or, case (c), if the newer move does not clear the deferral (the
+/// deferred jump then cuts the move short at `4,512 + J`; checked once). The comparison point
+/// `at = end` is not observable here (on a flat table both points read -5 dB); G1
+/// (`a_level_move_in_flight_across_a_table_only_rebuild_keeps_its_bits`) holds it.
 #[cfg(feature = "test-support")]
 #[test]
 fn a_moved_target_jumps_over_the_fader_length_at_the_moves_first_free_sample() {
@@ -3442,8 +3414,10 @@ fn a_moved_target_jumps_over_the_fader_length_at_the_moves_first_free_sample() {
         graph_compiler::Backend::Simd4,
     ] {
         for case in MOVED_TARGET_MOVES {
-            for heard in [12, 30] {
+            for heard in [1, 12, 30] {
                 moved_target_case(backend, case, heard, &[], 0);
+            }
+            for heard in [12, 30] {
                 let left = moved_target_case(backend, case, heard, &[SECOND], second_last);
                 let last = second_last as usize;
                 assert_ne!(
@@ -3452,30 +3426,6 @@ fn a_moved_target_jumps_over_the_fader_length_at_the_moves_first_free_sample() {
                     "{backend:?}, {}, heard {heard}: the second move keeps its own length",
                     case.0
                 );
-            }
-        }
-    }
-}
-
-/// #1711 R19-1 on host-core, at both bank widths. [`MOVE`] heard 1 and 12 blocks (3,872 and
-/// 2,464 samples left, both at least `J` = 960) on the flat ride, then the table-only rebuild that
-/// moves its target: the move's ramp runs to its end as the uninterrupted engine runs it, then
-/// the cell jumps over `J`. Every sample is bit-equal to the fresh plan with that jump at the
-/// move's first free sample.
-///
-/// Test value: red if the adoption retargets the move at the swap (over its remaining frames, or
-/// over `J`) instead of deferring the jump to the ramp's end.
-#[cfg(feature = "test-support")]
-#[test]
-fn a_moved_target_lets_a_live_move_longer_than_the_jump_end_when_it_was_due() {
-    for backend in [
-        #[cfg(target_feature = "avx2")]
-        graph_compiler::Backend::Simd8,
-        graph_compiler::Backend::Simd4,
-    ] {
-        for case in MOVED_TARGET_MOVES {
-            for heard in [1, 12] {
-                moved_target_case(backend, case, heard, &[], 0);
             }
         }
     }

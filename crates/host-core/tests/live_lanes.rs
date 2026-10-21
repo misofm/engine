@@ -1,6 +1,7 @@
-//! Issue #1254 gate 1(a)-(c): `prepare_host_runtime_with_live_lanes` with
+//! Issue #1254 gate 1(a)-(b): `prepare_host_runtime_with_live_lanes` with
 //! `HostLiveLanes::FADER_AND_MATRIX` attaches every strip's fader/mute and matrix/pan lanes and
-//! nothing else.
+//! nothing else. Gate 1(c), an observation tap without effect lanes, is
+//! `effect_observation.rs`'s `observation_without_effect_lanes_is_refused`.
 //!
 //! Two sessions. The nine-track EQ fixture carries an EQ console slot (whose tail is infinite) and
 //! enabled input filters, so its tail is infinite whatever lanes are attached; it shows the effect
@@ -312,41 +313,4 @@ fn fader_and_matrix_lanes_render_as_the_session_with_their_values_baked() {
         );
         assert_eq!(render(&mut live, &planes), expected);
     }
-}
-
-/// Gate 1(c). Red if an observation tap is attached without the effect queue it rides.
-#[test]
-fn observation_without_effect_lanes_is_refused() {
-    let compiled = compile(&eq_fixture());
-    let request = HostLiveControlRequest {
-        observation_taps: 1,
-        ..request()
-    };
-    let lanes = HostLiveLanes {
-        effects: false,
-        ..HostLiveLanes::ALL
-    };
-    let failure = prepare_host_runtime_with_live_lanes(
-        &compiled,
-        &caps(),
-        &request,
-        lanes,
-        &LiveValuesSuperseded::default(),
-    )
-    .err()
-    .expect("observation without effect lanes is refused");
-    assert!(
-        String::from_utf8_lossy(failure.as_bytes()).contains("host.observation.live_controls"),
-        "{}",
-        String::from_utf8_lossy(failure.as_bytes())
-    );
-    // The same request with effect lanes prepares, so the refusal is the selection's.
-    prepare_host_runtime_with_live_lanes(
-        &compiled,
-        &caps(),
-        &request,
-        HostLiveLanes::ALL,
-        &LiveValuesSuperseded::default(),
-    )
-    .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
 }

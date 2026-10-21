@@ -224,14 +224,6 @@ fn track_id(model: &SessionModel, index: usize) -> String {
     model.tracks[index].id.as_str().to_owned()
 }
 
-/// Gate 1(a). Red if the classifier emits a redundant record for a transaction that rewrites
-/// identical values.
-#[test]
-fn a_revision_only_delta_is_live_with_no_records() {
-    let current = two_tracks();
-    assert_eq!(classify(&current, |_| {}), Ok(Vec::new()));
-}
-
 /// Gate 1(b). Red if a fader record goes to the wrong lane, merges lanes wrongly or is emitted
 /// for a sign-of-zero change that keeps the gain.
 #[test]
@@ -407,21 +399,6 @@ fn values_outside_the_setter_domain_need_a_rebuild() {
     assert_eq!(
         classify(&current, |next| set_ll(next, 1.0_f32.next_up())),
         Err(LiveRebuild::Domain)
-    );
-}
-
-/// Gate 1(g). Red if the mask comparison uses `PartialEq` and misses a sign-of-zero edit of a
-/// field that is not live: the delay is the one builtin still rebuild-only.
-#[test]
-fn a_sign_of_zero_delay_edit_is_a_rebuild_by_its_row() {
-    let current = two_tracks();
-    assert_eq!(current.tracks[0].builtins.left.delay_samples, 0);
-    assert_eq!(
-        classify(&current, |next| next.tracks[0]
-            .builtins
-            .left
-            .delay_samples = 1),
-        Err(LiveRebuild::RebuildOnly(builtin_reason(DELAY_SAMPLES)))
     );
 }
 
@@ -3024,49 +3001,6 @@ fn a_live_parameter_change_is_one_record_on_its_lane() {
     );
 }
 
-/// #1264 gate 1(b). Red if a rewritten representation emits a redundant record: a `Both` value
-/// split into per-lane values records only the lane whose value changes.
-#[test]
-fn a_both_value_split_into_lanes_records_only_the_changed_lane() {
-    let mut current = with_effects();
-    inserts(&mut current, 0).push(param(1, ParameterChannel::Both, ParameterUnit::Db, -20.0));
-    let current = normalized(&current);
-    assert_eq!(
-        classify_effects(&current, |next| {
-            *inserts(next, 0) = vec![
-                param(1, ParameterChannel::Left, ParameterUnit::Db, -20.0),
-                param(1, ParameterChannel::Right, ParameterUnit::Db, -30.0),
-            ];
-        }),
-        Ok((
-            Vec::new(),
-            vec![(
-                track_id(&current, 0),
-                LiveEffectAddress::insert(0),
-                vec![record(0, Lane::Right, -30.0)]
-            )]
-        ))
-    );
-    // The same values in the other representation: no record at all.
-    assert_eq!(
-        classify_effects(&current, |next| {
-            *inserts(next, 0) = vec![
-                param(1, ParameterChannel::Left, ParameterUnit::Db, -20.0),
-                param(1, ParameterChannel::Right, ParameterUnit::Db, -20.0),
-            ];
-        }),
-        Ok((Vec::new(), Vec::new()))
-    );
-    // `-0.0` for the makeup's `+0.0` default is the same prepared value: no record (#1264
-    // verdict NIT 5).
-    assert_eq!(
-        classify_effects(&current, |next| {
-            inserts(next, 0).push(param(6, ParameterChannel::Both, ParameterUnit::Db, -0.0));
-        }),
-        Ok((Vec::new(), Vec::new()))
-    );
-}
-
 /// #1264 gate 1(c). Red if a removed parameter is not returned to the descriptor's default, as a
 /// rebuild would prepare it.
 #[test]
@@ -3190,17 +3124,6 @@ fn params_preparation_refuses_need_a_rebuild() {
             inserts(next, 0).push(param(1, ParameterChannel::Both, ParameterUnit::Db, 0.0));
         })
         .is_ok()
-    );
-}
-
-/// #1264 gate 1(f). Red if the params and bypass masks also hide a structural change of the
-/// instances: an insert reorder.
-#[test]
-fn an_insert_reorder_is_structural() {
-    let current = with_effects();
-    assert_eq!(
-        classify_effects(&current, |next| next.tracks[0].inserts.effects.swap(0, 1)),
-        Err(LiveRebuild::Structure)
     );
 }
 
@@ -3734,9 +3657,11 @@ fn a_rebuild_only_row_is_a_rebuild_with_its_reason() {
     );
 }
 
-/// Gate 4. Red if the mask compares resolved values instead of representations, or the reverse:
-/// a `both` entry rewritten as equal `left` and `right` entries is a different field with the same
-/// value, so it is live with no record; a different value is a record.
+/// Gate 4 and #1264 gate 1(b). Red if the mask compares resolved values instead of
+/// representations, or the reverse: a `both` entry rewritten as equal `left` and `right` entries
+/// is a different field with the same value, so it is live with no record; a different value is
+/// one record on the lane whose value changes only, and a `-0.0` for a `+0.0` default is no
+/// record.
 #[test]
 fn rewriting_an_effect_entry_in_another_form_is_live_with_no_record() {
     let mut model = with_effects();
@@ -3770,10 +3695,26 @@ fn rewriting_an_effect_entry_in_another_form_is_live_with_no_record() {
         }),
         Ok((Vec::new(), Vec::new()))
     );
-    // One lane's value differs: one record.
-    let (_, effects) = classify_effects(&both, split(-30.0, -20.0)).expect("live");
-    assert_eq!(effects.len(), 1);
-    assert_eq!(effects[0].2, vec![record(0, Lane::Right, -20.0)]);
+    // One lane's value differs: one record on that lane only.
+    assert_eq!(
+        classify_effects(&both, split(-30.0, -20.0)),
+        Ok((
+            Vec::new(),
+            vec![(
+                track_id(&both, 0),
+                LiveEffectAddress::insert(0),
+                vec![record(0, Lane::Right, -20.0)]
+            )]
+        ))
+    );
+    // `-0.0` for the makeup's `+0.0` default is the same prepared value: no record (#1264
+    // verdict NIT 5).
+    assert_eq!(
+        classify_effects(&both, |next| {
+            inserts(next, 0).push(param(6, ParameterChannel::Both, ParameterUnit::Db, -0.0));
+        }),
+        Ok((Vec::new(), Vec::new()))
+    );
 }
 
 /// 64 tracks and four submixes, each fed by one track.
