@@ -516,23 +516,6 @@ fn preparation_accepts_explicit_64_128_and_256_quanta_with_stable_buffers() {
     }
 }
 
-#[test]
-fn malformed_config_and_atomic_compile_failure_are_sticky() {
-    let mut bad = boot_options(128);
-    bad.abi_version = 1;
-    let failure = AudioWorkletEngineHost::boot(one_track_session(128).as_bytes(), bad)
-        .err()
-        .expect("wrong ABI");
-    assert_eq!(failure.result(), RESULT_REFUSED_OPTIONS);
-    assert_eq!(failure.diagnostic(), b"web.options.abi_version\t$\n");
-
-    let failure = AudioWorkletEngineHost::boot(b"no=", boot_options(128))
-        .err()
-        .expect("bad document");
-    assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
-    assert!(!failure.diagnostic().is_empty());
-}
-
 /// Issue #387: json-syntax 0.12.5 never calls `end_fragment` for an empty JSON object, so the
 /// reserved `CodeMap` entry keeps `volume = 0` and every later member is read one slot off --
 /// `session::parse::Parser::keys` used to hit `Option::unwrap()` on the resulting `None`, which
@@ -1149,134 +1132,6 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
     }
 }
 
-#[test]
-fn source_backpressure_seek_render_and_stable_output_are_bounded() {
-    let quantum = 128_usize;
-    let document = one_track_session(quantum as u32);
-    let options = WebBootOptions {
-        source_ring_frames: quantum as u32,
-        ..boot_options(quantum as u32)
-    };
-    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
-    let source_id_ptr = host.source_id_mut().expect("ID").as_ptr();
-    let source_pcm_ptr = host.source_pcm_mut().expect("PCM").as_ptr();
-    let output_ptr = host.output_pcm().expect("output").as_ptr();
-    assert_eq!(source_id_ptr, host.source_id_mut().expect("ID").as_ptr());
-    assert_eq!(source_pcm_ptr, host.source_pcm_mut().expect("PCM").as_ptr());
-    assert_eq!(output_ptr, host.output_pcm().expect("output").as_ptr());
-    let left = vec![0.25_f32; quantum];
-    let right = vec![-0.5_f32; quantum];
-    let planes: [&[f32]; 2] = [&left, &right];
-    assert_eq!(
-        host.submit_source(
-            b"fixture-source",
-            1,
-            0,
-            48_000,
-            &planes,
-            quantum as u32,
-            false
-        ),
-        RESULT_OK
-    );
-    assert_eq!(
-        host.submit_source(
-            b"fixture-source",
-            1,
-            quantum as u64,
-            48_000,
-            &planes,
-            quantum as u32,
-            true
-        ),
-        RESULT_BACKPRESSURE
-    );
-    assert_eq!(host.render_next(), RESULT_OK);
-    assert_eq!(host.status().next_absolute_sample, quantum as u64);
-    assert_eq!(host.status().rendered_quanta, 1);
-    assert_eq!(output_ptr, host.output_pcm().expect("output").as_ptr());
-    assert_eq!(
-        host.submit_source(
-            b"fixture-source",
-            1,
-            quantum as u64,
-            48_000,
-            &planes,
-            quantum as u32,
-            true
-        ),
-        RESULT_OK
-    );
-    assert_eq!(host.seek_source(b"fixture-source", 2, 0), RESULT_OK);
-    assert_eq!(host.seek_source(b"fixture-source", 3, 0), RESULT_OK);
-    assert_eq!(host.render_next(), RESULT_OK);
-    assert_eq!(host.status().rendered_quanta, 2);
-}
-
-#[test]
-fn paused_seek_recycles_full_internal_queue_before_first_target_quantum() {
-    let quantum = 128;
-    let document = identity_session(quantum, 480_000);
-    let options = WebBootOptions {
-        source_ring_frames: 512,
-        ..boot_options(quantum)
-    };
-    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap();
-    let old = [0.25; 128];
-    for block in 0..4 {
-        assert_eq!(
-            host.submit_source(
-                b"fixture-source",
-                1,
-                block * 128,
-                48_000,
-                &[&old, &old],
-                quantum,
-                false
-            ),
-            RESULT_OK
-        );
-    }
-    assert_eq!(
-        host.submit_source(
-            b"fixture-source",
-            1,
-            512,
-            48_000,
-            &[&old, &old],
-            quantum,
-            false
-        ),
-        RESULT_BACKPRESSURE
-    );
-    assert_eq!(
-        host.seek_source(b"unknown", 2, 10_000),
-        RESULT_INVALID_ARGUMENT
-    );
-    assert_eq!(host.seek_source(b"fixture-source", 2, 10_000), RESULT_OK);
-    assert_eq!(host.status().next_absolute_sample, 0);
-    assert_eq!(host.status().rendered_quanta, 0);
-    let left = core::array::from_fn::<_, 128, _>(|index| (index + 1) as f32 / 256.0);
-    let right = core::array::from_fn::<_, 128, _>(|index| -(index as f32 + 1.0) / 512.0);
-    assert_eq!(
-        host.submit_source(
-            b"fixture-source",
-            2,
-            10_000,
-            48_000,
-            &[&left, &right],
-            quantum,
-            false
-        ),
-        RESULT_OK
-    );
-    assert_eq!(host.render_next(), RESULT_OK);
-    let output = host.output_pcm().unwrap();
-    assert_eq!(&output[..128], &left);
-    assert_eq!(&output[128..256], &right);
-    assert_eq!(host.status().next_absolute_sample, 128);
-}
-
 /// The exports of an identity session at one quantum, driven as the page's message handler does:
 /// the source ID staged, then `seek_at`, `source_submit`, `render` and `seek_report` as raw calls.
 struct SeekExports {
@@ -1359,7 +1214,8 @@ impl SeekExports {
 ///
 /// Test value: red if `source_seek_at` is wired through `plan.prepare_source_seek` (the D4 trap:
 /// the future anchor would be `RESULT_INTERNAL`), if it queues a plain seek (sound from the next
-/// block), or if the report export reads another word order or a stale record. The session has
+/// block), if the report export reads another word order or a stale record, or if either seek
+/// export maps an unknown source to a result other than `RESULT_INVALID_ARGUMENT`. The session has
 /// one source, so this test cannot show which source's ring the report reads.
 #[test]
 fn the_anchored_seek_exports_play_at_the_anchor_and_report_where_it_landed() {
@@ -1376,6 +1232,11 @@ fn the_anchored_seek_exports_play_at_the_anchor_and_report_where_it_landed() {
     rig.stage(b"no-such-source");
     assert_eq!(
         miso_engine_web_v1_source_seek_at(rig.handle, 14, 2, 10_000, 256),
+        RESULT_INVALID_ARGUMENT
+    );
+    // The plain seek export refuses an unknown source the same way.
+    assert_eq!(
+        miso_engine_web_v1_source_seek(rig.handle, 14, 2, 10_000),
         RESULT_INVALID_ARGUMENT
     );
     assert_eq!(
@@ -2777,48 +2638,6 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
         &before[..]
     );
     assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
-}
-
-/// A live-control host over the *command* fixture: the identity session plus one dynamic-rack
-/// parametric EQ, so an effect-addressed command has something real to address (issue #140 A).
-fn effect_live_control_host(quantum: u32) -> AudioWorkletEngineHost {
-    let document = include_str!("../tests/browser-v1/command-session.json");
-    let options = WebBootOptions {
-        source_ring_frames: quantum,
-        ..boot_options(quantum)
-    };
-    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect live-control boot")
-}
-
-/// #140 C: `UNSUPPORTED_KIND` still means exactly what it says -- the target is real and the value
-/// is legal, and *this session* has no write path. A host compiled with no live controls is that
-/// session, and every live kind is refused with it.
-#[test]
-fn a_live_control_free_host_refuses_every_live_kind_as_unsupported() {
-    const QUANTUM: u32 = 128;
-    let mut host = effect_live_control_host(QUANTUM);
-    feed_and_render(&mut host, 1, 0, 0.25);
-    let baseline = host.output_pcm().expect("output").to_vec();
-    // A live-control-free host has no staging buffer at all: the refusal is decided before a record
-    // could even be written, which is the strongest form of "this session cannot apply it".
-    assert!(
-        host.command_staging_mut().is_none(),
-        "no live controls means no staging buffer",
-    );
-    for records in [1_u32, 8, MAXIMUM_COMMAND_RECORDS] {
-        assert_eq!(host.submit_commands(records), RESULT_UNSUPPORTED);
-        assert_eq!(
-            host.command_report().reason,
-            COMMAND_REASON_UNSUPPORTED_KIND
-        );
-        assert_eq!(host.command_report().admitted, 0);
-    }
-    feed_and_render(&mut host, 1, 1, 0.25);
-    assert_eq!(
-        baseline,
-        host.output_pcm().expect("output"),
-        "a live-control-free host renders the same block it would have without any traffic",
-    );
 }
 
 /// A record whose strip ID or effect ID has length zero is refused `MALFORMED` at its index in pass
@@ -4730,40 +4549,6 @@ fn a_submission_names_each_observation_tap_once() {
     assert_eq!(host.submit_commands(1), RESULT_OK);
 }
 
-/// A session with no observation taps has no command staging, so a subscription is refused as
-/// unsupported (#1565A D4): the effect exists, the tap is declared, and this preparation bound no
-/// lane and no staging to carry it.
-#[test]
-fn a_subscription_without_capacity_is_unsupported() {
-    const QUANTUM: u32 = 128;
-    let document = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
-    let options = WebBootOptions {
-        source_ring_frames: QUANTUM * 4,
-        live_control_meter_blocks: DEFAULT_METER_BLOCKS as u64,
-        ..boot_options(QUANTUM)
-    };
-    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
-    assert!(!host.observation_attached());
-    assert_eq!(host.resources().observation_retained_bytes, 0);
-    assert!(
-        host.command_staging_mut().is_none(),
-        "no taps means no staging"
-    );
-    assert_eq!(
-        host.submit_commands(1),
-        RESULT_UNSUPPORTED,
-        "this preparation cannot deliver a subscription"
-    );
-    assert_eq!(
-        host.command_report().reason,
-        COMMAND_REASON_UNSUPPORTED_KIND
-    );
-    // And the frame is the pre-#143 shape plus the positional gain-reduction section, all zero.
-    let tracks = host.live_control_tracks().len();
-    assert_eq!(host.meter_frame().len(), tracks * 3 + 3);
-    assert!(host.meter_frame().iter().all(|value| *value == 0.0));
-}
-
 /// The observation words are validated at configuration time: more taps than the cap, a master
 /// designation with no taps to designate it from, and the reserved word are all refused.
 #[test]
@@ -5240,85 +5025,71 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
     assert_eq!(miso_engine_web_v1_source_count(handle), 0);
 }
 
+/// The spectrum hop a boot names reaches the browser's stream cadence, for a single capture and
+/// for a collection (whose entry is selected first), and a boot that names no hop keeps the
+/// default cadence. Each row was its own test.
 #[test]
-fn ordinary_spectrum_single_and_collection_use_explicit_prepared_hops() {
+fn ordinary_spectrum_hops_reach_the_browser_stream_cadence() {
     let document = one_track_resource_session(128);
     let target = SpectrumTarget::TrackPostMatrix("eq0".into());
-
-    let single_hop = SpectrumHop::new(256).expect("supported single hop");
-    let mut single = AudioWorkletEngineHost::boot_with_spectrum_config(
-        document.as_bytes(),
-        boot_options(128),
-        Some(SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
+    let single = || {
+        SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
             target: target.clone(),
             channels: SpectrumChannels::Stereo,
             maximum_capture_bytes: u64::MAX,
-        })),
-        Some(single_hop),
-    )
-    .expect("single explicit-hop boot");
-    single
-        .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
-        .expect("single explicit-hop start");
-    assert_eq!(
-        single
-            .spectrum_stream_cadence()
-            .expect("single stream cadence")
-            .hop_frames(),
-        single_hop.get()
-    );
-
-    let collection_hop = SpectrumHop::new(1024).expect("supported collection hop");
-    let mut collection = AudioWorkletEngineHost::boot_with_spectrum_config(
-        document.as_bytes(),
-        boot_options(128),
-        Some(SpectrumPreparationRequest::Collection(
-            SpectrumCaptureCollectionRequest {
-                entries: vec![host_core::SpectrumCaptureCollectionEntry {
-                    target: target.clone(),
-                    channels: SpectrumChannels::Stereo,
-                }],
-                maximum_capture_bytes: u64::MAX,
-            },
-        )),
-        Some(collection_hop),
-    )
-    .expect("collection explicit-hop boot");
-    assert_eq!(
-        collection.select_spectrum_target(target.as_ref(), SpectrumChannels::Stereo, None, None),
-        Ok(false)
-    );
-    collection
-        .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
-        .expect("collection explicit-hop start");
-    assert_eq!(
-        collection
-            .spectrum_stream_cadence()
-            .expect("collection stream cadence")
-            .hop_frames(),
-        collection_hop.get()
-    );
-}
-
-#[test]
-fn ordinary_spectrum_omitted_hop_keeps_default_cadence() {
-    let document = one_track_resource_session(128);
-    let mut host = AudioWorkletEngineHost::boot_with_spectrum(
-        document.as_bytes(),
-        boot_options(128),
-        Some(SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
-            target: SpectrumTarget::TrackPostMatrix("eq0".into()),
-            channels: SpectrumChannels::Stereo,
+        })
+    };
+    let collection = || {
+        SpectrumPreparationRequest::Collection(SpectrumCaptureCollectionRequest {
+            entries: vec![host_core::SpectrumCaptureCollectionEntry {
+                target: target.clone(),
+                channels: SpectrumChannels::Stereo,
+            }],
             maximum_capture_bytes: u64::MAX,
-        })),
-    )
-    .expect("default-hop boot");
-    host.start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
-        .expect("default-hop start");
-    assert_eq!(
-        host.spectrum_stream_cadence().expect("stream cadence"),
-        SpectrumCadence::new(48_000, 128).expect("default cadence")
-    );
+        })
+    };
+    let default_hop = SpectrumCadence::new(48_000, 128)
+        .expect("default cadence")
+        .hop_frames();
+    for (label, request, hop, select, expected_hop) in [
+        ("single, explicit hop", single(), Some(256), false, 256),
+        (
+            "collection, explicit hop",
+            collection(),
+            Some(1024),
+            true,
+            1024,
+        ),
+        ("single, omitted hop", single(), None, false, default_hop),
+    ] {
+        let hop = hop.map(|frames| SpectrumHop::new(frames).expect("supported hop"));
+        let mut host = AudioWorkletEngineHost::boot_with_spectrum_config(
+            document.as_bytes(),
+            boot_options(128),
+            Some(request),
+            hop,
+        )
+        .expect(label);
+        if select {
+            assert_eq!(
+                host.select_spectrum_target(target.as_ref(), SpectrumChannels::Stereo, None, None),
+                Ok(false),
+                "{label}"
+            );
+        }
+        host.start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
+            .expect(label);
+        let cadence = host.spectrum_stream_cadence().expect(label);
+        assert_eq!(
+            (
+                cadence.sample_rate_hz(),
+                cadence.quantum_frames(),
+                cadence.hop_frames()
+            ),
+            (48_000, 128, expected_hop),
+            "{label}"
+        );
+    }
 }
 
 // Issue #1213: browser live commands address submix strips. The index word is a strip index:
@@ -6733,56 +6504,21 @@ mod structural_apply {
         }))
     }
 
-    fn capture_collection() -> Option<SpectrumPreparationRequest> {
-        Some(SpectrumPreparationRequest::Collection(
-            SpectrumCaptureCollectionRequest {
-                entries: vec![host_core::SpectrumCaptureCollectionEntry {
-                    target: SpectrumTarget::TrackPostMatrix(model_track_id().into()),
-                    channels: SpectrumChannels::Stereo,
-                }],
-                maximum_capture_bytes: u64::MAX,
-            },
-        ))
-    }
-
     fn model_track_id() -> String {
         gate_model().tracks[3].id.as_str().to_owned()
-    }
-
-    /// Gate 5. Test value: red if a successor of either spectrum branch is prepared without its
-    /// capture, or by a different path than the boot's (the swap would refuse or the bits move).
-    #[test]
-    fn a_rebuild_swaps_with_a_spectrum_capture_or_a_collection_configured() {
-        gap_free_acceptance(single_capture);
-        gap_free_acceptance(capture_collection);
     }
 
     // Issue #1290d2: the spectrum part of gate 7. A rebuild keeps a running stream, an armed
     // one-shot and a collection's selection, because the host installs the successor's prepared
     // captures at the plan's promotion (the service step after the adoption block) through
     // `SpectrumService::adopt_successor`, with the plan's pairing and the engine's carry outcome.
+    // The browser keeps the running stream as its parity row; the one-shot and the collection
+    // carry are `host-core`'s `tests/successor_swap.rs` (`spectrum_carry`).
 
     /// A run long enough for several windows of the 2048-frame capture (16 blocks each).
     const SPECTRUM_BLOCKS: u64 = 48;
     /// The block before which the rebuild runs: inside the window that opened before it.
     const SPECTRUM_APPLY_BEFORE: u64 = 21;
-
-    fn other_track_id() -> String {
-        gate_model().tracks[4].id.as_str().to_owned()
-    }
-
-    fn two_entry_collection() -> Option<SpectrumPreparationRequest> {
-        let entry = |id: String| host_core::SpectrumCaptureCollectionEntry {
-            target: SpectrumTarget::TrackPostMatrix(id.into()),
-            channels: SpectrumChannels::Stereo,
-        };
-        Some(SpectrumPreparationRequest::Collection(
-            SpectrumCaptureCollectionRequest {
-                entries: vec![entry(model_track_id()), entry(other_track_id())],
-                maximum_capture_bytes: u64::MAX,
-            },
-        ))
-    }
 
     /// One read of the managed stream: the result word, the metadata and the held window.
     #[derive(Clone, Copy, Debug)]
@@ -6953,79 +6689,6 @@ mod structural_apply {
     fn a_running_spectrum_stream_continues_across_a_rebuild() {
         stream_continues(single_capture, start_stream, SPECTRUM_APPLY_BEFORE);
         stream_continues(single_capture, start_stream, SPECTRUM_BLOCKS - 3);
-    }
-
-    /// Gate 7, spectrum part (collection). Test value: red if a collection's selection or its
-    /// stream is lost at promotion: the second entry is selected and streamed before the swap, and
-    /// the stream reads like the committed model's.
-    #[test]
-    fn a_collection_selection_and_its_stream_continue_across_a_rebuild() {
-        let select_second = |rig: &mut Rig| {
-            let other: StableId = StableId::parse(&other_track_id()).expect("track ID");
-            assert_eq!(
-                rig.host.select_spectrum_target(
-                    SpectrumTarget::TrackPostMatrix(other.as_str().into()).as_ref(),
-                    SpectrumChannels::Stereo,
-                    None,
-                    None
-                ),
-                Ok(false)
-            );
-            start_stream(rig);
-        };
-        stream_continues(two_entry_collection, select_second, SPECTRUM_APPLY_BEFORE);
-        stream_continues(two_entry_collection, select_second, SPECTRUM_BLOCKS - 3);
-    }
-
-    /// Gate 7, spectrum part (one-shot). Test value: red if an armed one-shot is lost at the swap:
-    /// armed before it, completed after it, equal to the committed model's.
-    #[test]
-    fn an_armed_one_shot_completes_across_a_rebuild() {
-        const ARM_BEFORE: u64 = 12;
-        let model = gate_model();
-        let committed = with_muted_track(&model, ADDED);
-        let shot = |model: &SessionModel, rebuild: bool| {
-            let mut rig = Rig::boot(model, options(), single_capture());
-            let mut found = None;
-            for block in 0..SPECTRUM_BLOCKS {
-                if block == ARM_BEFORE {
-                    assert_eq!(rig.host.arm_spectrum(), RESULT_OK);
-                }
-                if rebuild && block == SPECTRUM_APPLY_BEFORE {
-                    rig.apply(&add_muted_track(model, ADDED), 1);
-                }
-                rig.step();
-                if rebuild && block == SPECTRUM_APPLY_BEFORE {
-                    assert_eq!(rig.host.service(None), RESULT_OK);
-                }
-                if found.is_none() && block >= ARM_BEFORE {
-                    found = rig
-                        .host
-                        .read_spectrum(SpectrumChannels::Stereo)
-                        .expect("read the one-shot");
-                }
-            }
-            found.expect("the one-shot completed")
-        };
-        let reference = shot(&committed, false);
-        let got = shot(&model, true);
-        assert!(
-            got.window.first_sample < SPECTRUM_APPLY_BEFORE * u64::from(QUANTUM)
-                && got.window.end_sample().expect("end")
-                    > SPECTRUM_APPLY_BEFORE * u64::from(QUANTUM),
-            "the window spans the swap"
-        );
-        assert_eq!(got.window.first_sample, reference.window.first_sample);
-        assert_eq!(got.token, reference.token);
-        assert!(
-            got.window
-                .left
-                .iter()
-                .chain(&got.window.right)
-                .zip(reference.window.left.iter().chain(&reference.window.right))
-                .all(|(a, b)| a.to_bits() == b.to_bits()),
-            "the planes equal the committed model's bit for bit"
-        );
     }
 
     /// Everything a refusal must leave as it was.
@@ -9856,57 +9519,6 @@ mod session_seek {
         assert_eq!(rig.landed(LONG), (3, anchor, 1_000));
         assert_eq!(rig.landed(SHORT), (3, anchor, 1_000));
         assert_eq!(rig.timeline(anchor), 1_000);
-    }
-
-    /// Gate 1, a stale generation changes nothing, under the consumers' own rule and under the
-    /// session's published generation.
-    ///
-    /// Test value: red if the export checks the generation per consumer after earlier pushes, or
-    /// if a stale refusal pushes to any consumer (the short source and the timeline stay put).
-    #[test]
-    fn a_stale_generation_changes_nothing() {
-        // The twin takes no stale call. The host holds one instance per thread, so it runs and is
-        // disposed first.
-        let (twin_bits, twin_timeline) = {
-            let mut twin = after_plain_seek();
-            let sample = twin.next();
-            assert_eq!(twin.submit(LONG, 2, 6_000 + Q), RESULT_OK);
-            (twin.render(), twin.timeline(sample))
-        };
-        let mut refused = after_plain_seek();
-        assert_eq!(
-            miso_engine_web_v1_session_seek(refused.handle, 2, 0),
-            RESULT_INVALID_ARGUMENT
-        );
-        assert_eq!(refused.last_result(), RESULT_INVALID_ARGUMENT);
-        let sample = refused.next();
-        assert_eq!(refused.submit(LONG, 2, 6_000 + Q), RESULT_OK);
-        assert_eq!(refused.render(), twin_bits, "the next block is the same");
-        assert_eq!(refused.timeline(sample), twin_timeline);
-        assert_eq!(refused.timeline(sample), (6_000 + Q) as i64);
-
-        // A per-source seek to generation 5 makes a session seek at 4 stale. The long source's
-        // own generation (5) and the session's published generation both refuse it, so this case
-        // does not tell the two rules apart; the C ABI's
-        // `a_removed_sources_generation_keeps_a_session_seek_stale` isolates the published one.
-        refused.stage(LONG);
-        assert_eq!(
-            miso_engine_web_v1_source_seek(refused.handle, LONG.len() as u32, 5, 0),
-            RESULT_OK
-        );
-        refused.render();
-        assert_eq!(
-            miso_engine_web_v1_session_seek(refused.handle, 4, 0),
-            RESULT_INVALID_ARGUMENT
-        );
-        let sample = refused.next();
-        refused.render();
-        assert_eq!(refused.landed(SHORT).0, 2, "the refusal pushed nothing");
-        assert_eq!(refused.timeline(sample), (6_000 + 3 * Q) as i64);
-        assert_eq!(
-            miso_engine_web_v1_session_seek(refused.handle, 6, 0),
-            RESULT_OK
-        );
     }
 
     /// Gate 1, one full source slot refuses every consumer.

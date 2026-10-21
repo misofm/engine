@@ -371,7 +371,9 @@ now only through the test-support switch `structural_command_for_test` (the refu
 - gate 3: `a_malformed_transaction_is_refused_and_changes_nothing`,
   `a_rate_or_quantum_change_is_refused_as_a_required_reprepare`,
   `a_transaction_over_the_memory_budget_is_refused_and_changes_nothing`
-- gate 5: `a_rebuild_swaps_with_a_spectrum_capture_or_a_collection_configured`
+- gate 5: `a_rebuild_swaps_with_a_spectrum_capture_or_a_collection_configured` (deleted by the
+  host-web read cut; held by `crates/host-core/tests/browser_successor.rs`
+  `every_branch_swaps_in_without_a_gap`)
 - gate 6: `the_catalogs_describe_the_successor_from_the_adoption_block_on`
 - meter interim: `meter_delivery_restarts_on_the_successor_and_never_publishes_a_misshaped_frame`
 - gate 8: `tests/structural_apply_realtime.rs` (two tests); render-locked allocations 0 across every
@@ -603,9 +605,12 @@ carried)` with the plan's own pairing list and the engine's real carry outcome.
   committed model window for window; one capture epoch, no `Failed`/`Gap`; service step right after
   the adoption block, and 18 blocks later)
 - gate 7, collection: `a_collection_selection_and_its_stream_continue_across_a_rebuild` (second entry
-  selected and streamed)
+  selected and streamed) (deleted by the host-web read cut; held by
+  `crates/host-core/tests/successor_swap.rs`
+  `spectrum_carry::a_reordered_collection_pairs_by_key_and_its_reader_keeps_receiving`)
 - armed one-shot: `an_armed_one_shot_completes_across_a_rebuild` (window spans the swap, equal to the
-  committed model's)
+  committed model's) (deleted by the host-web read cut; held by
+  `crates/host-core/tests/successor_swap.rs` `spectrum_carry::an_armed_one_shot_completes_across_the_swap`)
 - `web_runtime_preparer_attaches_the_companions_on_every_branch` now reads the capture kind from the
   record.
 - Red check: forcing `swap_carried = false` turns the stream, collection and one-shot tests red.

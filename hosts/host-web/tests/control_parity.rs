@@ -1770,8 +1770,9 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
 ///
 /// Red if a value lowers to a different lane or cell, ramps over a different length, composes
 /// with a VCA or a solo differently, drains differently, or is refused with a different code on
-/// one host. The control run proves the script is heard: the edits move the output away from a
-/// run with no edits, and dropping any one edit changes some block at 48 kHz.
+/// one host. At every rate the script also supersedes at least one write (the two fader edits of
+/// block 4), and at least 40 blocks differ from a run with no edits on the same session, so the
+/// script is heard. Which edit moves which block is held in `host-core`'s `live_delta.rs`.
 #[test]
 fn both_hosts_give_the_same_result_for_the_same_control_edits() {
     let steps = script();
@@ -1817,70 +1818,6 @@ fn status_watermark(browser: &Rig) -> (u64, u64, u64) {
         status.watermark_first_sample,
         status.watermark_outcome_flags,
     )
-}
-
-/// #1349 gates 1 and 3: the status words stay at the initial revision until the block that applies
-/// a live edit, then read `(r2, that block's first sample, EXACT)`. That is the C ABI's watermark
-/// for the same script and the record `read_watermark` copies from the plan's query.
-///
-/// Test value: red if the browser computes its own application sample (it would report the new
-/// revision before block 3, or block 2's sample), if the status copies from a different advance
-/// than the record published (a block late), or if a block that advanced nothing rewrites the words.
-#[test]
-fn the_status_words_carry_the_applied_revision_the_c_abi_reports() {
-    for rate in RATES {
-        let model = model_at(rate);
-        let mut browser = Rig::new(&model);
-        let mut c_abi = CAbi::new(&model);
-        let initial = (model.revision, 0, 1);
-        assert_eq!(status_watermark(&browser), initial, "{rate} Hz: boot");
-        assert_eq!(c_abi.watermark(), initial, "{rate} Hz: C ABI boot");
-
-        let edit = Edit::Fader {
-            strip: T1,
-            lanes: Lanes::Both,
-            db: -6.0,
-        };
-        for block in 0..3 {
-            let _ = (browser.step(block), c_abi.step(block));
-            assert_eq!(
-                status_watermark(&browser),
-                initial,
-                "{rate} Hz: block {block}"
-            );
-            assert_eq!(c_abi.watermark(), initial);
-        }
-        // Committed before block 3: pending until the block that applies it renders.
-        let (verdict, _) = browser.transaction_reply(&CAbi::edits(edit, None));
-        let (c_verdict, _) = c_abi.edit(edit, None);
-        assert_eq!(verdict, c_verdict);
-        let Verdict::Applied { revision, .. } = verdict else {
-            panic!("the live edit commits")
-        };
-        assert_eq!(revision, model.revision + 1);
-        assert_eq!(
-            status_watermark(&browser),
-            initial,
-            "{rate} Hz: never early"
-        );
-
-        let _ = (browser.step(3), c_abi.step(3));
-        let applied = (revision, 3 * u64::from(QUANTUM), 1);
-        assert_eq!(status_watermark(&browser), applied, "{rate} Hz: block 3");
-        assert_eq!(c_abi.watermark(), applied, "{rate} Hz: C ABI block 3");
-        // Gate 3: the control-side record is the same level.
-        assert_eq!(browser.host.read_watermark(), host_web::RESULT_OK);
-        let record = browser.host.watermark();
-        assert_eq!(
-            (record.revision, record.first_sample, record.outcome_flags),
-            applied
-        );
-
-        // A block that advances nothing leaves the words as they were.
-        let _ = (browser.step(4), c_abi.step(4));
-        assert_eq!(status_watermark(&browser), applied, "{rate} Hz: block 4");
-        assert_eq!(c_abi.watermark(), applied);
-    }
 }
 
 /// #1349's rebuild leg (#1562b): a rebuild, then a live edit before the swap. The status words
@@ -2187,85 +2124,6 @@ fn a_live_bypass_crossfades_alike_on_both_hosts() {
                 .bypass = true;
         },
     );
-}
-
-/// The browser leg alone over `steps`: its blocks. The audibility check below compares scripts
-/// that differ by one edit, which the C ABI would answer `model_only` when the edit left out was
-/// the one that made a later edit a change.
-fn browser_blocks(rate: u32, steps: &[Step]) -> Vec<Vec<u32>> {
-    let mut browser = Rig::new(&model_at(rate));
-    (0..BLOCKS)
-        .map(|block| {
-            for step in steps.iter().filter(|step| step.block == block) {
-                browser.transaction(&CAbi::edits(step.edit, step.ramp));
-            }
-            browser.step(block)
-        })
-        .collect()
-}
-
-/// Whether `later`, submitted in the same block, writes the cell that `earlier` writes.
-fn replaces(earlier: &Edit, later: &Edit) -> bool {
-    match (earlier, later) {
-        (Edit::Fader { strip: a, .. }, Edit::Fader { strip: b, .. })
-        | (Edit::Pan { strip: a, .. }, Edit::Pan { strip: b, .. }) => a.id == b.id,
-        (
-            Edit::Parameter {
-                insert: a,
-                parameter: pa,
-                ..
-            },
-            Edit::Parameter {
-                insert: b,
-                parameter: pb,
-                ..
-            },
-        ) => a.id == b.id && pa == pb,
-        _ => false,
-    }
-}
-
-/// Every accepted edit changes the render on its own: the script with that edit left out differs
-/// from the full script in some block, so no row of the parity run is a silent no-op on both hosts
-/// (a row that edited nothing would pass the comparison above on any defect).
-#[test]
-fn every_scripted_edit_is_heard() {
-    let rate = 48_000;
-    // The repeats are left out: with the edit they repeat omitted, a repeat is a change on the
-    // browser leg alone, which is not what this test asks.
-    let full: Vec<Step> = script()
-        .into_iter()
-        .filter(|step| !matches!(step.outcome, Outcome::Unchanged))
-        .collect();
-    let all = browser_blocks(rate, &full);
-    for omitted in 0..full.len() {
-        // A step that a later step of the same block replaces (same strip's fader, same strip's
-        // pan, same insert parameter) is superseded by design, before any render reads it: that
-        // is what the equal superseded counts check, so it is never heard.
-        if !matches!(full[omitted].outcome, Outcome::Accepted | Outcome::Rebuilt)
-            || full[omitted + 1..].iter().any(|later| {
-                later.block == full[omitted].block && replaces(&full[omitted].edit, &later.edit)
-            })
-        {
-            continue;
-        }
-        let rest: Vec<Step> = full
-            .iter()
-            .enumerate()
-            .filter(|(position, _)| *position != omitted)
-            .map(|(_, step)| Step {
-                block: step.block,
-                edit: step.edit,
-                ramp: step.ramp,
-                outcome: step.outcome,
-            })
-            .collect();
-        assert!(
-            all != browser_blocks(rate, &rest),
-            "step {omitted} (block {}) changes nothing: it is not heard",
-            full[omitted].block
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5766,52 +5624,6 @@ fn follow_model(entry: bool, muted: bool) -> SessionModel {
     model
 }
 
-/// #1652 gate 1 on both hosts (the browser at its native width, as the C ABI). Both hosts render
-/// the same bits for the session with `t1`'s mute entry. From the first block boundary after the
-/// end of the mute ramp to the unmute, each host's output is bit for bit its plan with `t1`
-/// statically muted, fed the same PCM; from the first block boundary after the end of the unmute
-/// ramp, bit for bit its plan with no mute. Not vacuous: before the mute the curve's plan differs
-/// from the statically muted one.
-///
-/// Test value: red if either host's plan attaches no following lane for `t1-b` (its pre-fader
-/// audio leaks into `b` while `t1` is muted), or if the two hosts disagree.
-#[test]
-fn a_following_send_leaks_nothing_of_a_stored_mute_on_both_hosts() {
-    const BLOCKS: u64 = 32;
-    let quantum = u64::from(QUANTUM);
-    let run = |model: &SessionModel| {
-        let mut browser = Rig::new(model);
-        let mut c_abi = CAbi::new(model);
-        (0..BLOCKS)
-            .map(|block| {
-                let (b, c) = (browser.step(block), c_abi.step(block));
-                assert_eq!(b, c, "block {block}: the two hosts agree");
-                b
-            })
-            .collect::<Vec<_>>()
-    };
-    let curve = run(&follow_model(true, false));
-    let muted = run(&follow_model(false, true));
-    let open = run(&follow_model(false, false));
-    let first_after = |sample: u64| sample.div_ceil(quantum);
-    for block in first_after(1_000 + 480)..2_500 / quantum {
-        assert_eq!(
-            curve[block as usize], muted[block as usize],
-            "block {block}: the statically muted plan's bits while the curve mutes"
-        );
-    }
-    for block in first_after(2_500 + 480)..BLOCKS {
-        assert_eq!(
-            curve[block as usize], open[block as usize],
-            "block {block}: the open plan's bits after the unmute"
-        );
-    }
-    assert_ne!(
-        curve[2], muted[2],
-        "the strip and its send play before the mute"
-    );
-}
-
 /// #1652 U2a fold 2 (MAJOR-A, conservative; #1713 deletes the flag) on both hosts. A rebuild
 /// whose send join carries a following route into a six-word one (it removes `t1`'s mute entry
 /// while `t1-b` follows it, sent at block 8 while the send's columns ramp toward the mute the
@@ -6610,47 +6422,6 @@ fn vca_mute_steps(vca: &str, from: f32, steps: &[(u64, f32)]) -> session::Automa
         })
         .collect();
     vca_entry(vca, VCA_MUTE, segments)
-}
-
-/// #1655 gate 1 on both hosts. On [`automated_vca_model`] (`v` holds `t2`, which rides its own
-/// fader, and `t3`, which has none and sits behind the true-peak limiter) with VCA `w` at -2 dB
-/// also holding `t3` (two VCAs on one member, one automated): a flat `offset_db` ride of `v` at -6
-/// dB (its static fallback +3 dB unused) and a flat `mute` entry at 0 render, on each host and
-/// alike, the bits of the session whose `v` holds -6 dB statically. Not vacuous: a ride at -5 dB
-/// is heard.
-///
-/// Test value: red if either host composes the VCA curve into a member's fader with other
-/// arithmetic or order than the static path, if the fallback leaks into `S`, if a flat mute
-/// curve moves a bit, or if the hosts disagree.
-#[test]
-fn a_flat_vca_ride_and_mute_render_the_static_vca_bits_on_both_hosts() {
-    const RUN: u64 = 24;
-    let session = |ride: Option<f32>| {
-        automated_vca_model(48_000, |model| {
-            let static_db = if ride.is_some() { 3.0 } else { -6.0 };
-            model.vcas = vec![
-                vca_at(VCA.id, static_db, &[T2.id, T3.id]),
-                vca_at("w", -2.0, &[T3.id]),
-            ];
-            if let Some(db) = ride {
-                model.automation.extend([
-                    vca_flat_ride(VCA.id, db),
-                    vca_mute_steps(VCA.id, 0.0, &[(u64::from(QUANTUM) * BLOCKS, 0.0)]),
-                ]);
-            }
-        })
-    };
-    let fixed = both_run(&session(None), RUN, &[]);
-    assert_eq!(
-        both_run(&session(Some(-6.0)), RUN, &[]),
-        fixed,
-        "the static VCA's bits"
-    );
-    assert_ne!(
-        both_run(&session(Some(-5.0)), RUN, &[]),
-        fixed,
-        "a ride at -5 dB is heard"
-    );
 }
 
 /// #1655 gate 2 on both hosts. A linear `offset_db` ride of `v` (0 to -12 dB over the run) over

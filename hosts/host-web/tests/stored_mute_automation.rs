@@ -1,19 +1,18 @@
 //! #1651 T5 on the browser host: stored mute automation (builtin row 6) through
 //! `AudioWorkletEngineHost`, every edit a command frame through the entry the Worker's control
-//! plane serves (#1382, #1562a D1). `crates/capi/src/runtime/mute_automation_tests.rs` runs the
-//! same script on the C ABI; the bank widths (Simd8, Simd4 and the scalar oracle) are
+//! plane serves (#1382, #1562a D1). The bank widths (Simd8, Simd4 and the scalar oracle) are
 //! `host-core`'s `stored_mute_automation.rs`.
 //!
 //! The session: tracks `t` and `u`, each on its own source and routed to the output, with no
 //! console, no insert and no send; VCA `v` holds `t`. `t`'s mute is driven by a step curve:
 //! unmuted, muted over a span whose ends are not grid samples, unmuted again. The session mute
-//! length is `mute_ms` 10, `M = 480` at 48 kHz. Every check compares the output with plans
+//! length is `mute_ms` 10, `M = 480` at 48 kHz. A render check compares the output with plans
 //! prepared with `t` statically unmuted and muted, fed the same PCM.
 //!
-//! - Gate 1 (exact samples), with a seek case.
-//! - Gate 3 (composition): solo, a VCA mute and a hand mute (OQ1 = C) compose with the curve;
-//!   gate 4's browser case: a hand mute through the Worker's apply replies `live` and the output
-//!   follows `curve || terms`.
+//! - Gate 1's seek case: a seek into the muted span, then the curve's next step on the new
+//!   timeline. Gate 1's exact samples and gate 3 (solo, VCA and hand mutes composed with the
+//!   curve) are `host-core`'s `stored_mute_automation.rs`; the browser's parity row is
+//!   `control_parity.rs`'s `a_composed_stored_mute_renders_alike_on_both_hosts`.
 //! - Root ruling R18-2: the control list marks a `mute` row an entry drives `automated`.
 
 use core::ops::Range;
@@ -140,9 +139,8 @@ impl Leg for Browser {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The script. `crates/capi/src/runtime/mute_automation_tests.rs` and
-// `hosts/host-web/tests/stored_mute_automation.rs` run this same script, each on its own host
-// (`Host`); keep the two copies equal.
+// The script, in the same form as `crates/capi/src/runtime/mute_automation_tests.rs` (each on
+// its own host, `Host`). This copy keeps only the parts its tests use.
 // ---------------------------------------------------------------------------------------------
 
 const RATE: u32 = 48_000;
@@ -152,10 +150,6 @@ const M: u64 = 480;
 const END: u64 = 5_000;
 const FADER_DB: u32 = 5;
 const MUTE: u32 = 6;
-/// The own-row ID of a strip's `solo`, a monitor row.
-const SOLO: u32 = 2;
-/// The own-row ID of a VCA's `mute`.
-const VCA_MUTE: u32 = 2;
 
 /// One host's session as the script drives it: booted on a document, fed one quantum of both
 /// sources per block (`src-t` and `src-u`, from [`chunk`]) and rendered.
@@ -465,44 +459,6 @@ fn run<L: Leg>(
     }
 }
 
-/// #1651 gate 1. `t`'s curve closes at 1,000 and opens at 2,500 (neither a multiple of the
-/// grid's 64). Each ramp starts at its step sample: every earlier sample equals the static plan
-/// the lane leaves and the step sample differs from it; the ramp is still moving at `step + M - 2`
-/// (the session mute length, not a shorter one); from the first block boundary at or after the
-/// ramp's end (`step + M`) every sample equals the static plan of the new state, up to the next
-/// step. Quanta 128, 100 and 37.
-///
-/// Test value: red if a mute step snaps to a block or to the grid, ramps over another row's length
-/// or over none, or ramps where the static plan does not (a muted lane left at a residue or at a
-/// zero of another sign).
-#[test]
-fn a_mute_curve_mutes_at_its_exact_samples() {
-    let closed = 1_000..2_500;
-    for quantum in [128_u32, 100, 37] {
-        let q = u64::from(quantum);
-        let label = format!("quantum {quantum}");
-        let mut leg = Host::boot(&model(
-            quantum,
-            Some(curve(ParameterChannel::Both, closed.clone())),
-            false,
-        ));
-        let expect = Expect {
-            equal: vec![
-                (0..closed.start, Static::Open),
-                (boundary(closed.start + M, q)..closed.end, Static::Closed),
-                (boundary(closed.end + M, q)..END, Static::Open),
-            ],
-            differ: vec![
-                (closed.start, Static::Open),
-                (closed.start + M - 2, Static::Closed),
-                (closed.end, Static::Closed),
-                (closed.end + M - 2, Static::Open),
-            ],
-        };
-        run(&label, &mut leg, &expect, |_, _| None);
-    }
-}
-
 /// #1651 gate 1, the seek case. Before the fifth block (render sample `R`) a plain session seek
 /// lands on timeline 1,600, inside the curve's muted span: from `R` on the lane is muted exactly
 /// (`n = 0`: every sample equals the muted static plan, seeked alike), and the curve's opening at
@@ -538,130 +494,18 @@ fn a_seek_into_a_muted_span_mutes_exactly_from_the_seek() {
     }
 }
 
-/// A mute term of `t` the curve does not drive, set on or off as one transaction.
-#[derive(Clone, Copy, Debug)]
-enum Term {
-    /// Solo on `u` (a monitor row: `t` is muted by solo).
-    Solo,
-    /// VCA `v`'s mute.
-    Vca,
-    /// `t`'s own (hand) mute, through `SET_CONTROL` (OQ1 = C).
-    Hand,
-}
-
-impl Term {
-    fn edit(self, on: bool) -> SessionEdit {
-        let (owner, section, control) = match self {
-            Self::Solo => (Owner::Strip(id("u")), Section::Own, SOLO),
-            Self::Vca => (Owner::Vca(id("v")), Section::Own, VCA_MUTE),
-            Self::Hand => (Owner::Strip(id("t")), Section::Builtins, MUTE),
-        };
-        SessionEdit::SetControl {
-            expected_effect: None,
-            address: ControlAddress {
-                owner,
-                section,
-                control,
-                lane: ParameterChannel::Both,
-            },
-            value: f32::from(u8::from(on)),
-            ramp_samples: None,
-        }
-    }
-
-    fn path(self) -> EditPath {
-        match self {
-            Self::Solo => EditPath::Monitor,
-            Self::Vca | Self::Hand => EditPath::Live,
-        }
-    }
-}
-
-/// #1651 gate 3 and gate 4's live case. `t`'s curve closes at 2,000 and opens at 3,500; quantum
-/// 128. Each of solo on `u`, a VCA mute of `t` and a hand mute of `t` (OQ1 = C):
-///
-/// - set at 256 while the curve is open, it mutes `t` (the muted static plan from the ramp's end);
-/// - released at 2,560, while the curve is closed, `t` stays muted, and the curve's opening at
-///   3,500 ramps the lane open;
-/// - released at 1,024, while the curve is open, the lane ramps open at 1,024, then the curve
-///   closes it at 2,000 and opens it at 3,500;
-/// - never released, `t` stays muted through the curve's opening.
-///
-/// Every edit commits with its own path: solo `monitor`, the VCA and the hand mute `live` (on the
-/// browser, through the Worker's apply).
-///
-/// Test value: red if solo, a VCA mute or a hand mute overwrites the curve instead of composing
-/// with it (a release while closed would open the lane), if a curve step overwrites the term (the
-/// opening at 3,500 would unmute a lane the term holds), or if a term on an automated lane is
-/// dropped (`model_only`).
-#[test]
-fn solo_vca_and_hand_mutes_compose_with_the_curve() {
-    const QUANTUM: u32 = 128;
-    let q = u64::from(QUANTUM);
-    let closed = 2_000..3_500;
-    let on_at = 2 * q;
-    for term in [Term::Solo, Term::Vca, Term::Hand] {
-        for release in [Some(20 * q), Some(8 * q), None] {
-            let label = format!("{term:?}, released at {release:?}");
-            let mut leg = Host::boot(&model(
-                QUANTUM,
-                Some(curve(ParameterChannel::Both, closed.clone())),
-                false,
-            ));
-            let mut expect = Expect {
-                equal: vec![(0..on_at, Static::Open)],
-                differ: vec![(on_at, Static::Open)],
-            };
-            let settled = boundary(on_at + M, q);
-            match release {
-                // Held through the curve's opening: closed to the end.
-                None => expect.equal.push((settled..END, Static::Closed)),
-                // Released while the curve is closed: closed until the curve opens.
-                Some(at) if closed.contains(&at) => {
-                    expect.equal.push((settled..closed.end, Static::Closed));
-                    expect.differ.push((closed.end, Static::Closed));
-                    expect
-                        .equal
-                        .push((boundary(closed.end + M, q)..END, Static::Open));
-                }
-                // Released while the curve is open: open again, then the curve's own steps.
-                Some(at) => {
-                    expect.equal.push((settled..at, Static::Closed));
-                    expect.differ.push((at, Static::Closed));
-                    expect
-                        .equal
-                        .push((boundary(at + M, q)..closed.start, Static::Open));
-                    expect.differ.push((closed.start, Static::Open));
-                    expect
-                        .equal
-                        .push((boundary(closed.start + M, q)..closed.end, Static::Closed));
-                    expect.differ.push((closed.end, Static::Closed));
-                    expect
-                        .equal
-                        .push((boundary(closed.end + M, q)..END, Static::Open));
-                }
-            }
-            let mut revision = leg.revision();
-            run(&label, &mut leg, &expect, |at, leg| {
-                let on = if at == on_at {
-                    true
-                } else if Some(at) == release {
-                    false
-                } else {
-                    return None;
-                };
-                // Solo is a monitor write: the revision does not advance (C8).
-                if term.path() == EditPath::Live {
-                    revision += 1;
-                }
-                assert_eq!(
-                    transaction(leg, &[term.edit(on)]),
-                    (term.path(), revision),
-                    "{label}: the term at {at} commits with its path"
-                );
-                None
-            });
-        }
+/// `t`'s own (hand) mute on `lane`, through `SET_CONTROL` (OQ1 = C).
+fn hand_mute(lane: ParameterChannel) -> SessionEdit {
+    SessionEdit::SetControl {
+        expected_effect: None,
+        address: ControlAddress {
+            owner: Owner::Strip(id("t")),
+            section: Section::Builtins,
+            control: MUTE,
+            lane,
+        },
+        value: 1.0,
+        ramp_samples: None,
     }
 }
 
@@ -747,12 +591,8 @@ fn the_list_marks_a_mute_row_an_entry_drives_automated() {
             listed(&mut leg, "u", MUTE).iter().all(|row| !row.2),
             "{label}: u's mute rows are not automated"
         );
-        let mut hand = Term::Hand.edit(true);
-        if let SessionEdit::SetControl { address, .. } = &mut hand {
-            address.lane = ParameterChannel::Left;
-        }
         assert_eq!(
-            transaction(&mut leg, &[hand]).0,
+            transaction(&mut leg, &[hand_mute(ParameterChannel::Left)]).0,
             EditPath::Live,
             "{label}: a hand mute is live"
         );

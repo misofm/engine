@@ -6359,12 +6359,20 @@ mod spectrum_ffi_tests {
         });
     }
 
+    /// An imported stream analyses at an explicit hop (H256, H1024) and at the 96 kHz derived
+    /// default hop (3 200 frames).
     #[test]
-    fn imported_stream_analysis_accepts_explicit_hops() {
-        for hop_frames in [256_u32, 1_024] {
+    fn imported_stream_analysis_accepts_supported_hops() {
+        let derived = SpectrumCadence::new(96_000, 128)
+            .expect("launch default cadence")
+            .hop_frames();
+        assert_eq!(derived, 3_200);
+        for (sample_rate_hz, hop_frames) in
+            [(48_000_u32, 256_u32), (48_000, 1_024), (96_000, derived)]
+        {
             stage_left_output_request();
-            stage_imported_left_window(0, 48_000, 1, 0.25);
-            stage_imported_stream_metadata_with_hop(0, 0, 48_000, 0.0, hop_frames);
+            stage_imported_left_window(0, sample_rate_hz, 1, 0.25);
+            stage_imported_stream_metadata_with_hop(0, 0, sample_rate_hz, 0.0, hop_frames);
 
             assert_eq!(
                 miso_engine_web_v1_spectrum_stream_analysis_configure(),
@@ -6387,32 +6395,6 @@ mod spectrum_ffi_tests {
             assert_eq!(metadata.hop_frames, hop_frames);
             assert!(with_spectrum_staging(|slot| slot.borrow().result_len > 0));
         }
-        stage_left_output_request();
-    }
-
-    #[test]
-    fn imported_stream_analysis_accepts_high_rate_derived_default_hop() {
-        let cadence = SpectrumCadence::new(96_000, 128).expect("launch default cadence");
-        assert_eq!(cadence.hop_frames(), 3_200);
-        stage_left_output_request();
-        stage_imported_left_window(0, 96_000, 1, 0.25);
-        stage_imported_stream_metadata_with_hop(0, 0, 96_000, 0.0, cadence.hop_frames());
-
-        assert_eq!(
-            miso_engine_web_v1_spectrum_stream_analysis_configure(),
-            RESULT_OK,
-        );
-        assert_eq!(
-            analysis_cadence()
-                .expect("configured stream cadence")
-                .hop_frames(),
-            3_200,
-        );
-        assert_eq!(miso_engine_web_v1_spectrum_stream_analysis(), RESULT_OK);
-        let metadata = with_spectrum_staging(|slot| slot.borrow().stream_metadata);
-        assert_eq!(metadata.status, SPECTRUM_STREAM_STATUS_READY);
-        assert_eq!(metadata.hop_frames, 3_200);
-        assert!(with_spectrum_staging(|slot| slot.borrow().result_len > 0));
         stage_left_output_request();
     }
 
