@@ -1043,9 +1043,11 @@ that window is admitted against the plan that renders.
   floors (#1698's base is the running plan's inventory). A fresh `miso_engine_v1_compile_session`
   and a browser boot compile with no floors; the lower latency returns there, or at a
   host-declared discontinuity (#1323, below). There is no permanent latency reserve.
-- **Evidence.** `capi` `runtime::tests::removing_a_limited_track_keeps_the_plan_latency`
+- **Evidence.** `host-core` `tests/successor_swap.rs::removing_a_limited_track_keeps_the_output_timing_at_every_rate_and_width`
   (`RemoveTrack` of a limited track: an unchanged `latency_samples` after the swap, and every
-  block equal to the floored reference). With no floors neither the program nor its canonical bytes
+  block equal to the floored reference), with `host-web`
+  `tests/control_parity.rs::removing_a_limited_track_keeps_the_plan_latency_alike_on_both_hosts` as
+  the C ABI parity row. With no floors neither the program nor its canonical bytes
   change: the graph fixture corpus, `scripts/check-graph-determinism.sh` and `console-workload`
   keep their digests.
 
