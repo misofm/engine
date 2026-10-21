@@ -9,15 +9,18 @@
 //! prepared with `t` statically unmuted and muted, fed the same PCM.
 //!
 //! This file tests two things on the C ABI:
-//! - Gate 3 (composition): solo, a VCA mute and a hand mute (OQ1 = C) compose with the curve. It
-//!   is the C ABI's parity row for the composed stored mute (the host-web twin was cut).
+//! - Gate 3 (composition): solo, a VCA mute and a hand mute (OQ1 = C) compose with the curve.
+//!   `solo_vca_and_hand_mutes_compose_with_the_curve` is the only test that checks the solo and
+//!   VCA mute terms composing with a stored curve against a static-plan oracle; host-core covers
+//!   them only in pieces (the hand mute in
+//!   `a_hand_mute_on_an_automated_lane_composes_with_the_curve`). The host-web twin was cut, so
+//!   this test is also the C ABI's parity row for the composed stored mute.
 //! - Root ruling R18-2: the control list marks a `mute` row an entry drives `automated`.
 //!
-//! The owner tests are `crates/host-core/tests/stored_mute_automation.rs`: gate 1's exact samples
-//! (`a_mute_step_mutes_the_lane_at_its_exact_sample_over_the_mute_length`), the seek into a muted
-//! span (`a_seek_that_leaves_the_mute_unchanged_lets_the_unmute_ramp_finish`) and the composition
-//! (`a_hand_mute_on_an_automated_lane_composes_with_the_curve`), on every bank width and the
-//! scalar oracle. `hosts/host-web/tests/control_parity.rs`'s
+//! The owner tests of gate 1 are `crates/host-core/tests/stored_mute_automation.rs`'s
+//! `a_mute_step_mutes_the_lane_at_its_exact_sample_over_the_mute_length` (exact samples) and
+//! `a_seek_that_leaves_the_mute_unchanged_lets_the_unmute_ramp_finish` (a seek into a muted span),
+//! on every bank width and the scalar oracle. `hosts/host-web/tests/control_parity.rs`'s
 //! `a_composed_stored_mute_renders_alike_on_both_hosts` compares the two hosts.
 
 use core::ops::Range;
@@ -185,9 +188,8 @@ impl Leg for CAbi {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The script. `crates/capi/src/runtime/mute_automation_tests.rs` and
-// `hosts/host-web/tests/stored_mute_automation.rs` run this same script, each on its own host
-// (`Host`); keep the two copies equal.
+// The script: the session, the curve and the oracle checks that the tests below run on the C ABI
+// host (`Host`).
 // ---------------------------------------------------------------------------------------------
 
 const RATE: u32 = 48_000;

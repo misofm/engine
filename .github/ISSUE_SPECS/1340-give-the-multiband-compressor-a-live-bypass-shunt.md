@@ -129,8 +129,8 @@ bits. This closes decision 14's F4 for the multiband compressor.
 - `crates/host-core/src/live_delta.rs` (D3 only: the variant, its arm and its docs; stream B owns
   the file, so coordinate the merge order with its coordinator),
   `crates/host-core/tests/live_delta.rs`
-- `crates/capi/src/runtime/live_tests.rs` (gate 5's C ABI case; the capi read cut deleted it as a twin
-  of host-core `tests/live_delta.rs::a_prepared_bypass_change_needs_a_rebuild`)
+- `crates/capi/src/runtime/live_tests.rs` (the C ABI parity row
+  `a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed_control`)
 - `docs/C_ABI_V1_QUALIFICATION.md` (the one sentence at `:393`)
 - `hosts/host-web/src/lib.rs` (the `COMMAND_EFFECT_BYPASS` doc comment, and #1315's
   prepared-bypass refusal if D8 leaves it no caller), `hosts/host-web/src/tests.rs` (D8's
@@ -177,8 +177,8 @@ bits. This closes decision 14's F4 for the multiband compressor.
    prepared with the insert enabled and fed the same input (the wet path ran throughout). With the
    default table, the same holds from the first block after #1341's crossfade ends. On the C ABI, the live case: the
    bypass change commits with no plan replacement, and the render from the first block after the
-   crossfade equals the control that never bypassed (the capi read cut deleted the C ABI test as a
-   twin of host-core `tests/live_delta.rs::a_prepared_bypass_change_needs_a_rebuild`).
+   crossfade equals the control that never bypassed (the kept parity row
+   `a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed_control`).
 6. **Realtime.** The bank render path still allocates nothing (`tests/no_alloc_render.rs`), the
    recovery block included.
 7. **Click against the mute baseline** (root, 2026-10-05, from #1055). The bypass crossfade's click

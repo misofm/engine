@@ -84,11 +84,11 @@ host-core paths are `crates/host-core/...`; control_parity is
   `a_mute_step_mutes_the_lane_at_its_exact_sample_over_the_mute_length` (exact samples, mute length,
   quanta 128/100/37, every bank form) and
   `a_seek_that_leaves_the_mute_unchanged_lets_the_unmute_ramp_finish` (its seek-into-muted-span
-  partner: muted exactly from the seek). The C ABI parity row is control_parity
-  `a_composed_stored_mute_renders_alike_on_both_hosts`. The placement of the curve's next step after
-  a seek is the shared automation cursor, which host-core `tests/stored_fader_automation.rs`
-  (`a_session_seek_sets_the_fader_lane_exactly`,
-  `a_seek_step_after_the_unmute_ramps_end_in_its_block_still_lands`) defends.
+  partner: muted exactly from the seek). The curve's next step after the seek, on the new
+  timeline, is defended by the kept host-web copy
+  `hosts/host-web/tests/stored_mute_automation.rs::a_seek_into_a_muted_span_mutes_exactly_from_the_seek`,
+  and control_parity `a_composed_stored_mute_renders_alike_on_both_hosts` runs that seek on the C
+  ABI. The owner, host-core, lacks this test: see the host-web successor note.
 - `ffi.rs` (1): `empty_object_document_is_diagnosed_not_aborted`, a #387 reproducer whose logic is the
   session preflight. Host-twin exception: the owner reproducer
   `crates/session/tests/json_grammar.rs::empty_object_refuses_at_regression_placements_instead_of_corrupting_the_code_map`
@@ -102,6 +102,9 @@ host-core paths are `crates/host-core/...`; control_parity is
   every case of both stays (ceiling claim).
 
 Integrator notes on composed defences (each read, none restored):
+`a_vca_added_live_advances_the_epoch_and_lists_its_rows_live` is the epoch rule
+(`control_provider.rs::tests::a_commit_refreshes_values_and_only_a_changed_address_sequence_advances_the_epoch`)
+plus the VCA rows' live class (`crates/controls/tests/list.rs::classes_match_decision_14`, line 173);
 `a_live_track_edit_beside_a_submix_strip_reaches_its_track` is the strip table order
 (`strip_handles.rs`) plus records addressed by strip ID (`live_delta.rs::a_submix_strip_fader_mute_and_pan_are_live`);
 `a_live_commit_gives_the_control_list_of_a_fresh_session`'s followed-mute case is
@@ -138,7 +141,8 @@ applied with `git apply`; a host-core mutant first ran the 20 named host-core de
 the 29 deleted tests at `64fe78c46` with the mutant in place.
 
 - 2 unviable (do not compile).
-- 13 of 16 viable caught by a remaining test: 11 by a host-core defender or a capi test, and 2
+- 13 of 16 viable caught by a remaining test: 11 by a host-core defender or a capi test (mutant
+  24, `check_response_axis` `<=` to `>`, by a timeout of the host-core defenders at 1,800 s), and 2
   (`follow_route_jumps` to `Default`, `resolve_spectrum_carry` `!=` to `==`) by other remaining
   host-core tests (`route_mute.rs`, `spectrum_carry.rs`, `prepare::tests`). For
   `follow_route_jumps` the deleted
@@ -175,6 +179,10 @@ the 29 deleted tests at `64fe78c46` with the mutant in place.
   replay writes nothing, routing a write to the pending producer, drain-then-carry, commit events,
   the EQ owner push and lookup, the submix ramp carry, the smoothing seed, the fader ride carry
   cases). The successor writes each claim once in control-plane and deletes the capi twin.
+- Solo and VCA terms on a stored mute curve: only capi
+  `mute_automation_tests.rs::solo_vca_and_hand_mutes_compose_with_the_curve` checks them composing
+  with a stored curve against a static-plan oracle; host-core covers them only in pieces.
+  Successor: one host-core test of the full composition; this capi test then stays as the parity row.
 - Spot-check survivors (older gaps, not caused by this cut). Successor: one test per claim in
   the owning crate: capi, a successful call after a failed one reads an empty last error; host-core,
   a strip join whose right fader lane continues keeps that lane's bit; host-core, a row-only
