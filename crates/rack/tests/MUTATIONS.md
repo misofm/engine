@@ -115,8 +115,9 @@ lane's own program, in order.
 `bind_rack_banks` matches the frozen outcome table exactly: `Err(code)` becomes a transactional
 graph-compile diagnostic (`id_ordered_bank_plan_rejects_transactionally_and_returned_ownership_is_reusable`,
 `fixture.bank.bind_failure`), `Ok(None)` marks the group unbound and its members render on the
-per-node scalar path (`launch_parametric_eq_fixture_retains_banks_and_matches_scalar_across_blocks`
-asserts every planned group is reported unbound and all nine members appear in `scalar_in`).
+per-node scalar path (the parametric-EQ row of graph-compiler
+`tests::launch_effect_fixtures_bank_render_and_bypass_as_frozen` asserts that its bank-free
+reference arm binds no slot and puts all nine members in `scalar_in`).
 
 ## Issue #140 — the automation-span feed, the live fader, and GR observation
 

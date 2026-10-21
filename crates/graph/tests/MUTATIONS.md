@@ -433,8 +433,8 @@ checked before writing, the suites were run with `--no-fail-fast`, and the file 
 `-C target-feature=+avx2,+fma`), debug profile. The tests these rows name:
 
 - graph "gate 1" is `runtime::tests::an_unobserved_source_input_is_not_dispatched_and_moves_no_bit`,
-  "gate 2" `runtime::tests::an_observed_source_input_stays_dispatched_and_meters_the_base_values`,
-  "gate 3" `runtime::tests::a_delayed_claim_stays_dispatched_and_renders_the_base_bits`, "gate 5"
+  "gate 2" `runtime::tests::an_observed_source_input_stays_dispatched_and_meters_the_full_dispatch_values`,
+  "gate 3" `runtime::tests::a_delayed_claim_stays_dispatched_and_renders_the_full_dispatch_bits`, "gate 5"
   `runtime::tests::the_metadata_charge_covers_the_ring_plans_executor_tables`, and "the metadata
   test" `tests::runtime_metadata_charge_covers_mixed_ops_once_and_refuses_overflow`. Gates 1-3 pin
   the digest this fixture recorded on the base tree (`INERT_PRE_CHANGE`, `64b155d0`). Issue #957
@@ -516,8 +516,8 @@ before writing), the suites were run with `--no-fail-fast`, and the file was res
 - "#927's gates 1 and 2" are `a_plain_strip_source_is_read_in_place_by_the_fused_output_with_the_copy_bits`
   and `a_claim_with_another_reader_keeps_the_copy_and_the_copy_bits`; "#936's gates" are
   `an_unobserved_source_input_is_not_dispatched_and_moves_no_bit`,
-  `an_observed_source_input_stays_dispatched_and_meters_the_base_values` and
-  `a_delayed_claim_stays_dispatched_and_renders_the_base_bits`.
+  `an_observed_source_input_stays_dispatched_and_meters_the_full_dispatch_values` and
+  `a_delayed_claim_stays_dispatched_and_renders_the_full_dispatch_bits`.
 - "The console counter gate" is console-workload `tests::the_driver_fed_gain_pan_row_renders_the_bound_rows_bits`
   (then `the_driver_fed_plumbing_row_renders_the_bound_rows_bits`, re-homed by issue #956)
   (`[0, claims * BLOCKS, 0]`); "the console digests" are chain_shape
@@ -634,8 +634,8 @@ and `crates/graph/src` was restored with `git checkout` before the next row. Hos
 (`.cargo/config.toml` pin `-C target-feature=+avx2,+fma`), debug profile. The tests these rows name:
 
 - "Gate 1" is `runtime::tests::an_unobserved_source_input_is_not_dispatched_and_moves_no_bit`,
-  "gate 2" `…::an_observed_source_input_stays_dispatched_and_meters_the_base_values` (shapes
-  `ObservedInput`, then `ObservedAlias`), "gate 3" `…::a_delayed_claim_stays_dispatched_and_renders_the_base_bits`,
+  "gate 2" `…::an_observed_source_input_stays_dispatched_and_meters_the_full_dispatch_values` (shapes
+  `ObservedInput`, then `ObservedAlias`), "gate 3" `…::a_delayed_claim_stays_dispatched_and_renders_the_full_dispatch_bits`,
   "gate 5" `…::the_metadata_charge_covers_the_banked_source_plans_executor_tables`, and "the dead
   claim test" `…::a_claim_nothing_reads_is_bound_in_place_and_its_recoloured_slot_moves_no_bit`.
   Gates 1-3 pin digests recorded on `64b155d0` (`INERT_PRE_CHANGE`); the dead claim test pins
