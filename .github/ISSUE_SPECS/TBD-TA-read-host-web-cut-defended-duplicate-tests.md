@@ -169,8 +169,8 @@ host-core mutant); the files were reverted (signal-safe; the tree was clean at t
 
 - All 31 `run:` steps of the qualification `lint` job (fmt, workspace clippy `-D warnings`,
   `cargo doc -D warnings`, every hermetic policy gate and the three x86 lane-guard probes), from
-  `policy-job-read-host-web.sh` pointed at this worktree, on the merged tree: see the PR.
-- `cargo test --locked --all-features -p host-web -p parameter-metadata` on the merged tree: see
-  the PR.
+  `policy-job-read-host-web.sh` pointed at this worktree, on the merged tree: PASS (31 of 31).
+- `cargo test --locked --all-features -p host-web -p parameter-metadata` on the merged tree: PASS
+  (223 passed, 0 failed).
 
 The per-test verdict list (227 rows) is posted as an issue comment.
