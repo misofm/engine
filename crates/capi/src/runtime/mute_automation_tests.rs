@@ -1,7 +1,6 @@
 //! #1651 T5 on the C ABI: stored mute automation (builtin row 6) through the exported entries
 //! (`miso_engine_v1_submit_command`, the source submit, the session seek and the render, through
-//! `ffi`'s test wrappers). The bank widths (Simd8, Simd4 and the scalar oracle) are `host-core`'s
-//! `stored_mute_automation.rs`; the cross-host comparison is `hosts/host-web/tests/control_parity.rs`.
+//! `ffi`'s test wrappers).
 //!
 //! The session: tracks `t` and `u`, each on its own source and routed to the output, with no
 //! console, no insert and no send; VCA `v` holds `t`. `t`'s mute is driven by a step curve:
@@ -9,11 +8,17 @@
 //! length is `mute_ms` 10, `M = 480` at 48 kHz. Every check compares the output with plans
 //! prepared with `t` statically unmuted and muted, fed the same PCM.
 //!
-//! - Gate 1 (exact samples, and a seek into the muted span) is `host-core`'s
-//!   `stored_mute_automation.rs`; `hosts/host-web/tests/control_parity.rs`'s
-//!   `a_composed_stored_mute_renders_alike_on_both_hosts` is the C ABI's parity row for it.
-//! - Gate 3 (composition): solo, a VCA mute and a hand mute (OQ1 = C) compose with the curve.
+//! This file tests two things on the C ABI:
+//! - Gate 3 (composition): solo, a VCA mute and a hand mute (OQ1 = C) compose with the curve. It
+//!   is the C ABI's parity row for the composed stored mute (the host-web twin was cut).
 //! - Root ruling R18-2: the control list marks a `mute` row an entry drives `automated`.
+//!
+//! The owner tests are `crates/host-core/tests/stored_mute_automation.rs`: gate 1's exact samples
+//! (`a_mute_step_mutes_the_lane_at_its_exact_sample_over_the_mute_length`), the seek into a muted
+//! span (`a_seek_that_leaves_the_mute_unchanged_lets_the_unmute_ramp_finish`) and the composition
+//! (`a_hand_mute_on_an_automated_lane_composes_with_the_curve`), on every bank width and the
+//! scalar oracle. `hosts/host-web/tests/control_parity.rs`'s
+//! `a_composed_stored_mute_renders_alike_on_both_hosts` compares the two hosts.
 
 use core::ops::Range;
 
