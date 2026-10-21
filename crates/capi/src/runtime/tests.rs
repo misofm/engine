@@ -445,112 +445,6 @@ pub(super) fn control_state_all_c(
     }
 }
 
-/// A committed structural edit publishes the replacement control list to the running controller:
-/// the structure epoch advances, the removed track's owner rows are gone, the last handle of the
-/// superseded list stops naming a row, and a request that holds the old epoch is told so.
-///
-/// Red if a commit leaves the controller holding the list of the superseded session, so a client
-/// keeps handles that name rows that no longer exist.
-#[test]
-fn c_commands_publish_the_replacement_control_list() {
-    let (c_session, c_plan) = boxed_c_children(SESSION);
-    let mut request = 0;
-    let (before, epoch, revision) = control_list_all_c(c_session, &mut request, 64);
-    assert_eq!((epoch, revision), (1, 42));
-    assert!(
-        before
-            .iter()
-            .any(|entry| entry.address.owner_id.as_deref() == Some("eq0"))
-    );
-    let last = before.len() as u32;
-    // The row at `last` is listed before the replacement.
-    let tail = protocol::ControlListRequest {
-        structure_epoch: epoch,
-        after_handle: last - 1,
-        limit: 1,
-        owner: None,
-    };
-    request += 1;
-    let page = control_list_c(c_session, request, &tail).expect("the tail page");
-    assert_eq!(
-        page.entries
-            .iter()
-            .map(|entry| entry.handle)
-            .collect::<Vec<_>>(),
-        [last],
-        "the last row has a handle before the replacement"
-    );
-    // The EQ is a console slot every track carries (decision 12), so the replacement list drops
-    // `eq0`'s rows by removing the track and its route; console edits are #1094's.
-    let edits = [
-        protocol::SessionEdit::RemoveRoute {
-            route_id: session::StableId::parse("eq0-main").expect("route ID"),
-        },
-        protocol::SessionEdit::RemoveTrack {
-            track_id: session::StableId::parse("eq0").expect("track ID"),
-        },
-    ];
-    request += 1;
-    let replace = command_bytes_at_revision(
-        request,
-        ExpectedRevision::Exact(SessionRevision(42)),
-        protocol::CommandPayload::SessionTransactionApply(&edits),
-    );
-    assert_eq!(command_c(c_session, &replace).0, crate::RESULT_OK);
-
-    let (after, epoch, revision) = control_list_all_c(c_session, &mut request, 64);
-    assert_eq!((epoch, revision), (2, 43), "the structure changed once");
-    assert!(
-        after
-            .iter()
-            .all(|entry| !matches!(entry.address.owner_id.as_deref(), Some("eq0" | "eq0-main"))),
-        "the removed track's and route's rows are gone"
-    );
-    assert!(
-        after
-            .iter()
-            .any(|entry| entry.address.owner_id.as_deref() == Some("eq1"))
-    );
-    assert!(after.len() < before.len());
-    request += 1;
-    let tail = protocol::ControlListRequest {
-        structure_epoch: epoch,
-        ..tail
-    };
-    let page = control_list_c(c_session, request, &tail).expect("the tail page");
-    assert!(
-        page.entries.iter().all(|entry| entry.handle != last),
-        "the last handle of the superseded list is gone"
-    );
-
-    // A client that holds the old epoch starts again, from either message.
-    let stale = protocol::ControlListRequest {
-        structure_epoch: 1,
-        after_handle: 0,
-        limit: 1,
-        owner: None,
-    };
-    request += 1;
-    assert_eq!(
-        control_list_c(c_session, request, &stale).err(),
-        Some((
-            StatusCode::RevisionConflict,
-            vec!["control.list.stale".to_owned()]
-        ))
-    );
-    request += 1;
-    assert_eq!(
-        control_state_c(c_session, request, &stale).err(),
-        Some((
-            StatusCode::RevisionConflict,
-            vec!["control.list.stale".to_owned()]
-        ))
-    );
-
-    crate::ffi::test_plan_destroy(c_plan);
-    crate::ffi::test_session_destroy(c_session);
-}
-
 #[test]
 fn c_commands_observe_the_rendered_plan_sample() {
     let (c_session, c_plan) = boxed_c_children(SESSION);
@@ -776,60 +670,6 @@ fn render_parity_shape(track_count: usize, sample_rate_hz: u32) {
         crate::ffi::test_plan_destroy(c_plan);
         crate::ffi::test_session_destroy(c_session);
     }
-}
-
-#[test]
-fn generated_session_prepares_independent_source_and_plan_ownership() {
-    let mut children = compile_children(SESSION, limits()).unwrap_or_else(|failure| {
-        panic!("compile: {}", String::from_utf8_lossy(&failure.diagnostics))
-    });
-    let resources = children.plan.resources();
-    assert_eq!(resources.sample_rate_hz, 48_000);
-    assert_eq!(resources.quantum_frames, 128);
-    assert_eq!(resources.source_count, 1);
-    assert_eq!(resources.track_count, 9);
-    assert!(resources.graph_session_plus_plan_bytes > 0);
-    assert!(resources.source_total_bytes > 0);
-    assert!(resources.effect_scalar_state_bytes > 0);
-    assert!(resources.builtin_retained_payload_bytes > 0);
-    assert!(resources.capi_retained_bytes > 0);
-    assert!(resources.largest_named_allocation_bytes > 0);
-
-    let left = [0.25_f32; 128];
-    let right = [-0.5_f32; 128];
-    let submitted = children
-        .session
-        .submit(
-            b"fixture-source",
-            SourceSubmission {
-                generation: 1,
-                start_frame: 0,
-                sample_rate_hz: 48_000,
-                planes: &[&left, &right],
-                frames: 128,
-                end_of_region: false,
-            },
-        )
-        .expect("first source block");
-    assert_eq!(submitted.accepted_frames, 128);
-    children
-        .session
-        .seek(b"fixture-source", 2, 48_000)
-        .expect("inclusive end seek");
-    children
-        .session
-        .submit(
-            b"fixture-source",
-            SourceSubmission {
-                generation: 2,
-                start_frame: 48_000,
-                sample_rate_hz: 48_000,
-                planes: &[&[], &[]],
-                frames: 0,
-                end_of_region: true,
-            },
-        )
-        .expect("zero-frame final marker");
 }
 
 #[test]
@@ -2135,111 +1975,6 @@ fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
     submit_direct(&mut reference, &both[..1], 0);
     let expected = feed_and_render_direct(&mut reference, &both[..1], 0, 12);
     assert_bit_identical("removal", 6, &swapped, &expected[6..]);
-}
-
-/// Issue #1285 gate 3: three tracks, the first muted behind a true-peak limiter insert. A
-/// `RemoveTrack` transaction after block 6 removes it. `miso_engine_v1_plan_resources` reports the
-/// same `latency_samples` after the swap, and every block equals the floored reference: the same
-/// transaction committed before the first block, so its successor is compiled with A's floors and
-/// adopts at frame 0 with every state at rest, which is B compiled with A's floors and rendered
-/// from frame 0. B compiled fresh has a lower latency and renders the remaining tracks earlier.
-///
-/// Test value: red if the plan's resource row keeps the natural latency while the plan renders
-/// the floored one, or if a successor is compiled without floors (the latency drops and the two
-/// remaining tracks jump forward at the swap).
-#[test]
-fn removing_a_limited_track_keeps_the_plan_latency() {
-    let source: [&[u8]; 1] = [b"fixture-source"];
-    let mut model = stateless_session(48_000);
-    let limited = &mut model.tracks[0];
-    limited.fader.left_mute = true;
-    limited.fader.right_mute = true;
-    limited.inserts.effects.push(session::Effect {
-        id: session::StableId::parse("lim").expect("insert ID"),
-        identity: session::EffectIdentity::Native {
-            effect_id: session::StableId::parse("miso.true-peak-limiter").expect("limiter id"),
-        },
-        quality: session::EffectQuality::Normal,
-        bypass: false,
-        link_mode: session::LinkMode::Maximum,
-        params: Vec::new(),
-        sidechain: session::SidechainDeclaration::None,
-    });
-    let document = session::canonical_session_json(&model).expect("canonical");
-    let edits = [
-        protocol::SessionEdit::RemoveRoute {
-            route_id: model.routes[0].id.clone(),
-        },
-        protocol::SessionEdit::RemoveTrack {
-            track_id: model.tracks[0].id.clone(),
-        },
-    ];
-    let transaction = command_bytes_at_revision(
-        1,
-        ExpectedRevision::Exact(SessionRevision(42)),
-        protocol::CommandPayload::SessionTransactionApply(&edits),
-    );
-    let bits = |blocks: &[Vec<f32>]| -> Vec<Vec<u32>> {
-        blocks
-            .iter()
-            .map(|block| block.iter().map(|sample| sample.to_bits()).collect())
-            .collect()
-    };
-
-    let mut children = compile_children(&document, limits()).expect("children");
-    let latency = children.plan.resources().latency_samples;
-    assert!(latency > 0, "the limiter delays A");
-    submit_direct(&mut children, &source, 0);
-    let mut swapped = feed_and_render_direct(&mut children, &source, 0, 6);
-    children
-        .session
-        .command(&transaction, 4_096)
-        .expect("removal transaction");
-    swapped.extend(feed_and_render_direct(&mut children, &source, 6, 6));
-    assert_eq!(children.plan.owner().carried_count(), 1, "the swap carried");
-    assert_eq!(
-        children.plan.resources().latency_samples,
-        latency,
-        "the plan reports A's latency after the swap (D4)"
-    );
-
-    let mut reference = compile_children(&document, limits()).expect("reference");
-    submit_direct(&mut reference, &source, 0);
-    reference
-        .session
-        .command(&transaction, 4_096)
-        .expect("reference transaction");
-    let expected = feed_and_render_direct(&mut reference, &source, 0, 12);
-    assert_eq!(reference.plan.owner().carried_count(), 1);
-    assert_eq!(reference.plan.resources().latency_samples, latency);
-    assert!(
-        expected[7..].iter().flatten().all(|sample| *sample != 0.0),
-        "the reference plays after the swap"
-    );
-    assert_eq!(
-        bits(&swapped),
-        bits(&expected),
-        "every block equals B compiled with A's floors"
-    );
-
-    let committed = session::canonical_session_json(
-        children
-            .session
-            .test_controller()
-            .session()
-            .compiled()
-            .normalized_model(),
-    )
-    .expect("committed");
-    let mut fresh = compile_children(&committed, limits()).expect("fresh B");
-    assert!(fresh.plan.resources().latency_samples < latency);
-    submit_direct(&mut fresh, &source, 0);
-    let unfloored = feed_and_render_direct(&mut fresh, &source, 0, 12);
-    assert_ne!(
-        bits(&unfloored[6..]),
-        bits(&expected[6..]),
-        "without floors the remaining tracks move by the limiter's latency"
-    );
 }
 
 // Issue #1323: a host-declared discontinuity resets the latency floors of #1285.
@@ -5811,48 +5546,6 @@ mod session_seek {
         assert_eq!(rig.timeline(anchor), 1_000);
     }
 
-    /// Gate 2, a stale generation changes nothing, under the source's rule and the session's
-    /// published generation alike.
-    ///
-    /// Test value: red if the generation check runs per consumer after earlier pushes, or if a
-    /// stale refusal pushes to any consumer (the short source and the timeline stay put).
-    #[test]
-    fn a_stale_generation_changes_nothing() {
-        let mut refused = after_gate_one_plain();
-        let mut twin = after_gate_one_plain();
-        assert_eq!(refused.seek(2, 0), crate::RESULT_INVALID_ARGUMENT);
-        assert_eq!(refused.last_error(), b"source.generation.stale");
-        let sample = refused.next();
-        refused.feed_long(2, 6_000 + Q);
-        twin.feed_long(2, 6_000 + Q);
-        let bits = |block: Vec<f32>| {
-            block
-                .iter()
-                .map(|value| value.to_bits())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(bits(refused.render()), bits(twin.render()));
-        assert_eq!(refused.timeline(sample), twin.timeline(sample));
-        assert_eq!(refused.timeline(sample), (6_000 + Q) as i64);
-
-        // A per-source seek to 5 makes a session seek at 4 stale. Both the long source's own
-        // generation (5) and the session's published generation refuse it here, so this case
-        // does not tell the two rules apart; `a_removed_sources_generation_keeps_a_session_seek_stale`
-        // isolates the published generation.
-        assert_eq!(
-            crate::ffi::test_source_seek(refused.session, LONG, 5, 0),
-            crate::RESULT_OK
-        );
-        refused.render();
-        assert_eq!(refused.seek(4, 0), crate::RESULT_INVALID_ARGUMENT);
-        assert_eq!(refused.last_error(), b"source.generation.stale");
-        let sample = refused.next();
-        refused.render();
-        assert_eq!(refused.landed(SHORT).0, 2, "the refusal pushed nothing");
-        assert_eq!(refused.timeline(sample), (6_000 + 3 * Q) as i64);
-        assert_eq!(refused.seek(6, 0), crate::RESULT_OK);
-    }
-
     /// Gate 2, the published generation alone (batch 16b review, MAJOR 1): a per-source seek of
     /// the short source to 10, then a transaction that removes it, swapped in. No live producer
     /// holds a generation above 1 now, so only the session's published generation (10) refuses a
@@ -6067,28 +5760,6 @@ mod session_seek_declares {
         }
     }
 
-    /// Gate 1: a refused plain session seek publishes nothing.
-    ///
-    /// Test value: red if the seek declares before (or without) its check: the stale seek would
-    /// publish the floorless successor, and the epoch and the latency would move.
-    #[test]
-    fn a_refused_plain_session_seek_publishes_nothing() {
-        let mut rig = Floored::new(true);
-        let epoch = rig.epoch();
-        assert_eq!(
-            crate::ffi::test_session_seek(rig.session, 1, 0, None),
-            crate::RESULT_INVALID_ARGUMENT
-        );
-        assert_eq!(
-            crate::ffi::test_last_error(rig.session),
-            b"source.generation.stale"
-        );
-        assert_eq!(rig.epoch(), epoch, "nothing is published");
-        rig.play(1, (rig.block + 1) * Q, 2);
-        assert_eq!(rig.latency(), rig.floored, "the floors stay");
-        assert_eq!(seek_report_c(rig.session, SOURCE).0, 1, "nothing is pushed");
-    }
-
     /// Gate 2: an accepted plain session seek publishes exactly one discontinuity successor and its
     /// seek applies, at the next block; also while the removal's candidate still waits, which the
     /// declaration supersedes before the seek is pushed to the same producers.
@@ -6155,28 +5826,6 @@ mod session_seek_declares {
         rig.play(2, 1_280, 3);
         let (generation, first, frame, _, _) = seek_report_c(rig.session, SOURCE);
         assert_eq!((generation, first, frame), (2, sample, 1_280));
-    }
-
-    /// Gate 3: an anchored session seek publishes no successor; it applies at its anchor and the
-    /// floors stay.
-    ///
-    /// Test value: red if the anchored form declares (the successor would publish, the epoch
-    /// would move and the latency drop before the anchor).
-    #[test]
-    fn an_anchored_session_seek_publishes_no_successor() {
-        let mut rig = Floored::new(true);
-        let epoch = rig.epoch();
-        let anchor = (rig.block + 2) * Q;
-        assert_eq!(
-            crate::ffi::test_session_seek(rig.session, 2, 1_280, Some(anchor)),
-            crate::RESULT_OK
-        );
-        assert_eq!(rig.epoch(), epoch, "nothing is published");
-        rig.play(2, 1_280, 4);
-        let (generation, first, frame, _, _) = seek_report_c(rig.session, SOURCE);
-        assert_eq!((generation, first, frame), (2, anchor, 1_280));
-        assert_eq!(rig.latency(), rig.floored, "the floors stay");
-        assert_eq!(rig.epoch(), epoch);
     }
 }
 

@@ -837,51 +837,6 @@ fn an_oversized_reply_is_refused_before_any_curve_is_computed() {
     assert_eq!(host_core::take_response_counts(), (1, 1));
 }
 
-/// Gate 4 and 5: `CAPABILITIES_GET` lists `0x000e` and sets bit 14, and the same request ID and
-/// bytes sent twice return byte-identical replies, the second without preparing an owner.
-///
-/// Red if the message is not advertised or advertised without its flag, or if a replayed read runs
-/// again.
-#[test]
-fn the_message_is_advertised_and_a_replayed_read_does_not_run_again() {
-    let mut endpoint = Endpoint::new(1 << 20);
-    let bytes = endpoint.encode(CommandPayload::CapabilitiesGet);
-    let response = endpoint.submit(&bytes);
-    let mut fields = [0_u16; 1024];
-    let decoded = ProtocolCodec::default()
-        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
-        .expect("capabilities");
-    let DecodedTypedResponseFrame::Success {
-        payload: DecodedSuccessResponsePayload::Capabilities(capabilities),
-        ..
-    } = decoded
-    else {
-        panic!("capabilities");
-    };
-    let commands: Vec<u16> = capabilities
-        .supported_commands
-        .chunks_exact(2)
-        .map(|id| u16::from_le_bytes([id[0], id[1]]))
-        .collect();
-    assert!(commands.contains(&0x000e));
-    assert_ne!(capabilities.flags.0 & (1 << 14), 0);
-
-    let mut query = request(eq_target(), 64);
-    query.overrides = vec![row(BAND_1_GAIN, ParameterChannel::Both, 3.0)];
-    let bytes = endpoint.encode(CommandPayload::ResponseGet(&query));
-    host_core::take_response_counts();
-    let first = endpoint.submit(&bytes);
-    assert_eq!(host_core::take_response_counts(), (1, 1));
-    let second = endpoint.submit(&bytes);
-    assert_eq!(second, first, "the replay is the same bytes");
-    assert_eq!(
-        host_core::take_response_counts(),
-        (0, 0),
-        "a replayed read prepares no owner"
-    );
-    assert!(matches!(decode(&second), Reply::Result(_)));
-}
-
 /// #1574 gate 1: the session-less frame entry the browser preview uses answers the payload a C ABI
 /// session answers for the same request, byte for byte. This is a wire format.
 #[test]

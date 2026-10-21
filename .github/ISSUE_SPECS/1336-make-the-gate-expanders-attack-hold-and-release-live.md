@@ -160,9 +160,10 @@ the same track rendered alone.
 5. **Carry mid-ramp.** A snapshot taken at frame 10 of an attack ramp, restored into a fresh lane at
    every launch rate, renders bit-identical to the uninterrupted lane; a payload whose rate target
    differs from the design of its time word by one ulp is refused with `effect.state.parameter`.
-6. **Live on the C ABI.** `the_parameter_readback_after_a_live_edit_equals_a_rebuilds` and
-   `live_effect_parameter_edits_render_like_the_browsers_lane` (`crates/capi/src/runtime/live_tests.rs`)
-   now cover ids 5-7 through `eligible_values`, with no edit to them.
+6. **Live on the C ABI.** `live_effect_parameter_edits_render_like_the_browsers_lane`
+   (`crates/capi/src/runtime/live_tests.rs`) and host-core
+   `src/control_provider.rs::tests::a_staged_live_commit_gives_the_list_of_a_full_build` (the readback;
+   the capi read cut deleted its C ABI twin) now cover ids 5-7 through `eligible_values`, with no edit to them.
 7. **Unchanged.** `gate_digests.in` and the console benchmark workload counts unchanged; the
    descriptor and `GATE_SPECS` agree; allocations during a block that applies all three records are 0
    (`bench_support::alloc` thread counters).

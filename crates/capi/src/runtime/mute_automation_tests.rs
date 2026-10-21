@@ -1,8 +1,6 @@
 //! #1651 T5 on the C ABI: stored mute automation (builtin row 6) through the exported entries
 //! (`miso_engine_v1_submit_command`, the source submit, the session seek and the render, through
-//! `ffi`'s test wrappers). `hosts/host-web/tests/stored_mute_automation.rs` runs the same script
-//! on the browser host; the bank widths (Simd8, Simd4 and the scalar oracle) are `host-core`'s
-//! `stored_mute_automation.rs`.
+//! `ffi`'s test wrappers).
 //!
 //! The session: tracks `t` and `u`, each on its own source and routed to the output, with no
 //! console, no insert and no send; VCA `v` holds `t`. `t`'s mute is driven by a step curve:
@@ -10,9 +8,20 @@
 //! length is `mute_ms` 10, `M = 480` at 48 kHz. Every check compares the output with plans
 //! prepared with `t` statically unmuted and muted, fed the same PCM.
 //!
-//! - Gate 1 (exact samples), with a seek case.
+//! This file tests two things on the C ABI:
 //! - Gate 3 (composition): solo, a VCA mute and a hand mute (OQ1 = C) compose with the curve.
+//!   `solo_vca_and_hand_mutes_compose_with_the_curve` is the only test that checks the solo and
+//!   VCA mute terms composing with a stored curve against a static-plan oracle; host-core covers
+//!   them only in pieces (the hand mute in
+//!   `a_hand_mute_on_an_automated_lane_composes_with_the_curve`). The host-web twin was cut, so
+//!   this test is also the C ABI's parity row for the composed stored mute.
 //! - Root ruling R18-2: the control list marks a `mute` row an entry drives `automated`.
+//!
+//! The owner tests of gate 1 are `crates/host-core/tests/stored_mute_automation.rs`'s
+//! `a_mute_step_mutes_the_lane_at_its_exact_sample_over_the_mute_length` (exact samples) and
+//! `a_seek_that_leaves_the_mute_unchanged_lets_the_unmute_ramp_finish` (a seek into a muted span),
+//! on every bank width and the scalar oracle. `hosts/host-web/tests/control_parity.rs`'s
+//! `a_composed_stored_mute_renders_alike_on_both_hosts` compares the two hosts.
 
 use core::ops::Range;
 
@@ -179,9 +188,8 @@ impl Leg for CAbi {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The script. `crates/capi/src/runtime/mute_automation_tests.rs` and
-// `hosts/host-web/tests/stored_mute_automation.rs` run this same script, each on its own host
-// (`Host`); keep the two copies equal.
+// The script: the session, the curve and the oracle checks that the tests below run on the C ABI
+// host (`Host`).
 // ---------------------------------------------------------------------------------------------
 
 const RATE: u32 = 48_000;
@@ -501,79 +509,6 @@ fn run<L: Leg>(
             &open.step(),
             &closed.step(),
         );
-    }
-}
-
-/// #1651 gate 1. `t`'s curve closes at 1,000 and opens at 2,500 (neither a multiple of the
-/// grid's 64). Each ramp starts at its step sample: every earlier sample equals the static plan
-/// the lane leaves and the step sample differs from it; the ramp is still moving at `step + M - 2`
-/// (the session mute length, not a shorter one); from the first block boundary at or after the
-/// ramp's end (`step + M`) every sample equals the static plan of the new state, up to the next
-/// step. Quanta 128, 100 and 37.
-///
-/// Test value: red if a mute step snaps to a block or to the grid, ramps over another row's length
-/// or over none, or ramps where the static plan does not (a muted lane left at a residue or at a
-/// zero of another sign).
-#[test]
-fn a_mute_curve_mutes_at_its_exact_samples() {
-    let closed = 1_000..2_500;
-    for quantum in [128_u32, 100, 37] {
-        let q = u64::from(quantum);
-        let label = format!("quantum {quantum}");
-        let mut leg = Host::boot(&model(
-            quantum,
-            Some(curve(ParameterChannel::Both, closed.clone())),
-            false,
-        ));
-        let expect = Expect {
-            equal: vec![
-                (0..closed.start, Static::Open),
-                (boundary(closed.start + M, q)..closed.end, Static::Closed),
-                (boundary(closed.end + M, q)..END, Static::Open),
-            ],
-            differ: vec![
-                (closed.start, Static::Open),
-                (closed.start + M - 2, Static::Closed),
-                (closed.end, Static::Closed),
-                (closed.end + M - 2, Static::Open),
-            ],
-        };
-        run(&label, &mut leg, &expect, |_, _| None);
-    }
-}
-
-/// #1651 gate 1, the seek case. Before the fifth block (render sample `R`) a plain session seek
-/// lands on timeline 1,600, inside the curve's muted span: from `R` on the lane is muted exactly
-/// (`n = 0`: every sample equals the muted static plan, seeked alike), and the curve's opening at
-/// timeline 2,500 ramps from render sample `R + 900`. Quanta 128, 100 and 37.
-///
-/// Test value: red if a seek into a muted span ramps instead of setting the stage, keeps the state
-/// from before the seek, or places the curve's next step off the new timeline.
-#[test]
-fn a_seek_into_a_muted_span_mutes_exactly_from_the_seek() {
-    let closed = 1_000..2_500;
-    let target = 1_600;
-    for quantum in [128_u32, 100, 37] {
-        let q = u64::from(quantum);
-        let seek_at = 4 * q;
-        let opens_at = seek_at + (closed.end - target);
-        let label = format!("quantum {quantum}, seek");
-        let mut leg = Host::boot(&model(
-            quantum,
-            Some(curve(ParameterChannel::Both, closed.clone())),
-            false,
-        ));
-        let expect = Expect {
-            equal: vec![
-                (0..seek_at, Static::Open),
-                (seek_at..opens_at, Static::Closed),
-                (boundary(opens_at + M, q)..END, Static::Open),
-            ],
-            differ: vec![(opens_at, Static::Closed), (opens_at + M - 2, Static::Open)],
-        };
-        run(&label, &mut leg, &expect, |at, _| {
-            (at == seek_at).then_some(target)
-        });
     }
 }
 

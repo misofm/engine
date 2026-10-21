@@ -1073,7 +1073,6 @@ under `crates/engine/src/realtime/`; no row class or table changed (the SDK is u
   a_source_mute_added_while_a_move_is_in_flight_fades_its_column_at_once}` and the four VCA
   gates; host-core `removing_a_source_mute_curve_of_a_following_send_lands_on_the_fresh_plan`
   (three widths), `a_following_send_binds_its_lanes_and_the_commit_refuses_others`; capi
-  `removing_a_source_mute_curve_of_a_following_send_lands_on_the_fresh_plan_on_the_c_abi`,
   `an_unrelated_rebuild_across_a_live_send_move_on_a_following_send_is_flagged_on_the_c_abi`
   (also twin bits), `a_send_move_inside_a_rebuild_is_flagged_on_the_c_abi`,
   `a_second_rebuild_inside_a_flagged_rebuilds_landing_is_flagged_on_the_c_abi`; control_parity
