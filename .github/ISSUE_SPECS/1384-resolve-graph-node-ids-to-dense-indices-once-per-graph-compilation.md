@@ -156,8 +156,21 @@ Built on `main` at `82053706c` (#1285 merged).
   `ac23bd04...888430cf`, `console-sixty-four-track-sends.json` `58c54351...81d5f883` (the same digests
   #1330 recorded).
 - **Gate 5 (descriptive).** Modules prepared and preflighted: base `06bb9bc5...` at `82053706c`,
-  branch at the final commit (the module is re-prepared at each new HEAD). The two `rebuild-run`s run back to back under one exclusive
-  lock; records `artifacts/steps/d15-15-node-ids-before/` and `-after/`. Results: pending.
+  branch `31b970c3...` at `809805745`. `rebuild-run` once each, back to back under one exclusive
+  lock, base then branch, one warmup and two measured rounds, no retry; both validators accepted.
+  Both ran with `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` (1-minute load 0.64 and 1.01, above the
+  runner's 0.50 ceiling; 32 cores; root read 0.73 just before), pinned to CPU 31. Records:
+  `artifacts/steps/d15-15-node-ids-before/` and `artifacts/steps/d15-15-node-ids-after/`. Boot p50,
+  mean of the two rounds:
+
+  | document | before ms | after ms | change |
+  |---|---|---|---|
+  | nine_track_eq | 3.536 | 3.181 | -10.0 % |
+  | sixty_four_track_console | 29.074 | 25.337 | -12.9 % |
+  | sixty_four_track_app_shape | 28.315 | 24.526 | -13.4 % |
+  | sixty_four_track_console_sends | 46.420 | 40.054 | -13.7 % |
+
+  Descriptive; one invocation per side, so run-to-run noise is not separated.
 - **Gate 6 (profile).** Blocked on this machine: `perf record` is refused
   (`kernel.perf_event_paranoid` = 4) and no valgrind is installed. No workaround was tried; no
   compare share is recorded. When it is measured, read it with #1749: compares other than D1's
