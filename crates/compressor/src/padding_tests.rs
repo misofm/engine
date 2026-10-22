@@ -599,6 +599,106 @@ fn padded_differential<L: Lane>(seed: u64, reach: &mut Reach) {
     }
 }
 
+/// Tone blocks before and after the staggered-rest silence.
+const STAGGER_TONE_BLOCKS: usize = 4;
+/// Long enough for the slowest compressing lane (8 ms release at 48 kHz) to release to an exact
+/// `+0.0` envelope, so the bank-wide claim is earned inside the silence.
+const STAGGER_SILENT_BLOCKS: usize = 320;
+
+/// A bank whose lanes come to rest on **different** blocks of one whole-bank silence (issue
+/// #1745).
+///
+/// `W - 1` members and one padded lane. Even members sit under their threshold, so their envelope
+/// is `+0.0` from the first silent block; odd members compress a ~`-6` dBFS tone hard and release
+/// at 5 to 8 ms, so each releases to an exact `+0.0` on its own block, well inside the silence.
+/// Then the tone returns. Until the last lane rests, every silent block is `quiet` with some lanes
+/// at rest and others still releasing: the shape in which a claim earned on *some* lanes at rest
+/// rather than *every* lane freezes the releasing lanes' envelope, and the returning tone shows it.
+fn staggered_rest_case(width: usize, mono: bool) -> Case {
+    let members = width - 1;
+    let values = (0..members)
+        .map(|member| {
+            let (threshold, knee, release) = if member % 2 == 0 {
+                (0.0, 0.0, 50.0)
+            } else {
+                (-40.0, 6.0, 5.0 + member as f32 / width as f32 * 3.0)
+            };
+            values_from([
+                (threshold, threshold),
+                (8.0, 8.0),
+                (knee, knee),
+                (1.0, 1.0),
+                (release, release),
+                (0.0, 0.0),
+                (1.0, 1.0),
+            ])
+        })
+        .collect();
+    let mut draw = Draw::new(0x1745_0001);
+    let frames = QUANTUM as usize;
+    let blocks = (0..2 * STAGGER_TONE_BLOCKS + STAGGER_SILENT_BLOCKS)
+        .map(|block| {
+            let silent =
+                (STAGGER_TONE_BLOCKS..STAGGER_TONE_BLOCKS + STAGGER_SILENT_BLOCKS).contains(&block);
+            let inputs = (0..members)
+                .map(|_| {
+                    let mut tone = || -> Vec<f32> {
+                        (0..frames)
+                            .map(|_| if silent { 0.0 } else { draw.noise(0.5) })
+                            .collect()
+                    };
+                    let left = tone();
+                    let right = if mono { left.clone() } else { tone() };
+                    (left, right)
+                })
+                .collect();
+            Block {
+                frames,
+                inputs,
+                spans: vec![Vec::new(); members],
+                stray: Vec::new(),
+            }
+        })
+        .collect();
+    Case {
+        rate: 48_000,
+        link: LinkMode::DualMono,
+        mono,
+        members: values,
+        mask: members_first(members, width),
+        blocks,
+    }
+}
+
+/// The staggered-rest case at one width, dual and collapsed: the banked render, fast path allowed,
+/// matches every member's per-node render (output words, reports and final state payload), and
+/// the fast path is reached once the last lane rests, inside the silence.
+fn staggered_rest<L: Lane>() {
+    for mono in [false, true] {
+        let case = staggered_rest_case(L::WIDTH, mono);
+        let oracle = per_node(&case);
+        let admitted = SILENT_ADMISSIONS.with(core::cell::Cell::get);
+        let banked = banked::<L>(&case, 0);
+        let admitted = SILENT_ADMISSIONS.with(core::cell::Cell::get) - admitted;
+        println!(
+            "staggered rest W{} mono {mono}: {admitted} silent admissions",
+            L::WIDTH
+        );
+        assert_same(
+            &format!("staggered rest W{} mono {mono}", L::WIDTH),
+            &oracle,
+            &banked,
+            &case,
+        );
+        assert!(
+            admitted > 0 && admitted < STAGGER_SILENT_BLOCKS - 100,
+            "staggered rest W{} mono {mono}: {admitted} silent admissions, so the lanes did not \
+             come to rest on different blocks inside the silence",
+            L::WIDTH
+        );
+    }
+}
+
 /// Gates 1 and 2: a padded bank's members render their per-node bits, at `Simd4` and `Simd8`.
 ///
 /// Seeds reach every active count `1..W` under every link mode at both widths, every launch rate,
@@ -614,7 +714,9 @@ fn padded_differential<L: Lane>(seed: u64, reach: &mut Reach) {
 /// * a padded lane's failure reported, or a span addressed to it counted;
 /// * a padded lane that does not stay at `+0.0` out, or a padded lane counted as a track;
 /// * active bits that depend on the clone source (every source is rendered);
-/// * a link that reads another lane (every link mode, heterogeneous neighbours).
+/// * a link that reads another lane (every link mode, heterogeneous neighbours);
+/// * a bank-wide silent claim earned on some lanes at rest rather than every lane, on the dual or
+///   the collapsed body ([`staggered_rest_case`]: lanes rest on different blocks of one silence).
 #[test]
 fn a_padded_bank_renders_each_member_as_its_own_instance() {
     let mut reach = Reach::default();
@@ -643,6 +745,7 @@ fn a_padded_bank_renders_each_member_as_its_own_instance() {
         );
         assert!(reach.collapsed > 0, "no case rendered collapsed");
     }
+    lane::each_vector_lane!(|L| staggered_rest::<L>());
 }
 
 /// Gate 3 at one width: with every member silent, a padded bank takes the silent fast path on
