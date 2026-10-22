@@ -149,4 +149,14 @@ Built on `main` at `82053706c` (#1285 merged).
     rather than by order.
 - **Gates 1-3.** Gate 1: 291 passed, 0 failed, 2 ignored. Gate 2 (test-debug-a line): 2,400 passed, 0 failed, 12 ignored. Gate 3: fmt, clippy
   (`--all-features -D warnings`), `check-graph-policy.sh` and `check-workspace-policy.sh` pass.
-- **Gates 4-6.** Coordinator records.
+- **Gate 4 (no bit moved; PR evidence).** `sdk_render_oracle 64 < F`, base `82053706c` and branch
+  `8bdfe418f`, identical digests: `parametric-eq-nine-track.json` `2938bb78...f1f5c8`,
+  `console-sixty-four-track.json` `24607288...accffce8`, `console-sixty-four-track-app.json`
+  `ac23bd04...888430cf`, `console-sixty-four-track-sends.json` `58c54351...81d5f883` (the same digests
+  #1330 recorded).
+- **Gate 5 (descriptive).** Modules prepared and preflighted: base `06bb9bc5...` at `82053706c`,
+  branch `0691f076...` at `8bdfe418f`. The two `rebuild-run`s run back to back under one exclusive
+  lock; records `artifacts/steps/d15-15-node-ids-before/` and `-after/`. Results: pending.
+- **Gate 6 (profile).** Blocked on this machine: `perf record` is refused
+  (`kernel.perf_event_paranoid` = 4) and no valgrind is installed. No workaround was tried; no
+  compare share is recorded.
