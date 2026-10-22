@@ -503,6 +503,12 @@ fn one_frame<L: Lane>(
 
 /// Renders one dual-mono block. The bounded ramp-prefix/idle-body split remains, but both bodies
 /// use the same direct causal frame law.
+///
+/// `#[inline(never)]`: the shipped wasm's kernel roster (`check-web-audioworklet-callgraph.py`,
+/// `KERNEL_ROSTER`) requires this kernel as its own arithmetic-carrying function, and the
+/// inliner alone does not guarantee it: it folded [`process_block_mono`] into its caller once that
+/// caller shrank (#1745 attempt 3).
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_block<L: Lane>(
     left: &mut [f32],
@@ -1392,6 +1398,11 @@ fn ramping_frames_mono<L: Lane, const DUAL_MONO: bool, const WET: bool>(
 
 /// Renders the collapsed one-plane bank path. The detector is evaluated from the left plane twice
 /// to retain the exact linked Average arithmetic used by the dual path.
+///
+/// `#[inline(never)]`: the shipped wasm's kernel roster (`check-web-audioworklet-callgraph.py`,
+/// `KERNEL_ROSTER`) requires this kernel as its own arithmetic-carrying function. Left to the
+/// inliner, it was folded into `Instance::render_mono` once that caller shrank (#1745 attempt 3).
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_block_mono<L: Lane>(
     left: &mut [f32],

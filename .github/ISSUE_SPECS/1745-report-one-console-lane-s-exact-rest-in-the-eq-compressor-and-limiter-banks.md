@@ -135,3 +135,14 @@ without #1694.
 - Gates: the six packages' tests (five above plus conformance) 449 passed, 0 failed, 5 ignored
   (as before); `cargo fmt --all --check`, workspace clippy and `realtime-policy` clean.
 - Sol attempt 2 verdict: PASS (a7e294ca6). The verifier re-ran the `!= 0` mutants at the limiter's two sites and the compressor's two sites (each red), and a limiter base-vs-branch digest over 5 new seeds on both bodies (10/10 equal, so removing the output leg moved no bit).
+
+## Evidence (attempt 3, 2026-10-22)
+
+- CI (PR #1757, merged head 152238299) failed the wasm kernel roster: `compressor f32x4
+  collapsed` matched 0 kernels. Cause: attempt 1 removed the before/after state snapshot from
+  `Instance::render_mono`, the caller shrank, and the inliner folded `kernel::process_block_mono`
+  into it. Fix: `#[inline(never)]` on `kernel::process_block_mono` and on `kernel::process_block`
+  (same roster requirement), no arithmetic change. Local `build-web-audioworklet.sh` plus the
+  gate: compressor dual `vector=949 scalar=0`, collapsed `vector=524 scalar=0`, identical to main
+  c8520f2f8; `check-web-audioworklet.sh`, the V8 spill gate and `check-browser-expected-resources.py`
+  (native/simd128 digest parity) pass.
