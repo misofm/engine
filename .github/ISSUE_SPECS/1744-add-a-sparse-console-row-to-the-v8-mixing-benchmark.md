@@ -53,7 +53,16 @@ None.
   exact `+0.0` on both planes every block, at the tone source's frame. No strip, fader, mute, route
   or parameter changes; the harness asserts that the derived document, its odd tracks bound back
   and the second source dropped, deep-equals the standing one. The cost the row adds over the
-  standing console is one more source ring and one more submit per block, outside the clock.
+  standing console is one more source per block: its submit is outside the clock, but its
+  consumer step (`begin_block`: one ring pop and recycle, no PCM copy) is inside the clock. That
+  constant counts against the sparse row, and the native row (fed without rings) does not have it.
+- **For #1107 (W=4 reading).** Read the gain as sparse minus standing, with that constant included,
+  and with the standing V8 difference from native (every V8 document feeds one tone phase; the
+  native row gives each track its own phase). The harness writes exact `+0.0`; nothing checks the
+  sign, so a feed change that wrote `-0.0` would hide #1107's skip without moving a digest.
+- **Sol attempt 1 verdict: PASS.** The verifier re-ran the four harness mutants and the two new
+  validator cases (each red on its revert); the three existing documents' preflight digests are
+  unchanged against main's harness.
 - **Gate 2 without an idle row.** The V8 harness has no idle row. In preflight and in the run the
   sparse row is asserted audible (some output word nonzero, so not silence, which is what the
   native idle row renders) and distinct from every other document, the standing console included.

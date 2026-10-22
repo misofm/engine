@@ -705,7 +705,10 @@ assert.deepEqual((table.documents ?? []).map((doc) => doc.workload_kind), TABLE_
 // second source of the same shape, which the harness feeds exact +0.0 every block (`feed`). That
 // binding is the only difference from the standing document, and it is asserted: the derived
 // document, its odd tracks bound back and its second source dropped, is the standing one. No strip,
-// fader, mute, route or effect parameter changes.
+// fader, mute, route or effect parameter changes. The second source costs one more source
+// consumer step per render inside the clock (its `begin_block`: one ring pop and recycle, no PCM
+// copy), a constant per block that the native row, fed without rings, does not have; it counts
+// against the sparse row. Its submit is outside the clock.
 const SILENT_SOURCE_ID = "fixture-source-silent";
 function sparseDocument(standing) {
   const base = standing.fixture.sources[0];
