@@ -49,7 +49,9 @@ use effect_contract::{
     ResponseSnapshotSummary, SmoothingRule, StatePayloadError, StatePayloadInput,
     StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
-use effect_runtime::bank::{BLOCK_LIMIT, block_is_positive_zero, check_block, nonfinite_lane_mask};
+use effect_runtime::bank::{
+    BLOCK_LIMIT, block_is_positive_zero, check_block, nonfinite_lane_mask, positive_zero_lanes,
+};
 use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as domain_valid,
 };
@@ -69,6 +71,8 @@ mod control;
 #[cfg(test)]
 mod randomized_restores;
 mod response;
+#[cfg(test)]
+mod rest_tests;
 
 pub use response::{
     EqResponseConfiguration, EqResponseError, EqResponseMode, EqResponseOutput, EqResponseRequest,
@@ -1774,12 +1778,89 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             .all(|section| section.iter().all(|remaining| *remaining == 0))
     }
 
-    /// The raw bit patterns of every integrator word, for an exact before/after comparison.
+    /// The lane mask of this channel's exact rest (issue #1745): bit `l` is set when one block of
+    /// exact `+0.0` input leaves every state word of lane `l` bit-identical and writes exact
+    /// `+0.0` on every frame of the lane.
     ///
-    /// Bits rather than floats because the comparison has to distinguish `+0.0` from `-0.0`: an
-    /// integrator that settles at `-0.0` is still settled, but a float compare would also call a
-    /// pair that moved between the two zeros "unchanged", which is exactly the bit the fast path
-    /// promises not to move.
+    /// # The words it pins, and to what
+    ///
+    /// Per section `s`, on lane `l`:
+    ///
+    /// | word | pinned to | why |
+    /// |---|---|---|
+    /// | `remaining[s][l]` | `0` | a ramp in flight moves `coef` within the block. |
+    /// | `state.ic1`, `state.ic2` | `+0.0` bits | the integrators, the cascade's cross-frame state. |
+    /// | `step` (six words) | `+0.0` bits | a neighbour's ramp runs this lane through the ramped kernel, which adds `step` to `coef` every frame; `+0.0` added to a designed word (never `-0.0`, [`validate_rounded_svf`]) is the same bits. Every write site leaves a settled lane `+0.0` there and a restore refuses anything else, so this is a stricter sufficient condition, not a new restriction. |
+    /// | `c1`, `a2`, `a3` | finite (`w * +0.0` is a zero) | the recurrence's products with `+0.0` are signed zeros only for finite words. |
+    /// | the zero response `m2*0 + (m1*0 + m0*0)` | `+0.0` bits | the output mix on `v0 = v1 = v2 = +0.0`, in the kernel's own operation order. |
+    ///
+    /// # Why that is the claim
+    ///
+    /// From `ic1 = ic2 = +0.0` and section input `v0 = +0.0` ([`lane::kernels::svf_step_when`]):
+    /// `v3 = +0.0`; `d1` and `d2` are sums of products of a finite word and `+0.0`, signed zeros
+    /// of either sign; `v1 = ic1 + d1`, `v2 = ic2 + d2` and the new integrators `ic + (d + d)` each
+    /// add a signed zero to `+0.0`, which is `+0.0` under round-to-nearest; `flush` and
+    /// `flush_pair` keep `+0.0` whatever the rest threshold, so the silence counters' arming does
+    /// not matter. The section output is then the zero response above. When it is `+0.0` the next
+    /// section's input is `+0.0` and the induction runs down the cascade; an elided identity
+    /// section and a dry-selected lane pass their `+0.0` input through. So every frame of the
+    /// block writes `+0.0` on the lane and leaves its integrators `+0.0`, and with no ramp and a
+    /// `+0.0` step no coefficient word moves. A `+0.0` output never fails the §4.4 bound, so the D7
+    /// recovery cannot touch the lane.
+    ///
+    /// # What it leaves out
+    ///
+    /// * `silence` -- a **clock**: a block of `+0.0` input advances it by the block's length
+    ///   ([`silence_advance`]), whatever the signal was; the bank-wide fast path advances it.
+    /// * `targets` -- the control-plane band table; no render writes it.
+    /// * `coef`, `target` -- no render moves them on a lane with no ramp and a `+0.0` step (above).
+    /// * `identity`, `dry` -- derived from `coef` and `remaining`, and refreshed only where those
+    ///   change; `identity` is a whole-channel flag, not a lane word.
+    ///
+    /// The list covers the per-track state payload ([`snapshot_track`](Self::snapshot_track)),
+    /// which carries every word a continuation reads: integrators, coefficients, increments, the
+    /// countdown, the targets, the cut enables and the silence counter.
+    ///
+    /// Vector folds: one unsigned-maximum fold of the words pinned to `+0.0`, then one per-lane
+    /// compare; the countdown is a `u32` array and is folded per lane.
+    fn rest_lanes(&self) -> u32 {
+        let zero = L::zero();
+        let mut held = zero;
+        for section in &self.sections {
+            let c = &section.coef;
+            let step = &section.step;
+            let response = c.m2.fma(zero, c.m1.fma(zero, c.m0.mul(zero)));
+            held = held
+                .max_u32(section.state.ic1)
+                .max_u32(section.state.ic2)
+                .max_u32(response)
+                .max_u32(c.c1.mul(zero).abs())
+                .max_u32(c.a2.mul(zero).abs())
+                .max_u32(c.a3.mul(zero).abs())
+                .max_u32(step.c1)
+                .max_u32(step.a2)
+                .max_u32(step.a3)
+                .max_u32(step.m0)
+                .max_u32(step.m1)
+                .max_u32(step.m2);
+        }
+        let mut mask = positive_zero_lanes::<L>(held);
+        for section in &self.remaining {
+            for (lane, remaining) in section.iter().enumerate() {
+                if *remaining != 0 {
+                    mask &= !(1 << lane);
+                }
+            }
+        }
+        mask
+    }
+
+    /// The raw bit patterns of every integrator word, for an exact before/after comparison in the
+    /// crate's tests.
+    ///
+    /// Bits rather than floats because the comparison has to distinguish `+0.0` from `-0.0`: a
+    /// float compare would call a pair that moved between the two zeros "unchanged".
+    #[cfg(test)]
     fn state_bits(&self, out: &mut [u32; EQ_SECTION_COUNT * 2 * MAX_LANES]) {
         for (index, section) in self.sections.iter().enumerate() {
             let base = index * 2 * L::WIDTH;
@@ -3016,22 +3097,21 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     /// control plane reads it to refuse a prepared target or a state restore addressed to a padded
     /// lane, the two writes that could move it off `+0.0` at rest.
     active: [bool; W],
-    /// Issue #163 phase 4 item 1: the previous block proved this bank is at a silent fixed point.
+    /// Issue #163 phase 4 item 1: every lane of this bank, padded lanes included, is at its exact
+    /// rest ([`lanes_at_rest`](PreparedNativeEffectBank::lanes_at_rest), issue #1745 D2).
     ///
-    /// Set only by [`render`](Self::render), and only after it has *observed* -- not assumed --
-    /// all three facts on a block it actually ran: the input was exactly `+0.0` everywhere, the
-    /// output it produced was exactly `+0.0` everywhere, and every integrator word came out of the
-    /// block bit-identical to the word it went in with. Cleared by anything that can move a
-    /// coefficient or a state word out from under that observation.
+    /// Set only by [`render`](Self::render) and [`render_mono`](Self::render_mono), at the end of
+    /// a block whose input was exactly `+0.0` with no ramp in flight (`quiet`), and only when the
+    /// rest mask after that block has every lane set: both channels' masks on the dual body, the
+    /// left channel's on the collapsed one (its right channel is the left one). Cleared by
+    /// anything that can move a coefficient or a state word out from under it (a target, a reset,
+    /// a restore, a block that carries automation).
     ///
-    /// The induction it licenses: a bank kernel is a pure function of (input, state,
-    /// coefficients). If those three are bit-identical to a block that provably produced all
-    /// `+0.0` output and left its state unmoved, the next block produces the same output and
-    /// leaves the state unmoved again -- so writing nothing is bit-identical to running it. This
-    /// is why the flag is *earned* by observation rather than derived from a theory about where an
-    /// SVF settles: the fixed point is not always `+0.0` (a negative coefficient drives an
-    /// integrator to `-0.0` and it stays there), and a theory that assumed it was would either
-    /// engage wrongly or never engage at all.
+    /// The induction it licenses: from a state at rest, a block of `+0.0` input writes `+0.0` and
+    /// leaves every state word bit-identical but the silence clocks
+    /// ([`Channel::rest_lanes`] states the proof), and the state is then at rest again. So on the
+    /// next `quiet` block writing nothing and advancing the clocks is bit-identical to running the
+    /// kernel.
     silent_fixed_point: bool,
     /// The two channels' rest planes ([`silence_block`], issue #1328 amendment A9): one threshold
     /// word per lane per frame of the prepared quantum, allocated once at preparation. Written from
@@ -3047,13 +3127,6 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     /// issue #1328). A block on which no lane needs the joint rule ([`Channel::arms`]) writes and
     /// reads neither: it runs the cascades' unarmed form ([`RestThresholds`]).
     rest: [Box<[f32]>; 2],
-}
-
-/// `true` when the silence counter `run` of every lane has reached `N_SILENCE - 1`: on an
-/// all-zero block every frame's rest threshold is then `REST_EPS`, on every lane, now and on every
-/// later all-zero block (the run only grows), which the silent fixed point's induction needs.
-fn silence_armed_throughout<L: Lane>(run: L, armed_after: L) -> bool {
-    !L::mask_any(L::mask_not(run.ge(armed_after.sub(L::splat(1.0)))))
 }
 
 impl<L: Lane, const W: usize> Channel<L, W> {
@@ -3078,7 +3151,17 @@ fn silence_window<L: Lane>(sample_rate: SampleRateHz) -> L {
     L::splat(lane::silence_frames(sample_rate.0) as f32)
 }
 
+/// The mask with every lane of a `W`-lane bank set.
+const fn all_lanes<const W: usize>() -> u32 {
+    if W >= 32 { u32::MAX } else { (1 << W) - 1 }
+}
+
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
+    /// The rest mask of both channels ([`Channel::rest_lanes`], issue #1745): `left & right`.
+    fn lanes_at_rest(&self) -> u32 {
+        self.left.rest_lanes() & self.right.rest_lanes()
+    }
+
     /// The channel's sample rate, as the design functions take it.
     fn sample_rate(&self) -> SampleRateHz {
         SampleRateHz(self.sample_rate)
@@ -3161,10 +3244,9 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         let mut failures = [[false; MAX_LANES]; 2];
         let words = frames * W;
         // Issue #163 phase 4 item 1. `quiet` is the whole precondition, evaluated whole-bank:
-        // no ramp in flight on either channel (so the coefficients are the same words the
-        // observed block used) and both input planes exactly `+0.0`. The block test short-circuits on
-        // its first chunk, so a console rendering music pays 32 words per channel for this and
-        // nothing else.
+        // no ramp in flight on either channel and both input planes exactly `+0.0`. The block test
+        // short-circuits on its first chunk, so a console rendering music pays 32 words per
+        // channel for this and nothing else.
         // #163 phase 3 reuses this leg. "Stationary" -- no lane of either channel has a ramp in
         // flight -- is exactly the condition under which every section runs `svf_block` with fixed
         // coefficients over the whole block, which is the shape the interleaved cascade replaces.
@@ -3174,26 +3256,16 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             && block_is_positive_zero(&right[..words]);
         if quiet && self.silent_fixed_point {
             // The buffers already hold exactly `+0.0`, which is exactly what the six sections
-            // would have written; the integrators are at a fixed point the previous block
-            // measured. Writing nothing is bit-identical, and an all-`+0.0` block is trivially
-            // inside the §4.4 bound, so no lane failed. The silence counters advance exactly as
+            // would have written; every lane is at rest (`Channel::rest_lanes`), so the kernel
+            // would leave every state word but the clocks where it is. Writing nothing is
+            // bit-identical, and an all-`+0.0` block is trivially inside the §4.4 bound, so no
+            // lane failed. The silence counters advance exactly as
             // the skipped frames would have advanced them (issue #1328, amendment A9).
             silence_advance(&mut self.left.silence, frames);
             silence_advance(&mut self.right.silence, frames);
             return failures;
         }
-        // The fixed point's induction needs every frame of the observed block, and of every later
-        // all-zero block, to carry the same rest thresholds: so it is earned only on a block that
-        // starts with every lane's joint rule already armed (issue #1328, amendment A9).
         let armed_after = silence_window::<L>(self.sample_rate());
-        let armed = silence_armed_throughout(self.left.silence, armed_after)
-            && silence_armed_throughout(self.right.silence, armed_after);
-        let mut before_left = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
-        let mut before_right = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
-        if quiet {
-            self.left.state_bits(&mut before_left);
-            self.right.state_bits(&mut before_right);
-        }
         // Issue #1328: on a block where some lane of either channel needs the joint rule
         // ([`Channel::arms`]), both channels' rest planes come from the EQ's input before any
         // section runs, and the cascade reads them. Every other block -- every block of live audio
@@ -3257,20 +3329,9 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 *failed = mask & (1 << lane) != 0;
             }
         }
-        // Earn (or lose) the flag from what this block actually did. All three legs are required:
-        // the input was `+0.0` and the coefficients were still (`quiet`), the integrators came out
-        // exactly as they went in, and the output the sections wrote was `+0.0` to the bit. Only
-        // then is "write nothing" a faithful replay of "run the kernel".
-        self.silent_fixed_point = quiet && armed && {
-            let mut after_left = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
-            let mut after_right = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
-            self.left.state_bits(&mut after_left);
-            self.right.state_bits(&mut after_right);
-            after_left == before_left
-                && after_right == before_right
-                && block_is_positive_zero(&left[..words])
-                && block_is_positive_zero(&right[..words])
-        };
+        // Earn (or lose) the claim (issue #1745 D2): a `quiet` block, after which every lane of
+        // both channels, padded lanes included, is at rest.
+        self.silent_fixed_point = quiet && self.lanes_at_rest() == all_lanes::<W>();
         failures
     }
 
@@ -3292,11 +3353,6 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             return failures;
         }
         let armed_after = silence_window::<L>(self.sample_rate());
-        let armed = silence_armed_throughout(self.left.silence, armed_after);
-        let mut before_left = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
-        if quiet {
-            self.left.state_bits(&mut before_left);
-        }
         // As in `render`: the armed form only on a block where some lane needs the joint rule.
         let within = if self.left.arms(frames, armed_after) {
             let plane = &mut self.rest[0][..words];
@@ -3315,11 +3371,9 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             }
             failures[1] = failures[0];
         }
-        self.silent_fixed_point = quiet && armed && {
-            let mut after_left = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
-            self.left.state_bits(&mut after_left);
-            after_left == before_left && block_is_positive_zero(&left[..words])
-        };
+        // The collapsed body's claim reads the left channel alone: the right one is frozen at the
+        // collapse, and the counterfactual right channel is the left one.
+        self.silent_fixed_point = quiet && self.left.rest_lanes() == all_lanes::<W>();
         failures
     }
 
@@ -3891,6 +3945,13 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
 
     fn supports_mono_collapse(&self) -> bool {
         true
+    }
+
+    /// Both channels' [`Channel::rest_lanes`]. The clocks are the two silence counters; a
+    /// prepared bypass is not read (the predicate on state is sound with it too: a bypassed bank
+    /// moves no word and passes its `+0.0` input through).
+    fn lanes_at_rest(&self) -> u32 {
+        PreparedParametricEq::lanes_at_rest(self)
     }
 
     fn process_bank_mono(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
