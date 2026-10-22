@@ -17,13 +17,13 @@ use crate::canonical::{
 };
 use crate::estimate::{effect_control_resource, estimate_fits_platform, resource_estimate};
 use crate::ids::{
-    PreparedEffectIndex, add_main_edge, add_node, add_route_destination_edge,
+    NodeTable, PreparedEffectIndex, add_main_edge, add_node, add_route_destination_edge,
     add_route_source_edge, diag, effect_path, gid, into_effects, port, ports_for,
     prepared_effect_node, route_destination_node, route_source_node, route_values,
     sidechain_matches, stages, track_node,
 };
 use crate::pdc::timings;
-use crate::schedule::{buffer_assignments, cycle_primary_path, cycle_witnesses, topo};
+use crate::schedule::{Topo, buffer_assignments, cycle_primary_path, cycle_witnesses, topo};
 
 impl GraphCompiler {
     /// The canonical text, its SHA-256 and the Graphviz rendering, produced on demand.
@@ -213,8 +213,6 @@ impl GraphCompiler {
 
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
-        let mut node_latency = BTreeMap::new();
-        let mut node_tail = BTreeMap::new();
         let mut effect_ids = vec![None; effects.entries.len()];
         let mut route_transforms = Vec::new();
         for (index, strip) in strips.iter().enumerate() {
@@ -229,8 +227,6 @@ impl GraphCompiler {
                 };
                 add_node(
                     &mut nodes,
-                    &mut node_latency,
-                    &mut node_tail,
                     id,
                     LatencySamples(0),
                     tail,
@@ -260,8 +256,6 @@ impl GraphCompiler {
                     let metadata = effects.entries[index].metadata;
                     add_node(
                         &mut nodes,
-                        &mut node_latency,
-                        &mut node_tail,
                         node.clone(),
                         metadata.latency,
                         metadata.tail,
@@ -309,8 +303,6 @@ impl GraphCompiler {
             };
             add_node(
                 &mut nodes,
-                &mut node_latency,
-                &mut node_tail,
                 id,
                 LatencySamples(0),
                 TailSamples::Finite(0),
@@ -348,8 +340,6 @@ impl GraphCompiler {
             };
             add_node(
                 &mut nodes,
-                &mut node_latency,
-                &mut node_tail,
                 route_node.clone(),
                 LatencySamples(0),
                 TailSamples::Finite(0),
@@ -402,7 +392,10 @@ impl GraphCompiler {
         if nodes.len() as u64 > caps.maximum_nodes || edges.len() as u64 > caps.maximum_edges {
             diagnostics.push(diag("graph.resource.limit", "$.graph_compile_caps"));
         }
-        for cycle in cycle_witnesses(&nodes, &edges) {
+        // #1384 D1: node IDs ordered and edge ends resolved once. A duplicate ID or a dangling
+        // end leaves no table: no cycle is reported, and `topo` has no schedule.
+        let table = NodeTable::new(&nodes, &edges);
+        for cycle in table.as_ref().map(cycle_witnesses).unwrap_or_default() {
             diagnostics.push(GraphDiagnostic {
                 code: "graph.cycle",
                 path: cycle_primary_path(&cycle.0, &cycle.1),
@@ -413,10 +406,17 @@ impl GraphCompiler {
         if !diagnostics.is_empty() {
             return Err(failure(effects, diagnostics));
         }
-        let levels = topo(&nodes, &edges).expect("acyclic graph has schedule");
-        let schedule: Vec<_> = levels
+        let Topo {
+            levels,
+            schedule: dense_schedule,
+        } = table
+            .as_ref()
+            .and_then(topo)
+            .expect("acyclic graph has schedule");
+        let table = table.expect("a schedule has a node table");
+        let schedule: Vec<_> = dense_schedule
             .iter()
-            .flat_map(|level| level.nodes.iter().cloned())
+            .map(|&dense| table.id(dense).clone())
             .collect();
         if schedule.len() as u64 > caps.maximum_schedule_items
             || levels.len() as u64 > caps.maximum_dependency_levels
@@ -426,18 +426,11 @@ impl GraphCompiler {
                 vec![diag("graph.resource.limit", "$.graph_compile_caps")],
             ));
         }
-        let timing = match timings(
-            &schedule,
-            &edges,
-            &node_latency,
-            &node_tail,
-            input_floors,
-            &caps,
-        ) {
+        let timing = match timings(&table, &dense_schedule, input_floors, &caps) {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
         };
-        let buffers = buffer_assignments(&schedule, &edges);
+        let buffers = buffer_assignments(&table, &dense_schedule);
         let ports = ports_for(&nodes, &edges);
         // Reductions were only ever computed for the canonical text; `GraphCompiler::evidence`
         // recomputes them from the plan's spec when something asks (#99 F5).
@@ -514,8 +507,7 @@ impl GraphCompiler {
         let Some(mut estimate) = resource_estimate(
             session.quantum().0,
             session.resource_estimate().requested_runtime_bytes,
-            &nodes,
-            &edges,
+            &table,
             &schedule,
             &levels,
             &buffers,

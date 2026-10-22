@@ -23,7 +23,7 @@
 //! report does not**, which is what eval P2-3 pins.
 
 use super::*;
-use crate::ids::diag;
+use crate::ids::{NodeTable, diag};
 
 pub(crate) struct TimingResult {
     pub(crate) routes: Vec<RouteTiming>,
@@ -39,53 +39,66 @@ pub(crate) struct TimingResult {
     pub(crate) raised_arrivals: Vec<(GraphNodeId, LatencySamples)>,
 }
 
-/// Arrivals, compensation and tails for `schedule`.
+/// Arrivals, compensation and tails for `schedule`, which is dense indices of `table` (#1384 D2).
 ///
 /// `floors` holds a lower bound on a node's input arrival (#1285 D1): a node's `max` is the larger
 /// of its latest incoming arrival and its floor, and every incoming edge is compensated to that
 /// `max`. A floor that names no node of `schedule` is ignored. With no floors the result is the
-/// natural one.
-#[allow(clippy::too_many_arguments)]
+/// natural one. Each node's latency and tail are the ones its `GraphNode` declares.
 pub(crate) fn timings(
-    schedule: &[GraphNodeId],
-    edges: &[GraphEdge],
-    latencies: &BTreeMap<GraphNodeId, LatencySamples>,
-    tails: &BTreeMap<GraphNodeId, TailSamples>,
+    table: &NodeTable<'_>,
+    schedule: &[usize],
     floors: &BTreeMap<GraphNodeId, LatencySamples>,
     caps: &GraphCompileCaps,
 ) -> Result<TimingResult, GraphDiagnostic> {
-    let mut incoming_by_node: BTreeMap<&GraphNodeId, Vec<&GraphEdge>> =
-        schedule.iter().map(|node| (node, Vec::new())).collect();
-    for edge in edges {
-        incoming_by_node
-            .get_mut(&edge.destination.node)
-            .ok_or_else(|| diag("graph.internal.invariant", &edge.path))?
-            .push(edge);
+    let count = table.len();
+    let edges = table.edges();
+    let ends = table.ends();
+    let mut in_schedule = vec![false; count];
+    for &dense in schedule {
+        in_schedule[dense] = true;
     }
-    let mut arrivals = BTreeMap::<&GraphNodeId, u64>::new();
-    let mut extents = BTreeMap::<&GraphNodeId, TailSamples>::new();
+    let mut incoming_by_node = vec![Vec::<usize>::new(); count];
+    for (index, edge) in edges.iter().enumerate() {
+        let destination = ends[index].destination();
+        if !in_schedule[destination] {
+            return Err(diag("graph.internal.invariant", &edge.path));
+        }
+        incoming_by_node[destination].push(index);
+    }
+    let mut floor_of = vec![0_u64; count];
+    for (node, floor) in floors {
+        if let Some(dense) = table.dense_of(node)
+            && in_schedule[dense]
+        {
+            floor_of[dense] = floor.0;
+        }
+    }
+    let mut arrivals = vec![None::<u64>; count];
+    let mut extents = vec![None::<TailSamples>; count];
     let mut total_delay: u64 = 0;
     let mut delay_count: u64 = 0;
     let mut routes = Vec::new();
     let mut delays = Vec::new();
-    let mut input_arrivals = Vec::new();
-    let mut raised_arrivals = Vec::new();
-    for node in schedule {
+    let mut input_arrivals = Vec::<(usize, LatencySamples)>::new();
+    let mut raised_arrivals = Vec::<(usize, LatencySamples)>::new();
+    for &node in schedule {
         let incoming = &incoming_by_node[node];
         let latest = incoming
             .iter()
-            .filter_map(|edge| arrivals.get(&edge.source.node).copied())
+            .filter_map(|&edge| arrivals[ends[edge].source()])
             .max()
             .unwrap_or(0);
-        let max = latest.max(floors.get(node).map_or(0, |floor| floor.0));
+        let max = latest.max(floor_of[node]);
         if max > latest {
-            raised_arrivals.push((node.clone(), LatencySamples(latest)));
+            raised_arrivals.push((node, LatencySamples(latest)));
         }
         if max > 0 {
-            input_arrivals.push((node.clone(), LatencySamples(max)));
+            input_arrivals.push((node, LatencySamples(max)));
         }
-        for edge in incoming {
-            let source = arrivals.get(&edge.source.node).copied().unwrap_or(0);
+        for &index in incoming {
+            let edge = &edges[index];
+            let source = arrivals[ends[index].source()].unwrap_or(0);
             let delay = max
                 .checked_sub(source)
                 .ok_or_else(|| diag("graph.pdc.arithmetic_overflow", &edge.path))?;
@@ -117,33 +130,30 @@ pub(crate) fn timings(
                 });
             }
         }
-        let latency = latencies.get(node).copied().unwrap_or(LatencySamples(0)).0;
-        arrivals.insert(
-            node,
+        let declared = table.node(node);
+        let latency = declared.latency.0;
+        arrivals[node] = Some(
             max.checked_add(latency)
                 .ok_or_else(|| diag("graph.pdc.arithmetic_overflow", "$.graph"))?,
         );
         let mut extent = TailSamples::Finite(0);
-        for edge in incoming {
-            let source_arrival = arrivals.get(&edge.source.node).copied().unwrap_or(0);
+        for &index in incoming {
+            let edge = &edges[index];
+            let source = ends[index].source();
+            let source_arrival = arrivals[source].unwrap_or(0);
             let compensation_delay = max
                 .checked_sub(source_arrival)
                 .ok_or_else(|| diag("graph.pdc.arithmetic_overflow", &edge.path))?;
             extent = max_tail(
                 extent,
                 shifted_tail(
-                    *extents
-                        .get(&edge.source.node)
-                        .unwrap_or(&TailSamples::Finite(0)),
+                    extents[source].unwrap_or(TailSamples::Finite(0)),
                     compensation_delay,
                 )?,
             );
         }
         extent = shifted_tail(extent, latency)?;
-        extent = match (
-            extent,
-            tails.get(node).copied().unwrap_or(TailSamples::Finite(0)),
-        ) {
+        extent = match (extent, declared.tail) {
             (TailSamples::Infinite, _) | (_, TailSamples::Infinite) => TailSamples::Infinite,
             (TailSamples::Finite(value), TailSamples::Finite(declared_tail)) => value
                 .checked_add(declared_tail)
@@ -155,24 +165,27 @@ pub(crate) fn timings(
         {
             return Err(diag("graph.tail.limit", "$.graph"));
         }
-        extents.insert(node, extent);
+        extents[node] = Some(extent);
     }
     routes.sort_by(|a, b| a.route_id.cmp(&b.route_id));
     delays.sort_by(|left, right| left.edge_id.cmp(&right.edge_id));
-    input_arrivals.sort_by(|left, right| left.0.cmp(&right.0));
-    raised_arrivals.sort_by(|left, right| left.0.cmp(&right.0));
-    let output = schedule
+    // Dense order is ID order, so these are the ID sorts.
+    input_arrivals.sort_unstable_by_key(|entry| entry.0);
+    raised_arrivals.sort_unstable_by_key(|entry| entry.0);
+    let output = *schedule
         .iter()
-        .find(|node| matches!(node, GraphNodeId::Output { .. }))
+        .find(|&&node| matches!(table.id(node), GraphNodeId::Output { .. }))
         .ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?;
     let output_latency = LatencySamples(
-        *arrivals
-            .get(output)
-            .ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?,
+        arrivals[output].ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?,
     );
-    let output_tail = *extents
-        .get(output)
-        .ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?;
+    let output_tail = extents[output].ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?;
+    let named = |entries: Vec<(usize, LatencySamples)>| {
+        entries
+            .into_iter()
+            .map(|(dense, arrival)| (table.id(dense).clone(), arrival))
+            .collect()
+    };
     Ok(TimingResult {
         routes,
         delays,
@@ -180,8 +193,8 @@ pub(crate) fn timings(
         delay_count,
         output_latency,
         output_tail,
-        input_arrivals,
-        raised_arrivals,
+        input_arrivals: named(input_arrivals),
+        raised_arrivals: named(raised_arrivals),
     })
 }
 pub(crate) fn shifted_tail(value: TailSamples, add: u64) -> Result<TailSamples, GraphDiagnostic> {
