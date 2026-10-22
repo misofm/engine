@@ -134,3 +134,4 @@ without #1694.
   `phase` clock and that the clock-advance entry point is owed by #1747 (added to its slice).
 - Gates: the six packages' tests (five above plus conformance) 449 passed, 0 failed, 5 ignored
   (as before); `cargo fmt --all --check`, workspace clippy and `realtime-policy` clean.
+- Sol attempt 2 verdict: PASS (a7e294ca6). The verifier re-ran the `!= 0` mutants at the limiter's two sites and the compressor's two sites (each red), and a limiter base-vs-branch digest over 5 new seeds on both bodies (10/10 equal, so removing the output leg moved no bit).
