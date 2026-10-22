@@ -375,6 +375,7 @@ fn mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scal
 /// #1200 gate 4: a bus that three routes feed keeps its sum in the canonical text and in
 /// `GraphCompiler::reductions`, now recorded on the submix strip's `Input` stage: exactly one
 /// reduction, whose three contributions are the three route-destination edges in route-ID order.
+/// The track also fans out (#1748): red if the estimate counts inputs by edge source.
 #[test]
 fn a_three_input_bus_keeps_one_reduction_on_its_input_stage() {
     let mut model = parse_session_json(SESSION).expect("canonical session");
@@ -435,6 +436,14 @@ fn a_three_input_bus_keeps_one_reduction_on_its_input_stage() {
             .to_vec()
     );
     assert_eq!(artifact.report().semantic_estimate.reductions, 1);
+    // #1748: the estimate counts a node's inputs by edge destination, so its widest fan-in is the
+    // bus input's three routes. `audio_buffer_samples` is whole two-lane quanta plus that count.
+    let quantum = u64::from(session.quantum().0);
+    assert_eq!(
+        artifact.report().semantic_estimate.audio_buffer_samples % (2 * quantum),
+        3,
+        "maximum_inputs is the bus input's fan-in"
+    );
 
     let evidence = GraphCompiler::evidence(artifact.graph(), artifact.report());
     let text = String::from_utf8(evidence.canonical_bytes).expect("canonical text is UTF-8");
