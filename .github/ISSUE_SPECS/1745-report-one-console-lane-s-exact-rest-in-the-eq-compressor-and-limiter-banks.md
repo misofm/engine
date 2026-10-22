@@ -146,3 +146,4 @@ without #1694.
   gate: compressor dual `vector=949 scalar=0`, collapsed `vector=524 scalar=0`, identical to main
   c8520f2f8; `check-web-audioworklet.sh`, the V8 spill gate and `check-browser-expected-resources.py`
   (native/simd128 digest parity) pass.
+- Sol attempt 3 verdict: PASS (82a87c388). On main the compressor kernels were already out of line on wasm and native (CI run 39792050816: dual 949, collapsed 524); the attribute only pins that shape.
