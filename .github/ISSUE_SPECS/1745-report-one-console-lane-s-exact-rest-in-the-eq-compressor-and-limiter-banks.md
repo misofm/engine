@@ -50,3 +50,100 @@ defect that today's bank-wide tests miss because they only check whole silent ba
 ## Dependencies
 
 None. #1372 and #1375 stay open and independent.
+
+## Decision record
+
+### D1 Where the query lives (attempt 1, 2026-10-22)
+
+`effect-contract` `PreparedNativeEffectBank::lanes_at_rest(&self) -> u32`, default `0`.
+
+- `BankKernel` (`effect-runtime`) has no production implementor: only a test fixture in
+  `effect-runtime/tests/bank.rs` uses it. Every console slot is a `Box<dyn PreparedNativeEffectBank>`,
+  which is what `rack` (#1107's consumer) holds, and #1747's `swap_lanes` belongs on the same bank
+  stage contract. #1746's three effects implement the same method.
+- A mask, not `fn(lane) -> bool`: one call answers every lane, as `observe_resident_bank` does,
+  because a bank's state is vector state. #1107 ANDs the masks of a chain's slots per bank.
+- Clocks (words a `+0.0` block advances by its length alone: the EQ's silence counters, the
+  limiter's per-bank cursors and per-lane van Herk `phase`) are not state words for the claim.
+  Only the bank's own fast path advances them today; the per-lane clock-advance entry point
+  (`advance_clocks`, or folded into the swap) is owed by #1747.
+- Padded lanes answer by the same predicate on their own state. The bank-wide fast path asks for
+  every lane, padded included, which is what today's whole-bank observation covered.
+- A collapsed bank's frozen right channel keeps the answer sound (it can only clear a bit).
+
+### D2 The bank-wide fast path
+
+Each effect keeps its cached claim, earned at the end of a block whose input was quiet, with the
+same withdrawals (target, reset, restore, automation). The earning test becomes "the rest mask
+has every lane set" in place of "the observed block left the state bits unchanged". Rendered bits
+cannot move: the fast path is still "write nothing" under a sound claim.
+
+Per effect (attempt 1):
+- **EQ**: pins per lane `remaining == 0`, both integrators and the six `step` words `+0.0`,
+  `c1`/`a2`/`a3` finite, and the zero response `m2*0 + m1*0 + m0*0` (kernel order) `+0.0`. Clock:
+  `silence`. The old `armed` leg and the before/after state compare are deleted: on `+0.0`
+  integrators the rest threshold changes nothing, so the claim can now be earned before the
+  counters arm.
+- **Compressor**: pins `gain_reduction_db` to `+0.0` (a release stalled at a non-zero value no
+  longer earns the claim) and every parameter and coefficient ramp settled. No clocks. The
+  before/after compare and the output check are deleted.
+- **Limiter**: `is_at_silent_rest` becomes the per-lane `lanes_at_silent_rest`: history,
+  `main_ring`, `reduction` `+0.0`; `required_ring`, `box_ring`, `prefix` exactly `1.0`; `box_sum`
+  the lane's window; `limit` and `release` stationary. Clocks: the bank `Cursors` and each lane's
+  `phase`. The earning rule **keeps** the old "this block's output was `+0.0`" leg. It is not a
+  soundness leg (gate 1 shows the predicate implies the next block's output), but without it the
+  claim is earned one block sooner and the existing exact count in
+  `a_settled_silent_limiter_renders_exactly_the_never_fast_path` (35 of 40 blocks) becomes 36.
+  Attempt 2 (root ruling): the leg is removed on both bodies and that count is now 36.
+
+### D3 Shared gate helper
+
+`conformance::rest_probe` (attempt 2 moved it out of the production crate `effect-runtime`): one randomized driver and check (`Probe`, `Schedule`,
+`check`, `Reach::assert_reached`). Each effect's test binds its own bank at `Simd4` and `Simd8`
+through crate internals (`lane::each_vector_lane!`), so the Simd4 leg runs on this AVX2 host
+without #1694.
+
+## Evidence (attempt 1, 2026-10-22)
+
+- Gate 1: `rest_tests::a_lane_reported_at_rest_stays_at_rest_through_silence` (compressor),
+  `rest_tests::a_lane_the_eq_bank_calls_at_rest_stays_there_on_a_silent_block` (EQ),
+  `rest_tests::a_lane_the_limiter_bank_reports_at_rest_is_a_fixed_point` (limiter), each at
+  `Simd4` and `Simd8` on the AVX2 host, dual and collapsed bodies. Reach (claims / earned / quiet
+  refusals): compressor W4 8761/5971/10132, W8 17272/10940/20488; EQ W4 5891/4344/3187, W8
+  9504/5549/8949; limiter W4 1999/859/4603, W8 4389/1536/12520. Mutants red: compressor envelope
+  and ramps; EQ `ic1`, ramp countdown plus step; limiter every leg one at a time.
+- Gate 2: the five crates' tests pass unchanged (430 passed, 0 failed, 4 ignored as before).
+  One-time base comparison (PR evidence, not committed): a scratch test rendering 4000-block
+  tone/silence/automation runs through the public factory banks (full and padded, dual and
+  collapsed, 44.1/48/96 kHz; output words and every member lane's payload hashed per block) gave
+  56 of 56 equal digests on main 80edd93f7 and on this branch (EQ 12, compressor 16 at W8; limiter
+  28 at W4 and W8). The `bench` crate's console-row records (8 `output_sha256`) are identical.
+- Gate 3: `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets
+  --all-features -- -D warnings`, `cargo run --release -p realtime-policy` (171 marked regions in
+  34 files): clean.
+
+## Evidence (attempt 2, 2026-10-22)
+
+- Verifier finding: `== every_lane` -> `!= 0` on the bank-wide rule survived the limiter (dual and
+  collapsed) and the compressor's collapsed site. New coverage, each red under that mutant:
+  limiter `lanes_resting_on_different_blocks_render_exactly_the_never_fast_path` (W4/W8, dual
+  and collapsed; `run_silence_arm` generalised to per-lane tones); compressor
+  `a_padded_bank_renders_each_member_as_its_own_instance` gains a staggered-rest case (W4/W8,
+  dual and collapsed, against the per-node oracle).
+- `rest_probe` moved to `crates/conformance/src/rest_probe.rs`. The trait doc names the limiter's
+  `phase` clock and that the clock-advance entry point is owed by #1747 (added to its slice).
+- Gates: the six packages' tests (five above plus conformance) 449 passed, 0 failed, 5 ignored
+  (as before); `cargo fmt --all --check`, workspace clippy and `realtime-policy` clean.
+- Sol attempt 2 verdict: PASS (a7e294ca6). The verifier re-ran the `!= 0` mutants at the limiter's two sites and the compressor's two sites (each red), and a limiter base-vs-branch digest over 5 new seeds on both bodies (10/10 equal, so removing the output leg moved no bit).
+
+## Evidence (attempt 3, 2026-10-22)
+
+- CI (PR #1757, merged head 152238299) failed the wasm kernel roster: `compressor f32x4
+  collapsed` matched 0 kernels. Cause: attempt 1 removed the before/after state snapshot from
+  `Instance::render_mono`, the caller shrank, and the inliner folded `kernel::process_block_mono`
+  into it. Fix: `#[inline(never)]` on `kernel::process_block_mono` and on `kernel::process_block`
+  (same roster requirement), no arithmetic change. Local `build-web-audioworklet.sh` plus the
+  gate: compressor dual `vector=949 scalar=0`, collapsed `vector=524 scalar=0`, identical to main
+  c8520f2f8; `check-web-audioworklet.sh`, the V8 spill gate and `check-browser-expected-resources.py`
+  (native/simd128 digest parity) pass.
+- Sol attempt 3 verdict: PASS (82a87c388). On main the compressor kernels were already out of line on wasm and native (CI run 39792050816: dual 949, collapsed 524); the attribute only pins that shape.

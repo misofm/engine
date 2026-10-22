@@ -45,6 +45,8 @@
 use core::cell::Cell;
 
 pub mod corpus;
+#[cfg(test)]
+mod rest_tests;
 
 use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
@@ -62,6 +64,7 @@ use effect_contract::{
 };
 use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask,
+    positive_zero_lanes_of,
 };
 use effect_runtime::params::{
     ParameterSpec, is_negative_zero, normalize_zero, parameter_value_valid,
@@ -764,19 +767,39 @@ impl ChannelState {
         self.box_sum[lane] = self.lane[lane].window as f32;
     }
 
-    /// `true` when every runtime word of this channel is exactly what [`clear_runtime`] writes.
+    /// The lanes of this channel whose every running word is exactly what [`clear_runtime`]
+    /// writes, and whose two ramps are at rest: bit `l` set means one block of exact `+0.0` input
+    /// leaves lane `l` of this channel bit-identical (its `phase` aside, which is a clock) and
+    /// writes `+0.0` from it (issue #1745; the per-lane form of the #182 S2 observation).
     ///
-    /// Issue #182 S2, the observation half of the silent fixed point. The list is
-    /// [`clear_runtime`]'s own, word for word, and that is the point: the rest state is not a
-    /// property this function invents, it is the state the crate already documents a silent lane
-    /// rests in, read back rather than assumed.
+    /// The list is [`clear_runtime`]'s own, word for word, and that is the point: the rest state
+    /// is not a property this function invents, it is the state the crate already documents a
+    /// silent lane rests in, read back rather than assumed. Per lane, every word it pins:
     ///
-    /// The one member of [`clear_runtime`]'s list that is deliberately **absent** is `phase`. A
-    /// resting channel is at whatever van Herk position its history left it at, and the position is
+    /// | word | pinned to |
+    /// |---|---|
+    /// | `history` (all twelve taps) | `+0.0` |
+    /// | `main_ring` (every slot) | `+0.0` |
+    /// | `reduction` | `+0.0` |
+    /// | `required_ring`, `box_ring` (every slot) | exactly `1.0` |
+    /// | `prefix` | exactly `1.0` |
+    /// | `box_sum` | exactly the lane's window `Wb` |
+    /// | `limit`, `release` | no window open and `current` bit-equal to `target` |
+    ///
+    /// `lookahead_ms` and `lane` are preparation words a rendered block never writes. With these
+    /// words at rest a `+0.0` frame writes `r = 1.0` over a `1.0`, takes a window minimum of
+    /// `1.0`s, adds and subtracts the same `1.0` from a box sum that is exactly `Wb`, lands on
+    /// `d = +0.0`, and stores the `+0.0` it read out of the main ring; the output is
+    /// `select(bypass, z, z * 1.0)` with `z = +0.0`, which is `+0.0` on both arms. So the claim
+    /// implies the next block's output, and needs no observation of the block just rendered.
+    ///
+    /// The one member of [`clear_runtime`]'s list that is deliberately **absent** is `phase`, and
+    /// it is a clock: every rendered frame advances it by one modulo the lane's window, whatever
+    /// the signal, which is what [`advance_rest_phase`](Self::advance_rest_phase) restates. A
+    /// resting lane is at whatever van Herk position its history left it at, and the position is
     /// unobservable while the rest of the state holds: with `required_ring` and `prefix` entirely
     /// `1.0`, [`sliding_minimum`] returns `1.0` from every position and its backward pass writes
-    /// `1.0` over `1.0`. Requiring `phase == 0` would refuse the claim for all but one frame in
-    /// `Wb`, which is a correctness-free way to never engage.
+    /// `1.0` over `1.0`. The shared [`Cursors`] are the bank's other clock.
     ///
     /// `history` is *not* absent, and it is the one entry that is not obvious. A channel can reach
     /// `required_ring == 1.0` everywhere with a non-zero detector history — that only needs the
@@ -788,19 +811,41 @@ impl ChannelState {
     /// Bits, not values, at every word. `-0.0 == 0.0` and `1.0 - 2^-24 != 1.0`, but the fast path
     /// promises not to move a bit, so the test that licenses it has to be a bit test.
     ///
+    /// Cost: one OR fold per lane over each ring in the bank layout ([`positive_zero_lanes_of`],
+    /// [`exactly_one_lanes`]), and one compare per lane for the planar words. It returns as soon as
+    /// no lane is left.
+    ///
     /// [`clear_runtime`]: ChannelState::clear_runtime
-    fn is_at_silent_rest(&self) -> bool {
-        block_is_positive_zero(&self.history)
-            && block_is_positive_zero(&self.main_ring)
-            && block_is_positive_zero(&self.reduction)
-            && all_exactly_one(&self.required_ring)
-            && all_exactly_one(&self.box_ring)
-            && all_exactly_one(&self.prefix)
-            && self
-                .box_sum
-                .iter()
-                .zip(self.lane.iter())
-                .all(|(sum, shape)| sum.to_bits() == (shape.window as f32).to_bits())
+    fn lanes_at_silent_rest<L: Lane>(&self) -> u32 {
+        debug_assert_eq!(self.width, L::WIDTH);
+        let mut mask =
+            positive_zero_lanes_of::<L>(&self.reduction) & exactly_one_lanes::<L>(&self.prefix);
+        for (lane, ((sum, shape), (limit, release))) in self
+            .box_sum
+            .iter()
+            .zip(self.lane.iter())
+            .zip(self.limit.iter().zip(self.release.iter()))
+            .enumerate()
+        {
+            if sum.to_bits() != (shape.window as f32).to_bits()
+                || !ramp_is_stationary(limit)
+                || !ramp_is_stationary(release)
+            {
+                mask &= !(1 << lane);
+            }
+        }
+        if mask == 0 {
+            return 0;
+        }
+        mask &= positive_zero_lanes_of::<L>(&self.history);
+        if mask == 0 {
+            return 0;
+        }
+        mask &= positive_zero_lanes_of::<L>(&self.main_ring);
+        if mask == 0 {
+            return 0;
+        }
+        mask & exactly_one_lanes::<L>(&self.required_ring) & exactly_one_lanes::<L>(&self.box_ring)
     }
 
     /// Advances each lane's van Herk phase by a whole block, as the frame loop would (#182 S2).
@@ -836,14 +881,37 @@ fn zero_lanes<L: Lane>(io: &mut [f32], lanes: u32) {
     }
 }
 
-/// `true` when every word of `values` is **exactly** the `f32` `1.0`, by bit pattern.
+/// The lane bitmask of an AoSoA run of `L::WIDTH`-word frames whose every word is **exactly** the
+/// `f32` `1.0`, by bit pattern: bit `l` is set when every frame's lane `l` is `1.0`.
 ///
 /// The identity element of this kernel's three multiplicative rings, and the counterpart of
-/// [`block_is_positive_zero`] for them: a ring of exact `1.0` returns `1.0` from any cursor
+/// [`positive_zero_lanes_of`] for them: a ring lane of exact `1.0` returns `1.0` from any cursor
 /// position, which is what lets a skipped block leave it untouched and still be bit-identical.
-fn all_exactly_one(values: &[f32]) -> bool {
+/// The same shape as that fold, one `|` per lane over the run of `bits ^ 1.0`, then one compare
+/// per lane.
+fn exactly_one_lanes<L: Lane>(words: &[f32]) -> u32 {
     const ONE: u32 = 1.0_f32.to_bits();
-    values.iter().all(|value| value.to_bits() == ONE)
+    debug_assert_eq!(words.len() % L::WIDTH, 0);
+    debug_assert!(L::WIDTH <= MAXIMUM_WIDTH);
+    let mut bits = [0_u32; MAXIMUM_WIDTH];
+    for frame in words.chunks_exact(L::WIDTH) {
+        for (acc, word) in bits.iter_mut().zip(frame) {
+            *acc |= word.to_bits() ^ ONE;
+        }
+    }
+    let mut mask = 0_u32;
+    for (lane, word) in bits.iter().take(L::WIDTH).enumerate() {
+        if *word == 0 {
+            mask |= 1 << lane;
+        }
+    }
+    mask
+}
+
+/// `true` when `ramp` has no window open and holds exactly its target: [`ramps_are_stationary`]
+/// for one lane.
+fn ramp_is_stationary(ramp: &LinearRamp) -> bool {
+    ramp.remaining == 0 && ramp.current.to_bits() == ramp.target.to_bits()
 }
 
 /// `true` when no lane of `ramps` has a window open and every lane holds exactly its target.
@@ -854,9 +922,7 @@ fn all_exactly_one(values: &[f32]) -> bool {
 /// [`RampLanes::advance`] would have produced sample by sample. Tolerances are not used anywhere
 /// in this decision -- an epsilon here would make the optimisation a re-tuning.
 fn ramps_are_stationary(ramps: &[LinearRamp]) -> bool {
-    ramps
-        .iter()
-        .all(|ramp| ramp.remaining == 0 && ramp.current.to_bits() == ramp.target.to_bits())
+    ramps.iter().all(ramp_is_stationary)
 }
 
 /// `true` when two ramps hold the same four words, by bit pattern.
@@ -1671,7 +1737,7 @@ const fn wrapped(value: usize, ring: usize) -> usize {
 /// left; `state.phase` is filled from the local for the same reason, every lane
 /// of a uniform cohort holding one phase being precisely what [`lanes_uniform`] established. The
 /// state words move in *when* they are written, never in what is written, and nothing observes
-/// them between two frames of one block — `snapshot_track` and `is_at_silent_rest` read the arena
+/// them between two frames of one block — `snapshot_track` and `lanes_at_silent_rest` read the arena
 /// between blocks. That is the same licence the #182 S2 cursor note relies on when it advances the
 /// cursors and the rest phase of a block it skipped instead of running it: mid-block state is not
 /// observable, so only the state a block *ends* on has to match.
@@ -3704,9 +3770,14 @@ impl<L: Lane> LimiterCore<L> {
             &mut self.cursors,
             linked,
         );
-        // Earn or lose the claim from what this block actually did. `is_at_silent_rest` is
+        // Earn or lose the claim (issue #1745 D2): this block was quiet and every lane of both
+        // channels, padded lanes included, is at rest by the per-lane predicate. The predicate is
         // `clear_runtime`'s own word list read back, which is the state the crate documents a
-        // silent lane rests in; the output test is what says the *caller* saw silence too.
+        // silent lane rests in, and it implies the next quiet block's `+0.0` output.
+        //
+        // This block's own output is therefore not a leg: by root ruling it was removed, so the
+        // claim is earned on the block whose output still carried the line's last samples, once
+        // the line has drained into the state the predicate reads. No rendered bit moves.
         //
         // The rest state is exactly reachable here, which is the precondition #163 phase 4 states
         // for engaging at all. Every box term is an integer multiple of `2^-14` and `BOX_GRID * R`
@@ -3715,11 +3786,7 @@ impl<L: Lane> LimiterCore<L> {
         // asymptotically, which is the difference between this kernel and the compressor's
         // `gain_reduction_db`. Without both, the claim would be refused forever and the fast path
         // would be dead code.
-        self.silent_fixed_point = quiet
-            && self.left.is_at_silent_rest()
-            && self.right.is_at_silent_rest()
-            && block_is_positive_zero(&left_io[..words])
-            && block_is_positive_zero(&right_io[..words]);
+        self.silent_fixed_point = quiet && self.lanes_at_rest() == every_lane(L::WIDTH);
         self.silent_bypass = self.coefficients.bypass;
         // The §4.4 boundary check: one vector scan per channel, exactly `effect-runtime`'s
         // `finish_block` test. The two channels fail together per lane, as they do there, because
@@ -3855,8 +3922,10 @@ impl<L: Lane> LimiterCore<L> {
             &mut self.left,
             &mut self.cursors,
         );
+        // Issue #1745 D2: the left channel's mask alone, since only the left channel advances. As
+        // on the dual body (see `process_block`), this block's own output is not a leg.
         self.silent_fixed_point =
-            quiet && self.left.is_at_silent_rest() && block_is_positive_zero(&left_io[..words]);
+            quiet && self.left.lanes_at_silent_rest::<L>() == every_lane(L::WIDTH);
         self.silent_bypass = self.coefficients.bypass;
         if check_block::<L>(left_io) {
             return;
@@ -3903,6 +3972,13 @@ impl<L: Lane> LimiterCore<L> {
     #[cfg(test)]
     const fn silent_engagements(&self) -> u32 {
         self.silent_engagements
+    }
+
+    /// The bank's rest mask (issue #1745): both channels' per-lane predicates ANDed
+    /// ([`ChannelState::lanes_at_silent_rest`]). Clocks excluded: the shared [`Cursors`] and each
+    /// lane's van Herk `phase`.
+    fn lanes_at_rest(&self) -> u32 {
+        self.left.lanes_at_silent_rest::<L>() & self.right.lanes_at_silent_rest::<L>()
     }
 }
 
@@ -4574,6 +4650,13 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
 impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.core.designed_channel_symmetry(lane)
+    }
+
+    /// Issue #1745: see [`LimiterCore::lanes_at_rest`]. The clocks a caller that skips a resting
+    /// lane advances are the bank's [`Cursors`] and the lane's van Herk `phase`, as the bank's own
+    /// silent fast path does.
+    fn lanes_at_rest(&self) -> u32 {
+        self.core.lanes_at_rest()
     }
 
     fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
@@ -6903,6 +6986,26 @@ mod tests {
         amplitude: f32,
         force_slow: bool,
     ) -> SilenceArm {
+        run_lane_silence_arm(
+            core,
+            plan,
+            frames,
+            &vec![amplitude; L::WIDTH],
+            false,
+            force_slow,
+        )
+    }
+
+    /// [`run_silence_arm`] with a tone amplitude per lane (`0.0` keeps that lane at exact `+0.0`
+    /// through the tone blocks too), through the collapsed body when `mono` is set.
+    fn run_lane_silence_arm<L: Lane>(
+        core: &mut LimiterCore<L>,
+        plan: &[Option<f32>],
+        frames: usize,
+        amplitudes: &[f32],
+        mono: bool,
+        force_slow: bool,
+    ) -> SilenceArm {
         let width = L::WIDTH;
         let mut arm = SilenceArm {
             rendered: Vec::new(),
@@ -6910,17 +7013,37 @@ mod tests {
             reduction: Vec::new(),
             engagements: 0,
         };
+        let shape = |plane: Vec<f32>| -> Vec<f32> {
+            plane
+                .iter()
+                .enumerate()
+                .map(|(word, value)| match amplitudes[word % width] {
+                    0.0 => 0.0,
+                    gain => value * gain,
+                })
+                .collect()
+        };
         for (block, quiet) in plan.iter().enumerate() {
-            let mut left = silence_plane(block, frames, width, *quiet, amplitude, false);
-            let mut right = silence_plane(block, frames, width, *quiet, amplitude, true);
+            let mut left = silence_plane(block, frames, width, *quiet, 1.0, false);
+            let mut right = silence_plane(block, frames, width, *quiet, 1.0, true);
+            if quiet.is_none() {
+                left = shape(left);
+                right = shape(right);
+            }
             if force_slow {
                 core.silent_fixed_point = false;
             }
-            core.process_block(&mut left, &mut right, frames);
+            if mono {
+                core.process_block_mono(&mut left, frames);
+            } else {
+                core.process_block(&mut left, &mut right, frames);
+            }
             arm.rendered
                 .extend(left.iter().map(|value| value.to_bits()));
-            arm.rendered
-                .extend(right.iter().map(|value| value.to_bits()));
+            if !mono {
+                arm.rendered
+                    .extend(right.iter().map(|value| value.to_bits()));
+            }
             arm.states.extend(state_bits(core));
             arm.reduction.push(core.left.reduction[0].to_bits());
         }
@@ -6974,14 +7097,13 @@ mod tests {
     /// recursive word's own leg load-bearing.
     ///
     /// What has to drain here is the main delay line, `B = N + 6 = 486` samples at 48 kHz, which is
-    /// 3.8 blocks of 128. The claim is therefore earned at the end of the block in which both the
-    /// line has gone entirely `+0.0` *and* the output has, and the engagement count below is that
-    /// arithmetic read back rather than asserted loosely.
+    /// 3.8 blocks of 128. The claim is therefore earned at the end of the block in which the line
+    /// has gone entirely `+0.0`, and the engagement count below is that arithmetic read back rather
+    /// than asserted loosely.
     ///
     /// Red mutations: drop `block_is_positive_zero` on either input plane from the admission test;
-    /// drop `is_at_silent_rest` on either channel from the claim; drop `all_exactly_one(&self
-    /// .main_ring)`'s counterpart `block_is_positive_zero(&self.main_ring)`; drop the output test
-    /// from the claim; and — caught by the state comparison rather than the sample comparison —
+    /// drop `lanes_at_silent_rest` on either channel from the claim; drop
+    /// `positive_zero_lanes_of::<L>(&self.main_ring)` from it; and — caught by the state comparison rather than the sample comparison —
     /// delete `self.cursors.advance(..)` or either `advance_rest_phase(..)` from the fast path.
     #[test]
     fn a_settled_silent_limiter_renders_exactly_the_never_fast_path() {
@@ -7005,9 +7127,11 @@ mod tests {
                 width_label(*width)
             );
         }
+        // 36, not 35: the claim no longer waits for the block's own output to be `+0.0`, so it
+        // is earned on the block where the line has just drained, one block sooner; no bit moves.
         assert_eq!(
-            widest.engagements, 35,
-            "the fast path engaged on {} of {SILENT_BLOCKS} silent blocks, not the 35 the 486-sample \
+            widest.engagements, 36,
+            "the fast path engaged on {} of {SILENT_BLOCKS} silent blocks, not the 36 the 486-sample \
              delay line allows",
             widest.engagements
         );
@@ -7024,6 +7148,89 @@ mod tests {
         );
     }
 
+    /// **Lanes that come to rest on different blocks never let one lane's rest freeze another.**
+    ///
+    /// Issue #1745 D2, the "every lane" leg of the bank-wide claim, on the dual body and the
+    /// collapsed one. Every arm above prepares identical lanes, so they all rest on the same block
+    /// and a claim earned on *any* lane at rest is indistinguishable from one earned on *every*
+    /// lane. Here the lanes are mixed by `lane % 4`: silent throughout (at rest from the first
+    /// block), a quiet tone at 100 ms (rests once the line drains), a hot tone at 10 ms (rests
+    /// some 170 blocks into the silence), and, in the first mix only, a hot tone at 2 000 ms (never
+    /// rests in this run). The silence is long enough for the 10 ms lanes, so the second mix
+    /// really engages, and the tone returns after it.
+    ///
+    /// Red mutations: weaken either body's `== every_lane(L::WIDTH)` to `!= 0`. The claim is then
+    /// earned on the first silent block on the strength of the silent lanes alone, the releasing
+    /// lanes' `reduction` and lines are frozen, and the returning tone renders different bits.
+    #[test]
+    fn lanes_resting_on_different_blocks_render_exactly_the_never_fast_path() {
+        fn case<L: Lane>(label: &str, never_rests: bool, mono: bool) {
+            const KINDS: [(f32, f32); 4] =
+                [(0.0, 100.0), (0.05, 100.0), (3.0, 10.0), (3.0, 2_000.0)];
+            let kind = |lane: usize| {
+                KINDS[if lane % 4 == 3 && !never_rests {
+                    2
+                } else {
+                    lane % 4
+                }]
+            };
+            let values = values_with(-6.0, 100.0, 5.0);
+            let mut preparation = request(&values);
+            preparation.link_mode = LinkMode::DualMono;
+            let (left, right) = initial_defaults(&values).expect("defaults");
+            let core = || {
+                let lanes = |defaults: [f32; PARAMETER_COUNT]| {
+                    (0..L::WIDTH)
+                        .map(|lane| {
+                            let mut lane_defaults = defaults;
+                            lane_defaults[1] = kind(lane).1;
+                            lane_defaults
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice()
+                };
+                let metadata =
+                    expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
+                        .expect("metadata");
+                LimiterCore::<L>::new(metadata, lanes(left), lanes(right)).expect("core")
+            };
+            let amplitudes = (0..L::WIDTH).map(|lane| kind(lane).0).collect::<Vec<_>>();
+            let plan = silence_plan(4, 200, 4);
+            let free = run_lane_silence_arm(&mut core(), &plan, 128, &amplitudes, mono, false);
+            let forced = run_lane_silence_arm(&mut core(), &plan, 128, &amplitudes, mono, true);
+            assert_eq!(
+                forced.engagements, 0,
+                "{label}: the control arm took the fast path"
+            );
+            let first = |a: &[u32], b: &[u32]| a.iter().zip(b).position(|(x, y)| x != y);
+            assert!(
+                free.rendered == forced.rendered,
+                "{label}: one lane's rest froze another lane's release (first rendered word {:?})",
+                first(&free.rendered, &forced.rendered)
+            );
+            assert!(
+                free.states == forced.states,
+                "{label}: the fast path moved a state word (first {:?})",
+                first(&free.states, &forced.states)
+            );
+            assert_eq!(
+                free.engagements == 0,
+                never_rests,
+                "{label}: the claim engaged {} times",
+                free.engagements
+            );
+        }
+        // Vector widths only: a scalar bank has one lane, so there is nothing to mix.
+        lane::each_vector_lane!(|L| {
+            for never_rests in [true, false] {
+                for mono in [false, true] {
+                    let label = format!("W{} never_rests={never_rests} mono={mono}", L::WIDTH);
+                    case::<L>(&label, never_rests, mono);
+                }
+            }
+        });
+    }
+
     /// **A limiter still releasing when the tone returns is never frozen by the fast path.**
     ///
     /// Issue #182 S2, the recursive-word and delay-line legs, and the refusal the brief for this
@@ -7037,7 +7244,7 @@ mod tests {
     /// vacuous — a run in which the release had already finished would refuse for the wrong
     /// reason and prove nothing.
     ///
-    /// Red mutation: drop `block_is_positive_zero(&self.reduction)` from `is_at_silent_rest`. The
+    /// Red mutation: drop `positive_zero_lanes_of::<L>(&self.reduction)` from `lanes_at_silent_rest`. The
     /// claim is then earned on the first block whose output has drained to `+0.0`, `d` is frozen
     /// part-way through its release, and the returning tone is limited by a reduction that was
     /// never allowed to finish — the exact failure the compressor's file describes, at a kernel
@@ -7162,7 +7369,7 @@ mod tests {
 
     /// **A stale detector history refuses the claim, even when every ring is already at rest.**
     ///
-    /// Issue #182 S2, the `history` leg of `is_at_silent_rest` — the one entry on that list that is
+    /// Issue #182 S2, the `history` leg of `lanes_at_silent_rest` — the one entry on that list that is
     /// not obviously needed, and the one that is not reachable at a 128-frame quantum.
     ///
     /// At an ordinary quantum the leg is *implied*: `main_ring` holds the last `B = 486` input
@@ -7185,7 +7392,7 @@ mod tests {
     /// zeroed delay line behind a non-zero history. That path is closed by the restore withdrawal;
     /// this one is closed by the leg.
     ///
-    /// Red mutation: drop `block_is_positive_zero(&self.history)` from `is_at_silent_rest`.
+    /// Red mutation: drop `positive_zero_lanes_of::<L>(&self.history)` from `lanes_at_silent_rest`.
     #[test]
     fn a_stale_detector_history_refuses_the_claim() {
         fn arm<L: Lane>(force_slow: bool) -> SilenceArm {
@@ -8325,7 +8532,7 @@ mod tests {
     }
 
     /// `true` when lane `lane` of `state` holds exactly the words `clear_runtime` writes, the van
-    /// Herk phase aside: [`ChannelState::is_at_silent_rest`] for one lane. Every word is finite.
+    /// Herk phase aside: [`ChannelState::lanes_at_silent_rest`] for one lane. Every word is finite.
     fn lane_at_rest(state: &ChannelState, lane: usize) -> bool {
         let width = state.width;
         let all = |plane: &[f32], value: f32| {

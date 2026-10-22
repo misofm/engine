@@ -2575,6 +2575,55 @@ pub trait PreparedNativeEffectBank: Send {
     fn channels_agree(&self) -> bool {
         false
     }
+
+    /// The lanes of this bank that are at their **exact rest**, as a bitmask: bit `l` set means
+    /// lane `l` is at rest (issue #1745; the consumer is #1107's per-lane skip).
+    ///
+    /// # The claim (#1107 D3, root ruling of 2026-10-22)
+    ///
+    /// Lane `l` is at rest when one block of exact `+0.0` input on every input of the lane -- both
+    /// channels, and the sidechain when one is connected -- would leave every state word of the
+    /// lane bit-identical and write exact `+0.0` to both of the lane's output planes. Raw bits:
+    /// `-0.0` is not `+0.0`, on an input, a state word or an output. A ramp in flight, a latency or
+    /// ring word that is not `+0.0`, and any non-zero envelope or filter word clear the bit. No
+    /// `RestSamples` bound is needed for the claim; such a bound says only *when* it becomes true.
+    ///
+    /// A **clock** is not a state word for this claim: a word that a block of `+0.0` input
+    /// advances by a function of the block's length (and the lane's prepared shape) alone, never
+    /// of the signal: the EQ's silence counters, the limiter's per-bank cursors and its per-lane
+    /// van Herk `phase`. Each implementation names its clocks. A caller that skips a resting
+    /// lane's block must still advance that lane's clocks as a rendered zero block would; this
+    /// trait has no entry point for that yet. It is owed by #1747 (`advance_clocks`, or folded
+    /// into the swap entry), and until it lands only the bank's own silent fast path, which
+    /// advances every clock of a skipped bank, may skip a block.
+    ///
+    /// # How it is answered
+    ///
+    /// From state only. It never renders a block, allocates, locks or makes a syscall, and it runs
+    /// in time bounded by the prepared state size. `&self`, so it cannot advance a smoother. On
+    /// the render thread at a block boundary, or off it.
+    ///
+    /// One call answers every lane, as [`observe_resident_bank`](Self::observe_resident_bank)
+    /// does: a bank's state is vector state, so one vector pass over a word answers all lanes at
+    /// the cost one lane would pay.
+    ///
+    /// # Padded lanes and a collapsed bank
+    ///
+    /// A padded lane is answered by the same predicate on its own state; the padding contract
+    /// feeds it `+0.0`, so it is at rest whenever its state is. A bank's own bank-wide silent fast
+    /// path asks for this mask with every lane set, padded lanes included.
+    ///
+    /// While a bank is collapsed its right channel is frozen at the collapse
+    /// ([`process_bank_mono`](Self::process_bank_mono)). The answer still reads both channels and
+    /// stays sound: a frozen right channel that is not at rest only clears a bit, and one that is
+    /// at rest sets no bit the left channel does not, because the counterfactual right channel is
+    /// the left one.
+    ///
+    /// The default is `0`: an effect that has not written the predicate declines for every lane,
+    /// and a wrong set bit is the only answer that could ever be unsound.
+    fn lanes_at_rest(&self) -> u32 {
+        0
+    }
 }
 /// One entry of a [`NativeEffectRegistry`]'s tail-bound table: the [`NodeTailBound`] an effect's
 /// [`EffectDescriptor::tail_and_rest`] stated at one launch rate and one declared quality

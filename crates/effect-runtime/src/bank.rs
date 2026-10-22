@@ -181,6 +181,55 @@ pub fn lane_is_positive_zero<L: Lane>(value: L) -> bool {
     bits == 0
 }
 
+/// The lane bitmask of `value`'s lanes that are **exactly** `+0.0`: bit `l` is set when lane `l`'s
+/// word is `+0.0`, by the same bit rule as [`lane_is_positive_zero`].
+///
+/// The per-lane form a bank's rest query (`PreparedNativeEffectBank::lanes_at_rest`, issue #1745)
+/// folds its state words with: `&` the masks of every word the claim pins to `+0.0`.
+#[inline]
+#[must_use]
+pub fn positive_zero_lanes<L: Lane>(value: L) -> u32 {
+    debug_assert!(L::WIDTH <= 32);
+    let mut words = [0_u32; 32];
+    value.store_bits(&mut words[..L::WIDTH]);
+    let mut mask = 0_u32;
+    for (lane, word) in words.iter().take(L::WIDTH).enumerate() {
+        if *word == 0 {
+            mask |= 1 << lane;
+        }
+    }
+    mask
+}
+
+/// The lane bitmask of an AoSoA run of `L::WIDTH`-word frames whose every word is exactly `+0.0`:
+/// bit `l` is set when every frame's lane `l` is `+0.0` ([`block_is_positive_zero`] per lane).
+///
+/// For a ring or a block of history in the bank layout. One `|` fold per lane over the run, then
+/// one compare per lane.
+///
+/// # Panics
+///
+/// Panics in debug builds if `words` is not a whole number of frames or `L::WIDTH` exceeds 32.
+#[inline]
+#[must_use]
+pub fn positive_zero_lanes_of<L: Lane>(words: &[f32]) -> u32 {
+    debug_assert_eq!(words.len() % L::WIDTH, 0);
+    debug_assert!(L::WIDTH <= 32);
+    let mut bits = [0_u32; 32];
+    for frame in words.chunks_exact(L::WIDTH) {
+        for (acc, word) in bits.iter_mut().zip(frame) {
+            *acc |= word.to_bits();
+        }
+    }
+    let mut mask = 0_u32;
+    for (lane, word) in bits.iter().take(L::WIDTH).enumerate() {
+        if *word == 0 {
+            mask |= 1 << lane;
+        }
+    }
+    mask
+}
+
 /// The lane bitmask of the values in `io` that are out of bounds.
 ///
 /// Only called on the failing path, once, to attribute a rejected block to a track. Bit `l` is set

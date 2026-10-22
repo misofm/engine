@@ -7,6 +7,7 @@ mod prng;
 mod protocol_corpus;
 pub mod ramp_endpoint;
 mod randomized;
+pub mod rest_probe;
 
 pub use dsp_reference::{F64PlanarBuffer, IdentityProcessor, render_planar_f64};
 pub use effect::{

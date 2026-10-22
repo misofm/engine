@@ -34,6 +34,8 @@ mod design;
 mod kernel;
 #[cfg(test)]
 mod padding_tests;
+#[cfg(test)]
+mod rest_tests;
 mod state;
 
 pub mod corpus;
@@ -107,6 +109,11 @@ fn finish_lanes<L: Lane>(io: &mut [f32], channel: &mut Channel<L>) -> u32 {
     }
     channel.gain_reduction_db = channel.gain_reduction_db.andnot(rejected);
     failed
+}
+
+/// Every lane of an `L`-wide channel, as a [`Channel::rest_lanes`] mask.
+const fn all_lanes<L: Lane>() -> u32 {
+    (1 << L::WIDTH) - 1
 }
 
 /// Fixed scalar words each channel section carries in the current causal payload.
@@ -532,9 +539,11 @@ struct Instance<L: Lane> {
     state_sizes: StatePayloadSizes,
     left: Channel<L>,
     right: Channel<L>,
-    /// Issue #163 phase 4 item 1: the previous block proved this instance is at a silent fixed
-    /// point. Earned only by observation in [`render`](Self::render), never assumed. See the
-    /// matching field on `parametric-eq` for the induction it licenses.
+    /// Issue #163 phase 4 item 1: the instance is at a silent fixed point. Earned at the end of a
+    /// quiet block in [`render`](Self::render) when every lane is at exact rest
+    /// ([`lanes_at_rest`](Self::lanes_at_rest), issue #1745), never assumed, and withdrawn by
+    /// every target, automation, reset and restore. See the matching field on `parametric-eq`
+    /// for the induction it licenses.
     silent_fixed_point: bool,
     /// The bypass flag in force when the claim above was earned. Bypass selects a different path
     /// through the kernel, so a claim earned on one side of it says nothing about the other.
@@ -607,14 +616,13 @@ impl<L: Lane> Instance<L> {
             && block_is_positive_zero(&left[..words])
             && block_is_positive_zero(&right[..words]);
         if quiet && self.silent_fixed_point {
-            // The recursive words are at their fixed point and the buffers already hold the
-            // `+0.0` the current-sample kernel would write, so the whole block is bit-identical
-            // to the slow path. There is no history cursor to advance.
+            // Every lane is at its exact rest and the buffers already hold the `+0.0` the
+            // current-sample kernel would write, so the whole block is bit-identical to the slow
+            // path. There is no history cursor to advance.
             #[cfg(test)]
             admitted_silent();
             return;
         }
-        let before = quiet.then(|| (self.left.recursive_bits(), self.right.recursive_bits()));
         kernel::process_block::<L>(
             left,
             right,
@@ -625,20 +633,12 @@ impl<L: Lane> Instance<L> {
             self.sample_rate,
             (&mut self.left, &mut self.right),
         );
-        // Earn or lose the claim from what this block actually did: the recursive gain-reduction
-        // word came out as it went in and the output is `+0.0` to the bit.
-        self.silent_fixed_point = match before {
-            Some((left_before, right_before)) => {
-                left_before == self.left.recursive_bits()
-                    && right_before == self.right.recursive_bits()
-                    && block_is_positive_zero(&left[..words])
-                    && block_is_positive_zero(&right[..words])
-            }
-            None => false,
-        };
         self.silent_bypass = self.bypass;
         let left_mask = finish_lanes::<L>(left, &mut self.left);
         let right_mask = finish_lanes::<L>(right, &mut self.right);
+        // Earn or lose the claim from the state the block left (issue #1745): every lane of both
+        // channels at its exact rest.
+        self.silent_fixed_point = quiet && self.lanes_at_rest() == all_lanes::<L>();
         if left_mask | right_mask == 0 {
             return;
         }
@@ -675,7 +675,6 @@ impl<L: Lane> Instance<L> {
             admitted_silent();
             return;
         }
-        let before = quiet.then(|| self.left.recursive_bits());
         kernel::process_block_mono::<L>(
             left,
             detector,
@@ -685,14 +684,11 @@ impl<L: Lane> Instance<L> {
             self.sample_rate,
             &mut self.left,
         );
-        self.silent_fixed_point = match before {
-            Some(left_before) => {
-                left_before == self.left.recursive_bits() && block_is_positive_zero(&left[..words])
-            }
-            None => false,
-        };
         self.silent_bypass = self.bypass;
         let left_mask = finish_lanes::<L>(left, &mut self.left);
+        // The collapsed claim reads the left channel only: the right one is frozen at the
+        // collapse, and the counterfactual right channel is the left one.
+        self.silent_fixed_point = quiet && self.left.rest_lanes() == all_lanes::<L>();
         if left_mask == 0 {
             return;
         }
@@ -700,6 +696,12 @@ impl<L: Lane> Instance<L> {
             let bit = 1 << lane;
             record(lane, left_mask & bit != 0, left_mask & bit != 0);
         }
+    }
+
+    /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`): see
+    /// `kernel::Channel::rest_lanes` for the words pinned and why the list is complete.
+    fn lanes_at_rest(&self) -> u32 {
+        self.left.rest_lanes() & self.right.rest_lanes()
     }
 
     /// Copies the left channel's whole state onto the right (the collapse's disengage boundary).
@@ -1181,6 +1183,11 @@ impl PreparedNativeEffect for PreparedCompressor {
 impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.instance.designed_channel_symmetry(lane)
+    }
+
+    /// Issue #1745: `kernel::Channel::rest_lanes` on both channels, padded lanes included.
+    fn lanes_at_rest(&self) -> u32 {
+        self.instance.lanes_at_rest()
     }
 
     /// One `store` per channel fills every lane: the bank's reduction is one vector.
