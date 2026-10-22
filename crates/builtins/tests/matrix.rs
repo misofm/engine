@@ -498,7 +498,7 @@ fn fused_ramping_fader_matrix_matches_the_separate_stages() {
     use BuiltinLaneSelector::{Both, Left, Right};
     const FRAMES: usize = 3;
     const BLOCKS: usize = 5;
-    let schedules: [(&str, &[(usize, RampOp)]); 7] = [
+    let schedules: [(&str, &[(usize, RampOp)]); 9] = [
         ("fader only", &[(0, RampOp::Fader(1, Both, -9.5, 5))]),
         ("one fader channel", &[(0, RampOp::Fader(0, Right, 4.0, 5))]),
         ("matrix only", &[(0, RampOp::Matrix(1, non_identity(3), 5))]),
@@ -528,6 +528,27 @@ fn fused_ramping_fader_matrix_matches_the_separate_stages() {
             &[
                 (0, RampOp::Matrix(1, non_identity(4), 5)),
                 (1, RampOp::Fader(0, Both, -20.0, 7)),
+            ],
+        ),
+        (
+            // Both windows are clipped by the first block, so the stage keeps a nonzero leftover
+            // countdown word; the zero-window mute then settles the fader while the matrix ramps.
+            "zero-window mute after a clipped ramp",
+            &[
+                (0, RampOp::Fader(0, Left, -6.0, 10)),
+                (0, RampOp::Fader(0, Right, -6.0, 8)),
+                (1, RampOp::Mute(0, Both, true, 0)),
+                (1, RampOp::Matrix(1, Matrix2x2::IDENTITY, 8)),
+            ],
+        ),
+        (
+            // The left and right windows end in different blocks, so one block's two channel
+            // windows differ and each channel's leftover countdown is its own.
+            "different channel windows",
+            &[
+                (0, RampOp::Fader(0, Left, -3.0, 7)),
+                (0, RampOp::Fader(1, Right, 5.0, 4)),
+                (1, RampOp::Matrix(0, non_identity(6), 2)),
             ],
         ),
     ];

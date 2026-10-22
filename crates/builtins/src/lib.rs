@@ -3714,6 +3714,8 @@ impl<L: Lane> MatrixStage<L> {
         let mut ramp = fader.ramp;
         for (channel, words) in ramp.iter_mut().enumerate() {
             if fader_windows[channel] == 0 {
+                // An equivalent mutant while "a settled lane has current == target" holds; kept
+                // so a settled channel renders what `gain_mute_block` renders without relying on it.
                 words.target = words.current;
                 words.remaining = L::zero();
             } else {
