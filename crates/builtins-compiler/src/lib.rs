@@ -5248,6 +5248,10 @@ static FADER_MATRIX_FUSED_CALLS: core::sync::atomic::AtomicUsize =
 #[cfg(any(test, feature = "test-support"))]
 static FADER_MATRIX_FALLBACK_CALLS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
+/// Blocks a banked fader and matrix pair rendered in the fused ramping passes (issue #890).
+#[cfg(any(test, feature = "test-support"))]
+static FADER_MATRIX_RAMP_FUSED_CALLS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 /// Test-only source of stamps: a gate that stamps the next revision for a write and publishes it
 /// when the write is done, as a transaction's commit does (#1312 D7).
@@ -5317,7 +5321,7 @@ impl TestOnlyWriteGate for TestOnlyGate {
 // diagnostic surface or interference from another test thread.
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 8]> = const { std::cell::Cell::new([0; 8]) };
+    static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 9]> = const { std::cell::Cell::new([0; 9]) };
     static FADER_MATRIX_OUTPUT_WITNESS: std::cell::Cell<[u32; 2]> = const { std::cell::Cell::new([0; 2]) };
     static SCALAR_OWNER_DROPS: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
     static SCALAR_OUTER_LIFETIME: std::cell::Cell<[u64; 3]> = const { std::cell::Cell::new([0; 3]) };
@@ -5335,6 +5339,9 @@ pub struct TestOnlyFaderMatrixWitness {
     pub factory_members: u64,
     pub fader_values_applied: u64,
     pub matrix_values_applied: u64,
+    /// Blocks a banked pair rendered in the fused ramping passes (issue #890); a block counted
+    /// here is counted in neither `fused_calls` nor `fallback_calls`.
+    pub ramp_fused_calls: u64,
     pub first_left_bits: u32,
     pub first_right_bits: u32,
 }
@@ -5342,7 +5349,7 @@ pub struct TestOnlyFaderMatrixWitness {
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn test_only_reset_fader_matrix_witness() {
-    FADER_MATRIX_LIVE_WITNESS.with(|value| value.set([0; 8]));
+    FADER_MATRIX_LIVE_WITNESS.with(|value| value.set([0; 9]));
     FADER_MATRIX_OUTPUT_WITNESS.with(|value| value.set([0; 2]));
     SCALAR_OWNER_DROPS.with(|value| value.set([0; 3]));
 }
@@ -5373,6 +5380,7 @@ pub fn test_only_fader_matrix_witness() -> TestOnlyFaderMatrixWitness {
         factory_members: values[5],
         fader_values_applied: values[6],
         matrix_values_applied: values[7],
+        ramp_fused_calls: values[8],
         first_left_bits: FADER_MATRIX_OUTPUT_WITNESS.with(std::cell::Cell::get)[0],
         first_right_bits: FADER_MATRIX_OUTPUT_WITNESS.with(std::cell::Cell::get)[1],
     }
@@ -5683,7 +5691,32 @@ impl GraphPreparedBuiltinBankProcessor for FaderMatrixBankProcessor {
                 driver,
             ),
         };
-        if !fused {
+        // Issue #890: a pair with a ramp in flight renders in fused passes unless the block
+        // carries a timed operation, which only the stage's timed path applies.
+        let ramp_fused = !fused
+            && match driver.as_mut() {
+                None => bank.try_process_ramping_with_matrix(&mut matrix.bank, left, right, frames),
+                Some(driver) => bank.try_process_ramping_with_matrix_and_operations(
+                    &mut matrix.bank,
+                    left,
+                    right,
+                    frames,
+                    driver,
+                ),
+            };
+        if ramp_fused {
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_RAMP_FUSED_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            #[cfg(any(test, feature = "test-support"))]
+            FADER_MATRIX_LIVE_WITNESS.with(|value| {
+                let mut counters = value.get();
+                counters[8] = counters[8].saturating_add(1);
+                value.set(counters);
+            });
+            if let Some(driver) = driver.take() {
+                driver.finish();
+            }
+        } else if !fused {
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_FALLBACK_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             #[cfg(any(test, feature = "test-support"))]
@@ -12642,8 +12675,13 @@ mod tests {
         }
     }
 
-    fn assert_pair_call(fixture: &mut PairFixture, frames: u32, seed: u32, expect_fused: bool) {
+    /// Renders one block through the pair and through the separate owners and compares them.
+    /// `settled` names the branch the pair must take: the settled fused pass when `true`, the
+    /// fused ramping passes (issue #890) when `false`; a fixture with no timed operation never
+    /// reaches the split fallback.
+    fn assert_pair_call(fixture: &mut PairFixture, frames: u32, seed: u32, settled: bool) {
         FADER_MATRIX_FUSED_CALLS.store(0, Ordering::Relaxed);
+        FADER_MATRIX_RAMP_FUSED_CALLS.store(0, Ordering::Relaxed);
         FADER_MATRIX_FALLBACK_CALLS.store(0, Ordering::Relaxed);
         let samples = fixture.lanes * frames as usize;
         let input_l = (0..samples)
@@ -12664,10 +12702,11 @@ mod tests {
             .process(&mut paired_l, &mut paired_r, frames, 0)
             .expect("paired process");
         let fused = FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed);
+        let ramp_fused = FADER_MATRIX_RAMP_FUSED_CALLS.load(Ordering::Relaxed);
         let fallback = FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed);
         assert_eq!(
-            (fused, fallback),
-            if expect_fused { (1, 0) } else { (0, 1) },
+            (fused, ramp_fused, fallback),
+            if settled { (1, 0, 0) } else { (0, 1, 0) },
             "the named call must take its expected actual dispatch branch"
         );
         fixture
@@ -13223,8 +13262,8 @@ mod tests {
         );
     }
 
-    /// #459 Case A: a three-sample queued ramp crossing two-sample render calls remains on the
-    /// fallback path until the following call, where the settled serialized pair fuses.
+    /// #459 Case A: a three-sample queued ramp crossing two-sample render calls stays on the fused
+    /// ramping passes (issue #890) until the following call, where the settled pass takes over.
     #[test]
     fn queued_three_sample_ramp_crosses_call_boundary_before_fusing() {
         let _guard = PAIR_WITNESS_LOCK
@@ -13246,14 +13285,8 @@ mod tests {
             smoothing_samples: 3,
         });
         assert_pair_call(&mut fixture, 2, 0x4590, false);
-        assert_eq!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed), 0);
-        assert_eq!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed), 1);
         assert_pair_call(&mut fixture, 2, 0x4591, false);
-        assert_eq!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed), 0);
-        assert_eq!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed), 1);
         assert_pair_call(&mut fixture, 2, 0x4592, true);
-        assert_eq!(FADER_MATRIX_FUSED_CALLS.load(Ordering::Relaxed), 1);
-        assert_eq!(FADER_MATRIX_FALLBACK_CALLS.load(Ordering::Relaxed), 0);
     }
 
     #[test]
