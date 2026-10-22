@@ -4,26 +4,25 @@
 //! concatenation -- the contract graph binding enforces (#99 F1).
 
 use super::*;
-use crate::ids::port;
+use crate::ids::{NodeTable, port};
 
-pub(crate) fn topo(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<Vec<DependencyLevel>> {
+/// `topo`'s result: the dependency levels, and the sequential schedule (their concatenation) as
+/// dense indices of the [`NodeTable`], so later passes need no ID lookup (#1384 D2).
+#[derive(Debug)]
+pub(crate) struct Topo {
+    pub(crate) levels: Vec<DependencyLevel>,
+    pub(crate) schedule: Vec<usize>,
+}
+
+pub(crate) fn topo(table: &NodeTable<'_>) -> Option<Topo> {
     // Dense indices follow GraphNodeId order, so integer ready membership preserves the
     // existing deterministic tie-break without owning graph identities in scratch state.
-    let mut ordered: Vec<usize> = (0..nodes.len()).collect();
-    ordered.sort_unstable_by(|left, right| nodes[*left].id.cmp(&nodes[*right].id));
-    let mut dense_by_id = BTreeMap::<&GraphNodeId, usize>::new();
-    for (dense, &node_index) in ordered.iter().enumerate() {
-        if dense_by_id.insert(&nodes[node_index].id, dense).is_some() {
-            return None;
-        }
-    }
-
-    let mut degree = vec![0_u64; nodes.len()];
-    let mut successors = vec![Vec::<usize>::new(); nodes.len()];
-    let mut predecessors = vec![Vec::<usize>::new(); nodes.len()];
-    for edge in edges {
-        let source = *dense_by_id.get(&edge.source.node)?;
-        let destination = *dense_by_id.get(&edge.destination.node)?;
+    let count = table.len();
+    let mut degree = vec![0_u64; count];
+    let mut successors = vec![Vec::<usize>::new(); count];
+    let mut predecessors = vec![Vec::<usize>::new(); count];
+    for ends in table.ends() {
+        let (source, destination) = (ends.source(), ends.destination());
         degree[destination] = degree[destination].checked_add(1)?;
         successors[source].push(destination);
         predecessors[destination].push(source);
@@ -35,7 +34,7 @@ pub(crate) fn topo(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<Vec<Depen
         .collect();
     let mut processed = 0_usize;
     let mut levels = Vec::<Vec<usize>>::new();
-    let mut node_levels = vec![None::<u64>; nodes.len()];
+    let mut node_levels = vec![None::<u64>; count];
     while let Some(node) = ready.pop_first() {
         let level = predecessors[node]
             .iter()
@@ -58,33 +57,31 @@ pub(crate) fn topo(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<Vec<Depen
             }
         }
     }
-    if processed != nodes.len() {
+    if processed != count {
         return None;
     }
 
-    Some(
-        levels
-            .into_iter()
-            .enumerate()
-            .map(|(level, mut dense_nodes)| {
-                dense_nodes.sort_unstable();
-                DependencyLevel {
-                    level: level as u64,
-                    nodes: dense_nodes
-                        .into_iter()
-                        .map(|dense| nodes[ordered[dense]].id.clone())
-                        .collect(),
-                }
-            })
-            .collect(),
-    )
+    let mut schedule = Vec::with_capacity(count);
+    let levels = levels
+        .into_iter()
+        .enumerate()
+        .map(|(level, mut dense_nodes)| {
+            dense_nodes.sort_unstable();
+            schedule.extend_from_slice(&dense_nodes);
+            DependencyLevel {
+                level: level as u64,
+                nodes: dense_nodes
+                    .into_iter()
+                    .map(|dense| table.id(dense).clone())
+                    .collect(),
+            }
+        })
+        .collect();
+    Some(Topo { levels, schedule })
 }
 #[cfg(test)]
-pub(crate) fn cycle_witness(
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
-) -> Option<(Vec<GraphNodeId>, Vec<String>)> {
-    cycle_witnesses(nodes, edges).into_iter().next()
+pub(crate) fn cycle_witness(table: &NodeTable<'_>) -> Option<(Vec<GraphNodeId>, Vec<String>)> {
+    cycle_witnesses(table).into_iter().next()
 }
 /// A cycle's host-visible path: the first route or sidechain edge of its witness, else its first
 /// edge. A host shows only this path, so it names an edge an author wired: a witness can start on
@@ -116,149 +113,172 @@ pub(crate) fn cycle_primary_path(witness: &[GraphNodeId], edge_paths: &[String])
         .cloned()
         .unwrap_or_else(|| "$".to_owned())
 }
-pub(crate) fn cycle_witnesses(
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
-) -> Vec<(Vec<GraphNodeId>, Vec<String>)> {
-    let mut adjacency: BTreeMap<_, Vec<_>> = nodes
-        .iter()
-        .map(|node| (node.id.clone(), Vec::new()))
-        .collect();
-    let mut reverse: BTreeMap<_, Vec<_>> = nodes
-        .iter()
-        .map(|node| (node.id.clone(), Vec::new()))
-        .collect();
-    for edge in edges {
-        let Some(outgoing) = adjacency.get_mut(&edge.source.node) else {
-            return Vec::new();
-        };
-        outgoing.push(edge);
-        let Some(incoming) = reverse.get_mut(&edge.destination.node) else {
-            return Vec::new();
-        };
-        incoming.push(edge);
+/// Every cyclic strongly connected component's witness, sorted by the component's least node ID:
+/// the witness starts and ends at that node. Kosaraju over dense indices (#1384 D2); each node's
+/// edge lists are sorted by edge ID, so the walk is independent of edge order.
+pub(crate) fn cycle_witnesses(table: &NodeTable<'_>) -> Vec<(Vec<GraphNodeId>, Vec<String>)> {
+    let edges = table.edges();
+    let ends = table.ends();
+    let count = table.len();
+    let mut adjacency = vec![Vec::<usize>::new(); count];
+    let mut reverse = vec![Vec::<usize>::new(); count];
+    for (index, end) in ends.iter().enumerate() {
+        adjacency[end.source()].push(index);
+        reverse[end.destination()].push(index);
     }
-    for outgoing in adjacency.values_mut() {
-        outgoing.sort_by(|left, right| left.id.cmp(&right.id));
+    for outgoing in &mut adjacency {
+        outgoing.sort_by(|left, right| edges[*left].id.cmp(&edges[*right].id));
     }
-    for incoming in reverse.values_mut() {
-        incoming.sort_by(|left, right| left.id.cmp(&right.id));
+    for incoming in &mut reverse {
+        incoming.sort_by(|left, right| edges[*left].id.cmp(&edges[*right].id));
     }
 
-    let mut visited = BTreeSet::new();
-    let mut finish = Vec::with_capacity(nodes.len());
-    for start in nodes.iter().map(|node| &node.id) {
-        if !visited.insert(start.clone()) {
+    let mut visited = vec![false; count];
+    let mut finish = Vec::with_capacity(count);
+    for start in 0..count {
+        if visited[start] {
             continue;
         }
-        let mut stack = vec![(start.clone(), 0usize)];
+        visited[start] = true;
+        let mut stack = vec![(start, 0usize)];
         while let Some((node, next_edge)) = stack.last_mut() {
-            let outgoing = &adjacency[node];
+            let outgoing = &adjacency[*node];
             if *next_edge == outgoing.len() {
                 finish.push(stack.pop().expect("nonempty DFS stack").0);
                 continue;
             }
-            let destination = outgoing[*next_edge].destination.node.clone();
+            let destination = ends[outgoing[*next_edge]].destination();
             *next_edge += 1;
-            if visited.insert(destination.clone()) {
+            if !visited[destination] {
+                visited[destination] = true;
                 stack.push((destination, 0));
             }
         }
     }
 
-    let mut assigned = BTreeSet::new();
+    let mut assigned = vec![false; count];
     let mut components = Vec::new();
     for start in finish.into_iter().rev() {
-        if !assigned.insert(start.clone()) {
+        if assigned[start] {
             continue;
         }
+        assigned[start] = true;
         let mut component = Vec::new();
         let mut stack = vec![start];
         while let Some(node) = stack.pop() {
-            component.push(node.clone());
-            for edge in reverse[&node].iter().rev() {
-                let predecessor = edge.source.node.clone();
-                if assigned.insert(predecessor.clone()) {
+            component.push(node);
+            for &edge in reverse[node].iter().rev() {
+                let predecessor = ends[edge].source();
+                if !assigned[predecessor] {
+                    assigned[predecessor] = true;
                     stack.push(predecessor);
                 }
             }
         }
-        component.sort();
+        // Dense order is ID order, so this is the ID sort.
+        component.sort_unstable();
         let cyclic = component.len() > 1
-            || adjacency[&component[0]]
+            || adjacency[component[0]]
                 .iter()
-                .any(|edge| edge.destination.node == component[0]);
+                .any(|&edge| ends[edge].destination() == component[0]);
         if cyclic {
             components.push(component);
         }
     }
-    components.sort_by(|left, right| left[0].cmp(&right[0]));
+    components.sort_by_key(|component| component[0]);
+    let mut members = vec![false; count];
+    let mut on_path = vec![false; count];
     components
         .into_iter()
-        .filter_map(|component| cycle_witness_in_component(&component, &adjacency))
+        .filter_map(|component| {
+            cycle_witness_in_component(table, &component, &adjacency, &mut members, &mut on_path)
+        })
         .collect()
 }
+/// `members` and `on_path` are all-false scratch on entry and on return.
 pub(crate) fn cycle_witness_in_component(
-    component: &[GraphNodeId],
-    adjacency: &BTreeMap<GraphNodeId, Vec<&GraphEdge>>,
+    table: &NodeTable<'_>,
+    component: &[usize],
+    adjacency: &[Vec<usize>],
+    members: &mut [bool],
+    on_path: &mut [bool],
 ) -> Option<(Vec<GraphNodeId>, Vec<String>)> {
-    let members: BTreeSet<_> = component.iter().cloned().collect();
-    let start = component.first()?;
-    {
-        let mut nodes_path = vec![start.clone()];
-        let mut edge_path = Vec::new();
-        let mut on_path = BTreeSet::from([start.clone()]);
-        let mut stack = vec![(start.clone(), 0usize)];
-        while let Some((node, next_edge)) = stack.last_mut() {
-            let outgoing = &adjacency[node];
-            while *next_edge < outgoing.len()
-                && !members.contains(&outgoing[*next_edge].destination.node)
-            {
-                *next_edge += 1;
-            }
-            if *next_edge == outgoing.len() {
-                stack.pop();
-                if let Some(removed) = nodes_path.pop() {
-                    on_path.remove(&removed);
-                }
-                if !edge_path.is_empty() {
-                    edge_path.pop();
-                }
-                continue;
-            }
-            let edge = outgoing[*next_edge];
+    let edges = table.edges();
+    let ends = table.ends();
+    let start = *component.first()?;
+    for &node in component {
+        members[node] = true;
+    }
+    let mut result = None;
+    let mut nodes_path = vec![start];
+    let mut edge_path = Vec::new();
+    on_path[start] = true;
+    let mut stack = vec![(start, 0usize)];
+    while let Some((node, next_edge)) = stack.last_mut() {
+        let outgoing = &adjacency[*node];
+        while *next_edge < outgoing.len() && !members[ends[outgoing[*next_edge]].destination()] {
             *next_edge += 1;
-            if edge.destination.node == *start {
-                let mut witness = nodes_path.clone();
-                witness.push(start.clone());
-                let mut witness_edges = edge_path.clone();
-                witness_edges.push(edge.path.clone());
-                return Some((witness, witness_edges));
+        }
+        if *next_edge == outgoing.len() {
+            stack.pop();
+            if let Some(removed) = nodes_path.pop() {
+                on_path[removed] = false;
             }
-            if on_path.insert(edge.destination.node.clone()) {
-                nodes_path.push(edge.destination.node.clone());
-                edge_path.push(edge.path.clone());
-                stack.push((edge.destination.node.clone(), 0));
+            if !edge_path.is_empty() {
+                edge_path.pop();
             }
+            continue;
+        }
+        let edge = outgoing[*next_edge];
+        *next_edge += 1;
+        let destination = ends[edge].destination();
+        if destination == start {
+            let mut witness: Vec<GraphNodeId> = nodes_path
+                .iter()
+                .map(|&dense| table.id(dense).clone())
+                .collect();
+            witness.push(table.id(start).clone());
+            let mut witness_edges: Vec<String> = edge_path
+                .iter()
+                .map(|&index: &usize| edges[index].path.clone())
+                .collect();
+            witness_edges.push(edges[edge].path.clone());
+            result = Some((witness, witness_edges));
+            break;
+        }
+        if !on_path[destination] {
+            on_path[destination] = true;
+            nodes_path.push(destination);
+            edge_path.push(edge);
+            stack.push((destination, 0));
         }
     }
-    None
+    // Only the nodes still on the path are marked: every other mark was cleared when its node
+    // was popped.
+    for &node in &nodes_path {
+        on_path[node] = false;
+    }
+    for &node in component {
+        members[node] = false;
+    }
+    result
 }
+/// `schedule` is dense indices of `table`; a node of `table` absent from it is never a source or
+/// destination of an edge.
 pub(crate) fn buffer_assignments(
-    schedule: &[GraphNodeId],
-    edges: &[GraphEdge],
+    table: &NodeTable<'_>,
+    schedule: &[usize],
 ) -> Vec<BufferAssignment> {
-    let positions: BTreeMap<&GraphNodeId, usize> = schedule
-        .iter()
-        .enumerate()
-        .map(|(position, node)| (node, position))
-        .collect();
+    let mut positions = vec![usize::MAX; table.len()];
+    for (position, &dense) in schedule.iter().enumerate() {
+        positions[dense] = position;
+    }
     let mut consumer_counts = vec![0_usize; schedule.len()];
     let mut last_consumers: Vec<_> = schedule
         .iter()
         .enumerate()
-        .map(|(position, node)| {
-            if matches!(node, GraphNodeId::Output { .. }) {
+        .map(|(position, &dense)| {
+            if matches!(table.id(dense), GraphNodeId::Output { .. }) {
                 schedule.len()
             } else {
                 position
@@ -267,9 +287,9 @@ pub(crate) fn buffer_assignments(
         .collect();
     let mut main_input_counts = vec![0_usize; schedule.len()];
     let mut main_input_sources = vec![None; schedule.len()];
-    for edge in edges {
-        let source = positions[&edge.source.node];
-        let destination = positions[&edge.destination.node];
+    for (edge, ends) in table.edges().iter().zip(table.ends()) {
+        let source = positions[ends.source()];
+        let destination = positions[ends.destination()];
         consumer_counts[source] += 1;
         last_consumers[source] = last_consumers[source].max(destination);
         if edge.destination.kind == GraphPortKind::MainInput {
@@ -284,7 +304,8 @@ pub(crate) fn buffer_assignments(
     let mut expirations = vec![Vec::<u64>::new(); schedule.len() + 1];
     let mut node_buffers = vec![0_u64; schedule.len()];
     let mut assignments = Vec::with_capacity(schedule.len());
-    for (position, node) in schedule.iter().enumerate() {
+    for (position, &dense) in schedule.iter().enumerate() {
+        let node = table.id(dense);
         if position != 0 {
             for buffer in expirations[position - 1].drain(..) {
                 if live_until[buffer as usize] == position - 1 {

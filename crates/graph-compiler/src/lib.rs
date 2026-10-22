@@ -345,8 +345,8 @@ mod tests {
         write_canonical,
     };
     use crate::ids::{
-        PreparedEffectIndex, gid, port, prepared_effect_node, rack_id, route_destination_node,
-        route_source_node, track_node,
+        NodeTable, PreparedEffectIndex, gid, port, prepared_effect_node, rack_id,
+        route_destination_node, route_source_node, track_node,
     };
     use crate::pdc::timings;
     use crate::schedule::{
@@ -1675,6 +1675,33 @@ mod tests {
         }
     }
 
+    /// The node table a compile builds over `nodes` and `edges` (#1384 D1).
+    fn table<'a>(nodes: &'a [GraphNode], edges: &'a [GraphEdge]) -> NodeTable<'a> {
+        NodeTable::new(nodes, edges).expect("node table")
+    }
+
+    /// `topo`'s levels, or `None` where the compile has no table or no schedule.
+    fn levels_of(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<Vec<DependencyLevel>> {
+        NodeTable::new(nodes, edges)
+            .as_ref()
+            .and_then(topo)
+            .map(|topo| topo.levels)
+    }
+
+    /// `buffer_assignments` over a schedule given by node ID.
+    fn assignments_for(
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+        schedule: &[GraphNodeId],
+    ) -> Vec<BufferAssignment> {
+        let table = table(nodes, edges);
+        let dense: Vec<usize> = schedule
+            .iter()
+            .map(|id| table.dense_of(id).expect("scheduled node"))
+            .collect();
+        buffer_assignments(&table, &dense)
+    }
+
     /// Independent literals cover every identity variant, nested edges and UTF-8 byte lengths.
     /// A wrong token or length changes canonical identity or graph-budget admission.
     #[test]
@@ -1886,7 +1913,7 @@ mod tests {
             nodes.sort_by(|a, b| a.id.cmp(&b.id));
             edges.sort_by(|a, b| a.id.cmp(&b.id));
 
-            let levels = topo(&nodes, &edges).expect("acyclic by construction");
+            let levels = levels_of(&nodes, &edges).expect("acyclic by construction");
             let schedule: Vec<GraphNodeId> = levels
                 .iter()
                 .flat_map(|level| level.nodes.iter().cloned())
@@ -1940,7 +1967,7 @@ mod tests {
             let mut reversed = edges.clone();
             reversed.reverse();
             assert_eq!(
-                topo(&nodes, &reversed).expect("acyclic"),
+                levels_of(&nodes, &reversed).expect("acyclic"),
                 levels,
                 "graph {graph}: level assignment depends on edge order"
             );
@@ -13046,7 +13073,7 @@ mod tests {
             edge("to-b", "c", "b"),
             edge("to-c", "b", "c"),
         ];
-        let (witness, paths) = cycle_witness(&nodes, &edges).expect("cycle");
+        let (witness, paths) = cycle_witness(&table(&nodes, &edges)).expect("cycle");
         assert_eq!(witness, [node("b"), node("c"), node("b")]);
         assert_eq!(paths, ["$.routes[id=to-c]", "$.routes[id=to-b]"]);
     }
@@ -13066,7 +13093,7 @@ mod tests {
             edge("za", "a", "z"),
         ];
         edges.sort_by(|left, right| left.id.cmp(&right.id));
-        let witnesses = cycle_witnesses(&nodes, &edges);
+        let witnesses = cycle_witnesses(&table(&nodes, &edges));
         assert_eq!(witnesses.len(), 3);
         assert_eq!(witnesses[0].0, [node("a"), node("b"), node("a")]);
         assert_eq!(witnesses[0].1, ["$.routes[id=ab]", "$.routes[id=ba]"]);
@@ -13074,6 +13101,67 @@ mod tests {
         assert_eq!(witnesses[1].1, ["$.routes[id=cc]"]);
         assert_eq!(witnesses[2].0, [node("d"), node("e"), node("d")]);
         assert_eq!(witnesses[2].1, ["$.routes[id=de]", "$.routes[id=ed]"]);
+        // #1384 D4: a dense index is the node's ID rank, not its insertion position. Every
+        // compile passes ID-sorted nodes, so only reversed input tells the two apart.
+        let mut reversed = nodes;
+        reversed.reverse();
+        assert_eq!(cycle_witnesses(&table(&reversed, &edges)), witnesses);
+    }
+
+    /// #1384 D1: the table is the one place a duplicate node ID or a dangling edge end is
+    /// detected; without it a compile reports no cycle and has no schedule.
+    #[test]
+    fn node_table_refuses_duplicate_ids_and_dangling_ends() {
+        let nodes = [
+            graph_node("a", 0, TailSamples::Finite(0)),
+            graph_node("b", 0, TailSamples::Finite(0)),
+        ];
+        assert!(NodeTable::new(&nodes, &[edge("ab", "a", "b")]).is_some());
+        assert!(
+            NodeTable::new(&nodes, &[edge("qb", "q", "b")]).is_none(),
+            "dangling source"
+        );
+        assert!(
+            NodeTable::new(&nodes, &[edge("aq", "a", "q")]).is_none(),
+            "dangling destination"
+        );
+        let duplicated = [nodes[0].clone(), nodes[0].clone(), nodes[1].clone()];
+        assert!(NodeTable::new(&duplicated, &[]).is_none(), "duplicate ID");
+    }
+
+    /// #1384 D4: a dense index is the node's ID rank, not its insertion position, so levels do
+    /// not depend on the order nodes are given in. Every compile passes ID-sorted nodes, so only
+    /// reversed input tells the two apart. (The witness half is in
+    /// `every_cyclic_scc_has_one_closed_sorted_witness_and_edge_paths`.)
+    #[test]
+    fn levels_follow_id_order_not_insertion_order() {
+        let sorted: Vec<_> = ["a", "b", "c", "d", "e", "z"]
+            .into_iter()
+            .map(|name| graph_node(name, 0, TailSamples::Finite(0)))
+            .collect();
+        let mut reversed = sorted.clone();
+        reversed.reverse();
+
+        // Two sources, two middles, two sinks: every level holds two nodes.
+        let acyclic = [
+            edge("ac", "a", "c"),
+            edge("bd", "b", "d"),
+            edge("ce", "c", "e"),
+            edge("dz", "d", "z"),
+        ];
+        let levels = levels_of(&sorted, &acyclic).expect("acyclic");
+        assert_eq!(
+            levels
+                .iter()
+                .map(|level| level.nodes.clone())
+                .collect::<Vec<_>>(),
+            [
+                vec![node("a"), node("b")],
+                vec![node("c"), node("d")],
+                vec![node("e"), node("z")],
+            ]
+        );
+        assert_eq!(levels_of(&reversed, &acyclic), Some(levels));
     }
 
     #[test]
@@ -13083,29 +13171,11 @@ mod tests {
             graph_node("effect", 3, TailSamples::Finite(5)),
         ];
         let edges = [edge("serial", "source", "effect")];
-        let levels = topo(&nodes, &edges).expect("acyclic");
-        let schedule: Vec<_> = levels
-            .iter()
-            .flat_map(|level| level.nodes.iter().cloned())
-            .collect();
-        let latencies = nodes
-            .iter()
-            .map(|node| (node.id.clone(), node.latency))
-            .collect();
-        let tails = nodes
-            .iter()
-            .map(|node| (node.id.clone(), node.tail))
-            .collect();
-        let error = timings(
-            &schedule,
-            &edges,
-            &latencies,
-            &tails,
-            &BTreeMap::new(),
-            &caps(7),
-        )
-        .err()
-        .expect("latency plus tail exceeds cap");
+        let table = table(&nodes, &edges);
+        let schedule = topo(&table).expect("acyclic").schedule;
+        let error = timings(&table, &schedule, &BTreeMap::new(), &caps(7))
+            .err()
+            .expect("latency plus tail exceeds cap");
         assert_eq!(error.code, "graph.tail.limit");
     }
 
@@ -13151,43 +13221,19 @@ mod tests {
                 path: "$.routes[id=late-main]".to_owned(),
             },
         ];
-        let levels = topo(&nodes, &edges).expect("acyclic output graph");
-        let schedule: Vec<_> = levels
-            .iter()
-            .flat_map(|level| level.nodes.iter().cloned())
-            .collect();
-        let latencies = nodes
-            .iter()
-            .map(|node| (node.id.clone(), node.latency))
-            .collect();
-        let tails = nodes
-            .iter()
-            .map(|node| (node.id.clone(), node.tail))
-            .collect();
-        let timing = timings(
-            &schedule,
-            &edges,
-            &latencies,
-            &tails,
-            &BTreeMap::new(),
-            &caps(100),
-        )
-        .expect("checked output timing");
+        let finite_table = table(&nodes, &edges);
+        let schedule = topo(&finite_table).expect("acyclic output graph").schedule;
+        let timing = timings(&finite_table, &schedule, &BTreeMap::new(), &caps(100))
+            .expect("checked output timing");
         assert_eq!(timing.output_latency, LatencySamples(7));
         assert_eq!(timing.output_tail, TailSamples::Finite(12));
         assert_eq!(timing.delays.len(), 1);
 
-        let mut infinite_tails = tails;
-        infinite_tails.insert(node("late"), TailSamples::Infinite);
-        let infinite = timings(
-            &schedule,
-            &edges,
-            &latencies,
-            &infinite_tails,
-            &BTreeMap::new(),
-            &caps(100),
-        )
-        .expect("infinite output tail");
+        let mut infinite_nodes = nodes.clone();
+        infinite_nodes[1].tail = TailSamples::Infinite;
+        let infinite_table = table(&infinite_nodes, &edges);
+        let infinite = timings(&infinite_table, &schedule, &BTreeMap::new(), &caps(100))
+            .expect("infinite output tail");
         assert_eq!(infinite.output_latency, LatencySamples(7));
         assert_eq!(infinite.output_tail, TailSamples::Infinite);
     }
@@ -13239,26 +13285,14 @@ mod tests {
                 path: "$.routes[id=late-main]".to_owned(),
             },
         ];
-        let levels = topo(&nodes, &edges).expect("acyclic output graph");
-        let schedule: Vec<_> = levels
-            .iter()
-            .flat_map(|level| level.nodes.iter().cloned())
-            .collect();
-        let latencies = nodes
-            .iter()
-            .map(|node| (node.id.clone(), node.latency))
-            .collect();
-        let tails = nodes
-            .iter()
-            .map(|node| (node.id.clone(), node.tail))
-            .collect();
+        let table = table(&nodes, &edges);
+        let schedule = topo(&table).expect("acyclic output graph").schedule;
         let run = |floors: &[(GraphNodeId, u64)]| {
             let floors = floors
                 .iter()
                 .map(|(node, floor)| (node.clone(), LatencySamples(*floor)))
                 .collect();
-            let timing = timings(&schedule, &edges, &latencies, &tails, &floors, &caps(100))
-                .expect("checked timing");
+            let timing = timings(&table, &schedule, &floors, &caps(100)).expect("checked timing");
             let delays: Vec<u64> = timing
                 .routes
                 .iter()
@@ -13347,7 +13381,15 @@ mod tests {
                 output.clone(),
             ),
         ];
-        let assigned: BTreeMap<_, _> = buffer_assignments(&schedule, &edges)
+        let nodes: Vec<_> = schedule
+            .iter()
+            .map(|id| GraphNode {
+                id: id.clone(),
+                latency: LatencySamples(0),
+                tail: TailSamples::Finite(0),
+            })
+            .collect();
+        let assigned: BTreeMap<_, _> = assignments_for(&nodes, &edges, &schedule)
             .into_iter()
             .map(|assignment| (assignment.port.node, assignment.buffer_index))
             .collect();
@@ -13369,7 +13411,7 @@ mod tests {
         assert_eq!(report.sequential_schedule, flattened);
         assert_eq!(
             report.buffer_assignments,
-            buffer_assignments(&flattened, &report.spec.edges)
+            assignments_for(&report.spec.nodes, &report.spec.edges, &flattened)
         );
 
         // The pre-#99 pop order: a submix strip's end, then the route it feeds, before the other
@@ -13379,7 +13421,7 @@ mod tests {
         old_kahn.swap(22, 23);
         assert_ne!(old_kahn, flattened);
         assert_ne!(
-            buffer_assignments(&old_kahn, &report.spec.edges),
+            assignments_for(&report.spec.nodes, &report.spec.edges, &old_kahn),
             report.buffer_assignments,
             "old Kahn coloring cannot be retained under level-major execution"
         );
@@ -13719,43 +13761,24 @@ mod tests {
                 ));
             }
             edges.sort_by(|left, right| left.id.cmp(&right.id));
-            let first_cycle = cycle_witness(&nodes, &edges);
-            let second_cycle = cycle_witness(&nodes, &edges);
+            let table = table(&nodes, &edges);
+            let first_cycle = cycle_witness(&table);
+            let second_cycle = cycle_witness(&table);
             assert_eq!(first_cycle, second_cycle);
             if first_cycle.is_none() {
-                let first_levels = topo(&nodes, &edges).expect("acyclic");
-                let second_levels = topo(&nodes, &edges).expect("repeat");
-                assert_eq!(first_levels, second_levels);
-                let first_schedule: Vec<_> = first_levels
-                    .iter()
-                    .flat_map(|level| level.nodes.iter().cloned())
-                    .collect();
-                let second_schedule: Vec<_> = second_levels
-                    .iter()
-                    .flat_map(|level| level.nodes.iter().cloned())
-                    .collect();
-                assert_eq!(first_schedule, second_schedule);
-                let latencies = nodes
-                    .iter()
-                    .map(|node| (node.id.clone(), node.latency))
-                    .collect();
-                let tails = nodes
-                    .iter()
-                    .map(|node| (node.id.clone(), node.tail))
-                    .collect();
+                let first_topo = topo(&table).expect("acyclic");
+                let second_topo = topo(&table).expect("repeat");
+                assert_eq!(first_topo.levels, second_topo.levels);
+                assert_eq!(first_topo.schedule, second_topo.schedule);
                 let first = timings(
-                    &first_schedule,
-                    &edges,
-                    &latencies,
-                    &tails,
+                    &table,
+                    &first_topo.schedule,
                     &BTreeMap::new(),
                     &caps(1_000_000),
                 );
                 let second = timings(
-                    &second_schedule,
-                    &edges,
-                    &latencies,
-                    &tails,
+                    &table,
+                    &second_topo.schedule,
                     &BTreeMap::new(),
                     &caps(1_000_000),
                 );

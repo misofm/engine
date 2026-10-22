@@ -5,11 +5,11 @@
 
 use super::*;
 use crate::canonical::node_text_len;
-use crate::ids::is_summing_node;
+use crate::ids::{NodeTable, is_summing_node};
 use crate::pdc::TimingResult;
 use effect_contract::{BypassShunt, EffectControlLane, ObservationLane, PreparedAutomationSpan};
 
-/// Twelve inputs because the estimate is a function of that many independent facts about the
+/// Eleven inputs because the estimate is a function of that many independent facts about the
 /// compile, and bundling them into a struct would only move the argument list. Was inside `lib.rs`
 /// before the #99 module split, where the crate-level allow covered it.
 ///
@@ -28,8 +28,7 @@ use effect_contract::{BypassShunt, EffectControlLane, ObservationLane, PreparedA
 pub(crate) fn resource_estimate(
     quantum: u32,
     session_bytes: u64,
-    nodes: &[GraphNode],
-    edges: &[GraphEdge],
+    table: &NodeTable<'_>,
     schedule: &[GraphNodeId],
     levels: &[DependencyLevel],
     buffers: &[BufferAssignment],
@@ -42,22 +41,22 @@ pub(crate) fn resource_estimate(
     prepared_routes: &[PreparedRoute],
 ) -> Option<GraphResourceEstimate> {
     let count = |value: usize| u64::try_from(value).ok();
+    let (nodes, edges) = (table.nodes(), table.edges());
     let logical_nodes = count(nodes.len())?;
     let logical_edges = count(edges.len())?;
     let materialized_nodes = logical_nodes.checked_add(timing.delay_count)?;
     let materialized_edges = logical_edges.checked_add(timing.delay_count)?;
     let schedule_items = count(schedule.len())?.checked_add(timing.delay_count)?;
     let dependency_levels = count(levels.len())?;
-    let mut input_counts: BTreeMap<&GraphNodeId, u64> =
-        nodes.iter().map(|node| (&node.id, 0_u64)).collect();
-    for edge in edges {
-        let count = input_counts.get_mut(&edge.destination.node)?;
+    // Per dense index (#1384 D2): every edge's destination is a node of `table`.
+    let mut input_counts = vec![0_u64; table.len()];
+    for ends in table.ends() {
+        let count = &mut input_counts[ends.destination()];
         *count = count.checked_add(1)?;
     }
     let reductions = count(
-        nodes
-            .iter()
-            .filter(|node| is_summing_node(&node.id) && input_counts[&node.id] > 1)
+        (0..table.len())
+            .filter(|&dense| is_summing_node(table.id(dense)) && input_counts[dense] > 1)
             .count(),
     )?;
     let routes = count(
@@ -67,7 +66,7 @@ pub(crate) fn resource_estimate(
             .count(),
     )?;
     let effect_count = count(effects.len())?;
-    let maximum_inputs = input_counts.values().copied().max().unwrap_or(0);
+    let maximum_inputs = input_counts.iter().copied().max().unwrap_or(0);
     let quantum = u64::from(quantum);
     // Node outputs use the deterministic liveness coloring recorded in `buffers`. Edge
     // contributions remain distinct because they carry independent PDC state into reductions.

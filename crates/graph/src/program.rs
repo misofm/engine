@@ -248,16 +248,19 @@ const fn is_dedicated(node: &GraphNodeId) -> bool {
 /// own ownership. `runtime::op_dataflow` derives the same edge from the colouring; the two have to
 /// agree, and `chainable_bank_groups` is the only place the lowering needs the answer before the
 /// colouring exists.
+///
+/// `ends[edge]` is `spec.edges[edge]`'s `(source, destination)` node indices, resolved once by
+/// `lower_with` (#1384 D3).
 fn first_main_producer(
-    spec: &GraphSpec,
+    ends: &[(usize, usize)],
     elided: &[bool],
     main_in: &[Vec<usize>],
     node: usize,
 ) -> Option<usize> {
     let edge = *main_in.get(node)?.first()?;
-    let mut source = node_index(spec, &spec.edges[edge].source.node)? as usize;
+    let mut source = ends.get(edge)?.0;
     while elided[source] {
-        source = node_index(spec, &spec.edges[*main_in[source].first()?].source.node)? as usize;
+        source = ends.get(*main_in[source].first()?)?.0;
     }
     Some(source)
 }
@@ -284,6 +287,7 @@ fn first_main_producer(
 fn chainable_bank_groups(
     banks: &[Vec<GraphNodeId>],
     spec: &GraphSpec,
+    ends: &[(usize, usize)],
     elided: &[bool],
     main_in: &[Vec<usize>],
 ) -> Vec<Vec<GraphNodeId>> {
@@ -306,7 +310,7 @@ fn chainable_bank_groups(
             bank_lane.insert(*node, (bank, lane));
         }
     }
-    let producer = |node: usize| first_main_producer(spec, elided, main_in, node);
+    let producer = |node: usize| first_main_producer(ends, elided, main_in, node);
     let mut parent: Vec<usize> = (0..banks.len()).collect();
     fn root(parent: &mut [usize], mut bank: usize) -> usize {
         while parent[bank] != bank {
@@ -598,13 +602,16 @@ fn lower_with(
         .map(|delay| (&delay.edge_id, delay.samples.0))
         .collect();
 
-    // Inputs per node, in `spec.edges` order -- which is sorted by `GraphEdgeId` (D9).
+    // Inputs per node, in `spec.edges` order -- which is sorted by `GraphEdgeId` (D9). Each
+    // edge's ends are resolved here once, and every later pass reads `ends` (#1384 D3).
     let mut main_in: Vec<Vec<usize>> = vec![Vec::new(); node_count];
     let mut side_in: Vec<Option<usize>> = vec![None; node_count];
+    let mut ends: Vec<(usize, usize)> = Vec::with_capacity(spec.edges.len());
     for (edge_index, edge) in spec.edges.iter().enumerate() {
         let source = node_index(spec, &edge.source.node).ok_or(ProgramError::UnknownNode)? as usize;
         let destination =
             node_index(spec, &edge.destination.node).ok_or(ProgramError::UnknownNode)? as usize;
+        ends.push((source, destination));
         if position[source] >= position[destination] {
             return Err(ProgramError::NotTopological);
         }
@@ -637,18 +644,14 @@ fn lower_with(
     // producing op, before any consumer). Counting either would block every in-place op in a
     // chain.
     let mut reads_of = vec![0usize; node_count];
-    for edge in &spec.edges {
-        let destination =
-            node_index(spec, &edge.destination.node).ok_or(ProgramError::UnknownNode)? as usize;
+    for &(source, destination) in &ends {
         if elided[destination] {
             continue;
         }
-        let mut source =
-            node_index(spec, &edge.source.node).ok_or(ProgramError::UnknownNode)? as usize;
+        let mut source = source;
         // Resolve through the alias chain to the node that actually produces the storage.
         while elided[source] {
-            source = node_index(spec, &spec.edges[main_in[source][0]].source.node)
-                .ok_or(ProgramError::UnknownNode)? as usize;
+            source = ends[main_in[source][0]].0;
         }
         reads_of[source] += 1;
     }
@@ -668,8 +671,7 @@ fn lower_with(
     for &index in &order {
         let id = &spec.nodes[index].id;
         if elided[index] {
-            let producer = node_index(spec, &spec.edges[main_in[index][0]].source.node)
-                .ok_or(ProgramError::UnknownNode)? as usize;
+            let producer = ends[main_in[index][0]].0;
             let buffer = logical_of_node[producer].ok_or(ProgramError::NotTopological)?;
             let after = after_op_of_node[producer].ok_or(ProgramError::NotTopological)?;
             logical_of_node[index] = Some(buffer);
@@ -685,8 +687,7 @@ fn lower_with(
         let op_index = u32::try_from(ops.len()).map_err(|_| ProgramError::Overflow)?;
         let first_input = u32::try_from(inputs.len()).map_err(|_| ProgramError::Overflow)?;
         for &edge_index in &main_in[index] {
-            let source = node_index(spec, &spec.edges[edge_index].source.node)
-                .ok_or(ProgramError::UnknownNode)? as usize;
+            let source = ends[edge_index].0;
             let buffer = logical_of_node[source].ok_or(ProgramError::NotTopological)?;
             let delay = edge_delay(edge_index).map(|samples| {
                 delay_specs.push(DelaySpec {
@@ -709,8 +710,7 @@ fn lower_with(
         let sidechain = match side_in[index] {
             None => None,
             Some(edge_index) => {
-                let source = node_index(spec, &spec.edges[edge_index].source.node)
-                    .ok_or(ProgramError::UnknownNode)? as usize;
+                let source = ends[edge_index].0;
                 let buffer = logical_of_node[source].ok_or(ProgramError::NotTopological)?;
                 let delay = edge_delay(edge_index).map(|samples| {
                     delay_specs.push(DelaySpec {
@@ -788,7 +788,7 @@ fn lower_with(
     // ops, and a chain may now fuse across rack locations and into a builtin bank, so the union is
     // derived from the graph's own dataflow rather than from the cohort planner's grouping.
     let chained = if chain_windows {
-        chainable_bank_groups(banks, spec, &elided, &main_in)
+        chainable_bank_groups(banks, spec, &ends, &elided, &main_in)
     } else {
         banks.to_vec()
     };

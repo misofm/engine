@@ -115,3 +115,68 @@ gate 6 in the PR.
 ## Dependencies
 
 - *Keep every node's latency from dropping during playback* (#1285): this slice rebases on it.
+
+## Attempt record
+
+### Attempt 1
+
+Built on `main` at `82053706c` (#1285 merged).
+
+- **D1.** `ids::NodeTable` (built in `compile_graph` after the node and edge sorts): node positions
+  sorted once by ID (dense index = ID rank) and one `EdgeEnds { source, destination }` per edge,
+  resolved once by binary search. `NodeTable::new` returns `None` on a duplicate ID or a dangling
+  end; then no cycle is reported and `topo`'s `expect` panics as before. `add_node` no longer fills
+  latency/tail maps; `timings` reads them from the `GraphNode`.
+- **D2.** `topo`, `cycle_witnesses` (Kosaraju on `Vec<bool>`/`Vec<Vec<edge index>>`, per-node edge
+  lists still sorted by edge ID), `timings` (floors converted once to a per-dense `Vec`),
+  `buffer_assignments` and `resource_estimate`'s input counts take the table. `topo` also returns
+  the schedule as dense indices.
+- **D3.** `lower_with` resolves each spec edge's ends once (in the `main_in`/`side_in` loop) and
+  `reads_of`, the elided producer, main inputs, sidechains and `first_main_producer` (through
+  `chainable_bank_groups`, which gained an `ends` parameter) read them.
+- **Behaviour note.** Before, `cycle_witnesses` deduplicated a duplicated node ID through its maps
+  and could still report a cycle; now a duplicate ID yields no table, as D1 states. A compile never
+  produces a duplicate ID.
+- **Tests.** Two added in `crates/graph-compiler/src/lib.rs`; the old dangling/duplicate tests were
+  deleted earlier (f8b947995).
+  - `node_table_refuses_duplicate_ids_and_dangling_ends`. Mutation (no duplicate check; a dangling
+    end resolves to 0): this test red, every other `graph-compiler` test green.
+  - `levels_follow_id_order_not_insertion_order` (levels over reversed insertion order); the
+    witness half is one reversed-order assertion folded into
+    `every_cyclic_scc_has_one_closed_sorted_witness_and_edge_paths` (root ruling after the verdict:
+    one test per claim). Mutation (dense index = insertion position, ends found by linear search),
+    re-run after the fold with `cargo test -p graph-compiler --lib`: exactly these two red, the
+    other 81 green. Before the fold, the same mutation left every other `graph-compiler` test green
+    (the 65,537-track scale test skipped, as a linear search makes it quadratic).
+- **Gates 1-3.** Gate 1: 291 passed, 0 failed, 2 ignored. Gate 2 (test-debug-a line): 2,400 passed, 0 failed, 12 ignored. Gate 3: fmt, clippy
+  (`--all-features -D warnings`), `check-graph-policy.sh` and `check-workspace-policy.sh` pass.
+- **Gate 4 (no bit moved; PR evidence).** `sdk_render_oracle 64 < F`, base `82053706c` and branch
+  `8bdfe418f`, then again after the review fixes below, identical digests: `parametric-eq-nine-track.json` `2938bb78...f1f5c8`,
+  `console-sixty-four-track.json` `24607288...accffce8`, `console-sixty-four-track-app.json`
+  `ac23bd04...888430cf`, `console-sixty-four-track-sends.json` `58c54351...81d5f883` (the same digests
+  #1330 recorded).
+- **Gate 5 (descriptive).** Modules prepared and preflighted: base `06bb9bc5...` at `82053706c`,
+  branch `31b970c3...` at `809805745`. `rebuild-run` once each, back to back under one exclusive
+  lock, base then branch, one warmup and two measured rounds, no retry; both validators accepted.
+  Both ran with `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` (1-minute load 0.64 and 1.01, above the
+  runner's 0.50 ceiling; 32 cores; root read 0.73 just before), pinned to CPU 31. Records:
+  `artifacts/steps/d15-15-node-ids-before/` and `artifacts/steps/d15-15-node-ids-after/`. Boot p50,
+  mean of the two rounds:
+
+  | document | before ms | after ms | change |
+  |---|---|---|---|
+  | nine_track_eq | 3.536 | 3.181 | -10.0 % |
+  | sixty_four_track_console | 29.074 | 25.337 | -12.9 % |
+  | sixty_four_track_app_shape | 28.315 | 24.526 | -13.4 % |
+  | sixty_four_track_console_sends | 46.420 | 40.054 | -13.7 % |
+
+  Descriptive; one invocation per side, so run-to-run noise is not separated.
+- **Gate 6 (profile).** Blocked on this machine: `perf record` is refused
+  (`kernel.perf_event_paranoid` = 4) and no valgrind is installed. No workaround was tried; no
+  compare share is recorded. When it is measured, read it with #1749: compares other than D1's
+  sort and resolution and D3's resolution remain by design of this slice.
+- **Verdict.** A fresh verifier gave attempt 1 a PASS. Root ruled two small fixes into the attempt:
+  `cycle_witness_in_component`'s `on_path` scratch is allocated once in `cycle_witnesses` and
+  cleared only on its path entries on return, and the witness-order test fold above. The verdict's
+  M4 and M6 (gaps in older tests) are filed as #1748; the remaining `GraphNodeId` compares are
+  filed as #1749.

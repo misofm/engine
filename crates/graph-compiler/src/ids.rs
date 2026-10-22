@@ -117,15 +117,106 @@ pub(crate) fn is_summing_node(node: &GraphNodeId) -> bool {
 }
 pub(crate) fn add_node(
     nodes: &mut Vec<GraphNode>,
-    latencies: &mut BTreeMap<GraphNodeId, LatencySamples>,
-    tails: &mut BTreeMap<GraphNodeId, TailSamples>,
     id: GraphNodeId,
     latency: LatencySamples,
     tail: TailSamples,
 ) {
-    latencies.insert(id.clone(), latency);
-    tails.insert(id.clone(), tail);
     nodes.push(GraphNode { id, latency, tail });
+}
+
+/// An edge's two ends as dense node indices (#1384 D1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EdgeEnds {
+    pub(crate) source: u32,
+    pub(crate) destination: u32,
+}
+
+impl EdgeEnds {
+    pub(crate) const fn source(self) -> usize {
+        self.source as usize
+    }
+
+    pub(crate) const fn destination(self) -> usize {
+        self.destination as usize
+    }
+}
+
+/// One compile's node identities resolved once (#1384 D1): a node's dense index is its rank in
+/// ascending `GraphNodeId` order, and every edge's ends are resolved to dense indices once. The
+/// per-edge passes (`topo`, `cycle_witnesses`, `timings`, `buffer_assignments`,
+/// `resource_estimate`) then index `Vec`s by dense index instead of comparing IDs. Because the
+/// dense order is the ID order, iterating the dense range ascending visits nodes in exactly the
+/// order a map keyed by `GraphNodeId` did (D4).
+pub(crate) struct NodeTable<'a> {
+    nodes: &'a [GraphNode],
+    edges: &'a [GraphEdge],
+    /// `order[dense]` is the position in `nodes` of the node of ID rank `dense`.
+    order: Vec<usize>,
+    /// `ends[i]` is `edges[i]`'s ends.
+    ends: Vec<EdgeEnds>,
+}
+
+impl<'a> NodeTable<'a> {
+    /// `None` on a duplicate node ID or an edge end that names no node.
+    pub(crate) fn new(nodes: &'a [GraphNode], edges: &'a [GraphEdge]) -> Option<Self> {
+        let mut order: Vec<usize> = (0..nodes.len()).collect();
+        order.sort_unstable_by(|left, right| nodes[*left].id.cmp(&nodes[*right].id));
+        if order
+            .windows(2)
+            .any(|pair| nodes[pair[0]].id == nodes[pair[1]].id)
+        {
+            return None;
+        }
+        u32::try_from(nodes.len()).ok()?;
+        let mut table = Self {
+            nodes,
+            edges,
+            order,
+            ends: Vec::with_capacity(edges.len()),
+        };
+        for edge in edges {
+            let source = table.dense_of(&edge.source.node)?;
+            let destination = table.dense_of(&edge.destination.node)?;
+            table.ends.push(EdgeEnds {
+                source: source as u32,
+                destination: destination as u32,
+            });
+        }
+        Some(table)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub(crate) fn node(&self, dense: usize) -> &'a GraphNode {
+        &self.nodes[self.order[dense]]
+    }
+
+    pub(crate) fn id(&self, dense: usize) -> &'a GraphNodeId {
+        &self.node(dense).id
+    }
+
+    /// The nodes in the caller's order (not dense order).
+    pub(crate) fn nodes(&self) -> &'a [GraphNode] {
+        self.nodes
+    }
+
+    pub(crate) fn edges(&self) -> &'a [GraphEdge] {
+        self.edges
+    }
+
+    /// `ends()[i]` is `edges()[i]`'s ends.
+    pub(crate) fn ends(&self) -> &[EdgeEnds] {
+        &self.ends
+    }
+
+    /// A node's dense index, by binary search over the ID order.
+    pub(crate) fn dense_of(&self, id: &GraphNodeId) -> Option<usize> {
+        self.order
+            .binary_search_by(|position| self.nodes[*position].id.cmp(id))
+            .ok()
+    }
 }
 pub(crate) fn add_main_edge(
     edges: &mut Vec<GraphEdge>,
