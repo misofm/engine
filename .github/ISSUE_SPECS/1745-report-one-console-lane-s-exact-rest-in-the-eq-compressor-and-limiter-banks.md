@@ -50,3 +50,36 @@ defect that today's bank-wide tests miss because they only check whole silent ba
 ## Dependencies
 
 None. #1372 and #1375 stay open and independent.
+
+## Decision record
+
+### D1 Where the query lives (attempt 1, 2026-10-22)
+
+`effect-contract` `PreparedNativeEffectBank::lanes_at_rest(&self) -> u32`, default `0`.
+
+- `BankKernel` (`effect-runtime`) has no production implementor: only a test fixture in
+  `effect-runtime/tests/bank.rs` uses it. Every console slot is a `Box<dyn PreparedNativeEffectBank>`,
+  which is what `rack` (#1107's consumer) holds, and #1747's `swap_lanes` belongs on the same bank
+  stage contract. #1746's three effects implement the same method.
+- A mask, not `fn(lane) -> bool`: one call answers every lane, as `observe_resident_bank` does,
+  because a bank's state is vector state. #1107 ANDs the masks of a chain's slots per bank.
+- Clocks (words a `+0.0` block advances by its length alone: the EQ's silence counters, the
+  limiter's per-bank cursors) are not state words for the claim; a skip advances them as the
+  bank's own fast path does.
+- Padded lanes answer by the same predicate on their own state. The bank-wide fast path asks for
+  every lane, padded included, which is what today's whole-bank observation covered.
+- A collapsed bank's frozen right channel keeps the answer sound (it can only clear a bit).
+
+### D2 The bank-wide fast path
+
+Each effect keeps its cached claim, earned at the end of a block whose input was quiet, with the
+same withdrawals (target, reset, restore, automation). The earning test becomes "the rest mask
+has every lane set" in place of "the observed block left the state bits unchanged". Rendered bits
+cannot move: the fast path is still "write nothing" under a sound claim.
+
+### D3 Shared gate helper
+
+`effect_runtime::bank::rest_probe`: one randomized driver and check (`Probe`, `Schedule`,
+`check`, `Reach::assert_reached`). Each effect's test binds its own bank at `Simd4` and `Simd8`
+through crate internals (`lane::each_vector_lane!`), so the Simd4 leg runs on this AVX2 host
+without #1694.
