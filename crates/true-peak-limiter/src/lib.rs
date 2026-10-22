@@ -3775,11 +3775,9 @@ impl<L: Lane> LimiterCore<L> {
         // `clear_runtime`'s own word list read back, which is the state the crate documents a
         // silent lane rests in, and it implies the next quiet block's `+0.0` output.
         //
-        // The output leg is therefore not a soundness leg. It is kept, pending a ruling, only
-        // because dropping it earns the claim one block sooner (the block whose own output still
-        // carried the line's last samples) and moves the exact engagement count that
-        // `a_settled_silent_limiter_renders_exactly_the_never_fast_path` pins from 35 to 36; that
-        // test's rendered and state comparisons stay green without it.
+        // This block's own output is therefore not a leg: by root ruling it was removed, so the
+        // claim is earned on the block whose output still carried the line's last samples, once
+        // the line has drained into the state the predicate reads. No rendered bit moves.
         //
         // The rest state is exactly reachable here, which is the precondition #163 phase 4 states
         // for engaging at all. Every box term is an integer multiple of `2^-14` and `BOX_GRID * R`
@@ -3788,10 +3786,7 @@ impl<L: Lane> LimiterCore<L> {
         // asymptotically, which is the difference between this kernel and the compressor's
         // `gain_reduction_db`. Without both, the claim would be refused forever and the fast path
         // would be dead code.
-        self.silent_fixed_point = quiet
-            && self.lanes_at_rest() == every_lane(L::WIDTH)
-            && block_is_positive_zero(&left_io[..words])
-            && block_is_positive_zero(&right_io[..words]);
+        self.silent_fixed_point = quiet && self.lanes_at_rest() == every_lane(L::WIDTH);
         self.silent_bypass = self.coefficients.bypass;
         // The §4.4 boundary check: one vector scan per channel, exactly `effect-runtime`'s
         // `finish_block` test. The two channels fail together per lane, as they do there, because
@@ -3927,11 +3922,10 @@ impl<L: Lane> LimiterCore<L> {
             &mut self.left,
             &mut self.cursors,
         );
-        // Issue #1745 D2: the left channel's mask alone, since only the left channel advances. The
-        // output leg is kept for the dual body's reason (see `process_block`), not for soundness.
-        self.silent_fixed_point = quiet
-            && self.left.lanes_at_silent_rest::<L>() == every_lane(L::WIDTH)
-            && block_is_positive_zero(&left_io[..words]);
+        // Issue #1745 D2: the left channel's mask alone, since only the left channel advances. As
+        // on the dual body (see `process_block`), this block's own output is not a leg.
+        self.silent_fixed_point =
+            quiet && self.left.lanes_at_silent_rest::<L>() == every_lane(L::WIDTH);
         self.silent_bypass = self.coefficients.bypass;
         if check_block::<L>(left_io) {
             return;
@@ -6992,6 +6986,26 @@ mod tests {
         amplitude: f32,
         force_slow: bool,
     ) -> SilenceArm {
+        run_lane_silence_arm(
+            core,
+            plan,
+            frames,
+            &vec![amplitude; L::WIDTH],
+            false,
+            force_slow,
+        )
+    }
+
+    /// [`run_silence_arm`] with a tone amplitude per lane (`0.0` keeps that lane at exact `+0.0`
+    /// through the tone blocks too), through the collapsed body when `mono` is set.
+    fn run_lane_silence_arm<L: Lane>(
+        core: &mut LimiterCore<L>,
+        plan: &[Option<f32>],
+        frames: usize,
+        amplitudes: &[f32],
+        mono: bool,
+        force_slow: bool,
+    ) -> SilenceArm {
         let width = L::WIDTH;
         let mut arm = SilenceArm {
             rendered: Vec::new(),
@@ -6999,17 +7013,37 @@ mod tests {
             reduction: Vec::new(),
             engagements: 0,
         };
+        let shape = |plane: Vec<f32>| -> Vec<f32> {
+            plane
+                .iter()
+                .enumerate()
+                .map(|(word, value)| match amplitudes[word % width] {
+                    0.0 => 0.0,
+                    gain => value * gain,
+                })
+                .collect()
+        };
         for (block, quiet) in plan.iter().enumerate() {
-            let mut left = silence_plane(block, frames, width, *quiet, amplitude, false);
-            let mut right = silence_plane(block, frames, width, *quiet, amplitude, true);
+            let mut left = silence_plane(block, frames, width, *quiet, 1.0, false);
+            let mut right = silence_plane(block, frames, width, *quiet, 1.0, true);
+            if quiet.is_none() {
+                left = shape(left);
+                right = shape(right);
+            }
             if force_slow {
                 core.silent_fixed_point = false;
             }
-            core.process_block(&mut left, &mut right, frames);
+            if mono {
+                core.process_block_mono(&mut left, frames);
+            } else {
+                core.process_block(&mut left, &mut right, frames);
+            }
             arm.rendered
                 .extend(left.iter().map(|value| value.to_bits()));
-            arm.rendered
-                .extend(right.iter().map(|value| value.to_bits()));
+            if !mono {
+                arm.rendered
+                    .extend(right.iter().map(|value| value.to_bits()));
+            }
             arm.states.extend(state_bits(core));
             arm.reduction.push(core.left.reduction[0].to_bits());
         }
@@ -7063,14 +7097,13 @@ mod tests {
     /// recursive word's own leg load-bearing.
     ///
     /// What has to drain here is the main delay line, `B = N + 6 = 486` samples at 48 kHz, which is
-    /// 3.8 blocks of 128. The claim is therefore earned at the end of the block in which both the
-    /// line has gone entirely `+0.0` *and* the output has, and the engagement count below is that
-    /// arithmetic read back rather than asserted loosely.
+    /// 3.8 blocks of 128. The claim is therefore earned at the end of the block in which the line
+    /// has gone entirely `+0.0`, and the engagement count below is that arithmetic read back rather
+    /// than asserted loosely.
     ///
     /// Red mutations: drop `block_is_positive_zero` on either input plane from the admission test;
     /// drop `lanes_at_silent_rest` on either channel from the claim; drop
-    /// `positive_zero_lanes_of::<L>(&self.main_ring)` from it; drop the output test
-    /// from the claim; and — caught by the state comparison rather than the sample comparison —
+    /// `positive_zero_lanes_of::<L>(&self.main_ring)` from it; and — caught by the state comparison rather than the sample comparison —
     /// delete `self.cursors.advance(..)` or either `advance_rest_phase(..)` from the fast path.
     #[test]
     fn a_settled_silent_limiter_renders_exactly_the_never_fast_path() {
@@ -7094,9 +7127,11 @@ mod tests {
                 width_label(*width)
             );
         }
+        // 36, not 35: the claim no longer waits for the block's own output to be `+0.0`, so it
+        // is earned on the block where the line has just drained, one block sooner; no bit moves.
         assert_eq!(
-            widest.engagements, 35,
-            "the fast path engaged on {} of {SILENT_BLOCKS} silent blocks, not the 35 the 486-sample \
+            widest.engagements, 36,
+            "the fast path engaged on {} of {SILENT_BLOCKS} silent blocks, not the 36 the 486-sample \
              delay line allows",
             widest.engagements
         );
@@ -7111,6 +7146,89 @@ mod tests {
                 .any(|word| *word != 0),
             "the block after the silence rendered nothing at all"
         );
+    }
+
+    /// **Lanes that come to rest on different blocks never let one lane's rest freeze another.**
+    ///
+    /// Issue #1745 D2, the "every lane" leg of the bank-wide claim, on the dual body and the
+    /// collapsed one. Every arm above prepares identical lanes, so they all rest on the same block
+    /// and a claim earned on *any* lane at rest is indistinguishable from one earned on *every*
+    /// lane. Here the lanes are mixed by `lane % 4`: silent throughout (at rest from the first
+    /// block), a quiet tone at 100 ms (rests once the line drains), a hot tone at 10 ms (rests
+    /// some 170 blocks into the silence), and, in the first mix only, a hot tone at 2 000 ms (never
+    /// rests in this run). The silence is long enough for the 10 ms lanes, so the second mix
+    /// really engages, and the tone returns after it.
+    ///
+    /// Red mutations: weaken either body's `== every_lane(L::WIDTH)` to `!= 0`. The claim is then
+    /// earned on the first silent block on the strength of the silent lanes alone, the releasing
+    /// lanes' `reduction` and lines are frozen, and the returning tone renders different bits.
+    #[test]
+    fn lanes_resting_on_different_blocks_render_exactly_the_never_fast_path() {
+        fn case<L: Lane>(label: &str, never_rests: bool, mono: bool) {
+            const KINDS: [(f32, f32); 4] =
+                [(0.0, 100.0), (0.05, 100.0), (3.0, 10.0), (3.0, 2_000.0)];
+            let kind = |lane: usize| {
+                KINDS[if lane % 4 == 3 && !never_rests {
+                    2
+                } else {
+                    lane % 4
+                }]
+            };
+            let values = values_with(-6.0, 100.0, 5.0);
+            let mut preparation = request(&values);
+            preparation.link_mode = LinkMode::DualMono;
+            let (left, right) = initial_defaults(&values).expect("defaults");
+            let core = || {
+                let lanes = |defaults: [f32; PARAMETER_COUNT]| {
+                    (0..L::WIDTH)
+                        .map(|lane| {
+                            let mut lane_defaults = defaults;
+                            lane_defaults[1] = kind(lane).1;
+                            lane_defaults
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice()
+                };
+                let metadata =
+                    expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
+                        .expect("metadata");
+                LimiterCore::<L>::new(metadata, lanes(left), lanes(right)).expect("core")
+            };
+            let amplitudes = (0..L::WIDTH).map(|lane| kind(lane).0).collect::<Vec<_>>();
+            let plan = silence_plan(4, 200, 4);
+            let free = run_lane_silence_arm(&mut core(), &plan, 128, &amplitudes, mono, false);
+            let forced = run_lane_silence_arm(&mut core(), &plan, 128, &amplitudes, mono, true);
+            assert_eq!(
+                forced.engagements, 0,
+                "{label}: the control arm took the fast path"
+            );
+            let first = |a: &[u32], b: &[u32]| a.iter().zip(b).position(|(x, y)| x != y);
+            assert!(
+                free.rendered == forced.rendered,
+                "{label}: one lane's rest froze another lane's release (first rendered word {:?})",
+                first(&free.rendered, &forced.rendered)
+            );
+            assert!(
+                free.states == forced.states,
+                "{label}: the fast path moved a state word (first {:?})",
+                first(&free.states, &forced.states)
+            );
+            assert_eq!(
+                free.engagements == 0,
+                never_rests,
+                "{label}: the claim engaged {} times",
+                free.engagements
+            );
+        }
+        // Vector widths only: a scalar bank has one lane, so there is nothing to mix.
+        lane::each_vector_lane!(|L| {
+            for never_rests in [true, false] {
+                for mono in [false, true] {
+                    let label = format!("W{} never_rests={never_rests} mono={mono}", L::WIDTH);
+                    case::<L>(&label, never_rests, mono);
+                }
+            }
+        });
     }
 
     /// **A limiter still releasing when the tone returns is never frozen by the fast path.**
