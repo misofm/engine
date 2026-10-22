@@ -39,7 +39,7 @@ active lane per bank), split that row into a qualification issue first.
 
 ## Dependencies
 
-- None open. *Measure the console strip against its baseline* (S4, #1099) is closed as completed.
+- #1744, #1745, #1746, #1747 (see D3), and #1694 or a wasm32 run for the Simd4 leg. *Measure the console strip against its baseline* (S4, #1099) is closed as completed.
 - Note (root-authorized, 2026-10-06; #1329 Amendment 3 addendum, A2): a lane's state is at the
   kernel's exact fixed point no later than the node's exact-rest bound, `RestSamples` (#1329 D2),
   which holds for every input up to its stated peak. Silence skipping uses `RestSamples`, not
@@ -109,3 +109,18 @@ console slot of a run over one resident AoSoA block per bank).
 Proposed split, in order: (a) qualification: the V8 sparse row; (b) the ruling in item 1, or
 #1372/#1375/#1376; (c) a per-lane fixed-point predicate and an allocation-free per-lane swap
 on the bank contract, effect by effect; (d) the chain compaction with gates 1-3.
+
+### D3 Root ruling and split (2026-10-22)
+
+- **Item 1, ruled.** An exact fixed point does not need a `RestSamples` bound. A lane is at rest
+  when a state-only per-lane predicate holds whose meaning is: one block of exact `+0.0` input
+  leaves every state word of the lane bit-identical and outputs exact `+0.0`. That is the same
+  proof the shipped #163 fast paths use. `RestSamples` bounds only *when* the predicate becomes
+  true; #1372, #1375 and #1376 stay open and independent.
+- **Split (owner, 2026-10-22: "Split, do it next").** This issue keeps the chain compaction (D1)
+  and gates 1-3. It starts after:
+  - #1744 the V8 sparse row (item 3);
+  - #1745 and #1746 the per-lane rest predicate (item 2), EQ/compressor/limiter, then
+    gate/transient shaper/soft clip;
+  - #1747 the allocation-free per-lane swap (item 2);
+  - for gate 1's Simd4 leg (item 4): #1694, or a wasm32 run of the differential.
