@@ -86,14 +86,9 @@ all(.[]; console_benchmark_record_valid_lib) and
  [.[] | select(.record == "console_session" and
                .workload_kind == "sixty_four_track_console_sends")
       | .output_sha256] | length == 2 and all(.[]; . as $digest | all($standing[]; . != $digest))) and
-# #1750: the fader-ride row rides faders and pans on the standing console's session, so its riding
-# arm never renders the standing row's bits: an equality means its traffic never reached the plan. Both
-# rounds ride the same traffic, so the ridden tracks are one list and the quiet arm renders one
-# digest (the riding digest's agreement across rounds is the group rule above).
-(([.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console")
-       | .output_sha256] | unique) as $standing |
- [.[] | select(.record == "console_fader_ride") | .riding_output_sha256]
-   | length == 2 and all(.[]; . as $digest | all($standing[]; . != $digest))) and
+# #1750: both rounds of the fader-ride row ride the same traffic, so the ridden tracks are one list
+# and the quiet arm renders one digest (the riding digest's agreement across rounds is the group
+# rule above). Its riding and quiet digests differ per record (the record library).
 ([.[] | select(.record == "console_fader_ride") | [.fader_tracks, .pan_tracks, .quiet_output_sha256]]
   | unique | length == 1) and
 ([.[] | .backend] | unique | length) == 1 and

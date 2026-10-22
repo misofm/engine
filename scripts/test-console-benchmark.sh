@@ -1363,7 +1363,6 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
 
 expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the sixty-four-record set'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_fader_ride")] | .[]')" 'a set with no fader-ride row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'first(.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console")).output_sha256 as $standing | (.[] | select(.record == "console_fader_ride")).riding_output_sha256 = $standing | .[]')" 'a fader-ride row that rendered the standing row bits'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg b "$digest_b" '.[63].riding_output_sha256 = $b | .[]')" 'a fader-ride row whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg b "$digest_b" '.[63].quiet_output_sha256 = $b | .[]')" 'a fader-ride quiet arm whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[63].fader_tracks |= reverse | .[63].pan_tracks |= reverse | .[]')" 'a fader-ride row whose rounds rode different tracks'

@@ -198,7 +198,7 @@
 //! cost: the split ramping output path a live console pays today (#1754 would pair the two stages
 //! and re-run it). Its per-block witness is a stepped twin replayed after the timed loop
 //! (`FaderRideMeasurement` says how and `console_workload::fader_ride` what it proves), and its
-//! riding digest is asserted in-run to differ from `sixty_four_track_console`'s.
+//! riding digest is asserted in-run to differ from its quiet arm's.
 
 use crate::floor::{self, CoreClock};
 use bench_support::alloc as bench_alloc;
@@ -371,14 +371,7 @@ pub(crate) fn main() {
     println!("{}", mono.record(round, backend, metadata));
     let mixing = MixingAutomationMeasurement::run(backend);
     println!("{}", mixing.record(round, backend, metadata));
-    // Issue #1750: the fader-ride row rides faders and pans on the standing console, so it does
-    // not render that row's bits. An equality means its traffic never reached the plan.
     let ride = FaderRideMeasurement::run();
-    assert_ne!(
-        &ride.digests[1],
-        digest_of(fader_ride::WORKLOAD),
-        "the fader-ride row rendered the standing console row's output"
-    );
     println!("{}", ride.record(round, backend, metadata));
 }
 
