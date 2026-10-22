@@ -141,22 +141,29 @@ Built on `main` at `82053706c` (#1285 merged).
   deleted earlier (f8b947995).
   - `node_table_refuses_duplicate_ids_and_dangling_ends`. Mutation (no duplicate check; a dangling
     end resolves to 0): this test red, every other `graph-compiler` test green.
-  - `levels_and_witnesses_follow_id_order_not_insertion_order`. Mutation (dense index = insertion
-    position, ends found by linear search): this test red on its order assertion, every other
-    `graph-compiler` test green (the 65,537-track scale test was skipped under this mutation only,
-    because a linear search makes it quadratic). With the binary search left in place the same
-    mutation also turns `timing_applies_declared_tail_after_node_latency` red, by a failed lookup
-    rather than by order.
+  - `levels_follow_id_order_not_insertion_order` (levels over reversed insertion order); the
+    witness half is one reversed-order assertion folded into
+    `every_cyclic_scc_has_one_closed_sorted_witness_and_edge_paths` (root ruling after the verdict:
+    one test per claim). Mutation (dense index = insertion position, ends found by linear search),
+    re-run after the fold with `cargo test -p graph-compiler --lib`: exactly these two red, the
+    other 81 green. Before the fold, the same mutation left every other `graph-compiler` test green
+    (the 65,537-track scale test skipped, as a linear search makes it quadratic).
 - **Gates 1-3.** Gate 1: 291 passed, 0 failed, 2 ignored. Gate 2 (test-debug-a line): 2,400 passed, 0 failed, 12 ignored. Gate 3: fmt, clippy
   (`--all-features -D warnings`), `check-graph-policy.sh` and `check-workspace-policy.sh` pass.
 - **Gate 4 (no bit moved; PR evidence).** `sdk_render_oracle 64 < F`, base `82053706c` and branch
-  `8bdfe418f`, identical digests: `parametric-eq-nine-track.json` `2938bb78...f1f5c8`,
+  `8bdfe418f`, then again after the review fixes below, identical digests: `parametric-eq-nine-track.json` `2938bb78...f1f5c8`,
   `console-sixty-four-track.json` `24607288...accffce8`, `console-sixty-four-track-app.json`
   `ac23bd04...888430cf`, `console-sixty-four-track-sends.json` `58c54351...81d5f883` (the same digests
   #1330 recorded).
 - **Gate 5 (descriptive).** Modules prepared and preflighted: base `06bb9bc5...` at `82053706c`,
-  branch `0691f076...` at `8bdfe418f`. The two `rebuild-run`s run back to back under one exclusive
+  branch at the final commit (the module is re-prepared at each new HEAD). The two `rebuild-run`s run back to back under one exclusive
   lock; records `artifacts/steps/d15-15-node-ids-before/` and `-after/`. Results: pending.
 - **Gate 6 (profile).** Blocked on this machine: `perf record` is refused
   (`kernel.perf_event_paranoid` = 4) and no valgrind is installed. No workaround was tried; no
-  compare share is recorded.
+  compare share is recorded. When it is measured, read it with #1749: compares other than D1's
+  sort and resolution and D3's resolution remain by design of this slice.
+- **Verdict.** A fresh verifier gave attempt 1 a PASS. Root ruled two small fixes into the attempt:
+  `cycle_witness_in_component`'s `on_path` scratch is allocated once in `cycle_witnesses` and
+  cleared only on its path entries on return, and the witness-order test fold above. The verdict's
+  M4 and M6 (gaps in older tests) are filed as #1748; the remaining `GraphNodeId` compares are
+  filed as #1749.

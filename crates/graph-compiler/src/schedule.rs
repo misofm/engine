@@ -187,19 +187,21 @@ pub(crate) fn cycle_witnesses(table: &NodeTable<'_>) -> Vec<(Vec<GraphNodeId>, V
     }
     components.sort_by_key(|component| component[0]);
     let mut members = vec![false; count];
+    let mut on_path = vec![false; count];
     components
         .into_iter()
         .filter_map(|component| {
-            cycle_witness_in_component(table, &component, &adjacency, &mut members)
+            cycle_witness_in_component(table, &component, &adjacency, &mut members, &mut on_path)
         })
         .collect()
 }
-/// `members` is all-false scratch on entry and on return.
+/// `members` and `on_path` are all-false scratch on entry and on return.
 pub(crate) fn cycle_witness_in_component(
     table: &NodeTable<'_>,
     component: &[usize],
     adjacency: &[Vec<usize>],
     members: &mut [bool],
+    on_path: &mut [bool],
 ) -> Option<(Vec<GraphNodeId>, Vec<String>)> {
     let edges = table.edges();
     let ends = table.ends();
@@ -210,7 +212,6 @@ pub(crate) fn cycle_witness_in_component(
     let mut result = None;
     let mut nodes_path = vec![start];
     let mut edge_path = Vec::new();
-    let mut on_path = vec![false; table.len()];
     on_path[start] = true;
     let mut stack = vec![(start, 0usize)];
     while let Some((node, next_edge)) = stack.last_mut() {
@@ -251,6 +252,11 @@ pub(crate) fn cycle_witness_in_component(
             edge_path.push(edge);
             stack.push((destination, 0));
         }
+    }
+    // Only the nodes still on the path are marked: every other mark was cleared when its node
+    // was popped.
+    for &node in &nodes_path {
+        on_path[node] = false;
     }
     for &node in component {
         members[node] = false;

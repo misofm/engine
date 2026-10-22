@@ -13101,6 +13101,11 @@ mod tests {
         assert_eq!(witnesses[1].1, ["$.routes[id=cc]"]);
         assert_eq!(witnesses[2].0, [node("d"), node("e"), node("d")]);
         assert_eq!(witnesses[2].1, ["$.routes[id=de]", "$.routes[id=ed]"]);
+        // #1384 D4: a dense index is the node's ID rank, not its insertion position. Every
+        // compile passes ID-sorted nodes, so only reversed input tells the two apart.
+        let mut reversed = nodes;
+        reversed.reverse();
+        assert_eq!(cycle_witnesses(&table(&reversed, &edges)), witnesses);
     }
 
     /// #1384 D1: the table is the one place a duplicate node ID or a dangling edge end is
@@ -13124,11 +13129,12 @@ mod tests {
         assert!(NodeTable::new(&duplicated, &[]).is_none(), "duplicate ID");
     }
 
-    /// #1384 D4: a dense index is the node's ID rank, not its insertion position, so levels and
-    /// witnesses do not depend on the order nodes are given in. Every compile passes ID-sorted
-    /// nodes, so only reversed input tells the two apart.
+    /// #1384 D4: a dense index is the node's ID rank, not its insertion position, so levels do
+    /// not depend on the order nodes are given in. Every compile passes ID-sorted nodes, so only
+    /// reversed input tells the two apart. (The witness half is in
+    /// `every_cyclic_scc_has_one_closed_sorted_witness_and_edge_paths`.)
     #[test]
-    fn levels_and_witnesses_follow_id_order_not_insertion_order() {
+    fn levels_follow_id_order_not_insertion_order() {
         let sorted: Vec<_> = ["a", "b", "c", "d", "e", "z"]
             .into_iter()
             .map(|name| graph_node(name, 0, TailSamples::Finite(0)))
@@ -13156,20 +13162,6 @@ mod tests {
             ]
         );
         assert_eq!(levels_of(&reversed, &acyclic), Some(levels));
-
-        // Two disjoint cycles and a self-loop.
-        let mut cyclic = vec![
-            edge("ab", "a", "b"),
-            edge("ba", "b", "a"),
-            edge("cc", "c", "c"),
-            edge("de", "d", "e"),
-            edge("ed", "e", "d"),
-            edge("za", "a", "z"),
-        ];
-        cyclic.sort_by(|left, right| left.id.cmp(&right.id));
-        let witnesses = cycle_witnesses(&table(&sorted, &cyclic));
-        assert_eq!(witnesses[0].0, [node("a"), node("b"), node("a")]);
-        assert_eq!(cycle_witnesses(&table(&reversed, &cyclic)), witnesses);
     }
 
     #[test]
