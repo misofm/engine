@@ -94,8 +94,7 @@ Per effect (attempt 1):
   soundness leg (gate 1 shows the predicate implies the next block's output), but without it the
   claim is earned one block sooner and the existing exact count in
   `a_settled_silent_limiter_renders_exactly_the_never_fast_path` (35 of 40 blocks) becomes 36.
-  The gates forbid editing that test, so the leg stays; removing it (and the count to 36) is a
-  one-line follow-up for root to rule on.
+  Attempt 2 (root ruling): the leg is removed on both bodies and that count is now 36.
 
 ### D3 Shared gate helper
 
@@ -122,3 +121,16 @@ without #1694.
 - Gate 3: `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets
   --all-features -- -D warnings`, `cargo run --release -p realtime-policy` (171 marked regions in
   34 files): clean.
+
+## Evidence (attempt 2, 2026-10-22)
+
+- Verifier finding: `== every_lane` -> `!= 0` on the bank-wide rule survived the limiter (dual and
+  collapsed) and the compressor's collapsed site. New coverage, each red under that mutant:
+  limiter `lanes_resting_on_different_blocks_render_exactly_the_never_fast_path` (W4/W8, dual
+  and collapsed; `run_silence_arm` generalised to per-lane tones); compressor
+  `a_padded_bank_renders_each_member_as_its_own_instance` gains a staggered-rest case (W4/W8,
+  dual and collapsed, against the per-node oracle).
+- `rest_probe` moved to `crates/conformance/src/rest_probe.rs`. The trait doc names the limiter's
+  `phase` clock and that the clock-advance entry point is owed by #1747 (added to its slice).
+- Gates: the six packages' tests (five above plus conformance) 449 passed, 0 failed, 5 ignored
+  (as before); `cargo fmt --all --check`, workspace clippy and `realtime-policy` clean.
