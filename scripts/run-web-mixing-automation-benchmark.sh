@@ -11,7 +11,9 @@
 # sixty-four-track console, the app shape and the bus-and-send console, the native rows
 # `sixty_four_track_console`, `sixty_four_track_app_shape` and `sixty_four_track_console_sends`,
 # booted from their checked-in fixtures with live controls and listed with their facts in the same
-# control table. The record states them under `documents`.
+# control table, and a fourth the harness derives from the first (#1744): the native row
+# `sixty_four_track_console_sparse`, the standing console with every odd track fed exact +0.0. The
+# record states the four under `documents`.
 #
 # Three subcommands, so that nothing is built while anything is timed:
 #
@@ -22,7 +24,7 @@
 #                          mixing_automation_controls`), and records the commit both were built at,
 #                          with their digests, in `provenance.json` (#1011).
 #   preflight WORKDIR      Untimed. The seven-arm premises (restated == quiet, every automated
-#                          effect moves bits) on the prepared module, and the three documents'
+#                          effect moves bits) on the prepared module, and the four documents'
 #                          (each renders audible bits of its own, and every two differ).
 #   run WORKDIR --step N   The one timed invocation. It refuses a module or a control table that
 #                          was not prepared at HEAD, or that changed after `prepare` recorded it.

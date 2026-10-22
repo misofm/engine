@@ -37,3 +37,31 @@ No change to the engine, to the native rows, or to any other V8 row.
 ## Dependencies
 
 None.
+
+## Decision record (attempt 1)
+
+- **Which documents.** The `:144-149` anchor (also cited by #1107) is the boot-cost mode's
+  `REBUILD_DOCUMENTS`, which times `miso_engine_web_v1_boot`. #1107's gate 3 needs render cost,
+  so the row joins the render mode's console-strip `documents` (today three: the standing console,
+  the app shape, the sends console), appended fourth and timed in the same per-observation
+  alternation. The boot-cost mode is unchanged.
+- **How the silence is fed.** The native row feeds each track its own block in code. The browser
+  feeds sources, and the standing fixture (`console-sixty-four-track-intended.json`) binds all
+  sixty-four tracks to its one source. So the harness derives the row's document in code (as the
+  native row is "derived", `synthetic_fixture: true`): a second source of the same shape,
+  `fixture-source-silent`, and every odd track's `source_id` rebound to it. The harness feeds it
+  exact `+0.0` on both planes every block, at the tone source's frame. No strip, fader, mute, route
+  or parameter changes; the harness asserts that the derived document, its odd tracks bound back
+  and the second source dropped, deep-equals the standing one. The cost the row adds over the
+  standing console is one more source ring and one more submit per block, outside the clock.
+- **Gate 2 without an idle row.** The V8 harness has no idle row. In preflight and in the run the
+  sparse row is asserted audible (some output word nonzero, so not silence, which is what the
+  native idle row renders) and distinct from every other document, the standing console included.
+  Because an underrun also renders `+0.0`, and no digest can tell it from fed silence, both of the
+  row's sources are also asserted to report zero cumulative underrun frames (seek report, #1293 D6).
+- **Validator.** `scripts/web-mixing-automation-lib.jq` now requires four documents, the fourth
+  `sixty_four_track_console_sparse` on the standing console's fixture and facts with
+  `input_signal == "odd_tracks_silent"`; the first three stay `tone`.
+- **Cross-set edit needed.** `scripts/test-console-benchmark.sh` (#1750's file set) builds a
+  three-document synthetic web record (`web_round`, near `:1490`) that this validator now refuses.
+  It needs a fourth document entry appended. Not edited here; root sequences it.
