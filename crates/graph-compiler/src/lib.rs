@@ -13330,6 +13330,58 @@ mod tests {
         );
     }
 
+    /// #1748: `input_arrivals` is in node-ID order, the order `graph::floored_input_arrival`'s
+    /// binary search needs. The chain `c -> b -> a` schedules opposite to ID order, and all three
+    /// feed the output. Red if the rows are left in schedule order or sorted the wrong way: the
+    /// binary search then misses a row and gives a floored arrival of 0, which is a silent
+    /// compensation error.
+    #[test]
+    fn timing_lists_input_arrivals_in_node_id_order() {
+        let output = GraphNodeId::Output {
+            output_id: gid("main"),
+        };
+        let nodes = [
+            graph_node("c", 2, TailSamples::Finite(0)),
+            graph_node("b", 3, TailSamples::Finite(0)),
+            graph_node("a", 4, TailSamples::Finite(0)),
+            GraphNode {
+                id: output.clone(),
+                latency: LatencySamples(0),
+                tail: TailSamples::Finite(0),
+            },
+        ];
+        let to_output = |name: &str, source: &str| GraphEdge {
+            id: GraphEdgeId::RouteDestination {
+                route_id: gid(name),
+            },
+            source: port(node(source), GraphPortKind::MainOutput),
+            destination: port(output.clone(), GraphPortKind::MainInput),
+            path: format!("$.routes[id={name}]"),
+        };
+        let edges = [
+            edge("cb", "c", "b"),
+            edge("ba", "b", "a"),
+            to_output("c-main", "c"),
+            to_output("b-main", "b"),
+            to_output("a-main", "a"),
+        ];
+        let table = table(&nodes, &edges);
+        let schedule = topo(&table).expect("acyclic chain").schedule;
+        let timing = timings(&table, &schedule, &BTreeMap::new(), &caps(100)).expect("timing");
+        assert_eq!(
+            timing.input_arrivals.as_ref(),
+            [
+                (node("a"), LatencySamples(5)),
+                (node("b"), LatencySamples(2)),
+                (output, LatencySamples(9)),
+            ]
+        );
+        assert_eq!(
+            graph::floored_input_arrival(&timing.input_arrivals, &node("a")),
+            5
+        );
+    }
+
     #[test]
     fn buffer_coloring_aliases_identity_and_preserves_fanout_liveness() {
         let source = track_node("track", TrackStage::Input);
