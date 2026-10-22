@@ -60,14 +60,15 @@ use lane::{
     kernels::{
         SvfCoef,
         builtins::{
-            GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, InputTrimRamp,
-            Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block, fader_matrix_block_without_identity,
-            gain_mute_block, gain_mute_ramp_block, input_chain_block_elided,
-            input_chain_block_mono_elided, input_chain_plan, input_chain_ramp_block_elided,
-            input_chain_ramp_block_filter, input_chain_ramp_block_filter_mono,
-            input_chain_ramp_block_mono_elided, lanes_below, mask_from_flags, matrix2x2_block,
-            matrix2x2_block_without_identity, matrix2x2_ramp_block, no_lanes,
-            plan_is_channel_symmetric, section_is_identity, zero_lanes_block,
+            FaderMatrixArm, GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState,
+            InputTrimRamp, Matrix2x2Coef, Matrix2x2Ramp, fader_matrix_block,
+            fader_matrix_block_without_identity, fader_matrix_ramp_block, gain_mute_block,
+            gain_mute_ramp_block, input_chain_block_elided, input_chain_block_mono_elided,
+            input_chain_plan, input_chain_ramp_block_elided, input_chain_ramp_block_filter,
+            input_chain_ramp_block_filter_mono, input_chain_ramp_block_mono_elided, lanes_below,
+            mask_from_flags, matrix2x2_block, matrix2x2_block_without_identity,
+            matrix2x2_ramp_block, no_lanes, plan_is_channel_symmetric, section_is_identity,
+            zero_lanes_block,
         },
     },
 };
@@ -3210,6 +3211,37 @@ impl<L: Lane> FaderRampStage<L> {
         self.process_plane(1, right, frames);
     }
 
+    /// Ends each channel's ramp window of `ramp_frames[channel]` frames, in one pass over that
+    /// channel's lane words; a channel whose window is `0` ran no ramp and is not touched.
+    ///
+    /// The kernel already assigned the target exactly on the frame a lane settled on, so these
+    /// writes are the bookkeeping the scalar path did after its loop and not a second numeric
+    /// event: `current` is re-assigned to the value it already holds, and the step is dropped so a
+    /// later block cannot walk past a finished ramp.
+    #[inline(always)]
+    fn end_ramp_windows(&mut self, ramp_frames: [usize; 2]) {
+        for (channel, &frames) in ramp_frames.iter().enumerate() {
+            if frames == 0 {
+                continue;
+            }
+            let mut current = lane_read::<L>(self.ramp[channel].current);
+            let target = lane_read::<L>(self.ramp[channel].target);
+            let mut steps = lane_read::<L>(self.ramp[channel].step);
+            for lane in 0..L::WIDTH {
+                let remaining = &mut self.remaining[channel][lane];
+                *remaining = remaining.saturating_sub(frames as u32);
+                if *remaining == 0 {
+                    current[lane] = target[lane];
+                    steps[lane] = 0.0;
+                    // D2: a mute ramp ends in the same step that assigns its target.
+                    self.mute_ramp[channel][lane] = false;
+                }
+            }
+            self.ramp[channel].current = lane_words::<L>(&current);
+            self.ramp[channel].step = lane_words::<L>(&steps);
+        }
+    }
+
     fn process_plane(&mut self, channel: usize, plane: &mut [f32], frames: usize) {
         let maximum = self.remaining[channel]
             .iter()
@@ -3234,26 +3266,9 @@ impl<L: Lane> FaderRampStage<L> {
         self.ramp[channel].remaining = lane_words::<L>(&countdown);
         let split = ramp_frames * L::WIDTH;
         gain_mute_ramp_block::<L>(&mut plane[..split], ramp_frames, &mut self.ramp[channel]);
-        for remaining in self.remaining[channel].iter_mut().take(L::WIDTH) {
-            *remaining = remaining.saturating_sub(ramp_frames as u32);
-        }
-        // The kernel already assigned the target exactly on the frame a lane settled on, so these
-        // two writes are the bookkeeping the scalar path did after its loop and not a second
-        // numeric event: `current` is re-assigned to the value it already holds, and the step is
-        // dropped so a later block cannot walk past a finished ramp.
-        let mut current = lane_read::<L>(self.ramp[channel].current);
-        let target = lane_read::<L>(self.ramp[channel].target);
-        let mut steps = lane_read::<L>(self.ramp[channel].step);
-        for lane in 0..L::WIDTH {
-            if self.remaining[channel][lane] == 0 {
-                current[lane] = target[lane];
-                steps[lane] = 0.0;
-                // D2: a mute ramp ends in the same step that assigns its target.
-                self.mute_ramp[channel][lane] = false;
-            }
-        }
-        self.ramp[channel].current = lane_words::<L>(&current);
-        self.ramp[channel].step = lane_words::<L>(&steps);
+        let mut window = [0; 2];
+        window[channel] = ramp_frames;
+        self.end_ramp_windows(window);
         if ramp_frames < frames {
             // Reached only when every lane settled inside this block, because `ramp_frames` is the
             // largest remaining count: the settled kernel is therefore correct for all of them.
@@ -3611,6 +3626,155 @@ impl<L: Lane> MatrixStage<L> {
         }
     }
 
+    /// Ends a ramp window of `ramp_frames` frames, in one pass over the lane words: counts the
+    /// window off every lane, assigns a settled lane its target, and re-derives the settled
+    /// coefficients and their identity mask exactly as [`Self::sync_settled`] does.
+    ///
+    /// A lane is an identity lane only when it is settled: a ramping lane must keep running the
+    /// ramp arithmetic even if it passes through the identity matrix on the way.
+    #[inline(always)]
+    fn end_ramp_window(&mut self, ramp_frames: usize) {
+        let mut current = self.ramp.current.map(lane_read::<L>);
+        let target = self.ramp.target.map(lane_read::<L>);
+        let mut identity = [0.0_f32; MAX_BANK_LANES];
+        for lane in 0..L::WIDTH {
+            let remaining = &mut self.remaining[lane];
+            *remaining = remaining.saturating_sub(ramp_frames as u32);
+            if *remaining == 0 {
+                for (current, target) in current.iter_mut().zip(&target) {
+                    current[lane] = target[lane];
+                }
+                let settled = Matrix2x2 {
+                    ll: current[0][lane],
+                    lr: current[1][lane],
+                    rl: current[2][lane],
+                    rr: current[3][lane],
+                };
+                identity[lane] = f32::from(u8::from(settled == Matrix2x2::IDENTITY));
+            }
+        }
+        for (slot, words) in self.ramp.current.iter_mut().zip(&current) {
+            *slot = lane_words::<L>(words);
+        }
+        self.coef.ll = self.ramp.current[0];
+        self.coef.lr = self.ramp.current[1];
+        self.coef.rl = self.ramp.current[2];
+        self.coef.rr = self.ramp.current[3];
+        self.coef.identity = mask_from_flags::<L>(&identity[..L::WIDTH]);
+    }
+
+    /// Renders one block of `fader` and this matrix while either has a lane ramping, in fused
+    /// passes (issue #890).
+    ///
+    /// The bits -- output, lane words and bookkeeping -- are those of [`FaderRampStage::process`]
+    /// followed by [`Self::process`]: each section keeps its own ramp window, `min(max remaining,
+    /// frames)`, and its settled tail, and each fused pass runs the frames where the sections'
+    /// kernels are the ones the split path runs there.
+    ///
+    /// 1. `[0, matrix window)`: [`fader_matrix_ramp_block`] with the matrix ramp; then the
+    ///    matrix's window ends, which re-derives its identity mask.
+    /// 2. `[matrix window, fader window)`, when the fader's is longer: the same kernel with the
+    ///    settled matrix, with or without the identity select as [`Self::settled_block`] chooses.
+    /// 3. `[longer window, frames)`: [`Self::fused_settled_block`], after the fader's window ends.
+    ///
+    /// The fader runs its ramp step over the longer of its two channels' windows on both channels,
+    /// which gives the split path's bits on each frame where a channel's own kernel is
+    /// [`gain_mute_block`]. Past a ramping channel's window every lane is done, so the step
+    /// assigns `target` -- the value the window's end assigns `current` -- and clears muted lanes,
+    /// exactly as the settled kernel does; the one word that differs, the kernel's leftover
+    /// countdown, is restored to what the window alone leaves (`countdown - window`, which is
+    /// exact: every word involved is an integer at most `2^24`). A channel with no lane ramping
+    /// runs the step on a copy whose target is its current gain and whose countdown is zero, so it
+    /// assigns `current` to itself, and none of its words is written back.
+    fn fused_ramp_block(
+        &mut self,
+        fader: &mut FaderRampStage<L>,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+    ) {
+        // One pass over the lanes: every section's window and the countdown words it reads.
+        let mut fader_maximum = [0_u32; 2];
+        let mut fader_countdown = [[0.0_f32; MAX_BANK_LANES]; 2];
+        let mut matrix_maximum = 0_u32;
+        let mut matrix_countdown = [0.0_f32; MAX_BANK_LANES];
+        for lane in 0..L::WIDTH {
+            for (channel, maximum) in fader_maximum.iter_mut().enumerate() {
+                let remaining = fader.remaining[channel][lane];
+                *maximum = (*maximum).max(remaining);
+                fader_countdown[channel][lane] = remaining.min(FADER_RAMP_COUNTDOWN_MAXIMUM) as f32;
+            }
+            let remaining = self.remaining[lane];
+            matrix_maximum = matrix_maximum.max(remaining);
+            matrix_countdown[lane] = remaining.min(MATRIX_RAMP_COUNTDOWN_MAXIMUM) as f32;
+        }
+        let fader_windows = fader_maximum.map(|maximum| (maximum as usize).min(frames));
+        let fader_window = fader_windows[0].max(fader_windows[1]);
+        let matrix_window = (matrix_maximum as usize).min(frames);
+        let mut ramp = fader.ramp;
+        for (channel, words) in ramp.iter_mut().enumerate() {
+            if fader_windows[channel] == 0 {
+                // An equivalent mutant while "a settled lane has current == target" holds; kept
+                // so a settled channel renders what `gain_mute_block` renders without relying on it.
+                words.target = words.current;
+                words.remaining = L::zero();
+            } else {
+                words.remaining = lane_words::<L>(&fader_countdown[channel]);
+            }
+        }
+
+        let mut position = 0;
+        if matrix_window > 0 {
+            self.ramp.remaining = lane_words::<L>(&matrix_countdown);
+            let end = matrix_window * L::WIDTH;
+            fader_matrix_ramp_block::<L>(
+                &mut left[..end],
+                &mut right[..end],
+                matrix_window,
+                &mut ramp,
+                FaderMatrixArm::Ramp(&mut self.ramp),
+            );
+            self.end_ramp_window(matrix_window);
+            position = matrix_window;
+        }
+        if fader_window > position {
+            let (from, to) = (position * L::WIDTH, fader_window * L::WIDTH);
+            let arm = if L::mask_any(self.coef.identity) {
+                FaderMatrixArm::Settled(&self.coef)
+            } else {
+                FaderMatrixArm::SettledWithoutIdentity(&self.coef)
+            };
+            fader_matrix_ramp_block::<L>(
+                &mut left[from..to],
+                &mut right[from..to],
+                fader_window - position,
+                &mut ramp,
+                arm,
+            );
+            position = fader_window;
+        }
+        for (channel, &window) in fader_windows.iter().enumerate() {
+            if window > 0 {
+                fader.ramp[channel].current = ramp[channel].current;
+                fader.ramp[channel].remaining =
+                    lane_words::<L>(&fader_countdown[channel]).sub(L::splat(window as f32));
+            }
+        }
+        fader.end_ramp_windows(fader_windows);
+        if position < frames {
+            let from = position * L::WIDTH;
+            self.fused_settled_block(
+                &mut left[from..],
+                &mut right[from..],
+                frames - position,
+                fader.ramp[0].current,
+                fader.ramp[0].mute,
+                fader.ramp[1].current,
+                fader.ramp[1].mute,
+            );
+        }
+    }
+
     /// Renders one block of both channels.
     fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
         let maximum = self
@@ -3637,18 +3801,7 @@ impl<L: Lane> MatrixStage<L> {
             ramp_frames,
             &mut self.ramp,
         );
-        for remaining in self.remaining.iter_mut().take(L::WIDTH) {
-            *remaining = remaining.saturating_sub(ramp_frames as u32);
-        }
-        let mut current = self.read_current();
-        let target = self.read_target();
-        for (lane, current) in current.iter_mut().enumerate().take(L::WIDTH) {
-            if self.remaining[lane] == 0 {
-                *current = target[lane];
-            }
-        }
-        self.write_current(&current);
-        self.sync_settled();
+        self.end_ramp_window(ramp_frames);
         if ramp_frames < frames {
             self.settled_block(
                 &mut left[split..],
@@ -4720,6 +4873,52 @@ impl BuiltinFaderBank {
                 fader.ramp[1].current,
                 fader.ramp[1].mute,
             );
+        }, else return false);
+        true
+    }
+
+    /// [`Self::try_process_ramping_with_matrix`] for a block that may carry timed operations:
+    /// declines, touching nothing, when the source has an operation inside the block, so the
+    /// caller renders it with [`Self::process_with`].
+    pub fn try_process_ramping_with_matrix_and_operations<S: FaderOperationSource + ?Sized>(
+        &mut self,
+        matrix: &mut BuiltinMatrixBank,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        operations: &mut S,
+    ) -> bool {
+        if operations
+            .next_offset()
+            .is_some_and(|offset| offset < frames)
+        {
+            return false;
+        }
+        self.try_process_ramping_with_matrix(matrix, left, right, frames)
+    }
+
+    /// Runs the fader and matrix stages in fused passes while either has a ramp in flight
+    /// (issue #890), rendering the bits [`Self::process`] followed by
+    /// [`BuiltinMatrixBank::process`] renders. Returns false without touching either stage when
+    /// their shapes disagree or both are settled; a settled pair belongs to
+    /// [`Self::try_process_settled_with_matrix`].
+    pub fn try_process_ramping_with_matrix(
+        &mut self,
+        matrix: &mut BuiltinMatrixBank,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+    ) -> bool {
+        if self.backend != matrix.backend
+            || self.width != matrix.width
+            || self.members != matrix.members
+            || !(self.remaining_nonzero() || matrix.remaining_nonzero())
+        {
+            return false;
+        }
+        let stages = (&mut self.stage, &mut matrix.stage);
+        per_width!((FaderStageKernel(fader), MatrixStageKernel(matrix)) in stages => {
+            matrix.fused_ramp_block(fader, left, right, frames as usize);
         }, else return false);
         true
     }

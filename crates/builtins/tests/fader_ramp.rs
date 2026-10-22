@@ -1220,8 +1220,10 @@ fn fused_words(fader: &BuiltinFaderBank, matrix: &BuiltinMatrixBank) -> String {
 }
 
 /// D5: `try_process_settled_with_matrix_and_operations` declines, touching nothing, when an
-/// operation sits inside the block, and otherwise forwards to the fused settled path. Checked
-/// against a twin pair driven by the paths it chooses between.
+/// operation sits inside the block, and otherwise forwards to the fused settled path; with a ramp
+/// in flight, `try_process_ramping_with_matrix_and_operations` does the same for the fused
+/// ramping passes (issue #890). Checked against a twin pair driven by the paths it chooses
+/// between.
 #[test]
 fn the_fused_settled_path_declines_only_an_operation_inside_the_block() {
     const FRAMES: u32 = 128;
@@ -1231,14 +1233,24 @@ fn the_fused_settled_path_declines_only_an_operation_inside_the_block() {
     };
     for &width in BankWidth::ALL {
         let lanes = width.lanes() as usize;
-        for (case, offset, declines) in [
-            ("inside", Some(10_u32), true),
-            ("at the block end", Some(FRAMES), false),
-            ("none", None, false),
+        for (case, offset, declines, ramping) in [
+            ("inside", Some(10_u32), true, false),
+            ("at the block end", Some(FRAMES), false, false),
+            ("none", None, false, false),
+            ("ramping, inside", Some(10_u32), true, true),
+            ("ramping, at the block end", Some(FRAMES), false, true),
+            ("ramping, none", None, false, true),
         ] {
             let ops: Vec<Timed> = offset.map(|at| (at, 0, held)).into_iter().collect();
             let (mut fader, mut matrix) = fused_pair(width);
             let (mut twin_fader, mut twin_matrix) = fused_pair(width);
+            if ramping {
+                // A window longer than the block keeps the ramp in flight across it.
+                for bank in [&mut fader, &mut twin_fader] {
+                    bank.set_fader_db(1, BuiltinLaneSelector::Both, -6.0, 300)
+                        .expect("retarget");
+                }
+            }
             let (mut left, mut right) = signal(FRAMES as usize, lanes, 0);
             let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
             let input = (bits(&left), bits(&right));
@@ -1247,13 +1259,23 @@ fn the_fused_settled_path_declines_only_an_operation_inside_the_block() {
                 inner: SliceSource::new(&ops),
                 scalar: false,
             };
-            let fused = fader.try_process_settled_with_matrix_and_operations(
-                &mut matrix,
-                &mut left,
-                &mut right,
-                FRAMES,
-                &mut source,
-            );
+            let fused = if ramping {
+                fader.try_process_ramping_with_matrix_and_operations(
+                    &mut matrix,
+                    &mut left,
+                    &mut right,
+                    FRAMES,
+                    &mut source,
+                )
+            } else {
+                fader.try_process_settled_with_matrix_and_operations(
+                    &mut matrix,
+                    &mut left,
+                    &mut right,
+                    FRAMES,
+                    &mut source,
+                )
+            };
             assert_eq!(fused, !declines, "width={lanes} {case}");
             assert_eq!(
                 source.next_offset(),
@@ -1280,6 +1302,16 @@ fn the_fused_settled_path_declines_only_an_operation_inside_the_block() {
                 };
                 twin_fader.process_with(&mut twin_left, &mut twin_right, FRAMES, &mut twin_source);
                 twin_matrix.process(&mut twin_left, &mut twin_right, FRAMES);
+            } else if ramping {
+                assert!(
+                    twin_fader.try_process_ramping_with_matrix(
+                        &mut twin_matrix,
+                        &mut twin_left,
+                        &mut twin_right,
+                        FRAMES,
+                    ),
+                    "width={lanes} {case}: the twin is ramping"
+                );
             } else {
                 assert!(
                     twin_fader.try_process_settled_with_matrix(

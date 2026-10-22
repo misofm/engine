@@ -474,6 +474,228 @@ fn fused_fader_matrix_shapes_match_the_separate_stages() {
     }
 }
 
+/// One retarget of [`fused_ramping_fader_matrix_matches_the_separate_stages`]'s schedules.
+#[derive(Clone, Copy, Debug)]
+enum RampOp {
+    /// `set_fader_db(lane, channels, db, window)`.
+    Fader(usize, BuiltinLaneSelector, f32, u32),
+    /// `set_mute(lane, channels, muted, window)`.
+    Mute(usize, BuiltinLaneSelector, bool, u32),
+    /// `set_target_smoothed(lane, target, window)`.
+    Matrix(usize, Matrix2x2, u32),
+}
+
+/// Issue #890: while either bank has a ramp in flight, the fused ramping passes render the PCM
+/// and lane words the separate `process` calls render, and they decline on a settled pair.
+///
+/// Three-frame blocks cover each ramp's first block, its middle, the block where a window ends
+/// with a settled tail, and the first settled block, for a fader window longer than the matrix's
+/// and the reverse, a ramp on one fader channel only, a mute ramp, and a matrix ramp ending at
+/// the identity. Every member is non-identity in the `false` member shape, so a full bank's
+/// settled matrix takes the select-free arm.
+#[test]
+fn fused_ramping_fader_matrix_matches_the_separate_stages() {
+    use BuiltinLaneSelector::{Both, Left, Right};
+    const FRAMES: usize = 3;
+    const BLOCKS: usize = 5;
+    let schedules: [(&str, &[(usize, RampOp)]); 9] = [
+        ("fader only", &[(0, RampOp::Fader(1, Both, -9.5, 5))]),
+        ("one fader channel", &[(0, RampOp::Fader(0, Right, 4.0, 5))]),
+        ("matrix only", &[(0, RampOp::Matrix(1, non_identity(3), 5))]),
+        (
+            "fader window longer",
+            &[
+                (0, RampOp::Fader(0, Left, -3.0, 7)),
+                (0, RampOp::Matrix(0, non_identity(2), 4)),
+            ],
+        ),
+        (
+            "matrix window longer",
+            &[
+                (0, RampOp::Fader(1, Both, 6.0, 4)),
+                (0, RampOp::Matrix(0, Matrix2x2::IDENTITY, 7)),
+            ],
+        ),
+        (
+            "mute ramp",
+            &[
+                (0, RampOp::Mute(0, Left, true, 5)),
+                (0, RampOp::Matrix(1, non_identity(5), 2)),
+            ],
+        ),
+        (
+            "overlapping retargets",
+            &[
+                (0, RampOp::Matrix(1, non_identity(4), 5)),
+                (1, RampOp::Fader(0, Both, -20.0, 7)),
+            ],
+        ),
+        (
+            // Both windows are clipped by the first block, so the stage keeps a nonzero leftover
+            // countdown word; the zero-window mute then settles the fader while the matrix ramps.
+            "zero-window mute after a clipped ramp",
+            &[
+                (0, RampOp::Fader(0, Left, -6.0, 10)),
+                (0, RampOp::Fader(0, Right, -6.0, 8)),
+                (1, RampOp::Mute(0, Both, true, 0)),
+                (1, RampOp::Matrix(1, Matrix2x2::IDENTITY, 8)),
+            ],
+        ),
+        (
+            // The left and right windows end in different blocks, so one block's two channel
+            // windows differ and each channel's leftover countdown is its own.
+            "different channel windows",
+            &[
+                (0, RampOp::Fader(0, Left, -3.0, 7)),
+                (0, RampOp::Fader(1, Right, 5.0, 4)),
+                (1, RampOp::Matrix(0, non_identity(6), 2)),
+            ],
+        ),
+    ];
+    let _canonical = lane::CanonicalFpEnv::enter();
+    for &width in effect_contract::BankWidth::ALL {
+        let backend = width.backend();
+        let lanes = width.lanes() as usize;
+        for members in [lanes - 1, lanes] {
+            for identity_member in [false, true] {
+                for (name, schedule) in schedules {
+                    let label = format!(
+                        "{name} width={lanes} members={members} identity_member={identity_member}"
+                    );
+                    let prepared: Vec<_> = (0..members)
+                        .map(|lane| {
+                            let matrix = if identity_member && lane == members - 1 {
+                                Matrix2x2::IDENTITY
+                            } else {
+                                non_identity(lane)
+                            };
+                            (matrix, 0)
+                        })
+                        .collect();
+                    let new_pair = || {
+                        (
+                            BuiltinFaderBank::new(
+                                backend,
+                                width,
+                                (0..members).map(fused_fader).collect(),
+                            )
+                            .expect("fader"),
+                            BuiltinMatrixBank::new(backend, width, prepared.clone())
+                                .expect("matrix"),
+                        )
+                    };
+                    let (mut fader, mut matrix) = new_pair();
+                    let (mut separate_fader, mut separate_matrix) = new_pair();
+                    let ramp_end = schedule
+                        .iter()
+                        .map(|&(block, op)| {
+                            let window = match op {
+                                RampOp::Fader(.., window)
+                                | RampOp::Mute(.., window)
+                                | RampOp::Matrix(.., window) => window as usize,
+                            };
+                            block * FRAMES + window
+                        })
+                        .max()
+                        .expect("a schedule");
+                    let mut state = (lanes * 1_000 + members * 10 + 890) as u64;
+                    let mut left = vec![0.0_f32; FRAMES * lanes];
+                    let mut right = vec![0.0_f32; FRAMES * lanes];
+                    let mut separate_left = left.clone();
+                    let mut separate_right = right.clone();
+                    for block in 0..BLOCKS {
+                        for &(at, op) in schedule.iter().filter(|(at, _)| *at == block) {
+                            for (fader, matrix) in [
+                                (&mut fader, &mut matrix),
+                                (&mut separate_fader, &mut separate_matrix),
+                            ] {
+                                match op {
+                                    RampOp::Fader(lane, channels, db, window) => {
+                                        fader.set_fader_db(lane, channels, db, window)
+                                    }
+                                    RampOp::Mute(lane, channels, muted, window) => {
+                                        fader.set_mute(lane, channels, muted, window)
+                                    }
+                                    RampOp::Matrix(lane, target, window) => {
+                                        matrix.set_target_smoothed(lane, target, window)
+                                    }
+                                }
+                                .unwrap_or_else(|error| panic!("{label} at={at}: {error:?}"));
+                            }
+                        }
+                        for frame in 0..FRAMES {
+                            for lane in 0..lanes {
+                                let (l, r) =
+                                    hostile_pair(block * FRAMES + frame + lane, &mut state);
+                                left[frame * lanes + lane] = l;
+                                right[frame * lanes + lane] = r;
+                            }
+                        }
+                        separate_left.copy_from_slice(&left);
+                        separate_right.copy_from_slice(&right);
+                        let ramping = block * FRAMES < ramp_end;
+                        assert_eq!(
+                            fader.try_process_ramping_with_matrix(
+                                &mut matrix,
+                                &mut left,
+                                &mut right,
+                                FRAMES as u32,
+                            ),
+                            ramping,
+                            "{label} block={block}: the ramping passes take exactly the ramping blocks"
+                        );
+                        if !ramping {
+                            assert!(
+                                fader.try_process_settled_with_matrix(
+                                    &mut matrix,
+                                    &mut left,
+                                    &mut right,
+                                    FRAMES as u32,
+                                ),
+                                "{label} block={block}: a settled pair takes the settled pass"
+                            );
+                        }
+                        separate_fader.process(
+                            &mut separate_left,
+                            &mut separate_right,
+                            FRAMES as u32,
+                        );
+                        separate_matrix.process(
+                            &mut separate_left,
+                            &mut separate_right,
+                            FRAMES as u32,
+                        );
+                        for (index, (actual, expected)) in left
+                            .iter()
+                            .chain(&right)
+                            .zip(separate_left.iter().chain(&separate_right))
+                            .enumerate()
+                        {
+                            assert_eq!(
+                                actual.to_bits(),
+                                expected.to_bits(),
+                                "{label} block={block} word={index}"
+                            );
+                        }
+                        for lane in 0..lanes {
+                            assert_eq!(
+                                test_support::fader_bank_lane_words(&fader, lane),
+                                test_support::fader_bank_lane_words(&separate_fader, lane),
+                                "{label} block={block} fader lane={lane}"
+                            );
+                            assert_eq!(
+                                test_support::matrix_bank_lane_words(&matrix, lane),
+                                test_support::matrix_bank_lane_words(&separate_matrix, lane),
+                                "{label} block={block} matrix lane={lane}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The live scalar fused call must preserve identity signed zeros and match the current separate
 /// fader/matrix stages through instant and smoothed retargets.
 #[test]
