@@ -115,3 +115,38 @@ gate 6 in the PR.
 ## Dependencies
 
 - *Keep every node's latency from dropping during playback* (#1285): this slice rebases on it.
+
+## Attempt record
+
+### Attempt 1
+
+Built on `main` at `82053706c` (#1285 merged).
+
+- **D1.** `ids::NodeTable` (built in `compile_graph` after the node and edge sorts): node positions
+  sorted once by ID (dense index = ID rank) and one `EdgeEnds { source, destination }` per edge,
+  resolved once by binary search. `NodeTable::new` returns `None` on a duplicate ID or a dangling
+  end; then no cycle is reported and `topo`'s `expect` panics as before. `add_node` no longer fills
+  latency/tail maps; `timings` reads them from the `GraphNode`.
+- **D2.** `topo`, `cycle_witnesses` (Kosaraju on `Vec<bool>`/`Vec<Vec<edge index>>`, per-node edge
+  lists still sorted by edge ID), `timings` (floors converted once to a per-dense `Vec`),
+  `buffer_assignments` and `resource_estimate`'s input counts take the table. `topo` also returns
+  the schedule as dense indices.
+- **D3.** `lower_with` resolves each spec edge's ends once (in the `main_in`/`side_in` loop) and
+  `reads_of`, the elided producer, main inputs, sidechains and `first_main_producer` (through
+  `chainable_bank_groups`, which gained an `ends` parameter) read them.
+- **Behaviour note.** Before, `cycle_witnesses` deduplicated a duplicated node ID through its maps
+  and could still report a cycle; now a duplicate ID yields no table, as D1 states. A compile never
+  produces a duplicate ID.
+- **Tests.** Two added in `crates/graph-compiler/src/lib.rs`; the old dangling/duplicate tests were
+  deleted earlier (f8b947995).
+  - `node_table_refuses_duplicate_ids_and_dangling_ends`. Mutation (no duplicate check; a dangling
+    end resolves to 0): this test red, every other `graph-compiler` test green.
+  - `levels_and_witnesses_follow_id_order_not_insertion_order`. Mutation (dense index = insertion
+    position, ends found by linear search): this test red on its order assertion, every other
+    `graph-compiler` test green (the 65,537-track scale test was skipped under this mutation only,
+    because a linear search makes it quadratic). With the binary search left in place the same
+    mutation also turns `timing_applies_declared_tail_after_node_latency` red, by a failed lookup
+    rather than by order.
+- **Gates 1-3.** Gate 1: 291 passed, 0 failed, 2 ignored. Gate 2 (test-debug-a line): 2,400 passed, 0 failed, 12 ignored. Gate 3: fmt, clippy
+  (`--all-features -D warnings`), `check-graph-policy.sh` and `check-workspace-policy.sh` pass.
+- **Gates 4-6.** Coordinator records.

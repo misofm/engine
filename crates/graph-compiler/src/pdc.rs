@@ -179,7 +179,8 @@ pub(crate) fn timings(
     let output_latency = LatencySamples(
         arrivals[output].ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?,
     );
-    let output_tail = extents[output].ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?;
+    let output_tail =
+        extents[output].ok_or_else(|| diag("graph.internal.invariant", "$.outputs"))?;
     let named = |entries: Vec<(usize, LatencySamples)>| {
         entries
             .into_iter()

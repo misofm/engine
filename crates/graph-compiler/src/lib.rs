@@ -13183,7 +13183,7 @@ mod tests {
         let schedule = topo(&table).expect("acyclic").schedule;
         let error = timings(&table, &schedule, &BTreeMap::new(), &caps(7))
             .err()
-        .expect("latency plus tail exceeds cap");
+            .expect("latency plus tail exceeds cap");
         assert_eq!(error.code, "graph.tail.limit");
     }
 
@@ -13300,8 +13300,7 @@ mod tests {
                 .iter()
                 .map(|(node, floor)| (node.clone(), LatencySamples(*floor)))
                 .collect();
-            let timing =
-                timings(&table, &schedule, &floors, &caps(100)).expect("checked timing");
+            let timing = timings(&table, &schedule, &floors, &caps(100)).expect("checked timing");
             let delays: Vec<u64> = timing
                 .routes
                 .iter()

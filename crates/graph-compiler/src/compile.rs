@@ -225,12 +225,7 @@ impl GraphCompiler {
                 } else {
                     TailSamples::Finite(0)
                 };
-                add_node(
-                    &mut nodes,
-                    id,
-                    LatencySamples(0),
-                    tail,
-                );
+                add_node(&mut nodes, id, LatencySamples(0), tail);
             }
             let mut preceding = track_node(strip.id.as_str(), TrackStage::Input);
             let builtins = track_node(strip.id.as_str(), TrackStage::PostInputBuiltins);
@@ -254,12 +249,7 @@ impl GraphCompiler {
                         .expect("validated prepared effect");
                     let index = slot.index();
                     let metadata = effects.entries[index].metadata;
-                    add_node(
-                        &mut nodes,
-                        node.clone(),
-                        metadata.latency,
-                        metadata.tail,
-                    );
+                    add_node(&mut nodes, node.clone(), metadata.latency, metadata.tail);
                     add_main_edge(
                         &mut edges,
                         preceding.clone(),
@@ -301,12 +291,7 @@ impl GraphCompiler {
             let id = GraphNodeId::Output {
                 output_id: gid(output.id.as_str()),
             };
-            add_node(
-                &mut nodes,
-                id,
-                LatencySamples(0),
-                TailSamples::Finite(0),
-            );
+            add_node(&mut nodes, id, LatencySamples(0), TailSamples::Finite(0));
         }
         // Decision 17, C7: each route's follow gate is the effective one the builtins were prepared
         // with (`follows_mute` on a muted lane of its source strip, composed by
