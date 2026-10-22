@@ -64,4 +64,25 @@ None.
   `input_signal == "odd_tracks_silent"`; the first three stay `tone`.
 - **Cross-set edit needed.** `scripts/test-console-benchmark.sh` (#1750's file set) builds a
   three-document synthetic web record (`web_round`, near `:1490`) that this validator now refuses.
-  It needs a fourth document entry appended. Not edited here; root sequences it.
+  It needs a fourth document entry appended, plus two cases (no sparse document; a sparse
+  document claiming `tone`). Not edited here; root sequences it. With that edit applied in a
+  scratch worktree the suite passed, and each new case went red on its claim's revert.
+
+## Evidence (attempt 1)
+
+- Harness mutants (preflight, each restored): no submit on the silent source -> "underran";
+  the tone on the silent source -> "rendered the same bits" as the standing console; zeros on
+  the tone source -> "silent"; no track rebound -> "binding". The three existing documents'
+  preflight digests are unchanged from `main`'s harness.
+- Descriptive run, commit `8670f98d0`, module `e7567184...` (not the release pin), one warmup
+  and two measured launches, cpu 31, uncontrolled (loadavg 2.19, waived), exclusive lock:
+  `artifacts/steps/1744-v8-sparse/web-mixing-automation.jsonl`, validator accepted. Per-block
+  p50 / p95 / p99 in microseconds, rounds 1 and 2:
+
+  | document | round 1 | round 2 |
+  |---|---|---|
+  | sixty_four_track_console | 242.0 / 254.2 / 262.8 | 247.0 / 290.1 / 295.0 |
+  | sixty_four_track_console_sparse | 247.0 / 258.4 / 261.8 | 250.9 / 294.6 / 299.9 |
+
+  Today the sparse row costs no less than the all-active row: the browser module does no
+  per-lane silent work skipping (that is #1107).
