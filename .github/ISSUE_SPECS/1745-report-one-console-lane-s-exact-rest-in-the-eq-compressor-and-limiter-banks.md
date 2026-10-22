@@ -77,9 +77,47 @@ same withdrawals (target, reset, restore, automation). The earning test becomes 
 has every lane set" in place of "the observed block left the state bits unchanged". Rendered bits
 cannot move: the fast path is still "write nothing" under a sound claim.
 
+Per effect (attempt 1):
+- **EQ**: pins per lane `remaining == 0`, both integrators and the six `step` words `+0.0`,
+  `c1`/`a2`/`a3` finite, and the zero response `m2*0 + m1*0 + m0*0` (kernel order) `+0.0`. Clock:
+  `silence`. The old `armed` leg and the before/after state compare are deleted: on `+0.0`
+  integrators the rest threshold changes nothing, so the claim can now be earned before the
+  counters arm.
+- **Compressor**: pins `gain_reduction_db` to `+0.0` (a release stalled at a non-zero value no
+  longer earns the claim) and every parameter and coefficient ramp settled. No clocks. The
+  before/after compare and the output check are deleted.
+- **Limiter**: `is_at_silent_rest` becomes the per-lane `lanes_at_silent_rest`: history,
+  `main_ring`, `reduction` `+0.0`; `required_ring`, `box_ring`, `prefix` exactly `1.0`; `box_sum`
+  the lane's window; `limit` and `release` stationary. Clocks: the bank `Cursors` and each lane's
+  `phase`. The earning rule **keeps** the old "this block's output was `+0.0`" leg. It is not a
+  soundness leg (gate 1 shows the predicate implies the next block's output), but without it the
+  claim is earned one block sooner and the existing exact count in
+  `a_settled_silent_limiter_renders_exactly_the_never_fast_path` (35 of 40 blocks) becomes 36.
+  The gates forbid editing that test, so the leg stays; removing it (and the count to 36) is a
+  one-line follow-up for root to rule on.
+
 ### D3 Shared gate helper
 
 `effect_runtime::bank::rest_probe`: one randomized driver and check (`Probe`, `Schedule`,
 `check`, `Reach::assert_reached`). Each effect's test binds its own bank at `Simd4` and `Simd8`
 through crate internals (`lane::each_vector_lane!`), so the Simd4 leg runs on this AVX2 host
 without #1694.
+
+## Evidence (attempt 1, 2026-10-22)
+
+- Gate 1: `rest_tests::a_lane_reported_at_rest_stays_at_rest_through_silence` (compressor),
+  `rest_tests::a_lane_the_eq_bank_calls_at_rest_stays_there_on_a_silent_block` (EQ),
+  `rest_tests::a_lane_the_limiter_bank_reports_at_rest_is_a_fixed_point` (limiter), each at
+  `Simd4` and `Simd8` on the AVX2 host, dual and collapsed bodies. Reach (claims / earned / quiet
+  refusals): compressor W4 8761/5971/10132, W8 17272/10940/20488; EQ W4 5891/4344/3187, W8
+  9504/5549/8949; limiter W4 1999/859/4603, W8 4389/1536/12520. Mutants red: compressor envelope
+  and ramps; EQ `ic1`, ramp countdown plus step; limiter every leg one at a time.
+- Gate 2: the five crates' tests pass unchanged (430 passed, 0 failed, 4 ignored as before).
+  One-time base comparison (PR evidence, not committed): a scratch test rendering 4000-block
+  tone/silence/automation runs through the public factory banks (full and padded, dual and
+  collapsed, 44.1/48/96 kHz; output words and every member lane's payload hashed per block) gave
+  56 of 56 equal digests on main 80edd93f7 and on this branch (EQ 12, compressor 16 at W8; limiter
+  28 at W4 and W8). The `bench` crate's console-row records (8 `output_sha256`) are identical.
+- Gate 3: `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets
+  --all-features -- -D warnings`, `cargo run --release -p realtime-policy` (171 marked regions in
+  34 files): clean.
