@@ -29,3 +29,7 @@ No engine change. No V8 row (a later issue may add one).
 ## Dependencies
 
 #890 merged, so the in-run witness can name the fused ramping path.
+
+## Evidence and decision record
+
+- 2026-10-22, attempt 1 (implementer), stopped before code: #890's fused ramping pass is reachable only from `FaderMatrixBankProcessor::process` (`crates/builtins-compiler/src/lib.rs`, the one caller of `try_process_ramping_with_matrix(_and_operations)`). That pair exists only when `make_fader_matrix` sees both banks at `BuiltinControlDelivery::BetweenRenderCalls`; it declines `Concurrent`. No production host prepares `BetweenRenderCalls`: the C ABI calls `prepare_host_runtime_with_live_lanes(_successor)`, which passes `between_render_calls = false`, and the browser's `prepare_web_host` calls no `_between_render_calls` entry since #1400b (13fd9b491). Only tests call the host-core `_between_render_calls` entries. So a row whose gate 2 needs the fused ramping witness must prepare a delivery no product runs, and a row on the production (`Concurrent`) delivery takes the split fader/matrix ramp path and cannot see #890. The two conflict with "benchmark real paths only"; the choice is root's. The metered row's doc (`tools/bench/src/console.rs` near `:103-118`) still calls `BetweenRenderCalls` the browser's delivery, which is stale for the same reason.
