@@ -352,8 +352,16 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
             );
         });
     }
+    // Issue #890: the ramping tail renders in the fused ramping passes, not the split fallback.
     let ramp_a = audit_graph_render(&mut eligible, &mut output, 64);
-    assert_eq!((ramp_a.fused_calls, ramp_a.fallback_calls), (1, 1));
+    assert_eq!(
+        (
+            ramp_a.fused_calls,
+            ramp_a.ramp_fused_calls,
+            ramp_a.fallback_calls
+        ),
+        (1, 1, 0)
+    );
     let ramp_b = audit_graph_render(&mut eligible, &mut output, 128);
     assert_eq!((ramp_b.fused_calls, ramp_b.fallback_calls), (2, 0));
 
@@ -372,7 +380,14 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
         );
     });
     let retarget = audit_graph_render(&mut eligible, &mut output, 192);
-    assert_eq!((retarget.fused_calls, retarget.fallback_calls), (1, 1));
+    assert_eq!(
+        (
+            retarget.fused_calls,
+            retarget.ramp_fused_calls,
+            retarget.fallback_calls
+        ),
+        (1, 1, 0)
+    );
     let resettled = audit_graph_render(&mut eligible, &mut output, 256);
     assert_eq!((resettled.fused_calls, resettled.fallback_calls), (2, 0));
 
@@ -462,9 +477,16 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
             );
         });
     }
-    for (sample, expected) in [(64, (1, 1)), (128, (1, 1)), (192, (2, 0))] {
+    for (sample, expected) in [(64, (1, 0, 1)), (128, (1, 0, 1)), (192, (2, 0, 0))] {
         let witness = audit_graph_render(&mut selected, &mut output, sample);
-        assert_eq!((witness.fused_calls, witness.fallback_calls), expected);
+        assert_eq!(
+            (
+                witness.fused_calls,
+                witness.ramp_fused_calls,
+                witness.fallback_calls
+            ),
+            expected
+        );
         assert_eq!(witness.process_members, 2);
     }
 
