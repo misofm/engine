@@ -1575,7 +1575,13 @@ web_round=$(jq -cn --arg a "$digest_a" --arg b "$digest_b" --arg c "$digest_c" -
      strip_content: "eq+compressor+limiter",
      strip_layout: "pre_insert:eq+compressor,post_insert:limiter", input_signal: "tone",
      bypass_pattern: "none", bypassed_tracks: 0,
-     p50_ns: 352000, p95_ns: 371000, p99_ns: 389000, output_sha256: ($a[0:63] + "5")}],
+     p50_ns: 352000, p95_ns: 371000, p99_ns: 389000, output_sha256: ($a[0:63] + "5")},
+    {workload_kind: "sixty_four_track_console_sparse",
+     fixture_id: "fixtures/session/v1/console-sixty-four-track-intended.json", tracks: 64,
+     strip_content: "eq+compressor+limiter",
+     strip_layout: "pre_insert:eq+compressor,post_insert:limiter", input_signal: "odd_tracks_silent",
+     bypass_pattern: "none", bypassed_tracks: 0,
+     p50_ns: 306000, p95_ns: 327000, p99_ns: 345000, output_sha256: ($a[0:63] + "4")}],
   bit_identity: "quiet == restated, asserted in-run", bank_collapse_counters_exported: false,
   loadavg_start: "9.52 7.22 7.64 8/1930 3836898", loadavg_end: "9.48 7.25 7.65 6/1921 3837039",
   descriptive_only: true,
@@ -1671,7 +1677,9 @@ web_document_mutation 'del(.documents)' 'a browser round without its documents'
 web_document_mutation '.documents = []' 'a browser round that timed no document'
 web_document_mutation '.documents |= .[0:1]' 'a browser round that timed the console alone'
 web_document_mutation '.documents |= reverse' 'documents in another order'
-web_document_mutation '.documents |= . + [.[0]]' 'a fourth document'
+web_document_mutation '.documents |= . + [.[0]]' 'a fifth document'
+web_document_mutation '.documents |= .[0:3]' 'a browser round without the sparse document'
+web_document_mutation '.documents[3].input_signal = "tone"' 'the sparse document claiming every track active'
 web_document_mutation '.documents |= .[0:2]' 'a browser round without the bus-and-send document'
 web_document_mutation '.documents[2].workload_kind = "sixty_four_track_console"' 'the bus-and-send document labelled the standing console'
 web_document_mutation '.documents[2].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' 'the bus-and-send document booted from the standing fixture'

@@ -34,9 +34,11 @@
 // same table. Each is booted from its checked-in fixture as written (its one source stretched) the
 // way every document boots, through host-core with live controls, so every route into a submix of
 // the sends document is a live route; each is checked to carry the layout and the bypass the table
-// states, fed the same streamed tone, and rendered with no control traffic. After the three arms
-// are timed, the three documents are timed alternated per observation,
-// `miso_engine_web_v1_render` alone inside the clock, and the record states each one's
+// states, fed the same streamed tone, and rendered with no control traffic. A fourth document is the
+// native row `sixty_four_track_console_sparse` (#1744): the standing console's session with every
+// odd track fed exact +0.0 by the harness's own PCM, not by a mute or an edit to any strip (see
+// `sparseDocument`). After the three arms are timed, the four documents are timed alternated per
+// observation, `miso_engine_web_v1_render` alone inside the clock, and the record states each one's
 // percentiles and digest under `documents`. They are the console strip's browser baseline; no
 // per-N browser rows exist, because that would be a second framework.
 //
@@ -51,9 +53,9 @@
 //        node web-mixing-automation-benchmark.mjs rebuild-validate RECORDS.jsonl
 //
 // `preflight` is untimed: seven arms over the pre-roll and the preflight blocks, and the row's
-// premises asserted on their digests; then the three documents over the same blocks, each rendering
+// premises asserted on their digests; then the four documents over the same blocks, each rendering
 // audible bits of its own. `run` asserts the same premises first, then times the three arms
-// alternated per observation, then the three documents alternated per observation, and prints one
+// alternated per observation, then the four documents alternated per observation, and prints one
 // JSON record for ROUND (`warmup`, `1` or `2`; the runner launches one process per round, as the
 // console runner does). Every assertion throws, so a broken premise exits non-zero before any
 // number is printed.
@@ -598,10 +600,13 @@ function loadDocument(fixtureId) {
   assert.deepEqual(parsed.automation, [], `${fixtureId}: no automation`);
   const frames = `"frames": "${parsed.sources[0].frames}"`;
   assert.equal(text.split(frames).length, 2, `${fixtureId}: exactly one source length to stretch`);
+  const stretched = text.replace(frames, `"frames": "${SOURCE_FRAMES}"`);
   return {
     fixture: parsed,
-    bytes: new TextEncoder().encode(text.replace(frames, `"frames": "${SOURCE_FRAMES}"`)),
+    text: stretched,
+    bytes: new TextEncoder().encode(stretched),
     sourceId: new TextEncoder().encode(parsed.sources[0].id),
+    silentSourceId: null,
   };
 }
 
@@ -640,14 +645,17 @@ for (const control of table.controls) {
   }
 }
 
-// The three console-strip documents (#1085, #1228), as the native rows state them. Each fixture is checked
+// The three console-strip documents the table lists (#1085, #1228), as the native rows state them, and
+// the sparse row derived from the first of them (#1744). Each fixture is checked
 // against the table's facts from its own JSON: every track's effects, section by section in strip
 // order, in the console vocabulary of `console_workload::Workload::strip_layout` (decision 12,
 // #1093: the session's `pre_insert` slots, the track's `inserts`, then the `post_insert` slots),
 // and which tracks bypass them.
-const DOCUMENT_KINDS = [
+const TABLE_DOCUMENT_KINDS = [
   "sixty_four_track_console", "sixty_four_track_app_shape", "sixty_four_track_console_sends",
 ];
+const SPARSE_KIND = "sixty_four_track_console_sparse";
+const DOCUMENT_KINDS = [...TABLE_DOCUMENT_KINDS, SPARSE_KIND];
 const SHORT_NAMES = {
   "miso.parametric-eq": "eq", "miso.compressor": "compressor", "miso.true-peak-limiter": "limiter",
 };
@@ -686,10 +694,68 @@ function bypassCensus(document) {
   });
   return { pattern: !any ? "none" : exact ? "index_mod_3_is_2" : "other", bypassed };
 }
-assert.deepEqual((table.documents ?? []).map((doc) => doc.workload_kind), DOCUMENT_KINDS,
+assert.deepEqual((table.documents ?? []).map((doc) => doc.workload_kind), TABLE_DOCUMENT_KINDS,
   "the table lists the three console-strip documents");
-const DOCUMENTS = table.documents.map((doc) => {
-  const loaded = loadDocument(doc.fixture_id);
+
+// The sparse row (#1744), as the native row `sixty_four_track_console_sparse` states it (#1085): the
+// standing console's session, every strip as written and active, with every odd track fed exact
+// +0.0, so every four-lane bank holds two tone lanes and two silent ones and none is wholly silent.
+// The native row feeds each track its own block in code; the browser feeds a source, and the
+// standing fixture binds all sixty-four tracks to its one source. So the odd tracks are bound to a
+// second source of the same shape, which the harness feeds exact +0.0 every block (`feed`). That
+// binding is the only difference from the standing document, and it is asserted: the derived
+// document, its odd tracks bound back and its second source dropped, is the standing one. No strip,
+// fader, mute, route or effect parameter changes. The second source costs one more source
+// consumer step per render inside the clock (its `begin_block`: one ring pop and recycle, no PCM
+// copy), a constant per block that the native row, fed without rings, does not have; it counts
+// against the sparse row. Its submit is outside the clock.
+const SILENT_SOURCE_ID = "fixture-source-silent";
+function sparseDocument(standing) {
+  const base = standing.fixture.sources[0];
+  const binding = `"source_id": "${base.id}"`;
+  const bindings = standing.text.split(binding);
+  assert.equal(bindings.length, standing.fixture.tracks.length + 1, `${SPARSE_KIND}: one binding per track`);
+  // A second source after the first: the same object with another id and content.
+  const sourceStart = standing.text.indexOf(`"sources": [`);
+  const objectStart = standing.text.indexOf("{", sourceStart);
+  const objectEnd = standing.text.indexOf("}", objectStart) + 1;
+  const sourceText = standing.text.slice(objectStart, objectEnd);
+  const silentText = sourceText.replace(`"id": "${base.id}"`, `"id": "${SILENT_SOURCE_ID}"`)
+    .replace(`"content": "${base.content}"`, `"content": "blake3:${"0".repeat(64)}"`);
+  assert.notEqual(silentText.indexOf(SILENT_SOURCE_ID), -1, `${SPARSE_KIND}: second source id`);
+  const indent = standing.text.slice(standing.text.lastIndexOf("\n", objectStart) + 1, objectStart);
+  const withSource = standing.text.slice(0, objectEnd) + `,\n${indent}${silentText}`
+    + standing.text.slice(objectEnd);
+  // The bindings appear in track order; every odd one is rebound.
+  const rebound = withSource.split(binding).reduce((text, piece, index) => (index === 0 ? piece
+    : text + (index % 2 === 0 ? `"source_id": "${SILENT_SOURCE_ID}"` : binding) + piece), "");
+  const derived = JSON.parse(rebound);
+  derived.tracks.forEach((track, index) => {
+    assert.equal(track.id, standing.fixture.tracks[index].id, `${SPARSE_KIND}: track order`);
+    assert.equal(track.source_id, index % 2 === 1 ? SILENT_SOURCE_ID : base.id, `${SPARSE_KIND} ${track.id}: binding`);
+  });
+  const restored = structuredClone(derived);
+  restored.sources = restored.sources.filter((source) => source.id !== SILENT_SOURCE_ID);
+  for (const track of restored.tracks) track.source_id = base.id;
+  const stretchedStanding = JSON.parse(standing.text);
+  assert.deepEqual(restored, stretchedStanding, `${SPARSE_KIND}: differs from the standing document only in its odd tracks' source`);
+  return {
+    fixture: derived,
+    text: rebound,
+    bytes: new TextEncoder().encode(rebound),
+    sourceId: standing.sourceId,
+    silentSourceId: new TextEncoder().encode(SILENT_SOURCE_ID),
+  };
+}
+
+const TABLE_DOCUMENTS = table.documents.map((doc) => ({ doc, loaded: loadDocument(doc.fixture_id) }));
+const [STANDING] = TABLE_DOCUMENTS;
+assert.equal(STANDING.doc.input_signal, "tone", "the standing console is fed the tone");
+// The sparse row's facts are the standing console's, but its input (#1085's `odd_tracks_silent`).
+const DOCUMENTS = [...TABLE_DOCUMENTS, {
+  doc: { ...STANDING.doc, workload_kind: SPARSE_KIND, input_signal: "odd_tracks_silent" },
+  loaded: sparseDocument(STANDING.loaded),
+}].map(({ doc, loaded }) => {
   const document = loaded.fixture;
   assert.equal(document.tracks.length, doc.tracks, `${doc.workload_kind}: track count`);
   for (const track of document.tracks) {
@@ -784,7 +850,7 @@ function boot(document = mixingDocument) {
   }
   return {
     e, handle, requestId: 1n, revision: e.miso_engine_web_v1_control_revision(handle),
-    frame: 0n, block: 0, sourceId: document.sourceId,
+    frame: 0n, block: 0, sourceId: document.sourceId, silentSourceId: document.silentSourceId,
     outputPointer: e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_OUTPUT),
     left: new Float32Array(Q), right: new Float32Array(Q),
   };
@@ -811,6 +877,19 @@ function feed(engine) {
   const result = engine.e.miso_engine_web_v1_source_submit(
     engine.handle, sourceId.length, 1n, engine.frame, 2, Q, 0);
   assert.equal(result, RESULT_OK, "source submit");
+  // The sparse row's second source (#1744): the same block of exact +0.0 on both planes, submitted
+  // like the tone, so its tracks read fed silence and never an underrun.
+  const { silentSourceId } = engine;
+  if (silentSourceId !== null) {
+    const silentIdPointer = engine.e.miso_engine_web_v1_buffer_ptr(engine.handle, BUFFER_SOURCE_ID);
+    const silentPcmPointer = engine.e.miso_engine_web_v1_buffer_ptr(engine.handle, BUFFER_SOURCE_PCM);
+    const silentMemory = engine.e.memory.buffer;
+    new Uint8Array(silentMemory, silentIdPointer, silentSourceId.length).set(silentSourceId);
+    new Float32Array(silentMemory, silentPcmPointer, 2 * Q).fill(0);
+    const silent = engine.e.miso_engine_web_v1_source_submit(
+      engine.handle, silentSourceId.length, 1n, engine.frame, 2, Q, 0);
+    assert.equal(silent, RESULT_OK, "silent source submit");
+  }
   engine.frame += BigInt(Q);
 }
 
@@ -910,6 +989,29 @@ function makeDocument({ doc, loaded }) {
   return state;
 }
 
+// A source's cumulative underrun frames, from its seek report (#1293 D6). Control side, outside
+// every clock.
+function underrunFrames(engine, sourceId) {
+  const { e, handle } = engine;
+  const idPointer = e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID);
+  new Uint8Array(e.memory.buffer, idPointer, sourceId.length).set(sourceId);
+  assert.equal(e.miso_engine_web_v1_source_seek_report(handle, sourceId.length), RESULT_OK, "seek report");
+  const pointer = e.miso_engine_web_v1_source_seek_report_ptr(handle);
+  assert.notEqual(pointer, 0, "seek report record");
+  return new DataView(e.memory.buffer, pointer, ABI_LAYOUT.structures.seekReport.bytes)
+    .getBigUint64(field("seekReport", "cumulativeUnderrunFrames"), true);
+}
+
+// The sparse row's feed (#1744): its odd tracks' silence is the exact +0.0 the harness submitted,
+// never an underrun's zeros, which render the same bits and so no digest can tell apart.
+function assertSparseFed(state, phase) {
+  if (state.engine.silentSourceId === null) return;
+  for (const sourceId of [state.engine.sourceId, state.engine.silentSourceId]) {
+    assert.equal(underrunFrames(state.engine, sourceId), 0n,
+      `${phase} ${state.doc.workload_kind}: source ${new TextDecoder().decode(sourceId)} underran`);
+  }
+}
+
 // Folds a document's block into its digest and notes whether it was audible. Outside the clock.
 function absorbDocument(state, hash) {
   absorb(state, hash);
@@ -918,7 +1020,10 @@ function absorbDocument(state, hash) {
 }
 
 // Asserts every pair of documents rendered different bits, or one session was booted twice; a
-// failure names the pair.
+// failure names the pair. With the audibility every caller also asserts, it is the sparse row's
+// in-run check (#1744), as the native row makes it (#1085): the sparse row renders neither the
+// standing console's bits (every track active) nor silence, which is what the native idle row
+// renders and this harness has no row for. Either one means its feed never reached the plan.
 function assertDocumentsDistinct(digests, phase) {
   DOCUMENT_KINDS.forEach((first, i) => DOCUMENT_KINDS.slice(i + 1).forEach((second) => {
     assert.notEqual(digests[first], digests[second],
@@ -941,7 +1046,10 @@ function documentPreflight() {
   const digests = Object.fromEntries(states.map((state, index) => [
     state.doc.workload_kind, hashes[index].digest("hex"),
   ]));
-  for (const state of states) assert.ok(state.audible, `preflight ${state.doc.workload_kind}: silent`);
+  for (const state of states) {
+    assert.ok(state.audible, `preflight ${state.doc.workload_kind}: silent`);
+    assertSparseFed(state, "preflight");
+  }
   assertDocumentsDistinct(digests, "preflight");
   return digests;
 }
@@ -1040,7 +1148,10 @@ for (let observation = 0; observation < OBSERVATIONS; observation++) {
 }
 const loadEnd = readFileSync("/proc/loadavg", "utf8").trim();
 const documentDigests = documentHashes.map((hash) => hash.digest("hex"));
-for (const state of documents) assert.ok(state.audible, `run ${state.doc.workload_kind}: silent`);
+for (const state of documents) {
+  assert.ok(state.audible, `run ${state.doc.workload_kind}: silent`);
+  assertSparseFed(state, "run");
+}
 assertDocumentsDistinct(Object.fromEntries(documents.map((state, index) => [
   state.doc.workload_kind, documentDigests[index],
 ])), "run");
@@ -1115,6 +1226,6 @@ const record = {
   loadavg_start: loadStart,
   loadavg_end: loadEnd,
   descriptive_only: true,
-  statistical_method: "three arms alternated per observation, then the three documents alternated per observation; one warmup launch and two measured launches; nearest-rank percentiles over per-block nanoseconds of miso_engine_web_v1_render alone; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold",
+  statistical_method: "three arms alternated per observation, then the four documents alternated per observation, the sparse document's odd tracks bound to a second source fed exact +0.0; one warmup launch and two measured launches; nearest-rank percentiles over per-block nanoseconds of miso_engine_web_v1_render alone; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold",
 };
 process.stdout.write(`${JSON.stringify(record)}\n`);
