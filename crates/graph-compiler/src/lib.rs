@@ -13332,9 +13332,9 @@ mod tests {
 
     /// #1748: `input_arrivals` is in node-ID order, the order `graph::floored_input_arrival`'s
     /// binary search needs. The chain `c -> b -> a` schedules opposite to ID order, and all three
-    /// feed the output. Red if the rows are left in schedule order or sorted the wrong way: the
-    /// binary search then misses a row and gives a floored arrival of 0, which is a silent
-    /// compensation error.
+    /// feed the output. The row assertion is red if the rows are left in schedule order or sorted
+    /// the wrong way; out of order, the binary search can miss a row and give a floored arrival of
+    /// 0, a silent compensation error (the floored read shows it for the reversed order).
     #[test]
     fn timing_lists_input_arrivals_in_node_id_order() {
         let output = GraphNodeId::Output {

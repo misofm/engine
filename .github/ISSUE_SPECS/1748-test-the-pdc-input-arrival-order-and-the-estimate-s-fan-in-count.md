@@ -41,3 +41,4 @@ Assertion 1 turns red when PDC input arrivals are out of order (a silent compens
 - M4 (`Reverse(entry.0)` in the `input_arrivals` sort): the gate (65 537-track test skipped) has one red test, the new one; the rows come out reversed. For the reversed rows, a standalone copy of the binary search gives 0 for `a`.
 - M6 (`ends.source()` in the estimate's input count): one red test, the new assertion (2, expected 3). Nothing else turns red.
 - Both mutants are restored; `git diff` is empty.
+- Sol attempt 1 verdict: PASS. The verifier re-ran M4, M4b (no sort) and M6: each turns exactly one test red. The floored read alone catches M4, not M4b; the row assertion catches both (test comment corrected by root).
