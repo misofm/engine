@@ -65,8 +65,10 @@ None.
 - **Cross-set edit needed.** `scripts/test-console-benchmark.sh` (#1750's file set) builds a
   three-document synthetic web record (`web_round`, near `:1490`) that this validator now refuses.
   It needs a fourth document entry appended, plus two cases (no sparse document; a sparse
-  document claiming `tone`). Not edited here; root sequences it. With that edit applied in a
-  scratch worktree the suite passed, and each new case went red on its claim's revert.
+  document claiming `tone`). Root authorized this edit and declared the order: #1744 edits the
+  file and merges first, and #1750 takes `main` after that. The edit is applied on this branch;
+  the suite passes, and each new case went red on its claim's revert (checked in a scratch
+  worktree).
 
 ## Evidence (attempt 1)
 
