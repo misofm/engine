@@ -1,6 +1,6 @@
 # Shared definitions for the console qualification benchmark records.
 #
-# Eight record shapes share one stream. `console_session` is a workload rendered through a real
+# Nine record shapes share one stream. `console_session` is a workload rendered through a real
 # prepared plan; `console_hoist` is the paired-alternation comparison of the stationary-smoother
 # arms; `console_meters` and `console_observation` are the #163 item 0d paired arms of the console
 # observation facilities; `console_placement` is the #175 chain-shape row-pair; and
@@ -9,7 +9,8 @@
 # `console_mono` is the mono-collapse row-pair, whose two arms are one session in this tree and
 # whose digest equality is the gate the collapse will be constrained by when it lands; and
 # `console_mixing_automation` (#1003) is the mono console riding eight controls on eight tracks in
-# the shapes a real host pushes them.
+# the shapes a real host pushes them; and `console_fader_ride` (#1750) is the standing console
+# riding one fader and one pan per bank on the product's delivery.
 # `console_benchmark_record_valid_lib` dispatches on `.record`, so a record that claims one shape
 # and carries another's keys fails rather than being validated against the wrong table.
 def sha256: type == "string" and test("^[0-9a-f]{64}$");
@@ -43,6 +44,8 @@ def mono_keys: ["arm_difference","arms","backend","background_load_note","bit_id
 def observation_keys: ["absent_output_sha256","absent_p50_ns","absent_p95_ns","absent_p99_ns","armed_output_sha256","armed_p50_ns","armed_p95_ns","armed_p99_ns","armed_windows_published","arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","observation_lanes","observation_taps","observation_window_blocks","observations","os","paired_arm_delta_median_ns","paired_capacity_delta_median_ns","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","unarmed_output_sha256","unarmed_p50_ns","unarmed_p95_ns","unarmed_p99_ns","unarmed_windows_published","units","workload_kind"];
 
 def automation_keys: ["arms","automated_channel","automated_effect","automated_effect_id","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_parameter","automated_parameter_index","automated_pushes_accepted","automated_track_id","automation_spans_per_block","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","paired_control_delta_median_ns","paired_ramp_delta_median_ns","paired_ramp_delta_median_ns_per_track","pairing","percentile_method","profile","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
+
+def fader_ride_keys: ["backend","background_load_note","banks","candidate_commit","control_delivery","cpu_affinity","cpu_model","descriptive_only","fader_records_per_block","fader_records_written","fader_smoothing_samples","fader_step_db","fader_tracks","fixture_id","governor_or_power_mode","input_signal","issue","live_lanes","live_values_superseded","llvm_version","matrix_records_per_block","matrix_records_written","max_ns_per_block","measurement_control","min_ns_per_block","missing_metadata","observations","os","output_sha256","p50_ns_per_block","p50_ns_per_block_per_track","p95_ns_per_block","p99_ns_per_block","pan_smoothing_samples","pan_step","pan_tracks","percentile_method","preroll_blocks","profile","quantum_frames","ramp_in_flight_blocks","ramp_witness","record","render_errors","render_total_forbidden_operations","round","rust_version","sample_rate_hz","schema_version","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","transactions_published","units","workload_kind"];
 
 def mixing_automation_keys: ["arms","automated_bank_collapse_counters","automated_controls","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_pushes_accepted","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","owner_edits_per_block","paired_collapse_delta_median_ns","paired_ramp_delta_median_ns","pairing","parameter_records_per_block","percentile_method","preflight_bank_collapse_counters","preflight_blocks","preflight_output_sha256","preroll_blocks","profile","quantum_frames","quiet_bank_collapse_counters","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_bank_collapse_counters","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
@@ -508,6 +511,10 @@ def automation_statistical_method:
   "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is automated minus restated and control delta is restated minus quiet, per observation; descriptive only; no threshold";
 def mixing_automation_statistical_method:
   "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold";
+def fader_ride_statistical_method:
+  "nearest-rank percentiles over per-block nanoseconds of the riding arm; the stepped twin renders untimed; one warmup pass and two measured rounds; descriptive only; no threshold";
+def fader_ride_ramp_witness:
+  "each timed block differs from a stepped twin's, which holds every target from the block's first sample; after the settled pre-roll the two agree";
 def mono_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is collapse_forced_off minus collapse_eligible per observation; descriptive only; no threshold";
 def observation_statistical_method:
@@ -875,6 +882,47 @@ def mixing_automation_record_valid:
   .preflight_bank_collapse_counters.restated_eq_only == .preflight_bank_collapse_counters.quiet and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
+# The fader-ride row (#1750): the standing console, prepared with every track's fader and pan lanes
+# on the product's `Concurrent` delivery, riding one fader and one pan in every bank chain, one
+# transaction per block. Its claims are pinned so the row cannot quietly measure something else:
+# the delivery (a between-render-calls plan fuses the pair, which no product host prepares), one
+# fader and one pan per bank on two different tracks, exact record and transaction counts, no
+# superseded value, and the in-run witness that a ramp was in flight in every timed block.
+# A bank chain has a vector's lanes, so the vector backends alone have banks to ride.
+def lane_width: if .backend == "Simd8" then 8 elif .backend == "Simd4" then 4 else null end;
+def fader_ride_record_valid:
+  (keys | sort) == fader_ride_keys and
+  .record == "console_fader_ride" and common_shape and
+  .statistical_method == fader_ride_statistical_method and
+  .workload_kind == "sixty_four_track_console_fader_ride" and
+  # The standing console's pinned facts, verbatim from `session_kind_shape`.
+  .tracks == 64 and .synthetic_fixture == false and
+  .strip_content == "eq+compressor+limiter" and
+  .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and
+  .fixture_id == console_fixture and
+  .sample_rate_hz == 48000 and .quantum_frames == 128 and
+  .control_delivery == "concurrent" and .live_lanes == "fader_and_matrix" and
+  (.preroll_blocks | positive_integer) and
+  lane_width != null and .banks == (.tracks / lane_width) and
+  ([.fader_tracks, .pan_tracks] | all(type == "array" and all(.[]; type == "string" and test("^ch[0-9]{2}$")))) and
+  (.fader_tracks | length) == .banks and (.pan_tracks | length) == .banks and
+  ((.fader_tracks + .pan_tracks) | unique | length) == 2 * .banks and
+  .fader_step_db == 0.5 and .pan_step == 0.1 and
+  # The session's `fader_ms` default at 48 kHz, longer than a block so a ramp retargeted every
+  # block never ends; and the standing console's own pan window.
+  .fader_smoothing_samples == 960 and .pan_smoothing_samples == 16 and
+  .fader_records_per_block == 2 * .banks and .matrix_records_per_block == .banks and
+  .fader_records_written == .fader_records_per_block * .observations and
+  .matrix_records_written == .matrix_records_per_block * .observations and
+  .transactions_published == .observations and .live_values_superseded == 0 and
+  .ramp_in_flight_blocks == .observations and .ramp_witness == fader_ride_ramp_witness and
+  .units == "ns_per_block" and
+  ordered_percentiles([.min_ns_per_block,.p50_ns_per_block,.p95_ns_per_block,.p99_ns_per_block,.max_ns_per_block]) and
+  .min_ns_per_block > 0 and
+  (.p50_ns_per_block_per_track | type == "number" and . > 0) and
+  (.output_sha256 | sha256) and
+  .render_errors == 0 and .render_total_forbidden_operations == 0;
+
 def console_benchmark_record_valid_lib:
   type == "object" and (.record | type == "string") and
   (if .record == "console_session" then session_record_valid
@@ -885,4 +933,5 @@ def console_benchmark_record_valid_lib:
    elif .record == "console_automation" then automation_record_valid
    elif .record == "console_mono" then mono_record_valid
    elif .record == "console_mixing_automation" then mixing_automation_record_valid
+   elif .record == "console_fader_ride" then fader_ride_record_valid
    else false end);
