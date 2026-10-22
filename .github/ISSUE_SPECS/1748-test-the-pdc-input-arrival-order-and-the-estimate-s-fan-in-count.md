@@ -33,3 +33,11 @@ Assertion 1 turns red when PDC input arrivals are out of order (a silent compens
 ## Dependencies
 
 #1384 (the dense-index refactor) merges first; the assertions run on its code.
+
+## Evidence (attempt 1, 2026-10-22)
+
+- Assertion 1 is a new unit test, `timing_lists_input_arrivals_in_node_id_order` (`crates/graph-compiler/src/lib.rs`): no existing timing test has two nodes with a nonzero arrival. The chain `c -> b -> a` schedules opposite to ID order, and all three feed the output (fan-in 3). It asserts the exact rows and `floored_input_arrival(a) == 5`.
+- Assertion 2 is added to the existing `a_three_input_bus_keeps_one_reduction_on_its_input_stage` (`crates/graph-compiler/tests/compile_shapes.rs`): `semantic_estimate.audio_buffer_samples % (2 * quantum) == 3`, the bus input's fan-in, which is `maximum_inputs`. Under M6 its `reductions == 1` stays green: the track's `Input` stage fans out to two edges and takes the bus's place in the count. That is why M6 survived.
+- M4 (`Reverse(entry.0)` in the `input_arrivals` sort): the gate (65 537-track test skipped) has one red test, the new one; the rows come out reversed. For the reversed rows, a standalone copy of the binary search gives 0 for `a`.
+- M6 (`ends.source()` in the estimate's input count): one red test, the new assertion (2, expected 3). Nothing else turns red.
+- Both mutants are restored; `git diff` is empty.
