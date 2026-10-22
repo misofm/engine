@@ -11,8 +11,8 @@ use super::padding_tests::{
     members_first, width_of,
 };
 use super::*;
+use conformance::rest_probe::{self, Reach, Schedule};
 use dsp_reference::randomized::Draw;
-use effect_runtime::bank::rest_probe::{self, Reach, Schedule};
 
 /// Not a divisor of the 64-sample smoothing, so a target's ramp is still in flight at the end of
 /// the block it starts in.

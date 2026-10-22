@@ -2,12 +2,12 @@
 //!
 //! A crate-internal module so that it binds [`PreparedParametricEq`] at `Simd4` and `Simd8` on an
 //! AVX2 host (`lane::each_vector_lane!`), reads every state word of a lane, and forks a bank with
-//! its bank-wide claim withdrawn. The shared driver is `effect_runtime::bank::rest_probe`.
+//! its bank-wide claim withdrawn. The shared driver is `conformance::rest_probe`.
 
 use super::ramping_elision::{Rng, automatable, draw, request};
 use super::*;
+use conformance::rest_probe::{self, Probe, Reach, Schedule};
 use effect_contract::{EffectTargetRequest, NativeEffectTargetPreparation};
-use effect_runtime::bank::rest_probe::{self, Probe, Reach, Schedule};
 
 const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 

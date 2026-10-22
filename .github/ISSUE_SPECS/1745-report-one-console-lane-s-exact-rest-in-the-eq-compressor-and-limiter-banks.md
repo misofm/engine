@@ -64,8 +64,9 @@ None. #1372 and #1375 stay open and independent.
 - A mask, not `fn(lane) -> bool`: one call answers every lane, as `observe_resident_bank` does,
   because a bank's state is vector state. #1107 ANDs the masks of a chain's slots per bank.
 - Clocks (words a `+0.0` block advances by its length alone: the EQ's silence counters, the
-  limiter's per-bank cursors) are not state words for the claim; a skip advances them as the
-  bank's own fast path does.
+  limiter's per-bank cursors and per-lane van Herk `phase`) are not state words for the claim.
+  Only the bank's own fast path advances them today; the per-lane clock-advance entry point
+  (`advance_clocks`, or folded into the swap) is owed by #1747.
 - Padded lanes answer by the same predicate on their own state. The bank-wide fast path asks for
   every lane, padded included, which is what today's whole-bank observation covered.
 - A collapsed bank's frozen right channel keeps the answer sound (it can only clear a bit).
@@ -98,7 +99,7 @@ Per effect (attempt 1):
 
 ### D3 Shared gate helper
 
-`effect_runtime::bank::rest_probe`: one randomized driver and check (`Probe`, `Schedule`,
+`conformance::rest_probe` (attempt 2 moved it out of the production crate `effect-runtime`): one randomized driver and check (`Probe`, `Schedule`,
 `check`, `Reach::assert_reached`). Each effect's test binds its own bank at `Simd4` and `Simd8`
 through crate internals (`lane::each_vector_lane!`), so the Simd4 leg runs on this AVX2 host
 without #1694.

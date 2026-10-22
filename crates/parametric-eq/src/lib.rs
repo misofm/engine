@@ -1829,6 +1829,10 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         for section in &self.sections {
             let c = &section.coef;
             let step = &section.step;
+            // The zero-response leg. Dropping it is an equivalent mutant on designed words:
+            // `design_svf` guarantees finite words and `m0 >= +0.0`, so the response is `+0.0`.
+            // It stays because it is the only local finiteness check on the `m` words (a NaN or
+            // an infinity makes the response NaN, which is not `+0.0`).
             let response = c.m2.fma(zero, c.m1.fma(zero, c.m0.mul(zero)));
             held = held
                 .max_u32(section.state.ic1)

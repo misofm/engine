@@ -20,6 +20,7 @@ swap, and it is not a render-time operation.
   do not swap; the slice records that every bank of one slot keeps equal cursors, so a swapped
   lane lands on the same cursor.
 - Padded lanes never swap.
+- Add an allocation-free `advance_clocks(lanes_mask, frames)` (or fold it into the swap entry) so a caller that skips a resting lane's block advances that lane's clocks exactly as a rendered zero block would: the limiter's per-bank cursors and per-lane van Herk `phase`, and the EQ's silence counters if they are payload-visible (#1745 D1). A test renders N zero blocks on one bank and skips N on a twin with `advance_clocks`; every state and payload word is equal after.
 
 ## Authorized paths
 

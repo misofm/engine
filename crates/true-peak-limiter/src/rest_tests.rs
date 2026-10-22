@@ -2,7 +2,7 @@
 //!
 //! Every lane the bank reports at rest is checked by rendering one more block of exact `+0.0`
 //! through a fork of the bank whose fast-path claim is withdrawn: the lane's every state word must
-//! keep its bits and both output planes must be `+0.0` (`effect_runtime::bank::rest_probe`). Both
+//! keep its bits and both output planes must be `+0.0` (`conformance::rest_probe`). Both
 //! vector widths the build has are bound through crate internals (`lane::each_vector_lane!`), so
 //! the `Simd4` leg runs on an AVX2 host too.
 //!
@@ -23,8 +23,8 @@
 //! `prefix`, `box_sum`, the ramps) and each turned this test red.
 
 use super::*;
+use conformance::rest_probe::{self, Probe, Reach, Schedule};
 use effect_contract::{BankWidth, PrepareEffectLimits, PreparedPorts, PreparedSidechainPort};
-use effect_runtime::bank::rest_probe::{self, Probe, Reach, Schedule};
 
 /// SplitMix64, for the case parameters and the probe's own automation draws.
 struct Draw(u64);

@@ -2589,10 +2589,13 @@ pub trait PreparedNativeEffectBank: Send {
     /// `RestSamples` bound is needed for the claim; such a bound says only *when* it becomes true.
     ///
     /// A **clock** is not a state word for this claim: a word that a block of `+0.0` input
-    /// advances by a function of the block's length alone, never of the signal (the EQ's silence
-    /// counters, the limiter's per-bank cursors). A caller that skips a resting lane's block
-    /// advances its clocks as the bank's own silent fast path does; each implementation names its
-    /// clocks.
+    /// advances by a function of the block's length (and the lane's prepared shape) alone, never
+    /// of the signal: the EQ's silence counters, the limiter's per-bank cursors and its per-lane
+    /// van Herk `phase`. Each implementation names its clocks. A caller that skips a resting
+    /// lane's block must still advance that lane's clocks as a rendered zero block would; this
+    /// trait has no entry point for that yet. It is owed by #1747 (`advance_clocks`, or folded
+    /// into the swap entry), and until it lands only the bank's own silent fast path, which
+    /// advances every clock of a skipped bank, may skip a block.
     ///
     /// # How it is answered
     ///
