@@ -36,7 +36,7 @@ all(.[]; console_benchmark_record_valid_lib) and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
-(group_by([.record,.workload_kind]) | all(map(.output_sha256 // .restated_output_sha256 // .meters_off_output_sha256 // .absent_output_sha256 // .split_chains_output_sha256 // .collapse_eligible_output_sha256) | unique | length == 1)) and
+(group_by([.record,.workload_kind]) | all(map(.output_sha256 // .restated_output_sha256 // .meters_off_output_sha256 // .absent_output_sha256 // .split_chains_output_sha256 // .collapse_eligible_output_sha256 // .riding_output_sha256) | unique | length == 1)) and
 # #1003: the mixing-automation row's moving arm and its preflight are frozen workloads too, so both
 # rounds render them identically, and the collapse counters are functions of the traffic alone.
 ([.[] | select(.record == "console_mixing_automation")
@@ -86,15 +86,16 @@ all(.[]; console_benchmark_record_valid_lib) and
  [.[] | select(.record == "console_session" and
                .workload_kind == "sixty_four_track_console_sends")
       | .output_sha256] | length == 2 and all(.[]; . as $digest | all($standing[]; . != $digest))) and
-# #1750: the fader-ride row rides faders and pans on the standing console's session, so it never
-# renders the standing row's bits: an equality means its traffic never reached the plan. Both
-# rounds ride the same traffic, so the ridden tracks are one list (the digest agreement across
-# rounds is the group rule above).
+# #1750: the fader-ride row rides faders and pans on the standing console's session, so its riding
+# arm never renders the standing row's bits: an equality means its traffic never reached the plan. Both
+# rounds ride the same traffic, so the ridden tracks are one list and the quiet arm renders one
+# digest (the riding digest's agreement across rounds is the group rule above).
 (([.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console")
        | .output_sha256] | unique) as $standing |
- [.[] | select(.record == "console_fader_ride") | .output_sha256]
+ [.[] | select(.record == "console_fader_ride") | .riding_output_sha256]
    | length == 2 and all(.[]; . as $digest | all($standing[]; . != $digest))) and
-([.[] | select(.record == "console_fader_ride") | [.fader_tracks, .pan_tracks]] | unique | length == 1) and
+([.[] | select(.record == "console_fader_ride") | [.fader_tracks, .pan_tracks, .quiet_output_sha256]]
+  | unique | length == 1) and
 ([.[] | .backend] | unique | length) == 1 and
 # Ragged versus full, and every decomposition subtraction, are the whole point of the fixture set,
 # so the per-track costs must be comparable numbers taken on one host in one run: same binary,

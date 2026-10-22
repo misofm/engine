@@ -3,9 +3,9 @@
 //!
 //! # The row
 //!
-//! The standing sixty-four-track console, prepared with every track's fader/mute and matrix/pan
-//! live-control lanes on the product's `Concurrent` delivery
-//! ([`SessionRuntime::build_with_strip_controls`]). In every block, one transaction moves the
+//! The standing sixty-four-track console, prepared with the live-control lanes a product host
+//! attaches for it, on the product's `Concurrent` delivery
+//! ([`SessionRuntime::build_with_product_lanes`]). In every block, one transaction moves the
 //! fader of the first lane of every bank chain that carries the output section and the pan of the
 //! second lane, each as the ordinary live value a host commits: a fader retarget per channel, Left
 //! then Right, with the session's `fader_ms` ramp, and a pan lowered to its 2x2 target with the
@@ -20,11 +20,19 @@
 //!
 //! [`FaderRide::write`] with `stepped` writes the same values with a zero-length ramp, an exact
 //! set. A twin plan driven that way holds every target from the block's first sample, so a block
-//! the riding plan renders differently from its stepped twin is a block in which a ramp of the
-//! riding plan was in flight. The bench uses this as its per-block witness, outside the clock.
+//! the riding plan renders differently from its stepped twin is a block in which the riding plan
+//! did not hold that block's targets from its first sample. The bench uses this as its per-block
+//! witness, outside the clock.
+//!
+//! That is all it proves. It does not say which bank ramped, or that every bank did: one ridden
+//! lane that differs is enough. Nor does it rule out a value applied late rather than ramped: a
+//! riding arm that wrote the previous block's values as exact sets would differ from the twin in
+//! every block too, and passes this witness. When a committed value takes effect is the
+//! applied-revision watermark's claim, and its own tests cover it.
 
 use builtins::{BuiltinLaneSelector, Matrix2x2};
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord, lower_matrix_or_pan};
+pub use controls::LiveLanes;
 use controls::{LiveRampRow, LiveRamps};
 use session::MatrixOrPan;
 
@@ -74,7 +82,7 @@ pub struct FaderRide {
 
 impl FaderRide {
     /// Resolves the ride against `runtime`, an arm of [`WORKLOAD`] prepared by
-    /// [`SessionRuntime::build_with_strip_controls`].
+    /// [`SessionRuntime::build_with_product_lanes`].
     ///
     /// # Panics
     ///
@@ -265,4 +273,22 @@ impl FaderRide {
     pub fn settle_blocks(&self) -> u64 {
         u64::from(self.fader_smoothing.max(self.pan_smoothing)).div_ceil(QUANTUM as u64) + 1
     }
+}
+
+/// The record-side name of a product lane set: the fader/mute and matrix/pan lanes every strip
+/// carries, then each optional lane the set attaches, joined by `+`.
+#[must_use]
+pub fn lane_set_name(lanes: LiveLanes) -> String {
+    let mut name = String::from("fader_matrix");
+    for (attached, lane) in [
+        (lanes.strip_input, "strip_input"),
+        (lanes.effects, "effects"),
+        (lanes.routes, "routes"),
+    ] {
+        if attached {
+            name.push('+');
+            name.push_str(lane);
+        }
+    }
+    name
 }

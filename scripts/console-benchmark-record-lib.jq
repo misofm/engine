@@ -45,7 +45,7 @@ def observation_keys: ["absent_output_sha256","absent_p50_ns","absent_p95_ns","a
 
 def automation_keys: ["arms","automated_channel","automated_effect","automated_effect_id","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_parameter","automated_parameter_index","automated_pushes_accepted","automated_track_id","automation_spans_per_block","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","paired_control_delta_median_ns","paired_ramp_delta_median_ns","paired_ramp_delta_median_ns_per_track","pairing","percentile_method","profile","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
-def fader_ride_keys: ["backend","background_load_note","banks","candidate_commit","control_delivery","cpu_affinity","cpu_model","descriptive_only","fader_records_per_block","fader_records_written","fader_smoothing_samples","fader_step_db","fader_tracks","fixture_id","governor_or_power_mode","input_signal","issue","live_lanes","live_values_superseded","llvm_version","matrix_records_per_block","matrix_records_written","max_ns_per_block","measurement_control","min_ns_per_block","missing_metadata","observations","os","output_sha256","p50_ns_per_block","p50_ns_per_block_per_track","p95_ns_per_block","p99_ns_per_block","pan_smoothing_samples","pan_step","pan_tracks","percentile_method","preroll_blocks","profile","quantum_frames","ramp_in_flight_blocks","ramp_witness","record","render_errors","render_total_forbidden_operations","round","rust_version","sample_rate_hz","schema_version","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","transactions_published","units","workload_kind"];
+def fader_ride_keys: ["arms","backend","background_load_note","banks","candidate_commit","control_delivery","cpu_affinity","cpu_model","descriptive_only","fader_records_per_block","fader_records_written","fader_smoothing_samples","fader_step_db","fader_tracks","fixture_id","governor_or_power_mode","input_signal","issue","live_lanes","live_values_superseded","llvm_version","matrix_records_per_block","matrix_records_written","measurement_control","missing_metadata","observations","os","paired_ramp_delta_median_ns","paired_ramp_delta_median_ns_per_track","pairing","pan_smoothing_samples","pan_step","pan_tracks","percentile_method","preroll_blocks","profile","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","ramp_in_flight_blocks","ramp_witness","record","render_errors","render_total_forbidden_operations","riding_output_sha256","riding_p50_ns","riding_p95_ns","riding_p99_ns","round","rust_version","sample_rate_hz","schema_version","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","transactions_published","units","workload_kind"];
 
 def mixing_automation_keys: ["arms","automated_bank_collapse_counters","automated_controls","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_pushes_accepted","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","owner_edits_per_block","paired_collapse_delta_median_ns","paired_ramp_delta_median_ns","pairing","parameter_records_per_block","percentile_method","preflight_bank_collapse_counters","preflight_blocks","preflight_output_sha256","preroll_blocks","profile","quantum_frames","quiet_bank_collapse_counters","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_bank_collapse_counters","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
@@ -512,9 +512,9 @@ def automation_statistical_method:
 def mixing_automation_statistical_method:
   "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold";
 def fader_ride_statistical_method:
-  "nearest-rank percentiles over per-block nanoseconds of the riding arm; the stepped twin renders untimed; one warmup pass and two measured rounds; descriptive only; no threshold";
+  "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is riding minus quiet per observation; the stepped twin is replayed untimed after the run; descriptive only; no threshold";
 def fader_ride_ramp_witness:
-  "each timed block differs from a stepped twin's, which holds every target from the block's first sample; after the settled pre-roll the two agree";
+  "each timed block of the riding arm differs from a stepped twin's, replayed untimed after the run; the twin holds every target from the block's first sample, so the riding arm did not; after the settled pre-roll the two agree";
 def mono_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is collapse_forced_off minus collapse_eligible per observation; descriptive only; no threshold";
 def observation_statistical_method:
@@ -882,12 +882,15 @@ def mixing_automation_record_valid:
   .preflight_bank_collapse_counters.restated_eq_only == .preflight_bank_collapse_counters.quiet and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
-# The fader-ride row (#1750): the standing console, prepared with every track's fader and pan lanes
-# on the product's `Concurrent` delivery, riding one fader and one pan in every bank chain, one
-# transaction per block. Its claims are pinned so the row cannot quietly measure something else:
-# the delivery (a between-render-calls plan fuses the pair, which no product host prepares), one
+# The fader-ride row (#1750): the standing console, prepared with the live lanes a product host
+# attaches for it (`controls::live_lanes`: for this session every strip's fader/matrix, input and
+# effect lanes) on the product's `Concurrent` delivery, riding one fader and one pan in every bank
+# chain, one transaction per block, alternated per observation with a quiet arm of the same plan.
+# Its claims are pinned so the row cannot quietly measure something else: the delivery (a
+# between-render-calls plan fuses the pair, which no product host prepares), the lane set, one
 # fader and one pan per bank on two different tracks, exact record and transaction counts, no
-# superseded value, and the in-run witness that a ramp was in flight in every timed block.
+# superseded value, and the witness that the riding arm did not hold any timed block's targets
+# from that block's first sample.
 # A bank chain has a vector's lanes, so the vector backends alone have banks to ride.
 def lane_width: if .backend == "Simd8" then 8 elif .backend == "Simd4" then 4 else null end;
 def fader_ride_record_valid:
@@ -901,7 +904,8 @@ def fader_ride_record_valid:
   .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and
   .fixture_id == console_fixture and
   .sample_rate_hz == 48000 and .quantum_frames == 128 and
-  .control_delivery == "concurrent" and .live_lanes == "fader_and_matrix" and
+  .pairing == "alternating_per_observation" and .arms == ["quiet","riding"] and
+  .control_delivery == "concurrent" and .live_lanes == "fader_matrix+strip_input+effects" and
   (.preroll_blocks | positive_integer) and
   lane_width != null and .banks == (.tracks / lane_width) and
   ([.fader_tracks, .pan_tracks] | all(type == "array" and all(.[]; type == "string" and test("^ch[0-9]{2}$")))) and
@@ -917,10 +921,13 @@ def fader_ride_record_valid:
   .transactions_published == .observations and .live_values_superseded == 0 and
   .ramp_in_flight_blocks == .observations and .ramp_witness == fader_ride_ramp_witness and
   .units == "ns_per_block" and
-  ordered_percentiles([.min_ns_per_block,.p50_ns_per_block,.p95_ns_per_block,.p99_ns_per_block,.max_ns_per_block]) and
-  .min_ns_per_block > 0 and
-  (.p50_ns_per_block_per_track | type == "number" and . > 0) and
-  (.output_sha256 | sha256) and
+  ([.quiet_p50_ns,.quiet_p95_ns,.quiet_p99_ns,.riding_p50_ns,.riding_p95_ns,.riding_p99_ns] | all(positive_integer)) and
+  ordered_percentiles([.quiet_p50_ns,.quiet_p95_ns,.quiet_p99_ns]) and
+  ordered_percentiles([.riding_p50_ns,.riding_p95_ns,.riding_p99_ns]) and
+  (.paired_ramp_delta_median_ns | type == "number" and floor == .) and
+  (.paired_ramp_delta_median_ns_per_track | type == "number") and
+  ([.quiet_output_sha256,.riding_output_sha256] | all(sha256)) and
+  .quiet_output_sha256 != .riding_output_sha256 and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
 def console_benchmark_record_valid_lib:

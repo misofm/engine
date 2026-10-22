@@ -1153,13 +1153,15 @@ const _: () = assert!((QUANTUM * core::mem::size_of::<f32>()).is_multiple_of(64)
 /// evidence collection and belongs outside it.
 pub struct SessionRuntime {
     /// Issue #1750: each track's fader/mute and matrix/pan cell writers, for the arm prepared by
-    /// [`SessionRuntime::build_with_strip_controls`], and empty on every other arm. Declared before
+    /// [`SessionRuntime::build_with_product_lanes`], and empty on every other arm. Declared before
     /// `plan`, the drop order `PreparedBuiltinsGraphBound` states: producers before the plan that
     /// owns their readers. Never touched inside the clock.
     strip_controls: Vec<TrackControlProducer>,
     /// The session's one `live_values_superseded` count, shared by every live-control channel this
     /// arm attached (decision 15, D15-2).
     superseded: LiveValuesSuperseded,
+    /// The product lane set of an arm prepared by [`SessionRuntime::build_with_product_lanes`].
+    live_lanes: Option<controls::LiveLanes>,
     plan: PreparedRenderPlan,
     /// The plan's gate handle: every live value is a latest-target cell, written under a stamp
     /// of this gate and revealed by publishing the stamp's revision on it (decision 15, D15-2).
@@ -1337,18 +1339,23 @@ impl SessionRuntime {
         Self::build_inner(workload, config, dispatch, source, false)
     }
 
-    /// Compiles, prepares and binds one console arm at [`PlanConfig::BASELINE`] with every track's
-    /// fader/mute and matrix/pan live-control lanes attached (issue #1750).
+    /// Compiles, prepares and binds one console arm with the live-control lanes a product host
+    /// attaches for its session (issue #1750).
     ///
-    /// The product's preparation of those lanes: the `Concurrent` delivery entry
-    /// (`prepare_session_builtins_with_live_controls`) the C ABI and the browser reach through
-    /// `host-core`, with no input lane, which is `host_core::HostLiveLanes::FADER_AND_MATRIX`.
-    /// [`SessionRuntime::write_strip_transaction`] writes the cells.
+    /// The lane set is `controls::live_lanes` of the compiled session, the selection the C ABI and
+    /// the browser make (`control-plane`'s `compile`): every strip's fader/mute and matrix/pan
+    /// lanes, each strip's input lane when an input row is live, and one lane per effect instance
+    /// when an effect row is live, with no meter and no observation capacity (the C ABI's default
+    /// `HostLiveControlRequest`). The strips are prepared through the `Concurrent` delivery entry
+    /// (`prepare_session_builtins_with_live_controls`) those hosts reach through `host-core`.
+    /// [`SessionRuntime::live_lanes`] states the set; [`SessionRuntime::write_strip_transaction`]
+    /// writes the strip cells.
     ///
     /// # Panics
     ///
-    /// As [`SessionRuntime::build`].
-    pub fn build_with_strip_controls(workload: Workload) -> Self {
+    /// As [`SessionRuntime::build`], and if the session asks for route lanes, which this harness
+    /// does not attach: only a route into a submix has one.
+    pub fn build_with_product_lanes(workload: Workload) -> Self {
         Self::build_inner(
             workload,
             PlanConfig::BASELINE,
@@ -1356,6 +1363,13 @@ impl SessionRuntime {
             SourceSignal::Local,
             true,
         )
+    }
+
+    /// The product lane set this arm was prepared with ([`SessionRuntime::build_with_product_lanes`]),
+    /// or `None` for every other arm.
+    #[must_use]
+    pub fn live_lanes(&self) -> Option<controls::LiveLanes> {
+        self.live_lanes
     }
 
     fn build_inner(
@@ -1366,6 +1380,11 @@ impl SessionRuntime {
         strip_controls_requested: bool,
     ) -> Self {
         let mut model = console_model(workload);
+        assert!(
+            !strip_controls_requested || config == PlanConfig::BASELINE,
+            "{}: the product lane set is the arm's whole live configuration",
+            workload.kind()
+        );
         if dispatch != Backend::current() && BankWidth::for_backend(dispatch).is_some() {
             fold_console_into_inserts(&mut model);
         }
@@ -1400,7 +1419,18 @@ impl SessionRuntime {
         // The control channel is attached for every observation arm including `Absent`, so the
         // paired delta between the arms is the observation lane and not the cell reads.
         let superseded = LiveValuesSuperseded::new();
-        let controls = if config.control {
+        // Issue #1750: the lanes a product host attaches for this session, chosen from its live
+        // rows exactly as `control-plane` chooses them.
+        let live_lanes =
+            strip_controls_requested.then(|| controls::live_lanes(session.normalized_model()));
+        if let Some(lanes) = live_lanes {
+            assert!(
+                !lanes.routes || model.submixes.is_empty(),
+                "{}: route lanes are not attached by this harness",
+                workload.kind()
+            );
+        }
+        let controls = if config.control || live_lanes.is_some_and(|lanes| lanes.effects) {
             attach_effect_live_controls(
                 &mut effects,
                 &superseded,
@@ -1458,7 +1488,7 @@ impl SessionRuntime {
                 .map(|track| TrackControlRequest {
                     track_id: track.id.as_str().to_owned(),
                     superseded: superseded.clone(),
-                    input_lane: false,
+                    input_lane: live_lanes.is_some_and(|lanes| lanes.strip_input),
                 })
                 .collect();
             builtins_compiler::prepare_session_builtins_with_live_controls(
@@ -1582,6 +1612,7 @@ impl SessionRuntime {
         let mut runtime = Self {
             strip_controls,
             superseded,
+            live_lanes,
             plan,
             gate,
             output: Box::new(OutputPlanes([0.0; QUANTUM * 2])),
@@ -1790,14 +1821,10 @@ impl SessionRuntime {
         self.superseded.get()
     }
 
-    /// Whether this arm's last rendered block is bit-identical to `other`'s. Outside the clock.
+    /// This arm's last rendered block, left plane then right plane. Outside the clock.
     #[must_use]
-    pub fn same_output(&self, other: &Self) -> bool {
-        self.output
-            .0
-            .iter()
-            .zip(&other.output.0)
-            .all(|(left, right)| left.to_bits() == right.to_bits())
+    pub fn output(&self) -> &[f32] {
+        &self.output.0
     }
 
     /// Prepared observation lanes. Zero for an `Absent` arm.

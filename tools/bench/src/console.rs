@@ -191,13 +191,14 @@
 //!
 //! # The fader-ride row (issue #1750)
 //!
-//! `console_fader_ride` is the standing console with every track's fader and pan lanes attached
-//! on the product's `Concurrent` delivery, riding one fader and one pan in every bank chain, one
-//! transaction per block, emitted last. It is the only row with a fader or matrix ramp in its
-//! timed region: the split ramping output path a live console pays today (#1754 would pair the
-//! two stages and re-run it). Its witness that a ramp was in flight in every timed block is a
-//! stepped twin rendered outside the clock (`FaderRideMeasurement` says how), and its digest is
-//! asserted in-run to differ from `sixty_four_track_console`'s.
+//! `console_fader_ride` is the standing console prepared with the live lanes a product host
+//! attaches for it (`controls::live_lanes`) on the product's `Concurrent` delivery, riding one
+//! fader and one pan in every bank chain, one transaction per block, emitted last. Its `quiet` arm
+//! is the same plan with no writes, alternated per observation, so `riding - quiet` is the ride's
+//! cost: the split ramping output path a live console pays today (#1754 would pair the two stages
+//! and re-run it). Its per-block witness is a stepped twin replayed after the timed loop
+//! (`FaderRideMeasurement` says how and `console_workload::fader_ride` what it proves), and its
+//! riding digest is asserted in-run to differ from `sixty_four_track_console`'s.
 
 use crate::floor::{self, CoreClock};
 use bench_support::alloc as bench_alloc;
@@ -374,7 +375,7 @@ pub(crate) fn main() {
     // not render that row's bits. An equality means its traffic never reached the plan.
     let ride = FaderRideMeasurement::run();
     assert_ne!(
-        &ride.output_sha256,
+        &ride.digests[1],
         digest_of(fader_ride::WORKLOAD),
         "the fader-ride row rendered the standing console row's output"
     );
@@ -2402,41 +2403,56 @@ impl MixingAutomationMeasurement {
 /// The record kind of the fader-ride row.
 const FADER_RIDE_WORKLOAD_KIND: &str = "sixty_four_track_console_fader_ride";
 
-/// How the row proves a ramp was in flight in every timed block. Pinned verbatim in the validator.
-const FADER_RIDE_RAMP_WITNESS: &str = "each timed block differs from a stepped twin's, which \
-holds every target from the block's first sample; after the settled pre-roll the two agree";
+/// The two timed arms, in record order: no writes, then the ride.
+const FADER_RIDE_ARMS: [&str; 2] = ["quiet", "riding"];
+
+/// What the row's per-block witness shows. Pinned verbatim in the validator.
+const FADER_RIDE_RAMP_WITNESS: &str = "each timed block of the riding arm differs from a stepped \
+twin's, replayed untimed after the run; the twin holds every target from the block's first sample, \
+so the riding arm did not; after the settled pre-roll the two agree";
 
 /// Pinned verbatim in the validator, for the reason every method sentence in this stream is.
-const FADER_RIDE_STATISTICAL_METHOD: &str = "nearest-rank percentiles over per-block \
-nanoseconds of the riding arm; the stepped twin renders untimed; one warmup pass and two measured \
-rounds; descriptive only; no threshold";
+const FADER_RIDE_STATISTICAL_METHOD: &str = "two arms alternated per observation; nearest-rank \
+percentiles over per-block nanoseconds; ramp delta is riding minus quiet per observation; the \
+stepped twin is replayed untimed after the run; descriptive only; no threshold";
 
-/// The fader-ride row (issue #1750): the standing console prepared with every track's fader and
-/// pan lanes on the product's `Concurrent` delivery, riding one fader and one pan in every bank
-/// chain, one transaction per block ([`console_workload::fader_ride`] is the ride).
+/// The fader-ride row (issue #1750): the standing console prepared with the live lanes a product
+/// host attaches for it, on the product's `Concurrent` delivery, riding one fader and one pan in
+/// every bank chain, one transaction per block ([`console_workload::fader_ride`] is the ride).
 ///
 /// # Why this row exists
 ///
 /// Every other row renders with every fader, mute and matrix settled -- `console_automation` rides
-/// a compressor threshold -- so no row reached the output section's ramping path. This one keeps a
-/// fader ramp in flight on one lane of every bank for the whole run: the fader's `fader_ms` ramp
-/// is longer than a block and is retargeted every block. On the product's delivery the fader and
-/// the matrix are two chain stages, so the row times the split ramping path a live console pays
-/// today; #1754 is the issue that would pair them and re-run it.
+/// a compressor threshold -- so no row reached the output section's ramping path. This one moves a
+/// fader on one lane of every bank in every block, with the session's `fader_ms` ramp, which is
+/// longer than a block. On the product's delivery the fader and the matrix are two chain stages, so
+/// the row times the split ramping path a live console pays today; #1754 is the issue that would
+/// pair them and re-run it.
+///
+/// # The arms
+///
+/// `quiet` and `riding` are the same plan with the same lanes, alternated observation by
+/// observation as `console_automation`'s arms are; `quiet` takes no write. `riding - quiet`, paired
+/// per observation, is the cost of the ride: the cell drains and the ramps they open.
 ///
 /// # The witness
 ///
-/// No production counter says a ramp ran, so the row takes the witness from the output: a twin
-/// plan, prepared the same way, takes the same values as exact sets, and every timed block of the
-/// riding arm must differ from the twin's. The untimed pre-roll shows the witness discriminates:
-/// the first block after a move differs, and once the move's ramps end the two arms agree bit for
-/// bit. The twin renders outside the clock; the clock holds the riding arm's render call alone.
+/// No production counter says a ramp ran, so the witness comes from the output. The riding arm's
+/// every block, pre-roll included, is kept in storage allocated before the clock, and after the
+/// timed loop a stepped twin -- the same plan, the same values as exact sets -- replays the whole
+/// run and is compared block by block. Every timed block must differ, and the pre-roll shows the
+/// comparison discriminates: the first block after a move differs, and once the move's ramps end
+/// the two agree bit for bit. What a difference proves, and what it does not, is stated on
+/// [`console_workload::fader_ride`].
 struct FaderRideMeasurement {
     observations: usize,
-    ns_per_block: Vec<u64>,
-    output_sha256: String,
+    /// Per arm, in [`FADER_RIDE_ARMS`] order.
+    ns_per_block: [Vec<u64>; 2],
+    digests: [String; 2],
     ride: FaderRide,
-    /// Untimed blocks rendered before the clock: the signal settle and the witness check.
+    /// The product lane set both arms were prepared with.
+    live_lanes: fader_ride::LiveLanes,
+    /// Untimed blocks rendered before the clock: the signal settle and one settled move.
     preroll_blocks: u64,
     /// Timed blocks the riding arm rendered differently from its stepped twin.
     ramp_in_flight_blocks: u64,
@@ -2458,75 +2474,113 @@ impl FaderRideMeasurement {
     /// [`FaderRideMeasurement::run`] over `observations` timed blocks. Only the unit test below
     /// passes anything but [`OBSERVATIONS`], and the record says so.
     fn run_for(observations: usize) -> Self {
-        let mut riding = SessionRuntime::build_with_strip_controls(fader_ride::WORKLOAD);
-        let mut stepped = SessionRuntime::build_with_strip_controls(fader_ride::WORKLOAD);
-        let ride = FaderRide::resolve(&riding);
+        let mut arms =
+            [(); 2].map(|()| SessionRuntime::build_with_product_lanes(fader_ride::WORKLOAD));
+        let live_lanes = arms[0].live_lanes().expect("a product lane set");
+        let ride = FaderRide::resolve(&arms[1]);
         let settle = ride.settle_blocks();
-        let mut clock = 0_u64;
-        let mut render_both = |riding: &mut SessionRuntime, stepped: &mut SessionRuntime| {
-            let _ = riding.render(clock);
-            let _ = stepped.render(clock);
-            clock += 1;
-            riding.same_output(stepped)
+        let preroll_blocks = 2 * settle;
+        let block_samples = 2 * QUANTUM;
+        // Every block the riding arm renders, pre-roll included, for the twin's replay. Allocated
+        // here, before the clock.
+        let mut riding_blocks =
+            vec![0.0_f32; (preroll_blocks as usize + observations) * block_samples];
+        let mut keep = |runtime: &SessionRuntime, block: u64| {
+            let start = block as usize * block_samples;
+            riding_blocks[start..start + block_samples].copy_from_slice(runtime.output());
         };
-        // Untimed pre-roll. First the signal reaches the output section, with nothing moved.
-        for _ in 0..settle {
-            render_both(&mut riding, &mut stepped);
-        }
-        // Then one move, the odd block's values: the riding arm ramps to them and its twin steps.
-        // The first block must differ and the last must agree, or the witness proves nothing.
-        ride.write(&mut riding, 1, false);
-        ride.write(&mut stepped, 1, true);
-        let first = render_both(&mut riding, &mut stepped);
-        assert!(
-            !first,
-            "fader ride: a ramping block rendered its stepped twin's bits"
-        );
-        let mut last = first;
-        for _ in 1..settle {
-            last = render_both(&mut riding, &mut stepped);
-        }
-        assert!(
-            last,
-            "fader ride: a settled ride did not render its stepped twin's bits"
-        );
-        let preroll_blocks = clock;
 
-        let revision = riding.published_revision();
-        let mut ns_per_block = Vec::with_capacity(observations);
-        let mut hash = Sha256Sink::new();
+        // Untimed pre-roll, the same on both arms but for the riding arm's one move: the signal
+        // reaches the output section with nothing moved, then the riding arm moves to the odd
+        // block's values and every ramp of that move ends.
+        for block in 0..preroll_blocks {
+            if block == settle {
+                ride.write(&mut arms[1], 1, false);
+            }
+            for arm in &mut arms {
+                let _ = arm.render(block);
+            }
+            keep(&arms[1], block);
+        }
+
+        let revision = arms[1].published_revision();
+        let mut samples = [(); 2].map(|()| Vec::with_capacity(observations));
+        let mut hashes = [(); 2].map(|()| Sha256Sink::new());
         let mut written = [0_u64; 2];
-        let mut ramp_in_flight_blocks = 0_u64;
         let mut render_errors = 0_u64;
         audit::warm_up();
         audit::reset();
         for observation in 0..observations as u64 {
-            // Control-plane work, outside the clock, where a host does it: one transaction of
-            // cell writes. The render-side drain and the ramps it opens are what the clock holds.
-            let [faders, matrices] = ride.write(&mut riding, observation, false);
-            written[0] += faders;
-            written[1] += matrices;
             let block = preroll_blocks + observation;
-            let (elapsed_ns, result) = timing::timed(|| riding.render(block));
-            if result.is_err() {
-                render_errors += 1;
+            for (index, arm) in arms.iter_mut().enumerate() {
+                // Control-plane work, outside the clock, where a host does it: one transaction of
+                // cell writes on the riding arm. The drain and the ramps it opens are what the
+                // clock holds.
+                if index == 1 {
+                    let [faders, matrices] = ride.write(arm, observation, false);
+                    written[0] += faders;
+                    written[1] += matrices;
+                }
+                let (elapsed_ns, result) = timing::timed(|| arm.render(block));
+                if result.is_err() {
+                    render_errors += 1;
+                }
+                samples[index].push(elapsed_ns);
             }
-            ns_per_block.push(elapsed_ns);
-            // The witness, untimed: the twin takes the same values as exact sets.
-            ride.write(&mut stepped, observation, true);
+            for (index, arm) in arms.iter().enumerate() {
+                arm.hash_output(&mut hashes[index]);
+            }
+            keep(&arms[1], block);
+        }
+        let snapshot = audit::snapshot();
+        let transactions = arms[1].published_revision() - revision;
+        let superseded = arms[1].live_values_superseded();
+        let digests = hashes.map(Sha256Sink::finish_hex);
+        drop(arms);
+
+        // The witness, replayed untimed: a twin takes the riding arm's every write as an exact
+        // set, and each of its blocks is compared with the riding arm's kept block.
+        let mut stepped = SessionRuntime::build_with_product_lanes(fader_ride::WORKLOAD);
+        let mut differs = |stepped: &mut SessionRuntime, block: u64| {
             if stepped.render(block).is_err() {
                 render_errors += 1;
             }
-            ramp_in_flight_blocks += u64::from(!riding.same_output(&stepped));
-            riding.hash_output(&mut hash);
+            let start = block as usize * block_samples;
+            let kept = &riding_blocks[start..start + block_samples];
+            stepped
+                .output()
+                .iter()
+                .zip(kept)
+                .any(|(left, right)| left.to_bits() != right.to_bits())
+        };
+        for block in 0..preroll_blocks {
+            if block == settle {
+                ride.write(&mut stepped, 1, true);
+            }
+            let differed = differs(&mut stepped, block);
+            if block == settle {
+                assert!(
+                    differed,
+                    "fader ride: a ramping block rendered its stepped twin's bits"
+                );
+            }
+            if block + 1 == preroll_blocks {
+                assert!(
+                    !differed,
+                    "fader ride: a settled ride did not render its stepped twin's bits"
+                );
+            }
         }
-        let snapshot = audit::snapshot();
-        let transactions = riding.published_revision() - revision;
-        let superseded = riding.live_values_superseded();
+        let mut ramp_in_flight_blocks = 0_u64;
+        for observation in 0..observations as u64 {
+            ride.write(&mut stepped, observation, true);
+            ramp_in_flight_blocks += u64::from(differs(&mut stepped, preroll_blocks + observation));
+        }
+
         let observed = observations as u64;
         assert_eq!(
             ramp_in_flight_blocks, observed,
-            "fader ride: a timed block rendered with no fader or matrix ramp in flight"
+            "fader ride: a timed block rendered its stepped twin's bits"
         );
         assert_eq!(
             written,
@@ -2541,11 +2595,16 @@ impl FaderRideMeasurement {
             "fader ride: one transaction per block"
         );
         assert_eq!(superseded, 0, "fader ride: a ridden value was superseded");
+        assert_ne!(
+            digests[0], digests[1],
+            "fader ride: the riding arm rendered the quiet arm's output"
+        );
         Self {
             observations,
-            ns_per_block,
-            output_sha256: hash.finish_hex(),
+            ns_per_block: samples,
+            digests,
             ride,
+            live_lanes,
             preroll_blocks,
             ramp_in_flight_blocks,
             written,
@@ -2557,7 +2616,8 @@ impl FaderRideMeasurement {
     }
 
     fn record(&self, round: u32, backend: Backend, metadata: &Metadata) -> String {
-        let percentiles = Percentiles::from_samples(&self.ns_per_block);
+        let quiet = Percentiles::from_samples(&self.ns_per_block[0]);
+        let riding = Percentiles::from_samples(&self.ns_per_block[1]);
         let workload = fader_ride::WORKLOAD;
         let tracks = |ids: &mut dyn Iterator<Item = &str>| {
             let quoted: Vec<String> = ids.map(|id| format!("\"{}\"", json_escape(id))).collect();
@@ -2572,7 +2632,9 @@ impl FaderRideMeasurement {
                 "\"fixture_id\":\"{fixture}\",\"round\":{round},\"backend\":\"{backend}\",",
                 "\"sample_rate_hz\":{rate},\"quantum_frames\":{quantum},",
                 "\"observations\":{obs},\"preroll_blocks\":{preroll},",
-                "\"control_delivery\":\"concurrent\",\"live_lanes\":\"fader_and_matrix\",",
+                "\"pairing\":\"alternating_per_observation\",",
+                "\"arms\":[\"{arm0}\",\"{arm1}\"],",
+                "\"control_delivery\":\"concurrent\",\"live_lanes\":\"{lanes}\",",
                 "\"banks\":{banks},\"fader_tracks\":{fader_tracks},\"pan_tracks\":{pan_tracks},",
                 "\"fader_step_db\":{fader_step},\"pan_step\":{pan_step},",
                 "\"fader_smoothing_samples\":{fader_smoothing},",
@@ -2585,10 +2647,11 @@ impl FaderRideMeasurement {
                 "\"live_values_superseded\":{superseded},",
                 "\"ramp_in_flight_blocks\":{in_flight},\"ramp_witness\":\"{witness}\",",
                 "\"units\":\"ns_per_block\",\"percentile_method\":\"nearest_rank\",",
-                "\"min_ns_per_block\":{min},\"p50_ns_per_block\":{p50},",
-                "\"p95_ns_per_block\":{p95},\"p99_ns_per_block\":{p99},",
-                "\"max_ns_per_block\":{max},\"p50_ns_per_block_per_track\":{per_track},",
-                "\"output_sha256\":\"{digest}\",",
+                "\"quiet_p50_ns\":{q50},\"quiet_p95_ns\":{q95},\"quiet_p99_ns\":{q99},",
+                "\"riding_p50_ns\":{r50},\"riding_p95_ns\":{r95},\"riding_p99_ns\":{r99},",
+                "\"paired_ramp_delta_median_ns\":{ramp},",
+                "\"paired_ramp_delta_median_ns_per_track\":{ramp_per_track},",
+                "\"quiet_output_sha256\":\"{qd}\",\"riding_output_sha256\":\"{rd}\",",
                 "\"render_errors\":{errors},\"render_total_forbidden_operations\":{forbidden},",
                 "{metadata}",
                 "\"descriptive_only\":true,",
@@ -2608,6 +2671,9 @@ impl FaderRideMeasurement {
             quantum = QUANTUM,
             obs = self.observations,
             preroll = self.preroll_blocks,
+            arm0 = FADER_RIDE_ARMS[0],
+            arm1 = FADER_RIDE_ARMS[1],
+            lanes = fader_ride::lane_set_name(self.live_lanes),
             banks = self.ride.banks(),
             fader_tracks = tracks(&mut self.ride.faders().iter().map(|f| &*f.track_id)),
             pan_tracks = tracks(&mut self.ride.pans().iter().map(|p| &*p.track_id)),
@@ -2623,13 +2689,19 @@ impl FaderRideMeasurement {
             superseded = self.superseded,
             in_flight = self.ramp_in_flight_blocks,
             witness = FADER_RIDE_RAMP_WITNESS,
-            min = percentiles.min,
-            p50 = percentiles.p50,
-            p95 = percentiles.p95,
-            p99 = percentiles.p99,
-            max = percentiles.max,
-            per_track = format_f64(percentiles.p50 as f64 / f64::from(workload.tracks())),
-            digest = self.output_sha256,
+            q50 = quiet.p50,
+            q95 = quiet.p95,
+            q99 = quiet.p99,
+            r50 = riding.p50,
+            r95 = riding.p95,
+            r99 = riding.p99,
+            ramp = paired_median(&self.ns_per_block[1], &self.ns_per_block[0]),
+            ramp_per_track = format_f64(
+                paired_median(&self.ns_per_block[1], &self.ns_per_block[0]) as f64
+                    / f64::from(workload.tracks())
+            ),
+            qd = self.digests[0],
+            rd = self.digests[1],
             errors = self.render_errors,
             forbidden = self.audit.total(),
             metadata = metadata.record_fields(),
@@ -2868,13 +2940,15 @@ mod tests {
         }
     }
 
-    /// Issue #1750: the fader-ride row, run short through the real subject, keeps a ramp in flight
-    /// in every timed block, writes exactly its records, renders with no forbidden operation, and
-    /// prints a record the validator accepts at the frozen counts and refuses as shortened.
+    /// Issue #1750: the fader-ride row, run short through the real subject, differs from its
+    /// stepped twin in every timed block, writes exactly its records, renders with no forbidden
+    /// operation, and prints a record the validator accepts at the frozen counts and refuses as
+    /// shortened.
     ///
-    /// The same `FaderRideMeasurement` the runner's run takes -- the pre-roll's witness checks,
-    /// then the riding arm timed and its stepped twin untimed -- over eight timed blocks instead
-    /// of a thousand (`cargo test -p bench the_fader_ride_row -- --nocapture` prints the record).
+    /// The same `FaderRideMeasurement` the runner's run takes -- the quiet and riding arms timed
+    /// and alternated, then the stepped twin's untimed replay with its pre-roll checks -- over
+    /// eight timed blocks instead of a thousand (`cargo test -p bench the_fader_ride_row --
+    /// --nocapture` prints the record).
     /// Its timings are not to be read. The validator's own mutation cases are in
     /// `scripts/test-console-benchmark.sh`.
     ///
