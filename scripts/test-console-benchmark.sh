@@ -2,7 +2,7 @@
 # Console validator mutation suite. Hermetic: no workload, no timing, no binary.
 #
 # A validator that has never been shown to reject anything is decoration. Every rule below is
-# mutated in turn and asserted red, so the aggregate's guarantees -- sixty-two records, both rounds,
+# mutated in turn and asserted red, so the aggregate's guarantees -- sixty-four records, both rounds,
 # one host, one admissibility state, the decomposition rows' pinned strip contents, every session
 # row's pinned source feed, the class-A statements that neither the stationary smoother nor a
 # meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
@@ -10,7 +10,8 @@
 # rendered bit, the meters pair's equal fold and redirect counters, the metered row's pinned
 # meter group, the mixing-automation row's pinned controls, host lowerings, collapse counters
 # and per-effect bit movement, and the console-strip rows' pinned layouts, bypass group and sparse
-# input (#1085) -- are properties the suite can actually lose. The same holds for the
+# input (#1085), and the fader-ride row's delivery, counts and ramp witness (#1750) -- are
+# properties the suite can actually lose. The same holds for the
 # mixing-automation row's browser arm (`web-mixing-automation-validator.jq`, #1011): its input
 # feed, its provenance, and its two measured rounds' agreement -- and for its runner: a refused run
 # keeps its rounds, no artifact is overwritten, and the provenance is checked after the rounds.
@@ -1185,10 +1186,76 @@ mixing_mutation '.preflight_bank_collapse_counters.automated_eq_only = [1024, 8,
 expect_accept "$(printf '%s' "$mixing" | jq -c '.restated_bank_collapse_counters = [8512, 8] | .automated_bank_collapse_counters = [8512, 8] | .paired_collapse_delta_median_ns = -40 | .restated_p50_ns = 69700')" \
     'a mixing row whose restatements keep the collapse'
 
+# The fader-ride row (#1750): the standing console riding one fader and one pan per bank on the
+# product's delivery. Its delivery, its per-bank tracks, its exact counts and its ramp witness are
+# what make it the row it claims to be.
+# Its digest is one no other base record or aggregate case uses, so no case moves it by accident.
+fader_ride=$(jq -cn --arg a "$(printf 'd%.0s' {1..64})" --arg q "$(printf 'e%.0s' {1..64})" --argjson m "$metadata" '$m + {
+  schema_version: 1, issue: 149, record: "console_fader_ride",
+  workload_kind: "sixty_four_track_console_fader_ride", tracks: 64, synthetic_fixture: false,
+  strip_content: "eq+compressor+limiter",
+  strip_layout: "pre_insert:eq+compressor,post_insert:limiter", input_signal: "tone",
+  fixture_id: "fixtures/session/v1/console-sixty-four-track-intended.json",
+  round: 1, backend: "Simd8", sample_rate_hz: 48000, quantum_frames: 128,
+  observations: 1000, preroll_blocks: 18,
+  pairing: "alternating_per_observation", arms: ["quiet","riding"],
+  control_delivery: "concurrent", live_lanes: "fader_matrix+strip_input+effects", banks: 8,
+  fader_tracks: ["ch00","ch08","ch16","ch24","ch32","ch40","ch48","ch56"],
+  pan_tracks: ["ch01","ch09","ch17","ch25","ch33","ch41","ch49","ch57"],
+  fader_step_db: 0.5, pan_step: 0.1,
+  fader_smoothing_samples: 960, pan_smoothing_samples: 16,
+  fader_records_per_block: 16, matrix_records_per_block: 8,
+  fader_records_written: 16000, matrix_records_written: 8000,
+  transactions_published: 1000, live_values_superseded: 0, ramp_in_flight_blocks: 1000,
+  ramp_witness: "each timed block of the riding arm differs from a stepped twin'"'"'s, replayed untimed after the run; the twin holds every target from the block'"'"'s first sample, so the riding arm did not; after the settled pre-roll the two agree",
+  units: "ns_per_block", percentile_method: "nearest_rank",
+  quiet_p50_ns: 102000, quiet_p95_ns: 104000, quiet_p99_ns: 106000,
+  riding_p50_ns: 108000, riding_p95_ns: 110000, riding_p99_ns: 112000,
+  paired_ramp_delta_median_ns: 6000, paired_ramp_delta_median_ns_per_track: 93.75,
+  quiet_output_sha256: $q, riding_output_sha256: $a,
+  render_errors: 0, render_total_forbidden_operations: 0,
+  descriptive_only: true,
+  statistical_method: "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is riding minus quiet per observation; the stepped twin is replayed untimed after the run; descriptive only; no threshold"
+}')
+expect_accept "$fader_ride" 'the fader-ride row'
+expect_accept "$(printf '%s' "$fader_ride" | jq -c '.backend = "Simd4" | .banks = 16 | .fader_tracks = [range(0; 64; 4) | "ch\(. / 10 | floor)\(. % 10)"] | .pan_tracks = [range(1; 64; 4) | "ch\(. / 10 | floor)\(. % 10)"] | .fader_records_per_block = 32 | .matrix_records_per_block = 16 | .fader_records_written = 32000 | .matrix_records_written = 16000')" \
+    'the fader-ride row at four lanes'
+ride_mutation() { expect_reject "$(printf '%s' "$fader_ride" | jq -c "$1")" "$2"; }
+ride_mutation '.control_delivery = "between_render_calls"' 'a ride on a delivery no product host prepares'
+ride_mutation '.live_lanes = "fader_matrix"' 'a ride on a lane subset no product host attaches'
+ride_mutation '.arms = ["riding","quiet"]' 'fader-ride arms in the wrong order'
+ride_mutation '.pairing = "sequential"' 'a fader ride whose arms were not alternated'
+ride_mutation '.riding_output_sha256 = .quiet_output_sha256' 'a riding arm that rendered the quiet bits'
+ride_mutation 'del(.quiet_p50_ns)' 'a fader ride with no quiet arm'
+ride_mutation '.paired_ramp_delta_median_ns = 0.5' 'a ramp delta that is not whole nanoseconds'
+ride_mutation '.record = "console_session"' 'a fader-ride record claiming the session shape'
+ride_mutation '.workload_kind = "sixty_four_track_console"' 'a fader-ride record claiming the standing row'
+ride_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' 'a ride on another fixture'
+ride_mutation '.banks = 7' 'a ride missing a bank'
+ride_mutation '.backend = "Scalar"' 'a ride on a backend with no banks'
+ride_mutation '.fader_tracks = .fader_tracks[0:7]' 'a bank with no ridden fader'
+ride_mutation '.pan_tracks = .fader_tracks' 'a fader and a pan on one track'
+ride_mutation '.pan_tracks[0] = "bus"' 'a ridden track that is not a track id'
+ride_mutation '.fader_smoothing_samples = 64' 'a fader ramp shorter than a block'
+ride_mutation '.fader_records_per_block = 8' 'a fader moved on one channel'
+ride_mutation '.fader_records_written = 15999' 'a fader record count that is not exact'
+ride_mutation '.matrix_records_written = 8001' 'a matrix record count that is not exact'
+ride_mutation '.transactions_published = 2000' 'a block that published two transactions'
+ride_mutation '.live_values_superseded = 1' 'a ridden value superseded unheard'
+ride_mutation '.ramp_in_flight_blocks = 999' 'a timed block with no ramp in flight'
+ride_mutation '.ramp_witness = "asserted in-run"' 'a ramp witness that does not say what it compared'
+ride_mutation '.statistical_method = "descriptive only"' 'a fader-ride row that changed its method'
+ride_mutation '.units = "us_per_block"' 'the wrong fader-ride unit'
+ride_mutation '.riding_p99_ns = 1' 'riding percentiles out of order'
+ride_mutation '.quiet_p99_ns = 1' 'quiet percentiles out of order'
+ride_mutation '.render_total_forbidden_operations = 1' 'a fader ride with a forbidden operation on render'
+ride_mutation 'del(.preroll_blocks)' 'a fader ride with no pre-roll'
+ride_mutation '.extra = 1' 'a fader-ride record with a key the shape does not list'
+
 records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
     --argjson meters "$meters" --argjson observation "$observation" \
     --argjson placement "$placement" --argjson automation "$automation" \
-    --argjson mono "$mono" --argjson mixing "$mixing" \
+    --argjson mono "$mono" --argjson mixing "$mixing" --argjson ride "$fader_ride" \
     --arg a "$digest_a" --arg b "$digest_b" '
   def console_fixture: "fixtures/session/v1/console-sixty-four-track-intended.json";
   def legacy_fixture: "fixtures/session/v1/console-sixty-four-track.json";
@@ -1289,9 +1356,16 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
       ($automation | .round = $round),
       ($mono | .round = $round),
       ($mixing | .round = $round)
-  ) ]')
+  ) ]
+  # #1750: the fader-ride row of each round, appended after both rounds so the index map below
+  # is unchanged: 62 is the round-one fader-ride row and 63 the round-two one.
+  + [ (1, 2) as $round | $ride | .round = $round ]')
 
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the sixty-two-record set'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the sixty-four-record set'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_fader_ride")] | .[]')" 'a set with no fader-ride row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg b "$digest_b" '.[63].riding_output_sha256 = $b | .[]')" 'a fader-ride row whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg b "$digest_b" '.[63].quiet_output_sha256 = $b | .[]')" 'a fader-ride quiet arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[63].fader_tracks |= reverse | .[63].pan_tracks |= reverse | .[]')" 'a fader-ride row whose rounds rode different tracks'
 
 # Index map of the frozen emission order: 0-22 are round one's twenty-three session rows (15 is
 # the driver-fed gain-and-pan row, 16 the metered console row, 17 the bus-and-send row of #1227 and
@@ -1436,7 +1510,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
                  / .isolated_cycles_per_lane_sample)
         else . end ]')
 
-expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the sixty-two-record set with floor accounting'
+expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the sixty-four-record set with floor accounting'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_cycles_per_lane_sample = 3.0 | .[]')" 'an isolate that is not the subtraction it names'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_percent_of_floor = 88.0 | .[]')" 'an isolate percentage that does not follow from the two rows floors'
 # The control row moving is the same defect seen from the other side: the subtraction stops being

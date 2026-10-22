@@ -43,7 +43,9 @@ use std::collections::BTreeSet;
 
 use bench_support::digest::Sha256Sink;
 use builtins::{MeterConfig, MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap};
-use builtins_compiler::{MeterConsumer, MeterRequest, SelectedMeterRequest};
+use builtins_compiler::{
+    MeterConsumer, MeterRequest, SelectedMeterRequest, TrackControlProducer, TrackControlRequest,
+};
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_live_controls,
     attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
@@ -67,6 +69,7 @@ use session::{
     parse_session_json,
 };
 
+pub mod fader_ride;
 pub mod mixing_automation;
 
 /// Sample rate every console workload is prepared and rendered at.
@@ -1149,6 +1152,16 @@ const _: () = assert!((QUANTUM * core::mem::size_of::<f32>()).is_multiple_of(64)
 /// driver may do inside a clock is [`SessionRuntime::render`]; every other method on this type is
 /// evidence collection and belongs outside it.
 pub struct SessionRuntime {
+    /// Issue #1750: each track's fader/mute and matrix/pan cell writers, for the arm prepared by
+    /// [`SessionRuntime::build_with_product_lanes`], and empty on every other arm. Declared before
+    /// `plan`, the drop order `PreparedBuiltinsGraphBound` states: producers before the plan that
+    /// owns their readers. Never touched inside the clock.
+    strip_controls: Vec<TrackControlProducer>,
+    /// The session's one `live_values_superseded` count, shared by every live-control channel this
+    /// arm attached (decision 15, D15-2).
+    superseded: LiveValuesSuperseded,
+    /// The product lane set of an arm prepared by [`SessionRuntime::build_with_product_lanes`].
+    live_lanes: Option<controls::LiveLanes>,
     plan: PreparedRenderPlan,
     /// The plan's gate handle: every live value is a latest-target cell, written under a stamp
     /// of this gate and revealed by publishing the stamp's revision on it (decision 15, D15-2).
@@ -1323,7 +1336,55 @@ impl SessionRuntime {
         dispatch: Backend,
         source: SourceSignal,
     ) -> Self {
+        Self::build_inner(workload, config, dispatch, source, false)
+    }
+
+    /// Compiles, prepares and binds one console arm with the live-control lanes a product host
+    /// attaches for its session (issue #1750).
+    ///
+    /// The lane set is `controls::live_lanes` of the compiled session, the selection the C ABI and
+    /// the browser make (`control-plane`'s `compile`): every strip's fader/mute and matrix/pan
+    /// lanes, each strip's input lane when an input row is live, and one lane per effect instance
+    /// when an effect row is live, with no meter and no observation capacity (the C ABI's default
+    /// `HostLiveControlRequest`). The strips are prepared through the `Concurrent` delivery entry
+    /// (`prepare_session_builtins_with_live_controls`) those hosts reach through `host-core`.
+    /// [`SessionRuntime::live_lanes`] states the set; [`SessionRuntime::write_strip_transaction`]
+    /// writes the strip cells.
+    ///
+    /// # Panics
+    ///
+    /// As [`SessionRuntime::build`], and if the session asks for route lanes, which this harness
+    /// does not attach: only a route into a submix has one.
+    pub fn build_with_product_lanes(workload: Workload) -> Self {
+        Self::build_inner(
+            workload,
+            PlanConfig::BASELINE,
+            Backend::current(),
+            SourceSignal::Local,
+            true,
+        )
+    }
+
+    /// The product lane set this arm was prepared with ([`SessionRuntime::build_with_product_lanes`]),
+    /// or `None` for every other arm.
+    #[must_use]
+    pub fn live_lanes(&self) -> Option<controls::LiveLanes> {
+        self.live_lanes
+    }
+
+    fn build_inner(
+        workload: Workload,
+        config: PlanConfig,
+        dispatch: Backend,
+        source: SourceSignal,
+        strip_controls_requested: bool,
+    ) -> Self {
         let mut model = console_model(workload);
+        assert!(
+            !strip_controls_requested || config == PlanConfig::BASELINE,
+            "{}: the product lane set is the arm's whole live configuration",
+            workload.kind()
+        );
         if dispatch != Backend::current() && BankWidth::for_backend(dispatch).is_some() {
             fold_console_into_inserts(&mut model);
         }
@@ -1341,6 +1402,11 @@ impl SessionRuntime {
             "{}: the metered row carries its own meters and no other console facility",
             workload.kind()
         );
+        assert!(
+            !strip_controls_requested || !workload.web_meters(),
+            "{}: strip live controls ride the product's Concurrent preparation",
+            workload.kind()
+        );
         let web_meters = if workload.web_meters() {
             web_meter_requests(&session)
         } else {
@@ -1353,7 +1419,18 @@ impl SessionRuntime {
         // The control channel is attached for every observation arm including `Absent`, so the
         // paired delta between the arms is the observation lane and not the cell reads.
         let superseded = LiveValuesSuperseded::new();
-        let controls = if config.control {
+        // Issue #1750: the lanes a product host attaches for this session, chosen from its live
+        // rows exactly as `control-plane` chooses them.
+        let live_lanes =
+            strip_controls_requested.then(|| controls::live_lanes(session.normalized_model()));
+        if let Some(lanes) = live_lanes {
+            assert!(
+                !lanes.routes || model.submixes.is_empty(),
+                "{}: route lanes are not attached by this harness",
+                workload.kind()
+            );
+        }
+        let controls = if config.control || live_lanes.is_some_and(|lanes| lanes.effects) {
             attach_effect_live_controls(
                 &mut effects,
                 &superseded,
@@ -1392,6 +1469,33 @@ impl SessionRuntime {
                 &effective,
                 &web_meters,
                 &[],
+                builtin_caps(),
+            )
+        } else if strip_controls_requested {
+            // Issue #1750: the product's strip lanes, through the entry `host-core` calls for a
+            // `Concurrent` host, under the effective values it composes (decision 17, C7: no solo),
+            // in the canonical floating-point environment (#1646 D2).
+            let effective = {
+                let _canonical = lane::CanonicalFpEnv::enter();
+                controls::effective(
+                    session.normalized_model(),
+                    &controls::MonitorOverlay::default(),
+                )
+            };
+            let requests: Vec<TrackControlRequest> = model
+                .tracks
+                .iter()
+                .map(|track| TrackControlRequest {
+                    track_id: track.id.as_str().to_owned(),
+                    superseded: superseded.clone(),
+                    input_lane: live_lanes.is_some_and(|lanes| lanes.strip_input),
+                })
+                .collect();
+            builtins_compiler::prepare_session_builtins_with_live_controls(
+                &session,
+                &effective,
+                &meters,
+                &requests,
                 builtin_caps(),
             )
         } else {
@@ -1469,7 +1573,18 @@ impl SessionRuntime {
                     })
             }
         };
-        let (plan, meter_consumers) = (bound.plan, bound.meter_consumers);
+        let (plan, meter_consumers, strip_controls) =
+            (bound.plan, bound.meter_consumers, bound.track_controls);
+        assert_eq!(
+            strip_controls.len(),
+            if strip_controls_requested {
+                model.tracks.len()
+            } else {
+                0
+            },
+            "{}: one strip live-control channel per requested track",
+            workload.kind()
+        );
         assert_eq!(
             meter_consumers.len(),
             meters.len() + web_meters.len(),
@@ -1495,6 +1610,9 @@ impl SessionRuntime {
         plan.force_mono_collapse_off(workload.collapse_forced_off());
         let gate = plan.take_revision_gate().expect("the plan's gate handle");
         let mut runtime = Self {
+            strip_controls,
+            superseded,
+            live_lanes,
             plan,
             gate,
             output: Box::new(OutputPlanes([0.0; QUANTUM * 2])),
@@ -1661,6 +1779,52 @@ impl SessionRuntime {
         };
         producer.preflight(record).is_ok()
             && write_published(gate, |stamp| producer.write(stamp, record).is_ok())
+    }
+
+    /// The strip live-control channel of `track_id` (issue #1750), or `None` on an arm prepared
+    /// without strip controls or for a track the session does not declare.
+    #[must_use]
+    pub fn strip_control(&self, track_id: &str) -> Option<usize> {
+        self.strip_controls
+            .iter()
+            .position(|producer| &*producer.track_id == track_id)
+    }
+
+    /// Writes one transaction of strip live values, as a host commits one (issue #1750): stamp the
+    /// next revision on the plan's gate, run `write` over every strip channel with the stamp, then
+    /// publish the revision. The next block applies every value of it (decision 15, D15-2).
+    ///
+    /// Off the clock. A cell write cannot fail, so there is nothing to refuse; the caller counts
+    /// what it wrote, and [`SessionRuntime::published_revision`] counts the transactions.
+    pub fn write_strip_transaction<R>(
+        &mut self,
+        write: impl FnOnce(&mut [TrackControlProducer], LiveStamp<'_>) -> R,
+    ) -> R {
+        let Self {
+            strip_controls,
+            gate,
+            ..
+        } = self;
+        write_published(gate, |stamp| write(strip_controls, stamp))
+    }
+
+    /// The last revision published on this arm's gate: one per live-control transaction.
+    #[must_use]
+    pub fn published_revision(&self) -> u64 {
+        self.gate.last_published()
+    }
+
+    /// Live values a later committed value replaced before any block applied them, over every
+    /// live-control channel of this arm (decision 15, D15-2).
+    #[must_use]
+    pub fn live_values_superseded(&self) -> u64 {
+        self.superseded.get()
+    }
+
+    /// This arm's last rendered block, left plane then right plane. Outside the clock.
+    #[must_use]
+    pub fn output(&self) -> &[f32] {
+        &self.output.0
     }
 
     /// Prepared observation lanes. Zero for an `Absent` arm.

@@ -1,15 +1,15 @@
 # Aggregate validator: twenty-three session workloads (fifteen bound-feed rows, the driver-fed
 # gain/pan row, #928 and #956, the metered console row, #881, the bus-and-send row, #1227, and the
 # five console-strip rows, #1085), two hoist workloads, one meters arm, one observation arm, one
-# placement row-pair, one automation-active row, one mono row-pair and one mixing-automation row
-# (#1003), each in rounds one and two -- sixty-two records. #956 retired the builtins-less plumbing
+# placement row-pair, one automation-active row, one mono row-pair, one mixing-automation row
+# (#1003) and one fader-ride row (#1750), each in rounds one and two -- sixty-four records. #956 retired the builtins-less plumbing
 # row and re-based the driver-fed row, two records fewer than the fifty before it; #1003's row
 # brought the count back to fifty, #1085's five rows, emitted after the metered row, took it to
 # sixty, and #1227's bus-and-send row, emitted between the metered row and the console-strip rows,
-# to sixty-two.
+# to sixty-two. #1750's fader-ride row, emitted last, takes it to sixty-four.
 include "console-benchmark-record-lib";
 . as $records |
-(type == "array") and length == 62 and
+(type == "array") and length == 64 and
 all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session") | .workload_kind] | unique | sort) == session_kinds and
 ([.[] | select(.record == "console_hoist") | .workload_kind] | unique | sort)
@@ -28,12 +28,15 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_mixing_automation")] | length) == 2 and
 ([.[] | select(.record == "console_mixing_automation") | .workload_kind] | unique)
   == ["sixty_four_track_console_mono_mixing_automation"] and
+([.[] | select(.record == "console_fader_ride")] | length) == 2 and
+([.[] | select(.record == "console_fader_ride") | .workload_kind] | unique)
+  == ["sixty_four_track_console_fader_ride"] and
 ([.[] | .round] | unique | sort) == [1,2] and
-([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 62 and
+([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 64 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
-(group_by([.record,.workload_kind]) | all(map(.output_sha256 // .restated_output_sha256 // .meters_off_output_sha256 // .absent_output_sha256 // .split_chains_output_sha256 // .collapse_eligible_output_sha256) | unique | length == 1)) and
+(group_by([.record,.workload_kind]) | all(map(.output_sha256 // .restated_output_sha256 // .meters_off_output_sha256 // .absent_output_sha256 // .split_chains_output_sha256 // .collapse_eligible_output_sha256 // .riding_output_sha256) | unique | length == 1)) and
 # #1003: the mixing-automation row's moving arm and its preflight are frozen workloads too, so both
 # rounds render them identically, and the collapse counters are functions of the traffic alone.
 ([.[] | select(.record == "console_mixing_automation")
@@ -83,6 +86,11 @@ all(.[]; console_benchmark_record_valid_lib) and
  [.[] | select(.record == "console_session" and
                .workload_kind == "sixty_four_track_console_sends")
       | .output_sha256] | length == 2 and all(.[]; . as $digest | all($standing[]; . != $digest))) and
+# #1750: both rounds of the fader-ride row ride the same traffic, so the ridden tracks are one list
+# and the quiet arm renders one digest (the riding digest's agreement across rounds is the group
+# rule above). Its riding and quiet digests differ per record (the record library).
+([.[] | select(.record == "console_fader_ride") | [.fader_tracks, .pan_tracks, .quiet_output_sha256]]
+  | unique | length == 1) and
 ([.[] | .backend] | unique | length) == 1 and
 # Ragged versus full, and every decomposition subtraction, are the whole point of the fixture set,
 # so the per-track costs must be comparable numbers taken on one host in one run: same binary,
