@@ -23,14 +23,14 @@ use effect_contract::{
     PreparedSidechainPort,
 };
 
-const QUANTUM: u32 = 128;
-const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
+pub(super) const QUANTUM: u32 = 128;
+pub(super) const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+pub(super) const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
 
-type Values = [InitialParameterValue; PARAMETER_COUNT * 2];
+pub(super) type Values = [InitialParameterValue; PARAMETER_COUNT * 2];
 
 /// A request as the session compiler prepares a console slot: unkeyed, unbypassed.
-fn request(values: &Values, rate: u32, link: LinkMode) -> PrepareEffectRequest<'_> {
+pub(super) fn request(values: &Values, rate: u32, link: LinkMode) -> PrepareEffectRequest<'_> {
     PrepareEffectRequest {
         sample_rate: rate,
         quantum: QUANTUM,
@@ -76,7 +76,7 @@ fn values_from(pairs: [(f32, f32); PARAMETER_COUNT]) -> Values {
 
 /// Random values in every parameter's domain, edges included; `symmetric` gives both channels the
 /// same ones.
-fn draw_values(draw: &mut Draw, symmetric: bool) -> Values {
+pub(super) fn draw_values(draw: &mut Draw, symmetric: bool) -> Values {
     values_from(core::array::from_fn(|parameter| {
         let spec = &COMPRESSOR_PARAMETERS[parameter];
         let (low, high) = (spec.minimum.unwrap(), spec.maximum.unwrap());
@@ -91,7 +91,7 @@ fn draw_values(draw: &mut Draw, symmetric: bool) -> Values {
 }
 
 /// The bank width of `L`, with the backend that executes it.
-fn width_of<L: Lane>() -> (Backend, BankWidth) {
+pub(super) fn width_of<L: Lane>() -> (Backend, BankWidth) {
     let width =
         BankWidth::for_lanes(L::WIDTH).unwrap_or_else(|| panic!("no bank of width {}", L::WIDTH));
     (width.backend(), width)
@@ -99,7 +99,7 @@ fn width_of<L: Lane>() -> (Backend, BankWidth) {
 
 /// The bank `bind_homogeneous_bank` binds for `requests` and `mask` at `L`, whatever this host's
 /// own width is.
-fn bind<L: Lane>(
+pub(super) fn bind<L: Lane>(
     requests: &[PrepareEffectRequest<'_>],
     mask: &[bool],
 ) -> PreparedCompressorBank<L> {
@@ -117,13 +117,13 @@ fn bind<L: Lane>(
 
 /// The mask of `members` members: lanes `0..members` active, the rest padded (the only layout
 /// `validate_shape` admits).
-fn members_first(members: usize, lanes: usize) -> Vec<bool> {
+pub(super) fn members_first(members: usize, lanes: usize) -> Vec<bool> {
     (0..lanes).map(|lane| lane < members).collect()
 }
 
 /// Every request of a bank: member `k` on the `k`-th active lane, `clone_of`'s request on every
 /// padded lane.
-fn lane_requests<'a>(
+pub(super) fn lane_requests<'a>(
     members: &'a [Values],
     mask: &[bool],
     clone_of: usize,
@@ -175,7 +175,7 @@ struct Case {
 
 /// One point on `parameter`, or on both channels of it for a collapsed case; now and then a span
 /// the effect refuses (`Both`), which must be counted on the member's own report.
-fn draw_spans(draw: &mut Draw, mono: bool) -> Vec<PreparedAutomationSpan> {
+pub(super) fn draw_spans(draw: &mut Draw, mono: bool) -> Vec<PreparedAutomationSpan> {
     let mut spans = Vec::new();
     if !draw.chance(1, 3) {
         return spans;
@@ -280,7 +280,10 @@ fn payload_words(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
     class_a::le_words(bytes).map(u32::from_le_bytes)
 }
 
-fn at(spans: &[PreparedAutomationSpan], first_sample: u64) -> Vec<PreparedAutomationSpan> {
+pub(super) fn at(
+    spans: &[PreparedAutomationSpan],
+    first_sample: u64,
+) -> Vec<PreparedAutomationSpan> {
     spans
         .iter()
         .map(|span| PreparedAutomationSpan {
@@ -334,7 +337,7 @@ fn per_node(case: &Case) -> Rendered {
 
 /// One lane's whole channel state as bits: its envelope word, every coefficient word, and every
 /// field of every parameter and coefficient ramp.
-fn lane_state<L: Lane>(channel: &Channel<L>, lane: usize) -> Vec<u32> {
+pub(super) fn lane_state<L: Lane>(channel: &Channel<L>, lane: usize) -> Vec<u32> {
     let mut envelope = [0_u32; MAX_WIDTH];
     channel.gain_reduction_db.store_bits(&mut envelope);
     let mut state = vec![envelope[lane]];

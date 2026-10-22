@@ -7,8 +7,8 @@
 //! A compressor's output is `input * gain`, so with an all-`+0.0` input the output is `+0.0` from
 //! the *first* silent sample — long before the detector has finished releasing. That makes it the
 //! effect where "the output is silent" and "the state has settled" come apart the furthest, and it
-//! is why the fast path's claim is earned on the recursive word coming out of a block bit-identical
-//! to the way it went in, and never on the output alone.
+//! is why the fast path's claim is earned on the state's exact rest (issue #1745: the recursive
+//! word at `+0.0` and no ramp in flight, `Channel::rest_lanes`), and never on the output alone.
 //!
 //! A fast path that engaged on silent output would freeze `gain_reduction_db` part-way through its
 //! release. Nothing about the silence would reveal it: the silent blocks are `+0.0` either way.
@@ -38,8 +38,8 @@ const TRAILING_TONE_BLOCKS: usize = 12;
 /// compressor that has actually been reducing gain releases *asymptotically*. The recursive word
 /// approaches `0.0` dB geometrically and only becomes bit-stable once the flush catches it, which
 /// at a 50 ms release is on the order of a thousand blocks away. The claim in `Instance::render`
-/// requires the word to come out of a block bit-identical, so it correctly refuses to engage for
-/// all of that time -- which is the "where the fixed point is not exactly reachable, do not
+/// requires the word at exactly `+0.0` (`Channel::rest_lanes`), so it correctly refuses to engage
+/// for all of that time -- which is the "where the fixed point is not exactly reachable, do not
 /// engage" rule doing its job, and is pinned by
 /// `a_compressing_detector_never_earns_the_claim_while_it_releases`.
 const THRESHOLD_DB: f32 = -6.0;
@@ -168,13 +168,12 @@ fn a_settled_silent_bank_renders_exactly_the_never_fast_path() {
 ///
 /// A 2 000 ms release is ~750 blocks at this quantum, so across 24 blocks of silence the detector
 /// is still moving the whole way and the correct code never earns the claim at all. A fast path
-/// that dropped the `recursive_bits` before/after comparison would earn it on the *first* silent
+/// that dropped the recursive word from its rest predicate would earn it on the *first* silent
 /// block — the output is `+0.0` from the first silent sample, because a compressor multiplies —
 /// and would then hold `gain_reduction_db` at its compressed value for the rest of the silence.
 /// The returning tone is then compressed by a gain that never finished releasing.
 ///
-/// Red mutation: remove `left_before == self.left.recursive_bits() && right_before == ...` from
-/// the claim in `Instance::render`.
+/// Red mutation: drop the `gain_reduction_db` term from `Channel::rest_lanes`.
 #[test]
 fn a_detector_still_releasing_through_the_silence_is_never_frozen() {
     let Some((_, width)) = native_bank_width() else {

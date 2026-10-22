@@ -5,6 +5,7 @@
 //! There is no audio or detector history: the compressor adds exactly zero samples of latency.
 
 use effect_contract::LinkMode;
+use effect_runtime::bank::positive_zero_lanes;
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db};
 use effect_runtime::envelope::rms_follow;
 use effect_runtime::ramp::LinearRamp;
@@ -172,6 +173,40 @@ impl<L: Lane> Channel<L> {
         }
     }
 
+    /// The lanes of this channel at their **exact rest** (issue #1745), as a bitmask over
+    /// `L::WIDTH` lanes: from this state, one block of exact `+0.0` input (main or a silent
+    /// detector) leaves every word of the lane bit-identical and writes `+0.0`.
+    ///
+    /// The channel's state words are the four `copy_state_from` lists, which are also the payload
+    /// (`state.rs`): `gain_reduction_db`, `words`, `ramps` and `rate_ramps`. `defaults` is a
+    /// control-side reset value the kernel never reads. Pinned, per lane:
+    ///
+    /// * `gain_reduction_db` to `+0.0` by raw bits. With a `+0.0` detector the curve target is
+    ///   `+0.0` for every legal threshold and knee (the level clamps to -160 dB and the lowest
+    ///   knee start is `-80 - 12` dB), `rms_follow(+0, +0, c)` is `c * +0 + +0 = +0` and `flush`
+    ///   keeps it, so `+0.0` is the one fixed point the predicate accepts. A release stalled at
+    ///   a non-zero value is refused even if no bit would move.
+    /// * every parameter ramp and both coefficient ramps settled (`remaining == 0`): a settled
+    ///   ramp is never advanced, and `words` move only when a ramp advances, so the coefficient
+    ///   words and all ramp fields stay put.
+    ///
+    /// The output is then `+0.0`: the applied gain is finite and positive, `+0 * gain` is `+0`,
+    /// and the mix `mix * +0 + +0` is `+0` for a finite mix; the bypassed arm passes the `+0.0`
+    /// input. The detector updates the envelope under bypass too, so bypass does not change the
+    /// answer. The compressor has no clocks.
+    pub(crate) fn rest_lanes(&self) -> u32 {
+        let mut mask = positive_zero_lanes(self.gain_reduction_db);
+        for parameter in self.ramps.iter().chain(self.rate_ramps.iter()) {
+            for (lane, ramp) in parameter.iter().take(L::WIDTH).enumerate() {
+                if ramp.remaining != 0 {
+                    mask &= !(1 << lane);
+                }
+            }
+        }
+        mask
+    }
+
+    #[cfg(test)]
     pub(crate) fn recursive_bits(&self) -> [u32; MAX_WIDTH] {
         let mut words = [0_u32; MAX_WIDTH];
         self.gain_reduction_db.store_bits(&mut words[..L::WIDTH]);
