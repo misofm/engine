@@ -26,4 +26,5 @@ Cut the block at each operation offset and run the fused ramping pass on each sp
 
 ## Dependencies
 
-#890 merged.
+- #890 merged.
+- #1754: the fused ramping pass runs on product plans only after #1754 pairs the fader and matrix banks under concurrent delivery (#890 correction, 2026-10-22).
