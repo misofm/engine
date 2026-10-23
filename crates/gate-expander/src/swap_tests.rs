@@ -1,36 +1,23 @@
 //! Issue #1747 gate 1: a render-time lane swap moves a gate/expander lane whole, at every bank
-//! width the build has (`BankWidth::ALL`: `Simd4` and, with AVX2, `Simd8`).
+//! width the build has (`BankWidth::ALL`: `Simd4` and, with AVX2, `Simd8`). The shared driver is
+//! `conformance::swap_probe`.
 //!
 //! A crate-internal test for the same reason as `padding_tests`: the width the build does not
 //! execute binds through `bind_bank::<false>`, the factory's own code without the D4 width check.
 //!
-//! The gate has no lane clock: `hold` is a countdown, but its value depends on the detector, and
-//! a lane at rest holds it at zero. Its one bank-wide counter, `ramp_frames_left`, only chooses
-//! where `run_block` splits a block between its ramping and settled variants, and the render is
-//! partition-invariant, so no output bit or payload word reads it.
+//! The hold countdown `hold` is detector state, carried in the payload like the envelope. The
+//! bank-wide counter `ramp_frames_left` only chooses where `run_block` splits a block between its
+//! ramping and settled variants; a restore raises it to cover the restored ramps, which the
+//! driver's quiet block after a ramping lane lands in a settled bank checks.
 
 use super::*;
+use conformance::swap_probe::{self, Automate, Automation, Probe};
 use dsp_reference::randomized::{Draw, Profile};
-use effect_contract::{
-    PrepareEffectLimits, PreparedPorts, swap_bank_lanes, swap_bank_lanes_scratch_bytes,
-};
+use effect_contract::{PrepareEffectLimits, PreparedPorts};
 
 const QUANTUM: u32 = 128;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
-
-/// Not a divisor of the 64-sample smoothing: a span at a block's first sample is still ramping
-/// when the block ends, so the ramps of every strip are in flight at a swap.
-const FRAMES: usize = 48;
-/// Blocks before the swap inside bank A.
-const BEFORE: usize = 10;
-/// Blocks between that swap and the swap across banks A and B.
-const BETWEEN: usize = 6;
-/// Blocks after the second swap.
-const AFTER: usize = 20;
-/// The last block: every bank is first reset to its prepared defaults, so a strip renders from
-/// the defaults of the lane it now sits on.
-const RESET: usize = BEFORE + BETWEEN + AFTER;
 
 /// A request as the session compiler prepares a console slot: unkeyed, unbypassed.
 fn request(
@@ -87,376 +74,146 @@ fn draw_values(draw: &mut Draw) -> Vec<InitialParameterValue> {
         .collect()
 }
 
-/// The four banks of one case: A and B swap, `A'` and `B'` are their twins and never swap.
-struct Rig {
-    banks: [Box<dyn PreparedNativeEffectBank>; 4],
+/// Two full banks of random per-lane values at one rate and link.
+struct GateProbe {
     width: BankWidth,
-    lanes: usize,
+    members: [Vec<Vec<InitialParameterValue>>; 2],
+    rate: u32,
+    link: LinkMode,
     sizes: StatePayloadSizes,
-    version: u32,
+    /// One stream per strip.
+    feeds: Vec<Draw>,
 }
 
-/// One block of automation on one strip: each smoothed parameter, left then right, in the order
-/// the effect admits, each with probability one third, or every one of them when `all`.
-fn draw_spans(draw: &mut Draw, all: bool, first_sample: u64) -> Vec<PreparedAutomationSpan> {
-    let mut spans = Vec::new();
-    for (parameter, spec) in GATE_EXPANDER_PARAMETERS.iter().enumerate().take(RAMP_COUNT) {
-        for channel in [ParameterChannel::Left, ParameterChannel::Right] {
-            if all || draw.chance(1, 3) {
-                spans.push(PreparedAutomationSpan {
-                    channel,
-                    parameter_index: parameter as u32,
-                    sample: first_sample,
-                    value: draw.in_domain(spec.minimum.unwrap(), spec.maximum.unwrap()),
-                });
-            }
-        }
-    }
-    spans
-}
-
-/// One block of input on one channel: an ordinary, loud, tiny or exact level, so the envelope
-/// attacks and releases and its state is never trivial.
-fn draw_input(draw: &mut Draw) -> Vec<f32> {
-    let profile = draw.pick(&[Profile::Loud, Profile::Clean, Profile::Tiny, Profile::Exact]);
-    (0..FRAMES).map(|_| draw.sample(profile)).collect()
-}
-
-/// The payload of `lane` of `bank`, left then right.
-fn payload(rig: &Rig, bank: usize, lane: usize) -> Vec<u8> {
-    let (mut left, mut right) = (
-        vec![0_u8; rig.sizes.left_bytes as usize],
-        vec![0_u8; rig.sizes.right_bytes as usize],
-    );
-    let mut common = vec![0_u8; rig.sizes.common_bytes as usize];
-    rig.banks[bank]
-        .snapshot_track_state_payload(
-            lane as u32,
-            StatePayloadOutput::new(&mut common, &mut left, &mut right, rig.sizes)
-                .expect("the prepared sizes"),
-        )
-        .expect("a snapshot");
-    common.into_iter().chain(left).chain(right).collect()
-}
-
-/// Swaps `(0, first)` with `(bank, second)` (`bank` 0 swaps inside A) on the swapping pair,
-/// counting the calling thread's allocations, and moves the two strips in `place` with it.
-fn swap(
-    rig: &mut Rig,
-    place: &mut [(usize, usize)],
-    first: usize,
-    bank: usize,
-    second: usize,
-    scratch: &mut [u8],
-) {
-    let mark = bench_support::alloc::current_thread_counters();
-    let [a, b, ..] = &mut rig.banks;
-    let result = if bank == 0 {
-        swap_bank_lanes(
-            a.as_mut(),
-            first,
-            None,
-            second,
-            rig.version,
-            rig.sizes,
-            scratch,
-        )
-    } else {
-        swap_bank_lanes(
-            a.as_mut(),
-            first,
-            Some(b.as_mut()),
-            second,
-            rig.version,
-            rig.sizes,
-            scratch,
-        )
-    };
-    let moved = bench_support::alloc::current_thread_delta_since(mark);
-    result.expect("a swap of two populated lanes of one layout");
-    assert_eq!(moved.allocations, 0, "a lane swap allocates nothing");
-    for spot in place.iter_mut() {
-        if *spot == (0, first) {
-            *spot = (bank, second);
-        } else if *spot == (bank, second) {
-            *spot = (0, first);
+impl GateProbe {
+    fn new(width: BankWidth, seed: u64) -> Self {
+        let lanes = width.lanes() as usize;
+        let mut draw = Draw::new(seed);
+        let rate = draw.pick(&RATES);
+        let link = draw.pick(&LINKS);
+        let members: [Vec<Vec<InitialParameterValue>>; 2] =
+            core::array::from_fn(|_| (0..lanes).map(|_| draw_values(&mut draw)).collect());
+        let sizes = GateExpanderFactory
+            .prepare(request(&members[0][0], rate, link))
+            .expect("a member prepares")
+            .metadata
+            .state_sizes;
+        Self {
+            width,
+            members,
+            rate,
+            link,
+            sizes,
+            feeds: (0..2 * lanes)
+                .map(|strip| Draw::new(seed ^ (0x1747_0000 + strip as u64)))
+                .collect(),
         }
     }
 }
 
-/// The shared driver: every strip keeps its own input and automation stream wherever it sits.
-/// Strip `s` starts on bank `s / lanes`, lane `s % lanes`, and stays there in the twins. The
-/// swapping pair swaps two lanes of A, then a lane of A with a lane of B. The block before the
-/// first swap automates every parameter of every strip, so every ramp is in flight across it. The
-/// two blocks before the second swap automate only one of its two strips, every parameter, and the
-/// block after it automates nothing, so a ramping lane moves into a bank that has settled and must
-/// keep ramping there with no new target to restart it. The last block resets all four banks
-/// to their defaults and automates nothing, so a moved strip whose prepared defaults stayed
-/// behind re-seeds from another strip's values.
-fn run(rig: &mut Rig, seed: u64) {
-    let lanes = rig.lanes;
-    let strips = 2 * lanes;
-    let mut draw = Draw::new(seed);
-    let mut feeds: Vec<Draw> = (0..strips)
-        .map(|strip| Draw::new(seed ^ (0x1747_0000 + strip as u64)))
-        .collect();
-    let mut place: Vec<(usize, usize)> = (0..strips).map(|s| (s / lanes, s % lanes)).collect();
-    let inside = draw.below(lanes);
-    let inside_other = (inside + 1 + draw.below(lanes - 1)) % lanes;
-    let across = (draw.below(lanes), draw.below(lanes));
-    let mover = if draw.chance(1, 2) {
-        (0, across.0)
-    } else {
-        (1, across.1)
-    };
-    let total = swap_bank_lanes_scratch_bytes(rig.banks[0].as_ref(), rig.sizes)
-        .expect("a bank that declares its defaults");
-    let mut scratch = vec![0_u8; total];
-    let mut first_sample = 0_u64;
-    for block in 0..=RESET {
-        if block == RESET {
-            for bank in &mut rig.banks {
-                bank.reset(ResetKind::FullToDefaults);
-            }
-        }
-        if block == BEFORE {
-            swap(rig, &mut place, inside, 0, inside_other, &mut scratch);
-        }
-        if block == BEFORE + BETWEEN {
-            swap(rig, &mut place, across.0, 1, across.1, &mut scratch);
-        }
-        let everyone = block + 1 == BEFORE;
-        let only_mover = (BEFORE + BETWEEN - 2..BEFORE + BETWEEN).contains(&block);
-        let nobody = block == BEFORE + BETWEEN || block == RESET;
-        let mut left = vec![vec![0.0_f32; FRAMES * lanes]; 4];
-        let mut right = left.clone();
-        let mut spans: Vec<Vec<Vec<PreparedAutomationSpan>>> = vec![vec![Vec::new(); lanes]; 4];
-        for (strip, feed) in feeds.iter_mut().enumerate() {
-            let input = (draw_input(feed), draw_input(feed));
-            let automation = if nobody {
-                Vec::new()
-            } else if only_mover {
-                if place[strip] == mover {
-                    draw_spans(feed, true, first_sample)
-                } else {
-                    Vec::new()
-                }
-            } else {
-                draw_spans(feed, everyone, first_sample)
-            };
-            let twin = (2 + strip / lanes, strip % lanes);
-            for (bank, lane) in [place[strip], twin] {
-                for frame in 0..FRAMES {
-                    left[bank][frame * lanes + lane] = input.0[frame];
-                    right[bank][frame * lanes + lane] = input.1[frame];
-                }
-                spans[bank][lane].clone_from(&automation);
-            }
-        }
-        let mut reports = Vec::new();
-        for bank in 0..4 {
-            let mut offsets = vec![0_u32];
-            for lane in &spans[bank] {
-                offsets.push(offsets[offsets.len() - 1] + lane.len() as u32);
-            }
-            let flat: Vec<PreparedAutomationSpan> = spans[bank].concat();
-            let process = EffectBankProcessBlock::new(
-                &mut left[bank],
-                &mut right[bank],
-                None,
-                FRAMES as u32,
-                rig.width,
-                first_sample,
-                &flat,
-                &offsets,
-                QUANTUM,
-            )
-            .expect("a bank block");
-            reports.push(rig.banks[bank].process_bank(process));
-        }
-        for (strip, (bank, lane)) in place.iter().copied().enumerate() {
-            let (twin, twin_lane) = (2 + strip / lanes, strip % lanes);
-            for frame in 0..FRAMES {
-                for (plane, name) in [(&left, "left"), (&right, "right")] {
-                    assert_eq!(
-                        plane[bank][frame * lanes + lane].to_bits(),
-                        plane[twin][frame * lanes + twin_lane].to_bits(),
-                        "W{lanes} seed {seed:#x}: strip {strip} {name} frame {frame} of block \
-                         {block} differs from its twin"
-                    );
-                }
-            }
-            assert_eq!(
-                reports[bank].reports[lane], reports[twin].reports[twin_lane],
-                "W{lanes} seed {seed:#x}: strip {strip} report of block {block}"
-            );
-        }
-        first_sample += FRAMES as u64;
+impl Probe for GateProbe {
+    fn lanes(&self) -> usize {
+        self.width.lanes() as usize
     }
-    for (strip, (bank, lane)) in place.iter().copied().enumerate() {
-        assert_eq!(
-            payload(rig, bank, lane),
-            payload(rig, 2 + strip / lanes, strip % lanes),
-            "W{lanes} seed {seed:#x}: strip {strip}'s payload differs from its twin's"
-        );
-    }
-}
 
-/// One case at `width`: two full banks of random per-lane values at one rate and link.
-fn case(width: BankWidth, seed: u64) {
-    let lanes = width.lanes() as usize;
-    let mut draw = Draw::new(seed);
-    let rate = draw.pick(&RATES);
-    let link = draw.pick(&LINKS);
-    let mask = vec![true; lanes];
-    let members: [Vec<Vec<InitialParameterValue>>; 2] =
-        core::array::from_fn(|_| (0..lanes).map(|_| draw_values(&mut draw)).collect());
-    let bank = |which: usize| -> Box<dyn PreparedNativeEffectBank> {
-        let requests: Vec<_> = members[which]
+    fn width(&self) -> BankWidth {
+        self.width
+    }
+
+    fn quantum(&self) -> u32 {
+        QUANTUM
+    }
+
+    fn sizes(&self) -> StatePayloadSizes {
+        self.sizes
+    }
+
+    fn state_layout_version(&self) -> u32 {
+        GATE_EXPANDER_DESCRIPTOR.state_layout_version
+    }
+
+    fn bind(&mut self, which: usize) -> Box<dyn PreparedNativeEffectBank> {
+        let mask = vec![true; self.lanes()];
+        let requests: Vec<_> = self.members[which]
             .iter()
-            .map(|values| request(values, rate, link))
+            .map(|values| request(values, self.rate, self.link))
             .collect();
         bind_bank::<false>(PrepareEffectBankRequest {
-            backend: width.backend(),
-            width,
+            backend: self.width.backend(),
+            width: self.width,
             requests: &requests,
             active_mask: &mask,
         })
         .expect("a valid bank request")
         .expect("one program banks")
         .processor
-    };
-    let sizes = GateExpanderFactory
-        .prepare(request(&members[0][0], rate, link))
-        .expect("a member prepares")
-        .metadata
-        .state_sizes;
-    let mut rig = Rig {
-        banks: [bank(0), bank(1), bank(0), bank(1)],
-        width,
-        lanes,
-        sizes,
-        version: GATE_EXPANDER_DESCRIPTOR.state_layout_version,
-    };
-    run(&mut rig, seed);
+    }
+
+    /// An ordinary, loud, tiny or exact level, so the envelope attacks and releases.
+    fn input(&mut self, strip: usize, left: &mut [f32], right: &mut [f32]) {
+        let feed = &mut self.feeds[strip];
+        for plane in [left, right] {
+            let profile =
+                feed.pick(&[Profile::Loud, Profile::Clean, Profile::Tiny, Profile::Exact]);
+            plane.fill_with(|| feed.sample(profile));
+        }
+    }
+
+    /// Each smoothed parameter, left then right, in the order the effect admits; on a random
+    /// block each with probability one third.
+    fn automate(&mut self, strip: usize, how: Automate, first_sample: u64) -> Automation {
+        let feed = &mut self.feeds[strip];
+        let mut spans = Vec::new();
+        for (parameter, spec) in GATE_EXPANDER_PARAMETERS.iter().enumerate().take(RAMP_COUNT) {
+            for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+                let wanted = match how {
+                    Automate::Nothing => false,
+                    Automate::Random => feed.chance(1, 3),
+                    Automate::Every => true,
+                };
+                if wanted {
+                    spans.push(PreparedAutomationSpan {
+                        channel,
+                        parameter_index: parameter as u32,
+                        sample: first_sample,
+                        value: feed.in_domain(spec.minimum.unwrap(), spec.maximum.unwrap()),
+                    });
+                }
+            }
+        }
+        Automation {
+            spans,
+            targets: Vec::new(),
+        }
+    }
+
+    /// A channel section's ramps are quadruples from `STATE_RAMP_WORD`, `remaining` last.
+    fn ramp_in_flight(&self, left: &[u8], right: &[u8]) -> bool {
+        [left, right].iter().any(|section| {
+            (0..RAMP_COUNT)
+                .any(|ramp| payload::read_f32(section, STATE_RAMP_WORD + ramp * 4 + 3) != 0.0)
+        })
+    }
+
+    fn heap_calls(&self, call: &mut dyn FnMut()) -> u64 {
+        let mark = bench_support::alloc::current_thread_counters();
+        call();
+        let delta = bench_support::alloc::current_thread_delta_since(mark);
+        delta.allocations + delta.deallocations + delta.reallocations
+    }
 }
 
 /// **Gate 1: a strip whose lane is swapped, inside one bank and across two, with its ramps in
-/// flight, renders bit for bit as its twin that never moved, still does after a full reset to its
-/// prepared defaults, and ends on the twin's payload; the swap allocates nothing. At every bank
-/// width the build has.**
+/// flight, renders bit for bit as its twin that never moved, holds its twin's payload, re-seeds
+/// from its own defaults on a full reset, and the swap allocates nothing. At every bank width
+/// the build has.**
 #[test]
 fn a_swapped_lane_renders_as_its_unswapped_twin() {
     bench_support::alloc::assert_installed();
     for width in BankWidth::ALL {
         for seed in 0..4_u64 {
-            case(*width, 0x1747_6000 + seed);
+            let seed = 0x1747_6000 + seed;
+            swap_probe::check(&mut GateProbe::new(*width, seed), seed);
         }
     }
-}
-
-/// One gate at `width`, concrete so the test can read its bank-wide clock.
-fn concrete_gate<L: Lane>(draw: &mut Draw) -> PreparedGate<L, false> {
-    let values: Vec<_> = (0..L::WIDTH).map(|_| draw_values(draw)).collect();
-    let metadata = expected_prepared_metadata(
-        &GATE_EXPANDER_DESCRIPTOR,
-        request(&values[0], 48_000, LinkMode::DualMono),
-    )
-    .expect("a member prepares");
-    let mut defaults = [initial_defaults(&values[0]).expect("defaults"); MAX_WIDTH];
-    for (track, set) in values.iter().enumerate() {
-        defaults[track] = initial_defaults(set).expect("defaults");
-    }
-    let width = BankWidth::ALL
-        .iter()
-        .copied()
-        .find(|width| width.lanes() as usize == L::WIDTH)
-        .expect("a bank width");
-    PreparedGate::<L, false>::new(&metadata, Some(width), defaults).expect("a bank")
-}
-
-fn lowers_like_a_rendered_block<L: Lane>(seed: u64)
-where
-    PreparedGate<L, false>: PreparedNativeEffectBank,
-{
-    let lanes = L::WIDTH;
-    let width = BankWidth::ALL
-        .iter()
-        .copied()
-        .find(|width| width.lanes() as usize == lanes)
-        .expect("a bank width");
-    let mut draw = Draw::new(seed);
-    let mut rendered = concrete_gate::<L>(&mut draw);
-    let mut skipped = concrete_gate::<L>(&mut Draw::new(seed));
-    let render = |bank: &mut PreparedGate<L, false>,
-                  frames: usize,
-                  spans: &[PreparedAutomationSpan]| {
-        let (mut left, mut right) = (vec![0.0_f32; frames * lanes], vec![0.0_f32; frames * lanes]);
-        let mut offsets = vec![spans.len() as u32; lanes + 1];
-        offsets[0] = 0;
-        let block = EffectBankProcessBlock::new(
-            &mut left,
-            &mut right,
-            None,
-            frames as u32,
-            width,
-            0,
-            spans,
-            &offsets,
-            QUANTUM,
-        )
-        .expect("a bank block");
-        let _ = bank.process_bank(block);
-    };
-    // Lane 0 starts every ramp and renders 48 of its 64 frames; restoring its own payload then
-    // raises the schedule to the whole smoothing length while its ramps need 16 more frames.
-    let spans = draw_spans(&mut draw, true, 0);
-    let sizes = GATE_EXPANDER_DESCRIPTOR
-        .qualities
-        .iter()
-        .find(|quality| quality.sample_rate == 48_000)
-        .expect("a launch rate")
-        .maximum_state;
-    for bank in [&mut rendered, &mut skipped] {
-        render(bank, FRAMES, &spans);
-        let mut common = vec![0_u8; sizes.common_bytes as usize];
-        let mut left = vec![0_u8; sizes.left_bytes as usize];
-        let mut right = vec![0_u8; sizes.right_bytes as usize];
-        bank.snapshot_track_state_payload(
-            0,
-            StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes).expect("sizes"),
-        )
-        .expect("a snapshot");
-        bank.restore_track_state_payload(
-            0,
-            GATE_EXPANDER_DESCRIPTOR.state_layout_version,
-            StatePayloadInput::new(&common, &left, &right, sizes).expect("sizes"),
-        )
-        .expect("its own payload");
-        render(bank, 16, &[]);
-        assert_eq!(bank.ramp_frames_left, 48, "the schedule outlives the ramps");
-    }
-    for frames in [7_usize, 30, 1, 64, 3] {
-        render(&mut rendered, frames, &[]);
-        skipped.advance_clocks(u32::MAX >> (32 - lanes), frames as u32);
-        assert_eq!(
-            skipped.ramp_frames_left, rendered.ramp_frames_left,
-            "W{lanes}: after a {frames}-frame block"
-        );
-    }
-    assert_eq!(
-        rendered.ramp_frames_left, 0,
-        "the schedule saturates at zero"
-    );
-}
-
-/// **`advance_clocks` lowers the bank's one clock, `ramp_frames_left`, as a rendered block does,
-/// saturating at zero, at every bank width the build has.** A restore that lands a ramp with
-/// fewer frames left than the smoothing length leaves the counter above what the ramps need,
-/// which is the state in which a skipped block must still lower it.
-#[test]
-fn advancing_the_clocks_lowers_the_ramp_schedule_as_a_rendered_block() {
-    lowers_like_a_rendered_block::<lane::Simd4>(0x1747_6100);
-    #[cfg(target_feature = "avx2")]
-    lowers_like_a_rendered_block::<lane::Simd8>(0x1747_6108);
 }

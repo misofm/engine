@@ -7,6 +7,7 @@
 use super::ramping_elision::{Rng, automatable, draw, request};
 use super::*;
 use conformance::rest_probe::{self, Probe, Reach, Schedule};
+use conformance::swap_probe::{self, Automate, Automation};
 use effect_contract::{EffectTargetRequest, NativeEffectTargetPreparation};
 
 const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
@@ -437,7 +438,6 @@ fn clocks_advance_as_a_zero_block<L: Lane, const W: usize>(label: &str) {
 fn advance_clocks_leaves_a_resting_bank_where_a_rendered_zero_block_does() {
     lane::each_vector_lane!(|L, W| clocks_advance_as_a_zero_block::<L, W>(&width_label(W)));
 }
-
 /// The EQ's payload sizes, as the contract's swap takes them.
 const SWAP_SIZES: effect_contract::StatePayloadSizes = effect_contract::StatePayloadSizes {
     common_bytes: STATE_SIZES.common as u32,
@@ -445,254 +445,52 @@ const SWAP_SIZES: effect_contract::StatePayloadSizes = effect_contract::StatePay
     right_bytes: STATE_SIZES.right as u32,
 };
 
-/// Lane `lane`'s whole state payload: `[common, left, right]`.
-fn swap_payload(bank: &dyn PreparedNativeEffectBank, lane: usize) -> [Vec<u8>; 3] {
-    let mut common = vec![0; STATE_SIZES.common];
-    let mut left = vec![0; STATE_SIZES.left];
-    let mut right = vec![0; STATE_SIZES.right];
-    bank.snapshot_track_state_payload(
-        lane as u32,
-        StatePayloadOutput {
-            common: &mut common,
-            left: &mut left,
-            right: &mut right,
-        },
-    )
-    .expect("a lane snapshot");
-    [common, left, right]
-}
-
-/// Two full banks of one slot shape (rate, quantum, width), every lane a member with its own
-/// random targets, the general bands' enables and families included.
-fn swap_banks<L: Lane, const W: usize>(
-    rng: &mut Rng,
-) -> (
-    [PreparedParametricEq<L, W>; 2],
-    Vec<Vec<InitialParameterValue>>,
-    u32,
-) {
-    loop {
-        let rate = LAUNCH_RATES[rng.below(LAUNCH_RATES.len())];
-        let configs: Vec<Vec<InitialParameterValue>> = (0..2 * W)
-            .map(|_| {
-                let symmetric = rng.chance(0.3);
-                configuration(rng, symmetric)
-            })
-            .collect();
-        let prepare = |members: &[Vec<InitialParameterValue>]| {
-            let requests: Vec<_> = members.iter().map(|lane| request(lane, rate)).collect();
-            let metadata =
-                expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, requests[0]).ok()?;
-            prepare_width::<L, W>(metadata, &requests, &[true; W]).ok()
-        };
-        let (Some(a), Some(b)) = (prepare(&configs[..W]), prepare(&configs[W..])) else {
-            continue;
-        };
-        return ([a, b], configs, rate);
-    }
-}
-
-/// Swaps lane `first.1` of bank `first.0` with lane `second.1` of bank `second.0` through the
-/// contract's swap: `second = None` when both are one bank.
-fn swap<L: Lane, const W: usize>(
-    banks: &mut [PreparedParametricEq<L, W>; 2],
-    first: (usize, usize),
-    second: (usize, usize),
-    scratch: &mut [u8],
-) -> Result<(), effect_contract::LaneSwapRefusal> {
-    let [a, b] = banks;
-    let (one, other) = if first.0 == 0 { (a, b) } else { (b, a) };
-    let other: Option<&mut dyn PreparedNativeEffectBank> = if first.0 == second.0 {
-        None
-    } else {
-        Some(other)
-    };
-    effect_contract::swap_bank_lanes(
-        one,
-        first.1,
-        other,
-        second.1,
-        STATE_LAYOUT_VERSION,
-        SWAP_SIZES,
-        scratch,
-    )
-}
-
-/// [`swap`], required to succeed and to allocate nothing, measured after the same swap on copies
-/// has warmed the process statics.
-fn measured_swap<L: Lane, const W: usize>(
-    banks: &mut [PreparedParametricEq<L, W>; 2],
-    first: (usize, usize),
-    second: (usize, usize),
-    scratch: &mut [u8],
-    label: &str,
-) {
-    let mut copies = [copy_bank(&banks[0]), copy_bank(&banks[1])];
-    assert_eq!(
-        swap(&mut copies, first, second, scratch),
-        Ok(()),
-        "{label}: warm-up"
-    );
-    let mark = bench_support::alloc::current_thread_counters();
-    let result = swap(banks, first, second, scratch);
-    let delta = bench_support::alloc::current_thread_delta_since(mark);
-    assert_eq!(result, Ok(()), "{label}: the swap");
-    assert_eq!(
-        (delta.allocations, delta.deallocations, delta.reallocations),
-        (0, 0, 0),
-        "{label}: the swap allocated"
-    );
-}
-
-/// The strips' run: `banks` move strips between lanes, `twins` keep every strip at home (strip
-/// `s` at bank `s / W`, lane `s % W`). `at[s]` is strip `s`'s place in `banks`.
-struct SwapRun<L: Lane, const W: usize> {
-    banks: [PreparedParametricEq<L, W>; 2],
-    twins: [PreparedParametricEq<L, W>; 2],
-    at: Vec<(usize, usize)>,
-    values: Vec<Vec<InitialParameterValue>>,
+/// Issue #1747 gate 1 for the EQ under `conformance::swap_probe`: two banks of one slot shape,
+/// every strip a member with its own random targets (the general bands' enables and families
+/// included), automated through prepared targets that follow the strip.
+struct EqSwapProbe<L: Lane, const W: usize> {
     rate: u32,
+    /// Every strip's prepare-time values.
+    configs: Vec<Vec<InitialParameterValue>>,
+    /// Every strip's current values, and the retune its last targets would make current.
+    values: Vec<Vec<InitialParameterValue>>,
+    pending: Vec<Option<Vec<InitialParameterValue>>>,
+    rng: Rng,
+    _lane: core::marker::PhantomData<L>,
 }
 
-impl<L: Lane, const W: usize> SwapRun<L, W> {
-    /// Retunes strip `strip` in both runs, wherever it sits; `true` if the retune applied.
-    fn retune(&mut self, rng: &mut Rng, strip: usize) -> bool {
-        let Some((candidate, targets)) = retune_targets(rng, self.rate, &self.values[strip]) else {
-            return false;
-        };
-        let (bank, lane) = self.at[strip];
-        let moved = &mut self.banks[bank];
-        let home = &mut self.twins[strip / W];
-        let mut applied = true;
-        for target in &targets {
-            let one = moved.apply_prepared_target_lane(lane, target);
-            let two = home.apply_prepared_target_lane(strip % W, target);
-            assert_eq!(one, two, "a retune applies alike in both runs");
-            applied &= one.is_ok();
-        }
-        if applied {
-            self.values[strip] = candidate;
-        }
-        applied
-    }
-
-    /// One block of random input per strip (now and then silence) through all four banks; every
-    /// strip's output is bit-equal in the two runs.
-    fn block(&mut self, rng: &mut Rng, frames: usize, label: &str) {
-        let strips = 2 * W;
-        let mut input = vec![[vec![0.0_f32; frames], vec![0.0_f32; frames]]; strips];
-        for planes in &mut input {
-            if rng.chance(0.15) {
-                continue;
-            }
-            for word in planes.iter_mut().flatten() {
-                *word = 2.0 * rng.unit() - 1.0;
-            }
-        }
-        let mut moved = [
-            [vec![0.0; frames * W], vec![0.0; frames * W]],
-            [vec![0.0; frames * W], vec![0.0; frames * W]],
-        ];
-        let mut home = moved.clone();
-        for (strip, planes) in input.iter().enumerate() {
-            let (bank, lane) = self.at[strip];
-            for side in 0..2 {
-                for frame in 0..frames {
-                    moved[bank][side][frame * W + lane] = planes[side][frame];
-                    home[strip / W][side][frame * W + strip % W] = planes[side][frame];
-                }
-            }
-        }
-        for bank in 0..2 {
-            let [left, right] = &mut moved[bank];
-            process(&mut self.banks[bank], left, right, frames);
-            let [left, right] = &mut home[bank];
-            process(&mut self.twins[bank], left, right, frames);
-        }
-        for strip in 0..strips {
-            let (bank, lane) = self.at[strip];
-            for side in 0..2 {
-                for frame in 0..frames {
-                    assert_eq!(
-                        moved[bank][side][frame * W + lane].to_bits(),
-                        home[strip / W][side][frame * W + strip % W].to_bits(),
-                        "{label}: strip {strip}, channel {side}, frame {frame}"
-                    );
-                }
+impl<L: Lane, const W: usize> EqSwapProbe<L, W> {
+    fn new(seed: u64) -> Self {
+        let mut rng = Rng(seed);
+        loop {
+            let rate = LAUNCH_RATES[rng.below(LAUNCH_RATES.len())];
+            let configs: Vec<Vec<InitialParameterValue>> = (0..2 * W)
+                .map(|_| {
+                    let symmetric = rng.chance(0.3);
+                    configuration(&mut rng, symmetric)
+                })
+                .collect();
+            let probe = Self {
+                rate,
+                values: configs.clone(),
+                pending: vec![None; 2 * W],
+                configs,
+                rng: Rng(rng.next() | 1),
+                _lane: core::marker::PhantomData,
+            };
+            if probe.prepare(0).is_some() && probe.prepare(1).is_some() {
+                return probe;
             }
         }
     }
 
-    /// `true` if strip `strip` has a ramp in flight in `banks`.
-    fn in_flight(&self, strip: usize) -> bool {
-        let (bank, lane) = self.at[strip];
-        let eq = &self.banks[bank];
-        [&eq.left, &eq.right]
+    fn prepare(&self, which: usize) -> Option<PreparedParametricEq<L, W>> {
+        let requests: Vec<_> = self.configs[which * W..(which + 1) * W]
             .iter()
-            .any(|channel| channel.remaining.iter().any(|section| section[lane] > 0))
-    }
-
-    /// Retunes `strips` until each has a ramp in flight, then renders one block shorter than the
-    /// ramp, so the ramps are still in flight after it.
-    fn ramps_in_flight(&mut self, rng: &mut Rng, strips: [usize; 2], label: &str) {
-        for strip in strips {
-            for _ in 0..64 {
-                if self.in_flight(strip) {
-                    break;
-                }
-                self.retune(rng, strip);
-            }
-        }
-        let frames = [16, 32, 48][rng.below(3)];
-        self.block(rng, frames, label);
-        for strip in strips {
-            assert!(
-                self.in_flight(strip),
-                "{label}: strip {strip} has no ramp in flight"
-            );
-        }
-    }
-
-    /// `count` blocks of random lengths, retuning a random strip now and then.
-    fn blocks(&mut self, rng: &mut Rng, count: usize, label: &str) {
-        for _ in 0..count {
-            if rng.chance(0.4) {
-                let strip = rng.below(2 * W);
-                self.retune(rng, strip);
-            }
-            let frames = block_frames(rng);
-            self.block(rng, frames, label);
-        }
-    }
-
-    /// Swaps the strips at `first` and `second` in `banks`, and follows them.
-    fn swap(
-        &mut self,
-        first: (usize, usize),
-        second: (usize, usize),
-        scratch: &mut [u8],
-        label: &str,
-    ) {
-        measured_swap(&mut self.banks, first, second, scratch, label);
-        for place in &mut self.at {
-            if *place == first {
-                *place = second;
-            } else if *place == second {
-                *place = first;
-            }
-        }
-    }
-
-    /// Every strip's payload, where it sits now, equals its twin's.
-    fn assert_payloads(&self, label: &str) {
-        for strip in 0..2 * W {
-            let (bank, lane) = self.at[strip];
-            assert_eq!(
-                swap_payload(&self.banks[bank], lane),
-                swap_payload(&self.twins[strip / W], strip % W),
-                "{label}: strip {strip}'s payload"
-            );
-        }
+            .map(|lane| request(lane, self.rate))
+            .collect();
+        let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, requests[0]).ok()?;
+        prepare_width::<L, W>(metadata, &requests, &[true; W]).ok()
     }
 }
 
@@ -715,68 +513,120 @@ fn general_bands_differ<L: Lane, const W: usize>(
     })
 }
 
-fn swapped_lanes_render_as_unswapped<L: Lane, const W: usize>(label: &str) {
-    bench_support::alloc::assert_installed();
-    bench_support::alloc::set_mode(bench_support::alloc::Mode::Count);
-    for seed in 0..3_u64 {
-        let mut rng = Rng(0x1747_0101 + seed * 0x9e37);
-        let (banks, values, rate) = swap_banks::<L, W>(&mut rng);
-        let scratch_bytes = effect_contract::swap_bank_lanes_scratch_bytes(&banks[0], SWAP_SIZES)
-            .expect("the scratch size");
-        let mut scratch = vec![0_u8; scratch_bytes];
-        let twins = [copy_bank(&banks[0]), copy_bank(&banks[1])];
-        let mut run = SwapRun {
-            banks,
-            twins,
-            at: (0..2 * W).map(|strip| (strip / W, strip % W)).collect(),
-            values,
-            rate,
-        };
-        let label = format!("{label} seed {seed}");
-        run.blocks(&mut rng, 6, &label);
-        // Within bank A: two distinct lanes, each with a ramp in flight.
-        let i = rng.below(W);
-        let j = (i + 1 + rng.below(W - 1)) % W;
-        assert!(
-            general_bands_differ(&run.banks[0], i, j),
-            "{label}: the lanes swapped within bank A share every general band's enable and family"
-        );
-        run.ramps_in_flight(&mut rng, [i, j], &label);
-        run.swap((0, i), (0, j), &mut scratch, &label);
-        run.blocks(&mut rng, 6, &label);
-        // Across A and B: whichever strips now sit at the two places.
-        let (first, second) = ((0, rng.below(W)), (1, rng.below(W)));
-        let strips = [first, second].map(|place| {
-            run.at
-                .iter()
-                .position(|&at| at == place)
-                .expect("a strip at every place")
-        });
-        run.ramps_in_flight(&mut rng, strips, &label);
-        run.swap(first, second, &mut scratch, &label);
-        // Long enough for every ramp to land and for the landed words to render.
-        run.blocks(&mut rng, 8, &label);
-        run.assert_payloads(&label);
-        // The prepared defaults moved with each strip: a full reset re-seeds every strip from its
-        // own bands and designed words, wherever it now sits.
-        for eq in run.banks.iter_mut().chain(run.twins.iter_mut()) {
-            PreparedNativeEffectBank::reset(eq, ResetKind::FullToDefaults);
+impl<L: Lane + 'static, const W: usize> swap_probe::Probe for EqSwapProbe<L, W> {
+    fn lanes(&self) -> usize {
+        W
+    }
+
+    fn width(&self) -> BankWidth {
+        BankWidth::for_lanes(W).expect("a bank width")
+    }
+
+    fn quantum(&self) -> u32 {
+        request(&self.configs[0], self.rate).quantum
+    }
+
+    fn sizes(&self) -> effect_contract::StatePayloadSizes {
+        SWAP_SIZES
+    }
+
+    fn state_layout_version(&self) -> u32 {
+        STATE_LAYOUT_VERSION
+    }
+
+    fn bind(&mut self, which: usize) -> Box<dyn PreparedNativeEffectBank> {
+        Box::new(self.prepare(which).expect("a bank that prepared once"))
+    }
+
+    /// Random input, now and then a block of silence.
+    fn input(&mut self, _strip: usize, left: &mut [f32], right: &mut [f32]) {
+        let silent = self.rng.chance(0.15);
+        for word in left.iter_mut().chain(right.iter_mut()) {
+            *word = if silent {
+                0.0
+            } else {
+                2.0 * self.rng.unit() - 1.0
+            };
         }
-        let frames = block_frames(&mut rng);
-        run.block(&mut rng, frames, &format!("{label} after a full reset"));
-        run.assert_payloads(&format!("{label} after a full reset"));
+    }
+
+    /// A retune of one random automatable parameter on a random block (about one in ten), or of
+    /// eight in a row, so every strip's ramps open.
+    fn automate(&mut self, strip: usize, how: Automate, _first_sample: u64) -> Automation {
+        let retunes = match how {
+            Automate::Nothing => 0,
+            Automate::Random => usize::from(self.rng.chance(0.1)),
+            Automate::Every => 8,
+        };
+        let mut candidate = self.values[strip].clone();
+        let mut targets = Vec::new();
+        for _ in 0..retunes {
+            if let Some((next, more)) = retune_targets(&mut self.rng, self.rate, &candidate) {
+                candidate = next;
+                targets.extend(more);
+            }
+        }
+        self.pending[strip] = Some(candidate);
+        Automation {
+            spans: Vec::new(),
+            targets,
+        }
+    }
+
+    fn targets_applied(&mut self, strip: usize, applied: bool) {
+        if let Some(candidate) = self.pending[strip].take()
+            && applied
+        {
+            self.values[strip] = candidate;
+        }
+    }
+
+    /// A channel section's band `s` keeps its `remaining` at word `s * STATE_WORDS_PER_BAND + 14`
+    /// (`Channel::snapshot_track`).
+    fn ramp_in_flight(&self, left: &[u8], right: &[u8]) -> bool {
+        [left, right].iter().any(|section| {
+            (0..EQ_SECTION_COUNT).any(|band| {
+                let at = (band * STATE_WORDS_PER_BAND + 14) * 4;
+                section[at..at + 4] != [0; 4]
+            })
+        })
+    }
+
+    /// Two lanes of bank A that differ in some general band's enable or family.
+    fn inside_pair(&mut self) -> Option<(usize, usize)> {
+        let eq = self.prepare(0).expect("a bank that prepared once");
+        let start = self.rng.below(W);
+        let pair = (0..W * W)
+            .map(|index| ((start + index / W) % W, index % W))
+            .find(|&(first, second)| first != second && general_bands_differ(&eq, first, second));
+        assert!(
+            pair.is_some(),
+            "bank A has no two lanes that differ in a general band"
+        );
+        pair
+    }
+
+    fn heap_calls(&self, call: &mut dyn FnMut()) -> u64 {
+        let mark = bench_support::alloc::current_thread_counters();
+        call();
+        let delta = bench_support::alloc::current_thread_delta_since(mark);
+        delta.allocations + delta.deallocations + delta.reallocations
     }
 }
 
-/// Issue #1747 gate 1 for the EQ: two banks of one slot shape render random input with per-lane
-/// targets; two lanes swap through `effect_contract::swap_bank_lanes`, once within a bank and
-/// once across the two, each with ramps in flight on both lanes; inputs and later retunes follow
-/// the strips. The lanes swapped within a bank differ in some general band's enable or family.
-/// Every strip's output is bit-equal to a twin run that never swaps, every strip's payload is
-/// equal at the end, and the swap allocates nothing. Last, every bank and twin takes a full reset
-/// and renders one more block, bit-equal again, so a swap that left a strip's prepared defaults
-/// behind is red.
+/// Issue #1747 gate 1 for the EQ (`conformance::swap_probe::check`): a strip whose lane is
+/// swapped, inside one bank (two lanes whose general bands differ in enable or family) and across
+/// two, with its ramps in flight, renders bit for bit as its twin that never moved, holds its
+/// twin's payload, re-seeds from its own bands and designed words on a full reset, and the swap
+/// reaches the allocator zero times.
 #[test]
 fn swapped_eq_lanes_render_exactly_as_unswapped_ones() {
-    lane::each_vector_lane!(|L, W| swapped_lanes_render_as_unswapped::<L, W>(&width_label(W)));
+    bench_support::alloc::assert_installed();
+    bench_support::alloc::set_mode(bench_support::alloc::Mode::Count);
+    lane::each_vector_lane!(|L, W| {
+        for seed in 0..3_u64 {
+            let seed = 0x1747_0101 + seed * 0x9e37;
+            swap_probe::check(&mut EqSwapProbe::<L, W>::new(seed), seed);
+        }
+    });
 }
