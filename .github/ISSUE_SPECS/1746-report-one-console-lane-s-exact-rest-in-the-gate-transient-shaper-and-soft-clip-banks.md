@@ -43,3 +43,69 @@ word would still change; gate 2 turns red when the new fast path skips work that
 
 - #1745 (EQ, compressor, limiter), which adds the bank-contract query.
 - #1376 stays open and independent.
+
+## Decision record
+
+### D1 The claim is decided on demand (attempt 1, 2026-10-23)
+
+Each effect's bank-wide fast path asks `lanes_at_rest()` at the start of every quiet block, after
+the block's automation is applied, and skips the kernel when every lane (padded lanes included) is
+set. No cached `silent_fixed_point` flag, so there are no withdrawal sites (target, reset, restore,
+automation) to miss. The input scan runs first, so a block with signal never evaluates the
+predicate. The fast path sits in the driver each bank shares with its scalar instance (gate
+`run_block`, shaper `Shaper::process_block`, soft clip `SoftClip::process`), as in the compressor.
+Test builds only: an admissions counter and a switch that forbids the fast path.
+
+### D2 Per effect
+
+- **Gate/expander**: per lane and channel, every ramp settled, then one frame of the kernel's own
+  `channel_step::<f32, false>` on a scalar copy with a `+0.0` main and detector must leave
+  `gain_db`, `open` and `hold` bit-identical, write `+0.0`, and keep `gain_db` inside the D7 bound
+  (`finish_block` would reset it). With settled ramps and constant input a block is that frame map
+  applied `frames` times, so a one-frame fixed point is a block fixed point; the scalar lane is the
+  vector backends' bit oracle. The fixed point is not a closed form (the gain stalls at a
+  bit-stable word, the hysteresis may stay open with `hold` reloaded), hence the evaluation.
+  Clock: the bank's `ramp_frames_left`, which the skip advances as `run_block` does. The output
+  leg is implied by the others (an equivalent mutant) and is kept so the clause is checked.
+- **Transient shaper**: both followers of both channels `+0.0` and every ramp settled. No clocks.
+- **Soft clip**: every row of the lane in `x`, `e` and `dry` (all 64 double-written rows) `+0.0`
+  and every ramp settled. Clock: each channel's shared `history.pos`, which the skip advances by
+  `frames` modulo 32.
+
+### D3 The wasm kernel roster
+
+The roster needs exactly one `f32x4`-arithmetic function per effect. The shaper and soft clip
+predicates are bit tests and integer compares. The gate's scalar evaluation is a non-generic
+`#[inline(never)]` `kernel::channel_at_rest` (its name has no `f32x4`, and its scalar ops stay out
+of `process_bank`'s scalar budget), called from an `#[inline(never)]` `silent_block`. It is scalar
+by necessity: a vector form would be a second `gate_expander` `f32x4` symbol (the trait method is
+kept alive by the vtable). It runs once per quiet block, `2 * W` calls. The soft clip's
+`Channel::process` is pinned `#[inline(never)]` as a precaution; it was already out of line on
+main.
+
+## Evidence (attempt 1, 2026-10-23)
+
+- Gate 1 (`rest_tests::a_lane_reported_at_rest_stays_at_rest_through_silence` in each crate, W4
+  and W8 on the AVX2 host, `conformance::rest_probe`). Reach, claims / earned / quiet refusals:
+  gate W4 6409/4833/12424, W8 16008/11554/21847; shaper W4 21202/4844/50709, W8
+  57294/14353/86488 (463 and 1413 of the earned claims after a follower held a non-zero word);
+  soft clip W4 7099/6999/2778, W8 14913/14537/5192. The gate plants a NaN gain, the shaper plants
+  envelope words, and the soft clip plants a restored `X` row, so each leg is reachable.
+- Gate 2 (gate `the_silent_fast_path_renders_the_kernel_bits`, shaper
+  `the_silent_fast_path_renders_the_kernels_bits`, soft clip
+  `the_silent_fast_path_renders_what_the_kernel_renders`): staggered rests, full and padded, W4
+  and W8, fast path allowed against forbidden; every output word, every lane word, the reports and
+  the clocks equal after every block; admitted on some silent blocks but not all.
+- Gate 3: zero allocations on the fast path: soft clip and shaper `tests/allocation.rs` gain a
+  silent stretch; the gate has no allocation test, so `rest_tests::the_silent_fast_path_allocates_nothing`
+  counts 256 admitted blocks at `(0, 0)`.
+- Mutants, each red: every predicate leg (gate ramps, gain, open, hold, D7; shaper four envelope
+  words and ramps; soft clip `x`, `e`, `dry`, ramps, right channel), `== all` to `!= 0` (all
+  three), and the skipped clock advance (gate, soft clip). The gate output leg survives (equivalent).
+- Gate 4: `cargo fmt --all --check`, `cargo clippy --locked --workspace --all-targets
+  --all-features -- -D warnings`, `cargo run --release -p realtime-policy` (171 regions in 34
+  files): clean. `cargo test` on the three crates plus `rack` and `effect-compiler`: 212 passed, 0
+  failed, 3 ignored.
+- Wasm: `build-web-audioworklet.sh` plus `check-web-audioworklet.sh` pass; the roster rows are
+  unchanged from main (gate vector 174 scalar 8, shaper 522/0, soft clip 47/0); the V8 spill
+  gate, `check-browser-expected-resources.py --artifacts` and `check-scalar-oracle-absent.py` pass.
