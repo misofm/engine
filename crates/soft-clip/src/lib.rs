@@ -1058,6 +1058,35 @@ struct PreparedSoftClipBank<L: Lane> {
     inner: SoftClip<L>,
 }
 
+/// The bank's one clock, advanced for a skipped block (issue #1747).
+impl<L: Lane> PreparedSoftClipBank<L> {
+    /// Advances the bank's shared history position `pos` on both channels by `frames`, exactly as
+    /// one rendered block of `frames` frames of `+0.0` input would.
+    ///
+    /// `pos` is the soft clip's only clock: the kernel advances it once per frame by
+    /// `history_advance`, a step of one modulo the 32 live rows, whatever the signal. Nothing else
+    /// a zero block changes is a clock. A lane at rest has every ramp settled (a ramp in flight
+    /// clears its rest bit), so a zero block leaves its ramp words alone; and every row of its
+    /// three histories already holds `+0.0`, which is exactly what a zero block would push
+    /// (`xin = +0.0`, `X = flush(2g * +0.0) = +0.0` for a positive gain, and `e = flush(cubic(u))`
+    /// with `u` an ascending sum from `+0.0` of zero products, so `+0.0`). A ring of `+0.0` reads
+    /// the same at every rotation, so moving `pos` without writing the rows leaves every state word
+    /// and every payload word bit-identical to the rendered block.
+    ///
+    /// The position is per bank, so it moves whatever `lanes_mask` holds: the caller skips a bank
+    /// whole and passes every lane, and a lane in the mask that was not at rest is a caller defect
+    /// (its rows would rotate under it). Every bank of one slot renders the same block lengths, so
+    /// their positions stay equal; that is what lets a lane swap between two banks restore relative
+    /// to the destination's position. Constant time: `frames` is reduced modulo the ring first.
+    fn advance_skipped_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        let _ = lanes_mask;
+        let step = frames as usize & POS_MASK;
+        for history in [&mut self.inner.left.history, &mut self.inner.right.history] {
+            history.pos = ((history.pos as usize + step) & POS_MASK) as u32;
+        }
+    }
+}
+
 impl NativeEffectFactory for SoftClipFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
         &SOFT_CLIP_DESCRIPTOR
@@ -1324,6 +1353,10 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         )
     }
     // REALTIME_POLICY_END
+
+    fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        self.advance_skipped_clocks(lanes_mask, frames);
+    }
 }
 
 fn bank_track_index<L: Lane>(track_index: u32) -> Result<usize, StatePayloadError> {
