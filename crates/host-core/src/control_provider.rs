@@ -29,13 +29,14 @@ use crate::response::{
 };
 
 /// The counters the provider serves, in ascending ID order (#1351 D1): the two telemetry
-/// counters, `live_values_superseded` (#1312 D8) and `transition_reprepare_refusals` (D6). Each
-/// reads 0 from construction.
-const SERVED_COUNTERS: [CounterId; 4] = [
+/// counters, `live_values_superseded` (#1312 D8), `transition_reprepare_refusals` (D6) and
+/// `strips_restarted` (#1768). Each reads 0 from construction.
+const SERVED_COUNTERS: [CounterId; 5] = [
     CounterId::TelemetryCoalesced,
     CounterId::TelemetryDropped,
     CounterId::LiveValuesSuperseded,
     CounterId::TransitionReprepareRefusals,
+    CounterId::StripsRestarted,
 ];
 
 /// The slots the provider's counter snapshot keeps even when the controller retains fewer IDs.
@@ -555,6 +556,17 @@ impl SessionControlProvider {
         set_counter(
             &mut self.counter_snapshot,
             CounterId::LiveValuesSuperseded,
+            count,
+        );
+    }
+
+    /// Record the session's `strips_restarted` count (#1768): for every plan render adopted, the
+    /// strips it started at rest ([`crate::PlanStateInventory::restarted_strips`]). The control
+    /// plane copies it in beside `live_values_superseded`.
+    pub fn set_strips_restarted(&mut self, count: u64) {
+        set_counter(
+            &mut self.counter_snapshot,
+            CounterId::StripsRestarted,
             count,
         );
     }
@@ -3216,6 +3228,7 @@ mod tests {
             telemetry_dropped: 9,
         });
         provider.set_live_values_superseded(13);
+        provider.set_strips_restarted(5);
         let counters = provider
             .counters(&CountersRequest {
                 all: true,
@@ -3232,7 +3245,9 @@ mod tests {
             CounterId::TransitionReprepareRefusals
         );
         assert_eq!(counters.values[3].value, 0);
-        assert_eq!(counters.values.len(), 4);
+        assert_eq!(counters.values[4].id, CounterId::StripsRestarted);
+        assert_eq!(counters.values[4].value, 5);
+        assert_eq!(counters.values.len(), 5);
         assert_eq!(provider.retained_capacities().1, counter_capacity);
 
         provider.set_render_diagnostic(0, 256, 3, true);

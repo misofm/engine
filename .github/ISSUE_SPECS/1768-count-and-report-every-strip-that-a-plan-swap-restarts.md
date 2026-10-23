@@ -32,3 +32,35 @@ The core test turns red when an adopted restart is not counted, or when a candid
 ## Dependencies
 
 None. Edit order: #1767 (the fused-stage removal) edits `resolve_strip_carry` in the same file and merges first.
+
+## Decision record (attempt 1, 2026-10-23)
+
+- **D1 Counter.** `CounterId::StripsRestarted = 18` (`STRIPS_RESTARTED`), the next free ID. The
+  provider serves it beside `LIVE_VALUES_SUPERSEDED` (`SERVED_COUNTERS`, now five), a saturating
+  `u64` from 0. The protocol's counter test now refuses 19 as the next ID. The SDK has no typed
+  counter-ID list (it sends `COUNTERS_GET` frames through `control()`/`controlFrame()`), so only
+  its doc changes.
+- **D2 Where it is added.** In the control plane, where a pending provider is promoted
+  (`SessionState::promote_pending_provider`, `crates/control-plane/src/control.rs`): a provider is
+  promoted only once render has adopted its plan (the active-epoch atomic render stores after the
+  adopting block, the reclaim of the plan it displaced, or a `Taken` withdrawal), each adopted
+  candidate exactly once, and a withdrawn candidate never (rebuild pops it). Both hosts run this
+  one `SessionState`, so no host computes the value. The refresh that copies
+  `live_values_superseded` into the provider copies it too. Render code does not change, so render
+  allocation and the realtime policy are unchanged. The spec's "render adds it at adoption" would
+  need a per-candidate word through the plan exchange (`crates/engine`, as `superseded` travels)
+  or the graph hand-over (`crates/graph`), both outside the authorized paths; the control-side
+  promotion observes the same adoption without them. `COUNTERS_GET` reports a restart once the
+  adopting block's render call has returned (every session call runs the service step first).
+- **D3 Rule.** A strip counts once per adopted plan, whichever carries restart it: the count is
+  the length of the plan's deduplicated `restarted` list (`PlanStateInventory::restarted_strips`,
+  new accessor; `PreparedHost::restarted_strips` reads it). Added strips are not restarts. A
+  discontinuity successor lists none (its base carries no strip state; the jump is declared, not a
+  fallback). A candidate withdrawn unadopted adds nothing; its replacement is prepared against the
+  running plan, so its list holds the withdrawn edit's strips too.
+- **Known limit.** A hand-over that render refuses whole (`CarryOutcome::PredecessorMismatch`, an
+  invariant failure already counted by `carry_mismatch_count`) starts more strips at rest than the
+  list names; the counter reports the prepared list.
+- **Not done (outside the authorized paths).** `docs/CONTROL_PROTOCOL_REGISTRY.md` ("Counter IDs
+  run 1 to 17") and `docs/C_ABI_V1_QUALIFICATION.md` (the served-counter paragraph, already stale
+  before this issue) do not name counter 18.

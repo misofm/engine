@@ -11,7 +11,7 @@
 //! Per scripted edit the test compares the verdict of the two hosts whole: committed with the same
 //! path (`live`, or `monitor` for solo) and the same revision, or refused with the same control
 //! codes. Per block it compares the bits of the two output planes. At the end the two hosts report
-//! the same `live_values_superseded` count, and every page of `CONTROL_LIST_GET` and
+//! the same `live_values_superseded` and `STRIPS_RESTARTED` counts (#1768), and every page of `CONTROL_LIST_GET` and
 //! `CONTROL_STATE_GET` and the `SESSION_SNAPSHOT_GET` bytes are byte-identical. The whole run
 //! repeats at 44.1, 48, 88.2 and 96 kHz. The script holds the edits that take the rebuild arm (a
 //! route into the output, the prepared bypass of the delay and the multiband compressor, and
@@ -1407,29 +1407,10 @@ impl CAbi {
     }
 
     fn superseded(&mut self) -> u64 {
-        let response = self.send(
-            CommandPayload::CountersGet(&CountersRequest {
-                all: false,
-                ids: vec![CounterId::LiveValuesSuperseded as u32],
-            }),
-            ExpectedRevision::Any,
-        );
-        let mut fields = [0_u16; 64];
-        let DecodedTypedResponseFrame::Success {
-            payload: DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
-            ..
-        } = ProtocolCodec::default()
-            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
-            .expect("counters response")
-        else {
-            panic!("expected a counter snapshot")
-        };
-        snapshot
-            .values
-            .iter()
-            .find(|value| value.id == CounterId::LiveValuesSuperseded)
-            .expect("the counter is in the snapshot")
-            .value
+        counter(
+            |payload| self.send(payload, ExpectedRevision::Any),
+            CounterId::LiveValuesSuperseded,
+        )
     }
 
     fn step(&mut self, block: u64) -> Vec<u32> {
@@ -1654,7 +1635,31 @@ fn listed_masters(
 
 /// One run of `steps` on both legs. Returns the browser's blocks and the final superseded count
 /// (equal on both legs, asserted here).
-fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
+/// Counter `id`, read with a `COUNTERS_GET` of it alone that `send` submits and answers.
+fn counter(send: impl FnOnce(CommandPayload<'_>) -> Vec<u8>, id: CounterId) -> u64 {
+    let response = send(CommandPayload::CountersGet(&CountersRequest {
+        all: false,
+        ids: vec![id as u32],
+    }));
+    let mut fields = [0_u16; 64];
+    let DecodedTypedResponseFrame::Success {
+        payload: DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+        ..
+    } = ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("counters response")
+    else {
+        panic!("expected a counter snapshot")
+    };
+    snapshot
+        .values
+        .iter()
+        .find(|value| value.id == id)
+        .expect("the counter is in the snapshot")
+        .value
+}
+
+fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64, u64) {
     let model = model_at(rate);
     let mut browser = Rig::new(&model);
     let mut c_abi = CAbi::new(&model);
@@ -1746,6 +1751,19 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
         superseded,
         "{rate} Hz: the browser status reports the superseded count the C ABI reports"
     );
+    // #1768: the strips the script's rebuilds restarted, counted by the core on both hosts.
+    let restarted = counter(
+        |payload| c_abi.send(payload, ExpectedRevision::Any),
+        CounterId::StripsRestarted,
+    );
+    assert_eq!(
+        counter(
+            |payload| browser.command(payload, ExpectedRevision::Any),
+            CounterId::StripsRestarted,
+        ),
+        restarted,
+        "{rate} Hz: the browser reports the C ABI's STRIPS_RESTARTED"
+    );
     // Gate 8: the control list, the control state and the committed document are the same bytes.
     let (browser_pages, browser_snapshot) =
         dump(|payload, expected| browser.command(payload, expected));
@@ -1762,27 +1780,33 @@ fn run(rate: u32, steps: &[Step]) -> (Vec<Vec<u32>>, u64) {
         browser_snapshot, c_snapshot,
         "{rate} Hz: the committed documents are byte-identical"
     );
-    (blocks, superseded)
+    (blocks, superseded, restarted)
 }
 
 /// The same script on both hosts: every edit ends alike, every block has the same bits, the
-/// superseded counts are equal.
+/// superseded counts are equal and so are the restarted-strip counts.
 ///
 /// Red if a value lowers to a different lane or cell, ramps over a different length, composes
 /// with a VCA or a solo differently, drains differently, or is refused with a different code on
-/// one host. At every rate the script also supersedes at least one write (the two fader edits of
-/// block 4), and at least 40 blocks differ from a run with no edits on the same session, so the
+/// one host, or if one host counts its restarted strips itself. At every rate the script also
+/// supersedes at least one write (the two fader edits of block 4), its rebuilds restart at least
+/// one strip, and at least 40 blocks differ from a run with no edits on the same session, so the
 /// script is heard. Which edit moves which block is held in `host-core`'s `live_delta.rs`.
 #[test]
 fn both_hosts_give_the_same_result_for_the_same_control_edits() {
     let steps = script();
     for rate in RATES {
-        let (blocks, superseded) = run(rate, &steps);
+        let (blocks, superseded, restarted) = run(rate, &steps);
         assert!(
             superseded >= 1,
             "{rate} Hz: the two fader edits of block 4 replace one write"
         );
-        let (untouched, _) = run(rate, &[]);
+        assert!(
+            restarted >= 1,
+            "{rate} Hz: the script's rebuilds restart a strip, so the two hosts compare a count \
+             the core moved"
+        );
+        let (untouched, _, _) = run(rate, &[]);
         let moved = blocks
             .iter()
             .zip(&untouched)
@@ -2060,7 +2084,7 @@ const BYPASS_BLOCK: u64 = 6;
 fn a_live_bypass_crossfades_alike(edit: Edit, author: fn(&mut SessionModel)) {
     let step = [live(BYPASS_BLOCK, edit)];
     for rate in RATES {
-        let (edited, _) = run(rate, &step);
+        let (edited, _, _) = run(rate, &step);
         let model = model_at(rate);
         let mut plain = Rig::new(&model);
         let wet: Vec<Vec<u32>> = (0..BLOCKS).map(|block| plain.step(block)).collect();
