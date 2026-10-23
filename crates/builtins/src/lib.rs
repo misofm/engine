@@ -2823,8 +2823,82 @@ impl<L: Lane> InputStage<L> {
         self.refresh_filter_plan();
         self.refresh_channel_symmetry_lane(lane);
     }
+
+    /// Exchange populated lane `lane` with `peer`'s lane `peer_lane` (`None`: this stage's), at a
+    /// block boundary (issue #1765): the running state through the carry payload
+    /// ([`Self::export_lane`] and [`Self::import_lane`], the one record of a lane's running state),
+    /// then the prepared endpoint a full reset returns to (`filter_initial`), which the payload
+    /// leaves with the stage and a swap moves with the strip. Allocation-free.
+    ///
+    /// Never called on a collapsed stage: the chain takes the disengage boundary first, so both
+    /// channels' integrators are real state when they are exported.
+    fn swap_lanes(&mut self, lane: usize, peer: Option<&mut Self>, peer_lane: usize) {
+        debug_assert!(
+            !self.collapsed,
+            "a lane swap follows the disengage boundary"
+        );
+        let own = self.export_lane(lane);
+        match peer {
+            None => {
+                let theirs = self.export_lane(peer_lane);
+                self.import_lane(lane, &theirs);
+                self.import_lane(peer_lane, &own);
+                for channel in &mut self.filter_initial {
+                    for coef in channel {
+                        for word in svf_coef_words_mut(coef) {
+                            let mut words = lane_read::<L>(*word);
+                            words.swap(lane, peer_lane);
+                            *word = lane_words::<L>(&words);
+                        }
+                    }
+                }
+            }
+            Some(other) => {
+                debug_assert!(
+                    !other.collapsed,
+                    "a lane swap follows the disengage boundary"
+                );
+                let theirs = other.export_lane(peer_lane);
+                self.import_lane(lane, &theirs);
+                other.import_lane(peer_lane, &own);
+                for (channel, other_channel) in self
+                    .filter_initial
+                    .iter_mut()
+                    .zip(&mut other.filter_initial)
+                {
+                    for (coef, other_coef) in channel.iter_mut().zip(other_channel) {
+                        for (word, other_word) in svf_coef_words_mut(coef)
+                            .into_iter()
+                            .zip(svf_coef_words_mut(other_coef))
+                        {
+                            let mut words = lane_read::<L>(*word);
+                            let mut other_words = lane_read::<L>(*other_word);
+                            core::mem::swap(&mut words[lane], &mut other_words[peer_lane]);
+                            *word = lane_words::<L>(&words);
+                            *other_word = lane_words::<L>(&other_words);
+                        }
+                    }
+                }
+            }
+        }
+    }
     // REALTIME_POLICY_END
 }
+
+// REALTIME_POLICY_BEGIN
+/// The six coefficient words of one section, in a fixed order, for a per-lane exchange.
+fn svf_coef_words_mut<L: Lane>(coef: &mut SvfCoef<L>) -> [&mut L; 6] {
+    let SvfCoef {
+        c1,
+        a2,
+        a3,
+        m0,
+        m1,
+        m2,
+    } = coef;
+    [c1, a2, a3, m0, m1, m2]
+}
+// REALTIME_POLICY_END
 
 /// One input bank lane's whole state, both channels: what a plan swap hands from the
 /// predecessor's lane to the successor's (issue #1276 D2).
@@ -4434,6 +4508,46 @@ impl BuiltinInputBank {
         per_width!(InputStageKernel(stage) in &mut self.stage => stage.import_lane(lane, state));
         Ok(())
     }
+    /// Whether [`Self::swap_lanes`] would exchange populated lane `lane` with `peer`'s populated
+    /// lane `peer_lane` (`None`: this bank's): both lanes are members and the two banks have one
+    /// width, so one kernel type (issue #1765). Allocation-free.
+    #[must_use]
+    pub fn can_swap_lanes(&self, lane: usize, peer: Option<&Self>, peer_lane: usize) -> bool {
+        let peer = peer.unwrap_or(self);
+        lane < self.members && peer_lane < peer.members && peer.width == self.width
+    }
+
+    /// Exchange populated lane `lane`'s whole state with `peer`'s lane `peer_lane` (`None`: this
+    /// bank's), at a block boundary on the render thread (issue #1765): the carry payload
+    /// ([`InputLaneState`]) both ways, then the prepared endpoint a full reset returns to. Every
+    /// refusal ([`Self::can_swap_lanes`]) comes before the first write. Allocation-free.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`], changing nothing, when [`Self::can_swap_lanes`] does
+    /// not hold.
+    pub fn swap_lanes(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut Self>,
+        peer_lane: usize,
+    ) -> Result<(), BuiltinParameterError> {
+        if !self.can_swap_lanes(lane, peer.as_deref(), peer_lane) {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        match peer {
+            None => per_width!(InputStageKernel(stage) in &mut self.stage => {
+                stage.swap_lanes(lane, None, peer_lane);
+            }),
+            Some(other) => per_width!(
+                (InputStageKernel(own), InputStageKernel(theirs))
+                    in (&mut self.stage, &mut other.stage)
+                    => own.swap_lanes(lane, Some(theirs), peer_lane),
+                else return Err(BuiltinParameterError::LaneLength)
+            ),
+        }
+        Ok(())
+    }
     // REALTIME_POLICY_END
 }
 
@@ -4731,6 +4845,48 @@ impl BuiltinFaderBank {
         per_width!(FaderStageKernel(stage) in &mut self.stage => stage.import_lane(lane, state));
         Ok(())
     }
+    /// Whether [`Self::swap_lanes`] would exchange populated lane `lane` with `peer`'s populated
+    /// lane `peer_lane` (`None`: this bank's): both lanes are members and the two banks have one
+    /// width, so one kernel type (issue #1765). Allocation-free.
+    #[must_use]
+    pub fn can_swap_lanes(&self, lane: usize, peer: Option<&Self>, peer_lane: usize) -> bool {
+        let peer = peer.unwrap_or(self);
+        lane < self.members && peer_lane < peer.members && peer.width == self.width
+    }
+
+    /// Exchange populated lane `lane`'s whole state with `peer`'s lane `peer_lane` (`None`: this
+    /// bank's), at a block boundary on the render thread (issue #1765): the carry payload
+    /// ([`FaderLaneState`], the one record of a lane's state) both ways. Every refusal
+    /// ([`Self::can_swap_lanes`]) comes before the first write. Allocation-free.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`], changing nothing, when [`Self::can_swap_lanes`] does
+    /// not hold.
+    pub fn swap_lanes(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut Self>,
+        peer_lane: usize,
+    ) -> Result<(), BuiltinParameterError> {
+        if !self.can_swap_lanes(lane, peer.as_deref(), peer_lane) {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        let own = per_width!(FaderStageKernel(stage) in &self.stage => stage.export_lane(lane));
+        match peer {
+            None => per_width!(FaderStageKernel(stage) in &mut self.stage => {
+                let theirs = stage.export_lane(peer_lane);
+                stage.import_lane(lane, &theirs);
+                stage.import_lane(peer_lane, &own);
+            }),
+            Some(other) => {
+                let theirs = per_width!(FaderStageKernel(stage) in &other.stage => stage.export_lane(peer_lane));
+                per_width!(FaderStageKernel(stage) in &mut self.stage => stage.import_lane(lane, &theirs));
+                per_width!(FaderStageKernel(stage) in &mut other.stage => stage.import_lane(peer_lane, &own));
+            }
+        }
+        Ok(())
+    }
     // REALTIME_POLICY_END
 
     /// Snaps every lane to its target and cancels any ramp in flight.
@@ -4882,6 +5038,48 @@ impl BuiltinMatrixBank {
             return Err(BuiltinParameterError::LaneLength);
         }
         per_width!(MatrixStageKernel(stage) in &mut self.stage => stage.import_lane(lane, state));
+        Ok(())
+    }
+    /// Whether [`Self::swap_lanes`] would exchange populated lane `lane` with `peer`'s populated
+    /// lane `peer_lane` (`None`: this bank's): both lanes are members and the two banks have one
+    /// width, so one kernel type (issue #1765). Allocation-free.
+    #[must_use]
+    pub fn can_swap_lanes(&self, lane: usize, peer: Option<&Self>, peer_lane: usize) -> bool {
+        let peer = peer.unwrap_or(self);
+        lane < self.members && peer_lane < peer.members && peer.width == self.width
+    }
+
+    /// Exchange populated lane `lane`'s whole state with `peer`'s lane `peer_lane` (`None`: this
+    /// bank's), at a block boundary on the render thread (issue #1765): the carry payload
+    /// ([`MatrixLaneState`], the one record of a lane's state) both ways. Every refusal
+    /// ([`Self::can_swap_lanes`]) comes before the first write. Allocation-free.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`], changing nothing, when [`Self::can_swap_lanes`] does
+    /// not hold.
+    pub fn swap_lanes(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut Self>,
+        peer_lane: usize,
+    ) -> Result<(), BuiltinParameterError> {
+        if !self.can_swap_lanes(lane, peer.as_deref(), peer_lane) {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        let own = per_width!(MatrixStageKernel(stage) in &self.stage => stage.export_lane(lane));
+        match peer {
+            None => per_width!(MatrixStageKernel(stage) in &mut self.stage => {
+                let theirs = stage.export_lane(peer_lane);
+                stage.import_lane(lane, &theirs);
+                stage.import_lane(peer_lane, &own);
+            }),
+            Some(other) => {
+                let theirs = per_width!(MatrixStageKernel(stage) in &other.stage => stage.export_lane(peer_lane));
+                per_width!(MatrixStageKernel(stage) in &mut self.stage => stage.import_lane(lane, &theirs));
+                per_width!(MatrixStageKernel(stage) in &mut other.stage => stage.import_lane(peer_lane, &own));
+            }
+        }
         Ok(())
     }
     // REALTIME_POLICY_END

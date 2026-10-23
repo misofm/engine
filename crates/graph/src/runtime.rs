@@ -5408,7 +5408,8 @@ pub(crate) fn take_observers(
 
 use effect_contract::BankWidth;
 use rack::{
-    AoSoaScratch, BankBlock, BankSlot, BankStage, EffectBankStage, LiveControlEffectBankStage,
+    AoSoaScratch, BankBlock, BankSlot, BankStage, EffectBankStage, LanePeer, LanePeerMut,
+    LiveControlEffectBankStage,
 };
 
 use crate::{
@@ -5478,6 +5479,71 @@ impl BankStage for BuiltinStage {
     fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
         Some(self)
     }
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+    // REALTIME_POLICY_BEGIN
+    /// A builtin bank swaps on the stack, so the chain's scratch is not read (issue #1765).
+    fn lane_swap_scratch_bytes(&self) -> usize {
+        0
+    }
+    /// The bank's own check, forwarded: a peer is another builtin stage, and its bank decides
+    /// whether it is of the same concrete type and width
+    /// ([`GraphPreparedBuiltinBankProcessor::can_swap_builtin_lanes`], issue #1765).
+    fn can_swap_lanes(&self, lane: usize, peer: LanePeer<'_>, scratch_bytes: usize) -> bool {
+        let _ = scratch_bytes;
+        match peer {
+            LanePeer::Same(other_lane) => self.0.can_swap_builtin_lanes(lane, None, other_lane),
+            LanePeer::Other(stage, other_lane) => stage
+                .as_any()
+                .and_then(|any| any.downcast_ref::<Self>())
+                .is_some_and(|other| {
+                    self.0
+                        .can_swap_builtin_lanes(lane, Some(&*other.0), other_lane)
+                }),
+        }
+    }
+    /// The bank's swap, forwarded (issue #1765). Every per-lane field lives in the bank, so this
+    /// adapter holds nothing that moves.
+    fn swap_lanes(&mut self, lane: usize, peer: LanePeerMut<'_>, scratch: &mut [u8]) -> bool {
+        if !self.can_swap_lanes(lane, peer.as_peer(), scratch.len()) {
+            return false;
+        }
+        match peer {
+            LanePeerMut::Same(other_lane) => self.0.swap_builtin_lanes(lane, None, other_lane),
+            LanePeerMut::Other(stage, other_lane) => stage
+                .as_any_mut()
+                .and_then(|any| any.downcast_mut::<Self>())
+                .is_some_and(|other| {
+                    self.0
+                        .swap_builtin_lanes(lane, Some(&mut *other.0), other_lane)
+                }),
+        }
+    }
+    // REALTIME_POLICY_END
+}
+
+/// Test-only (issue #1765): `processor` in the graph's builtin chain-slot adapter, as bind wraps
+/// a builtin bank, so a test outside this crate builds a chain of real builtin slots.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_builtin_stage(
+    processor: Box<dyn GraphPreparedBuiltinBankProcessor>,
+) -> Box<dyn BankStage> {
+    Box::new(BuiltinStage(processor))
+}
+
+/// Test-only (issue #1765): the builtin bank processor slot `slot` of `chain` holds, as the
+/// executor reaches it ([`builtin_processor_mut`]); `None` for another slot kind or past the
+/// last slot.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_builtin_processor_mut(
+    chain: &mut BankChain,
+    slot: usize,
+) -> Option<&mut dyn GraphPreparedBuiltinBankProcessor> {
+    builtin_processor_mut(chain, slot)
 }
 
 // REALTIME_POLICY_BEGIN

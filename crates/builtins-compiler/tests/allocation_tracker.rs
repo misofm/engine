@@ -354,6 +354,22 @@ fn actual_input_trim_cell_drain_allocates_and_frees_nothing() {
     );
 }
 
+/// #1765 gate 1: a render-time swap of two strips' builtin lanes moves each strip's whole state
+/// ([`builtins_compiler::test_only_builtin_lane_swap`] holds the scenario and its bit checks).
+///
+/// Red if a swap leaves a per-lane field behind (stage state or ramp, cell reader, live symmetry
+/// term, stored automation), if a builtin stage refuses a swap it should make, or if an automated
+/// lane is let into a fader bank without automation slots. The allocation claim is
+/// `tests/lane_swap_alloc.rs`.
+#[test]
+fn a_builtin_lane_swap_moves_the_whole_strip() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let swaps = builtins_compiler::test_only_builtin_lane_swap(&mut |swap| swap());
+    assert!(swaps >= 8, "two passes of four swaps at one width at least");
+}
+
 #[test]
 fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation() {
     let _session_guard = SESSION

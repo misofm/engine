@@ -4361,6 +4361,44 @@ const fn lane_selected(lanes: u8, lane: usize) -> bool {
     debug_assert!(lane < MAXIMUM_BANK_LANES);
     (lanes >> (lane % MAXIMUM_BANK_LANES)) & 1 != 0
 }
+
+/// Whether [`exchange_lane_slots`] would exchange slot `lane` of `own` with slot `peer_lane` of
+/// `peer` (`None`: of `own`): both are in range.
+fn lane_slots_fit<T>(own: &[T], lane: usize, peer: Option<&[T]>, peer_lane: usize) -> bool {
+    lane < own.len() && peer_lane < peer.unwrap_or(own).len()
+}
+
+/// Exchange slot `lane` of `own` with slot `peer_lane` of `peer` (`None`: of `own`), issue
+/// #1765. Returns `false`, changing nothing, when [`lane_slots_fit`] does not hold. Moves the two
+/// values; allocation-free.
+fn exchange_lane_slots<T>(
+    own: &mut [T],
+    lane: usize,
+    peer: Option<&mut [T]>,
+    peer_lane: usize,
+) -> bool {
+    match peer {
+        None if lane == peer_lane => lane < own.len(),
+        None => {
+            let (low, high) = (lane.min(peer_lane), lane.max(peer_lane));
+            let Some((head, tail)) = own.split_at_mut_checked(high) else {
+                return false;
+            };
+            let (Some(first), Some(second)) = (head.get_mut(low), tail.first_mut()) else {
+                return false;
+            };
+            core::mem::swap(first, second);
+            true
+        }
+        Some(peer) => match (own.get_mut(lane), peer.get_mut(peer_lane)) {
+            (Some(first), Some(second)) => {
+                core::mem::swap(first, second);
+                true
+            }
+            _ => false,
+        },
+    }
+}
 // REALTIME_POLICY_END
 
 /// The mask [`GraphPreparedBuiltinBankProcessor::live_lanes`] reports: bit `n` is set when lane
@@ -4445,6 +4483,21 @@ impl BuiltinBankProcessor {
             first_error = first_error.and(drained);
         }
         first_error.map(|()| refused)
+    }
+
+    /// Whether [`GraphPreparedBuiltinBankProcessor::swap_builtin_lanes`] would exchange lane
+    /// `lane` with `peer`'s lane `peer_lane` (`None`: this bank's), issue #1765: the banks' own
+    /// check, and both lanes hold a reader slot and a symmetry term.
+    fn can_swap_with(&self, lane: usize, peer: Option<&Self>, peer_lane: usize) -> bool {
+        self.bank
+            .can_swap_lanes(lane, peer.map(|peer| &peer.bank), peer_lane)
+            && lane_slots_fit(
+                &self.controls,
+                lane,
+                peer.map(|peer| &*peer.controls),
+                peer_lane,
+            )
+            && lane_slots_fit(&self.live, lane, peer.map(|peer| &peer.live[..]), peer_lane)
     }
     // REALTIME_POLICY_END
 }
@@ -4554,6 +4607,58 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         // produced; were it, it is reported as one refused value, never as none.
         self.drain_controls(LiveSnapshot::ALL, lanes, true)
             .unwrap_or(1)
+    }
+
+    fn can_swap_builtin_lanes(
+        &self,
+        lane: usize,
+        peer: Option<&dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        match peer {
+            None => self.can_swap_with(lane, None, peer_lane),
+            Some(peer) => peer
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|peer| self.can_swap_with(lane, Some(peer), peer_lane)),
+        }
+    }
+
+    /// Issue #1765: the lane's input-section state and prepared endpoint
+    /// ([`BuiltinInputBank::swap_lanes`]), its cell reader (cells, dirty bits, carry marks and
+    /// superseded counter: the strip's live controls move with the strip) and its live symmetry
+    /// terms. The block counters are the bank's and stay.
+    fn swap_builtin_lanes(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        let other = match peer {
+            None => None,
+            Some(peer) => match peer.as_any_mut().and_then(|any| any.downcast_mut::<Self>()) {
+                Some(other) => Some(other),
+                None => return false,
+            },
+        };
+        if !self.can_swap_with(lane, other.as_deref(), peer_lane) {
+            return false;
+        }
+        // One path for both peers: `None` names this bank's own field, so no field can be
+        // exchanged for one kind of peer and left behind for the other.
+        let (bank, controls, live) = match other {
+            None => (None, None, None),
+            Some(other) => (
+                Some(&mut other.bank),
+                Some(&mut *other.controls),
+                Some(&mut other.live[..]),
+            ),
+        };
+        let swapped = self.bank.swap_lanes(lane, bank, peer_lane).is_ok()
+            && exchange_lane_slots(&mut self.controls, lane, controls, peer_lane)
+            && exchange_lane_slots(&mut self.live, lane, live, peer_lane);
+        debug_assert!(swapped, "a checked input lane swaps");
+        swapped
     }
     // REALTIME_POLICY_END
 
@@ -4863,6 +4968,45 @@ impl FaderBankProcessor {
         }
         adopted
     }
+
+    /// Whether [`GraphPreparedBuiltinBankProcessor::swap_builtin_lanes`] would exchange lane
+    /// `lane` with `peer`'s lane `peer_lane` (`None`: this bank's), issue #1765: the banks' own
+    /// check, both lanes hold a reader slot, and the stored automation fits
+    /// ([`Self::automation_swap_fits`]).
+    fn can_swap_with(&self, lane: usize, peer: Option<&Self>, peer_lane: usize) -> bool {
+        self.bank
+            .can_swap_lanes(lane, peer.map(|peer| &peer.bank), peer_lane)
+            && lane_slots_fit(
+                &self.controls,
+                lane,
+                peer.map(|peer| &*peer.controls),
+                peer_lane,
+            )
+            && Self::automation_swap_fits(
+                &self.automation,
+                lane,
+                peer.map_or(&self.automation, |peer| &peer.automation),
+                peer_lane,
+            )
+    }
+
+    /// Whether two lanes' stored automation slots can trade places. A bank none of whose members
+    /// is automated holds no slots at all (`automation` is empty, #1646 D1), so a lane can move
+    /// into it only when it carries no automation: the automated lane would have no slot to land
+    /// in. Two banks that both hold slots, or neither, always fit.
+    fn automation_swap_fits(
+        own: &[Option<LaneFaderAutomation>],
+        lane: usize,
+        theirs: &[Option<LaneFaderAutomation>],
+        peer_lane: usize,
+    ) -> bool {
+        match (own.is_empty(), theirs.is_empty()) {
+            (false, false) => lane < own.len() && peer_lane < theirs.len(),
+            (true, true) => true,
+            (false, true) => own.get(lane).is_some_and(Option::is_none),
+            (true, false) => theirs.get(peer_lane).is_some_and(Option::is_none),
+        }
+    }
     // REALTIME_POLICY_END
 }
 
@@ -4946,6 +5090,64 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     /// rest still apply. A lane that restarts is not read, so its replaced writes are not counted.
     fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
         usize::from(owner == BuiltinStripOwner::Fader && self.apply_pending(lanes).is_err())
+    }
+
+    fn can_swap_builtin_lanes(
+        &self,
+        lane: usize,
+        peer: Option<&dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        match peer {
+            None => self.can_swap_with(lane, None, peer_lane),
+            Some(peer) => peer
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|peer| self.can_swap_with(lane, Some(peer), peer_lane)),
+        }
+    }
+
+    /// Issue #1765: the lane's fader and mute state, ramps in flight included
+    /// ([`BuiltinFaderBank::swap_lanes`]), its cell reader (cells, dirty bits, carry marks,
+    /// superseded counter) and its stored automation (event cursors, held-ramp obligations, offsets
+    /// cells and `a(n)`; the block's node time is set again by the next block). The block counters
+    /// are the bank's and stay.
+    fn swap_builtin_lanes(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        let other = match peer {
+            None => None,
+            Some(peer) => match peer.as_any_mut().and_then(|any| any.downcast_mut::<Self>()) {
+                Some(other) => Some(other),
+                None => return false,
+            },
+        };
+        if !self.can_swap_with(lane, other.as_deref(), peer_lane) {
+            return false;
+        }
+        // One path for both peers, as the input bank's.
+        let (bank, controls, automation) = match other {
+            None => (None, None, None),
+            Some(other) => (
+                Some(&mut other.bank),
+                Some(&mut *other.controls),
+                Some(&mut *other.automation),
+            ),
+        };
+        // A bank without slots trades only a lane without automation (`automation_swap_fits`):
+        // both lanes' slots are `None`, and nothing moves.
+        let slotless = self.automation.is_empty()
+            || automation
+                .as_deref()
+                .is_some_and(<[Option<LaneFaderAutomation>]>::is_empty);
+        let swapped = self.bank.swap_lanes(lane, bank, peer_lane).is_ok()
+            && exchange_lane_slots(&mut self.controls, lane, controls, peer_lane)
+            && (slotless || exchange_lane_slots(&mut self.automation, lane, automation, peer_lane));
+        debug_assert!(swapped, "a checked fader lane swaps");
+        swapped
     }
     // REALTIME_POLICY_END
     /// The fader and mute cells' drain, before any lane of the block is dispatched (#1312 D12).
@@ -5117,6 +5319,19 @@ impl MatrixBankProcessor {
         }
         adopted
     }
+
+    /// The matrix bank's counterpart of [`FaderBankProcessor::can_swap_with`], without stored
+    /// automation.
+    fn can_swap_with(&self, lane: usize, peer: Option<&Self>, peer_lane: usize) -> bool {
+        self.bank
+            .can_swap_lanes(lane, peer.map(|peer| &peer.bank), peer_lane)
+            && lane_slots_fit(
+                &self.controls,
+                lane,
+                peer.map(|peer| &*peer.controls),
+                peer_lane,
+            )
+    }
     // REALTIME_POLICY_END
 }
 
@@ -5169,6 +5384,50 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     /// Issue #1277 D8: the fader bank's counterpart, on the matrix cell.
     fn drain_strip_for_carry(&mut self, owner: BuiltinStripOwner, lanes: u8) -> usize {
         usize::from(owner == BuiltinStripOwner::Matrix && self.apply_pending(lanes).is_err())
+    }
+
+    fn can_swap_builtin_lanes(
+        &self,
+        lane: usize,
+        peer: Option<&dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        match peer {
+            None => self.can_swap_with(lane, None, peer_lane),
+            Some(peer) => peer
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|peer| self.can_swap_with(lane, Some(peer), peer_lane)),
+        }
+    }
+
+    /// Issue #1765: the lane's matrix state, ramp in flight included
+    /// ([`BuiltinMatrixBank::swap_lanes`]), and its cell reader. The block counters stay.
+    fn swap_builtin_lanes(
+        &mut self,
+        lane: usize,
+        peer: Option<&mut dyn GraphPreparedBuiltinBankProcessor>,
+        peer_lane: usize,
+    ) -> bool {
+        let other = match peer {
+            None => None,
+            Some(peer) => match peer.as_any_mut().and_then(|any| any.downcast_mut::<Self>()) {
+                Some(other) => Some(other),
+                None => return false,
+            },
+        };
+        if !self.can_swap_with(lane, other.as_deref(), peer_lane) {
+            return false;
+        }
+        // One path for both peers, as the input bank's.
+        let (bank, controls) = match other {
+            None => (None, None),
+            Some(other) => (Some(&mut other.bank), Some(&mut *other.controls)),
+        };
+        let swapped = self.bank.swap_lanes(lane, bank, peer_lane).is_ok()
+            && exchange_lane_slots(&mut self.controls, lane, controls, peer_lane);
+        debug_assert!(swapped, "a checked matrix lane swaps");
+        swapped
     }
     // REALTIME_POLICY_END
     /// The matrix cell's drain, before any lane of the block is dispatched (#1312 D12).
@@ -6800,6 +7059,11 @@ impl PreparedBuiltinsSession {
     /// Lowering is infallible after `graph_builtin_bank_resource`: `with_builtin_banks` consumes
     /// the plan on error, so the read-only preflight is what makes the attach transactional and
     /// the `expect`s here are this crate's own planner invariants.
+    ///
+    /// Kept out of line: `scripts/check-scalar-oracle-absent.py` reads this symbol in the shipped
+    /// wasm and C ABI artifacts as its positive control (#1765 moved its body into
+    /// `lower_strip_banks`, which let the optimizer inline it).
+    #[inline(never)]
     pub fn into_graph_artifact_with_banks<R>(
         mut self,
         graph: PreparedGraphPlan,
@@ -6836,6 +7100,34 @@ impl PreparedBuiltinsSession {
         let resource = self
             .strip_bank_resource(&plan, width)
             .expect("preflighted builtin-bank resource");
+        let (graph_banks, selected) = self.lower_strip_banks(plan, dispatch, width);
+        let mut processors = core::mem::take(&mut self.processors);
+        processors.retain(|binding| !selected.contains(&binding.node));
+        processors.append(&mut self.unbanked_strip_bindings());
+
+        let graph = graph
+            .with_builtin_banks(graph_banks, resource)
+            .expect("validated fixed builtin member shape");
+        PreparedBuiltinsGraphArtifact {
+            graph,
+            builtin_processors: processors,
+            builtin_observers: self.observers,
+            report,
+            track_controls: self.track_controls,
+            meter_consumers: self.meter_consumers,
+        }
+    }
+
+    /// Lower `plan`'s strip groups into the builtin bank processors that render them (issue #212),
+    /// moving each member's prepared input, live readers and stored fader automation into its
+    /// bank lane: the body of [`Self::into_graph_artifact_with_banks`]. Returns the banks and the
+    /// member nodes they claim; a strip whose three stages were all claimed leaves `self.strips`.
+    fn lower_strip_banks(
+        &mut self,
+        plan: [(TrackStage, Vec<Box<[GraphNodeId]>>); 3],
+        dispatch: Backend,
+        width: BankWidth,
+    ) -> (Vec<GraphPreparedBuiltinBank>, BTreeSet<GraphNodeId>) {
         // Borrowed: a strip no bank claims keeps its automation for the scalar oracle's bindings.
         let fader_automation = &self.fader_automation;
 
@@ -6996,21 +7288,7 @@ impl PreparedBuiltinsSession {
                 && claimed_matrix.contains(track))
         });
         self.strips = strips.into_values().collect();
-        let mut processors = core::mem::take(&mut self.processors);
-        processors.retain(|binding| !selected.contains(&binding.node));
-        processors.append(&mut self.unbanked_strip_bindings());
-
-        let graph = graph
-            .with_builtin_banks(graph_banks, resource)
-            .expect("validated fixed builtin member shape");
-        PreparedBuiltinsGraphArtifact {
-            graph,
-            builtin_processors: processors,
-            builtin_observers: self.observers,
-            report,
-            track_controls: self.track_controls,
-            meter_consumers: self.meter_consumers,
-        }
+        (graph_banks, selected)
     }
 
     #[cfg(feature = "test-support")]
@@ -9183,7 +9461,7 @@ pub const TEST_ONLY_PAIR_GRAPH_TRACKS: usize = Backend::current().width() + 1;
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub use tests::test_only_prepared_unpaired_graph;
+pub use tests::{test_only_builtin_lane_swap, test_only_prepared_unpaired_graph};
 
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -14297,5 +14575,715 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// SplitMix64, for [`test_only_builtin_lane_swap`].
+    #[cfg(feature = "test-support")]
+    struct LaneSwapRng(u64);
+
+    #[cfg(feature = "test-support")]
+    impl LaneSwapRng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        }
+
+        fn below(&mut self, bound: u64) -> u64 {
+            self.next() % bound
+        }
+
+        /// A value in `[low, high)`.
+        fn within(&mut self, low: f32, high: f32) -> f32 {
+            let unit = (self.next() >> 40) as f32 / (1_u64 << 24) as f32;
+            low + (high - low) * unit
+        }
+
+        fn selector(&mut self) -> BuiltinLaneSelector {
+            [
+                BuiltinLaneSelector::Left,
+                BuiltinLaneSelector::Right,
+                BuiltinLaneSelector::Both,
+            ][self.below(3) as usize]
+        }
+    }
+
+    /// One live write to one strip's cells.
+    #[cfg(feature = "test-support")]
+    #[derive(Clone, Copy)]
+    enum LaneSwapWrite {
+        Input(TrackInputRecord),
+        Fader(TrackFaderRecord),
+        Matrix(TrackControlRecord),
+        Offsets(usize, FaderOffsetsRecord),
+    }
+
+    /// Per lane of one chain, a strip's planes.
+    #[cfg(feature = "test-support")]
+    struct LaneSwapPlanes {
+        left: Vec<Vec<f32>>,
+        right: Vec<Vec<f32>>,
+    }
+
+    #[cfg(feature = "test-support")]
+    impl rack::BankMembers for LaneSwapPlanes {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            (&self.left[lane], &self.right[lane])
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            (&mut self.left[lane], &mut self.right[lane])
+        }
+    }
+
+    /// A session's strips in builtin bank chains `[input, fader, matrix]`, one per cohort, as the
+    /// graph binds them, with every strip's live controls and the strip -> `(chain, lane)` map.
+    #[cfg(feature = "test-support")]
+    struct LaneSwapRig {
+        chains: Vec<rack::BankChain>,
+        position: Vec<(usize, usize)>,
+        controls: Vec<TrackControlProducer>,
+        gate: TestOnlyGate,
+        width: usize,
+        frames: u32,
+        first: u64,
+    }
+
+    /// `tracks` strips with live controls and stored fader and mute automation on `t01`, `t05` and
+    /// `t09`, each with an event after the swaps below. `mono`: one source channel and equal
+    /// input sections on every track.
+    #[cfg(feature = "test-support")]
+    fn lane_swap_session(tracks: usize, mono: bool) -> CompiledSession {
+        let mut model = n_track_session_with_symmetry(tracks, mono)
+            .normalized_model()
+            .clone();
+        if mono {
+            for track in &mut model.tracks {
+                track.right_source_channel = track.left_source_channel;
+            }
+        }
+        let db = session::ParameterUnit::Db;
+        let toggle = session::ParameterUnit::Linear;
+        let (left, right, both) = (
+            session::ParameterChannel::Left,
+            session::ParameterChannel::Right,
+            session::ParameterChannel::Both,
+        );
+        model.vcas.clear();
+        model.automation = vec![
+            stored(
+                "a1f",
+                strip_owner(1),
+                5,
+                left,
+                step_table(800, -6.0, -14.0, db),
+            ),
+            stored(
+                "a1m",
+                strip_owner(1),
+                6,
+                right,
+                step_table(900, 0.0, 1.0, toggle),
+            ),
+            stored(
+                "a5f",
+                strip_owner(5),
+                5,
+                both,
+                ride_table(1_400, -3.0, -18.0),
+            ),
+            stored(
+                "a5m",
+                strip_owner(5),
+                6,
+                left,
+                step_table(1_100, 1.0, 0.0, toggle),
+            ),
+            stored(
+                "a9f",
+                strip_owner(9),
+                5,
+                right,
+                step_table(1_100, -2.0, -9.0, db),
+            ),
+        ];
+        compile_session(&model, vca_caps()).expect("the session compiles")
+    }
+
+    #[cfg(feature = "test-support")]
+    fn lane_swap_rig(compiled: &CompiledSession, backend: Backend, armed: bool) -> LaneSwapRig {
+        let tracks = compiled.normalized_model().tracks.len();
+        let requests = (0..tracks)
+            .map(|index| TrackControlRequest {
+                track_id: track_name(index),
+                superseded: LiveValuesSuperseded::default(),
+                input_lane: true,
+            })
+            .collect::<Vec<_>>();
+        let mut prepared = prepare_session_builtins_with_live_controls(
+            compiled,
+            &effective_of(compiled),
+            &[],
+            &requests,
+            caps(),
+        )
+        .expect("prepared builtins");
+        let (_, levels) = track_graph(tracks);
+        let classes = SessionPoolClasses::from_session(compiled);
+        let width = BankWidth::for_backend(backend).expect("a bank width");
+        let plan = planned_strip_banks(&prepared.seal.tracks, backend, &levels, &classes);
+        let (banks, _) = {
+            let _canonical = lane::CanonicalFpEnv::enter();
+            prepared.lower_strip_banks(plan, backend, width)
+        };
+        let strip_of = |member: &GraphNodeId| {
+            let GraphNodeId::TrackStage { track_id, stage } = member else {
+                panic!("a strip bank member is a track stage")
+            };
+            let strip: usize = track_id.as_str()[1..]
+                .parse()
+                .expect("a generated track ID");
+            (strip, *stage)
+        };
+        type Cohort = (
+            Vec<usize>,
+            [Option<Box<dyn GraphPreparedBuiltinBankProcessor>>; 3],
+            Option<AoSoaScratch>,
+        );
+        let mut cohorts: Vec<Cohort> = Vec::new();
+        for bank in banks {
+            let members = bank.members.iter().map(strip_of).collect::<Vec<_>>();
+            let stage = members[0].1;
+            assert!(members.iter().all(|member| member.1 == stage));
+            let strips = members.iter().map(|member| member.0).collect::<Vec<_>>();
+            let slot = match stage {
+                TrackStage::PostInputBuiltins => 0,
+                TrackStage::PostFader => 1,
+                TrackStage::PostMatrix => 2,
+                _ => unreachable!("a strip bank stage"),
+            };
+            let index = cohorts
+                .iter()
+                .position(|cohort| cohort.0 == strips)
+                .unwrap_or_else(|| {
+                    cohorts.push((strips, [None, None, None], None));
+                    cohorts.len() - 1
+                });
+            let cohort = &mut cohorts[index];
+            assert!(cohort.1[slot].is_none(), "one bank per stage and cohort");
+            cohort.1[slot] = Some(bank.processor);
+            if slot == 0 {
+                cohort.2 = Some(bank.scratch);
+            }
+        }
+        let mut position = vec![None; tracks];
+        let mut chains = Vec::new();
+        for (chain, (strips, processors, scratch)) in cohorts.into_iter().enumerate() {
+            for (lane, strip) in strips.iter().enumerate() {
+                assert!(position[*strip].replace((chain, lane)).is_none());
+            }
+            let active = (0..width.lanes() as usize)
+                .map(|lane| lane < strips.len())
+                .collect::<Box<[bool]>>();
+            let slots = processors
+                .into_iter()
+                .map(|processor| rack::BankSlot {
+                    stage: graph::test_only_builtin_stage(
+                        processor.expect("the input, fader and matrix banks share one member list"),
+                    ),
+                    active_lanes: active.clone(),
+                })
+                .collect();
+            let mut built = rack::BankChain::new(
+                scratch.expect("the cohort has an input bank"),
+                active,
+                slots,
+            )
+            .expect("a builtin chain");
+            built.arm_mono_collapse(armed);
+            chains.push(built);
+        }
+        let mut controls = (0..tracks).map(|_| None).collect::<Vec<_>>();
+        for control in core::mem::take(&mut prepared.track_controls) {
+            let strip: usize = control.track_id[1..].parse().expect("a generated track ID");
+            controls[strip] = Some(control);
+        }
+        LaneSwapRig {
+            chains,
+            position: position
+                .into_iter()
+                .map(|at| at.expect("every strip is banked"))
+                .collect(),
+            controls: controls
+                .into_iter()
+                .map(|control| control.expect("every strip has live controls"))
+                .collect(),
+            gate: TestOnlyGate::new(),
+            width: width.lanes() as usize,
+            frames: prepared.seal.quantum,
+            first: 0,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    impl LaneSwapRig {
+        fn write(&mut self, writes: &[(usize, LaneSwapWrite)]) {
+            let controls = &mut self.controls;
+            self.gate.write_published(|stamp| {
+                for &(strip, write) in writes {
+                    let control = &mut controls[strip];
+                    match write {
+                        LaneSwapWrite::Input(record) => control
+                            .input
+                            .as_mut()
+                            .expect("an input lane")
+                            .write(stamp, record),
+                        LaneSwapWrite::Fader(record) => control.fader.write(stamp, record),
+                        LaneSwapWrite::Matrix(record) => control.producer.write(stamp, record),
+                        LaneSwapWrite::Offsets(channel, record) => {
+                            control.fader.write_offsets(stamp, channel, record);
+                        }
+                    }
+                }
+            });
+        }
+
+        /// The automated fader lanes of chain `chain`.
+        fn automated_lanes(&mut self, chain: usize) -> Vec<usize> {
+            self.fader(chain)
+                .automation
+                .iter()
+                .enumerate()
+                .filter_map(|(lane, slot)| slot.as_ref().map(|_| lane))
+                .collect()
+        }
+
+        /// Chain `chain`'s fader bank processor (slot 1).
+        fn fader(&mut self, chain: usize) -> &mut FaderBankProcessor {
+            graph::test_only_builtin_processor_mut(&mut self.chains[chain], 1)
+                .and_then(GraphPreparedBuiltinBankProcessor::as_any_mut)
+                .and_then(|any| any.downcast_mut::<FaderBankProcessor>())
+                .expect("slot 1 is the fader bank")
+        }
+
+        /// One block of `inputs[strip]`; per strip, its output bits.
+        fn block(&mut self, inputs: &[[Vec<f32>; 2]]) -> Vec<[Vec<u32>; 2]> {
+            let frames = self.frames as usize;
+            let mut planes = self
+                .chains
+                .iter()
+                .map(|_| LaneSwapPlanes {
+                    left: vec![vec![0.0; frames]; self.width],
+                    right: vec![vec![0.0; frames]; self.width],
+                })
+                .collect::<Vec<_>>();
+            for (strip, [left, right]) in inputs.iter().enumerate() {
+                let (chain, lane) = self.position[strip];
+                planes[chain].left[lane].clone_from(left);
+                planes[chain].right[lane].clone_from(right);
+            }
+            let snapshot = self.gate.snapshot();
+            {
+                let _canonical = lane::CanonicalFpEnv::enter();
+                for (chain, planes) in self.chains.iter_mut().zip(planes.iter_mut()) {
+                    // The block's node time as `set_block_time` sets it, with `a(n) = 0`.
+                    let fader = graph::test_only_builtin_processor_mut(chain, 1)
+                        .and_then(GraphPreparedBuiltinBankProcessor::as_any_mut)
+                        .and_then(|any| any.downcast_mut::<FaderBankProcessor>())
+                        .expect("slot 1 is the fader bank");
+                    for slot in fader.automation.iter_mut().flatten() {
+                        slot.span = Some(TimelineSpan {
+                            start: i64::try_from(self.first).expect("time"),
+                            step: None,
+                        });
+                        slot.fader_jump = Some(96);
+                        slot.mute_jump = Some(64);
+                        slot.vca_jumps = Some([32, 32]);
+                    }
+                    chain
+                        .run(planes, self.frames, self.first, snapshot)
+                        .expect("the chain renders");
+                }
+            }
+            self.first += u64::from(self.frames);
+            self.position
+                .iter()
+                .map(|&(chain, lane)| {
+                    [&planes[chain].left[lane], &planes[chain].right[lane]]
+                        .map(|plane| plane.iter().map(|sample| sample.to_bits()).collect())
+                })
+                .collect()
+        }
+
+        /// Swap `at` with `other` (`at.0 <= other.0`) inside `measure`'s callback, which must
+        /// call it exactly once, and move the strips' positions.
+        fn swap(
+            &mut self,
+            at: (usize, usize),
+            other: (usize, usize),
+            measure: &mut dyn FnMut(&mut dyn FnMut()),
+        ) {
+            assert!(at.0 <= other.0);
+            let bytes = self.chains[at.0]
+                .lane_swap_scratch_bytes()
+                .max(self.chains[other.0].lane_swap_scratch_bytes());
+            let mut scratch = vec![0_u8; bytes];
+            let mut swapped = 0_u32;
+            let chains = &mut self.chains;
+            measure(&mut || {
+                let result = if at.0 == other.0 {
+                    chains[at.0].swap_lanes(at.1, rack::ChainLanePeer::Same(other.1), &mut scratch)
+                } else {
+                    let (head, tail) = chains.split_at_mut(other.0);
+                    head[at.0].swap_lanes(
+                        at.1,
+                        rack::ChainLanePeer::Other(&mut tail[0], other.1),
+                        &mut scratch,
+                    )
+                };
+                result.expect("a builtin lane swap");
+                swapped += 1;
+            });
+            assert_eq!(swapped, 1, "the measure callback runs the swap once");
+            self.moved(at, other);
+        }
+
+        /// A cross-chain swap the chains must refuse; the refusal, and nothing moved.
+        fn refused_swap(
+            &mut self,
+            at: (usize, usize),
+            other: (usize, usize),
+        ) -> Result<(), rack::ChainLaneSwapRefusal> {
+            assert!(at.0 < other.0);
+            let mut scratch = vec![
+                0_u8;
+                self.chains[at.0]
+                    .lane_swap_scratch_bytes()
+                    .max(self.chains[other.0].lane_swap_scratch_bytes())
+            ];
+            let (head, tail) = self.chains.split_at_mut(other.0);
+            let result = head[at.0].swap_lanes(
+                at.1,
+                rack::ChainLanePeer::Other(&mut tail[0], other.1),
+                &mut scratch,
+            );
+            if result.is_ok() {
+                self.moved(at, other);
+            }
+            result
+        }
+
+        /// The strips at `at` and `other` trade positions.
+        fn moved(&mut self, at: (usize, usize), other: (usize, usize)) {
+            let strip_at = |position: &[(usize, usize)], at| {
+                position
+                    .iter()
+                    .position(|here| *here == at)
+                    .expect("a strip sits there")
+            };
+            let (a, b) = (
+                strip_at(&self.position, at),
+                strip_at(&self.position, other),
+            );
+            self.position.swap(a, b);
+        }
+    }
+
+    /// One block's random live writes: per strip, up to three input, fader, mute, matrix or
+    /// offsets writes, ramped over windows up to 600 samples (a block is 128). `ramp_all` also
+    /// starts a long trim, fader and matrix ramp on every strip, so ramps are in flight at a swap.
+    /// A `mono` strip's input writes address both channels.
+    #[cfg(feature = "test-support")]
+    fn lane_swap_writes(
+        rng: &mut LaneSwapRng,
+        offsets: &[[bool; 2]],
+        filters: &[builtins::PreparedInputFilterTarget],
+        mono: bool,
+        ramp_all: bool,
+        quiet: Option<usize>,
+    ) -> Vec<(usize, LaneSwapWrite)> {
+        let mut writes = Vec::new();
+        for (strip, offsets) in offsets.iter().enumerate() {
+            let input_lanes = |rng: &mut LaneSwapRng| {
+                if mono {
+                    BuiltinLaneSelector::Both
+                } else {
+                    rng.selector()
+                }
+            };
+            for _ in 0..rng.below(4) {
+                let smoothing_samples = rng.below(600) as u32;
+                let write = match rng.below(7) {
+                    0 => LaneSwapWrite::Input(TrackInputRecord::TrimDb {
+                        lanes: input_lanes(rng),
+                        db: rng.within(-12.0, 6.0),
+                        smoothing_samples,
+                    }),
+                    1 => LaneSwapWrite::Input(TrackInputRecord::PolarityInvert {
+                        lanes: input_lanes(rng),
+                        inverted: rng.below(2) == 1,
+                        smoothing_samples,
+                    }),
+                    2 => LaneSwapWrite::Input(TrackInputRecord::PreparedFilter {
+                        target: builtins::PreparedInputFilterTarget {
+                            lanes: input_lanes(rng),
+                            ..filters[rng.below(filters.len() as u64) as usize]
+                        },
+                    }),
+                    3 => LaneSwapWrite::Fader(TrackFaderRecord::FaderDb {
+                        lanes: rng.selector(),
+                        db: rng.within(-30.0, 6.0),
+                        smoothing_samples,
+                    }),
+                    4 => LaneSwapWrite::Fader(TrackFaderRecord::Mute {
+                        lanes: rng.selector(),
+                        muted: rng.below(3) == 0,
+                        smoothing_samples,
+                    }),
+                    5 => LaneSwapWrite::Matrix(TrackControlRecord {
+                        matrix: Matrix2x2 {
+                            ll: rng.within(-1.0, 1.0),
+                            lr: rng.within(-1.0, 1.0),
+                            rl: rng.within(-1.0, 1.0),
+                            rr: rng.within(-1.0, 1.0),
+                        },
+                        smoothing_samples,
+                    }),
+                    _ => {
+                        let channel = rng.below(2) as usize;
+                        if !offsets[channel] {
+                            continue;
+                        }
+                        LaneSwapWrite::Offsets(
+                            channel,
+                            FaderOffsetsRecord {
+                                offsets_sum: f64::from(rng.within(-6.0, 0.0)),
+                                smoothing_samples,
+                                own_db: None,
+                            },
+                        )
+                    }
+                };
+                if quiet == Some(strip) && matches!(write, LaneSwapWrite::Input(_)) {
+                    continue;
+                }
+                writes.push((strip, write));
+            }
+            if ramp_all {
+                let smoothing_samples = 300 + rng.below(300) as u32;
+                let trim = LaneSwapWrite::Input(TrackInputRecord::TrimDb {
+                    lanes: input_lanes(rng),
+                    db: rng.within(-12.0, 6.0),
+                    smoothing_samples,
+                });
+                if quiet != Some(strip) {
+                    writes.push((strip, trim));
+                }
+                writes.push((
+                    strip,
+                    LaneSwapWrite::Fader(TrackFaderRecord::FaderDb {
+                        lanes: BuiltinLaneSelector::Both,
+                        db: rng.within(-30.0, 6.0),
+                        smoothing_samples,
+                    }),
+                ));
+                writes.push((
+                    strip,
+                    LaneSwapWrite::Matrix(TrackControlRecord {
+                        matrix: Matrix2x2 {
+                            ll: rng.within(-1.0, 1.0),
+                            lr: rng.within(-1.0, 1.0),
+                            rl: rng.within(-1.0, 1.0),
+                            rr: rng.within(-1.0, 1.0),
+                        },
+                        smoothing_samples,
+                    }),
+                ));
+            }
+        }
+        writes
+    }
+
+    /// Test-only (#1765 gates 1 and 2): a render-time swap of two strips' builtin lanes -- inside
+    /// one chain and across two chains -- moves each strip's whole input, fader and matrix state
+    /// with it. Every `BankChain::swap_lanes` call runs inside `measure`'s callback, which must
+    /// call it once, so a caller with a counting allocator gates the swap's allocations (the
+    /// `lane_swap_alloc` test). Returns the number of swaps measured.
+    ///
+    /// A real session's strips are prepared with live controls and stored fader and mute
+    /// automation, lowered into the builtin banks, and bound as the graph binds them: one
+    /// `[input, fader, matrix]` chain per cohort, every slot the graph's own builtin adapter. Two
+    /// identical preparations render the same random inputs and the same random live writes
+    /// (trim, polarity, filter target, fader, mute, matrix and offsets, ramped over windows longer
+    /// than a block), strip by strip. Before block 5 the test rig swaps two lanes of chain 0 (an
+    /// automated strip and a plain one) after that block's writes are published, so dirty cells,
+    /// ramps in flight and a stored step at sample 800 all lie ahead of the swap; before block 8 it
+    /// swaps a lane of chain 0 with an automated lane of chain 1, whose stored events at 1,100 are
+    /// ahead. Every strip's left and right output, every block, is bit-equal to the twin's. The
+    /// mono pass arms every chain for mono sources with equal channels and both-channel input
+    /// writes: the in-chain swap lands on a
+    /// chain that rendered its last block collapsed (R7), and the cross-chain swap takes a collapsed
+    /// chain's lane and a strip whose left-only trim (of its own value) cleared its live symmetry
+    /// term, so that strip's new chain must render dual and its old one collapse again. Before block
+    /// 10, where a chain has no automated strip (`t12` alone at four lanes), an automated lane is
+    /// refused a move into its slotless fader bank (`Slot`), and the twin check proves nothing
+    /// moved. At both widths this host builds.
+    ///
+    /// Red if a swap leaves behind any per-lane field the next blocks read: the stage state or a
+    /// ramp, a cell reader (with its dirty bits), the live symmetry term, the stored automation,
+    /// or the disengage before an in-chain swap of a collapsed chain (through the input stage's
+    /// debug assertion); or if a builtin stage refuses the swap. Not covered: the input stage's
+    /// prepared filter endpoint (`filter_initial`), which only a `FullToPrepared` reset reads and
+    /// no chain path reaches.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_only_builtin_lane_swap(measure: &mut dyn FnMut(&mut dyn FnMut())) -> usize {
+        const TRACKS: usize = 13;
+        const BLOCKS: u64 = 14;
+        const SAME_AT: u64 = 5;
+        const OTHER_AT: u64 = 8;
+        /// The block before which an automated lane is refused a move into a fader bank with no
+        /// automation slots.
+        const REFUSED_AT: u64 = 10;
+        /// The strip the cross-chain swap moves out of chain 0.
+        const QUIET: usize = 2;
+        let mut swaps = 0;
+        let mut refusals = 0;
+        let filters = [(40.0, 16_000.0), (120.0, 8_000.0), (300.0, 12_000.0)]
+            .into_iter()
+            .flat_map(|(hpf, lpf)| {
+                builtins::prepare_input_filter_pair(48_000, hpf, lpf)
+                    .expect("a filter pair")
+                    .targets
+            })
+            .collect::<Vec<_>>();
+        for backend in input_test_backends() {
+            for mono in [false, true] {
+                let what = format!("{backend:?}, mono {mono}");
+                let compiled = lane_swap_session(TRACKS, mono);
+                let mut rig = lane_swap_rig(&compiled, backend, mono);
+                let mut twin = lane_swap_rig(&compiled, backend, mono);
+                assert!(rig.chains.len() >= 2, "{what}: two chains");
+                // The swaps below move automated lanes: `t01` inside chain 0, and lane 1 of
+                // chain 1 (`t09` at eight lanes, `t05` at four) into chain 0.
+                assert!(rig.automated_lanes(0).contains(&1), "{what}");
+                assert!(rig.automated_lanes(1).contains(&1), "{what}");
+                let offsets = rig
+                    .controls
+                    .iter()
+                    .map(|control| {
+                        core::array::from_fn(|channel| control.fader.has_offsets(channel))
+                    })
+                    .collect::<Vec<[bool; 2]>>();
+                let mut rng = LaneSwapRng(0x1765 ^ ((rig.width as u64) << 8) ^ u64::from(mono));
+                for block in 0..BLOCKS {
+                    let ramp_all = block == SAME_AT - 1 || block == OTHER_AT - 1;
+                    let mut writes = lane_swap_writes(
+                        &mut rng,
+                        &offsets,
+                        &filters,
+                        mono,
+                        ramp_all,
+                        mono.then_some(QUIET),
+                    );
+                    // The mono pass's quiet strip: one both-channel trim, then before the
+                    // cross-chain swap the same trim on its left channel alone. Its channels
+                    // stay equal, but its live symmetry term is cleared for the plan: its chain
+                    // renders dual from then on, wherever it sits.
+                    let quiet_trim = |lanes| {
+                        LaneSwapWrite::Input(TrackInputRecord::TrimDb {
+                            lanes,
+                            db: -4.0,
+                            smoothing_samples: 0,
+                        })
+                    };
+                    if mono && block == 0 {
+                        writes.push((QUIET, quiet_trim(BuiltinLaneSelector::Both)));
+                    }
+                    if mono && block == OTHER_AT - 1 {
+                        writes.push((QUIET, quiet_trim(BuiltinLaneSelector::Left)));
+                    }
+                    rig.write(&writes);
+                    twin.write(&writes);
+                    if block == SAME_AT {
+                        assert!(!mono || rig.chains[0].is_collapsed(), "{what}: R7");
+                        // A swap, its inverse and the swap again: each is counted, and the first
+                        // two cancel.
+                        for _ in 0..3 {
+                            rig.swap((0, 1), (0, 3), measure);
+                        }
+                        swaps += 3;
+                    }
+                    if block == OTHER_AT {
+                        assert_eq!(rig.position[QUIET], (0, 2), "{what}");
+                        assert!(
+                            !mono
+                                || (!rig.chains[0].is_collapsed() && rig.chains[1].is_collapsed()),
+                            "{what}: R7 across chains, the quiet strip's chain dual"
+                        );
+                        rig.swap((0, 2), (1, 1), measure);
+                        swaps += 1;
+                    }
+                    if block == REFUSED_AT {
+                        // A chain none of whose strips is automated has a fader bank without
+                        // automation slots (#1646 D1): an automated lane has nowhere to land, so
+                        // the swap is refused before any write, and the twin check of the blocks
+                        // after it proves that nothing moved. At four lanes `t12` is such a chain.
+                        let slotless = (1..rig.chains.len())
+                            .find(|&chain| rig.fader(chain).automation.is_empty());
+                        assert!(
+                            backend != Backend::Simd4 || slotless.is_some(),
+                            "{what}: a chain without automation"
+                        );
+                        if let Some(slotless) = slotless {
+                            let automated = rig.automated_lanes(0)[0];
+                            assert_eq!(
+                                rig.refused_swap((0, automated), (slotless, 0)),
+                                Err(rack::ChainLaneSwapRefusal::Slot),
+                                "{what}: an automated lane into a slotless fader bank"
+                            );
+                            refusals += 1;
+                        }
+                    }
+                    let inputs = (0..TRACKS)
+                        .map(|_| {
+                            let left = (0..rig.frames)
+                                .map(|_| rng.within(-0.8, 0.8))
+                                .collect::<Vec<_>>();
+                            let right = if mono {
+                                left.clone()
+                            } else {
+                                (0..rig.frames).map(|_| rng.within(-0.8, 0.8)).collect()
+                            };
+                            [left, right]
+                        })
+                        .collect::<Vec<_>>();
+                    let got = rig.block(&inputs);
+                    let expected = twin.block(&inputs);
+                    for (strip, (got, expected)) in got.iter().zip(&expected).enumerate() {
+                        assert!(
+                            got == expected,
+                            "{what}: strip t{strip:02}, block {block}, left/right equal: {}/{}",
+                            got[0] == expected[0],
+                            got[1] == expected[1]
+                        );
+                    }
+                }
+                // The quiet strip's cleared term moved with it: its new chain renders dual, and its
+                // old chain collapses again.
+                if mono {
+                    assert!(
+                        rig.chains[0].is_collapsed() && !rig.chains[1].is_collapsed(),
+                        "{what}: the live symmetry term moves with the strip"
+                    );
+                }
+            }
+        }
+        assert!(
+            !input_test_backends().contains(&Backend::Simd4) || refusals == 2,
+            "the slotless refusal ran in both Simd4 passes"
+        );
+        swaps
     }
 }
