@@ -69,3 +69,7 @@ Keep, with the reason:
 ### Class-A comparison (one-time PR evidence, no timed run)
 
 An uncommitted ignored test, appended to `tools/bench/src/console.rs` and then removed, printed the output digests of every console measurement through its untimed `run_for`/`run` paths in release on AVX2: all 23 `native_session_rows()` rows (64 blocks each), both hoist rows, the meters and observation facilities, placement, automation, mono, mixing automation, the fader-ride arms (quiet and riding) and the product-lane row. Base a9188e347 (code identical to main be2044c42) and head cdd061338 (before the merge of main) gave 33 equal digest lines, for example `sixty_four_track_console` and `sixty_four_track_console_metered` `fe5bed9b...` and ride `66f87de4...` / `8e6cfd17...`. host-web `control_parity` (33 tests) and the host-core suites pass unchanged on the merged tree. The record count (74 after #1763) and the record schema did not change.
+
+## Verifier (attempt 1, 2026-10-23)
+
+PASS. Its own digest comparison (live fader, mute and matrix ramps in flight, a successor swap adding a post-fader send, metered plans, Scalar/Simd4/Simd8) found every digest equal. Before merge the implementer deleted the dead scalar-owner witnesses, renamed the randomized test to `..._armed_and_dual`, removed the one-variant `Form { Split }`, and retired #1288's gate 5. The capi release-only vacuity failure is pre-existing on main and is #1775.
