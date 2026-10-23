@@ -394,13 +394,16 @@ fn bank_binding_declines_a_heterogeneous_cohort() {
 /// * A malformed member is refused with the code `prepare` gives it, at every member count from
 ///   two. The malformed member is the last one, never lane 0 (P2a verdict, L1): the metadata is
 ///   taken from lane 0, so a decision taken before the member loop would still refuse a malformed
-///   lane 0, and only a later member shows the order (#1070's).
+///   lane 0, and only a later member shows the order (#1070's). From three members it is still
+///   refused when lane 1 carries another program key, so a decline at the first heterogeneous
+///   member cannot skip the members after it.
 /// * A padded lane whose request is not a clone -- another program key -- declines the bank.
 /// * A mask whose members are not on lanes `0..members` is refused
 ///   (`effect.bank.mask_not_prefix`, P2a verdict L3).
 ///
 /// Red if the #1088 guard comes back (a padded request declines), if a decline is taken before the
-/// member loop (the malformed member declines instead of refusing), or if the bind stops calling
+/// member loop or at its first heterogeneous member (the malformed member declines instead of
+/// refusing), or if the bind stops calling
 /// `validate_shape` (the scattered mask binds).
 #[test]
 fn a_padded_request_binds_after_every_lane_is_validated() {
@@ -443,6 +446,16 @@ fn a_padded_request_binds_after_every_lane_is_validated() {
                     Some(refusal),
                     "{members} members: a malformed {what} on lane {last} is refused"
                 );
+                // A heterogeneous member ahead of it must not decline the bank first (#1070).
+                if last >= 2 {
+                    let mut mixed = malformed.clone();
+                    mixed[1].bypass = true;
+                    assert_eq!(
+                        bind(&mixed, &mask).err().map(|error| error.code),
+                        Some(refusal),
+                        "{members} members: a foreign lane 1 hides the malformed {what} on lane {last}"
+                    );
+                }
             }
         }
         if members < lanes {

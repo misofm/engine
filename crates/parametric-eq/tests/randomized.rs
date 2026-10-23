@@ -5,15 +5,8 @@
 //! words -- and probes `bind_homogeneous_bank`'s three outcomes, all through the contract calls. A
 //! failing seed prints the command that replays it.
 //!
-//! # A known defect, narrowed
-//!
-//! The first run of this differential found that `ParametricEqFactory::bind_homogeneous_bank`
-//! answers `Ok(None)` at a width this build does not execute, and on the first heterogeneous
-//! member, before it has validated every member's initial values. The three-outcome rule on
-//! `NativeEffectFactory::bind_homogeneous_bank` says an invalid member refuses first, so "an absent
-//! capability can never hide a malformed member". Until #1070 lands the per-PR test accepts
-//! that decline (`Known::BindDeclinesBeforeValidating`); the ignored test below is the
-//! reproducer.
+//! The bind probe runs at full strength: an invalid member refuses with `prepare`'s own
+//! diagnostic at every width, the width this build does not execute included (#1070).
 //!
 //! # Ramps
 //!
@@ -44,32 +37,8 @@ conformance::randomized_effect_test!(
     seeds: 24,
     blocks: 24,
     craft: None,
-    known: &[conformance::Known::BindDeclinesBeforeValidating],
+    known: &[],
     banks_natively: true,
     witness: true,
     in_flight: Some(ramp_in_flight),
 );
-
-/// The same differential without the narrowing: red until the known defect's issue lands.
-#[test]
-#[ignore = "#1070: bind declines before validating its members; see the module documentation"]
-fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
-    bench_support::alloc::assert_installed();
-    bench_support::alloc::set_mode(bench_support::alloc::Mode::Count);
-    let (registry, effect) = conformance::admit(Box::new(parametric_eq::ParametricEqFactory));
-    let coverage = conformance::run_effect_differential(&conformance::EffectDifferential {
-        registry: &registry,
-        effect,
-        test: "the_bank_renders_its_scalar_instances_including_the_known_defect",
-        replay: "cargo test -p parametric-eq --test randomized -- --ignored --exact \
-                 the_bank_renders_its_scalar_instances_including_the_known_defect",
-        seeds: 24,
-        blocks: 24,
-        craft: None,
-        known: &[],
-        banks_natively: true,
-        witness: true,
-        in_flight: Some(ramp_in_flight),
-    });
-    conformance::assert_reached(&coverage);
-}

@@ -3658,10 +3658,6 @@ fn bind_bank(
     // crate used to answer `Ok(None)` to both, which was the other half of the wave-2
     // divergence (`NativeEffectFactory::bind_homogeneous_bank` states the frozen rule).
     request.validate_shape()?;
-    let lanes = request.width.lanes() as usize;
-    if lanes != native_lanes {
-        return Ok(None);
-    }
     let first = request
         .requests
         .first()
@@ -3669,16 +3665,22 @@ fn bind_bank(
         .ok_or(EffectPrepareError {
             code: "effect.bank.requests",
         })?;
-    let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, first)?;
-    for item in request.requests.iter().copied() {
-        let candidate = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, item)?;
-        if candidate.program_key() != metadata.program_key() {
-            return Ok(None);
+    // Issue #1070: every member is validated as `prepare` validates it, in `prepare`'s order,
+    // before any decline is decided, so neither an absent width nor a heterogeneous member can
+    // hide a malformed member: the bank refuses with the diagnostic `prepare` would give.
+    let metadata = validate_member(first)?;
+    let mut same_program = true;
+    for item in request.requests.iter().copied().skip(1) {
+        if validate_member(item)?.program_key() != metadata.program_key() {
+            same_program = false;
         }
+    }
+    if !same_program || request.width.lanes() as usize != native_lanes {
+        return Ok(None);
     }
     // Issue #1089 (console strip P2b): the EQ accepts a padded request. Every lane's request, a
     // padded lane's clone included, has been validated above, so the decision to bind is taken
-    // after validation (#1070's order) and a malformed member is still refused. The mask goes to
+    // after validation and a malformed member is still refused. The mask goes to
     // the bank, which keeps a padded lane out of every report and refuses the two writes that could
     // move it off `+0.0` at rest; the padding contract on `PrepareEffectBankRequest` lists the
     // clauses, and `Channel::recover_failed_lanes` is why a padded lane's bits and an active lane's
@@ -3696,6 +3698,19 @@ fn bind_bank(
             program_key: metadata.program_key(),
         },
     }))
+}
+
+/// Validates one bank member exactly as [`ParametricEqFactory::prepare`] does, in the same order,
+/// and returns its metadata: the request's contract checks, then both channels' initial sections.
+fn validate_member(
+    request: PrepareEffectRequest<'_>,
+) -> Result<PreparedEffectMetadata, EffectPrepareError> {
+    let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, request)?;
+    let sample_rate = SampleRateHz(metadata.sample_rate);
+    for channel in 0..2 {
+        physical_targets(request.initial_values, channel, sample_rate)?;
+    }
+    Ok(metadata)
 }
 
 // REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
