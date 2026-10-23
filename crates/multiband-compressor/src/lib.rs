@@ -106,6 +106,11 @@ const BAND_KNEE: (f32, f32) = knee_coefficients(KNEE_DB);
 /// Samples a ramped parameter takes to reach its target (`SmoothingRule::Linear`, 64).
 const SMOOTHING_SAMPLES: u32 = 64;
 
+/// The ramps [`Side::band_coefficients`] reads, as a mask over ramp indices: each band's ratio,
+/// attack and release (ramps 1-3 and 6-8). One in flight caps a segment at one frame (issue #1069,
+/// [`Instance::plan_segment`]).
+const COEFFICIENT_RAMPS: u16 = 0b01_1100_1110;
+
 /// Detector floor: the smallest amplitude a band level is measured at, `-160 dB`.
 const DETECTOR_FLOOR: f32 = 1.0e-8;
 
@@ -1323,6 +1328,16 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// The lengths this returns are exactly the lengths the pre-split form returned — the scan is
     /// the same scan, `ramping` is a second answer read out of it — so segment boundaries, and
     /// with them the sample at which each ramp arrives, do not move.
+    ///
+    /// **A ratio, attack or release ramp in flight caps the segment at one frame** (issue #1069).
+    /// [`Side::band_coefficients`] samples those three ramps once, at a segment's first frame, and
+    /// holds the result over the segment, so a longer segment would let the segment boundary
+    /// decide when a lane's coefficients move. That boundary is set by every lane's ramps on both
+    /// channels and by the host's block ends, so a neighbour's arrival or a block split moved a
+    /// lane's bits. At one frame per segment while any of them ramps, each lane's coefficients
+    /// follow its own ramp frame by frame; when none of them ramps, each lane's coefficient words
+    /// are constant and the sample point cannot matter. Threshold and makeup advance inside the
+    /// kernel frame by frame on every path, so they keep the long segments.
     fn plan_segment(&mut self, budget: usize) -> SegmentPlan {
         for side in &mut self.sides {
             for track in 0..W {
@@ -1337,10 +1352,13 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         let mut ramping = false;
         for side in &self.sides {
             for track in 0..W {
-                for ramp in &side.ramps[track] {
+                for (index, ramp) in side.ramps[track].iter().enumerate() {
                     if ramp.remaining > 0 {
                         ramping = true;
                         length = length.min(ramp.remaining as usize - 1);
+                        if COEFFICIENT_RAMPS & (1 << index) != 0 {
+                            length = 1;
+                        }
                     }
                 }
             }
