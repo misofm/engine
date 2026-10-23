@@ -13,5 +13,8 @@ name = "rack"
 engine.workspace = true
 effect-contract.workspace = true
 
+[dev-dependencies]
+bench-support.workspace = true
+
 [lints]
 workspace = true

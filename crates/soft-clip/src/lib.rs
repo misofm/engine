@@ -1180,6 +1180,38 @@ struct PreparedSoftClipBank<L: Lane> {
     inner: SoftClip<L>,
 }
 
+/// The bank's one clock, advanced for a skipped block (issue #1747).
+impl<L: Lane> PreparedSoftClipBank<L> {
+    /// Advances the bank's shared history position `pos` on both channels by `frames`, exactly as
+    /// one rendered block of `frames` frames of `+0.0` input would.
+    ///
+    /// `pos` is the soft clip's only clock: the kernel advances it once per frame by
+    /// `history_advance`, a step of one modulo the 32 live rows, whatever the signal. Nothing else
+    /// a zero block changes is a clock. A lane at rest has every ramp settled (a ramp in flight
+    /// clears its rest bit), so a zero block leaves its ramp words alone; and every row of its
+    /// three histories already holds `+0.0`, which is exactly what a zero block would push
+    /// (`xin = +0.0`, `X = flush(2g * +0.0) = +0.0` for a positive gain, and `e = flush(cubic(u))`
+    /// with `u` an ascending sum from `+0.0` of zero products, so `+0.0`). A ring of `+0.0` reads
+    /// the same at every rotation, so moving `pos` without writing the rows leaves every state word
+    /// and every payload word bit-identical to the rendered block.
+    ///
+    /// The position is per bank, so it moves whatever `lanes_mask` holds: the caller skips a bank
+    /// whole and passes every lane, and a lane in the mask that was not at rest is a caller defect
+    /// (its rows would rotate under it). Two banks of one slot need not hold equal positions: a
+    /// lane swap between them stays exact because a restore places each row by its age relative
+    /// to the receiving bank's own position (`apply_lane_words`). The advance is the silent fast
+    /// path's own ([`Channel::advance_cursor`]): constant time.
+    fn advance_skipped_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        debug_assert_eq!(
+            lanes_mask & all_lanes::<L>() & !self.inner.lanes_at_rest(),
+            0,
+            "a lane not at rest"
+        );
+        self.inner.left.advance_cursor(frames as usize);
+        self.inner.right.advance_cursor(frames as usize);
+    }
+}
+
 impl NativeEffectFactory for SoftClipFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
         &SOFT_CLIP_DESCRIPTOR
@@ -1451,7 +1483,47 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         )
     }
     // REALTIME_POLICY_END
+
+    fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        self.advance_skipped_clocks(lanes_mask, frames);
+    }
+
+    fn lane_default_bytes(&self) -> Option<usize> {
+        Some(LANE_DEFAULT_BYTES)
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        self.exchange_defaults(lane, bytes)
+    }
 }
+
+/// One lane's prepared defaults in bytes: every parameter of both channels, one `f32` each.
+const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
+
+// REALTIME_POLICY_BEGIN: #1747, the prepared defaults move with a render-time lane swap.
+impl<L: Lane> PreparedSoftClipBank<L> {
+    /// [`PreparedNativeEffectBank::exchange_lane_defaults`]: lane `lane`'s `left_defaults` row
+    /// then its `right_defaults` row, each parameter in descriptor order as little-endian `f32`
+    /// bits. They are the soft clip's only prepared per-lane values: a full reset re-seeds the
+    /// lane's ramps and state words from them. The D7 recovery snaps ramps and reads no default.
+    fn exchange_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        if lane >= L::WIDTH || bytes.len() != LANE_DEFAULT_BYTES {
+            return false;
+        }
+        let inner = &mut self.inner;
+        let words = inner.left_defaults[lane]
+            .iter_mut()
+            .chain(inner.right_defaults[lane].iter_mut());
+        for (value, chunk) in words.zip(bytes.chunks_exact_mut(4)) {
+            let mut incoming = [0_u8; 4];
+            incoming.copy_from_slice(chunk);
+            chunk.copy_from_slice(&value.to_bits().to_le_bytes());
+            *value = f32::from_bits(u32::from_le_bytes(incoming));
+        }
+        true
+    }
+}
+// REALTIME_POLICY_END
 
 fn bank_track_index<L: Lane>(track_index: u32) -> Result<usize, StatePayloadError> {
     let track = usize::try_from(track_index).map_err(|_| StatePayloadError {
