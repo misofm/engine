@@ -109,3 +109,10 @@ main.
 - Wasm: `build-web-audioworklet.sh` plus `check-web-audioworklet.sh` pass; the roster rows are
   unchanged from main (gate vector 174 scalar 8, shaper 522/0, soft clip 47/0); the V8 spill
   gate, `check-browser-expected-resources.py --artifacts` and `check-scalar-oracle-absent.py` pass.
+- One-time base comparison (PR evidence, not committed): a scratch test through each public
+  factory (scalar, and W8 banks with 8, 7, 5 and 1 members; 44.1/48/96 kHz; every link mode;
+  about 32 s of tone, noise, long `+0.0` silences with `-0.0` blocks, short blocks and automation;
+  every output word, every report and every member's payload hashed) gave 105 of 105 equal
+  digests on main e9c1dc40c and on this branch (gate 45, shaper 45, soft clip 15). The branch took
+  the fast path in 83 of the 84 bank cases. W4 does not bind publicly on this AVX2 host; the
+  crate-internal gate 2 tests cover it.
