@@ -67,6 +67,9 @@ Test builds only: an admissions counter and a switch that forbids the fast path.
   bit-stable word, the hysteresis may stay open with `hold` reloaded), hence the evaluation.
   Clock: the bank's `ramp_frames_left`, which the skip advances as `run_block` does. The output
   leg is implied by the others (an equivalent mutant) and is kept so the clause is checked.
+  Padded lanes are in the bank-wide check, but leaving them out is equivalent at the bank
+  interface: a padded lane's output stays `+0.0`, it never swaps (#1747) and never gains a member
+  within a plan, so only its internal words would differ (attempt-2 verifier, mutant G8).
 - **Transient shaper**: both followers of both channels `+0.0` and every ramp settled. No clocks.
 - **Soft clip**: every row of the lane in `x`, `e` and `dry` (all 64 double-written rows) `+0.0`
   and every ramp settled. Clock: each channel's shared `history.pos`, which the skip advances by
@@ -137,3 +140,8 @@ main.
 - `cargo test --locked -p gate-expander -p transient-shaper -p soft-clip`: 114 passed, 0 failed,
   3 ignored. `cargo fmt --all --check`, clippy on the three crates and `realtime-policy` (171
   regions in 34 files): clean.
+- Verifier (attempt 2): PASS. Root applied its two small fixes: the right channel's hold is
+  `hold_ms * 2.0` (with `hold_ms + 1.0` no lane was claimed in the seed state, so gate 1 lost the
+  open leg; the verifier showed the open-leg mutant red again at W4 and W8 with this change), and
+  gate 2's doc names the connected scalar arm. Stated limit: the `coef[channel]` mutant is red in
+  gate 1 at W8 only; the code is generic over the lane width, and x86 runs W8.

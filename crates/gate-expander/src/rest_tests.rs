@@ -155,7 +155,7 @@ fn set_pair(values: &mut Values, parameter: usize, left: f32, right: f32) {
 /// still moves.
 fn fast(values: &mut Values, hold_ms: f32) {
     set_pair(values, 4, 0.1, 1.0);
-    set_pair(values, 5, hold_ms, hold_ms + 1.0);
+    set_pair(values, 5, hold_ms, hold_ms * 2.0);
     set_pair(values, 6, 40.0, 5.0);
 }
 
@@ -494,7 +494,8 @@ fn connected_scalar() {
 }
 
 /// **Gate 2: a bank whose lanes come to rest on different blocks renders bit-identically with
-/// the silent fast path and without it, at `Simd4` and `Simd8`, full and padded, every link mode.**
+/// the silent fast path and without it, at `Simd4` and `Simd8`, full and padded, every link mode,
+/// plus one connected scalar arm under a live sidechain.**
 #[test]
 fn the_silent_fast_path_renders_the_kernel_bits() {
     fn at<L: Lane>()
