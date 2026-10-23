@@ -144,3 +144,7 @@ swap).
   128-frame quantum it is never in flight at a block boundary, at a swap or at a plan-swap carry.
   Dropping the `filter_remaining` import is green in every suite. Root files a successor for a
   quantum below 64.
+
+## Verifier (attempt 1, 2026-10-23)
+
+PASS. Before merge: the slotless-fader-bank refusal is asserted (M4 red), each swap body has one path for both peers (M1 red), and the 0-allocation claim moved to its own `bench_support` binary. Successor: #1777 (a filter ramp crossing a block).
