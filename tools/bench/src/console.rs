@@ -104,18 +104,16 @@
 //! window, prepared through the concurrent entry. `sixty_four_track_console_metered` is a session
 //! row that meters it the way the default web boot does -- one `SAMPLE_PEAK` meter at `PostMatrix`
 //! per track, a twelve-block window, no hold, no decay, bound as permanent observers through
-//! `prepare_selected_session_builtins_between_render_calls` -- so the observer path the browser
-//! pays for has a row that can move. That entry also brings the browser's between-render-calls
-//! control delivery, which fuses each cohort's fader and matrix into one chain stage where the
-//! standing row's `Concurrent` delivery keeps two (48 chain stages against 40, pinned in
-//! `console-workload`'s pair test). So the row minus `sixty_four_track_console` is the meters plus
-//! the fused fader and matrix, and must be read that way. It is timed exactly like every other
-//! session row: the clock holds the render call alone, and the row's meter streams are drained of
-//! every snapshot after each block, outside the clock, where the output identity is also taken.
-//! Its record adds a meter group (streams, tap, metric set, window, snapshots consumed, snapshots
+//! `prepare_selected_session_builtins_with_live_controls` with the product's `Concurrent` delivery
+//! -- so the observer path the browser pays for has a row that can move. Both rows run the same 48
+//! chain stages (pinned in `console-workload`'s pair test), so the row minus
+//! `sixty_four_track_console` is the meters alone. It is timed exactly like every other session
+//! row: the clock holds the render call alone, and the row's meter streams are drained of every
+//! snapshot after each block, outside the clock, where the output identity is also taken. Its
+//! record adds a meter group (streams, tap, metric set, window, snapshots consumed, snapshots
 //! dropped) and the plan's `bank_route_folds` and `bank_scatter_redirects`, read once at bind; the
 //! rows' digests are asserted equal to `sixty_four_track_console`'s in-run, because a meter
-//! observes and the fused fader and matrix render the split pair's bits.
+//! observes and never changes signal flow.
 //!
 //! # The automation-active row (`console_automation`)
 //!

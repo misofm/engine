@@ -1572,16 +1572,14 @@ mod follow {
         [plane(0), plane(1)]
     }
 
-    /// How a plan is prepared: no live control, live controls, or live controls between render
-    /// calls (the browser's form).
+    /// How a plan is prepared: no live control or live controls.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(super) enum Live {
         None,
         Controls,
-        Between,
     }
 
-    pub(super) const LIVE_FORMS: [Live; 3] = [Live::None, Live::Controls, Live::Between];
+    pub(super) const LIVE_FORMS: [Live; 2] = [Live::None, Live::Controls];
 
     /// `model` prepared on `backend` in form `live`.
     pub(super) fn prepare(
@@ -1609,14 +1607,6 @@ mod follow {
             Live::Controls => {
                 let (prepared, handles) =
                     host_core::test_only_prepare_host_runtime_with_live_controls_on(
-                        &compiled, &caps, &request, backend,
-                    )
-                    .unwrap_or_else(|failure| fail(failure));
-                (prepared, Some(handles))
-            }
-            Live::Between => {
-                let (prepared, handles) =
-                    host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
                         &compiled, &caps, &request, backend,
                     )
                     .unwrap_or_else(|failure| fail(failure));

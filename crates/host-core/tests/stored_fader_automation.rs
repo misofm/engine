@@ -1266,23 +1266,17 @@ fn render_parity(mut rig: Rig, blocks: usize, offsets: bool) -> [Vec<f32>; 2] {
 
 /// R17-4: the test-only scalar oracle renders the stored fader events through the one event
 /// driver, so a `Backend::Scalar` plan renders the bank's bits: with no live control (the oracle's
-/// automated strip binds the ramped fader), with live controls (the live fader owner and its pair
-/// with the matrix), and prepared between render calls (the split pair), each with a live mute
-/// and unmute ramp on an automated lane.
+/// automated strip binds the ramped fader) and with live controls (the live fader owner), each
+/// with a live mute and unmute ramp on an automated lane.
 ///
-/// The live variants also write the offsets cells (#1649): a jump on a free lane and one under a
+/// The live variant also writes the offsets cells (#1649): a jump on a free lane and one under a
 /// held unmute ramp, read by the fader bank and by the oracle's live fader owner alike.
 ///
-/// The bank prepared between render calls fuses its fader-matrix pair with the event driver once
-/// no fader event falls in a block (the fused path with operations, #1647 D1.5): its fused counter
-/// advances, and the oracle, which never fuses an automated fader, renders the same bits.
-///
 /// Test value: red if the oracle's fader owners ignore the program, take no node time or `a(n)`
-/// (track 0's fader sits behind a latent insert), defer or fuse an automated fader past its
-/// events, or convert an event differently from the bank: "a placement change moves no bit" would
-/// fail for automated sessions. Red too if the oracle does not read the offsets cells, or jumps
-/// (or forgets a held lane's target) otherwise than the bank, or if the bank's fused path with
-/// operations renders otherwise than the timed path.
+/// (track 0's fader sits behind a latent insert), defer an automated fader past its events, or
+/// convert an event differently from the bank: "a placement change moves no bit" would fail for
+/// automated sessions. Red too if the oracle does not read the offsets cells, or jumps (or
+/// forgets a held lane's target) otherwise than the bank.
 #[cfg(feature = "test-support")]
 #[test]
 fn the_scalar_oracle_renders_the_banks_fader_events() {
@@ -1299,34 +1293,19 @@ fn the_scalar_oracle_renders_the_banks_fader_events() {
             .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
         render_parity(Rig::from(prepared, &model), BLOCKS, true)
     };
-    let live_with = |backend, between: bool, offsets: bool| {
-        let (prepared, handles) = if between {
-            host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
-                &compiled, &caps, &request, backend,
-            )
-        } else {
-            host_core::test_only_prepare_host_runtime_with_live_controls_on(
-                &compiled, &caps, &request, backend,
-            )
-        }
+    let live_with = |backend, offsets: bool| {
+        let (prepared, handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
+            &compiled, &caps, &request, backend,
+        )
         .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
         let mut rig = Rig::from(prepared, &model);
         rig.handles = Some(handles);
         render_parity(rig, BLOCKS, offsets)
     };
-    let live_on = |backend, between| live_with(backend, between, true);
+    let live_on = |backend| live_with(backend, true);
     let mut unautomated = model.clone();
     unautomated.automation.clear();
     let without = render_parity(Rig::new(&unautomated), BLOCKS, true);
-    // Delivery between render calls forms the fused fader-matrix bank.
-    builtins_compiler::test_only_reset_fader_matrix_witness();
-    let fused_bank = live_on(Backend::Simd4, true);
-    let witness = builtins_compiler::test_only_fader_matrix_witness();
-    assert!(
-        witness.fused_calls > 0 && witness.fallback_calls > 0,
-        "the bank fuses its automated fader-matrix pair in the blocks with no event, and takes \
-         the timed path in the others: {witness:?}"
-    );
     for (label, bank, oracle) in [
         (
             "no live control",
@@ -1335,13 +1314,8 @@ fn the_scalar_oracle_renders_the_banks_fader_events() {
         ),
         (
             "live controls",
-            live_on(Backend::Simd4, false),
-            live_on(Backend::Scalar, false),
-        ),
-        (
-            "between render calls",
-            fused_bank,
-            live_on(Backend::Scalar, true),
+            live_on(Backend::Simd4),
+            live_on(Backend::Scalar),
         ),
     ] {
         assert_ne!(bank, without, "{label}: the automation is heard");
@@ -1350,7 +1324,7 @@ fn the_scalar_oracle_renders_the_banks_fader_events() {
             // writes can make the difference.
             assert_ne!(
                 bank,
-                live_with(Backend::Simd4, label == "between render calls", false),
+                live_with(Backend::Simd4, false),
                 "{label}: the offsets writes are heard"
             );
         }
@@ -2120,28 +2094,20 @@ fn a_live_write_that_frees_a_held_lane_releases_its_hold() {
     }
 }
 
-/// The render forms [`acted`] compares, as `(backend, between render calls)`: the live bank at
-/// eight lanes (on an AVX2 target only, the one that has them) and four, the same between render
-/// calls (the fused path), and the scalar oracle (R17-4).
+/// The render forms [`acted`] compares: the live bank at eight lanes (on an AVX2 target only, the
+/// one that has them) and four, and the scalar oracle (R17-4).
 #[cfg(feature = "test-support")]
-const FORMS: &[(graph_compiler::Backend, bool)] = &[
+const FORMS: &[graph_compiler::Backend] = &[
     #[cfg(target_feature = "avx2")]
-    (graph_compiler::Backend::Simd8, false),
-    (graph_compiler::Backend::Simd4, false),
-    #[cfg(target_feature = "avx2")]
-    (graph_compiler::Backend::Simd8, true),
-    (graph_compiler::Backend::Simd4, true),
-    (graph_compiler::Backend::Scalar, false),
+    graph_compiler::Backend::Simd8,
+    graph_compiler::Backend::Simd4,
+    graph_compiler::Backend::Scalar,
 ];
 
 /// A rig of `model` at `quantum` with live controls and its plan's gate, on one of the
 /// [`FORMS`].
 #[cfg(feature = "test-support")]
-fn form_rig(
-    model: &SessionModel,
-    quantum: u32,
-    (backend, between): (graph_compiler::Backend, bool),
-) -> Rig {
+fn form_rig(model: &SessionModel, quantum: u32, backend: graph_compiler::Backend) -> Rig {
     let mut model = model.clone();
     model.quantum_frames = quantum;
     let document = canonical_session_json(&model).expect("canonical");
@@ -2149,15 +2115,9 @@ fn form_rig(
     let compiled = host_core::compile_host_session(&document, &caps)
         .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
     let request = host_core::HostLiveControlRequest::default();
-    let (mut prepared, handles) = if between {
-        host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
-            &compiled, &caps, &request, backend,
-        )
-    } else {
-        host_core::test_only_prepare_host_runtime_with_live_controls_on(
-            &compiled, &caps, &request, backend,
-        )
-    }
+    let (mut prepared, handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
+        &compiled, &caps, &request, backend,
+    )
     .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
     let gate = prepared.plan.take_revision_gate();
     let mut rig = Rig::from(prepared, &model);
@@ -2192,7 +2152,7 @@ const fn act(at: u64) -> Act {
 }
 
 /// The output of `model` at `quantum` over `frames` with `acts`, the same bits on each of the
-/// [`FORMS`] the target provides (five on AVX2); and the block entry each act landed on.
+/// [`FORMS`] the target provides (three on AVX2); and the block entry each act landed on.
 #[cfg(feature = "test-support")]
 fn acted(
     model: &SessionModel,
@@ -2283,7 +2243,7 @@ fn acted(
 /// entry); a mute (256) at 1,536 and an unmute (200) at 2,048 hold it again where the ride is
 /// flat, so nothing is remembered in that hold, whose end `E` is 2,248. From 1,152 on both lanes
 /// equal the rig that takes only the second hold, at quantum 128 on every render form (Simd8 on
-/// AVX2, Simd4, the between-render forms and the scalar oracle).
+/// AVX2, Simd4 and the scalar oracle).
 ///
 /// Test value: red if the free write at the unmute's entry does not discharge the owed move (the
 /// `owed = false` of `HeldRampObligation::block`): the stale obligation then lands a move over

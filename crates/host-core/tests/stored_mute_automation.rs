@@ -165,17 +165,15 @@ struct Rig {
     allocations: (u64, u64, u64),
 }
 
-/// How a [`Rig`] is prepared: a backend, live controls, and delivery between render calls.
+/// How a [`Rig`] is prepared: a backend, and live controls or none.
 #[derive(Clone, Copy, Debug)]
 struct Form {
     backend: graph_compiler::Backend,
     live: bool,
-    between: bool,
 }
 
 /// Every form of the target: Simd8 (on an AVX2 target only), Simd4 and the scalar oracle, each
-/// with no live control, with live controls, and with live controls between render calls (the
-/// fused fader-matrix pair).
+/// with no live control and with live controls.
 fn forms() -> Vec<Form> {
     let backends = [
         #[cfg(target_feature = "avx2")]
@@ -185,12 +183,8 @@ fn forms() -> Vec<Form> {
     ];
     let mut forms = Vec::new();
     for backend in backends {
-        for (live, between) in [(false, false), (true, false), (true, true)] {
-            forms.push(Form {
-                backend,
-                live,
-                between,
-            });
+        for live in [false, true] {
+            forms.push(Form { backend, live });
         }
     }
     forms
@@ -212,22 +206,16 @@ impl Rig {
                 None,
             )
         } else {
-            let (prepared, handles) = if form.between {
-                host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
-                    &compiled,
-                    &caps,
-                    &request,
-                    form.backend,
-                )
-            } else {
+            let (prepared, handles) =
                 host_core::test_only_prepare_host_runtime_with_live_controls_on(
                     &compiled,
                     &caps,
                     &request,
                     form.backend,
                 )
-            }
-            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+                .unwrap_or_else(|failure| {
+                    panic!("{}", String::from_utf8_lossy(failure.as_bytes()))
+                });
             (prepared, Some(handles))
         };
         let gate = if handles.is_some() {
@@ -411,15 +399,15 @@ fn mute_events() -> Vec<(usize, u64, bool, u32)> {
 
 /// #1651 gate 1 (widths, T3a): a mute entry on `both` of track 0 with steps 0, 1, 0 at samples
 /// 1,000 and 2,500 (not grid samples). On every form (Simd8 on AVX2, Simd4 and the scalar oracle;
-/// with no live control, with live controls, and between render calls) and at quanta 128, 100 and
-/// 37, the driver pushes `SetMute` at exactly those samples over the session mute length `M`, and
-/// the output is bit for bit the stage driven directly with those two operations: each ramp
-/// starts at its step sample, the lane is the exact `+0.0` of a static mute from the end of the
-/// mute ramp, and back at the fader from the end of the unmute ramp. Render allocates nothing.
+/// with no live control and with live controls) and at quanta 128, 100 and 37, the driver pushes
+/// `SetMute` at exactly those samples over the session mute length `M`, and the output is bit for
+/// bit the stage driven directly with those two operations: each ramp starts at its step sample,
+/// the lane is the exact `+0.0` of a static mute from the end of the mute ramp, and back at the
+/// fader from the end of the unmute ramp. Render allocates nothing.
 ///
 /// Test value: red if a mute step snaps to the grid or a block boundary, ramps over another row's
 /// length (the fader's 240), fires twice or not at all, depends on the quantum or the form, or if
-/// the scalar oracle or the fused pair skips the mute cells.
+/// the scalar oracle skips the mute cells.
 #[test]
 fn a_mute_step_mutes_the_lane_at_its_exact_sample_over_the_mute_length() {
     const FRAMES: u64 = 4_096;
@@ -1626,7 +1614,7 @@ fn a_hand_mute_in_a_curve_rebuild_lands_over_its_own_ramp() {
 /// (`mute_ms` 1: below the 64-sample grid, with no grid point in `(2_570, E)`), from `E` plus `J`
 /// the lane follows the composed curve: at each completion sample `64k + 63` it equals
 /// `checked_fader_gain(vca_compose_db(curve, S))` exactly, on every live form (Simd8 on AVX2,
-/// Simd4, between render calls, the scalar oracle) at quanta 128, 100 and 37.
+/// Simd4, the scalar oracle) at quanta 128, 100 and 37.
 ///
 /// Test value: red at `M = 0` if the unmute leaves the cell's older hold in place: the exact
 /// unmute owes nothing, so its grid events after `E` are only remembered on a free stage and the

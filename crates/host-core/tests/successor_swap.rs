@@ -2773,12 +2773,10 @@ fn pan_record(pan: [f32; 2], smoothing_samples: u32) -> TrackControlRecord {
     }
 }
 
-/// How a plan's fader and matrix banks are built: one bank each, or the fused stage the browser's
-/// plans prepared between render calls get.
+/// How a plan's fader and matrix banks are built: one bank each.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Form {
     Split,
-    Fused,
 }
 
 /// One value written to a strip's cells.
@@ -2825,14 +2823,6 @@ impl CellPlan {
                 &LivePlan::request(),
                 backend,
             ),
-            Form::Fused => {
-                host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
-                    &session.compiled,
-                    &caps(),
-                    &LivePlan::request(),
-                    backend,
-                )
-            }
         });
         let gate = prepared
             .plan
@@ -2861,15 +2851,6 @@ impl CellPlan {
         let (mut prepared, handles) = match form {
             Form::Split => {
                 host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
-                    &session.compiled,
-                    &caps(),
-                    &LivePlan::request(),
-                    base,
-                    backend,
-                )
-            }
-            Form::Fused => {
-                host_core::prepare::test_only_prepare_host_runtime_between_render_calls_successor_on(
                     &session.compiled,
                     &caps(),
                     &LivePlan::request(),
@@ -3085,7 +3066,7 @@ fn first_cell_difference(left: &CellRun, right: &CellRun) -> Option<usize> {
 }
 
 fn forms() -> Vec<Form> {
-    vec![Form::Split, Form::Fused]
+    vec![Form::Split]
 }
 
 fn assert_swapped_like(run: &CellRun, reference: &CellRun, what: &str) {
@@ -3502,8 +3483,8 @@ const CARRIED: &str = "eq1";
 
 /// #1312 D2: `live_values_superseded` counts the writes a carry drain replaces on every lane that
 /// carries, whichever lanes share their bank. B adds a VCA over [`MOVED`], a live difference
-/// (#1558): its stage carries and is retargeted, so its writes are counted like [`CARRIED`]'s, in
-/// the split form and in the fused one. Three fader writes sit unread in [`MOVED`]'s cells and
+/// (#1558): its stage carries and is retargeted, so its writes are counted like [`CARRIED`]'s.
+/// Three fader writes sit unread in [`MOVED`]'s cells and
 /// three fader and three pan writes in [`CARRIED`]'s when the swap block hands over. The count of a
 /// stage that restarts instead (an input lane, `a_restarting_input_lane_...`) stays zero.
 fn a_carried_lane_counts_its_replaced_writes(backend: Backend, form: Form) {
@@ -4022,77 +4003,6 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
     assert_ne!(unmoved.blocks[SWAP_BLOCK + 1], run.blocks[SWAP_BLOCK + 1]);
 }
 
-/// The fused form of the second case: the fused stage is one unit (D9), and a followed mute with a
-/// pan change carries and retargets both halves (#1558 D4). Nothing restarts, and every block from
-/// the swap on equals the run that writes both records to A just before the swap. Red if the
-/// fused stage restarts, or only one half of it is retargeted.
-fn a_followed_mute_change_retargets_the_fused_stage_whole(backend: Backend) {
-    let form = Form::Fused;
-    let before = with_send_through_submix(strip_state_session(), MOVED, true);
-    let moved = with_pan(before.clone(), MOVED, [0.8, 0.6], 300);
-    let mut model = with_muted_track(moved.clone());
-    track_mut(&mut model, MOVED).fader.left_mute = true;
-    let mut written_model = moved;
-    track_mut(&mut written_model, MOVED).fader.left_mute = true;
-    let (a, b) = (Session::compile(before.clone()), Session::compile(model));
-    let feed = feed_for_strips();
-    let mute_samples = LiveRamps::for_session(&written_model).for_row(LiveRampRow::Mute);
-    let run = cell_run(
-        &a,
-        form,
-        Some(Swap {
-            to: &b,
-            committed: &before,
-            form,
-            successor_writes: &[],
-            edit_ramps: &EditRamps::new(),
-        }),
-        &feed,
-        &[],
-        backend,
-    );
-    let written = cell_run(
-        &a,
-        form,
-        Some(Swap {
-            to: &b,
-            committed: &written_model,
-            form,
-            successor_writes: &[],
-            edit_ramps: &EditRamps::new(),
-        }),
-        &feed,
-        &{
-            let mut writes = followed_mute_writes(true, [true, false], mute_samples);
-            writes.push(CellWrite {
-                block: SWAP_BLOCK,
-                strip: MOVED,
-                record: CellRecord::Matrix(pan_record([0.8, 0.6], 300)),
-            });
-            writes
-        },
-        backend,
-    );
-    assert_eq!(run.carry, CarryOutcome::Carried);
-    assert!(
-        run.restarted.is_empty(),
-        "{backend:?}: the followed mute restarts nothing: {:?}",
-        run.restarted
-    );
-    assert_eq!(
-        first_cell_difference(&run, &written),
-        None,
-        "{backend:?}: X's fused stage carries and is retargeted, both halves"
-    );
-}
-
-#[test]
-fn a_followed_mute_change_retargets_the_fused_stage_whole_on_every_width() {
-    for backend in backends() {
-        a_followed_mute_change_retargets_the_fused_stage_whole(backend);
-    }
-}
-
 #[test]
 fn a_followed_mute_change_leaves_the_matrix_stage_carrying_on_every_width() {
     for backend in backends() {
@@ -4161,37 +4071,6 @@ fn the_strip_carry_allocates_and_frees_nothing() {
                 ((0, 0, 0), (0, 0)),
                 "{backend:?} {form:?}: allocator calls and audited allocations at the swap block"
             );
-        }
-    }
-}
-
-/// D9: a fused stage and a split one do not pair. Every strip present in both starts at rest and
-/// is listed, the hand-over still reports `Carried`, and the successor sounds like a fresh one.
-#[test]
-fn a_cross_form_pair_does_not_carry() {
-    let a = Session::compile(strip_state_session());
-    let b = Session::compile(with_muted_track(strip_state_session()));
-    let feed = feed_for_strips();
-    for backend in backends() {
-        for (from, to) in [(Form::Split, Form::Fused), (Form::Fused, Form::Split)] {
-            let reference = cell_run(&b, to, None, &feed, &[], backend);
-            let run = cell_run(
-                &a,
-                from,
-                Some(Swap {
-                    to: &b,
-                    committed: &a.model,
-                    form: to,
-                    successor_writes: &[],
-                    edit_ramps: &EditRamps::new(),
-                }),
-                &feed,
-                &[],
-                backend,
-            );
-            assert_eq!(run.carry, CarryOutcome::Carried);
-            assert_eq!(run.restarted.len(), 9, "{backend:?} {from:?} to {to:?}");
-            assert_eq!(first_cell_difference(&run, &reference), None);
         }
     }
 }

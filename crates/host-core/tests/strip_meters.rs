@@ -19,7 +19,7 @@ use engine::realtime::audit;
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
     HostPrepareCaps, HostShapePolicy, PrepareRejection, PreparedHost, SourceSubmission,
-    compile_host_session, prepare_host_runtime_with_selected_meters_between_render_calls,
+    compile_host_session, prepare_host_runtime_with_selected_meters,
     prepare_host_session_with_live_controls,
 };
 use session::{
@@ -376,7 +376,7 @@ fn prepare_selected(
     let compiled = compile_host_session(document, &caps()).unwrap_or_else(|failure| {
         panic!("compile: {}", String::from_utf8_lossy(failure.as_bytes()))
     });
-    prepare_host_runtime_with_selected_meters_between_render_calls(
+    prepare_host_runtime_with_selected_meters(
         &compiled,
         &caps(),
         &meter_controls(),
@@ -607,7 +607,7 @@ fn selected_strip_meters_keep_the_callers_order_and_an_unknown_strip_is_refused(
     );
 
     let compiled = compile_host_session(&pair.bus, &caps()).expect("compile");
-    let Err(failure) = prepare_host_runtime_with_selected_meters_between_render_calls(
+    let Err(failure) = prepare_host_runtime_with_selected_meters(
         &compiled,
         &caps(),
         &meter_controls(),

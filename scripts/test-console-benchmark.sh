@@ -6,9 +6,8 @@
 # one host, one admissibility state, the decomposition rows' pinned strip contents, every session
 # row's pinned source feed, the class-A statements that neither the stationary smoother nor a
 # meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
-# driver-fed source feed nor the metered row's web meters and fused fader and matrix changes a
-# rendered bit, the meters pair's equal fold and redirect counters, the metered row's pinned
-# meter group, the mixing-automation row's pinned controls, host lowerings, collapse counters
+# driver-fed source feed nor the metered row's web meters changes a rendered bit, the meters
+# pair's equal fold and redirect counters, the metered row's pinned meter group, the mixing-automation row's pinned controls, host lowerings, collapse counters
 # and per-effect bit movement, and the console-strip rows' pinned layouts, bypass group and sparse
 # input (#1085), the fader-ride row's delivery, counts and ramp witness (#1750), and the
 # product-lane row's lanes, absent writes and standing-row bits (#1758) -- are

@@ -261,7 +261,7 @@ def session_row_floor_keys: (session_row_keys + floor_keys) | sort;
 # stream, and a stream that dropped one or published off its cadence changes the count. The fold
 # and redirect counters are the #914 pair, which the digest cannot see: every route of the console
 # folds whether or not a post-matrix meter reads it (#885). The redirect count is the metered plan's
-# own; no record in the run shares its delivery, so none is its baseline (see the aggregate).
+# own (see the aggregate).
 def metered_session_shape:
   .meter_streams == .tracks and .meter_tap == "post_matrix" and
   .meter_metrics == "sample_peak" and .meter_window_blocks == 12 and
@@ -328,10 +328,8 @@ def session_kind_shape:
     .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and
     .fixture_id == console_fixture
   # The metered console row (#881) is that session as written, prepared as the default web boot
-  # prepares it: meters, and the between-render-calls delivery that fuses each cohort's fader and
-  # matrix into one stage. Neither is strip content -- a meter observes, and the fused stage computes
-  # the split pair's arithmetic -- so it states the standing row's six facts, and its meter group
-  # says what else it prepared.
+  # prepares it: with meters. A meter is not strip content -- it observes -- so the row states the
+  # standing row's six facts, and its meter group says what else it prepared.
   elif .workload_kind == "sixty_four_track_console_metered" then
     .tracks == 64 and .synthetic_fixture == false and
     .strip_content == "eq+compressor+limiter" and
@@ -890,10 +888,9 @@ def mixing_automation_record_valid:
 # attaches for it (`controls::live_lanes`: for this session every strip's fader/matrix, input and
 # effect lanes) on the product's `Concurrent` delivery, riding one fader and one pan in every bank
 # chain, one transaction per block, alternated per observation with a quiet arm of the same plan.
-# Its claims are pinned so the row cannot quietly measure something else: the delivery (a
-# between-render-calls plan fuses the pair, which no product host prepares), the lane set, one
-# fader and one pan per bank on two different tracks, exact record and transaction counts, no
-# superseded value, and the witness that the riding arm did not hold any timed block's targets
+# Its claims are pinned so the row cannot quietly measure something else: the delivery, the lane
+# set, one fader and one pan per bank on two different tracks, exact record and transaction
+# counts, no superseded value, and the witness that the riding arm did not hold any timed block's targets
 # from that block's first sample.
 # A bank chain has a vector's lanes, so the vector backends alone have banks to ride.
 def lane_width: if .backend == "Simd8" then 8 elif .backend == "Simd4" then 4 else null end;

@@ -206,8 +206,7 @@ fn backends() -> Vec<graph_compiler::Backend> {
     ]
 }
 
-/// A plan of `model` with live controls on `backend` (`between`: delivery between render calls),
-/// rendered block by block on a DC source of `1.0`.
+/// A plan of `model` with live controls on `backend`, rendered block by block on a DC source of `1.0`.
 struct Rig {
     prepared: PreparedHost,
     handles: host_core::HostLiveControlHandles,
@@ -220,20 +219,15 @@ struct Rig {
 }
 
 impl Rig {
-    fn new(model: &SessionModel, backend: graph_compiler::Backend, between: bool) -> Self {
+    fn new(model: &SessionModel, backend: graph_compiler::Backend) -> Self {
         let compiled = compiled(model);
         let caps = caps(model);
         let request = host_core::HostLiveControlRequest::default();
-        let (mut prepared, handles) = if between {
-            host_core::prepare::test_only_prepare_host_runtime_between_render_calls_on(
-                &compiled, &caps, &request, backend,
-            )
-        } else {
+        let (mut prepared, handles) =
             host_core::test_only_prepare_host_runtime_with_live_controls_on(
                 &compiled, &caps, &request, backend,
             )
-        }
-        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
+            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.as_bytes())));
         let gate = prepared.plan.take_revision_gate().expect("the plan's gate");
         Self {
             prepared,
@@ -331,13 +325,11 @@ fn every_fader_event_lane_has_an_offsets_cell() {
     model.automation.push(ride);
     let model = normalized(&model);
     for backend in backends() {
-        for between in [false, true] {
-            let rig = Rig::new(&model, backend, between);
-            let what = format!("{backend:?} between {between}");
-            assert_eq!(rig.has_offsets(t0.as_str()), [true, false], "{what}");
-            assert_eq!(rig.has_offsets(t1.as_str()), [true, true], "{what}");
-            assert_eq!(rig.has_offsets(t2.as_str()), [false, false], "{what}");
-        }
+        let rig = Rig::new(&model, backend);
+        let what = format!("{backend:?}");
+        assert_eq!(rig.has_offsets(t0.as_str()), [true, false], "{what}");
+        assert_eq!(rig.has_offsets(t1.as_str()), [true, true], "{what}");
+        assert_eq!(rig.has_offsets(t2.as_str()), [false, false], "{what}");
     }
 }
 
@@ -482,7 +474,7 @@ fn same_bits(a: &[f32], b: &[f32]) -> bool {
 /// unused) and a flat VCA `mute` at 0 on `va` render, bit for bit, the session whose `va` holds
 /// -6 dB statically: `t0` is in `va` and in the static `vb` (-2 dB; two VCAs on one member, one
 /// automated) and has no ride of its own, `t1` rides its own fader (flat -3 dB), `t2` is in no
-/// VCA. On every backend, live and between render calls, at quanta 128, 100 and 37, render
+/// VCA. On every backend, live, at quanta 128, 100 and 37, render
 /// allocation-free. Not vacuous: a ride at -5 dB is heard.
 ///
 /// Test value: red if the composed lane adds the VCA curve to `S` with other arithmetic or in
@@ -513,25 +505,23 @@ fn a_flat_vca_ride_and_mute_render_the_static_vca_bits() {
         };
         let (flat, fixed, other) = (session(Some(-6.0)), session(None), session(Some(-5.0)));
         for backend in backends() {
-            for between in [false, true] {
-                let what = format!("{backend:?} between {between}, quantum {quantum}");
-                let run = |model: &SessionModel| {
-                    let mut rig = Rig::new(model, backend, between);
-                    rig.blocks(40);
-                    assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
-                    rig.out
-                };
-                let (flat, fixed, other) = (run(&flat), run(&fixed), run(&other));
-                for lane in 0..2 {
-                    assert!(
-                        same_bits(&flat[lane], &fixed[lane]),
-                        "{what}: lane {lane} renders the static VCA's bits"
-                    );
-                    assert!(
-                        !same_bits(&other[lane], &fixed[lane]),
-                        "{what}: lane {lane}, a ride at -5 dB is heard"
-                    );
-                }
+            let what = format!("{backend:?}, quantum {quantum}");
+            let run = |model: &SessionModel| {
+                let mut rig = Rig::new(model, backend);
+                rig.blocks(40);
+                assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
+                rig.out
+            };
+            let (flat, fixed, other) = (run(&flat), run(&fixed), run(&other));
+            for lane in 0..2 {
+                assert!(
+                    same_bits(&flat[lane], &fixed[lane]),
+                    "{what}: lane {lane} renders the static VCA's bits"
+                );
+                assert!(
+                    !same_bits(&other[lane], &fixed[lane]),
+                    "{what}: lane {lane}, a ride at -5 dB is heard"
+                );
             }
         }
     }
@@ -543,7 +533,7 @@ fn a_flat_vca_ride_and_mute_render_the_static_vca_bits() {
 /// member's stage carries the fader dB `vca_compose_db(own, S + c(τ))` computed here, `τ` the
 /// event's completion sample in that member's node time (render sample less `a(n)`, plus 63), so
 /// its gain is `checked_fader_gain` of it; the latent member's events fall on the render samples
-/// `L` after the other's. On every backend, live and between render calls.
+/// `L` after the other's. On every backend, live.
 ///
 /// Test value: red if VCA events run on the render clock or another member's arrival (the latent
 /// member's grid would fall on the plain member's samples and carry another time's value), or if
@@ -595,73 +585,72 @@ fn a_vca_ride_reaches_each_member_in_its_own_node_time() {
         automation::value_at(&controls::stored_segments(entry), at)
     };
     for backend in backends() {
-        for between in [false, true] {
-            let what = format!("{backend:?} between {between}");
-            let mut rig = Rig::new(&model, backend, between);
-            let latent = fader_arrival(&rig.prepared, &model, 0);
-            assert_eq!(fader_arrival(&rig.prepared, &model, 1), 0, "{what}");
-            assert!(
-                !latent.is_multiple_of(64),
-                "{what}: L = {latent} is off the grid"
-            );
-            let events = probed(&mut rig, 30);
-            let mut samples = [Vec::new(), Vec::new()];
-            for event in events.iter().filter(|event| {
-                !event.mute && !event.held && event.kind == automation::EventKind::Grid
-            }) {
-                // The member by its grid: `t1`'s node time is render time, `t0`'s is `L` behind.
-                let member = usize::from(!event.sample.is_multiple_of(64));
-                let arrival = [0, latent][member];
-                assert_eq!(
-                    (event.sample - arrival) % 64,
-                    0,
-                    "{what}: {event:?} on a member's grid"
-                );
-                samples[member].push(event.sample);
-                let at = (event.sample - arrival) as i64 + 63;
-                if at >= 4_096 {
-                    continue;
-                }
-                let own = if member == 0 {
-                    curve("t1-ride", at)
-                } else {
-                    -1.0
-                };
-                let expected = session::vca_compose_db(own, 0.0 + f64::from(curve("va-ride", at)));
-                assert_eq!(
-                    builtins::checked_fader_gain(event.value)
-                        .expect("fader domain")
-                        .to_bits(),
-                    builtins::checked_fader_gain(expected)
-                        .expect("fader domain")
-                        .to_bits(),
-                    "{what}: {event:?} at node time {at}"
-                );
-            }
-            for list in &mut samples {
-                list.sort_unstable();
-                list.dedup();
-            }
-            assert!(
-                samples.iter().all(|list| list.len() >= 40),
-                "{what}: both members move on their grids: {samples:?}"
-            );
-            let shifted: Vec<u64> = samples[0]
-                .iter()
-                .map(|sample| sample + latent)
-                .filter(|sample| (latent + 64..3_840).contains(sample))
-                .collect();
-            let latent_grid: Vec<u64> = samples[1]
-                .iter()
-                .copied()
-                .filter(|sample| (latent + 64..3_840).contains(sample))
-                .collect();
+        let what = format!("{backend:?}");
+        let mut rig = Rig::new(&model, backend);
+        let latent = fader_arrival(&rig.prepared, &model, 0);
+        assert_eq!(fader_arrival(&rig.prepared, &model, 1), 0, "{what}");
+        assert!(
+            !latent.is_multiple_of(64),
+            "{what}: L = {latent} is off the grid"
+        );
+        let events = probed(&mut rig, 30);
+        let mut samples = [Vec::new(), Vec::new()];
+        for event in events
+            .iter()
+            .filter(|event| !event.mute && !event.held && event.kind == automation::EventKind::Grid)
+        {
+            // The member by its grid: `t1`'s node time is render time, `t0`'s is `L` behind.
+            let member = usize::from(!event.sample.is_multiple_of(64));
+            let arrival = [0, latent][member];
             assert_eq!(
-                shifted, latent_grid,
-                "{what}: the latent member's events fall L later"
+                (event.sample - arrival) % 64,
+                0,
+                "{what}: {event:?} on a member's grid"
             );
-            assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
+            samples[member].push(event.sample);
+            let at = (event.sample - arrival) as i64 + 63;
+            if at >= 4_096 {
+                continue;
+            }
+            let own = if member == 0 {
+                curve("t1-ride", at)
+            } else {
+                -1.0
+            };
+            let expected = session::vca_compose_db(own, 0.0 + f64::from(curve("va-ride", at)));
+            assert_eq!(
+                builtins::checked_fader_gain(event.value)
+                    .expect("fader domain")
+                    .to_bits(),
+                builtins::checked_fader_gain(expected)
+                    .expect("fader domain")
+                    .to_bits(),
+                "{what}: {event:?} at node time {at}"
+            );
         }
+        for list in &mut samples {
+            list.sort_unstable();
+            list.dedup();
+        }
+        assert!(
+            samples.iter().all(|list| list.len() >= 40),
+            "{what}: both members move on their grids: {samples:?}"
+        );
+        let shifted: Vec<u64> = samples[0]
+            .iter()
+            .map(|sample| sample + latent)
+            .filter(|sample| (latent + 64..3_840).contains(sample))
+            .collect();
+        let latent_grid: Vec<u64> = samples[1]
+            .iter()
+            .copied()
+            .filter(|sample| (latent + 64..3_840).contains(sample))
+            .collect();
+        assert_eq!(
+            shifted, latent_grid,
+            "{what}: the latent member's events fall L later"
+        );
+        assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
     }
 }
 
@@ -672,8 +661,7 @@ fn a_vca_ride_reaches_each_member_in_its_own_node_time() {
 /// `SetMute` events fall on render samples `1,000` (`t1`, `t2`) and `1,000 + L` (`t0`) and back at
 /// `2,500` and `2,500 + L`, each over `M`. From the first block boundary after the mute ramp's end
 /// in the output until the unmute, the output equals the plan with `va` muted statically; from
-/// the first boundary after the unmute ramp, the plan with no VCA mute. On every backend, live
-/// and between render calls.
+/// the first boundary after the unmute ramp, the plan with no VCA mute. On every backend, live.
 ///
 /// Test value: red if a member's mute follows the render clock (the latent member closes `L`
 /// early), if a nested member or one with no own mute entry misses the VCA curve, or if the
@@ -707,56 +695,54 @@ fn a_vca_mute_step_mutes_each_member_at_its_node_time() {
     );
     const BLOCKS: usize = 40;
     for backend in backends() {
-        for between in [false, true] {
-            let what = format!("{backend:?} between {between}");
-            let mut rig = Rig::new(&curve, backend, between);
-            let latent = fader_arrival(&rig.prepared, &curve, 0);
-            assert!(latent > 0, "{what}: the limiter delays t0's fader");
-            let events = probed(&mut rig, BLOCKS);
-            let mut mutes: Vec<(u64, bool, u32)> = events
-                .iter()
-                .filter(|event| event.mute)
-                .map(|event| (event.sample, event.value != 0.0, event.ramp))
-                .collect();
-            mutes.sort_unstable();
-            mutes.dedup();
-            assert_eq!(
-                mutes,
-                [
-                    (1_000, true, M),
-                    (1_000 + latent, true, M),
-                    (2_500, false, M),
-                    (2_500 + latent, false, M),
-                ],
-                "{what}: each member's mute at its node time over VcaMute"
+        let what = format!("{backend:?}");
+        let mut rig = Rig::new(&curve, backend);
+        let latent = fader_arrival(&rig.prepared, &curve, 0);
+        assert!(latent > 0, "{what}: the limiter delays t0's fader");
+        let events = probed(&mut rig, BLOCKS);
+        let mut mutes: Vec<(u64, bool, u32)> = events
+            .iter()
+            .filter(|event| event.mute)
+            .map(|event| (event.sample, event.value != 0.0, event.ramp))
+            .collect();
+        mutes.sort_unstable();
+        mutes.dedup();
+        assert_eq!(
+            mutes,
+            [
+                (1_000, true, M),
+                (1_000 + latent, true, M),
+                (2_500, false, M),
+                (2_500 + latent, false, M),
+            ],
+            "{what}: each member's mute at its node time over VcaMute"
+        );
+        let mut fixed = Rig::new(&muted, backend);
+        fixed.blocks(BLOCKS);
+        let mut plain = Rig::new(&open, backend);
+        plain.blocks(BLOCKS);
+        let q = rig.quantum as u64;
+        let closed = ((1_000 + latent + u64::from(M)).div_ceil(q) * q) as usize;
+        let opened = ((2_500 + latent + u64::from(M)).div_ceil(q) * q) as usize;
+        let end = BLOCKS * rig.quantum;
+        for lane in 0..2 {
+            assert!(
+                same_bits(
+                    &rig.out[lane][closed..2_500],
+                    &fixed.out[lane][closed..2_500]
+                ),
+                "{what}: lane {lane} equals the static VCA mute while the curve mutes"
             );
-            let mut fixed = Rig::new(&muted, backend, between);
-            fixed.blocks(BLOCKS);
-            let mut plain = Rig::new(&open, backend, between);
-            plain.blocks(BLOCKS);
-            let q = rig.quantum as u64;
-            let closed = ((1_000 + latent + u64::from(M)).div_ceil(q) * q) as usize;
-            let opened = ((2_500 + latent + u64::from(M)).div_ceil(q) * q) as usize;
-            let end = BLOCKS * rig.quantum;
-            for lane in 0..2 {
-                assert!(
-                    same_bits(
-                        &rig.out[lane][closed..2_500],
-                        &fixed.out[lane][closed..2_500]
-                    ),
-                    "{what}: lane {lane} equals the static VCA mute while the curve mutes"
-                );
-                assert!(
-                    same_bits(&rig.out[lane][opened..end], &plain.out[lane][opened..end]),
-                    "{what}: lane {lane} equals the open plan after the unmute"
-                );
-                assert!(
-                    !same_bits(&fixed.out[lane][..900], &rig.out[lane][..900]),
-                    "{what}: lane {lane} plays before the mute"
-                );
-            }
-            assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
+            assert!(
+                same_bits(&rig.out[lane][opened..end], &plain.out[lane][opened..end]),
+                "{what}: lane {lane} equals the open plan after the unmute"
+            );
+            assert!(
+                !same_bits(&fixed.out[lane][..900], &rig.out[lane][..900]),
+                "{what}: lane {lane} plays before the mute"
+            );
         }
+        assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
     }
 }
 
@@ -766,7 +752,7 @@ fn a_vca_mute_step_mutes_each_member_at_its_node_time() {
 /// longest of the two jumps (the fader and `VcaOffset` rows' lengths, both `J` here) and one
 /// `SetMute` at 3,000 over `M`, and the output equals, bit for bit, a session whose own curves
 /// alone make the composed moves (-3 to -15 dB, one mute step) under a static `va` at 0 dB. On
-/// every backend, live and between render calls.
+/// every backend, live.
 ///
 /// Test value: red if coincident curve events land as two jumps (the second retargets inside the
 /// first), as a shorter jump, or compose another value than one curve making the sum would.
@@ -809,29 +795,27 @@ fn coincident_member_and_vca_events_take_one_longest_jump() {
     };
     let (composed, single) = (session(true), session(false));
     for backend in backends() {
-        for between in [false, true] {
-            let what = format!("{backend:?} between {between}");
-            let mut rig = Rig::new(&composed, backend, between);
-            let events = probed(&mut rig, 32);
-            let at = |sample: u64, mute: bool| {
-                let mut found: Vec<(usize, u32)> = events
-                    .iter()
-                    .filter(|event| event.sample == sample && event.mute == mute && !event.held)
-                    .map(|event| (event.channel, event.ramp))
-                    .collect();
-                found.sort_unstable();
-                found
-            };
-            assert_eq!(at(1_000, false), [(0, J), (1, J)], "{what}: one fader jump");
-            assert_eq!(at(3_000, true), [(0, M), (1, M)], "{what}: one mute step");
-            let mut twin = Rig::new(&single, backend, between);
-            twin.blocks(32);
-            for lane in 0..2 {
-                assert!(
-                    same_bits(&rig.out[lane], &twin.out[lane]),
-                    "{what}: lane {lane} equals one curve making the sum"
-                );
-            }
+        let what = format!("{backend:?}");
+        let mut rig = Rig::new(&composed, backend);
+        let events = probed(&mut rig, 32);
+        let at = |sample: u64, mute: bool| {
+            let mut found: Vec<(usize, u32)> = events
+                .iter()
+                .filter(|event| event.sample == sample && event.mute == mute && !event.held)
+                .map(|event| (event.channel, event.ramp))
+                .collect();
+            found.sort_unstable();
+            found
+        };
+        assert_eq!(at(1_000, false), [(0, J), (1, J)], "{what}: one fader jump");
+        assert_eq!(at(3_000, true), [(0, M), (1, M)], "{what}: one mute step");
+        let mut twin = Rig::new(&single, backend);
+        twin.blocks(32);
+        for lane in 0..2 {
+            assert!(
+                same_bits(&rig.out[lane], &twin.out[lane]),
+                "{what}: lane {lane} equals one curve making the sum"
+            );
         }
     }
 }
@@ -1293,37 +1277,35 @@ mod classifier {
     /// before the write (the edit is heard), and the render thread allocated and freed nothing.
     fn assert_heard_as_fresh(current: &SessionModel, next: &SessionModel, records: &[Level]) {
         for backend in backends() {
-            for between in [false, true] {
-                let what = format!("{backend:?} between {between}");
-                let mut live = Rig::new(current, backend, between);
-                live.blocks(8);
-                write(&mut live, records);
-                live.blocks(24);
-                let mut fresh = Rig::new(next, backend, between);
-                fresh.blocks(32);
-                let tail = 24 * live.quantum..32 * live.quantum;
-                for lane in 0..2 {
-                    let (heard, expected) = (
-                        &live.out[lane][tail.clone()],
-                        &fresh.out[lane][tail.clone()],
-                    );
-                    assert!(
-                        heard
-                            .iter()
-                            .zip(expected)
-                            .all(|(a, b)| a.to_bits() == b.to_bits()),
-                        "{what}: lane {lane} heard {:?}, a fresh plan {:?}",
-                        heard[0],
-                        expected[0]
-                    );
-                }
-                assert_ne!(
-                    live.out[0][8 * live.quantum - 1].to_bits(),
-                    live.out[0][tail.start].to_bits(),
-                    "{what}: the edit is heard"
+            let what = format!("{backend:?}");
+            let mut live = Rig::new(current, backend);
+            live.blocks(8);
+            write(&mut live, records);
+            live.blocks(24);
+            let mut fresh = Rig::new(next, backend);
+            fresh.blocks(32);
+            let tail = 24 * live.quantum..32 * live.quantum;
+            for lane in 0..2 {
+                let (heard, expected) = (
+                    &live.out[lane][tail.clone()],
+                    &fresh.out[lane][tail.clone()],
                 );
-                assert_eq!(live.allocations, (0, 0), "{what}: the render thread");
+                assert!(
+                    heard
+                        .iter()
+                        .zip(expected)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "{what}: lane {lane} heard {:?}, a fresh plan {:?}",
+                    heard[0],
+                    expected[0]
+                );
             }
+            assert_ne!(
+                live.out[0][8 * live.quantum - 1].to_bits(),
+                live.out[0][tail.start].to_bits(),
+                "{what}: the edit is heard"
+            );
+            assert_eq!(live.allocations, (0, 0), "{what}: the render thread");
         }
     }
 
@@ -1567,7 +1549,7 @@ mod classifier {
     /// the whole lane, as one cell's jump does, so the lane follows the own ride from 3,328 on.
     /// From the step's jump's end (3,240) every sample equals the session whose `t0` rides the
     /// summed curve as its own table under a static `va` given the same hand move (one cell), on
-    /// every backend, live and between render calls; the classifier gives both the same records.
+    /// every backend, live; the classifier gives both the same records.
     /// Before 3,000 the two differ: the record's ramp aims at each curve toward its completion,
     /// clipped at that curve's own next discontinuity (the VCA step), where one cell clips the
     /// sum at the lane's; the jump's end makes the gains equal.
@@ -1662,31 +1644,29 @@ mod classifier {
         );
         assert_eq!(records, single_records, "one cell's records");
         for backend in backends() {
-            for between in [false, true] {
-                let what = format!("{backend:?} between {between}");
-                let run = |model: &SessionModel| {
-                    let mut rig = Rig::new(model, backend, between);
-                    rig.blocks(8);
-                    write(&mut rig, &records);
-                    rig.blocks(92);
-                    assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
-                    rig.out
-                };
-                let (heard, expected) = (run(&composed), run(&single));
-                for lane in 0..2 {
-                    let first = (FROM..heard[lane].len())
-                        .find(|&at| heard[lane][at].to_bits() != expected[lane][at].to_bits());
-                    assert_eq!(
-                        first, None,
-                        "{what}: lane {lane}, first sample that differs"
-                    );
-                }
-                assert_ne!(
-                    heard[0][3_400].to_bits(),
-                    heard[0][9_000].to_bits(),
-                    "{what}: the own ride moves the lane inside the hand move"
+            let what = format!("{backend:?}");
+            let run = |model: &SessionModel| {
+                let mut rig = Rig::new(model, backend);
+                rig.blocks(8);
+                write(&mut rig, &records);
+                rig.blocks(92);
+                assert_eq!(rig.allocations, (0, 0), "{what}: the render thread");
+                rig.out
+            };
+            let (heard, expected) = (run(&composed), run(&single));
+            for lane in 0..2 {
+                let first = (FROM..heard[lane].len())
+                    .find(|&at| heard[lane][at].to_bits() != expected[lane][at].to_bits());
+                assert_eq!(
+                    first, None,
+                    "{what}: lane {lane}, first sample that differs"
                 );
             }
+            assert_ne!(
+                heard[0][3_400].to_bits(),
+                heard[0][9_000].to_bits(),
+                "{what}: the own ride moves the lane inside the hand move"
+            );
         }
     }
 }
