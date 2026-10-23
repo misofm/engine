@@ -19,7 +19,7 @@ use effect_contract::{EffectBankProcessBlock, EffectProcessBlock, LinkMode, Para
 const ZERO_OFFSETS: [u32; 9] = [0; 9];
 
 /// Red mutation: `std::hint::black_box(Vec::<u8>::with_capacity(1));` inside
-/// `Shaper::process_block`.
+/// `Shaper::process_block`, before or inside the silent fast path's early return.
 #[test]
 fn the_render_path_allocates_nothing() {
     let blocks = 1_000;
@@ -78,8 +78,53 @@ fn the_render_path_allocates_nothing() {
             );
         }
     }
+    // Issue #1746 gate 3: a silent stretch, rendered until every lane of the bank is at rest and
+    // then on, so the silent fast path's blocks (the rest query and the skip) are measured too.
+    // The fast path's taking is the crate's own `rest_tests`' claim; here the rest is the reach.
+    left.fill(0.0);
+    right.fill(0.0);
+    bank_left.fill(0.0);
+    bank_right.fill(0.0);
+    let all = (1_u32 << lanes) - 1;
+    let mut rest_blocks = 0;
+    for block in blocks..blocks + 20_000 {
+        let first = (block * frames) as u64;
+        effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, first, &[], frames as u32)
+                .expect("scalar block"),
+        );
+        let Some(bank) = bank.as_mut() else {
+            continue;
+        };
+        bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut bank_left,
+                &mut bank_right,
+                None,
+                frames as u32,
+                width,
+                first,
+                &[],
+                &ZERO_OFFSETS[..lanes + 1],
+                frames as u32,
+            )
+            .expect("bank block"),
+        );
+        if bank.lanes_at_rest() == all {
+            rest_blocks += 1;
+            if rest_blocks == 64 {
+                break;
+            }
+        }
+    }
     let counted = bench_alloc::current_thread_delta_since(mark);
 
+    if bank.is_some() {
+        assert_eq!(
+            rest_blocks, 64,
+            "the silent stretch never brought the bank to rest"
+        );
+    }
     assert_eq!(counted.allocations, 0, "the render path must not allocate");
     assert_eq!(counted.deallocations, 0, "the render path must not free");
 }

@@ -33,7 +33,10 @@ use effect_contract::{
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
-use effect_runtime::bank::{NonFiniteReport, check_block, nonfinite_lane_mask};
+use effect_runtime::bank::{
+    NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask,
+    positive_zero_lanes_of,
+};
 use effect_runtime::params::{ParameterSpec, is_negative_zero, normalize_zero};
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
@@ -45,6 +48,32 @@ pub mod corpus;
 pub mod kernel;
 
 use kernel::{SoftClipCoef, SoftClipHistory, SoftClipState, soft_clip_block};
+
+#[cfg(test)]
+thread_local! {
+    /// Blocks the bank-wide silent fast path skipped (issue #1746), counted once per skipped block.
+    static SILENT_ADMISSIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// While set, the silent fast path is refused and every block renders the whole kernel: the
+    /// control arm of the fast-path differential and the rest probe's fork (issue #1746).
+    static SILENT_FORBIDDEN: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// `true` when a test has forbidden the silent fast path on this thread. Production: `false`.
+#[cfg(test)]
+fn silent_forbidden() -> bool {
+    SILENT_FORBIDDEN.with(core::cell::Cell::get)
+}
+
+/// Counts one silent admission. Test builds only: production has no counter.
+#[cfg(test)]
+fn admitted_silent() {
+    SILENT_ADMISSIONS.with(|blocks| blocks.set(blocks.get() + 1));
+}
+
+/// Every lane of an `L`-wide cohort, as a [`Channel::rest_lanes`] mask.
+const fn all_lanes<L: Lane>() -> u32 {
+    (1 << L::WIDTH) - 1
+}
 
 /// Parameters: drive, output, mix, in stable numeric-ID order.
 const PARAMETER_COUNT: usize = 3;
@@ -477,6 +506,11 @@ impl<L: Lane> Channel<L> {
     /// for sample, which `tests/ramp_law.rs` asserts by bits.
     ///
     /// Segments are bounded by `1 + 3 * WIDTH` per block and the loop allocates nothing.
+    ///
+    /// `#[inline(never)]` keeps this the one arithmetic kernel of the cohort, as it was before the
+    /// silent fast path joined its caller (issue #1746): inlined into `SoftClip::process` it would
+    /// move the wasm kernel roster's `Channel<f32x4>::process` row into another symbol.
+    #[inline(never)]
     fn process(&mut self, io: &mut [f32], frames: usize, bypass: bool) {
         let width = L::WIDTH;
         debug_assert_eq!(io.len(), frames * width);
@@ -560,6 +594,63 @@ impl<L: Lane> Channel<L> {
                 self.ramps[lane][parameter].current = *value;
             }
         }
+    }
+
+    /// The lanes of this channel at their **exact rest** (issue #1746), as a bitmask over
+    /// `L::WIDTH` lanes: from this state, one block of exact `+0.0` input leaves every word of the
+    /// lane bit-identical and writes `+0.0`.
+    ///
+    /// The channel's words, per lane, are the three state words (`drive`, `output`, `mix`), the
+    /// lane's rows of the three histories (`x`, `e`, `dry`, all 64 double-written rows each), and
+    /// every field of its three ramps: the payload (`write_lane_words`) plus the mirror rows and
+    /// `ramp.current`. Pinned:
+    ///
+    /// * every row of the lane in all three histories `+0.0` by raw bits, mirrors included;
+    /// * every ramp of the lane settled, `remaining == 0`.
+    ///
+    /// Why that is enough. A settled lane's increment is `+0.0` (`step_vector`) and it takes no
+    /// completion snap (only `remaining == 1` snaps), whichever body the block runs: the settled
+    /// body holds the three words, and the ramping body (when another lane ramps) computes
+    /// `ramp_toward(w, +0.0, target)`, which is `w`, because `w + 0.0 = w` for every finite, never
+    /// `-0.0` ramp word and `w` lies in `[min(w, t), max(w, t)]`. `remaining` and `step` are not
+    /// written. `ramp.current` is a copy of the state word at every block boundary: construction,
+    /// both resets, the lane reset and a restore write the two together, every rendered block ends
+    /// with [`synchronize_currents`](Self::synchronize_currents), and an automation point changes
+    /// `current` only in the stationary hoist, to the same bits. So the synchronisation rewrites
+    /// it with the bits it holds, and a skipped block need not run it.
+    ///
+    /// With `+0.0` input every pushed word is `+0.0`: the dry word is the raw `+0.0`; `X =
+    /// flush((g + g) * +0.0)` is `+0.0` (`g > 0`, and `flush` clears a zero's sign anyway); each
+    /// half-band sum starts at `+0.0` and adds products `h * +0.0`, which are `±0.0`, and `+0.0 +
+    /// -0.0` is `+0.0`; `cubic(+0.0)` is `+0.0 - (+0.0 / 3)`, `+0.0`, and is not clamped; so `e`
+    /// and `odd` are `+0.0` and the wet sum is `+0.0`. The block writes only `+0.0` into rows that
+    /// already hold `+0.0`. The output is `output * ((1 - mix) * +0.0 + mix * +0.0)`: `1 - mix >=
+    /// 0` and `mix >= +0.0` (the mix domain is `[0, 1]` and no ramp word is `-0.0`), so both
+    /// products and their sum are `+0.0`, and `output > 0` keeps it; the identity and bypass select
+    /// takes the `+0.0` dry word instead. The D7 check passes `+0.0`, so no lane recovery runs.
+    ///
+    /// A dry `-0.0` (a `-0.0` input) is a history word that is not `+0.0`, so the lane is refused:
+    /// its identity path would write `-0.0`. Bypass changes nothing above.
+    ///
+    /// **Clock:** the shared cursor `history.pos`, one per channel of the cohort, which a block
+    /// advances by `frames` modulo 32 whatever the signal. It is not a lane word; the bank's silent
+    /// fast path advances it ([`advance_cursor`](Self::advance_cursor)).
+    fn rest_lanes(&self) -> u32 {
+        let mut mask = positive_zero_lanes_of::<L>(&self.history.x)
+            & positive_zero_lanes_of::<L>(&self.history.e)
+            & positive_zero_lanes_of::<L>(&self.history.dry);
+        for (lane, ramps) in self.ramps.iter().enumerate() {
+            if ramps.iter().any(|ramp| ramp.remaining != 0) {
+                mask &= !(1 << lane);
+            }
+        }
+        mask
+    }
+
+    /// Advances the shared cursor as a rendered block of `frames` does: `history_advance` once per
+    /// frame, which is `(pos + frames) & POS_MASK`. The one clock a skipped block must move.
+    fn advance_cursor(&mut self, frames: usize) {
+        self.history.pos = ((self.history.pos as usize + frames) & POS_MASK) as u32;
     }
 }
 
@@ -995,7 +1086,32 @@ impl<L: Lane> SoftClip<L> {
     ///
     /// Returns the bitmask of the active lanes charged with a D7 recovery, `0` when the block was
     /// accepted. See [`recover_lanes`](Self::recover_lanes).
+    ///
+    /// # The silent fast path (issue #1746)
+    ///
+    /// Whole-cohort, never per lane, and decided afresh on every block from state, after this
+    /// block's automation was applied: when both input planes are exact `+0.0` and every lane,
+    /// padded lanes included, is at rest ([`lanes_at_rest`](Self::lanes_at_rest)), the kernel is
+    /// skipped. The buffers already hold the `+0.0` it would write, no lane word would move, and the
+    /// D7 check would pass, so the block reports `0` as a rendered one does. The one word a
+    /// rendered block would still move is each channel's cursor, which is advanced here. Bit tests
+    /// and integer arithmetic only.
     fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize, bypass: bool) -> u32 {
+        #[cfg(test)]
+        let allowed = !silent_forbidden();
+        #[cfg(not(test))]
+        let allowed = true;
+        if allowed
+            && block_is_positive_zero(left)
+            && block_is_positive_zero(right)
+            && self.lanes_at_rest() == all_lanes::<L>()
+        {
+            #[cfg(test)]
+            admitted_silent();
+            self.left.advance_cursor(frames);
+            self.right.advance_cursor(frames);
+            return 0;
+        }
         self.left.process(left, frames, bypass);
         self.right.process(right, frames, bypass);
         if check_block::<L>(left) && check_block::<L>(right) {
@@ -1003,6 +1119,12 @@ impl<L: Lane> SoftClip<L> {
         }
         let failed = nonfinite_lane_mask::<L>(left) | nonfinite_lane_mask::<L>(right);
         self.recover_lanes(left, right, failed)
+    }
+
+    /// The lanes at exact rest on both channels (`PreparedNativeEffectBank::lanes_at_rest`): see
+    /// [`Channel::rest_lanes`] for the words pinned, why the list is complete, and the one clock.
+    fn lanes_at_rest(&self) -> u32 {
+        self.left.rest_lanes() & self.right.rest_lanes()
     }
 
     /// The D7 recovery, one lane at a time (issue #1092; decision 12's coupling rule).
@@ -1298,6 +1420,11 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         report
     }
 
+    /// Issue #1746: [`Channel::rest_lanes`] on both channels, padded lanes included.
+    fn lanes_at_rest(&self) -> u32 {
+        self.inner.lanes_at_rest()
+    }
+
     // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_track_state_payload(
         &self,
@@ -1364,3 +1491,5 @@ fn bank_block_matches(block: &EffectBankProcessBlock<'_>, width: BankWidth, quan
 
 #[cfg(test)]
 mod padding_tests;
+#[cfg(test)]
+mod rest_tests;
