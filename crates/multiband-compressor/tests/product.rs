@@ -60,10 +60,10 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
     );
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version, 1);
     for (rate, bytes) in [
-        (44_100u32, 192u32),
-        (48_000, 192),
-        (88_200, 192),
-        (96_000, 192),
+        (44_100u32, 256u32),
+        (48_000, 256),
+        (88_200, 256),
+        (96_000, 256),
     ] {
         let initial = values();
         let mut prepared = request(&initial);
@@ -73,7 +73,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
             prepared.sample_rate,
             prepared.quality,
         );
-        prepared.limits.maximum_total_state_bytes = 384;
+        prepared.limits.maximum_total_state_bytes = 512;
         // The contract requires a positive capacity limit even when the prepared effect needs no
         // scratch; one byte is the smallest admissible declaration for the exact zero-byte row.
         prepared.limits.maximum_scratch_bytes = 1;
@@ -1173,9 +1173,9 @@ fn bank_requests_are_validated_before_any_fallback() {
         .expect("state bytes")
         .checked_add(quality.scratch_fixed_bytes)
         .expect("prepared bytes");
-    assert_eq!(per_track, 384);
-    assert_eq!(per_track * 4, 1_536);
-    assert_eq!(per_track * 8, 3_072);
+    assert_eq!(per_track, 512);
+    assert_eq!(per_track * 4, 2_048);
+    assert_eq!(per_track * 8, 4_096);
 }
 
 /// Issue #1088 (console strip P2a), gate 3: the multiband compressor has not opted into padding (it is not padded until #1069 closes), so
@@ -1608,6 +1608,58 @@ fn a_moving_ramp_word_past_its_domain_is_refused() {
                 });
             bank.restore_track_state_payload(0, 1, input(&saved, sizes))
                 .expect("own snapshot");
+        }
+    }
+
+    // Issue #1069: the four coefficient ramps after the silence counter (word 48 on). A current
+    // or target word outside `(0, 1]`, or a settled ramp away from its target, is refused and
+    // changes nothing.
+    const COEFFICIENT_WORD: usize = 48;
+    restore(effect.as_mut(), 1, &saved, sizes).expect("own snapshot");
+    let set = |sections: &mut (Vec<u8>, Vec<u8>, Vec<u8>), at: usize, bits: u32| {
+        sections.1[at * 4..at * 4 + 4].copy_from_slice(&bits.to_le_bytes());
+    };
+    for rate in 0..4 {
+        let at = COEFFICIENT_WORD + rate * 4;
+        assert_ne!(word(&saved.1, at + 3), 0, "coefficient {rate} walks");
+        let walking = [1.5f32, 0.0, -0.5, f32::NAN].map(|current| {
+            let mut sections = saved.clone();
+            set(&mut sections, at, current.to_bits());
+            (format!("coefficient {rate}: current {current:e}"), sections)
+        });
+        let mut off_target = saved.clone();
+        set(&mut off_target, at, 0.9f32.to_bits());
+        set(&mut off_target, at + 1, 0.95f32.to_bits());
+        set(&mut off_target, at + 2, 0);
+        set(&mut off_target, at + 3, 0);
+        let settled = (
+            format!("coefficient {rate}: settled off target"),
+            off_target,
+        );
+        let mut zero_target = saved.clone();
+        set(&mut zero_target, at + 1, 0.0f32.to_bits());
+        let zero_target = (format!("coefficient {rate}: target 0e0"), zero_target);
+        for (case, sections) in walking.into_iter().chain([settled, zero_target]) {
+            assert_eq!(
+                restore(effect.as_mut(), 1, &sections, sizes)
+                    .expect_err(&case)
+                    .code,
+                "effect.state.parameter",
+                "{case}"
+            );
+            assert_eq!(snapshot(effect.as_ref(), sizes), saved, "{case}");
+            assert_eq!(
+                bank.restore_track_state_payload(0, 1, input(&sections, sizes))
+                    .expect_err(&case)
+                    .code,
+                "effect.state.parameter",
+                "bank {case}"
+            );
+            assert_eq!(
+                support::snapshot_track(bank.as_ref(), 0, sizes),
+                bank_saved,
+                "bank {case}"
+            );
         }
     }
 }

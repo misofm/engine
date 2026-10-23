@@ -56,8 +56,8 @@ use effect_runtime::envelope::retention_coefficient;
 use effect_runtime::params::{ParameterSpec, normalize_zero, parameter_value_valid};
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    STATE_LENGTH_CODE, STATE_VERSION_CODE, ramp_path_inside, read_f32, read_u32, write_f32,
-    write_u32,
+    STATE_LENGTH_CODE, STATE_VERSION_CODE, ramp_path_inside, read_f32, read_ramp, read_u32,
+    write_f32, write_ramp, write_u32,
 };
 use lane::kernels::{SvfState, ramp_toward, silence_skip_block, svf_state_held, svf_step_when};
 use lane::{Lane, flush};
@@ -80,8 +80,9 @@ const RAMP_COUNT: usize = 10;
 /// State-payload words each ramp occupies: current, target, step, remaining.
 const RAMP_WORDS: usize = 4;
 
-/// Fixed scalar words of one channel's state payload.
-const LANE_HEADER_WORDS: usize = 48;
+/// Fixed scalar words of one channel's state payload: 48 before the coefficient ramps, and four
+/// four-word coefficient ramps after them (issue #1069).
+const LANE_HEADER_WORDS: usize = RATE_WORD + RATE_COUNT * RAMP_WORDS;
 
 /// State layout version. This is the sole prelaunch layout identity; the payload shape incorporates
 /// the audit's F1, F4 and D11 corrections.
@@ -105,6 +106,40 @@ const BAND_KNEE: (f32, f32) = knee_coefficients(KNEE_DB);
 
 /// Samples a ramped parameter takes to reach its target (`SmoothingRule::Linear`, 64).
 const SMOOTHING_SAMPLES: u32 = 64;
+
+/// Coefficient ramps per channel and track: each band's attack and release retention coefficient,
+/// in the order low attack, low release, high attack, high release (issue #1069).
+///
+/// They follow the compressor's coefficient ramps (`crates/compressor`, `rate_ramps`): a time
+/// retarget designs its exact coefficient once, at the event ([`Instance::apply_automation`]), and
+/// the render path walks the coefficient word linearly to it over the same 64 samples, so no
+/// exponential runs per frame and the walk is a lane-wide `ramp_toward` like every other ramp.
+const RATE_COUNT: usize = 4;
+
+/// Ramp slots per channel and track: the ten parameter ramps, then the four coefficient ramps.
+const RAMP_SLOTS: usize = RAMP_COUNT + RATE_COUNT;
+
+/// The slot of coefficient ramp `rate` ([`RATE_COUNT`]).
+const fn rate_slot(rate: usize) -> usize {
+    RAMP_COUNT + rate
+}
+
+/// The parameter index whose time coefficient ramp `rate` walks: low attack 3, low release 4,
+/// high attack 8, high release 9.
+const fn rate_parameter(rate: usize) -> usize {
+    (rate / 2) * 5 + 3 + rate % 2
+}
+
+/// The coefficient ramp that parameter ramp `index` (parameter `index + 1`) drives, if any.
+const fn rate_of_ramp(index: usize) -> Option<usize> {
+    match index {
+        2 => Some(0),
+        3 => Some(1),
+        7 => Some(2),
+        8 => Some(3),
+        _ => None,
+    }
+}
 
 /// Detector floor: the smallest amplitude a band level is measured at, `-160 dB`.
 const DETECTOR_FLOOR: f32 = 1.0e-8;
@@ -651,44 +686,11 @@ pub fn lr4_coefficients<L: Lane>(sample_rate: u32, crossover_hz: f32) -> Option<
 // Instance
 // ---------------------------------------------------------------------------------------------
 
-/// Control-rate values derived from one band's ratio, attack and release.
+/// One band's lane coefficients for one frame: `1/R - 1` and the two retention coefficients.
 ///
-/// Keyed by the raw bits of the three ramp values they came from, so a segment recomputes them
-/// only when one of the three has actually moved. `-0.0` never reaches a ramp, so the key is a
-/// faithful identity.
-#[derive(Clone, Copy)]
-struct BandCache {
-    key: [u32; 3],
-    inv_ratio_minus_one: f32,
-    attack: f32,
-    release: f32,
-}
-
-impl BandCache {
-    /// A cache that will always miss on its first use.
-    const fn empty() -> Self {
-        Self {
-            key: [0; 3],
-            inv_ratio_minus_one: 0.0,
-            attack: 0.0,
-            release: 0.0,
-        }
-    }
-
-    /// Refreshes the cache from the three ramps' current values if any of them has changed.
-    fn refresh(&mut self, ratio: f32, attack_ms: f32, release_ms: f32, sample_rate: u32) {
-        let key = [ratio.to_bits(), attack_ms.to_bits(), release_ms.to_bits()];
-        if key == self.key {
-            return;
-        }
-        self.key = key;
-        self.inv_ratio_minus_one = 1.0 / ratio - 1.0;
-        self.attack = retention_coefficient(attack_ms, sample_rate);
-        self.release = retention_coefficient(release_ms, sample_rate);
-    }
-}
-
-/// One band's control-rate lane coefficients for one segment.
+/// [`frame_coefficients`] derives them from the ramp words of the same frame, so a lane's
+/// coefficients depend on its own ramps alone, never on where a segment or a block begins
+/// (issue #1069).
 #[derive(Clone, Copy)]
 struct BandCoef<L: Lane> {
     inv_ratio_minus_one: L,
@@ -696,15 +698,28 @@ struct BandCoef<L: Lane> {
     release: L,
 }
 
-/// The ten ramps of one channel, as lanes, for the duration of one segment.
+/// The fourteen ramps of one channel ([`RAMP_SLOTS`]), as lanes, for the duration of one segment.
 ///
 /// `target` rides beside `step` so each frame's update holds the word inside its endpoints
 /// (issue #1409 D4); it is transient, never state.
 #[derive(Clone, Copy)]
 struct Segment<L: Lane> {
-    current: [L; RAMP_COUNT],
-    step: [L; RAMP_COUNT],
-    target: [L; RAMP_COUNT],
+    current: [L; RAMP_SLOTS],
+    step: [L; RAMP_SLOTS],
+    target: [L; RAMP_SLOTS],
+}
+
+/// Both bands' coefficients from one frame's ramp words: `1/R - 1` lane-wide from the ratio word
+/// (the operations `GainComputerCoef::new` runs, as the compressor's `design_curve` does), and the
+/// attack and release coefficient words as they stand.
+#[inline(always)]
+fn frame_coefficients<L: Lane>(segment: &Segment<L>) -> [BandCoef<L>; 2] {
+    let one = L::splat(1.0);
+    core::array::from_fn(|band| BandCoef {
+        inv_ratio_minus_one: one.div(segment.current[band * 5 + 1]).sub(one),
+        attack: segment.current[rate_slot(band * 2)],
+        release: segment.current[rate_slot(band * 2 + 1)],
+    })
 }
 
 /// How far the next segment reaches, and whether anything is ramping over it.
@@ -740,8 +755,10 @@ struct Side<L: Lane, const W: usize> {
     silence: L,
     /// The branching smoother's state, in dB, per band.
     gain_db: [L; 2],
-    ramps: [[LinearRamp; RAMP_COUNT]; W],
-    cache: [[BandCache; 2]; W],
+    /// Per track: the ten parameter ramps, then the four coefficient ramps ([`RAMP_SLOTS`]).
+    ramps: [[LinearRamp; RAMP_SLOTS]; W],
+    /// The coefficient words a full reset restores, designed once at preparation.
+    prepared_rates: [[f32; RATE_COUNT]; W],
     /// `(c1, a2, a3)` per track, kept so a reset does not have to redesign (#94 F9).
     designed: [[f32; 3]; W],
     prepared_designed: [[f32; 3]; W],
@@ -753,12 +770,18 @@ impl<L: Lane, const W: usize> Side<L, W> {
     fn new(defaults: [[f32; PARAMETER_COUNT]; W], sample_rate: u32) -> Option<Self> {
         let mut designed = [[0.0; 3]; W];
         let mut crossover_hz = [0.0; W];
-        let mut ramps = [[LinearRamp::fixed(0.0); RAMP_COUNT]; W];
+        let mut ramps = [[LinearRamp::fixed(0.0); RAMP_SLOTS]; W];
+        let mut prepared_rates = [[0.0; RATE_COUNT]; W];
         for track in 0..W {
             designed[track] = design_lr4(sample_rate, defaults[track][0])?;
             crossover_hz[track] = defaults[track][0];
             for index in 0..RAMP_COUNT {
                 ramps[track][index] = LinearRamp::fixed(defaults[track][index + 1]);
+            }
+            for rate in 0..RATE_COUNT {
+                prepared_rates[track][rate] =
+                    retention_coefficient(defaults[track][rate_parameter(rate)], sample_rate);
+                ramps[track][rate_slot(rate)] = LinearRamp::fixed(prepared_rates[track][rate]);
             }
         }
         let prepared_coefficients = lane_coefficients::<L, W>(&designed);
@@ -769,7 +792,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
             silence: L::zero(),
             gain_db: [L::zero(); 2],
             ramps,
-            cache: [[BandCache::empty(); 2]; W],
+            prepared_rates,
             designed,
             prepared_designed: designed,
             crossover_hz,
@@ -816,7 +839,10 @@ impl<L: Lane, const W: usize> Side<L, W> {
             for index in 0..RAMP_COUNT {
                 self.ramps[track][index] = LinearRamp::fixed(self.defaults[track][index + 1]);
             }
-            self.cache[track] = [BandCache::empty(); 2];
+            for rate in 0..RATE_COUNT {
+                self.ramps[track][rate_slot(rate)] =
+                    LinearRamp::fixed(self.prepared_rates[track][rate]);
+            }
         }
     }
 }
@@ -958,14 +984,16 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// `RAMPING` is the third compile-time switch, and it is the one that varies *within* a block.
 /// It says whether any ramp of any track of either channel still has samples to produce over this
 /// segment; [`Instance::plan_segment`] decides it from the ramp counters at the same moment it
-/// decides the segment's length. At `RAMPING == false` the twenty per-frame lane additions below
-/// are not merely predicted away, they are not emitted: a settled bank pays no smoothing
-/// arithmetic at all.
+/// decides the segment's length. At `RAMPING == false` the twenty-eight per-frame lane additions
+/// below, and the per-frame coefficient derivation ([`frame_coefficients`], one division per band
+/// and channel), are not merely predicted away, they are not emitted: a settled bank derives its
+/// coefficients once per segment and pays no smoothing arithmetic at all.
 ///
 /// **Why that is bit-identical, not merely close.** `LinearRamp` keeps `remaining == 0` implying
 /// `step == +0.0`, and this crate admits parameter words through exactly four doors — prepared
 /// defaults, `apply_automation`, `snap`, and a restored payload — every one of which runs
-/// `normalize_zero` over a `parameter_value_valid` word. So on the skipped path every lane of
+/// `normalize_zero` over a `parameter_value_valid` word; a coefficient word enters through the
+/// same four, as `retention_coefficient` of a legal time or a restored word, both in `(0, 1]`. So on the skipped path every lane of
 /// every `step` is `+0.0` and every lane of every `current` is finite and is not `-0.0`, which
 /// makes `ramp_toward(current, step, target)` (whose add is the identity there, and whose clamp
 /// keeps an in-range word's bits) the identity on all of them. The two exclusions matter and are
@@ -998,7 +1026,6 @@ fn run_segment<
     right: &mut [f32],
     frames: usize,
     segments: &mut [Segment<L>; 2],
-    coefficients: &[[BandCoef<L>; 2]; 2],
     armed_after: L,
 ) {
     let (head, tail) = sides.split_at_mut(1);
@@ -1010,9 +1037,15 @@ fn run_segment<
     let mut silence_far = far.silence;
     let mut gain_near = near.gain_db;
     let mut gain_far = far.gain_db;
+    // On a flat segment no word moves, so the coefficients are derived once, here; on a ramped
+    // one they are derived again every frame from the frame's own advanced words below.
+    let mut coefficients = [
+        frame_coefficients(&segments[0]),
+        frame_coefficients(&segments[1]),
+    ];
     for frame in 0..frames {
         if RAMPING {
-            for index in 0..RAMP_COUNT {
+            for index in 0..RAMP_SLOTS {
                 // Issue #1409: the step added, held inside `[min(current, target),
                 // max(current, target)]`, so no word passes its target.
                 for segment in segments.iter_mut() {
@@ -1023,6 +1056,12 @@ fn run_segment<
                     );
                 }
             }
+            // Issue #1069: the ratio and the two time coefficients take the value of this frame,
+            // after its step, the same convention as threshold and makeup.
+            coefficients = [
+                frame_coefficients(&segments[0]),
+                frame_coefficients(&segments[1]),
+            ];
         }
         let input_near = L::load(&left[frame * W..]);
         let input_far = L::load(&right[frame * W..]);
@@ -1129,10 +1168,6 @@ fn process_block<
         let plan = instance.plan_segment(frames - position);
         let length = plan.frames;
         let mut segments = [instance.sides[0].segment(), instance.sides[1].segment()];
-        let coefficients = [
-            instance.sides[0].band_coefficients(sample_rate),
-            instance.sides[1].band_coefficients(sample_rate),
-        ];
         // A bypassed instance runs no crossover and freezes the silence counters with the filter
         // (issue #1328, amendment A9). Otherwise the joint flush's arithmetic runs only on a
         // segment it can act on (issue #1455, [`Side::arms`]); on every other segment each side's
@@ -1161,7 +1196,6 @@ fn process_block<
                     &mut right[position * W..(position + length) * W],
                     length,
                     &mut segments,
-                    &coefficients,
                     armed_after,
                 )
             };
@@ -1230,12 +1264,12 @@ fn render<L: Lane, const W: usize, const FORCE_RAMPING: bool>(
 }
 
 impl<L: Lane, const W: usize> Side<L, W> {
-    /// The ten ramps of every track, as lanes, for one segment.
+    /// The fourteen ramps of every track, as lanes, for one segment.
     fn segment(&self) -> Segment<L> {
-        let mut current = [L::zero(); RAMP_COUNT];
-        let mut step = [L::zero(); RAMP_COUNT];
-        let mut target = [L::zero(); RAMP_COUNT];
-        for index in 0..RAMP_COUNT {
+        let mut current = [L::zero(); RAMP_SLOTS];
+        let mut step = [L::zero(); RAMP_SLOTS];
+        let mut target = [L::zero(); RAMP_SLOTS];
+        for index in 0..RAMP_SLOTS {
             let mut values = [0.0f32; 8];
             let mut steps = [0.0f32; 8];
             let mut targets = [0.0f32; 8];
@@ -1262,7 +1296,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
     /// segment split guarantees no ramp reaches `remaining == 1` inside a segment, so no snap can
     /// be missed and the state can be written back instead of replayed.
     fn store_segment(&mut self, segment: &Segment<L>, advanced: u32) {
-        for index in 0..RAMP_COUNT {
+        for index in 0..RAMP_SLOTS {
             let mut values = [0.0f32; 8];
             segment.current[index].store(&mut values[..W]);
             for (track, value) in values.iter().enumerate().take(W) {
@@ -1271,37 +1305,6 @@ impl<L: Lane, const W: usize> Side<L, W> {
                 ramp.remaining = ramp.remaining.saturating_sub(advanced);
             }
         }
-    }
-
-    /// Control-rate coefficients of both bands, refreshed only where a ramp value moved.
-    fn band_coefficients(&mut self, sample_rate: u32) -> [BandCoef<L>; 2] {
-        let mut bands = [BandCoef {
-            inv_ratio_minus_one: L::zero(),
-            attack: L::zero(),
-            release: L::zero(),
-        }; 2];
-        for (band, coefficients) in bands.iter_mut().enumerate() {
-            let base = band * 5;
-            let mut ratios = [0.0f32; 8];
-            let mut attacks = [0.0f32; 8];
-            let mut releases = [0.0f32; 8];
-            for track in 0..W {
-                let ratio = self.ramps[track][base + 1].current;
-                let attack_ms = self.ramps[track][base + 2].current;
-                let release_ms = self.ramps[track][base + 3].current;
-                let cache = &mut self.cache[track][band];
-                cache.refresh(ratio, attack_ms, release_ms, sample_rate);
-                ratios[track] = cache.inv_ratio_minus_one;
-                attacks[track] = cache.attack;
-                releases[track] = cache.release;
-            }
-            *coefficients = BandCoef {
-                inv_ratio_minus_one: L::load(&ratios[..W]),
-                attack: L::load(&attacks[..W]),
-                release: L::load(&releases[..W]),
-            };
-        }
-        bands
     }
 }
 
@@ -1317,12 +1320,22 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// The snap pass runs **before** the ramping scan, and that ordering is what makes a settled
     /// ramp stop costing anything. A ramp arriving on this segment's first sample is snapped here,
     /// leaves `remaining == 0` behind it, and so does not report itself as in flight; the rest of
-    /// the block is then one flat segment. Without the split that segment still ran the twenty
-    /// additions per frame with every step at `+0.0`, which is the cost this change removes.
+    /// the block is then one flat segment. Without the split that segment still ran the
+    /// twenty-eight additions per frame with every step at `+0.0`, which is the cost the split
+    /// removes.
     ///
-    /// The lengths this returns are exactly the lengths the pre-split form returned — the scan is
-    /// the same scan, `ramping` is a second answer read out of it — so segment boundaries, and
-    /// with them the sample at which each ramp arrives, do not move.
+    /// The scan covers all fourteen slots of every track on both channels: the ten parameter
+    /// ramps and the four coefficient ramps. A coefficient ramp therefore snaps to its exact
+    /// designed word here, and one still in flight keeps the segment on the ramped path even when
+    /// its parameter ramp has already settled (a retarget to the value in force, which the hoist in
+    /// `LinearRamp::set_target` settles at once while the coefficient returns from mid-walk). That
+    /// is the compressor's "a Point that cancels a time ramp" rule, kept by the scan rather than by
+    /// re-arming the parameter ramp.
+    ///
+    /// Where a segment ends does not move a lane's bits (issue #1069): every word the kernel reads
+    /// on a ramped segment, coefficients included, is advanced and read frame by frame, so a
+    /// boundary set by another lane's arrival or by the host's block end only splits a run of
+    /// identical per-frame arithmetic.
     fn plan_segment(&mut self, budget: usize) -> SegmentPlan {
         for side in &mut self.sides {
             for track in 0..W {
@@ -1455,10 +1468,23 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             previous = order;
             pending[side][ramp] = Some(normalize_zero(span.value));
         }
+        let sample_rate = self.sample_rate;
         for (side, targets) in pending.iter().enumerate() {
             for (index, target) in targets.iter().enumerate() {
                 if let Some(value) = *target {
-                    self.sides[side].ramps[track][index].set_target(value, SMOOTHING_SAMPLES);
+                    let ramps = &mut self.sides[side].ramps[track];
+                    ramps[index].set_target(value, SMOOTHING_SAMPLES);
+                    // Issue #1069: a time retarget designs its exact coefficient once, here, and
+                    // the coefficient walks to it over the same window (the compressor's
+                    // `set_parameter_target`). A retarget to the time in force settles the
+                    // parameter ramp at once, and still returns a coefficient caught mid-walk to
+                    // that time's exact design over the window: `plan_segment` scans this slot.
+                    if let Some(rate) = rate_of_ramp(index) {
+                        ramps[rate_slot(rate)].set_target(
+                            retention_coefficient(value, sample_rate),
+                            SMOOTHING_SAMPLES,
+                        );
+                    }
                 }
             }
         }
@@ -1469,12 +1495,15 @@ impl<L: Lane, const W: usize> Instance<L, W> {
 // State payload, current layout
 // ---------------------------------------------------------------------------------------------
 //
-// Per channel: crossover, the two smoother words, ten four-word ramps, and the four filter words.
+// Per channel: crossover, the two smoother words, ten four-word parameter ramps, the four filter
+// words, the silence counter, and the four four-word coefficient ramps (issue #1069).
 
 /// Word offset of the first filter word.
 const FILTER_WORD: usize = 3 + RAMP_COUNT * RAMP_WORDS;
 /// The input's silence counter, after the four crossover words (issue #1328, amendment A9).
 const SILENCE_WORD: usize = FILTER_WORD + 4;
+/// Word offset of the first coefficient ramp, after the silence counter (issue #1069).
+const RATE_WORD: usize = SILENCE_WORD + 1;
 /// The silence counter's saturation, `2^24`.
 const SILENCE_SATURATION: f32 = 16_777_216.0;
 
@@ -1501,7 +1530,7 @@ struct StagedSide {
     crossover_hz: f32,
     designed: [f32; 3],
     gains: [f32; 2],
-    ramps: [LinearRamp; RAMP_COUNT],
+    ramps: [LinearRamp; RAMP_SLOTS],
     filter: [f32; 4],
     silence: f32,
 }
@@ -1528,6 +1557,13 @@ fn write_side<L: Lane, const W: usize>(bytes: &mut [u8], side: &Side<L, W>, trac
         write_f32(bytes, FILTER_WORD + index, lane_value(value, track));
     }
     write_f32(bytes, SILENCE_WORD, lane_value(side.silence, track));
+    for rate in 0..RATE_COUNT {
+        write_ramp(
+            bytes,
+            RATE_WORD + rate * RAMP_WORDS,
+            side.ramps[track][rate_slot(rate)],
+        );
+    }
 }
 
 /// Validates one channel's fixed words.
@@ -1545,8 +1581,8 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
     {
         return Err(state_error("effect.state.gain"));
     }
-    let mut ramps = [LinearRamp::fixed(0.0); RAMP_COUNT];
-    for (index, ramp) in ramps.iter_mut().enumerate() {
+    let mut ramps = [LinearRamp::fixed(0.0); RAMP_SLOTS];
+    for (index, ramp) in ramps[..RAMP_COUNT].iter_mut().enumerate() {
         let word = 3 + index * RAMP_WORDS;
         let current = read_f32(bytes, word);
         let target = read_f32(bytes, word + 1);
@@ -1597,6 +1633,26 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
     if silence.to_bits() != 0 && !counted {
         return Err(state_error("effect.state.filter"));
     }
+    // Issue #1069, the compressor's rule: `retention_coefficient` designs every legal time in
+    // `(0, 1]` (exactly `0.0` only for a time the domains exclude), so a target is held there, and
+    // a `current`, moving or settled, lies between two designed words under the clamped law
+    // (issue #1409 D2) and is held to the same range with no rounding budget (issue #1411 D1). A
+    // settled coefficient ramp is at its target, as a settled parameter ramp is.
+    for rate in 0..RATE_COUNT {
+        let read = read_ramp(bytes, RATE_WORD + rate * RAMP_WORDS);
+        let designed = |value: f32| value > 0.0 && value <= 1.0;
+        if !designed(read.current)
+            || !designed(read.target)
+            || !ramp_path_inside(read, (0.0, 1.0), SMOOTHING_SAMPLES)
+            || (read.remaining == 0 && read.current.to_bits() != read.target.to_bits())
+        {
+            return Err(state_error("effect.state.parameter"));
+        }
+        ramps[rate_slot(rate)] = LinearRamp {
+            step: normalize_zero(read.step),
+            ..read
+        };
+    }
     Ok(StagedSide {
         crossover_hz,
         designed,
@@ -1616,7 +1672,6 @@ fn commit_side<L: Lane, const W: usize>(side: &mut Side<L, W>, staged: &StagedSi
     side.gain_db[HIGH_BAND] =
         set_lane_value(side.gain_db[HIGH_BAND], track, staged.gains[HIGH_BAND]);
     side.ramps[track] = staged.ramps;
-    side.cache[track] = [BandCache::empty(); 2];
     side.filter.a.ic1 = set_lane_value(side.filter.a.ic1, track, staged.filter[0]);
     side.filter.a.ic2 = set_lane_value(side.filter.a.ic2, track, staged.filter[1]);
     side.filter.b.ic1 = set_lane_value(side.filter.b.ic1, track, staged.filter[2]);

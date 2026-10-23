@@ -159,8 +159,8 @@ fn stimulus(sample: usize, track: usize, channel: usize) -> f32 {
 /// Every mutable word of an instance, as bit patterns, in a fixed order.
 ///
 /// This is deliberately the whole of the mutable state and not a summary: the ramps (so a split
-/// that stopped a ramp one sample early is caught), the branching smoother, crossover filter, and
-/// derived per-track coefficient caches.
+/// that stopped a ramp one sample early is caught, the coefficient ramps among them), the branching
+/// smoother and the crossover filter.
 fn fingerprint<L: Lane, const W: usize>(instance: &Instance<L, W>) -> Vec<u32> {
     let mut words = Vec::new();
     for side in &instance.sides {
@@ -186,12 +186,6 @@ fn fingerprint<L: Lane, const W: usize>(instance: &Instance<L, W>) -> Vec<u32> {
                 words.push(ramp.target.to_bits());
                 words.push(ramp.step.to_bits());
                 words.push(ramp.remaining);
-            }
-            for cache in &side.cache[track] {
-                words.extend_from_slice(&cache.key);
-                words.push(cache.inv_ratio_minus_one.to_bits());
-                words.push(cache.attack.to_bits());
-                words.push(cache.release.to_bits());
             }
             for value in side.designed[track] {
                 words.push(value.to_bits());
