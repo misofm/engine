@@ -116,3 +116,24 @@ main.
   digests on main e9c1dc40c and on this branch (gate 45, shaper 45, soft clip 15). The branch took
   the fast path in 83 of the 84 bank cases. W4 does not bind publicly on this AVX2 host; the
   crate-internal gate 2 tests cover it.
+
+## Evidence (attempt 2, 2026-10-23)
+
+- Verifier (attempt 1): FAIL on test reach in the gate/expander only; predicates, fast paths and
+  roster rows sound. Four gate mutants survived: `coef[channel]` -> `coef[0]` in `rest_lanes`,
+  `remaining != 0.0` -> `> 1.0` in `channel_at_rest`, and the right-plane and sidechain legs of
+  `silent_block` -> `true`. Tests only were changed (no production code).
+- Gate 1 (gate): the two channels get different attack, hold and release times, and the probe's
+  block is 21 frames, so a 64-sample ramp reaches `remaining == 1` at a block boundary. Reach W4
+  1686/978/17286, W8 5189/4353/32636.
+- Gate 2 (gate): after rest, one block carries noise on one lane's right plane only (the fast path
+  must refuse it), and a connected scalar `PreparedGate<f32, true>` arm renders `+0.0` main under
+  a live sidechain after rest, against the forbidden arm. The reload-block comment is now an
+  assert that the block was admitted.
+- Each of the four mutants is red (rerun by the coordinator for `coef[0]` and the right plane).
+- Gate 1 (shaper): schedule `blocks: 800, longest_silence: 300`, the woken-claims count removed
+  (gate 2 covers rest from woken followers). Reach W4 5641/1631/13322, W8 13904/3496/23947; its
+  five leg mutants stay red; runtime 35 s to about 2 s (debug).
+- `cargo test --locked -p gate-expander -p transient-shaper -p soft-clip`: 114 passed, 0 failed,
+  3 ignored. `cargo fmt --all --check`, clippy on the three crates and `realtime-policy` (171
+  regions in 34 files): clean.
