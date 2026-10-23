@@ -2,16 +2,16 @@
 # Console validator mutation suite. Hermetic: no workload, no timing, no binary.
 #
 # A validator that has never been shown to reject anything is decoration. Every rule below is
-# mutated in turn and asserted red, so the aggregate's guarantees -- sixty-six records, both rounds,
-# one host, one admissibility state, the decomposition rows' pinned strip contents, every session
-# row's pinned source feed, the class-A statements that neither the stationary smoother nor a
-# meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
+# mutated in turn and asserted red, so the aggregate's guarantees -- seventy-four records, both
+# rounds, one host, one admissibility state, the decomposition rows' pinned strip contents, every
+# session row's pinned source feed, the class-A statements that neither the stationary smoother nor
+# a meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
 # driver-fed source feed nor the metered row's web meters and fused fader and matrix changes a
 # rendered bit, the meters pair's equal fold and redirect counters, the metered row's pinned
 # meter group, the mixing-automation row's pinned controls, host lowerings, collapse counters
 # and per-effect bit movement, and the console-strip rows' pinned layouts, bypass group and sparse
 # input (#1085), the fader-ride row's delivery, counts and ramp witness (#1750), and the
-# product-lane row's lanes, absent writes and standing-row bits (#1758) -- are
+# product-lane arms' lanes, absent writes and standing-row bits (#1758, #1763) -- are
 # properties the suite can actually lose. The same holds for the
 # mixing-automation row's browser arm (`web-mixing-automation-validator.jq`, #1011): its input
 # feed, its provenance, and its two measured rounds' agreement -- and for its runner: a refused run
@@ -1256,7 +1256,7 @@ ride_mutation '.extra = 1' 'a fader-ride record with a key the shape does not li
 # The product-lane row (#1758): the standing console prepared with the product's live lanes,
 # never written, rendered back to back. Its digest is the standing session row's in the aggregate
 # set below (`$a[0:63] + "3"`); its lanes and its absent writes are what make it the row it
-# claims to be.
+# claims to be. #1763's arms are this record with their kind, lanes and standing row (below).
 product_lanes=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   schema_version: 1, issue: 149, record: "console_product_lanes",
   workload_kind: "sixty_four_track_console_product_lanes",
@@ -1279,7 +1279,8 @@ product_lanes=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
 }')
 expect_accept "$product_lanes" 'the product-lane row'
 lanes_mutation() { expect_reject "$(printf '%s' "$product_lanes" | jq -c "$1")" "$2"; }
-lanes_mutation '.live_lanes = "fader_matrix"' 'a product-lane row on a lane subset no product host attaches'
+lanes_mutation '.workload_kind = "sixty_four_track_console_effect_lanes" | .live_lanes = "fader_matrix+effects"' \
+    'an effect-lanes arm that also attached strip channels'
 lanes_mutation '.transactions_published = 1' 'a product-lane row that wrote a lane'
 lanes_mutation '.p95_ns_per_block = 1' 'product-lane percentiles out of order'
 lanes_mutation '.render_total_forbidden_operations = 1' 'a product-lane row with a forbidden operation on render'
@@ -1395,10 +1396,22 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
   # is unchanged: 62 is the round-one fader-ride row and 63 the round-two one.
   + [ (1, 2) as $round | $ride | .round = $round ]
   # #1758: the product-lane row of each round, appended after those: 64 and 65.
-  + [ (1, 2) as $round | $lanes | .round = $round ]')
+  + [ (1, 2) as $round | $lanes | .round = $round ]
+  # #1763: the lane-group arms and the app-shape arm, each round in turn, after those: 66-67
+  # fader/matrix, 68-69 strip input, 70-71 effects, 72-73 app shape.
+  + [ ({workload_kind: "sixty_four_track_console_fader_matrix_lanes", live_lanes: "fader_matrix"},
+       {workload_kind: "sixty_four_track_console_strip_input_lanes",
+        live_lanes: "fader_matrix+strip_input"},
+       {workload_kind: "sixty_four_track_console_effect_lanes", live_lanes: "effects"},
+       {workload_kind: "sixty_four_track_app_shape_product_lanes",
+        standing_row: "sixty_four_track_app_shape", strip_content: "eq+compressor",
+        strip_layout: "pre_insert:eq+compressor", fixture_id: app_fixture,
+        output_sha256: ($a[0:63] + "4")}) as $arm
+      | (1, 2) as $round | $lanes + $arm | .round = $round ]')
 
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the sixty-six-record set'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the seventy-four-record set'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[64].output_sha256 = ($a[0:63] + "7") | .[65].output_sha256 = ($a[0:63] + "7") | .[]')" 'a product-lane row that rendered other bits than the standing row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[72].output_sha256 = ($a[0:63] + "7") | .[73].output_sha256 = ($a[0:63] + "7") | .[]')" 'an app-shape product-lane arm that rendered other bits than the app-shape row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_fader_ride")] | .[]')" 'a set with no fader-ride row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg b "$digest_b" '.[63].riding_output_sha256 = $b | .[]')" 'a fader-ride row whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg b "$digest_b" '.[63].quiet_output_sha256 = $b | .[]')" 'a fader-ride quiet arm whose rounds rendered different output'
@@ -1412,8 +1425,8 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[63].fader_tracks |=
 # fifty before it (the plumbing row, both rounds), #1003 added two back at the end of each round,
 # #1085 added ten after the metered row, and #1227 two between the metered row and the
 # console-strip rows.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'sixty-five records'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[27]]) | .[]')" 'sixty-seven records'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'seventy-three records'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[27]]) | .[]')" 'seventy-five records'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[0]]) | .[]')" 'a duplicated record'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[31].round = 1 | .[]')" 'a workload measured twice in one round'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].cpu_model = "Another CPU" | .[]')" 'records from two hosts'
@@ -1474,8 +1487,9 @@ expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_metered")] | .[]')" 'a set missing the metered console row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.workload_kind == "sixty_four_track_console_metered")).output_sha256 = $c | .[]')" 'a metered row that rendered other bits than the standing row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console")).output_sha256 = $c | .[]')" 'a standing row that rendered other bits than the metered row'
-# #1758: the product-lane row renders the standing row's bits too, so it moves with the pair.
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select((.record == "console_session" and (.workload_kind == "sixty_four_track_console" or .workload_kind == "sixty_four_track_console_metered")) or .record == "console_product_lanes")).output_sha256 = $c | .[]')" 'the console pair and the product-lane row moving together'
+# #1758: the product-lane arms of the standing console render its bits too, so they move with
+# the pair (#1763: the app-shape arm does not).
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select((.record == "console_session" and (.workload_kind == "sixty_four_track_console" or .workload_kind == "sixty_four_track_console_metered")) or (.record == "console_product_lanes" and .standing_row == "sixty_four_track_console"))).output_sha256 = $c | .[]')" 'the console pair and its product-lane arms moving together'
 expect_aggregate_accept "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_console_metered")).bank_scatter_redirects = 8 | .[]')" 'a metered row redirecting lanes the Concurrent meters arm does not'
 expect_aggregate_accept "$(printf '%s' "$records" | jq -c '(.[] | select(.record == "console_meters")) |= (.meters_off_bank_scatter_redirects = 8 | .meters_on_bank_scatter_redirects = 8) | .[]')" 'a Concurrent meters arm redirecting lanes the metered row does not'
 # #1085: every console-strip row is required, and the sparse row renders neither the all-active
@@ -1548,7 +1562,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
                  / .isolated_cycles_per_lane_sample)
         else . end ]')
 
-expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the sixty-six-record set with floor accounting'
+expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the seventy-four-record set with floor accounting'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_cycles_per_lane_sample = 3.0 | .[]')" 'an isolate that is not the subtraction it names'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_percent_of_floor = 88.0 | .[]')" 'an isolate percentage that does not follow from the two rows floors'
 # The control row moving is the same defect seen from the other side: the subtraction stops being

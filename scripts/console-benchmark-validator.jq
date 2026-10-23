@@ -2,16 +2,17 @@
 # gain/pan row, #928 and #956, the metered console row, #881, the bus-and-send row, #1227, and the
 # five console-strip rows, #1085), two hoist workloads, one meters arm, one observation arm, one
 # placement row-pair, one automation-active row, one mono row-pair, one mixing-automation row
-# (#1003), one fader-ride row (#1750) and one product-lane row (#1758), each in rounds one and
-# two -- sixty-six records. #956 retired the builtins-less plumbing
+# (#1003), one fader-ride row (#1750) and five product-lane arms (#1758, #1763), each in rounds
+# one and two -- seventy-four records. #956 retired the builtins-less plumbing
 # row and re-based the driver-fed row, two records fewer than the fifty before it; #1003's row
 # brought the count back to fifty, #1085's five rows, emitted after the metered row, took it to
 # sixty, and #1227's bus-and-send row, emitted between the metered row and the console-strip rows,
 # to sixty-two. #1750's fader-ride row, emitted last, takes it to sixty-four, and #1758's
-# product-lane row, emitted after it, to sixty-six.
+# product-lane row, emitted after it, to sixty-six, and #1763's four more product-lane arms,
+# emitted after that, to seventy-four.
 include "console-benchmark-record-lib";
 . as $records |
-(type == "array") and length == 66 and
+(type == "array") and length == 74 and
 all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session") | .workload_kind] | unique | sort) == session_kinds and
 ([.[] | select(.record == "console_hoist") | .workload_kind] | unique | sort)
@@ -34,7 +35,7 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_fader_ride") | .workload_kind] | unique)
   == ["sixty_four_track_console_fader_ride"] and
 ([.[] | .round] | unique | sort) == [1,2] and
-([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 66 and
+([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 74 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
@@ -97,9 +98,11 @@ all(.[]; console_benchmark_record_valid_lib) and
 # never written, so every lane reads the value the plan was prepared with and the row renders the
 # standing row's bits over the same block window, in both rounds. A difference is refused rather
 # than published as the lanes' cost, because the two rows would no longer be one computation.
-([.[] | select((.record == "console_session" and .workload_kind == "sixty_four_track_console") or
-               .record == "console_product_lanes")
-      | .output_sha256] | length == 4 and (unique | length) == 1) and
+# #1763: the same holds per arm against the session row it names as `standing_row`.
+all(["sixty_four_track_console", 10], ["sixty_four_track_app_shape", 4]; . as [$standing, $count] |
+  [$records[] | select((.record == "console_session" and .workload_kind == $standing) or
+                       (.record == "console_product_lanes" and .standing_row == $standing))
+      | .output_sha256] | length == $count and (unique | length) == 1) and
 ([.[] | .backend] | unique | length) == 1 and
 # Ragged versus full, and every decomposition subtraction, are the whole point of the fixture set,
 # so the per-track costs must be comparable numbers taken on one host in one run: same binary,

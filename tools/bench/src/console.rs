@@ -207,6 +207,11 @@
 //! rows' loop (`SessionMeasurement::run_prepared`) straight after them, and emitted last. Its p50
 //! minus `sixty_four_track_console`'s is what the lanes cost a console that nobody edits, without
 //! the ride row's two-plan alternation. Its digest is asserted in-run to equal the standing row's.
+//!
+//! Issue #1763 splits it: three more arms of the standing console attach one lane group each
+//! (fader/matrix, fader/matrix plus strip input, effects only), and one arm attaches the product
+//! set of `sixty_four_track_app_shape`, which has no console slot with latency. Each arm is timed
+//! the same way, names its `standing_row`, and is asserted in-run to render that row's bits.
 
 use crate::floor::{self, CoreClock};
 use bench_support::alloc as bench_alloc;
@@ -221,7 +226,7 @@ use console_workload::mixing_automation::{
     self, Lowering, MixingArm, Preflight, PushTally, ResolvedControl,
 };
 use console_workload::{
-    BypassCensus, ObservationArm, PlanConfig, QUANTUM, SAMPLE_RATE_HZ, SessionRuntime,
+    BypassCensus, LaneGroup, ObservationArm, PlanConfig, QUANTUM, SAMPLE_RATE_HZ, SessionRuntime,
     WINDOW_BLOCKS, Workload, native_session_rows,
 };
 use effect_compiler::launch_native_effect_registry;
@@ -312,8 +317,11 @@ pub(crate) fn main() {
     let sessions: Vec<SessionMeasurement> =
         rows.iter().copied().map(SessionMeasurement::run).collect();
     // Issue #1758: the standing console prepared with the product's lanes, timed by the session
-    // rows' own loop straight after them. Emitted last.
-    let product_lanes = ProductLanesMeasurement::run();
+    // rows' own loop straight after them, and issue #1763's lane-group arms. Emitted last.
+    let product_lanes: Vec<ProductLanesMeasurement> = PRODUCT_LANE_ARMS
+        .iter()
+        .map(ProductLanesMeasurement::run)
+        .collect();
     let digest_of = |workload: Workload| {
         rows.iter()
             .position(|row| *row == workload)
@@ -350,14 +358,17 @@ pub(crate) fn main() {
         sends != standing,
         "the bus-and-send row rendered the standing console row's output"
     );
-    // And the product-lane row's (issue #1758): live lanes that nobody writes read the values
-    // the plan was prepared with, so the row renders the standing console's bits over the same
+    // And the product-lane rows' (issues #1758, #1763): live lanes that nobody writes read the
+    // values the plan was prepared with, so each arm renders its standing row's bits over the same
     // block window. A difference is a harness defect, never a finding.
-    assert_eq!(
-        &product_lanes.session.output_sha256,
-        digest_of(PRODUCT_LANES_WORKLOAD),
-        "the product-lane row rendered different output from the standing console row"
-    );
+    for arm in &product_lanes {
+        assert_eq!(
+            &arm.session.output_sha256,
+            digest_of(arm.arm.workload),
+            "the {} arm rendered different output from its standing row",
+            arm.arm.kind
+        );
+    }
     for (workload, session) in rows.iter().zip(&sessions) {
         let control = floor::floor_row(*workload)
             .and_then(|row| row.control)
@@ -392,7 +403,9 @@ pub(crate) fn main() {
     println!("{}", mixing.record(round, backend, metadata));
     let ride = FaderRideMeasurement::run();
     println!("{}", ride.record(round, backend, metadata));
-    println!("{}", product_lanes.record(round, backend, metadata));
+    for arm in &product_lanes {
+        println!("{}", arm.record(round, backend, metadata));
+    }
 }
 
 /// `bench console --preflight`: the mixing-automation row's premises, untimed, with what they
@@ -2730,11 +2743,43 @@ impl FaderRideMeasurement {
     }
 }
 
-/// The session the product-lane row renders: the standing console, read against its own row.
-const PRODUCT_LANES_WORKLOAD: Workload = Workload::SixtyFourTrackConsole;
+/// One arm of the product-lane row: the session it renders (read against that session's own
+/// row), the lanes it attaches, and its record kind.
+struct ProductLaneArm {
+    workload: Workload,
+    group: LaneGroup,
+    kind: &'static str,
+}
 
-/// The record kind of the product-lane row (issue #1758).
-const PRODUCT_LANES_WORKLOAD_KIND: &str = "sixty_four_track_console_product_lanes";
+/// The product-lane row's arms in emission order: issue #1758's product set first, then issue
+/// #1763's lane groups and the app-shape session's product set.
+const PRODUCT_LANE_ARMS: [ProductLaneArm; 5] = [
+    ProductLaneArm {
+        workload: Workload::SixtyFourTrackConsole,
+        group: LaneGroup::Product,
+        kind: "sixty_four_track_console_product_lanes",
+    },
+    ProductLaneArm {
+        workload: Workload::SixtyFourTrackConsole,
+        group: LaneGroup::FaderMatrix,
+        kind: "sixty_four_track_console_fader_matrix_lanes",
+    },
+    ProductLaneArm {
+        workload: Workload::SixtyFourTrackConsole,
+        group: LaneGroup::StripInput,
+        kind: "sixty_four_track_console_strip_input_lanes",
+    },
+    ProductLaneArm {
+        workload: Workload::SixtyFourTrackConsole,
+        group: LaneGroup::Effects,
+        kind: "sixty_four_track_console_effect_lanes",
+    },
+    ProductLaneArm {
+        workload: Workload::SixtyFourTrackAppShape,
+        group: LaneGroup::Product,
+        kind: "sixty_four_track_app_shape_product_lanes",
+    },
+];
 
 /// Held by the record's key list only: the subject writes it as a constant, so the validator does
 /// not pin its text.
@@ -2760,10 +2805,12 @@ rounds; descriptive only; no threshold";
 /// renders the standing row's bits: the run asserts it before it emits a record, and the aggregate
 /// validator pins it. The record states the lane set and that no transaction was published.
 struct ProductLanesMeasurement {
+    /// The arm measured.
+    arm: &'static ProductLaneArm,
     /// The timed loop's output: the session rows' own measurement.
     session: SessionMeasurement,
-    /// The product lane set the plan was prepared with.
-    live_lanes: fader_ride::LiveLanes,
+    /// The lane groups the plan attached ([`SessionRuntime::lane_set_name`]).
+    live_lanes: String,
     /// Transactions the plan's gate published over the run: none, because nobody writes.
     transactions: u64,
     /// The plan's `live_values_superseded` after the run.
@@ -2771,19 +2818,20 @@ struct ProductLanesMeasurement {
 }
 
 impl ProductLanesMeasurement {
-    fn run() -> Self {
-        Self::run_for(OBSERVATIONS)
+    fn run(arm: &'static ProductLaneArm) -> Self {
+        Self::run_for(arm, OBSERVATIONS)
     }
 
     /// [`ProductLanesMeasurement::run`] over `observations` timed blocks. Only the unit test below
     /// passes anything but [`OBSERVATIONS`], and the record says so.
-    fn run_for(observations: usize) -> Self {
-        let workload = PRODUCT_LANES_WORKLOAD;
-        let mut runtime = SessionRuntime::build_with_product_lanes(workload);
-        let live_lanes = runtime.live_lanes().expect("a product lane set");
+    fn run_for(arm: &'static ProductLaneArm, observations: usize) -> Self {
+        let workload = arm.workload;
+        let mut runtime = SessionRuntime::build_with_lane_group(workload, arm.group);
+        let live_lanes = runtime.lane_set_name().expect("a lane group");
         let revision = runtime.published_revision();
         let session = SessionMeasurement::run_prepared(workload, &mut runtime, observations);
         Self {
+            arm,
             session,
             live_lanes,
             transactions: runtime.published_revision() - revision,
@@ -2793,7 +2841,7 @@ impl ProductLanesMeasurement {
 
     fn record(&self, round: u32, backend: Backend, metadata: &Metadata) -> String {
         let percentiles = Percentiles::from_samples(&self.session.ns_per_block);
-        let workload = PRODUCT_LANES_WORKLOAD;
+        let workload = self.arm.workload;
         format!(
             concat!(
                 "{{\"schema_version\":1,\"issue\":{issue},\"record\":\"console_product_lanes\",",
@@ -2816,7 +2864,7 @@ impl ProductLanesMeasurement {
                 "\"statistical_method\":\"{method}\"}}"
             ),
             issue = ISSUE,
-            kind = PRODUCT_LANES_WORKLOAD_KIND,
+            kind = self.arm.kind,
             standing = workload.kind(),
             tracks = workload.tracks(),
             synthetic = workload.synthetic(),
@@ -2830,7 +2878,7 @@ impl ProductLanesMeasurement {
             rate = SAMPLE_RATE_HZ,
             quantum = QUANTUM,
             obs = self.session.observations,
-            lanes = fader_ride::lane_set_name(self.live_lanes),
+            lanes = self.live_lanes,
             transactions = self.transactions,
             superseded = self.superseded,
             min = percentiles.min,
@@ -3120,38 +3168,45 @@ mod tests {
         );
     }
 
-    /// Issue #1758: the product-lane row, run short through the real subject, renders the standing
-    /// row's bits over the same window with no forbidden operation and no write, and prints a
-    /// record the validator accepts at the frozen count and refuses as shortened.
+    /// Issues #1758 and #1763: every product-lane arm, run short through the real subject,
+    /// renders its standing row's bits over the same window with no forbidden operation and no
+    /// write, and prints a record the validator accepts at the frozen count and refuses as
+    /// shortened.
     ///
     /// The same `ProductLanesMeasurement` the runner's run takes, over eight timed blocks instead of
-    /// a thousand (`cargo test -p bench the_product_lane_row -- --nocapture` prints the record).
+    /// a thousand (`cargo test -p bench the_product_lane_row -- --nocapture` prints the records).
     /// Its timings are not to be read. The validator's own mutation cases are in
     /// `scripts/test-console-benchmark.sh`.
     #[test]
     fn the_product_lane_row_renders_the_standing_bits_and_the_validator_pins_it() {
-        let measured = ProductLanesMeasurement::run_for(SHORT_RUN_OBSERVATIONS);
-        let standing = SessionMeasurement::run_for(PRODUCT_LANES_WORKLOAD, SHORT_RUN_OBSERVATIONS);
-        assert_eq!(
-            measured.session.output_sha256, standing.output_sha256,
-            "the product-lane row must render the standing row's bits"
-        );
-        assert_eq!(measured.session.render_errors, 0);
-        assert_eq!(
-            measured.session.audit.total(),
-            0,
-            "a forbidden operation on the render path"
-        );
-        let record = measured.record(1, Backend::current(), Metadata::gather());
-        println!("{record}");
-        assert!(
-            !record_validator_accepts(&record, "."),
-            "a shortened run must not pass for the frozen one"
-        );
-        assert!(
-            record_validator_accepts(&record, ".observations = 1000"),
-            "the product-lane record at the frozen count"
-        );
+        for arm in &PRODUCT_LANE_ARMS {
+            let measured = ProductLanesMeasurement::run_for(arm, SHORT_RUN_OBSERVATIONS);
+            let standing = SessionMeasurement::run_for(arm.workload, SHORT_RUN_OBSERVATIONS);
+            assert_eq!(
+                measured.session.output_sha256, standing.output_sha256,
+                "the {} arm must render its standing row's bits",
+                arm.kind
+            );
+            assert_eq!(measured.session.render_errors, 0, "{}", arm.kind);
+            assert_eq!(
+                measured.session.audit.total(),
+                0,
+                "{}: a forbidden operation on the render path",
+                arm.kind
+            );
+            let record = measured.record(1, Backend::current(), Metadata::gather());
+            println!("{record}");
+            assert!(
+                !record_validator_accepts(&record, "."),
+                "{}: a shortened run must not pass for the frozen one",
+                arm.kind
+            );
+            assert!(
+                record_validator_accepts(&record, ".observations = 1000"),
+                "{}: the product-lane record at the frozen count",
+                arm.kind
+            );
+        }
     }
 
     /// Issue #928, re-based onto the gain/pan session by #956: the driver-fed gain/pan row, run
