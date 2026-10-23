@@ -1,8 +1,8 @@
 //! Issue #1375's gates for the compressor: the stated zero tail beyond latency, the exact-rest
 //! bound and the composition values, against the real kernel.
 //!
-//! Every launch rate in release; 48 kHz only in debug, where gate 2's slowest-release runs are a
-//! few million samples each. Evidence lines print with `--nocapture`.
+//! Every launch rate in release; 48 kHz only in debug, where gate 2 runs its slowest-release cases
+//! (a few million samples each) only at the deeper start. Evidence lines print with `--nocapture`.
 #![allow(missing_docs)]
 
 mod support;
@@ -315,6 +315,11 @@ fn the_state_reaches_its_rest_by_the_stated_bound() {
                 (release_min, false),
                 (release_min, true),
             ] {
+                // Debug runs the slowest-release cases only at the worst start (the reduction
+                // pinned at the curve's -100 dB clamp is not reached; 1e29 is the deeper one).
+                if cfg!(debug_assertions) && (release == release_max || ramp) && peak < 1.0e28 {
+                    continue;
+                }
                 let mut case = [
                     domain(THRESHOLD).0,
                     domain(RATIO).1,
