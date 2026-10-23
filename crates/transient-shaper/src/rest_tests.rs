@@ -214,13 +214,15 @@ impl<L: Lane, const W: usize> rest_probe::Probe for Bank<L, W> {
 /// Plants one envelope word (or both) of one channel of `lane`, as a state restore at a block
 /// boundary may (`restore_track_state_payload` accepts any normal positive envelope pair).
 ///
-/// The driver's signal levels never leave a woken **fast** follower beside a flushed slow one:
-/// that needs inputs between about `2e-19` (the fast attack's `k * u` clears the flush threshold)
-/// and `5e-18` (the slow attack's does), and every level the driver draws is outside that band.
+/// The driver's signal levels rarely leave a woken **fast** follower beside a snapped slow one:
+/// that needs inputs between about `2.4e-11` (the fast attack's `k * u` clears the
+/// [`FOLLOWER_REST`] snap) and `4.8e-10` (the slow attack's does). The driver's levels are not
+/// outside that band (`rest_probe` draws `unit() * 1e-9`, which crosses it), but nothing makes it
+/// reach that state, so the plant puts it there.
 /// Without the plant, dropping either fast word from the predicate stays green. A slow-only word is
 /// what every decay reaches (the fast follower releases five times faster); it is planted too.
 fn plant<L: Lane, const W: usize>(shaper: &mut Shaper<L, W>, lane: usize, draw: &mut Draw) {
-    const WORDS: [f32; 3] = [1.0e-19, 3.0e-18, 1.0e-6];
+    const WORDS: [f32; 3] = [3.0e-12, 1.0e-10, 1.0e-6];
     // Each choice from the high bits: the low bits right after a passed `chance(1, 256)` are not
     // independent of it, and drawing the channel from them planted the left channel only.
     let mut pick = |count: usize| ((draw.unit() * count as f32) as usize).min(count - 1);
@@ -296,13 +298,14 @@ fn a_lane_reported_at_rest_stays_at_rest_through_silence() {
 /// Blocks of tone every lane starts with; lane `l` plays `STAGGER * l` blocks more.
 const TONE_BLOCKS: usize = 4;
 const STAGGER: usize = 8;
-/// Whole-bank silence after the last lane's tone: long enough for every follower to flush.
+/// Whole-bank silence after the last lane's tone: long enough for every follower to snap.
 const SILENT_BLOCKS: usize = 520;
 /// Tone again at the end, on every lane.
 const CODA_BLOCKS: usize = 4;
-/// The tone's level (lane-distinct noise): low enough that its slow follower flushes inside the silence, high enough
-/// that both followers wake (the slow attack's `k * u` clears the flush threshold).
-const TONE_LEVEL: f32 = 1.0e-15;
+/// The tone's level (lane-distinct noise): low enough that its slow follower snaps inside the
+/// silence (`ln(1e-8 / 1e-12)` slow-release time constants, about 44,000 samples, of the 66,560),
+/// high enough that both followers wake (the slow attack's `k * u` clears [`FOLLOWER_REST`]).
+const TONE_LEVEL: f32 = 1.0e-8;
 
 /// The fast-path differential at one width, link and member count: two copies of one bank render
 /// the same blocks, one with the fast path allowed and one with it forbidden. Returns the blocks
@@ -418,5 +421,130 @@ fn the_silent_fast_path_renders_the_kernels_bits() {
                 );
             }
         }
+    });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Issue #1784: rest after real signal
+// ---------------------------------------------------------------------------------------------
+
+/// The unit roundoff of `f32` round-to-nearest, `2^-24`.
+const ROUNDOFF: f64 = 1.0 / 16_777_216.0;
+
+/// Samples after which a follower at `envelope` has snapped to `+0.0` under retention `c`
+/// (#1784 D4).
+///
+/// Fed `+0.0`, the follower is not rising and takes its release pair:
+/// `e' = snap(c * e + k * +0.0)`, and `k * +0.0` is `+0.0`, so `e' = snap(c * e)` with one
+/// rounding, `|e'| <= c e (1 + u)` for `u = 2^-24`. The word falls below [`FOLLOWER_REST`], where
+/// the snap writes `+0.0`, within `ln(e / FOLLOWER_REST) / (-ln c - u)` steps, plus the snapping
+/// step.
+fn follower_bound(envelope: f32, c: f32) -> u64 {
+    if envelope.to_bits() == 0 {
+        return 0;
+    }
+    let rate = -math::log(f64::from(c)) - ROUNDOFF;
+    let steps = math::log(f64::from(envelope) / f64::from(FOLLOWER_REST)) / rate;
+    steps.ceil() as u64 + 1
+}
+
+/// **Issue #1784 gate 1: a lane that has followed a real tone lands at its exact rest within the
+/// slower of its two followers' release bounds** ([`follower_bound`]), at `Simd4` and `Simd8`.
+/// The fixture members cover boost, cut and partial mix. The rate only changes the coefficients
+/// the bound reads and the link mode only the envelope the release starts from, so one of each is
+/// run. Measured at 48 kHz from a 0.5 tone: 128,640 samples (217,088 before the #1784 snap)
+/// against bounds of 128,653 to 128,668, set by the 100 ms slow release.
+#[test]
+fn a_lane_that_followed_a_tone_lands_at_rest_within_its_release_bound() {
+    assert_eq!(
+        FOLLOWER_REST.to_bits(),
+        1.0e-12_f32.to_bits(),
+        "owner ruling B2, 2026-10-23"
+    );
+    const TONE_BLOCKS: usize = 40;
+    lane::each_vector_lane!(|L, N| {
+        let rate = 48_000;
+        let members: Vec<Values> = (0..N).map(fixture_values).collect();
+        let mut bank = bind_bank_of::<L, N>(&members, rate, LinkMode::DualMono);
+        let frames = QUANTUM as usize;
+        let offsets = [0_u32; 9];
+        let mut sample = 0_u64;
+        for _ in 0..TONE_BLOCKS {
+            let mut left = vec![0.0_f32; frames * N];
+            let mut right = vec![0.0_f32; frames * N];
+            for frame in 0..frames {
+                let t = (sample + frame as u64) as f64;
+                for lane in 0..N {
+                    let phase = t * (0.05 + 0.007 * lane as f64);
+                    left[frame * N + lane] = (0.5 * math::sin(phase)) as f32;
+                    right[frame * N + lane] = (0.4 * math::cos(phase)) as f32;
+                }
+            }
+            process(
+                &mut bank,
+                &mut left,
+                &mut right,
+                frames,
+                sample,
+                &[],
+                &offsets[..=N],
+                false,
+            );
+            sample += frames as u64;
+        }
+        let row = coefficient_row(rate).expect("a launch rate");
+        let context = format!("W{N}, {rate} Hz");
+        let mut bounds = [0_u64; N];
+        for env in [&bank.shaper.left_env, &bank.shaper.right_env] {
+            let mut fast = [0.0_f32; 8];
+            let mut slow = [0.0_f32; 8];
+            env.fast.store(&mut fast[..N]);
+            env.slow.store(&mut slow[..N]);
+            for lane in 0..N {
+                assert!(
+                    slow[lane] > 0.1,
+                    "{context}: lane {lane} did not follow the tone"
+                );
+                bounds[lane] = bounds[lane]
+                    .max(follower_bound(fast[lane], row[1]))
+                    .max(follower_bound(slow[lane], row[3]));
+            }
+        }
+        let longest = *bounds.iter().max().expect("a lane");
+        let mut first_rest = [None; N];
+        let mut silent = 0_u64;
+        while silent <= longest && first_rest.iter().any(Option::is_none) {
+            let mut left = vec![0.0_f32; frames * N];
+            let mut right = vec![0.0_f32; frames * N];
+            process(
+                &mut bank,
+                &mut left,
+                &mut right,
+                frames,
+                sample,
+                &[],
+                &offsets[..=N],
+                false,
+            );
+            sample += frames as u64;
+            silent += frames as u64;
+            let rest = PreparedNativeEffectBank::lanes_at_rest(&bank);
+            for (lane, first) in first_rest.iter_mut().enumerate() {
+                if rest & (1 << lane) != 0 && first.is_none() {
+                    *first = Some(silent);
+                }
+            }
+        }
+        for lane in 0..N {
+            let reached = first_rest[lane].unwrap_or_else(|| {
+                panic!("{context}: lane {lane} not at rest {silent} samples into the silence")
+            });
+            let bound = bounds[lane].next_multiple_of(frames as u64);
+            assert!(
+                reached <= bound,
+                "{context}: lane {lane} rested after {reached} samples, bound {bound}"
+            );
+        }
+        std::eprintln!("{context}: rest after {first_rest:?} samples, bounds {bounds:?}");
     });
 }

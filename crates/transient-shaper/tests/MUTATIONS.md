@@ -40,8 +40,11 @@ cargo test --locked -p transient-shaper --test <test binary>
 Rows 13–15 are the three mutations that prove `effect_runtime::envelope::ar_one_pole_step`
 — added from this job — and are recorded in that crate's `tests/MUTATIONS.md` as rows 16–18: the
 strict `u > e` switch, the two-product form against the one-rounding one, and the D7 flush on the
-recurrence. Row 15 (no flush) is what `boundary::a_subnormal_input_renders_and_flushes_the_envelope`
-also catches from this side.
+recurrence. Since #1784 the step takes a rest floor in place of the fixed flush, and the shaper
+passes its `1e-12` `FOLLOWER_REST`. `boundary::a_subnormal_input_renders_and_flushes_the_envelope`
+catches row 15 (no snap) from this side only since #1784 changed its inputs to
+`f32::from_bits(0x400)` and `-f32::from_bits(0x300)`. Its earlier one- and three-ulp subnormals
+underflowed to `+0.0` without the snap, so the mutant stayed green.
 
 ## Recorded failures
 

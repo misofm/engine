@@ -296,6 +296,31 @@ fn a_lane_reported_at_rest_stays_at_rest_through_silence() {
 // Gate 2
 // ---------------------------------------------------------------------------------------------
 
+/// Samples of `+0.0` after which a lane that played real signal is at its exact rest (#1784 D2),
+/// for a lane whose curve at the -160 dB level floor clamps to `-range` (every `staggered` member).
+///
+/// The gate closes at most `hold + 1` samples into the silence: the countdown runs out and the
+/// next sample clears `open`. The release then steps `g' = flush(fma(c, t - g, g))` toward
+/// `t = -range`, two roundings, from a `g` in `[-range, 0]`. Counted in units `q` of the grid `g`
+/// ends on (`ulp(g)` near `t`), the distance `D = (g - t) / q` is below `2^24`, and a step that
+/// moves shrinks `D - D*` by at least the factor `1 - c(1 - u)` (`u = 2^-24`), where `D*` is
+/// within one unit of the stall point `c D (1 + u) <= 1/2` at which the add rounds back to `g`
+/// and the word is a fixed point. So the word is still within
+/// `24 ln 2 / -ln(1 - c(1 - u))` steps of the stall, plus 3 more for the last units, each of which
+/// moves `g` by at least one `q`.
+fn rest_bound<L: Lane>(gate: &PreparedGate<L, false>, lane: usize) -> usize {
+    const ROUNDOFF: f64 = 1.0 / 16_777_216.0;
+    (0..2)
+        .map(|channel| {
+            let coef = gate.coef[channel].lanes()[lane];
+            let c = f64::from(coef.release);
+            let steps = 24.0 * core::f64::consts::LN_2 / -math::log(1.0 - c * (1.0 - ROUNDOFF));
+            coef.hold_samples as usize + 1 + steps.ceil() as usize + 3
+        })
+        .max()
+        .expect("two channels")
+}
+
 /// The members of the differential: lane `l` releases in `5 + 3 l` ms, so lanes come to rest on
 /// different blocks.
 fn staggered(count: usize) -> Vec<Values> {
@@ -534,6 +559,16 @@ fn the_silent_fast_path_renders_the_kernel_bits() {
                 );
                 let all = *rests.last().expect("a rest");
                 assert!(all < RELOAD_BLOCK, "{context}: the bank rested too late");
+                // Issue #1784 gate 1: each lane rests within its own derived bound.
+                let gate = bound::<L>(&values, &mask, 48_000, link);
+                for (lane, first) in first_rest[..members].iter().enumerate() {
+                    let rested = (first.expect("a rest") + 1 - TONE_BLOCKS) * FRAMES;
+                    let limit = rest_bound(&gate, lane).next_multiple_of(FRAMES);
+                    assert!(
+                        rested <= limit,
+                        "{context}: lane {lane} rested after {rested} samples, bound {limit}"
+                    );
+                }
                 assert!(
                     taken[RELOAD_BLOCK],
                     "{context}: the fast path refused the reload block"

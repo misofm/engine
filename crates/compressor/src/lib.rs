@@ -16,7 +16,7 @@
 //! | `20 * log10` / `10^(x/20)` through libm | `dynamics::level_db` / `dynamics::gain_from_db` (D6) |
 //! | `expf` per sample for the ballistics | exact event-rate endpoints plus coefficient interpolation |
 //! | the two-rounding one-pole | `effect_runtime::envelope::rms_follow` + one `Lane::select` |
-//! | `sanitize` / `recover` / `flushed` per value | `lane::flush` on `g`, one block-boundary check (D7) |
+//! | `sanitize` / `recover` / `flushed` per value | the rest snap on `g` (the D7 flush, raised to the gain plateau by #1784), one block-boundary check (D7) |
 //! | `write_*` / `read_*` byte helpers | `effect_runtime::state_payload` |
 //! | `parameter_value_valid` | `effect_runtime::params` |
 //! | `PreparedCompressorGainMixKernel` | the `gain_mix_block` form inside the kernel (D10) |

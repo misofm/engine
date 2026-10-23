@@ -9,8 +9,8 @@ use effect_runtime::bank::positive_zero_lanes;
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db};
 use effect_runtime::envelope::rms_follow;
 use effect_runtime::ramp::LinearRamp;
+use lane::Lane;
 use lane::kernels::{gain_mix_step, ramp_toward};
-use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 use crate::design::{
@@ -183,8 +183,8 @@ impl<L: Lane> Channel<L> {
     ///
     /// * `gain_reduction_db` to `+0.0` by raw bits. With a `+0.0` detector the curve target is
     ///   `+0.0` for every legal threshold and knee (the level clamps to -160 dB and the lowest
-    ///   knee start is `-80 - 12` dB), `rms_follow(+0, +0, c)` is `c * +0 + +0 = +0` and `flush`
-    ///   keeps it, so `+0.0` is the one fixed point the predicate accepts. A release stalled at
+    ///   knee start is `-80 - 12` dB), `rms_follow(+0, +0, c)` is `c * +0 + +0 = +0` and
+    ///   `snap_reduction` keeps it, so `+0.0` is the one fixed point the predicate accepts. A release stalled at
     ///   a non-zero value is refused even if no bit would move.
     /// * every parameter ramp and both coefficient ramps settled (`remaining == 0`): a settled
     ///   ramp is never advanced, and `words` move only when a ramp advances, so the coefficient
@@ -395,10 +395,33 @@ fn curve_target<L: Lane>(
         .min(invariants.zero)
 }
 
+/// The largest gain-reduction magnitude, in dB, on the applied gain's plateau next to zero:
+/// `fast_gain_from_db(g)` is `fast_gain_from_db(-1e-30)`, `0x3f7f_fffe` (`1 - 2` ulps), for every
+/// `g` in `[-REDUCTION_REST_DB, -FLUSH_EPS]`, and leaves it at the next `f32` below (issue #1784,
+/// owner ruling B1 of 2026-10-23). About `5.38e-7` dB.
+///
+/// [`ballistic`] snaps a word on the plateau to `+0.0`. With `makeup == 0` the applied gain then
+/// moves from `1 - 2` ulps to exactly `1`, the step the release would otherwise take on reaching
+/// `FLUSH_EPS`, about 150,000 samples later at a 100 ms release; with a non-zero makeup the gain
+/// moves by at most 2 ulps. Bits move only on the next non-silent input after the snap. The constant is a
+/// bit pattern so it cannot drift with a literal's rounding;
+/// `rest_tests::the_reduction_rest_floor_is_the_fast_gain_plateau_edge` re-derives it from the real
+/// `fast_gain_from_db`, so a change to the fast tier cannot leave it stale.
+pub(crate) const REDUCTION_REST_DB: f32 = f32::from_bits(0x3510_7e90);
+
+/// Snaps a gain-reduction word on the unity plateau to `+0.0`: `flush` with the plateau edge for
+/// its threshold, `andnot(abs(x) <= REDUCTION_REST_DB, x)`. It replaces `flush` at the one place
+/// the word is written, and subsumes it (`FLUSH_EPS` is far below the edge). NaN passes, as under
+/// `flush`; `-0.0` becomes `+0.0`.
+#[inline(always)]
+fn snap_reduction<L: Lane>(x: L) -> L {
+    x.andnot(x.abs().le(L::splat(REDUCTION_REST_DB)))
+}
+
 #[inline(always)]
 fn ballistic<L: Lane>(target: L, gain_reduction_db: &mut L, coef: &Coef<L>) -> L {
     let coefficient = L::select(target.lt(*gain_reduction_db), coef.attack, coef.release);
-    let smoothed = flush(rms_follow(target, *gain_reduction_db, coefficient));
+    let smoothed = snap_reduction(rms_follow(target, *gain_reduction_db, coefficient));
     *gain_reduction_db = smoothed;
     smoothed
 }
@@ -436,7 +459,7 @@ fn gain_mix<L: Lane>(input: L, smoothed: L, coef: &Coef<L>, invariants: &Invaria
 ///
 /// When every lane has `mix == 1` and the block is unbypassed, `gain_mix` reduces to
 /// `select(smoothed == 0 && makeup == 0, input, input * gain)`. Where that select picks `input`,
-/// `smoothed` is `+0.0` (`flush` never leaves `-0.0`) and `makeup` is `±0`, so the gain is
+/// `smoothed` is `+0.0` (`snap_reduction` never leaves `-0.0`) and `makeup` is `±0`, so the gain is
 /// `fast_gain_from_db(+0.0)`, exactly `1.0` by the form of the sealed tier's `exp2`, and
 /// `input * 1.0` is `input` for every word but a signalling NaN, which the multiply quiets.
 ///

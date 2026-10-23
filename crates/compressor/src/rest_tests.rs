@@ -11,6 +11,8 @@ use super::padding_tests::{
     members_first, width_of,
 };
 use super::*;
+use crate::design::COEF_RELEASE;
+use crate::kernel::REDUCTION_REST_DB;
 use conformance::rest_probe::{self, Reach, Schedule};
 use dsp_reference::randomized::Draw;
 
@@ -181,4 +183,166 @@ fn a_lane_reported_at_rest_stays_at_rest_through_silence() {
         reach.assert_reached(&format!("W{}", L::WIDTH));
         std::eprintln!("W{}: {reach:?}", L::WIDTH);
     });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Issue #1784: rest after real signal
+// ---------------------------------------------------------------------------------------------
+
+/// The unit roundoff of `f32` round-to-nearest, `2^-24`.
+const ROUNDOFF: f64 = 1.0 / 16_777_216.0;
+
+/// Blocks of tone before the silence: 4,800 samples, 100 ms at 48 kHz, so the reduction settles.
+const TONE_BLOCKS: usize = 100;
+
+/// Samples after which a release from `reduction` dB has snapped to `+0.0`, at release rate
+/// coefficient `c` (#1784 D4).
+///
+/// With a `+0.0` detector the curve target is `+0.0`, so the release step is
+/// `g' = snap(fma(c, 0 - g, g))`: `0 - g` is exact, and the multiply and the add round once each
+/// (`Lane::fma` is two roundings on every target), so `|g'| <= |g| (1 - c(1 - u)) (1 + u)` with
+/// `u = 2^-24`. The word therefore reaches `REDUCTION_REST_DB`, where the snap writes `+0.0`,
+/// within `ln(|g| / REDUCTION_REST_DB) / (-ln(1 - c(1 - u)) - u)` steps, plus the snapping step.
+fn release_bound(reduction: f32, c: f32) -> u64 {
+    if reduction.to_bits() == 0 {
+        return 0;
+    }
+    let c = f64::from(c);
+    let rate = -math::log(1.0 - c * (1.0 - ROUNDOFF)) - ROUNDOFF;
+    let steps = math::log(f64::from(reduction.abs()) / f64::from(REDUCTION_REST_DB)) / rate;
+    steps.ceil() as u64 + 1
+}
+
+/// The default parameters with threshold `threshold_db`.
+fn defaults_at(threshold_db: f32) -> Values {
+    let mut values: Values = core::array::from_fn(|slot| InitialParameterValue {
+        parameter_index: (slot / 2) as u32,
+        channel: if slot % 2 == 0 {
+            ParameterChannel::Left
+        } else {
+            ParameterChannel::Right
+        },
+        value: COMPRESSOR_PARAMETERS[slot / 2].default_value,
+    });
+    set(&mut values, 0, threshold_db);
+    values
+}
+
+/// **Issue #1784 gate 1: a lane that has reduced gain on a real tone lands at its exact rest
+/// within its release bound** ([`release_bound`]), at the default 100 ms release and thresholds
+/// from the -18 dB default down to the -80 dB floor, at `Simd4` and `Simd8`. The link mode only
+/// changes the reduction the release starts from, so one mode is run. Measured at the -18 dB
+/// default: 79,200 samples (230,928 before the #1784 snap) against a bound of 79,185, which is
+/// 79,200 at the block end.
+#[test]
+fn a_compressing_lane_lands_at_rest_within_its_release_bound() {
+    const THRESHOLDS: [f32; 8] = [-18.0, -40.0, -60.0, -80.0, -24.0, -30.0, -50.0, -70.0];
+    lane::each_vector_lane!(|L| {
+        let link = LinkMode::DualMono;
+        let lanes = L::WIDTH;
+        let members: Vec<Values> = THRESHOLDS[..lanes]
+            .iter()
+            .map(|t| defaults_at(*t))
+            .collect();
+        let mask = members_first(lanes, lanes);
+        let requests = lane_requests(&members, &mask, 0, 48_000, link);
+        let mut bank = Bank::<L> {
+            bank: bind::<L>(&requests, &mask),
+            members: members.clone(),
+            mask,
+            rate: 48_000,
+            link,
+            mono: false,
+            first_sample: 0,
+            automation: None,
+        };
+        let mut sample = 0_u64;
+        for _ in 0..TONE_BLOCKS {
+            let mut left = vec![0.0_f32; FRAMES * lanes];
+            let mut right = vec![0.0_f32; FRAMES * lanes];
+            for frame in 0..FRAMES {
+                let t = (sample + frame as u64) as f64;
+                for lane in 0..lanes {
+                    let phase = t * (0.05 + 0.007 * lane as f64);
+                    left[frame * lanes + lane] = (0.5 * math::sin(phase)) as f32;
+                    right[frame * lanes + lane] = (0.4 * math::cos(phase)) as f32;
+                }
+            }
+            rest_probe::Probe::render(&mut bank, &mut left, &mut right);
+            sample += FRAMES as u64;
+        }
+        let context = format!("W{lanes}, {link:?}");
+        let bounds: Vec<u64> = (0..lanes)
+            .map(|lane| {
+                [&bank.bank.instance.left, &bank.bank.instance.right]
+                    .iter()
+                    .map(|channel| {
+                        let mut reduction = [0.0_f32; MAX_WIDTH];
+                        channel.gain_reduction_db.store(&mut reduction);
+                        assert!(
+                            reduction[lane] < -1.0,
+                            "{context}: lane {lane} did not reduce gain on the tone"
+                        );
+                        release_bound(reduction[lane], channel.words[COEF_RELEASE][lane])
+                    })
+                    .max()
+                    .expect("two channels")
+            })
+            .collect();
+        let longest = *bounds.iter().max().expect("a lane");
+        let mut first_rest = vec![None; lanes];
+        let mut silent = 0_u64;
+        while silent <= longest && first_rest.iter().any(Option::is_none) {
+            let mut left = vec![0.0_f32; FRAMES * lanes];
+            let mut right = vec![0.0_f32; FRAMES * lanes];
+            rest_probe::Probe::render(&mut bank, &mut left, &mut right);
+            silent += FRAMES as u64;
+            let rest = rest_probe::Probe::lanes_at_rest(&bank);
+            for (lane, first) in first_rest.iter_mut().enumerate() {
+                if rest & (1 << lane) != 0 && first.is_none() {
+                    *first = Some(silent);
+                }
+            }
+        }
+        for lane in 0..lanes {
+            let reached = first_rest[lane].unwrap_or_else(|| {
+                panic!("{context}: lane {lane} not at rest {silent} samples into the silence")
+            });
+            let bound = bounds[lane].next_multiple_of(FRAMES as u64);
+            assert!(
+                reached <= bound,
+                "{context}: lane {lane} rested after {reached} samples, bound {bound}"
+            );
+        }
+        std::eprintln!("{context}: rest after {first_rest:?} samples, bounds {bounds:?}");
+    });
+}
+
+/// **Issue #1784 B1: `REDUCTION_REST_DB` is the edge of the applied gain's plateau next to zero,**
+/// re-derived from the real `fast_gain_from_db`: the gain at `-REDUCTION_REST_DB` is the plateau
+/// value `fast_gain_from_db(-1e-30)`, pinned at `0x3f7f_fffe` (`1 - 2` ulps, the step the snap
+/// takes), the gain at the next `f32` below is not, and every 997th word from the smallest normal
+/// magnitude to the edge is on the plateau. (An exhaustive release-build sweep of every word up to
+/// `1e-3` dB found the plateau contiguous and never re-entered: #1784 D2.)
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "#1784 B1: re-derives the reduction rest floor from the fast tier, as its bound gate"
+)]
+fn the_reduction_rest_floor_is_the_fast_gain_plateau_edge() {
+    use math::fast_db::fast_gain_from_db;
+    let gain = |db: f32| fast_gain_from_db::<f32>(db).to_bits();
+    let plateau = gain(-1.0e-30);
+    assert_eq!(plateau, 0x3f7f_fffe, "the plateau value moved");
+    assert_eq!(
+        gain(-REDUCTION_REST_DB),
+        plateau,
+        "the edge is off the plateau"
+    );
+    let beyond = -f32::from_bits(REDUCTION_REST_DB.to_bits() + 1);
+    assert_ne!(gain(beyond), plateau, "the plateau extends past the edge");
+    for bits in (f32::MIN_POSITIVE.to_bits()..=REDUCTION_REST_DB.to_bits()).step_by(997) {
+        let db = -f32::from_bits(bits);
+        assert_eq!(gain(db), plateau, "{db:e} dB is off the plateau");
+    }
 }
