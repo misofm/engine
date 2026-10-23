@@ -159,7 +159,7 @@ nothing reads it to decide a later bit (crate tests read it). The per-lane D7 co
 attributes to a strip come from each block's `BankProcessReport`, which the caller already
 routes by the lane map.
 
-### D3 Evidence (attempt 1)
+### D3 Evidence (attempt 1; attempt 2 changes listed at the end)
 
 - Gate 1: one randomized gate-1 test per effect (Simd4 and Simd8; every console factory builds a
   Simd4 bank on this AVX2 host through its crate-internal binder) and one whole-chain test
@@ -173,3 +173,20 @@ routes by the lane map.
   schedule word no output bit reads; it has no test (attempt 2 deleted the one that read it).
 - Not covered: the `designed`/`unrestored` bits and the agreement AND reach only the collapse
   witness, and the rack mock does not collapse.
+
+Attempt 2 (after the verifier's FAIL on the chain swap):
+- The six per-effect gate-1 rigs are one driver, `conformance::swap_probe` (a dev-dependency, as
+  `rest_probe`); each crate keeps a short `Probe` and its own cases (EQ: a swapped pair whose
+  general bands differ). The frozen schedule swaps mid-ramp inside one bank and across two, moves
+  a ramping lane into a settled bank followed by a quiet block, and ends with a `FullToDefaults`
+  reset; every swap call reaches the allocator 0 times.
+- The rack gate-1 chain test gained a collapse case (armed chains, a stereo strip refused into a
+  mono-armed chain, an agreement lost and carried) and absorbed the allocation test.
+- Mutants red: rack `designed` (in-chain and cross), witness, `unrestored` (in-chain and cross),
+  agreement `self && other` -> `self`, arming refusal removed; EQ `initial_words`, limiter right
+  `phase`, soft clip left-only `pos`, shaper left defaults, compressor `rate_ramps`, gate `hold`
+  and `ramp_frames_left` raise, an allocation in a restore.
+- Owed at the #1746 rebase: the soft clip `advance_clocks` rest `debug_assert` (its clock test
+  passes every lane, and this tree has no soft clip `lanes_at_rest`), soft clip calling #1746's
+  `Channel::advance_cursor`, `SILENT_FORBIDDEN` in its clock test's rendered bank.
+
