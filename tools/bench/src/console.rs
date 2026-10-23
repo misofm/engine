@@ -199,6 +199,14 @@
 //! and re-run it). Its per-block witness is a stepped twin replayed after the timed loop
 //! (`FaderRideMeasurement` says how and `console_workload::fader_ride` what it proves), and its
 //! riding digest is asserted in-run to differ from its quiet arm's.
+//!
+//! # The product-lane row (issue #1758)
+//!
+//! `console_product_lanes` is the fader-ride row's quiet arm on its own: the standing console
+//! prepared with the product's live lanes and never written, rendered back to back by the session
+//! rows' loop (`SessionMeasurement::run_prepared`) straight after them, and emitted last. Its p50
+//! minus `sixty_four_track_console`'s is what the lanes cost a console that nobody edits, without
+//! the ride row's two-plan alternation. Its digest is asserted in-run to equal the standing row's.
 
 use crate::floor::{self, CoreClock};
 use bench_support::alloc as bench_alloc;
@@ -303,6 +311,9 @@ pub(crate) fn main() {
     let rows: Vec<Workload> = native_session_rows().collect();
     let sessions: Vec<SessionMeasurement> =
         rows.iter().copied().map(SessionMeasurement::run).collect();
+    // Issue #1758: the standing console prepared with the product's lanes, timed by the session
+    // rows' own loop straight after them. Emitted last.
+    let product_lanes = ProductLanesMeasurement::run();
     let digest_of = |workload: Workload| {
         rows.iter()
             .position(|row| *row == workload)
@@ -339,6 +350,14 @@ pub(crate) fn main() {
         sends != standing,
         "the bus-and-send row rendered the standing console row's output"
     );
+    // And the product-lane row's (issue #1758): live lanes that nobody writes read the values
+    // the plan was prepared with, so the row renders the standing console's bits over the same
+    // block window. A difference is a harness defect, never a finding.
+    assert_eq!(
+        &product_lanes.session.output_sha256,
+        digest_of(PRODUCT_LANES_WORKLOAD),
+        "the product-lane row rendered different output from the standing console row"
+    );
     for (workload, session) in rows.iter().zip(&sessions) {
         let control = floor::floor_row(*workload)
             .and_then(|row| row.control)
@@ -373,6 +392,7 @@ pub(crate) fn main() {
     println!("{}", mixing.record(round, backend, metadata));
     let ride = FaderRideMeasurement::run();
     println!("{}", ride.record(round, backend, metadata));
+    println!("{}", product_lanes.record(round, backend, metadata));
 }
 
 /// `bench console --preflight`: the mixing-automation row's premises, untimed, with what they
@@ -472,7 +492,14 @@ impl SessionMeasurement {
     /// passes anything but [`OBSERVATIONS`], and the record it produces says so in its
     /// `observations` field, which the validator pins to the frozen count.
     fn run_for(workload: Workload, observations: usize) -> Self {
-        let mut runtime = SessionRuntime::new(workload);
+        Self::run_prepared(workload, &mut SessionRuntime::new(workload), observations)
+    }
+
+    /// The timed loop of every session row, over a runtime the caller prepared: one block of the
+    /// production render entry per observation, back to back. The product-lane row (issue #1758)
+    /// passes the standing console prepared with the product's lanes, so the two rows are timed by
+    /// this one loop and differ only in how their plan was prepared.
+    fn run_prepared(workload: Workload, runtime: &mut SessionRuntime, observations: usize) -> Self {
         let mut durations = Vec::with_capacity(observations);
         let mut output_hash = Sha256Sink::new();
         let mut render_errors = 0_u64;
@@ -480,7 +507,7 @@ impl SessionMeasurement {
         // every other row, whose loop below is unchanged.
         let mut meters = workload
             .web_meters()
-            .then(|| MeteredEvidence::bind(&runtime));
+            .then(|| MeteredEvidence::bind(runtime));
         // Issue #1085: fixed at compile time, so read once, before the clock starts.
         let bypass = BYPASS_ROWS
             .contains(&workload)
@@ -2703,6 +2730,122 @@ impl FaderRideMeasurement {
     }
 }
 
+/// The session the product-lane row renders: the standing console, read against its own row.
+const PRODUCT_LANES_WORKLOAD: Workload = Workload::SixtyFourTrackConsole;
+
+/// The record kind of the product-lane row (issue #1758).
+const PRODUCT_LANES_WORKLOAD_KIND: &str = "sixty_four_track_console_product_lanes";
+
+/// Pinned verbatim in the validator, for the reason every method sentence in this stream is.
+const PRODUCT_LANES_STATISTICAL_METHOD: &str = "one plan rendered back to back by the session \
+rows' loop; nearest-rank percentiles over per-block nanoseconds; one warmup pass and two measured \
+rounds; descriptive only; no threshold";
+
+/// The product-lane row (issue #1758): the standing console prepared with the live lanes a product
+/// host attaches for it (`controls::live_lanes`, on the product's `Concurrent` delivery), with no
+/// write, rendered back to back by [`SessionMeasurement::run_prepared`], the loop that times
+/// `sixty_four_track_console`.
+///
+/// # Why this row exists
+///
+/// In #1750's run the fader-ride row's `quiet` arm -- this plan, no writes -- took about ten per
+/// cent longer per block than the standing row, which renders the same session with no live lane.
+/// That arm alternates two plans per observation, so the gap could be the lanes' per-block cell
+/// reads or the two plans' cache residency. This row removes the alternation: one plan, timed by
+/// the standing row's own loop over the same block window, so its p50 minus the standing row's is
+/// what the lanes cost a console that nobody edits.
+///
+/// Nobody writes a lane, so every lane reads the value the plan was prepared with and the row
+/// renders the standing row's bits: the run asserts it before it emits a record, and the aggregate
+/// validator pins it. The record states the lane set and that no transaction was published.
+struct ProductLanesMeasurement {
+    /// The timed loop's output: the session rows' own measurement.
+    session: SessionMeasurement,
+    /// The product lane set the plan was prepared with.
+    live_lanes: fader_ride::LiveLanes,
+    /// Transactions the plan's gate published over the run: none, because nobody writes.
+    transactions: u64,
+    /// The plan's `live_values_superseded` after the run.
+    superseded: u64,
+}
+
+impl ProductLanesMeasurement {
+    fn run() -> Self {
+        Self::run_for(OBSERVATIONS)
+    }
+
+    /// [`ProductLanesMeasurement::run`] over `observations` timed blocks. Only the unit test below
+    /// passes anything but [`OBSERVATIONS`], and the record says so.
+    fn run_for(observations: usize) -> Self {
+        let workload = PRODUCT_LANES_WORKLOAD;
+        let mut runtime = SessionRuntime::build_with_product_lanes(workload);
+        let live_lanes = runtime.live_lanes().expect("a product lane set");
+        let revision = runtime.published_revision();
+        let session = SessionMeasurement::run_prepared(workload, &mut runtime, observations);
+        Self {
+            session,
+            live_lanes,
+            transactions: runtime.published_revision() - revision,
+            superseded: runtime.live_values_superseded(),
+        }
+    }
+
+    fn record(&self, round: u32, backend: Backend, metadata: &Metadata) -> String {
+        let percentiles = Percentiles::from_samples(&self.session.ns_per_block);
+        let workload = PRODUCT_LANES_WORKLOAD;
+        format!(
+            concat!(
+                "{{\"schema_version\":1,\"issue\":{issue},\"record\":\"console_product_lanes\",",
+                "\"workload_kind\":\"{kind}\",\"standing_row\":\"{standing}\",",
+                "\"tracks\":{tracks},\"synthetic_fixture\":{synthetic},",
+                "\"strip_content\":\"{strip}\",\"strip_layout\":\"{layout}\",",
+                "\"input_signal\":\"{signal}\",\"source_feed\":\"{feed}\",",
+                "\"fixture_id\":\"{fixture}\",\"round\":{round},\"backend\":\"{backend}\",",
+                "\"sample_rate_hz\":{rate},\"quantum_frames\":{quantum},",
+                "\"observations\":{obs},\"control_delivery\":\"concurrent\",",
+                "\"live_lanes\":\"{lanes}\",\"transactions_published\":{transactions},",
+                "\"live_values_superseded\":{superseded},",
+                "\"units\":\"ns_per_block\",\"percentile_method\":\"nearest_rank\",",
+                "\"min_ns_per_block\":{min},\"p50_ns_per_block\":{p50},",
+                "\"p95_ns_per_block\":{p95},\"p99_ns_per_block\":{p99},",
+                "\"max_ns_per_block\":{max},\"output_sha256\":\"{digest}\",",
+                "\"render_errors\":{errors},\"render_total_forbidden_operations\":{forbidden},",
+                "{metadata}",
+                "\"descriptive_only\":true,",
+                "\"statistical_method\":\"{method}\"}}"
+            ),
+            issue = ISSUE,
+            kind = PRODUCT_LANES_WORKLOAD_KIND,
+            standing = workload.kind(),
+            tracks = workload.tracks(),
+            synthetic = workload.synthetic(),
+            strip = workload.strip_content(),
+            layout = workload.strip_layout(),
+            signal = workload.input_signal(),
+            feed = workload.source_feed().name(),
+            fixture = json_escape(workload.fixture_id()),
+            round = round,
+            backend = backend_name(backend),
+            rate = SAMPLE_RATE_HZ,
+            quantum = QUANTUM,
+            obs = self.session.observations,
+            lanes = fader_ride::lane_set_name(self.live_lanes),
+            transactions = self.transactions,
+            superseded = self.superseded,
+            min = percentiles.min,
+            p50 = percentiles.p50,
+            p95 = percentiles.p95,
+            p99 = percentiles.p99,
+            max = percentiles.max,
+            digest = self.session.output_sha256,
+            errors = self.session.render_errors,
+            forbidden = self.session.audit.total(),
+            metadata = metadata.record_fields(),
+            method = PRODUCT_LANES_STATISTICAL_METHOD,
+        )
+    }
+}
+
 /// The median of the per-observation differences `left[i] - right[i]`.
 ///
 /// Pairs taken microseconds apart, then summarised -- never a difference of two summaries taken
@@ -2973,6 +3116,40 @@ mod tests {
         assert!(
             record_validator_accepts(&record, frozen),
             "the fader-ride record at the frozen counts"
+        );
+    }
+
+    /// Issue #1758: the product-lane row, run short through the real subject, renders the standing
+    /// row's bits over the same window with no forbidden operation and no write, and prints a
+    /// record the validator accepts at the frozen count and refuses as shortened.
+    ///
+    /// The same `ProductLanesMeasurement` the runner's run takes, over eight timed blocks instead of
+    /// a thousand (`cargo test -p bench the_product_lane_row -- --nocapture` prints the record).
+    /// Its timings are not to be read. The validator's own mutation cases are in
+    /// `scripts/test-console-benchmark.sh`.
+    #[test]
+    fn the_product_lane_row_renders_the_standing_bits_and_the_validator_pins_it() {
+        let measured = ProductLanesMeasurement::run_for(SHORT_RUN_OBSERVATIONS);
+        let standing = SessionMeasurement::run_for(PRODUCT_LANES_WORKLOAD, SHORT_RUN_OBSERVATIONS);
+        assert_eq!(
+            measured.session.output_sha256, standing.output_sha256,
+            "the product-lane row must render the standing row's bits"
+        );
+        assert_eq!(measured.session.render_errors, 0);
+        assert_eq!(
+            measured.session.audit.total(),
+            0,
+            "a forbidden operation on the render path"
+        );
+        let record = measured.record(1, Backend::current(), Metadata::gather());
+        println!("{record}");
+        assert!(
+            !record_validator_accepts(&record, "."),
+            "a shortened run must not pass for the frozen one"
+        );
+        assert!(
+            record_validator_accepts(&record, ".observations = 1000"),
+            "the product-lane record at the frozen count"
         );
     }
 

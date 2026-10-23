@@ -1,6 +1,6 @@
 # Shared definitions for the console qualification benchmark records.
 #
-# Nine record shapes share one stream. `console_session` is a workload rendered through a real
+# Ten record shapes share one stream. `console_session` is a workload rendered through a real
 # prepared plan; `console_hoist` is the paired-alternation comparison of the stationary-smoother
 # arms; `console_meters` and `console_observation` are the #163 item 0d paired arms of the console
 # observation facilities; `console_placement` is the #175 chain-shape row-pair; and
@@ -10,7 +10,9 @@
 # whose digest equality is the gate the collapse will be constrained by when it lands; and
 # `console_mixing_automation` (#1003) is the mono console riding eight controls on eight tracks in
 # the shapes a real host pushes them; and `console_fader_ride` (#1750) is the standing console
-# riding one fader and one pan per bank on the product's delivery.
+# riding one fader and one pan per bank on the product's delivery; and `console_product_lanes`
+# (#1758) is the standing console prepared with the product's live lanes, never written, rendered
+# back to back.
 # `console_benchmark_record_valid_lib` dispatches on `.record`, so a record that claims one shape
 # and carries another's keys fails rather than being validated against the wrong table.
 def sha256: type == "string" and test("^[0-9a-f]{64}$");
@@ -46,6 +48,8 @@ def observation_keys: ["absent_output_sha256","absent_p50_ns","absent_p95_ns","a
 def automation_keys: ["arms","automated_channel","automated_effect","automated_effect_id","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_parameter","automated_parameter_index","automated_pushes_accepted","automated_track_id","automation_spans_per_block","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","paired_control_delta_median_ns","paired_ramp_delta_median_ns","paired_ramp_delta_median_ns_per_track","pairing","percentile_method","profile","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
 def fader_ride_keys: ["arms","backend","background_load_note","banks","candidate_commit","control_delivery","cpu_affinity","cpu_model","descriptive_only","fader_records_per_block","fader_records_written","fader_smoothing_samples","fader_step_db","fader_tracks","fixture_id","governor_or_power_mode","input_signal","issue","live_lanes","live_values_superseded","llvm_version","matrix_records_per_block","matrix_records_written","measurement_control","missing_metadata","observations","os","paired_ramp_delta_median_ns","paired_ramp_delta_median_ns_per_track","pairing","pan_smoothing_samples","pan_step","pan_tracks","percentile_method","preroll_blocks","profile","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","ramp_in_flight_blocks","ramp_witness","record","render_errors","render_total_forbidden_operations","riding_output_sha256","riding_p50_ns","riding_p95_ns","riding_p99_ns","round","rust_version","sample_rate_hz","schema_version","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","transactions_published","units","workload_kind"];
+
+def product_lanes_keys: ["backend","background_load_note","candidate_commit","control_delivery","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","live_lanes","live_values_superseded","llvm_version","max_ns_per_block","measurement_control","min_ns_per_block","missing_metadata","observations","os","output_sha256","p50_ns_per_block","p95_ns_per_block","p99_ns_per_block","percentile_method","profile","quantum_frames","record","render_errors","render_total_forbidden_operations","round","rust_version","sample_rate_hz","schema_version","source_feed","standing_row","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","transactions_published","units","workload_kind"];
 
 def mixing_automation_keys: ["arms","automated_bank_collapse_counters","automated_controls","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_pushes_accepted","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","owner_edits_per_block","paired_collapse_delta_median_ns","paired_ramp_delta_median_ns","pairing","parameter_records_per_block","percentile_method","preflight_bank_collapse_counters","preflight_blocks","preflight_output_sha256","preroll_blocks","profile","quantum_frames","quiet_bank_collapse_counters","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_bank_collapse_counters","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
@@ -515,6 +519,8 @@ def fader_ride_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is riding minus quiet per observation; the stepped twin is replayed untimed after the run; descriptive only; no threshold";
 def fader_ride_ramp_witness:
   "each timed block of the riding arm differs from a stepped twin's, replayed untimed after the run; the twin holds every target from the block's first sample, so the riding arm did not; after the settled pre-roll the two agree";
+def product_lanes_statistical_method:
+  "one plan rendered back to back by the session rows' loop; nearest-rank percentiles over per-block nanoseconds; one warmup pass and two measured rounds; descriptive only; no threshold";
 def mono_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is collapse_forced_off minus collapse_eligible per observation; descriptive only; no threshold";
 def observation_statistical_method:
@@ -930,6 +936,34 @@ def fader_ride_record_valid:
   .quiet_output_sha256 != .riding_output_sha256 and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
+# The product-lane row (#1758): the fader-ride row's quiet arm on its own -- the standing console,
+# prepared with the lanes a product host attaches for it on the product's `Concurrent` delivery,
+# never written, and timed back to back by the session rows' loop. It names the standing row it is
+# read against and states that row's facts verbatim, so the subtraction is between two
+# preparations of one session; its lane set, its delivery and the absence of any write are pinned,
+# because a row with fewer lanes, another delivery or a write would publish another cost under the
+# name of this one. The aggregate holds its digest equal to the standing row's.
+def product_lanes_record_valid:
+  (keys | sort) == product_lanes_keys and
+  .record == "console_product_lanes" and common_shape and
+  .statistical_method == product_lanes_statistical_method and
+  .workload_kind == "sixty_four_track_console_product_lanes" and
+  .standing_row == "sixty_four_track_console" and
+  # The standing console's pinned facts, verbatim from `session_kind_shape` and its source feed.
+  .tracks == 64 and .synthetic_fixture == false and
+  .strip_content == "eq+compressor+limiter" and
+  .strip_layout == intended_layout and .input_signal == "tone" and
+  .source_feed == "bound" and .fixture_id == console_fixture and
+  .sample_rate_hz == 48000 and .quantum_frames == 128 and
+  .control_delivery == "concurrent" and .live_lanes == "fader_matrix+strip_input+effects" and
+  .transactions_published == 0 and .live_values_superseded == 0 and
+  .units == "ns_per_block" and
+  ([.min_ns_per_block,.p50_ns_per_block,.p95_ns_per_block,.p99_ns_per_block,.max_ns_per_block]
+    | all(positive_integer)) and
+  ordered_percentiles([.min_ns_per_block,.p50_ns_per_block,.p95_ns_per_block,.p99_ns_per_block,.max_ns_per_block]) and
+  (.output_sha256 | sha256) and
+  .render_errors == 0 and .render_total_forbidden_operations == 0;
+
 def console_benchmark_record_valid_lib:
   type == "object" and (.record | type == "string") and
   (if .record == "console_session" then session_record_valid
@@ -941,4 +975,5 @@ def console_benchmark_record_valid_lib:
    elif .record == "console_mono" then mono_record_valid
    elif .record == "console_mixing_automation" then mixing_automation_record_valid
    elif .record == "console_fader_ride" then fader_ride_record_valid
+   elif .record == "console_product_lanes" then product_lanes_record_valid
    else false end);
