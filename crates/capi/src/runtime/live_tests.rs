@@ -6743,7 +6743,14 @@ mod set_control {
         /// environment: remove its `CanonicalFpEnv` guard.
         #[test]
         fn a_session_booted_under_a_hostile_caller_word_is_the_canonical_session() {
-            let parse = || "0.1".parse::<f32>().expect("a number");
+            // Opaque, so no profile folds the parse at compile time (#1775).
+            let parse = || {
+                core::hint::black_box(
+                    core::hint::black_box("0.1")
+                        .parse::<f32>()
+                        .expect("a number"),
+                )
+            };
             assert_ne!(
                 parse().to_bits(),
                 under_hostile_fp_env(parse).to_bits(),
