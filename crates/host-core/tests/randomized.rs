@@ -55,9 +55,9 @@ use session::{
 const BANK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
 const QUANTUM: usize = 128;
 const BLOCKS: usize = 8;
-const TEST: &str = "randomized_consoles_render_the_same_bits_armed_dual_and_serialized";
+const TEST: &str = "randomized_consoles_render_the_same_bits_armed_and_dual";
 const REPLAY: &str = "cargo test -p host-core --features host-core/test-support --test randomized \
-                      -- --exact randomized_consoles_render_the_same_bits_armed_dual_and_serialized";
+                      -- --exact randomized_consoles_render_the_same_bits_armed_and_dual";
 
 const KINDS: [&str; 8] = [
     "miso.parametric-eq",
@@ -918,7 +918,7 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
 }
 
 #[test]
-fn randomized_consoles_render_the_same_bits_armed_dual_and_serialized() {
+fn randomized_consoles_render_the_same_bits_armed_and_dual() {
     let registry = launch_native_effect_registry().expect("the launch registry");
     let mut reach = Reach::default();
     let seeds = run_seeds(TEST, REPLAY, 12, |seed| probe(seed, registry, &mut reach));

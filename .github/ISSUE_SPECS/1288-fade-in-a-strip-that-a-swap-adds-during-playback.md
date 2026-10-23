@@ -167,8 +167,9 @@ start at rest at the adopted block.
    path gets a 486-sample compensation line and `D` is 486. Each output equals a fresh
    plan of the successor session, fed the same source frames at the same blocks, with the strip
    muted and given a live unmute of `N` samples at the D3 fire block: bit-identical for every block.
-5. **Browser form.** Gate 4(a) with both runs prepared between render calls
-   (`FaderMatrixBankProcessor`).
+5. **Browser form.** Retired by #1767: every host prepares the one `Concurrent` delivery, and every
+   plan keeps the fader and the matrix as separate banks (`FaderBankProcessor`,
+   `MatrixBankProcessor`), so gate 4(a) already covers the browser's plans.
 6. **Realtime.** Extend `the_swap_block_allocates_and_frees_nothing` (`successor_swap.rs:476`) over
    the fade blocks of gate 4(c): zero allocations and frees.
 7. Commands:
@@ -194,7 +195,7 @@ start at rest at the adopted block.
 - Gate 4(d): a `D` that counts node latencies only (0 here) fires the ramp at the first played
   block while the compensation line still emits its at-rest zeros, so part of the ramp is spent
   on zeros and the output differs from the reference's fade; it turns red.
-- Gate 5: arming only the split banks leaves the browser's fused form unfaded; it turns red.
+- Gate 5: retired by #1767 (no fused form remains).
 
 ## Dependencies
 

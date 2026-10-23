@@ -2773,12 +2773,6 @@ fn pan_record(pan: [f32; 2], smoothing_samples: u32) -> TrackControlRecord {
     }
 }
 
-/// How a plan's fader and matrix banks are built: one bank each.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Form {
-    Split,
-}
-
 /// One value written to a strip's cells.
 #[derive(Clone, Copy, Debug)]
 enum CellRecord {
@@ -2815,15 +2809,15 @@ impl CellPlan {
         prepared.unwrap_or_else(|failure| panic!("prepare: {failure:?}"))
     }
 
-    fn fresh(session: &Session, backend: Backend, form: Form) -> Self {
-        let (mut prepared, handles) = Self::prepared(match form {
-            Form::Split => host_core::test_only_prepare_host_runtime_with_live_controls_on(
+    fn fresh(session: &Session, backend: Backend) -> Self {
+        let (mut prepared, handles) = Self::prepared(
+            host_core::test_only_prepare_host_runtime_with_live_controls_on(
                 &session.compiled,
                 &caps(),
                 &LivePlan::request(),
                 backend,
             ),
-        });
+        );
         let gate = prepared
             .plan
             .take_revision_gate()
@@ -2845,20 +2839,16 @@ impl CellPlan {
         session: &Session,
         base: host_core::SuccessorBase<'_>,
         backend: Backend,
-        form: Form,
     ) -> Result<Self, host_core::PrepareDiagnostics> {
         let revision = base.revision;
-        let (mut prepared, handles) = match form {
-            Form::Split => {
-                host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
-                    &session.compiled,
-                    &caps(),
-                    &LivePlan::request(),
-                    base,
-                    backend,
-                )
-            }
-        }?;
+        let (mut prepared, handles) =
+            host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+                &session.compiled,
+                &caps(),
+                &LivePlan::request(),
+                base,
+                backend,
+            )?;
         let mut gate = prepared
             .plan
             .take_revision_gate()
@@ -2883,7 +2873,6 @@ impl CellPlan {
         committed: &SessionModel,
         edit_ramps: &EditRamps,
         backend: Backend,
-        form: Form,
     ) -> Self {
         Self::successor_at(
             session,
@@ -2896,7 +2885,6 @@ impl CellPlan {
                 )
             },
             backend,
-            form,
         )
         .unwrap_or_else(|failure| panic!("successor: {failure:?}"))
     }
@@ -2950,7 +2938,6 @@ struct Swap<'a> {
     to: &'a Session,
     /// The predecessor's base: the model it was prepared from plus every record written to it.
     committed: &'a SessionModel,
-    form: Form,
     /// Records written to the successor's cells after it is prepared, before it is swapped in.
     successor_writes: &'a [(&'static str, CellRecord)],
     /// The ramp lengths the transaction's edits gave their rows (#1394 D6).
@@ -2981,14 +2968,13 @@ struct CellRun {
 /// same blocks.
 fn cell_run(
     a: &Session,
-    form: Form,
     swap: Option<Swap<'_>>,
     feed: &Feed,
     writes: &[CellWrite],
     backend: Backend,
 ) -> CellRun {
     use bench_support::alloc as bench_alloc;
-    let mut plan = CellPlan::fresh(a, backend, form);
+    let mut plan = CellPlan::fresh(a, backend);
     let mut blocks = Vec::with_capacity(BLOCKS);
     let mut carry = CarryOutcome::NotRequested;
     let mut restarted = Vec::new();
@@ -3005,7 +2991,6 @@ fn cell_run(
                 swap.committed,
                 swap.edit_ramps,
                 backend,
-                swap.form,
             );
             restarted = successor.live.prepared.restarted_strips().to_vec();
             successor.write_all(swap.successor_writes);
@@ -3063,10 +3048,6 @@ fn first_cell_difference(left: &CellRun, right: &CellRun) -> Option<usize> {
         .iter()
         .zip(&right.blocks)
         .position(|(left, right)| left != right)
-}
-
-fn forms() -> Vec<Form> {
-    vec![Form::Split]
 }
 
 fn assert_swapped_like(run: &CellRun, reference: &CellRun, what: &str) {
@@ -3188,29 +3169,27 @@ fn feed_for_strips() -> Feed {
 /// the base, and A is swapped out at block 6 before it renders again, so they are still dirty in
 /// A's cells and only the carry's `apply_pending` applies them. The reference is A plus the muted
 /// track, fed the same records at the same blocks.
-fn a_ramp_in_flight_finishes_after_the_swap(backend: Backend, form: Form) {
+fn a_ramp_in_flight_finishes_after_the_swap(backend: Backend) {
     let a = Session::compile(strip_state_session());
     let b_after = Session::compile(with_muted_track(ramped_model()));
     let b_before = Session::compile(with_muted_track(strip_state_session()));
     let committed = ramped_model();
     let feed = feed_for_strips();
     let writes = ramp_writes();
-    let reference = cell_run(&b_before, form, None, &feed, &writes, backend);
-    let silent = cell_run(&b_before, form, None, &feed, &[], backend);
+    let reference = cell_run(&b_before, None, &feed, &writes, backend);
+    let silent = cell_run(&b_before, None, &feed, &[], backend);
     assert!(
         reference.blocks[SWAP_BLOCK..SWAP_BLOCK + 3]
             .iter()
             .zip(&silent.blocks[SWAP_BLOCK..SWAP_BLOCK + 3])
             .all(|(moved, rest)| moved != rest),
-        "{backend:?} {form:?}: the ramp is audible in the three blocks after the swap"
+        "{backend:?}: the ramp is audible in the three blocks after the swap"
     );
     let run = cell_run(
         &a,
-        form,
         Some(Swap {
             to: &b_after,
             committed: &committed,
-            form,
             successor_writes: &[],
             edit_ramps: &EditRamps::new(),
         }),
@@ -3218,31 +3197,29 @@ fn a_ramp_in_flight_finishes_after_the_swap(backend: Backend, form: Form) {
         &writes,
         backend,
     );
-    assert_swapped_like(&run, &reference, &format!("{backend:?} {form:?}"));
+    assert_swapped_like(&run, &reference, &format!("{backend:?}"));
     assert!(run.restarted.is_empty(), "{:?}", run.restarted);
 }
 
 /// Gate 2/3, second case: the records are written to the pending successor's cells (a live edit
 /// committed after the structural transaction, #1053 D7), so the carry's lane state is at rest and
 /// the successor applies the records at its first block.
-fn records_in_the_pending_successor_apply_at_its_first_block(backend: Backend, form: Form) {
+fn records_in_the_pending_successor_apply_at_its_first_block(backend: Backend) {
     let a = Session::compile(strip_state_session());
     let b = Session::compile(with_muted_track(strip_state_session()));
     let committed = strip_state_session();
     let feed = feed_for_strips();
     let writes = ramp_writes();
-    let reference = cell_run(&b, form, None, &feed, &writes, backend);
+    let reference = cell_run(&b, None, &feed, &writes, backend);
     let successor_writes: Vec<(&'static str, CellRecord)> = writes
         .iter()
         .map(|write| (write.strip, write.record))
         .collect();
     let run = cell_run(
         &a,
-        form,
         Some(Swap {
             to: &b,
             committed: &committed,
-            form,
             successor_writes: &successor_writes,
             edit_ramps: &EditRamps::new(),
         }),
@@ -3250,24 +3227,20 @@ fn records_in_the_pending_successor_apply_at_its_first_block(backend: Backend, f
         &[],
         backend,
     );
-    assert_swapped_like(&run, &reference, &format!("{backend:?} {form:?}"));
+    assert_swapped_like(&run, &reference, &format!("{backend:?}"));
 }
 
 #[test]
 fn a_ramp_in_flight_finishes_after_the_swap_on_every_width() {
     for backend in backends() {
-        for form in forms() {
-            a_ramp_in_flight_finishes_after_the_swap(backend, form);
-        }
+        a_ramp_in_flight_finishes_after_the_swap(backend);
     }
 }
 
 #[test]
 fn records_in_the_pending_successor_apply_at_its_first_block_on_every_width() {
     for backend in backends() {
-        for form in forms() {
-            records_in_the_pending_successor_apply_at_its_first_block(backend, form);
-        }
+        records_in_the_pending_successor_apply_at_its_first_block(backend);
     }
 }
 
@@ -3275,7 +3248,7 @@ fn records_in_the_pending_successor_apply_at_its_first_block_on_every_width() {
 /// X's stage carries, then D5's records retarget it. Run 2 writes the same records to A just
 /// before the swap and prepares B from a base that already holds them. The runs are bit-identical
 /// in every block, and X is not in the restart set.
-fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
+fn a_live_difference_retargets_the_carried_stage(backend: Backend) {
     let after = |model: SessionModel| {
         let model = with_fader(model, MOVED, [-4.0, -6.0]);
         with_pan(model, MOVED, [0.8, 0.6], 300)
@@ -3312,11 +3285,9 @@ fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
         .collect();
     let retargeted = cell_run(
         &a,
-        form,
         Some(Swap {
             to: &b,
             committed: &before,
-            form,
             successor_writes: &[],
             edit_ramps: &EditRamps::new(),
         }),
@@ -3326,11 +3297,9 @@ fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
     );
     let written = cell_run(
         &a,
-        form,
         Some(Swap {
             to: &b,
             committed: &moved,
-            form,
             successor_writes: &[],
             edit_ramps: &EditRamps::new(),
         }),
@@ -3342,24 +3311,22 @@ fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
     assert_eq!(written.carry, CarryOutcome::Carried);
     assert!(
         retargeted.restarted.is_empty() && written.restarted.is_empty(),
-        "{backend:?} {form:?}: {:?} {:?}",
+        "{backend:?}: {:?} {:?}",
         retargeted.restarted,
         written.restarted
     );
     assert_eq!(
         first_cell_difference(&retargeted, &written),
         None,
-        "{backend:?} {form:?}: carry then retarget sounds like live edit then structural edit"
+        "{backend:?}: carry then retarget sounds like live edit then structural edit"
     );
     // Not vacuous: the pan ramp is audible after the swap, so a retarget that is dropped or a
     // stage that restarts at the new values differs from the written run.
     let unmoved = cell_run(
         &a,
-        form,
         Some(Swap {
             to: &Session::compile(with_muted_track(strip_state_session())),
             committed: &before,
-            form,
             successor_writes: &[],
             edit_ramps: &EditRamps::new(),
         }),
@@ -3376,9 +3343,7 @@ fn a_live_difference_retargets_the_carried_stage(backend: Backend, form: Form) {
 #[test]
 fn a_live_difference_retargets_the_carried_stage_on_every_width() {
     for backend in backends() {
-        for form in forms() {
-            a_live_difference_retargets_the_carried_stage(backend, form);
-        }
+        a_live_difference_retargets_the_carried_stage(backend);
     }
 }
 
@@ -3388,7 +3353,7 @@ fn a_live_difference_retargets_the_carried_stage_on_every_width() {
 /// the classifier derives for it: `FaderDb` over 37 and the pan over 100. Red if the join reads
 /// the session's lengths and ignores the transaction's: the retarget then ramps 480 and 300, and
 /// differs from the written run.
-fn a_retarget_carries_the_edit_ramp_of_its_transaction(backend: Backend, form: Form) {
+fn a_retarget_carries_the_edit_ramp_of_its_transaction(backend: Backend) {
     let after = |model: SessionModel| {
         let model = with_fader(model, MOVED, [-4.0, -6.0]);
         with_pan(model, MOVED, [0.8, 0.6], 300)
@@ -3425,11 +3390,9 @@ fn a_retarget_carries_the_edit_ramp_of_its_transaction(backend: Backend, form: F
     let run = |committed: &SessionModel, edit_ramps: &EditRamps, writes: &[CellWrite]| {
         cell_run(
             &a,
-            form,
             Some(Swap {
                 to: &b,
                 committed,
-                form,
                 successor_writes: &[],
                 edit_ramps,
             }),
@@ -3444,22 +3407,20 @@ fn a_retarget_carries_the_edit_ramp_of_its_transaction(backend: Backend, form: F
     assert_eq!(
         first_cell_difference(&retargeted, &written),
         None,
-        "{backend:?} {form:?}: the retarget ramps over the edit's lengths"
+        "{backend:?}: the retarget ramps over the edit's lengths"
     );
     // Not vacuous: without the transaction's lengths the same retarget ramps over the session's.
     let session_ramps = run(&before, &EditRamps::new(), &[]);
     assert_ne!(
         session_ramps.blocks[SWAP_BLOCK], retargeted.blocks[SWAP_BLOCK],
-        "{backend:?} {form:?}: the edit's lengths are audible"
+        "{backend:?}: the edit's lengths are audible"
     );
 }
 
 #[test]
-fn a_retarget_carries_the_edit_ramp_of_its_transaction_on_every_width_and_form() {
+fn a_retarget_carries_the_edit_ramp_of_its_transaction_on_every_width() {
     for backend in backends() {
-        for form in forms() {
-            a_retarget_carries_the_edit_ramp_of_its_transaction(backend, form);
-        }
+        a_retarget_carries_the_edit_ramp_of_its_transaction(backend);
     }
 }
 
@@ -3487,7 +3448,7 @@ const CARRIED: &str = "eq1";
 /// Three fader writes sit unread in [`MOVED`]'s cells and
 /// three fader and three pan writes in [`CARRIED`]'s when the swap block hands over. The count of a
 /// stage that restarts instead (an input lane, `a_restarting_input_lane_...`) stays zero.
-fn a_carried_lane_counts_its_replaced_writes(backend: Backend, form: Form) {
+fn a_carried_lane_counts_its_replaced_writes(backend: Backend) {
     let a = Session::compile(strip_state_session());
     let b = Session::compile(with_vca(
         with_muted_track(strip_state_session()),
@@ -3516,11 +3477,9 @@ fn a_carried_lane_counts_its_replaced_writes(backend: Backend, form: Form) {
         }
         let run = cell_run(
             &a,
-            form,
             Some(Swap {
                 to: &b,
                 committed: &a.model,
-                form,
                 successor_writes: &[],
                 edit_ramps: &EditRamps::new(),
             }),
@@ -3528,10 +3487,10 @@ fn a_carried_lane_counts_its_replaced_writes(backend: Backend, form: Form) {
             &writes,
             backend,
         );
-        assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?} {form:?}");
+        assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
         assert!(
             run.restarted.is_empty(),
-            "{backend:?} {form:?}: a VCA added over a strip restarts nothing: {:?}",
+            "{backend:?}: a VCA added over a strip restarts nothing: {:?}",
             run.restarted
         );
         run
@@ -3544,26 +3503,24 @@ fn a_carried_lane_counts_its_replaced_writes(backend: Backend, form: Form) {
     assert_eq!(
         moved.carry_superseded,
         2 * 2,
-        "{backend:?} {form:?}: the retargeted lane counts the writes its drain replaced"
+        "{backend:?}: the retargeted lane counts the writes its drain replaced"
     );
     assert_eq!(
         carried.carry_superseded,
         2 * 2 + 2,
-        "{backend:?} {form:?}: a carried lane counts the writes its drain replaced"
+        "{backend:?}: a carried lane counts the writes its drain replaced"
     );
     assert_eq!(
         both.carry_superseded,
         moved.carry_superseded + carried.carry_superseded,
-        "{backend:?} {form:?}: the counts of two lanes of one bank add"
+        "{backend:?}: the counts of two lanes of one bank add"
     );
 }
 
 #[test]
 fn a_carried_lane_counts_its_replaced_writes_on_every_width() {
     for backend in backends() {
-        for form in forms() {
-            a_carried_lane_counts_its_replaced_writes(backend, form);
-        }
+        a_carried_lane_counts_its_replaced_writes(backend);
     }
 }
 
@@ -3574,7 +3531,7 @@ fn a_carried_lane_counts_its_replaced_writes_on_every_width() {
 /// sample renders: one value, one cell, superseded. The run is bit-identical to one whose base
 /// never held the write, and with no retarget nothing is counted. Red without the adopting block's
 /// count (0, not 1).
-fn a_carried_strip_value_the_retarget_replaces_is_counted(backend: Backend, form: Form) {
+fn a_carried_strip_value_the_retarget_replaces_is_counted(backend: Backend) {
     const WRITTEN_DB: f32 = -7.5;
     const MOVED_DB: f32 = -2.25;
     let base = strip_state_session();
@@ -3619,11 +3576,9 @@ fn a_carried_strip_value_the_retarget_replaces_is_counted(backend: Backend, form
     let run = |to: &Session, committed: &SessionModel, writes: &[CellWrite]| {
         let run = cell_run(
             &a,
-            form,
             Some(Swap {
                 to,
                 committed,
-                form,
                 successor_writes: &[],
                 edit_ramps: &EditRamps::new(),
             }),
@@ -3631,27 +3586,27 @@ fn a_carried_strip_value_the_retarget_replaces_is_counted(backend: Backend, form
             writes,
             backend,
         );
-        assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?} {form:?}");
-        assert!(run.restarted.is_empty(), "{backend:?} {form:?}");
+        assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+        assert!(run.restarted.is_empty(), "{backend:?}");
         run
     };
     let replaced = run(&b, &written, &writes);
     assert_eq!(
         (replaced.carry_superseded, replaced.successor_superseded),
         (0, 1),
-        "{backend:?} {form:?}: the carried value the retarget replaced is counted once"
+        "{backend:?}: the carried value the retarget replaced is counted once"
     );
     assert_eq!(
         replaced.final_superseded, 1,
-        "{backend:?} {form:?}: a later write to the cell is not a second carried value"
+        "{backend:?}: a later write to the cell is not a second carried value"
     );
     let unwritten = run(&b, &base, &writes[1..]);
-    assert_eq!(unwritten.successor_superseded, 0, "{backend:?} {form:?}");
-    assert_eq!(unwritten.final_superseded, 0, "{backend:?} {form:?}");
+    assert_eq!(unwritten.successor_superseded, 0, "{backend:?}");
+    assert_eq!(unwritten.final_superseded, 0, "{backend:?}");
     assert_eq!(
         first_cell_difference(&replaced, &unwritten),
         None,
-        "{backend:?} {form:?}: the replaced carried value moves no bit"
+        "{backend:?}: the replaced carried value moves no bit"
     );
     let kept = run(
         &Session::compile(with_muted_track(written.clone())),
@@ -3661,17 +3616,15 @@ fn a_carried_strip_value_the_retarget_replaces_is_counted(backend: Backend, form
     assert_eq!(
         (kept.carry_superseded, kept.successor_superseded),
         (0, 0),
-        "{backend:?} {form:?}: a carried value nothing replaces is not counted"
+        "{backend:?}: a carried value nothing replaces is not counted"
     );
-    assert_eq!(kept.final_superseded, 0, "{backend:?} {form:?}");
+    assert_eq!(kept.final_superseded, 0, "{backend:?}");
 }
 
 #[test]
-fn a_carried_strip_value_the_retarget_replaces_is_counted_on_every_width_and_form() {
+fn a_carried_strip_value_the_retarget_replaces_is_counted_on_every_width() {
     for backend in backends() {
-        for form in forms() {
-            a_carried_strip_value_the_retarget_replaces_is_counted(backend, form);
-        }
+        a_carried_strip_value_the_retarget_replaces_is_counted(backend);
     }
 }
 
@@ -3681,7 +3634,7 @@ fn a_carried_strip_value_the_retarget_replaces_is_counted_on_every_width_and_for
 /// writes the same effective records to A just before the swap and prepares B from a base that
 /// already holds them. The runs are bit-identical in every block. Red if the join compares X's own
 /// fader (no difference, so no retarget) or still prepares a strip under a VCA.
-fn a_vca_added_over_a_strip_retargets_its_carried_stage(backend: Backend, form: Form) {
+fn a_vca_added_over_a_strip_retargets_its_carried_stage(backend: Backend) {
     let before = strip_state_session();
     let a = Session::compile(before.clone());
     let b_model = with_vca(with_muted_track(strip_state_session()), MOVED, 3.0);
@@ -3711,11 +3664,9 @@ fn a_vca_added_over_a_strip_retargets_its_carried_stage(backend: Backend, form: 
     let no_ramps = EditRamps::new();
     let retargeted = cell_run(
         &a,
-        form,
         Some(Swap {
             to: &b,
             committed: &before,
-            form,
             successor_writes: &[],
             edit_ramps: &no_ramps,
         }),
@@ -3725,11 +3676,9 @@ fn a_vca_added_over_a_strip_retargets_its_carried_stage(backend: Backend, form: 
     );
     let written = cell_run(
         &a,
-        form,
         Some(Swap {
             to: &b,
             committed: &moved,
-            form,
             successor_writes: &[],
             edit_ramps: &no_ramps,
         }),
@@ -3740,22 +3689,20 @@ fn a_vca_added_over_a_strip_retargets_its_carried_stage(backend: Backend, form: 
     assert_eq!(retargeted.carry, CarryOutcome::Carried);
     assert!(
         retargeted.restarted.is_empty(),
-        "{backend:?} {form:?}: {:?}",
+        "{backend:?}: {:?}",
         retargeted.restarted
     );
     assert_eq!(
         first_cell_difference(&retargeted, &written),
         None,
-        "{backend:?} {form:?}: the retarget is the live record"
+        "{backend:?}: the retarget is the live record"
     );
     // Not vacuous: the offset is audible after the swap.
     let without = cell_run(
         &a,
-        form,
         Some(Swap {
             to: &Session::compile(with_muted_track(strip_state_session())),
             committed: &before,
-            form,
             successor_writes: &[],
             edit_ramps: &EditRamps::new(),
         }),
@@ -3766,16 +3713,14 @@ fn a_vca_added_over_a_strip_retargets_its_carried_stage(backend: Backend, form: 
     assert_ne!(
         retargeted.blocks[SWAP_BLOCK + 1],
         without.blocks[SWAP_BLOCK + 1],
-        "{backend:?} {form:?}: the VCA offset is audible"
+        "{backend:?}: the VCA offset is audible"
     );
 }
 
 #[test]
 fn a_vca_added_over_a_strip_retargets_its_carried_stage_on_every_width() {
     for backend in backends() {
-        for form in forms() {
-            a_vca_added_over_a_strip_retargets_its_carried_stage(backend, form);
-        }
+        a_vca_added_over_a_strip_retargets_its_carried_stage(backend);
     }
 }
 
@@ -3851,7 +3796,7 @@ fn followed_mute_writes(follows_mute: bool, lanes: [bool; 2], mute_samples: u32)
 /// prepares B from a base that already holds it; the runs are bit-identical. Red if the join still
 /// treats the followed mute as prepared: X would restart at rest at the new mute and drop the ramp
 /// a live mute record has.
-fn a_followed_mute_change_carries_and_retargets_the_stage(backend: Backend, form: Form) {
+fn a_followed_mute_change_carries_and_retargets_the_stage(backend: Backend) {
     let a_model =
         |follows_mute| with_send_through_submix(strip_state_session(), MOVED, follows_mute);
     let b_model = |follows_mute| with_mute(with_muted_track(a_model(follows_mute)), MOVED, true);
@@ -3861,14 +3806,12 @@ fn a_followed_mute_change_carries_and_retargets_the_stage(backend: Backend, form
             Session::compile(a_model(follows_mute)),
             Session::compile(b_model(follows_mute)),
         );
-        let reference = cell_run(&b, form, None, &feed, &[], backend);
+        let reference = cell_run(&b, None, &feed, &[], backend);
         let run = cell_run(
             &a,
-            form,
             Some(Swap {
                 to: &b,
                 committed: &a.model,
-                form,
                 successor_writes: &[],
                 edit_ramps: &EditRamps::new(),
             }),
@@ -3879,7 +3822,7 @@ fn a_followed_mute_change_carries_and_retargets_the_stage(backend: Backend, form
         assert_eq!(run.carry, CarryOutcome::Carried);
         assert!(
             run.restarted.is_empty(),
-            "{backend:?} {form:?} follows {follows_mute}: {:?}",
+            "{backend:?} follows {follows_mute}: {:?}",
             run.restarted
         );
         // The retarget ramps over the session's mute length (#1054 D4), so it sounds like the live
@@ -3889,11 +3832,9 @@ fn a_followed_mute_change_carries_and_retargets_the_stage(backend: Backend, form
         assert_ne!(mute_samples, 0, "the default table ramps a mute");
         let written = cell_run(
             &a,
-            form,
             Some(Swap {
                 to: &b,
                 committed: &moved,
-                form,
                 successor_writes: &[],
                 edit_ramps: &EditRamps::new(),
             }),
@@ -3904,7 +3845,7 @@ fn a_followed_mute_change_carries_and_retargets_the_stage(backend: Backend, form
         assert_eq!(
             run.blocks[SWAP_BLOCK..],
             written.blocks[SWAP_BLOCK..],
-            "{backend:?} {form:?} follows {follows_mute}: a live mute carries and retargets over \
+            "{backend:?} follows {follows_mute}: a live mute carries and retargets over \
              the session's mute ramp"
         );
         // A strip whose only route follows its mute is silent at the swap block either way; the
@@ -3913,7 +3854,7 @@ fn a_followed_mute_change_carries_and_retargets_the_stage(backend: Backend, form
             assert_ne!(
                 run.blocks[SWAP_BLOCK..],
                 reference.blocks[SWAP_BLOCK..],
-                "{backend:?} {form:?}: the mute ramp is audible, not a step"
+                "{backend:?}: the mute ramp is audible, not a step"
             );
         }
     }
@@ -3922,10 +3863,9 @@ fn a_followed_mute_change_carries_and_retargets_the_stage(backend: Backend, form
 /// When X's followed mute changes and X's pan changes too (#1558 D4), both stages carry and are
 /// retargeted: nothing restarts. The reference writes the pan record to A just before the swap, as
 /// gate 4 does, so the mute retarget is identical in both runs and the matrix carry is what is
-/// compared. Split form only. Red if the followed mute makes the matrix family prepared: the matrix
+/// compared. Red if the followed mute makes the matrix family prepared: the matrix
 /// stage then restarts at the new pan, and the pan ramp the carry continues is lost.
 fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
-    let form = Form::Split;
     let before = with_send_through_submix(strip_state_session(), MOVED, true);
     let moved = with_pan(before.clone(), MOVED, [0.8, 0.6], 300);
     // Only the left channel mutes, so X's right channel stays audible and its pan ramp is heard.
@@ -3941,11 +3881,9 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
     let feed = feed_for_strips();
     let run = cell_run(
         &a,
-        form,
         Some(Swap {
             to: &b,
             committed: &before,
-            form,
             successor_writes: &[],
             edit_ramps: &EditRamps::new(),
         }),
@@ -3960,11 +3898,9 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
     }];
     let reference = cell_run(
         &a,
-        form,
         Some(Swap {
             to: &b,
             committed: &moved,
-            form,
             successor_writes: &[],
             edit_ramps: &EditRamps::new(),
         }),
@@ -3988,11 +3924,9 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying(backend: Backend) {
     // new pan sounds different.
     let unmoved = cell_run(
         &a,
-        form,
         Some(Swap {
             to: &Session::compile(after(&before)),
             committed: &before,
-            form,
             successor_writes: &[],
             edit_ramps: &EditRamps::new(),
         }),
@@ -4013,9 +3947,7 @@ fn a_followed_mute_change_leaves_the_matrix_stage_carrying_on_every_width() {
 #[test]
 fn a_followed_mute_change_carries_and_retargets_the_stage_on_every_width() {
     for backend in backends() {
-        for form in forms() {
-            a_followed_mute_change_carries_and_retargets_the_stage(backend, form);
-        }
+        a_followed_mute_change_carries_and_retargets_the_stage(backend);
     }
 }
 
@@ -4050,28 +3982,24 @@ fn the_strip_carry_allocates_and_frees_nothing() {
         record: CellRecord::Fader(fader_both(-12.0, RAMP_FRAMES)),
     }];
     for backend in backends() {
-        for form in forms() {
-            let run = cell_run(
-                &a,
-                form,
-                Some(Swap {
-                    to: &b,
-                    committed: &committed,
-                    form,
-                    successor_writes: &[],
-                    edit_ramps: &EditRamps::new(),
-                }),
-                &feed,
-                &writes,
-                backend,
-            );
-            assert_eq!(run.carry, CarryOutcome::Carried);
-            assert_eq!(
-                run.swap_allocator,
-                ((0, 0, 0), (0, 0)),
-                "{backend:?} {form:?}: allocator calls and audited allocations at the swap block"
-            );
-        }
+        let run = cell_run(
+            &a,
+            Some(Swap {
+                to: &b,
+                committed: &committed,
+                successor_writes: &[],
+                edit_ramps: &EditRamps::new(),
+            }),
+            &feed,
+            &writes,
+            backend,
+        );
+        assert_eq!(run.carry, CarryOutcome::Carried);
+        assert_eq!(
+            run.swap_allocator,
+            ((0, 0, 0), (0, 0)),
+            "{backend:?}: allocator calls and audited allocations at the swap block"
+        );
     }
 }
 
@@ -4090,7 +4018,6 @@ fn a_changed_control_kind_carries_no_strip_stage() {
             &a.model,
             &EditRamps::new(),
             backend,
-            Form::Split,
         );
         assert_eq!(successor.live.prepared.restarted_strips().len(), 9);
         assert_eq!(
@@ -4114,7 +4041,6 @@ fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
             &b,
             host_core::SuccessorBase::new(&predecessor.inventory, &a.model, revision),
             backend,
-            Form::Split,
         )
         .err()
         .unwrap_or_else(|| panic!("revision {revision} was accepted"));
@@ -4131,7 +4057,6 @@ fn a_successor_revision_its_gate_cannot_stamp_is_refused() {
             &b,
             host_core::SuccessorBase::new(&predecessor.inventory, &a.model, accepted),
             backend,
-            Form::Split,
         )
         .is_ok()
     );
@@ -4146,7 +4071,7 @@ fn successor_handle(
     let a = Session::compile(strip_state_session());
     let b = Session::compile(next);
     let backend = Backend::current();
-    let predecessor = CellPlan::fresh(&a, backend, Form::Split);
+    let predecessor = CellPlan::fresh(&a, backend);
     let (mut prepared, _handles) =
         host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
             &b.compiled,

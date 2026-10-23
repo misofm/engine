@@ -5285,7 +5285,6 @@ impl TestOnlyWriteGate for TestOnlyGate {
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FADER_MATRIX_LIVE_WITNESS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
-    static SCALAR_OWNER_DROPS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -5300,13 +5299,6 @@ pub struct TestOnlyFaderMatrixWitness {
 #[doc(hidden)]
 pub fn test_only_reset_fader_matrix_witness() {
     FADER_MATRIX_LIVE_WITNESS.with(|value| value.set([0; 2]));
-    SCALAR_OWNER_DROPS.with(|value| value.set([0; 2]));
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub fn test_only_scalar_owner_drops() -> [u64; 2] {
-    SCALAR_OWNER_DROPS.with(std::cell::Cell::get)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -5899,20 +5891,6 @@ pub fn test_only_begin_phase_two_allocation_observation() -> impl Drop {
     TestPhaseTwoAllocationGuard::begin()
 }
 
-#[cfg(feature = "test-support")]
-#[must_use]
-#[doc(hidden)]
-pub fn test_only_scalar_owner_layouts() -> [BuiltinRetainedLayout; 2] {
-    let layout = |value: core::alloc::Layout| BuiltinRetainedLayout {
-        size_bytes: value.size() as u64,
-        align_bytes: value.align() as u64,
-        allocation_count: 1,
-    };
-    [
-        layout(core::alloc::Layout::new::<LiveControlFaderProcessor>()),
-        layout(core::alloc::Layout::new::<LiveControlMatrixProcessor>()),
-    ]
-}
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for TestPhaseTwoAllocationGuard {
     fn drop(&mut self) {
@@ -8761,16 +8739,6 @@ struct LiveControlMatrixProcessor {
     control: MatrixReader,
 }
 #[cfg(any(test, feature = "test-support"))]
-impl Drop for LiveControlMatrixProcessor {
-    fn drop(&mut self) {
-        SCALAR_OWNER_DROPS.with(|value| {
-            let mut drops = value.get();
-            drops[1] = drops[1].saturating_add(1);
-            value.set(drops);
-        });
-    }
-}
-#[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for LiveControlMatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         self.drain_controls(block.live_snapshot)?;
@@ -8818,16 +8786,6 @@ struct LiveControlFaderProcessor {
     control: FaderReader,
     /// The strip's stored fader automation (#1646 D1, R17-4): the bank's event driver, per strip.
     automation: Option<Box<LaneFaderAutomation>>,
-}
-#[cfg(any(test, feature = "test-support"))]
-impl Drop for LiveControlFaderProcessor {
-    fn drop(&mut self) {
-        SCALAR_OWNER_DROPS.with(|value| {
-            let mut drops = value.get();
-            drops[0] = drops[0].saturating_add(1);
-            value.set(drops);
-        });
-    }
 }
 #[cfg(any(test, feature = "test-support"))]
 impl GraphRuntimeProcessor for LiveControlFaderProcessor {
