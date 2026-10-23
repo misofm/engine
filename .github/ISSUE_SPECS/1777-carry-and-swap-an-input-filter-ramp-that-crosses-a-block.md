@@ -32,5 +32,7 @@ The fold turns red when a carry or swap drops an input filter ramp in flight, wh
 ## Evidence (attempt 1, 2026-10-23)
 
 - Carry: `a_carried_lane_arms_its_joint_flush_on_the_frame_the_exported_lane_would` (`crates/builtins/tests/exact_rest.rs`) gains a 32-frame pass that retargets the high-pass (10 Hz to 10.5 Hz) before block 7, so the ramp has 32 samples left at the block-8 carry.
-- Swap: `test_only_builtin_lane_swap` (`crates/builtins-compiler/src/lib.rs`) runs at quanta 128 and 32. Before each swap, strips `t01`, `t05`, `t09` (every fourth from `t01`) retarget both filter sections to a pair no other write holds; the strips they trade with have no new ramp.
+- Swap: `test_only_builtin_lane_swap` (`crates/builtins-compiler/src/lib.rs`) runs at quanta 128 and 32. Before each swap, strips `t01`, `t05`, `t09` (every fourth from `t01`) retarget both filter sections to a pair no other write holds; the strips they trade with have no new ramp in the mono passes and may hold a random one in the stereo passes.
 - Mutant (drop `self.filter_remaining[channel][section][lane] = words.remaining;` in the input stage's `import_lane`): the carry test is red at block 8; both swap tests are red at `quantum 32, strip t01, block 5` (Simd8, and Simd4 with Simd8 removed). Restored: green. Production code is unchanged.
+
+- Verifier (attempt 1, 2026-10-23): PASS (Fable). It measured the filter countdown at each export and swap point (32 of 64 left at quantum 32; 0 at 128) and found the target and step import mutants red too. Root corrected two doc sentences and the swap-count bound.

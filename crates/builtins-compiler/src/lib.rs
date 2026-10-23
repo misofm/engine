@@ -15182,8 +15182,10 @@ mod tests {
     /// refused a move into its slotless fader bank (`Slot`), and the twin check proves nothing
     /// moved. At both widths this host builds, at a 128-frame quantum and at a 32-frame one: before
     /// each swap every fourth strip from `t01` retargets both filter sections (#1777), and at 32
-    /// frames that 64-sample filter ramp is half done at the swap, while the strip it trades with
-    /// has none in flight.
+    /// frames that 64-sample filter ramp is half done at the swap; the strip it trades with has no
+    /// new ramp in the mono passes and may hold a random one in the stereo passes. At 32 frames
+    /// the 14 blocks end before the first stored event, so only the 128-frame passes render
+    /// stored automation.
     ///
     /// Red if a swap leaves behind any per-lane field the next blocks read: the stage state or a
     /// ramp (the input filter's countdown among them), a cell reader (with its dirty bits), the
