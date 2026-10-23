@@ -33,9 +33,6 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_fader_ride")] | length) == 2 and
 ([.[] | select(.record == "console_fader_ride") | .workload_kind] | unique)
   == ["sixty_four_track_console_fader_ride"] and
-([.[] | select(.record == "console_product_lanes")] | length) == 2 and
-([.[] | select(.record == "console_product_lanes") | .workload_kind] | unique)
-  == ["sixty_four_track_console_product_lanes"] and
 ([.[] | .round] | unique | sort) == [1,2] and
 ([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 66 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and

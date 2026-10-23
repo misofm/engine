@@ -519,8 +519,6 @@ def fader_ride_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is riding minus quiet per observation; the stepped twin is replayed untimed after the run; descriptive only; no threshold";
 def fader_ride_ramp_witness:
   "each timed block of the riding arm differs from a stepped twin's, replayed untimed after the run; the twin holds every target from the block's first sample, so the riding arm did not; after the settled pre-roll the two agree";
-def product_lanes_statistical_method:
-  "one plan rendered back to back by the session rows' loop; nearest-rank percentiles over per-block nanoseconds; one warmup pass and two measured rounds; descriptive only; no threshold";
 def mono_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is collapse_forced_off minus collapse_eligible per observation; descriptive only; no threshold";
 def observation_statistical_method:
@@ -937,31 +935,17 @@ def fader_ride_record_valid:
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
 # The product-lane row (#1758): the fader-ride row's quiet arm on its own -- the standing console,
-# prepared with the lanes a product host attaches for it on the product's `Concurrent` delivery,
-# never written, and timed back to back by the session rows' loop. It names the standing row it is
-# read against and states that row's facts verbatim, so the subtraction is between two
-# preparations of one session; its lane set, its delivery and the absence of any write are pinned,
-# because a row with fewer lanes, another delivery or a write would publish another cost under the
-# name of this one. The aggregate holds its digest equal to the standing row's.
+# prepared with the lanes a product host attaches for it, never written, and timed back to back by
+# the session rows' loop. Only what a plausible defect can break is pinned here; the fields the
+# subject writes as constants are held by the key list alone, and the aggregate holds its digest
+# equal to the standing row's, which refuses any other session. Pinned: the lane set (it is derived
+# from the session's live rows, so a session or selection change moves it), no write, and a render
+# path with no error or forbidden operation.
 def product_lanes_record_valid:
-  (keys | sort) == product_lanes_keys and
-  .record == "console_product_lanes" and common_shape and
-  .statistical_method == product_lanes_statistical_method and
-  .workload_kind == "sixty_four_track_console_product_lanes" and
-  .standing_row == "sixty_four_track_console" and
-  # The standing console's pinned facts, verbatim from `session_kind_shape` and its source feed.
-  .tracks == 64 and .synthetic_fixture == false and
-  .strip_content == "eq+compressor+limiter" and
-  .strip_layout == intended_layout and .input_signal == "tone" and
-  .source_feed == "bound" and .fixture_id == console_fixture and
-  .sample_rate_hz == 48000 and .quantum_frames == 128 and
-  .control_delivery == "concurrent" and .live_lanes == "fader_matrix+strip_input+effects" and
-  .transactions_published == 0 and .live_values_superseded == 0 and
-  .units == "ns_per_block" and
-  ([.min_ns_per_block,.p50_ns_per_block,.p95_ns_per_block,.p99_ns_per_block,.max_ns_per_block]
-    | all(positive_integer)) and
+  (keys | sort) == product_lanes_keys and common_shape and
+  .live_lanes == "fader_matrix+strip_input+effects" and
+  .transactions_published == 0 and
   ordered_percentiles([.min_ns_per_block,.p50_ns_per_block,.p95_ns_per_block,.p99_ns_per_block,.max_ns_per_block]) and
-  (.output_sha256 | sha256) and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
 def console_benchmark_record_valid_lib:

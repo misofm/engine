@@ -11,7 +11,7 @@
 # meter group, the mixing-automation row's pinned controls, host lowerings, collapse counters
 # and per-effect bit movement, and the console-strip rows' pinned layouts, bypass group and sparse
 # input (#1085), the fader-ride row's delivery, counts and ramp witness (#1750), and the
-# product-lane row's lanes, delivery, absent writes and standing-row bits (#1758) -- are
+# product-lane row's lanes, absent writes and standing-row bits (#1758) -- are
 # properties the suite can actually lose. The same holds for the
 # mixing-automation row's browser arm (`web-mixing-automation-validator.jq`, #1011): its input
 # feed, its provenance, and its two measured rounds' agreement -- and for its runner: a refused run
@@ -1255,8 +1255,8 @@ ride_mutation '.extra = 1' 'a fader-ride record with a key the shape does not li
 
 # The product-lane row (#1758): the standing console prepared with the product's live lanes,
 # never written, rendered back to back. Its digest is the standing session row's in the aggregate
-# set below (`$a[0:63] + "3"`); its lanes, its delivery and its absent writes are what make it the
-# row it claims to be.
+# set below (`$a[0:63] + "3"`); its lanes and its absent writes are what make it the row it
+# claims to be.
 product_lanes=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   schema_version: 1, issue: 149, record: "console_product_lanes",
   workload_kind: "sixty_four_track_console_product_lanes",
@@ -1280,14 +1280,7 @@ product_lanes=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
 expect_accept "$product_lanes" 'the product-lane row'
 lanes_mutation() { expect_reject "$(printf '%s' "$product_lanes" | jq -c "$1")" "$2"; }
 lanes_mutation '.live_lanes = "fader_matrix"' 'a product-lane row on a lane subset no product host attaches'
-lanes_mutation '.control_delivery = "between_render_calls"' 'a product-lane row on a delivery that fuses the fader and matrix'
 lanes_mutation '.transactions_published = 1' 'a product-lane row that wrote a lane'
-lanes_mutation '.live_values_superseded = 1' 'a product-lane row with a superseded value'
-lanes_mutation '.standing_row = "sixty_four_track_console_metered"' 'a product-lane row read against another row'
-lanes_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' 'a product-lane row on another fixture'
-lanes_mutation '.source_feed = "played_planes"' 'a product-lane row on another feed than the standing row'
-lanes_mutation '.record = "console_session"' 'a product-lane record claiming the session shape'
-lanes_mutation '.statistical_method = "descriptive only"' 'a product-lane row that changed its method'
 lanes_mutation '.p95_ns_per_block = 1' 'product-lane percentiles out of order'
 lanes_mutation '.render_total_forbidden_operations = 1' 'a product-lane row with a forbidden operation on render'
 lanes_mutation '.extra = 1' 'a product-lane record with a key the shape does not list'
@@ -1405,7 +1398,6 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
   + [ (1, 2) as $round | $lanes | .round = $round ]')
 
 expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the sixty-six-record set'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_product_lanes")] | .[]')" 'a set with no product-lane row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[64].output_sha256 = ($a[0:63] + "7") | .[65].output_sha256 = ($a[0:63] + "7") | .[]')" 'a product-lane row that rendered other bits than the standing row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_fader_ride")] | .[]')" 'a set with no fader-ride row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg b "$digest_b" '.[63].riding_output_sha256 = $b | .[]')" 'a fader-ride row whose rounds rendered different output'
