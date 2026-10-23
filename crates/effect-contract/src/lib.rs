@@ -2677,11 +2677,13 @@ pub trait PreparedNativeEffectBank: Send {
     /// `bytes` holds the lane's old defaults and the lane holds what `bytes` held (issue #1747).
     ///
     /// `bytes` is exactly [`lane_default_bytes`](Self::lane_default_bytes) long, in the bank's own
-    /// little-endian encoding. A caller only ever writes back another lane's (or this lane's) own
-    /// defaults of a bank of one layout, or rotates arbitrary words through a lane and back out
-    /// again before anything reads it, so nothing is validated and no word may be refused.
-    /// Returns `false`, changing nothing, for a lane out of range or a wrong length. It changes no
-    /// state word and no payload word.
+    /// little-endian encoding. A caller only ever leaves a lane holding another lane's (or this
+    /// lane's) own defaults of a bank of one layout; on the way it may rotate arbitrary bytes
+    /// through a lane and back out again before anything reads it. So nothing is validated and no
+    /// byte is refused. Bytes the bank wrote itself round-trip exactly; bytes outside its encoding
+    /// (an enum or flag word of a spare area) may come back canonicalised. Returns `false`,
+    /// changing nothing, for a lane out of range or a wrong length. It changes no state word and
+    /// no payload word.
     ///
     /// The default refuses. On the render thread at a block boundary: allocation-free,
     /// lock-free and bounded by the defaults size.

@@ -195,7 +195,10 @@ fn a_swapped_strip_keeps_its_twins_bits() {
             }
             assert_eq!(swapped[0].bank.core.cursors, swapped[1].bank.core.cursors);
             let sizes = quality(RATE).maximum_state;
-            let mut scratch = vec![0_u8; 2 * sizes.total().expect("total") as usize];
+            let scratch_bytes =
+                effect_contract::swap_bank_lanes_scratch_bytes(&swapped[0].bank, sizes)
+                    .expect("scratch bytes");
+            let mut scratch = vec![0_u8; scratch_bytes];
             let mark = bench_support::alloc::current_thread_counters();
             let first = effect_contract::swap_bank_lanes(
                 &mut swapped[0].bank,
@@ -234,6 +237,18 @@ fn a_swapped_strip_keeps_its_twins_bits() {
                     );
                 }
             }
+            assert_eq!(payloads(&swapped), payloads(&twins));
+            // The prepared defaults moved with each strip: a full reset re-seeds every strip from
+            // its own defaults, wherever it now sits.
+            for seat in swapped.iter_mut().chain(twins.iter_mut()) {
+                seat.bank.reset(ResetKind::FullToDefaults);
+            }
+            let block = BEFORE + AFTER;
+            assert_eq!(
+                render_all(&mut swapped, seed, block),
+                render_all(&mut twins, seed, block),
+                "W{width} seed {seed:x}: after a full reset"
+            );
             assert_eq!(payloads(&swapped), payloads(&twins));
         }
     });

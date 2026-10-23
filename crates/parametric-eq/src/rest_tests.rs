@@ -463,7 +463,7 @@ fn swap_payload(bank: &dyn PreparedNativeEffectBank, lane: usize) -> [Vec<u8>; 3
 }
 
 /// Two full banks of one slot shape (rate, quantum, width), every lane a member with its own
-/// random targets. The general bands' enables and families are shared by every member.
+/// random targets, the general bands' enables and families included.
 fn swap_banks<L: Lane, const W: usize>(
     rng: &mut Rng,
 ) -> (
@@ -473,18 +473,10 @@ fn swap_banks<L: Lane, const W: usize>(
 ) {
     loop {
         let rate = LAUNCH_RATES[rng.below(LAUNCH_RATES.len())];
-        let base = configuration(rng, false);
         let configs: Vec<Vec<InitialParameterValue>> = (0..2 * W)
             .map(|_| {
                 let symmetric = rng.chance(0.3);
-                let mut values = configuration(rng, symmetric);
-                for (value, shared) in values.iter_mut().zip(&base) {
-                    let index = value.parameter_index as usize;
-                    if index < 24 && index % 6 < 2 {
-                        value.value = shared.value;
-                    }
-                }
-                values
+                configuration(rng, symmetric)
             })
             .collect();
         let prepare = |members: &[Vec<InitialParameterValue>]| {
@@ -690,15 +682,48 @@ impl<L: Lane, const W: usize> SwapRun<L, W> {
             }
         }
     }
+
+    /// Every strip's payload, where it sits now, equals its twin's.
+    fn assert_payloads(&self, label: &str) {
+        for strip in 0..2 * W {
+            let (bank, lane) = self.at[strip];
+            assert_eq!(
+                swap_payload(&self.banks[bank], lane),
+                swap_payload(&self.twins[strip / W], strip % W),
+                "{label}: strip {strip}'s payload"
+            );
+        }
+    }
+}
+
+/// `true` if lanes `first` and `second` of `eq` were prepared with a different enable or family
+/// on some general band: a swap that left `initial` behind would restore, retune and reset them
+/// against the other strip's bands.
+fn general_bands_differ<L: Lane, const W: usize>(
+    eq: &PreparedParametricEq<L, W>,
+    first: usize,
+    second: usize,
+) -> bool {
+    (0..2).any(|channel| {
+        (HPF_SECTION + 1..LPF_SECTION).any(|section| {
+            let (one, two) = (
+                eq.initial[first][channel][section],
+                eq.initial[second][channel][section],
+            );
+            one.enabled != two.enabled || one.kind != two.kind
+        })
+    })
 }
 
 fn swapped_lanes_render_as_unswapped<L: Lane, const W: usize>(label: &str) {
     bench_support::alloc::assert_installed();
     bench_support::alloc::set_mode(bench_support::alloc::Mode::Count);
-    let mut scratch = vec![0_u8; 2 * SWAP_SIZES.total().expect("a payload size") as usize];
     for seed in 0..3_u64 {
         let mut rng = Rng(0x1747_0101 + seed * 0x9e37);
         let (banks, values, rate) = swap_banks::<L, W>(&mut rng);
+        let scratch_bytes = effect_contract::swap_bank_lanes_scratch_bytes(&banks[0], SWAP_SIZES)
+            .expect("the scratch size");
+        let mut scratch = vec![0_u8; scratch_bytes];
         let twins = [copy_bank(&banks[0]), copy_bank(&banks[1])];
         let mut run = SwapRun {
             banks,
@@ -712,6 +737,10 @@ fn swapped_lanes_render_as_unswapped<L: Lane, const W: usize>(label: &str) {
         // Within bank A: two distinct lanes, each with a ramp in flight.
         let i = rng.below(W);
         let j = (i + 1 + rng.below(W - 1)) % W;
+        assert!(
+            general_bands_differ(&run.banks[0], i, j),
+            "{label}: the lanes swapped within bank A share every general band's enable and family"
+        );
         run.ramps_in_flight(&mut rng, [i, j], &label);
         run.swap((0, i), (0, j), &mut scratch, &label);
         run.blocks(&mut rng, 6, &label);
@@ -727,22 +756,26 @@ fn swapped_lanes_render_as_unswapped<L: Lane, const W: usize>(label: &str) {
         run.swap(first, second, &mut scratch, &label);
         // Long enough for every ramp to land and for the landed words to render.
         run.blocks(&mut rng, 8, &label);
-        for strip in 0..2 * W {
-            let (bank, lane) = run.at[strip];
-            assert_eq!(
-                swap_payload(&run.banks[bank], lane),
-                swap_payload(&run.twins[strip / W], strip % W),
-                "{label}: strip {strip}'s payload"
-            );
+        run.assert_payloads(&label);
+        // The prepared defaults moved with each strip: a full reset re-seeds every strip from its
+        // own bands and designed words, wherever it now sits.
+        for eq in run.banks.iter_mut().chain(run.twins.iter_mut()) {
+            PreparedNativeEffectBank::reset(eq, ResetKind::FullToDefaults);
         }
+        let frames = block_frames(&mut rng);
+        run.block(&mut rng, frames, &format!("{label} after a full reset"));
+        run.assert_payloads(&format!("{label} after a full reset"));
     }
 }
 
 /// Issue #1747 gate 1 for the EQ: two banks of one slot shape render random input with per-lane
 /// targets; two lanes swap through `effect_contract::swap_bank_lanes`, once within a bank and
 /// once across the two, each with ramps in flight on both lanes; inputs and later retunes follow
-/// the strips. Every strip's output is bit-equal to a twin run that never swaps, every strip's
-/// payload is equal at the end, and the swap allocates nothing.
+/// the strips. The lanes swapped within a bank differ in some general band's enable or family.
+/// Every strip's output is bit-equal to a twin run that never swaps, every strip's payload is
+/// equal at the end, and the swap allocates nothing. Last, every bank and twin takes a full reset
+/// and renders one more block, bit-equal again, so a swap that left a strip's prepared defaults
+/// behind is red.
 #[test]
 fn swapped_eq_lanes_render_exactly_as_unswapped_ones() {
     lane::each_vector_lane!(|L, W| swapped_lanes_render_as_unswapped::<L, W>(&width_label(W)));

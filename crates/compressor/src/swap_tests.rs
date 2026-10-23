@@ -125,7 +125,8 @@ fn swap(
 /// first swap automates every parameter of every strip, so every ramp is in flight across it. The
 /// two blocks before the second swap automate only one of its two strips, every parameter, and the
 /// block after it automates nothing, so a ramping lane moves into a bank that has settled and must
-/// keep ramping there with no new target to restart it.
+/// keep ramping there with no new target to restart it. After the last of those blocks every bank
+/// takes `ResetKind::FullToDefaults` and renders one more block.
 fn run(rig: &mut Rig, seed: u64) {
     let lanes = rig.lanes;
     let strips = 2 * lanes;
@@ -142,10 +143,22 @@ fn run(rig: &mut Rig, seed: u64) {
     } else {
         (1, across.1)
     };
-    let total = rig.sizes.total().expect("a payload size") as usize;
-    let mut scratch = vec![0_u8; 2 * total];
+    let scratch_bytes =
+        effect_contract::swap_bank_lanes_scratch_bytes(rig.banks[0].as_ref(), rig.sizes)
+            .expect("the scratch size");
+    let mut scratch = vec![0_u8; scratch_bytes];
     let mut first_sample = 0_u64;
-    for block in 0..BEFORE + BETWEEN + AFTER {
+    let reset_block = BEFORE + BETWEEN + AFTER;
+    for block in 0..=reset_block {
+        if block == reset_block {
+            // Every strip's payload equals its twin's, then every bank takes a full reset and
+            // renders one block with no automation: a swap that left a strip's prepared defaults
+            // behind re-seeds it from another strip's values.
+            assert_payloads(rig, &place, seed);
+            for bank in &mut rig.banks {
+                bank.reset(ResetKind::FullToDefaults);
+            }
+        }
         if block == BEFORE {
             swap(rig, &mut place, inside, 0, inside_other, &mut scratch);
         }
@@ -154,7 +167,7 @@ fn run(rig: &mut Rig, seed: u64) {
         }
         let everyone = block + 1 == BEFORE;
         let only_mover = (BEFORE + BETWEEN - 2..BEFORE + BETWEEN).contains(&block);
-        let nobody = block == BEFORE + BETWEEN;
+        let nobody = block == BEFORE + BETWEEN || block == reset_block;
         let mut left = vec![vec![0.0_f32; FRAMES * lanes]; 4];
         let mut right = left.clone();
         let mut spans: Vec<Vec<Vec<PreparedAutomationSpan>>> = vec![vec![Vec::new(); lanes]; 4];
@@ -220,6 +233,12 @@ fn run(rig: &mut Rig, seed: u64) {
         }
         first_sample += FRAMES as u64;
     }
+    assert_payloads(rig, &place, seed);
+}
+
+/// Every strip's payload, where it sits now, equals its twin's.
+fn assert_payloads(rig: &Rig, place: &[(usize, usize)], seed: u64) {
+    let lanes = rig.lanes;
     for (strip, (bank, lane)) in place.iter().copied().enumerate() {
         assert_eq!(
             payload(rig, bank, lane),

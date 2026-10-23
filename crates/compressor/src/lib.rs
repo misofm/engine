@@ -759,8 +759,34 @@ impl<L: Lane> Instance<L> {
         state::commit_channel(input.right, &mut self.right, lane, rate);
         Ok(())
     }
+
+    /// Exchanges lane `lane`'s prepared defaults with `bytes` in place (issue #1747): the left
+    /// channel's seven preparation values, then the right's, each `f32` little-endian. They are
+    /// what `full_reset` re-seeds a lane from; no state word changes. `false`, changing nothing,
+    /// for a lane out of range or a wrong length.
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        if lane >= L::WIDTH || bytes.len() != LANE_DEFAULT_BYTES {
+            return false;
+        }
+        let (left_bytes, right_bytes) = bytes.split_at_mut(PARAMETER_COUNT * 4);
+        for (values, side) in [
+            (&mut self.left.defaults[lane], left_bytes),
+            (&mut self.right.defaults[lane], right_bytes),
+        ] {
+            for (value, word) in values.iter_mut().zip(side.chunks_exact_mut(4)) {
+                let incoming =
+                    f32::from_bits(u32::from_le_bytes([word[0], word[1], word[2], word[3]]));
+                word.copy_from_slice(&value.to_bits().to_le_bytes());
+                *value = incoming;
+            }
+        }
+        true
+    }
     // REALTIME_POLICY_END
 }
+
+/// The bytes of one lane's prepared defaults: both channels' preparation values (issue #1747).
+const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
 
 /// The `DESIGNED` term of the channel-symmetry witness, over the compressor's own kernel read
 /// surface.
@@ -1253,6 +1279,14 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, L::WIDTH, self.active)?;
         self.instance.restore(state_layout_version, input, track)
+    }
+
+    fn lane_default_bytes(&self) -> Option<usize> {
+        Some(LANE_DEFAULT_BYTES)
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        self.instance.exchange_lane_defaults(lane, bytes)
     }
     // REALTIME_POLICY_END
 }

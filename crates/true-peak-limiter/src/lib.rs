@@ -4471,7 +4471,37 @@ impl<L: Lane> LimiterCore<L> {
         self.gain_linked = gain_state_agrees(&self.left, &self.right);
         Ok(())
     }
+
+    /// Exchanges lane `lane`'s prepared defaults with `bytes` in place (issue #1747): the left
+    /// channel's three parameter values, then the right's, each `f32` little-endian. The defaults
+    /// are what `reset(FullToDefaults)` and the D7 recovery re-seed a lane from; nothing else in
+    /// the core changes. `false`, changing nothing, for a lane out of range or a wrong length.
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        if lane >= L::WIDTH
+            || lane >= self.left_defaults.len()
+            || lane >= self.right_defaults.len()
+            || bytes.len() != LANE_DEFAULT_BYTES
+        {
+            return false;
+        }
+        let (left_bytes, right_bytes) = bytes.split_at_mut(PARAMETER_COUNT * 4);
+        for (values, side) in [
+            (&mut self.left_defaults[lane], left_bytes),
+            (&mut self.right_defaults[lane], right_bytes),
+        ] {
+            for (value, word) in values.iter_mut().zip(side.chunks_exact_mut(4)) {
+                let incoming =
+                    f32::from_bits(u32::from_le_bytes([word[0], word[1], word[2], word[3]]));
+                word.copy_from_slice(&value.to_bits().to_le_bytes());
+                *value = incoming;
+            }
+        }
+        true
+    }
 }
+
+/// The bytes of one lane's prepared defaults: both channels' parameter values (issue #1747).
+const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
 
 // REALTIME_POLICY_END
 
@@ -4778,6 +4808,14 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     ) -> Result<(), StatePayloadError> {
         let track = self.checked_member(track_index)?;
         self.core.restore_track(track, state_layout_version, &input)
+    }
+
+    fn lane_default_bytes(&self) -> Option<usize> {
+        Some(LANE_DEFAULT_BYTES)
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        self.core.exchange_lane_defaults(lane, bytes)
     }
     // REALTIME_POLICY_END
 }

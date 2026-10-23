@@ -301,6 +301,19 @@ pub enum EqBandKind {
 }
 
 impl EqBandKind {
+    /// The family whose `repr(u32)` discriminant is `word`, and a bell for any other word: the
+    /// prepared-defaults exchange's decoding (issue #1747), which may not refuse a word.
+    fn from_word(word: u32) -> Self {
+        match word {
+            2 => Self::LowShelf,
+            3 => Self::HighShelf,
+            4 => Self::LowPass,
+            5 => Self::HighPass,
+            6 => Self::Notch,
+            _ => Self::Bell,
+        }
+    }
+
     /// Decodes the enumeration parameter's frozen numeric encoding.
     fn from_value(value: f32) -> Option<Self> {
         match value.to_bits() {
@@ -3784,7 +3797,66 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             .commit_track(track, &decoded_right, right_silence);
         Ok(())
     }
+
+    /// Exchanges lane `lane`'s prepared defaults with `bytes` in place (issue #1747): for the left
+    /// channel then the right, for every section in cascade order, the band's prepared target
+    /// ([`BandTarget`]: enable and family as `u32`, then frequency, gain, Q and slope as `f32`
+    /// bits) and its designed words ([`EqSvfWords::to_array`] order), every word little-endian
+    /// ([`LANE_DEFAULT_BYTES`]).
+    ///
+    /// They are `initial[lane]` and `initial_words[lane]`: what a full reset re-seeds the lane
+    /// from, what a restore takes the general bands' enable and family from (they are not in the
+    /// payload), and what a prepared target's permission check compares against. No state word
+    /// changes. The enable and family words of this crate's own encoding round-trip exactly; a
+    /// word outside it (only ever a caller's spare area passing through, which no reader sees
+    /// before it leaves again) is held as the nearest legal value: a non-zero enable as enabled,
+    /// an unknown family as a bell. `false`, changing nothing, for a lane out of range or a wrong
+    /// length.
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        if lane >= W || bytes.len() != LANE_DEFAULT_BYTES {
+            return false;
+        }
+        let mut words = bytes.chunks_exact_mut(4);
+        // The length was checked, so `words` yields one word per call; the `else` is unreachable.
+        let mut exchange = |old: u32| -> u32 {
+            let Some(word) = words.next() else {
+                return old;
+            };
+            let incoming = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+            word.copy_from_slice(&old.to_le_bytes());
+            incoming
+        };
+        for channel in 0..2 {
+            for section in 0..EQ_SECTION_COUNT {
+                let target = &mut self.initial[lane][channel][section];
+                target.enabled = exchange(u32::from(target.enabled)) != 0;
+                target.kind = EqBandKind::from_word(exchange(target.kind as u32));
+                for field in [
+                    &mut target.frequency,
+                    &mut target.gain,
+                    &mut target.q,
+                    &mut target.slope,
+                ] {
+                    *field = f32::from_bits(exchange(field.to_bits()));
+                }
+                let designed = &mut self.initial_words[lane][channel][section];
+                let mut array = designed.to_array();
+                for word in &mut array {
+                    *word = f32::from_bits(exchange(word.to_bits()));
+                }
+                *designed = EqSvfWords::from_array(array);
+            }
+        }
+        true
+    }
 }
+
+/// The `u32` words of one band's prepared defaults: its target's six fields and its six designed
+/// words (issue #1747).
+const DEFAULT_WORDS_PER_BAND: usize = 12;
+
+/// The bytes of one lane's prepared defaults: both channels' bands (issue #1747).
+const LANE_DEFAULT_BYTES: usize = 2 * EQ_SECTION_COUNT * DEFAULT_WORDS_PER_BAND * 4;
 // REALTIME_POLICY_END
 
 /// The `DESIGNED` term of the channel-symmetry witness, over the EQ's own kernel read surface.
@@ -4039,6 +4111,14 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
             self.silent_fixed_point = false;
         }
         result
+    }
+
+    fn lane_default_bytes(&self) -> Option<usize> {
+        Some(LANE_DEFAULT_BYTES)
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        PreparedParametricEq::exchange_lane_defaults(self, lane, bytes)
     }
     // REALTIME_POLICY_END
 }
