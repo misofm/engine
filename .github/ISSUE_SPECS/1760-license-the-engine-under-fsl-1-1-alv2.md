@@ -24,13 +24,13 @@ Issue #314 licensed the original project work under Apache-2.0. The workspace po
 
 ## Authorized paths
 
-`LICENSE`, `NOTICE`, `THIRD_PARTY_LICENSES.md`, `Cargo.toml`, `fuzz/Cargo.toml`, `sdk/package.json`, `sdk/package-lock.json`, `sdk/README.md`, `hosts/host-web/qualification/package.json`, `hosts/host-web/qualification/package-lock.json`, `scripts/check-workspace-policy.sh`, `scripts/test-workspace-policy.sh`, `scripts/check-release-shape.py`, this spec.
+`LICENSE`, `NOTICE`, `THIRD_PARTY_LICENSES.md`, `Cargo.toml`, `fuzz/Cargo.toml`, `sdk/package.json`, `sdk/package-lock.json`, `sdk/README.md`, `hosts/host-web/qualification/package.json`, `hosts/host-web/qualification/package-lock.json`, `scripts/check-workspace-policy.sh`, `scripts/test-workspace-policy.sh`, `scripts/check-release-shape.py`, `docs/handoffs/control-smoothing-defaults/measure/Cargo.toml` (root, 2026-10-23: the #1055 research harness is project-owned, so it carries the project license), this spec.
 
 ## Objective gates
 
 1. `diff` between LICENSE and the official template with the notice line filled in shows no difference.
 2. `bash scripts/check-workspace-policy.sh` and `bash scripts/test-workspace-policy.sh` pass; the old Apache text now fails the digest check.
-3. `rg -n 'Apache-2\.0' --glob '!crates/math/**' --glob '!**/node_modules/**' --glob '!target/**'` lists only dependency licenses, rulings, specs, research and history, never the project's own license.
+3. `git grep -n 'Apache-2\.0' -- . ':!crates/math' ':!**/node_modules/**'` lists only dependency licenses, rulings, specs, research and history, never the project's own license.
 4. `cargo metadata --format-version 1 --no-deps` reports `FSL-1.1-ALv2` for every workspace package.
 5. `python3 scripts/check-release-shape.py`'s self-test passes, if it has one.
 
@@ -46,6 +46,6 @@ None. #314's spec is history.
 
 - Gate 1: the `diff` of LICENSE against the template with the notice line filled in is empty. New LICENSE sha256 `3e1f69ef8217e8c1f6fe7e8659f4ca909941eefe09e236ade15c9cd975d963ac`.
 - Gate 2: `check-workspace-policy.sh` and `test-workspace-policy.sh` pass. In a scratch copy, the old Apache text fails with `LICENSE is not the canonical FSL-1.1-ALv2 text`.
-- Gate 3: the remaining tracked hits are dependency licenses (wasmtime, playwright and other lockfile dependency entries, `object`, `rustc-demangle`, ViSQOL), the vendored libm line in `THIRD_PARTY_LICENSES.md`, the NOTICE lineage line (D4) and this spec. One finding is outside the authorized paths: `docs/handoffs/control-smoothing-defaults/measure/Cargo.toml` (the #1055 research harness, its own workspace root) says `license = "Apache-2.0"` for project work. Root decides whether research keeps it.
+- Gate 3: the remaining tracked hits are dependency licenses (wasmtime, playwright and other lockfile dependency entries, `object`, `rustc-demangle`, ViSQOL), the vendored libm line in `THIRD_PARTY_LICENSES.md`, the NOTICE lineage line (D4) and this spec. One finding is outside the authorized paths: `docs/handoffs/control-smoothing-defaults/measure/Cargo.toml` (the #1055 research harness, its own workspace root) says `license = "Apache-2.0"` for project work. Root ruled (2026-10-23): the harness is project work, so it now says `FSL-1.1-ALv2` too.
 - Gate 4: `cargo metadata --no-deps` reports `FSL-1.1-ALv2` for all 42 workspace packages and for `session-fuzz`.
 - Gate 5: `python3 scripts/check-release-shape.py --self-test` passes.
