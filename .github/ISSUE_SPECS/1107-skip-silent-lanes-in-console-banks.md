@@ -330,3 +330,18 @@ alternative is #1694.
 
 Not touched: the effect crates (their predicates exist), benchmark tools and scripts (#1107c owns
 rows; the runs use the existing scripts), host-core, capi, host-web.
+
+### D6 Root ruling on D5 (2026-10-23)
+
+- The split is approved. The building block is #1781 (rest predicates and clock advance on
+  every production bank stage); packing is #1782; its qualification rows are #1783. This issue
+  is narrowed to D5 item 2: the whole-bank skip on compiled plans, with D5's gates 1-3.
+- This attempt delivers #1781 and then this issue, as two checkpoints on this branch.
+- The `test-support` no-skip switch in `crates/graph/src/lib.rs` is approved (test-support only,
+  never compiled into a shipped artifact; `scripts/check-test-support-ci.py` and the scalar-oracle
+  check must still pass).
+- Gate 1's Simd4 leg is the arm64 CI legs at the batch push (no local Simd4 runner).
+- Root's reason for the master-order rule: packing must not move a master bit, because the
+  packing pattern would differ between W=4 and W=8, so browser and phone would render different
+  master bits for one session (AGENTS.md; the summation-order ruling covers a fixed new order, not
+  one that depends on the target).
