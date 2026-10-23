@@ -354,6 +354,33 @@ fn actual_input_trim_cell_drain_allocates_and_frees_nothing() {
     );
 }
 
+/// #1765 gate 2: every builtin lane swap of [`builtins_compiler::test_only_builtin_lane_swap`]
+/// (in-chain and cross-chain, stereo and collapsed mono, at every width this build has) allocates
+/// and frees nothing; the hook itself gates gate 1, the swaps' bit-exactness.
+///
+/// Red if a swap of the input, fader or matrix bank, or the chain's own swap, allocates or frees
+/// on the render thread.
+#[test]
+fn a_builtin_lane_swap_moves_the_whole_strip_without_allocating() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut measured = 0_usize;
+    let swaps = builtins_compiler::test_only_builtin_lane_swap(&mut |swap| {
+        LIVE_ALLOCS.set(0);
+        LIVE_FREES.set(0);
+        armed(swap);
+        assert_eq!(
+            (LIVE_ALLOCS.get(), LIVE_FREES.get()),
+            (0, 0),
+            "a builtin lane swap allocated or freed"
+        );
+        measured += 1;
+    });
+    assert!(swaps >= 8, "two passes of four swaps at one width at least");
+    assert_eq!(measured, swaps, "every swap ran under the measure");
+}
+
 #[test]
 fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservation() {
     let _session_guard = SESSION
