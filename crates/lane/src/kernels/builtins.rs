@@ -511,16 +511,31 @@ pub struct Matrix2x2Ramp<L: Lane> {
 ///
 /// The identity select of [`matrix2x2_block`] is deliberately **not** applied while a lane is
 /// ramping: a ramp that passes through the identity must not change its arithmetic mid-flight.
+/// A lane whose ramp ended on an earlier frame -- or never started, because another lane of the
+/// bank is the one ramping -- is settled, and a settled lane on the identity matrix passes its
+/// samples through untouched, exactly as [`matrix2x2_block`] passes it (issue #1072): the
+/// arithmetic `1 * -0.0 + 0 * x` would turn a `-0.0` the same lane rendered alone keeps into
+/// `+0.0`.
 ///
 /// Frozen operation order, per frame:
-/// 1. `remaining = remaining - 1`
-/// 2. `done = remaining <= 0`
-/// 3. `current[i] = select(done, target[i], ramp_toward(current[i], step[i], target[i]))` for
+/// 1. `settled = remaining <= 0` -- the lane's ramp ended before this frame
+/// 2. `remaining = remaining - 1`
+/// 3. `done = remaining <= 0`
+/// 4. `current[i] = select(done, target[i], ramp_toward(current[i], step[i], target[i]))` for
 ///    `i` in `0..4` -- no word passes its target ([`ramp_toward`])
-/// 4. `l = load(left)`, `r = load(right)`
-/// 5. `yl = ll * l + lr * r`, `yr = rl * l + rr * r` — the [`matrix2x2_block`] arithmetic, in the
+/// 5. `l = load(left)`, `r = load(right)`
+/// 6. `yl = ll * l + lr * r`, `yr = rl * l + rr * r` — the [`matrix2x2_block`] arithmetic, in the
 ///    same operation order
-/// 6. `store(left, yl)`, `store(right, yr)`
+/// 7. `pass = settled & identity`, where `identity` holds on the lanes whose target is exactly
+///    [`matrix2x2_block`]'s identity (`target == [1, 0, 0, 1]` by `f32` equality, so a `-0.0`
+///    coefficient counts as `0`); `yl = select(pass, l, yl)`, `yr = select(pass, r, yr)`
+/// 8. `store(left, yl)`, `store(right, yr)`
+///
+/// Step 7 is the per-lane select of [`matrix2x2_block`] on the frames a lane is settled, so a
+/// lane renders the bits it renders alone whichever lanes share its bank. `identity` is computed
+/// once per call from the targets; with no identity target over all `L::WIDTH` lanes -- padding
+/// lanes included, so a partial bank keeps the select -- step 7 returns its second arm on every
+/// word and the body runs without it (the reason [`matrix2x2_block_without_identity`] exists).
 ///
 /// `remaining` and `current` are advanced in place, so a lane's ramp carries across block
 /// boundaries and evolves by its own additions regardless of block size or of its neighbours:
@@ -532,6 +547,28 @@ pub fn matrix2x2_ramp_block<L: Lane>(
     frames: usize,
     r: &mut Matrix2x2Ramp<L>,
 ) {
+    let one = L::splat(1.0);
+    let zero = L::zero();
+    let identity = L::mask_and(
+        L::mask_and(r.target[0].eq(one), r.target[1].eq(zero)),
+        L::mask_and(r.target[2].eq(zero), r.target[3].eq(one)),
+    );
+    if L::mask_any(identity) {
+        matrix2x2_ramp_frames::<L, true>(left, right, frames, r, identity);
+    } else {
+        matrix2x2_ramp_frames::<L, false>(left, right, frames, r, identity);
+    }
+}
+
+/// [`matrix2x2_ramp_block`]'s frame loop; `PASS` is whether step 7 runs.
+#[inline(always)]
+fn matrix2x2_ramp_frames<L: Lane, const PASS: bool>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    r: &mut Matrix2x2Ramp<L>,
+    identity: L::Mask,
+) {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
     let one = L::splat(1.0);
@@ -542,6 +579,7 @@ pub fn matrix2x2_ramp_block<L: Lane>(
         .chunks_exact_mut(L::WIDTH)
         .zip(right.chunks_exact_mut(L::WIDTH))
     {
+        let settled = remaining.le(zero);
         remaining = remaining.sub(one);
         let done = remaining.le(zero);
         for ((current, target), step) in current.iter_mut().zip(&r.target).zip(&r.step) {
@@ -549,8 +587,13 @@ pub fn matrix2x2_ramp_block<L: Lane>(
         }
         let l = L::load(left_frame);
         let right_sample = L::load(right_frame);
-        let yl = current[0].mul(l).add(current[1].mul(right_sample));
-        let yr = current[2].mul(l).add(current[3].mul(right_sample));
+        let mut yl = current[0].mul(l).add(current[1].mul(right_sample));
+        let mut yr = current[2].mul(l).add(current[3].mul(right_sample));
+        if PASS {
+            let pass = L::mask_and(settled, identity);
+            yl = L::select(pass, l, yl);
+            yr = L::select(pass, right_sample, yr);
+        }
         yl.store(left_frame);
         yr.store(right_frame);
     }

@@ -277,3 +277,89 @@ fn a_long_matrix_move_stays_inside_its_endpoints() {
         rendered += block;
     }
 }
+
+/// Issue #1072: a banked lane on the identity renders the bits it renders alone while another
+/// lane's ramp keeps the bank on the ramp kernel: `-0.0` passes through on every frame after the
+/// lane's own ramp ends, and the ramp's last frame is still the arithmetic `1 * -0.0 + 0 * +0.0`,
+/// which is `+0.0`.
+///
+/// Lane 0 ramps onto the identity over two frames, lane 1 ramps for the whole block, and lane 2
+/// sits on the identity throughout. Each lane must equal its own `MatrixBuiltins` word for word,
+/// and the signed zeros are also spelled out, so a bank and a scalar wrong the same way stay red.
+#[test]
+fn a_banked_identity_lane_keeps_signed_zero_while_another_lane_ramps() {
+    const FRAMES: usize = 8;
+    let start = Matrix2x2 {
+        ll: 0.5,
+        lr: 0.5,
+        rl: 0.5,
+        rr: 0.5,
+    };
+    let other = Matrix2x2 {
+        ll: -1.0,
+        lr: 0.0,
+        rl: 0.0,
+        rr: -1.0,
+    };
+    let prepared = [start, start, Matrix2x2::IDENTITY];
+    let retargets = [
+        (Matrix2x2::IDENTITY, 2),
+        (other, 64),
+        (Matrix2x2::IDENTITY, 0),
+    ];
+    let (negative, positive) = ((-0.0_f32).to_bits(), 0.0_f32.to_bits());
+    for &width in effect_contract::BankWidth::ALL {
+        let count = width.lanes() as usize;
+        let mut bank = BuiltinMatrixBank::new(
+            width.backend(),
+            width,
+            prepared.iter().map(|matrix| (*matrix, 0)).collect(),
+        )
+        .expect("bank");
+        for (lane, (target, window)) in retargets.iter().enumerate() {
+            bank.set_target_smoothed(lane, *target, *window)
+                .expect("retarget");
+        }
+        let mut left = vec![-0.0_f32; FRAMES * count];
+        let mut right = vec![0.0_f32; FRAMES * count];
+        bank.process(&mut left, &mut right, FRAMES as u32);
+        for (lane, (matrix, (target, window))) in prepared.iter().zip(&retargets).enumerate() {
+            let mut alone = BuiltinChain::new(
+                48_000,
+                BuiltinParameters {
+                    matrix: *matrix,
+                    ..BuiltinParameters::default()
+                },
+            )
+            .expect("prepare")
+            .into_sections()
+            .2;
+            alone
+                .set_target_smoothed(*target, *window)
+                .expect("retarget");
+            let mut l = [-0.0_f32; FRAMES];
+            let mut r = [0.0_f32; FRAMES];
+            alone.process(DualMonoBlock::new(&mut l, &mut r, 0).expect("block"));
+            for frame in 0..FRAMES {
+                let word = frame * count + lane;
+                let context = format!("W{count} lane {lane} frame {frame}");
+                assert_eq!(left[word].to_bits(), l[frame].to_bits(), "{context} left");
+                assert_eq!(right[word].to_bits(), r[frame].to_bits(), "{context} right");
+                let pass = match lane {
+                    0 => frame >= 2,
+                    1 => false,
+                    _ => true,
+                };
+                if pass {
+                    assert_eq!(left[word].to_bits(), negative, "{context}: -0.0 passes");
+                } else if lane == 0 && frame == 1 {
+                    assert_eq!(
+                        left[word].to_bits(),
+                        positive,
+                        "{context}: the last ramp frame"
+                    );
+                }
+            }
+        }
+    }
+}
