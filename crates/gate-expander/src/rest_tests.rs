@@ -14,10 +14,16 @@ use super::padding_tests::{
 };
 use super::*;
 use conformance::rest_probe::{self, Reach, Schedule};
+use effect_contract::PreparedPorts;
 
-/// Not a divisor of the 64-sample smoothing, so a ramp is still in flight at the end of the block
-/// it starts in.
+/// Gates 2 and 3's block length. Not a divisor of the 64-sample smoothing, so a ramp is still in
+/// flight at the end of the block it starts in.
 const FRAMES: usize = 48;
+
+/// Gate 1's block length: a 64-sample ramp that starts on a block's first sample ends blocks with
+/// 43, 22 and then 1 sample left, so the predicate sees a ramp whose last step is still to come
+/// (`remaining == 1`), which a block of 48 never leaves.
+const PROBE_FRAMES: usize = 21;
 
 /// The bank width of `L`.
 fn width_of<L: Lane>() -> BankWidth {
@@ -69,7 +75,11 @@ fn copy<L: Lane>(gate: &PreparedGate<L, false>) -> PreparedGate<L, false> {
 
 /// Every word of lane `lane` of both channels: state (gain, open flag, hold countdown, every
 /// field of every ramp) and the coefficients, which render never writes.
-fn lane_words<L: Lane>(gate: &PreparedGate<L, false>, lane: usize, out: &mut Vec<u32>) {
+fn lane_words<L: Lane, const CONNECTED: bool>(
+    gate: &PreparedGate<L, CONNECTED>,
+    lane: usize,
+    out: &mut Vec<u32>,
+) {
     for channel in 0..2 {
         let state = gate.state[channel].lanes()[lane];
         let coef = gate.coef[channel].lanes()[lane];
@@ -130,15 +140,23 @@ fn admissions() -> usize {
 
 /// Sets parameter `parameter` to `value` on both channels.
 fn set(values: &mut Values, parameter: usize, value: f32) {
-    values[parameter * 2].value = value;
-    values[parameter * 2 + 1].value = value;
+    set_pair(values, parameter, value, value);
 }
 
-/// The fastest attack and release and a short hold, so a lane comes back to rest inside a case.
+/// Sets parameter `parameter` to `left` and `right` on the two channels.
+fn set_pair(values: &mut Values, parameter: usize, left: f32, right: f32) {
+    values[parameter * 2].value = left;
+    values[parameter * 2 + 1].value = right;
+}
+
+/// Fast attack and release and a short hold, so a lane comes back to rest inside a case. The two
+/// channels take different times, with the slower release on the left, so a predicate that read
+/// one channel's coefficients for the other would claim the right channel at rest while its gain
+/// still moves.
 fn fast(values: &mut Values, hold_ms: f32) {
-    set(values, 4, 0.1);
-    set(values, 5, hold_ms);
-    set(values, 6, 5.0);
+    set_pair(values, 4, 0.1, 1.0);
+    set_pair(values, 5, hold_ms, hold_ms + 1.0);
+    set_pair(values, 6, 40.0, 5.0);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -166,7 +184,7 @@ where
     }
 
     fn frames(&self) -> usize {
-        FRAMES
+        PROBE_FRAMES
     }
 
     fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
@@ -199,7 +217,7 @@ where
             let (lane, channel) = (draw.below(L::WIDTH), draw.below(2));
             self.gate.inject_nonfinite_gain(lane, channel);
         }
-        self.first_sample += FRAMES as u64;
+        self.first_sample += PROBE_FRAMES as u64;
     }
 
     fn lanes_at_rest(&self) -> u32 {
@@ -297,6 +315,9 @@ const SILENT_BLOCKS: usize = 420;
 /// The silent block that retargets lane 0's threshold to its own value: every ramp stays settled,
 /// but the bank's `ramp_frames_left` clock is reloaded while the bank is at rest.
 const RELOAD_BLOCK: usize = TONE_BLOCKS + 400;
+/// The silent block, after the reload block and with the bank at rest, in which lane 0's right
+/// plane alone carries noise: the fast path must refuse it on the right plane's leg.
+const RIGHT_ONLY_BLOCK: usize = RELOAD_BLOCK + 5;
 
 /// One block's input: noise on every active lane, or `+0.0`.
 fn input(block: usize, lanes: usize, mask: &[bool]) -> (Vec<f32>, Vec<f32>) {
@@ -318,24 +339,30 @@ fn input(block: usize, lanes: usize, mask: &[bool]) -> (Vec<f32>, Vec<f32>) {
 }
 
 /// Renders the signal/silence/signal schedule. Returns per block the output words, the reports and
-/// every lane's words plus the clock, the blocks the fast path took, and the first block each
-/// lane was reported at rest.
+/// every lane's words plus the clock, per block whether the fast path took it, and the first block
+/// each lane was reported at rest.
 fn schedule<L: Lane>(
     members: &[Values],
     mask: &[bool],
     link: LinkMode,
     forbid: bool,
-) -> (Vec<Vec<u32>>, usize, Vec<Option<usize>>)
+) -> (Vec<Vec<u32>>, Vec<bool>, Vec<Option<usize>>)
 where
     PreparedGate<L, false>: PreparedNativeEffectBank,
 {
     let lanes = L::WIDTH;
     let mut gate = bound::<L>(members, mask, 48_000, link);
     let mut trace = Vec::new();
-    let mut taken = 0;
+    let mut taken = Vec::new();
     let mut first_rest = vec![None; lanes];
     for block in 0..TONE_BLOCKS * 2 + SILENT_BLOCKS {
         let (mut left, mut right) = input(block, lanes, mask);
+        if block == RIGHT_ONLY_BLOCK {
+            let mut draw = Draw::new(block as u64);
+            for frame in 0..FRAMES {
+                right[frame * lanes] = 0.25 * (draw.unit() * 2.0 - 1.0);
+            }
+        }
         let first_sample = (block * FRAMES) as u64;
         let spans: Vec<PreparedAutomationSpan> = if block == RELOAD_BLOCK {
             vec![PreparedAutomationSpan {
@@ -359,7 +386,7 @@ where
             &offsets,
             forbid,
         );
-        taken += admissions() - before;
+        taken.push(admissions() != before);
         let mut words: Vec<u32> = left.iter().chain(&right).map(|w| w.to_bits()).collect();
         for lane in 0..lanes {
             lane_words(&gate, lane, &mut words);
@@ -382,6 +409,90 @@ where
     (trace, taken, first_rest)
 }
 
+/// The scalar instance with a connected sidechain: noise, then silence until it rests, then
+/// `+0.0` main input under a sidechain that carries noise, then silence again.
+const SIDE_BLOCKS: [usize; 4] = [20, 80, 10, 20];
+
+/// Renders [`SIDE_BLOCKS`] on one scalar instance with a connected sidechain. Returns per block
+/// the output words, every state and coefficient word, the report and the clock, and per block
+/// whether the fast path took it.
+fn side_schedule(forbid: bool) -> (Vec<Vec<u32>>, Vec<bool>) {
+    let values = staggered(1).remove(0);
+    let mut preparation = request(&values, 48_000, LinkMode::DualMono);
+    preparation.ports = PreparedPorts {
+        sidechain: PreparedSidechainPort::Connected {
+            id: port_id("sidechain-in"),
+            required: false,
+        },
+    };
+    let metadata =
+        expected_prepared_metadata(&GATE_EXPANDER_DESCRIPTOR, preparation).expect("metadata");
+    let defaults = [initial_defaults(&values).expect("valid"); MAX_WIDTH];
+    let mut gate = PreparedGate::<f32, true>::new(&metadata, None, defaults).expect("connected");
+    let [tone, rest, side, _] = SIDE_BLOCKS;
+    let mut trace = Vec::new();
+    let mut taken = Vec::new();
+    for block in 0..SIDE_BLOCKS.iter().sum() {
+        let mut draw = Draw::new(0x51DE + block as u64);
+        let mut noise = || -> Vec<f32> {
+            (0..FRAMES)
+                .map(|_| 0.5 * (draw.unit() * 2.0 - 1.0))
+                .collect()
+        };
+        let silent = vec![0.0_f32; FRAMES];
+        let (mut left, mut right, side_left, side_right) = if block < tone {
+            (noise(), noise(), noise(), noise())
+        } else if (tone + rest..tone + rest + side).contains(&block) {
+            (silent.clone(), silent.clone(), noise(), noise())
+        } else {
+            (silent.clone(), silent.clone(), silent.clone(), silent)
+        };
+        let process = EffectProcessBlock::new(
+            &mut left,
+            &mut right,
+            Some((&side_left, &side_right)),
+            (block * FRAMES) as u64,
+            &[],
+            QUANTUM,
+        )
+        .expect("a block");
+        let before = admissions();
+        SILENT_FORBIDDEN.with(|cell| cell.set(forbid));
+        let report = PreparedNativeEffect::process(&mut gate, process);
+        SILENT_FORBIDDEN.with(|cell| cell.set(false));
+        taken.push(admissions() != before);
+        let mut words: Vec<u32> = left.iter().chain(&right).map(|w| w.to_bits()).collect();
+        lane_words(&gate, 0, &mut words);
+        words.extend([
+            report.invalid_spans as u32,
+            report.nonfinite_left_blocks as u32,
+            report.nonfinite_right_blocks as u32,
+            gate.ramp_frames_left,
+        ]);
+        trace.push(words);
+    }
+    (trace, taken)
+}
+
+/// Gate 2's scalar arm: the connected instance at rest renders `+0.0` main input under an active
+/// sidechain bit for bit as the whole kernel does.
+fn connected_scalar() {
+    let (fast, taken) = side_schedule(false);
+    let (slow, forbidden) = side_schedule(true);
+    assert!(
+        !forbidden.contains(&true),
+        "scalar: the control arm took the fast path"
+    );
+    let [tone, rest, _, _] = SIDE_BLOCKS;
+    assert!(
+        taken[tone + rest - 1],
+        "scalar: the instance was not at rest before the sidechain block"
+    );
+    for (block, (fast, slow)) in fast.iter().zip(&slow).enumerate() {
+        assert!(fast == slow, "scalar: block {block} moved a bit");
+    }
+}
+
 /// **Gate 2: a bank whose lanes come to rest on different blocks renders bit-identically with
 /// the silent fast path and without it, at `Simd4` and `Simd8`, full and padded, every link mode.**
 #[test]
@@ -398,15 +509,16 @@ fn the_silent_fast_path_renders_the_kernel_bits() {
                 let values = staggered(members);
                 let (fast, taken, first_rest) = schedule::<L>(&values, &mask, link, false);
                 let (slow, forbidden, _) = schedule::<L>(&values, &mask, link, true);
-                assert_eq!(
-                    forbidden, 0,
+                assert!(
+                    !forbidden.contains(&true),
                     "{context}: the control arm took the fast path"
                 );
                 for (block, (fast, slow)) in fast.iter().zip(&slow).enumerate() {
                     assert!(fast == slow, "{context}: block {block} moved a bit");
                 }
                 // Staggered rests: the first lane to rest did not make the bank skip, the bank
-                // skipped once every lane rested, and the reload block was among the skipped.
+                // skipped once every lane rested, the reload block was skipped, and the block with
+                // noise on one right plane was not, though the bank rested going into it.
                 let mut rests: Vec<usize> = first_rest[..members]
                     .iter()
                     .map(|first| first.expect("every member came to rest"))
@@ -414,16 +526,26 @@ fn the_silent_fast_path_renders_the_kernel_bits() {
                 rests.sort_unstable();
                 rests.dedup();
                 assert!(rests.len() > 1, "{context}: every lane rested on one block");
+                let count = taken.iter().filter(|taken| **taken).count();
                 assert!(
-                    taken > 0 && taken < SILENT_BLOCKS,
-                    "{context}: the fast path took {taken} of {SILENT_BLOCKS} silent blocks"
+                    count > 0 && count < SILENT_BLOCKS,
+                    "{context}: the fast path took {count} of {SILENT_BLOCKS} silent blocks"
                 );
                 let all = *rests.last().expect("a rest");
                 assert!(all < RELOAD_BLOCK, "{context}: the bank rested too late");
+                assert!(
+                    taken[RELOAD_BLOCK],
+                    "{context}: the fast path refused the reload block"
+                );
+                assert!(
+                    taken[RIGHT_ONLY_BLOCK - 1] && !taken[RIGHT_ONLY_BLOCK],
+                    "{context}: the right-plane block was not the first block refused after rest"
+                );
             }
         }
     }
     lane::each_vector_lane!(|L| at::<L>());
+    connected_scalar();
 }
 
 // ---------------------------------------------------------------------------------------------
