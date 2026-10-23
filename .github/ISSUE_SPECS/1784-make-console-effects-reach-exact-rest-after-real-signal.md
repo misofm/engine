@@ -133,6 +133,10 @@ each bound is rounded up to a block end.
   because `effect-runtime` is outside this issue's paths. As a result, `ar_one_pole_step` has no
   production caller left (its own tests still use it). Giving the shared step an epsilon parameter
   is root's choice.
+  `effect-runtime`'s tests of the step's form do not reach the copy. Mutants of `follow` (`u >= e`
+  for the switch, and the one-product form `c (e - u) + u`) left every existing test green, so
+  `follow_tests::follow_is_the_shared_step_with_the_rest_snap` pins `follow` to the shared step
+  bit for bit, outside the snap.
 
 **Time to rest, at 48 kHz:**
 

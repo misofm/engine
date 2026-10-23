@@ -1258,3 +1258,50 @@ impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
 mod padding_tests;
 #[cfg(test)]
 mod rest_tests;
+
+/// Issue #1784 B2: [`follow`] is a crate-local copy of `effect_runtime`'s `ar_one_pole_step`, so
+/// that crate's tests of the step's form do not reach it. This pins the copy to the shared step.
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+    use effect_runtime::envelope::ar_one_pole_step;
+
+    /// **`follow` is `ar_one_pole_step` bit for bit, except that a result below
+    /// [`FOLLOWER_REST`] is `+0.0`,** for every rate's two coefficient pairs, envelopes and
+    /// detector words from `0` to `4` across every normal binade, and `u == e`, the switch's tie.
+    #[test]
+    fn follow_is_the_shared_step_with_the_rest_snap() {
+        let mut seed = 0x0017_84b2_u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 40) as f32 / (1_u64 << 24) as f32
+        };
+        // A unit times `2^k`, `k` in `[-126, 1]`: every binade from the smallest normal to 4.
+        let mut level = || {
+            let unit = next();
+            let binade = (next() * 128.0) as u32;
+            let scale = f32::from_bits(((binade + 1) << 23).min(128 << 23));
+            if unit < 0.05 { 0.0 } else { unit * scale }
+        };
+        for bits in TRANSIENT_SHAPER_COEFFICIENT_BITS {
+            let row = bits.map(f32::from_bits);
+            for (attack, release) in [(row[0], row[1]), (row[2], row[3])] {
+                let coefficients = ArCoef::<f32>::splat(attack, release);
+                for case in 0..20_000 {
+                    let e = level();
+                    let u = if case % 7 == 0 { e } else { level() };
+                    let shared = ar_one_pole_step(e, u, &coefficients);
+                    let own = follow(e, u, &coefficients);
+                    let expected = if shared.abs() < FOLLOWER_REST {
+                        0.0
+                    } else {
+                        shared
+                    };
+                    assert_eq!(own.to_bits(), expected.to_bits(), "e {e:e}, u {u:e}");
+                }
+            }
+        }
+    }
+}
