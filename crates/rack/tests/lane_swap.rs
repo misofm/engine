@@ -966,8 +966,15 @@ fn collapse_case(width: BankWidth, lanes: usize, seed: u64, case: OddStrip) {
             }
             step(&mut swapped, &mut twin, &mut rng, block);
             block += 1;
+            // Both directions, by seed parity, so each chain's half of the disengage and of the
+            // agreement write is the receiving side on some seed.
+            let (from, to) = if seed % 2 == 0 {
+                ((1, across), (0, odd))
+            } else {
+                ((0, odd), (1, across))
+            };
             swapped
-                .swap_counted((1, across), (0, odd), &mut scratch)
+                .swap_counted(from, to, &mut scratch)
                 .expect("a cross-chain swap");
         }
         _ => {

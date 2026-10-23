@@ -2975,8 +2975,9 @@ pub enum ChainLanePeer<'a> {
     Other(&'a mut BankChain, usize),
 }
 
-/// Why [`BankChain::swap_lanes`] exchanged nothing. Every refusal leaves both chains as they were;
-/// none carries an allocation.
+/// Why [`BankChain::swap_lanes`] exchanged nothing. Every refusal but `Defect` leaves both chains
+/// as they were; `Defect` may already have disengaged the collapse and lowered the channel
+/// agreement, which is conservative. None carries an allocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChainLaneSwapRefusal {
     /// A lane is out of range or not active: a padded lane never swaps.

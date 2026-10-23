@@ -98,7 +98,12 @@ None. It can run beside the predicate slices.
   arming. The channel-agreement flag after a cross swap is the AND of the two chains'
   `carried_channel_agreement()`, taken before anything changes. Every slot must swap (an identity
   slot is not skipped; a stage that cannot swap refuses the chain swap), and both stages must hold
-  the same full `EffectProgramKey`.
+  the same full `EffectProgramKey`. No production console chain can swap yet: graph-built chains
+  hold `graph::BuiltinStage` slots (input section, fader, matrix), which keep
+  `can_swap_lanes = false`, so every chain swap on a real console refuses. #1765 owes those swaps
+  and blocks #1107. Stated limit (attempt-2 verifier, mutant R7): dropping the in-chain
+  `disengage_for_carry` changes nothing with the rack's mock stage; with real effects a stale right
+  channel restored after a swap could re-derive a bank flag, so #1107's chain test must cover it.
 
 ### D2 Per-lane field classes
 
@@ -193,3 +198,10 @@ Attempt 2 (after the verifier's FAIL on the chain swap):
   before each skip; the gate swap test reuses `padding_tests`' request and constants. #1746's
   shaper and gate state no other clock than the ones above. The swap tests render drawn signal,
   so the bank-wide fast paths do not hollow them; they pass with the fast paths live.
+
+## Verifier (attempt 2, 2026-10-23)
+
+PASS. Root applied its record and test fixes: the cross-chain collapse case swaps in both
+directions by seed parity (mutants R9 and R12, the mirror images of R8 and R3, are now red), the
+limiter swap test's doc no longer claims equal cursors, `ChainLaneSwapRefusal`'s doc names the
+`Defect` exception, and D1 records the builtin-stage gap (#1765) and the R7 limit.

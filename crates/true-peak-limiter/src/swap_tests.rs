@@ -3,9 +3,9 @@
 //!
 //! Every strip draws its own parameters (ceiling, release, lookahead, per channel), so the lanes
 //! of a bank carry different lookaheads and hence different box windows: a swap that left a
-//! channel's `phase` or a ring word behind renders the destination's window position. The banks
-//! of one slot render the same block lengths, so their shared cursors stay equal, which the
-//! contract's swap relies on.
+//! channel's `phase` or a ring word behind renders the destination's window position. The swap
+//! does not rely on equal cursors across banks: each payload is written and restored relative to
+//! its own bank's cursor (#1747 D1).
 
 use super::rest_tests::{Draw, QUANTUM, RATE, limiter_bank};
 use super::*;
