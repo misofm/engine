@@ -7553,13 +7553,15 @@ mod tests {
     /// skipped block runs a stage, advances fewer than every lane's clocks or counts a transpose.
     #[test]
     fn a_skipped_block_writes_zero_outputs_where_no_silent_fold_takes_them() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
         /// At rest on every lane; counts its blocks and its clock advances, and keeps the mask.
-        struct Resting(Arc<[AtomicU32; 3]>);
+        /// The test reads the counts back through `as_any`.
+        struct Resting([u32; 3]);
         impl BankStage for Resting {
+            fn as_any(&self) -> Option<&dyn core::any::Any> {
+                Some(self)
+            }
             fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
-                self.0[0].fetch_add(1, Relaxed);
+                self.0[0] += 1;
                 block.left.fill(1.0);
                 block.right.fill(1.0);
                 Ok(())
@@ -7570,8 +7572,8 @@ mod tests {
             fn advance_clocks(&mut self, lanes_mask: u32, block: BankBlock<'_>) {
                 let zero = block.left.iter().chain(block.right.iter());
                 assert!(zero.into_iter().all(|word| word.to_bits() == 0));
-                self.0[1].fetch_add(1, Relaxed);
-                self.0[2].store(lanes_mask, Relaxed);
+                self.0[1] += 1;
+                self.0[2] = lanes_mask;
             }
         }
         /// Separate input and output planes; `fold_plane` records each lane and whether its tile
@@ -7604,13 +7606,20 @@ mod tests {
             Some(vec![true, true, true, false]),
             Some(vec![true, true, false, false]),
         ] {
-            let counts = Arc::new([AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)]);
             let mut chain = BankChain::new(
                 AoSoaScratch::new(BankWidth::Four, FRAMES).expect("scratch"),
                 active.clone().into_boxed_slice(),
-                vec![slot(active.clone(), Box::new(Resting(Arc::clone(&counts))))],
+                vec![slot(active.clone(), Box::new(Resting([0; 3])))],
             )
             .expect("chain");
+            let counts = |chain: &BankChain| -> [u32; 3] {
+                chain.slots[0]
+                    .stage
+                    .as_any()
+                    .and_then(|stage| stage.downcast_ref::<Resting>())
+                    .expect("the resting stage")
+                    .0
+            };
             if let Some(fold) = &fold {
                 chain
                     .arm_fold(fold.clone().into_boxed_slice())
@@ -7628,11 +7637,7 @@ mod tests {
             chain
                 .run(&mut members, FRAMES, 0, LiveSnapshot::ALL)
                 .expect("processed block");
-            assert_eq!(
-                counts[0].load(Relaxed),
-                1,
-                "{fold:?}: a forbidden skip processes"
-            );
+            assert_eq!(counts(&chain)[0], 1, "{fold:?}: a forbidden skip processes");
             assert_eq!(chain.silent_skips(), 0, "{fold:?}");
             members.outputs = planes(7.0);
             members.spare = planes(7.0);
@@ -7643,9 +7648,9 @@ mod tests {
                 .run(&mut members, FRAMES, u64::from(FRAMES), LiveSnapshot::ALL)
                 .expect("skipped block");
             assert_eq!(chain.silent_skips(), 1, "{fold:?}: the block skipped");
-            assert_eq!(counts[0].load(Relaxed), 1, "{fold:?}: no stage ran");
-            assert_eq!(counts[1].load(Relaxed), 1, "{fold:?}: one clock advance");
-            assert_eq!(counts[2].load(Relaxed), 0b1111, "{fold:?}: every lane");
+            assert_eq!(counts(&chain)[0], 1, "{fold:?}: no stage ran");
+            assert_eq!(counts(&chain)[1], 1, "{fold:?}: one clock advance");
+            assert_eq!(counts(&chain)[2], 0b1111, "{fold:?}: every lane");
             assert_eq!(chain.transposes(), transposes, "{fold:?}: no transpose");
             let folds = |lane: usize| fold.as_ref().is_some_and(|fold| fold[lane]);
             assert_eq!(
