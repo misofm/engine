@@ -20,7 +20,7 @@ pub use runtime::{
 #[doc(hidden)]
 pub use runtime::{
     test_only_bank_meter_passes, test_only_bank_sample_peak_passes, test_only_carry_payload_bytes,
-    test_only_meter_input_counts, test_only_meter_input_reset,
+    test_only_disable_bank_skip, test_only_meter_input_counts, test_only_meter_input_reset,
     test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
     test_only_reset_carry_payload_bytes, test_only_resident_input_counts,
     test_only_resident_input_reset, test_only_route_activity_built, test_only_route_drain_calls,
@@ -2207,7 +2207,10 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     /// (issue #1781). The caller's contract is `rack::BankStage::advance_clocks`': every input
     /// word of the block is `+0.0`, the mask is every lane of the bank (a bank is skipped whole),
     /// and each lane in it is one [`Self::builtin_lanes_at_rest`] reported for the block. After the
-    /// call every state word is bit-identical to what that rendered block would leave.
+    /// call every state word is bit-identical to what that rendered block would leave, with the
+    /// two exceptions `rack::BankStage::advance_clocks` states: the `[process calls, frames
+    /// processed]` qualification counters do not count a skipped block, and on a collapsed chain
+    /// the input's frozen right silence counter advances (the disengage copies the left over it).
     ///
     /// The default is a no-op: exact for a bank with no clocks, and sound for any bank whose
     /// predicate declines, because a declined lane is never skipped. Allocation-free and bounded
@@ -4975,6 +4978,21 @@ pub fn test_only_carry_counts(plan: &mut PreparedRenderPlan) -> [usize; 4] {
                 executor.carry_strips.len(),
                 executor.carry_effects.len(),
             ]
+        })
+}
+
+/// Blocks the plan's bank chains skipped whole (issue #1107), summed over every bank unit; zero
+/// for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_bank_silent_skips(plan: &PreparedRenderPlan) -> u64 {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or(0, |executor| {
+            executor.runtime.units.iter().fold(0_u64, |total, unit| {
+                total.saturating_add(unit.silent_skips())
+            })
         })
 }
 

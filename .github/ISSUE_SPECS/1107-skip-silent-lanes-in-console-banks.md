@@ -345,3 +345,128 @@ rows; the runs use the existing scripts), host-core, capi, host-web.
   packing pattern would differ between W=4 and W=8, so browser and phone would render different
   master bits for one session (AGENTS.md; the summation-order ruling covers a fixed new order, not
   one that depends on the target).
+
+### D7 Evidence, the narrowed slice (attempt 2, 2026-10-23)
+
+**Mechanism.** In `BankChain::run_with_input`, step 0 (the drains) and the whole collapse dispatch
+run on every block, unchanged. Then the chain skips the block when all of these hold:
+- `silent_skip` is set (default true; only the graph's `test-support` switch clears it);
+- no aux destination is armed;
+- every active lane's input is exact `+0.0` on both planes: through
+  `BankMembers::input_is_positive_zero`, or, on a resident run, the predecessor's `resident_zero`.
+  This test runs first and returns on the first non-zero word;
+- `lanes_at_rest()` covers every lane (#1781).
+
+A skipped block does this:
+- zeroes the resident scratch once per run of skips;
+- calls `advance_clocks(all lanes, the +0.0 block)` on every slot that has an active lane;
+- does no gather, process, seam copy or transpose (counted in `silent_skips`, not in
+  `transposes`);
+- writes its outputs:
+  - an unfolded chain writes `+0.0` to each active lane's output planes;
+  - a folded chain calls `ArenaMembers::fold_silent`, which applies the master's exact
+    signed-zero effect per plane: a fill for a `store` lane, one `+= +0.0` pass, or nothing;
+  - the ordinary scatter over the zeroed scratch runs when `fold_silent` declines, or on a
+    partial fold.
+
+Observers, meters and resident successors read the zeroed scratch, which is what a rendered
+silent block leaves. A skipped block does not count in the builtin
+`[process calls, frames processed]` qualification counters, because those count real processing.
+On a collapsed chain the skip also advances the frozen right silence counter, which is
+overwritten by the next disengage. Both exceptions are stated in the `advance_clocks` docs.
+
+**Gate 1:** `a_skipped_bank_renders_the_bits_of_a_processed_one`
+(`crates/graph-compiler/tests/silent_bank_skip.rs`). It compiles one session twice and renders a
+skip plan and a no-skip twin from the same inputs.
+- **Session:** 20 tracks; EQ, compressor and true-peak limiter in the console; width-generic over
+  `Backend::VECTOR`, so it ran at Simd8 here. The banks:
+  - bank 0 is mono-sourced and collapse-armed, and it holds the store lane;
+  - bank 1 is stereo, with a fader ride;
+  - the padded bank is stereo and dual.
+- **Inputs:** negative route rows, so the master carries both signed zeros. Per-lane random
+  signal and `+0.0` runs, with tiny levels, `-0.0` blocks, a late right-plane impulse, and three
+  forced whole-bank silence windows.
+- **Check:** every host word and every strip's PostMatrix observer is equal by `to_bits`, with
+  NaNs folded.
+- **Reach:**
+  - 335 bank skips, 176 of them while other banks were audible;
+  - 84 blocks with a `-0.0` master;
+  - collapse engaged (`[560, 1]`), and 20 route folds.
+
+**Gate 2:** `a_skipping_block_allocates_nothing` (same file): 0 allocations and 0 frees on the
+render thread over skipping blocks.
+
+**Other new tests:**
+- `a_skipped_block_writes_zero_outputs_where_no_silent_fold_takes_them` (rack lib): the unfolded,
+  declined-fold and partial-fold paths, the one clock advance over every lane, no stage run, no
+  transpose.
+- `the_effect_stage_forwards_rest_and_clocks` (`rack/tests/lane_rest.rs`) and
+  `a_builtin_stage_forwards_rest_and_clocks` (graph runtime): the #1781 verifier's F1 and F2.
+
+**Changed tests:**
+- graph-compiler's three G5 pins now read `transposes + silent_skips == BLOCKS * chains`, and one
+  asserts `silent_skips > 0` (root-approved).
+- graph `rt10` renders with the skip off under `test-support`, because the skip's input test
+  borrows `played_planes` once more on a block it does not skip. Production `played_planes` is a
+  pure `&self` lookup.
+
+**Mutants** (applied by the worker; script and results in the scratchpad `mut1107/`):
+
+| Mutant | Gate 1 | Elsewhere |
+|---|---|---|
+| Skip without zeroing the scratch | red | |
+| `fold_silent` always `+0.0` | red | |
+| `fold_silent` sign rule inverted | red | |
+| Input test reads only the left plane | red | |
+| Rest-mask check dropped | red (the process aborts on a debug assertion) | |
+| `resident_zero` not cleared before a gather | red | |
+| Skip without `advance_clocks` | green | |
+| F1 (`EffectBankStage` forwards made no-ops) | green | red in the rack forwarding test |
+| F2 (`BuiltinStage` forwards dropped) | green | red in the graph forwarding test |
+
+The clock mutants are invisible to output bits by construction: a lane at rest holds zero state,
+the silence counter only arms a threshold, and any non-zero input resets it. So the
+clock-forwarding claims are tested where state can be read.
+
+**Test value:**
+- Gate 1 is red when a skipped block leaves any host or strip bit other than a processed block
+  would: a stale scratch, a wrong signed zero in the silent fold, a missed non-zero input word, or
+  a skip while a lane is not at rest.
+- Gate 2 is red when a skipping block allocates.
+- The rack test is red when an unfolded skip leaves stale output words, a declined or partial fold
+  loses a `fold_plane` call, or a skip runs a stage, advances fewer lanes or counts a transpose.
+- The two forwarding tests are red when a stage stops forwarding the rest mask or the clock
+  advance.
+
+**Checks:**
+- `cargo fmt --all --check`: pass.
+- Workspace clippy (`--all-targets --all-features -D warnings`): pass.
+- `cargo test` on rack, graph, graph-compiler, builtins, builtins-compiler, host-core,
+  console-workload, control-plane and capi with the test-support features: 1384 passed, 0 failed.
+- AArch64 `cargo check --tests`: pass.
+- `cargo doc -D warnings`: pass.
+- `realtime_policy`: 192 regions.
+- `check-scalar-oracle-absent.py` on a release `libcapi.so` and on the wasm named twin: all 4
+  banked controls present, no scalar path.
+- `check-test-support-ci.py`: pass.
+- `check-web-audioworklet.sh` on a fresh closure: pass.
+- Simd4 runs on the arm64 CI legs at the batch push (D6).
+
+**Coverage and reach limits:**
+- **Settled live bypass.** A live lane whose session bypass is settled declines on every block
+  (`needs_dry`), so a bank that holds one never skips.
+- **Stored automation.** A fader lane with stored automation declines on every block, outside its
+  spans too (#1781), so its bank never skips.
+- **Compressor reach (worker observation, not yet diagnosed).**
+  - A lane that has reduced gain did not report rest again within 300 blocks.
+  - Thresholds at or below about -18 dB did not report rest within 200,000 samples.
+  - Likely cause: `gain_reduction_db` settles at `-0.0` or stalls short of `+0.0`.
+  - Gate 1 therefore runs its skipping banks at a 0 dB threshold. This limits the skip on real
+    material and is a follow-up for the compressor's rest bound (#1372-#1376 family).
+- **Other effects.**
+  - The gate takes about 50,000 samples at its defaults to reach rest.
+  - The transient shaper did not reach rest within 200,000 samples.
+  - Soft clip stops collapse as a console slot and the route fold as an insert.
+  - None of these three is in gate 1.
+- **Live writes.** Mid-ramp edits and bypass edges are not in gate 1: graph-compiler compiles
+  without live controls. #1781's rack test covers the bypass line.

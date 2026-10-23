@@ -587,3 +587,85 @@ fn the_live_stage_rests_only_lanes_with_no_work_and_skips_exactly() {
     assert!(pair.skips > 100, "too few skipped blocks ({})", pair.skips);
     assert!(pair.refused > 100, "too few refusals ({})", pair.refused);
 }
+
+/// Issue #1107 (the #1781 verifier's F1): the plain effect bank stage forwards the effect's rest
+/// mask and its clock advance. A stage that skips every silent block its mask allows through
+/// `advance_clocks` must render and hold (the effect's words and clocks) exactly what a twin that
+/// renders every block does, and must skip some.
+///
+/// Test value: red if `EffectBankStage` stops forwarding `lanes_at_rest` (it would never skip)
+/// or `advance_clocks` (a skipped block would leave the effect's clocks behind its twin's).
+#[test]
+fn the_effect_stage_forwards_rest_and_clocks() {
+    let state = || {
+        Arc::new(Mutex::new(MockState {
+            acc: [[0.0; 2]; LANES],
+            gain: [1.0; LANES],
+            clock: [0; LANES],
+        }))
+    };
+    let (rendered_state, skipping_state) = (state(), state());
+    let stage = |state: &Arc<Mutex<MockState>>| {
+        rack::EffectBankStage::new(
+            MockBank(Arc::clone(state)).bound(),
+            BankWidth::Four,
+            QUANTUM,
+        )
+        .expect("stage")
+    };
+    let (mut rendered, mut skipping) = (stage(&rendered_state), stage(&skipping_state));
+    let mut rng = Rng(0x1107);
+    let mut skips = 0;
+    for block in 0..40_u64 {
+        let input = if rng.below(3) == 0 {
+            let mut planes = silence();
+            for word in planes.0.iter_mut().chain(planes.1.iter_mut()) {
+                *word = rng.signed();
+            }
+            planes
+        } else {
+            silence()
+        };
+        let silent = input
+            .0
+            .iter()
+            .chain(&input.1)
+            .all(|word| word.to_bits() == 0);
+        let first_sample = block * u64::from(QUANTUM);
+        let (mut left, mut right) = input.clone();
+        rendered
+            .process(BankBlock {
+                left: &mut left,
+                right: &mut right,
+                frames: QUANTUM,
+                first_sample,
+                lanes: LANES,
+            })
+            .expect("process");
+        let (mut other_left, mut other_right) = input;
+        let block_view = BankBlock {
+            left: &mut other_left,
+            right: &mut other_right,
+            frames: QUANTUM,
+            first_sample,
+            lanes: LANES,
+        };
+        if silent && skipping.lanes_at_rest() == ALL {
+            skips += 1;
+            skipping.advance_clocks(ALL, block_view);
+        } else {
+            skipping.process(block_view).expect("process");
+        }
+        let bits = |plane: &[f32]| plane.iter().map(|word| word.to_bits()).collect::<Vec<_>>();
+        assert!(
+            bits(&left) == bits(&other_left) && bits(&right) == bits(&other_right),
+            "block {block}: output"
+        );
+        assert_eq!(
+            *rendered_state.lock().expect("state"),
+            *skipping_state.lock().expect("state"),
+            "block {block}: the effect's words, clocks included"
+        );
+    }
+    assert!(skips > 0, "the stage skipped");
+}

@@ -3376,6 +3376,7 @@ impl<L: Lane> FaderRampStage<L> {
         for channel in 0..2 {
             let current = lane_read::<L>(self.ramp[channel].current);
             for (lane, gain) in current.iter().enumerate().take(L::WIDTH) {
+                // `!mute_ramp` is defensive: the bookkeeping that ends a countdown clears it too.
                 let settled = self.remaining[channel][lane] == 0 && !self.mute_ramp[channel][lane];
                 let zero_out = self.muted[channel][lane] || !gain.is_sign_negative();
                 if !(settled && zero_out) {

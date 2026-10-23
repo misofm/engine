@@ -58,6 +58,17 @@ thread_local! {
         const { std::cell::Cell::new(false) };
     static TEST_ONLY_BANK_METER_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static TEST_ONLY_CARRY_PAYLOAD_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_ONLY_BANK_SKIP_DISABLED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Forbid (`true`) or allow (`false`) every bank chain's whole-bank silent skip (issue #1107) on
+/// this thread, from the next block a bank unit executes: the no-skip twin a differential
+/// compares the skipping plan with. Test-support only; a shipped build always may skip.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_disable_bank_skip(disabled: bool) {
+    TEST_ONLY_BANK_SKIP_DISABLED.with(|value| value.set(disabled));
 }
 
 /// Zero the count of payload bytes a plan swap's effect carry has passed through the payload
@@ -3178,6 +3189,15 @@ impl RuntimeUnit {
         }
     }
 
+    /// Blocks this unit's chain skipped whole (issue #1107); `0` for an op.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn silent_skips(&self) -> u64 {
+        match self {
+            Self::Op(_) => 0,
+            Self::Bank { chain, .. } => chain.silent_skips(),
+        }
+    }
+
     /// `[blocks rendered collapsed, cohorts that can collapse at all]` for this unit.
     ///
     /// A per-block count and a bind-time one, together, because either alone is unreadable: the
@@ -3412,6 +3432,17 @@ enum MasterPlanes<'a> {
     Host(HostMaster<'a>),
 }
 
+/// What [`BankMembers::fold_silent`] does to one master plane (issue #1107).
+#[derive(Clone, Copy)]
+enum SilentFold {
+    /// A storing first lane: the whole plane becomes this constant.
+    Fill(f32),
+    /// No store and some lane adds `+0.0`: one `+= +0.0` pass.
+    AddPositiveZero,
+    /// No store and every lane adds `-0.0`: the plane is left as it is.
+    Untouched,
+}
+
 /// One folded lane's epilogue: the route's bind-folded 2x2, and how its tile meets the master.
 ///
 /// `store` is the D9 association restated for a scatter-accumulate: the reduction this replaces is
@@ -3446,27 +3477,23 @@ impl BankMembers for ArenaMembers<'_> {
             let [gathers, residents] = count.get();
             count.set([gathers + 1, residents]);
         });
-        let buffer = self.inputs[lane];
-        if let Some(planes) = self.sources.planes
-            && let Some(claim) = self.sources.claim(lane, buffer)
-        {
-            return match planes.played_planes(claim) {
-                Some(played) => {
-                    #[cfg(any(test, feature = "test-support"))]
-                    test_only_count_source_plane(1);
-                    played
-                }
-                None => {
-                    #[cfg(any(test, feature = "test-support"))]
-                    test_only_count_source_plane(2);
-                    self.arena.read_stereo(ARENA_SILENCE_BUFFER)
-                }
-            };
+        let (planes, source) = self.gather_planes(lane);
+        #[cfg(any(test, feature = "test-support"))]
+        if source != 0 {
+            test_only_count_source_plane(source);
         }
-        self.arena.read_stereo(buffer)
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = source;
+        planes
     }
     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
         self.arena.write_stereo(self.outputs[lane])
+    }
+    /// The skip's input test (issue #1107) over the words [`Self::plane`] lends, read without
+    /// moving its gather and source-plane evidence counts: the test is not a gather.
+    fn input_is_positive_zero(&self, lane: usize, frames: usize) -> bool {
+        let ((left, right), _) = self.gather_planes(lane);
+        rack::planes_are_positive_zero(left, right, frames)
     }
     fn distinct_planes_mut(&mut self, lanes: usize, frames: usize) -> Option<BankPlaneViews<'_>> {
         match lanes {
@@ -3611,9 +3638,109 @@ impl BankMembers for ArenaMembers<'_> {
             self.fold_resident_tiles::<W, L>(cohort, transpose)
         })
     }
+
+    /// The master effect of folding `+0.0` lanes, without their routes and sums (issue #1107).
+    ///
+    /// # Why this is the fold's arithmetic over `+0.0` words
+    ///
+    /// Each lane's route is `mix2x2_block`'s `l' = lr.fma(r, ll * l)` and
+    /// `r' = rr.fma(r, rl * l)`, the unfused `(a * b) + c` on every backend. With `l = r = +0.0`
+    /// and finite coefficients, `ll * l` and `lr * r` are zeros carrying their coefficient's
+    /// sign, and their sum is `-0.0` exactly when both are, else `+0.0`. So a plane's routed word
+    /// is one constant per lane: `-0.0` exactly when both of that plane's row coefficients carry
+    /// the sign bit. A non-finite coefficient would give NaN and declines.
+    ///
+    /// Then the master, per plane, in lane order, as `fold_plane`, `fold_cohort` and
+    /// `fold_resident` accumulate it: a storing lane (only the first may store) writes its
+    /// constant, and every later lane adds its constant, master on the left. Adding `-0.0` is
+    /// an identity on every word, and adding `+0.0` maps only `-0.0` to `+0.0` and is idempotent.
+    /// So with a store the master becomes `-0.0` only if the stored and every later constant are
+    /// `-0.0`, else `+0.0`; without one, a single `+= 0.0` pass runs when some lane's constant
+    /// is `+0.0`, and nothing runs otherwise.
+    ///
+    /// A collapsed block reaches here as a dual one does: the chain's seam would have copied the
+    /// zero left plane over the zero right plane, so the words are the same `+0.0`.
+    ///
+    /// Declines, having written nothing, when the lanes are not exactly this chain's fold list in
+    /// order, the frames exceed the arena's, a later lane stores, or the master is not writable.
+    fn fold_silent(&mut self, lanes: u32, frames: u32) -> bool {
+        let frames = frames as usize;
+        let count = self.fold.len();
+        if count == 0
+            || count > 8
+            || lanes != (1_u32 << count) - 1
+            || frames == 0
+            || frames > self.arena.frames()
+            || !self.master_writable()
+            || self.fold[1..].iter().any(|lane| lane.store)
+            || self
+                .fold
+                .iter()
+                .any(|lane| lane.coefficients.iter().any(|value| !value.is_finite()))
+        {
+            return false;
+        }
+        // Per plane: the row's two coefficients, `[ll, lr]` for the left and `[rl, rr]` for the
+        // right.
+        let routed = |lane: &FoldLane, row: usize| -> f32 {
+            let [a, b] = [lane.coefficients[2 * row], lane.coefficients[2 * row + 1]];
+            if a.is_sign_negative() && b.is_sign_negative() {
+                -0.0
+            } else {
+                0.0
+            }
+        };
+        let store = self.fold[0].store;
+        let action = |row: usize| {
+            let any_positive = self
+                .fold
+                .iter()
+                .any(|lane| routed(lane, row).to_bits() == 0);
+            match (store, any_positive) {
+                (true, true) => SilentFold::Fill(0.0),
+                (true, false) => SilentFold::Fill(-0.0),
+                // The `+= +0.0` pass, which only a `-0.0` master word notices.
+                (false, true) => SilentFold::AddPositiveZero,
+                // Every add is `-0.0`, an identity on every word.
+                (false, false) => SilentFold::Untouched,
+            }
+        };
+        let actions = [action(0), action(1)];
+        let (master_left, master_right) = self.master_planes();
+        for (plane, action) in [master_left, master_right].into_iter().zip(actions) {
+            let plane = &mut plane[..frames];
+            match action {
+                SilentFold::Fill(value) => plane.fill(value),
+                SilentFold::AddPositiveZero => {
+                    for word in plane.iter_mut() {
+                        *word += 0.0;
+                    }
+                }
+                SilentFold::Untouched => {}
+            }
+        }
+        true
+    }
 }
 
 impl ArenaMembers<'_> {
+    /// A lane's gather source and how it was found: `0` an arena buffer, `1` a played source
+    /// claim, `2` a claim with no played block (the arena's silence buffer). [`Self::plane`]
+    /// counts the last two as source-plane reads; [`BankMembers::input_is_positive_zero`] reads
+    /// the same words uncounted.
+    fn gather_planes(&self, lane: usize) -> ((&[f32], &[f32]), usize) {
+        let buffer = self.inputs[lane];
+        if let Some(planes) = self.sources.planes
+            && let Some(claim) = self.sources.claim(lane, buffer)
+        {
+            return match planes.played_planes(claim) {
+                Some(played) => (played, 1),
+                None => (self.arena.read_stereo(ARENA_SILENCE_BUFFER), 2),
+            };
+        }
+        (self.arena.read_stereo(buffer), 0)
+    }
+
     /// Whether this block's master may be written: an arena master must be a reserved non-silence
     /// buffer; the host's planes are always writable.
     fn master_writable(&self) -> bool {
@@ -4425,6 +4552,8 @@ impl Runtime {
                 };
                 let frames = u32::try_from(frames).unwrap_or(u32::MAX);
                 set_block_time(chain, block_time);
+                #[cfg(any(test, feature = "test-support"))]
+                chain.set_silent_skip(!TEST_ONLY_BANK_SKIP_DISABLED.with(std::cell::Cell::get));
                 if let Some(predecessor) = predecessor {
                     #[cfg(any(test, feature = "test-support"))]
                     TEST_ONLY_RESIDENT_COUNTS.with(|count| {
@@ -11127,6 +11256,59 @@ mod tests {
             let stage = BuiltinStage(Box::new(LiveLaneBank(mask)));
             assert_eq!(BankStage::live_lanes(&stage), mask);
         }
+    }
+
+    /// A builtin bank at rest on `.0`, recording every clock advance it is handed.
+    struct RestingBank(u32, Arc<std::sync::Mutex<Vec<(u32, u32)>>>);
+    impl GraphPreparedBuiltinBankProcessor for RestingBank {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+        fn builtin_lanes_at_rest(&self) -> u32 {
+            self.0
+        }
+        fn advance_builtin_clocks(&mut self, lanes_mask: u32, frames: u32) {
+            self.1.lock().expect("advances").push((lanes_mask, frames));
+        }
+        fn process(
+            &mut self,
+            _: &mut [f32],
+            _: &mut [f32],
+            _: u32,
+            _: u64,
+        ) -> Result<(), RenderError> {
+            Ok(())
+        }
+    }
+
+    /// #1107 (the #1781 verifier's F2): `BuiltinStage` forwards its bank's rest mask, and its
+    /// clock advance with the skipped block's length, to the processor.
+    ///
+    /// Test value: red if the adapter drops either forward -- the chain would then never skip a
+    /// builtin bank, or a skipped block would leave the input's silence counters behind a rendered
+    /// run's, which no rendered bit shows (a lane at rest holds zero state, which the counters'
+    /// armed rest threshold leaves as it is), so the compiled-plan differential cannot see it.
+    #[test]
+    fn a_builtin_stage_forwards_rest_and_clocks() {
+        let advances = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut stage = BuiltinStage(Box::new(RestingBank(0b1011, Arc::clone(&advances))));
+        assert_eq!(BankStage::lanes_at_rest(&stage), 0b1011);
+        let (mut left, mut right) = ([0.0_f32; 16], [0.0_f32; 16]);
+        BankStage::advance_clocks(
+            &mut stage,
+            0b1111,
+            BankBlock {
+                left: &mut left,
+                right: &mut right,
+                frames: 4,
+                first_sample: 0,
+                lanes: 4,
+            },
+        );
+        assert_eq!(*advances.lock().expect("advances"), [(0b1111, 4)]);
     }
 
     #[test]
