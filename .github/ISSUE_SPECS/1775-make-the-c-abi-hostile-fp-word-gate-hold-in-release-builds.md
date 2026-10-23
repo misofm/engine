@@ -28,3 +28,10 @@ No new test; the fix restores an existing gate's power in release builds.
 ## Dependencies
 
 None.
+
+## Evidence (attempt 1, 2026-10-23)
+
+- Cause: test-only. `assert_the_hostile_word_rounds_the_offsets_sum` called `session::vca_offsets_sum([HAND_DB, VCA_DB, 0.0])` on literal constants with no `black_box`, so under `--release` LLVM folded the `f64` sum at compile time (round to nearest) and the hostile word never reached it. The sibling `assert_the_hostile_word_rounds_the_composition` already used `black_box` for the same reason. Production is unaffected: its inputs are run-time model values, and the guard in `SessionState::command` is unchanged.
+- Fix: `black_box` on the three inputs and on the sum, as in the sibling guard.
+- Gate 1: the test passes in debug and in `--release` (reproduced red in `--release` before the fix).
+- Gate 2: mutant `under_hostile_fp_env` skips `write_fp_control_word(hostile...)` (crates/lane/src/fpenv.rs, restored): red in both profiles at the composition guard; with that guard's call also removed, red in both profiles at "S sums alike under the hostile word".
