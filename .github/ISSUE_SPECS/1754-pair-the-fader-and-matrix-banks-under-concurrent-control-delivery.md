@@ -2,6 +2,8 @@
 
 Found by the #1750 implementer (2026-10-22), checked by root.
 
+Superseded by #1767 (owner, 2026-10-23: remove the fused stage instead of pairing it); the diagnosis below stays as its evidence.
+
 ## Problem
 
 The fused fader and matrix stage (#466; its settled pass #881 and its ramping pass #890) forms only when both banks use `BuiltinControlDelivery::BetweenRenderCalls` (`make_fader_matrix`, `crates/builtins-compiler/src/lib.rs` near `:5505-5525`). No product host prepares that delivery:

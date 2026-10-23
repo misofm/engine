@@ -31,8 +31,8 @@ start at rest at the adopted block.
   arrays of gain, mute and `remaining`; `FaderLane { gain, muted }` (`:798`). The stage's
   `set_mute` (`:2774`) retargets to 0 or back to the fader gain over a window, and a settled mute is
   exact `+0.0` (doc at `:4150-4162`). Per-node form: `FaderMuteRampBuiltins` (`:4163`).
-- Owners in `crates/builtins-compiler/src/lib.rs`: `FaderBankProcessor` (`:715`), the browser's
-  fused `FaderMatrixBankProcessor` (`:831`), `LiveControlFaderProcessor` (`:4377`). Graph traits:
+- Owners in `crates/builtins-compiler/src/lib.rs`: `FaderBankProcessor` (`:715`),
+  `LiveControlFaderProcessor` (`:4377`). Graph traits:
   `GraphPreparedBuiltinBankProcessor` (`crates/graph/src/lib.rs:1285`), `GraphRuntimeProcessor`
   (`:2447`).
 - Render entry: `GraphExecutor::render` (`crates/graph/src/lib.rs:3228`) calls the source set's
