@@ -168,7 +168,7 @@ impl<L: Lane> GateState<L> {
 /// * **`gain_db`, `open`, `hold`: a one-frame fixed point.** They are not a closed form: with a
 ///   `+0.0` detector the level is the clamped floor, the gate may stay closed (hold untouched) or
 ///   stay open with `hold` reloaded, and `gain_db` stalls at a bit-stable value that need not equal
-///   the curve target. So the kernel's own [`channel_step`] runs one frame on a copy, with own,
+///   the curve target. So the kernel's own `channel_step` runs one frame on a copy, with own,
 ///   partner and dry all `+0.0` (every link mode's detector is then `+0.0`), and the three words
 ///   must come out bit-identical and the output `+0.0` by bits. With settled ramps and constant
 ///   input a block is `frames` applications of that same frame map to the same state, so by

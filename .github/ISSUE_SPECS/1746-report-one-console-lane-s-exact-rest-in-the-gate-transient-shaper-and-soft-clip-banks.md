@@ -145,3 +145,11 @@ main.
   open leg; the verifier showed the open-leg mutant red again at W4 and W8 with this change), and
   gate 2's doc names the connected scalar arm. Stated limit: the `coef[channel]` mutant is red in
   gate 1 at W8 only; the code is generic over the lane width, and x86 runs W8.
+
+## Evidence (attempt 3, 2026-10-23)
+
+- CI on PR #1766 failed in two places that the x86 host did not build: the transient shaper's rest
+  test named `BankWidth::Eight` without the `avx2` gate (AArch64 test builds), and the gate's
+  `channel_at_rest` doc linked the private `channel_step` (`cargo doc -D warnings`). Root fixed
+  both (tests and docs only); `cargo check --target aarch64-unknown-linux-gnu --tests` on the three
+  crates and their `cargo doc -D warnings` are clean.

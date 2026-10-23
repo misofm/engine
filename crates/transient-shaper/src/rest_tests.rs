@@ -66,6 +66,7 @@ fn copy_bank<L: Lane, const W: usize>(
 fn width_of<const W: usize>() -> BankWidth {
     match W {
         4 => BankWidth::Four,
+        #[cfg(target_feature = "avx2")]
         8 => BankWidth::Eight,
         _ => unreachable!("a vector width"),
     }
