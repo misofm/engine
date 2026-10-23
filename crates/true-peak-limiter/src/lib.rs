@@ -47,6 +47,8 @@ use core::cell::Cell;
 pub mod corpus;
 #[cfg(test)]
 mod rest_tests;
+#[cfg(test)]
+mod swap_tests;
 
 use effect_contract::control::{PreparedReason, RebuildReason};
 use effect_contract::{
@@ -852,9 +854,14 @@ impl ChannelState {
     ///
     /// Per lane, because `window` is a per-lane preparation parameter — this is the control-plane
     /// mirror of the same fact [`lanes_uniform`] gates on. The phase cycles `0 .. Wb - 1` one step
-    /// per frame, so `frames` steps land on `(phase + frames) mod Wb`.
-    fn advance_rest_phase(&mut self, frames: usize) {
-        for (phase, shape) in self.phase.iter_mut().zip(self.lane.iter()) {
+    /// per frame, so `frames` steps land on `(phase + frames) mod Wb`. Only the lanes of `lanes`
+    /// (bit `l` is lane `l`) advance: the fast path passes every lane, and
+    /// [`advance_clocks`](PreparedNativeEffectBank::advance_clocks) passes its caller's mask.
+    fn advance_rest_phase(&mut self, lanes: u32, frames: usize) {
+        for (lane, (phase, shape)) in self.phase.iter_mut().zip(self.lane.iter()).enumerate() {
+            if lanes & (1 << lane) == 0 {
+                continue;
+            }
             let window = shape.window as usize;
             *phase = ((*phase as usize + frames % window) % window) as u32;
         }
@@ -3743,8 +3750,8 @@ impl<L: Lane> LimiterCore<L> {
             // **bit-identical** to the block that ran, rather than merely observationally
             // equivalent to it: the weaker invariant would have to be re-proved every time the ring
             // handling changed, and `snapshot_track` would expose the difference immediately.
-            self.left.advance_rest_phase(frames);
-            self.right.advance_rest_phase(frames);
+            self.left.advance_rest_phase(every_lane(L::WIDTH), frames);
+            self.right.advance_rest_phase(every_lane(L::WIDTH), frames);
             self.cursors.advance(frames, &self.shape);
             #[cfg(test)]
             {
@@ -3906,7 +3913,7 @@ impl<L: Lane> LimiterCore<L> {
             && ramps_are_stationary(&self.left.release)
             && block_is_positive_zero(&left_io[..words]);
         if quiet && self.silent_fixed_point {
-            self.left.advance_rest_phase(frames);
+            self.left.advance_rest_phase(every_lane(L::WIDTH), frames);
             self.cursors.advance(frames, &self.shape);
             #[cfg(test)]
             {
@@ -3979,6 +3986,51 @@ impl<L: Lane> LimiterCore<L> {
     /// lane's van Herk `phase`.
     fn lanes_at_rest(&self) -> u32 {
         self.left.lanes_at_silent_rest::<L>() & self.right.lanes_at_silent_rest::<L>()
+    }
+
+    /// What one dual block of `frames` frames of exact `+0.0` input leaves on a bank whose lanes
+    /// in `lanes` are at rest (issue #1747), without rendering it.
+    ///
+    /// The clocks are the two [`lanes_at_rest`](Self::lanes_at_rest) leaves out: the shared
+    /// [`Cursors`] always advance, and each lane of `lanes` advances its van Herk `phase` on both
+    /// channels. Every other word of a resting lane is a fixed point of a `+0.0` frame (see
+    /// [`ChannelState::lanes_at_silent_rest`]), so the clocks are all a rendered block moves.
+    ///
+    /// The three bank flags follow [`process_block`](Self::process_block) on that block, so the
+    /// skipped block leaves them as the rendered one would, not merely sound:
+    ///
+    /// * with the silent claim standing and the bypass it was earned on still in force, the
+    ///   rendered block takes the fast path, which touches no flag;
+    /// * otherwise it renders the body: the #990 record becomes the block's linked decision, and
+    ///   the claim is earned, because the block is quiet (input `+0.0`, ramps stationary at rest)
+    ///   and every lane is at rest, when the bypass in force is the one the claim records and the
+    ///   whole bank is skipped. Then the bypass in force is recorded.
+    ///
+    /// A mask that leaves a lane out is not a whole-bank skip, so it withdraws the claim rather
+    /// than keep or earn it: the claim only ever buys speed, and withdrawing it is always sound.
+    ///
+    /// The right channel's phase advances on a collapsed bank too. A collapsed block would leave
+    /// it frozen, but a collapsed bank's right channel is stale by contract and
+    /// [`desymmetrize`](Self::desymmetrize) overwrites it before any dual block reads it.
+    ///
+    /// Bounded by the lane count: one remainder per lane and per cursor, never a per-frame step.
+    fn advance_clocks(&mut self, lanes: u32, frames: usize) {
+        let lanes = lanes & every_lane(L::WIDTH);
+        self.left.advance_rest_phase(lanes, frames);
+        self.right.advance_rest_phase(lanes, frames);
+        self.cursors.advance(frames, &self.shape);
+        let whole = lanes == every_lane(L::WIDTH);
+        let bypass_held = self.silent_bypass == self.coefficients.bypass;
+        if !(self.silent_fixed_point && bypass_held) {
+            self.gain_linked = self.coefficients.link_max
+                && self.gain_linked
+                && designed_gain_agree(&self.left, &self.right);
+            self.silent_fixed_point = bypass_held;
+            self.silent_bypass = self.coefficients.bypass;
+        }
+        if !whole {
+            self.silent_fixed_point = false;
+        }
     }
 }
 
@@ -4657,6 +4709,12 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     /// silent fast path does.
     fn lanes_at_rest(&self) -> u32 {
         self.core.lanes_at_rest()
+    }
+
+    /// Issue #1747: see [`LimiterCore::advance_clocks`].
+    fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        debug_assert!(frames <= self.core.quantum);
+        self.core.advance_clocks(lanes_mask, frames as usize);
     }
 
     fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
