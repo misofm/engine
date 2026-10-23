@@ -60,10 +60,10 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
     );
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version, 1);
     for (rate, bytes) in [
-        (44_100u32, 192u32),
-        (48_000, 192),
-        (88_200, 192),
-        (96_000, 192),
+        (44_100u32, 256u32),
+        (48_000, 256),
+        (88_200, 256),
+        (96_000, 256),
     ] {
         let initial = values();
         let mut prepared = request(&initial);
@@ -73,7 +73,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
             prepared.sample_rate,
             prepared.quality,
         );
-        prepared.limits.maximum_total_state_bytes = 384;
+        prepared.limits.maximum_total_state_bytes = 512;
         // The contract requires a positive capacity limit even when the prepared effect needs no
         // scratch; one byte is the smallest admissible declaration for the exact zero-byte row.
         prepared.limits.maximum_scratch_bytes = 1;
@@ -1173,9 +1173,9 @@ fn bank_requests_are_validated_before_any_fallback() {
         .expect("state bytes")
         .checked_add(quality.scratch_fixed_bytes)
         .expect("prepared bytes");
-    assert_eq!(per_track, 384);
-    assert_eq!(per_track * 4, 1_536);
-    assert_eq!(per_track * 8, 3_072);
+    assert_eq!(per_track, 512);
+    assert_eq!(per_track * 4, 2_048);
+    assert_eq!(per_track * 8, 4_096);
 }
 
 /// Issue #1088 (console strip P2a), gate 3: the multiband compressor has not opted into padding (it is not padded until #1069 closes), so
