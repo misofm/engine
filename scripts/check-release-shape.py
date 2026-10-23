@@ -233,7 +233,7 @@ VALID_CARGO_TOML = (
     "members = []\n"
     "\n"
     "[workspace.package]\n"
-    "license = \"Apache-2.0\"\n"
+    "license = \"FSL-1.1-ALv2\"\n"
     "\n"
     "[profile.release]\n"
     "lto = \"fat\"\n"

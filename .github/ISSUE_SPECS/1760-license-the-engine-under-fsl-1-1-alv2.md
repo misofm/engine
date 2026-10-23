@@ -41,3 +41,11 @@ No new test. The existing policy mutants (`mutate_workspace_license`, `mutate_np
 ## Dependencies
 
 None. #314's spec is history.
+
+## Evidence (attempt 1)
+
+- Gate 1: the `diff` of LICENSE against the template with the notice line filled in is empty. New LICENSE sha256 `3e1f69ef8217e8c1f6fe7e8659f4ca909941eefe09e236ade15c9cd975d963ac`.
+- Gate 2: `check-workspace-policy.sh` and `test-workspace-policy.sh` pass. In a scratch copy, the old Apache text fails with `LICENSE is not the canonical FSL-1.1-ALv2 text`.
+- Gate 3: the remaining tracked hits are dependency licenses (wasmtime, playwright and other lockfile dependency entries, `object`, `rustc-demangle`, ViSQOL), the vendored libm line in `THIRD_PARTY_LICENSES.md`, the NOTICE lineage line (D4) and this spec. One finding is outside the authorized paths: `docs/handoffs/control-smoothing-defaults/measure/Cargo.toml` (the #1055 research harness, its own workspace root) says `license = "Apache-2.0"` for project work. Root decides whether research keeps it.
+- Gate 4: `cargo metadata --no-deps` reports `FSL-1.1-ALv2` for all 42 workspace packages and for `session-fuzz`.
+- Gate 5: `python3 scripts/check-release-shape.py --self-test` passes.
