@@ -3958,6 +3958,45 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         PreparedParametricEq::lanes_at_rest(self)
     }
 
+    /// The EQ's clocks are the two channels' silence counters and nothing else (issue #1747): a
+    /// lane at rest has no ramp in flight, so its countdown is `0` and stays there, and a rendered
+    /// `+0.0` block leaves every other word where it was ([`Channel::rest_lanes`]). That block
+    /// leaves each counter of the lane at `min(run + frames, 2^24)` on both channels
+    /// ([`silence_block`] and [`silence_skip_block`] agree with [`silence_advance`] on an
+    /// all-zero lane), so a masked lane takes exactly that: one vector add, one minimum and one
+    /// select per channel, bounded independent of `frames`.
+    ///
+    /// A prepared bypass renders nothing and advances nothing, so it advances nothing here. A
+    /// rendered block after which every lane, padded lanes included, is at rest sets
+    /// `silent_fixed_point`, so a mask that covers the whole bank sets it too; a partial mask
+    /// leaves it to the render of the other lanes. A collapsed bank's render advances only the
+    /// left counter; its right channel is dead until the disengage copies the left one over it
+    /// ([`desymmetrize`](PreparedParametricEq::desymmetrize)), so advancing it too moves no word
+    /// that is read.
+    fn advance_clocks(&mut self, lanes: u32, frames: u32) {
+        let bank = all_lanes::<W>();
+        let bits = lanes & bank;
+        debug_assert_eq!(bits, lanes, "a lane past the bank");
+        debug_assert!(frames <= self.quantum(), "a block longer than the quantum");
+        debug_assert_eq!(
+            PreparedParametricEq::lanes_at_rest(self) & bits,
+            bits,
+            "a lane not at rest"
+        );
+        if self.bypass || bits == 0 {
+            return;
+        }
+        let mask = lanes_mask::<L>(bits);
+        for channel in [&mut self.left, &mut self.right] {
+            let mut advanced = channel.silence;
+            silence_advance(&mut advanced, frames as usize);
+            channel.silence = L::select(mask, advanced, channel.silence);
+        }
+        if bits == bank {
+            self.silent_fixed_point = true;
+        }
+    }
+
     fn process_bank_mono(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
         self.process_bank_inner::<true>(block)
     }
