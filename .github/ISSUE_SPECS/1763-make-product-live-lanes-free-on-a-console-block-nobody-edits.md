@@ -120,3 +120,8 @@ A test is owed only for a new mechanism: it turns red when the skipped work was 
   per lane per block, which cannot skip (above); (3) noise: the no-lane console row moved 0.72 us
   between the two rounds on a loaded host. The next candidate is (1), in
   `crates/builtins-compiler/src/lib.rs`, shared with #1765 and not started without root.
+- The app shape did not move: +2.36 / +1.75 us after, against +2.11 / +1.89 us before. So step 1's
+  estimate of about 1.2 us for its EQ and compressor lanes was not the cell walk, and the reasons
+  above are plausible for the app shape but not measured.
+- Verifier follow-up: the quiet-slot test (`rack/tests/lane_swap.rs`) gains a prepared-target step;
+  the quiet mark without its `targets` term turns it red on the first quiet block after the target.

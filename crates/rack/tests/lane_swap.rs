@@ -19,10 +19,11 @@ use bench_support::alloc::{assert_installed, current_thread_counters, current_th
 use effect_contract::{
     BankProcessReport, BankWidth, BypassSwitch, EffectBankProcessBlock, EffectCellWriter,
     EffectControlLane, EffectControlRecord, EffectId, EffectLaneShape, EffectLaneSpec,
-    EffectProgramKey, EffectQuality, LatencySamples, LinkMode, ObservationCadence,
-    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
-    ObservationLane, ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
-    ParameterUnit, PreparedBankMetadata, PreparedEffectBank, PreparedNativeEffectBank,
+    EffectProgramKey, EffectQuality, EffectTargetError, LatencySamples, LinkMode,
+    ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
+    ObservationFold, ObservationKind, ObservationLane, ObservationSample, ObservationTapId,
+    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, ParameterChannelPolicy, ParameterUnit,
+    PreparedBankMetadata, PreparedEffectBank, PreparedEffectTarget, PreparedNativeEffectBank,
     PreparedPorts, PreparedSidechainPort, ResetKind, StatePayloadError, StatePayloadInput,
     StatePayloadOutput, StatePayloadSizes, TailSamples, effect_control_lane,
 };
@@ -341,6 +342,30 @@ impl PreparedNativeEffectBank for StripBank {
         Some(8)
     }
 
+    /// Target slot 0's word 0 is a gain the ramp restarts toward, as a parameter span does, so
+    /// a target applied twice renders other bits than one applied once.
+    fn apply_prepared_target_lane(
+        &mut self,
+        lane: usize,
+        target: &PreparedEffectTarget,
+    ) -> Result<(), EffectTargetError> {
+        let channels = self
+            .lanes
+            .get_mut(lane)
+            .filter(|_| target.slot == 0)
+            .ok_or(EffectTargetError::Shape)?;
+        let value = f32::from_bits(target.words[0]);
+        match target.channel {
+            ParameterChannel::Left => channels[0].retarget(value),
+            ParameterChannel::Right => channels[1].retarget(value),
+            ParameterChannel::Both => {
+                channels[0].retarget(value);
+                channels[1].retarget(value);
+            }
+        }
+        Ok(())
+    }
+
     fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
         let (Some(own), Ok(word)) = (self.defaults.get(lane), <[u8; 8]>::try_from(&*bytes)) else {
             return false;
@@ -427,6 +452,11 @@ struct World {
 
 impl World {
     fn new(width: BankWidth, seed: u64, shape: Shape) -> Self {
+        Self::with_target_slots(width, seed, shape, 0)
+    }
+
+    /// [`Self::new`] with `target_slots` prepared-target slots on every live lane.
+    fn with_target_slots(width: BankWidth, seed: u64, shape: Shape, target_slots: usize) -> Self {
         let lanes = width.lanes() as usize;
         let mut rng = Rng(seed);
         let (gate, pin) = RevisionGate::pair(0);
@@ -443,7 +473,7 @@ impl World {
                     EffectLaneSpec {
                         shape: EffectLaneShape::from_live_parameters(
                             [(0, ParameterChannelPolicy::PerLane)],
-                            0,
+                            target_slots,
                         ),
                         bypass: false,
                         observation_depth: 2,
@@ -923,14 +953,17 @@ fn quiet(
 /// Issue #1763: a live slot that skips its cell walk under a snapshot publication it already read
 /// and found quiet renders and publishes, block for block, what the same world renders when every
 /// block reads every lane (`LiveSnapshot::ALL`, which never skips; every write here is published
-/// before the block that reads it, so the two read the same writes). Each step needs the walk on a
-/// block that brings no new publication: a bypass crossfade that runs on over quiet blocks, a lane
-/// moved mid-crossfade into a quiet chain (once as the swap's peer, once into the chain the swap is
-/// called on), a plan-swap carry's unread write taken into a quiet slot, and a write on a chain
-/// quiet for several blocks.
+/// before the block that reads it, so the two read the same writes). Each step is followed by
+/// blocks that bring no new publication: a prepared target, which stages no span, a bypass
+/// crossfade, a lane moved mid-crossfade into a quiet chain (once as the swap's peer, once into
+/// the chain the swap is called on), a plan-swap carry's unread write taken into a quiet slot, and
+/// a write on a chain quiet for several blocks. The crossfade steps do not test the `ramping` term
+/// of the quiet mark: a walk's verdicts kept over a running crossfade render the same bits, and
+/// the term only refreshes them once the crossfade settles, which saves cost.
 ///
-/// Test value: a skip that ignores a running crossfade, that survives a lane swap on either side
-/// or a carry, or that lets `LiveSnapshot::ALL` skip; no other test renders a live slot under an
+/// Test value: a quiet mark that ignores a staged target (the target is applied again on every
+/// quiet block and restarts the gain ramp), that survives a lane swap on either side or a carry,
+/// or that lets `LiveSnapshot::ALL` skip; no other rack test renders a live slot under an
 /// unchanged publication across these steps.
 #[test]
 fn a_quiet_live_slot_renders_what_one_read_every_block_does() {
@@ -941,9 +974,9 @@ fn a_quiet_live_slot_renders_what_one_read_every_block_does() {
     };
     for &width in BankWidth::ALL {
         let lanes = width.lanes() as usize;
-        let mut skipping = World::new(width, 0x1763, shape);
+        let mut skipping = World::with_target_slots(width, 0x1763, shape, 1);
         skipping.snapshot = true;
-        let mut reading = World::new(width, 0x1763, shape);
+        let mut reading = World::with_target_slots(width, 0x1763, shape, 1);
         let mut scratch = skipping.scratch();
         let mut rng = Rng(0x1763);
         let mut block = 0;
@@ -956,6 +989,20 @@ fn a_quiet_live_slot_renders_what_one_read_every_block_does() {
         let record = gain(&mut rng);
         for world in [&mut skipping, &mut reading] {
             world.push(0, record);
+        }
+        quiet(&mut skipping, &mut reading, &mut rng, &mut block, 3);
+        // A prepared target on chain 0's first lane: it stages a target and no span, and its gain
+        // ramp (eleven frames) outlasts a block.
+        let mut words = [0_u32; PREPARED_EFFECT_TARGET_WORDS];
+        words[0] = 0.625_f32.to_bits();
+        let target = EffectControlRecord::PreparedTarget(PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Both,
+            words,
+        });
+        let targeted = skipping.strip_at((0, 0));
+        for world in [&mut skipping, &mut reading] {
+            world.push(targeted, target);
         }
         quiet(&mut skipping, &mut reading, &mut rng, &mut block, 3);
         // A crossfade toward bypass starts on chain 1's last lane; chain 0 reads the publication
@@ -993,7 +1040,7 @@ fn a_quiet_live_slot_renders_what_one_read_every_block_does() {
                         EffectLaneSpec {
                             shape: EffectLaneShape::from_live_parameters(
                                 [(0, ParameterChannelPolicy::PerLane)],
-                                0,
+                                1,
                             ),
                             bypass: false,
                             observation_depth: 2,
