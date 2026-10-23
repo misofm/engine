@@ -2762,38 +2762,6 @@ mod carry_tests {
         words
     }
 
-    /// #1763: a line fed without the dry copy over a long unbypassed stretch, with blocks shorter
-    /// than, as long as and longer than the line, hands the first bypassed block the same delayed
-    /// words as a line captured on every block.
-    ///
-    /// Test value: a feed that writes the oldest words of a long block, starts at the wrong
-    /// position or leaves the cursor elsewhere renders other bits on the bypass edge.
-    #[test]
-    fn a_line_fed_without_the_dry_copy_matches_a_captured_line() {
-        const LANES: usize = 2;
-        const LATENCY: usize = 3;
-        let mut captured = BypassShunt::new(5 * LANES, LATENCY * LANES);
-        let mut fed = BypassShunt::new(5 * LANES, LATENCY * LANES);
-        let mut f = 0;
-        for frames in [1, 2, 5, 3, 1, 4, 5, 5, 2, 3] {
-            let (mut left, mut right) = (Vec::new(), Vec::new());
-            for _ in 0..frames {
-                let (l, r) = frame(f, LANES);
-                left.extend(l);
-                right.extend(r);
-                f += 1;
-            }
-            captured.capture(&left, &right);
-            fed.feed_line(&left, &right);
-        }
-        assert_eq!(
-            drain(&mut fed, LANES, LATENCY),
-            drain(&mut captured, LANES, LATENCY)
-        );
-        // No line, nothing fed.
-        BypassShunt::new(LANES, 0).feed_line(&[1.0; LANES], &[1.0; LANES]);
-    }
-
     /// #1747: a swap of two lanes' latency words, across two lines of other cursors and within
     /// one line, hands each lane the other's delayed samples in age order and leaves every other
     /// lane and the cursors alone; a shape mismatch exchanges nothing. The rack swaps only

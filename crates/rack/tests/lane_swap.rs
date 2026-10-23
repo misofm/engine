@@ -421,6 +421,8 @@ struct World {
     defaults: [[Arc<[AtomicU64]>; 3]; 2],
     /// Mono inputs and both-channel writes ([`Shape::collapse`]).
     collapsing: bool,
+    /// Render under the gate's snapshot, as production does; [`LiveSnapshot::ALL`] otherwise.
+    snapshot: bool,
 }
 
 impl World {
@@ -546,6 +548,7 @@ impl World {
                 .try_into()
                 .expect("two chains"),
             collapsing,
+            snapshot: false,
         }
     }
 
@@ -596,9 +599,14 @@ impl World {
             planes[chain].left[lane].clone_from(left);
             planes[chain].right[lane].clone_from(right);
         }
+        let snapshot = if self.snapshot {
+            self.gate.snapshot()
+        } else {
+            LiveSnapshot::ALL
+        };
         for (chain, planes) in self.chains.iter_mut().zip(planes.iter_mut()) {
             chain
-                .run(planes, QUANTUM, self.first_sample, LiveSnapshot::ALL)
+                .run(planes, QUANTUM, self.first_sample, snapshot)
                 .expect("run");
         }
         self.first_sample += u64::from(QUANTUM);
@@ -883,6 +891,138 @@ fn a_swapped_strip_renders_and_publishes_what_its_twin_does() {
                 collapse_case(width, lanes, seed, case);
             }
         }
+    }
+}
+
+/// Render `blocks` blocks with no write in both worlds and assert every strip's output and
+/// publications agree.
+fn quiet(skipping: &mut World, reading: &mut World, rng: &mut Rng, block: &mut usize, blocks: usize) {
+    for _ in 0..blocks {
+        let inputs = inputs(rng, reading.strips(), false);
+        let (got, expected) = (skipping.render(&inputs), reading.render(&inputs));
+        for strip in 0..reading.strips() {
+            assert!(
+                got[strip] == expected[strip],
+                "block {block}: strip {strip} differs from a bank read every block"
+            );
+        }
+        assert!(
+            skipping.publications() == reading.publications(),
+            "block {block}: a publication differs from a bank read every block"
+        );
+        *block += 1;
+    }
+}
+
+/// Issue #1763: a live slot that skips its cell walk under a snapshot publication it already read
+/// and found quiet renders and publishes, block for block, what the same world renders when every
+/// block reads every lane (`LiveSnapshot::ALL`, which never skips; every write here is published
+/// before the block that reads it, so the two read the same writes). Each step needs the walk on a
+/// block that brings no new publication: a bypass crossfade that runs on over quiet blocks, a lane
+/// moved mid-crossfade into a quiet chain (once as the swap's peer, once into the chain the swap is
+/// called on), a plan-swap carry's unread write taken into a quiet slot, and a write on a chain
+/// quiet for several blocks.
+///
+/// Test value: a skip that ignores a running crossfade, that survives a lane swap on either side
+/// or a carry, or that lets `LiveSnapshot::ALL` skip; no other test renders a live slot under an
+/// unchanged publication across these steps.
+#[test]
+fn a_quiet_live_slot_renders_what_one_read_every_block_does() {
+    let shape = Shape {
+        padded: false,
+        slot_gap: false,
+        collapse: None,
+    };
+    for &width in BankWidth::ALL {
+        let lanes = width.lanes() as usize;
+        let mut skipping = World::new(width, 0x1763, shape);
+        skipping.snapshot = true;
+        let mut reading = World::new(width, 0x1763, shape);
+        let mut scratch = skipping.scratch();
+        let mut rng = Rng(0x1763);
+        let mut block = 0;
+        let carried = lanes - 1;
+        for world in [&mut skipping, &mut reading] {
+            world
+                .stage_mut::<LiveControlEffectBankStage>(0, 1)
+                .install_carry_slots(carried);
+        }
+        let record = gain(&mut rng);
+        for world in [&mut skipping, &mut reading] {
+            world.push(0, record);
+        }
+        quiet(&mut skipping, &mut reading, &mut rng, &mut block, 3);
+        // A crossfade toward bypass starts on chain 1's last lane; chain 0 reads the publication
+        // once and is quiet under it.
+        let fading = skipping.strip_at((1, lanes - 1));
+        for world in [&mut skipping, &mut reading] {
+            world.push(fading, bypass(true));
+        }
+        quiet(&mut skipping, &mut reading, &mut rng, &mut block, 1);
+        // Mid-crossfade, into the quiet chain 0 as the swap's peer.
+        for world in [&mut skipping, &mut reading] {
+            world
+                .swap((1, lanes - 1), (0, 0), &mut scratch)
+                .expect("a cross-chain swap");
+        }
+        quiet(&mut skipping, &mut reading, &mut rng, &mut block, 4);
+        // Back toward wet, then into the quiet chain 1 as the chain the swap is called on.
+        for world in [&mut skipping, &mut reading] {
+            world.push(fading, bypass(false));
+        }
+        quiet(&mut skipping, &mut reading, &mut rng, &mut block, 1);
+        for world in [&mut skipping, &mut reading] {
+            world
+                .swap((1, 0), (0, 0), &mut scratch)
+                .expect("a cross-chain swap");
+        }
+        quiet(&mut skipping, &mut reading, &mut rng, &mut block, 4);
+        // A predecessor's unread write carried into chain 0's quiet live slot.
+        for world in [&mut skipping, &mut reading] {
+            let superseded = LiveValuesSuperseded::new();
+            let (gate, mut pin) = RevisionGate::pair(0);
+            let controls = (0..lanes)
+                .map(|lane| {
+                    let (mut writer, control) = effect_control_lane(
+                        EffectLaneSpec {
+                            shape: EffectLaneShape::from_live_parameters(
+                                [(0, ParameterChannelPolicy::PerLane)],
+                                0,
+                            ),
+                            bypass: false,
+                            observation_depth: 2,
+                        },
+                        &superseded,
+                    )
+                    .expect("lane");
+                    if lane == carried {
+                        let stamp = pin.stamp(1).expect("a legal revision");
+                        writer.write(stamp, record).expect("a gain cell");
+                        pin.publish(&gate, 1);
+                    }
+                    Some(control)
+                })
+                .collect();
+            let source = LiveControlEffectBankStage::new(
+                StripBank::new(width, &mut Rng(0x50_75), false).bound(),
+                width,
+                QUANTUM,
+                controls,
+                (0..lanes).map(|_| None).collect(),
+                LATENCY,
+            )
+            .expect("stage");
+            let stage = world.stage_mut::<LiveControlEffectBankStage>(0, 1);
+            assert!(stage.carry_lane_from(carried, &source, carried, &mut scratch));
+        }
+        quiet(&mut skipping, &mut reading, &mut rng, &mut block, 3);
+        // A write on chain 1 after its quiet stretch.
+        let written = skipping.strip_at((1, 1 % lanes));
+        let record = gain(&mut rng);
+        for world in [&mut skipping, &mut reading] {
+            world.push(written, record);
+        }
+        quiet(&mut skipping, &mut reading, &mut rng, &mut block, 2);
     }
 }
 
