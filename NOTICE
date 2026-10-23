@@ -5,8 +5,8 @@ This product includes software developed by the Miso Engine contributors.
 
 The original material in this repository is licensed under the Functional
 Source License, Version 1.1, ALv2 Future License (FSL-1.1-ALv2). See LICENSE.
-Copies published before this change remain available under the Apache
-License, Version 2.0, to those who received them.
+Copies published before this relicense (2026-10-23, issue #1760) remain
+licensed under the Apache License, Version 2.0.
 
 The browser PCM feed ring and attachment sources are adapted from
 misofm/engine-web-adapter at commit 63b4ee6212287000ff85e1cfa969d385f6246d2d.
