@@ -2736,7 +2736,8 @@ const PRODUCT_LANES_WORKLOAD: Workload = Workload::SixtyFourTrackConsole;
 /// The record kind of the product-lane row (issue #1758).
 const PRODUCT_LANES_WORKLOAD_KIND: &str = "sixty_four_track_console_product_lanes";
 
-/// Pinned verbatim in the validator, for the reason every method sentence in this stream is.
+/// Held by the record's key list only: the subject writes it as a constant, so the validator does
+/// not pin its text.
 const PRODUCT_LANES_STATISTICAL_METHOD: &str = "one plan rendered back to back by the session \
 rows' loop; nearest-rank percentiles over per-block nanoseconds; one warmup pass and two measured \
 rounds; descriptive only; no threshold";
