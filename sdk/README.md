@@ -476,4 +476,4 @@ bash ../scripts/check-sdk-types.sh
 `npm run check:assets` requires Rust. `npm run build` prepares the packaged artifacts;
 `npm run check:package` additionally checks a fresh packed consumer, public imports, rendering,
 and digest rejection. See the [engine guide](https://github.com/misofm/engine/blob/main/AGENTS.md)
-for realtime, DSP, and contribution requirements. Licensed under Apache-2.0.
+for realtime, DSP, and contribution requirements. Licensed under FSL-1.1-ALv2.

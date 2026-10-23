@@ -84,9 +84,10 @@ toml_array_names() {
     ' "$manifest"
 }
 
-# Issue #314: Apache-2.0 is the default license for original project work. The digest protects the
-# legal text itself, not a prose claim: a truncated or edited LICENSE grants different rights.
-apache_license_sha256='cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30'
+# Issue #1760: FSL-1.1-ALv2 is the license for original project work; it replaced the Apache
+# License of #314. The digest protects the legal text itself, not a prose claim: a truncated or
+# edited LICENSE grants different rights.
+fsl_license_sha256='3e1f69ef8217e8c1f6fe7e8659f4ca909941eefe09e236ade15c9cd975d963ac'
 for required_license_file in LICENSE NOTICE THIRD_PARTY_LICENSES.md crates/math/LICENSE-libm.txt; do
     [[ -s "$required_license_file" ]] || fail "required license artifact is missing or empty: $required_license_file"
 done
@@ -95,8 +96,8 @@ capture license_sha256 sha256sum LICENSE
 capture license_digest awk '{print $1}' "$CAPTURE_OUT"
 (( CAPTURE_STATUS == 0 )) || execution_failure 'LICENSE digest extraction' "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
 actual_license_sha256="$(<"$CAPTURE_OUT")"
-[[ "$actual_license_sha256" == "$apache_license_sha256" ]] || {
-    fail "LICENSE is not the canonical Apache License 2.0 text"
+[[ "$actual_license_sha256" == "$fsl_license_sha256" ]] || {
+    fail "LICENSE is not the canonical FSL-1.1-ALv2 text"
 }
 required_search() {
     local label="$1" message="$2"; shift 2
@@ -107,8 +108,8 @@ required_search() {
         *) execution_failure "rg $label" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR" ;;
     esac
 }
-required_search workspace-license 'Cargo.toml workspace package license must be Apache-2.0' -x 'license = "Apache-2.0"' Cargo.toml
-required_search fuzz-license 'fuzz/Cargo.toml license must be Apache-2.0' -x 'license = "Apache-2.0"' fuzz/Cargo.toml
+required_search workspace-license 'Cargo.toml workspace package license must be FSL-1.1-ALv2' -x 'license = "FSL-1.1-ALv2"' Cargo.toml
+required_search fuzz-license 'fuzz/Cargo.toml license must be FSL-1.1-ALv2' -x 'license = "FSL-1.1-ALv2"' fuzz/Cargo.toml
 required_search libm-inventory 'third-party inventory must retain the vendored libm license record' 'crates/math/LICENSE-libm\.txt' THIRD_PARTY_LICENSES.md
 
 checked_find npm-manifests . -name package.json -type f -not -path '*/node_modules/*'
@@ -117,10 +118,10 @@ capture npm-manifests-sort sort "$CHECKED_FIND_OUT"
 sorted_npm_manifests="$CAPTURE_OUT"
 while IFS= read -r npm_manifest; do
     [[ -n "$npm_manifest" ]] || continue
-    capture "jq-npm-$RANDOM" jq -e '.license == "Apache-2.0"' "$npm_manifest"
+    capture "jq-npm-$RANDOM" jq -e '.license == "FSL-1.1-ALv2"' "$npm_manifest"
     case "$CAPTURE_STATUS" in
         0) ;;
-        1) fail "$npm_manifest license must be Apache-2.0" ;;
+        1) fail "$npm_manifest license must be FSL-1.1-ALv2" ;;
         *) execution_failure "jq $npm_manifest" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR" ;;
     esac
 done <"$sorted_npm_manifests"
@@ -131,10 +132,10 @@ capture npm-locks-sort sort "$CHECKED_FIND_OUT"
 sorted_npm_locks="$CAPTURE_OUT"
 while IFS= read -r npm_lock; do
     [[ -n "$npm_lock" ]] || continue
-    capture "jq-lock-$RANDOM" jq -e '.packages[""].license == "Apache-2.0"' "$npm_lock"
+    capture "jq-lock-$RANDOM" jq -e '.packages[""].license == "FSL-1.1-ALv2"' "$npm_lock"
     case "$CAPTURE_STATUS" in
         0) ;;
-        1) fail "$npm_lock root package license must be Apache-2.0" ;;
+        1) fail "$npm_lock root package license must be FSL-1.1-ALv2" ;;
         *) execution_failure "jq $npm_lock" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR" ;;
     esac
 done <"$sorted_npm_locks"
@@ -151,7 +152,7 @@ while IFS= read -r manifest; do
     (( CAPTURE_STATUS == 0 )) || execution_failure "package name extraction $manifest" "$CAPTURE_STATUS" "$CAPTURE_OUT" "$CAPTURE_ERR"
     package_name="$(<"$CAPTURE_OUT")"
 
-    required_search "package-license-$RANDOM" "$manifest must inherit the Apache-2.0 workspace license" -x 'license\.workspace = true' "$manifest"
+    required_search "package-license-$RANDOM" "$manifest must inherit the FSL-1.1-ALv2 workspace license" -x 'license\.workspace = true' "$manifest"
 
     # The retired prefix has no root-specific exemption: package and directory names are the
     # same short identity everywhere in the three package roots.
