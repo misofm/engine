@@ -70,7 +70,7 @@ fn a_nonfinite_block_is_zeroed_and_the_envelopes_are_reset() {
 /// can never enter the recurrence — and the shaper is still the identity on it, because two floored
 /// envelopes divide to exactly `1` and `fast_level_db(1)` is exactly `0`.
 ///
-/// Red mutation: drop the snap from the shaper's `follow` — the state word becomes subnormal.
+/// Red mutation: drop the snap from `ar_one_pole_step` — the state word becomes subnormal.
 #[test]
 fn a_subnormal_input_renders_and_flushes_the_envelope() {
     let mut effect = prepare(&values_of(1.0, -1.0, 1.0));

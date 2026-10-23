@@ -314,10 +314,10 @@ fn ar_coefficient_complements_are_exact() {
 fn ar_one_pole_step_switches_strictly_on_rising() {
     let coefficients = ArCoef::<f32>::splat(0.75, 0.99);
     // Rising: the attack coefficient is the one that moves the envelope.
-    let rising = ar_one_pole_step(0.25f32, 1.0, &coefficients);
+    let rising = ar_one_pole_step(0.25f32, 1.0, &coefficients, lane::FLUSH_EPS);
     assert_eq!(rising.to_bits(), (0.75f32 * 0.25 + 0.25f32 * 1.0).to_bits());
     // Falling: the release coefficient.
-    let falling = ar_one_pole_step(1.0f32, 0.25, &coefficients);
+    let falling = ar_one_pole_step(1.0f32, 0.25, &coefficients, lane::FLUSH_EPS);
     assert_eq!(
         falling.to_bits(),
         (0.99f32 * 1.0 + 0.010000005f32 * 0.25).to_bits()
@@ -327,7 +327,7 @@ fn ar_one_pole_step_switches_strictly_on_rising() {
     // products sum differently -- this witness is such a point at the 0.5 ms / 20 ms 44.1 kHz pair.
     let fast = ArCoef::<f32>::splat(f32::from_bits(0x3f74_a63c), f32::from_bits(0x3f7f_b5bd));
     let witness = f32::from_bits(0x3c1b_4ffb);
-    let equal = ar_one_pole_step(witness, witness, &fast);
+    let equal = ar_one_pole_step(witness, witness, &fast, lane::FLUSH_EPS);
     let released = fast.release * witness + fast.one_minus_release * witness;
     let attacked = fast.attack * witness + fast.one_minus_attack * witness;
     assert_ne!(
@@ -365,7 +365,7 @@ fn ar_one_pole_step_is_the_two_product_form() {
         e.to_bits(),
         "the one-rounding form must stall on this witness"
     );
-    let moved = ar_one_pole_step(e, u, &coefficients);
+    let moved = ar_one_pole_step(e, u, &coefficients, lane::FLUSH_EPS);
     assert_ne!(
         moved.to_bits(),
         e.to_bits(),
@@ -382,7 +382,7 @@ fn ar_one_pole_step_flushes_the_recurrence() {
     let coefficients = ArCoef::<f32>::splat(0.5, 0.5);
     let mut e = 1.0e-18f32;
     for _ in 0..8 {
-        e = ar_one_pole_step(e, 0.0, &coefficients);
+        e = ar_one_pole_step(e, 0.0, &coefficients, lane::FLUSH_EPS);
     }
     assert_eq!(e.to_bits(), 0.0f32.to_bits(), "envelope must flush to +0.0");
 }
@@ -402,7 +402,7 @@ fn ar_one_pole_step_is_width_independent() {
     let scalar: Vec<u32> = envelopes
         .iter()
         .zip(detectors.iter())
-        .map(|(e, u)| ar_one_pole_step(*e, *u, &coefficients).to_bits())
+        .map(|(e, u)| ar_one_pole_step(*e, *u, &coefficients, lane::FLUSH_EPS).to_bits())
         .collect();
 
     fn packed<L: Lane>(envelopes: &[f32; 8], detectors: &[f32; 8]) -> Vec<u32> {
@@ -410,7 +410,8 @@ fn ar_one_pole_step_is_width_independent() {
         let mut words = [0u32; 8];
         let mut result = Vec::new();
         for (e, u) in envelopes.chunks(L::WIDTH).zip(detectors.chunks(L::WIDTH)) {
-            ar_one_pole_step(L::load(e), L::load(u), &coefficients).store_bits(&mut words);
+            ar_one_pole_step(L::load(e), L::load(u), &coefficients, lane::FLUSH_EPS)
+                .store_bits(&mut words);
             result.extend_from_slice(&words[..L::WIDTH]);
         }
         result

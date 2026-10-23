@@ -127,16 +127,15 @@ each bound is rounded up to a block end.
   `andnot(abs(g) <= REDUCTION_REST_DB, g)`, replaces `flush` in `ballistic`. That is the one
   place the word is written, and every path calls it. The snap has the flush's form, subsumes it,
   and adds no operation and no per-lane branch.
-- **B2, transient shaper.** `FOLLOWER_REST = 1e-12`. The shaper's followers now run a crate-local
-  `follow`. It is `effect-runtime`'s `ar_one_pole_step` operation for operation, with the snap
-  `andnot(abs(e) < 1e-12, e)` in place of the D7 flush, so it adds no operation. It is crate-local
-  because `effect-runtime` is outside this issue's paths. As a result, `ar_one_pole_step` has no
-  production caller left (its own tests still use it). Giving the shared step an epsilon parameter
-  is root's choice.
-  `effect-runtime`'s tests of the step's form do not reach the copy. Mutants of `follow` (`u >= e`
-  for the switch, and the one-product form `c (e - u) + u`) left every existing test green, so
-  `follow_tests::follow_is_the_shared_step_with_the_rest_snap` pins `follow` to the shared step
-  bit for bit, outside the snap.
+- **B2, transient shaper.** `FOLLOWER_REST = 1e-12`. The shared follower step
+  `effect_runtime::envelope::ar_one_pole_step` now takes the rest floor as a parameter. Its snap
+  `andnot(abs(x) < rest, x)` replaces the fixed D7 flush and is that flush bit for bit at
+  `rest = FLUSH_EPS`, so it adds no operation. The transient shaper is its only production
+  caller, and it passes `FOLLOWER_REST`. `effect-runtime`'s own tests pass `FLUSH_EPS`, so their
+  claims (strict switch, two-product form, flush to `+0.0`, width independence) are unchanged.
+  Root approved the path extension to `crates/effect-runtime/src/envelope.rs` (attempt 2). An
+  intermediate crate-local copy of the step, with a drift test, was removed in favour of the
+  parameter.
 
 **Time to rest, at 48 kHz:**
 
@@ -192,7 +191,7 @@ the hand-back). Their corpora have no silence long enough to reach a snap.
   (the fast path took every silent block). It is now `1e-8`.
 - Transient `plant` words: `1e-19` and `3e-18` are now `3e-12` and `1e-10`. Each is still a
   word between the snap and the two attack wake points.
-- The `boundary.rs` and `MUTATIONS.md` text now names `follow`'s snap.
+- The `boundary.rs` and `MUTATIONS.md` text now names the step's rest-floor snap.
 
 **`scripts/check-web-audioworklet.sh`** now runs, because kernel source changed: it passes. The
 roster rows are compressor dual (vector 949, scalar 0), compressor collapsed (524, 0) and

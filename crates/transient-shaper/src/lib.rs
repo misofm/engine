@@ -51,7 +51,7 @@ use effect_contract::{
 use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask, positive_zero_lanes,
 };
-use effect_runtime::envelope::ArCoef;
+use effect_runtime::envelope::{ArCoef, ar_one_pole_step};
 use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as spec_value_valid,
 };
@@ -342,35 +342,19 @@ fn link<L: Lane, const LINK: u8>(left: L, right: L) -> (L, L) {
 /// Magnitude below which a follower word snaps to `+0.0` (issue #1784, owner ruling B2 of
 /// 2026-10-23): `1e-12`, 240 dB under full scale and four decades under [`FLOOR`].
 ///
-/// It replaces the D7 floor `FLUSH_EPS` (`1e-20`) for the two envelope words, so a follower
-/// released from full scale reaches its exact rest about 129,000 samples after the signal stops
-/// at 48 kHz instead of 217,000. A word below `FLOOR` does not reach the output while the input is
-/// silent; it does reach the next onset through `c * e + k * u`. The measured change there is at
-/// most `3.1e-5` dB, on onsets below -40 dBFS, and none at louder onsets (the #1784 decision
-/// record).
+/// Passed to `ar_one_pole_step` in place of the D7 floor `FLUSH_EPS` (`1e-20`) for the two
+/// envelope words, so a follower released from full scale reaches its exact rest about 129,000
+/// samples after the signal stops at 48 kHz instead of 217,000. A word below `FLOOR` does not reach
+/// the output while the input is silent; it does reach the next onset through `c * e + k * u`.
+/// Measured right after the snap, that onset changes by at most `1.3e-5` dB from -100 dBFS up and
+/// not at all from -80 dBFS up, but by up to `7.3e-5` dB at -120 dBFS and `7.0e-4` dB at -140 dBFS
+/// (the #1784 decision record, D5).
 const FOLLOWER_REST: f32 = 1.0e-12;
-
-/// One sample of one switched attack/release follower: `effect_runtime`'s `ar_one_pole_step`,
-/// operation for operation (`c * e + k * u`, the pair chosen by `u > e`), with its D7 flush
-/// replaced by the [`FOLLOWER_REST`] snap `andnot(abs(x) < FOLLOWER_REST, x)`. The snap has the
-/// flush's form and subsumes it, so every word at or above the snap is bit-identical to the shared
-/// step's.
-#[inline(always)]
-fn follow<L: Lane>(e: L, u: L, coefficients: &ArCoef<L>) -> L {
-    let rising = u.gt(e);
-    let c = L::select(rising, coefficients.attack, coefficients.release);
-    let k = L::select(
-        rising,
-        coefficients.one_minus_attack,
-        coefficients.one_minus_release,
-    );
-    let next = c.mul(e).add(k.mul(u));
-    next.andnot(next.abs().lt(L::splat(FOLLOWER_REST)))
-}
 
 /// One frame of one channel. Frozen operation order.
 ///
-/// 1. both followers advance ([`follow`]: two products, one sum, one rest snap each)
+/// 1. both followers advance (`ar_one_pole_step`: two products, one sum, one rest snap each, at
+///    [`FOLLOWER_REST`])
 /// 2. `ratio = max(fast, FLOOR) / max(slow, FLOOR)` — one IEEE division
 /// 3. `contrast = fast_level_db(ratio)`, clamped `min` then `max` to ±24 dB (X7)
 /// 4. `shape = attack * max(contrast, 0) + sustain * max(-contrast, 0)`, clamped to ±18 dB
@@ -381,12 +365,12 @@ fn follow<L: Lane>(e: L, u: L, coefficients: &ArCoef<L>) -> L {
 ///    `fma(mix, +0.0, -0.0)` is `+0.0`, so the dry value has to be selected, not computed
 ///
 /// There is no per-value finiteness or subnormal classification (D7): the two envelope words are
-/// snapped inside the follower ([`FOLLOWER_REST`], which subsumes the D7 flush) and the output
+/// snapped inside the follower (at [`FOLLOWER_REST`], which subsumes the D7 flush) and the output
 /// block is checked once, by the caller.
 #[inline(always)]
 fn frame<L: Lane>(x: L, u: L, c: &Coef<L>, e: &mut Env<L>, p: &Params<L>, bypass: L::Mask) -> L {
-    e.fast = follow(e.fast, u, &c.fast);
-    e.slow = follow(e.slow, u, &c.slow);
+    e.fast = ar_one_pole_step(e.fast, u, &c.fast, FOLLOWER_REST);
+    e.slow = ar_one_pole_step(e.slow, u, &c.slow, FOLLOWER_REST);
     let floor = L::splat(FLOOR);
     let ratio = e.fast.max(floor).div(e.slow.max(floor));
     // FAST-DB-CROSSING X7: detector contrast; MA-5 proves [1e-8, 16] and its clamp.
@@ -1258,50 +1242,3 @@ impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
 mod padding_tests;
 #[cfg(test)]
 mod rest_tests;
-
-/// Issue #1784 B2: [`follow`] is a crate-local copy of `effect_runtime`'s `ar_one_pole_step`, so
-/// that crate's tests of the step's form do not reach it. This pins the copy to the shared step.
-#[cfg(test)]
-mod follow_tests {
-    use super::*;
-    use effect_runtime::envelope::ar_one_pole_step;
-
-    /// **`follow` is `ar_one_pole_step` bit for bit, except that a result below
-    /// [`FOLLOWER_REST`] is `+0.0`,** for every rate's two coefficient pairs, envelopes and
-    /// detector words from `0` to `4` across every normal binade, and `u == e`, the switch's tie.
-    #[test]
-    fn follow_is_the_shared_step_with_the_rest_snap() {
-        let mut seed = 0x0017_84b2_u64;
-        let mut next = move || {
-            seed = seed
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            (seed >> 40) as f32 / (1_u64 << 24) as f32
-        };
-        // A unit times `2^k`, `k` in `[-126, 1]`: every binade from the smallest normal to 4.
-        let mut level = || {
-            let unit = next();
-            let binade = (next() * 128.0) as u32;
-            let scale = f32::from_bits(((binade + 1) << 23).min(128 << 23));
-            if unit < 0.05 { 0.0 } else { unit * scale }
-        };
-        for bits in TRANSIENT_SHAPER_COEFFICIENT_BITS {
-            let row = bits.map(f32::from_bits);
-            for (attack, release) in [(row[0], row[1]), (row[2], row[3])] {
-                let coefficients = ArCoef::<f32>::splat(attack, release);
-                for case in 0..20_000 {
-                    let e = level();
-                    let u = if case % 7 == 0 { e } else { level() };
-                    let shared = ar_one_pole_step(e, u, &coefficients);
-                    let own = follow(e, u, &coefficients);
-                    let expected = if shared.abs() < FOLLOWER_REST {
-                        0.0
-                    } else {
-                        shared
-                    };
-                    assert_eq!(own.to_bits(), expected.to_bits(), "e {e:e}, u {u:e}");
-                }
-            }
-        }
-    }
-}

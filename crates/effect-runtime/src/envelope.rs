@@ -127,7 +127,7 @@ impl<L: Lane> ArCoef<L> {
 
 /// One sample of a switched attack/release one-pole on a rectified detector.
 ///
-/// `e' = flush(c * e + k * u)` with `c` and `k` selected by the direction of travel — the
+/// `e' = snap(c * e + k * u)` with `c` and `k` selected by the direction of travel — the
 /// **two-product** form, deliberately, and the counterpart of [`peak_follow`]'s one-rounding form.
 /// The two exist side by side because they are not the same filter: [`peak_follow`] attacks
 /// instantaneously and only its release is filtered, while this one filters both directions with
@@ -145,11 +145,16 @@ impl<L: Lane> ArCoef<L> {
 ///    workspace
 /// 2. `c = select(rising, attack, release)`, `k = select(rising, one_minus_attack,
 ///    one_minus_release)` — branchless (D10)
-/// 3. `e' = flush(c * e + k * u)` — two rounded products, one rounded sum, then the D7 flush,
-///    because `e` is a recurrence
+/// 3. `e' = snap(c * e + k * u)` — two rounded products, one rounded sum, then the rest snap
+///    `andnot(abs(x) < rest, x)`, because `e` is a recurrence
+///
+/// `rest` is the caller's rest floor, at or above `lane::FLUSH_EPS`. At `FLUSH_EPS` the snap is the
+/// D7 [`lane::flush`] bit for bit; a larger floor lands a decaying follower on `+0.0` sooner (the
+/// transient shaper passes `1e-12`, issue #1784 B2). A constant `rest` splats once per call site
+/// and adds no operation over the flush.
 #[inline(always)]
 #[must_use]
-pub fn ar_one_pole_step<L: Lane>(e: L, u: L, coefficients: &ArCoef<L>) -> L {
+pub fn ar_one_pole_step<L: Lane>(e: L, u: L, coefficients: &ArCoef<L>, rest: f32) -> L {
     let rising = u.gt(e);
     let c = L::select(rising, coefficients.attack, coefficients.release);
     let k = L::select(
@@ -157,7 +162,8 @@ pub fn ar_one_pole_step<L: Lane>(e: L, u: L, coefficients: &ArCoef<L>) -> L {
         coefficients.one_minus_attack,
         coefficients.one_minus_release,
     );
-    lane::flush(c.mul(e).add(k.mul(u)))
+    let next = c.mul(e).add(k.mul(u));
+    next.andnot(next.abs().lt(L::splat(rest)))
 }
 
 /// One sample of a mean-square follower: `y' = fma(c, x2 - y, y)`.

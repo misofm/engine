@@ -42,8 +42,8 @@ Rows 13–15 are the three mutations that prove `effect_runtime::envelope::ar_on
 strict `u > e` switch, the two-product form against the one-rounding one, and the D7 flush on the
 recurrence. Row 15 (no flush) is what `boundary::a_subnormal_input_renders_and_flushes_the_envelope`
 also catches from this side.
-Since #1784 the shaper runs its own copy of that step, `follow`, whose flush is the `1e-12`
-`FOLLOWER_REST` snap; the boundary test now guards that snap.
+Since #1784 the step takes a rest floor in place of the fixed flush, and the shaper passes its
+`1e-12` `FOLLOWER_REST`; the boundary test guards that snap from this side.
 
 ## Recorded failures
 
