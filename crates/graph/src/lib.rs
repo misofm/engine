@@ -20,7 +20,7 @@ pub use runtime::{
 #[doc(hidden)]
 pub use runtime::{
     test_only_bank_meter_passes, test_only_bank_sample_peak_passes, test_only_carry_payload_bytes,
-    test_only_meter_input_counts, test_only_meter_input_reset,
+    test_only_disable_bank_skip, test_only_meter_input_counts, test_only_meter_input_reset,
     test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
     test_only_reset_carry_payload_bytes, test_only_resident_input_counts,
     test_only_resident_input_reset, test_only_route_activity_built, test_only_route_drain_calls,
@@ -2184,6 +2184,39 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     /// thread (#1504 D3). The default `0` is a bank that holds no live lane.
     fn live_lanes(&self) -> u8 {
         0
+    }
+    /// The lanes of this bank at **exact rest**, bit `n` for lane `n`, padded lanes included
+    /// (issue #1781, #1107 D3): one block of exact `+0.0` on both planes would leave every state
+    /// word of the lane bit-identical and write exact `+0.0` on both of its output planes. A
+    /// **clock** -- a word a `+0.0` block advances by the block's length alone -- is not a state
+    /// word for the claim; [`Self::advance_builtin_clocks`] advances it.
+    ///
+    /// `BuiltinStage` forwards it to `rack::BankStage::lanes_at_rest`, so it carries that
+    /// method's contract: it is asked after this block's [`Self::begin_block`] (the drain) and
+    /// [`Self::set_block_time`], before [`Self::process`], and it answers for the block those two
+    /// prepared. A lane with work of its own in the block (stored automation, a timed operation)
+    /// is not at rest. From state only: allocation-free, lock-free and bounded by the lane count.
+    ///
+    /// The default `0` declines every lane: a bank that has not written the predicate is never
+    /// skipped, and a wrong set bit is the only answer that could be unsound.
+    fn builtin_lanes_at_rest(&self) -> u32 {
+        0
+    }
+    /// Advance the clocks of the lanes in `lanes_mask` (bit `n` is lane `n`) by `frames`, exactly
+    /// as one rendered block of `frames` frames of exact `+0.0` would, for a block the caller skips
+    /// (issue #1781). The caller's contract is `rack::BankStage::advance_clocks`': every input
+    /// word of the block is `+0.0`, the mask is every lane of the bank (a bank is skipped whole),
+    /// and each lane in it is one [`Self::builtin_lanes_at_rest`] reported for the block. After the
+    /// call every state word is bit-identical to what that rendered block would leave, with the
+    /// two exceptions `rack::BankStage::advance_clocks` states: the `[process calls, frames
+    /// processed]` qualification counters do not count a skipped block, and on a collapsed chain
+    /// the input's frozen right silence counter advances (the disengage copies the left over it).
+    ///
+    /// The default is a no-op: exact for a bank with no clocks, and sound for any bank whose
+    /// predicate declines, because a declined lane is never skipped. Allocation-free and bounded
+    /// by the lane count, never by `frames`.
+    fn advance_builtin_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        let _ = (lanes_mask, frames);
     }
     /// Take the floored input arrival `a(n)` of each member, in lane order (#1647a, R17-2):
     /// `arrivals[l]` is lane `l`'s, and a lane past the slice is padding. The graph compiler calls
@@ -4945,6 +4978,21 @@ pub fn test_only_carry_counts(plan: &mut PreparedRenderPlan) -> [usize; 4] {
                 executor.carry_strips.len(),
                 executor.carry_effects.len(),
             ]
+        })
+}
+
+/// Blocks the plan's bank chains skipped whole (issue #1107), summed over every bank unit; zero
+/// for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_bank_silent_skips(plan: &PreparedRenderPlan) -> u64 {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or(0, |executor| {
+            executor.runtime.units.iter().fold(0_u64, |total, unit| {
+                total.saturating_add(unit.silent_skips())
+            })
         })
 }
 

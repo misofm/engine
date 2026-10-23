@@ -196,6 +196,7 @@ name = "builtins"
 version = "0.1.0"
 dependencies = [
  "bench-support",
+ "conformance",
  "dsp-reference",
  "effect-contract",
  "engine",

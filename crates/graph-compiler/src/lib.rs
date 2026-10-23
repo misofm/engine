@@ -9292,7 +9292,15 @@ mod tests {
             cohorts + 2 * strip_stage_groups,
             "every track still banks all three of its bankable stages"
         );
-        assert_eq!(transposes, BLOCKS * chains, "G5 holds however little fuses");
+        // G5 (#1107): every block of every chain is transposed or skipped exactly once; a chain in
+        // this fixture skips silent blocks, so the skip term is not vacuous here.
+        let skips = last_silent_skips();
+        assert!(skips > 0, "a chain of this fixture skips a silent block");
+        assert_eq!(
+            transposes + skips,
+            BLOCKS * chains,
+            "G5 holds however little fuses"
+        );
         // The derivation. 60 tracks carry the strip, so each effect rack binds
         // `60 / lanes` full cohorts and strands the remainder in a padded group that never binds:
         // 7 EQ + 7 compressor + 7 limiter slots at eight lanes. Those three still align with each
@@ -9544,7 +9552,8 @@ mod tests {
             cohorts + 1,
             "the send is taken from an alias inside the chain, so ch00's cohort splits there"
         );
-        assert_eq!(transposes, BLOCKS * chains);
+        // G5 (#1107): every block of every chain is transposed or skipped exactly once.
+        assert_eq!(transposes + last_silent_skips(), BLOCKS * chains);
         assert_eq!(
             redirects, 0,
             "the strip's chains still end in buffers their consumers read in place, sent or not"
@@ -10845,7 +10854,12 @@ mod tests {
             cohorts + 1,
             "ch00's cohort splits at the metered fader; every other cohort stays one chain"
         );
-        assert_eq!(transposes, BLOCKS * chains, "G5 on the declining plan");
+        // G5 (#1107): every block of every chain is transposed or skipped exactly once.
+        assert_eq!(
+            transposes + last_silent_skips(),
+            BLOCKS * chains,
+            "G5 on the declining plan"
+        );
 
         // And the meter reads the fader's output. The oracle is the same session with every effect
         // on the per-node scalar path, where the strip's effect banks do not exist and the meter
@@ -11379,6 +11393,19 @@ mod tests {
         render_bound_console_blocks(bound, frames, blocks)
     }
 
+    thread_local! {
+        /// The whole-bank skips (issue #1107) of the plan [`render_bound_console_blocks`] rendered
+        /// last on this thread, so a G5 pin reads `transposes + silent_skips` without widening the
+        /// shared tuple.
+        static LAST_SILENT_SKIPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The whole-bank skips of the plan this thread's last [`render_bound_console_blocks`]
+    /// rendered: G5 is that every block of every chain is transposed or skipped exactly once.
+    fn last_silent_skips() -> u64 {
+        LAST_SILENT_SKIPS.with(std::cell::Cell::get)
+    }
+
     /// [`render_console_builtins_blocks`] for a plan the caller bound.
     fn render_bound_console_blocks(
         bound: PreparedGraphBuiltinsBound,
@@ -11410,6 +11437,7 @@ mod tests {
             })
             .collect();
         let transposes = plan.bank_transposes();
+        LAST_SILENT_SKIPS.with(|skips| skips.set(graph::test_only_bank_silent_skips(&plan)));
         let [chains, slots] = plan.bank_shape();
         let redirects = plan.bank_scatter_redirects();
         let folds = plan.bank_route_folds();

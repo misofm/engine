@@ -1040,6 +1040,7 @@ fn zero_svf_coef<L: Lane>() -> SvfCoef<L> {
 /// [`SvfSection::IDENTITY`] coefficients and unit trim, so they are arithmetically inert; they run
 /// through every pass, and they are excluded from every counter and from the boundary check by
 /// [`InputStage::active`]. Their samples are never observed.
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct InputStage<L: Lane> {
     /// Populated lanes, `1..=L::WIDTH`.
     members: usize,
@@ -1874,6 +1875,95 @@ impl<L: Lane> InputStage<L> {
             .map(|word| *word as u64)
             .sum()
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// The lanes of this stage at **exact rest**, bit `l` for lane `l` (issue #1781, #1107 D3):
+    /// one block of exact `+0.0` on both channels would leave every state word of the lane
+    /// bit-identical and write exact `+0.0` to both of its output planes. The input's silence
+    /// counter is the one clock (a `+0.0` block advances it by the block's length alone), and
+    /// [`Self::advance_clocks`] advances it.
+    ///
+    /// # The terms
+    ///
+    /// * **No ramp in flight anywhere in the bank.** A trim or filter ramp on any lane runs the
+    ///   whole bank through the ramp bodies, which rewrite every lane's kernel countdown residue
+    ///   (`ramp.remaining`, a word the lane export carries) by the block's length and re-derive
+    ///   the elision plan and the symmetry cache. So the whole bank declines while `ramping` or
+    ///   `filter_ramping` holds: sound, and a ramp lasts a few blocks.
+    /// * **Every integrator of both sections of both channels at `+0.0` bits** (`-0.0` is not
+    ///   rest).
+    ///
+    /// # Signed zero through a negative trim (the finding)
+    ///
+    /// A lane whose trim carries the sign bit (polarity inverted, on one channel or both) is
+    /// **not** declined, because the settled kernel provably writes `+0.0` for it. With `x =
+    /// +0.0` the trimmed input `v0 = x * trim` is `-0.0`. Then, with both integrators at `+0.0`:
+    ///
+    /// * a designed section's update gives `v3 = v0 - ic2 = -0.0`, `d1 = -c1*ic1 + a2*v3 = -0.0`,
+    ///   `v1 = ic1 + d1 = +0.0`, `d2 = a3*v3 + a2*ic1 = +0.0`, `v2 = +0.0`, and new integrators
+    ///   `ic + (d + d) = +0.0`: the state stays `+0.0`. A high-pass section's output
+    ///   `m2*v2 + (m1*v1 + m0*v0)` is `-0.0` (`m1`, `m2` negative, `m0 = 1`);
+    /// * the **last** step of every chain shape maps a `-0.0` to `+0.0`: an elided run is one
+    ///   `add(+0.0)`, and both a designed low-pass section (`m0 = m1 = 0`, `m2 = 1`) and a
+    ///   non-elided identity section (`m0 = 1`, `m1 = m2 = 0`) sum two `+0.0` products with
+    ///   `m0*v0`, which is `+0.0` whatever the sign of `m0*v0`; the all-identity body adds `+0.0`
+    ///   explicitly.
+    ///
+    /// Every product of a zero is exact, so a fused and an unfused multiply-add give the same
+    /// zeros. So the lane is a fixed point and its output is `+0.0`. The rest probe
+    /// (`rest_tests`) draws polarity-inverted lanes and checks it.
+    ///
+    /// # Padded lanes and a collapsed stage
+    ///
+    /// A padded lane carries identity coefficients and unit trim and is answered by the same
+    /// terms on its own state. A collapsed stage's right channel is frozen at the collapse; it
+    /// is still read, and that is sound for the reason the effect contract gives
+    /// (`PreparedNativeEffectBank::lanes_at_rest`): a frozen word that is not at rest only clears
+    /// a bit.
+    ///
+    /// State only, `&self`, allocation-free and bounded by the lane count.
+    fn lanes_at_rest(&self) -> u32 {
+        if self.ramping || self.filter_ramping {
+            return 0;
+        }
+        let mut rest = (1_u32 << L::WIDTH) - 1;
+        for channel in &self.state.section {
+            for section in channel {
+                for word in [section.ic1, section.ic2] {
+                    let words = lane_read::<L>(word);
+                    for (lane, value) in words.iter().enumerate().take(L::WIDTH) {
+                        if value.to_bits() != 0 {
+                            rest &= !(1 << lane);
+                        }
+                    }
+                }
+            }
+        }
+        rest
+    }
+
+    /// Advance the silence counters of the lanes in `lanes_mask` by `frames`, both channels,
+    /// exactly as a rendered block of `frames` frames of `+0.0` would (`silence_advance`, issue
+    /// #1781): the caller skips the block, and every lane in the mask is one
+    /// [`Self::lanes_at_rest`] reports. A lane outside the mask keeps its counters.
+    ///
+    /// Both channels advance even when the stage is collapsed, where the one-plane body would have
+    /// left the right counter frozen. Nothing reads a collapsed stage's right counter before the
+    /// disengage copy ([`Self::desymmetrize`]) overwrites it with the left one, so the difference
+    /// cannot be observed.
+    fn advance_clocks(&mut self, lanes_mask: u32, frames: usize) {
+        let mut flags = [0.0_f32; MAX_BANK_LANES];
+        for (lane, flag) in flags.iter_mut().enumerate().take(L::WIDTH) {
+            *flag = f32::from(u8::from(lanes_mask & (1 << lane) != 0));
+        }
+        let mask = mask_from_flags::<L>(&flags[..L::WIDTH]);
+        for silence in &mut self.state.silence {
+            let mut advanced = *silence;
+            lane::kernels::silence_advance(&mut advanced, frames);
+            *silence = L::select(mask, advanced, *silence);
+        }
+    }
+    // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
     /// Renders one block of both channels.
@@ -3063,6 +3153,7 @@ impl<L: Lane> FaderStage<L> {
 /// the block -- and then, if the block outlives every ramp, [`gain_mute_block`] over the tail. A
 /// lane whose own ramp ended earlier inside that window keeps multiplying by its exactly-assigned
 /// target, which is what the scalar tail multiply did for it before.
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct FaderRampStage<L: Lane> {
     /// Ramp words per channel. `ramp[c].current` is the settled gain between events, and
     /// `ramp[c].mute` is the per-lane mute mask, so there is no second copy of either.
@@ -3262,6 +3353,41 @@ impl<L: Lane> FaderRampStage<L> {
         lane_read::<L>(self.ramp[channel].target)[lane]
     }
 
+    // REALTIME_POLICY_BEGIN
+    /// The lanes of this stage at **exact rest**, bit `l` for lane `l` (issue #1781, #1107 D3):
+    /// one block of exact `+0.0` would leave every state word of the lane bit-identical and write
+    /// exact `+0.0` on both planes. The stage has no clock.
+    ///
+    /// A lane is at rest when, on both channels, no gain or mute ramp is in flight (`remaining`
+    /// is `0` and no mute ramp is set) and the settled path writes `+0.0` for a `+0.0` input:
+    /// a muted lane writes the `andnot`'s exact `+0.0`; an unmuted one writes `+0.0 * gain`,
+    /// which carries the sign of `gain`, so a lane whose current gain has the sign bit set
+    /// declines.
+    ///
+    /// A settled lane of a bank in which another lane ramps runs the ramp kernel, which assigns
+    /// it its target (equal in bits to its current gain, since a settle assigns `current =
+    /// target`) and leaves its value words where they were; the kernel's `f32` countdown word
+    /// it also rewrites is residue that `process_plane` recomputes from the `u32` countdown
+    /// before every read and that the lane export does not carry, so it is not state.
+    ///
+    /// State only, `&self`, allocation-free and bounded by the lane count.
+    fn lanes_at_rest(&self) -> u32 {
+        let mut rest = (1_u32 << L::WIDTH) - 1;
+        for channel in 0..2 {
+            let current = lane_read::<L>(self.ramp[channel].current);
+            for (lane, gain) in current.iter().enumerate().take(L::WIDTH) {
+                // `!mute_ramp` is defensive: the bookkeeping that ends a countdown clears it too.
+                let settled = self.remaining[channel][lane] == 0 && !self.mute_ramp[channel][lane];
+                let zero_out = self.muted[channel][lane] || !gain.is_sign_negative();
+                if !(settled && zero_out) {
+                    rest &= !(1 << lane);
+                }
+            }
+        }
+        rest
+    }
+    // REALTIME_POLICY_END
+
     /// Whether one lane and channel is muted.
     const fn is_muted(&self, lane: usize, channel: usize) -> bool {
         self.muted[channel][lane]
@@ -3458,6 +3584,7 @@ impl<L: Lane> FaderRampStage<L> {
 /// The lane words are authoritative for the coefficient values; the scalar arrays carry the
 /// control-plane bookkeeping (target, window length, frames left) that decides which kernel a
 /// block runs.
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct MatrixStage<L: Lane> {
     /// Settled coefficients and the per-lane identity mask.
     coef: Matrix2x2Coef<L>,
@@ -3626,6 +3753,38 @@ impl<L: Lane> MatrixStage<L> {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// The lanes of this stage at **exact rest**, bit `l` for lane `l` (issue #1781, #1107 D3):
+    /// one block of exact `+0.0` on both planes would leave every state word of the lane
+    /// bit-identical and write exact `+0.0` on both planes. The stage has no clock.
+    ///
+    /// A lane is at rest when it is not ramping (`remaining` is `0`) and no output row can write
+    /// `-0.0`. Each row is `c0 * l + c1 * r` (multiply, multiply, add, in every body: settled,
+    /// select-free and ramp), and with `l = r = +0.0` each product is a zero with its
+    /// coefficient's sign, so the sum is `-0.0` exactly when both coefficients of the row carry
+    /// the sign bit: `(ll, lr)` for the left plane, `(rl, rr)` for the right. A settled identity
+    /// lane passes `+0.0` through by the select, and its coefficients `(1, 0, 0, 1)` carry no
+    /// sign, so it needs no term of its own.
+    ///
+    /// A settled lane of a bank in which another lane ramps runs the ramp kernel, which assigns
+    /// it its target (equal in bits to its current words, since a settle assigns them) and
+    /// renders the same row sums; the kernel's `f32` countdown word it also rewrites is residue
+    /// that [`Self::process`] recomputes from the `u32` countdown before every read and that the
+    /// lane export does not carry, so it is not state.
+    ///
+    /// State only, `&self`, allocation-free and bounded by the lane count.
+    fn lanes_at_rest(&self) -> u32 {
+        let mut rest = (1_u32 << L::WIDTH) - 1;
+        let current = self.read_current();
+        for (lane, matrix) in current.iter().enumerate().take(L::WIDTH) {
+            let negative_row = (matrix.ll.is_sign_negative() && matrix.lr.is_sign_negative())
+                || (matrix.rl.is_sign_negative() && matrix.rr.is_sign_negative());
+            if self.remaining[lane] != 0 || negative_row {
+                rest &= !(1 << lane);
+            }
+        }
+        rest
+    }
+
     #[inline(always)]
     fn is_settled(&self) -> bool {
         self.remaining
@@ -4480,6 +4639,36 @@ impl BuiltinInputBank {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// The lanes of this bank at exact rest, bit `l` for lane `l`, padded lanes included (issue
+    /// #1781, #1107 D3): one block of exact `+0.0` on both planes would leave every state word of
+    /// the lane bit-identical and write exact `+0.0` on both planes. The silence counters are the
+    /// one clock ([`Self::advance_clocks`]). See `InputStage::lanes_at_rest` for the terms and the
+    /// signed-zero finding: no ramp in flight in the bank, every integrator at `+0.0` bits, and a
+    /// polarity-inverted lane is not declined because the kernel writes `+0.0` for it. State only,
+    /// allocation-free and bounded by the lane count.
+    #[must_use]
+    pub fn lanes_at_rest(&self) -> u32 {
+        per_width!(InputStageKernel(stage) in &self.stage => stage.lanes_at_rest())
+    }
+
+    /// Advance the silence counters of the lanes in `lanes_mask` by `frames` on both channels,
+    /// exactly as a rendered `+0.0` block would, for a block the caller skips (issue #1781). Each
+    /// lane in the mask must be one [`Self::lanes_at_rest`] reports for the block; the caller skips
+    /// a bank whole, so it passes every lane, padded lanes included. Allocation-free and bounded by
+    /// the lane count, never by `frames`.
+    pub fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        debug_assert_eq!(
+            lanes_mask & !self.lanes_at_rest() & ((1 << self.width.lanes()) - 1),
+            0,
+            "a lane not at rest"
+        );
+        per_width!(InputStageKernel(stage) in &mut self.stage => {
+            stage.advance_clocks(lanes_mask, frames as usize);
+        });
+    }
+    // REALTIME_POLICY_END
+
+    // REALTIME_POLICY_BEGIN
     /// Populated lane `lane`'s whole state (issue #1276 D2), or `None` for a padding lane or one
     /// past the bank. Allocation-free; bounded by the lane's fixed word count.
     #[must_use]
@@ -4817,6 +5006,18 @@ impl BuiltinFaderBank {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// The lanes of this bank at exact rest, bit `l` for lane `l`, padded lanes included (issue
+    /// #1781, #1107 D3): on both channels no gain or mute ramp is in flight and the settled path
+    /// writes `+0.0` for a `+0.0` input (muted, or a gain without the sign bit). See
+    /// `FaderRampStage::lanes_at_rest`. The bank has no clock, so a skipped block needs no
+    /// advance. State only, allocation-free and bounded by the lane count.
+    #[must_use]
+    pub fn lanes_at_rest(&self) -> u32 {
+        per_width!(FaderStageKernel(stage) in &self.stage => stage.lanes_at_rest())
+    }
+    // REALTIME_POLICY_END
+
+    // REALTIME_POLICY_BEGIN
     /// Populated lane `lane`'s whole state (issue #1277 D7), or `None` for a padding lane or one
     /// past the bank. Allocation-free; bounded by the lane's fixed word count.
     #[must_use]
@@ -5010,6 +5211,18 @@ impl BuiltinMatrixBank {
         });
         BuiltinProcessReport::default()
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// The lanes of this bank at exact rest, bit `l` for lane `l`, padded lanes included (issue
+    /// #1781, #1107 D3): not ramping, and neither output row has both coefficients with the sign
+    /// bit set, the one way `+0.0` inputs give a `-0.0` output. See `MatrixStage::lanes_at_rest`.
+    /// The bank has no clock, so a skipped block needs no advance. State only, allocation-free and
+    /// bounded by the lane count.
+    #[must_use]
+    pub fn lanes_at_rest(&self) -> u32 {
+        per_width!(MatrixStageKernel(stage) in &self.stage => stage.lanes_at_rest())
+    }
+    // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
     /// Populated lane `lane`'s whole state (issue #1277 D7), or `None` for a padding lane or one
@@ -6925,6 +7138,11 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests;
+
+/// Issue #1781 gates 1 and 2: the input, fader and matrix stages' rest claims under
+/// `conformance::rest_probe`, and the input's clock advance.
+#[cfg(test)]
+mod rest_tests;
 
 /// Issue #1277 D7: a fader or matrix lane's exported state, imported into another bank's lane,
 /// renders exactly what the exported lane renders next, ramp in flight or not.

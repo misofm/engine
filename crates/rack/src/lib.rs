@@ -518,6 +518,74 @@ pub trait BankStage: Send {
         0
     }
 
+    /// The lanes of this stage at their **exact rest** for the coming block, as a bitmask: bit
+    /// `l` set means lane `l` is at rest (issue #1781; the consumer is #1107's whole-bank skip).
+    ///
+    /// # The claim (#1107 D3)
+    ///
+    /// Lane `l` is at rest when one block of exact `+0.0` on both planes of the lane, processed
+    /// as [`process`](Self::process) would process it, would leave every state word of the lane
+    /// bit-identical and write exact `+0.0` to both of its output planes. Raw bits: `-0.0` is not
+    /// `+0.0`. A **clock** -- a word a `+0.0` block advances by the block's length alone, never by
+    /// the signal -- is not a state word for the claim, as in
+    /// `PreparedNativeEffectBank::lanes_at_rest`; [`advance_clocks`](Self::advance_clocks)
+    /// advances it for a skipped block. Work the block itself brings -- a staged span or target,
+    /// a timed operation, a crossfade to advance, a tap to accumulate -- clears the bit.
+    ///
+    /// # When it is asked
+    ///
+    /// At the block boundary on the render thread, after this block's
+    /// [`begin_block`](Self::begin_block) (the drain) and, for a builtin stage, after the graph's
+    /// `set_block_time`, and before [`process`](Self::process): the answer is for the block the
+    /// drain prepared. From state only: `&self`, allocation-free, lock-free and bounded by the
+    /// lane count and the prepared state size.
+    ///
+    /// A padded lane is answered on its own state; the padding contract feeds it `+0.0`.
+    ///
+    /// The default `0` declines every lane: a stage that has not written the predicate is never
+    /// skipped, and a wrong set bit is the only answer that could be unsound.
+    fn lanes_at_rest(&self) -> u32 {
+        0
+    }
+
+    /// Advance the clocks of the lanes in `lanes_mask` exactly as [`process`](Self::process) on
+    /// `block` would, for a block the caller skips (issue #1781; the consumer is #1107).
+    ///
+    /// # The caller's contract
+    ///
+    /// `block`'s planes hold exact `+0.0` on every lane (`frames * lanes` words each);
+    /// `lanes_mask` is every lane of the bank, padded lanes included, because a bank is skipped
+    /// whole; and every bit is one [`lanes_at_rest`](Self::lanes_at_rest) reported for this block,
+    /// after its drain. The caller calls this once for each block it skips, in place of
+    /// `process` or `process_mono`.
+    ///
+    /// # What it owes
+    ///
+    /// After the call the stage's state is bit-identical to what `process(block)` on that zero
+    /// block would leave: the effect's clocks advanced, and anything the stage stages for a later
+    /// block fed (a live stage's dry shunt line takes the `+0.0` block). It takes the block, not
+    /// only `frames`, so a stage that stages its input for a later block feeds those words rather
+    /// than synthesising them. The planes are not written: the caller already holds the `+0.0`
+    /// output.
+    ///
+    /// Two exceptions, both outside the audio state a later block reads:
+    ///
+    /// * evidence counters of real processing -- the builtin processors' `[process calls,
+    ///   frames processed]` qualification counters -- do not count a skipped block, because no
+    ///   processing ran;
+    /// * on a collapsed chain the call advances both channels, so a prefix stage's frozen right
+    ///   channel (the input's right silence counter, for one) moves where `process_mono` would
+    ///   have left it. Nothing reads it before the disengage copies the left channel over it, and
+    ///   the swap and carry paths disengage first.
+    ///
+    /// The default is a no-op: exact for a stage with no clock and no staged line, and sound for
+    /// any stage whose predicate declines, because a declined lane is never skipped. On the render
+    /// thread at a block boundary: allocation-free, lock-free and bounded by the lane count and
+    /// the staged line's length.
+    fn advance_clocks(&mut self, lanes_mask: u32, block: BankBlock<'_>) {
+        let _ = (lanes_mask, block);
+    }
+
     /// Which side of the fader/matrix seam this stage sits on.
     ///
     /// The default is [`SeamSide::UpstreamOfSeam`], which is the **conservative** answer here and
@@ -1096,6 +1164,24 @@ impl BankStage for EffectBankStage {
     fn seam_side(&self) -> SeamSide {
         SeamSide::UpstreamOfSeam
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// The effect's own mask, forwarded (issue #1781). This stage hands the bank no span, no
+    /// target and no sidechain on any block, so its block is exactly the one
+    /// `PreparedNativeEffectBank::lanes_at_rest` answers for. The prepared `bypass` this stage
+    /// keeps is the bank's own, from its program key, and is read here only by the response
+    /// snapshot: the bank's `process_bank` runs its prepared bypass path itself, so the effect's
+    /// predicate already answers for it, and no lane needs declining here.
+    fn lanes_at_rest(&self) -> u32 {
+        self.processor.lanes_at_rest()
+    }
+
+    /// The effect's clocks, forwarded with the block's length (issue #1781). The stage stages
+    /// nothing for a later block.
+    fn advance_clocks(&mut self, lanes_mask: u32, block: BankBlock<'_>) {
+        self.processor.advance_clocks(lanes_mask, block.frames);
+    }
+    // REALTIME_POLICY_END
 
     fn supports_mono_collapse(&self) -> bool {
         self.processor.supports_mono_collapse()
@@ -2156,6 +2242,71 @@ impl BankStage for LiveControlEffectBankStage {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// The effect's own mask minus every lane that has work of its own in this block, read after
+    /// this block's drain (issue #1781):
+    ///
+    /// * a **staged span** (`offsets[l + 1] > offsets[l]`): the bank would apply it;
+    /// * a **staged prepared target**: the process body would apply it before the bank runs;
+    /// * a lane that **reads the dry block** -- bypassed, settled or crossfading -- whose output
+    ///   is the shunt's latency-matched dry signal, not the wet `+0.0`, and a **running bypass
+    ///   crossfade**, which the block advances;
+    /// * an **armed observation tap**, which the block accumulates into.
+    ///
+    /// The effect's mask answers for a block with no span and no target, which is what is left.
+    /// The quiet skip of #1763 is covered: a drain that skips the cell walk keeps the last walk's
+    /// partition and `LaneWalk`, and a walk is skipped only after one that staged no span, no
+    /// target and left no crossfade running, so every `offsets` window is empty and no target
+    /// prefix is read (`walk.targets` is false). The shunt's latency line is not a term: a
+    /// skipped block feeds it in [`Self::advance_clocks`], as a rendered one does.
+    fn lanes_at_rest(&self) -> u32 {
+        let mut rest = self.processor.lanes_at_rest();
+        let observations = self.observations.as_deref();
+        for (lane, control) in self.lanes.iter().enumerate() {
+            let spans = self.offsets[lane + 1] > self.offsets[lane];
+            let targets = self.walk.targets
+                && control
+                    .as_ref()
+                    .is_some_and(|control| !control.prepared_targets().is_empty());
+            let dry = control
+                .as_ref()
+                // Defensive: a running bypass ramp already implies `needs_dry`.
+                .is_some_and(|control| control.needs_dry() || control.bypass_ramping());
+            let tap = observations
+                .and_then(|lanes| lanes.get(lane))
+                .and_then(Option::as_ref)
+                .is_some_and(ObservationLane::any_armed);
+            if spans || targets || dry || tap {
+                rest &= !(1 << lane);
+            }
+        }
+        rest
+    }
+
+    /// The effect's clocks, forwarded with the block's length, and the shunt's latency line fed
+    /// the `+0.0` block exactly as the process body feeds it on a block no lane reads dry
+    /// ([`BypassShunt::feed_line`], issue #1781): a later bypass edge then reads the line words a
+    /// never-skipped run holds. Every lane is at rest, so no lane reads dry and the process body
+    /// would have fed the line and not captured. A collapsed process body feeds the left plane
+    /// twice; this feeds both planes of the skipped block, which are both `+0.0`, so the line takes
+    /// the same words either way and this method has no collapsed form.
+    fn advance_clocks(&mut self, lanes_mask: u32, block: BankBlock<'_>) {
+        // `feed_line` matches a rendered block only on the caller's `+0.0` planes.
+        debug_assert!(
+            block
+                .left
+                .iter()
+                .chain(block.right.iter())
+                .all(|word| word.to_bits() == 0),
+            "a skipped block's planes are exact +0.0"
+        );
+        self.processor.advance_clocks(lanes_mask, block.frames);
+        if let Some(shunt) = self.shunt.as_mut() {
+            shunt.feed_line(block.left, block.right);
+        }
+    }
+    // REALTIME_POLICY_END
+
+    // REALTIME_POLICY_BEGIN
     /// [`LiveControlEffectBankStage::process`] with the bank call collapsed onto the left plane.
     ///
     /// Every other step is the dual one, in the same order and on the same words: the drain runs
@@ -2861,7 +3012,60 @@ pub trait BankMembers {
         let _ = cohort;
         false
     }
+
+    /// Whether lane `lane`'s gather source holds exact `+0.0` (raw bits zero) on both planes over
+    /// its first `frames` words (issue #1107's whole-bank skip input test).
+    ///
+    /// It reads the same words [`Self::plane`] lends, and returns at the first non-zero word, so
+    /// an audible lane pays its head. The default is built on [`Self::plane`]; an implementor
+    /// whose `plane` counts reads for its own evidence overrides it with an uncounted read of the
+    /// same words, so the test does not move those counts.
+    fn input_is_positive_zero(&self, lane: usize, frames: usize) -> bool {
+        let (left, right) = self.plane(lane);
+        planes_are_positive_zero(left, right, frames)
+    }
+
+    /// Finish the fold of a skipped block whose every folded lane is exact `+0.0`, or decline
+    /// (issue #1107).
+    ///
+    /// `lanes` is the mask of the lanes the chain folds, which is every active lane, in ascending
+    /// order; their resident words are `+0.0` on both planes over `frames`. Returning `true`
+    /// asserts the implementor has written exactly what [`Self::fold_plane`],
+    /// [`Self::fold_cohort`] or [`Self::fold_resident`] would write for those lanes over those
+    /// words. Returning `false` asserts it wrote nothing, and the chain then runs its ordinary
+    /// scatter over the zeroed resident block, which is exact by construction. The default
+    /// declines.
+    fn fold_silent(&mut self, lanes: u32, frames: u32) -> bool {
+        let _ = (lanes, frames);
+        false
+    }
 }
+
+// REALTIME_POLICY_BEGIN
+/// Whether both planes hold exact `+0.0` (raw bits zero) on their first `frames` words; `false`
+/// when a plane is shorter (issue #1107).
+///
+/// The shape of `effect_runtime::block_is_positive_zero`: a 32-word head, so an audible plane
+/// returns after one short fold, and then 128-word chunks whose `|` fold vectorises.
+#[inline]
+#[must_use]
+pub fn planes_are_positive_zero(left: &[f32], right: &[f32], frames: usize) -> bool {
+    let (Some(left), Some(right)) = (left.get(..frames), right.get(..frames)) else {
+        return false;
+    };
+    plane_is_positive_zero(left) && plane_is_positive_zero(right)
+}
+
+#[inline(always)]
+fn plane_is_positive_zero(words: &[f32]) -> bool {
+    let or_bits = |words: &[f32]| words.iter().fold(0_u32, |bits, word| bits | word.to_bits());
+    let (head, rest) = words.split_at(words.len().min(32));
+    if or_bits(head) != 0 {
+        return false;
+    }
+    rest.chunks(128).all(|chunk| or_bits(chunk) == 0)
+}
+// REALTIME_POLICY_END
 
 /// An immutable active lane of the final left/right resident bank output.
 ///
@@ -3036,6 +3240,17 @@ pub struct BankChain {
     /// [`collapse_transitions`](Self::collapse_transitions) for what each one counts and why a
     /// block count alone cannot say it.
     transitions: [u64; 3],
+    /// Whether the whole-bank silent skip may run (issue #1107). `true` from construction and in
+    /// every shipped build; only the graph's test-support switch clears it, so a differential can
+    /// render the same plan with every block processed.
+    silent_skip: bool,
+    /// Blocks this chain skipped whole (issue #1107). Evidence only.
+    silent_skips: u64,
+    /// The resident scratch holds exact `+0.0` on every word of both planes, whole quantum: set
+    /// by a skipped block that zeroed it, cleared by every block that gathers, acquires or
+    /// processes. A run of skips zeroes once, and a resident successor reads it as "this
+    /// predecessor's output is silent" without a pass over the words.
+    resident_zero: bool,
 }
 
 /// The other lane of a [`BankChain::swap_lanes`] (issue #1747).
@@ -3170,6 +3385,11 @@ impl BankChain {
             collapse_source: false,
             collapses: 0,
             transitions: [0; 3],
+            silent_skip: true,
+            silent_skips: 0,
+            // Conservative: the planes are built zeroed, but the first skip zeroes them again
+            // rather than resting on how the scratch was constructed.
+            resident_zero: false,
         })
     }
 
@@ -3662,6 +3882,22 @@ impl BankChain {
         if collapse {
             self.collapses = self.collapses.saturating_add(1);
         }
+        // Issue #1107: the whole-bank skip. The drains and the collapse dispatch above have run,
+        // so no acknowledgement or publication is held and the collapse bookkeeping is the
+        // block's own. The input test runs first and returns at the first non-zero word, so an
+        // audible block pays only its lanes' heads; the rest masks are asked only after it. An
+        // armed auxiliary destination never skips.
+        if self.silent_skip
+            && self.aux.is_empty()
+            && self.inputs_are_positive_zero(members, frames, predecessor)
+            && self.lanes_at_rest() == self.all_lanes_mask()
+        {
+            self.skip_block(members, frames, first_sample);
+            return Ok(());
+        }
+        // Every path below writes the resident scratch: the acquisition or gather, then the
+        // stages.
+        self.resident_zero = false;
         if let Some(source) = predecessor {
             self.acquire_resident_input(source, frames, collapse);
         } else if collapse {
@@ -3719,6 +3955,102 @@ impl BankChain {
             self.accumulate_aux(members, frames);
         }
         Ok(())
+    }
+
+    /// Whether every active lane's input for this block is exact `+0.0` on both planes over
+    /// `frames` (issue #1107): for a resident-input run, the predecessor chain skipped this block
+    /// and so holds a zeroed scratch; otherwise each active lane's gather source, lane by lane,
+    /// returning at the first non-zero word. An inactive lane's scratch words are never gathered.
+    fn inputs_are_positive_zero<M: BankMembers + ?Sized>(
+        &self,
+        members: &M,
+        frames: u32,
+        predecessor: Option<&BankChain>,
+    ) -> bool {
+        if let Some(source) = predecessor {
+            return source.resident_zero;
+        }
+        let frames = frames as usize;
+        self.active
+            .iter()
+            .enumerate()
+            .all(|(lane, active)| !*active || members.input_is_positive_zero(lane, frames))
+    }
+
+    /// Skip one block whole (issue #1107): every lane's input is exact `+0.0` and every lane,
+    /// padded lanes included, is at rest after this block's drains, so a rendered block would
+    /// leave every state word as it is and write `+0.0` everywhere.
+    ///
+    /// The resident scratch is zeroed once per run of skips, so the final-output readers -- the
+    /// observers, the meters and a resident successor -- read the `+0.0` a rendered block leaves
+    /// there. Every slot with an active lane advances its clocks over that zero block in place of
+    /// `process`, on every lane. On a collapsed block that includes the prefix stages' frozen
+    /// right channel: nothing reads it before the disengage copies the left channel over it, and
+    /// the swap and carry paths disengage first. No gather, no stage, no seam copy and no
+    /// transpose; then the outputs: `+0.0` into each unfolded active lane's plane, and the folded
+    /// lanes' master effect through [`BankMembers::fold_silent`], or the ordinary scatter over the
+    /// zeroed block when that declines.
+    fn skip_block<M: BankMembers + ?Sized>(
+        &mut self,
+        members: &mut M,
+        frames: u32,
+        first_sample: u64,
+    ) {
+        let len = frames as usize * self.lanes;
+        if !self.resident_zero {
+            self.scratch.left.fill(0.0);
+            self.scratch.right.fill(0.0);
+            self.resident_zero = true;
+        }
+        let all = self.all_lanes_mask();
+        for slot in &mut self.slots {
+            if slot.has_active_lanes() {
+                slot.stage.advance_clocks(
+                    all,
+                    BankBlock {
+                        left: &mut self.scratch.left[..len],
+                        right: &mut self.scratch.right[..len],
+                        frames,
+                        first_sample,
+                        lanes: self.lanes,
+                    },
+                );
+            }
+        }
+        self.silent_skips = self.silent_skips.saturating_add(1);
+        let frames_used = frames as usize;
+        let mut folded = 0_u32;
+        let mut unfolded = false;
+        for lane in 0..self.lanes {
+            if !self.active[lane] {
+                continue;
+            }
+            if Self::mask_bit(&self.fold, lane) {
+                folded |= 1 << lane;
+            } else {
+                unfolded = true;
+            }
+        }
+        if folded != 0 && (unfolded || !members.fold_silent(folded, frames)) {
+            // A chain that folds only some of its lanes, or members that decline: the ordinary
+            // scatter over the zeroed resident block writes exactly what a rendered block would.
+            self.scatter(members, frames);
+            return;
+        }
+        if folded == 0 {
+            for lane in 0..self.lanes {
+                if self.active[lane] {
+                    let (left, right) = members.plane_mut(lane);
+                    left.iter_mut()
+                        .take(frames_used)
+                        .for_each(|word| *word = 0.0);
+                    right
+                        .iter_mut()
+                        .take(frames_used)
+                        .for_each(|word| *word = 0.0);
+                }
+            }
+        }
     }
     // REALTIME_POLICY_END
 
@@ -4468,10 +4800,57 @@ impl BankChain {
     pub fn active(&self) -> &[bool] {
         &self.active
     }
-    /// Completed planar/AoSoA round-trips: exactly one per rendered block per chain.
+
+    // REALTIME_POLICY_BEGIN
+    /// The lanes of this chain at exact rest for the coming block, bit `l` for lane `l`, within
+    /// the chain's lanes (issue #1781; the consumer is #1107's whole-bank skip): the AND of
+    /// [`BankStage::lanes_at_rest`] over every slot that has an active lane. Asked after this
+    /// block's drains (`begin_block` on every slot), as each stage's answer is.
+    ///
+    /// A slot with no active lane never runs, so it contributes every lane. A slot active on some
+    /// lanes still runs over the whole resident block, so it answers its inactive (identity)
+    /// lanes from its own state, as it answers a padded lane: such a lane is fed `+0.0` by the
+    /// chain whenever the chain is skipped, and the stage's predicate holds or clears its bit on
+    /// what the stage would do to it. Allocation-free; one call per slot.
+    #[must_use]
+    pub fn lanes_at_rest(&self) -> u32 {
+        self.slots
+            .iter()
+            .filter(|slot| slot.has_active_lanes())
+            .fold(self.all_lanes_mask(), |rest, slot| {
+                rest & slot.stage.lanes_at_rest()
+            })
+    }
+
+    /// Every lane of the bank, padded lanes included: bit `l` for lane `l`.
+    const fn all_lanes_mask(&self) -> u32 {
+        if self.lanes >= 32 {
+            u32::MAX
+        } else {
+            (1_u32 << self.lanes) - 1
+        }
+    }
+    // REALTIME_POLICY_END
+    /// Completed planar/AoSoA round-trips: exactly one per rendered block per chain. A block the
+    /// chain skipped whole moves no word and is not one ([`Self::silent_skips`] counts it).
     #[must_use]
     pub const fn transposes(&self) -> u64 {
         self.transposes
+    }
+
+    /// Blocks this chain skipped whole because every lane's input was exact `+0.0` and every
+    /// lane was at rest (issue #1107). Evidence only.
+    #[must_use]
+    pub const fn silent_skips(&self) -> u64 {
+        self.silent_skips
+    }
+
+    /// Allow (`true`, the default) or forbid the whole-bank silent skip (issue #1107).
+    ///
+    /// For a test-support differential only: the graph's test switch forbids it to render the
+    /// no-skip twin of a plan. Shipped builds never call it, so every shipped chain may skip.
+    pub const fn set_silent_skip(&mut self, allowed: bool) {
+        self.silent_skip = allowed;
     }
     #[must_use]
     pub fn qualification_counters(&self) -> [u64; 2] {
@@ -7119,6 +7498,187 @@ mod tests {
         chain
             .run(&mut planes, frames, 0, LiveSnapshot::ALL)
             .expect("run");
+    }
+
+    /// #1781: a chain's rest mask is the AND of its running slots' masks, within its lanes. A
+    /// slot with no active lane never runs and contributes every lane; a slot active on some
+    /// lanes answers all of them from its own state.
+    ///
+    /// Test value: a chain that ANDs in a slot that never runs (declining a bank it could skip),
+    /// skips a running slot's answer on its identity lanes, or reports a lane past its own.
+    #[test]
+    fn a_chain_rests_a_lane_every_running_slot_rests() {
+        struct Rest(u32);
+        impl BankStage for Rest {
+            fn process(&mut self, _block: BankBlock<'_>) -> Result<(), RenderError> {
+                Ok(())
+            }
+            fn lanes_at_rest(&self) -> u32 {
+                self.0
+            }
+        }
+        let chain = |slots: Vec<BankSlot>| {
+            BankChain::new(
+                AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
+                vec![true; 4].into_boxed_slice(),
+                slots,
+            )
+            .expect("chain")
+        };
+        let rested = chain(vec![
+            slot(vec![true; 4], Box::new(Rest(u32::MAX))),
+            // Active on lanes 0 and 1 only, and it still answers lane 3.
+            slot(vec![true, true, false, false], Box::new(Rest(0b0111))),
+            // Never runs: its declining answer does not count.
+            slot(vec![false; 4], Box::new(Rest(0))),
+        ]);
+        assert_eq!(rested.lanes_at_rest(), 0b0111);
+        assert_eq!(chain(vec![]).lanes_at_rest(), 0b1111);
+        assert_eq!(
+            chain(vec![slot(vec![true; 4], Box::new(PassThrough))]).lanes_at_rest(),
+            0,
+            "a stage that has not written the predicate declines"
+        );
+    }
+
+    /// #1107: a skipped block's outputs where no accepting silent fold takes them -- an unfolded
+    /// chain writes `+0.0` into every active lane's plane, and a chain whose members decline
+    /// [`BankMembers::fold_silent`] (the default), or that folds only some of its lanes, takes the
+    /// ordinary scatter over the zeroed block -- with no stage run, one clock advance over every
+    /// lane and no transpose; with the skip forbidden the same block processes. The graph's
+    /// accepting fold is gate 1 of `graph-compiler/tests/silent_bank_skip.rs`.
+    ///
+    /// Test value: red if the unfolded skip leaves an output plane's previous words, if a declined
+    /// or partial fold drops a lane's `fold_plane` call or hands it stale resident words, or if a
+    /// skipped block runs a stage, advances fewer than every lane's clocks or counts a transpose.
+    #[test]
+    fn a_skipped_block_writes_zero_outputs_where_no_silent_fold_takes_them() {
+        /// At rest on every lane; counts its blocks and its clock advances, and keeps the mask.
+        /// The test reads the counts back through `as_any`.
+        struct Resting([u32; 3]);
+        impl BankStage for Resting {
+            fn as_any(&self) -> Option<&dyn core::any::Any> {
+                Some(self)
+            }
+            fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+                self.0[0] += 1;
+                block.left.fill(1.0);
+                block.right.fill(1.0);
+                Ok(())
+            }
+            fn lanes_at_rest(&self) -> u32 {
+                u32::MAX
+            }
+            fn advance_clocks(&mut self, lanes_mask: u32, block: BankBlock<'_>) {
+                let zero = block.left.iter().chain(block.right.iter());
+                assert!(zero.into_iter().all(|word| word.to_bits() == 0));
+                self.0[1] += 1;
+                self.0[2] = lanes_mask;
+            }
+        }
+        /// Separate input and output planes; `fold_plane` records each lane and whether its tile
+        /// was exact `+0.0`.
+        struct Split {
+            inputs: Vec<Vec<f32>>,
+            outputs: Vec<Vec<f32>>,
+            spare: Vec<Vec<f32>>,
+            folded: Vec<(usize, bool)>,
+        }
+        impl BankMembers for Split {
+            fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+                (&self.inputs[lane], &self.inputs[lane])
+            }
+            fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+                (&mut self.outputs[lane], &mut self.spare[lane])
+            }
+            fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
+                let zero = left
+                    .iter()
+                    .chain(right.iter())
+                    .all(|word| word.to_bits() == 0);
+                self.folded.push((lane, zero));
+            }
+        }
+        const FRAMES: u32 = 8;
+        let active = vec![true, true, true, false];
+        for fold in [
+            None,
+            Some(vec![true, true, true, false]),
+            Some(vec![true, true, false, false]),
+        ] {
+            let mut chain = BankChain::new(
+                AoSoaScratch::new(BankWidth::Four, FRAMES).expect("scratch"),
+                active.clone().into_boxed_slice(),
+                vec![slot(active.clone(), Box::new(Resting([0; 3])))],
+            )
+            .expect("chain");
+            let counts = |chain: &BankChain| -> [u32; 3] {
+                chain.slots[0]
+                    .stage
+                    .as_any()
+                    .and_then(|stage| stage.downcast_ref::<Resting>())
+                    .expect("the resting stage")
+                    .0
+            };
+            if let Some(fold) = &fold {
+                chain
+                    .arm_fold(fold.clone().into_boxed_slice())
+                    .expect("fold");
+            }
+            let planes = |value: f32| vec![vec![value; FRAMES as usize]; 4];
+            let mut members = Split {
+                inputs: planes(0.0),
+                outputs: planes(7.0),
+                spare: planes(7.0),
+                folded: Vec::new(),
+            };
+            // A processed block leaves `1.0` in the resident words, so a stale scatter shows.
+            chain.set_silent_skip(false);
+            chain
+                .run(&mut members, FRAMES, 0, LiveSnapshot::ALL)
+                .expect("processed block");
+            assert_eq!(counts(&chain)[0], 1, "{fold:?}: a forbidden skip processes");
+            assert_eq!(chain.silent_skips(), 0, "{fold:?}");
+            members.outputs = planes(7.0);
+            members.spare = planes(7.0);
+            members.folded.clear();
+            chain.set_silent_skip(true);
+            let transposes = chain.transposes();
+            chain
+                .run(&mut members, FRAMES, u64::from(FRAMES), LiveSnapshot::ALL)
+                .expect("skipped block");
+            assert_eq!(chain.silent_skips(), 1, "{fold:?}: the block skipped");
+            assert_eq!(counts(&chain)[0], 1, "{fold:?}: no stage ran");
+            assert_eq!(counts(&chain)[1], 1, "{fold:?}: one clock advance");
+            assert_eq!(counts(&chain)[2], 0b1111, "{fold:?}: every lane");
+            assert_eq!(chain.transposes(), transposes, "{fold:?}: no transpose");
+            let folds = |lane: usize| fold.as_ref().is_some_and(|fold| fold[lane]);
+            assert_eq!(
+                members.folded,
+                (0..3)
+                    .filter(|lane| folds(*lane))
+                    .map(|lane| (lane, true))
+                    .collect::<Vec<_>>(),
+                "{fold:?}: every folded lane took a +0.0 tile"
+            );
+            for (lane, active) in active.iter().enumerate() {
+                let written = !folds(lane) && *active;
+                for plane in [&members.outputs[lane], &members.spare[lane]] {
+                    assert!(
+                        plane
+                            .iter()
+                            .all(|word| word.to_bits()
+                                == if written { 0 } else { 7.0_f32.to_bits() }),
+                        "{fold:?}: lane {lane}'s output plane"
+                    );
+                }
+            }
+            let (left, right) = chain.final_output_block(FRAMES).expect("resident");
+            assert!(
+                left.iter().chain(right).all(|word| word.to_bits() == 0),
+                "{fold:?}: the resident block is +0.0"
+            );
+        }
     }
 
     /// #1504 D3: `run` skips a slot with no active lane, so a slot that holds a live lane while it

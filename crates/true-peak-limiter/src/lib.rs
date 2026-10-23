@@ -3793,7 +3793,7 @@ impl<L: Lane> LimiterCore<L> {
         // asymptotically, which is the difference between this kernel and the compressor's
         // `gain_reduction_db`. Without both, the claim would be refused forever and the fast path
         // would be dead code.
-        self.silent_fixed_point = quiet && self.lanes_at_rest() == every_lane(L::WIDTH);
+        self.silent_fixed_point = quiet && self.scan_lanes_at_rest() == every_lane(L::WIDTH);
         self.silent_bypass = self.coefficients.bypass;
         // The §4.4 boundary check: one vector scan per channel, exactly `effect-runtime`'s
         // `finish_block` test. The two channels fail together per lane, as they do there, because
@@ -3984,7 +3984,42 @@ impl<L: Lane> LimiterCore<L> {
     /// The bank's rest mask (issue #1745): both channels' per-lane predicates ANDed
     /// ([`ChannelState::lanes_at_silent_rest`]). Clocks excluded: the shared [`Cursors`] and each
     /// lane's van Herk `phase`.
+    ///
+    /// # The standing claim (issue #1107)
+    ///
+    /// When the #182 S2 claim stands -- `silent_fixed_point`, earned under the bypass now in
+    /// force, with every ramp of both channels stationary -- every lane is at rest, and the scan
+    /// is not run. The scan reads every ring word of every lane (about 3 us per bank per call on
+    /// the 64-track console at 48 kHz), which a whole-bank skip would otherwise pay on every
+    /// silent block. The claim is the scan's own answer, taken after the last rendered or skipped
+    /// block ([`process_block`](Self::process_block), [`advance_clocks`](Self::advance_clocks)),
+    /// and every path that can move a lane's state between two blocks clears it: both resets,
+    /// a restore (the plan-swap carry and #1747's lane swap restore through it), an automation
+    /// span, and a block with signal. A prepared target or a zero-window span moves only ramps
+    /// and coefficient words, so the ramp legs here and the span rule cover it. A D7 recovery
+    /// returns a lane to `clear_runtime`'s words, which are the rest state the claim names. The
+    /// equality with the scan is asserted in `rest_tests`.
     fn lanes_at_rest(&self) -> u32 {
+        if self.silent_claim_stands() {
+            return every_lane(L::WIDTH);
+        }
+        self.scan_lanes_at_rest()
+    }
+
+    /// The #182 S2 claim, with the fast path's own state legs (the input leg excluded): earned
+    /// under the bypass in force and every ramp stationary.
+    fn silent_claim_stands(&self) -> bool {
+        self.silent_fixed_point
+            && self.silent_bypass == self.coefficients.bypass
+            && ramps_are_stationary(&self.left.limit)
+            && ramps_are_stationary(&self.left.release)
+            && ramps_are_stationary(&self.right.limit)
+            && ramps_are_stationary(&self.right.release)
+    }
+
+    /// The per-lane scan [`lanes_at_rest`](Self::lanes_at_rest) answers from when the claim does
+    /// not stand.
+    fn scan_lanes_at_rest(&self) -> u32 {
         self.left.lanes_at_silent_rest::<L>() & self.right.lanes_at_silent_rest::<L>()
     }
 
