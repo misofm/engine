@@ -24,6 +24,9 @@ effect-contract.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+# Issue #1765: the builtin lane-swap chain test counts the swap's allocations with the audited
+# allocator's thread counters.
+bench-support.workspace = true
 # Issue #1059: this crate's own tests drive the whole-plan scalar oracle, which needs
 # `Backend::Scalar` and the graph's scalar pairing passes; both are test-support only.
 lane = { workspace = true, features = ["test-support"] }
