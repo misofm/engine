@@ -2072,6 +2072,89 @@ impl BypassShunt {
         }
         true
     }
+
+    /// Exchange lane `lane`'s words of this shunt's interleaved latency line with lane
+    /// `other_lane`'s words of `other`'s line, or of this same line when `other` is `None`: a
+    /// render-time lane swap (issue #1747). Both lines are the lines of AoSoA banks of `lanes`
+    /// and `other_lanes` lanes (equal when `other` is `None`), laid out as
+    /// [`Self::carry_line_lane_from`] reads them, and each lane is walked from its own line's
+    /// shared cursor, so the sample of age `latency - t` of one lane trades places with the sample
+    /// of the same age of the other. The shared cursors never move: they are per line, not per
+    /// lane, and the dry staging (`dry_*`) is per-block scratch that never crosses a block.
+    ///
+    /// Returns `false`, exchanging nothing, when either line is not a whole number of frames of
+    /// its lanes, a lane index is out of range, the two lanes' latencies differ, or `other` is
+    /// `None` and `other_lanes` is not `lanes`. Two lines both empty (zero latency), or a lane
+    /// swapped with itself, exchange nothing and return `true`. Allocation-free and bounded by the
+    /// latency.
+    pub fn swap_line_lanes(
+        &mut self,
+        lane: usize,
+        lanes: usize,
+        other: Option<&mut Self>,
+        other_lane: usize,
+        other_lanes: usize,
+    ) -> bool {
+        let length = self.line_left.len();
+        let (other_length, other_right) = match other.as_deref() {
+            Some(other) => (other.line_left.len(), other.line_right.len()),
+            None => (length, self.line_right.len()),
+        };
+        if length == 0 && other_length == 0 {
+            return true;
+        }
+        if lanes == 0
+            || other_lanes == 0
+            || lane >= lanes
+            || other_lane >= other_lanes
+            || self.line_right.len() != length
+            || other_right != other_length
+            || !length.is_multiple_of(lanes)
+            || !other_length.is_multiple_of(other_lanes)
+            || length / lanes != other_length / other_lanes
+            || (other.is_none() && other_lanes != lanes)
+        {
+            return false;
+        }
+        let latency = length / lanes;
+        let mut own = self.cursor + lane;
+        match other {
+            Some(other) => {
+                let mut theirs = other.cursor + other_lane;
+                for _ in 0..latency {
+                    if own >= length {
+                        own -= length;
+                    }
+                    if theirs >= other_length {
+                        theirs -= other_length;
+                    }
+                    core::mem::swap(&mut self.line_left[own], &mut other.line_left[theirs]);
+                    core::mem::swap(&mut self.line_right[own], &mut other.line_right[theirs]);
+                    own += lanes;
+                    theirs += other_lanes;
+                }
+            }
+            None => {
+                if lane == other_lane {
+                    return true;
+                }
+                let mut theirs = self.cursor + other_lane;
+                for _ in 0..latency {
+                    if own >= length {
+                        own -= length;
+                    }
+                    if theirs >= length {
+                        theirs -= length;
+                    }
+                    self.line_left.swap(own, theirs);
+                    self.line_right.swap(own, theirs);
+                    own += lanes;
+                    theirs += lanes;
+                }
+            }
+        }
+        true
+    }
     // REALTIME_POLICY_END
 
     /// Replace the wet block with the latency-matched dry block.
@@ -2543,5 +2626,257 @@ mod carry_tests {
         // Neither shunt has a line: nothing to move.
         let mut empty = BypassShunt::new(8, 0);
         assert!(empty.carry_line_lane_from(0, 8, &BypassShunt::new(4, 0), 0, 4));
+    }
+
+    /// The words every lane of a `lanes`-lane shunt emits over its next `latency` zero frames,
+    /// oldest first, left then right, per lane. Advances the shunt.
+    fn drain(shunt: &mut BypassShunt, lanes: usize, latency: usize) -> Vec<Vec<u32>> {
+        let zero = vec![0.0_f32; lanes];
+        let mut words = vec![Vec::new(); lanes];
+        for _ in 0..latency {
+            shunt.capture(&zero, &zero);
+            let (left, right) = shunt.dry();
+            for (lane, words) in words.iter_mut().enumerate() {
+                words.push(left[lane].to_bits());
+                words.push(right[lane].to_bits());
+            }
+        }
+        words
+    }
+
+    /// #1747: a swap of two lanes' latency words, across two lines of other widths and cursors
+    /// and within one line, hands each lane the other's delayed samples in age order and leaves
+    /// every other lane and the cursors alone; a shape mismatch exchanges nothing.
+    ///
+    /// Test value: a swap that walks one line from the other's cursor, steps by the wrong width,
+    /// moves a cursor, or half-exchanges on a refusal.
+    #[test]
+    fn swapped_line_lanes_trade_their_delayed_samples() {
+        const LATENCY: usize = 3;
+        let fill = |lanes: usize, frames: usize, seed: usize| {
+            let mut shunt = BypassShunt::new(lanes, LATENCY * lanes);
+            for f in 0..frames {
+                let (left, right) = frame(f + seed, lanes);
+                shunt.capture(&left, &right);
+            }
+            shunt
+        };
+        // Five frames into a four-lane line (cursor 8) and six into an eight-lane one (cursor 0).
+        let (mut a, mut b) = (fill(4, 5, 0), fill(8, 6, 20));
+        let (before_a, before_b) = (
+            drain(&mut fill(4, 5, 0), 4, LATENCY),
+            drain(&mut fill(8, 6, 20), 8, LATENCY),
+        );
+        assert!(a.swap_line_lanes(2, 4, Some(&mut b), 5, 8));
+        let (after_a, after_b) = (drain(&mut a, 4, LATENCY), drain(&mut b, 8, LATENCY));
+        let mut expected_a = before_a.clone();
+        let mut expected_b = before_b.clone();
+        expected_a[2].clone_from(&before_b[5]);
+        expected_b[5].clone_from(&before_a[2]);
+        assert_eq!((after_a, after_b), (expected_a, expected_b));
+        // Within one line.
+        let mut a = fill(4, 5, 0);
+        assert!(a.swap_line_lanes(0, 4, None, 3, 4));
+        let mut expected = before_a.clone();
+        expected.swap(0, 3);
+        assert_eq!(drain(&mut a, 4, LATENCY), expected);
+        // Refusals change nothing.
+        let mut a = fill(4, 5, 0);
+        let mut longer = BypassShunt::new(8, (LATENCY + 1) * 8);
+        assert!(!a.swap_line_lanes(0, 4, Some(&mut longer), 0, 8), "latency");
+        assert!(!a.swap_line_lanes(4, 4, None, 0, 4), "lane index");
+        assert!(
+            !a.swap_line_lanes(0, 4, None, 1, 8),
+            "one line has one width"
+        );
+        assert_eq!(drain(&mut a, 4, LATENCY), before_a);
+        assert!(BypassShunt::new(4, 0).swap_line_lanes(
+            0,
+            4,
+            Some(&mut BypassShunt::new(8, 0)),
+            0,
+            8
+        ));
+    }
+}
+
+#[cfg(test)]
+mod lane_swap_tests {
+    use super::{LaneSwapRefusal, swap_bank_lanes};
+    use crate::{
+        BankProcessReport, BankWidth, EffectBankProcessBlock, PreparedNativeEffectBank, ResetKind,
+        StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
+    };
+
+    const SIZES: StatePayloadSizes = StatePayloadSizes {
+        common_bytes: 4,
+        left_bytes: 4,
+        right_bytes: 4,
+    };
+    const SCRATCH: usize = 24;
+
+    /// Four lanes of three words (common, left, right). `refuse_restore_call` names the restore
+    /// call (counted from 1) that refuses; every other restore commits.
+    struct Words {
+        lanes: [[u32; 3]; 4],
+        restores: u32,
+        refuse_restore_call: Option<u32>,
+    }
+
+    fn words(seed: u32, refuse_restore_call: Option<u32>) -> Words {
+        Words {
+            lanes: core::array::from_fn(|lane| {
+                let base = seed + 10 * lane as u32;
+                [base, base + 1, base + 2]
+            }),
+            restores: 0,
+            refuse_restore_call,
+        }
+    }
+
+    impl PreparedNativeEffectBank for Words {
+        fn reset(&mut self, _kind: ResetKind) {}
+
+        fn process_bank(&mut self, _block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+            BankProcessReport::empty(BankWidth::Four)
+        }
+
+        fn snapshot_track_state_payload(
+            &self,
+            track_index: u32,
+            output: StatePayloadOutput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            let lane = self
+                .lanes
+                .get(track_index as usize)
+                .ok_or(StatePayloadError {
+                    code: "effect.state.lane",
+                })?;
+            output.common.copy_from_slice(&lane[0].to_le_bytes());
+            output.left.copy_from_slice(&lane[1].to_le_bytes());
+            output.right.copy_from_slice(&lane[2].to_le_bytes());
+            Ok(())
+        }
+
+        fn restore_track_state_payload(
+            &mut self,
+            track_index: u32,
+            _state_layout_version: u32,
+            input: StatePayloadInput<'_>,
+        ) -> Result<(), StatePayloadError> {
+            self.restores += 1;
+            if self.refuse_restore_call == Some(self.restores) {
+                return Err(StatePayloadError {
+                    code: "effect.state.refused",
+                });
+            }
+            let lane = self
+                .lanes
+                .get_mut(track_index as usize)
+                .ok_or(StatePayloadError {
+                    code: "effect.state.lane",
+                })?;
+            let word = |bytes: &[u8]| u32::from_le_bytes(bytes.try_into().expect("four bytes"));
+            *lane = [word(input.common), word(input.left), word(input.right)];
+            Ok(())
+        }
+    }
+
+    /// #1747: every refusal of [`swap_bank_lanes`] leaves both lanes' payloads as they were,
+    /// including the one where the second restore refuses after the first committed, which the
+    /// undo must put back; and an accepted swap exchanges the payloads exactly.
+    ///
+    /// Test value: a swap that restores before it has both snapshots, skips the undo after a
+    /// second-restore refusal, or names the wrong refusal.
+    #[test]
+    fn every_lane_swap_refusal_leaves_both_lanes_unchanged() {
+        type Case = (Words, Option<Words>, usize, usize, usize, LaneSwapRefusal);
+        let cases: [Case; 6] = [
+            (
+                words(1, None),
+                Some(words(100, None)),
+                1,
+                2,
+                SCRATCH - 1,
+                LaneSwapRefusal::Scratch,
+            ),
+            (
+                words(1, None),
+                Some(words(100, None)),
+                usize::MAX,
+                2,
+                SCRATCH,
+                LaneSwapRefusal::Lane,
+            ),
+            (
+                words(1, None),
+                Some(words(100, None)),
+                1,
+                4,
+                SCRATCH,
+                LaneSwapRefusal::Snapshot,
+            ),
+            (
+                words(1, Some(1)),
+                Some(words(100, None)),
+                1,
+                2,
+                SCRATCH,
+                LaneSwapRefusal::Restore,
+            ),
+            // The second bank refuses the second restore: the first bank's lane is undone.
+            (
+                words(1, None),
+                Some(words(100, Some(1))),
+                1,
+                2,
+                SCRATCH,
+                LaneSwapRefusal::Restore,
+            ),
+            // One bank whose second restore (of three: two plus the undo) refuses.
+            (
+                words(1, Some(2)),
+                None,
+                1,
+                2,
+                SCRATCH,
+                LaneSwapRefusal::Restore,
+            ),
+        ];
+        for (index, (mut first, mut second, first_lane, second_lane, scratch, refusal)) in
+            cases.into_iter().enumerate()
+        {
+            let (first_before, second_before) =
+                (first.lanes, second.as_ref().map(|bank| bank.lanes));
+            let mut scratch = vec![0_u8; scratch];
+            let result = swap_bank_lanes(
+                &mut first,
+                first_lane,
+                second
+                    .as_mut()
+                    .map(|bank| bank as &mut dyn PreparedNativeEffectBank),
+                second_lane,
+                1,
+                SIZES,
+                &mut scratch,
+            );
+            assert_eq!(result, Err(refusal), "case {index}");
+            assert_eq!(first.lanes, first_before, "case {index}: first bank");
+            assert_eq!(
+                second.map(|bank| bank.lanes),
+                second_before,
+                "case {index}: second bank"
+            );
+        }
+        let (mut first, mut second) = (words(1, None), words(100, None));
+        let mut scratch = [0_u8; SCRATCH];
+        assert_eq!(
+            swap_bank_lanes(&mut first, 1, Some(&mut second), 2, 1, SIZES, &mut scratch),
+            Ok(())
+        );
+        assert_eq!(
+            (first.lanes[1], second.lanes[2]),
+            (words(100, None).lanes[2], words(1, None).lanes[1])
+        );
     }
 }
