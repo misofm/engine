@@ -687,8 +687,9 @@ fn partition_render(
     (left, right, state)
 }
 
-/// E4. Automation of every ramped kind -- threshold, ratio, attack and makeup -- leaves full PCM
-/// and state bit-identical at every partition, and a ratio or attack retarget really ramps.
+/// E4. Automation of every ramped kind -- threshold, ratio, attack, release and makeup -- leaves
+/// full PCM and state bit-identical at every partition, and a ratio, attack or release retarget
+/// really ramps.
 ///
 /// Before #1069 a ratio, attack or release word reached the kernel once per segment, so where a
 /// block began moved the output and only threshold and makeup were partition-exact. Since #1069

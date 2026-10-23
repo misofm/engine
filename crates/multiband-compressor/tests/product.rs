@@ -1611,16 +1611,11 @@ fn a_moving_ramp_word_past_its_domain_is_refused() {
         }
     }
 
-    // Issue #1069: the four coefficient ramps after the silence counter (word 48 on). The
-    // effect's own mid-walk payload restores and snapshots back word for word; a word outside
-    // `(0, 1]`, or a settled ramp away from its target, is refused and changes nothing.
+    // Issue #1069: the four coefficient ramps after the silence counter (word 48 on). A current
+    // or target word outside `(0, 1]`, or a settled ramp away from its target, is refused and
+    // changes nothing.
     const COEFFICIENT_WORD: usize = 48;
     restore(effect.as_mut(), 1, &saved, sizes).expect("own snapshot");
-    assert_eq!(
-        snapshot(effect.as_ref(), sizes),
-        saved,
-        "own mid-walk snapshot"
-    );
     let set = |sections: &mut (Vec<u8>, Vec<u8>, Vec<u8>), at: usize, bits: u32| {
         sections.1[at * 4..at * 4 + 4].copy_from_slice(&bits.to_le_bytes());
     };
@@ -1641,7 +1636,10 @@ fn a_moving_ramp_word_past_its_domain_is_refused() {
             format!("coefficient {rate}: settled off target"),
             off_target,
         );
-        for (case, sections) in walking.into_iter().chain([settled]) {
+        let mut zero_target = saved.clone();
+        set(&mut zero_target, at + 1, 0.0f32.to_bits());
+        let zero_target = (format!("coefficient {rate}: target 0e0"), zero_target);
+        for (case, sections) in walking.into_iter().chain([settled, zero_target]) {
             assert_eq!(
                 restore(effect.as_mut(), 1, &sections, sizes)
                     .expect_err(&case)

@@ -51,8 +51,9 @@ Attempt 1 (implementer), on main be2044c42.
   - The per-track `BandCache` and `band_coefficients` are gone: no exponential runs on the render
     path between retargets, and a flat segment derives its coefficients once.
 - **Semantics.** Ratio ramps linearly in R; attack and release ramp linearly in the coefficient
-  domain, as in the compressor, not in milliseconds. A mid-ramp frame differs both from the old
-  value held and from the target jumped to (`tests/identity.rs`, `partition_invariance`).
+  domain, as in the compressor, not in milliseconds. For ratio, attack and release, some frame in
+  1..63 of a ramp differs from the old value held and some from the target jumped to
+  (`tests/identity.rs`, `partition_invariance`).
 - **State payload.** Each channel gains four four-word coefficient ramps after the silence counter:
   64 words, 256 bytes per channel (was 192). Restore holds each coefficient word and target to
   `(0, 1]`, inside its path, and settled at its target, which is the compressor's rule. The layout
@@ -89,3 +90,20 @@ Attempt 1 (implementer), on main be2044c42.
   ThresholdAll to +1.8% (W8), but moved the settled W8 None row +4% in its one run. It was reverted
   in favour of the simpler kernel (records `fix-a2b.txt` and `main-a2b.txt`). Making
   threshold-only ramps free is a weekly-optimisation candidate, not a #1069 gate.
+
+## Attempts 2 and 3 verdicts (2026-10-23)
+
+- Attempt 2 verifier: FAIL on tests only. The code was correct (9,600-seed differential, red on
+  revert), but five claims on the new slots had no test, each shown by a surviving mutant: M10
+  (restore range `(0, 2]`), M10b (settled-at-target rule deleted), M11 (the planner's scan skips
+  the coefficient slots: the Point-cancels rule), M13 (`full_reset` skips them), M14
+  (`discontinuity_reset` skips them), M18 (release reads its target). Root accepted the +4-5 %
+  ramped cost (a required class-A fix; settled rows unchanged) and filed #1773 for the
+  `COEF` const-generic skip.
+- Attempt 3 (tests and one doc only): E4 gains a release retarget and a Point-cancel block (M11,
+  M18 red, M11 in release too); `resets_agree_across_widths` ends with a walking coefficient
+  (M13, M14 red); `a_moving_ramp_word_past_its_domain_is_refused` refuses current 1.5, 0, -0.5,
+  NaN and a settled ramp off target (M10, M10b red). The `tests/randomized.rs` doc describes the
+  per-frame design.
+- Attempt 3 verifier: PASS. Root applied its small fixes: a target-0 refusal case (mutant M10t
+  survived without it), release named in E4's doc, and a duplicate round-trip assertion deleted.
