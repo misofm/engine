@@ -1460,6 +1460,7 @@ where
         limits,
         preparer,
         live_values_superseded,
+        strips_restarted: 0,
         decode_fields: decode_fields.into_boxed_slice(),
         response_scratch: boxed_zeroed(limits.maximum_control_frame_bytes)?,
         shared: Arc::clone(&shared),
