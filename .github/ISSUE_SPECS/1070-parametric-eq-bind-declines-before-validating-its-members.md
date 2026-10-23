@@ -48,3 +48,6 @@ Validate every member first, then decide bind or decline. Un-ignore the reproduc
   (its illegal probe never adds a heterogeneous member), so `a_padded_request_binds_after_every_lane_is_validated`
   (`crates/parametric-eq/tests/bank.rs`) now also asserts the refusal with lane 1 foreign, and is red
   on that mutant.
+- **Console digests (PR evidence, one run each, untimed use).** `bench console` with
+  `MISO_ENGINE_BENCH_ROUND=warmup` on this AVX2 host, at the fix and with base 87b818f17's
+  `crates/parametric-eq/src/lib.rs`: all 51 `*output_sha256` fields are identical.
