@@ -18,6 +18,7 @@ A structural edit that cannot carry a strip's stage state starts that strip at r
 - `crates/capi/` (the counter id, the header doc, its parity row)
 - `hosts/host-web/` and `sdk/` (the counter read and its parity row)
 - this spec
+- `docs/CONTROL_PROTOCOL_REGISTRY.md` and `docs/C_ABI_V1_QUALIFICATION.md` (the counter's entry; root ruling 2026-10-23)
 
 ## Objective gates
 
@@ -40,7 +41,8 @@ None. Edit order: #1767 (the fused-stage removal) edits `resolve_strip_carry` in
   `u64` from 0. The protocol's counter test now refuses 19 as the next ID. The SDK has no typed
   counter-ID list (it sends `COUNTERS_GET` frames through `control()`/`controlFrame()`), so only
   its doc changes.
-- **D2 Where it is added.** In the control plane, where a pending provider is promoted
+- **D2 Where it is added (root ruling 2026-10-23: accepted; D2 replaces the slice's "render
+  only adds it at adoption" wording).** In the control plane, where a pending provider is promoted
   (`SessionState::promote_pending_provider`, `crates/control-plane/src/control.rs`): a provider is
   promoted only once render has adopted its plan (the active-epoch atomic render stores after the
   adopting block, the reclaim of the plan it displaced, or a `Taken` withdrawal), each adopted
@@ -61,6 +63,7 @@ None. Edit order: #1767 (the fused-stage removal) edits `resolve_strip_carry` in
 - **Known limit.** A hand-over that render refuses whole (`CarryOutcome::PredecessorMismatch`, an
   invariant failure already counted by `carry_mismatch_count`) starts more strips at rest than the
   list names; the counter reports the prepared list.
-- **Not done (outside the authorized paths).** `docs/CONTROL_PROTOCOL_REGISTRY.md` ("Counter IDs
-  run 1 to 17") and `docs/C_ABI_V1_QUALIFICATION.md` (the served-counter paragraph, already stale
-  before this issue) do not name counter 18.
+- **Path extension (root ruling 2026-10-23).** `docs/CONTROL_PROTOCOL_REGISTRY.md` (IDs run 1 to
+  18, the `STRIPS_RESTARTED` entry) and `docs/C_ABI_V1_QUALIFICATION.md` (the served-counter
+  paragraph now names the five counters `SERVED_COUNTERS` serves; canceled automation, ID 12, was
+  stale: retired by #1629, absent from `CounterId`).
