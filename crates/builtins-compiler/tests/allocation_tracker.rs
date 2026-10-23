@@ -367,7 +367,10 @@ fn a_builtin_lane_swap_moves_the_whole_strip() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let swaps = builtins_compiler::test_only_builtin_lane_swap(&mut |swap| swap());
-    assert!(swaps >= 8, "two passes of four swaps at one width at least");
+    assert!(
+        swaps >= 16,
+        "four passes of four swaps at one width at least"
+    );
 }
 
 #[test]
