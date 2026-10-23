@@ -325,6 +325,10 @@ fn a_compressing_lane_lands_at_rest_within_its_release_bound() {
 /// magnitude to the edge is on the plateau. (An exhaustive release-build sweep of every word up to
 /// `1e-3` dB found the plateau contiguous and never re-entered: #1784 D2.)
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "#1784 B1: re-derives the reduction rest floor from the fast tier, as its bound gate"
+)]
 fn the_reduction_rest_floor_is_the_fast_gain_plateau_edge() {
     use math::fast_db::fast_gain_from_db;
     let gain = |db: f32| fast_gain_from_db::<f32>(db).to_bits();
