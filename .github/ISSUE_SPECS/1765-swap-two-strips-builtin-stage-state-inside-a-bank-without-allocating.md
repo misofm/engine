@@ -71,6 +71,12 @@ Gate 1 turns red when a builtin swap leaves one per-lane field behind, such as a
   move into it: that swap refuses (`ChainLaneSwapRefusal::Slot`). Note for #1107: packing moves an
   automated strip only into a fader bank that holds slots. Lifting it would give every fader bank
   of an automated plan its slots and its event-driver path; not done here.
+- **One path per processor (attempt-1 verifier).** Each `swap_builtin_lanes` names the peer's
+  fields as `Option`s (`None`: this bank's own) and runs one expression for both peers, so no
+  field can move for one kind of peer and stay behind for the other.
+- **Root approvals (2026-10-23):** the two `GraphPreparedBuiltinBankProcessor` methods and the two
+  re-exported hook names in `crates/graph/src/lib.rs`, the two test hooks in
+  `crates/graph/src/runtime.rs`, and the `bench-support` dev-dependency of `builtins-compiler`.
 - **Test hooks** (root-approved, `test-support` only): `graph::test_only_builtin_stage` and
   `graph::test_only_builtin_processor_mut` (re-exported in graph's `lib.rs`), and
   `builtins_compiler::test_only_builtin_lane_swap`, which runs the scenario and its bit checks
@@ -111,9 +117,10 @@ swap).
 
 ### D3 Evidence (attempt 1)
 
-- Gate 1 and 2: one test, `a_builtin_lane_swap_moves_the_whole_strip_without_allocating`
-  (`builtins-compiler/tests/allocation_tracker.rs`, which has the crate's counting allocator; the
-  scenario is `test_only_builtin_lane_swap` in `lib.rs`). 13 strips with live controls on every
+- Gate 1: `a_builtin_lane_swap_moves_the_whole_strip` (`builtins-compiler/tests/
+  allocation_tracker.rs`); gate 2: `a_builtin_lane_swap_allocates_nothing`
+  (`tests/lane_swap_alloc.rs`, its own binary with `bench_support`'s audited allocator and thread
+  counters). Both run the scenario `test_only_builtin_lane_swap` in `lib.rs`. 13 strips with live controls on every
   strip and stored fader and mute automation on three, two preparations (test and twin), random
   inputs and identical random live writes (trim, polarity, filter target, fader, mute, matrix,
   offsets; ramps up to 600 samples, block 128). Before block 5 an in-chain swap (automated with
@@ -121,11 +128,19 @@ swap).
   both with dirty cells, ramps in flight and stored events ahead. Every strip's output equals the
   twin's by `to_bits` on all 14 blocks. Simd8 and Simd4, stereo and mono. The mono pass arms
   collapse: both swaps land on a chain that rendered collapsed (R7), and a strip whose live
-  symmetry term was cleared moves its chain to dual. Each swap call: 0 allocations, 0 frees.
+  symmetry term was cleared moves its chain to dual. At Simd4 an automated lane is refused a move
+  into the slotless fader bank of `t12`'s chain (`Err(Slot)`), and the twin check of the blocks
+  after it proves nothing moved. Each swap call: 0 allocations, 0 frees.
 - Mutants red: `controls` exchange dropped (input, fader, matrix, each), `live` exchange dropped,
   `automation` exchange dropped (each arm), fader bank one-way import, `BuiltinStage` refusing,
-  one allocation in the fader swap. Rack's in-chain `disengage_for_carry` removed: red only
+  one allocation in the fader swap (red in `lane_swap_alloc` as (1, 1)); after the verifier: the
+  slotless-bank refusal arm forced true (M4) and the `live` exchange dropped from the one path
+  (M1). Rack's in-chain `disengage_for_carry` removed: red only
   through the input stage's debug assertion; with that assertion also removed the bits stay equal
   (the next disengage copies left onto right), so R7 is guarded by the assertion, not by bits.
 - Not covered (stated limit): the `filter_initial` exchange. Only a `FullToPrepared` reset reads
   it, and no chain path resets a builtin bank. The mutant stays green.
+- Stated limit (attempt-1 verifier, mutant M3): an input filter ramp is 64 updates, so with a
+  128-frame quantum it is never in flight at a block boundary, at a swap or at a plan-swap carry.
+  Dropping the `filter_remaining` import is green in every suite. Root files a successor for a
+  quantum below 64.

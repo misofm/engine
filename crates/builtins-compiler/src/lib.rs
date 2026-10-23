@@ -4644,25 +4644,19 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         if !self.can_swap_with(lane, other.as_deref(), peer_lane) {
             return false;
         }
-        let swapped = match other {
-            None => {
-                self.bank.swap_lanes(lane, None, peer_lane).is_ok()
-                    && exchange_lane_slots(&mut self.controls, lane, None, peer_lane)
-                    && exchange_lane_slots(&mut self.live, lane, None, peer_lane)
-            }
-            Some(other) => {
-                self.bank
-                    .swap_lanes(lane, Some(&mut other.bank), peer_lane)
-                    .is_ok()
-                    && exchange_lane_slots(
-                        &mut self.controls,
-                        lane,
-                        Some(&mut other.controls),
-                        peer_lane,
-                    )
-                    && exchange_lane_slots(&mut self.live, lane, Some(&mut other.live), peer_lane)
-            }
+        // One path for both peers: `None` names this bank's own field, so no field can be
+        // exchanged for one kind of peer and left behind for the other.
+        let (bank, controls, live) = match other {
+            None => (None, None, None),
+            Some(other) => (
+                Some(&mut other.bank),
+                Some(&mut *other.controls),
+                Some(&mut other.live[..]),
+            ),
         };
+        let swapped = self.bank.swap_lanes(lane, bank, peer_lane).is_ok()
+            && exchange_lane_slots(&mut self.controls, lane, controls, peer_lane)
+            && exchange_lane_slots(&mut self.live, lane, live, peer_lane);
         debug_assert!(swapped, "a checked input lane swaps");
         swapped
     }
@@ -5134,35 +5128,24 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
         if !self.can_swap_with(lane, other.as_deref(), peer_lane) {
             return false;
         }
-        let swapped = match other {
-            None => {
-                self.bank.swap_lanes(lane, None, peer_lane).is_ok()
-                    && exchange_lane_slots(&mut self.controls, lane, None, peer_lane)
-                    && (self.automation.is_empty()
-                        || exchange_lane_slots(&mut self.automation, lane, None, peer_lane))
-            }
-            Some(other) => {
-                self.bank
-                    .swap_lanes(lane, Some(&mut other.bank), peer_lane)
-                    .is_ok()
-                    && exchange_lane_slots(
-                        &mut self.controls,
-                        lane,
-                        Some(&mut other.controls),
-                        peer_lane,
-                    )
-                    // A bank without slots trades only a lane without automation
-                    // (`automation_swap_fits`): both lanes' slots are `None`, nothing moves.
-                    && (self.automation.is_empty()
-                        || other.automation.is_empty()
-                        || exchange_lane_slots(
-                            &mut self.automation,
-                            lane,
-                            Some(&mut other.automation),
-                            peer_lane,
-                        ))
-            }
+        // One path for both peers, as the input bank's.
+        let (bank, controls, automation) = match other {
+            None => (None, None, None),
+            Some(other) => (
+                Some(&mut other.bank),
+                Some(&mut *other.controls),
+                Some(&mut *other.automation),
+            ),
         };
+        // A bank without slots trades only a lane without automation (`automation_swap_fits`):
+        // both lanes' slots are `None`, and nothing moves.
+        let slotless = self.automation.is_empty()
+            || automation
+                .as_deref()
+                .is_some_and(<[Option<LaneFaderAutomation>]>::is_empty);
+        let swapped = self.bank.swap_lanes(lane, bank, peer_lane).is_ok()
+            && exchange_lane_slots(&mut self.controls, lane, controls, peer_lane)
+            && (slotless || exchange_lane_slots(&mut self.automation, lane, automation, peer_lane));
         debug_assert!(swapped, "a checked fader lane swaps");
         swapped
     }
@@ -5436,23 +5419,13 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
         if !self.can_swap_with(lane, other.as_deref(), peer_lane) {
             return false;
         }
-        let swapped = match other {
-            None => {
-                self.bank.swap_lanes(lane, None, peer_lane).is_ok()
-                    && exchange_lane_slots(&mut self.controls, lane, None, peer_lane)
-            }
-            Some(other) => {
-                self.bank
-                    .swap_lanes(lane, Some(&mut other.bank), peer_lane)
-                    .is_ok()
-                    && exchange_lane_slots(
-                        &mut self.controls,
-                        lane,
-                        Some(&mut other.controls),
-                        peer_lane,
-                    )
-            }
+        // One path for both peers, as the input bank's.
+        let (bank, controls) = match other {
+            None => (None, None),
+            Some(other) => (Some(&mut other.bank), Some(&mut *other.controls)),
         };
+        let swapped = self.bank.swap_lanes(lane, bank, peer_lane).is_ok()
+            && exchange_lane_slots(&mut self.controls, lane, controls, peer_lane);
         debug_assert!(swapped, "a checked matrix lane swaps");
         swapped
     }
@@ -14873,16 +14846,20 @@ mod tests {
 
         /// The automated fader lanes of chain `chain`.
         fn automated_lanes(&mut self, chain: usize) -> Vec<usize> {
-            let fader = graph::test_only_builtin_processor_mut(&mut self.chains[chain], 1)
-                .and_then(GraphPreparedBuiltinBankProcessor::as_any_mut)
-                .and_then(|any| any.downcast_mut::<FaderBankProcessor>())
-                .expect("slot 1 is the fader bank");
-            fader
+            self.fader(chain)
                 .automation
                 .iter()
                 .enumerate()
                 .filter_map(|(lane, slot)| slot.as_ref().map(|_| lane))
                 .collect()
+        }
+
+        /// Chain `chain`'s fader bank processor (slot 1).
+        fn fader(&mut self, chain: usize) -> &mut FaderBankProcessor {
+            graph::test_only_builtin_processor_mut(&mut self.chains[chain], 1)
+                .and_then(GraphPreparedBuiltinBankProcessor::as_any_mut)
+                .and_then(|any| any.downcast_mut::<FaderBankProcessor>())
+                .expect("slot 1 is the fader bank")
         }
 
         /// One block of `inputs[strip]`; per strip, its output bits.
@@ -14964,6 +14941,36 @@ mod tests {
                 swapped += 1;
             });
             assert_eq!(swapped, 1, "the measure callback runs the swap once");
+            self.moved(at, other);
+        }
+
+        /// A cross-chain swap the chains must refuse; the refusal, and nothing moved.
+        fn refused_swap(
+            &mut self,
+            at: (usize, usize),
+            other: (usize, usize),
+        ) -> Result<(), rack::ChainLaneSwapRefusal> {
+            assert!(at.0 < other.0);
+            let mut scratch = vec![
+                0_u8;
+                self.chains[at.0]
+                    .lane_swap_scratch_bytes()
+                    .max(self.chains[other.0].lane_swap_scratch_bytes())
+            ];
+            let (head, tail) = self.chains.split_at_mut(other.0);
+            let result = head[at.0].swap_lanes(
+                at.1,
+                rack::ChainLanePeer::Other(&mut tail[0], other.1),
+                &mut scratch,
+            );
+            if result.is_ok() {
+                self.moved(at, other);
+            }
+            result
+        }
+
+        /// The strips at `at` and `other` trade positions.
+        fn moved(&mut self, at: (usize, usize), other: (usize, usize)) {
             let strip_at = |position: &[(usize, usize)], at| {
                 position
                     .iter()
@@ -15097,7 +15104,7 @@ mod tests {
     /// one chain and across two chains -- moves each strip's whole input, fader and matrix state
     /// with it. Every `BankChain::swap_lanes` call runs inside `measure`'s callback, which must
     /// call it once, so a caller with a counting allocator gates the swap's allocations (the
-    /// `allocation_tracker` test). Returns the number of swaps measured.
+    /// `lane_swap_alloc` test). Returns the number of swaps measured.
     ///
     /// A real session's strips are prepared with live controls and stored fader and mute
     /// automation, lowered into the builtin banks, and bound as the graph binds them: one
@@ -15113,8 +15120,10 @@ mod tests {
     /// writes: the in-chain swap lands on a
     /// chain that rendered its last block collapsed (R7), and the cross-chain swap takes a collapsed
     /// chain's lane and a strip whose left-only trim (of its own value) cleared its live symmetry
-    /// term, so that strip's new chain must render dual and its old one collapse again. At both
-    /// widths this host builds.
+    /// term, so that strip's new chain must render dual and its old one collapse again. Before block
+    /// 10, where a chain has no automated strip (`t12` alone at four lanes), an automated lane is
+    /// refused a move into its slotless fader bank (`Slot`), and the twin check proves nothing
+    /// moved. At both widths this host builds.
     ///
     /// Red if a swap leaves behind any per-lane field the next blocks read: the stage state or a
     /// ramp, a cell reader (with its dirty bits), the live symmetry term, the stored automation,
@@ -15129,9 +15138,13 @@ mod tests {
         const BLOCKS: u64 = 14;
         const SAME_AT: u64 = 5;
         const OTHER_AT: u64 = 8;
+        /// The block before which an automated lane is refused a move into a fader bank with no
+        /// automation slots.
+        const REFUSED_AT: u64 = 10;
         /// The strip the cross-chain swap moves out of chain 0.
         const QUIET: usize = 2;
         let mut swaps = 0;
+        let mut refusals = 0;
         let filters = [(40.0, 16_000.0), (120.0, 8_000.0), (300.0, 12_000.0)]
             .into_iter()
             .flat_map(|(hpf, lpf)| {
@@ -15207,6 +15220,27 @@ mod tests {
                         rig.swap((0, 2), (1, 1), measure);
                         swaps += 1;
                     }
+                    if block == REFUSED_AT {
+                        // A chain none of whose strips is automated has a fader bank without
+                        // automation slots (#1646 D1): an automated lane has nowhere to land, so
+                        // the swap is refused before any write, and the twin check of the blocks
+                        // after it proves that nothing moved. At four lanes `t12` is such a chain.
+                        let slotless = (1..rig.chains.len())
+                            .find(|&chain| rig.fader(chain).automation.is_empty());
+                        assert!(
+                            backend != Backend::Simd4 || slotless.is_some(),
+                            "{what}: a chain without automation"
+                        );
+                        if let Some(slotless) = slotless {
+                            let automated = rig.automated_lanes(0)[0];
+                            assert_eq!(
+                                rig.refused_swap((0, automated), (slotless, 0)),
+                                Err(rack::ChainLaneSwapRefusal::Slot),
+                                "{what}: an automated lane into a slotless fader bank"
+                            );
+                            refusals += 1;
+                        }
+                    }
                     let inputs = (0..TRACKS)
                         .map(|_| {
                             let left = (0..rig.frames)
@@ -15241,6 +15275,10 @@ mod tests {
                 }
             }
         }
+        assert!(
+            !input_test_backends().contains(&Backend::Simd4) || refusals == 2,
+            "the slotless refusal ran in both Simd4 passes"
+        );
         swaps
     }
 }
