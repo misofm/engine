@@ -303,6 +303,20 @@ const TONE_BLOCKS: usize = 6;
 /// rest on different blocks and the bank only after the last one.
 const SILENT_BLOCKS: usize = 40;
 
+/// Samples of `+0.0` after which lane `lane` of [`render_tone_silence_tone`] is at its exact rest
+/// (#1784 D2), rounded up to a block end.
+///
+/// The soft clip has no recursion. Its three histories hold 32 live rows each. The dry and `X`
+/// rows are `+0.0` after 32 silent pushes. `e` is computed from the 31 newest `X` rows, so the
+/// last `e` that can be non-zero is pushed on silent frame 29 and leaves the live rows 32 pushes
+/// later: `DRY_DELAY - 1 + 32 = 62` samples (measured: 62). The lane's mix ramp, started at
+/// silent block `2 * lane`, settles `RAMP_SAMPLES` later.
+fn rest_bound(lane: usize) -> usize {
+    let histories = crate::kernel::DRY_DELAY - 1 + LIVE_ROWS;
+    let ramp = 2 * lane * FRAMES + RAMP_SAMPLES as usize;
+    histories.max(ramp).next_multiple_of(FRAMES)
+}
+
 /// One whole render: every block's output words, and after every block every lane's words and both
 /// cursors. Returns them with the fast-path admissions it made.
 fn render_tone_silence_tone<L: Lane>(members: &[Values], mask: &[bool]) -> (Vec<u32>, usize) {
@@ -337,6 +351,18 @@ fn render_tone_silence_tone<L: Lane>(members: &[Values], mask: &[bool]) -> (Vec<
         }
         render_block(&mut bank, &mut left, &mut right, first_sample, &spans);
         first_sample += FRAMES as u64;
+        if silent {
+            let rest = PreparedNativeEffectBank::lanes_at_rest(&bank);
+            let rested = (block + 1 - TONE_BLOCKS) * FRAMES;
+            for lane in (0..lanes).filter(|&lane| mask[lane]) {
+                if rest & (1 << lane) == 0 {
+                    assert!(
+                        rested < rest_bound(lane),
+                        "lane {lane} not at rest {rested} samples into the silence"
+                    );
+                }
+            }
+        }
         record.extend(left.iter().chain(&right).map(|word| word.to_bits()));
         for lane in 0..lanes {
             lane_state(&bank, lane, &mut record);
