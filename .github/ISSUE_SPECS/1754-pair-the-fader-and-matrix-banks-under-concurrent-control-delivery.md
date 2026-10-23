@@ -63,3 +63,24 @@ The rule came from #444: under the September control queues, a fader or matrix r
 - Main: no bank fuses in A or in B. `restarted_strips()` is empty for A to B and for B to A.
 - Patched: all strips fuse in A. In B, eq0's 8-lane bank splits. `restarted_strips()` is `[eq0..eq7]` in both directions, and an A to A swap restarts nothing.
 - A live fader move to -24 dB with a 4096-sample ramp ran on eq3, which the edit does not touch. At the swap block, main continues the ramp smoothly (last sample before the swap -0.497, first after -0.560). Patched, the strip jumps to its target in one sample (-0.497, then -0.043).
+
+### Step 2a: measure only (root ruling, 2026-10-23)
+
+Root set the decision rule before any timing. Implement (a) only if, in one arm, the fused plan is at least 2 % faster at p50 in both measured rounds, and product plans do fuse. Otherwise stop. Do not implement (c) without the owner.
+
+**Do product plans fuse with the patch? Yes, unless a strip in the bank has a post-fader send.**
+- The fader-ride plan (`build_with_product_lanes(SixtyFourTrackConsole)`: 64 tracks, no submixes, only `post_pan` routes) forms 8 fused banks with 64 members on AVX2. The scratch witness gives `factory_calls=8`, `factory_members=64`. In 20 riding blocks, all 160 bank passes are ramp-fused (`ramp_fused=160`, `fallback=0`).
+- The only product tap that splits a bank is a session route at `SendTap::PostFader`. This is because `chains_into` refuses a second reader of the fader output, or an observer on the post-fader node (`crates/graph/src/runtime.rs:10912`, `:10916-10923`). Product meters do not split a bank. They are `PostMatrix` on every plan: the host-core default `meter_tap` (`crates/host-core/src/prepare.rs:412`), and the browser at `hosts/host-web/src/lib.rs:5638` and `:6884`. The #881 metered row fused with them. Spectrum captures observe `PostInputBuiltins` and `PostMatrix` (`crates/host-core/src/spectrum.rs:220`, `:224`). Effect observation observes effects. Pre-fader and post-pan sends read other nodes.
+- So a mix with post-fader aux sends fuses nothing in the banks that hold those strips. `fixtures/session/v1/console-sixty-four-track-sends.json` has a post-fader send on every track.
+
+**Timing.** I ran `scripts/operator/run-console-benchmark.sh` once per arm, with one warmup and two measured rounds. Main e9c1dc40c ran as step `opt3-1754-main`. The scratch commit 59f5ec8ab (main plus the pairing patch only, never on this branch) ran as `opt3-1754-patch`. The release build ran under the shared lock and the timing under the exclusive lock, on cpu 31. `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` was set, because the load average at lock was 5.0 and 4.1 (`measurement_control: uncontrolled`). The records are preserved at `/tmp/claude-1002/-home-bl-misofm-engine/258223fb-6f51-4ebb-b550-04d18c009589/scratchpad/opt/records-1754/`. `console_fader_ride` p50, ns per block, rounds 1 / 2:
+
+| arm | main | patch | change |
+|---|---|---|---|
+| quiet | 111442 / 111212 | 111472 / 110701 | +0.03 % / -0.46 % |
+| riding | 117233 / 116582 | 115109 / 115170 | -1.81 % / -1.21 % |
+| paired riding - quiet | 5682 / 5359 | 3636 / 4409 | |
+
+Bit identity: every output digest of all 64 records is equal between the two runs. The fader-ride digests are quiet `21d04f12...` and riding `11b0f9b5...`.
+
+**Decision by the rule: stop.** Neither arm is 2 % faster in both rounds; riding is 1.81 % and 1.21 % faster. So (a) is not implemented, and (c) goes to the owner if anyone proposes it. The step-2 patch is not on this branch. Steps 2 and 3 of the slice, the row move and the stale comments, remain open for root.
