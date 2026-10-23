@@ -340,3 +340,109 @@ fn a_swapped_lane_renders_as_its_unswapped_twin() {
         }
     }
 }
+
+/// One gate at `width`, concrete so the test can read its bank-wide clock.
+fn concrete_gate<L: Lane>(draw: &mut Draw) -> PreparedGate<L, false> {
+    let values: Vec<_> = (0..L::WIDTH).map(|_| draw_values(draw)).collect();
+    let metadata = expected_prepared_metadata(
+        &GATE_EXPANDER_DESCRIPTOR,
+        request(&values[0], 48_000, LinkMode::DualMono),
+    )
+    .expect("a member prepares");
+    let mut defaults = [initial_defaults(&values[0]).expect("defaults"); MAX_WIDTH];
+    for (track, set) in values.iter().enumerate() {
+        defaults[track] = initial_defaults(set).expect("defaults");
+    }
+    let width = BankWidth::ALL
+        .iter()
+        .copied()
+        .find(|width| width.lanes() as usize == L::WIDTH)
+        .expect("a bank width");
+    PreparedGate::<L, false>::new(&metadata, Some(width), defaults).expect("a bank")
+}
+
+fn lowers_like_a_rendered_block<L: Lane>(seed: u64)
+where
+    PreparedGate<L, false>: PreparedNativeEffectBank,
+{
+    let lanes = L::WIDTH;
+    let width = BankWidth::ALL
+        .iter()
+        .copied()
+        .find(|width| width.lanes() as usize == lanes)
+        .expect("a bank width");
+    let mut draw = Draw::new(seed);
+    let mut rendered = concrete_gate::<L>(&mut draw);
+    let mut skipped = concrete_gate::<L>(&mut Draw::new(seed));
+    let render = |bank: &mut PreparedGate<L, false>,
+                  frames: usize,
+                  spans: &[PreparedAutomationSpan]| {
+        let (mut left, mut right) = (vec![0.0_f32; frames * lanes], vec![0.0_f32; frames * lanes]);
+        let mut offsets = vec![spans.len() as u32; lanes + 1];
+        offsets[0] = 0;
+        let block = EffectBankProcessBlock::new(
+            &mut left,
+            &mut right,
+            None,
+            frames as u32,
+            width,
+            0,
+            spans,
+            &offsets,
+            QUANTUM,
+        )
+        .expect("a bank block");
+        let _ = bank.process_bank(block);
+    };
+    // Lane 0 starts every ramp and renders 48 of its 64 frames; restoring its own payload then
+    // raises the schedule to the whole smoothing length while its ramps need 16 more frames.
+    let spans = draw_spans(&mut draw, true, 0);
+    let sizes = GATE_EXPANDER_DESCRIPTOR
+        .qualities
+        .iter()
+        .find(|quality| quality.sample_rate == 48_000)
+        .expect("a launch rate")
+        .maximum_state;
+    for bank in [&mut rendered, &mut skipped] {
+        render(bank, FRAMES, &spans);
+        let mut common = vec![0_u8; sizes.common_bytes as usize];
+        let mut left = vec![0_u8; sizes.left_bytes as usize];
+        let mut right = vec![0_u8; sizes.right_bytes as usize];
+        bank.snapshot_track_state_payload(
+            0,
+            StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes).expect("sizes"),
+        )
+        .expect("a snapshot");
+        bank.restore_track_state_payload(
+            0,
+            GATE_EXPANDER_DESCRIPTOR.state_layout_version,
+            StatePayloadInput::new(&common, &left, &right, sizes).expect("sizes"),
+        )
+        .expect("its own payload");
+        render(bank, 16, &[]);
+        assert_eq!(bank.ramp_frames_left, 48, "the schedule outlives the ramps");
+    }
+    for frames in [7_usize, 30, 1, 64, 3] {
+        render(&mut rendered, frames, &[]);
+        skipped.advance_clocks(u32::MAX >> (32 - lanes), frames as u32);
+        assert_eq!(
+            skipped.ramp_frames_left, rendered.ramp_frames_left,
+            "W{lanes}: after a {frames}-frame block"
+        );
+    }
+    assert_eq!(
+        rendered.ramp_frames_left, 0,
+        "the schedule saturates at zero"
+    );
+}
+
+/// **`advance_clocks` lowers the bank's one clock, `ramp_frames_left`, as a rendered block does,
+/// saturating at zero, at every bank width the build has.** A restore that lands a ramp with
+/// fewer frames left than the smoothing length leaves the counter above what the ramps need,
+/// which is the state in which a skipped block must still lower it.
+#[test]
+fn advancing_the_clocks_lowers_the_ramp_schedule_as_a_rendered_block() {
+    lowers_like_a_rendered_block::<lane::Simd4>(0x1747_6100);
+    #[cfg(target_feature = "avx2")]
+    lowers_like_a_rendered_block::<lane::Simd8>(0x1747_6108);
+}
