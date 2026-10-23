@@ -164,3 +164,169 @@ Constraints from the reviews of 2026-10-23 (Fable design review S5; #1747, #1765
    plans.
 6. **R7.** With real stages, a stale right channel restored after an in-chain swap on a collapsed
    chain is guarded only by a debug assertion (#1747, #1765); gate 1 runs collapsed chains.
+
+### D5 Attempt-2 design and proposed split (implementer, 2026-10-23; for root's approval)
+
+Facts read for this design (`rt` = `crates/graph/src/runtime.rs`, anchors at a0b950874):
+- The standard console strip is **one** `RuntimeUnit::Bank` per bank: one `BankChain` holds input
+  builtins, the console and banked insert slots, fader and matrix, and the route is folded into
+  the scatter epilogue (`graph-compiler/src/lib.rs` near 11453). The 64-track console is 8
+  consecutive peer units at W=8 and 16 at W=4. Packing is therefore a **cross-unit** move
+  (`ChainLanePeer::Other`), and the lane map is graph-level.
+- Still missing, not delivered by #1745-#1765: a rest predicate and a clock advance on the rack
+  `BankStage` trait (only `PreparedNativeEffectBank` has them) and on the builtin input, fader and
+  matrix banks. Without them no production chain can report a lane at rest.
+- Hazards for a cross-unit move that D1 did not name:
+  - **Master order.** On a folded plan, `route_fold` (rt near 9875) proves that the master's
+    edge order equals the chain-lane render order. If a strip moves to another unit, its add
+    into the master happens at a different position, and the master bits move. AGENTS.md: "a
+    placement change must not move a rendered bit".
+  - **Signed zeros.** A `store` lane writes the master, and the route of a `+0.0` lane can give
+    `-0.0` (a negative coefficient). Skipping a `+0.0` add changes a `-0.0` master word.
+  - **Schedule.** A slot-0 member's reduction and PDC staging run in its home unit's `execute`.
+    If a strip moves to an earlier unit, it would read an input that is not produced yet.
+  - **Resident pairs** (`arm_resident_inputs`, rt near 9073) must be permuted together.
+- Lane-keyed consumers: every per-lane graph object is **member-owned**, so it follows the strip
+  if `members[slot * lanes + lane]` is exchanged with the chain swap:
+  - slot-0 inputs, PDC lines and scatter redirects;
+  - last-slot outputs and their observers and meters.
+
+  The objects that need a map:
+  - `fold[lane]`: a `FoldLane` holds the route coefficients and the positional `store`;
+  - `source_lanes` (a u8 mask);
+  - response-snapshot bindings `{unit, member}` (rt near 3936 and 9002);
+  - the predecessor side of a plan carry (raw `(unit, slot, lane)` from the bind-time
+    inventory, `adopt_predecessor`, lib near 5300);
+  - the evidence rows of `unit_eligibility`.
+
+#### Proposed split (the whole slice does not fit one attempt under the half-day rule)
+
+1. **#1107a: the rest predicates on every production stage.** This is a building block, the same
+   kind as #1745 and #1746.
+   - `BankStage::{lanes_at_rest, advance_clocks}`, declining by default, on:
+     - `EffectBankStage`: forwards to the effect.
+     - `LiveControlEffectBankStage`: the effect's mask, minus every lane with a staged span, a
+       staged prepared target, a bypass, a running crossfade or an armed observation tap after
+       this block's drain. The clock advance also feeds the shunt line a `+0.0` block through
+       `feed_line` (D4), so the line words stay as a rendered zero block leaves them.
+     - `BuiltinStage`: forwards through `GraphPreparedBuiltinBankProcessor`.
+   - Builtin input, fader and matrix banks:
+     - Each has a state-only predicate under the D3 ruling: one `+0.0` block leaves every state
+       word bit-equal and writes `+0.0`.
+     - Input: all integrators at `+0.0` bits and no trim or filter ramp in flight. A lane whose
+       signed trim or polarity can turn `+0.0` into `-0.0` declines unless the kernel proves
+       otherwise.
+     - Fader: no gain or mute ramp in flight.
+     - Matrix: not ramping, and no output row whose two coefficients both carry the sign bit.
+     - Processor level: no automation span this block (`automation[lane].span`).
+   - Clocks: the input's silence counter (`lane::silence_advance`). The fader and matrix have
+     none.
+   - `BankChain::lanes_at_rest()`: the AND over the slots. A slot that is an identity on a lane
+     counts as at rest on that lane.
+   - Gate: one rest-probe test per new predicate, in the crate that owns it (as #1745). The test
+     renders a `+0.0` block and fails when a reported bit is not an exact fixed point.
+2. **#1107: the whole-bank skip on compiled plans** (this issue, narrowed). This is the smallest
+   closable product slice. It removes all work of a bank whose every lane is silent, which the
+   owner's priority asks for. It moves no lane, so the hazards above do not arise. Design:
+   - `BankChain::run_with_input` is split. Step 0 (`begin_block` on every slot) and the collapse
+     dispatch (disengage, agreement maintenance, counters) run on every block, unchanged. Then,
+     when every lane's gather source is exact `+0.0` on both planes and the chain's
+     `lanes_at_rest()` covers all lanes (padded lanes included), the chain calls
+     `skip_block(frames)`.
+   - The input test runs first. It is the `block_is_positive_zero` head on each lane's source,
+     which returns on the first non-zero word. The rest masks are read only when every input is
+     zero. So an all-active block pays W head checks per bank and nothing more.
+   - `skip_block` calls `advance_clocks(all lanes, frames)` on every slot and does no gather, no
+     process and no scatter transpose. On a collapsed block it also advances the frozen right
+     clocks. Nothing can see them before the disengage copies the left channel over them, and
+     the swap and the carry paths disengage first.
+   - The resident scratch is zeroed once per run of skips (a `resident_zero` flag), so that
+     `final_output_lane`, the observers and the meters read the `+0.0` that a rendered block
+     leaves there.
+   - Unfolded lanes: their output buffers (redirects included) get `frames` words of `+0.0` per
+     plane.
+   - Folded lanes keep the master's sequence exactly. A `store` lane stores its
+     route-of-`+0.0` constants (bind-time, per plane: `-0.0` only if both of the plane's
+     coefficients are negative). Each add lane's constant is added in order. An add of `-0.0` is
+     an identity for every word, so only a `+0.0` add is performed, and that is one
+     `sum_into_block` per plane per skipped bank, not per lane.
+   - A chain with a slot that reads a sidechain never skips. That is decided at bind.
+   - The drain and the observation queues still run on every block, so no acknowledgement and
+     no publication is held.
+   - Allocation-free and bounded by the lanes, the slots and the frames.
+   - Gate 1, a class A differential on compiled plans:
+     - It renders sessions with random per-lane silence runs (whole banks silent at times,
+       mid-ramp edits, a bypass edge, stored fader automation, mono-armed collapsed chains for
+       R7), with and without the skip. Every strip output and the master must be equal by
+       `to_bits`, with NaNs folded.
+     - The no-skip twin needs one `test-support` switch on the plan (root approval needed: a
+       hook in `crates/graph/src/lib.rs`).
+   - Gate 2: allocations == 0 on the render thread with the skip active.
+   - Gate 3: one native and one V8 console run. The idle and sparse rows are read against S4 and
+     the current main; the sparse row is not expected to move in this slice. The all-active row
+     must be within 2 % of S4.
+3. **#1107b: packing (swap-to-pack)** on top of #1107a and #1107. This is where D4's constraints
+   1-6 apply. Design sketch, to be refined in its own brief:
+   - **Pack groups.** A pack group is a maximal run of consecutive Bank units in the schedule
+     that are peers. Peers have an equal slot program and an equal collapse arming (D4-2). A
+     group has no resident pairing and has only direct gather sources (`bank_gather_source` is
+     `Some` for every slot-0 member, so a move changes no reduction order). Either every unit
+     folds into one master or none folds. Other units only whole-bank skip.
+   - **The lane map.** It lives in the group as `home[strip] -> (unit, lane)`, its inverse, and
+     a per-strip `automated` bit. A move exchanges the two chains' lanes and, in the same call,
+     `members[s * lanes + lane]` for every slot `s`, `fold[lane]` and the `source_lanes` bits.
+     Then gather, scatter, PDC, redirects, observers and meters follow the strip with no reader
+     change. The other readers translate through the map:
+     - response-snapshot bindings;
+     - the predecessor side of the carry;
+     - `unit_eligibility`.
+   - **Folded groups.** The epilogue fold is deferred to a group-level fold after the group's
+     last unit, in home order, and it reads each strip's staged tile through the map. That
+     keeps the master's association exactly as `route_fold` proved it. Skipped strips take the
+     signed-zero rule of item 2.
+   - **Packing decision.** It is made per block, after the drains.
+     - An active lane in a bank that would otherwise be skipped is always moved in, or that bank
+       runs. Running is always exact.
+     - Empty out the bank with the fewest active lanes into lanes that have been idle for at
+       least `R` blocks in running banks.
+     - Hysteresis: a lane idles for `R` blocks before it may be packed out.
+     - Budget: at most `B = W` moves per group per block, so the worst block moves one bank's
+       worth of state.
+     - `R` and `B` are preallocated constants, recorded with their reasons in #1107b.
+     - Automated strips move only into fader banks with automation slots (D4-3). This is a
+       bind-time per-unit bit, checked before a move is chosen, so the render path never
+       reaches the refusal.
+   - **Tests.** A plan-level swap test (D4-5), and gate 1 rerun with packing. The sparse row is
+     read against S4.
+4. **#1107c, qualification, before #1107b's timing:** the toggle row (D4-1) and a row with one
+   active lane per bank, native and V8.
+
+W=4 and W=8: the skip is per bank at both widths. At W=4 the 64-track console has 16 banks and
+at W=8 it has 8. #1107 skips a bank only when all of its lanes are silent. The sparse row (odd
+tracks silent) skips nothing until #1107b packs it: 32 active lanes into 8 of 16 banks at W=4,
+into 4 of 8 at W=8.
+
+#### Gate 1's Simd4 leg
+
+The differential will be a `graph-compiler` test, and graph-compiler is a product crate. The
+arm64 CI legs (`aarch64-debug` and `aarch64-release`, `scripts/run-aarch64-tests.sh`) run it
+natively at Simd4 (NEON). Locally it runs at Simd8 only. That means:
+- No wasm32 run: no runner exists here for a compiled-plan test.
+- No #1694 dependency: it is open, and AVX2 cannot bind Simd4 console banks.
+- No qemu on this host.
+
+The Simd4 result exists only after root's batch push. If root needs it before the merge, the
+alternative is #1694.
+
+#### Authorized paths (for #1107a and #1107; root to confirm)
+
+- `crates/rack/src/lib.rs`, `crates/rack/tests/*`
+- `crates/effect-contract/src/live.rs` (only if `feed_line` needs a zero-source form)
+- `crates/builtins/src/lib.rs`, `crates/builtins-compiler/src/lib.rs`, and their tests
+- `crates/graph/src/runtime.rs`, and `crates/graph/src/lib.rs` (only the trait methods on
+  `GraphPreparedBuiltinBankProcessor` and the test-support skip switch)
+- `crates/graph-compiler/tests/` (one new differential file)
+- this spec
+
+Not touched: the effect crates (their predicates exist), benchmark tools and scripts (#1107c owns
+rows; the runs use the existing scripts), host-core, capi, host-web.
