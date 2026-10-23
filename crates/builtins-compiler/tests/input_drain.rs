@@ -160,9 +160,8 @@ fn re_equalising_the_words_does_not_re_arm_the_live_term() {
 ///   comparison can see a trim at all.
 /// * Nothing is **refused**: the walk is accepted in full, where the queue refused its 17th record.
 ///
-/// Both drains are held: the banked one (`BuiltinBankProcessor::begin_block`, through the full
-/// cohort and one-lane tail of the SIMD fixture, at the build's own width) and the scalar one
-/// (`LiveControlInputProcessor::process`, through the scalar-dispatch fixture).
+/// The banked drain is held (`BuiltinBankProcessor::begin_block`, through the full cohort and
+/// one-lane tail of the SIMD fixture, at the build's own width).
 ///
 /// Replaces `a_block_drains_every_input_record_queued_at_its_entry` (#1027, from the #600
 /// input-trim qualification), which filled the queue to capacity.
@@ -173,10 +172,7 @@ fn re_equalising_the_words_does_not_re_arm_the_live_term() {
 #[cfg(feature = "test-support")]
 #[test]
 fn a_block_applies_the_last_of_many_input_edits() {
-    use builtins_compiler::{
-        PreparedBuiltinsGraphBound, test_only_prepared_pair_graph,
-        test_only_prepared_scalar_pair_graph,
-    };
+    use builtins_compiler::{PreparedBuiltinsGraphBound, test_only_prepared_unpaired_graph};
     use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 
     /// Far past the 16 records the input queue held.
@@ -231,10 +227,7 @@ fn a_block_applies_the_last_of_many_input_edits() {
     }
 
     type Build = fn() -> PreparedBuiltinsGraphBound;
-    let arms: [(&str, Build); 2] = [
-        ("banked", || test_only_prepared_pair_graph(false)),
-        ("scalar", || test_only_prepared_scalar_pair_graph(false)),
-    ];
+    let arms: [(&str, Build); 1] = [("banked", test_only_prepared_unpaired_graph)];
     for (arm, build) in arms {
         let mut walked = build();
         let mut last_only = build();

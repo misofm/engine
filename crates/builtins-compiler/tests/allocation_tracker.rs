@@ -14,17 +14,12 @@ use std::sync::Mutex;
 use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, LiveValuesSuperseded, MeterRequest, TEST_ONLY_PAIR_GRAPH_TRACKS,
-    TestOnlyFaderMatrixPair, TrackControlRecord, TrackControlRequest, TrackFaderRecord,
-    TrackInputRecord, prepare_session_builtins, prepare_session_builtins_with_live_controls,
+    TrackControlRecord, TrackControlRequest, TrackFaderRecord, TrackInputRecord,
+    prepare_session_builtins, prepare_session_builtins_with_live_controls,
     test_only_begin_phase_two_allocation_observation, test_only_fader_matrix_witness,
-    test_only_observed_scalar_declined_split_pair_binding, test_only_observed_scalar_pair_binding,
-    test_only_observed_scalar_split_pair_binding, test_only_phase_two_allocation_snapshot,
-    test_only_prepared_scalar_split_pair_graph,
-    test_only_prepared_scalar_split_pair_graph_with_observer_error,
-    test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
-    test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
-    test_only_scalar_outer_lifetime, test_only_scalar_owner_drops, test_only_scalar_owner_layouts,
-    test_only_scalar_split_outer_layout,
+    test_only_phase_two_allocation_snapshot, test_only_record_phase_two_allocation,
+    test_only_record_phase_two_deallocation, test_only_reset_fader_matrix_witness,
+    test_only_reset_phase_two_allocation_tracker,
 };
 use engine::realtime::{LiveSnapshot, PlanarBufferMut, RenderIo, RenderTime};
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
@@ -164,36 +159,6 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
 }
 
-#[test]
-fn actual_serialized_composite_render_allocates_and_frees_nothing() {
-    let _session_guard = SESSION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut pair = TestOnlyFaderMatrixPair::new_ramping();
-    let mut left = [0.25_f32; 4 * 8];
-    let mut right = [-0.5_f32; 4 * 8];
-
-    let mut probe = Vec::<u8>::with_capacity(core::hint::black_box(64));
-    LIVE_ALLOCS.set(0);
-    LIVE_FREES.set(0);
-    armed(|| probe.reserve_exact(core::hint::black_box(128)));
-    assert!(LIVE_ALLOCS.get() > 0, "realloc allocation liveness");
-    LIVE_ALLOCS.set(0);
-    LIVE_FREES.set(0);
-    armed(|| drop(probe));
-    assert_eq!(LIVE_ALLOCS.get(), 0, "drop is not allocation activity");
-    assert!(LIVE_FREES.get() > 0, "independent free liveness");
-
-    LIVE_ALLOCS.set(0);
-    LIVE_FREES.set(0);
-    armed(|| {
-        for _ in 0..32 {
-            pair.process(&mut left, &mut right, 8);
-        }
-    });
-    assert_eq!((LIVE_ALLOCS.get(), LIVE_FREES.get()), (0, 0));
-}
-
 fn audit_graph_render(
     bound: &mut builtins_compiler::PreparedBuiltinsGraphBound,
     output: &mut [f32],
@@ -221,37 +186,6 @@ fn audit_graph_render(
         "actual queued graph render allocation/free gate"
     );
     witness
-}
-
-fn audit_failed_graph_render(
-    bound: &mut builtins_compiler::PreparedBuiltinsGraphBound,
-    output: &mut [f32],
-    absolute_sample: u64,
-    target: u32,
-    completion_disabled: bool,
-) -> graph::TestOnlyFailedBufferCapture {
-    graph::test_only_arm_failed_buffer_capture(target);
-    graph::test_only_set_completion_disabled(completion_disabled);
-    LIVE_ALLOCS.set(0);
-    LIVE_FREES.set(0);
-    armed(|| {
-        bound
-            .plan
-            .render(
-                RenderIo {
-                    output: PlanarBufferMut::try_new(output, 2, 64, 64).expect("output"),
-                },
-                RenderTime { absolute_sample },
-            )
-            .expect_err("injected observer render failure");
-    });
-    graph::test_only_set_completion_disabled(false);
-    assert_eq!(
-        (LIVE_ALLOCS.get(), LIVE_FREES.get()),
-        (0, 0),
-        "failed render allocation/free gate"
-    );
-    graph::test_only_failed_buffer_capture()
 }
 
 struct RuntimeBankPlanes {
@@ -297,79 +231,61 @@ fn audit_runtime_bank_render(
     );
 }
 
+/// Fader and matrix values drained into a running queued graph allocate and free nothing: a
+/// settled block, a fader and matrix ramp on the one-lane tail, a fader retarget inside it, and
+/// the block after it.
 #[test]
 fn actual_queued_graph_phases_allocate_and_free_nothing() {
     let _session_guard = SESSION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut output = [0.0_f32; 128];
-    test_only_reset_fader_matrix_witness();
-    let mut eligible = builtins_compiler::test_only_prepared_pair_graph(false);
-    let prepared = test_only_fader_matrix_witness();
+    let mut graph = builtins_compiler::test_only_prepared_unpaired_graph();
     // The graph is one full bank of the build's own width and a one-lane tail: nine tracks on an
     // 8-lane (AVX2) build, five on a 4-lane one (issue #1112).
-    let members = TEST_ONLY_PAIR_GRAPH_TRACKS as u64;
     let tail_id = format!("t{:02}", TEST_ONLY_PAIR_GRAPH_TRACKS - 1);
-    // Issue #916: the full first cohort pairs beside the one-lane tail. Its lane 0 is the
-    // output track, whose post-matrix buffer used to be the graph output and declined the
-    // cohort; the Output is dedicated storage now. So 2 pairs over every member, and every block
-    // below counts the first cohort's settled pair (always fused: nothing is queued for it) on
-    // top of the tail's branch.
-    assert_eq!(
-        (prepared.factory_calls, prepared.factory_members),
-        (2, members)
-    );
 
-    let settled = audit_graph_render(&mut eligible, &mut output, 0);
-    assert_eq!((settled.fused_calls, settled.fallback_calls), (2, 0));
-    assert_eq!(settled.process_members, members);
+    audit_graph_render(&mut graph, &mut output, 0);
 
-    {
-        eligible.test_only_write(|controls, stamp| {
-            let tail = controls
-                .iter_mut()
-                .find(|control| control.track_id.as_ref() == tail_id)
-                .expect("eligible tail controls");
-            tail.fader.write(
-                stamp,
-                TrackFaderRecord::FaderDb {
-                    lanes: BuiltinLaneSelector::Both,
-                    db: -12.0,
-                    smoothing_samples: 3,
-                },
-            );
-            tail.producer.write(
-                stamp,
-                TrackControlRecord {
-                    matrix: Matrix2x2 {
-                        ll: 0.5,
-                        lr: 0.25,
-                        rl: -0.25,
-                        rr: 0.75,
-                    },
-                    smoothing_samples: 3,
-                },
-            );
-        });
-    }
-    // Issue #890: the ramping tail renders in the fused ramping passes, not the split fallback.
-    let ramp_a = audit_graph_render(&mut eligible, &mut output, 64);
-    assert_eq!(
-        (
-            ramp_a.fused_calls,
-            ramp_a.ramp_fused_calls,
-            ramp_a.fallback_calls
-        ),
-        (1, 1, 0)
-    );
-    let ramp_b = audit_graph_render(&mut eligible, &mut output, 128);
-    assert_eq!((ramp_b.fused_calls, ramp_b.fallback_calls), (2, 0));
-
-    eligible.test_only_write(|controls, stamp| {
+    graph.test_only_write(|controls, stamp| {
         let tail = controls
             .iter_mut()
             .find(|control| control.track_id.as_ref() == tail_id)
-            .expect("eligible tail controls");
+            .expect("tail controls");
+        tail.fader.write(
+            stamp,
+            TrackFaderRecord::FaderDb {
+                lanes: BuiltinLaneSelector::Both,
+                db: -12.0,
+                smoothing_samples: 3,
+            },
+        );
+        tail.producer.write(
+            stamp,
+            TrackControlRecord {
+                matrix: Matrix2x2 {
+                    ll: 0.5,
+                    lr: 0.25,
+                    rl: -0.25,
+                    rr: 0.75,
+                },
+                smoothing_samples: 3,
+            },
+        );
+    });
+    let ramp = audit_graph_render(&mut graph, &mut output, 64);
+    assert_eq!(
+        (ramp.fader_values_applied, ramp.matrix_values_applied),
+        (1, 1),
+        "the ramp block drained both values"
+    );
+    audit_graph_render(&mut graph, &mut output, 128);
+
+    graph.test_only_write(|controls, stamp| {
+        let tail = controls
+            .iter_mut()
+            .find(|control| control.track_id.as_ref() == tail_id)
+            .expect("tail controls");
         tail.fader.write(
             stamp,
             TrackFaderRecord::FaderDb {
@@ -379,131 +295,9 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
             },
         );
     });
-    let retarget = audit_graph_render(&mut eligible, &mut output, 192);
-    assert_eq!(
-        (
-            retarget.fused_calls,
-            retarget.ramp_fused_calls,
-            retarget.fallback_calls
-        ),
-        (1, 1, 0)
-    );
-    let resettled = audit_graph_render(&mut eligible, &mut output, 256);
-    assert_eq!((resettled.fused_calls, resettled.fallback_calls), (2, 0));
-
-    test_only_reset_fader_matrix_witness();
-    let mut observed = builtins_compiler::test_only_prepared_pair_graph(true);
-    let observed_prepared = test_only_fader_matrix_witness();
-    assert_eq!(
-        (
-            observed_prepared.factory_calls,
-            observed_prepared.factory_members
-        ),
-        (1, 1),
-        "the observed full cohort declines while the tail is prepared"
-    );
-    let observed_call = audit_graph_render(&mut observed, &mut output, 0);
-    assert_eq!(
-        (observed_call.fused_calls, observed_call.fallback_calls),
-        (1, 0)
-    );
-    assert_eq!(observed_call.process_members, 1);
-    let meter = observed
-        .meter_consumers
-        .first_mut()
-        .expect("observed cohort meter");
-    assert!(
-        meter.consumer.try_pop().is_ok(),
-        "meter drains only after disarming"
-    );
-}
-
-#[test]
-fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
-    let _session_guard = SESSION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-    let mut liveness = Vec::<u8>::with_capacity(core::hint::black_box(32));
-    LIVE_ALLOCS.set(0);
-    LIVE_FREES.set(0);
-    armed(|| liveness.reserve_exact(core::hint::black_box(64)));
-    assert!(LIVE_ALLOCS.get() > 0, "scalar audit allocation liveness");
-    LIVE_ALLOCS.set(0);
-    LIVE_FREES.set(0);
-    armed(|| drop(liveness));
-    assert!(LIVE_FREES.get() > 0, "scalar audit free liveness");
-
-    let mut output = [0.0_f32; 128];
-    test_only_reset_fader_matrix_witness();
-    let mut selected = builtins_compiler::test_only_prepared_scalar_pair_graph(false);
-    // Issue #916: t00 pairs beside t01. t00's post-matrix buffer used to be the graph output,
-    // which declined it; the Output is dedicated storage now. Every block below counts t00's
-    // settled pair (always fused: nothing is queued for it) on top of t01's branch.
-    assert_eq!(
-        (
-            test_only_fader_matrix_witness().factory_calls,
-            test_only_fader_matrix_witness().factory_members
-        ),
-        (2, 2)
-    );
-    let settled = audit_graph_render(&mut selected, &mut output, 0);
-    assert_eq!((settled.fused_calls, settled.fallback_calls), (2, 0));
-    {
-        selected.test_only_write(|controls, stamp| {
-            let scalar = controls
-                .iter_mut()
-                .find(|control| control.track_id.as_ref() == "t01")
-                .expect("selected scalar controls");
-            scalar.fader.write(
-                stamp,
-                TrackFaderRecord::FaderDb {
-                    lanes: BuiltinLaneSelector::Both,
-                    db: -12.0,
-                    smoothing_samples: 96,
-                },
-            );
-            scalar.producer.write(
-                stamp,
-                TrackControlRecord {
-                    matrix: Matrix2x2 {
-                        ll: 0.5,
-                        lr: 0.25,
-                        rl: -0.25,
-                        rr: 0.75,
-                    },
-                    smoothing_samples: 96,
-                },
-            );
-        });
-    }
-    for (sample, expected) in [(64, (1, 0, 1)), (128, (1, 0, 1)), (192, (2, 0, 0))] {
-        let witness = audit_graph_render(&mut selected, &mut output, sample);
-        assert_eq!(
-            (
-                witness.fused_calls,
-                witness.ramp_fused_calls,
-                witness.fallback_calls
-            ),
-            expected
-        );
-        assert_eq!(witness.process_members, 2);
-    }
-
-    test_only_reset_fader_matrix_witness();
-    let mut observed = builtins_compiler::test_only_prepared_scalar_pair_graph(true);
-    let observed_call = audit_graph_render(&mut observed, &mut output, 0);
-    // Issue #916: the post-fader meter is on t01, which keeps its separate owners; t00 is
-    // unobserved and pairs, so one pair runs where none used to.
-    assert_eq!(
-        (observed_call.process_calls, observed_call.factory_calls),
-        (1, 0),
-        "the actual observed scalar graph retains separate owners for the observed track"
-    );
-    assert!(
-        observed.meter_consumers[0].consumer.try_pop().is_ok(),
-        "observed fallback publishes its meter window"
-    );
+    let retarget = audit_graph_render(&mut graph, &mut output, 192);
+    assert_eq!(retarget.fader_values_applied, 1, "the retarget was drained");
+    audit_graph_render(&mut graph, &mut output, 256);
 }
 
 /// Input trim values drained into a running graph allocate and free nothing, through the banked
@@ -526,8 +320,8 @@ fn actual_input_trim_cell_drain_allocates_and_frees_nothing() {
     let _session_guard = SESSION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut ridden = builtins_compiler::test_only_prepared_pair_graph(false);
-    let mut quiet = builtins_compiler::test_only_prepared_pair_graph(false);
+    let mut ridden = builtins_compiler::test_only_prepared_unpaired_graph();
+    let mut quiet = builtins_compiler::test_only_prepared_unpaired_graph();
     assert_eq!(
         ridden.track_controls.len(),
         TEST_ONLY_PAIR_GRAPH_TRACKS,
@@ -558,259 +352,6 @@ fn actual_input_trim_cell_drain_allocates_and_frees_nothing() {
         moved,
         "the trim records never moved the output, so the drain they went through proves nothing"
     );
-}
-
-#[test]
-fn actual_queued_scalar_split_graph_allocates_and_frees_nothing() {
-    let _session_guard = SESSION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut output = [0.0_f32; 128];
-    test_only_reset_fader_matrix_witness();
-    let mut selected = test_only_prepared_scalar_split_pair_graph();
-    let prepared = test_only_fader_matrix_witness();
-    assert_eq!((prepared.factory_calls, prepared.factory_members), (1, 1));
-
-    let settled = audit_graph_render(&mut selected, &mut output, 0);
-    assert_eq!((settled.fused_calls, settled.fallback_calls), (1, 0));
-    assert_eq!(settled.process_members, 1);
-
-    LIVE_ALLOCS.set(0);
-    LIVE_FREES.set(0);
-    test_only_reset_fader_matrix_witness();
-    armed(|| drop(selected));
-    assert_eq!(
-        LIVE_ALLOCS.get(),
-        0,
-        "split owner release does not allocate"
-    );
-    assert!(LIVE_FREES.get() > 0, "split owner releases off render");
-    assert_eq!(test_only_scalar_owner_drops(), [2, 2, 1]);
-    assert_eq!(test_only_scalar_outer_lifetime(), [1, 0, 1]);
-}
-
-#[test]
-fn actual_scalar_split_table_and_failed_render_fit_the_resource_gate() {
-    let _session_guard = SESSION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let table_layout = Layout::array::<Box<dyn graph::GraphRuntimeSplitPairProcessor>>(1)
-        .expect("one split table entry");
-
-    test_only_reset_phase_two_allocation_tracker();
-    graph::test_only_reset_split_pair_table_witness();
-    let (declined, declined_estimate, declined_resource, _, declined_binding) =
-        armed(test_only_observed_scalar_declined_split_pair_binding);
-    assert_eq!(declined_resource.split_pair_table_bytes, 0);
-    assert!(!declined_binding.overflowed);
-    assert_eq!(
-        graph::test_only_split_pair_table_witness(),
-        graph::TestOnlySplitPairTableWitness {
-            allocations: 0,
-            entries: 0,
-            bytes: 0,
-        },
-        "declined split has no boxed table allocation"
-    );
-    drop(declined);
-
-    test_only_reset_phase_two_allocation_tracker();
-    graph::test_only_reset_split_pair_table_witness();
-    let (mut selected, selected_estimate, selected_resource, _, selected_binding) =
-        armed(test_only_observed_scalar_split_pair_binding);
-    assert_eq!(
-        selected_resource.split_pair_table_bytes,
-        table_layout.size() as u64
-    );
-    assert!(!selected_binding.overflowed);
-    assert!(selected_estimate.graph_metadata_bytes >= selected_resource.total_bytes);
-    let scalar_delta = selected_resource
-        .total_bytes
-        .checked_sub(declined_resource.total_bytes)
-        .expect("selected scalar resource delta");
-    assert_eq!(
-        selected_estimate.graph_metadata_bytes - declined_estimate.graph_metadata_bytes,
-        scalar_delta,
-        "selected report adds exactly the retained scalar owner/table term"
-    );
-    assert_eq!(
-        selected_estimate.incremental_plan_bytes - declined_estimate.incremental_plan_bytes,
-        scalar_delta
-    );
-    assert_eq!(
-        graph::test_only_split_pair_table_witness(),
-        graph::TestOnlySplitPairTableWitness {
-            allocations: 1,
-            entries: 1,
-            bytes: table_layout.size() as u64,
-        },
-        "selected split retains exactly one boxed table entry"
-    );
-    assert!(selected_binding.layouts.iter().any(|layout| {
-        layout.size_bytes == table_layout.size() as u64
-            && layout.align_bytes == table_layout.align() as u64
-    }));
-    let mut output = [0.0_f32; 128];
-    let settled = audit_graph_render(&mut selected, &mut output, 0);
-    assert_eq!((settled.fused_calls, settled.fallback_calls), (1, 0));
-
-    test_only_reset_fader_matrix_witness();
-    LIVE_ALLOCS.set(0);
-    LIVE_FREES.set(0);
-    armed(|| drop(selected));
-    assert_eq!(
-        LIVE_ALLOCS.get(),
-        0,
-        "off-render selected owner release allocates nothing"
-    );
-    assert!(
-        LIVE_FREES.get() > 0,
-        "selected owner release occurs off render"
-    );
-    assert_eq!(test_only_scalar_owner_drops(), [2, 2, 1]);
-    assert_eq!(test_only_scalar_outer_lifetime(), [1, 0, 1]);
-
-    let mut failed = test_only_prepared_scalar_split_pair_graph_with_observer_error();
-    let target = failed
-        .test_only_post_fader_buffer
-        .expect("selected split post-fader buffer");
-    let failed_capture = audit_failed_graph_render(&mut failed, &mut output, 0, target, false);
-    assert!(failed_capture.captured && !failed_capture.overflow);
-
-    let mut disabled = test_only_prepared_scalar_split_pair_graph_with_observer_error();
-    let disabled_target = disabled
-        .test_only_post_fader_buffer
-        .expect("selected split post-fader buffer");
-    let disabled_capture =
-        audit_failed_graph_render(&mut disabled, &mut output, 0, disabled_target, true);
-    assert_ne!(
-        disabled_capture, failed_capture,
-        "completion-disable mutation must fail the same failed-buffer assertion"
-    );
-    drop(failed);
-    drop(disabled);
-}
-
-#[test]
-fn actual_scalar_prepare_and_bind_retain_the_charged_owner_layouts() {
-    let _session_guard = SESSION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let [fader, matrix, outer] = test_only_scalar_owner_layouts();
-    let split_outer = test_only_scalar_split_outer_layout();
-    // Issue #916: both tracks of this two-track plan pair (t00's post-matrix buffer is no longer
-    // the graph output), so binding builds two adjacent outers, one per track.
-    let retained_owner_bytes_expected =
-        2 * fader.size_bytes + 2 * matrix.size_bytes + 2 * outer.size_bytes;
-    let owner_max = fader
-        .size_bytes
-        .max(matrix.size_bytes)
-        .max(split_outer.size_bytes);
-
-    test_only_reset_phase_two_allocation_tracker();
-    let (bound, admitted, scalar_allowance, preparation, binding) =
-        armed(test_only_observed_scalar_pair_binding);
-    assert!(!preparation.overflowed);
-    let retained_owner_bytes: u64 = [fader, matrix]
-        .iter()
-        .map(|expected| {
-            preparation
-                .layouts
-                .iter()
-                .find(|observed| {
-                    observed.size_bytes == expected.size_bytes
-                        && observed.align_bytes == expected.align_bytes
-                })
-                .map_or(0, |observed| {
-                    observed.size_bytes * observed.allocation_count
-                })
-        })
-        .sum();
-    assert_eq!(
-        retained_owner_bytes,
-        2 * fader.size_bytes + 2 * matrix.size_bytes
-    );
-    for expected in [fader, matrix] {
-        assert!(
-            preparation.layouts.iter().any(|observed| {
-                observed.size_bytes == expected.size_bytes
-                    && observed.align_bytes == expected.align_bytes
-                    && observed.allocation_count == 2
-            }),
-            "both original owners are actual retained preparation allocations: expected={expected:?}, observed={:?}",
-            preparation.layouts
-        );
-    }
-    assert!(!binding.overflowed);
-    assert_eq!(
-        test_only_scalar_outer_lifetime(),
-        [2, 2, 0],
-        "two actual selected scalar outers were constructed and remain live after bind"
-    );
-    for retained in [fader, matrix] {
-        assert!(
-            !binding.deallocation_layouts.iter().any(|released| {
-                released.size_bytes == retained.size_bytes
-                    && released.align_bytes == retained.align_bytes
-            }),
-            "binding retains each original owner without free/reallocate substitution"
-        );
-    }
-    assert!(
-        binding.layouts.iter().any(|observed| {
-            observed.size_bytes == outer.size_bytes && observed.align_bytes == outer.align_bytes
-        }),
-        "binding allocates the selected scalar outer: {:?}",
-        binding.layouts
-    );
-    let outer_allocations = binding
-        .layouts
-        .iter()
-        .find(|observed| {
-            observed.size_bytes == outer.size_bytes && observed.align_bytes == outer.align_bytes
-        })
-        .map_or(0, |observed| observed.allocation_count);
-    let typed_outer_count = test_only_scalar_outer_lifetime()[0];
-    assert_eq!(typed_outer_count, 2);
-    assert!(
-        outer_allocations >= typed_outer_count,
-        "the bounded allocator window contains the allocation whose typed construction is witnessed"
-    );
-    let unrelated_same_layout_allocations = outer_allocations - typed_outer_count;
-    assert!(
-        unrelated_same_layout_allocations > 0,
-        "the fixture discriminates same-layout graph storage instead of charging it as an owner"
-    );
-    let bound_outer_bytes = 2 * outer.size_bytes;
-    assert_eq!(
-        retained_owner_bytes + bound_outer_bytes,
-        retained_owner_bytes_expected
-    );
-    assert_eq!(owner_max, scalar_allowance.largest_allocation_bytes);
-    assert!(owner_max <= admitted.largest_allocation_bytes);
-    let conservative_spare_outer = scalar_allowance
-        .total_bytes
-        .checked_sub(retained_owner_bytes_expected)
-        .expect("actual owners fit conservative scalar allowance");
-    assert_eq!(
-        conservative_spare_outer,
-        2 * split_outer.size_bytes - 2 * outer.size_bytes
-            + core::mem::size_of::<Box<dyn graph::GraphRuntimeSplitPairProcessor>>() as u64,
-        "the scalar allowance reserves two possible split owners and one possible table entry while this adjacent bind uses two of the smaller outers"
-    );
-    assert!(scalar_allowance.total_bytes <= admitted.session_plus_plan_bytes);
-
-    LIVE_ALLOCS.set(0);
-    LIVE_FREES.set(0);
-    test_only_reset_fader_matrix_witness();
-    armed(|| drop(bound));
-    assert_eq!(LIVE_ALLOCS.get(), 0, "off-render release does not allocate");
-    assert!(
-        LIVE_FREES.get() > 0,
-        "bound owners release only during off-render drop"
-    );
-    assert_eq!(test_only_scalar_owner_drops(), [2, 2, 2]);
-    assert_eq!(test_only_scalar_outer_lifetime(), [2, 0, 2]);
 }
 
 #[test]
@@ -1012,30 +553,8 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
     );
 
     // This direct-attachment fixture is separate from compiler admission. It proves the actual
-    // runtime R/S bounds for both delivery variants against the same calculated allowance.
+    // runtime R/S bounds against the calculated allowance.
     let mut output = [0.0_f32; 128];
-    graph::test_only_reset_bank_chain_construction_facts();
-    let mut paired = builtins_compiler::test_only_prepared_pair_graph(false);
-    let paired_facts = graph::test_only_bank_chain_construction_facts();
-    let paired_allowance = graph::GraphBankSlotResourceEstimate::checked_for(
-        paired_facts.prepared_memberships as u64,
-        effect_contract::BankWidth::for_backend(lane::Backend::current()),
-    )
-    .expect("paired allowance");
-    assert!(paired_facts.runtime_slots < paired_facts.run_memberships);
-    assert!(paired_facts.runtime_slots <= paired_facts.run_memberships);
-    assert!(paired_facts.run_memberships <= paired_facts.prepared_memberships);
-    assert!(paired_facts.maximum_runtime_slots <= paired_facts.maximum_run_memberships);
-    assert_eq!(
-        paired_allowance.bank_count,
-        paired_facts.prepared_memberships as u64
-    );
-    for sample in [0, 64] {
-        let witness = audit_graph_render(&mut paired, &mut output, sample);
-        assert!(witness.fused_calls > 0, "successful pairing is rendered");
-    }
-    drop(paired);
-
     graph::test_only_reset_bank_chain_construction_facts();
     let mut unpaired = builtins_compiler::test_only_prepared_unpaired_graph();
     let unpaired_facts = graph::test_only_bank_chain_construction_facts();
