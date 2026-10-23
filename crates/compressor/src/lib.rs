@@ -37,6 +37,8 @@ mod padding_tests;
 #[cfg(test)]
 mod rest_tests;
 mod state;
+#[cfg(test)]
+mod swap_tests;
 
 pub mod corpus;
 
@@ -735,10 +737,6 @@ impl<L: Lane> Instance<L> {
         input: StatePayloadInput<'_>,
         lane: usize,
     ) -> Result<(), StatePayloadError> {
-        // A restore writes the recursive word and coefficients from a payload this instance never
-        // rendered, so any standing claim is void. Withdraw it before the version check so a
-        // rejected restore cannot leave a half-trusted claim either.
-        self.silent_fixed_point = false;
         if state_layout_version != COMPRESSOR_DESCRIPTOR.state_layout_version {
             return Err(StatePayloadError {
                 code: "effect.state.version",
@@ -755,10 +753,41 @@ impl<L: Lane> Instance<L> {
         let rate = self.sample_rate;
         state::commit_channel(input.left, &mut self.left, lane, rate);
         state::commit_channel(input.right, &mut self.right, lane, rate);
+        // A restore writes the recursive word and coefficients from a payload this instance never
+        // rendered, so any standing claim is void. Withdrawn only here, after the commit: a
+        // refused restore returns above without writing a word, so the claim it leaves is as
+        // true as it was (a write-free refusal, #1747).
+        self.silent_fixed_point = false;
         Ok(())
+    }
+
+    /// Exchanges lane `lane`'s prepared defaults with `bytes` in place (issue #1747): the left
+    /// channel's seven preparation values, then the right's, each `f32` little-endian. They are
+    /// what `full_reset` re-seeds a lane from; no state word changes. `false`, changing nothing,
+    /// for a lane out of range or a wrong length.
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        if lane >= L::WIDTH || bytes.len() != LANE_DEFAULT_BYTES {
+            return false;
+        }
+        let (left_bytes, right_bytes) = bytes.split_at_mut(PARAMETER_COUNT * 4);
+        for (values, side) in [
+            (&mut self.left.defaults[lane], left_bytes),
+            (&mut self.right.defaults[lane], right_bytes),
+        ] {
+            for (value, word) in values.iter_mut().zip(side.chunks_exact_mut(4)) {
+                let incoming =
+                    f32::from_bits(u32::from_le_bytes([word[0], word[1], word[2], word[3]]));
+                word.copy_from_slice(&value.to_bits().to_le_bytes());
+                *value = incoming;
+            }
+        }
+        true
     }
     // REALTIME_POLICY_END
 }
+
+/// The bytes of one lane's prepared defaults: both channels' preparation values (issue #1747).
+const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
 
 /// The `DESIGNED` term of the channel-symmetry witness, over the compressor's own kernel read
 /// surface.
@@ -1190,6 +1219,29 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         self.instance.lanes_at_rest()
     }
 
+    /// The compressor has no clocks (issue #1747; see `kernel::Channel::rest_lanes`), so a
+    /// skipped block moves no state word or payload word. It overrides the default only for the
+    /// bank flag `silent_fixed_point`: a rendered `+0.0` block after which every lane, padded
+    /// lanes included, is at rest earns it (the bank always detects on the main input, and the
+    /// prepared bypass is the one the claim records), so a mask that covers the whole bank sets
+    /// it too, as the EQ's does. The contract's caller skips a bank whole; a partial mask leaves
+    /// the flag to the render of the other lanes. No output bit and no payload word reads the
+    /// flag: it only lets a later `+0.0` block take the fast path, which renders the same bits as
+    /// the kernel would, so no test reads it either.
+    fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        let bank = all_lanes::<L>();
+        debug_assert_eq!(lanes_mask & !bank, 0, "a lane past the bank");
+        debug_assert!(frames <= self.quantum, "a block longer than the quantum");
+        debug_assert_eq!(
+            lanes_mask & !self.instance.lanes_at_rest(),
+            0,
+            "a lane not at rest"
+        );
+        if lanes_mask & bank == bank {
+            self.instance.silent_fixed_point = true;
+        }
+    }
+
     /// One `store` per channel fills every lane: the bank's reduction is one vector.
     fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
         let lanes = L::WIDTH;
@@ -1251,6 +1303,14 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     ) -> Result<(), StatePayloadError> {
         let track = checked_track(track_index, L::WIDTH, self.active)?;
         self.instance.restore(state_layout_version, input, track)
+    }
+
+    fn lane_default_bytes(&self) -> Option<usize> {
+        Some(LANE_DEFAULT_BYTES)
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        self.instance.exchange_lane_defaults(lane, bytes)
     }
     // REALTIME_POLICY_END
 }

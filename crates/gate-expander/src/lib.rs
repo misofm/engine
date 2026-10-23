@@ -1147,9 +1147,69 @@ macro_rules! bank_impl {
                 self.restore_lane(track, state_layout_version, &input)
             }
             // REALTIME_POLICY_END
+
+            fn advance_clocks(&mut self, lanes_mask: u32, frames: u32) {
+                let lanes = u32::MAX >> (32 - <$lane>::WIDTH);
+                debug_assert_eq!(
+                    lanes_mask & lanes & !self.lanes_at_rest(),
+                    0,
+                    "a lane not at rest"
+                );
+                self.advance_skipped_clocks(lanes_mask, frames);
+            }
+
+            fn lane_default_bytes(&self) -> Option<usize> {
+                Some(LANE_DEFAULT_BYTES)
+            }
+
+            fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+                self.exchange_defaults(lane, bytes)
+            }
         }
     };
 }
+
+// REALTIME_POLICY_BEGIN: #1747, the clock advance of a skipped block.
+impl<L: Lane> PreparedGate<L, false> {
+    /// [`PreparedNativeEffectBank::advance_clocks`]: the gate's one clock is the bank-wide
+    /// `ramp_frames_left`, a schedule word. It only chooses where `run_block` splits a block, and
+    /// no output bit reads it: the `RAMPING = true` body run over settled ramps selects their
+    /// words back unchanged, so a split anywhere renders the same samples. It keeps the invariant
+    /// `ramp_frames_left >= every lane's remaining`, and a block of any input lowers it by its
+    /// length, down to zero; the skip lowers it as a rendered block would, which keeps that
+    /// invariant tight. The gate has no per-lane clock: the `hold` countdown is detector state
+    /// carried in the payload, not a clock.
+    fn advance_skipped_clocks(&mut self, lanes_mask: u32, frames: u32) {
+        let _ = lanes_mask;
+        self.ramp_frames_left = self.ramp_frames_left.saturating_sub(frames);
+    }
+}
+// REALTIME_POLICY_END
+
+/// One lane's prepared defaults in bytes: every parameter of both channels, one `f32` each.
+const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
+
+// REALTIME_POLICY_BEGIN: #1747, the prepared defaults move with a render-time lane swap.
+impl<L: Lane> PreparedGate<L, false> {
+    /// [`PreparedNativeEffectBank::exchange_lane_defaults`]: lane `lane`'s `defaults` row, left
+    /// then right, each parameter in descriptor order as little-endian `f32` bits. The row is the
+    /// gate's only prepared per-lane value: `reset_lane_full` (a full reset and the D7 recovery)
+    /// re-seeds the lane from it, and every other per-lane word is payload or derived from it.
+    fn exchange_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        if lane >= L::WIDTH || bytes.len() != LANE_DEFAULT_BYTES {
+            return false;
+        }
+        let words = self.defaults[lane].iter_mut().flatten();
+        for (value, chunk) in words.zip(bytes.chunks_exact_mut(4)) {
+            let mut incoming = [0_u8; 4];
+            incoming.copy_from_slice(chunk);
+            chunk.copy_from_slice(&value.to_bits().to_le_bytes());
+            *value = f32::from_bits(u32::from_le_bytes(incoming));
+        }
+        true
+    }
+}
+// REALTIME_POLICY_END
 
 bank_impl!(Simd4);
 // Issues #1110 and #1112: an eight-lane type only where `avx2` is enabled (`BankWidth`).
@@ -1304,6 +1364,8 @@ fn bind_bank<const NATIVE_ONLY: bool>(
 mod padding_tests;
 #[cfg(test)]
 mod rest_tests;
+#[cfg(test)]
+mod swap_tests;
 
 #[cfg(test)]
 mod tests {

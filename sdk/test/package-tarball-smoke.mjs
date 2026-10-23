@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { access, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 
 if (process.argv.length !== 3) throw new Error("usage: node package-tarball-smoke.mjs PACKAGE_ROOT");
@@ -43,6 +43,14 @@ assert.equal(typeof imported["./browser"].attachEngineFeed, "function");
 assert.equal(typeof imported["./browser"].prepareEngineFeed, "function");
 assert.ok(imported["./assets"].BUNDLED_ENGINE_ASSETS.wasm instanceof URL);
 assert.ok(imported["./assets"].BUNDLED_ENGINE_ASSETS.pcmFeedWorklet instanceof URL);
+// Issue #1761: the license terms travel with every packed copy, byte for byte the repository's own.
+const repoRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+for (const name of ["LICENSE", "NOTICE"]) {
+  assert.ok(
+    (await readFile(resolve(packageRoot, "dist", name))).equals(await readFile(resolve(repoRoot, name))),
+    `packed dist/${name} equals the repository-root ${name}`,
+  );
+}
 const shippedNotice = await readFile(resolve(packageRoot, "dist/NOTICE"), "utf8");
 assert.match(shippedNotice, /engine-web-adapter/);
 assert.match(shippedNotice, /bd7f330a9773ce43bb077f0e6d5c8fc30fe9e27c/);

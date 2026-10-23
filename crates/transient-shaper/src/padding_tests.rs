@@ -996,3 +996,7 @@ fn a_tripping_lane_leaves_every_bank_mates_bits() {
     }
     lane::each_vector_lane!(|L, N| at::<L, N>(BankWidth::for_lanes(N).expect("a bank width")));
 }
+
+// Issue #1747: the lane-swap test reuses this module's helpers.
+#[path = "swap_tests.rs"]
+mod swap_tests;

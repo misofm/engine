@@ -1186,7 +1186,43 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
         self.shaper.restore(track, state_layout_version, input)
     }
     // REALTIME_POLICY_END
+
+    fn lane_default_bytes(&self) -> Option<usize> {
+        Some(LANE_DEFAULT_BYTES)
+    }
+
+    fn exchange_lane_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        self.exchange_defaults(lane, bytes)
+    }
 }
+
+/// One lane's prepared defaults in bytes: every parameter of both channels, one `f32` each.
+const LANE_DEFAULT_BYTES: usize = 2 * PARAMETER_COUNT * 4;
+
+// REALTIME_POLICY_BEGIN: #1747, the prepared defaults move with a render-time lane swap.
+impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
+    /// [`PreparedNativeEffectBank::exchange_lane_defaults`]: lane `lane`'s left
+    /// `Ramps::defaults` row then its right one, each parameter in descriptor order as
+    /// little-endian `f32` bits. They are the shaper's only prepared per-lane values: a full reset
+    /// rebuilds the lane's ramps from them. The D7 recovery clears envelopes and reads no default.
+    fn exchange_defaults(&mut self, lane: usize, bytes: &mut [u8]) -> bool {
+        if lane >= W || bytes.len() != LANE_DEFAULT_BYTES {
+            return false;
+        }
+        let shaper = &mut self.shaper;
+        let words = shaper.left.defaults[lane]
+            .iter_mut()
+            .chain(shaper.right.defaults[lane].iter_mut());
+        for (value, chunk) in words.zip(bytes.chunks_exact_mut(4)) {
+            let mut incoming = [0_u8; 4];
+            incoming.copy_from_slice(chunk);
+            chunk.copy_from_slice(&value.to_bits().to_le_bytes());
+            *value = f32::from_bits(u32::from_le_bytes(incoming));
+        }
+        true
+    }
+}
+// REALTIME_POLICY_END
 
 #[cfg(test)]
 mod padding_tests;
