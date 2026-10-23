@@ -37,6 +37,8 @@ mod padding_tests;
 #[cfg(test)]
 mod rest_tests;
 mod state;
+#[cfg(test)]
+mod swap_tests;
 
 pub mod corpus;
 
