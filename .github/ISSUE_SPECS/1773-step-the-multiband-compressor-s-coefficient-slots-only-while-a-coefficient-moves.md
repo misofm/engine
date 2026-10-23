@@ -30,3 +30,10 @@ No new test: the change is exact, and the existing differential and partition te
 ## Dependencies
 
 #1069 merged.
+
+## Evidence and decisions (attempt 1, 2026-10-23)
+
+- D1. `run_segment` takes `COEF`; `SegmentPlan::coefficients` comes from the same scan as `ramping`. At `RAMPING && !COEF` the step loop skips every coefficient-path slot (a compile-time `continue`, so the ratio slots 1 and 6 are skipped too, not only 10-13) and `frame_coefficients` runs once per segment. `FORCE_RAMPING` forces `COEF`, so the split test also compares the new arm with full stepping. Debug builds assert `Instance::coefficients_at_rest`.
+- D2. The coefficient path includes the attack and release parameter ramps (slots 2, 3, 7, 8): nothing in the kernel reads them, so a `!COEF` segment steps only threshold and makeup (slots 0, 4, 5, 9). This is exact only because the predicate covers them: a time parameter ramp can move while its coefficient ramp rests (`ramp_endpoint` reaches that case; a mutant that leaves them out of the predicate only is red there in release).
+- D3. `conformance::Known::RampCutsMoveBits` and its `Shape::automate` narrowing are deleted. No draw is consumed differently for any other effect.
+- Bench (frozen bench1069 workload, scratch, one run per binary): ThresholdAll -4.8 % at W8 and W4 (D1); D2 adds about -3 % at W4 and nothing at W8, on a noisy run. W8 None is +3.5 % against main, although the flat loop's source is unchanged: LLVM schedules that loop differently (llvm-mca znver3: 220 against 205 cycles per frame). Aligning loops to 64 bytes does not remove the difference, so it is not code placement. Not tuned (brief).

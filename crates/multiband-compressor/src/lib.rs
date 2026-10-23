@@ -1431,12 +1431,9 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// same reason.
     #[cfg(any(debug_assertions, test))]
     fn flat_path_is_identity(&self) -> bool {
-        self.sides.iter().all(|side| {
-            side.ramps[..W]
-                .iter()
-                .flatten()
-                .all(|ramp| ramp_step_is_identity(ramp))
-        })
+        self.sides
+            .iter()
+            .all(|side| side.ramps[..W].iter().flatten().all(ramp_step_is_identity))
     }
 
     /// The precondition that makes a `RAMPING && !COEF` segment bit-identical to a fully stepped
