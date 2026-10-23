@@ -124,11 +124,14 @@ const fn rate_slot(rate: usize) -> usize {
     RAMP_COUNT + rate
 }
 
-/// Whether ramp slot `index` feeds [`frame_coefficients`]: each band's ratio ramp (slots 1 and 6)
-/// and the four coefficient ramps (slots 10-13). A segment over which none of them moves steps
-/// none of them and derives its coefficients once (issue #1773, `COEF` in [`run_segment`]).
-const fn feeds_coefficients(index: usize) -> bool {
-    index == LOW_BAND * 5 + 1 || index == HIGH_BAND * 5 + 1 || index >= RAMP_COUNT
+/// Whether ramp slot `index` is on the coefficient path (issue #1773, `COEF` in [`run_segment`]):
+/// each band's ratio, attack and release parameter ramps (slots 1-3 and 6-8) and the four
+/// coefficient ramps (slots 10-13). The ratio and coefficient ramps feed [`frame_coefficients`];
+/// the attack and release parameter ramps feed nothing in the kernel (their coefficient ramps carry
+/// the time) and are walked only so the state holds their words. A segment over which none of these
+/// moves steps none of them and derives its coefficients once.
+const fn coefficient_path(index: usize) -> bool {
+    index >= RAMP_COUNT || matches!(index % 5, 1..=3)
 }
 
 /// Whether one frame's `ramp_toward` is the identity on `ramp`'s word: at rest, a `+0.0` step,
@@ -758,8 +761,8 @@ struct SegmentPlan {
     frames: usize,
     /// `true` while any ramp in the bank still has samples to produce.
     ramping: bool,
-    /// `true` while any ramp that feeds the coefficients ([`feeds_coefficients`]) still has
-    /// samples to produce. Implies `ramping`.
+    /// `true` while any ramp on the coefficient path ([`coefficient_path`]) still has samples to
+    /// produce. Implies `ramping`.
     coefficients: bool,
 }
 
@@ -1022,13 +1025,13 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// an addition. `Instance::flat_path_is_identity` asserts the precondition in debug builds rather
 /// than leaving it as a comment.
 ///
-/// `COEF` (issue #1773) refines `RAMPING`: it says whether any ramp that feeds the coefficients
-/// ([`feeds_coefficients`]: both ratios and the four coefficient ramps) moves over the segment, and
-/// [`Instance::plan_segment`] decides it uniformly per segment by the same whole-bank scan. At
-/// `RAMPING && !COEF` only a threshold, makeup or time-parameter ramp moves: the frame loop steps
-/// the other slots alone and derives the coefficients once, as the flat path does. That is
-/// bit-identical by the flat path's argument, slot for slot: every skipped slot is at rest with a
-/// `+0.0` step and a finite, non-`-0.0` word, so its `ramp_toward` is the identity and the
+/// `COEF` (issue #1773) refines `RAMPING`: it says whether any ramp on the coefficient path
+/// ([`coefficient_path`]: the ratio, attack and release ramps and the four coefficient ramps)
+/// moves over the segment, and [`Instance::plan_segment`] decides it uniformly per segment by the
+/// same whole-bank scan. At `RAMPING && !COEF` only a threshold or makeup ramp moves: the frame
+/// loop steps those four slots alone and derives the coefficients once, as the flat path does.
+/// That is bit-identical by the flat path's argument, slot for slot: every skipped slot is at rest
+/// with a `+0.0` step and a finite, non-`-0.0` word, so its `ramp_toward` is the identity and the
 /// coefficients derived from it are the same every frame. `Instance::coefficients_at_rest` asserts
 /// that in debug builds. `COEF` is meaningful only at `RAMPING`; the flat path passes `false`.
 ///
@@ -1079,9 +1082,9 @@ fn run_segment<
     for frame in 0..frames {
         if RAMPING {
             for index in 0..RAMP_SLOTS {
-                // Issue #1773: a coefficient-feeding slot at rest is not stepped (a compile-time
+                // Issue #1773: a coefficient-path slot at rest is not stepped (a compile-time
                 // skip; the step would be the identity).
-                if !COEF && feeds_coefficients(index) {
+                if !COEF && coefficient_path(index) {
                     continue;
                 }
                 // Issue #1409: the step added, held inside `[min(current, target),
@@ -1404,7 +1407,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 for (index, ramp) in side.ramps[track].iter().enumerate() {
                     if ramp.remaining > 0 {
                         ramping = true;
-                        coefficients |= feeds_coefficients(index);
+                        coefficients |= coefficient_path(index);
                         length = length.min(ramp.remaining as usize - 1);
                     }
                 }
@@ -1437,8 +1440,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     }
 
     /// The precondition that makes a `RAMPING && !COEF` segment bit-identical to a fully stepped
-    /// one (issue #1773): [`Instance::flat_path_is_identity`]'s condition, on the slots that feed
-    /// the coefficients ([`feeds_coefficients`]) alone.
+    /// one (issue #1773): [`Instance::flat_path_is_identity`]'s condition, on the coefficient-path
+    /// slots ([`coefficient_path`]) alone.
     #[cfg(debug_assertions)]
     fn coefficients_at_rest(&self) -> bool {
         self.sides.iter().all(|side| {
@@ -1446,7 +1449,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 ramps
                     .iter()
                     .enumerate()
-                    .all(|(index, ramp)| !feeds_coefficients(index) || ramp_step_is_identity(ramp))
+                    .all(|(index, ramp)| !coefficient_path(index) || ramp_step_is_identity(ramp))
             })
         })
     }
