@@ -286,7 +286,23 @@ impl<L: Lane> Probe for LimiterProbe<L> {
     }
 
     fn lanes_at_rest(&self) -> u32 {
-        PreparedNativeEffectBank::lanes_at_rest(&self.bank)
+        let answer = PreparedNativeEffectBank::lanes_at_rest(&self.bank);
+        // Issue #1107: the standing-claim short-circuit is the scan's answer. On the dual body
+        // the two are equal; on the collapsed body the claim is earned on the left channel, whose
+        // scan it equals, and it covers the frozen right channel by the contract's counterfactual.
+        let core = &self.bank.core;
+        let scan = core.scan_lanes_at_rest();
+        if core.silent_claim_stands() {
+            if self.mono {
+                assert_eq!(answer, core.left.lanes_at_silent_rest::<L>(), "mono claim");
+                assert_eq!(answer & scan, scan, "mono claim covers the scan");
+            } else {
+                assert_eq!(answer, scan, "the standing claim is the scan's answer");
+            }
+        } else {
+            assert_eq!(answer, scan, "no claim: the scan answers");
+        }
+        answer
     }
 
     fn lane_state(&self, lane: usize, out: &mut Vec<u32>) {
@@ -413,6 +429,79 @@ fn a_lane_the_limiter_bank_reports_at_rest_is_a_fixed_point() {
         let reach = cases::<L>(0..8);
         println!("W{}: {reach:?}", L::WIDTH);
         reach.assert_reached(&format!("W{}", L::WIDTH));
+    });
+}
+
+/// **A restore that moves a lane off rest withdraws the standing claim** (issue #1107).
+///
+/// A bank at rest with its #182 S2 claim standing answers [`LimiterCore::lanes_at_rest`] without
+/// the scan. Restoring lane 0 from a payload snapshotted mid-signal must make the answer the
+/// scan's again, with lane 0 off rest.
+///
+/// Test value: a restore path that leaves the claim standing (a stale flag) would report the
+/// restored lane at rest, and a whole-bank skip would then freeze its rings; no other test reads
+/// the short-circuit after a state change between blocks.
+#[test]
+fn a_restore_off_rest_withdraws_the_standing_claim() {
+    lane::each_vector_lane!(|L| {
+        let params = vec![[-6.0_f32, 10.0, 5.0]; L::WIDTH];
+        let build =
+            || limiter_bank::<L>(params.clone(), params.clone(), false, LinkMode::Maximum).0;
+        let (mut resting, mut loud) = (build(), build());
+        let quantum = QUANTUM as usize;
+        let words = quantum * L::WIDTH;
+        let mut signal = Draw(0x1107_0001 ^ L::WIDTH as u64);
+        let mut first_sample = 0_u64;
+        for block in 0..400 {
+            if block >= 4 && resting.core.silent_claim_stands() {
+                break;
+            }
+            let (mut left, mut right) = (vec![0.0_f32; words], vec![0.0_f32; words]);
+            if block < 4 {
+                for word in left.iter_mut().chain(right.iter_mut()) {
+                    *word = signal.within(-2.0, 2.0);
+                }
+            }
+            render_plain(&mut resting, &mut left, &mut right, quantum, first_sample);
+            first_sample += quantum as u64;
+        }
+        assert!(
+            resting.core.silent_claim_stands(),
+            "W{}: the claim stands",
+            L::WIDTH
+        );
+        assert_eq!(resting.lanes_at_rest(), every_lane(L::WIDTH));
+        let (mut left, mut right) = (vec![0.0_f32; words], vec![0.0_f32; words]);
+        for word in left.iter_mut().chain(right.iter_mut()) {
+            *word = signal.within(-2.0, 2.0);
+        }
+        render_plain(&mut loud, &mut left, &mut right, quantum, 0);
+        let sizes = quality(RATE).maximum_state;
+        let mut payload = vec![0_u8; sizes.total().expect("total") as usize];
+        let (common, rest) = payload.split_at_mut(sizes.common_bytes as usize);
+        let (l, r) = rest.split_at_mut(sizes.left_bytes as usize);
+        loud.snapshot_track_state_payload(
+            0,
+            StatePayloadOutput::new(common, l, r, sizes).expect("output"),
+        )
+        .expect("snapshot");
+        let (common, rest) = payload.split_at(sizes.common_bytes as usize);
+        let (l, r) = rest.split_at(sizes.left_bytes as usize);
+        resting
+            .restore_track_state_payload(
+                0,
+                STATE_LAYOUT_VERSION,
+                StatePayloadInput::new(common, l, r, sizes).expect("input"),
+            )
+            .expect("restore");
+        let answer = resting.lanes_at_rest();
+        assert_eq!(answer, resting.core.scan_lanes_at_rest(), "W{}", L::WIDTH);
+        assert_eq!(
+            answer & 1,
+            0,
+            "W{}: the restored lane is off rest",
+            L::WIDTH
+        );
     });
 }
 

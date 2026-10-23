@@ -470,3 +470,88 @@ clock-forwarding claims are tested where state can be read.
   - None of these three is in gate 1.
 - **Live writes.** Mid-ramp edits and bypass edges are not in gate 1: graph-compiler compiles
   without live controls. #1781's rack test covers the bypass line.
+
+### D8 Gate 3, the pre-fix run, and the limiter short-circuit (2026-10-23)
+
+**Pre-fix native run.**
+- Command: `scripts/operator/run-console-benchmark.sh --step opt6-1107` at 68c21f232, with
+  `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` and an exclusive lock. Load average was about 2.5. One
+  warmup and two rounds. All 46 session records validated.
+- Records: `artifacts/steps/opt6-1107/`, committed in ba08fa334.
+- Class A: every digest equals opt5-1763's.
+
+p50 per block, us:
+
+| Row | Round 1 | Round 2 | S4 (`console-strip-after`) | opt5-1763 |
+|---|---|---|---|---|
+| `sixty_four_track_idle` | 35.95 | 36.83 | 31.23 / 31.08 | 31.49 / 31.44 |
+| `sixty_four_track_console` | 103.41 | 102.11 | 100.59 / 100.42 | 102.25 / 102.97 |
+| `sixty_four_track_console_sparse` | 103.71 | 103.32 | 99.89 / 100.33 | 103.19 / 103.66 |
+
+Reading:
+- **Idle regressed.** The row is all silence, and it got slower, not faster.
+- **The all-active console is +2.80 % / +1.69 % against S4.** Against opt5 it is +1.13 % /
+  -0.83 %, inside the run-to-run noise. The drift from S4 is older than this change: opt5 already
+  shows +1.6 % / +2.5 % against S4.
+- **The sparse row did not move.** That is expected: no bank of it is wholly silent, and packing
+  is #1782.
+
+**Diagnosis.**
+- I used temporary in-process timing in a scratch test, since reverted. It showed that every idle
+  bank does skip.
+- The cost is the true-peak limiter's `lanes_at_rest`: about 3 us per bank per call. It re-scans
+  every ring word of every lane (`ChannelState::lanes_at_silent_rest`), which is about 24 us per
+  block over 8 banks.
+- The other stages' predicates cost 5-90 ns per call. The skip's `advance_clocks` costs about
+  0.3 us per bank.
+- The limiter's own bank-wide fast path never pays the scan. It trusts its #182 S2 claim,
+  `silent_fixed_point`.
+
+**Fix (root-approved path extension: `crates/true-peak-limiter/src/lib.rs` and its
+`rest_tests.rs`).**
+- `LimiterCore::lanes_at_rest` returns every lane when the claim stands, and scans otherwise. The
+  claim stands when all of these hold:
+  - `silent_fixed_point`;
+  - `silent_bypass == coefficients.bypass`;
+  - all four ramps are stationary. These are the fast path's own state legs, without its input
+    leg.
+- The flag is earned only from the scan: `process_block` now calls `scan_lanes_at_rest`
+  explicitly. The collapsed body earns it on the left channel, as before.
+
+Paths that can change a lane's state between two blocks, and what each does to the flag:
+
+| Path | Effect on the flag |
+|---|---|
+| `reset` (both kinds) | Clears it. |
+| `restore_track` | Clears it. The plan-swap carry and #1747's `swap_bank_lanes` both restore through it, so both clear it. |
+| `exchange_lane_defaults` | Moves only prepared defaults, never state, so the rest state is unchanged. |
+| D7 recovery (`reset_failed_lanes`) | Does not clear it. It cannot fire on a block that leaves the claim standing: a quiet block over a resting state outputs `+0.0`. Any lane it does reset returns to `clear_runtime`'s words, which are the rest state the claim names. |
+| Automation span (`process`, `process_bank_inner`) | Clears it on any block that carries one. The live stage's span term also declines that block. |
+| Prepared target, or a zero-window snap | Moves ramps or coefficient words. The ramp legs decline at once, and the next rendered block re-earns the flag from the scan. |
+| A block with signal | Re-decides the flag from the scan (`quiet` false clears it). |
+| `advance_clocks` | Keeps or earns it only on a whole-bank skip, and withdraws it otherwise (#1747). |
+
+On a collapsed bank, the short-circuit equals the left channel's scan. It covers the frozen right
+channel by the contract's counterfactual: the disengage copies the left over the right.
+
+**Tests.**
+- The rest probe's `lanes_at_rest` now asserts that the answer equals the scan, on the dual body
+  and in every no-claim query. On the collapsed body it asserts the answer equals the left
+  channel's scan and covers the full scan.
+- New `a_restore_off_rest_withdraws_the_standing_claim`. A bank comes to rest with its claim
+  standing; the test asserts that the answer, the scan and every lane agree. It then restores
+  lane 0 from a payload snapshotted mid-signal, and asserts that the answer is the scan's with
+  lane 0 off rest.
+  - Test value: a restore path that leaves the claim stale would report the restored lane at
+    rest, and a whole-bank skip would freeze its rings. No other test reads the short-circuit
+    after a state change between blocks.
+- Mutant: `restore_track` without `silent_fixed_point = false`. It is red in the new test, and in
+  `advance_clocks_is_a_skipped_zero_block` and `tests::a_restore_withdraws_the_silence_claim`.
+- Checks:
+  - true-peak-limiter tests, debug and release: 66 passed, 0 failed;
+  - clippy (`--all-features`), the AArch64 test check and `cargo doc -D warnings`: pass;
+  - `realtime_policy`: ok;
+  - graph-compiler, rack, host-core and console-workload tests: 718 passed, 0 failed.
+
+The second native step, `opt6-1107-fix`, measures this changed code after a diagnosed defect. It
+is not a retry of the same code.
