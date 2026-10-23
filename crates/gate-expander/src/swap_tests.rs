@@ -10,51 +10,10 @@
 //! ramping and settled variants; a restore raises it to cover the restored ramps, which the
 //! driver's quiet block after a ramping lane lands in a settled bank checks.
 
+use super::padding_tests::{LINKS, QUANTUM, RATES, request};
 use super::*;
 use conformance::swap_probe::{self, Automate, Automation, Probe};
 use dsp_reference::randomized::{Draw, Profile};
-use effect_contract::{PrepareEffectLimits, PreparedPorts};
-
-const QUANTUM: u32 = 128;
-const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
-
-/// A request as the session compiler prepares a console slot: unkeyed, unbypassed.
-fn request(
-    values: &[InitialParameterValue],
-    rate: u32,
-    link: LinkMode,
-) -> PrepareEffectRequest<'_> {
-    let quality = GATE_EXPANDER_DESCRIPTOR
-        .qualities
-        .iter()
-        .find(|quality| quality.sample_rate == rate)
-        .expect("a launch rate");
-    PrepareEffectRequest {
-        sample_rate: rate,
-        quantum: QUANTUM,
-        quality: EffectQuality::Normal,
-        bypass: false,
-        link_mode: link,
-        ports: PreparedPorts {
-            sidechain: PreparedSidechainPort::Unconnected {
-                id: port_id("sidechain-in"),
-                required: false,
-            },
-        },
-        initial_values: values,
-        limits: PrepareEffectLimits {
-            maximum_total_state_bytes: quality.maximum_state.total().expect("state total"),
-            maximum_scratch_bytes: quality.scratch_fixed_bytes,
-            maximum_automation_spans_per_block: 16,
-        },
-        tail_bound: conformance::tail_bound_of(
-            Box::new(crate::GateExpanderFactory),
-            rate,
-            EffectQuality::Normal,
-        ),
-    }
-}
 
 /// Random initial values in every parameter's domain, each channel its own.
 fn draw_values(draw: &mut Draw) -> Vec<InitialParameterValue> {

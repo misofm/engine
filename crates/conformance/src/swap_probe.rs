@@ -275,15 +275,15 @@ impl<P: Probe> Rig<'_, P> {
 
 /// Runs one case on `probe`.
 ///
-/// The frozen schedule: [`WARM`] blocks of random lengths and random automation; one block shorter
+/// The frozen schedule: `WARM` blocks of random lengths and random automation; one block shorter
 /// than the ramps on which every strip automates every parameter; a swap of two lanes of A
-/// (`second = None`), both with a ramp in flight; one block that automates nothing; [`BETWEEN`]
+/// (`second = None`), both with a ramp in flight; one block that automates nothing; `BETWEEN`
 /// random blocks. Then, for the swap of a lane of A with a lane of B: one of the two strips (the
 /// mover) automates every parameter on quantum-long blocks while every other strip automates
 /// nothing, until the other bank (the destination) has no ramp in flight on any lane; one more
 /// short block of the same; the swap; and one block that automates nothing, so a ramping lane
 /// lands in a settled bank and must keep ramping there with no new target to restart it. Then
-/// [`AFTER`] random blocks, and last a full reset (`ResetKind::FullToDefaults`) of all four banks
+/// `AFTER` random blocks, and last a full reset (`ResetKind::FullToDefaults`) of all four banks
 /// and one block that automates nothing, so a strip whose prepared defaults stayed behind
 /// re-seeds from another strip's values. Each swap is measured at zero allocator calls.
 ///

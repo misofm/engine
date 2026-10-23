@@ -88,14 +88,14 @@ fn render_concrete<L: Lane>(
 
 /// `advance_clocks` on a bank at rest is a rendered block of `+0.0`, word for word.
 ///
-/// Three equal fresh banks with a padded lane: one renders blocks of `+0.0` and no automation, its
-/// twin skips each block with `advance_clocks(every lane, frames)`, and a third renders loud noise
-/// and automation over the same block lengths. The lengths include one frame, lengths below and
-/// at the quantum, and totals that wrap the 32-row ring many times. After every block the twin's
-/// every state word and every lane's payload equals the rendered bank's, and the rendered bank's
-/// histories hold only `+0.0` (a zero block pushes `+0.0`, so a resting lane already holds what the
-/// block would write). The noisy bank's `pos` equals the others' after every block: the position
-/// is a function of the block lengths alone, so every bank of one slot keeps the same one.
+/// Two equal fresh banks with a padded lane: one renders blocks of `+0.0` and no automation through
+/// its whole kernel (the silent fast path forbidden, since that path *is* the cursor advance this
+/// test checks against), and its twin skips each block with `advance_clocks(every lane, frames)`.
+/// The lengths include one frame, lengths below and at the quantum, and totals that wrap the
+/// 32-row ring many times. After every block the twin's every state word and every lane's payload
+/// equals the rendered bank's, the rendered bank's histories hold only `+0.0` (a zero block pushes
+/// `+0.0`, so a resting lane already holds what the block would write), and its position is the
+/// block lengths' sum modulo 32.
 ///
 /// Red if `advance_clocks` is left the default no-op, advances only one channel's position, steps
 /// by a length other than `frames` modulo 32, or writes any other word.
@@ -113,7 +113,6 @@ fn advancing_the_clocks_is_a_rendered_zero_block() {
             let values: Vec<Values> = (0..lanes).map(|_| draw.values()).collect();
             let mut rendered = concrete::<L>(width, &mask, &values);
             let mut skipped = concrete::<L>(width, &mask, &values);
-            let mut noisy = concrete::<L>(width, &mask, &values);
             assert!(
                 [&rendered.inner.left, &rendered.inner.right]
                     .iter()
@@ -132,28 +131,15 @@ fn advancing_the_clocks_is_a_rendered_zero_block() {
                     .map(|_| [vec![0.0; frames], vec![0.0; frames]])
                     .collect();
                 let none: Vec<Vec<PreparedAutomationSpan>> = vec![Vec::new(); lanes];
+                SILENT_FORBIDDEN.with(|flag| flag.set(true));
                 render_concrete(&mut rendered, width, first_sample, &zeros, &none);
+                SILENT_FORBIDDEN.with(|flag| flag.set(false));
+                assert_eq!(
+                    skipped.lanes_at_rest(),
+                    all_lanes,
+                    "{context}: every lane is at rest before the skip"
+                );
                 skipped.advance_clocks(all_lanes, frames as u32);
-                let noise: Vec<[Vec<f32>; 2]> = (0..lanes)
-                    .map(|_| {
-                        let level = [0.5_f32, 1.0, 4.0][draw.below(3)];
-                        [0, 1].map(|_| {
-                            (0..frames)
-                                .map(|_| (draw.unit() * 2.0 - 1.0) * level)
-                                .collect()
-                        })
-                    })
-                    .collect();
-                let spans: Vec<Vec<PreparedAutomationSpan>> = (0..lanes)
-                    .map(|lane| {
-                        if mask[lane] {
-                            draw.spans(first_sample)
-                        } else {
-                            Vec::new()
-                        }
-                    })
-                    .collect();
-                render_concrete(&mut noisy, width, first_sample, &noise, &spans);
                 first_sample += frames as u64;
 
                 let words = state_words(&rendered);
@@ -174,14 +160,14 @@ fn advancing_the_clocks_is_a_rendered_zero_block() {
                     );
                 }
                 let expected = (first_sample % LIVE_ROWS as u64) as u32;
-                for (name, bank) in [("rendered", &rendered), ("noisy", &noisy)] {
-                    assert_eq!(
-                        (bank.inner.left.history.pos, bank.inner.right.history.pos),
-                        (expected, expected),
-                        "{context}: the {name} bank's position is not the block lengths' sum \
-                         modulo 32"
-                    );
-                }
+                assert_eq!(
+                    (
+                        rendered.inner.left.history.pos,
+                        rendered.inner.right.history.pos
+                    ),
+                    (expected, expected),
+                    "{context}: the rendered position is not the block lengths' sum modulo 32"
+                );
             }
         }
     }

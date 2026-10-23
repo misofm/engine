@@ -1199,14 +1199,16 @@ impl<L: Lane> PreparedSoftClipBank<L> {
     /// whole and passes every lane, and a lane in the mask that was not at rest is a caller defect
     /// (its rows would rotate under it). Two banks of one slot need not hold equal positions: a
     /// lane swap between them stays exact because a restore places each row by its age relative
-    /// to the receiving bank's own position (`apply_lane_words`). Constant time: `frames` is
-    /// reduced modulo the ring first.
+    /// to the receiving bank's own position (`apply_lane_words`). The advance is the silent fast
+    /// path's own ([`Channel::advance_cursor`]): constant time.
     fn advance_skipped_clocks(&mut self, lanes_mask: u32, frames: u32) {
-        let _ = lanes_mask;
-        let step = frames as usize & POS_MASK;
-        for history in [&mut self.inner.left.history, &mut self.inner.right.history] {
-            history.pos = ((history.pos as usize + step) & POS_MASK) as u32;
-        }
+        debug_assert_eq!(
+            lanes_mask & all_lanes::<L>() & !self.inner.lanes_at_rest(),
+            0,
+            "a lane not at rest"
+        );
+        self.inner.left.advance_cursor(frames as usize);
+        self.inner.right.advance_cursor(frames as usize);
     }
 }
 

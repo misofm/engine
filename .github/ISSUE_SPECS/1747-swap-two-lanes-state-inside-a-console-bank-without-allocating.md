@@ -186,7 +186,10 @@ Attempt 2 (after the verifier's FAIL on the chain swap):
   agreement `self && other` -> `self`, arming refusal removed; EQ `initial_words`, limiter right
   `phase`, soft clip left-only `pos`, shaper left defaults, compressor `rate_ramps`, gate `hold`
   and `ramp_frames_left` raise, an allocation in a restore.
-- Owed at the #1746 rebase: the soft clip `advance_clocks` rest `debug_assert` (its clock test
-  passes every lane, and this tree has no soft clip `lanes_at_rest`), soft clip calling #1746's
-  `Channel::advance_cursor`, `SILENT_FORBIDDEN` in its clock test's rendered bank.
-
+- After merging #1746 (main be2044c42): the soft clip `advance_clocks` calls #1746's
+  `Channel::advance_cursor` and debug-asserts its lanes are at rest (as the EQ, limiter,
+  compressor and gate do); its clock test renders the reference bank with the silent fast path
+  forbidden (that path is the cursor advance under test) and asserts the skipped bank is at rest
+  before each skip; the gate swap test reuses `padding_tests`' request and constants. #1746's
+  shaper and gate state no other clock than the ones above. The swap tests render drawn signal,
+  so the bank-wide fast paths do not hollow them; they pass with the fast paths live.
