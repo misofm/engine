@@ -555,3 +555,51 @@ channel by the contract's counterfactual: the disengage copies the left over the
 
 The second native step, `opt6-1107-fix`, measures this changed code after a diagnosed defect. It
 is not a retry of the same code.
+
+### D9 Gate 3 after the fix (2026-10-23)
+
+**Native run.**
+- Command: `run-console-benchmark.sh --step opt6-1107-fix` at 4591c6188, uncontrolled
+  (load average 0.81 at the start), exclusive lock. One warmup and two rounds. All 46 session
+  records validated.
+- Records: `artifacts/steps/opt6-1107-fix/`, committed in 69639dc03.
+- Class A: every digest equals opt5-1763's.
+
+p50 per block, us:
+
+| Row | Round 1 | Round 2 | Pre-fix | S4 | opt5 |
+|---|---|---|---|---|---|
+| `sixty_four_track_idle` | 7.97 | 8.05 | 35.95 / 36.83 | 31.23 / 31.08 | 31.49 / 31.44 |
+| `sixty_four_track_console` | 103.15 | 102.07 | 103.41 / 102.11 | 100.59 / 100.42 | 102.25 / 102.97 |
+| `sixty_four_track_console_sparse` | 104.43 | 104.08 | 103.71 / 103.32 | 99.89 / 100.33 | 103.19 / 103.66 |
+| `sixty_four_track_app_shape` | 81.32 | 81.39 | 80.79 / 80.91 | 68.57 / 68.56 | 80.62 / 80.19 |
+
+Reading:
+- **Idle.** The fully silent console falls from 31.2 to 8.0 us per block (-74 % against S4).
+- **All-active console.** +2.54 % / +1.64 % against S4, and +0.88 % / -0.87 % against opt5.
+  Round 1 is above the 2 % gate against S4. The drift from S4 predates this change: opt5 already
+  stood at +1.6 % / +2.5 % against S4, and the change itself is within noise against opt5.
+- **Sparse row.** +0.7 % / +0.4 % against the pre-fix run, and +1.2 % / +0.4 % against opt5. It
+  does not move, as expected: no bank of it is wholly silent. Packing it is #1782.
+- **Effect predicates.** No other effect's predicate showed a measurable cost: the idle row now
+  carries the whole silent console. Nothing else was chased.
+
+**V8 run.**
+- Command: `run-web-mixing-automation-benchmark.sh run --step opt6-1107-fix` on the module
+  prepared at 69639dc03, uncontrolled, exclusive lock. One warmup and two rounds. The validator
+  passed.
+- Record: `artifacts/steps/opt6-1107-fix/web-mixing-automation.jsonl`.
+
+p50 per block, us:
+
+| Document | Round 1 | Round 2 | S4 | #1744 |
+|---|---|---|---|---|
+| `sixty_four_track_console` | 229.74 | 230.19 | 234.44 / 235.62 | 241.99 / 246.98 |
+| `sixty_four_track_console_sparse` | 237.95 | 237.19 | (not in S4) | 247.02 / 250.95 |
+| `sixty_four_track_app_shape` | 147.83 | 150.73 | 147.34 / 146.20 | |
+
+Reading:
+- **All-active console.** -2.0 % / -2.3 % against S4.
+- **Sparse row.** -3.7 % / -5.5 % against #1744. That is mostly the general drift since #1744:
+  the all-active row moved by a similar amount. No bank of the sparse row is wholly silent.
+- **No idle row.** The V8 harness has no idle document.
