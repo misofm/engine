@@ -740,6 +740,18 @@ struct SegmentPlan {
     frames: usize,
     /// `true` while any ramp in the bank still has samples to produce.
     ramping: bool,
+    /// `true` while any ramp a coefficient is derived from -- a ratio or a coefficient ramp, on any
+    /// track of either channel -- still has samples to produce (issue #1069). Whole-bank, like
+    /// `ramping`, and uniform over the segment, so the kernel takes it as one branch outside its
+    /// lanes: off, the four coefficient slots are not stepped and the coefficients are not
+    /// re-derived per frame, which a threshold or makeup ramp alone never needs.
+    coefficients_ramping: bool,
+}
+
+/// `true` for the slots the coefficients are derived from: both ratios and the four coefficient
+/// ramps ([`frame_coefficients`]).
+const fn coefficient_source(slot: usize) -> bool {
+    slot == 1 || slot == 6 || slot >= RAMP_COUNT
 }
 
 /// Everything one channel of one bank owns.
@@ -1026,6 +1038,7 @@ fn run_segment<
     right: &mut [f32],
     frames: usize,
     segments: &mut [Segment<L>; 2],
+    coefficients_ramping: bool,
     armed_after: L,
 ) {
     let (head, tail) = sides.split_at_mut(1);
@@ -1045,7 +1058,14 @@ fn run_segment<
     ];
     for frame in 0..frames {
         if RAMPING {
-            for index in 0..RAMP_SLOTS {
+            // The coefficient slots are stepped only while one of them moves: at rest each is the
+            // identity, for the reason the flat path is (`Instance::coefficients_at_rest`).
+            let stepped = if coefficients_ramping {
+                RAMP_SLOTS
+            } else {
+                RAMP_COUNT
+            };
+            for index in 0..stepped {
                 // Issue #1409: the step added, held inside `[min(current, target),
                 // max(current, target)]`, so no word passes its target.
                 for segment in segments.iter_mut() {
@@ -1058,10 +1078,12 @@ fn run_segment<
             }
             // Issue #1069: the ratio and the two time coefficients take the value of this frame,
             // after its step, the same convention as threshold and makeup.
-            coefficients = [
-                frame_coefficients(&segments[0]),
-                frame_coefficients(&segments[1]),
-            ];
+            if coefficients_ramping {
+                coefficients = [
+                    frame_coefficients(&segments[0]),
+                    frame_coefficients(&segments[1]),
+                ];
+            }
         }
         let input_near = L::load(&left[frame * W..]);
         let input_far = L::load(&right[frame * W..]);
@@ -1196,6 +1218,7 @@ fn process_block<
                     &mut right[position * W..(position + length) * W],
                     length,
                     &mut segments,
+                    plan.coefficients_ramping,
                     armed_after,
                 )
             };
@@ -1348,19 +1371,24 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         }
         let mut length = budget;
         let mut ramping = false;
+        let mut coefficients_ramping = false;
         for side in &self.sides {
             for track in 0..W {
-                for ramp in &side.ramps[track] {
+                for (slot, ramp) in side.ramps[track].iter().enumerate() {
                     if ramp.remaining > 0 {
                         ramping = true;
+                        coefficients_ramping |= coefficient_source(slot);
                         length = length.min(ramp.remaining as usize - 1);
                     }
                 }
             }
         }
+        #[cfg(debug_assertions)]
+        assert!(coefficients_ramping || self.coefficients_at_rest());
         SegmentPlan {
             frames: length.max(1),
             ramping,
+            coefficients_ramping,
         }
     }
 
@@ -1375,13 +1403,32 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// same reason.
     #[cfg(any(debug_assertions, test))]
     fn flat_path_is_identity(&self) -> bool {
+        self.slots_at_rest(|_| true)
+    }
+
+    /// The precondition that makes skipping the coefficient slots on a ramped segment
+    /// bit-identical (issue #1069): every slot a coefficient is derived from is at rest, by the
+    /// same test as [`Instance::flat_path_is_identity`], so its step is the identity and the
+    /// coefficients derived at the segment's start are the ones every frame would derive.
+    #[cfg(any(debug_assertions, test))]
+    fn coefficients_at_rest(&self) -> bool {
+        self.slots_at_rest(coefficient_source)
+    }
+
+    /// `true` when every slot `chosen` names is at rest with a `+0.0` step and a word that
+    /// `x + 0.0 == x` keeps bit for bit.
+    #[cfg(any(debug_assertions, test))]
+    fn slots_at_rest(&self, chosen: impl Fn(usize) -> bool) -> bool {
         const NEGATIVE_ZERO: u32 = 0x8000_0000;
         self.sides.iter().all(|side| {
-            side.ramps[..W].iter().flatten().all(|ramp| {
-                ramp.remaining == 0
-                    && ramp.step.to_bits() == 0
-                    && ramp.current.is_finite()
-                    && ramp.current.to_bits() != NEGATIVE_ZERO
+            side.ramps[..W].iter().all(|ramps| {
+                ramps.iter().enumerate().all(|(slot, ramp)| {
+                    !chosen(slot)
+                        || (ramp.remaining == 0
+                            && ramp.step.to_bits() == 0
+                            && ramp.current.is_finite()
+                            && ramp.current.to_bits() != NEGATIVE_ZERO)
+                })
             })
         })
     }
