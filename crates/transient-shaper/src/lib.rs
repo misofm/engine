@@ -51,7 +51,7 @@ use effect_contract::{
 use effect_runtime::bank::{
     NonFiniteReport, block_is_positive_zero, check_block, nonfinite_lane_mask, positive_zero_lanes,
 };
-use effect_runtime::envelope::{ArCoef, ar_one_pole_step};
+use effect_runtime::envelope::ArCoef;
 use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as spec_value_valid,
 };
@@ -339,9 +339,38 @@ fn link<L: Lane, const LINK: u8>(left: L, right: L) -> (L, L) {
     }
 }
 
+/// Magnitude below which a follower word snaps to `+0.0` (issue #1784, owner ruling B2 of
+/// 2026-10-23): `1e-12`, 240 dB under full scale and four decades under [`FLOOR`].
+///
+/// It replaces the D7 floor `FLUSH_EPS` (`1e-20`) for the two envelope words, so a follower
+/// released from full scale reaches its exact rest about 129,000 samples after the signal stops
+/// at 48 kHz instead of 217,000. A word below `FLOOR` does not reach the output while the input is
+/// silent; it does reach the next onset through `c * e + k * u`. The measured change there is at
+/// most `3.1e-5` dB, on onsets below -40 dBFS, and none at louder onsets (the #1784 decision
+/// record).
+const FOLLOWER_REST: f32 = 1.0e-12;
+
+/// One sample of one switched attack/release follower: `effect_runtime`'s `ar_one_pole_step`,
+/// operation for operation (`c * e + k * u`, the pair chosen by `u > e`), with its D7 flush
+/// replaced by the [`FOLLOWER_REST`] snap `andnot(abs(x) < FOLLOWER_REST, x)`. The snap has the
+/// flush's form and subsumes it, so every word at or above the snap is bit-identical to the shared
+/// step's.
+#[inline(always)]
+fn follow<L: Lane>(e: L, u: L, coefficients: &ArCoef<L>) -> L {
+    let rising = u.gt(e);
+    let c = L::select(rising, coefficients.attack, coefficients.release);
+    let k = L::select(
+        rising,
+        coefficients.one_minus_attack,
+        coefficients.one_minus_release,
+    );
+    let next = c.mul(e).add(k.mul(u));
+    next.andnot(next.abs().lt(L::splat(FOLLOWER_REST)))
+}
+
 /// One frame of one channel. Frozen operation order.
 ///
-/// 1. both followers advance (`ar_one_pole_step`: two products, one sum, one D7 flush each)
+/// 1. both followers advance ([`follow`]: two products, one sum, one rest snap each)
 /// 2. `ratio = max(fast, FLOOR) / max(slow, FLOOR)` — one IEEE division
 /// 3. `contrast = fast_level_db(ratio)`, clamped `min` then `max` to ±24 dB (X7)
 /// 4. `shape = attack * max(contrast, 0) + sustain * max(-contrast, 0)`, clamped to ±18 dB
@@ -352,11 +381,12 @@ fn link<L: Lane, const LINK: u8>(left: L, right: L) -> (L, L) {
 ///    `fma(mix, +0.0, -0.0)` is `+0.0`, so the dry value has to be selected, not computed
 ///
 /// There is no per-value finiteness or subnormal classification (D7): the two envelope words are
-/// flushed inside the follower and the output block is checked once, by the caller.
+/// snapped inside the follower ([`FOLLOWER_REST`], which subsumes the D7 flush) and the output
+/// block is checked once, by the caller.
 #[inline(always)]
 fn frame<L: Lane>(x: L, u: L, c: &Coef<L>, e: &mut Env<L>, p: &Params<L>, bypass: L::Mask) -> L {
-    e.fast = ar_one_pole_step(e.fast, u, &c.fast);
-    e.slow = ar_one_pole_step(e.slow, u, &c.slow);
+    e.fast = follow(e.fast, u, &c.fast);
+    e.slow = follow(e.slow, u, &c.slow);
     let floor = L::splat(FLOOR);
     let ratio = e.fast.max(floor).div(e.slow.max(floor));
     // FAST-DB-CROSSING X7: detector contrast; MA-5 proves [1e-8, 16] and its clamp.
@@ -590,7 +620,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     /// * `fast` and `slow` to `+0.0` by raw bits. Fed `+0.0`, every link mode's detector is `+0.0`
     ///   (`abs`, `max` of two `+0.0`, `0.5 * +0 + 0.5 * +0`); the follower is not rising
     ///   (`+0 > +0` is false), takes the release pair, and `c * +0 + k * +0` with positive `c`, `k`
-    ///   is `+0.0`, which `flush` keeps. So `+0.0` is a fixed point. A follower decaying to a
+    ///   is `+0.0`, which the [`FOLLOWER_REST`] snap keeps. So `+0.0` is a fixed point. A follower decaying to a
     ///   non-zero word is refused, even one no `+0.0` block would move.
     /// * every ramp settled (`remaining == 0`): `next_value` then returns `current` and changes no
     ///   field, and `current` is a read, so all four fields stay put whatever the bank's prefix is.

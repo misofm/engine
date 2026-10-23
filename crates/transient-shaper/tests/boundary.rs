@@ -1,8 +1,9 @@
-//! Decision D7: one flush per recursive state word, one boundary check per block per bank.
+//! Decision D7: one flush per recursive state word, one boundary check per block per bank. Since
+//! #1784 the follower's flush is its `FOLLOWER_REST` snap at `1e-12`, which contains the D7 band.
 //!
 //! The pre-audit crate classified seven intermediates per lane-sample through `Option`, sanitised
 //! every input sample and counted per-sample "recoveries". All of that is gone. What is left is the
-//! `lane::flush` inside the follower and one `effect_runtime::bank::check_block` scan of the output
+//! snap inside the follower and one `effect_runtime::bank::check_block` scan of the output
 //! per block, whose failing lanes are recovered one lane at a time (issue #1092).
 
 mod common;
@@ -63,13 +64,13 @@ fn a_nonfinite_block_is_zeroed_and_the_envelopes_are_reset() {
 }
 
 /// A subnormal input is no longer sanitised: it renders, and the envelope word it produces is
-/// flushed to exactly `+0.0` by `lane::flush`.
+/// snapped to exactly `+0.0` inside the follower.
 ///
-/// The flush band (`|x| < 1e-20`) strictly contains the subnormal range, so a subnormal detector
+/// The snap band (`|x| < 1e-12`, #1784) strictly contains the subnormal range, so a subnormal detector
 /// can never enter the recurrence — and the shaper is still the identity on it, because two floored
 /// envelopes divide to exactly `1` and `fast_level_db(1)` is exactly `0`.
 ///
-/// Red mutation: drop `flush` from `ar_one_pole_step` — the state word becomes subnormal.
+/// Red mutation: drop the snap from the shaper's `follow` — the state word becomes subnormal.
 #[test]
 fn a_subnormal_input_renders_and_flushes_the_envelope() {
     let mut effect = prepare(&values_of(1.0, -1.0, 1.0));

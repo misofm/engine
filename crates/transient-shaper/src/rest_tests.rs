@@ -214,13 +214,14 @@ impl<L: Lane, const W: usize> rest_probe::Probe for Bank<L, W> {
 /// Plants one envelope word (or both) of one channel of `lane`, as a state restore at a block
 /// boundary may (`restore_track_state_payload` accepts any normal positive envelope pair).
 ///
-/// The driver's signal levels never leave a woken **fast** follower beside a flushed slow one:
-/// that needs inputs between about `2e-19` (the fast attack's `k * u` clears the flush threshold)
-/// and `5e-18` (the slow attack's does), and every level the driver draws is outside that band.
+/// The driver's signal levels never leave a woken **fast** follower beside a snapped slow one:
+/// that needs inputs between about `2.4e-11` (the fast attack's `k * u` clears the
+/// [`FOLLOWER_REST`] snap) and `4.8e-10` (the slow attack's does), and every level the driver
+/// draws is outside that band.
 /// Without the plant, dropping either fast word from the predicate stays green. A slow-only word is
 /// what every decay reaches (the fast follower releases five times faster); it is planted too.
 fn plant<L: Lane, const W: usize>(shaper: &mut Shaper<L, W>, lane: usize, draw: &mut Draw) {
-    const WORDS: [f32; 3] = [1.0e-19, 3.0e-18, 1.0e-6];
+    const WORDS: [f32; 3] = [3.0e-12, 1.0e-10, 1.0e-6];
     // Each choice from the high bits: the low bits right after a passed `chance(1, 256)` are not
     // independent of it, and drawing the channel from them planted the left channel only.
     let mut pick = |count: usize| ((draw.unit() * count as f32) as usize).min(count - 1);
@@ -296,13 +297,14 @@ fn a_lane_reported_at_rest_stays_at_rest_through_silence() {
 /// Blocks of tone every lane starts with; lane `l` plays `STAGGER * l` blocks more.
 const TONE_BLOCKS: usize = 4;
 const STAGGER: usize = 8;
-/// Whole-bank silence after the last lane's tone: long enough for every follower to flush.
+/// Whole-bank silence after the last lane's tone: long enough for every follower to snap.
 const SILENT_BLOCKS: usize = 520;
 /// Tone again at the end, on every lane.
 const CODA_BLOCKS: usize = 4;
-/// The tone's level (lane-distinct noise): low enough that its slow follower flushes inside the silence, high enough
-/// that both followers wake (the slow attack's `k * u` clears the flush threshold).
-const TONE_LEVEL: f32 = 1.0e-15;
+/// The tone's level (lane-distinct noise): low enough that its slow follower snaps inside the
+/// silence (`ln(1e-8 / 1e-12)` slow-release time constants, about 44,000 samples, of the 66,560),
+/// high enough that both followers wake (the slow attack's `k * u` clears [`FOLLOWER_REST`]).
+const TONE_LEVEL: f32 = 1.0e-8;
 
 /// The fast-path differential at one width, link and member count: two copies of one bank render
 /// the same blocks, one with the fast path allowed and one with it forbidden. Returns the blocks
@@ -428,19 +430,20 @@ fn the_silent_fast_path_renders_the_kernels_bits() {
 /// The unit roundoff of `f32` round-to-nearest, `2^-24`.
 const ROUNDOFF: f64 = 1.0 / 16_777_216.0;
 
-/// Samples after which a follower at `envelope` has flushed to `+0.0` under retention `c`
-/// (#1784 D2).
+/// Samples after which a follower at `envelope` has snapped to `+0.0` under retention `c`
+/// (#1784 D4).
 ///
 /// Fed `+0.0`, the follower is not rising and takes its release pair:
-/// `e' = flush(c * e + k * +0.0)`, and `k * +0.0` is `+0.0`, so `e' = flush(c * e)` with one
-/// rounding, `|e'| <= c e (1 + u)` for `u = 2^-24`. The word falls below `FLUSH_EPS`, where `flush`
-/// writes `+0.0`, within `ln(e / FLUSH_EPS) / (-ln c - u)` steps, plus the flushing step.
+/// `e' = snap(c * e + k * +0.0)`, and `k * +0.0` is `+0.0`, so `e' = snap(c * e)` with one
+/// rounding, `|e'| <= c e (1 + u)` for `u = 2^-24`. The word falls below [`FOLLOWER_REST`], where
+/// the snap writes `+0.0`, within `ln(e / FOLLOWER_REST) / (-ln c - u)` steps, plus the snapping
+/// step.
 fn follower_bound(envelope: f32, c: f32) -> u64 {
     if envelope.to_bits() == 0 {
         return 0;
     }
     let rate = -math::log(f64::from(c)) - ROUNDOFF;
-    let steps = math::log(f64::from(envelope) / f64::from(lane::FLUSH_EPS)) / rate;
+    let steps = math::log(f64::from(envelope) / f64::from(FOLLOWER_REST)) / rate;
     steps.ceil() as u64 + 1
 }
 
@@ -448,8 +451,8 @@ fn follower_bound(envelope: f32, c: f32) -> u64 {
 /// slower of its two followers' release bounds** ([`follower_bound`]), at `Simd4` and `Simd8`.
 /// The fixture members cover boost, cut and partial mix. The rate only changes the coefficients
 /// the bound reads and the link mode only the envelope the release starts from, so one of each is
-/// run. Measured at 48 kHz from a 0.5 tone: 217,088 samples against bounds of 217,095 to
-/// 217,109, set by the 100 ms slow release.
+/// run. Measured at 48 kHz from a 0.5 tone: 128,640 samples (217,088 before the #1784 snap)
+/// against bounds of 128,653 to 128,668, set by the 100 ms slow release.
 #[test]
 fn a_lane_that_followed_a_tone_lands_at_rest_within_its_release_bound() {
     const TONE_BLOCKS: usize = 40;

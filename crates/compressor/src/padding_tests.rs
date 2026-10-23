@@ -601,7 +601,7 @@ fn padded_differential<L: Lane>(seed: u64, reach: &mut Reach) {
 
 /// Tone blocks before and after the staggered-rest silence.
 const STAGGER_TONE_BLOCKS: usize = 4;
-/// Long enough for the slowest compressing lane (8 ms release at 48 kHz) to release to an exact
+/// Long enough for the slowest compressing lane (24 ms release at 48 kHz) to release to an exact
 /// `+0.0` envelope, so the bank-wide claim is earned inside the silence.
 const STAGGER_SILENT_BLOCKS: usize = 320;
 
@@ -610,7 +610,8 @@ const STAGGER_SILENT_BLOCKS: usize = 320;
 ///
 /// `W - 1` members and one padded lane. Even members sit under their threshold, so their envelope
 /// is `+0.0` from the first silent block; odd members compress a ~`-6` dBFS tone hard and release
-/// at 5 to 8 ms, so each releases to an exact `+0.0` on its own block, well inside the silence.
+/// at 15 to 24 ms, so each releases to an exact `+0.0` (the #1784 plateau snap) on its own block,
+/// after about 110 to 140 blocks, well inside the silence.
 /// Then the tone returns. Until the last lane rests, every silent block is `quiet` with some lanes
 /// at rest and others still releasing: the shape in which a claim earned on *some* lanes at rest
 /// rather than *every* lane freezes the releasing lanes' envelope, and the returning tone shows it.
@@ -621,7 +622,7 @@ fn staggered_rest_case(width: usize, mono: bool) -> Case {
             let (threshold, knee, release) = if member % 2 == 0 {
                 (0.0, 0.0, 50.0)
             } else {
-                (-40.0, 6.0, 5.0 + member as f32 / width as f32 * 3.0)
+                (-40.0, 6.0, 15.0 + member as f32 / width as f32 * 9.0)
             };
             values_from([
                 (threshold, threshold),
