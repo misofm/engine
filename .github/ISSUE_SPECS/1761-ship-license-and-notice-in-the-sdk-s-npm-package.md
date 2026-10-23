@@ -18,7 +18,7 @@ Found by the #1760 verifier (2026-10-23).
 
 ## Objective gates
 
-1. `npm pack --dry-run` in `sdk/` lists `LICENSE` and `NOTICE`.
+1. `npm pack --dry-run` in `sdk/` lists `dist/LICENSE` and `dist/NOTICE` (root ruling 2026-10-23: `dist/` placement is enough for FSL's copy-of-the-terms clause).
 2. The packed files equal the repository-root files byte for byte.
 3. The SDK's existing build and tests pass.
 
@@ -35,3 +35,4 @@ The pack check turns red when a later `files` or build change drops the license 
 - 2026-10-23, attempt 1: the premise is partly stale. Since #320, `sdk/codegen/stage-package.mjs` (run by `scripts/sdk-package.sh`) copies the root LICENSE and NOTICE into `sdk/dist/`, so the tarball already lists `dist/LICENSE` and `dist/NOTICE` (`npm pack --dry-run --json`). No check compared them with the root files: the smoke test only regex-matched NOTICE and never read LICENSE.
 - Decision: keep the one source of truth and the `dist/` placement (no new committed copies, no ignore entries); add the byte-equality assertion for both files to `sdk/test/package-tarball-smoke.mjs`, which both `sdk-package.sh check` (qualification) and `npm-publish.yml` run on the unpacked tarball. A package-root LICENSE would need a `.gitignore` entry outside this spec's paths; it is a follow-up only if a consumer tool needs it.
 - Gates: `bash scripts/sdk-package.sh check` passes; a mutant that appends a byte to the packed `dist/LICENSE` fails the smoke test with `packed dist/LICENSE equals the repository-root LICENSE`.
+- Verifier (attempt 1): PASS.
